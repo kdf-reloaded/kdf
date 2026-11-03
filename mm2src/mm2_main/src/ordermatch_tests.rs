@@ -2406,6 +2406,1015 @@ fn test_recently_cancelled_allows_different_pubkey() {
     );
 }
 
+/// CRD ch.32 R-K1b, T-K8: a cancel this node received is final for the final-cancel window.
+mod t32_k1b_final_cancel_tests {
+    use super::*;
+    use crate::mm2::lp_ordermatch::ordermatch_orderbook::{cancel_final_max_entries, cancel_final_window_secs};
+    use mm2_p2p::atomicdex_behaviour::AdexResponse;
+    use std::time::Instant;
+
+    const PAIR: &str = "C1:C2";
+    /// Older than the 120 s of R-K1 and younger than any default window.
+    const OLD: u64 = 200;
+    const FORWARDER: &str = "forwarding-peer";
+
+    fn node(conf: Json) -> (MmArc, mpsc::Receiver<AdexBehaviourCmd>) {
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        ctx.init_metrics().unwrap();
+        let (tx, rx) = mpsc::channel(1024);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        (ctx, rx)
+    }
+
+    fn next_cmd(rx: &mut mpsc::Receiver<AdexBehaviourCmd>) -> AdexBehaviourCmd {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rx.try_recv() {
+                Ok(cmd) => return cmd,
+                Err(_) => {
+                    assert!(Instant::now() < deadline, "no command was sent");
+                    std::thread::sleep(Duration::from_millis(1));
+                },
+            }
+        }
+    }
+
+    fn octx(ctx: &MmArc) -> Arc<OrdermatchContext> { OrdermatchContext::from_ctx(ctx).unwrap() }
+
+    fn conf_ctx(conf: Json) -> MmArc { MmCtxBuilder::new().with_conf(conf).into_mm_arc() }
+
+    fn created(secret: &[u8; 32], order: &OrderbookItem) -> Vec<u8> {
+        let msg = new_protocol::MakerOrderCreated {
+            uuid: order.uuid.into(),
+            base: order.base.clone(),
+            rel: order.rel.clone(),
+            price: order.price.clone(),
+            max_volume: order.max_volume.clone(),
+            min_volume: order.min_volume.clone(),
+            conf_settings: OrderConfirmationsSettings::default(),
+            created_at: now_ms() / 1000,
+            timestamp: now_ms() / 1000,
+            pair_trie_root: H64::default(),
+            base_protocol_info: vec![],
+            rel_protocol_info: vec![],
+        };
+        encode_and_sign(&new_protocol::OrdermatchMessage::MakerOrderCreated(msg), secret).unwrap()
+    }
+
+    fn cancelled(secret: &[u8; 32], uuid: Uuid) -> Vec<u8> {
+        let msg = new_protocol::MakerOrderCancelled {
+            uuid: uuid.into(),
+            timestamp: now_ms() / 1000,
+            pair_trie_root: H64::default(),
+        };
+        encode_and_sign(&new_protocol::OrdermatchMessage::MakerOrderCancelled(msg), secret).unwrap()
+    }
+
+    fn receive(ctx: &MmArc, msg: &[u8]) -> bool {
+        let accepted = block_on(process_msg(ctx.clone(), vec![], "peer".to_owned(), msg, false));
+        flush_trie(ctx);
+        accepted
+    }
+
+    fn book(ctx: &MmArc) -> HashSet<Uuid> { octx(ctx).orderbook.lock().order_set.keys().copied().collect() }
+
+    /// The guard entry of `uuid`, as if its cancel had arrived `secs` ago.
+    fn set_guard_age(ctx: &MmArc, uuid: Uuid, pubkey: &str, secs: u64) {
+        let octx = octx(ctx);
+        let mut orderbook = octx.orderbook.lock();
+        orderbook.recently_cancelled.remove(uuid);
+        assert!(orderbook
+            .recently_cancelled
+            .insert_aged(uuid, pubkey.to_owned(), Duration::from_secs(secs)));
+    }
+
+    fn guarded(ctx: &MmArc, uuid: Uuid, pubkey: &str) -> bool {
+        octx(ctx).orderbook.lock().recently_cancelled.get_unexpired(&uuid) == Some(&pubkey.to_owned())
+    }
+
+    fn ttl(ctx: &MmArc) -> Duration { octx(ctx).orderbook.lock().recently_cancelled.ttl() }
+
+    /// What the node's own synchronization answer and order-book answer list for the maker.
+    fn own_answers(ctx: &MmArc, pubkey: &str) -> (HashSet<Uuid>, HashSet<Uuid>) {
+        flush_trie(ctx);
+        let roots = HashMap::from([(PAIR.to_owned(), H64::default())]);
+        let mut sync = process_sync_pubkey_orderbook_state(ctx.clone(), pubkey.to_owned(), roots)
+            .unwrap()
+            .unwrap();
+        let in_sync = match sync.pair_orders_diff.remove(PAIR).expect("the pair is answered") {
+            DeltaOrFullTrie::FullTrie(orders) => orders.into_iter().map(|(uuid, _)| uuid).collect(),
+            DeltaOrFullTrie::Delta(_) => panic!("expected a full snapshot"),
+        };
+        let encoded = process_get_orderbook_request(ctx.clone(), "C1".into(), "C2".into())
+            .unwrap()
+            .unwrap();
+        let mut orderbook = decode_message::<GetOrderbookRes>(&encoded).unwrap();
+        let in_orderbook = orderbook
+            .pubkey_orders
+            .remove(pubkey)
+            .map(|item| item.orders.into_iter().map(|(uuid, _)| uuid).collect())
+            .unwrap_or_default();
+        (in_sync, in_orderbook)
+    }
+
+    /// Three orders of one maker; `cancelled` is the one whose guard entry the node holds.
+    struct Maker {
+        pubkey: String,
+        secret: [u8; 32],
+        cancelled: OrderbookItem,
+        others: Vec<OrderbookItem>,
+    }
+
+    impl Maker {
+        fn new(name: &str) -> Maker {
+            let (pubkey, secret) = pubkey_and_secret_for_test(name);
+            let mut orders = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 3);
+            let cancelled = orders.remove(0);
+            Maker {
+                pubkey,
+                secret,
+                cancelled,
+                others: orders,
+            }
+        }
+
+        fn others(&self) -> HashSet<Uuid> { self.others.iter().map(|o| o.uuid).collect() }
+
+        fn all(&self) -> Vec<OrderbookItem> {
+            let mut all = vec![self.cancelled.clone()];
+            all.extend(self.others.clone());
+            all
+        }
+    }
+
+    // (a)
+
+    /// Whether a created message for the cancelled order is inserted `age_secs` after the cancel.
+    fn created_after(conf: Json, age_secs: u64) -> bool {
+        let (ctx, _rx) = node(conf);
+        let maker = Maker::new("final-cancel-a");
+        let order = &maker.cancelled;
+        assert!(receive(&ctx, &cancelled(&maker.secret, order.uuid)));
+        assert!(guarded(&ctx, order.uuid, &maker.pubkey), "the cancel is recorded");
+        set_guard_age(&ctx, order.uuid, &maker.pubkey, age_secs);
+        receive(&ctx, &created(&maker.secret, order));
+        book(&ctx).contains(&order.uuid)
+    }
+
+    #[test]
+    fn t_k8_a_default_window() {
+        assert!(!created_after(json!({}), 121), "121 s after the cancel");
+        assert!(!created_after(json!({}), 3599), "3,599 s after the cancel");
+        assert!(created_after(json!({}), 3601), "3,601 s after the cancel");
+        let (ctx, _rx) = node(json!({}));
+        assert_eq!(ttl(&ctx), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn t_k8_a_window_of_120_is_the_reference_behavior() {
+        let conf = json!({ "cancel_final_window_secs": 120 });
+        assert!(!created_after(conf.clone(), 100), "100 s after the cancel");
+        assert!(created_after(conf.clone(), 121), "121 s after the cancel");
+        let (ctx, _rx) = node(conf);
+        assert_eq!(ttl(&ctx), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn t_k8_a_the_window_comes_from_the_configuration() {
+        let conf = json!({ "cancel_final_window_secs": 7200 });
+        let (ctx, _rx) = node(conf.clone());
+        assert_eq!(ttl(&ctx), Duration::from_secs(7200));
+        assert!(!created_after(conf.clone(), 3601));
+        assert!(created_after(conf, 7201));
+    }
+
+    // (b)
+
+    /// A node whose guard holds the cancel of `maker.cancelled`, aged past the 120 s of R-K1.
+    fn guarding_node(conf: Json, maker: &Maker) -> (MmArc, mpsc::Receiver<AdexBehaviourCmd>) {
+        let (ctx, rx) = node(conf);
+        set_guard_age(&ctx, maker.cancelled.uuid, &maker.pubkey, OLD);
+        (ctx, rx)
+    }
+
+    fn assert_cancelled_kept_out(ctx: &MmArc, maker: &Maker) {
+        flush_trie(ctx);
+        assert_eq!(
+            book(ctx),
+            maker.others(),
+            "the other two orders are inserted, not the cancelled one"
+        );
+        assert!(guarded(ctx, maker.cancelled.uuid, &maker.pubkey));
+        let (in_sync, in_orderbook) = own_answers(ctx, &maker.pubkey);
+        assert_eq!(in_sync, maker.others(), "the synchronization answer omits it");
+        assert_eq!(in_orderbook, maker.others(), "the order-book answer omits it");
+        let octx = octx(ctx);
+        let orderbook = octx.orderbook.lock();
+        assert!(!orderbook.order_set.contains_key(&maker.cancelled.uuid));
+        assert!(orderbook
+            .unordered
+            .get(&("C1".to_owned(), "C2".to_owned()))
+            .is_none_or(|uuids| !uuids.contains(&maker.cancelled.uuid)));
+    }
+
+    #[test]
+    fn t_k8_b_order_message() {
+        let maker = Maker::new("final-cancel-b-message");
+        let (ctx, _rx) = guarding_node(json!({}), &maker);
+        for order in maker.all() {
+            receive(&ctx, &created(&maker.secret, &order));
+        }
+        assert_cancelled_kept_out(&ctx, &maker);
+    }
+
+    /// An update of a held order is applied as before, and the cancelled order stays out.
+    #[test]
+    fn t_k8_b_update_of_another_order_is_applied() {
+        let maker = Maker::new("final-cancel-b-update");
+        let (ctx, _rx) = guarding_node(json!({}), &maker);
+        for order in maker.all() {
+            receive(&ctx, &created(&maker.secret, &order));
+        }
+        let held = maker.others[0].clone();
+        let mut msg = MakerOrderUpdated::new(held.uuid);
+        msg.with_new_price(BigRational::new(3.into(), 2.into()));
+        let signed = encode_and_sign(&new_protocol::OrdermatchMessage::MakerOrderUpdated(msg), &maker.secret).unwrap();
+        assert!(receive(&ctx, &signed));
+        assert_eq!(
+            octx(&ctx).orderbook.lock().order_set[&held.uuid].price,
+            BigRational::new(3.into(), 2.into())
+        );
+        assert_cancelled_kept_out(&ctx, &maker);
+    }
+
+    /// `process_pubkey_full_trie` and `process_trie_delta`, as the synchronization applier calls them.
+    fn apply(ctx: &MmArc, maker: &Maker, diff: DeltaOrFullTrie<Uuid, OrderbookP2PItem>) {
+        let octx = octx(ctx);
+        let protocol_infos = HashMap::new();
+        let conf_infos = HashMap::new();
+        let params = ProcessTrieParams {
+            pubkey: &maker.pubkey,
+            alb_pair: PAIR,
+            protocol_infos: &protocol_infos,
+            conf_infos: &conf_infos,
+        };
+        let mut orderbook = octx.orderbook.lock();
+        let ops = match diff {
+            DeltaOrFullTrie::Delta(delta) => process_trie_delta(&mut orderbook, delta, params),
+            DeltaOrFullTrie::FullTrie(values) => process_pubkey_full_trie(&mut orderbook, values, params),
+        };
+        orderbook.queue_trie_ops(&octx.trie_ops_tx, ops);
+    }
+
+    #[test]
+    fn t_k8_b_full_snapshot_applier() {
+        let maker = Maker::new("final-cancel-b-full");
+        let (ctx, _rx) = guarding_node(json!({}), &maker);
+        let values = maker.all().into_iter().map(|o| (o.uuid, o.into())).collect();
+        apply(&ctx, &maker, DeltaOrFullTrie::FullTrie(values));
+        assert_cancelled_kept_out(&ctx, &maker);
+    }
+
+    #[test]
+    fn t_k8_b_delta_applier() {
+        let maker = Maker::new("final-cancel-b-delta");
+        let (ctx, _rx) = guarding_node(json!({}), &maker);
+        let delta = maker.all().into_iter().map(|o| (o.uuid, Some(o.into()))).collect();
+        apply(&ctx, &maker, DeltaOrFullTrie::Delta(delta));
+        assert_cancelled_kept_out(&ctx, &maker);
+    }
+
+    /// The keep-alive of the maker `pubkey` as `from` advertises it now.
+    fn keep_alive_of(from: &MmArc, pubkey: &str) -> PubkeyKeepAlive {
+        let roots = octx(from)
+            .trie_store
+            .lock()
+            .pubkeys_state
+            .get(pubkey)
+            .map(|s| s.trie_roots.clone())
+            .unwrap_or_default();
+        PubkeyKeepAlive {
+            trie_roots: advertisable_roots(&roots),
+            timestamp: now_ms() / 1000,
+        }
+    }
+
+    /// `relay` handles the keep-alive of `maker_node`, and the request it sends is answered by `maker_node`.
+    /// Returns whether the answer was a delta.
+    fn sync_with(
+        relay: &MmArc,
+        relay_rx: &mut mpsc::Receiver<AdexBehaviourCmd>,
+        maker_node: &MmArc,
+        pubkey: &str,
+    ) -> bool {
+        let keep_alive = keep_alive_of(maker_node, pubkey);
+        let relay2 = relay.clone();
+        let pubkey2 = pubkey.to_owned();
+        let task = std::thread::spawn(move || {
+            block_on(process_orders_keep_alive(
+                relay2,
+                FORWARDER.to_owned(),
+                pubkey2,
+                keep_alive,
+                true,
+            ))
+        });
+        let (req, response_tx) = match next_cmd(relay_rx) {
+            AdexBehaviourCmd::RequestPeers { req, response_tx, .. } => (req, response_tx),
+            other => panic!("unexpected command {:?}", other),
+        };
+        let (pubkey, trie_roots) = match decode_message::<P2PRequest>(&req).unwrap() {
+            P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState { pubkey, trie_roots }) => {
+                (pubkey, trie_roots)
+            },
+            other => panic!("unexpected request {:?}", other),
+        };
+        let answer = process_sync_pubkey_orderbook_state(maker_node.clone(), pubkey, trie_roots)
+            .unwrap()
+            .unwrap();
+        let is_delta = answer
+            .pair_orders_diff
+            .values()
+            .all(|diff| matches!(diff, DeltaOrFullTrie::Delta(_)));
+        let res = AdexResponse::Ok {
+            response: encode_message(&answer).unwrap(),
+        };
+        response_tx.send(vec![(PeerId::random(), res)]).unwrap();
+        assert!(task.join().unwrap(), "the keep-alive was handled");
+        is_delta
+    }
+
+    fn maker_node(orders: &[OrderbookItem]) -> (MmArc, mpsc::Receiver<AdexBehaviourCmd>) {
+        let (maker_ctx, rx) = node(json!({}));
+        for order in orders {
+            insert_or_update_order(&maker_ctx, order.clone());
+        }
+        flush_trie(&maker_ctx);
+        (maker_ctx, rx)
+    }
+
+    /// The whole keep-alive path, answered with a snapshot that lists the cancelled order.
+    #[test]
+    fn t_k8_b_keep_alive_full_snapshot() {
+        let maker = Maker::new("final-cancel-b-ka-full");
+        let (maker_ctx, _maker_rx) = maker_node(&maker.all());
+        let (relay, mut relay_rx) = guarding_node(json!({}), &maker);
+        assert!(
+            !sync_with(&relay, &mut relay_rx, &maker_ctx, &maker.pubkey),
+            "a snapshot is answered"
+        );
+        assert_cancelled_kept_out(&relay, &maker);
+    }
+
+    /// The whole keep-alive path, answered with a delta that lists the cancelled order.
+    #[test]
+    fn t_k8_b_keep_alive_delta() {
+        let maker = Maker::new("final-cancel-b-ka-delta");
+        let (first, second) = (maker.others[0].clone(), maker.others[1].clone());
+        let (maker_ctx, _maker_rx) = maker_node(std::slice::from_ref(&first));
+        let (relay, mut relay_rx) = node(json!({}));
+        assert!(!sync_with(&relay, &mut relay_rx, &maker_ctx, &maker.pubkey));
+        assert_eq!(book(&relay), HashSet::from([first.uuid]));
+
+        // The maker adds two orders, one of them the cancelled one, whose cancel the relay has recorded.
+        for order in [second, maker.cancelled.clone()] {
+            insert_or_update_order(&maker_ctx, order);
+        }
+        flush_trie(&maker_ctx);
+        set_guard_age(&relay, maker.cancelled.uuid, &maker.pubkey, OLD);
+        assert!(
+            sync_with(&relay, &mut relay_rx, &maker_ctx, &maker.pubkey),
+            "a delta is answered"
+        );
+        assert_cancelled_kept_out(&relay, &maker);
+    }
+
+    /// The order-book request-and-fill path.
+    #[test]
+    fn t_k8_b_order_book_answer() {
+        let maker = Maker::new("final-cancel-b-orderbook");
+        let (ctx, mut rx) = guarding_node(json!({}), &maker);
+        let task_ctx = ctx.clone();
+        let task = std::thread::spawn(move || block_on(request_and_fill_orderbook(&task_ctx, "C1", "C2")));
+        let response_tx = match next_cmd(&mut rx) {
+            AdexBehaviourCmd::RequestAnyRelay { response_tx, .. } => response_tx,
+            other => panic!("unexpected command {:?}", other),
+        };
+        let mut conf_infos = HashMap::new();
+        let item = GetOrderbookPubkeyItem {
+            orders: maker
+                .all()
+                .into_iter()
+                .map(|order| {
+                    if let Some(conf_settings) = order.conf_settings {
+                        conf_infos.insert(order.uuid, conf_settings);
+                    }
+                    (order.uuid, order.into())
+                })
+                .collect(),
+            last_keep_alive: now_ms() / 1000,
+            last_signed_pubkey_payload: vec![],
+        };
+        let answer = GetOrderbookRes {
+            pubkey_orders: HashMap::from([(maker.pubkey.clone(), item)]),
+            protocol_infos: HashMap::new(),
+            conf_infos,
+        };
+        response_tx
+            .send(Some((PeerId::random(), encode_message(&answer).unwrap())))
+            .unwrap();
+        task.join().unwrap().unwrap();
+        assert_cancelled_kept_out(&ctx, &maker);
+    }
+
+    // (c)
+
+    #[test]
+    fn t_k8_c_same_identifier_from_another_publisher_is_inserted() {
+        let maker = Maker::new("final-cancel-c-maker");
+        let other = Maker::new("final-cancel-c-other");
+        let (ctx, _rx) = guarding_node(json!({}), &maker);
+        let mut same_uuid = other.cancelled.clone();
+        same_uuid.uuid = maker.cancelled.uuid;
+        assert!(receive(&ctx, &created(&other.secret, &same_uuid)));
+        let octx = octx(&ctx);
+        let orderbook = octx.orderbook.lock();
+        assert_eq!(orderbook.order_set[&maker.cancelled.uuid].pubkey, other.pubkey);
+    }
+
+    // (d)
+
+    fn guard_of(cap: usize) -> Orderbook {
+        Orderbook {
+            cancel_guard_max_entries: cap,
+            recently_cancelled: TimeCache::new(Duration::from_secs(3600)),
+            ..Default::default()
+        }
+    }
+
+    fn held(orderbook: &Orderbook, uuids: &[Uuid]) -> Vec<bool> {
+        uuids
+            .iter()
+            .map(|uuid| orderbook.recently_cancelled.get_unexpired(uuid).is_some())
+            .collect()
+    }
+
+    #[test]
+    fn t_k8_d_cap_keeps_the_newest_of_the_older_entries() {
+        let mut orderbook = guard_of(3);
+        let uuids: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
+        // Oldest first: 1,000 s, 900 s, ... 600 s ago; each insertion applies the cap, as a cancel does.
+        for (i, uuid) in uuids.iter().enumerate() {
+            let age = Duration::from_secs(1000 - 100 * i as u64);
+            assert!(orderbook.recently_cancelled.insert_aged(*uuid, "pk".to_owned(), age));
+            orderbook.enforce_cancel_guard_cap();
+        }
+        assert_eq!(held(&orderbook, &uuids), vec![false, false, true, true, true]);
+        assert_eq!(orderbook.recently_cancelled.len(), 3);
+    }
+
+    #[test]
+    fn t_k8_d_entries_younger_than_120_s_are_never_dropped_for_the_cap() {
+        let mut orderbook = guard_of(3);
+        let old: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        for (i, uuid) in old.iter().enumerate() {
+            let age = Duration::from_secs(500 - 100 * i as u64);
+            orderbook.recently_cancelled.insert_aged(*uuid, "pk".to_owned(), age);
+        }
+        orderbook.enforce_cancel_guard_cap();
+        assert_eq!(held(&orderbook, &old), vec![true, true, true]);
+
+        // Three cancels, as `delete_order` records them: all guard, and only older entries are dropped.
+        let fresh: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        for uuid in &fresh {
+            orderbook.record_cancel(*uuid, "pk");
+        }
+        assert_eq!(held(&orderbook, &old), vec![false, false, false]);
+        assert_eq!(held(&orderbook, &fresh), vec![true, true, true]);
+        // A fourth one takes the guard above the cap with nothing older left to drop.
+        let fourth = Uuid::new_v4();
+        orderbook.record_cancel(fourth, "pk");
+        assert_eq!(held(&orderbook, &fresh), vec![true, true, true]);
+        assert_eq!(held(&orderbook, &[fourth]), vec![true]);
+        assert_eq!(orderbook.recently_cancelled.len(), 4);
+    }
+
+    #[test]
+    fn t_k8_d_cap_is_applied_by_a_cancel_message() {
+        let (ctx, _rx) = node(json!({ "cancel_final_max_entries": 1 }));
+        let old: Vec<Uuid> = (0..2).map(|_| Uuid::new_v4()).collect();
+        {
+            let octx = octx(&ctx);
+            let mut orderbook = octx.orderbook.lock();
+            for (i, uuid) in old.iter().enumerate() {
+                let age = Duration::from_secs(500 - 100 * i as u64);
+                orderbook.recently_cancelled.insert_aged(*uuid, "pk".to_owned(), age);
+            }
+        }
+        let maker = Maker::new("final-cancel-d-message");
+        assert!(receive(&ctx, &cancelled(&maker.secret, maker.cancelled.uuid)));
+        let octx = octx(&ctx);
+        let orderbook = octx.orderbook.lock();
+        assert_eq!(held(&orderbook, &old), vec![false, false]);
+        assert_eq!(held(&orderbook, &[maker.cancelled.uuid]), vec![true]);
+        assert_eq!(orderbook.cancel_guard_max_entries, 1);
+    }
+
+    // (e)
+
+    #[test]
+    fn t_k8_e_window_reader() {
+        let window = |conf: Json| cancel_final_window_secs(&conf_ctx(conf));
+        assert_eq!(window(json!({})), 3600);
+        assert_eq!(window(json!({ "cancel_final_window_secs": 60 })), 120);
+        assert_eq!(window(json!({ "cancel_final_window_secs": 100000 })), 86400);
+        assert_eq!(window(json!({ "cancel_final_window_secs": "x" })), 3600);
+        assert_eq!(window(json!({ "cancel_final_window_secs": 120 })), 120);
+        assert_eq!(window(json!({ "cancel_final_window_secs": 86400 })), 86400);
+        assert_eq!(window(json!({ "cancel_final_window_secs": 7200 })), 7200);
+        assert_eq!(window(json!({ "cancel_final_window_secs": 0 })), 120);
+        assert_eq!(window(json!({ "cancel_final_window_secs": -5 })), 120);
+        assert_eq!(window(json!({ "cancel_final_window_secs": 7200.5 })), 3600);
+        assert_eq!(window(json!({ "cancel_final_window_secs": null })), 3600);
+    }
+
+    #[test]
+    fn t_k8_e_cap_reader() {
+        let cap = |conf: Json| cancel_final_max_entries(&conf_ctx(conf));
+        assert_eq!(cap(json!({})), 100_000);
+        assert_eq!(cap(json!({ "cancel_final_max_entries": 0 })), 100_000);
+        assert_eq!(cap(json!({ "cancel_final_max_entries": "x" })), 100_000);
+        assert_eq!(cap(json!({ "cancel_final_max_entries": 2_000_000 })), 1_000_000);
+        assert_eq!(cap(json!({ "cancel_final_max_entries": 1_000_000 })), 1_000_000);
+        assert_eq!(cap(json!({ "cancel_final_max_entries": 3 })), 3);
+        assert_eq!(cap(json!({ "cancel_final_max_entries": -3 })), 100_000);
+    }
+
+    #[test]
+    fn t_k8_e_restore_switch_reader() {
+        let on = |conf: Json| maker_restore_skips_cancelled(&conf_ctx(conf));
+        assert!(on(json!({})));
+        assert!(on(json!({ "maker_restore_skips_cancelled": true })));
+        assert!(on(json!({ "maker_restore_skips_cancelled": "false" })));
+        assert!(on(json!({ "maker_restore_skips_cancelled": 0 })));
+        assert!(on(json!({ "maker_restore_skips_cancelled": null })));
+        assert!(!on(json!({ "maker_restore_skips_cancelled": false })));
+    }
+
+    // (f)
+
+    #[test]
+    fn t_k8_f_after_a_restart_nothing_is_guarded() {
+        let maker = Maker::new("final-cancel-f");
+        let (ctx, _rx) = node(json!({}));
+        assert!(receive(&ctx, &cancelled(&maker.secret, maker.cancelled.uuid)));
+        assert!(guarded(&ctx, maker.cancelled.uuid, &maker.pubkey));
+        // The restart: a new context starts with an empty guard, so the late copy is inserted.
+        let (restarted, _rx) = node(json!({}));
+        assert_eq!(octx(&restarted).orderbook.lock().recently_cancelled.len(), 0);
+        assert!(receive(&restarted, &created(&maker.secret, &maker.cancelled)));
+        assert!(book(&restarted).contains(&maker.cancelled.uuid));
+    }
+}
+
+/// CRD ch.12 R7c, T9: a stored active record that outlived its order's removal is not restored, and the deletion
+/// of the record at removal is retried.
+mod t12_7c_restore_guard_tests {
+    use super::*;
+    use crate::mm2::database::my_orders::CREATE_MY_ORDERS_TABLE;
+    use crate::mm2::lp_ordermatch::my_orders_storage::{delete_active_maker_order_attempt, MyOrdersError};
+    use common::log::log_crate::{set_logger, set_max_level, Level, LevelFilter, Log, Metadata, Record};
+    use futures::compat::Future01CompatExt;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::time::Instant;
+
+    static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    struct Capture;
+
+    impl Log for Capture {
+        fn enabled(&self, metadata: &Metadata) -> bool { metadata.level() <= Level::Warn }
+
+        fn log(&self, record: &Record) {
+            if self.enabled(record.metadata()) {
+                LINES
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(format!("{} {}", record.level(), record.args()));
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    static CAPTURE: Capture = Capture;
+
+    /// Installs the capture of the warn lines. `false` when another logger already owns the process, in which case a
+    /// test must not assert that a line is present.
+    fn capture_installed() -> bool {
+        let installed = set_logger(&CAPTURE).is_ok();
+        if installed {
+            set_max_level(LevelFilter::Warn);
+        }
+        // `set_logger` fails the second time too: the capture is ours when a line can be seen.
+        log::warn!("t9 capture probe");
+        installed || LINES.lock().unwrap().iter().any(|l| l.contains("t9 capture probe"))
+    }
+
+    /// The warn lines that name the order.
+    fn lines_for(uuid: Uuid) -> Vec<String> {
+        let uuid = uuid.to_string();
+        LINES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|l| l.contains(&uuid))
+            .cloned()
+            .collect()
+    }
+
+    struct Node {
+        ctx: MmArc,
+        dbdir: std::path::PathBuf,
+        p2p_rx: mpsc::Receiver<AdexBehaviourCmd>,
+    }
+
+    impl Drop for Node {
+        fn drop(&mut self) { std::fs::remove_dir_all(&self.dbdir).ok(); }
+    }
+
+    impl Node {
+        /// Real order files in a temporary directory, an in-memory history database, and `conf` merged in.
+        fn new(conf: Json) -> Node {
+            let dbdir = std::env::temp_dir().join(format!("kdf-restore-guard-{}", Uuid::new_v4()));
+            let mut full_conf = json!({ "dbdir": dbdir.to_string_lossy(), "coins": [] });
+            for (key, value) in conf.as_object().unwrap() {
+                full_conf[key] = value.clone();
+            }
+            let ctx = MmCtxBuilder::new().with_conf(full_conf).into_mm_arc();
+            std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+            std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
+            std::fs::create_dir_all(my_orders_history_dir(&ctx)).unwrap();
+            let connection = Connection::open_in_memory().unwrap();
+            connection.execute(CREATE_MY_ORDERS_TABLE, []).unwrap();
+            let _ = ctx.sqlite_connection.pin(Arc::new(Mutex::new(connection)));
+            let (tx, p2p_rx) = mpsc::channel(1000);
+            P2PContext::new(tx).store_to_mm_arc(&ctx);
+            Node { ctx, dbdir, p2p_rx }
+        }
+
+        fn storage(&self) -> MyOrdersStorage { MyOrdersStorage::new(self.ctx.clone()) }
+
+        fn active_file(&self, uuid: &Uuid) -> bool { my_maker_order_file_path(&self.ctx, uuid).exists() }
+
+        fn history_bytes(&self, uuid: &Uuid) -> Option<Vec<u8>> {
+            std::fs::read(my_order_history_file_path(&self.ctx, uuid)).ok()
+        }
+
+        /// The status and the last-updated time of the filtering-history row.
+        fn row(&self, uuid: &Uuid) -> Option<(String, i64)> {
+            self.ctx
+                .sqlite_connection()
+                .query_row(
+                    "SELECT status, last_updated FROM my_orders WHERE uuid = ?1",
+                    [uuid.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .ok()
+        }
+
+        fn restored_makers(&self) -> HashSet<Uuid> {
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&self.ctx).unwrap();
+            let uuids = ordermatch_ctx
+                .maker_orders_ctx
+                .lock()
+                .clone_orders()
+                .keys()
+                .copied()
+                .collect();
+            uuids
+        }
+
+        fn restore(&self) { block_on(orders_kick_start(&self.ctx)).unwrap(); }
+
+        /// The order is saved as `setprice` saves it, and then removed; the record is written back, as a record that
+        /// outlived the removal.
+        fn saved_removed_and_written_back(&self, order: &MakerOrder, reason: MakerOrderCancellationReason) {
+            block_on(save_my_new_maker_order(self.ctx.clone(), order)).unwrap();
+            block_on(delete_my_maker_order(self.ctx.clone(), order.clone(), reason).compat()).unwrap();
+            block_on(self.storage().save_new_active_maker_order(order)).unwrap();
+        }
+
+        fn assert_nothing_published(&mut self) {
+            assert!(self.p2p_rx.try_recv().is_err(), "a message was published");
+        }
+    }
+
+    fn maker(save_in_history: bool) -> MakerOrder {
+        MakerOrder {
+            base: "DOC".into(),
+            rel: "MARTY".into(),
+            created_at: now_ms(),
+            updated_at: Some(now_ms()),
+            max_base_vol: 10.into(),
+            min_base_vol: 0.into(),
+            price: 1.into(),
+            matches: HashMap::new(),
+            started_swaps: Vec::new(),
+            uuid: Uuid::new_v4(),
+            conf_settings: None,
+            changes_history: None,
+            save_in_history,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+            timeout_in_minutes: None,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    fn taker(save_in_history: bool) -> TakerOrder {
+        TakerOrder {
+            request: TakerRequest {
+                base: "DOC".into(),
+                rel: "MARTY".into(),
+                uuid: Uuid::new_v4(),
+                dest_pub_key: H256Json::default(),
+                sender_pubkey: H256Json::default(),
+                base_amount: 10.into(),
+                rel_amount: 10.into(),
+                action: TakerAction::Buy,
+                match_by: MatchBy::Any,
+                conf_settings: None,
+                base_protocol_info: None,
+                rel_protocol_info: None,
+                swap_version: SwapVersion::default(),
+            },
+            matches: HashMap::new(),
+            created_at: now_ms(),
+            order_type: OrderType::GoodTillCancelled,
+            min_volume: 0.into(),
+            timeout: 30,
+            save_in_history,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+        }
+    }
+
+    // (a)
+
+    #[test]
+    fn t9_a_a_record_whose_removal_the_history_records_is_not_restored() {
+        let logs = capture_installed();
+        let mut node = Node::new(json!({}));
+        let stale = maker(true);
+        let live = maker(true);
+        node.saved_removed_and_written_back(&stale, MakerOrderCancellationReason::Cancelled);
+        block_on(save_my_new_maker_order(node.ctx.clone(), &live)).unwrap();
+        let history_before = node
+            .history_bytes(&stale.uuid)
+            .expect("the removal wrote a history record");
+        let row_before = node.row(&stale.uuid).unwrap();
+        assert_eq!(row_before.0, "Cancelled");
+        assert!(node.active_file(&stale.uuid), "the record outlived the removal");
+
+        node.restore();
+
+        assert_eq!(node.restored_makers(), HashSet::from([live.uuid]));
+        assert!(!node.active_file(&stale.uuid), "the stale record is deleted");
+        assert!(node.active_file(&live.uuid));
+        node.assert_nothing_published();
+        assert_eq!(
+            node.history_bytes(&stale.uuid),
+            Some(history_before),
+            "no new history entry"
+        );
+        assert_eq!(node.row(&stale.uuid), Some(row_before), "no new status");
+        if logs {
+            let lines = lines_for(stale.uuid);
+            assert_eq!(lines.len(), 1, "{:?}", lines);
+            assert!(
+                lines[0].starts_with("WARN") && lines[0].contains("Cancelled"),
+                "{:?}",
+                lines
+            );
+        }
+        assert!(lines_for(live.uuid).is_empty());
+    }
+
+    #[test]
+    fn t9_a_every_removal_reason_counts() {
+        let mut node = Node::new(json!({}));
+        let reasons = [
+            MakerOrderCancellationReason::Fulfilled,
+            MakerOrderCancellationReason::InsufficientBalance,
+            MakerOrderCancellationReason::Cancelled,
+            MakerOrderCancellationReason::Expired,
+        ];
+        let stale: Vec<MakerOrder> = reasons.iter().map(|_| maker(true)).collect();
+        for (order, reason) in stale.iter().zip(reasons) {
+            node.saved_removed_and_written_back(order, reason);
+        }
+        node.restore();
+        assert!(node.restored_makers().is_empty());
+        for order in &stale {
+            assert!(!node.active_file(&order.uuid));
+        }
+        node.assert_nothing_published();
+    }
+
+    #[test]
+    fn t9_a_a_removal_status_without_a_history_record_or_a_history_record_without_a_status() {
+        let node = Node::new(json!({}));
+        let status_only = maker(true);
+        let record_only = maker(true);
+        let in_progress = maker(true);
+        let updated = maker(true);
+        for order in [&status_only, &record_only, &in_progress, &updated] {
+            block_on(save_my_new_maker_order(node.ctx.clone(), order)).unwrap();
+        }
+        let storage = node.storage();
+        // The history record write failed, the status was written.
+        block_on(storage.update_order_status_in_filtering_history(status_only.uuid, "Fulfilled".to_owned())).unwrap();
+        // The status write failed, the history record was written.
+        block_on(storage.save_order_in_history(&Order::Maker(record_only.clone()))).unwrap();
+        // An update leaves the status `Updated`, which an active order carries.
+        block_on(storage.update_maker_order_in_filtering_history(&updated)).unwrap();
+        assert_eq!(node.row(&updated.uuid).unwrap().0, "Updated");
+        assert_eq!(node.row(&in_progress.uuid).unwrap().0, "Created");
+
+        node.restore();
+
+        assert_eq!(node.restored_makers(), HashSet::from([in_progress.uuid, updated.uuid]));
+        assert!(!node.active_file(&status_only.uuid));
+        assert!(!node.active_file(&record_only.uuid));
+    }
+
+    // (b)
+
+    #[test]
+    fn t9_b_an_order_not_kept_in_the_history_is_restored() {
+        let node = Node::new(json!({}));
+        let order = maker(false);
+        // Its removal wrote no history entry, so its record is restored as before.
+        node.saved_removed_and_written_back(&order, MakerOrderCancellationReason::Cancelled);
+        assert!(node.history_bytes(&order.uuid).is_none());
+        assert!(node.row(&order.uuid).is_none());
+        node.restore();
+        assert_eq!(node.restored_makers(), HashSet::from([order.uuid]));
+        assert!(node.active_file(&order.uuid));
+    }
+
+    // (c)
+
+    #[test]
+    fn t9_c_the_switch_turns_the_guard_off() {
+        let node = Node::new(json!({ "maker_restore_skips_cancelled": false }));
+        let order = maker(true);
+        node.saved_removed_and_written_back(&order, MakerOrderCancellationReason::Cancelled);
+        node.restore();
+        assert_eq!(node.restored_makers(), HashSet::from([order.uuid]));
+        assert!(node.active_file(&order.uuid));
+    }
+
+    // (d)
+
+    /// Mocks the attempt: it fails `failures` times and then succeeds. Returns the number of calls.
+    fn mock_attempts(failures: usize) -> Arc<AtomicUsize> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        delete_active_maker_order_attempt.mock_safe(move |_ctx, _uuid| {
+            let call = counted.fetch_add(1, AtomicOrdering::SeqCst);
+            let result = if call < failures {
+                MmError::err(MyOrdersError::ErrorSaving("disk full".to_owned()))
+            } else {
+                Ok(())
+            };
+            MockResult::Return(Box::new(futures01::future::result(result)))
+        });
+        calls
+    }
+
+    fn remove(node: &Node, order: &MakerOrder) -> Duration {
+        let started = Instant::now();
+        block_on(
+            delete_my_maker_order(node.ctx.clone(), order.clone(), MakerOrderCancellationReason::Cancelled).compat(),
+        )
+        .unwrap();
+        started.elapsed()
+    }
+
+    #[test]
+    fn t9_d_a_deletion_that_fails_twice_and_then_succeeds() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        let order = maker(false);
+        let calls = mock_attempts(2);
+        let elapsed = remove(&node, &order);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 3);
+        assert!(elapsed >= Duration::from_millis(400), "{:?}", elapsed);
+        if logs {
+            let lines = lines_for(order.uuid);
+            assert_eq!(lines.len(), 2, "{:?}", lines);
+            assert!(lines.iter().all(|l| l.starts_with("WARN") && !l.contains("Giving up")));
+        }
+    }
+
+    #[test]
+    fn t9_d_a_deletion_that_fails_three_times_gives_up_with_the_identifier() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        let order = maker(false);
+        let calls = mock_attempts(3);
+        let elapsed = remove(&node, &order);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 3, "no fourth attempt");
+        assert!(elapsed >= Duration::from_millis(400), "{:?}", elapsed);
+        if logs {
+            let lines = lines_for(order.uuid);
+            assert_eq!(lines.len(), 4, "{:?}", lines);
+            assert_eq!(lines.iter().filter(|l| l.contains("Giving up")).count(), 1);
+            assert!(lines[3].contains("Giving up"));
+        }
+    }
+
+    #[test]
+    fn t9_d_the_history_writes_follow_the_failed_deletion() {
+        let node = Node::new(json!({}));
+        let order = maker(true);
+        block_on(save_my_new_maker_order(node.ctx.clone(), &order)).unwrap();
+        let _calls = mock_attempts(3);
+        remove(&node, &order);
+        assert!(node.history_bytes(&order.uuid).is_some());
+        assert_eq!(node.row(&order.uuid).unwrap().0, "Cancelled");
+    }
+
+    #[test]
+    fn t9_d_a_missing_record_is_not_retried() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        let order = maker(false);
+        assert!(!node.active_file(&order.uuid));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        // Counts the attempts, and lets the real one run.
+        delete_active_maker_order_attempt.mock_safe(move |ctx, uuid| {
+            counted.fetch_add(1, AtomicOrdering::SeqCst);
+            MockResult::Continue((ctx, uuid))
+        });
+        remove(&node, &order);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "one attempt, no retry");
+        if logs {
+            assert!(lines_for(order.uuid).is_empty());
+        }
+    }
+
+    #[test]
+    fn t9_d_an_existing_record_is_deleted_at_the_first_attempt() {
+        let node = Node::new(json!({}));
+        let order = maker(false);
+        block_on(save_my_new_maker_order(node.ctx.clone(), &order)).unwrap();
+        assert!(node.active_file(&order.uuid));
+        remove(&node, &order);
+        assert!(!node.active_file(&order.uuid));
+    }
+
+    #[test]
+    fn t9_d_the_switch_turns_the_retry_off() {
+        let node = Node::new(json!({ "maker_restore_skips_cancelled": false }));
+        let order = maker(false);
+        let calls = mock_attempts(3);
+        remove(&node, &order);
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            0,
+            "the reference deletes once, directly"
+        );
+    }
+
+    // (e)
+
+    #[test]
+    fn t9_e_a_stored_taker_record_is_restored() {
+        let node = Node::new(json!({}));
+        let order = taker(true);
+        block_on(save_my_new_taker_order(node.ctx.clone(), &order)).unwrap();
+        // Its removal is recorded in the history, and its record is written back.
+        block_on(
+            delete_my_taker_order(node.ctx.clone(), order.clone(), TakerOrderCancellationReason::Cancelled).compat(),
+        )
+        .unwrap();
+        block_on(node.storage().save_new_active_taker_order(&order)).unwrap();
+        assert!(node.history_bytes(&order.request.uuid).is_some());
+
+        node.restore();
+
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
+        assert!(taker_orders.contains_key(&order.request.uuid));
+    }
+}
+
 fn pair_trie_root_by_pub(ctx: &MmArc, pubkey: &str, pair: &str) -> H64 {
     let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
     let trie_store = ordermatch_ctx.trie_store.lock();

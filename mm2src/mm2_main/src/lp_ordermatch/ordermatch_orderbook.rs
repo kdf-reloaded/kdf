@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 impl From<(new_protocol::MakerOrderCreated, String)> for OrderbookItem {
     fn from(tuple: (new_protocol::MakerOrderCreated, String)) -> OrderbookItem {
@@ -515,7 +516,7 @@ pub(crate) fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) {
         let mut orderbook = ordermatch_ctx.orderbook.lock();
 
         // Record this UUID so that a late-arriving create message won't resurrect the order.
-        orderbook.recently_cancelled.insert(uuid, pubkey.to_string());
+        orderbook.record_cancel(uuid, pubkey);
 
         if let Some(order) = orderbook.order_set.get(&uuid) {
             if order.pubkey == pubkey {
@@ -1958,8 +1959,73 @@ impl OrdermatchContext {
     }
 }
 
-/// How long to remember a cancelled order UUID to guard against out-of-order P2P messages.
+/// How long to remember a cancelled order UUID to guard against out-of-order P2P messages: the reference
+/// value (CRD ch.32 R-K1), which `Orderbook::default` uses. A node built from its configuration uses the
+/// final-cancel window of R-K1b instead ([`cancel_final_window_secs`]).
 const RECENTLY_CANCELLED_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// CRD ch.32 R-K1b item 1: default of the MM2.json integer `cancel_final_window_secs`.
+pub(crate) const DEFAULT_CANCEL_FINAL_WINDOW_SECS: u64 = 3600;
+/// R-K1b item 1: the smallest window, the 120 s of R-K1; a configured value below it is taken as this.
+pub(crate) const MIN_CANCEL_FINAL_WINDOW_SECS: u64 = 120;
+/// R-K1b item 1: the largest window; a configured value above it is taken as this.
+pub(crate) const MAX_CANCEL_FINAL_WINDOW_SECS: u64 = 86400;
+/// R-K1b item 4: default of the MM2.json integer `cancel_final_max_entries`.
+pub(crate) const DEFAULT_CANCEL_FINAL_MAX_ENTRIES: usize = 100_000;
+/// R-K1b item 4: the largest cap; a configured value above it is taken as this.
+pub(crate) const CEILING_CANCEL_FINAL_MAX_ENTRIES: usize = 1_000_000;
+
+/// R-K1b item 1: the final-cancel window, the top-level MM2.json integer `cancel_final_window_secs`, default
+/// `3600`. A value below `120` is taken as `120`, one above `86400` as `86400` (logged once per process); an
+/// absent or non-integer value means the default.
+pub(crate) fn cancel_final_window_secs(ctx: &MmArc) -> u64 {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let configured = match (
+        ctx.conf["cancel_final_window_secs"].as_u64(),
+        ctx.conf["cancel_final_window_secs"].as_i64(),
+    ) {
+        (Some(configured), _) => configured as i128,
+        // A negative integer: below the smallest window.
+        (None, Some(configured)) => configured as i128,
+        (None, None) => return DEFAULT_CANCEL_FINAL_WINDOW_SECS,
+    };
+    let used = configured.clamp(
+        MIN_CANCEL_FINAL_WINDOW_SECS as i128,
+        MAX_CANCEL_FINAL_WINDOW_SECS as i128,
+    ) as u64;
+    if configured != used as i128 && !WARNED.swap(true, AtomicOrdering::Relaxed) {
+        log::warn!(
+            "cancel_final_window_secs is {}, outside {}..={}: {} is used instead",
+            configured,
+            MIN_CANCEL_FINAL_WINDOW_SECS,
+            MAX_CANCEL_FINAL_WINDOW_SECS,
+            used
+        );
+    }
+    used
+}
+
+/// R-K1b item 4: the cap on the guard entries older than 120 s, the top-level MM2.json integer
+/// `cancel_final_max_entries`, default `100000`, at most `1000000` (a larger value is taken as that, logged
+/// once per process). An absent, non-integer or zero value means the default.
+pub(crate) fn cancel_final_max_entries(ctx: &MmArc) -> usize {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let configured = match ctx.conf["cancel_final_max_entries"].as_u64() {
+        Some(configured) if configured > 0 => configured,
+        _ => return DEFAULT_CANCEL_FINAL_MAX_ENTRIES,
+    };
+    if configured <= CEILING_CANCEL_FINAL_MAX_ENTRIES as u64 {
+        return configured as usize;
+    }
+    if !WARNED.swap(true, AtomicOrdering::Relaxed) {
+        log::warn!(
+            "cancel_final_max_entries is {}, above the ceiling: {} is used instead",
+            configured,
+            CEILING_CANCEL_FINAL_MAX_ENTRIES
+        );
+    }
+    CEILING_CANCEL_FINAL_MAX_ENTRIES
+}
 
 pub(crate) struct Orderbook {
     /// A map from (base, rel).
@@ -1972,8 +2038,12 @@ pub(crate) struct Orderbook {
     pub(crate) unordered: HashMap<(String, String), HashSet<Uuid>>,
     pub(crate) order_set: HashMap<Uuid, OrderbookItem>,
     /// Recently cancelled order UUIDs mapped to the cancelling pubkey.
-    /// Guards against re-creation when P2P cancel arrives before the create message.
+    /// Guards against re-creation when P2P cancel arrives before the create message. Its time-to-live is
+    /// the final-cancel window of CRD ch.32 R-K1b.
     pub(crate) recently_cancelled: TimeCache<Uuid, String>,
+    /// R-K1b item 4: the number of entries of `recently_cancelled` older than [`RECENTLY_CANCELLED_TIMEOUT`]
+    /// that the guard keeps.
+    pub(crate) cancel_guard_max_entries: usize,
     /// Per-order P2P pubkeys owned by this node (e.g. ZHTLC random keypairs).
     /// Used by `is_my_order()` alongside the persistent secp256k1 pubkey.
     pub(crate) my_p2p_pubkeys: HashSet<String>,
@@ -1992,6 +2062,7 @@ impl Default for Orderbook {
             unordered: HashMap::default(),
             order_set: HashMap::default(),
             recently_cancelled: TimeCache::new(RECENTLY_CANCELLED_TIMEOUT),
+            cancel_guard_max_entries: DEFAULT_CANCEL_FINAL_MAX_ENTRIES,
             my_p2p_pubkeys: HashSet::default(),
             trie_ops_enqueued: 0,
         }
@@ -2001,6 +2072,37 @@ impl Default for Orderbook {
 pub(crate) fn hashed_null_node<T: TrieConfiguration>() -> TrieHash<T> { <T::Codec as NodeCodecT>::hashed_null_node() }
 
 impl Orderbook {
+    /// An order book whose cancellation guard keeps an entry for the final-cancel window and the older
+    /// entries within the cap, both read from the configuration (CRD ch.32 R-K1b items 1 and 4).
+    pub(crate) fn for_ctx(ctx: &MmArc) -> Orderbook {
+        Orderbook {
+            recently_cancelled: TimeCache::new(Duration::from_secs(cancel_final_window_secs(ctx))),
+            cancel_guard_max_entries: cancel_final_max_entries(ctx),
+            ..Default::default()
+        }
+    }
+
+    /// Records the cancel of `uuid` by `pubkey` in the guard (CRD ch.32 R-C5) and applies the cap.
+    pub(crate) fn record_cancel(&mut self, uuid: Uuid, pubkey: &str) {
+        self.recently_cancelled.insert(uuid, pubkey.to_string());
+        self.enforce_cancel_guard_cap();
+    }
+
+    /// CRD ch.32 R-K1b item 4: drops the oldest guard entries while the guard holds more than
+    /// `cancel_guard_max_entries`, but stops at the first entry younger than the 120 s of R-K1, which is
+    /// never dropped for the cap. Each step removes the oldest entry; nothing else is scanned.
+    pub(crate) fn enforce_cancel_guard_cap(&mut self) {
+        while self.recently_cancelled.len() > self.cancel_guard_max_entries {
+            if self
+                .recently_cancelled
+                .pop_oldest_at_least(RECENTLY_CANCELLED_TIMEOUT)
+                .is_none()
+            {
+                break;
+            }
+        }
+    }
+
     /// Queue the trie events of an index mutation for the trie worker (CRD ch.32 R-T3b item 1).
     ///
     /// Takes `&mut self` so that it can only be called while the caller holds the orderbook guard
@@ -2035,7 +2137,7 @@ impl Orderbook {
             log::debug!(
                 "Ignoring a late copy of order {}: it was cancelled less than {} s ago",
                 order.uuid,
-                RECENTLY_CANCELLED_TIMEOUT.as_secs()
+                self.recently_cancelled.ttl().as_secs()
             );
             return Vec::new();
         }
