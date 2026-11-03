@@ -53,6 +53,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   sync limits on relays above (PR #205). What two later packages waited for is now recorded: how a
   cancelled order can come back on Komodo and GLEEC KDF, and that their makers advertise every
   non-empty pair at every tick.
+- [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
+  spreads read-only Electrum queries only over the servers with the shortest round trip is written,
+  with its two switches and their defaults (PR #201).
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
   recorded; whether KDF Reloaded follows them stays the maintainer's decision.

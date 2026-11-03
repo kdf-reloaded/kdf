@@ -1,6 +1,6 @@
 # Plan: order-posting latency
 
-**Status:** in progress (all passes merged, Decision AM in PR #149; timing run done 2026-10-31; post-beta: read spreading by round trip, Decision BI) — **Last reviewed:** 2026-10-31
+**Status:** in progress (all passes merged, Decision AM in PR #149; timing run done 2026-10-31; read spreading by round trip, Decision BI: rule written 2026-11-02, code next) — **Last reviewed:** 2026-11-02
 
 > **Context:** a market maker found order posting on Reloaded slower than on GLEEC KDF, about 20 % on
 > UTXO and EVM coins and about 100 % on DOGE. Orders carrying `timeout_in_minutes` expired in the
@@ -108,8 +108,20 @@ the second time with the beta head first.
   servers from the coin's list, or sets `electrum_spread_reads` to `false` and `electrum_server_order`
   to `listed`. After the beta, reads are spread only over the connected servers whose recent round trip
   is close to the fastest one: a Reloaded-original amendment of ch.38 R38.6.4a, then code.
+- **Decisions 8, 15 and 22 (maintainer, 2026-11-02): near sessions, under monitoring.** Reads take turns
+  only over the connected servers whose smoothed latency is at most max(2 × fastest, fastest + 20 ms), on
+  by default (`electrum_spread_near_factor` 2, `electrum_spread_near_offset_ms` 20; R38.6.4a items 6–8).
+  The larger-of form stays. A latency study over 13 coins with one to six servers found the rule helpful
+  where servers differ and neutral where they do not. A check of the chain tip, so that a near server two or more blocks behind stops being near,
+  follows in batch 2 (work package 5).
 - **F6 (operator, no code).** Raise the per-session limits on the operator's own Electrum servers for the
   market maker. This gives relief until the code lands.
+
+## Open points
+
+- **Monitoring: the near-session rule and its defaults.** Decided but not closed. Revisit on field behavior
+  and user reports. Owner: session 6a. Input: the batch-1 swaplab timing rows and the first user reports on
+  0.4.0.
 
 ## Work packages
 
@@ -119,6 +131,7 @@ the second time with the beta head first.
 | 1 | Coder pass 1: F1 P2PK batching; F4 concurrent gas-price queries plus reuse within one request; F3(a) one fee read per request; F3(b) skip on price-only updates | R38.6.3a, R57.2.1, R57.2.6 item 1, R38.6.6j item 1, R60.6.7 amendment and item 8 | merged 2026-10-28 (PR #114) |
 | 2 | Coder pass 2: F3(c) fee cache `fee_estimate_cache_secs` with per-coin lifetime and per-chain gas price; F5 read spreading `electrum_spread_reads`; spend check on every update again | R38.6.6j items 2–4, R38.6.6k, R57.2.6, R57.2.7, R38.6.4a, R60.6.7 amendment (AC) | implemented (PR #128) |
 | 3 | F2 balance watch (order-bearing base coins, interval, restart seeding) | R60.4.5, R60.4.6 (D60.4 resolved, PR #96) | merged 2026-10-28 (PR #116) |
-| 4 | Read spreading only over the connected servers whose recent round trip is close to the fastest (Decision BI) | R38.6.4a amendment, to be written | after the beta |
+| 4 | Read spreading only over the connected servers whose recent round trip is close to the fastest (Decision BI) | R38.6.4a items 6–8, D38.6.4a.1 and D38.6.4a.2 (decided, under monitoring) | rule written 2026-11-02; code next, then the swaplab rows: RIN on its six-server list and its earlier three-server list, DOGE, and RIN under `mixed` and `measured` for D38.6.4l.1 |
+| 5 | Tip check for near sessions: a near server two or more blocks behind the best tip stops being near, under every server order (Decision 22, study proposal (c)) | R38.6.4a amendment, to be written | batch 2 |
 
 Each code PR is checked end to end by the swaplab session's timing run once it is built.
