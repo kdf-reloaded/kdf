@@ -359,6 +359,13 @@ balance MUST NOT emit. Each emission's JSON message body MUST carry the
 ticker, both balance components as decimal strings, and a timestamp in
 milliseconds.
 
+> **Amendment (reloaded, 2026-11-02).** For an Electrum-backed UTXO coin, and for
+> a QRC20 token through its contract-event subscription, the loop of item 2 also
+> races a server notification that the watched address changed (chapter 38
+> R38.6.5). A notification ends the wait early and leads to the same balance read
+> as the timer branch; the timer stays the floor, and the emit-on-change rule is
+> unchanged. Code: `mm2_main/src/rpc/streaming_activations/balance.rs`.
+
 **R26.** The non-balance streamers MUST follow the shared activation
 contract of R22 and the lifecycle contract of R8-R12, mapping activation
 failures into the bound activation error category unless a

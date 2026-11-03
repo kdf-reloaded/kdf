@@ -1521,6 +1521,11 @@ and a candidate of their own (forward once, on the consumer's report).
 Either is a divergence to record in the
 operator-facing compatibility documents; neither changes a wire shape.
 
+> **Status (2026-11-02).** Adopted in Reloaded: §28.9B RQ1 bounds the queue
+> (2,048 data RPCs or 4 MiB per connection, oldest forwards dropped, a stuck
+> peer disconnected), so "no bound … in Reloaded" above describes the tree
+> before RQ1.
+
 **D8.** *Close every connection of a stuck peer (Reloaded-original;
 added 2026-10-30; the reference facts it rests on are RQ1a).* RQ1 item 5 closes the connection whose data queue is
 stuck. Where a peer holds more than one connection to this node (RQ1a
@@ -1579,6 +1584,14 @@ accepted with per-advisory rationale in `deny.toml` (upstream-blocked —
 awaiting KomodoPlatform fork modernization / Solana SDK bumps), and the
 reloaded-owned roots (`libsqlite3-sys` via rusqlite; `metrics-util`) are
 tracked as scheduled migrations.
+
+> **Status (2026-11-02).** The residue is smaller than listed above.
+> `libp2p-websocket` is vendored on rustls 0.23, so no rustls 0.20 consumer
+> remains, and the `rustls`, `webpki` and `ring` advisories (RUSTSEC-2024-0336,
+> RUSTSEC-2023-0052, RUSTSEC-2025-0009) went with it. `mio` and
+> `remove_dir_all` never came from the fork: crossterm / signal-hook-mio and
+> tempfile 3.3.0 pull them. `deny.toml` holds the current list with its
+> reasons.
 
 ## 28.12 External References
 

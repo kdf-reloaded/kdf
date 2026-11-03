@@ -999,6 +999,15 @@ rather than defects. None is a correctness claim.
   response body of a non-success answer. Whether that is allowed was chapter
   36 D36.3; the maintainer decided on 2026-10-29 that it is not, and R-N3
   binds it, also at Reloaded's boundary.
+- **D11 -- A Sia-shaped withdraw fee form.** *Deferred until a client needs
+  it.* R-W3 reads `UtxoPerKbyte` as SC per kilobyte, which is what the
+  Komodo wallet already sends for SC, so no new fee variant was added. A
+  Sia-specific form remains possible later: a hastings-per-byte rate, which
+  the size-aware estimator would multiply by the real weight and so fits the
+  coin's own fee model better, or a fixed total, which is easier for a user
+  to understand. Either would be a new arm of the withdraw fee object, with
+  its own invalid-fee-policy texts and verification items next to T-W6 and
+  T-W7.
 
 ## 20.11 Baseline Verifications
 

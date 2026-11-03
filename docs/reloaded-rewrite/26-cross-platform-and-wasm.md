@@ -60,10 +60,11 @@ substrate; R6–R7 cover the two-crate platform-
 shim split; R8–R9 cover the storage-backend
 duality; R10–R12 cover the dual asynchronous-
 runtime substrate; R13–R14 cover the dual
-transport substrate; R15 covers the filesystem-
-and-operating-system isolation substrate; R16–R17 cover the
+transport substrate; R15 covers the RPC-types crate;
+R16 covers the filesystem-
+and-operating-system isolation substrate; R17–R18 cover the
 native-only-stack enumeration and the
-WebAssembly-only-stack identifier; R18 covers the
+WebAssembly-only-stack identifier; R19 covers the
 continuous-integration matrix.
 
 ## 26.2 Subsystem Shape
@@ -405,7 +406,7 @@ equivalent:
 | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | The Lightning Network coin module (under the coins crate's `lightning` sub-module). | Gated by `cfg_native!` blocks (R2) inside the coin-platform-aggregator module of the coins crate. Chapter-bound browser builds skip the entire Lightning module. |
 | The Z-coin Sapling sub-crate of the coins crate. | The Sapling cryptographic substrate consumes foreign-function-interface code that does not cross-compile to the browser target triple. |
-| The Solana sub-crate of the coins crate (see chapter 27). | The modular Solana sibling-allowlist crate set replaced the earlier chained substrate (the `solana-remote-wallet` → `hidapi` → `libudev` chain) precisely so that the mobile cross-compiles of R18 could succeed. |
+| The Solana sub-crate of the coins crate (see chapter 27). | The modular Solana sibling-allowlist crate set replaced the earlier chained substrate (the `solana-remote-wallet` → `hidapi` → `libudev` chain) precisely so that the mobile cross-compiles of R19 could succeed. |
 | The Trezor hardware-wallet crate. | Native uses the C `secp256k1-ffi` substrate and a USB human-interface-device transport; the WebAssembly target table ships `js-sys`/`wasm-bindgen` for a in-browser variant. |
 | The Ledger hardware-wallet crate. | The crate at the substrate landing point has only the WebAssembly-side WebUSB transport in its dependency table; the native HID path is scaffolded but not integrated and the crate is not yet wired into the rest of the workspace. |
 
@@ -578,7 +579,7 @@ goes through. Either failing MUST fail the build.
 
 ## 26.13 Tests
 
-**T1.** *Per-target build invocation.* The continuous-integration substrate of R18 MUST be confirmed to
+**T1.** *Per-target build invocation.* The continuous-integration substrate of R19 MUST be confirmed to
 issue the per-target build invocation against
 every row of the nine-row target
 matrix on every merge against the default branch.
@@ -595,7 +596,7 @@ a `wasm_storage.rs` module, and that the
 module-roots module branches on the R8
 step 4 attribute pair.
 
-**T4.** *Browser-target safety-net pair.* The continuous-integration substrate MUST confirm both R18 
+**T4.** *Browser-target safety-net pair.* The continuous-integration substrate MUST confirm both R19 
 browser-target safety nets (the check
 invocation and the `wasm-pack` invocation) run on
 every merge against the default
@@ -607,7 +608,7 @@ build.
 **D1.** Chapter-bound automated cross-target test execution: the
 browser-target continuous-integration job at the
 substrate landing point runs only the check and
-the `wasm-pack build` (R18); the mobile-target continuous-integration jobs run only the
+the `wasm-pack build` (R19); the mobile-target continuous-integration jobs run only the
 build step. Chapter-bound run-time behaviour on those
 targets is checked manually.
 
@@ -662,10 +663,10 @@ plus a `cdylib` entry in a single
 crate at the baseline workspace; and a
 early IndexedDB layer (an ancestor of R9). The
 baseline tree MUST NOT yet carry: the macOS
-Universal `lipo` step (R18); the iOS static-
-library target (R18); the Android cargo-ndk
-workflow (R18); the modern WebAssembly 
-continuous-integration safety nets (R18); the
+Universal `lipo` step (R19); the iOS static-
+library target (R19); the Android cargo-ndk
+workflow (R19); the modern WebAssembly 
+continuous-integration safety nets (R19); the
 dual asynchronous-runtime substrate's `AbortOnDropHandle` newtype (R11); the mobile-
 bindings crate `mm2_bin_lib` (R6); the split
 between the desktop binary in `mm2_main` and the
@@ -716,7 +717,7 @@ not under chapter 02 R5.
   patched-dependency substrate, the chapter-02 R8 build-target
   surface); chapter 03 (the toolchain pin and the
   2021-edition migration; the Cross.toml byte-identical preservation of chapter 03 R11
-  consumed by R18); chapter 05 (the canonical
+  consumed by R19); chapter 05 (the canonical
   hierarchical-deterministic-wallet storage worked instance of
   R8); chapter 12, chapter 14, chapter 15 (the swap state-store consumers of R8); chapter 19 (the
   non-fungible-token consumer of R8); chapter 22 (the
