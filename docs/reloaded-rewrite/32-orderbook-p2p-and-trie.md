@@ -174,7 +174,10 @@ on insert so that a `Cancel` message that races ahead of its
 matching `Create` cannot resurrect an order. The guard's TTL is
 bound by [§11.2](11-order-match-cancellation.md) and §32.9; this
 chapter binds only the guard's presence and the obligation to
-consult it on insert. *(Post-2022 component per §32.1.)* How a cancel
+consult it on insert. *(Reloaded, 2026-11-03, with R-K1b: the guard
+entry is keyed by identifier and publisher; a cancel from another
+publisher neither creates nor refreshes the entry for the order's
+publisher.)* *(Post-2022 component per §32.1.)* How a cancel
 that never arrives leaves a stale entry behind, and the paths that
 remove it, are bound in §32.9C R-GH1 and R-GH5.
 
@@ -2165,7 +2168,12 @@ three cancels younger than 120 s on top of three older ones all guard,
 and only older entries are dropped. (e) Readers: absent gives 3600, `60`
 gives 120, `100000` gives 86400 and `"x"` gives 3600; for the cap, absent,
 `0` and `"x"` give 100000 and `2000000` gives 1000000. (f) After a restart
-nothing is guarded.
+nothing is guarded. (g) A cancel for an order's identifier signed by
+another publisher, followed by the order's own publisher's cancel, leaves
+two guard entries: the order is kept out for its publisher's window,
+counted from its publisher's cancel, and a created message from the other
+publisher with that identifier is kept out only for that publisher's own
+window; neither cancel refreshes the other's entry.
 
 ## 32.9A Bounded and Unbounded State
 
@@ -4122,8 +4130,8 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   repository's own chapters 12, 59 and 60. The T-items are
   Reloaded-original.
 - *Reloaded-original addition (2026-11-03) -- §32.9 R-K1b, T-K8, the
-  row-4 sentence of §32.9A R-B2, and the notes added to R-GH10, T-GH10,
-  R-GH11, D2 and D12 item 2.* Written by a context that never read the
+  row-4 sentence of §32.9A R-B2, and the notes added to R-C5, R-GH10,
+  T-GH10, R-GH11, D2 and D12 item 2.* Written by a context that never read the
   forbidden corpus, from the maintainer's Decisions BK and 29 and from this
   repository's own order-message handlers, synchronization applier,
   order-book request path and cancellation guard. The one reference fact

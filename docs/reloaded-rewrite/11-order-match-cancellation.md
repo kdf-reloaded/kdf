@@ -79,6 +79,16 @@ R3. **Value is the cancelling publisher's identity.** The
     protocol uses on create and cancel messages (the
     publisher's persistent peer-identity string).
 
+    *(Reloaded amendment 2026-11-03, with ch. 32 R-K1b: the
+    guard entry is keyed by identifier **and** publisher, so
+    R2 and R3 together form the key and the entry holds no
+    further value. A cancel from another publisher neither
+    creates nor refreshes the entry for the order's
+    publisher; each publisher's entry for an identifier
+    lives for its own window. R8 and R9 are unchanged in
+    effect: an insert is dropped only while the entry for
+    its own identifier and publisher lives.)*
+
 R4. **Per-orderbook isolation.** Each orderbook instance
     carries its own cache. Per-network-id orderbooks do not
     share recently-cancelled state.
@@ -301,8 +311,8 @@ V3. The publish-subscribe mesh protocol the codebase uses
   use site of the cache, with the primitive read from the public crate. *Method:*
   reading plus a mechanical scan of the added lines. *Measure:* 0.00 against the
   0.10 threshold.
-- *Reloaded-original amendment (2026-11-03), R1, the note after R10's
-  informative paragraph, the first row of §11.7 and D2:* written by a
+- *Reloaded-original amendment (2026-11-03), R1, the note after R3, the
+  note after R10's informative paragraph, the first row of §11.7 and D2:* written by a
   context that never read the forbidden corpus, from the maintainer's
   Decision 29 and this repository's own cancellation guard. The window
   itself is bound in chapter 32 R-K1b; no reference behavior is added
