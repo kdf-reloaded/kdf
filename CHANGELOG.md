@@ -14,6 +14,23 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Added
 
+#### EVM coins
+
+- **The log shows the gas limits each EVM coin and token will use.** At activation, one line names
+  where the coin's gas limits come from: its own entry in the coins file, its platform coin's entry,
+  or the built-in defaults. It lists the values that differ from the defaults, and the gas-estimate
+  multiplier when one is set; the full list is logged at debug level. A coins file that lacks the
+  limits a chain needs is now visible at once, as it was not when Monad token swaps ran out of gas
+  with a coins file older than October 28, 2026. Detail: PR #200; CRD ch.57 R57.5.5.
+
+#### Start-up and configuration
+
+- **The start-up log now lists the files the node uses.** At start the node logs, at INFO and as
+  absolute paths, where its configuration came from (the command line, the default file or the file
+  named by `MM_CONF_PATH`), where its coins list came from, the log file, the database folders and the
+  wallet file it reads, so a node started from the wrong folder shows it at once. It never logs file
+  contents or configuration values, and no WSS certificate or key path. Detail: PR #209; CRD ch.45 R45.6.6.
+
 ### Changed
 
 #### Order book and peer-to-peer network
@@ -41,6 +58,21 @@ it and, where one exists, the CRD rule, for readers who want more.
   and `sync_answer_deferral_max_total` (at most 64 and 8,192). Nothing on the wire changes. Detail:
   PR #205; CRD ch.32 R-Q5b.
 
+#### UTXO coins and Electrum
+
+- **Electrum reads now go only to the servers with the shortest round trip.** Since 0.3.0-beta.1
+  a coin's read-only Electrum queries took turns over every connected server, so a distant server
+  in the list answered one read in N. Now they take turns only among the connected servers whose
+  recent round trip is at most twice the fastest one's, or within 20 ms of it. The others still
+  answer when those fail, and come back into the turn once their round trip is short again. The
+  round trip is measured from answers the node already gets; nothing extra is sent. From the lab
+  host, RIN's six servers answered a balance read in 25 to 266 ms: spread over all six that
+  averages about 114 ms per read, and over the three this rule keeps, about 28 ms. When every
+  server slows down, as under a per-session limit, all of them stay in the turn. The `MM2.json`
+  numbers `electrum_spread_near_factor` (default `2`) and `electrum_spread_near_offset_ms` (default
+  `20`) set the factor and the margin; a factor of `0` spreads over every connected server as
+  before. Detail: PR #215; CRD ch.38 R38.6.4a.
+
 ### Fixed
 
 #### Node names in logs and errors
@@ -64,12 +96,16 @@ it and, where one exists, the CRD rule, for readers who want more.
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
+- [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
+  now names the gas limits each EVM coin and token will use and where they come from (PR #200);
+  options (a) and (b) still wait on the reference maintainers' outcome.
 - [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes keep
   showing after a lost cancellation; five work packages after the beta, the first being the higher
   sync limits on relays above (PR #205).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
-  with its two switches and their defaults (PR #201).
+  with its two switches and their defaults (PR #201), and implemented (PR #215); the SwapLab timing
+  rows are next.
 - [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new: the peer-to-peer
   items of 0.4.0. The redial guards are in (PRs #199, #206).
 
@@ -154,9 +190,10 @@ lives.
   files from that date on give each Monad token, such as USDC-MON, its own `gas_limit` block, which
   KDF Reloaded uses. With an older file the payment runs out of gas and fails on-chain: its gas fee
   is spent, the tokens stay in the wallet and the swap stops. A counterparty whose payment is already
-  locked gets it back by refund once the swap's lock time passes. More in
-  [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md). Detail: PR #105; CRD ch.57
-  R57.5.2, R57.5.3.
+  locked gets it back by refund once the swap's lock time passes. With an older file, the token's
+  activation log line says `gas_limit: defaults`. More in
+  [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md). Detail: PR #105, PR #200; CRD
+  ch.57 R57.5.2, R57.5.3, R57.5.5.
 
 ## [0.3.0-beta.1] — 2026-11-01
 
