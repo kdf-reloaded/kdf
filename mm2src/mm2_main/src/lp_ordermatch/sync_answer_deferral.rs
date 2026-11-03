@@ -24,13 +24,20 @@ use futures::channel::oneshot;
 use futures::future::{select, Either};
 use mm2_p2p::atomicdex_behaviour::AdexResponse;
 use mm2_p2p::PeerId;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 /// Default of the MM2.json integer `sync_answer_deferral_ms`.
 pub(crate) const DEFAULT_SYNC_ANSWER_DEFERRAL_MS: u64 = 5000;
-/// R-Q5b item 4: parked requests per requesting peer.
-pub(crate) const MAX_PARKED_PER_PEER: usize = 8;
-/// R-Q5b item 4: parked requests in total.
-pub(crate) const MAX_PARKED_TOTAL: usize = 256;
+/// R-Q5b item 4: default of the MM2.json integer `sync_answer_deferral_max_per_peer`, parked requests per
+/// requesting peer.
+pub(crate) const DEFAULT_MAX_PARKED_PER_PEER: usize = 32;
+/// R-Q5b item 4: the largest per-peer limit; a configured value above it is taken as this.
+pub(crate) const CEILING_MAX_PARKED_PER_PEER: usize = 64;
+/// R-Q5b item 4: default of the MM2.json integer `sync_answer_deferral_max_total`, parked requests in
+/// total.
+pub(crate) const DEFAULT_MAX_PARKED_TOTAL: usize = 2048;
+/// R-Q5b item 4: the largest total limit; a configured value above it is taken as this.
+pub(crate) const CEILING_MAX_PARKED_TOTAL: usize = 8192;
 
 /// Number of inbound streams a connection negotiates concurrently. A parked request holds its inbound
 /// stream in negotiation until the answer is written, so the per-peer cap must stay below it.
@@ -38,8 +45,8 @@ pub(crate) const MAX_PARKED_TOTAL: usize = 256;
 /// This is the default of `libp2p-swarm` (`connection/pool.rs`, `max_negotiating_inbound_streams: 128`)
 /// in the pinned `rust-libp2p` tag `k-0.52.12`; the swarm of `mm2_p2p` is built with
 /// `SwarmBuilder::with_executor(..).build()` and does not override it. The limit is per connection, so
-/// it bounds [`MAX_PARKED_PER_PEER`]; [`MAX_PARKED_TOTAL`] is a sum over connections and is not
-/// comparable with it.
+/// it bounds [`CEILING_MAX_PARKED_PER_PEER`] (and so any configured per-peer limit);
+/// [`CEILING_MAX_PARKED_TOTAL`] is a sum over connections and is not comparable with it.
 const SWARM_MAX_NEGOTIATING_INBOUND_STREAMS: usize = 128;
 /// Time after which the request-response layer abandons an inbound substream that has not been answered:
 /// `RequestResponseConfig::default()` of `libp2p-request-response` 0.25.0 (`request_timeout`, 10 s),
@@ -47,7 +54,7 @@ const SWARM_MAX_NEGOTIATING_INBOUND_STREAMS: usize = 128;
 /// timeout (R-Q6). The default bound must stay well below it.
 const REQUEST_RESPONSE_TIMEOUT_MS: u64 = 10_000;
 
-const _: () = assert!(MAX_PARKED_PER_PEER < SWARM_MAX_NEGOTIATING_INBOUND_STREAMS);
+const _: () = assert!(CEILING_MAX_PARKED_PER_PEER < SWARM_MAX_NEGOTIATING_INBOUND_STREAMS);
 const _: () = assert!(DEFAULT_SYNC_ANSWER_DEFERRAL_MS * 2 <= REQUEST_RESPONSE_TIMEOUT_MS);
 
 /// Pause between two checks of the trie worker's progress.
@@ -61,6 +68,54 @@ pub(crate) fn sync_answer_deferral_ms(ctx: &MmArc) -> u64 {
     ctx.conf["sync_answer_deferral_ms"]
         .as_u64()
         .unwrap_or(DEFAULT_SYNC_ANSWER_DEFERRAL_MS)
+}
+
+/// A limit of R-Q5b item 4: the top-level MM2.json integer `key`. An absent, non-integer, negative or zero
+/// value means `default`; a value above `ceiling` is taken as `ceiling`, and that is logged once per process
+/// (`warned`), not per request.
+fn parking_limit(ctx: &MmArc, key: &str, default: usize, ceiling: usize, warned: &AtomicBool) -> usize {
+    let configured = match ctx.conf[key].as_u64() {
+        Some(configured) if configured > 0 => configured,
+        _ => return default,
+    };
+    if configured <= ceiling as u64 {
+        return configured as usize;
+    }
+    if !warned.swap(true, AtomicOrdering::Relaxed) {
+        log::warn!(
+            "{} is {}, above the ceiling: {} is used instead",
+            key,
+            configured,
+            ceiling
+        );
+    }
+    ceiling
+}
+
+/// The per-peer limit of R-Q5b item 4: the top-level MM2.json integer `sync_answer_deferral_max_per_peer`,
+/// default `32`, at most `64`.
+pub(crate) fn sync_answer_deferral_max_per_peer(ctx: &MmArc) -> usize {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    parking_limit(
+        ctx,
+        "sync_answer_deferral_max_per_peer",
+        DEFAULT_MAX_PARKED_PER_PEER,
+        CEILING_MAX_PARKED_PER_PEER,
+        &WARNED,
+    )
+}
+
+/// The total limit of R-Q5b item 4: the top-level MM2.json integer `sync_answer_deferral_max_total`,
+/// default `2048`, at most `8192`.
+pub(crate) fn sync_answer_deferral_max_total(ctx: &MmArc) -> usize {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    parking_limit(
+        ctx,
+        "sync_answer_deferral_max_total",
+        DEFAULT_MAX_PARKED_TOTAL,
+        CEILING_MAX_PARKED_TOTAL,
+        &WARNED,
+    )
 }
 
 /// Default of the MM2.json integer `sync_request_retry_ms`.
@@ -103,12 +158,27 @@ struct Tables {
     /// The same, indexed by pair. An entry is never empty.
     in_flight_by_pair: HashMap<PairKey, Vec<Id>>,
     parked: HashMap<Id, Parked>,
+    /// The number of entries of `parked` per requesting peer. A peer without parked requests has no key.
+    /// It changes together with `parked`, under the same lock.
+    parked_per_peer: HashMap<PeerId, usize>,
 }
 
 impl Tables {
     fn next_id(&mut self) -> Id {
         self.next_id += 1;
         self.next_id
+    }
+
+    /// Remove the parked request `id`, if present, and count it out of its peer.
+    fn unpark(&mut self, id: Id) {
+        if let Some(parked) = self.parked.remove(&id) {
+            if let Entry::Occupied(mut count) = self.parked_per_peer.entry(parked.peer) {
+                *count.get_mut() -= 1;
+                if *count.get() == 0 {
+                    count.remove();
+                }
+            }
+        }
     }
 }
 
@@ -159,11 +229,14 @@ impl SyncAnswerDeferral {
         }
     }
 
-    /// R-Q5b: park the request when it is deferrable and within the limits. `trie_store` is the store
-    /// the caller holds locked while asking. The error says why the request is to be answered at once.
+    /// R-Q5b: park the request when it is deferrable and within the limits (`max_per_peer` requests of one
+    /// peer, `max_total` in all). `trie_store` is the store the caller holds locked while asking. The error
+    /// says why the request is to be answered at once.
     fn try_park(
         &self,
         peer: PeerId,
+        max_per_peer: usize,
+        max_total: usize,
         pubkey: &str,
         trie_roots: &HashMap<AlbOrderedOrderbookPair, H64>,
         trie_store: &TrieStore,
@@ -192,9 +265,7 @@ impl SyncAnswerDeferral {
         if waits.is_empty() {
             return Err(AtOnce::NotDeferrable);
         }
-        if tables.parked.len() >= MAX_PARKED_TOTAL
-            || tables.parked.values().filter(|p| p.peer == peer).count() >= MAX_PARKED_PER_PEER
-        {
+        if tables.parked.len() >= max_total || tables.parked_per_peer.get(&peer).copied().unwrap_or(0) >= max_per_peer {
             return Err(AtOnce::CapsFull);
         }
 
@@ -205,11 +276,24 @@ impl SyncAnswerDeferral {
             waits,
             wake: Some(wake_tx),
         });
+        *tables.parked_per_peer.entry(peer).or_default() += 1;
         Ok((id, wake_rx))
     }
 
     #[cfg(test)]
     pub(crate) fn parked_len(&self) -> usize { self.0.lock().parked.len() }
+
+    /// The per-peer count agrees with `parked`: the count map is empty exactly when `parked` is, and
+    /// otherwise holds, per peer, the number of its parked requests.
+    #[cfg(test)]
+    pub(crate) fn parked_counts_agree(&self) -> bool {
+        let tables = self.0.lock();
+        let mut counts: HashMap<PeerId, usize> = HashMap::new();
+        for parked in tables.parked.values() {
+            *counts.entry(parked.peer).or_default() += 1;
+        }
+        counts == tables.parked_per_peer
+    }
 
     #[cfg(test)]
     pub(crate) fn in_flight_len(&self) -> usize { self.0.lock().in_flight.len() }
@@ -264,7 +348,7 @@ struct ParkedSlot {
 }
 
 impl Drop for ParkedSlot {
-    fn drop(&mut self) { self.table.0.lock().parked.remove(&self.id); }
+    fn drop(&mut self) { self.table.0.lock().unpark(self.id); }
 }
 
 /// The answer R-Q5 gives to the request at this moment, in the form the transport sends. It is the one place
@@ -361,10 +445,12 @@ fn park_sync_request(
         },
     };
 
+    let max_per_peer = sync_answer_deferral_max_per_peer(ctx);
+    let max_total = sync_answer_deferral_max_total(ctx);
     let table = ordermatch_ctx.sync_answer_deferral.clone();
     let parked = {
         let trie_store = ordermatch_ctx.trie_store.lock();
-        table.try_park(peer, pubkey, trie_roots, &trie_store)
+        table.try_park(peer, max_per_peer, max_total, pubkey, trie_roots, &trie_store)
     };
     let (id, wake_rx) = match parked {
         Ok(parked) => parked,
@@ -446,7 +532,14 @@ mod tests {
         let store = Arc::new(PaMutex::new(store_with_placeholder()));
         let in_flight = deferral.track_own_request(PUBKEY, [PAIR.to_owned()].iter());
         let (_, mut wake) = deferral
-            .try_park(PeerId::random(), PUBKEY, &requested(), &store.lock())
+            .try_park(
+                PeerId::random(),
+                DEFAULT_MAX_PARKED_PER_PEER,
+                DEFAULT_MAX_PARKED_TOTAL,
+                PUBKEY,
+                &requested(),
+                &store.lock(),
+            )
             .expect("deferrable");
 
         // The answer is queued as batch 1; the worker has applied none yet.
@@ -467,7 +560,14 @@ mod tests {
         let store = Arc::new(PaMutex::new(store_with_placeholder()));
         let in_flight = deferral.track_own_request(PUBKEY, [PAIR.to_owned()].iter());
         let (_, wake) = deferral
-            .try_park(PeerId::random(), PUBKEY, &requested(), &store.lock())
+            .try_park(
+                PeerId::random(),
+                DEFAULT_MAX_PARKED_PER_PEER,
+                DEFAULT_MAX_PARKED_TOTAL,
+                PUBKEY,
+                &requested(),
+                &store.lock(),
+            )
             .expect("deferrable");
 
         in_flight.complete_after_apply(store, 1, 50);
@@ -482,7 +582,14 @@ mod tests {
         let store = store_with_placeholder();
         let first = deferral.track_own_request(PUBKEY, [PAIR.to_owned()].iter());
         let (_, mut wake) = deferral
-            .try_park(PeerId::random(), PUBKEY, &requested(), &store)
+            .try_park(
+                PeerId::random(),
+                DEFAULT_MAX_PARKED_PER_PEER,
+                DEFAULT_MAX_PARKED_TOTAL,
+                PUBKEY,
+                &requested(),
+                &store,
+            )
             .expect("deferrable");
         let second = deferral.track_own_request(PUBKEY, [PAIR.to_owned()].iter());
 
