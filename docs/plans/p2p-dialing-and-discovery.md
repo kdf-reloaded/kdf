@@ -45,8 +45,8 @@ lookups of R8c item 7 onto the shared resolver, and they become asynchronous wit
   - The last known answer may be served for up to 24 hours when the resolver is unreachable.
   - The library is the maintained successor of the old one. The old one leaves the build in
     batch 1.
-  - On 2026-11-03 the maintainer chose that successor's message and network crates (0.26), with
-    our own cache and hosts-file reading on top. Its resolver crate needs a cache crate with
+  - On 2026-11-03 the maintainer chose that successor's message crate (0.26), with our own
+    queries, cache and hosts-file reading on top. Its resolver crate needs a cache crate with
     Apache-2.0-only files, and its older 0.24 line has an unfixed advisory (CRD ch.45 D45.8).
     P5 in batch 1 is about 7–8 days of code.
   - Batch 1 covers the peer-to-peer layer, HTTP(S), Electrum and lightwalletd; the rest follows
