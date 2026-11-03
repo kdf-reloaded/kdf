@@ -362,9 +362,13 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   into a concurrent cancel can write the cancelled order's stored record back. The
   order then returns as a live order at the next start and is announced to other
   nodes again. Reloaded never writes the record of an order once it has been removed.
-  An order whose record could not be deleted at cancel time still comes back after a
-  restart on both, because the failed deletion is logged and not retried. Contract:
-  [CRD ch.12 R7b](docs/reloaded-rewrite/12-order-match-state-store.md),
+  On the reference, an order whose record could not be deleted at cancel time comes
+  back after a restart, because the failed deletion is logged and not retried.
+  Reloaded retries the deletion and, at start, skips and deletes a record whose
+  removal the order history already records (switch `maker_restore_skips_cancelled`,
+  CRD ch.12 R7c); only an order without a history entry, such as one created with
+  `save_in_history: false`, can still come back. Contract:
+  [CRD ch.12 R7b, R7c](docs/reloaded-rewrite/12-order-match-state-store.md),
   [ch.32 R-GH11](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md).
 
 ### Removed / disabled in KDF Reloaded
@@ -515,6 +519,10 @@ switch. The value below gives the GLEEC-compatible behavior; the row of each swi
   maker's next keep-alive.
 - `sync_request_alternate_relay: false` — a failed or outdated sync answer is not followed by a
   request to another relay before the maker's next keep-alive.
+- `cancel_final_window_secs: 120` — a received cancel keeps the order out for 120 seconds only, so
+  a relay that missed the cancel can bring the order back after that.
+- `maker_restore_skips_cancelled: false` — at start every stored active order is restored,
+  including one whose record outlived its cancel.
 - `relay_second_copy_priority_only: false` — a relay sends every message it forwards a second
   time, not only cancellations, swap negotiation and messages outside the order book.
 - `p2p_resolve_peer_hostnames: false` — a hostname a peer gives in its list of peer addresses is
