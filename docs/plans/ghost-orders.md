@@ -25,7 +25,7 @@
 |---|---|---|---|---|
 | B5 | Higher, configurable limits for sync requests a relay holds while its own sync is in flight: 32 per asking peer and 2,048 in all by default (were 8 and 256), with ceilings of 64 and 8,192. | ch.32 R-Q5b item 4 | S | PR #205 |
 | B1 | After the forwarding relay's sync request fails, or its answer leaves a pair out of step with the maker's advertised root, ask one other connected relay once. The pair is never emptied. Switch `sync_request_alternate_relay`. | ch.32 R-Q5d (D12 item 1) | M | CRD PR #207, code PR #208 |
-| B2 | A cancel this node received keeps the order out of sync answers for a longer window (for example one hour), so a stale relay cannot bring it back. Memory-capped. | to be written (D12 item 2) | S | waits for one reference fact: whether a cancelled order can come back under the same identifier |
+| B2 | A cancel this node received keeps the order out of sync answers for a longer window (for example one hour), so a stale relay cannot bring it back. Memory-capped. | to be written (D12 item 2) | S | the reference fact it waited for is recorded (ch.32 R-GH11, 2026-11-03); rule to be written |
 | B3 | Per-pair liveness on the receiver's clock: a pair the maker stops advertising is dropped after the liveness window (`maker_order_timeout`, 90 s) while the maker's other pairs live on. | to be written (D12 item 3) | M | after B1 |
 | B4 | During start-up and re-post bursts, hold a sync request for a pair the relay is about to sync, instead of answering "missing pair" at once. | to be written (D12 item 4) | M | after B5 and B1 |
 | L1 | Lab: a live trigger of the second request after a quick failure (CRD ch.32 R-Q5c) on a chain with 200 ms latency, with the setting on and off. | — | S | after the 0.4.0-alpha.1 bump |
@@ -52,12 +52,24 @@ Each package changes no wire shape and has its own switch, so that a lab can run
 
 ## Open points
 
-- **B2 needs one reference fact first:** whether a maker can make an order live again under the same
-  identifier after its cancel, and with which message. The answer decides whether the one-hour
-  window is safe and when it has to be lifted. The window and the memory cap also need the rate of
-  cancel messages on a busy seed, from 0.4.0-alpha logs.
+- **B2's reference fact (recorded 2026-11-03, CRD ch.32 R-GH11):** whether a maker can make an
+  order live again under the same identifier after its cancel, and with which message. At the
+  reference release rows no path does so on purpose, and a new order never reuses a cancelled
+  order's identifier. A cancelled order comes back in two ways:
+  - An order update that runs into the cancel publishes an "updated" message for it. That message
+    refreshes the entry at any node that missed the cancel, and changes nothing at a node that
+    already dropped the order.
+  - Its stored record, when it outlives the cancel, is restored at the maker's next start, which
+    publishes an ordinary "created" message for it. The record outlives the cancel when its deletion
+    fails, or when an order update or the match-pruning step writes it back after the cancel.
+
+  KDF Reloaded never writes the record back (CRD ch.12 R7b). A failed deletion is logged and not
+  retried, as on the reference. The answer decides whether the one-hour window is safe and when it
+  has to be lifted. The window and the memory cap also need the rate of cancel messages on a busy
+  seed, from 0.4.0-alpha logs.
 - **B3:** the window assumes that an online maker advertises every non-empty pair at every tick
-  (CRD ch.32 R-K2a). Any exception widens the window.
+  (CRD ch.32 R-K2a). Confirmed for the reference release rows on 2026-11-03 (CRD ch.32 R-GH13
+  item 1): no pair with a non-empty root is skipped. Any exception would widen the window.
 - **B1, an extra request after a skipped second request.** When a node's first sync request fails
   quickly and the pairs leave the placeholder before the second request (an order message filled
   them), no second request is sent, yet the request to another relay still follows, as CRD ch.32

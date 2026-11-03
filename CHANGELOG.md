@@ -23,6 +23,14 @@ it and, where one exists, the CRD rule, for readers who want more.
   limits a chain needs is now visible at once, as it was not when Monad token swaps ran out of gas
   with a coins file older than October 28, 2026. Detail: PR #200; CRD ch.57 R57.5.5.
 
+#### Start-up and configuration
+
+- **The start-up log now lists the files the node uses.** At start the node logs, at INFO and as
+  absolute paths, where its configuration came from (the command line, the default file or the file
+  named by `MM_CONF_PATH`), where its coins list came from, the log file, the database folders and the
+  wallet file it reads, so a node started from the wrong folder shows it at once. It never logs file
+  contents or configuration values, and no WSS certificate or key path. Detail: PR #209; CRD ch.45 R45.6.6.
+
 ### Changed
 
 #### Order book and peer-to-peer network
@@ -83,11 +91,16 @@ file carries the detail. "New" means the plan was created in this cycle.
   options (a) and (b) still wait on the reference maintainers' outcome.
 - [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes
   keep showing after a lost cancellation; five work packages after the beta, the first two being the
-  higher sync limits on relays and the request to one other relay above (PRs #205, #207, #208).
+  higher sync limits on relays and the request to one other relay above (PRs #205, #207, #208). What
+  two later packages waited for is now recorded: how a cancelled order can come back on Komodo and
+  GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
   with its two switches and their defaults (PR #201), and implemented (PR #215); the SwapLab timing
   rows are next.
+- [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
+  GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
+  recorded; whether KDF Reloaded follows them stays the maintainer's decision (PR #222).
 
 ### Known limitations
 
