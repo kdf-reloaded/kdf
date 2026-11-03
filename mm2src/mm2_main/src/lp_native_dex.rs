@@ -917,8 +917,7 @@ fn wss_certs(ctx: &MmArc) -> P2PResult<Option<WssCerts>> {
         })?;
 
     info!(
-        "WSS private key file: {}; WSS certificate file: {}",
-        crate::mm2::absolute_path_for_log(&certs.server_priv_key),
+        "WSS certificate file: {}",
         crate::mm2::absolute_path_for_log(&certs.certificate)
     );
 
