@@ -9812,9 +9812,11 @@ mod order_message_liveness {
 /// when the node's own synchronization lands.
 mod sync_answer_deferral_tests {
     use super::*;
-    use crate::mm2::lp_ordermatch::sync_answer_deferral::{DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
-                                                          DEFAULT_SYNC_REQUEST_RETRY_MS, MAX_PARKED_PER_PEER,
-                                                          MAX_PARKED_TOTAL};
+    use crate::mm2::lp_ordermatch::sync_answer_deferral::{sync_answer_deferral_max_per_peer,
+                                                          sync_answer_deferral_max_total, CEILING_MAX_PARKED_PER_PEER,
+                                                          CEILING_MAX_PARKED_TOTAL, DEFAULT_MAX_PARKED_PER_PEER,
+                                                          DEFAULT_MAX_PARKED_TOTAL, DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
+                                                          DEFAULT_SYNC_REQUEST_RETRY_MS};
     use crate::mm2::lp_ordermatch::sync_log::RequestClass;
     use futures::channel::oneshot;
     use mm2_p2p::atomicdex_behaviour::AdexResponse;
@@ -9864,6 +9866,7 @@ mod sync_answer_deferral_tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(deferral.parked_len(), 0, "parked table");
+        assert!(deferral.parked_counts_agree(), "per-peer count of the parked table");
         assert_eq!(deferral.in_flight_len(), 0, "in-flight table");
     }
 
@@ -10205,33 +10208,35 @@ mod sync_answer_deferral_tests {
         assert_tables_empty(&f.relay);
     }
 
+    /// The relay config with the limits of R-Q5b item 4 set small.
+    fn small_limits(per_peer: usize, total: usize) -> Json {
+        json!({ "sync_answer_deferral_max_per_peer": per_peer, "sync_answer_deferral_max_total": total })
+    }
+
     #[test]
-    fn at_most_eight_requests_per_peer_are_parked() {
-        let mut f = Fixture::new(json!({}));
+    fn a_request_past_the_per_peer_limit_is_answered_at_once() {
+        let mut f = Fixture::new(small_limits(2, 3));
         let (answers_tx, answers) = std_mpsc::channel();
         let mut own = f.start_own_sync();
 
         let greedy = peer();
-        for id in 0..MAX_PARKED_PER_PEER {
+        for id in 0..2 {
             ask(&f.relay, greedy, id, MAKER, &[PAIR], &answers_tx).unwrap();
         }
         assert!(answers.try_recv().is_err());
-        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), MAX_PARKED_PER_PEER);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 2);
 
-        // The ninth of that peer is answered at once; another peer is still served by parking.
+        // The third of that peer is answered at once; another peer is still served by parking.
         ask(&f.relay, greedy, 100, MAKER, &[PAIR], &answers_tx).unwrap();
         let (id, res) = answers.try_recv().expect("answered at once");
         assert_eq!(id, 100);
         assert_placeholder_error(&res);
         ask(&f.relay, peer(), 101, MAKER, &[PAIR], &answers_tx).unwrap();
         assert!(answers.try_recv().is_err());
-        assert_eq!(
-            octx(&f.relay).sync_answer_deferral.parked_len(),
-            MAX_PARKED_PER_PEER + 1
-        );
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 3);
 
         own.answer(&f.maker);
-        let mut ids: Vec<usize> = (0..MAX_PARKED_PER_PEER + 1)
+        let mut ids: Vec<usize> = (0..3)
             .map(|_| {
                 let (id, res) = answered(&answers, 3000);
                 assert_eq!(full_set_len(&res), ORDERS);
@@ -10239,32 +10244,61 @@ mod sync_answer_deferral_tests {
             })
             .collect();
         ids.sort_unstable();
-        assert_eq!(ids, (0..MAX_PARKED_PER_PEER).chain(iter::once(101)).collect::<Vec<_>>());
+        assert_eq!(ids, vec![0, 1, 101]);
         assert!(own.finish());
         assert_tables_empty(&f.relay);
     }
 
     #[test]
-    fn at_most_256_requests_are_parked_in_total() {
-        let mut f = Fixture::new(json!({}));
+    fn a_request_past_the_total_limit_is_answered_at_once() {
+        let mut f = Fixture::new(small_limits(2, 3));
         let (answers_tx, answers) = std_mpsc::channel();
         let mut own = f.start_own_sync();
 
-        for id in 0..MAX_PARKED_TOTAL {
-            // Eight requests per peer, so only the total limit can stop the last one.
+        for id in 0..3 {
+            // One request per peer, so only the total limit can stop the last one.
             ask(&f.relay, peer(), id, MAKER, &[PAIR], &answers_tx).unwrap();
         }
         assert!(answers.try_recv().is_err());
-        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), MAX_PARKED_TOTAL);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 3);
 
         ask(&f.relay, peer(), 1000, MAKER, &[PAIR], &answers_tx).unwrap();
         let (id, res) = answers.try_recv().expect("answered at once");
         assert_eq!(id, 1000);
         assert_placeholder_error(&res);
-        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), MAX_PARKED_TOTAL);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 3);
 
         own.answer(&f.maker);
-        for _ in 0..MAX_PARKED_TOTAL {
+        for _ in 0..3 {
+            assert_eq!(full_set_len(&answered(&answers, 5000).1), ORDERS);
+        }
+        assert!(own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn the_default_per_peer_limit_parks_32_requests_and_answers_the_33rd_at_once() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+
+        let greedy = peer();
+        for id in 0..DEFAULT_MAX_PARKED_PER_PEER {
+            ask(&f.relay, greedy, id, MAKER, &[PAIR], &answers_tx).unwrap();
+        }
+        assert!(answers.try_recv().is_err());
+        assert_eq!(
+            octx(&f.relay).sync_answer_deferral.parked_len(),
+            DEFAULT_MAX_PARKED_PER_PEER
+        );
+
+        ask(&f.relay, greedy, 100, MAKER, &[PAIR], &answers_tx).unwrap();
+        let (id, res) = answers.try_recv().expect("answered at once");
+        assert_eq!(id, 100);
+        assert_placeholder_error(&res);
+
+        own.answer(&f.maker);
+        for _ in 0..DEFAULT_MAX_PARKED_PER_PEER {
             assert_eq!(full_set_len(&answered(&answers, 5000).1), ORDERS);
         }
         assert!(own.finish());
@@ -10274,16 +10308,21 @@ mod sync_answer_deferral_tests {
     #[test]
     fn the_per_peer_limit_is_the_same_for_a_peer_across_pairs_and_requests() {
         // A request for two tracked pairs counts once, whatever its size.
-        let mut f = Fixture::new(no_retry());
+        let mut f = Fixture::new(json!({
+            "sync_request_retry_ms": 0,
+            "sync_answer_deferral_max_per_peer": 2,
+        }));
         let (answers_tx, answers) = std_mpsc::channel();
         let mut own = f.start_own_sync();
         let p = peer();
-        for id in 0..MAX_PARKED_PER_PEER {
+        for id in 0..2 {
             ask(&f.relay, p, id, MAKER, &[PAIR, PAIR], &answers_tx).unwrap();
         }
-        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), MAX_PARKED_PER_PEER);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 2);
+        ask(&f.relay, p, 100, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_placeholder_error(&answers.try_recv().expect("answered at once").1);
         own.fail();
-        for _ in 0..MAX_PARKED_PER_PEER {
+        for _ in 0..2 {
             assert_placeholder_error(&answered(&answers, 3000).1);
         }
         assert!(!own.finish());
@@ -10337,7 +10376,47 @@ mod sync_answer_deferral_tests {
             assert_eq!(sync_answer_deferral_ms(&ctx), expected);
         }
         assert_eq!(DEFAULT_SYNC_ANSWER_DEFERRAL_MS, 5000);
-        assert_eq!((MAX_PARKED_PER_PEER, MAX_PARKED_TOTAL), (8, 256));
+        assert_eq!((DEFAULT_MAX_PARKED_PER_PEER, DEFAULT_MAX_PARKED_TOTAL), (32, 2048));
+        assert_eq!((CEILING_MAX_PARKED_PER_PEER, CEILING_MAX_PARKED_TOTAL), (64, 8192));
+    }
+
+    #[test]
+    fn only_a_positive_integer_sets_a_parking_limit_and_it_is_capped_at_the_ceiling() {
+        type Reader = fn(&MmArc) -> usize;
+        let readers: [(&str, Reader, usize, usize); 2] = [
+            (
+                "sync_answer_deferral_max_per_peer",
+                sync_answer_deferral_max_per_peer,
+                DEFAULT_MAX_PARKED_PER_PEER,
+                CEILING_MAX_PARKED_PER_PEER,
+            ),
+            (
+                "sync_answer_deferral_max_total",
+                sync_answer_deferral_max_total,
+                DEFAULT_MAX_PARKED_TOTAL,
+                CEILING_MAX_PARKED_TOTAL,
+            ),
+        ];
+        for (key, reader, default, ceiling) in readers {
+            let read = |conf: Json| reader(&MmCtxBuilder::new().with_conf(conf).into_mm_arc());
+            assert_eq!(read(json!({})), default, "{} absent", key);
+            for value in [json!(0), json!("5"), json!(-1), json!(2.5), json!(false)] {
+                assert_eq!(read(json!({ key: value.clone() })), default, "{} = {}", key, value);
+            }
+            assert_eq!(read(json!({ key: 5 })), 5, "{} = 5", key);
+            assert_eq!(read(json!({ key: ceiling })), ceiling, "{} = ceiling", key);
+            assert_eq!(read(json!({ key: ceiling + 1 })), ceiling, "{} above the ceiling", key);
+        }
+        let read = |conf: Json| MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        assert_eq!(
+            sync_answer_deferral_max_per_peer(&read(json!({ "sync_answer_deferral_max_per_peer": 100 }))),
+            64
+        );
+        assert_eq!(
+            sync_answer_deferral_max_total(&read(json!({ "sync_answer_deferral_max_total": 10000 }))),
+            8192
+        );
+        assert_eq!((DEFAULT_MAX_PARKED_PER_PEER, DEFAULT_MAX_PARKED_TOTAL), (32, 2048));
     }
 
     /// The pause of R-Q5c in the tests of the second request.
@@ -10742,11 +10821,11 @@ mod sync_answer_deferral_tests {
 
     #[test]
     fn a_full_parked_table_and_a_zero_bound_are_logged_with_their_paths() {
-        let mut f = Fixture::new(json!({}));
+        let mut f = Fixture::new(small_limits(2, 3));
         let (answers_tx, answers) = std_mpsc::channel();
         let mut own = f.start_own_sync();
         let greedy = peer();
-        for id in 0..MAX_PARKED_PER_PEER {
+        for id in 0..2 {
             ask(&f.relay, greedy, id, MAKER, &[PAIR], &answers_tx).unwrap();
         }
         ask(&f.relay, greedy, 100, MAKER, &[PAIR], &answers_tx).unwrap();

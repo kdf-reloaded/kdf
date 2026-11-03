@@ -217,6 +217,32 @@ impl Smoothed {
     pub(super) fn samples(&self) -> u32 { self.samples }
 }
 
+/// The default of `electrum_spread_near_factor` (CRD ch.38 R38.6.4a item 8, D38.6.4a.1). `0` would turn the near
+/// sessions off. This is the only place that holds the default.
+pub(super) const NEAR_FACTOR_DEFAULT: f64 = 2.0;
+/// The default of `electrum_spread_near_offset_ms`, the offset *A* of R38.6.4a item 6 (D38.6.4a.1). This is the only
+/// place that holds the default.
+pub(super) const NEAR_OFFSET_DEFAULT_MS: f64 = 20.0;
+
+/// Which of the maintained sessions are near (CRD ch.38 R38.6.4a item 6). `figures` holds the smoothed latency
+/// of each maintained session in priority order, `None` for one that has none yet; the answer holds one flag per
+/// figure, in the same order. With *f* the lowest figure, a session is near when it has no figure or when its
+/// figure is at most the larger of `factor` x *f* and *f* + `offset_ms` (the form of the limit is D38.6.4a.2, and
+/// this line is the only place that holds it). Without any figure, and with a `factor` of `0`, every session is
+/// near. A `factor` above `0` and below `1` acts as `1`: `factor` x *f* is then below *f* + `offset_ms`, which
+/// decides.
+pub(super) fn near_sessions(figures: &[Option<f64>], factor: f64, offset_ms: f64) -> Vec<bool> {
+    let fastest = figures.iter().flatten().copied().reduce(f64::min);
+    let Some(fastest) = fastest.filter(|_| factor > 0.) else {
+        return vec![true; figures.len()];
+    };
+    let limit = (factor * fastest).max(fastest + offset_ms);
+    figures
+        .iter()
+        .map(|figure| figure.map_or(true, |figure| figure <= limit))
+        .collect()
+}
+
 /// P2 (R38.6.4l item 6): after at least 5 samples, the smoothed latency exceeds all three of 4 times the
 /// connection's own `reference_ms`, 2 times the `best_activation_ms` and `slow_floor_ms`. A connection with no
 /// reference, or a pool with no activation figure, is not judged (D38.6.4l.5).
@@ -314,6 +340,81 @@ mod tests {
 
     fn eligible_ids(round: &[RoundServer]) -> Vec<usize> {
         eligible_servers(round, None, FLOOR).iter().map(|e| e.id).collect()
+    }
+
+    fn near_with_offset(figures: &[f64], factor: f64, offset_ms: f64) -> Vec<bool> {
+        near_sessions(
+            &figures.iter().map(|figure| Some(*figure)).collect::<Vec<_>>(),
+            factor,
+            offset_ms,
+        )
+    }
+
+    /// The chapter's cases are stated with the offset of 20 ms.
+    fn near_for(figures: &[f64], factor: f64) -> Vec<bool> { near_with_offset(figures, factor, 20.) }
+
+    const RIN_FIGURES: [f64; 6] = [25., 27., 32., 108., 230., 266.];
+
+    /// T38.6.4a.1: the near sessions from the figures of the chapter.
+    #[test]
+    fn t38_6_4a_1_the_near_sessions_follow_the_factor_and_the_margin() {
+        // F = 2: the limit is the larger of 50 ms and 45 ms, so exactly the first three stay.
+        assert_eq!(near_for(&RIN_FIGURES, 2.), [true, true, true, false, false, false]);
+        // F = 0 turns it off.
+        assert_eq!(near_for(&RIN_FIGURES, 0.), [true; 6]);
+        // F = 0.5 acts as 1: the 20 ms term keeps all three of 25, 27 and 32 near, and nothing above 45 ms.
+        assert_eq!(near_for(&[25., 27., 32.], 0.5), [true; 3]);
+        assert_eq!(near_for(&RIN_FIGURES, 0.5), near_for(&RIN_FIGURES, 1.));
+        assert_eq!(near_for(&RIN_FIGURES, 1.), [true, true, true, false, false, false]);
+        // The margin edge: 45 ms is near, a hair above is not (F = 1, f = 25).
+        assert_eq!(near_for(&[25., 45., 45.1], 1.), [true, true, false]);
+        // The factor edge: 100 ms is near, a hair above is not (F = 2, f = 50).
+        assert_eq!(near_for(&[50., 100., 100.1], 2.), [true, true, false]);
+    }
+
+    /// T38.6.4a.1: a session without a figure is near, and so is every session when none has one.
+    #[test]
+    fn t38_6_4a_1_a_session_without_a_figure_is_near() {
+        let mut figures: Vec<Option<f64>> = RIN_FIGURES.iter().map(|figure| Some(*figure)).collect();
+        figures[5] = None;
+        assert_eq!(near_sessions(&figures, 2., 20.), [true, true, true, false, false, true]);
+        // The lowest figure is taken among the present ones only.
+        figures[0] = None;
+        assert_eq!(near_sessions(&figures, 2., 20.), [true, true, true, false, false, true]);
+        assert_eq!(near_sessions(&[None, None, None], 2., 20.), [true; 3]);
+        assert_eq!(near_sessions(&[None, None, None], 0., 20.), [true; 3]);
+        assert!(near_sessions(&[], 2., 20.).is_empty());
+    }
+
+    /// T38.6.4a.1: with the offset at 0 the factor alone decides; with 50 a session up to 50 ms behind the
+    /// fastest is near.
+    #[test]
+    fn t38_6_4a_1_the_offset_is_a_parameter() {
+        // Offset 0: F = 2 and f = 25 give 50 ms, F = 1 gives f itself (with 20 ms it would admit 45 ms).
+        assert_eq!(near_with_offset(&[25., 50., 50.1], 2., 0.), [true, true, false]);
+        assert_eq!(near_with_offset(&[25., 25., 25.1], 1., 0.), [true, true, false]);
+        assert_eq!(near_for(&[25., 25., 25.1], 1.), [true, true, true]);
+        // A factor between 0 and 1 then admits only the fastest figure, and 0 still turns the rule off.
+        assert_eq!(near_with_offset(&[25., 27., 32.], 0.5, 0.), [true, false, false]);
+        assert_eq!(near_with_offset(&RIN_FIGURES, 0., 0.), [true; 6]);
+        // Offset 50: f = 25 admits up to 75 ms (the factor gives 50), and 76 ms is out.
+        assert_eq!(near_with_offset(&[25., 27., 32., 75., 76., 108.], 2., 50.), [
+            true, true, true, true, false, false
+        ]);
+        // The factor still wins where it is the larger: f = 100 gives 200 ms, not 150 ms.
+        assert_eq!(near_with_offset(&[100., 200., 201.], 2., 50.), [true, true, false]);
+    }
+
+    /// T38.6.4a.1: the default is one constant; with the factor at it, the figures of the chapter decide.
+    #[test]
+    fn t38_6_4a_1_the_default_factor_is_the_one_constant() {
+        assert!(NEAR_FACTOR_DEFAULT >= 0.);
+        let expected = if NEAR_FACTOR_DEFAULT == 0. {
+            [true; 6]
+        } else {
+            [true, true, true, false, false, false]
+        };
+        assert_eq!(near_for(&RIN_FIGURES, NEAR_FACTOR_DEFAULT), expected);
     }
 
     /// T38.6.4l.3: the height rule.
