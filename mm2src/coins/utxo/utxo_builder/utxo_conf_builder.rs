@@ -300,6 +300,7 @@ impl<'a> UtxoConfBuilder<'a> {
             protocol_header_reader,
             header_layout_fallback_families: self.header_layout_fallback_families.clone(),
             header_layout_fallback_logged: Arc::new(AtomicBool::new(false)),
+            header_time_only_logged: Arc::new(AtomicBool::new(false)),
         };
         Ok((conf, warnings))
     }
