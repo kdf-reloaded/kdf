@@ -92,7 +92,7 @@
   rate per 1,000 bytes, exactly like `UtxoPerKbyte`; the per-started-kilobyte
   meaning is the baseline anchor's. Whether this step adopts the reference
   arithmetic is the maintainer's decision.
-  *Done for UTXO coins (PR #XXX, decision 9):* the explicit `UtxoFixed` fee is
+  *Done for UTXO coins (PR #226, decision 9):* the explicit `UtxoFixed` fee is
   now proportional and truncated on every UTXO withdraw; only the SLP token
   withdraw keeps the per-started-kilobyte meaning.
 - 3: spend safety merged in PR #73 (2026-10-25): R60.6.4 and R60.6.7 with

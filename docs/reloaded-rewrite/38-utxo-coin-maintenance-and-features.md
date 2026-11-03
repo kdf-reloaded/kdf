@@ -2290,7 +2290,7 @@ tests of [Chapter 60](60-trading-floors-and-refusal-contract.md) T60.1–T60.2.
 > per-request withdraw fee, which this subsection does not cover, keeps its
 > existing per-started-kilobyte meaning. R38.6.6i is now fully as-built.
 > *Amended 2026-11-03:* the explicit `UtxoFixed` descriptor on a UTXO
-> withdraw now follows R38.6.6l item 2 (maintainer Decision 27, PR #XXX); the
+> withdraw now follows R38.6.6l item 2 (maintainer Decision 27, PR #226); the
 > SLP token withdraw keeps the per-started-kilobyte meaning (compatibility row
 > under R38.6.6l).
 
@@ -2512,7 +2512,7 @@ At both release rows:
    explicit `UtxoFixed` descriptor with it.
 
 > **Compatibility row (this repository, 2026-11-03; not corpus-sourced).**
-> **Parity** on the UTXO `withdraw` and `task::withdraw::init` since PR #XXX:
+> **Parity** on the UTXO `withdraw` and `task::withdraw::init` since PR #226:
 > the maintainer adopted item 2 (Decision 27, 2026-11-03), and Reloaded
 > applies `UtxoFixed` exactly like `UtxoPerKbyte`, `floor(a × s / 1000)`, as
 > the reference at both rows (Komodo DeFi Framework 2.6.0-beta and GLEEC KDF
@@ -3172,6 +3172,6 @@ R38.8.6 **Tests (two-direction, observable).**
   maintainer adopted R38.6.6l item 2, a session that never read the corpus
   updated the compatibility row under R38.6.6l, the last sentence of
   T38.6.6l with its clean-side note, and the as-built note under R38.6.6i
-  (PR #XXX). They rest on that
+  (PR #226). They rest on that
   decision and this repository's code, take no forbidden-class input, and so
   do not engage chapter 01 R38.

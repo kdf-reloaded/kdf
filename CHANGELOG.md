@@ -64,7 +64,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   costs less, and below 1,000 bytes less than the amount entered. A 245-byte KMD withdrawal that
   paid the whole fee now pays about a quarter of it, and a 1,404-byte DOGE withdrawal about 1.4
   times it instead of twice. A withdrawal without `fee`, swaps and the DEX fee are not affected, and
-  an SLP token withdrawal is unchanged (see Known limitations). Detail: PR #XXX; CRD ch.38 R38.6.6l.
+  an SLP token withdrawal is unchanged (see Known limitations). Detail: PR #226; CRD ch.38 R38.6.6l.
 
 ### Fixed
 
@@ -103,7 +103,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   rows are next.
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
-  recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #XXX); the SLP
+  recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226); the SLP
   token withdrawal waits for the reference's answer.
 
 ### Known limitations
@@ -131,7 +131,7 @@ lives.
   charges that amount for every started kilobyte of the transaction; what Komodo and GLEEC KDF
   charge there is not yet established. UTXO coins themselves now charge it in proportion to the
   size, as Komodo and GLEEC KDF do (see Changed). More in the
-  [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PR #XXX; CRD ch.38 R38.6.6l.
+  [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PR #226; CRD ch.38 R38.6.6l.
 - **The swap watcher does not work yet.** A watcher is another node that finishes a swap for you
   when you are offline. No swap hands its data to a watcher yet, for any coin (issue #56), so keep
   your node running until your swaps have finished. Bitcoin-family coins (UTXO coins such as RIN,

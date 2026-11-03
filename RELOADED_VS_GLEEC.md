@@ -338,7 +338,7 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   `coins/utxo/header_layout_fallback.rs`, `coins/utxo/utxo_builder/utxo_conf_builder.rs`.
 
 - **An explicit `UtxoFixed` withdraw fee on an SLP token is charged per started
-  kilobyte, with no switch.** Since PR #XXX a UTXO coin's `withdraw` with
+  kilobyte, with no switch.** Since PR #226 a UTXO coin's `withdraw` with
   `fee: {"type":"UtxoFixed","amount":"<n>"}` pays `<n>` as a rate per 1,000 bytes, in
   proportion to the size and rounded down, exactly like `UtxoPerKbyte`, as the
   reference (Komodo DeFi Framework 2.6.0-beta and GLEEC KDF 3.0.0-beta) does. A
