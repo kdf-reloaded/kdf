@@ -11,6 +11,7 @@
 //! arithmetic ([`scale_gas_estimate`]).
 
 use super::*;
+use common::log::{debug, info};
 use ethereum_types::U512;
 use json::Map;
 
@@ -303,6 +304,214 @@ pub fn estimate_gas_mult_from_confs(confs: &[&Json]) -> Result<Option<f64>, Esti
         };
     }
     Ok(None)
+}
+
+/// Where the gas-limit block (or the multiplier) in effect for a coin came from (CRD R57.5.5 item 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GasLimitSource {
+    /// The coin's own configuration entry.
+    OwnEntry,
+    /// The entry of the coin's platform coin (R57.5.3), inherited by a token.
+    PlatformEntry,
+    /// No entry carries it: the built-in defaults of R57.5.2 / R57.6.2, or no multiplier.
+    Defaults,
+}
+
+impl GasLimitSource {
+    /// The position of the first entry of `confs` that carries `key`, as a source. `confs` is ordered as for
+    /// [`gas_limits_from_confs`]: the coin's own entry first, a token's platform entry second. A `null` block
+    /// counts as absent, as [`block_of`] reads it.
+    fn of_first_entry_with(confs: &[&Json], key: &str, null_counts_as_absent: bool) -> Self {
+        let carries = |conf: &&Json| match conf.get(key) {
+            None => false,
+            Some(Json::Null) => !null_counts_as_absent,
+            Some(_) => true,
+        };
+        match confs.iter().position(carries) {
+            Some(0) => GasLimitSource::OwnEntry,
+            Some(_) => GasLimitSource::PlatformEntry,
+            None => GasLimitSource::Defaults,
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            GasLimitSource::OwnEntry => "its own entry",
+            GasLimitSource::PlatformEntry => "its platform coin's entry",
+            GasLimitSource::Defaults => "defaults",
+        }
+    }
+}
+
+/// The nine V1 members (configuration keys of R57.5.2) with their values.
+fn v1_members(limits: &EthGasLimit) -> Vec<(&'static str, u64)> {
+    vec![
+        ("eth_send_coins", limits.eth_send_coins),
+        ("eth_send_erc20", limits.eth_send_erc20),
+        ("eth_payment", limits.eth_payment),
+        ("erc20_payment", limits.erc20_payment),
+        ("eth_receiver_spend", limits.eth_receiver_spend),
+        ("erc20_receiver_spend", limits.erc20_receiver_spend),
+        ("eth_sender_refund", limits.eth_sender_refund),
+        ("erc20_sender_refund", limits.erc20_sender_refund),
+        ("eth_max_trade_gas", limits.eth_max_trade_gas),
+    ]
+}
+
+/// Every V2 member (configuration keys of R57.6.2, with their sub-object) with its value. The `nft_maker`
+/// members carry their configuration names (`erc721_payment`, ...), not the field names of [`MakerGasLimitV2`].
+fn v2_members(limits: &EthGasLimitV2) -> Vec<(&'static str, u64)> {
+    let (m, t) = (&limits.maker, &limits.taker);
+    vec![
+        ("gas_limit_v2.maker.eth_payment", m.eth_payment),
+        ("gas_limit_v2.maker.erc20_payment", m.erc20_payment),
+        ("gas_limit_v2.maker.eth_taker_spend", m.eth_taker_spend),
+        ("gas_limit_v2.maker.erc20_taker_spend", m.erc20_taker_spend),
+        (
+            "gas_limit_v2.maker.eth_maker_refund_timelock",
+            m.eth_maker_refund_timelock,
+        ),
+        (
+            "gas_limit_v2.maker.erc20_maker_refund_timelock",
+            m.erc20_maker_refund_timelock,
+        ),
+        ("gas_limit_v2.maker.eth_maker_refund_secret", m.eth_maker_refund_secret),
+        (
+            "gas_limit_v2.maker.erc20_maker_refund_secret",
+            m.erc20_maker_refund_secret,
+        ),
+        ("gas_limit_v2.taker.eth_payment", t.eth_payment),
+        ("gas_limit_v2.taker.erc20_payment", t.erc20_payment),
+        ("gas_limit_v2.taker.eth_maker_spend", t.eth_maker_spend),
+        ("gas_limit_v2.taker.erc20_maker_spend", t.erc20_maker_spend),
+        (
+            "gas_limit_v2.taker.eth_taker_refund_timelock",
+            t.eth_taker_refund_timelock,
+        ),
+        (
+            "gas_limit_v2.taker.erc20_taker_refund_timelock",
+            t.erc20_taker_refund_timelock,
+        ),
+        ("gas_limit_v2.taker.eth_taker_refund_secret", t.eth_taker_refund_secret),
+        (
+            "gas_limit_v2.taker.erc20_taker_refund_secret",
+            t.erc20_taker_refund_secret,
+        ),
+        ("gas_limit_v2.taker.approve_payment", t.approve_payment),
+        ("gas_limit_v2.nft_maker.erc721_payment", m.nft_erc721_payment),
+        ("gas_limit_v2.nft_maker.erc1155_payment", m.nft_erc1155_payment),
+        ("gas_limit_v2.nft_maker.erc721_taker_spend", m.nft_erc721_taker_spend),
+        ("gas_limit_v2.nft_maker.erc1155_taker_spend", m.nft_erc1155_taker_spend),
+        (
+            "gas_limit_v2.nft_maker.erc721_maker_refund_timelock",
+            m.nft_erc721_maker_refund_timelock,
+        ),
+        (
+            "gas_limit_v2.nft_maker.erc1155_maker_refund_timelock",
+            m.nft_erc1155_maker_refund_timelock,
+        ),
+        (
+            "gas_limit_v2.nft_maker.erc721_maker_refund_secret",
+            m.nft_erc721_maker_refund_secret,
+        ),
+        (
+            "gas_limit_v2.nft_maker.erc1155_maker_refund_secret",
+            m.nft_erc1155_maker_refund_secret,
+        ),
+    ]
+}
+
+/// `name value` pairs joined by commas, in alphabetical order of the name.
+fn join_members(mut members: Vec<(&'static str, u64)>) -> String {
+    members.sort_by_key(|(name, _)| *name);
+    members
+        .iter()
+        .map(|(name, value)| format!("{name} {value}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The members of `members` whose value differs from the one at the same position of `defaults`.
+fn differing_members(
+    members: Vec<(&'static str, u64)>,
+    defaults: Vec<(&'static str, u64)>,
+) -> Vec<(&'static str, u64)> {
+    members
+        .into_iter()
+        .zip(defaults)
+        .filter(|(member, default)| member.1 != default.1)
+        .map(|(member, _)| member)
+        .collect()
+}
+
+/// One block of the INFO line: where it came from and the members that differ from the default.
+fn block_summary(name: &str, source: GasLimitSource, differing: Vec<(&'static str, u64)>) -> String {
+    match source {
+        GasLimitSource::Defaults => format!("{name}: defaults"),
+        _ if differing.is_empty() => format!("{name} from {} (no member differs from the default)", source.describe()),
+        _ => format!("{name} from {} ({})", source.describe(), join_members(differing)),
+    }
+}
+
+/// The two activation log texts of CRD R57.5.5 for one coin: the INFO summary and the DEBUG full list.
+///
+/// `v1`, `v2` and `mult` are the values in effect. `confs` is the coin's own configuration entry first and,
+/// for a token, its platform coin's entry second (as for [`gas_limits_from_confs`]); it decides only the
+/// source of each block and of the multiplier. Nothing but the ticker, the two blocks and the multiplier
+/// reaches the texts (item 3): no URL, address or other configuration member is an input.
+pub(crate) fn gas_limit_log_texts(
+    ticker: &str,
+    confs: &[&Json],
+    v1: &EthGasLimit,
+    v2: &EthGasLimitV2,
+    mult: Option<f64>,
+) -> (String, String) {
+    let v1_source = GasLimitSource::of_first_entry_with(confs, GAS_LIMIT_KEY, true);
+    let v2_source = GasLimitSource::of_first_entry_with(confs, GAS_LIMIT_V2_KEY, true);
+    let mult_text = match mult {
+        None => "none".to_owned(),
+        Some(value) => {
+            let source = GasLimitSource::of_first_entry_with(confs, ESTIMATE_GAS_MULT_KEY, false);
+            format!("{value} from {}", source.describe())
+        },
+    };
+    let summary = format!(
+        "{ticker} gas limits: {}; {}; {ESTIMATE_GAS_MULT_KEY}: {mult_text}",
+        block_summary(
+            GAS_LIMIT_KEY,
+            v1_source,
+            differing_members(v1_members(v1), v1_members(&EthGasLimit::default()))
+        ),
+        block_summary(
+            GAS_LIMIT_V2_KEY,
+            v2_source,
+            differing_members(v2_members(v2), v2_members(&EthGasLimitV2::default()))
+        ),
+    );
+    let full_list = format!(
+        "{ticker} gas limits, full list: {GAS_LIMIT_KEY}: {}; {GAS_LIMIT_V2_KEY}: {}",
+        join_members(v1_members(v1)),
+        join_members(v2_members(v2)),
+    );
+    (summary, full_list)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The (INFO, DEBUG) texts [`log_gas_limits`] wrote on this thread. Thread-local, so a test reads exactly
+    /// what its own activation logged, with no process-wide log capture and no polling.
+    pub(crate) static LOGGED_GAS_LIMITS: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Logs the gas limits in effect for a coin that was activated successfully (CRD R57.5.5): the summary at INFO
+/// and the full list at DEBUG. Both activation sites call this once, after the blocks were read and accepted.
+pub(crate) fn log_gas_limits(ticker: &str, confs: &[&Json], v1: &EthGasLimit, v2: &EthGasLimitV2, mult: Option<f64>) {
+    let (summary, full_list) = gas_limit_log_texts(ticker, confs, v1, v2, mult);
+    info!("{summary}");
+    debug!("{full_list}");
+    #[cfg(test)]
+    LOGGED_GAS_LIMITS.with(|logged| logged.borrow_mut().push((summary, full_list)));
 }
 
 /// Why a gas estimate could not be scaled (CRD R57.5.3b item 3). Both outcomes fail the transaction at send
@@ -784,6 +993,151 @@ mod tests {
             assert!(err.to_string().contains("estimate_gas_mult"), "{err}");
             // A malformed token member is not rescued by a valid platform member.
             assert!(estimate_gas_mult_from_confs(&[&conf, &json!({"estimate_gas_mult": 1.3})]).is_err());
+        }
+    }
+
+    // ─── T14: the logged gas limits (CRD R57.5.5) ───────────────────────────────────────────────────────
+
+    /// The texts of a coin whose configuration entries are `confs`, with the limits resolved exactly as
+    /// activation resolves them from those entries.
+    fn texts(ticker: &str, confs: &[&Json]) -> (String, String) {
+        let (v1, v2) = gas_limits_from_confs(confs).unwrap();
+        let mult = estimate_gas_mult_from_confs(confs).unwrap();
+        gas_limit_log_texts(ticker, confs, &v1, &v2, mult)
+    }
+
+    /// The USDC-MON token of the 2026-10-31 lab result: three raised V1 members and `eth_send_erc20` lowered.
+    fn usdc_mon_block() -> Json {
+        json!({"gas_limit": {"erc20_payment": 250_000, "erc20_receiver_spend": 200_000,
+                             "erc20_sender_refund": 200_000, "eth_send_erc20": 150_000}})
+    }
+
+    #[test]
+    fn t14_a_token_with_its_own_block_names_its_entry_and_lists_exactly_the_differing_members() {
+        let token = usdc_mon_block();
+        let mon = json!({});
+        // A token activated with its platform: the token's entry first, the platform's second.
+        let (info, _) = texts("USDC-MON", &[&token, &mon]);
+        assert_eq!(
+            info,
+            "USDC-MON gas limits: gas_limit from its own entry (erc20_payment 250000, erc20_receiver_spend 200000, \
+             erc20_sender_refund 200000, eth_send_erc20 150000); gas_limit_v2: defaults; estimate_gas_mult: none"
+        );
+        // A standalone token: the same entry alone gives the same line.
+        assert_eq!(texts("USDC-MON", &[&token]).0, info);
+        // A member that equals its default is not listed, though the block carries it.
+        let same = json!({"gas_limit": {"eth_payment": 65_000, "erc20_payment": 1}});
+        assert_eq!(
+            texts("T", &[&same]).0,
+            "T gas limits: gas_limit from its own entry (erc20_payment 1); gas_limit_v2: defaults; \
+             estimate_gas_mult: none"
+        );
+        // A block whose members all equal their defaults still names its source.
+        let all_default = json!({"gas_limit": {"eth_payment": 65_000}});
+        assert_eq!(
+            texts("T", &[&all_default]).0,
+            "T gas limits: gas_limit from its own entry (no member differs from the default); gas_limit_v2: \
+             defaults; estimate_gas_mult: none"
+        );
+    }
+
+    #[test]
+    fn t14_a_silent_token_names_the_platform_entry_and_lists_its_non_default_members() {
+        let token = json!({});
+        let platform = json!({"gas_limit": {"eth_send_erc20": 111_111}});
+        assert_eq!(
+            texts("JST", &[&token, &platform]).0,
+            "JST gas limits: gas_limit from its platform coin's entry (eth_send_erc20 111111); gas_limit_v2: \
+             defaults; estimate_gas_mult: none"
+        );
+        // The platform coin itself reads only its own entry: the same block is "its own entry" there, and a
+        // platform coin's second entry slot is `null`, which can never be named.
+        assert_eq!(
+            texts("ETH", &[&platform, &Json::Null]).0,
+            "ETH gas limits: gas_limit from its own entry (eth_send_erc20 111111); gas_limit_v2: defaults; \
+             estimate_gas_mult: none"
+        );
+    }
+
+    #[test]
+    fn t14_a_coin_with_no_block_and_no_multiplier_says_defaults_and_lists_no_member() {
+        let (info, _) = texts("ETH", &[&json!({"coin": "ETH"}), &Json::Null]);
+        assert_eq!(
+            info,
+            "ETH gas limits: gas_limit: defaults; gas_limit_v2: defaults; estimate_gas_mult: none"
+        );
+        let (info, _) = texts("JST", &[&json!({}), &json!({})]);
+        assert_eq!(
+            info,
+            "JST gas limits: gas_limit: defaults; gas_limit_v2: defaults; estimate_gas_mult: none"
+        );
+        // A `null` block is no block.
+        assert_eq!(texts("T", &[&json!({"gas_limit": null})]).0, info.replace("JST", "T"));
+    }
+
+    #[test]
+    fn t14_own_v2_block_and_a_multiplier_from_the_platform_name_both_sources() {
+        let token = json!({"gas_limit_v2": {"maker": {"erc20_payment": 300_000},
+                                            "nft_maker": {"erc721_payment": 1}}});
+        let platform = json!({"gas_limit": {"eth_payment": 70_000}, "estimate_gas_mult": 1.5});
+        assert_eq!(
+            texts("JST", &[&token, &platform]).0,
+            "JST gas limits: gas_limit from its platform coin's entry (eth_payment 70000); gas_limit_v2 from its own \
+             entry (gas_limit_v2.maker.erc20_payment 300000, gas_limit_v2.nft_maker.erc721_payment 1); \
+             estimate_gas_mult: 1.5 from its platform coin's entry"
+        );
+        // A multiplier on the token's own entry wins and is named so.
+        let own_mult = json!({"estimate_gas_mult": 2});
+        assert_eq!(
+            texts("JST", &[&own_mult, &platform]).0,
+            "JST gas limits: gas_limit from its platform coin's entry (eth_payment 70000); gas_limit_v2: defaults; \
+             estimate_gas_mult: 2 from its own entry"
+        );
+    }
+
+    #[test]
+    fn t14_the_full_list_holds_every_member_of_both_blocks_with_the_values_in_effect() {
+        let token = json!({"gas_limit": {"erc20_payment": 250_000},
+                           "gas_limit_v2": {"taker": {"approve_payment": 77}}});
+        let (_, full) = texts("JST", &[&token, &json!({})]);
+        let (v1, v2) = gas_limits_from_confs(&[&token]).unwrap();
+        let mut expected_names: Vec<&str> = v1_members(&v1).iter().map(|(name, _)| *name).collect();
+        expected_names.extend(v2_members(&v2).iter().map(|(name, _)| *name));
+        assert_eq!(expected_names.len(), 9 + 25);
+        for name in &expected_names {
+            assert!(full.contains(&format!("{name} ")), "{name} missing from {full}");
+        }
+        // The values in effect: the configured ones and the defaults.
+        assert!(full.contains("erc20_payment 250000"));
+        assert!(full.contains("eth_send_coins 21000"));
+        assert!(full.contains("eth_send_erc20 210000"));
+        assert!(full.contains("gas_limit_v2.taker.approve_payment 77"));
+        assert!(full.contains("gas_limit_v2.taker.erc20_maker_spend 115000"));
+        assert!(full.contains("gas_limit_v2.nft_maker.erc1155_maker_refund_secret 100000"));
+        // One line, led by the ticker, with no source wording.
+        assert!(!full.contains('\n'));
+        assert!(full.starts_with("JST gas limits, full list: gas_limit: "));
+        assert!(!full.contains("entry"));
+    }
+
+    #[test]
+    fn t14_the_texts_carry_nothing_but_the_ticker_the_blocks_and_the_multiplier() {
+        let token = json!({"gas_limit": {"eth_payment": 1}, "gas_limit_v2": {"maker": {"eth_payment": 2}},
+                           "estimate_gas_mult": 3, "urls": ["https://secret.example/key"],
+                           "contract_address": "0xdeadbeef", "protocol": {"type": "ERC20"}, "mm2": 1});
+        let (info, full) = texts("JST", &[&token]);
+        for text in [&info, &full] {
+            for forbidden in [
+                "secret.example",
+                "https",
+                "0xdeadbeef",
+                "contract_address",
+                "mm2",
+                "urls",
+                "protocol",
+            ] {
+                assert!(!text.contains(forbidden), "{forbidden} leaked into {text}");
+            }
         }
     }
 }

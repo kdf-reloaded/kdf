@@ -1111,3 +1111,70 @@ fn t13f_no_fixed_limit_changes_when_the_member_is_set() {
         assert_eq!(token.gas_limit_v2.taker.approve_payment, approve);
     }
 }
+
+// ─── T14: the logged gas limits at the token-with-platform activation site (CRD R57.5.5) ────────────────
+
+/// Activates the token `JST` on the platform `ETH` the way the token-with-platform route does
+/// (`erc20_token_from_conf_or_contract`) and returns the (INFO, DEBUG) texts that activation logged.
+fn logged_by_token_activation(eth_extra: Json, jst_extra: Json) -> (String, String) {
+    LOGGED_GAS_LIMITS.with(|logged| logged.borrow_mut().clear());
+    let (_ctx, platform) = coin_over_entries(EthCoinType::Eth, eth_extra, jst_extra).unwrap();
+    block_on(platform.erc20_token_from_conf_or_contract("JST".to_owned(), token_address(), 1, false)).unwrap();
+    LOGGED_GAS_LIMITS.with(|logged| {
+        let logged = logged.borrow();
+        assert_eq!(logged.len(), 1, "exactly one pair of lines per activation: {logged:?}");
+        logged[0].clone()
+    })
+}
+
+#[test]
+fn t14_token_with_platform_route_names_its_own_block_and_the_inherited_platform_block() {
+    // (a) the token's own block; the platform carries none.
+    let (info, _) = logged_by_token_activation(
+        json!({}),
+        json!({"gas_limit": {"erc20_payment": 250_000, "erc20_receiver_spend": 200_000,
+                             "erc20_sender_refund": 200_000, "eth_send_erc20": 150_000}}),
+    );
+    assert_eq!(
+        info,
+        "JST gas limits: gas_limit from its own entry (erc20_payment 250000, erc20_receiver_spend 200000, \
+         erc20_sender_refund 200000, eth_send_erc20 150000); gas_limit_v2: defaults; estimate_gas_mult: none"
+    );
+    // (b) a silent token on a platform whose entry sets one member: the platform's entry is the source.
+    let (info, _) = logged_by_token_activation(json!({"gas_limit": {"eth_send_erc20": 111_111}}), json!({}));
+    assert_eq!(
+        info,
+        "JST gas limits: gas_limit from its platform coin's entry (eth_send_erc20 111111); gas_limit_v2: defaults; \
+         estimate_gas_mult: none"
+    );
+    // (c) nothing configured anywhere.
+    let (info, _) = logged_by_token_activation(json!({}), json!({}));
+    assert_eq!(
+        info,
+        "JST gas limits: gas_limit: defaults; gas_limit_v2: defaults; estimate_gas_mult: none"
+    );
+    // (d) the token's own V2 block and a multiplier the token takes from its platform.
+    let (info, full) = logged_by_token_activation(
+        json!({"estimate_gas_mult": 1.5}),
+        json!({"gas_limit_v2": {"taker": {"approve_payment": 77}}}),
+    );
+    assert_eq!(
+        info,
+        "JST gas limits: gas_limit: defaults; gas_limit_v2 from its own entry (gas_limit_v2.taker.approve_payment \
+         77); estimate_gas_mult: 1.5 from its platform coin's entry"
+    );
+    // (e) the full list of the same activation holds the values in effect.
+    assert!(full.contains("gas_limit_v2.taker.approve_payment 77"));
+    assert!(full.contains("eth_send_erc20 210000"));
+}
+
+#[test]
+fn t14_an_invalid_member_fails_the_token_activation_and_logs_no_gas_limit_line() {
+    LOGGED_GAS_LIMITS.with(|logged| logged.borrow_mut().clear());
+    // The platform entry is fine; the token's own block is not, so the token's activation fails on the member.
+    let (_ctx, platform) =
+        coin_over_entries(EthCoinType::Eth, json!({}), json!({"gas_limit": {"eth_payment": -1}})).unwrap();
+    let result = block_on(platform.erc20_token_from_conf_or_contract("JST".to_owned(), token_address(), 1, false));
+    assert!(result.is_err());
+    assert!(LOGGED_GAS_LIMITS.with(|logged| logged.borrow().is_empty()));
+}

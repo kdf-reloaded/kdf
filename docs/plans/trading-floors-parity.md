@@ -80,6 +80,12 @@
   explicit `UtxoFixed` withdraw fee keeps its per-started-kilobyte meaning,
   since no chapter covers it. Swaplab live tests are pending a dedicated
   swaplab session.
+  *Fact (KDF Spec Reader, 2026-11-03; CRD chapter 38 R38.6.6l, Dirty Gate
+  PASS 2026-11-03):* a chapter now covers it. At both reference designations an
+  explicit `UtxoFixed` withdraw fee is applied as a proportional, truncated
+  rate per 1,000 bytes, exactly like `UtxoPerKbyte`; the per-started-kilobyte
+  meaning is the baseline anchor's. Whether this step adopts the reference
+  arithmetic is the maintainer's decision.
 - 3: spend safety merged in PR #73 (2026-10-25): R60.6.4 and R60.6.7 with
   the switch `pre_trade_spend_check`. The Sia miner fee turned out to be
   0.00002 SC, not 0.02 SC as the chapter first said; the chapter is
