@@ -1,6 +1,6 @@
 # Plan: where the EVM gas multiplier and the gas limits reach the swap transactions
 
-**Status:** blocked ((c) and (d) decided and written in PR #123; (a) and (b) wait on the reference maintainers' outcome) — **Last reviewed:** 2026-11-02
+**Status:** blocked ((c) and (d) decided and written in PR #123; (a) and (b) wait on the reference maintainers' outcome) — **Last reviewed:** 2026-11-03
 
 > **Context:** an operator running a maker on USDC-MON (Monad) and USDC-BASE set
 > `estimate_gas_mult` and still saw the fixed 210,000 / 150,000 limits on the
@@ -241,6 +241,7 @@ note because the reference does not do it.
    small inconsistency of its own; leave it, or make the quote follow the limit.~~
    Decided 2026-11-02: the quote follows the limit (ch.57 R57.4.2), with the
    switch `evm_taker_fee_quote_at_limit` (default `true`; `false` quotes the
-   estimate as before). Reference behavior: pending. Whether GLEEC KDF quotes
-   by estimate or by limit is with the KDF Spec Reader (SR-4); the compatibility
-   row names no GLEEC behavior until the gated answer arrives.
+   estimate as before). Reference behavior (ch.57 R57.5.2a, 2026-11-03): GLEEC
+   KDF sends the taker fee with the same fixed limit and quotes it by
+   `eth_estimateGas`, so quoting at the limit diverges in the quote only, under
+   the second arm of the default-side rule; `false` gives GLEEC KDF's quote.

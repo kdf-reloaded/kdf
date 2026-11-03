@@ -444,15 +444,16 @@ therefore pass the check before the swap and then fail to send the fee. On a cha
 that charges only the gas used, the quote is now above the charge, as the
 payment quotes already are.
 
-> **Divergence (informative).** Before this rule, Reloaded quoted the
-> `eth_estimateGas` figure. What GLEEC KDF quotes here is not established:
-> the question is with the KDF Spec Reader (SR-4, 2026-11-02). No peer
-> observes the quote, which only changes this node's own figures, so by the
-> second arm of the default-side rule of `docs/COMPAT_SWITCHES.md` Reloaded's
-> variant is the default.
+> **Divergence (informative).** GLEEC KDF sends the taker-fee transfer with
+> the fixed `eth_send_coins` / `eth_send_erc20` limit and quotes it by
+> `eth_estimateGas` (R57.5.2a); so did Reloaded before this rule. The rule
+> diverges in the quote only: the transaction, its limit and its price stay
+> those of R57.5.2a. No peer observes the quote, which only changes this
+> node's own figures, so by the second arm of the default-side rule of
+> `docs/COMPAT_SWITCHES.md` Reloaded's variant is the default.
 >
-> **Compatibility:** for the behavior before this rule, set
-> `evm_taker_fee_quote_at_limit` to `false`.
+> **Compatibility:** to quote by estimate, as GLEEC KDF does and as Reloaded
+> did before this rule, set `evm_taker_fee_quote_at_limit` to `false`.
 
 *Acceptance.* T15.
 
@@ -1991,5 +1992,9 @@ pre-anchor baseline code.*
   session that never read the corpus wrote R57.4.2 and T15 from this project's own
   code at `e65d3c45f` and the lab result of 2026-10-31. They take no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
-  required. The divergence note makes no claim about GLEEC KDF; that question is
+  required. The divergence note made no claim about GLEEC KDF; that question was
   with the Spec Reader (SR-4).
+- *Clean-side amendment of 2026-11-03 (taker-fee quote).* The divergence note
+  under R57.4.2 now states GLEEC KDF's behavior by citing R57.5.2a, the Spec
+  Reader's answer to SR-4 after its Dirty Gate pass, and takes nothing beyond
+  that rule's text.

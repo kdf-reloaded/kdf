@@ -25,8 +25,9 @@ it and, where one exists, the CRD rule, for readers who want more.
   the full limit, the USDC-MON fee transfer is estimated at about 83,000 gas and charged the 150,000
   its coins-file entry sets. The quote now uses the limit, as every other EVM swap quote already
   does. On chains that charge only the gas used, the quoted fee is now higher than what is charged.
-  Set the `MM2.json` boolean `evm_taker_fee_quote_at_limit` to `false` to quote the estimate as
-  before. Detail: PR #213; CRD ch.57 R57.4.2.
+  GLEEC KDF sends the fee with the same limit but quotes the estimate; set the `MM2.json` boolean
+  `evm_taker_fee_quote_at_limit` to `false` to quote it that way, as KDF Reloaded did before.
+  Detail: PR #213; CRD ch.57 R57.4.2, R57.5.2a.
 
 ### Fixed
 

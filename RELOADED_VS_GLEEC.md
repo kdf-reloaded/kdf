@@ -485,8 +485,8 @@ quotes, Electrum and the shielded history, differ from GLEEC KDF by default, eac
 - `suppress_unchanged_order_updates: false` — every `update_maker_order` is broadcast, as the GPLv2
   baseline does; what GLEEC KDF does here is not established.
 - `evm_taker_fee_quote_at_limit: false` — the fee to send an EVM taker fee is quoted at the gas
-  estimate, as KDF Reloaded did before this switch, instead of at the gas limit the fee is sent
-  with; what GLEEC KDF quotes here is not established.
+  estimate, as GLEEC KDF does and as KDF Reloaded did before this switch, instead of at the gas
+  limit the fee is sent with; both send it with that limit.
 
 A fourteenth switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
 every maker-order message is published at once, and `true` turns on the maker's rate control.
