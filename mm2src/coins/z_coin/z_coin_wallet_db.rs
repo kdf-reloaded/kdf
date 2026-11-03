@@ -967,11 +967,18 @@ impl ZCoinShieldedHistory {
         } else {
             endpoint
         };
+        // The name goes through the node's resolver (CRD ch.45 R45.6B.9 item 5). The connector stands for the one tonic
+        // builds itself (`Endpoint::connect`): plain TCP, with the settings the endpoint would have given it. tonic
+        // applies the endpoint's TLS configuration on top of any connector, so TLS keeps the hostname of the URL.
+        let mut connector = common::wio::http_connector();
+        connector.enforce_http(false);
+        connector.set_nodelay(true);
+        connector.set_connect_timeout(Some(LIGHTWALLETD_CONNECT_TIMEOUT));
         let endpoint = endpoint
             .http2_keep_alive_interval(Duration::from_secs(20))
             .keep_alive_timeout(Duration::from_secs(10))
             .keep_alive_while_idle(true)
-            .connect()
+            .connect_with_connector(connector)
             .await
             .map_err(|e| scrubbed(&e))?;
         Ok(z_coin_grpc::compact_tx_streamer_client::CompactTxStreamerClient::new(
@@ -7357,5 +7364,40 @@ mod v6_transaction_parsing_tests {
             assert_eq!(out, raw, "height {height} round trip");
         }
         assert_eq!((v4, v6), (1, 18));
+    }
+}
+
+/// CRD ch.45 T45.17: the name of a lightwalletd server goes through the node's resolver. The TLS case (the certificate
+/// checked against the name) is not covered here: tonic applies the endpoint's TLS configuration on top of whatever
+/// connector it is given, and the configuration trusts the bundled roots only, so a test certificate cannot be trusted
+/// without a seam in `connect_lightwalletd`.
+#[cfg(test)]
+mod lightwalletd_dns_tests {
+    use super::*;
+    use common::dns_resolver::{gauges, install_test_map};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn the_server_name_is_resolved_through_the_installed_resolver() {
+        let _guard = install_test_map(&[("lwd.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)])]);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let port = listener.local_addr().unwrap().port();
+            let accepted = tokio::spawn(async move { listener.accept().await.map(|(stream, _)| stream) });
+            // The loopback listener does not speak gRPC: the outcome of the connection is not the point, only that the
+            // name reached the listener.
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                ZCoinShieldedHistory::connect_lightwalletd(&format!("http://lwd.test:{}", port)),
+            )
+            .await;
+            let reached = tokio::time::timeout(Duration::from_secs(3), accepted).await;
+            assert!(matches!(reached, Ok(Ok(Ok(_)))), "the listener was not reached");
+        });
+        assert_eq!(gauges().unwrap().lookups, 1);
     }
 }
