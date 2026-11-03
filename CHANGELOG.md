@@ -43,9 +43,9 @@ it and, where one exists, the CRD rule, for readers who want more.
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
-- [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes keep
-  showing after a lost cancellation; five work packages after the beta, the first being the higher
-  sync limits on relays above (PR #205).
+- [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes
+  keep showing after a lost cancellation; five work packages after the beta, the first two being the
+  higher sync limits on relays and the request to one other relay above (PRs #205, #207, #208).
 
 ### Known limitations
 
@@ -94,8 +94,10 @@ lives.
   D9.
 - **Other nodes can keep showing a cancelled order for a while if its cancellation is lost on the
   way.** Such an order cannot be matched or traded, and it disappears once the maker posts again on
-  that pair or goes offline. More in [`ghost-orders`](docs/plans/ghost-orders.md). Detail: PR #188;
-  CRD ch.32 D12.
+  that pair or goes offline. While the maker still has other orders on that pair, a node whose copy
+  differs from the maker's now also asks one other relay, which removes the order if that relay
+  received the cancellation. More in [`ghost-orders`](docs/plans/ghost-orders.md). Detail:
+  PRs #188, #208; CRD ch.32 D12, R-Q5d.
 - **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes.** ARRR now uses a newer
   transaction format (v6, from the Ironwood upgrade) that no other KDF implementation can handle, so a
   swap with a Komodo or GLEEC counterparty cannot complete. A swap between two KDF Reloaded nodes has
