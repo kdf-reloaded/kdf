@@ -732,6 +732,18 @@ resolver, and the operator documentation says so.
 D45.7 Encrypted DNS (DNS over HTTPS or over TLS) for the Google and fixed modes
 is deferred. It is a plan row without an effort estimate.
 
+D45.8 *Library choice (decided 2026-11-03, maintainer decision).* The Google
+and fixed modes are built on the message and network crates of the hickory DNS
+project (`hickory-proto` and `hickory-net`, the 0.26 line), not on its resolver
+crate. That resolver crate, from the 0.25 line on, depends on a cache crate
+with files under Apache-2.0 only, which LEGAL/LICENSING-POLICY.md §4 does not
+accept as a new dependency of the GPL-2.0-only combined work. Its 0.24 line has
+no such dependency, but it carries an advisory that is fixed only in 0.26 and
+gets no further fixes. The node therefore keeps its own cache (R45.6B.4), its
+own reading of the hosts file (R45.6B.3 item 2), the server order and the TCP
+retry on truncation (R45.6B.3) on top of those two crates. Moving to the
+resolver crate is deferred until it drops that dependency.
+
 ## 45.10 External References
 
 - KomodoPlatform Komodo DeFi Framework documentation — *Configure the
@@ -806,7 +818,8 @@ is deferred. It is a plan row without an effort estimate.
   measurements (R45.6A.7) and the documentation of the system allocator; no
   reference material was consulted for it.
 - *Section 45.6B (hostname resolution):* Reloaded-original, written from the
-  maintainer's decisions of 2026-11-02, this repository's own source and the
+  maintainer's decisions of 2026-11-02 and 2026-11-03, this repository's own
+  source, the licenses and advisories of the candidate DNS crates, and the
   documentation of the DNS library and of Google Public DNS; no reference
   material was consulted for it. Its one statement about the reference, that
   seed names are resolved through Google Public DNS, restates chapter 28's
