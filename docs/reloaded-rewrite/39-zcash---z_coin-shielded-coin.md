@@ -611,6 +611,11 @@ shielded leg's key is re-derived on restart and after re-activation and signs a 
 > as saved: 20 bytes under the default algorithm (the reference vector's case), 32 when
 > ch. 51 R71/R72 selects SHA-256.
 
+> **Note (2026-10-28) to T39.5.a.** In a saved swap, the `Negotiated` events' `taker_pubkey`
+> and `maker_pubkey` are 33 zero bytes, in Reloaded's swap files and in the reference's alike.
+> Reloaded parses that value and uses the HTLC public keys instead, so a vector needs only the
+> HTLC public keys of the `Started` and `Negotiated` events.
+
 > **Amendment (2026-10-28) to T39.5.c and the R39.5.4 candidate order.** T39.5.c concerns a
 > swap record that saved no HTLC private key, which every derived key is. Such a record has
 > no match-only candidate, so with a different seed recovery ends in the script-mismatch or
@@ -5341,6 +5346,12 @@ broadcast and the whole wallet half stay on lightwalletd (R39.11.9--R39.11.11).
 > - **Recorded check.** On 2026-10-28 a recovery of the September test swap ran against
 >   two `lightwalletd` servers without an address index plus one published ARRR ElectrumX.
 >   It reported the payment refunded, from Electrum.
+> - **Open after the beta.** The tip-lag bound of (b) and the identity height of (a), 10
+>   blocks each, are first values; revisit them after a field check. That field check was
+>   waived on 2026-10-28, because no public `lightwalletd` without an address index was
+>   available. Run it when one appears: an ARRR swap between two Reloaded nodes whose
+>   `lightwalletd` list holds only servers without the index, with the ElectrumX configured;
+>   the recovery against the same servers; and a swap with the published list unchanged.
 
 R39.11.26 **The wallet's own send record answers "sent" first.** *(binding;
 Reloaded-original, maintainer Decision AK of 2026-10-28; D39.11.h adopted.)* Before
@@ -6014,6 +6025,13 @@ of a balance request as an invalid address list surfaces as an ordinary endpoint
 that carries the node's text. Reclassifying it as a request-or-index condition would change
 only the class of the error; the request itself is refused either way, and a P2SH address
 never reaches the method (R39.11.4d).
+
+D39.11.o **The Electrum fallback names an unparsable server by the placeholder alone --
+after the beta.** *(Recorded 2026-10-29.)* D39.11.m names an entry that cannot be parsed by
+a placeholder and its position in the configured list, and the Electrum pool and
+`lightwalletd` do so. The fallback of R39.11.25 does not yet: its methods see only the
+address string, so it names such a server by the placeholder alone, and two unparsable
+entries in its list cannot be told apart. Passing the position to the fallback closes this.
 
 ## 39.7 Acceptance criteria (chapter)
 

@@ -1,6 +1,6 @@
-# KDF Reloaded v0.1.0-alpha.1 — Comparison to GLEEC KDF v\<X.Y.Z\>
+# KDF Reloaded 0.3.0-beta.1 — Comparison to GLEEC KDF 3.0.0-beta
 
-> **Status: skeleton.** Detail sections will be filled in as v0.1.0-alpha.1 is finalised. The summary lists below are the authoritative public catalogue of differences once the alpha is tagged.
+> The lists below are the public catalogue of differences as of KDF Reloaded 0.3.0-beta.1.
 
 ## What is KDF Reloaded?
 
@@ -354,7 +354,6 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   completes or is recovered. Orders and swaps are planned to return in a later
   release. No switch exists: the build constant `TENDERMINT_SWAPS_AVAILABLE`
   (`coins/lp_coins_ops.rs`) is `false`.
-- *(further entries to be enumerated as the alpha is finalised.)*
 
 ### Work in progress
 
@@ -363,13 +362,11 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   own ed25519 HTLC key (ch.51 R-S9), gets the CRD-dictated 32-byte secret
   hash whenever it is on either side of the pair (ch.51 R71/R72), and has
   completed real send/spend/refund swaps against UTXO counterparties
-  (confirmed live, both directions). Still open: the swap-spend search
-  event-walk remains unimplemented (ch.20 D3/R-S8 — the affected RPC now
-  fails cleanly instead of silently guessing "not spent", but does not yet
-  actually search), and the V2 swap protocol is not implemented for SC
-  (ch.20 D5, V1 only).
+  (confirmed live, both directions). The swap-spend search walks the HTLC
+  address's event log and tells a spend from a refund (ch.20 D3, closed).
+  Still open: the V2 swap protocol is not implemented for SC (ch.20 D5,
+  V1 only).
 - HD wallet dispatch in swap/ordermatch paths (legacy iguana-key fallback retained for parity with upstream and GLEEC; documented in code).
-- *(further entries to be enumerated.)*
 
 ### Settings to set for GLEEC-compatible operation
 
