@@ -88,7 +88,8 @@ lives.
   D9.
 - **Other nodes can keep showing a cancelled order for a while if its cancellation is lost on the
   way.** Such an order cannot be matched or traded, and it disappears once the maker posts again on
-  that pair or goes offline. Detail: PR #188; CRD ch.32 D12.
+  that pair or goes offline. More in [`ghost-orders`](docs/plans/ghost-orders.md). Detail: PR #188;
+  CRD ch.32 D12.
 - **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes.** ARRR now uses a newer
   transaction format (v6, from the Ironwood upgrade) that no other KDF implementation can handle, so a
   swap with a Komodo or GLEEC counterparty cannot complete. A swap between two KDF Reloaded nodes has
