@@ -2037,10 +2037,11 @@ pub(crate) struct Orderbook {
     /// A map from (base, rel).
     pub(crate) unordered: HashMap<(String, String), HashSet<Uuid>>,
     pub(crate) order_set: HashMap<Uuid, OrderbookItem>,
-    /// Recently cancelled order UUIDs mapped to the cancelling pubkey.
+    /// Recently cancelled orders, keyed by order UUID and cancelling pubkey (CRD ch.32 R-C5): a cancel
+    /// from another publisher neither creates nor refreshes the entry of the order's publisher.
     /// Guards against re-creation when P2P cancel arrives before the create message. Its time-to-live is
     /// the final-cancel window of CRD ch.32 R-K1b.
-    pub(crate) recently_cancelled: TimeCache<Uuid, String>,
+    pub(crate) recently_cancelled: TimeCache<(Uuid, String), ()>,
     /// R-K1b item 4: the number of entries of `recently_cancelled` older than [`RECENTLY_CANCELLED_TIMEOUT`]
     /// that the guard keeps.
     pub(crate) cancel_guard_max_entries: usize,
@@ -2084,7 +2085,7 @@ impl Orderbook {
 
     /// Records the cancel of `uuid` by `pubkey` in the guard (CRD ch.32 R-C5) and applies the cap.
     pub(crate) fn record_cancel(&mut self, uuid: Uuid, pubkey: &str) {
-        self.recently_cancelled.insert(uuid, pubkey.to_string());
+        self.recently_cancelled.insert((uuid, pubkey.to_string()), ());
         self.enforce_cancel_guard_cap();
     }
 
@@ -2133,7 +2134,11 @@ impl Orderbook {
     /// Index-only method: updates in-memory indices and returns the trie mutations
     /// that must be applied by TrieStore. No trie/memory_db mutation happens here.
     pub(crate) fn index_insert_or_update(&mut self, order: OrderbookItem) -> Vec<TrieOp> {
-        if self.recently_cancelled.get_unexpired(&order.uuid) == Some(&order.pubkey) {
+        if self
+            .recently_cancelled
+            .get_unexpired(&(order.uuid, order.pubkey.clone()))
+            .is_some()
+        {
             log::debug!(
                 "Ignoring a late copy of order {}: it was cancelled less than {} s ago",
                 order.uuid,

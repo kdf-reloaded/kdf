@@ -2348,7 +2348,7 @@ fn test_recently_cancelled_blocks_insert() {
     let uuid = order.uuid;
 
     // Simulate cancel arriving first
-    orderbook.recently_cancelled.insert(uuid, pubkey.clone());
+    orderbook.recently_cancelled.insert((uuid, pubkey.clone()), ());
 
     // Now try to insert — should be silently dropped
     orderbook.index_insert_or_update(order);
@@ -2370,7 +2370,7 @@ fn test_recently_cancelled_expired_entry_allows_insert() {
     let order = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 1).remove(0);
     let uuid = order.uuid;
 
-    orderbook.recently_cancelled.insert(uuid, pubkey.clone());
+    orderbook.recently_cancelled.insert((uuid, pubkey.clone()), ());
     orderbook.index_insert_or_update(order.clone());
     assert!(
         !orderbook.order_set.contains_key(&uuid),
@@ -2396,7 +2396,7 @@ fn test_recently_cancelled_allows_different_pubkey() {
     let uuid = order.uuid;
 
     // Cancel recorded for pubkey_a — not the order's pubkey
-    orderbook.recently_cancelled.insert(uuid, pubkey_a);
+    orderbook.recently_cancelled.insert((uuid, pubkey_a), ());
 
     // Insert from pubkey_b should succeed
     orderbook.index_insert_or_update(order);
@@ -2482,14 +2482,19 @@ mod t32_k1b_final_cancel_tests {
     fn set_guard_age(ctx: &MmArc, uuid: Uuid, pubkey: &str, secs: u64) {
         let octx = octx(ctx);
         let mut orderbook = octx.orderbook.lock();
-        orderbook.recently_cancelled.remove(uuid);
+        orderbook.recently_cancelled.remove((uuid, pubkey.to_owned()));
         assert!(orderbook
             .recently_cancelled
-            .insert_aged(uuid, pubkey.to_owned(), Duration::from_secs(secs)));
+            .insert_aged((uuid, pubkey.to_owned()), (), Duration::from_secs(secs)));
     }
 
     fn guarded(ctx: &MmArc, uuid: Uuid, pubkey: &str) -> bool {
-        octx(ctx).orderbook.lock().recently_cancelled.get_unexpired(&uuid) == Some(&pubkey.to_owned())
+        octx(ctx)
+            .orderbook
+            .lock()
+            .recently_cancelled
+            .get_unexpired(&(uuid, pubkey.to_owned()))
+            .is_some()
     }
 
     fn ttl(ctx: &MmArc) -> Duration { octx(ctx).orderbook.lock().recently_cancelled.ttl() }
@@ -2852,12 +2857,19 @@ mod t32_k1b_final_cancel_tests {
         }
     }
 
-    fn held(orderbook: &Orderbook, uuids: &[Uuid]) -> Vec<bool> {
+    fn held_for(orderbook: &Orderbook, uuids: &[Uuid], pubkey: &str) -> Vec<bool> {
         uuids
             .iter()
-            .map(|uuid| orderbook.recently_cancelled.get_unexpired(uuid).is_some())
+            .map(|uuid| {
+                orderbook
+                    .recently_cancelled
+                    .get_unexpired(&(*uuid, pubkey.to_owned()))
+                    .is_some()
+            })
             .collect()
     }
+
+    fn held(orderbook: &Orderbook, uuids: &[Uuid]) -> Vec<bool> { held_for(orderbook, uuids, "pk") }
 
     #[test]
     fn t_k8_d_cap_keeps_the_newest_of_the_older_entries() {
@@ -2866,7 +2878,9 @@ mod t32_k1b_final_cancel_tests {
         // Oldest first: 1,000 s, 900 s, ... 600 s ago; each insertion applies the cap, as a cancel does.
         for (i, uuid) in uuids.iter().enumerate() {
             let age = Duration::from_secs(1000 - 100 * i as u64);
-            assert!(orderbook.recently_cancelled.insert_aged(*uuid, "pk".to_owned(), age));
+            assert!(orderbook
+                .recently_cancelled
+                .insert_aged((*uuid, "pk".to_owned()), (), age));
             orderbook.enforce_cancel_guard_cap();
         }
         assert_eq!(held(&orderbook, &uuids), vec![false, false, true, true, true]);
@@ -2879,7 +2893,9 @@ mod t32_k1b_final_cancel_tests {
         let old: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
         for (i, uuid) in old.iter().enumerate() {
             let age = Duration::from_secs(500 - 100 * i as u64);
-            orderbook.recently_cancelled.insert_aged(*uuid, "pk".to_owned(), age);
+            orderbook
+                .recently_cancelled
+                .insert_aged((*uuid, "pk".to_owned()), (), age);
         }
         orderbook.enforce_cancel_guard_cap();
         assert_eq!(held(&orderbook, &old), vec![true, true, true]);
@@ -2908,7 +2924,9 @@ mod t32_k1b_final_cancel_tests {
             let mut orderbook = octx.orderbook.lock();
             for (i, uuid) in old.iter().enumerate() {
                 let age = Duration::from_secs(500 - 100 * i as u64);
-                orderbook.recently_cancelled.insert_aged(*uuid, "pk".to_owned(), age);
+                orderbook
+                    .recently_cancelled
+                    .insert_aged((*uuid, "pk".to_owned()), (), age);
             }
         }
         let maker = Maker::new("final-cancel-d-message");
@@ -2916,7 +2934,7 @@ mod t32_k1b_final_cancel_tests {
         let octx = octx(&ctx);
         let orderbook = octx.orderbook.lock();
         assert_eq!(held(&orderbook, &old), vec![false, false]);
-        assert_eq!(held(&orderbook, &[maker.cancelled.uuid]), vec![true]);
+        assert_eq!(held_for(&orderbook, &[maker.cancelled.uuid], &maker.pubkey), vec![true]);
         assert_eq!(orderbook.cancel_guard_max_entries, 1);
     }
 
@@ -2962,6 +2980,88 @@ mod t32_k1b_final_cancel_tests {
     }
 
     // (f)
+
+    // (g)
+
+    /// The cancel of the order `U` of the maker by `X`, a publisher that is not the maker, and then by the maker.
+    fn cancelled_by_other_and_by_maker(conf: Json) -> (MmArc, Maker, Maker) {
+        let (ctx, _rx) = node(conf);
+        let maker = Maker::new("final-cancel-g-maker");
+        let other = Maker::new("final-cancel-g-other");
+        let uuid = maker.cancelled.uuid;
+        assert!(receive(&ctx, &cancelled(&other.secret, uuid)));
+        assert!(receive(&ctx, &cancelled(&maker.secret, uuid)));
+        assert!(guarded(&ctx, uuid, &other.pubkey));
+        assert!(guarded(&ctx, uuid, &maker.pubkey));
+        assert_eq!(octx(&ctx).orderbook.lock().recently_cancelled.len(), 2, "two entries");
+        (ctx, maker, other)
+    }
+
+    #[test]
+    fn t_k8_g_a_cancel_is_kept_per_publisher() {
+        let (ctx, maker, other) = cancelled_by_other_and_by_maker(json!({}));
+        let uuid = maker.cancelled.uuid;
+        let from_maker = created(&maker.secret, &maker.cancelled);
+        let from_other = created(&other.secret, &maker.cancelled);
+
+        // The maker's window counts from the maker's cancel; the other publisher's entry is still young.
+        set_guard_age(&ctx, uuid, &maker.pubkey, 3599);
+        receive(&ctx, &from_maker);
+        assert!(book(&ctx).is_empty(), "kept out just below the maker's window");
+        set_guard_age(&ctx, uuid, &maker.pubkey, 3601);
+        receive(&ctx, &from_maker);
+        assert!(book(&ctx).contains(&uuid), "inserted just above the maker's window");
+        assert_eq!(octx(&ctx).orderbook.lock().order_set[&uuid].pubkey, maker.pubkey);
+
+        // The other publisher's copy is kept out for the other publisher's own window only.
+        receive(&ctx, &from_other);
+        assert_eq!(octx(&ctx).orderbook.lock().order_set[&uuid].pubkey, maker.pubkey);
+        set_guard_age(&ctx, uuid, &other.pubkey, 3601);
+        receive(&ctx, &from_other);
+        assert_eq!(octx(&ctx).orderbook.lock().order_set[&uuid].pubkey, other.pubkey);
+    }
+
+    /// Neither cancel refreshes the other's entry: the entry of the first, aged to just under the window, is gone
+    /// a moment after the second cancel arrived.
+    #[test]
+    fn t_k8_g_neither_cancel_refreshes_the_other() {
+        for other_first in [true, false] {
+            let (ctx, _rx) = node(json!({ "cancel_final_window_secs": 120 }));
+            let maker = Maker::new("final-cancel-g-maker");
+            let other = Maker::new("final-cancel-g-other");
+            let uuid = maker.cancelled.uuid;
+            let (first, second) = if other_first {
+                (&other, &maker)
+            } else {
+                (&maker, &other)
+            };
+            assert!(receive(&ctx, &cancelled(&first.secret, uuid)));
+            octx(&ctx)
+                .orderbook
+                .lock()
+                .recently_cancelled
+                .remove((uuid, first.pubkey.clone()));
+            octx(&ctx).orderbook.lock().recently_cancelled.insert_aged(
+                (uuid, first.pubkey.clone()),
+                (),
+                Duration::from_millis(119_700),
+            );
+            assert!(receive(&ctx, &cancelled(&second.secret, uuid)));
+            assert!(guarded(&ctx, uuid, &second.pubkey));
+            std::thread::sleep(Duration::from_millis(600));
+            assert!(
+                !guarded(&ctx, uuid, &first.pubkey),
+                "the first entry ran out on its own"
+            );
+            assert!(guarded(&ctx, uuid, &second.pubkey), "the second entry is still young");
+            receive(&ctx, &created(&first.secret, &maker.cancelled));
+            assert_eq!(
+                book(&ctx),
+                HashSet::from([uuid]),
+                "the first publisher's copy is inserted"
+            );
+        }
+    }
 
     #[test]
     fn t_k8_f_after_a_restart_nothing_is_guarded() {
