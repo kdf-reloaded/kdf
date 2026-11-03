@@ -459,6 +459,46 @@ the key is absent:
 > default for the platform coin (65000 against 100000), so substituting
 > one would under-fund the only transaction that recovers a stuck swap.
 
+**R57.5.2a** *The legacy taker-fee transaction's gas: fixed when sent,
+estimated when quoted.* *(Authored by the KDF Spec Reader 2026-11-03 from
+the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at
+both; **passed the KDF Dirty Gate on 2026-11-03**, measure 0.00, see
+§57.12.)* At both designations the
+legacy (V1) protocol's DEX-fee payment — the taker-fee transaction — is sent
+as a plain send-to-address: a native value transfer to the DEX fee address
+priced by the **fixed** `eth_send_coins` limit (default 21000), or an ERC-20
+`transfer` call priced by the **fixed** `eth_send_erc20` limit (default
+210000) — the same two keys and limits as the `withdraw` path of R57.5.2 —
+and never by `eth_estimateGas`; because a fixed limit is supplied, the
+gas-estimate multiplier of R57.5.3b is not reached. The **quote** of the
+fee to send the taker fee — the DEX-fee preimage of R57.4.1, consumed by
+`trade_preimage` and by the taker's pre-trade balance check — is obtained
+differently: by `eth_estimateGas` over the same encoded transfer (the
+native value to the DEX fee address, or the ERC-20 `transfer` of the fee
+amount), with the stage-raised, policy-resolved gas price supplied in the
+call (R57.3.3, R57.4.1), and the quoted fee is that estimate times that
+price. Quote and broadcast therefore use different limits: an estimate near
+actual use for the quote, a fixed limit with margin for the send. The
+swap-payment transactions differ from the taker fee in their keys, not in
+their class: the V1 payment is sent with the fixed `eth_payment` /
+`erc20_payment` limits and quoted with those same fixed limits (R57.5.2; the
+token quote adds an estimated approve when the allowance is short, R57.5.3b
+items 5–6). The version-two protocol has no separate taker-fee transaction:
+the DEX fee is paid inside the taker payment, priced by the fixed limits of
+`gas_limit_v2` (R57.6).
+
+> **Compatibility (this repository, 2026-11-03; not corpus-sourced).**
+> Reloaded sends the taker fee with the same fixed `eth_send_coins` /
+> `eth_send_erc20` limits (**parity**) and, on its integration branch as of
+> this date, quotes it by estimation as the reference does (**parity**). A
+> change that quotes the taker-fee transfer at the fixed limit it is sent
+> with is in preparation (branch `fix/evm-taker-fee-quote-at-limit`); it
+> would be a deliberate divergence of the **quote only** — a higher quoted
+> fee on a chain where the fixed limit exceeds actual use — that no peer
+> observes, of the kind `docs/COMPAT_SWITCHES.md` "The default-side rule"
+> arm 2, to be recorded under this rule and in the operator-facing
+> compatibility documents when it is merged.
+
 **R57.5.3** *Token inheritance.* For a token (ERC-20 or NFT), the
 `gas_limit` key shall be read from the token's own configuration entry
 and, when absent there, from the entry of its platform coin. The same
@@ -1917,3 +1957,17 @@ pre-anchor baseline code.*
   They take no forbidden-class input, so chapter 01 R38 is not engaged and no
   gate pass is required. The one-line cross-reference in R57.7.3 rides on the
   chapter-56 verdict of 2026-10-30.
+- *Scoped addition (2026-11-03) -- R57.5.2a and its compatibility note.*
+  **KDF Dirty Gate: PASS on 2026-11-03, measure 0.00.** The forbidden
+  corpus was consulted at the
+  designations `v2.6.0-beta` and `v3.0.0-beta` of §57.1, which agree,
+  **only** to establish how the legacy taker-fee transaction obtains its gas
+  limit when sent (the fixed send keys of R57.5.2, no estimation, multiplier
+  not reached) and when quoted (an estimate over the encoded transfer with
+  the stage-raised policy-resolved price), that the V1 payments are sent and
+  quoted at their fixed keys, and that the version-two protocol has no
+  separate fee transaction. Only those behaviors, the already-bound
+  configuration keys and the public method names (`eth_estimateGas`,
+  `trade_preimage`, `withdraw`) cross into the chapter; no private name,
+  body, control flow or literal was reproduced. The compatibility note rests
+  on this repository's own code and branches.

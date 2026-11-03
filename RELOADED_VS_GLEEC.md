@@ -331,6 +331,29 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   (the key-absent row and the port note under §37.5.8). Code:
   `coins/utxo/header_layout_fallback.rs`, `coins/utxo/utxo_builder/utxo_conf_builder.rs`.
 
+- **An explicit `UtxoFixed` withdraw fee for a UTXO coin is charged per started
+  kilobyte, with no switch.** A UTXO `withdraw` with
+  `fee: {"type":"UtxoFixed","amount":"<n>"}` pays `<n>` for every started kilobyte of
+  the transaction in Reloaded. The reference (Komodo DeFi Framework 2.6.0-beta and
+  GLEEC KDF 3.0.0-beta) charges `<n>` as a rate per 1,000 bytes, in proportion to the
+  size and rounded down, exactly like `UtxoPerKbyte`, so it pays less than `<n>` for
+  any transaction under a kilobyte. Reloaded never pays less than the fee entered. No
+  other node sees the difference, because a withdrawal is the node's own transaction.
+  Measured values are in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md);
+  parity is planned after the beta
+  ([`docs/plans/trading-floors-parity.md`](docs/plans/trading-floors-parity.md)).
+  Contract: [CRD ch.38 R38.6.6l](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md).
+
+- **Reloaded never writes a cancelled order's stored record back, with no switch.**
+  On the reference, an order update or the node's own match-pruning step that runs
+  into a concurrent cancel can write the cancelled order's stored record back. The
+  order then returns as a live order at the next start and is announced to other
+  nodes again. Reloaded never writes the record of an order once it has been removed.
+  An order whose record could not be deleted at cancel time still comes back after a
+  restart on both, because the failed deletion is logged and not retried. Contract:
+  [CRD ch.12 R7b](docs/reloaded-rewrite/12-order-match-state-store.md),
+  [ch.32 R-GH11](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md).
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.

@@ -50,7 +50,12 @@ file carries the detail. "New" means the plan was created in this cycle.
 
 - [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes keep
   showing after a lost cancellation; five work packages after the beta, the first being the higher
-  sync limits on relays above (PR #205).
+  sync limits on relays above (PR #205). What two later packages waited for is now recorded: how a
+  cancelled order can come back on Komodo and GLEEC KDF, and that their makers advertise every
+  non-empty pair at every tick.
+- [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
+  GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
+  recorded; whether KDF Reloaded follows them stays the maintainer's decision.
 
 ### Known limitations
 

@@ -731,6 +731,26 @@ next listing until the backend itself stops listing them.
 > build or signing time, and that a broadcast of bytes the node did not build
 > writes nothing, still hold.
 
+> **Re-verified 2026-11-03 (KDF Spec Reader; same rows; passed the KDF
+> Dirty Gate on 2026-11-03, measure 0.00, see §38.9).** Asked whether the reference's withdraw records the
+> inputs it spent, or its unconfirmed change output, so that a second
+> withdraw issued seconds later excludes the spent inputs and may spend the
+> change: it does not, at either row. The one mechanism the reference has
+> is the in-memory recently-spent record of R38.5B.1 — a **local
+> spent-outpoint record**, keyed to the coin's single address script, with
+> the lifetime of R38.5B.8 (the coin instance; no expiry, no size bound) —
+> and the withdraw path neither writes it nor consults the backend's
+> mempool; its candidate set is the backend's live unspent listing filtered
+> by that record (R38.5B.4). A second withdraw therefore excludes the first
+> one's inputs only once the backend's own listing stops showing them (an
+> Electrum server that has indexed the client's broadcast), and may spend
+> the unconfirmed change only once the listing shows it; the withdraw's
+> process-wide build lock covers building and signing only (R38.5B.5) and
+> orders nothing after the signed transaction is returned. Reloaded's
+> R38.5B.9 (Decision BE) is the divergence that closes this for a withdraw
+> whose bytes the node itself broadcasts; two withdraws both built before
+> the first broadcast still select from the same set, as in the reference.
+
 R38.5B.4 **Composition of the unspent listing.** (Reference-bound at both
 rows; also the baseline's behaviour.) Every listing a spend is built from --
 the single-address list and the multi-address map, in their all-outputs and
@@ -2309,6 +2329,69 @@ minimum relay fee follows the same lifetimes.
 > lifetime is asked for after activation (it cannot normally happen) is logged and
 > the coin reads afresh.
 
+R38.6.6l *Explicit withdraw fee descriptors: the reference's arithmetic
+(reference-bound; authored by the KDF Spec Reader 2026-11-03 from the rows
+`v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both, and
+compared with the row *baseline anchor (R1)*; **passed the KDF Dirty Gate
+on 2026-11-03**, measure 0.00, see §38.9).* A UTXO `withdraw` or `task::withdraw::init` request may carry a
+`fee` descriptor of type `UtxoFixed` or `UtxoPerKbyte`, each with an
+`amount` in coin units ([Chapter 49](49-withdrawal-task-path.md) R49.1); any
+other descriptor type fails the request with the invalid-fee-policy error.
+At both release rows:
+
+1. *The descriptor replaces the coin's policy.* For that one transaction the
+   coin's own fee policy of R38.6.6a is not consulted; the descriptor's
+   `amount`, converted to base units by the coin's decimals, is the rate `a`.
+2. *Both descriptors are a rate per 1,000 bytes, applied proportionally and
+   truncated.* For a transaction of size `s` bytes (virtual size for a
+   segregated-witness sender) the fee is `floor(a × s / 1000)` under
+   **either** descriptor. `UtxoFixed` is **not** charged as `a` per
+   transaction and **not** rounded up to a started kilobyte — not even on a
+   coin whose own policy is the whole-kilobyte one (R38.6.6a) — and
+   `UtxoPerKbyte` is not rounded up either. At the release rows the two
+   descriptors are therefore indistinguishable in every observable: the fee
+   charged, the change-output allowance (`floor(a × 34 / 1000)` for both,
+   R38.6.6b) and the `fee_details.amount` of the response, which reports the
+   fee actually charged (inputs minus outputs).
+3. *Relay floor.* When the coin forces the node's minimum relay fee
+   (R38.6.6b, last bullet), the floor `floor(relay_rate × s / 1000)` applies
+   to both descriptors as to any fee.
+4. *Baseline anchor.* At the baseline the two descriptors differed:
+   `UtxoFixed` was applied per **started** kilobyte, `a × ceil(s / 1000)`
+   (the baseline's arithmetic for every fixed fee, R38.6.6b's last sentence),
+   and `UtxoPerKbyte` proportionally. The reference's change of every fixed
+   fee to proportional arithmetic at `v2.6.0-beta` (R38.6.6b) carried the
+   explicit `UtxoFixed` descriptor with it.
+
+> **Compatibility row (this repository, 2026-11-03; not corpus-sourced).**
+> Reloaded applies `UtxoFixed` per started kilobyte, `a × ceil(s / 1000)` —
+> the baseline's meaning, kept deliberately when the fee policy of
+> R38.6.6a–b was ported (as-built note under R38.6.6i) — and
+> `UtxoPerKbyte` proportionally. The reference at both rows (Komodo DeFi
+> Framework 2.6.0-beta and GLEEC KDF 3.0.0-beta) applies both
+> proportionally. For the same request a Reloaded node therefore never pays
+> less than the entered `amount` and pays up to one `a` more than the
+> reference, while the reference pays less than the entered `amount` for
+> any transaction under a kilobyte; `docs/GLEEC_COMPATIBILITY.md` records
+> the difference with measured values (2026-10-31) and says parity is
+> planned after the beta. No peer observes the difference (a `withdraw` is
+> the node's own transaction), so arm 1 of `docs/COMPAT_SWITCHES.md` "The
+> default-side rule" does not bind the default. Whether to adopt the reference arithmetic
+> for `UtxoFixed` (parity, item 2) or keep the per-started-kilobyte meaning
+> is the maintainer's; this rule binds the reference's behavior, not the
+> choice.
+
+T38.6.6l *Explicit withdraw fee (R38.6.6l).* Against a mocked backend, a
+withdraw with `fee: {"type":"UtxoFixed","amount":"<a>"}` and one with
+`fee: {"type":"UtxoPerKbyte","amount":"<a>"}` for the same inputs and
+outputs shall produce, under the reference arithmetic, the same fee
+`floor(a × s / 1000)` for a 245-byte and for a 1,404-byte transaction, on a
+plain-fixed coin and on a whole-kilobyte coin alike, and the response's
+`fee_details.amount` shall equal inputs minus outputs. Until the maintainer
+adopts item 2, the `UtxoFixed` expectation for Reloaded is instead
+`a × ceil(s / 1000)` (`a` and `2a` for the two sizes), and the test shall
+state which arithmetic it asserts.
+
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the
 Spark-specific script/output types) so FIRO activates and transacts. Acceptance:
@@ -2902,3 +2985,23 @@ R38.8.6 **Tests (two-direction, observable).**
   2026-10-30, the cleared text of R38.5B.1--R38.5B.8 and this repository's own
   code. They take no forbidden-class input, so chapter 01 R38 is not engaged
   and no further gate pass is required.
+- *Spec Reader additions (2026-11-03) -- R38.6.6l, T38.6.6l and the
+  re-verification note after R38.5B.3.* **KDF Dirty Gate: PASS on
+  2026-11-03, measure 0.00.** The
+  forbidden corpus was consulted at the reference designations
+  `v2.6.0-beta` and `v3.0.0-beta`, which agree, and at the row *baseline
+  anchor (R1)*, **only** to establish how an explicit `UtxoFixed` or
+  `UtxoPerKbyte` withdraw fee descriptor is applied (the descriptor
+  replaces the coin's policy; both are a proportional, truncated rate per
+  1,000 bytes at the release rows; `UtxoFixed` was per started kilobyte at
+  the baseline; the relay floor and change allowance apply alike) and to
+  re-confirm R38.5B.2, R38.5B.4, R38.5B.5 and R38.5B.8 for the withdraw path
+  (no spent-outpoint or change recording by a withdraw, no mempool query,
+  the record's lifetime). Corpus-sourced: items 1–4 of R38.6.6l and the
+  reference facts of the re-verification note. Not corpus-sourced: the
+  compatibility row, T38.6.6l and every Reloaded statement, which rest on
+  this repository's own code, `docs/GLEEC_COMPATIBILITY.md` and R38.5B.9.
+  Only behavior, the public request members (`fee`, `type`, `UtxoFixed`,
+  `UtxoPerKbyte`, `amount`, `fee_details`) and arithmetic a client can
+  observe cross into the chapter; no private name, body, control flow or
+  literal was reproduced.
