@@ -43,13 +43,19 @@ Each package changes no wire shape and has its own switch, so that a lab can run
   nodes behind it). Count the requests answered at once because the limits were full, and the
   relay's peak number of held requests and its memory, at the old and the new limits. Both are set
   through configuration.
-- **B1:** a chain in which one relay misses a cancel. Before: the cancelled order comes back on the
-  nodes behind it. After: those nodes ask another relay and lose the entry in the same round. Also
-  a timeout case and an error case. A fault-free run with a busy maker passes when the extra
-  requests are at most 5 % of all sync requests.
+- **B1:** a chain in which a relay and the node behind it both miss a cancel on a pair the maker still
+  advertises. Before: the node clears the entry only after its relay has healed, one keep-alive
+  interval later or more. After: it asks another relay and clears it in the first interval. Also a
+  timeout case and an error case. A fault-free run with a busy maker passes when the extra requests
+  are at most 5 % of all sync requests. *(Lab control on 0.4.0-alpha.1, 2026-11-03: in a fault-free
+  chain a pair the maker still advertises heals hop by hop, one interval per hop, as CRD ch.32 R-GH4
+  says, so the entry did not persist. It persists only when the forwarding relay's sync answers keep
+  failing, as in the field; that case is the loaded-relay lab L2.)*
 - **B3:** the emptied-pair case leaves every Reloaded node within the liveness window plus one sweep.
   A run with a lossy link counts pairs dropped and refilled and the longest gap an order-book poll
-  sees.
+  sees. The "before" baseline is a lab run on 0.4.0-alpha.1 in which the maker cancels its only
+  order on a pair while one relay is cut off. B1 does not act on this case, because no keep-alive
+  names an emptied pair.
 - **B2:** a chain of a maker, a relay that misses a cancel, and a node that receives it. More than
   120 s after the cancel, the node gets the pair from the stale relay (a sync answer or an order-book
   request). Before: the cancelled order comes back on the node. After: it stays out for the window,
