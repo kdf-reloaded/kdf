@@ -785,6 +785,15 @@ pub(crate) async fn build_eth_coin(
             )
         );
     }
+    // CRD R57.5.5: the gas limits in effect, once the blocks have been accepted and the coin is built. For a
+    // platform coin `platform_conf` is `null`, which carries no block, so it can never be named as a source.
+    log_gas_limits(
+        ticker,
+        &[conf, &platform_conf],
+        &coin.gas_limit,
+        &coin.gas_limit_v2,
+        coin.estimate_gas_mult,
+    );
     Ok(EthCoin(Arc::new(coin)))
 }
 

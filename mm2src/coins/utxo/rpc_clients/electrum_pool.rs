@@ -15,9 +15,10 @@
 //! Every duration is held in [`ElectrumPoolTimings`]; production uses [`ElectrumPoolTimings::default`],
 //! tests build the pool with millisecond values.
 
-use super::electrum_measure::{block_interval_from_conf, eligible_servers, is_slow, lags_behind, next_round_at,
-                              pick_replacement, rank_after_round, rank_with_replacement, shuffle, stale_limit, Draw,
-                              Measurement, Measuring, RoundServer, ServerQuality};
+use super::electrum_measure::{block_interval_from_conf, eligible_servers, is_slow, lags_behind, near_sessions,
+                              next_round_at, pick_replacement, rank_after_round, rank_with_replacement, shuffle,
+                              stale_limit, Draw, Measurement, Measuring, RoundServer, ServerQuality,
+                              NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
 use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, ServerSpec, Session, SessionEnded};
 use super::*;
 use crate::endpoint_suspension::{Suspension, SUSPENSION_BASE, SUSPENSION_CAP};
@@ -214,6 +215,58 @@ pub(crate) fn electrum_spread_reads(ctx: &MmArc) -> bool {
     spread
 }
 
+/// The non-negative number `conf` holds under `key`, and the warning to log when the key holds anything else. An
+/// absent key means `default`, without a warning.
+fn parse_non_negative_number(conf: &Json, key: &str, default: f64) -> (f64, Option<String>) {
+    match conf.get(key) {
+        None => (default, None),
+        Some(value) => match value.as_f64().filter(|number| value.is_number() && *number >= 0.) {
+            Some(number) => (number, None),
+            None => (
+                default,
+                Some(format!("{key} {value} is not a non-negative number; using {default}")),
+            ),
+        },
+    }
+}
+
+/// The near factor `conf` asks for, and the warning to log when its `electrum_spread_near_factor` is not a
+/// non-negative number. An absent key means [`NEAR_FACTOR_DEFAULT`], without a warning.
+pub(super) fn parse_spread_near_factor(conf: &Json) -> (f64, Option<String>) {
+    parse_non_negative_number(conf, "electrum_spread_near_factor", NEAR_FACTOR_DEFAULT)
+}
+
+/// The near offset in milliseconds `conf` asks for, and the warning to log when its `electrum_spread_near_offset_ms`
+/// is not a non-negative number. An absent key means [`NEAR_OFFSET_DEFAULT_MS`], without a warning.
+pub(super) fn parse_spread_near_offset_ms(conf: &Json) -> (f64, Option<String>) {
+    parse_non_negative_number(conf, "electrum_spread_near_offset_ms", NEAR_OFFSET_DEFAULT_MS)
+}
+
+/// CRD ch.38 R38.6.4a item 8: the `MM2.json` number `electrum_spread_near_factor`, read at coin activation. A
+/// read-only query takes turns only over the maintained sessions whose smoothed latency is at most this many
+/// times the lowest one (or within the offset of `electrum_spread_near_offset_ms` of it); `0` makes every
+/// maintained session near. A value that is not a
+/// non-negative number is taken as the default and one warning is logged. Without effect when
+/// `electrum_spread_reads` is `false`.
+pub(crate) fn electrum_spread_near_factor(ctx: &MmArc) -> f64 {
+    let (factor, warning) = parse_spread_near_factor(&ctx.conf);
+    if let Some(warning) = warning {
+        warn!("{warning}");
+    }
+    factor
+}
+
+/// CRD ch.38 R38.6.4a item 8: the `MM2.json` number `electrum_spread_near_offset_ms`, the offset *A* of item 6 in
+/// milliseconds, read at coin activation next to the factor. A value that is not a non-negative number is taken
+/// as the default and one warning is logged. Without effect when `electrum_spread_reads` is `false`.
+pub(crate) fn electrum_spread_near_offset_ms(ctx: &MmArc) -> f64 {
+    let (offset_ms, warning) = parse_spread_near_offset_ms(&ctx.conf);
+    if let Some(warning) = warning {
+        warn!("{warning}");
+    }
+    offset_ms
+}
+
 /// The block interval of a coin from its configuration (`avg_blocktime`), for P1 of the measured order
 /// (CRD ch.38 R38.6.4l item 6). `None` when the coin has none or it is not a positive number.
 pub(crate) fn electrum_block_interval(coin_conf: &Json) -> Option<Duration> { block_interval_from_conf(coin_conf) }
@@ -264,6 +317,10 @@ pub struct ElectrumPoolOptions {
     /// Whether read-only queries start on the maintained connections in turn (R38.6.4a); `false` keeps the
     /// priority order for every query.
     pub spread_reads: bool,
+    /// The near factor of R38.6.4a item 8; `0` makes every maintained session near.
+    pub near_factor: f64,
+    /// The near offset *A* of R38.6.4a item 6, in milliseconds.
+    pub near_offset_ms: f64,
     /// The coin's block interval, from its `avg_blocktime` (R38.6.4l item 6); `None` when it has none.
     pub block_interval: Option<Duration>,
 }
@@ -277,6 +334,8 @@ impl Default for ElectrumPoolOptions {
             timings: ElectrumPoolTimings::default(),
             order: ServerOrder::default(),
             spread_reads: true,
+            near_factor: NEAR_FACTOR_DEFAULT,
+            near_offset_ms: NEAR_OFFSET_DEFAULT_MS,
             block_interval: None,
         }
     }
@@ -490,6 +549,9 @@ pub(super) struct PoolShared {
     order: ServerOrder,
     /// R38.6.4a item 5.
     spread_reads: bool,
+    /// R38.6.4a item 8.
+    near_factor: f64,
+    near_offset_ms: f64,
     /// The turn of the next spread read: the read starts on the maintained connection at this position,
     /// counted modulo the size of the set.
     read_cursor: AtomicUsize,
@@ -529,6 +591,8 @@ impl PoolShared {
             client_name: options.client_name,
             order: options.order,
             spread_reads: options.spread_reads,
+            near_factor: options.near_factor,
+            near_offset_ms: options.near_offset_ms,
             read_cursor: AtomicUsize::new(0),
             block_interval: options.block_interval,
             measure: StdMutex::new(MeasureState::default()),
@@ -1004,6 +1068,7 @@ impl PoolShared {
                 }
             }
         }
+        // Under `random` and `listed` there is no header request on joining (R38.6.4a item 7).
         if joined && self.measuring().is_some() && !session.headers().is_notifying() {
             self.request_header_on_join(slot, session);
         }
@@ -1300,24 +1365,28 @@ impl PoolShared {
     }
 
     /// A request over the maintained connection `session_id` of `slot` took `sample_ms`: a sample of its
-    /// smoothed latency (R38.6.4l item 2). P2 is judged here (item 6).
+    /// smoothed latency (R38.6.4l item 2, R38.6.4a item 7). P2 is judged here (item 6) under a measured order.
     fn record_sample(&self, slot: &ServerSlot, session_id: u64, sample_ms: f64) {
-        if self.measuring().is_none() {
-            return;
-        }
-        let best = self.measure_state().activation_best_ms;
+        // The figure is kept under every order (R38.6.4a item 7); P2 is judged only under a measured one.
+        let measuring = self.measuring().is_some();
+        let best = if measuring {
+            self.measure_state().activation_best_ms
+        } else {
+            None
+        };
         let slow = {
             let mut state = slot.state();
             if !state.maintained || state.session.as_ref().map(|session| session.id()) != Some(session_id) {
                 return;
             }
             state.quality.smoothed.record(sample_ms);
-            is_slow(
-                &state.quality.smoothed,
-                state.quality.reference_ms(),
-                best,
-                self.timings.slow_floor.as_secs_f64() * 1000.,
-            )
+            measuring
+                && is_slow(
+                    &state.quality.smoothed,
+                    state.quality.reference_ms(),
+                    best,
+                    self.timings.slow_floor.as_secs_f64() * 1000.,
+                )
         };
         if slow {
             self.signal_measure();
@@ -1747,17 +1816,28 @@ impl PoolShared {
     }
 
     /// The maintained connections in the order `request` tries them: the priority order, except that a
-    /// read-only query with `electrum_spread_reads` on starts at the next connection in turn (R38.6.4a items
-    /// 1 and 5). Everything else, and a set of one, keeps the priority order.
-    fn in_turn_for(&self, request: &JsonRpcRequestEnum, mut maintained: Vec<Arc<ServerSlot>>) -> Vec<Arc<ServerSlot>> {
-        if self.spread_reads && is_read_only(request) {
-            let turn = self.read_cursor.fetch_add(1, AtomicOrdering::Relaxed);
-            let size = maintained.len();
-            if size > 1 {
-                maintained.rotate_left(turn % size);
-            }
+    /// read-only query with `electrum_spread_reads` on tries the near connections first (R38.6.4a item 6),
+    /// starting at the one whose turn it is and going round them, and then the others in priority order
+    /// (items 1, 3 and 5). Everything else, and a set of one, keeps the priority order.
+    fn in_turn_for(&self, request: &JsonRpcRequestEnum, maintained: Vec<Arc<ServerSlot>>) -> Vec<Arc<ServerSlot>> {
+        if !(self.spread_reads && is_read_only(request)) {
+            return maintained;
         }
-        maintained
+        let turn = self.read_cursor.fetch_add(1, AtomicOrdering::Relaxed);
+        let figures: Vec<Option<f64>> = maintained
+            .iter()
+            .map(|slot| slot.state().quality.smoothed.value_ms())
+            .collect();
+        let near = near_sessions(&figures, self.near_factor, self.near_offset_ms);
+        let (mut turns, others): (Vec<_>, Vec<_>) = maintained
+            .into_iter()
+            .zip(near)
+            .partition::<Vec<_>, _>(|(_, near)| *near);
+        let size = turns.len();
+        if size > 1 {
+            turns.rotate_left(turn % size);
+        }
+        turns.into_iter().chain(others).map(|(slot, _)| slot).collect()
     }
 
     async fn route_inner(
