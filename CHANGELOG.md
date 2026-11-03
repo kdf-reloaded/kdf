@@ -14,6 +14,15 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Added
 
+#### Start-up and configuration
+
+- **The start-up log now lists the files the node uses.** At start the node logs, at INFO and as
+  absolute paths, where its configuration came from (the command line, the default file or the file
+  named by `MM_CONF_PATH`), where its coins list came from, the log file, the database folders, the
+  WSS certificate file and the wallet file it reads, so a node started from the wrong folder shows it
+  at once. It never logs file contents or configuration values, and never the WSS private-key path.
+  Detail: PR #209; CRD ch.45 R45.6.6.
+
 ### Changed
 
 ### Fixed
