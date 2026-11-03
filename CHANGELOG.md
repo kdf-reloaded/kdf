@@ -73,6 +73,17 @@ it and, where one exists, the CRD rule, for readers who want more.
   `20`) set the factor and the margin; a factor of `0` spreads over every connected server as
   before. Detail: PR #215; CRD ch.38 R38.6.4a.
 
+#### Memory use
+
+- **The memory limit set in 0.3.0-beta.1 was measured further, and its default of 2 stays.** In two consecutive
+  6.5-hour runs on the same host, with 480 orders updated about 20 times a second, both settings levelled off. With the
+  limit, resident memory was about 17 MB lower and showed no measurable drift in hours 3 to 6 (0.004 ± 0.003 MB/min; a
+  drift of up to about 0.01 MB/min is not excluded); without it, a small residual drift (0.019 ± 0.009 MB/min) is not
+  excluded. The limit is not shown to be necessary at that load on 8 cores; it removed the growth seen at about 80
+  updates a second on 256 cores. No cost of the limit was resolved on start-up, activation, eight swaps or query latency.
+  Not measured: 256 cores or 80 updates a second over several hours, and a shielded swap. Detail: PR PR_NUMBER; plan
+  [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md); CRD ch.45 R45.6A.8; issue #191.
+
 ### Fixed
 
 #### Node names in logs and errors
@@ -104,6 +115,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   sync limits on relays above (PR #205). What two later packages waited for is now recorded: how a
   cancelled order can come back on Komodo and GLEEC KDF, and that their makers advertise every
   non-empty pair at every tick (PR #222).
+- [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — in progress: the 2-arena limit of 0.3.0-beta.1
+  was measured in two 6.5-hour runs and on start-up, activation, eight swaps and query latency; no cost
+  was resolved and the default stays (PR PR_NUMBER); executor sizing and an allocator comparison are left.
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
   with its two switches and their defaults (PR #201), and implemented (PR #215); the SwapLab timing
