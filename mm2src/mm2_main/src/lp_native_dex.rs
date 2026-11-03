@@ -448,6 +448,11 @@ fn migration_1(_ctx: &MmArc) {}
 pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        info!(
+            "Database root: {}; identity database directory: {}",
+            crate::mm2::absolute_path_for_log(&ctx.db_root()),
+            crate::mm2::absolute_path_for_log(&ctx.dbdir())
+        );
         fix_directories(&ctx)?;
         ctx.init_sqlite_connection()
             .map_to_mm(MmInitError::ErrorSqliteInitializing)?;

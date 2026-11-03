@@ -1,4 +1,5 @@
-use super::{spawn_gossipsub, AdexBehaviourCmd, AdexBehaviourEvent, AdexResponse, NodeType, RelayAddress};
+use super::{spawn_gossipsub_with_guards, AdexBehaviourCmd, AdexBehaviourEvent, AdexResponse, NodeType, RelayAddress};
+use crate::redial_guard::RedialGuardConfig;
 use async_std::task::spawn;
 use futures::channel::{mpsc, oneshot};
 use futures::future::AbortHandle;
@@ -39,9 +40,23 @@ impl Node {
     where
         F: Fn(mpsc::Sender<AdexBehaviourCmd>, AdexBehaviourEvent) + Send + 'static,
     {
+        Node::spawn_with_guards(node_type, seednodes, RedialGuardConfig::default(), on_event).await
+    }
+
+    /// Like `spawn_with_type`, with the redial guard interval and the maintenance tick set by the test
+    /// (CRD ch.28 R27a, T12).
+    async fn spawn_with_guards<F>(
+        node_type: NodeType,
+        seednodes: Vec<u64>,
+        guard_config: RedialGuardConfig,
+        on_event: F,
+    ) -> Node
+    where
+        F: Fn(mpsc::Sender<AdexBehaviourCmd>, AdexBehaviourEvent) + Send + 'static,
+    {
         let seednodes = seednodes.into_iter().map(RelayAddress::Memory).collect();
         let (cmd_tx, mut event_rx, peer_id, abort_handle) =
-            spawn_gossipsub(None, spawn_boxed, seednodes, node_type, |_| {})
+            spawn_gossipsub_with_guards(None, spawn_boxed, seednodes, node_type, |_| {}, guard_config)
                 .await
                 .expect("Error spawning AdexBehaviour");
 
@@ -834,4 +849,72 @@ async fn test_relay_mesh_join_is_reported_again_after_a_forced_close() {
     light.wait_peers_exact(0, 40).await;
     let _second = Node::spawn(second_port, vec![], |_, _| ()).await;
     wait_for_joins(&joins, 2, 90).await;
+}
+
+/// The number of connections a node holds, summed over its peers.
+async fn connection_count(node: &mut Node) -> usize {
+    let (tx, rx) = oneshot::channel();
+    node.send_cmd(AdexBehaviourCmd::GetPeersInfo { result_tx: tx }).await;
+    rx.await.unwrap().values().map(Vec::len).sum()
+}
+
+/// CRD ch.28 R27a item 1, T12: a bootstrap address dialed at start-up is not dialed again before the guard interval
+/// has passed, even though the dial failed and the seed has come up since. It is dialed at the first tick after the
+/// interval.
+#[tokio::test]
+async fn test_failed_startup_dial_is_not_repeated_before_the_guard_interval() {
+    let _ = env_logger::try_init();
+    let config = RedialGuardConfig {
+        interval: Duration::from_secs(3),
+        tick: Duration::from_millis(200),
+    };
+    let seed_port = next_port();
+
+    let started = std::time::Instant::now();
+    // The seed is not up yet, so the start-up dial fails.
+    let mut light = Node::spawn_with_guards(NodeType::LightInMemory, vec![seed_port], config, |_, _| ()).await;
+    async_std::task::sleep(Duration::from_millis(300)).await;
+    let _seed = Node::spawn(seed_port, vec![], |_, _| ()).await;
+
+    // Five ticks pass with the seed listening: without the guard the node would have dialed it at the first one.
+    async_std::task::sleep(Duration::from_millis(1_200)).await;
+    assert_eq!(connection_count(&mut light).await, 0, "the guarded address was dialed");
+
+    // The first tick after the interval dials it.
+    light.wait_peers_exact(1, 20).await;
+    assert!(
+        started.elapsed() >= config.interval,
+        "connected after {:?}, before the guard interval {:?}",
+        started.elapsed(),
+        config.interval
+    );
+}
+
+/// CRD ch.28 R27a, T12: a node below its low watermark that is connected to a seed opens no further connection to
+/// it over 10 ticks. The guard interval is longer than the connection handshake but passes several times during the
+/// run, so that the connection checks of RQ1a item 6 and R27a item 2 keep the node away, not only the guard.
+#[tokio::test]
+async fn test_connected_seed_gets_no_second_connection_over_ten_ticks() {
+    let _ = env_logger::try_init();
+    let config = RedialGuardConfig {
+        interval: Duration::from_millis(400),
+        tick: Duration::from_millis(100),
+    };
+    let (seed_port, node_port) = (next_port(), next_port());
+    let _seed = Node::spawn_with_guards(NodeType::RelayInMemory { port: seed_port }, vec![], config, |_, _| ()).await;
+    // A relay needs four relays to reach its low watermark, so it stays below it with the one seed.
+    let mut node = Node::spawn_with_guards(
+        NodeType::RelayInMemory { port: node_port },
+        vec![seed_port],
+        config,
+        |_, _| (),
+    )
+    .await;
+
+    node.wait_peers_exact(1, 20).await;
+    assert_eq!(connection_count(&mut node).await, 1);
+    for tick in 0..10 {
+        async_std::task::sleep(config.tick).await;
+        assert_eq!(connection_count(&mut node).await, 1, "tick {}", tick);
+    }
 }

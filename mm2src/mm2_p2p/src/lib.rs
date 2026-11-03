@@ -5,6 +5,7 @@ pub mod atomicdex_behaviour;
 mod ip_helpers;
 pub mod network_streamer;
 pub mod peers_exchange;
+mod redial_guard;
 pub mod relay_address;
 pub mod request_response;
 mod runtime;
