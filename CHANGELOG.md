@@ -81,7 +81,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   drift of up to about 0.01 MB/min is not excluded); without it, a small residual drift (0.019 ± 0.009 MB/min) is not
   excluded. The limit is not shown to be necessary at that load on 8 cores; it removed the growth seen at about 80
   updates a second on 256 cores. No cost of the limit was resolved on start-up, activation, eight swaps or query latency.
-  Not measured: 256 cores or 80 updates a second over several hours, and a shielded swap. Detail: PR PR_NUMBER; plan
+  Not measured: 256 cores or 80 updates a second over several hours, and a shielded swap. Detail: PR #225; plan
   [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md); CRD ch.45 R45.6A.8; issue #191.
 
 ### Fixed
@@ -117,7 +117,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   non-empty pair at every tick (PR #222).
 - [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — in progress: the 2-arena limit of 0.3.0-beta.1
   was measured in two 6.5-hour runs and on start-up, activation, eight swaps and query latency; no cost
-  was resolved and the default stays (PR PR_NUMBER); executor sizing and an allocator comparison are left.
+  was resolved and the default stays (PR #225); executor sizing and an allocator comparison are left.
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
   with its two switches and their defaults (PR #201), and implemented (PR #215); the SwapLab timing
