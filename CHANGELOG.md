@@ -23,6 +23,14 @@ it and, where one exists, the CRD rule, for readers who want more.
   limits a chain needs is now visible at once, as it was not when Monad token swaps ran out of gas
   with a coins file older than October 28, 2026. Detail: PR #200; CRD ch.57 R57.5.5.
 
+#### Start-up and configuration
+
+- **The start-up log now lists the files the node uses.** At start the node logs, at INFO and as
+  absolute paths, where its configuration came from (the command line, the default file or the file
+  named by `MM_CONF_PATH`), where its coins list came from, the log file, the database folders and the
+  wallet file it reads, so a node started from the wrong folder shows it at once. It never logs file
+  contents or configuration values, and no WSS certificate or key path. Detail: PR #209; CRD ch.45 R45.6.6.
+
 ### Changed
 
 #### Order book and peer-to-peer network
