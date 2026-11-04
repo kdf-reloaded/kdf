@@ -217,8 +217,8 @@ lives.
   through `task::enable_utxo` at its first address trades normally. Until this is fixed, trade EVM
   coins under a login without `enable_hd`. The proceeds of a swap of a coin enabled through legacy
   `enable` under an HD login can land on an address the wallet does not show; logging in with the
-  same passphrase without `enable_hd` reaches them. Whether a maker's orders under an HD login stay
-  visible on other nodes is being checked. More in
+  same passphrase without `enable_hd` reaches them. A maker's own `orderbook` does not mark its
+  orders under an HD login as its own (`is_mine` is false); other nodes still see them. More in
   [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PR #228; CRD ch.51, note under
   R63.
 - **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
