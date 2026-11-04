@@ -151,7 +151,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   started is never stopped. A UTXO coin such as RIN activated through `task::enable_utxo` at its first
   address, BCH activated together with its tokens, and every login without `enable_hd` are not
   affected. Set the `MM2.json` boolean `swap_key_check` to `false` to restore the earlier behavior,
-  in which such a swap is negotiated and then fails. Detail: CRD ch.05 R36–R40.
+  in which such a swap is negotiated and then fails. Detail: PRs #231, #233; CRD ch.05 R36–R40.
 
 ### Fixed
 
@@ -202,7 +202,7 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
-  complete, which is now done (item H1: `swap_key_check`).
+  complete, which is now done (item H1: `swap_key_check`, PRs #231, #233).
 - [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — in progress: the 2-arena limit of 0.3.0-beta.1
   was measured in two 6.5-hour runs and on start-up, activation, eight swaps and query latency; no cost
   was resolved and the default stays (PR #225); executor sizing and an allocator comparison are left.
@@ -240,8 +240,8 @@ lives.
   swap of a coin enabled through legacy `enable` can land on an address the wallet does not show;
   logging in with the same passphrase without `enable_hd` reaches them. Whether a maker's orders
   under an HD login stay visible on other nodes is being checked. More in
-  [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PR #228; CRD ch.05 R36–R40; CRD
-  ch.51, note under R63.
+  [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PRs #228, #231, #233; CRD ch.05
+  R36–R40; CRD ch.51, note under R63.
 - **Do not run two KDF instances on the same seed at the same time.** If you do, for any coin (RIN
   included), both instances can pick the same funds for two different transactions. The network
   accepts one and rejects the other, and the instance that loses gets no explanation and may try
