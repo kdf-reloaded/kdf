@@ -167,6 +167,28 @@ pub fn max_eth_tx_type_absent_unrestricted(ctx: &MmArc) -> bool {
     ctx.conf[MAX_ETH_TX_TYPE_ABSENT_UNRESTRICTED_KEY].as_bool() == Some(true)
 }
 
+/// The `MM2.json` key of the switch that makes the fee to send an EVM taker fee quote the gas estimate instead
+/// of the gas limit the transfer is sent with, CRD ch.57 R57.4.2.
+pub const EVM_TAKER_FEE_QUOTE_AT_LIMIT_KEY: &str = "evm_taker_fee_quote_at_limit";
+
+/// The value of the [`EVM_TAKER_FEE_QUOTE_AT_LIMIT_KEY`] switch in the node configuration `conf`, and the warning to
+/// log when the value is unusable (CRD ch.57 R57.4.2 item 3).
+///
+/// An absent key is `true` and silent. A JSON boolean is its own value. Any other value, a JSON `null` included,
+/// is `true` with a warning naming the key and the value.
+pub fn evm_taker_fee_quote_at_limit_from_conf(conf: &Json) -> (bool, Option<String>) {
+    match conf.get(EVM_TAKER_FEE_QUOTE_AT_LIMIT_KEY) {
+        None => (true, None),
+        Some(Json::Bool(value)) => (*value, None),
+        Some(other) => (
+            true,
+            Some(format!(
+                "MM2.json key {EVM_TAKER_FEE_QUOTE_AT_LIMIT_KEY} is {other}, which is not a boolean: using the default true"
+            )),
+        ),
+    }
+}
+
 /// Where the effective cap on the emitted transaction type of a coin came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TxTypeCapSource {
@@ -682,6 +704,11 @@ pub(crate) async fn build_eth_coin(
         .map_to_mm(EthCoinBuildError::InvalidConfig)?;
     // The gas-estimate multiplier (CRD R57.5.3b) is read at the same point and under the same inheritance.
     let estimate_gas_mult = coin_estimate_gas_mult(ctx, conf, &protocol)?;
+    // The quote switch of R57.4.2 is a node-wide `MM2.json` key, read once for each coin built here.
+    let (taker_fee_quote_at_limit, switch_warning) = evm_taker_fee_quote_at_limit_from_conf(&ctx.conf);
+    if let Some(warning) = switch_warning {
+        warn!("{warning}");
+    }
     // A wallet-only coin has no swap, so its swap contracts are not required: none given means the zero address,
     // which `validate_swap_contracts` never lets through for a trading-capable coin.
     let swap_contract_address = params.swap_contract_address.unwrap_or_default();
@@ -765,6 +792,7 @@ pub(crate) async fn build_eth_coin(
         gas_limit,
         gas_limit_v2,
         estimate_gas_mult,
+        taker_fee_quote_at_limit,
         // ETH/ERC20 coins never use the TRON HTTP API; populated only by the
         // dedicated TRON activation path.
         tron_api: None,

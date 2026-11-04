@@ -509,9 +509,9 @@ R46.2.4, ch.55 R55.4.6):
   project's divergence, and that alone is what the switch hands back to GLEEC
   KDF; the malformed `fork_id` above stays outside it under every setting.
 
-Twelve more behaviors, in the order book and its relaying, peer exchange, fee readings, Electrum
-and the shielded history, differ from GLEEC KDF by default, each with one top-level `MM2.json`
-switch. The value below gives the GLEEC-compatible behavior; the row of each switch in
+Fourteen more behaviors, in the order book and its relaying, peer exchange, fee readings and fee
+quotes, Electrum and the shielded history, differ from GLEEC KDF by default, each with one top-level
+`MM2.json` switch. The value below gives the GLEEC-compatible behavior; the row of each switch in
 [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the full detail:
 
 - `pre_trade_spend_check: false` — no pre-trade spend check.
@@ -541,8 +541,11 @@ switch. The value below gives the GLEEC-compatible behavior; the row of each swi
   mined.
 - `suppress_unchanged_order_updates: false` — every `update_maker_order` is broadcast, as the GPLv2
   baseline does; what GLEEC KDF does here is not established.
+- `evm_taker_fee_quote_at_limit: false` — the fee to send an EVM taker fee is quoted at the gas
+  estimate, as GLEEC KDF does and as KDF Reloaded did before this switch, instead of at the gas
+  limit the fee is sent with; both send it with that limit.
 
-A thirteenth switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
+A fourteenth switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
 every maker-order message is published at once, and `true` turns on the maker's rate control.
 
 ## Detail sections

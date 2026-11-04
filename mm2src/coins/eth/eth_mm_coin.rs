@@ -283,12 +283,19 @@ impl MmCoin for EthCoin {
         })?;
         let to_addr = addr_from_raw_pubkey(net_cfg.dex_fee_addr_raw_pubkey())
             .expect("addr_from_raw_pubkey should never fail with NetConfig dex_fee raw pubkey");
-        let (eth_value, data, call_addr, fee_coin) = match &self.coin_type {
-            EthCoinType::Eth => (dex_fee_amount, Vec::new(), &to_addr, &self.ticker),
+        // The last member is the gas limit `send_to_address` broadcasts this very transfer with (R57.4.2).
+        let (eth_value, data, call_addr, fee_coin, send_gas_limit) = match &self.coin_type {
+            EthCoinType::Eth => (
+                dex_fee_amount,
+                Vec::new(),
+                &to_addr,
+                &self.ticker,
+                self.gas_limit.eth_send_coins,
+            ),
             EthCoinType::Erc20 { platform, token_addr } => {
                 let function = ERC20_CONTRACT.function("transfer")?;
                 let data = function.encode_input(&[Token::Address(to_addr), Token::Uint(dex_fee_amount)])?;
-                (0.into(), data, token_addr, platform)
+                (0.into(), data, token_addr, platform, self.gas_limit.eth_send_erc20)
             },
             // ETH-style fee preimage; TRON dex-fee preimage flows through the
             // dedicated TRON estimator. Activation gating prevents this branch. P10.2.5.
@@ -329,11 +336,11 @@ impl MmCoin for EthCoin {
             .compat()
             .await
             .mm_err(Into::into)?;
-        let gas_limit = match self
+        let estimated_gas = match self
             .estimate_gas_priced(estimate_gas_req, EstimationFeeSource::SwapPolicy, Some(estimation_fee))
             .await
         {
-            Ok((gas_limit, _fee)) => gas_limit,
+            Ok((gas, _fee)) => gas,
             // CRD ch.56 R5: a fee cap below the base fee is not a balance problem, so it is reported as what it
             // is before the balances are consulted. It reaches here only after the one retry of D5(a).
             Err(estimate_err) if matches!(estimate_err.get_inner(), Web3RpcError::FeeCapBelowBaseFee(_)) => {
@@ -383,7 +390,14 @@ impl MmCoin for EthCoin {
                 return Err(estimate_err).mm_err(TradePreimageError::from);
             },
         };
-        let total_fee = gas_limit * gas_price;
+        // CRD ch.57 R57.4.2: the quote is made at the gas limit `send_to_address` broadcasts the fee transfer
+        // with, unless the switch asks for the estimate. The estimate above is made either way for its errors.
+        let gas = if self.taker_fee_quote_at_limit {
+            U256::from(send_gas_limit)
+        } else {
+            estimated_gas
+        };
+        let total_fee = gas * gas_price;
         let amount = u256_to_big_decimal(total_fee, 18).mm_err(Into::into)?;
         Ok(TradeFee {
             coin: fee_coin.into(),

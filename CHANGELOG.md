@@ -33,6 +33,19 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Changed
 
+#### EVM coins
+
+- **The quoted fee for sending an EVM taker fee is now the fee at the gas limit the node sends it
+  with.** `trade_preimage`, the taker's balance check before a swap and the maximum taker volume
+  used to price the taker-fee transfer at the node's gas estimate, while the transfer is sent with
+  the fixed `eth_send_erc20` limit (`eth_send_coins` for a platform coin). On Monad, which charges
+  the full limit, the USDC-MON fee transfer is estimated at about 83,000 gas and charged the 150,000
+  its coins-file entry sets. The quote now uses the limit, as every other EVM swap quote already
+  does. On chains that charge only the gas used, the quoted fee is now higher than what is charged.
+  GLEEC KDF sends the fee with the same limit but quotes the estimate; set the `MM2.json` boolean
+  `evm_taker_fee_quote_at_limit` to `false` to quote it that way, as KDF Reloaded did before.
+  Detail: PR #213; CRD ch.57 R57.4.2, R57.5.2a.
+
 #### Order book and peer-to-peer network
 
 - **A node waits 5 minutes before it dials the same address again, and no longer dials a seed it
@@ -126,7 +139,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   `version` call and swap records should carry it, are listed as open questions for the next round.
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
   now names the gas limits each EVM coin and token will use and where they come from (PR #200);
-  options (a) and (b) still wait on the reference maintainers' outcome.
+  open point 3 is decided, and the fee to send an EVM taker fee is now quoted at the gas limit it
+  is sent with (PR #213); options (a) and (b) still wait on the reference maintainers' outcome.
 - [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes
   keep showing after a lost cancellation; five work packages after the beta, the first two being the
   higher sync limits on relays and the request to one other relay above (PRs #205, #207, #208). What
