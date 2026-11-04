@@ -28,8 +28,9 @@ Ironwood notes. A Sapling-only wallet therefore needs these two items to keep wo
 - **First step:** T39.6.5a. Parse a mainnet transaction with Ironwood actions, and verify its proof
   with this project's own verifying key. It shows that the pinned libraries match the chain before
   any building code is written.
-- **Still open:** the reference's answer to a Pirate1 address (a Spec Reader question). It changes
-  only a compatibility note.
+- **Reference answer (gated 2026-11-04):** the reference refuses a Pirate1 address (ch.39 §39.5A).
+  Reloaded's acceptance is a local, additive divergence without a switch back (maintainer
+  decision, 2026-11-04), recorded in the compatibility row.
 
 ## Scope (a later release, except the items above)
 

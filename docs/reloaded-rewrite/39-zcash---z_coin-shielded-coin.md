@@ -1186,8 +1186,9 @@ that are not a valid Orchard-type address), for a Pirate1 address of another net
 and for any Pirate1 address on a coin without an Ironwood pool. The response shape is
 unchanged.
 
-R39.6.5c **`withdraw` to a Pirate1 address.** The `withdraw` request accepts a Pirate1
-address in `to`; no request member is added. As today, a custom `fee` is refused and
+R39.6.5c **`withdraw` to a Pirate1 address.** A withdrawal request accepts a Pirate1
+address in `to`, on the legacy `withdraw` method and on `task::withdraw::init` alike (in
+this project both reach the same code); no request member is added. As today, a custom `fee` is refused and
 there is no memo member. With `max: true` the amount is the spendable balance less the
 fee of R39.6.5f. The response keeps its shape:
 
@@ -1308,7 +1309,9 @@ on a coin of their own network; each is refused on a coin of another network. A 
 checksum, a Bech32m checksum, a 42-byte and a 44-byte data part, and 43 bytes that are
 not a valid Orchard-type address are refused, each with its reason. A configured
 `hrp_ironwood_payment_address` replaces the built-in prefix. A coin without an Ironwood
-pool refuses every Pirate1 address.
+pool refuses every Pirate1 address. Next to these assertions the test records, as
+T39.5A.a requires, that the reference contract of §39.5A answers `is_valid: false` and
+`InvalidAddress` for the same strings.
 
 T39.6.5c *The built transaction.* Building a Pirate1 withdrawal against a wallet fixture
 yields: a version-6 transaction; the selected Sapling spends; exactly two Ironwood
@@ -1337,11 +1340,14 @@ change counts as non-spendable balance.
 > Pirate1 address, received by that wallet, and the return payment (R39.8.0bb). The
 > time and memory of the first proving-key build are measured in the same run.
 >
-> **Compatibility.** No switch exists. GLEEC KDF cannot build any transaction for the
-> post-Ironwood chain (R39.6.4a, its compatibility note), so there is no GLEEC behavior
-> on this side to switch back to. The reference's answer to a Pirate1 address in
-> `validateaddress` and `withdraw` is pending a gated question; until then the
-> compatibility row names only this project's behavior.
+> **Compatibility.** The reference answers a Pirate1 address with `is_valid: false` on
+> `validateaddress` and with `InvalidAddress` on its withdrawal route (§39.5A). This
+> project accepts the address and builds the transaction. The acceptance is additive and
+> local to this node, because a withdrawal is the node's own transaction, so arm 1 of the
+> default-side rule (`docs/COMPAT_SWITCHES.md`) does not bind the default. No switch is
+> offered, as the maintainer decided on 2026-11-04: GLEEC KDF cannot build any transaction
+> for the post-Ironwood chain (R39.6.4a, its compatibility note), so refusing the address
+> would restore nothing that works. The row is in `docs/GLEEC_COMPATIBILITY.md`.
 
 #### Deferred Work (§39.6)
 
@@ -6729,6 +6735,7 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   - They take no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
     is required. No rule text cleared by the Dirty Gate is edited; the additions are new
     rules, notes and parentheticals.
-  - *Pending:* how the reference answers a Pirate1 address in `validateaddress` and
-    `withdraw` is a Spec Reader question. Its answer reaches this chapter only after the
-    Dirty Gate, and changes at most the compatibility note of §39.6.5.
+  - *Reference answer:* how the reference answers a Pirate1 address is recorded in
+    §39.5A (Spec Reader, passed by the Dirty Gate on 2026-11-04). The compatibility note
+    of §39.6.5 and the parity record added to T39.6.5b cite that section and add no
+    reference fact of their own.
