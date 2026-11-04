@@ -76,6 +76,19 @@ it and, where one exists, the CRD rule, for readers who want more.
   asks one other relay it is connected to, once, for the pairs concerned, and never empties a pair
   because the sets differ. To restore the old behavior, set `sync_request_alternate_relay` to
   `false` in `MM2.json`. Detail: PRs #207, #208; CRD ch.32 R-Q5d.
+- **Skipped peer addresses are summarized once an hour instead of logged one by one.** Peer
+  exchange skips addresses it can't use, such as hostnames in another form or IPv6 addresses, and
+  used to log each new one at info level. It now logs each at debug level, and once an hour, if
+  anything was skipped, one info line with the counts per form and the hostname lookups that
+  failed, timed out or gave no usable address. Detail: PRs #203, #211; CRD ch.28 R8c item 4.
+- **An unused connection to a relay outside the node's relay mesh no longer logs a warning when it
+  closes.** No message keeps such a connection busy, so it closes after two minutes as idle. That
+  close now logs at info level, as an idle connection closing. A relay in the relay mesh, and
+  every other cause, still log a warning. Detail: PRs #203, #211; CRD ch.28 R27b.
+- **Two address ranges are judged as GLEEC KDF judges them.** All of `0.0.0.0/8` counts as not
+  public, and `192.0.0.9` and `192.0.0.10` count as public. This applies to the addresses a node
+  receives from peers, those it looks up, and the one it announces. Detail: PRs #203, #211; CRD
+  ch.28 R24.
 
 #### UTXO coins and Electrum
 
@@ -174,7 +187,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   with its two switches and their defaults (PR #201), and implemented (PR #215); the SwapLab timing
   rows are next.
 - [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new: the peer-to-peer
-  items of 0.4.0. The redial guards are in (PRs #199, #206).
+  items of 0.4.0. The redial guards are in (PRs #199, #206), and so are the peer-exchange
+  logging, the address ranges and the idle-close log (PRs #203, #211).
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
   recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226); the SLP
