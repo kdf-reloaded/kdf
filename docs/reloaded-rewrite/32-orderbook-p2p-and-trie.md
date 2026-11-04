@@ -174,7 +174,10 @@ on insert so that a `Cancel` message that races ahead of its
 matching `Create` cannot resurrect an order. The guard's TTL is
 bound by [§11.2](11-order-match-cancellation.md) and §32.9; this
 chapter binds only the guard's presence and the obligation to
-consult it on insert. *(Post-2022 component per §32.1.)* How a cancel
+consult it on insert. *(Reloaded, 2026-11-03, with R-K1b: the guard
+entry is keyed by identifier and publisher; a cancel from another
+publisher neither creates nor refreshes the entry for the order's
+publisher.)* *(Post-2022 component per §32.1.)* How a cancel
 that never arrives leaves a stale entry behind, and the paths that
 remove it, are bound in §32.9C R-GH1 and R-GH5.
 
@@ -1850,6 +1853,59 @@ create for the same UUID is suppressed. This value is fixed in
 the current binding; making it operator-configurable is deferred
 (§32.10 D2). *(Post-2022 component per §32.1.)*
 
+**R-K1b (a cancel this node received is final; Reloaded-original,
+Decision BK item 2, bound 2026-11-03 as Decision 29).** *(Established
+against this repository's own order-message handlers, synchronization
+applier and order-book request path; no forbidden-class input. It rests
+on §32.9C.1 R-GH11, which found no reference path by which a maker
+legitimately makes a cancelled identifier live again.)*
+
+1. *Window.* The guard entry a cancel message records (§32.3 R-C5,
+   R-GH5 item 3) lives for the **final-cancel window** instead of the
+   120 s of R-K1: the top-level `MM2.json` integer
+   `cancel_final_window_secs`, default `3600`. A value below `120` is
+   used as `120`, a value above `86400` as `86400`, and an absent or
+   non-integer value means `3600`. With `120` the node behaves as R-K1
+   describes; that is the GLEEC-compatible setting.
+2. *What it keeps out.* While the entry lives, the node inserts no order
+   with that identifier from that publisher, whatever brings it: a
+   created or updated order message (R-GH5 items 1, 2 and 4), a full
+   snapshot or a delta of a synchronization answer (R-GH4 items 1 and 2),
+   the answer of R-Q5d included, or an order-book answer (R-GH1 item 4).
+   Every other order of the message or answer is applied as before. An
+   order with the same identifier from another publisher is not affected
+   ([Chapter 11](11-order-match-cancellation.md) R9).
+3. *What it does not change.* No cancel is repeated, nothing is sent, and
+   no message or answer changes shape. The node's own answers are built
+   from its read index (R-Q5, R-GH12), so they never list a guarded order.
+4. *Memory.* An entry younger than 120 s is kept exactly as R-K1 keeps
+   it. The older entries are capped by the top-level `MM2.json` integer
+   `cancel_final_max_entries`, default `100000`, at most `1000000`; an
+   absent, non-integer or zero value means the default. When a new entry
+   takes the guard above the cap, the oldest entries are dropped until it
+   is back at the cap or the oldest left is younger than 120 s; an entry
+   younger than 120 s is never dropped for the cap. An order whose entry
+   was dropped falls back to the 120 s behavior of R-K1. *The memory
+   bound:* the guard holds the cancels of the last 120 s, as the
+   reference does, plus at most `cancel_final_max_entries` older ones; at
+   about 200 bytes an entry, the older part is about 20 MB at the default
+   and about 200 MB at the ceiling.
+5. *Restart.* The entries are held in memory only; a restart starts with
+   none ([Chapter 11](11-order-match-cancellation.md) D1 unchanged).
+
+*Consequence.* A guarded order can still be covered by the root a maker
+advertises (a reference maker that revived it, R-GH11 item 1) or by the
+set a stale responder sends. The node then never reaches that root for
+the pair: each keep-alive for the pair leads to the usual request (R-Q4)
+and, under R-Q5d, to one request to another relay, until the window ends
+or the maker's root drops the order. That is at most two requests per
+advertisement interval for such a pair.
+
+*Compatibility note.* A GLEEC or Komodo node sees no difference on the
+wire. Apart from the cancel's own 120 s guard, it would re-admit the
+order from a later answer or message; this node keeps it out for the
+window.
+
 **R-K2 (keep-alive advertisement).** Each node MUST periodically
 advertise, per pubkey it makes orders under, its current per-pair
 trie roots in keep-alive messages on the gossip mesh, so that
@@ -2100,6 +2156,27 @@ answered with the full snapshot; one holding a root inside the kept window is
 answered with a delta whose application reaches the advertised root; another
 slice of the same pubkey is unaffected.
 
+**T-K8** *Final cancel (R-K1b).* (a) With the default window, a created
+message for an order this node received a cancel for is dropped 121 s
+and 3,599 s after the cancel and inserted 3,601 s after it; with
+`cancel_final_window_secs: 120` it is inserted at 121 s. (b) A full
+snapshot, a delta, the answer of R-Q5d and an order-book answer that list
+the cancelled order with two other orders of the same pubkey insert the
+other two and not the cancelled one; the node's own synchronization
+answer and order-book answer for the pair then omit it. (c) An order with
+the same identifier from another publisher is inserted. (d) With the cap
+at 3, five cancels older than 120 s leave the three newest guarding;
+three cancels younger than 120 s on top of three older ones all guard,
+and only older entries are dropped. (e) Readers: absent gives 3600, `60`
+gives 120, `100000` gives 86400 and `"x"` gives 3600; for the cap, absent,
+`0` and `"x"` give 100000 and `2000000` gives 1000000. (f) After a restart
+nothing is guarded. (g) A cancel for an order's identifier signed by
+another publisher, followed by the order's own publisher's cancel, leaves
+two guard entries: the order is kept out for its publisher's window,
+counted from its publisher's cancel, and a created message from the other
+publisher with that identifier is kept out only for that publisher's own
+window; neither cancel refreshes the other's entry.
+
 ## 32.9A Bounded and Unbounded State
 
 *(Authored by the KDF Spec Reader 2026-10-28, second pass, from the rows
@@ -2153,6 +2230,10 @@ Since R-K4 (item 4) the cleared-slice part of row 6 is no longer
 parity: Reloaded releases the nodes of a cleared slice, and row 3 and
 the nodes of replaced leaves are released on a timer (R-K4 items 1 and
 3).
+Row 4 is the one row where Reloaded's bound is wider than the
+reference's: under R-K1b the guard keeps the cancels of the last 120 s
+as the reference does, plus at most `cancel_final_max_entries` older ones
+(100,000 by default, about 20 MB), so it stays bounded.
 
 **R-B3 (two growth modes an operator can tell apart).** Rows 6 and 7
 grow with what *this* node applies: every synchronization answer in the
@@ -2810,7 +2891,10 @@ the remedies of the later reference change, and in what form, is §32.10
 D12. *(Since 2026-11-02, §32.7.3 R-Q5d checks the root a pair reaches after
 an applied answer and asks one other relay once when it differs from the
 advertised root or when the forwarder failed; it never clears the pair.
-Reloaded still has no per-pair liveness.)*
+Reloaded still has no per-pair liveness.)* *(Since 2026-11-03, R-K1b
+keeps a cancelled order out of every later message and answer for the
+final-cancel window, one hour by default, where the release rows re-admit
+it after 120 s (R-GH5 item 4).)*
 
 **T-GH1** *Unnamed pairs are untouched (R-GH1).* A node holding entries of
 P on pairs X and Y receives a keep-alive from P naming only X with X's held
@@ -2876,7 +2960,9 @@ value and `order_messages_refresh_liveness` at either value, and with
 `sync_request_alternate_relay` set to `false` or no other relay connected
 (otherwise T-GH4's requester asks one other relay, T-Q5d); with
 `order_messages_refresh_liveness` at its default, T-GH3's silence is
-counted from the last keep-alive **or order message** of P.
+counted from the last keep-alive **or order message** of P. T-GH5's
+"inserted after" holds with `cancel_final_window_secs: 120`; at the
+default the late duplicate is dropped for the window (T-K8).
 
 ### 32.9C.1 Follow-up: resurrection paths, the order-book answer, and the maker's ticks
 
@@ -2963,8 +3049,10 @@ cancel. A node that received the cancel re-admits the identifier only after the
 120 s guard (R-K1); a node that never received it keeps the entry under
 R-GH1 regardless. *(Reloaded: ch. 12 R7b item 2 — once an order has left
 the container, no write recreates its active record — is Reloaded-original
-and already forbids the storage writes of items 2 and 4; the restore path
-of item 1 is otherwise at parity, ch. 59 R59.6.7, ch. 60 R60.4.6.)*
+and already forbids the storage writes of items 2 and 4; on the restore
+path of item 1, a record whose removal the order history already records
+is not restored (ch. 12 R7c), and a record without such an entry is
+restored at parity, ch. 59 R59.6.7, ch. 60 R60.4.6.)*
 
 **R-GH12 (the order-book answer of a relay whose trie worker lags).** At
 both release rows a responder answers an order-book request (`GetOrderbook`,
@@ -3070,7 +3158,9 @@ D2. **Cancellation-TTL configurability.** §32.9 R-K1 fixes the
     cancellation TTL to a compile-time value. Making it
     operator-configurable (per-coin or per-deployment) is
     deferred; the fixed value has held in production and the
-    deferral is conservative.
+    deferral is conservative. *(Partly bound on 2026-11-03: R-K1b makes
+    the window a deployment-wide setting, with 120 s as its lowest value;
+    per-coin windows stay deferred.)*
 
 D3. **Trie-hash width upgrade.** §32.6 R-T1 picks a 64-bit hash
     for wire compactness. If a future transport makes the saving
@@ -3357,7 +3447,9 @@ D12. **Stale entries of a maker that keeps sending keep-alives (open
        cancel the node received is not re-admitted from an answer for a
        window longer than the 120 s of R-K1 (for example one hour), so a
        stale responder cannot bring it back. It is stricter than R-GH5
-       item 4 on the receiving side only;
+       item 4 on the receiving side only *(bound on 2026-11-03 as §32.9
+       R-K1b, for every later message and answer, not answers alone; the
+       restore guard of ch. 12 R7c was added to the same work package)*;
     3. (a);
     4. two changes to the deferral of R-Q5b for start-up and re-post
        bursts: parking a request for a pair named by a keep-alive the
@@ -4045,3 +4137,12 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   log or comment text was reproduced. The Reloaded statements rest on this
   repository's own chapters 12, 59 and 60. The T-items are
   Reloaded-original.
+- *Reloaded-original addition (2026-11-03) -- §32.9 R-K1b, T-K8, the
+  row-4 sentence of §32.9A R-B2, and the notes added to R-C5, R-GH10,
+  T-GH10, R-GH11, D2 and D12 item 2.* Written by a context that never read the
+  forbidden corpus, from the maintainer's Decisions BK and 29 and from this
+  repository's own order-message handlers, synchronization applier,
+  order-book request path and cancellation guard. The one reference fact
+  it rests on, that no path legitimately revives a cancelled identifier,
+  is §32.9C.1 R-GH11, which passed the KDF Dirty Gate. No reference
+  implementation was consulted, and it needs no Dirty Gate pass.

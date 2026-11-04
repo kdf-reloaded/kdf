@@ -238,6 +238,37 @@ holding. For one order:
 > `t12_7_order_lock_io_tests`, together with a test of the side-map
 > sweep.
 
+**R7c.** *Restore guard (Reloaded; clean-room original; Decision BK item 2,
+bound 2026-11-03 as Decision 29).* A stored active record that outlives its
+order's removal MUST NOT bring the order back at the next start
+([Chapter 32](32-orderbook-p2p-and-trie.md) §32.9C.1 R-GH11 item 1):
+
+1. at start, before the stored active maker orders enter the container
+   ([Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.7 item 2),
+   each stored active record is checked against the order history. The
+   record is not restored when the history already records the order's
+   removal: the history record a removal writes (R7b item 2), or a
+   filtering-history status that only a removed order carries (a
+   cancellation reason of R13, or the fulfilled status). For such a record
+   the node logs, at warn level, the identifier and the history's status;
+   deletes the stale active record (a failure is logged); publishes
+   nothing for the order; and writes no new history entry. Every other
+   record is restored as before;
+2. an order created with `save_in_history: false` leaves no history
+   entry, so its record is restored as before, and so is one whose
+   history write failed together with the deletion;
+3. the top-level `MM2.json` boolean `maker_restore_skips_cancelled`,
+   default `true`, turns items 1 and 4 off; only a JSON `false` does. Off
+   is the reference's behavior: every stored active record is restored,
+   and a record that outlived its cancel brings the order back;
+4. when an order is removed, the deletion of its active record is tried
+   up to three times, 200 ms apart. A record that is already missing
+   counts as deleted. Each failed attempt is logged once, at warn level;
+   after the third failure one warn line gives up and names the order's
+   identifier; nothing else is logged. The removal's history writes
+   follow as before;
+5. taker records are not affected.
+
 ## 12.5 Bound TTL Semantics
 
 **R8.** Insertion takes one of two backings based on whether a
@@ -397,6 +428,18 @@ is in progress, the update's announcement, sent after the write, carries
 the lowered available volume. With no change during the write, the
 announcement is the same message the update sent before R7a.
 
+**T9.** *Restore guard (R7c).* (a) An active record whose identifier has a
+history record and a cancelled status is not restored at start; it is
+deleted, no message is published for it and no history entry is added,
+and the other records are restored. (b) The same record, from an order
+created with `save_in_history: false` and with no history entry, is
+restored. (c) With `maker_restore_skips_cancelled: false` the record of
+(a) is restored. (d) A deletion at removal that fails twice and then
+succeeds leaves no record and logs two warn lines; one that fails three
+times logs three warn lines and one give-up line naming the identifier;
+a missing record is not retried. (e) A stored taker record is restored as
+before.
+
 ## 12.11 Deferred Work
 
 **D1.** A richer per-order duration type (replacing `Option<u16>`
@@ -505,3 +548,10 @@ auto-expiry reason (R13) is purely additive.
   The "Forbidden corpus: not consulted" line above holds for every other
   part of this chapter. The as-built note after R14 rests on this
   repository's own code only.
+- *Clean-side addition (2026-11-03), R7c and T9:* written by a context that
+  never read the forbidden corpus, from the maintainer's Decisions BK and
+  29 and from this repository's own restore and storage code. The fact it
+  answers (a stored record that outlives its cancel brings the order back
+  at the next start) is chapter 32 R-GH11 item 1, which passed the KDF
+  Dirty Gate; R7c itself is Reloaded-original and states no further
+  reference behavior.
