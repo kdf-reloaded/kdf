@@ -844,6 +844,21 @@ weaken security. It is recorded in `docs/GLEEC_COMPATIBILITY.md` with
 > notifier's URL carries its bot token, though no caller shows its errors
 > today. The tests use a URL carrying userinfo, a key in the path and a token
 > in the query, plus a Telegram-shaped URL.
+>
+> *Other spellings of the URL (2026-11-03, PR #218).* A lower layer may repeat
+> the request URL in another spelling than the configured one; a browser does.
+> Such copies are now covered as well. The userinfo and the path-and-query are
+> also removed in their percent-encoded spelling, in either hex case and in any
+> mix of encoded and literal characters. Every `http`, `https`, `ws` or `wss`
+> URL in the text whose host equals the node's host, in any letter case, is
+> replaced by its own host-only form: the scheme, host and port as the lower
+> layer wrote them. A default port added or dropped and a trailing slash are
+> therefore covered too. If such a URL has no usable host-only form, the node's
+> configured one is used. Sentence punctuation after the URL (`.`, `:`, `!`,
+> `?`) stays in the text, and a URL of another host is kept. `mm2_net` now also
+> builds on its own for `wasm32-unknown-unknown`; it lacked five `web-sys`
+> features. The `mm2_net` tests cover each spelling. The wasm-target test
+> compiles but has not run, because the build host has no browser driver.
 
 ---
 

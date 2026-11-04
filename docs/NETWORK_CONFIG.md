@@ -119,6 +119,12 @@ the `"seednodes"` field in MM2.json, or run the node as a seed itself (`"i_am_se
 If `"seednodes"` is omitted and `"i_am_seed"` is not set, the node will start
 but will not be able to discover peers until it receives incoming connections.
 
+**Redials.** A node that holds fewer relays than it needs dials seeds and known peers every
+30 seconds. It dials each address at most once per 5 minutes, as GLEEC KDF does, so a seed that
+drops a connection soon after it was made is redialed up to 5 minutes later. It does not dial a
+seed it is already connected to, whichever side opened the connection. While nothing is left to
+dial, the warning "P2P relays below low watermark" appears at most once per 5 minutes.
+
 ### Hostnames from Other Peers
 
 Nodes ask each other for peer addresses every five minutes, and some peers give a seed by its

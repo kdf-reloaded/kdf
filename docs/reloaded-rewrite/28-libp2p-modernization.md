@@ -245,16 +245,19 @@ length-prefixed libp2p request-response frame whose payload is msgpack
 maximum accepted or emitted frame payload is `1024 * 1024 - 100` bytes.
 
 **R8c. Received peer addresses (Reloaded-original, maintainer decision
-2026-10-30; amended 2026-10-31).** A node accepts a peer address it
-received from another peer only in the form `/ip4/<address>/tcp/<port>`.
-That holds for an address in a peer-exchange answer and for one in a
-peers-topic announcement. The address MUST be globally routable (the
-`ip_helpers::is_global` predicate of R24, unless item 8 is set), and the
-port MUST be the network's TCP port. Every other form is not accepted,
-with one exception: a native build looks up a hostname in a
-peer-exchange answer under item 7 and stores the addresses it resolves
-to, unless item 10 turns that off. The node makes no other name lookup
-for a received address.
+2026-10-30; amended 2026-10-31 and 2026-11-02).** A node accepts a peer
+address it received from another peer only when the address's first
+component is `/ip4/<address>` and its second is `/tcp/<port>`. Later
+components, such as a trailing `/p2p/<peer id>`, are not examined
+*(worded by the first two components on 2026-11-02, finding (c) of the
+note after the rationale)*. That holds for an address in a peer-exchange
+answer and for one in a peers-topic announcement. The address MUST be
+globally routable (the `ip_helpers::is_global` predicate of R24, unless
+item 8 is set), and the port MUST be the network's TCP port. Every other
+form is not accepted, with one exception: a native build looks up a
+hostname in a peer-exchange answer under item 7 and stores the addresses
+it resolves to, unless item 10 turns that off. The node makes no other
+name lookup for a received address.
 
 1. **Per address.** The node skips an address it does not accept and
    keeps the other addresses of the same answer or announcement. It
@@ -264,10 +267,15 @@ for a received address.
 3. **Whole answer.** An answer with more than 20 peer entries (R8) is
    rejected as a whole. The node then forgets the peer that sent it and
    asks another peer.
-4. **Logging.** The first time a distinct skipped address is seen, the
-   node logs one INFO line. The line names the address, the peer that
-   sent it and the accepted form. Later sightings log at DEBUG. The set
-   of addresses already reported is bounded.
+4. **Logging** *(amended 2026-11-02, D9, batch 0.4.0 item P2).* The
+   node logs each skipped address at DEBUG, with the address, the peer
+   that sent it and the reason. Once per hour, if anything was skipped,
+   it logs one INFO line with the counts since the previous summary:
+   skipped addresses per form (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`,
+   `/ip6`, an `/ip4` address that is not globally routable, another
+   port, any other form), and the hostnames of item 7 whose lookup
+   failed, timed out or resolved to no accepted address. No skipped
+   address is logged at INFO on its own.
 5. **Own identity** *(added 2026-10-30, maintainer decision BD).* The
    node never stores a peer entry that names its own peer ID, and never
    picks one as a dial candidate. Other peers hand out this node's own
@@ -280,9 +288,9 @@ for a received address.
 7. **Hostnames in answers** *(added 2026-10-31, maintainer decision
    BH; a Reloaded-only extension: the reference rows keep no received
    hostname, see the note after the rationale).* On a native
-   build, an address `/dns/<name>/tcp/<port>` or
-   `/dns4/<name>/tcp/<port>` in a peer-exchange answer, with the
-   network's TCP port, is queued for a lookup under the entry's peer ID
+   build, an address in a peer-exchange answer whose first component is
+   `/dns/<name>` or `/dns4/<name>` and whose second is `/tcp` with the
+   network's TCP port is queued for a lookup under the entry's peer ID
    instead of being skipped. The node still skips `/dns6` and
    `/dnsaddr`, a hostname with another port, and every hostname in a
    peers-topic announcement. A browser build skips every hostname.
@@ -787,8 +795,10 @@ not required by the substrate contract.
 2. dial up to `mesh_n` random entries; if the normalised list is
    empty, start the swarm without dialing any relay;
 3. start a 10-second maintenance timer running R11 plus a periodic
-   peers-exchange request to a random connected relay on a bound
-   300-second interval after a bound 20-second initial delay.
+   peers-exchange request to a random known peer, connected or not, on
+   a bound 300-second interval after a bound 20-second initial delay
+   *(corrected 2026-11-02, finding (d) of the note after R8c's
+   rationale; the request was never limited to connected relays)*.
 
 Dial failures for configured seed addresses MUST be diagnosable by
 the attempted address and a failure reason. A failed seed dial MUST
@@ -800,7 +810,13 @@ nodes MUST be deployed at globally-routable addresses, and client
 nodes that sit behind NAT reach the mesh exclusively via at least one
 relay. The substrate MUST NOT advertise non-routable listener
 addresses to peers; the bound `ip_helpers::is_global` predicate is
-applied to listener announcements.
+applied to listener announcements. *(Amended 2026-11-02, finding (b) of
+the note after R8c's rationale.)* The predicate treats all of
+`0.0.0.0/8` as not globally routable. Within `192.0.0.0/24`, which is
+otherwise not globally routable, it treats `192.0.0.9` and `192.0.0.10`
+as globally routable, as the IANA special-purpose registry marks them
+and as the reference does. The same predicate checks received and
+resolved peer addresses (R8c).
 
 **R25.** A client node with no configured or reachable relay peers SHALL
 remain in an empty relay-mesh state until at least one relay connection is
@@ -826,6 +842,70 @@ startup condition merely because no relay mesh has formed yet.
 Peers that remain connected and advertise as relays remain eligible for
 relay-mesh maintenance even when peers-exchange requests to them time
 out, fail, or report unsupported protocol negotiation.
+
+**R27a.** *Redial guards (added 2026-11-02, batch 0.4.0 item P1).* Item
+1 is parity with the reference, whose facts are those of RQ1a items 3
+and 4, except for the bound on its record. Items 2 and 3 are
+Reloaded-original. The start-up dials of R23 item 2 and the 30 s
+relay-connection maintenance of RQ1a item 4 MUST follow these rules:
+
+1. **Dial guard.** The node MUST NOT dial an address that it dialed
+   within the last 5 minutes, at start-up or from maintenance. This
+   holds for both candidate sets of RQ1a item 4: the addresses of
+   known peers and the configured bootstrap addresses. An address is
+   compared as written, before name resolution. The record of dialed
+   addresses forgets an entry after 5 minutes. It holds at most 1,024
+   entries, and when it is full the oldest entry is dropped. As at the
+   reference, a connection that lasted less than 5 minutes delays the
+   redial of its address to the 5-minute mark.
+2. **Connected seed.** The node MUST NOT dial a configured bootstrap
+   address while the peer that the address belongs to is connected,
+   inbound or outbound. An address belongs to the peer that the last
+   outbound connection established to that address, as written,
+   reached. Before such a connection exists, only the address check of
+   RQ1a item 6 applies.
+   - *Why.* That address check compares only the remote addresses of
+     open connections. An inbound connection carries the dialer's
+     ephemeral port, so a relay that this node holds only through the
+     relay's own dial never matches its bootstrap address. A node below
+     its low watermark then dials that relay again at every tick.
+     Gossipsub writes to one connection per relay, so the second
+     connection idles out after the gossipsub idle timeout of 120 s,
+     and the next tick dials again. The result is one dial and one
+     close every 150 s. A lab run on 2026-11-01 showed it for 13.5
+     hours: the relay's own connection stayed open throughout, and
+     every second connection closed on the idle timeout.
+   - Item 1 alone would only slow that loop to one cycle per 5 minutes.
+   - Maintenance already picks its peer-exchange candidates among peers
+     that are not connected relays, by peer ID, so item 2 concerns the
+     bootstrap list only.
+3. **Short-of-relays line.** When the node is below its low watermark
+   and nothing is left to dial, the WARN line "P2P relays below low
+   watermark" keeps its text. It is logged at most once per 5 minutes
+   while the count of connected relays is unchanged, and at DEBUG in
+   between.
+
+Item 1 ends the difference on the dial guard recorded after RQ1a item 6.
+Item 2 diverges from the dial-side check of RQ1a item 6: by RQ1a items 4
+and 6, a reference node below its low watermark dials such a relay
+again, at most once per 5 minutes. The divergence changes no wire shape
+and nothing a peer relies on; the peer sees one connection fewer. It is
+therefore not a divergence under `docs/COMPAT_SWITCHES.md` and has no
+switch. Item 3 changes logging only.
+
+**R27b.** *Idle close of a relay outside the relay mesh (added
+2026-11-02, batch 0.4.0 item P2; listed in D9).* When the last
+connection to a connected relay closes on the idle timeout and that
+relay was not in this node's relay mesh when it closed, the node logs
+the close at INFO, as an idle connection closing, not as a warning.
+Every other close is logged as chapter 32's note "Consequence for a
+relay's connections" under R-F3b states: a surplus connection's idle
+close at INFO; the idle close of the last connection to a relay-mesh
+member or to a peer that is not a relay at WARN; every other cause at
+WARN. Nothing on the wire changes. *Why.* No topic mesh holds the
+connection to such a relay open, so its idle close is the normal end of
+a connection nothing uses. The lab rows and the public probes of
+2026-10-31 logged it as a warning on every run.
 
 ## 28.9A Required Port — Peer Health-check, Time-sync Admission, Expirable Bans (driving-spec)
 
@@ -1264,7 +1344,9 @@ moved to the other connection, while closing all of them makes X drop R
 and redial under item 4; the consequence of items 4 and 5 is that a
 reference client with one relay is back in at most 30 s once the
 5-minute dial guard has passed, and a reference client with spare relays
-does not come back until it is short of relays.
+does not come back until it is short of relays. *(Amended 2026-11-02:
+R27a item 1 adopts the 5-minute dial guard, which ends the second of
+these differences.)*
 
 **RQ1 test items.**
 
@@ -1390,7 +1472,15 @@ when `num > 20`, the responder MUST omit the response.
   forgotten.
 - A peers-topic announcement with one `/dns/...` address and one
   accepted address keeps the accepted one.
-- A skipped address is reported at INFO once, and at DEBUG after that.
+- *(Amended 2026-11-02, item 4.)* A skipped address is logged at DEBUG
+  only. One INFO summary per hour carries the counts per form and the
+  hostname lookup outcomes, and an hour with nothing skipped logs no
+  summary.
+- *(Added 2026-11-02, R24 and finding (c).)* A received `/ip4` address
+  in `0.0.0.0/8` is skipped as not globally routable. `192.0.0.9` and
+  `192.0.0.10` with the network's port are accepted, and another
+  address in `192.0.0.0/24` is skipped. An accepted address with a
+  trailing `/p2p/<peer id>` is accepted.
 - *(Added 2026-10-30, decision BD.)* An answer or announcement that
   carries this node's own peer ID stores nothing for it, and relay
   maintenance never dials it. A dial of A's address that reaches peer B
@@ -1464,6 +1554,36 @@ heartbeat receives IWANT for at most 5000 ids drawn from at most 10 of
 the announcements, and the next heartbeat starts the count afresh. A node
 with no orderbook topic in its mesh emits no IHAVE for such topics and
 ignores IHAVE for them.
+
+**T12.** *Redial guards (R27a; added 2026-11-02).* The 5-minute
+interval and the maintenance tick are shortened by test configuration.
+- A bootstrap address dialed at start-up is not dialed again before the
+  interval has passed, even when every dial to it fails. It is dialed
+  at the first tick after the interval.
+- The same holds for an address of a known peer dialed by maintenance.
+- A bootstrap address whose last outbound connection reached peer P is
+  not dialed while P is connected through an inbound connection only.
+  Once P has no connection, the address is dialed again, subject to
+  item 1.
+- A node below its low watermark that holds a seed only through the
+  seed's own dial opens no second connection to it over 10 ticks.
+- The record of dialed addresses holds at most 1,024 entries.
+- The short-of-relays line is logged at most once per interval while
+  the count of connected relays is unchanged.
+- *Lab item.* A Reloaded relay with a reference relay among its
+  seednodes, below its low watermark, runs for at least 15 minutes. It
+  opens no second connection to that relay while connected, and no
+  dial-and-close cycle appears.
+
+**T13.** *Idle-close logging (R27b; added 2026-11-02).* The
+classification is tested on its inputs:
+- an idle-timeout close of the last connection to a connected relay
+  outside the relay mesh logs at INFO;
+- the same close for a relay-mesh member, or for a peer that is not a
+  relay, logs at WARN;
+- an idle-timeout close with connections remaining logs at INFO;
+- every other cause logs at WARN, and a close without a cause logs at
+  INFO as a clean close.
 
 ## 28.11 Deferred Work
 
@@ -1558,6 +1678,12 @@ closed within 30 s or fewer than 2 would remain (RQ1 item 5, T-RQ1.12).*
   - (d) correct the request target in R23 item 3.
 - **Idle-close logging.** An idle close of a relay connection outside
   this node's relay mesh is logged at INFO.
+
+*Status (2026-11-02, batch 0.4.0).* Adopted: the skip logging (R8c
+item 4), findings (b) to (d) (R24, R8c's wording, R23 item 3) and the
+idle-close logging (R27b). The asynchronous lookups are dropped from
+0.4.0; the bounded blocking lookup of R8c item 7 stays. The
+transport-resolver evaluation is done and awaits a maintainer decision.
 
 ## 28.11A Open Questions
 
@@ -1887,5 +2013,32 @@ hardening carried by the pinned fork).
     - the public libp2p fork's request-response crate;
     - a 25-minute run of a Reloaded node on the public netid-8762
       network on 2026-10-31.
+  - The forbidden corpus was not consulted for this amendment, and it
+    needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-11-02) -- R27a, T12 and the note after RQ1a
+  item 6.* Reloaded-original, except R27a item 1, which adopts
+  reference facts already stated in RQ1a items 3 and 4. Those were
+  cleared by KDF Dirty Gate passes on 2026-10-30 and 2026-10-31. The
+  amendment states no new reference fact.
+  - *Inputs:*
+    - RQ1a, for every reference fact;
+    - this repository's relay-connection maintenance and the vendored
+      gossipsub behavior's address check;
+    - the logs of Reloaded nodes in lab runs on 2026-10-31 and
+      2026-11-01.
+  - The forbidden corpus was not consulted for this amendment, and it
+    needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-11-02) -- R8c's opening paragraph, items 4
+  and 7, R23 item 3, R24, R27b, T6a's bullets of 2026-11-02, T13 and
+  D9's status.* Reloaded-original, batch 0.4.0 item P2. The reference
+  facts behind the R24, R8c and R23 changes are findings (b) to (d) of
+  the note after R8c's rationale, cleared by a KDF Dirty Gate pass on
+  2026-10-31. The amendment states no new reference fact.
+  - *Inputs:*
+    - that note;
+    - this repository's peer-exchange logging, routability predicate
+      and connection-close logging;
+    - the logs of Reloaded nodes in the lab rows and public probes of
+      2026-10-31.
   - The forbidden corpus was not consulted for this amendment, and it
     needs no Dirty Gate pass of its own.
