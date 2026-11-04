@@ -344,17 +344,16 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   [CRD ch.28 R27a](docs/reloaded-rewrite/28-libp2p-modernization.md). Code:
   `mm2_p2p/src/redial_guard.rs`.
 
-- **An explicit `UtxoFixed` withdraw fee for a UTXO coin is charged per started
-  kilobyte, with no switch.** A UTXO `withdraw` with
-  `fee: {"type":"UtxoFixed","amount":"<n>"}` pays `<n>` for every started kilobyte of
-  the transaction in Reloaded. The reference (Komodo DeFi Framework 2.6.0-beta and
-  GLEEC KDF 3.0.0-beta) charges `<n>` as a rate per 1,000 bytes, in proportion to the
-  size and rounded down, exactly like `UtxoPerKbyte`, so it pays less than `<n>` for
-  any transaction under a kilobyte. Reloaded never pays less than the fee entered. No
-  other node sees the difference, because a withdrawal is the node's own transaction.
-  Measured values are in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md);
-  parity is planned after the beta
-  ([`docs/plans/trading-floors-parity.md`](docs/plans/trading-floors-parity.md)).
+- **An explicit `UtxoFixed` withdraw fee on an SLP token is charged per started
+  kilobyte, with no switch.** Since PR #226 a UTXO coin's `withdraw` with
+  `fee: {"type":"UtxoFixed","amount":"<n>"}` pays `<n>` as a rate per 1,000 bytes, in
+  proportion to the size and rounded down, exactly like `UtxoPerKbyte`, as the
+  reference (Komodo DeFi Framework 2.6.0-beta and GLEEC KDF 3.0.0-beta) does. A
+  `withdraw` of an SLP token on BCH still pays `<n>` for every started kilobyte; how
+  the reference charges it there is not established. No other node sees the
+  difference, because a withdrawal is the node's own transaction. See
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
+  [CRD ch.38 R38.6.6l](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md).
   Contract: [CRD ch.38 R38.6.6l](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md).
 
 - **Reloaded never writes a cancelled order's stored record back, with no switch.**

@@ -191,13 +191,11 @@ where
             .with_fee_policy(fee_policy);
 
         match req.fee {
-            Some(WithdrawFee::UtxoFixed { ref amount }) => {
-                let fixed = sat_from_big_decimal(amount, decimals).mm_err(Into::into)?;
-                // An explicit fixed withdraw fee keeps its established meaning: the amount for every started
-                // kilobyte of the transaction, independent of the coin's own fee policy.
-                tx_builder = tx_builder.with_fee(ActualTxFee::FixedPerStartedKb(fixed));
-            },
-            Some(WithdrawFee::UtxoPerKbyte { ref amount }) => {
+            // CRD ch.38 R38.6.6l item 2 (maintainer decision 27): both explicit descriptors are a rate per 1,000
+            // bytes, applied proportionally and truncated, `floor(a * s / 1000)`, independent of the coin's own
+            // fee policy. `UtxoFixed` is therefore handled by the very arm of `UtxoPerKbyte`, which keeps the
+            // fee charged, the change-output allowance, the relay floor and `fee_details.amount` identical.
+            Some(WithdrawFee::UtxoFixed { ref amount } | WithdrawFee::UtxoPerKbyte { ref amount }) => {
                 let dynamic = sat_from_big_decimal(amount, decimals).mm_err(Into::into)?;
                 tx_builder = tx_builder.with_fee(ActualTxFee::Dynamic(dynamic));
             },

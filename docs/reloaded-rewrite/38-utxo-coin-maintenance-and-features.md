@@ -2289,6 +2289,10 @@ tests of [Chapter 60](60-trading-floors-and-refusal-contract.md) T60.1–T60.2.
 > R38.6.6c over 496 bytes. The whole-kilobyte floor term is `r`. An explicit
 > per-request withdraw fee, which this subsection does not cover, keeps its
 > existing per-started-kilobyte meaning. R38.6.6i is now fully as-built.
+> *Amended 2026-11-03:* the explicit `UtxoFixed` descriptor on a UTXO
+> withdraw now follows R38.6.6l item 2 (maintainer Decision 27, PR #226); the
+> SLP token withdraw keeps the per-started-kilobyte meaning (compatibility row
+> under R38.6.6l).
 
 R38.6.6j *Fee-estimate reuse and short cache (Reloaded-original, maintainer
 Decision R of 2026-10-27; passed the KDF Dirty Gate on 2026-10-27).*
@@ -2508,22 +2512,21 @@ At both release rows:
    explicit `UtxoFixed` descriptor with it.
 
 > **Compatibility row (this repository, 2026-11-03; not corpus-sourced).**
-> Reloaded applies `UtxoFixed` per started kilobyte, `a × ceil(s / 1000)` —
-> the baseline's meaning, kept deliberately when the fee policy of
-> R38.6.6a–b was ported (as-built note under R38.6.6i) — and
-> `UtxoPerKbyte` proportionally. The reference at both rows (Komodo DeFi
-> Framework 2.6.0-beta and GLEEC KDF 3.0.0-beta) applies both
-> proportionally. For the same request a Reloaded node therefore never pays
-> less than the entered `amount` and pays up to one `a` more than the
-> reference, while the reference pays less than the entered `amount` for
-> any transaction under a kilobyte; `docs/GLEEC_COMPATIBILITY.md` records
-> the difference with measured values (2026-10-31) and says parity is
-> planned after the beta. No peer observes the difference (a `withdraw` is
-> the node's own transaction), so arm 1 of `docs/COMPAT_SWITCHES.md` "The
-> default-side rule" does not bind the default. Whether to adopt the reference arithmetic
-> for `UtxoFixed` (parity, item 2) or keep the per-started-kilobyte meaning
-> is the maintainer's; this rule binds the reference's behavior, not the
-> choice.
+> **Parity** on the UTXO `withdraw` and `task::withdraw::init` since PR #226:
+> the maintainer adopted item 2 (Decision 27, 2026-11-03), and Reloaded
+> applies `UtxoFixed` exactly like `UtxoPerKbyte`, `floor(a × s / 1000)`, as
+> the reference at both rows (Komodo DeFi Framework 2.6.0-beta and GLEEC KDF
+> 3.0.0-beta) does. Before, Reloaded applied `UtxoFixed` per started
+> kilobyte, `a × ceil(s / 1000)` — the baseline's meaning, kept deliberately
+> when the fee policy of R38.6.6a–b was ported (as-built note under
+> R38.6.6i) — so a Reloaded node never paid less than the entered `amount`
+> and paid up to one `a` more than the reference (measured values of
+> 2026-10-31 in `docs/release-tests/0.3.0-beta.1.md`). **Open:** the SLP token
+> withdraw on BCH still applies `UtxoFixed` per started kilobyte; how the
+> reference applies a fee descriptor there is not established, and the
+> question is queued for the KDF Spec Reader. No peer observes either
+> behavior (a `withdraw` is the node's own transaction), so arm 1 of
+> `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind the default.
 
 T38.6.6l *Explicit withdraw fee (R38.6.6l).* Against a mocked backend, a
 withdraw with `fee: {"type":"UtxoFixed","amount":"<a>"}` and one with
@@ -2531,10 +2534,17 @@ withdraw with `fee: {"type":"UtxoFixed","amount":"<a>"}` and one with
 outputs shall produce, under the reference arithmetic, the same fee
 `floor(a × s / 1000)` for a 245-byte and for a 1,404-byte transaction, on a
 plain-fixed coin and on a whole-kilobyte coin alike, and the response's
-`fee_details.amount` shall equal inputs minus outputs. Until the maintainer
-adopts item 2, the `UtxoFixed` expectation for Reloaded is instead
-`a × ceil(s / 1000)` (`a` and `2a` for the two sizes), and the test shall
-state which arithmetic it asserts.
+`fee_details.amount` shall equal inputs minus outputs. The maintainer
+adopted item 2 on 2026-11-03 (Decision 27), so Reloaded's tests assert the
+reference arithmetic, and each test shall state which arithmetic it asserts.
+*(Before that decision the `UtxoFixed` expectation for Reloaded was
+`a × ceil(s / 1000)`, `a` and `2a` for the two sizes.)* *Clean-side note
+(2026-11-03).* Where the builder adds the change output with the allowance of
+item 2, the figure both descriptors give is
+`floor(a × (s − 34) / 1000) + floor(a × 34 / 1000)`, which can be one base unit
+below `floor(a × s / 1000)`; the test asserts the two descriptors equal and the
+figure this split gives. With P2PKH inputs of 148 bytes the larger size reached
+is 1,429 bytes rather than 1,404.
 
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the
@@ -3158,3 +3168,10 @@ R38.8.6 **Tests (two-direction, observable).**
   `UtxoPerKbyte`, `amount`, `fee_details`) and arithmetic a client can
   observe cross into the chapter; no private name, body, control flow or
   literal was reproduced.
+- *Clean-side amendment (2026-11-03) -- maintainer Decision 27.* After the
+  maintainer adopted R38.6.6l item 2, a session that never read the corpus
+  updated the compatibility row under R38.6.6l, the last sentence of
+  T38.6.6l with its clean-side note, and the as-built note under R38.6.6i
+  (PR #226). They rest on that
+  decision and this repository's code, take no forbidden-class input, and so
+  do not engage chapter 01 R38.

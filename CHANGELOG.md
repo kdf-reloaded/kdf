@@ -91,6 +91,15 @@ it and, where one exists, the CRD rule, for readers who want more.
   numbers `electrum_spread_near_factor` (default `2`) and `electrum_spread_near_offset_ms` (default
   `20`) set the factor and the margin; a factor of `0` spreads over every connected server as
   before. Detail: PR #215; CRD ch.38 R38.6.4a.
+- **A fixed withdraw fee on a UTXO coin is now charged in proportion to the transaction's size, as
+  on Komodo and GLEEC KDF.** When `withdraw` or `task::withdraw::init` gives its fee as
+  `{"type":"UtxoFixed","amount":…}`, the amount is now a rate per 1,000 bytes: a transaction of `s`
+  bytes pays `amount × s / 1000`, rounded down to a base unit, exactly as with `UtxoPerKbyte`. Before,
+  KDF Reloaded charged the amount for every started kilobyte. *Upgrade note:* the same request now
+  costs less, and below 1,000 bytes less than the amount entered. A 245-byte KMD withdrawal that
+  paid the whole fee now pays about a quarter of it, and a 1,404-byte DOGE withdrawal about 1.4
+  times it instead of twice. A withdrawal without `fee`, swaps and the DEX fee are not affected, and
+  an SLP token withdrawal is unchanged (see Known limitations). Detail: PR #226; CRD ch.38 R38.6.6l.
 
 #### Start-up and configuration
 
@@ -154,7 +163,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   items of 0.4.0. The redial guards are in (PRs #199, #206).
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
-  recorded; whether KDF Reloaded follows them stays the maintainer's decision (PR #222).
+  recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226); the SLP
+  token withdrawal waits for the reference's answer.
 - [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — new step H6: the
   median time of a coin whose headers carry a fixed-length trailer (Bitcoin Atom) is read from each
   header's own bytes; the 1.6 list form of header requests and explicit `header_layout` entries for
@@ -180,14 +190,12 @@ lives.
   coin is offered only once the Electrum server lists it. More in
   [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md).
   Detail: PR #181; CRD ch.38 R38.5B.8, D38.5B.2, D38.5B.4.
-- **A withdrawal with an explicit fixed fee can cost more than on Komodo or GLEEC KDF.** When a UTXO
-  `withdraw` gives its fee as `{"type":"UtxoFixed","amount":…}`, KDF Reloaded charges that amount for
-  every started kilobyte of the transaction, while Komodo and GLEEC KDF charge it in proportion to
-  the size. For the same request, a 245-byte KMD withdrawal paid the whole fee here and about a
-  quarter of it on the reference, and a 1,404-byte DOGE withdrawal paid twice the fee here and about
-  1.4 times it there. You never pay less than the fee you entered, and a withdrawal without `fee`,
-  swaps and the DEX fee are not affected. Parity is planned after the beta. More in the
-  [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PR #72.
+- **A fixed fee on an SLP token withdrawal is still charged for every started kilobyte.** When a
+  `withdraw` of an SLP token on BCH gives its fee as `{"type":"UtxoFixed","amount":…}`, KDF Reloaded
+  charges that amount for every started kilobyte of the transaction; what Komodo and GLEEC KDF
+  charge there is not yet established. UTXO coins themselves now charge it in proportion to the
+  size, as Komodo and GLEEC KDF do (see Changed). More in the
+  [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PR #226; CRD ch.38 R38.6.6l.
 - **The swap watcher does not work yet.** A watcher is another node that finishes a swap for you
   when you are offline. No swap hands its data to a watcher yet, for any coin (issue #56), so keep
   your node running until your swaps have finished. Bitcoin-family coins (UTXO coins such as RIN,
