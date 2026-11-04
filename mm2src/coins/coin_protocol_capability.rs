@@ -246,8 +246,9 @@ fn read_header(bytes: &[u8], pos: &mut usize) -> Option<Header> {
 /// it, or `None` if the value is truncated or malformed (R59.4A.2 step 1).
 ///
 /// Iterative: the number of values still to skip at each open level lives in a fixed array of
-/// [`MAX_NESTING`] entries, and a value nested deeper than that counts as malformed. A length or count is checked against the bytes that remain before
-/// it is used (a container child takes at least one byte), and nothing is allocated from it.
+/// [`MAX_NESTING`] entries, and a value nested deeper than that counts as malformed. A length or
+/// count is checked against the bytes that remain before it is used (a container child takes at
+/// least one byte), and nothing is allocated from it.
 pub(crate) fn skip_value(bytes: &[u8], start: usize) -> Option<usize> {
     let mut open_levels = [0u64; MAX_NESTING];
     let mut depth = 0usize;
@@ -468,6 +469,28 @@ mod tests {
             word.extend_from_slice(&value);
             assert!(!declared(&with_word(&first, &word)), "{value:?}");
         }
+    }
+
+    #[test]
+    fn t14_b_key_twice_is_declared_when_any_occurrence_is_true() {
+        let first = address_formats().remove(0);
+        // map(2): "tx_v6" -> true, "tx_v6" -> false; and the reverse order.
+        let true_then_false = [
+            0x82, 0xa5, b't', b'x', b'_', b'v', b'6', 0xc3, 0xa5, b't', b'x', b'_', b'v', b'6', 0xc2,
+        ];
+        let false_then_true = [
+            0x82, 0xa5, b't', b'x', b'_', b'v', b'6', 0xc2, 0xa5, b't', b'x', b'_', b'v', b'6', 0xc3,
+        ];
+        assert!(declared(&with_word(&first, &true_then_false)));
+        assert!(declared(&with_word(&first, &false_then_true)));
+    }
+
+    #[test]
+    fn t14_b_empty_map_as_the_word_declares_nothing() {
+        let first = address_formats().remove(0);
+        let read = declared_capabilities(Some(&with_word(&first, &[0x80])));
+        assert!(read.is_empty());
+        assert!(!read.declares(CAPABILITY_TX_V6));
     }
 
     #[test]
