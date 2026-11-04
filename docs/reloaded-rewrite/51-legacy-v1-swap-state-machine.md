@@ -967,8 +967,9 @@ else. Its complete contract:
 > only by statistics stores, the extension breaks no peer, but it should
 > be adopted as a documented Reloaded-original divergence, not silently.
 
-**R50B.** *The transaction-helper topic (Reloaded addition, 2026-10-30,
-Decision BB).* Each side publishes the spend and refund transactions it
+**R50B.** *The transaction-helper topic (2026-10-30, Decision BB; the
+publisher side is parity, the receiver side a Reloaded correction of a
+reference defect -- see the notes below and D6).* Each side publishes the spend and refund transactions it
 builds on the coin's transaction-helper topic (`txhlp/<ticker>`), so that
 other nodes can broadcast them too: after its own broadcast succeeded, and
 also when its own broadcast failed with the transaction at hand. The
@@ -1005,7 +1006,7 @@ open (D6).
 > nor verifies the envelope. An envelope is not a raw transaction of any
 > coin, so at both reference rows every helper message a reference node
 > receives for a coin it has enabled fails to parse, is dropped, and is
-> neither broadcast nor propagated; the topic is inert on the reference side. This is a finding
+> neither submitted to the chain nor propagated; the topic is inert on the reference side. This is a finding
 > against the reference, **not** a convergence target: R50B's rule -- decode
 > and verify the envelope, broadcast the transaction inside it -- is the
 > correct behavior, and a Coder shall not adopt the reference's. For D6 it
@@ -1801,13 +1802,15 @@ with the message (whether it unwraps the envelope, and whether a relay acts
 on a topic it has not subscribed to), are deferred to a Spec Reader pass.
 
 > *Reference answer (2026-11-04; passed the KDF Dirty Gate on 2026-11-04,
-> measure 0.04).* The two
-> questions D6 deferred are answered in the note under R50B: a reference node
-> subscribes only for a native-mode legacy activation, acts only for a
-> native-mode coin, does not unwrap the envelope, and in consequence never
-> broadcasts a helper message and propagates one only for a coin it has not
-> enabled. What remains of D6 is this project's own choice
-> of receiver scope.
+> measure 0.04; last clause corrected after micro-run 0.4.0-2c, PASS 0.03).*
+> The two questions D6 deferred are answered in the note under R50B: a
+> reference node subscribes only for a native-mode legacy activation, acts
+> only for a native-mode coin, does not unwrap the envelope and in
+> consequence never gets a received helper transaction onto the chain; it
+> forwards a received helper message (when it is a relay) only for a coin it
+> has not enabled, and it does publish helper messages itself after its own
+> spend and refund attempts, exactly as R50B describes for Reloaded. What
+> remains of D6 is this project's own choice of receiver scope.
 
 ## 51.14 Baseline Verifications
 
@@ -2035,3 +2038,23 @@ reference rows alike.
   *Measure:* 0.04, read against the standard that any discretionary finding
   fails a file; dictated-interop and public-surface tokens were excluded from
   the measured set.)
+  (Correction of 2026-11-04, KDF Spec Reader micro-run 0.4.0-2c, gated
+  2026-11-04, **KDF Dirty Gate: PASS on 2026-11-04, measure 0.03**: the last
+  clause of the answer note under D6, the last sentence of the code-quality
+  finding under R50B, and the label of R50B. The micro-run re-read the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  only to establish whether the reference publishes transaction-helper
+  messages itself and when a relay forwards a received one: it publishes after
+  its own spend and refund attempts as R50B states, and it forwards only for a
+  coin it has not enabled or for bytes that parse as a raw transaction of an
+  enabled coin. The corrected wording is Reloaded-original. No private
+  identifier, function body, helper decomposition, log or error literal was
+  reproduced. *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04,
+  measure 0.03, no finding in the passages used here. *Extent:* the
+  transaction-helper topic publisher, including its call sites in the legacy
+  maker and taker swaps and the watcher, and the receiver and relay-forwarding
+  handler for that topic, at `v2.6.0-beta` and `v3.0.0-beta`, within a
+  micro-run that read seven source files at each row. *Method:* reading, plus
+  a mechanical diff between the two rows; the gate script was not run because
+  the candidate has no code blocks. *Measure:* 0.03, read against the judgment
+  standard of chapter 01 R35.)
