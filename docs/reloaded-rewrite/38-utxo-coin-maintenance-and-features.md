@@ -2563,7 +2563,7 @@ the miner, and that remainder is included in the reported fee on every
 withdraw path.
 
 > **Compatibility row (this repository, 2026-11-04; not corpus-sourced).**
-> **Parity** since this PR (maintainer-side routing 2026-11-04: a correctness
+> **Parity** since PR #236 (maintainer-side routing 2026-11-04: a correctness
 > fix, no switch). Before, Reloaded's UTXO transaction builder appended
 > required inputs to the transaction without adding their value to its input
 > total. Their coin value was therefore neither returned as change nor

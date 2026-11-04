@@ -501,7 +501,7 @@ binds only the **condition** and its HTTP status class, not new discriminants.
 > corpus-sourced).** A withdraw refused as unsupported under the MetaMask
 > policy (the TRON family, R47.5.6a) answers the shared arm of chapter 49
 > R49.27a: `error_type` `UnsupportedError`, HTTP 400, a string `error_data`.
-> **Parity** since PR #XXX, with no switch. Before, Reloaded answered it with
+> **Parity** since PR #236, with no switch. Before, Reloaded answered it with
 > its own discriminant `UnsupportedUnderMetamask` (historical; also HTTP 400,
 > with the same text).
 
@@ -960,7 +960,7 @@ must be revisited.
     discretionary. No finding follows from it.
 - *Clean-side amendment (2026-11-04) -- the discriminant note on the
   unsupported withdraw.* A session that never read the corpus added the note
-  on the shared `UnsupportedError` arm (PR #XXX). It rests on chapter 49
+  on the shared `UnsupportedError` arm (PR #236). It rests on chapter 49
   R49.27a, which passed the KDF Dirty Gate on 2026-11-04, and on this
   repository's own code. It takes no forbidden-class input, so it does not
   engage chapter 01 R38.

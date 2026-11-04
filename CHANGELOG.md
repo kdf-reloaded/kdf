@@ -155,7 +155,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   400 and the same message text in `error_data`. A `withdraw` of an SLP token that names `from` is
   now refused the same way; before, `from` was ignored and the token was sent from the BCH
   wallet's own address. *Upgrade note:* a client that checks `error_type` for either old value
-  must check `UnsupportedError` instead. Detail: PR #XXX; CRD ch.49 R49.27, R49.27a.
+  must check `UnsupportedError` instead. Detail: PR #236; CRD ch.49 R49.27, R49.27a.
 
 ### Fixed
 
@@ -189,7 +189,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   on Komodo and GLEEC KDF. Two smaller cases changed with it. On every UTXO coin, change exactly
   equal to the coin's dust amount now comes back as a change output instead of going to the miner.
   The fee shown for an SLP withdrawal now also includes change too small to keep, as it already did
-  for UTXO coins. Detail: PR #XXX; CRD ch.38 R38.6.6n.
+  for UTXO coins. Detail: PR #236; CRD ch.38 R38.6.6n.
 
 ### Tests
 
