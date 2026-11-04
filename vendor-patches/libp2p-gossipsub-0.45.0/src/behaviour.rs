@@ -408,6 +408,13 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     /// The peer ids of connected relay nodes
     connected_relays: HashSet<PeerId>,
 
+    /// The last connection to a peer that closed, with whether the peer was a connected relay outside the relay
+    /// mesh at that moment (CRD ch.28 R27b). The close is reported to the swarm only after
+    /// [`Behaviour::on_connection_closed`] removed the peer from `connected_relays` and `relays_mesh`, so this
+    /// keeps what the log line of the close needs. One slot suffices: the swarm hands each close to the behaviour
+    /// and then returns it as an event, before it takes the next one.
+    last_peer_close: Option<LastPeerClose>,
+
     /// Log level state of the "relay mesh below its low watermark" line.
     relays_low_report: WatermarkReport,
 
@@ -581,6 +588,7 @@ where
             ),
             explicit_relay_list: Vec::new(),
             connected_relays: HashSet::new(),
+            last_peer_close: None,
             relays_low_report: WatermarkReport::default(),
             relays_high_report: WatermarkReport::default(),
             last_stuck_relay_close: None,
@@ -3476,6 +3484,12 @@ where
                 }
             }
         } else {
+            // CRD ch.28 R27b: keep whether the peer was a relay outside the relay mesh, before it is removed below.
+            self.last_peer_close = Some(LastPeerClose {
+                peer_id,
+                relay_outside_relay_mesh: self.connected_relays.contains(&peer_id)
+                    && !self.relays_mesh.contains_key(&peer_id),
+            });
             // remove from mesh, topic_peers, peer_topic and the fanout
             debug!("Peer disconnected: {}", peer_id);
             {
@@ -3896,6 +3910,13 @@ where
 
     pub fn connected_relays_len(&self) -> usize {
         self.connected_relays.len()
+    }
+
+    /// Whether the last connection to `peer` closed as a connected relay that was not in the relay mesh (CRD ch.28
+    /// R27b). It answers for the most recent close of a peer's last connection only, so the caller asks while
+    /// handling the `SwarmEvent::ConnectionClosed` that reports it; `false` for any other peer.
+    pub fn closed_relay_outside_relay_mesh(&self, peer: &PeerId) -> bool {
+        matches!(&self.last_peer_close, Some(close) if close.peer_id == *peer && close.relay_outside_relay_mesh)
     }
 
     /// Decides what to do with a connection of `peer` whose send queue is stuck (CRD ch.28 §28.9B RQ1 item 5).
@@ -4504,6 +4525,97 @@ impl fmt::Debug for PublishConfig {
             PublishConfig::RandomAuthor => f.write_fmt(format_args!("PublishConfig::RandomAuthor")),
             PublishConfig::Anonymous => f.write_fmt(format_args!("PublishConfig::Anonymous")),
         }
+    }
+}
+
+/// The close of the last connection to a peer, as [`Behaviour::closed_relay_outside_relay_mesh`] reports it (CRD
+/// ch.28 R27b).
+#[derive(Debug, Clone, Copy)]
+struct LastPeerClose {
+    peer_id: PeerId,
+    relay_outside_relay_mesh: bool,
+}
+
+#[cfg(test)]
+mod relay_close_tests {
+    use super::*;
+
+    /// CRD ch.28 R27b: the close of the last connection to a connected relay reports whether the relay was in the
+    /// relay mesh; the close of a surplus connection, and of a peer that is not a relay, report nothing.
+    #[test]
+    fn test_last_close_reports_a_relay_outside_the_relay_mesh() {
+        let config = crate::ConfigBuilder::default()
+            .validation_mode(ValidationMode::Anonymous)
+            .build()
+            .unwrap();
+        let mut gs: Behaviour = Behaviour::new(MessageAuthenticity::Anonymous, config).unwrap();
+        let endpoint = ConnectedPoint::Dialer {
+            address: Multiaddr::empty(),
+            role_override: Endpoint::Dialer,
+        };
+        let connect = |gs: &mut Behaviour, peer: PeerId, ids: &[usize]| {
+            for (n, id) in ids.iter().enumerate() {
+                let conn = ConnectionId::new_unchecked(*id);
+                let _ = gs
+                    .handle_established_outbound_connection(conn, peer, &Multiaddr::empty(), Endpoint::Dialer)
+                    .unwrap();
+                gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+                    peer_id: peer,
+                    connection_id: conn,
+                    endpoint: &endpoint,
+                    failed_addresses: &[],
+                    other_established: n,
+                }));
+            }
+        };
+        let close = |gs: &mut Behaviour, peer: PeerId, id: usize, remaining: usize| {
+            let handler = gs
+                .handle_established_outbound_connection(
+                    ConnectionId::new_unchecked(1000 + id),
+                    peer,
+                    &Multiaddr::empty(),
+                    Endpoint::Dialer,
+                )
+                .unwrap();
+            gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+                peer_id: peer,
+                connection_id: ConnectionId::new_unchecked(id),
+                endpoint: &endpoint,
+                handler,
+                remaining_established: remaining,
+            }));
+        };
+
+        let (outside, in_mesh, not_relay, surplus) =
+            (PeerId::random(), PeerId::random(), PeerId::random(), PeerId::random());
+        for peer in [outside, in_mesh, surplus] {
+            gs.connected_relays.insert(peer);
+        }
+        connect(&mut gs, outside, &[1]);
+        connect(&mut gs, in_mesh, &[2]);
+        gs.relays_mesh.insert(in_mesh, 0);
+        connect(&mut gs, not_relay, &[3]);
+        connect(&mut gs, surplus, &[4, 5]);
+
+        // Nothing closed yet.
+        assert!(!gs.closed_relay_outside_relay_mesh(&outside));
+
+        // A surplus connection of a relay that stays connected: no last connection closed.
+        close(&mut gs, surplus, 5, 1);
+        assert!(!gs.closed_relay_outside_relay_mesh(&surplus));
+
+        close(&mut gs, outside, 1, 0);
+        assert!(gs.closed_relay_outside_relay_mesh(&outside));
+        // The answer is for that peer only, and the relay is gone from the relay state by now.
+        assert!(!gs.closed_relay_outside_relay_mesh(&in_mesh));
+        assert!(!gs.connected_relays.contains(&outside));
+
+        close(&mut gs, in_mesh, 2, 0);
+        assert!(!gs.closed_relay_outside_relay_mesh(&in_mesh));
+        assert!(!gs.closed_relay_outside_relay_mesh(&outside));
+
+        close(&mut gs, not_relay, 3, 0);
+        assert!(!gs.closed_relay_outside_relay_mesh(&not_relay));
     }
 }
 

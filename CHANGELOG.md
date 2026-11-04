@@ -33,6 +33,19 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Changed
 
+#### EVM coins
+
+- **The quoted fee for sending an EVM taker fee is now the fee at the gas limit the node sends it
+  with.** `trade_preimage`, the taker's balance check before a swap and the maximum taker volume
+  used to price the taker-fee transfer at the node's gas estimate, while the transfer is sent with
+  the fixed `eth_send_erc20` limit (`eth_send_coins` for a platform coin). On Monad, which charges
+  the full limit, the USDC-MON fee transfer is estimated at about 83,000 gas and charged the 150,000
+  its coins-file entry sets. The quote now uses the limit, as every other EVM swap quote already
+  does. On chains that charge only the gas used, the quoted fee is now higher than what is charged.
+  GLEEC KDF sends the fee with the same limit but quotes the estimate; set the `MM2.json` boolean
+  `evm_taker_fee_quote_at_limit` to `false` to quote it that way, as KDF Reloaded did before.
+  Detail: PR #213; CRD ch.57 R57.4.2, R57.5.2a.
+
 #### Order book and peer-to-peer network
 
 - **A node waits 5 minutes before it dials the same address again, and no longer dials a seed it
@@ -63,6 +76,19 @@ it and, where one exists, the CRD rule, for readers who want more.
   asks one other relay it is connected to, once, for the pairs concerned, and never empties a pair
   because the sets differ. To restore the old behavior, set `sync_request_alternate_relay` to
   `false` in `MM2.json`. Detail: PRs #207, #208; CRD ch.32 R-Q5d.
+- **Skipped peer addresses are summarized once an hour instead of logged one by one.** Peer
+  exchange skips addresses it can't use, such as hostnames in another form or IPv6 addresses, and
+  used to log each new one at info level. It now logs each at debug level, and once an hour, if
+  anything was skipped, one info line with the counts per form and the hostname lookups that
+  failed, timed out or gave no usable address. Detail: PRs #203, #211; CRD ch.28 R8c item 4.
+- **An unused connection to a relay outside the node's relay mesh no longer logs a warning when it
+  closes.** No message keeps such a connection busy, so it closes after two minutes as idle. That
+  close now logs at info level, as an idle connection closing. A relay in the relay mesh, and
+  every other cause, still log a warning. Detail: PRs #203, #211; CRD ch.28 R27b.
+- **Two address ranges are judged as GLEEC KDF judges them.** All of `0.0.0.0/8` counts as not
+  public, and `192.0.0.9` and `192.0.0.10` count as public. This applies to the addresses a node
+  receives from peers, those it looks up, and the one it announces. Detail: PRs #203, #211; CRD
+  ch.28 R24.
 - **A cancellation this node received now keeps the order out for an hour.** Before, 120 seconds
   after a cancellation, an answer from a relay that had missed it could bring the cancelled order
   back, and the node then passed it on. Now the order stays out of every later message and answer
@@ -91,6 +117,15 @@ it and, where one exists, the CRD rule, for readers who want more.
   numbers `electrum_spread_near_factor` (default `2`) and `electrum_spread_near_offset_ms` (default
   `20`) set the factor and the margin; a factor of `0` spreads over every connected server as
   before. Detail: PR #215; CRD ch.38 R38.6.4a.
+- **A fixed withdraw fee on a UTXO coin is now charged in proportion to the transaction's size, as
+  on Komodo and GLEEC KDF.** When `withdraw` or `task::withdraw::init` gives its fee as
+  `{"type":"UtxoFixed","amount":…}`, the amount is now a rate per 1,000 bytes: a transaction of `s`
+  bytes pays `amount × s / 1000`, rounded down to a base unit, exactly as with `UtxoPerKbyte`. Before,
+  KDF Reloaded charged the amount for every started kilobyte. *Upgrade note:* the same request now
+  costs less, and below 1,000 bytes less than the amount entered. A 245-byte KMD withdrawal that
+  paid the whole fee now pays about a quarter of it, and a 1,404-byte DOGE withdrawal about 1.4
+  times it instead of twice. A withdrawal without `fee`, swaps and the DEX fee are not affected, and
+  an SLP token withdrawal is unchanged (see Known limitations). Detail: PR #226; CRD ch.38 R38.6.6l.
 
 #### Start-up and configuration
 
@@ -99,6 +134,17 @@ it and, where one exists, the CRD rule, for readers who want more.
   of the release package before the short commit hash, so a log tells at once which release it came
   from. The `version` call and the version stored in swap records still carry the short commit hash
   only, unchanged. Detail: PR #210; CRD ch.45 R45.6.7.
+
+#### Memory use
+
+- **The memory limit set in 0.3.0-beta.1 was measured further, and its default of 2 stays.** In two consecutive
+  6.5-hour runs on the same host, with 480 orders updated about 20 times a second, both settings levelled off. With the
+  limit, resident memory was about 17 MB lower and showed no measurable drift in hours 3 to 6 (0.004 ± 0.003 MB/min; a
+  drift of up to about 0.01 MB/min is not excluded); without it, a small residual drift (0.019 ± 0.009 MB/min) is not
+  excluded. The limit is not shown to be necessary at that load on 8 cores; it removed the growth seen at about 80
+  updates a second on 256 cores. No cost of the limit was resolved on start-up, activation, eight swaps or query latency.
+  Not measured: 256 cores or 80 updates a second over several hours, and a shielded swap. Detail: PR #225; plan
+  [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md); CRD ch.45 R45.6A.8; issue #191.
 
 ### Fixed
 
@@ -139,7 +185,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   `version` call and swap records should carry it, are listed as open questions for the next round.
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
   now names the gas limits each EVM coin and token will use and where they come from (PR #200);
-  options (a) and (b) still wait on the reference maintainers' outcome.
+  open point 3 is decided, and the fee to send an EVM taker fee is now quoted at the gas limit it
+  is sent with (PR #213); options (a) and (b) still wait on the reference maintainers' outcome.
 - [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes
   keep showing after a lost cancellation; five work packages after the beta, the first two being the
   higher sync limits on relays and the request to one other relay above (PRs #205, #207, #208). What
@@ -147,15 +194,20 @@ file carries the detail. "New" means the plan was created in this cycle.
   GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222). A received
   cancellation now stays final for an hour, and a maker no longer restores an order it cancelled
   (PRs #223, #224).
+- [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — in progress: the 2-arena limit of 0.3.0-beta.1
+  was measured in two 6.5-hour runs and on start-up, activation, eight swaps and query latency; no cost
+  was resolved and the default stays (PR #225); executor sizing and an allocator comparison are left.
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
   with its two switches and their defaults (PR #201), and implemented (PR #215); the SwapLab timing
   rows are next.
 - [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new: the peer-to-peer
-  items of 0.4.0. The redial guards are in (PRs #199, #206).
+  items of 0.4.0. The redial guards are in (PRs #199, #206), and so are the peer-exchange
+  logging, the address ranges and the idle-close log (PRs #203, #211).
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
-  recorded; whether KDF Reloaded follows them stays the maintainer's decision (PR #222).
+  recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226); the SLP
+  token withdrawal waits for the reference's answer.
 - [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — new step H6: the
   median time of a coin whose headers carry a fixed-length trailer (Bitcoin Atom) is read from each
   header's own bytes; the 1.6 list form of header requests and explicit `header_layout` entries for
@@ -181,14 +233,12 @@ lives.
   coin is offered only once the Electrum server lists it. More in
   [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md).
   Detail: PR #181; CRD ch.38 R38.5B.8, D38.5B.2, D38.5B.4.
-- **A withdrawal with an explicit fixed fee can cost more than on Komodo or GLEEC KDF.** When a UTXO
-  `withdraw` gives its fee as `{"type":"UtxoFixed","amount":…}`, KDF Reloaded charges that amount for
-  every started kilobyte of the transaction, while Komodo and GLEEC KDF charge it in proportion to
-  the size. For the same request, a 245-byte KMD withdrawal paid the whole fee here and about a
-  quarter of it on the reference, and a 1,404-byte DOGE withdrawal paid twice the fee here and about
-  1.4 times it there. You never pay less than the fee you entered, and a withdrawal without `fee`,
-  swaps and the DEX fee are not affected. Parity is planned after the beta. More in the
-  [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PR #72.
+- **A fixed fee on an SLP token withdrawal is still charged for every started kilobyte.** When a
+  `withdraw` of an SLP token on BCH gives its fee as `{"type":"UtxoFixed","amount":…}`, KDF Reloaded
+  charges that amount for every started kilobyte of the transaction; what Komodo and GLEEC KDF
+  charge there is not yet established. UTXO coins themselves now charge it in proportion to the
+  size, as Komodo and GLEEC KDF do (see Changed). More in the
+  [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PR #226; CRD ch.38 R38.6.6l.
 - **The swap watcher does not work yet.** A watcher is another node that finishes a swap for you
   when you are offline. No swap hands its data to a watcher yet, for any coin (issue #56), so keep
   your node running until your swaps have finished. Bitcoin-family coins (UTXO coins such as RIN,

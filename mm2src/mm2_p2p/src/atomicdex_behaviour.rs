@@ -1065,7 +1065,11 @@ enum ConnectionClosedLog<'a, E> {
     Clean,
     /// A surplus connection that idled out while the peer stays connected: INFO, "idle connection ... closed".
     IdleDuplicate,
-    /// Closed with a cause that is a failure, or the last connection to the peer idled out: WARN. Carries the cause.
+    /// The last connection to a connected relay that was not in the relay mesh idled out: INFO, "idle connection
+    /// ... closed" (CRD ch.28 R27b).
+    IdleRelayOutsideMesh,
+    /// Closed with a cause that is a failure, or the last connection to a relay-mesh member or to a peer that is not
+    /// a relay idled out: WARN. Carries the cause.
     Error(&'a ConnectionError<E>),
 }
 
@@ -1082,13 +1086,23 @@ enum ConnectionClosedLog<'a, E> {
 /// connection busy goes away, which R-F3b as amended (D11) makes common. On a quiet mesh it happens whenever
 /// neither end sends on that connection.
 ///
-/// That is not an error, so a keep-alive timeout with `remaining > 0` is [`ConnectionClosedLog::IdleDuplicate`]. A
-/// keep-alive timeout of the last connection (`remaining == 0`), and every other cause, are
-/// [`ConnectionClosedLog::Error`], which carries the cause for the log line.
-fn connection_closed_log<E>(cause: Option<&ConnectionError<E>>, remaining: u32) -> ConnectionClosedLog<'_, E> {
+/// That is not an error, so a keep-alive timeout with `remaining > 0` is [`ConnectionClosedLog::IdleDuplicate`].
+///
+/// The last connection to a connected relay that was not in this node's relay mesh when it closed
+/// (`relay_outside_mesh`, CRD ch.28 R27b) idles out as the normal end of a connection nothing uses, so a keep-alive
+/// timeout of it is [`ConnectionClosedLog::IdleRelayOutsideMesh`]. The caller takes the input from the gossipsub
+/// behaviour (`closed_relay_outside_relay_mesh`), because the relay and relay-mesh state are already updated when
+/// the swarm event arrives. A keep-alive timeout of the last connection of a relay-mesh member or of a peer that is
+/// not a relay, and every other cause, are [`ConnectionClosedLog::Error`], which carries the cause for the log line.
+fn connection_closed_log<E>(
+    cause: Option<&ConnectionError<E>>,
+    remaining: u32,
+    relay_outside_mesh: bool,
+) -> ConnectionClosedLog<'_, E> {
     match cause {
         None => ConnectionClosedLog::Clean,
         Some(ConnectionError::KeepAliveTimeout) if remaining > 0 => ConnectionClosedLog::IdleDuplicate,
+        Some(ConnectionError::KeepAliveTimeout) if relay_outside_mesh => ConnectionClosedLog::IdleRelayOutsideMesh,
         Some(cause) => ConnectionClosedLog::Error(cause),
     }
 }
@@ -1125,9 +1139,12 @@ impl ConnectionFailureLogs {
     }
 }
 
+/// `relay_outside_mesh` is whether a `SwarmEvent::ConnectionClosed` closed the last connection to a connected relay
+/// that was not in the relay mesh (CRD ch.28 R27b); see [`connection_closed_log`].
 fn log_swarm_event<TBehaviourOutEvent, THandlerErr>(
     event: &SwarmEvent<TBehaviourOutEvent, THandlerErr>,
     failure_logs: &mut ConnectionFailureLogs,
+    relay_outside_mesh: bool,
 ) where
     TBehaviourOutEvent: std::fmt::Debug,
     THandlerErr: std::fmt::Debug,
@@ -1159,9 +1176,14 @@ fn log_swarm_event<TBehaviourOutEvent, THandlerErr>(
             num_established,
             cause,
             ..
-        } => match connection_closed_log(cause.as_ref(), *num_established) {
+        } => match connection_closed_log(cause.as_ref(), *num_established, relay_outside_mesh) {
             ConnectionClosedLog::IdleDuplicate => info!(
                 "P2P idle connection to peer {} via {:?} closed (KeepAliveTimeout); remaining connections to peer: {}",
+                peer_id, endpoint, num_established
+            ),
+            ConnectionClosedLog::IdleRelayOutsideMesh => info!(
+                "P2P idle connection to peer {} via {:?} closed (KeepAliveTimeout); the peer is a relay outside the relay \
+                 mesh; remaining connections to peer: {}",
                 peer_id, endpoint, num_established
             ),
             ConnectionClosedLog::Error(cause) => warn!(
@@ -1491,7 +1513,16 @@ fn start_gossipsub(
         loop {
             match swarm.poll_next_unpin(cx) {
                 Poll::Ready(Some(event)) => {
-                    log_swarm_event(&event, &mut failure_logs);
+                    // The gossipsub behaviour already dropped the peer from its relay state (CRD ch.28 R27b).
+                    let relay_outside_mesh = match &event {
+                        SwarmEvent::ConnectionClosed {
+                            peer_id,
+                            num_established: 0,
+                            ..
+                        } => swarm.behaviour().gossipsub.closed_relay_outside_relay_mesh(peer_id),
+                        _ => false,
+                    };
+                    log_swarm_event(&event, &mut failure_logs, relay_outside_mesh);
                     // The peer that an outbound connection reaches belongs to the bootstrap address that was dialed
                     // (CRD ch.28 R27a item 2). The connection is matched by its ID, not by its address.
                     match &event {
@@ -1972,8 +2003,9 @@ mod connection_failure_log_tests {
         }
     }
 
-    /// A keep-alive timeout of a surplus connection is an INFO idle close; the same timeout of the last connection,
-    /// and every other cause, stay WARN and carry the cause printed as before; no cause is a clean close.
+    /// A keep-alive timeout of a surplus connection is an INFO idle close; the same timeout of the last connection
+    /// of a relay-mesh member or of a peer that is not a relay, and every other cause, stay WARN and carry the cause
+    /// printed as before; no cause is a clean close.
     #[test]
     fn connection_closed_is_classified_by_cause_type_and_remaining_connections() {
         let timeout = ConnectionError::<()>::KeepAliveTimeout;
@@ -1981,29 +2013,73 @@ mod connection_failure_log_tests {
         let handler = ConnectionError::Handler(());
 
         assert!(matches!(
-            connection_closed_log(Some(&timeout), 1),
+            connection_closed_log(Some(&timeout), 1, false),
             ConnectionClosedLog::IdleDuplicate
         ));
-        match connection_closed_log(Some(&timeout), 0) {
+        match connection_closed_log(Some(&timeout), 0, false) {
             ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "KeepAliveTimeout"),
             _ => panic!("the last connection idling out must be a WARN"),
         }
-        match connection_closed_log(Some(&io), 1) {
+        match connection_closed_log(Some(&io), 1, false) {
             ConnectionClosedLog::Error(cause) => assert!(format!("{:?}", cause).starts_with("IO(")),
             _ => panic!("an IO error must be a WARN"),
         }
-        match connection_closed_log(Some(&handler), 1) {
+        match connection_closed_log(Some(&handler), 1, false) {
             ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "Handler(())"),
             _ => panic!("a handler error must be a WARN"),
         }
         assert!(matches!(
-            connection_closed_log::<()>(None, 1),
+            connection_closed_log::<()>(None, 1, false),
             ConnectionClosedLog::Clean
         ));
         assert!(matches!(
-            connection_closed_log::<()>(None, 0),
+            connection_closed_log::<()>(None, 0, false),
             ConnectionClosedLog::Clean
         ));
+    }
+
+    /// CRD ch.28 T13 (R27b), tested on its inputs: the idle close of the last connection to a connected relay
+    /// outside the relay mesh is INFO; the same close of a relay-mesh member or of a non-relay peer (the input is
+    /// `false` for both) is WARN; an idle close with connections remaining is INFO; every other cause is WARN, and a
+    /// close without a cause is a clean INFO close, whatever the relay input says.
+    #[test]
+    fn idle_close_of_a_relay_outside_the_relay_mesh_is_info() {
+        let timeout = ConnectionError::<()>::KeepAliveTimeout;
+        let io = ConnectionError::<()>::IO(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"));
+        let handler = ConnectionError::Handler(());
+
+        // The last connection to a relay outside the relay mesh.
+        assert!(matches!(
+            connection_closed_log(Some(&timeout), 0, true),
+            ConnectionClosedLog::IdleRelayOutsideMesh
+        ));
+        // A relay-mesh member or a non-relay peer: the same close stays a WARN.
+        match connection_closed_log(Some(&timeout), 0, false) {
+            ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "KeepAliveTimeout"),
+            _ => panic!("the last connection of a relay-mesh member or a non-relay peer idling out must be a WARN"),
+        }
+        // Connections remaining: an INFO idle close, with or without the relay input.
+        for relay_outside_mesh in [false, true] {
+            assert!(matches!(
+                connection_closed_log(Some(&timeout), 1, relay_outside_mesh),
+                ConnectionClosedLog::IdleDuplicate
+            ));
+        }
+        // Every other cause is a WARN even for a relay outside the relay mesh, and no cause is a clean close.
+        for remaining in [0, 1] {
+            match connection_closed_log(Some(&io), remaining, true) {
+                ConnectionClosedLog::Error(cause) => assert!(format!("{:?}", cause).starts_with("IO(")),
+                _ => panic!("an IO error must be a WARN"),
+            }
+            match connection_closed_log(Some(&handler), remaining, true) {
+                ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "Handler(())"),
+                _ => panic!("a handler error must be a WARN"),
+            }
+            assert!(matches!(
+                connection_closed_log::<()>(None, remaining, true),
+                ConnectionClosedLog::Clean
+            ));
+        }
     }
 
     /// The remembered keys stay bounded: a full map is cleared.

@@ -966,10 +966,15 @@ fn test_withdraw_impl_set_fixed_fee() {
             amount: "0.1".parse().unwrap(),
         }),
     };
+    // An explicit `UtxoFixed` fee is a rate per 1,000 bytes, applied exactly like `UtxoPerKbyte`:
+    // floor(a * s / 1000), reference arithmetic (CRD ch.38 R38.6.6l item 2, maintainer decision 27).
+    // The resulting transaction size might be 244 or 245 bytes depending on signature size
+    // MM2 always expects the worst case during fee calculation
+    // 0.1 * 245 / 1000 ~ 0.0245
     let expected = Some(
         UtxoFeeDetails {
             coin: Some(TEST_COIN_NAME.into()),
-            amount: "0.1".parse().unwrap(),
+            amount: "0.0245".parse().unwrap(),
         }
         .into(),
     );
@@ -1019,6 +1024,162 @@ fn test_withdraw_impl_sat_per_kb_fee() {
     );
     let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
     assert_eq!(expected, tx_details.fee_details);
+}
+
+/// What an explicit-fee withdraw of one coin produced, read from the signed transaction.
+#[cfg(not(target_arch = "wasm32"))]
+struct ExplicitFeeWithdraw {
+    /// Inputs minus outputs of the signed transaction, in base units.
+    fee: u64,
+    /// Serialized size of the signed transaction in bytes.
+    signed_size: u64,
+}
+
+/// Withdraws 1 coin with an explicit `UtxoFixed` (`fixed == true`) or `UtxoPerKbyte` fee of `rate` coin units
+/// per kilobyte from `input_count` mocked inputs of `input_value` base units each, on a coin whose own policy is
+/// the plain fixed one (`FixedPerKb`) or the whole-kilobyte one (`FixedPerStartedKb`). Asserts that the
+/// transaction has exactly the intended inputs and a change output, and that `fee_details.amount` equals the
+/// inputs minus the outputs of the signed transaction.
+#[cfg(not(target_arch = "wasm32"))]
+fn explicit_fee_withdraw(
+    whole_kilobyte_coin: bool,
+    fixed: bool,
+    rate: &str,
+    input_count: u8,
+    input_value: u64,
+) -> ExplicitFeeWithdraw {
+    UtxoStandardCoin::get_unspent_ordered_list.mock_safe(move |coin, _| {
+        let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
+        let unspents: Vec<UnspentInfo> = (0..input_count)
+            .map(|i| UnspentInfo {
+                outpoint: OutPoint {
+                    hash: (i + 1).into(),
+                    index: 0,
+                },
+                value: input_value,
+                height: Default::default(),
+            })
+            .collect();
+        MockResult::Return(Box::pin(futures::future::ok((unspents, cache))))
+    });
+
+    // The coin's own rate differs from every tested descriptor rate: the descriptor replaces the policy.
+    let tx_fee = if whole_kilobyte_coin {
+        TxFee::FixedPerStartedKb(50_000)
+    } else {
+        TxFee::FixedPerKb(50_000)
+    };
+    let coin = floor_test_coin(TEST_COIN_NAME, tx_fee, UTXO_DUST_AMOUNT, TEST_COIN_DECIMALS);
+
+    let amount: BigDecimal = rate.parse().unwrap();
+    let withdraw_req = WithdrawRequest {
+        amount: 1u64.into(),
+        from: None,
+        to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
+        coin: TEST_COIN_NAME.into(),
+        max: false,
+        fee: Some(if fixed {
+            WithdrawFee::UtxoFixed { amount }
+        } else {
+            WithdrawFee::UtxoPerKbyte { amount }
+        }),
+    };
+    let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
+
+    let signed: UtxoTx = deserialize(tx_details.tx_hex.as_slice()).unwrap();
+    assert_eq!(signed.inputs.len(), input_count as usize);
+    // The withdrawn output and the change output.
+    assert_eq!(signed.outputs.len(), 2);
+    let inputs_sum = input_value * u64::from(input_count);
+    let outputs_sum: u64 = signed.outputs.iter().map(|output| output.value).sum();
+    let fee = inputs_sum - outputs_sum;
+
+    let expected_details = Some(
+        UtxoFeeDetails {
+            coin: Some(TEST_COIN_NAME.into()),
+            amount: crate::utxo::utxo_common::big_decimal_from_sat(fee as i64, TEST_COIN_DECIMALS),
+        }
+        .into(),
+    );
+    assert_eq!(expected_details, tx_details.fee_details);
+
+    ExplicitFeeWithdraw {
+        fee,
+        signed_size: tx_details.tx_hex.len() as u64,
+    }
+}
+
+/// The two transaction shapes of T38.6.6l: `(inputs, value of one input, worst-case size in bytes)`.
+/// The size the fee is computed for is the worst case of an unsigned transaction with a change output:
+/// 97 bytes of overwintered overhead and two P2PKH outputs, plus 148 bytes (41 + 107) per input.
+/// One input gives 245 bytes. The several-input case has 9 inputs and 1,429 bytes: the input size does
+/// not allow exactly 1,404 bytes. The 9 inputs of 0.12 coin are all needed to cover the 1 coin withdrawn.
+#[cfg(not(target_arch = "wasm32"))]
+const EXPLICIT_FEE_SHAPES: [(u8, u64, u64); 2] = [(1, 1_000_000_000, 245), (9, 12_000_000, 1429)];
+
+/// The signed transaction is the worst-case size or shorter by a few signature bytes per input.
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_signed_size_near_worst_case(signed_size: u64, worst_case: u64, input_count: u8) {
+    assert!(signed_size <= worst_case, "{signed_size} > {worst_case}");
+    assert!(
+        worst_case - signed_size <= 2 * u64::from(input_count),
+        "{signed_size} too far below {worst_case}"
+    );
+}
+
+/// T38.6.6l: reference arithmetic (R38.6.6l item 2, maintainer decision 27), asserting the fee
+/// floor(a x (s - 34) / 1000) + floor(a x 34 / 1000) for `UtxoFixed` and `UtxoPerKbyte` alike, on a plain-fixed
+/// and a whole-kilobyte coin, at the worst-case sizes `s` of 245 and 1,429 bytes (1,429 stands in for 1,404).
+/// At a = 1001 base units this equals floor(a x s / 1000): 245 and 1430.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_withdraw_explicit_fee_reference_arithmetic() {
+    let rate_sat: u64 = 1001;
+    for (input_count, input_value, worst_case) in EXPLICIT_FEE_SHAPES {
+        // floor(a x s / 1000): 245 and 1430.
+        let expected = rate_sat * worst_case / 1000;
+        for whole_kilobyte_coin in [false, true] {
+            let fixed = explicit_fee_withdraw(whole_kilobyte_coin, true, "0.00001001", input_count, input_value);
+            let per_kbyte = explicit_fee_withdraw(whole_kilobyte_coin, false, "0.00001001", input_count, input_value);
+            assert_signed_size_near_worst_case(fixed.signed_size, worst_case, input_count);
+            assert_signed_size_near_worst_case(per_kbyte.signed_size, worst_case, input_count);
+            assert_eq!(
+                fixed.fee, expected,
+                "UtxoFixed, {worst_case} bytes, whole-kilobyte coin: {whole_kilobyte_coin}"
+            );
+            assert_eq!(
+                per_kbyte.fee, expected,
+                "UtxoPerKbyte, {worst_case} bytes, whole-kilobyte coin: {whole_kilobyte_coin}"
+            );
+        }
+    }
+}
+
+/// T38.6.6l: reference arithmetic (R38.6.6l item 2, maintainer decision 27). With the change allowance
+/// floor(a x 34 / 1000), the fee is floor(a x (s - 34) / 1000) + floor(a x 34 / 1000), not floor(a x s / 1000):
+/// at a = 1234 base units it asserts 301 at 245 bytes and 1762 at 1,429 bytes (302 and 1763 by the literal
+/// formula, which is also what the `FixedPerKb` size-difference allowance would charge).
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_withdraw_explicit_fee_change_allowance_is_proportional() {
+    let rate_sat: u64 = 1234;
+    for (input_count, input_value, worst_case) in EXPLICIT_FEE_SHAPES {
+        let without_change = worst_case - 34;
+        let expected = rate_sat * without_change / 1000 + rate_sat * 34 / 1000;
+        let literal = rate_sat * worst_case / 1000;
+        let plain_fixed_mapping = ActualTxFee::FixedPerKb(rate_sat).fee_for_size(without_change)
+            + ActualTxFee::FixedPerKb(rate_sat).change_output_increase(without_change);
+        assert_eq!(literal - expected, 1);
+        assert_eq!(plain_fixed_mapping, literal);
+        for whole_kilobyte_coin in [false, true] {
+            let fixed = explicit_fee_withdraw(whole_kilobyte_coin, true, "0.00001234", input_count, input_value);
+            let per_kbyte = explicit_fee_withdraw(whole_kilobyte_coin, false, "0.00001234", input_count, input_value);
+            assert_signed_size_near_worst_case(fixed.signed_size, worst_case, input_count);
+            assert_eq!(fixed.fee, expected, "UtxoFixed, {worst_case} bytes");
+            assert_eq!(per_kbyte.fee, expected, "UtxoPerKbyte, {worst_case} bytes");
+            assert_ne!(fixed.fee, plain_fixed_mapping);
+        }
+    }
 }
 
 #[test]
