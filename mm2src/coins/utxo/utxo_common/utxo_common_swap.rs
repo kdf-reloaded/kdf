@@ -1,7 +1,8 @@
 // utxo_common_swap — HTLC/swap operations, payment scripts, validation
 
 use super::*;
-use crate::SpendSafeAmountError;
+use crate::rpc_command::get_my_address::PathToAddress;
+use crate::{SpendSafeAmountError, SwapKeyDisagreement};
 use kdf_crypto::ripemd160;
 use primitives::hash::H160;
 
@@ -1439,6 +1440,37 @@ where
         PrivKeyPolicy::KeyPair(_) => None,
         PrivKeyPolicy::HDWallet { activated_key, .. } => Some(*activated_key),
         PrivKeyPolicy::Trezor => Some(KeyPair::random_compressed()),
+    }
+}
+
+/// CRD ch.05 R32 for a UTXO-family coin under a global-HD login: whether the key a legacy swap announces
+/// ([`get_htlc_key_pair`]) differs from the key the coin funds its swap payments from.
+///
+/// A coin with an HD policy funds from the first address (account `0`, chain `External`, address `0`, as
+/// `active_utxo_sender_address` selects it) and announces the key at its `path_to_address`: they differ
+/// when the coin was activated anywhere else. A coin with a single key announces the node's persistent key
+/// and funds from its own key. A coin activated with the Trezor policy is out of the rule's scope.
+pub fn swap_key_disagreement<T>(coin: &T, node_pubkey: &Public) -> Option<SwapKeyDisagreement>
+where
+    T: AsRef<UtxoCoinFields>,
+{
+    let fields = coin.as_ref();
+    match (&fields.priv_key_policy, &fields.derivation_method) {
+        (PrivKeyPolicy::Trezor, _) => None,
+        (PrivKeyPolicy::KeyPair(key_pair), _) => {
+            (key_pair.public() != node_pubkey).then_some(SwapKeyDisagreement::SingleKey)
+        },
+        (PrivKeyPolicy::HDWallet { path_to_address, .. }, DerivationMethod::HDWallet(hd_wallet)) => {
+            if path_to_address.is_first_external() {
+                return None;
+            }
+            Some(SwapKeyDisagreement::HdAddress {
+                activated_path: path_to_address.full_path_text(&hd_wallet.derivation_path),
+                paying_path: PathToAddress::default().full_path_text(&hd_wallet.derivation_path),
+            })
+        },
+        // An HD key with a single derived address funds from that address itself.
+        (PrivKeyPolicy::HDWallet { .. }, DerivationMethod::Iguana(_)) => None,
     }
 }
 

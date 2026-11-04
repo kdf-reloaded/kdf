@@ -3683,3 +3683,72 @@ mod gas_price_resolution {
         assert_eq!(calls.fee_history.load(Ordering::SeqCst), 4);
     }
 }
+
+/// CRD ch.05 R32, T13: an EVM coin announces the node's persistent key and pays from its signer.
+mod swap_key_agreement_tests {
+    use super::*;
+    use crate::eth::eth_impl::compressed_secp256k1_public;
+    use crate::{SwapKeyDisagreement, SwapOps};
+    use crypto::privkey::key_pair_from_secret;
+
+    /// The signer's key of `eth_coin_for_test`, in the form the swap wire carries.
+    fn signer_pubkey() -> keys::Public {
+        let secret = hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap();
+        *key_pair_from_secret(&secret).unwrap().public()
+    }
+
+    #[test]
+    fn the_compressed_form_of_a_signer_key_is_the_sec1_form() {
+        // Keys of both parities of `Y`.
+        let mut parities = std::collections::HashSet::new();
+        for seed in 1u8..=8 {
+            let secret = [seed; 32];
+            let eth_public = *KeyPair::from_secret_slice(&secret).unwrap().public();
+            let expected = *key_pair_from_secret(&secret).unwrap().public();
+            let expected: &[u8] = &expected;
+            let compressed = compressed_secp256k1_public(&eth_public);
+            assert_eq!(&compressed[..], expected);
+            parities.insert(compressed[0]);
+        }
+        assert_eq!(parities.len(), 2, "both parities of Y were exercised");
+    }
+
+    /// T13: under a global-HD login the node's persistent key is the passphrase hash, which is not the signer.
+    #[test]
+    fn an_evm_coin_whose_signer_is_not_the_node_key_disagrees() {
+        let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
+        let node_pubkey = *key_pair_from_secret(&[7u8; 32]).unwrap().public();
+        assert_eq!(
+            coin.swap_key_disagreement(&node_pubkey),
+            Some(SwapKeyDisagreement::EvmSigner)
+        );
+        let (_ctx, token) = eth_coin_for_test(
+            EthCoinType::Erc20 {
+                platform: "ETH".into(),
+                token_addr: Address::default(),
+            },
+            vec!["http://dummy.dummy".into()],
+            None,
+        );
+        assert_eq!(
+            token.swap_key_disagreement(&node_pubkey),
+            Some(SwapKeyDisagreement::EvmSigner)
+        );
+    }
+
+    /// A signer that is the node's persistent key agrees, as under an iguana login.
+    #[test]
+    fn an_evm_coin_whose_signer_is_the_node_key_agrees() {
+        let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
+        assert_eq!(coin.swap_key_disagreement(&signer_pubkey()), None);
+    }
+
+    /// T16: a coin under the Trezor policy is out of the rule's scope.
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+    #[test]
+    fn an_evm_coin_under_the_trezor_policy_is_exempt() {
+        let (_ctx, coin) = trezor_eth_coin_for_test(EthCoinType::Eth);
+        let node_pubkey = *key_pair_from_secret(&[7u8; 32]).unwrap().public();
+        assert_eq!(coin.swap_key_disagreement(&node_pubkey), None);
+    }
+}

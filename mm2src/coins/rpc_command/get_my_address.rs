@@ -54,6 +54,23 @@ impl Default for PathToAddress {
     }
 }
 
+impl PathToAddress {
+    /// Whether this is the first address (account `0`, chain `External`, address `0`), the one a UTXO coin
+    /// funds its legacy swap payments from (CRD ch.05 R32).
+    pub fn is_first_external(&self) -> bool {
+        self.account_id == 0 && self.chain == Bip44Chain::External && self.address_id == 0
+    }
+
+    /// The full derivation path of this address under the coin path `path_to_coin`, for example
+    /// `m/44'/141'/0'/0/1`.
+    pub fn full_path_text(&self, path_to_coin: &HDPathToCoin) -> String {
+        format!(
+            "{}/{}'/{}/{}",
+            path_to_coin, self.account_id, self.chain as u32, self.address_id
+        )
+    }
+}
+
 #[derive(Deserialize)]
 pub struct GetMyAddressRequest {
     /// Ticker of the configured coin whose own-address is queried.

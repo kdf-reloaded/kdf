@@ -204,6 +204,16 @@ pub trait SwapOps {
 
     fn get_htlc_key_pair(&self) -> Option<KeyPair>;
 
+    /// Whether the key a legacy swap of this coin announces (CRD ch.05 R32, the swap key) differs from the
+    /// key it pays from (the paying key), under a global-HD login. `node_pubkey` is the node's persistent
+    /// key, the swap key of a coin that supplies no [`SwapOps::get_htlc_key_pair`] of its own.
+    ///
+    /// `None` when the two agree and for a coin the rule does not apply to; the default answers `None`:
+    /// a coin that derives a fresh key for every swap, a coin whose key is not a secp256k1 key, a coin
+    /// activated with the Trezor policy, a coin that cannot trade. The caller asks only under a global-HD
+    /// login; under an iguana login the keys are one key.
+    fn swap_key_disagreement(&self, _node_pubkey: &Public) -> Option<SwapKeyDisagreement> { None }
+
     /// Whether this coin's per-swap HTLC key is derived from the swap (CRD ch.39 R39.5.6) rather than
     /// taken from [`SwapOps::get_htlc_key_pair`]. A derived key is never saved with the swap: every
     /// later use derives it again with [`SwapOps::derive_swap_htlc_key_pair`].
