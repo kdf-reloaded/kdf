@@ -245,16 +245,19 @@ length-prefixed libp2p request-response frame whose payload is msgpack
 maximum accepted or emitted frame payload is `1024 * 1024 - 100` bytes.
 
 **R8c. Received peer addresses (Reloaded-original, maintainer decision
-2026-10-30; amended 2026-10-31).** A node accepts a peer address it
-received from another peer only in the form `/ip4/<address>/tcp/<port>`.
-That holds for an address in a peer-exchange answer and for one in a
-peers-topic announcement. The address MUST be globally routable (the
-`ip_helpers::is_global` predicate of R24, unless item 8 is set), and the
-port MUST be the network's TCP port. Every other form is not accepted,
-with one exception: a native build looks up a hostname in a
-peer-exchange answer under item 7 and stores the addresses it resolves
-to, unless item 10 turns that off. The node makes no other name lookup
-for a received address.
+2026-10-30; amended 2026-10-31 and 2026-11-02).** A node accepts a peer
+address it received from another peer only when the address's first
+component is `/ip4/<address>` and its second is `/tcp/<port>`. Later
+components, such as a trailing `/p2p/<peer id>`, are not examined
+*(worded by the first two components on 2026-11-02, finding (c) of the
+note after the rationale)*. That holds for an address in a peer-exchange
+answer and for one in a peers-topic announcement. The address MUST be
+globally routable (the `ip_helpers::is_global` predicate of R24, unless
+item 8 is set), and the port MUST be the network's TCP port. Every other
+form is not accepted, with one exception: a native build looks up a
+hostname in a peer-exchange answer under item 7 and stores the addresses
+it resolves to, unless item 10 turns that off. The node makes no other
+name lookup for a received address.
 
 1. **Per address.** The node skips an address it does not accept and
    keeps the other addresses of the same answer or announcement. It
@@ -264,10 +267,15 @@ for a received address.
 3. **Whole answer.** An answer with more than 20 peer entries (R8) is
    rejected as a whole. The node then forgets the peer that sent it and
    asks another peer.
-4. **Logging.** The first time a distinct skipped address is seen, the
-   node logs one INFO line. The line names the address, the peer that
-   sent it and the accepted form. Later sightings log at DEBUG. The set
-   of addresses already reported is bounded.
+4. **Logging** *(amended 2026-11-02, D9, batch 0.4.0 item P2).* The
+   node logs each skipped address at DEBUG, with the address, the peer
+   that sent it and the reason. Once per hour, if anything was skipped,
+   it logs one INFO line with the counts since the previous summary:
+   skipped addresses per form (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`,
+   `/ip6`, an `/ip4` address that is not globally routable, another
+   port, any other form), and the hostnames of item 7 whose lookup
+   failed, timed out or resolved to no accepted address. No skipped
+   address is logged at INFO on its own.
 5. **Own identity** *(added 2026-10-30, maintainer decision BD).* The
    node never stores a peer entry that names its own peer ID, and never
    picks one as a dial candidate. Other peers hand out this node's own
@@ -280,9 +288,9 @@ for a received address.
 7. **Hostnames in answers** *(added 2026-10-31, maintainer decision
    BH; a Reloaded-only extension: the reference rows keep no received
    hostname, see the note after the rationale).* On a native
-   build, an address `/dns/<name>/tcp/<port>` or
-   `/dns4/<name>/tcp/<port>` in a peer-exchange answer, with the
-   network's TCP port, is queued for a lookup under the entry's peer ID
+   build, an address in a peer-exchange answer whose first component is
+   `/dns/<name>` or `/dns4/<name>` and whose second is `/tcp` with the
+   network's TCP port is queued for a lookup under the entry's peer ID
    instead of being skipped. The node still skips `/dns6` and
    `/dnsaddr`, a hostname with another port, and every hostname in a
    peers-topic announcement. A browser build skips every hostname.
@@ -787,8 +795,10 @@ not required by the substrate contract.
 2. dial up to `mesh_n` random entries; if the normalised list is
    empty, start the swarm without dialing any relay;
 3. start a 10-second maintenance timer running R11 plus a periodic
-   peers-exchange request to a random connected relay on a bound
-   300-second interval after a bound 20-second initial delay.
+   peers-exchange request to a random known peer, connected or not, on
+   a bound 300-second interval after a bound 20-second initial delay
+   *(corrected 2026-11-02, finding (d) of the note after R8c's
+   rationale; the request was never limited to connected relays)*.
 
 Dial failures for configured seed addresses MUST be diagnosable by
 the attempted address and a failure reason. A failed seed dial MUST
@@ -800,7 +810,13 @@ nodes MUST be deployed at globally-routable addresses, and client
 nodes that sit behind NAT reach the mesh exclusively via at least one
 relay. The substrate MUST NOT advertise non-routable listener
 addresses to peers; the bound `ip_helpers::is_global` predicate is
-applied to listener announcements.
+applied to listener announcements. *(Amended 2026-11-02, finding (b) of
+the note after R8c's rationale.)* The predicate treats all of
+`0.0.0.0/8` as not globally routable. Within `192.0.0.0/24`, which is
+otherwise not globally routable, it treats `192.0.0.9` and `192.0.0.10`
+as globally routable, as the IANA special-purpose registry marks them
+and as the reference does. The same predicate checks received and
+resolved peer addresses (R8c).
 
 **R25.** A client node with no configured or reachable relay peers SHALL
 remain in an empty relay-mesh state until at least one relay connection is
@@ -876,6 +892,20 @@ again, at most once per 5 minutes. The divergence changes no wire shape
 and nothing a peer relies on; the peer sees one connection fewer. It is
 therefore not a divergence under `docs/COMPAT_SWITCHES.md` and has no
 switch. Item 3 changes logging only.
+
+**R27b.** *Idle close of a relay outside the relay mesh (added
+2026-11-02, batch 0.4.0 item P2; listed in D9).* When the last
+connection to a connected relay closes on the idle timeout and that
+relay was not in this node's relay mesh when it closed, the node logs
+the close at INFO, as an idle connection closing, not as a warning.
+Every other close is logged as chapter 32's note "Consequence for a
+relay's connections" under R-F3b states: a surplus connection's idle
+close at INFO; the idle close of the last connection to a relay-mesh
+member or to a peer that is not a relay at WARN; every other cause at
+WARN. Nothing on the wire changes. *Why.* No topic mesh holds the
+connection to such a relay open, so its idle close is the normal end of
+a connection nothing uses. The lab rows and the public probes of
+2026-10-31 logged it as a warning on every run.
 
 ## 28.9A Required Port — Peer Health-check, Time-sync Admission, Expirable Bans (driving-spec)
 
@@ -1442,7 +1472,15 @@ when `num > 20`, the responder MUST omit the response.
   forgotten.
 - A peers-topic announcement with one `/dns/...` address and one
   accepted address keeps the accepted one.
-- A skipped address is reported at INFO once, and at DEBUG after that.
+- *(Amended 2026-11-02, item 4.)* A skipped address is logged at DEBUG
+  only. One INFO summary per hour carries the counts per form and the
+  hostname lookup outcomes, and an hour with nothing skipped logs no
+  summary.
+- *(Added 2026-11-02, R24 and finding (c).)* A received `/ip4` address
+  in `0.0.0.0/8` is skipped as not globally routable. `192.0.0.9` and
+  `192.0.0.10` with the network's port are accepted, and another
+  address in `192.0.0.0/24` is skipped. An accepted address with a
+  trailing `/p2p/<peer id>` is accepted.
 - *(Added 2026-10-30, decision BD.)* An answer or announcement that
   carries this node's own peer ID stores nothing for it, and relay
   maintenance never dials it. A dial of A's address that reaches peer B
@@ -1537,6 +1575,16 @@ interval and the maintenance tick are shortened by test configuration.
   opens no second connection to that relay while connected, and no
   dial-and-close cycle appears.
 
+**T13.** *Idle-close logging (R27b; added 2026-11-02).* The
+classification is tested on its inputs:
+- an idle-timeout close of the last connection to a connected relay
+  outside the relay mesh logs at INFO;
+- the same close for a relay-mesh member, or for a peer that is not a
+  relay, logs at WARN;
+- an idle-timeout close with connections remaining logs at INFO;
+- every other cause logs at WARN, and a close without a cause logs at
+  INFO as a clean close.
+
 ## 28.11 Deferred Work
 
 > **Note.** The §28.9A items (peer health-check RPC, time-sync
@@ -1630,6 +1678,12 @@ closed within 30 s or fewer than 2 would remain (RQ1 item 5, T-RQ1.12).*
   - (d) correct the request target in R23 item 3.
 - **Idle-close logging.** An idle close of a relay connection outside
   this node's relay mesh is logged at INFO.
+
+*Status (2026-11-02, batch 0.4.0).* Adopted: the skip logging (R8c
+item 4), findings (b) to (d) (R24, R8c's wording, R23 item 3) and the
+idle-close logging (R27b). The asynchronous lookups are dropped from
+0.4.0; the bounded blocking lookup of R8c item 7 stays. The
+transport-resolver evaluation is done and awaits a maintainer decision.
 
 ## 28.11A Open Questions
 
@@ -1972,5 +2026,19 @@ hardening carried by the pinned fork).
       gossipsub behavior's address check;
     - the logs of Reloaded nodes in lab runs on 2026-10-31 and
       2026-11-01.
+  - The forbidden corpus was not consulted for this amendment, and it
+    needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-11-02) -- R8c's opening paragraph, items 4
+  and 7, R23 item 3, R24, R27b, T6a's bullets of 2026-11-02, T13 and
+  D9's status.* Reloaded-original, batch 0.4.0 item P2. The reference
+  facts behind the R24, R8c and R23 changes are findings (b) to (d) of
+  the note after R8c's rationale, cleared by a KDF Dirty Gate pass on
+  2026-10-31. The amendment states no new reference fact.
+  - *Inputs:*
+    - that note;
+    - this repository's peer-exchange logging, routability predicate
+      and connection-close logging;
+    - the logs of Reloaded nodes in the lab rows and public probes of
+      2026-10-31.
   - The forbidden corpus was not consulted for this amendment, and it
     needs no Dirty Gate pass of its own.

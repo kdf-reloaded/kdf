@@ -134,6 +134,12 @@ pub(crate) fn sync_request_retry_ms(ctx: &MmArc) -> u64 {
         .unwrap_or(DEFAULT_SYNC_REQUEST_RETRY_MS)
 }
 
+/// The top-level MM2.json boolean `sync_request_alternate_relay` (CRD ch.32 R-Q5d item 7), default `true`;
+/// only a JSON `false` turns the request to one other relay off.
+pub(crate) fn sync_request_alternate_relay(ctx: &MmArc) -> bool {
+    ctx.conf["sync_request_alternate_relay"].as_bool() != Some(false)
+}
+
 /// Sends the answer of a synchronization request to the peer that asked. The inbound dispatcher builds
 /// it around the request's response channel; a parked request keeps it until it is answered.
 pub(crate) type SyncAnswerReply = Box<dyn FnOnce(AdexResponse) -> Result<(), String> + Send>;
@@ -323,22 +329,29 @@ impl SyncInFlight {
         target_batches: u64,
         max_wait_ms: u64,
     ) {
-        let applied = {
-            let trie_store = trie_store.clone();
-            move || trie_store.lock().applied_batches >= target_batches
-        };
-        if applied() {
+        if trie_applied(&trie_store, target_batches) {
             return;
         }
         spawn(async move {
-            let mut waited = 0;
-            while waited < max_wait_ms && !applied() {
-                Timer::sleep(APPLIED_CHECK_STEP_MS as f64 / 1000.).await;
-                waited += APPLIED_CHECK_STEP_MS;
-            }
+            wait_until_applied(&trie_store, target_batches, max_wait_ms).await;
             drop(self);
         });
     }
+}
+
+/// Whether the trie worker has applied at least `target_batches` batches.
+fn trie_applied(trie_store: &PaMutex<TrieStore>, target_batches: u64) -> bool {
+    trie_store.lock().applied_batches >= target_batches
+}
+
+/// Waits until the trie worker has applied `target_batches` batches, at most `max_wait_ms`; whether it has.
+pub(crate) async fn wait_until_applied(trie_store: &PaMutex<TrieStore>, target_batches: u64, max_wait_ms: u64) -> bool {
+    let mut waited = 0;
+    while waited < max_wait_ms && !trie_applied(trie_store, target_batches) {
+        Timer::sleep(APPLIED_CHECK_STEP_MS as f64 / 1000.).await;
+        waited += APPLIED_CHECK_STEP_MS;
+    }
+    trie_applied(trie_store, target_batches)
 }
 
 /// A parked request's slot in the table; dropping it frees the slot.
@@ -573,6 +586,21 @@ mod tests {
         in_flight.complete_after_apply(store, 1, 50);
         block_on(wake).expect("woken at the bound");
         assert_eq!(deferral.in_flight_len(), 0);
+    }
+
+    /// Only a JSON `false` turns the request to one other relay off.
+    #[test]
+    fn the_alternate_relay_switch_is_off_only_for_a_json_false() {
+        let switch = |conf: Json| {
+            let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            sync_request_alternate_relay(&ctx)
+        };
+        assert!(switch(json!({})));
+        assert!(switch(json!({ "sync_request_alternate_relay": true })));
+        assert!(!switch(json!({ "sync_request_alternate_relay": false })));
+        assert!(switch(json!({ "sync_request_alternate_relay": "false" })));
+        assert!(switch(json!({ "sync_request_alternate_relay": 0 })));
+        assert!(switch(json!({ "sync_request_alternate_relay": null })));
     }
 
     /// A request waits for the own requests in flight when it arrives, not for ones started later.
