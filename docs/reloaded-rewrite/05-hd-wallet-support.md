@@ -54,7 +54,9 @@ baseline or named after the public specifications the substrate
 expresses. Bound rules R1–R5 cover the crate-level shape; R6–R12
 cover the mnemonic and encryption layer; R13–R19 cover the
 hierarchical-deterministic seed and path machinery; R20–R26 cover
-the central context and the platform-gated extensions.
+the central context and the platform-gated extensions. R32–R36
+(§5.12B) are a Reloaded-original refusal rule for swaps whose keys
+do not agree under a global-HD login.
 
 ## 5.2 Subsystem Shape
 
@@ -557,6 +559,110 @@ consumers are the version-two atomic-swap state machines bound
 in chapter 14 (chapter 15 for the UTXO path and chapter 17 for
 the EVM path).
 
+## 5.12B Swap-Key Agreement under a Global-HD Login
+
+> **Scope (Reloaded-original, 2026-11-04).** Item H1 of plan
+> [`hd-key-unification`](../plans/hd-key-unification.md), maintainer
+> Decision BL. Under a global-HD login (chapter 45 R45.4.8) the node
+> holds three different secp256k1 keys where an iguana login holds
+> one: the hash of the passphrase text, which the V1 swap machines
+> use as the node's persistent key (chapter 51, the note under R63);
+> the internal key at `m/44'/141'/2147483647/0/0`, which a coin
+> enabled through legacy `enable` or `electrum` uses; and each coin's
+> own HD key. A V1 swap leg whose announced key is not the key its
+> coin pays from cannot complete: the other side rejects the dex fee
+> or the payment. This section refuses such a leg before any
+> negotiation. Plan items H3 and H4 later give every coin its own key,
+> and the refusals fall away with them (D6). Under an iguana login the
+> three keys are one key and nothing in this section changes.
+
+**R32.** *The agreement rule.* Under a global-HD login, a coin MAY
+take part in a V1 swap only when its **swap key** (the public key the
+V1 machines announce for it: the coin's own HTLC key where the coin
+supplies one, the node's persistent key otherwise) is its **paying
+key**:
+
+1. for a UTXO-family coin (the standard UTXO coin, QTUM, BCH, and the
+   tokens on them), the public key of the address its dex fee and swap
+   payments are funded from: the first address (account `0`, chain
+   `External`, address `0`) when the coin has an HD key policy, and its
+   single key otherwise;
+2. for an EVM coin or token, the public key of its signer.
+
+The rule does not apply to a coin activated with the Trezor policy, to
+a coin that derives a fresh key for every swap (chapter 39 R39.5.9), to
+a coin whose native key is not a secp256k1 key (chapter 51 R64), or to
+a coin that cannot trade (chapter 60 R60.6.5) or whose swaps are
+switched off. Under an iguana login the rule always holds.
+
+> *Consequences (informative).* On dev of 2026-11-04 the rule refuses,
+> under a global-HD login: every EVM coin and token (swap key: the
+> passphrase hash; paying key: the HD signer, or the internal key after
+> legacy `enable`); every UTXO-family coin enabled through legacy
+> `enable` or `electrum`, or activated with `priv_key_policy:
+> IguanaPrivKey` (paying key: the internal key); and a UTXO coin
+> activated through the HD task route at a `path_to_address` other than
+> its first address (swap key: the key at `path_to_address`). It accepts
+> a UTXO coin activated through the HD task route at its first address,
+> and a coin whose single key is the passphrase hash (BCH activated
+> together with its tokens).
+
+**R33.** *Where it is checked.* R32 MUST be checked for both coins of
+the pair at every place that refuses an untradable coin (chapter 60
+R60.6.5): every order creation (`setprice`, `buy`, `sell`), every
+`update_maker_order`, and `trade_preimage` in both its legacy and its
+mmrpc 2.0 form. It MUST also be checked before the node answers a
+match request with one of its own orders, and before it starts a swap.
+A pair that fails is not negotiated: no reservation and no connect
+message is sent for it. A swap that has already started is never
+stopped by this rule.
+
+**R34.** *Refusal.* A request that fails R32 MUST be refused before any
+balance, fee or volume check of the request, with the text
+
+`<coin> cannot be swapped under this login: <reason>`
+
+where `<coin>` is the ticker and `<reason>` is one of:
+
+1. `an EVM coin under an HD login ("enable_hd") pays from another key
+   than the one its swaps announce; trade it under a login without
+   "enable_hd"`;
+2. `it was enabled with a single key (legacy "enable" or "electrum")
+   under an HD login, so it pays from another key than the one its
+   swaps announce; enable it through its HD activation, or log in
+   without "enable_hd"`;
+3. `it is activated at <path>, but its swaps pay from <first path>;
+   activate it at account 0, external chain, address 0`, with both
+   paths written in full.
+
+The legacy RPCs answer this text as their error. `trade_preimage`
+reports `error_type` `SwapKeyMismatch` with `error_data`
+`{ "coin": <ticker>, "reason": <reason> }` and the same text.
+*(Gate-pending, Spec Reader question Q7: if the reference refuses such
+a pair with an existing discriminant, that discriminant replaces
+`SwapKeyMismatch`.)*
+
+**R35.** *An order of the node's own that fails the rule.* When the
+check before answering a match request (R33) fails for one of the
+node's own maker orders, for example an order restored from storage
+after an upgrade, the node MUST send no reservation, MUST cancel the
+order as an ordinary cancellation that peers see, and MUST log one WARN
+line: `Maker order <uuid> cancelled: <coin> cannot be swapped under
+this login: <reason>`.
+
+**R36.** *Switch.* The `MM2.json` boolean `swap_key_check`, default
+`true`, enables R32–R35; `false` restores the behavior of earlier
+builds, in which such a swap is negotiated and then fails in the coin
+layer. Under `docs/COMPAT_SWITCHES.md`, "The default-side rule", this
+is arm 2: it has no wire effect, affects only the node's own orders and
+swaps, and improves fund safety. The setting is documented next to
+itself and in `docs/GLEEC_COMPATIBILITY.md`.
+
+> **Compatibility (gate-pending, Spec Reader question Q7).** Whether
+> GLEEC KDF refuses these pairs is not established. If it does not,
+> `swap_key_check: false` matches it. If it refuses them the same way,
+> the switch is dropped.
+
 ## 5.13 Tests
 
 **T1.** *Mnemonic round-trip — Argon2id mode.* A fresh
@@ -676,6 +782,31 @@ the account xpub via the software derivation of R30; with a
 hardware context active, the same extraction is asserted to route
 to the device source (R25).
 
+**T13.** *EVM under a global-HD login.* With an EVM coin activated
+through `enable_eth_with_tokens`, and again through legacy `enable`,
+`setprice`, `buy`, `sell`, `update_maker_order` and `trade_preimage`
+(both forms) for a pair with that coin are refused with reason 1 of
+R34 before any balance check, and `trade_preimage` carries
+`SwapKeyMismatch`. The same requests under an iguana login pass this
+check.
+
+**T14.** *UTXO under a global-HD login.* RIN enabled through legacy
+`electrum` is refused with reason 2. RIN activated through
+`task::enable_utxo` at its first address passes this check. RIN
+activated with `path_to_address` at account `0`, chain `External`,
+address `1` is refused with reason 3, which names both full paths.
+
+**T15.** *Own order that fails the rule.* A maker order for a pair that
+fails R32, present in storage at start-up: a matching request gets no
+reservation, the order is cancelled once with the WARN line of R35, and
+no swap starts. A swap of such a pair that started before the restart is
+resumed and not stopped.
+
+**T16.** *Switch and exemptions.* With `swap_key_check` set to `false`
+the requests of T13 and T14 pass this check. With the default, a ZHTLC
+coin, a Sia coin, a coin activated with the Trezor policy, and BCH
+activated together with its tokens are not refused by it.
+
 ## 5.14 Deferred Work
 
 **D1.** Per-account hierarchical-deterministic activation
@@ -727,6 +858,13 @@ applies only to the wider bulk/offline/HD/ZHTLC export superset
 chapter's mnemonic module and encryption envelope (§5.4–§5.5) but
 are themselves bound, gated and tested entirely within Chapter 7; no
 further coordinated change to this chapter is required.
+
+**D6.** *One swap key per coin and one trading identity under a
+global-HD login* (plan [`hd-key-unification`](../plans/hd-key-unification.md),
+items H3 and H4). §5.12B refuses the swaps whose keys do not agree;
+the plan's later items make them agree, and each removes the refusal
+it makes unnecessary. Their rules will be added to this chapter once
+the behavior questions of the plan have passed the KDF Dirty Gate.
 
 ## 5.15 Baseline Verifications
 
@@ -811,3 +949,11 @@ surface.
   concurrent session ownership, and non-mutating reachability
   probes governed by the underlying transport/device-call
   behaviour); no protected expression crossed.
+- *Reloaded-original addition (2026-11-04) -- §5.12B (R32–R36), T13–T16,
+  D6 and the last sentence of §5.1.* Written by a context that never
+  read the forbidden corpus, from maintainer Decision BL and this
+  repository's own swap, ordermatch, coin-key and activation code. The
+  last sentence of R34 and the compatibility note under R36 are
+  gate-pending on the Spec Reader question Q7 of plan
+  `hd-key-unification`; nothing else in the addition depends on the
+  reference, and it needs no Dirty Gate pass.

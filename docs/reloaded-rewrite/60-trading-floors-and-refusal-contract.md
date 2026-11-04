@@ -516,6 +516,10 @@ refuse a Lightning pair with an error (R60.2.3). Reloaded's Solana values
 (row P1) may stay as they are, since no tree can swap Solana, but no
 Solana request shall terminate abnormally.
 
+> *Cross-reference (2026-11-04).* Under a global-HD login, the same
+> places also refuse a pair whose swap key and paying key do not agree
+> ([chapter 05](05-hd-wallet-support.md) §5.12B R32–R34).
+
 **R60.6.6** *Minimum transaction amount is frozen parity data.* For every
 family that can swap, reloaded's minimum transaction amount shall equal
 the reference's (§60.3). Changing it for any such family is a wire change
@@ -1018,3 +1022,7 @@ the bound value satisfies.
   no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
   is required. They supersede the 2026-10-27 amendment of Decision P; item 8
   is unchanged.
+- *Cross-reference added 2026-11-04.* The pointer under R60.6.5 to
+  chapter 05 §5.12B carries no reference content of its own; it was
+  written by a context that never read the forbidden corpus and needs
+  no Dirty Gate pass.

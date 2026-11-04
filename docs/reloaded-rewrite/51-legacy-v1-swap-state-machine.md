@@ -1182,8 +1182,8 @@ behind that public key is derived per swap and never stored
 > pays from. A swap of such a coin under an HD login does not complete as
 > intended. Plan
 > [`hd-key-unification`](../plans/hd-key-unification.md) first refuses those
-> swaps (item H1), then gives every coin its own key (item H3); chapter 05
-> will carry the rules.
+> swaps (item H1, chapter 05 §5.12B R32), then gives every coin its own
+> key (item H3, chapter 05 D6).
 
 **R64.** *Representation of non-secp256k1 keys — the dictated padding
 convention.* A chain whose native key is not a 33-byte secp256k1 point
