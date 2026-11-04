@@ -283,7 +283,7 @@ pub enum PrivKeyPolicy<T> {
         activated_key: T,
         /// The BIP32 root extended private key for deriving additional coin keys.
         bip39_secp_priv_key: bip32::ExtendedPrivateKey<secp256k1::SecretKey>,
-        /// The `path_to_address` the key was derived at (CRD ch.05 R32 compares it with the address the coin pays from).
+        /// The `path_to_address` the key was derived at (CRD ch.05 R36 compares it with the address the coin pays from).
         path_to_address: PathToAddress,
     },
     Trezor,

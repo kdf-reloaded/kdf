@@ -1443,7 +1443,7 @@ where
     }
 }
 
-/// CRD ch.05 R32 for a UTXO-family coin under a global-HD login: whether the key a legacy swap announces
+/// CRD ch.05 R36 for a UTXO-family coin under a global-HD login: whether the key a legacy swap announces
 /// ([`get_htlc_key_pair`]) differs from the key the coin funds its swap payments from.
 ///
 /// A coin with an HD policy funds from the first address (account `0`, chain `External`, address `0`, as

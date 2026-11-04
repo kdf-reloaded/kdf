@@ -221,8 +221,8 @@ pub enum HtlcPubkeyError {
     #[display(fmt = "Coin cannot derive an HTLC public key: {}", _0)]
     NotAvailable(String),
 }
-/// How a coin's legacy swap key differs from the key it pays from under a global-HD login (CRD ch.05 R32, R34).
-/// The three cases are the three reasons of R34.
+/// How a coin's legacy swap key differs from the key it pays from under a global-HD login (CRD ch.05 R36, R38).
+/// The three cases are the three reasons of R38.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SwapKeyDisagreement {
     /// An EVM coin: its signer is not the node's persistent key, which is what its swaps announce.

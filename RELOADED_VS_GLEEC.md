@@ -514,14 +514,17 @@ R46.2.4, ch.55 R55.4.6):
 
 More behaviors, in the order book and its relaying, peer exchange, fee readings and fee
 quotes, Electrum, the shielded history and trading under an HD login, differ from GLEEC KDF by
-default, each with one top-level `MM2.json` switch. The value below gives the GLEEC-compatible behavior; the row of each switch in
+default, each with one top-level `MM2.json` switch. The value below gives the GLEEC-compatible
+behavior, except for `swap_key_check`; the row of each switch in
 [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the full detail:
 
 - `pre_trade_spend_check: false` — no pre-trade spend check.
-- `swap_key_check: false` — under an HD login (`enable_hd`), a swap whose coin announces another
-  key than the one it pays from (every EVM coin, a coin enabled with a single key, a UTXO coin
-  activated away from its first address) is negotiated and fails in the coin layer, instead of
-  being refused up front; whether GLEEC KDF refuses it is not established.
+- `swap_key_check: false` — restores the behavior of earlier KDF Reloaded builds, not GLEEC KDF's:
+  under an HD login (`enable_hd`), a swap whose coin announces another key than the one it pays
+  from (every EVM coin, a coin enabled with a single key, a UTXO coin activated away from its first
+  address) is negotiated and fails in the coin layer, instead of being refused up front. GLEEC KDF
+  has no such check and needs none: its swaps announce the key the coin signs with (CRD ch.05 §5.9B
+  R34), so these pairs trade normally there. The divergence ends with plan items H3 and H4.
 - `fee_estimate_cache_secs: 0`, with no per-coin value — no fee reading is reused between
   requests.
 - `electrum_spread_reads: false` — every read-only Electrum query goes to the highest-ranked

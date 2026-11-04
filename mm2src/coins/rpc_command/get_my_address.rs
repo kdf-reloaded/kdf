@@ -56,7 +56,7 @@ impl Default for PathToAddress {
 
 impl PathToAddress {
     /// Whether this is the first address (account `0`, chain `External`, address `0`), the one a UTXO coin
-    /// funds its legacy swap payments from (CRD ch.05 R32).
+    /// funds its legacy swap payments from (CRD ch.05 R36).
     pub fn is_first_external(&self) -> bool {
         self.account_id == 0 && self.chain == Bip44Chain::External && self.address_id == 0
     }

@@ -238,7 +238,7 @@ pub enum TradePreimageRpcError {
     BaseEqualRel,
     #[display(fmt = "Trading is not supported for coin {}", coin)]
     TradingNotSupported { coin: String },
-    /// The coin's swap key is not the key it pays from under a global-HD login (CRD ch.05 R32, R34).
+    /// The coin's swap key is not the key it pays from under a global-HD login (CRD ch.05 R36, R38).
     #[display(fmt = "{} cannot be swapped under this login: {}", coin, reason)]
     SwapKeyMismatch { coin: String, reason: String },
     #[display(fmt = "Incorrect use of the '{}' parameter: {}", param, reason)]
@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(rpc.status_code(), StatusCode::BAD_REQUEST);
     }
 
-    /// CRD ch.05 §5.12B T13: `trade_preimage` reports a pair whose swap key is not the key its coin pays from. What
+    /// CRD ch.05 §5.12B T15: `trade_preimage` reports a pair whose swap key is not the key its coin pays from. What
     /// each coin family reports is pinned in the `coins` crate; here `TestCoin` reports it.
     mod swap_key_mismatch {
         use super::*;
@@ -581,7 +581,7 @@ mod tests {
         /// `SwapKeyMismatch` with the coin and the reason as its data and the same text as its message, for the
         /// maker and for both taker forms; reason 3 writes both full paths.
         #[test]
-        fn t13_trade_preimage_answers_swap_key_mismatch() {
+        fn t15_trade_preimage_answers_swap_key_mismatch() {
             mock_coins();
             let ctx = ctx_with(json!({}), true, &["ETH", "KMD", "RINX"]);
             for method in ["setprice", "buy", "sell"] {
@@ -612,10 +612,10 @@ mod tests {
                 .contains("it is activated at m/44'/141'/0'/0/1, but its swaps pay from m/44'/141'/0'/0/0;"));
         }
 
-        /// T13: under an iguana login the request does not meet the refusal, and neither does one with the
+        /// T15: under an iguana login the request does not meet the refusal, and neither does one with the
         /// check switched off (it stops later, at the first thing `TestCoin` cannot answer).
         #[test]
-        fn t13_an_iguana_login_and_the_switch_pass_the_check() {
+        fn t15_an_iguana_login_and_the_switch_pass_the_check() {
             mock_coins();
             for (conf, hd) in [(json!({}), false), (json!({ "swap_key_check": false }), true)] {
                 let ctx = ctx_with(conf, hd, &["ETH", "KMD"]);

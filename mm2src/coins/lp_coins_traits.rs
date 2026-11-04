@@ -204,7 +204,7 @@ pub trait SwapOps {
 
     fn get_htlc_key_pair(&self) -> Option<KeyPair>;
 
-    /// Whether the key a legacy swap of this coin announces (CRD ch.05 R32, the swap key) differs from the
+    /// Whether the key a legacy swap of this coin announces (CRD ch.05 R36, the swap key) differs from the
     /// key it pays from (the paying key), under a global-HD login. `node_pubkey` is the node's persistent
     /// key, the swap key of a coin that supplies no [`SwapOps::get_htlc_key_pair`] of its own.
     ///

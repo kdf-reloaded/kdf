@@ -12870,7 +12870,7 @@ mod negotiation_failure_penalty {
     }
 }
 
-/// CRD ch.05 §5.12B T13-T16: the refusal of a swap whose key is not the key its coin pays from, under a global-HD
+/// CRD ch.05 §5.12B T15-T18: the refusal of a swap whose key is not the key its coin pays from, under a global-HD
 /// login. What each coin family reports is pinned in the `coins` crate; here `TestCoin` reports it, so the sites
 /// that ask the question run without any network.
 mod t05_12b_swap_key_check_tests {
@@ -12930,9 +12930,9 @@ mod t05_12b_swap_key_check_tests {
         swap_key_mismatch(ctx, &base, &rel).map(|mismatch| mismatch.to_string())
     }
 
-    /// R34: the three reasons, word for word, and the coin they name: the first of the pair that fails.
+    /// R38: the three reasons, word for word, and the coin they name: the first of the pair that fails.
     #[test]
-    fn the_refusal_text_is_the_one_of_r34() {
+    fn the_refusal_text_is_the_one_of_r38() {
         mock_coins();
         let ctx = ctx_with(json!({}), true, &[]);
         assert_eq!(mismatch_of(&ctx, "ETH", "KMD"), Some(refusal("ETH", EVM_REASON)));
@@ -12951,7 +12951,7 @@ mod t05_12b_swap_key_check_tests {
         assert_eq!(mismatch_of(&ctx, "RINH", "KMD"), None);
     }
 
-    /// T13: an iguana login passes this check without asking any coin.
+    /// T15: an iguana login passes this check without asking any coin.
     #[test]
     fn an_iguana_login_is_never_refused() {
         TestCoin::swap_key_disagreement.mock_safe(|_, _| panic!("no coin is asked under an iguana login"));
@@ -12959,7 +12959,7 @@ mod t05_12b_swap_key_check_tests {
         assert_eq!(mismatch_of(&ctx, "ETH", "RIN"), None);
     }
 
-    /// T16 and R36: only an explicit JSON `false` switches the check off.
+    /// T18 and R40: only an explicit JSON `false` switches the check off.
     #[test]
     fn the_switch_false_disables_the_check() {
         mock_coins();
@@ -12976,7 +12976,7 @@ mod t05_12b_swap_key_check_tests {
         }
     }
 
-    /// T16: a coin whose swaps are off (wallet only) is not refused by this rule.
+    /// T18: a coin whose swaps are off (wallet only) is not refused by this rule.
     #[test]
     fn a_wallet_only_coin_is_exempt() {
         mock_coins();
@@ -12989,10 +12989,10 @@ mod t05_12b_swap_key_check_tests {
         assert_eq!(mismatch_of(&ctx, "ETH", "KMD"), None);
     }
 
-    /// T13: `setprice`, `buy`, `sell` and `update_maker_order` refuse the pair before any balance check and
-    /// answer the text of R34; an iguana login, and `swap_key_check` false, pass the check.
+    /// T15: `setprice`, `buy`, `sell` and `update_maker_order` refuse the pair before any balance check and
+    /// answer the text of R38; an iguana login, and `swap_key_check` false, pass the check.
     #[test]
-    fn t13_order_creation_and_update_are_refused() {
+    fn t15_order_creation_and_update_are_refused() {
         mock_coins();
         let ctx = ctx_with(json!({}), true, &["ETH", "KMD", "RIN", "RINX"]);
         for (base, rel, expected) in [
@@ -13045,10 +13045,10 @@ mod t05_12b_swap_key_check_tests {
         assert!(err.ends_with(&refusal("ETH", EVM_REASON)), "{err}");
     }
 
-    /// T13: the same requests under an iguana login, and with the switch off, are not refused by this check (they
+    /// T15: the same requests under an iguana login, and with the switch off, are not refused by this check (they
     /// stop later, at the first thing `TestCoin` cannot answer).
     #[test]
-    fn t13_the_same_requests_pass_this_check_when_the_keys_agree_or_the_check_is_off() {
+    fn t15_the_same_requests_pass_this_check_when_the_keys_agree_or_the_check_is_off() {
         mock_coins();
         for (conf, hd) in [(json!({}), false), (json!({ "swap_key_check": false }), true)] {
             let ctx = ctx_with(conf, hd, &["ETH", "KMD"]);
@@ -13080,10 +13080,10 @@ mod t05_12b_swap_key_check_tests {
         }
     }
 
-    /// T15: a stored order of ours whose pair fails the rule gets no reservation when a request matches it. It is
+    /// T17: a stored order of ours whose pair fails the rule gets no reservation when a request matches it. It is
     /// cancelled once, as an ordinary cancellation that peers see, and no swap starts.
     #[test]
-    fn t15_an_own_order_that_fails_is_cancelled_at_the_match_check() {
+    fn t17_an_own_order_that_fails_is_cancelled_at_the_match_check() {
         mock_coins();
         let ctx = ctx_with(json!({}), true, &["ETH", "KMD"]);
         let (tx, mut p2p_rx) = mpsc::channel(100);
@@ -13140,7 +13140,7 @@ mod t05_12b_swap_key_check_tests {
         );
     }
 
-    /// R33: no connect message is sent for a reservation whose pair fails the rule; with the keys in agreement
+    /// R37: no connect message is sent for a reservation whose pair fails the rule; with the keys in agreement
     /// the same reservation is answered with the connect message, so the setup does reach the send.
     #[test]
     fn a_connect_message_is_not_sent_for_a_pair_that_fails() {
@@ -13195,9 +13195,9 @@ mod t05_12b_swap_key_check_tests {
         }
     }
 
-    /// R35: the WARN line.
+    /// R39: the WARN line.
     #[test]
-    fn the_cancel_line_is_the_text_of_r35() {
+    fn the_cancel_line_is_the_text_of_r39() {
         let uuid = Uuid::new_v4();
         let mismatch = SwapKeyMismatch {
             coin: "ETH".into(),

@@ -3684,7 +3684,7 @@ mod gas_price_resolution {
     }
 }
 
-/// CRD ch.05 R32, T13: an EVM coin announces the node's persistent key and pays from its signer.
+/// CRD ch.05 R36, T15: an EVM coin announces the node's persistent key and pays from its signer.
 mod swap_key_agreement_tests {
     use super::*;
     use crate::eth::eth_impl::compressed_secp256k1_public;
@@ -3713,7 +3713,7 @@ mod swap_key_agreement_tests {
         assert_eq!(parities.len(), 2, "both parities of Y were exercised");
     }
 
-    /// T13: under a global-HD login the node's persistent key is the passphrase hash, which is not the signer.
+    /// T15: under a global-HD login the node's persistent key is the passphrase hash, which is not the signer.
     #[test]
     fn an_evm_coin_whose_signer_is_not_the_node_key_disagrees() {
         let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
@@ -3743,7 +3743,7 @@ mod swap_key_agreement_tests {
         assert_eq!(coin.swap_key_disagreement(&signer_pubkey()), None);
     }
 
-    /// T16: a coin under the Trezor policy is out of the rule's scope.
+    /// T18: a coin under the Trezor policy is out of the rule's scope.
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
     #[test]
     fn an_evm_coin_under_the_trezor_policy_is_exempt() {

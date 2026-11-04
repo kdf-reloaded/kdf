@@ -2749,7 +2749,7 @@ pub async fn taker_swap_trade_preimage(
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
         return MmError::err(TradePreimageRpcError::TradingNotSupported { coin });
     }
-    // CRD ch.05 R33: a pair whose swap key is not the key it pays from is refused before any balance check.
+    // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
     if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
         return MmError::err(TradePreimageRpcError::from(mismatch));
     }

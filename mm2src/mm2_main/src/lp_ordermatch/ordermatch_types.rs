@@ -183,11 +183,11 @@ fn is_untradable_coin(coin: &MmCoinEnum) -> bool {
 #[cfg(target_arch = "wasm32")]
 fn is_untradable_coin(_coin: &MmCoinEnum) -> bool { false }
 
-/// CRD ch.05 R36: the MM2.json boolean `swap_key_check`, default `true`. Only an explicit JSON `false` turns the
-/// refusal of R32-R35 off, which restores the behavior of earlier builds.
+/// CRD ch.05 R40: the MM2.json boolean `swap_key_check`, default `true`. Only an explicit JSON `false` turns the
+/// refusal of R36-R39 off, which restores the behavior of earlier builds.
 pub(crate) fn swap_key_check_enabled(ctx: &MmArc) -> bool { ctx.conf["swap_key_check"].as_bool() != Some(false) }
 
-/// A pair that fails the swap-key agreement rule (CRD ch.05 R32, R34): the first coin whose swap key is not the
+/// A pair that fails the swap-key agreement rule (CRD ch.05 R36, R38): the first coin whose swap key is not the
 /// key it pays from, and the reason. Its text is the refusal that the legacy RPCs answer as their error.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SwapKeyMismatch {
@@ -227,8 +227,8 @@ impl SwapKeyMismatch {
 }
 
 /// Returns the first coin of the pair whose legacy swap key is not the key it pays from, under a global-HD login
-/// (CRD ch.05 R32-R34). Every place that refuses an untradable coin asks it next to [`untradable_coin_ticker`],
-/// before any balance, fee or volume check, and so do the match and swap-start paths (R33). `None` under an iguana
+/// (CRD ch.05 R36-R38). Every place that refuses an untradable coin asks it next to [`untradable_coin_ticker`],
+/// before any balance, fee or volume check, and so do the match and swap-start paths (R37). `None` under an iguana
 /// login, with `swap_key_check` set to `false`, and for a coin the rule does not apply to; a coin that is wallet
 /// only has its swaps switched off.
 pub(crate) fn swap_key_mismatch(ctx: &MmArc, base: &MmCoinEnum, rel: &MmCoinEnum) -> Option<SwapKeyMismatch> {

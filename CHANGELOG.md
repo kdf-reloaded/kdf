@@ -151,7 +151,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   started is never stopped. A UTXO coin such as RIN activated through `task::enable_utxo` at its first
   address, BCH activated together with its tokens, and every login without `enable_hd` are not
   affected. Set the `MM2.json` boolean `swap_key_check` to `false` to restore the earlier behavior,
-  in which such a swap is negotiated and then fails. Detail: CRD ch.05 R32–R36.
+  in which such a swap is negotiated and then fails. Detail: CRD ch.05 R36–R40.
 
 ### Fixed
 
@@ -240,7 +240,7 @@ lives.
   swap of a coin enabled through legacy `enable` can land on an address the wallet does not show;
   logging in with the same passphrase without `enable_hd` reaches them. Whether a maker's orders
   under an HD login stay visible on other nodes is being checked. More in
-  [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PR #228; CRD ch.05 R32–R36; CRD
+  [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PR #228; CRD ch.05 R36–R40; CRD
   ch.51, note under R63.
 - **Do not run two KDF instances on the same seed at the same time.** If you do, for any coin (RIN
   included), both instances can pick the same funds for two different transactions. The network

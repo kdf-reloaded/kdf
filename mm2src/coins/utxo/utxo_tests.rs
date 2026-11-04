@@ -10006,7 +10006,7 @@ mod header_time_only_tests {
     }
 }
 
-/// CRD ch.05 R32, T14: whether the key a UTXO coin's legacy swaps announce is the key it pays from.
+/// CRD ch.05 R36, T16: whether the key a UTXO coin's legacy swaps announce is the key it pays from.
 mod swap_key_agreement_tests {
     use super::*;
     use crate::rpc_command::get_my_address::PathToAddress;
@@ -10057,7 +10057,7 @@ mod swap_key_agreement_tests {
 
     fn node_pubkey() -> keys::Public { *key_pair_from_seed("the passphrase of the test").unwrap().public() }
 
-    /// T14: a coin enabled with a single key that is not the node's persistent key (legacy `enable` or
+    /// T16: a coin enabled with a single key that is not the node's persistent key (legacy `enable` or
     /// `electrum`, or `IguanaPrivKey`) pays from another key than the one its swaps announce.
     #[test]
     fn a_single_key_other_than_the_node_key_disagrees() {
@@ -10071,7 +10071,7 @@ mod swap_key_agreement_tests {
         );
     }
 
-    /// T16: a single key that is the node's persistent key (BCH activated together with its tokens) agrees.
+    /// T18: a single key that is the node's persistent key (BCH activated together with its tokens) agrees.
     #[test]
     fn a_single_key_that_is_the_node_key_agrees() {
         let coin = coin_with(
@@ -10081,7 +10081,7 @@ mod swap_key_agreement_tests {
         assert_eq!(coin.swap_key_disagreement(&node_pubkey()), None);
     }
 
-    /// T14: RIN activated at its first address through the HD route agrees.
+    /// T16: RIN activated at its first address through the HD route agrees.
     #[test]
     fn an_hd_coin_at_the_first_address_agrees() {
         let coin = coin_with(
@@ -10091,7 +10091,7 @@ mod swap_key_agreement_tests {
         assert_eq!(coin.swap_key_disagreement(&node_pubkey()), None);
     }
 
-    /// T14: RIN activated at account 0, External, address 1 disagrees (reason 3), with both paths in full.
+    /// T16: RIN activated at account 0, External, address 1 disagrees (reason 3), with both paths in full.
     #[test]
     fn an_hd_coin_at_another_address_names_both_paths() {
         let at_address_1 = PathToAddress {
@@ -10126,7 +10126,7 @@ mod swap_key_agreement_tests {
         );
     }
 
-    /// T16: a coin activated with the Trezor policy is out of the rule's scope.
+    /// T18: a coin activated with the Trezor policy is out of the rule's scope.
     #[test]
     fn a_trezor_coin_is_exempt() {
         let coin = coin_with(PrivKeyPolicy::Trezor, None);
