@@ -757,6 +757,24 @@ transport-level peer identity authenticated by the libp2p handshake
 and is separate from the secp256k1 key material used for the
 application-payload signing surface in §28.7.
 
+> **Reference position on the identity key (passed the KDF Dirty Gate on
+> 2026-11-04, measure 0.02; Spec Reader 2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A, identical at both).** The reference derives a **relay's** Ed25519
+> identity secret as the SHA-256 of the node's internal secp256k1 signing key
+> (chapter 05 R16), so one passphrase gives one relay peer identifier at every
+> start -- the same derivation this substrate uses, so a relay has the same
+> peer identifier on both lineages for the same passphrase -- and gives every
+> **non-relay** node a fresh random identity at each start. Nothing in the
+> reference pins a relay's peer identifier: its seed-node entries are bare
+> hosts (R21). The identity key types a reference node can decode in the
+> Noise handshake are those compiled into its libp2p build on both targets:
+> Ed25519 and secp256k1; the RSA and ECDSA key types are not compiled in, so
+> a remote presenting one of them fails the handshake. A privacy coin's order
+> and swap messages are published under a per-order secp256k1 key with that
+> key's peer identifier as the gossip author (chapter 16), as here. The
+> reference's composed behavior includes no Identify protocol at either row
+> (R7); only the crate feature is enabled, as R0c records for this substrate.
+
 **R20.** The libp2p connection upgrade pipeline is bound to be
 uniform across all targets: multistream-select V1 negotiation,
 Noise XX security, yamux stream multiplexing, and a 20-second
@@ -2042,3 +2060,24 @@ hardening carried by the pinned fork).
       2026-10-31.
   - The forbidden corpus was not consulted for this amendment, and it
     needs no Dirty Gate pass of its own.
+- *Scoped addition (2026-11-04) -- the reference-position note under R19.*
+  **KDF Dirty Gate: PASS on 2026-11-04, measure 0.02.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish the relay and non-relay identity-key
+  derivations, the absence of any pinned relay identifier, the identity key
+  types enabled in the reference's libp2p dependency on both targets, the
+  per-order key and author of privacy-coin messages, and the absence of the
+  Identify protocol from the composed behavior. Behavior and public
+  dependency features only; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.02, no findings. *Extent:* the peer-to-peer identity-key derivation, the
+  identity key types of the libp2p build and the protocols of the composed
+  behavior, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole
+  batch, 30 source files and one dependency manifest were read at
+  `v3.0.0-beta`, 29 of them checked by hash against the tagged states of both
+  rows. *Method:* side-by-side reading of the compared regions against every
+  added or changed line, plus that hash check; the gate script was not run
+  because the candidate has no code blocks. *Measure:* 0.02, read against the
+  standard that any discretionary finding fails a file; dictated-interop and
+  public-surface tokens were excluded from the measured set.
