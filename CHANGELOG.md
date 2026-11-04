@@ -182,7 +182,8 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
-  complete.
+  complete. The maintainer's answers on withdraw, the legacy methods, legacy activation and Sia are
+  recorded in it.
 - [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — in progress: the 2-arena limit of 0.3.0-beta.1
   was measured in two 6.5-hour runs and on start-up, activation, eight swaps and query latency; no cost
   was resolved and the default stays (PR #225); executor sizing and an allocator comparison are left.
@@ -220,6 +221,11 @@ lives.
   visible on other nodes is being checked. More in
   [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PR #228; CRD ch.51, note under
   R63.
+- **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
+  `get_enabled_coins` fails as a whole once such a coin is enabled.** Both report a single address,
+  and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for
+  the balance and the mmrpc 2.0 `get_enabled_coins` for the list. For an EVM coin both legacy
+  methods answer with the activated address. Detail: PR #228; CRD ch.05 §5.9B R35.
 - **Do not run two KDF instances on the same seed at the same time.** If you do, for any coin (RIN
   included), both instances can pick the same funds for two different transactions. The network
   accepts one and rejects the other, and the instance that loses gets no explanation and may try

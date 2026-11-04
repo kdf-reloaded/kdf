@@ -86,9 +86,10 @@ HD UTXO task withdrawal omits `from`, the task shall use the enabled address
 > was supplied. Reloaded has used the enabled address instead since 0.1.x, so
 > that a wallet client whose withdraw preview omits `from` works. The divergence
 > from GLEEC KDF, which rejects an omitted `from`, is recorded in
-> [`RELOADED_VS_GLEEC.md`](../../RELOADED_VS_GLEEC.md). The direct `withdraw`
-> method does not yet serve an HD UTXO wallet; plan
-> [`hd-key-unification`](../plans/hd-key-unification.md) item H5 covers it.
+> [`RELOADED_VS_GLEEC.md`](../../RELOADED_VS_GLEEC.md). The maintainer kept it
+> on 2026-11-04. The direct `withdraw` method does not yet serve an HD UTXO
+> wallet; plan [`hd-key-unification`](../plans/hd-key-unification.md) item H5
+> serves it with `from`, and without `from` the same way as the task route.
 
 R49.5. EVM-family software-HD native-coin and fungible-token withdrawals shall
 be supported through both direct `withdraw` and `task::withdraw::init`. When
