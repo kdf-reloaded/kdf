@@ -923,4 +923,37 @@ mod tests {
         let result = block_on(peer_connection_healthcheck(ctx, "12D3KooWself".to_string())).unwrap();
         assert!(result);
     }
+
+    /// CRD ch.28 R16a, T4a (a): the peer healthcheck messages the node sends pass the bounds check.
+    #[test]
+    fn t4a_a_healthcheck_messages_nest_within_half_the_bound() {
+        use super::PeerHealthcheckMsg;
+        use common::msgpack_bounds::{check_msgpack_bounds, max_nesting_depth, MAX_PEER_NESTING};
+
+        let messages = [
+            PeerHealthcheckMsg::Probe {
+                source_peer: "12D3KooWsource".into(),
+                target_peer: "12D3KooWtarget".into(),
+                nonce: u64::MAX,
+                expires_at: 1_700_000_000,
+            },
+            PeerHealthcheckMsg::Ack {
+                source_peer: "12D3KooWtarget".into(),
+                target_peer: "12D3KooWsource".into(),
+                nonce: 7,
+                expires_at: 1_700_000_000,
+            },
+        ];
+        for (i, message) in messages.iter().enumerate() {
+            let payload = mm2_p2p::encode_message(message).unwrap();
+            let envelope = mm2_p2p::encode_and_sign(message, &[3; 32]).unwrap();
+            for (what, encoded) in [("payload", &payload), ("envelope", &envelope)] {
+                assert_eq!(check_msgpack_bounds(encoded), Ok(encoded.len()), "{i} {what}");
+                let depth = max_nesting_depth(encoded);
+                println!("t4a depth PeerHealthcheckMsg {i} {what}: {depth}");
+                assert!(depth <= MAX_PEER_NESTING / 2, "{i} {what}: depth {depth}");
+            }
+            mm2_p2p::decode_signed::<PeerHealthcheckMsg>(&envelope).unwrap();
+        }
+    }
 }
