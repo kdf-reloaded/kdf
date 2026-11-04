@@ -49,7 +49,7 @@ use crate::mm2::lp_ordermatch::{broadcast_maker_orders_keep_alive_loop, clean_me
                                 BalanceUpdateOrdermatchHandler, OrdermatchInitError};
 use crate::mm2::lp_swap::{clear_running_swaps, swap_kick_starts};
 use crate::mm2::rpc::spawn_rpc;
-use crate::mm2::{MM_DATETIME, MM_VERSION};
+use crate::mm2::version_text;
 
 cfg_native! {
     use mm2_io::fs::{ensure_dir_is_writable, ensure_file_is_writable};
@@ -448,6 +448,11 @@ fn migration_1(_ctx: &MmArc) {}
 pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        info!(
+            "Database root: {}; identity database directory: {}",
+            crate::mm2::absolute_path_for_log(&ctx.db_root()),
+            crate::mm2::absolute_path_for_log(&ctx.dbdir())
+        );
         fix_directories(&ctx)?;
         ctx.init_sqlite_connection()
             .map_to_mm(MmInitError::ErrorSqliteInitializing)?;
@@ -480,7 +485,7 @@ pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
 #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
 /// * `ctx_cb` - callback used to share the `MmCtx` ID with the call site.
 pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
-    info!("Version: {} DT {}", MM_VERSION, MM_DATETIME);
+    info!("Version: {}", version_text());
 
     // One resolver for every hostname the node looks up (CRD ch.45 R45.6B.8). The key is read and the resolver installed
     // before anything below opens a connection by name; an invalid value refuses the launch (R45.6B.2, R45.7.1).

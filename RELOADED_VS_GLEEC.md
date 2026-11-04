@@ -147,6 +147,12 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   the reference behavior. Nothing a counterparty observes changes, so the
   divergence is the default; the shared registry needs no change. See CRD ch.37
   R37.5.9e and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+- **EVM coins and tokens log the gas limits they will use.** At activation, one
+  INFO line names where each gas-limit block comes from (the coin's own entry,
+  its platform coin's entry or the defaults) and lists the members that differ
+  from the defaults, with the gas-estimate multiplier when one is set; a DEBUG
+  line lists every member. It is logging only: no request, response or
+  transaction changes, so no switch exists. See CRD ch.57 R57.5.5.
 
 ### Behavioural divergences without a compatibility switch
 
@@ -348,6 +354,49 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   Code: `common/dns_resolver.rs` (with `dns_resolver/wire.rs` and `hosts.rs`),
   `mm2_p2p/src/resolving_transport.rs`.
 
+- **An explicit `UtxoFixed` withdraw fee on an SLP token is charged per started
+  kilobyte, with no switch.** Since PR #226 a UTXO coin's `withdraw` with
+  `fee: {"type":"UtxoFixed","amount":"<n>"}` pays `<n>` as a rate per 1,000 bytes, in
+  proportion to the size and rounded down, exactly like `UtxoPerKbyte`, as the
+  reference (Komodo DeFi Framework 2.6.0-beta and GLEEC KDF 3.0.0-beta) does. A
+  `withdraw` of an SLP token on BCH still pays `<n>` for every started kilobyte; how
+  the reference charges it there is not established. No other node sees the
+  difference, because a withdrawal is the node's own transaction. See
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
+  [CRD ch.38 R38.6.6l](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md).
+  Contract: [CRD ch.38 R38.6.6l](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md).
+
+- **Reloaded never writes a cancelled order's stored record back, with no switch.**
+  On the reference, an order update or the node's own match-pruning step that runs
+  into a concurrent cancel can write the cancelled order's stored record back. The
+  order then returns as a live order at the next start and is announced to other
+  nodes again. Reloaded never writes the record of an order once it has been removed.
+  On the reference, an order whose record could not be deleted at cancel time comes
+  back after a restart, because the failed deletion is logged and not retried.
+  Reloaded retries the deletion and, at start, skips and deletes a record whose
+  removal the order history already records (switch `maker_restore_skips_cancelled`,
+  CRD ch.12 R7c); only an order without a history entry, such as one created with
+  `save_in_history: false`, can still come back. Contract:
+  [CRD ch.12 R7b, R7c](docs/reloaded-rewrite/12-order-match-state-store.md),
+  [ch.32 R-GH11](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md).
+
+- **Median-time-past of coins whose headers carry a fixed-length trailer.**
+  A coin whose Electrum servers serve the standard 80-byte header plus a
+  fixed-length trailer (Bitcoin Atom, 84 bytes from height 505888) has a
+  median-time-past list that no header layout reads, so its HTLC spend and
+  refund fail to build. GLEEC KDF reads such a list as consecutive 80-byte
+  records, so its median is a wrong value (black-box observation, SwapLab
+  2026-11-02, release 3.0.0-beta binary; for BCA 42 minutes early at the tip
+  observed). Reloaded, when the layout-aware reads fail, splits the list at the
+  even stride (odd count, byte count divisible by it, header size 80 to 4096) and
+  reads the time at byte 68 of each header, or else fetches the headers one by one,
+  and checks the times for plausibility; a read that cannot get plausible times
+  fails with an error naming the check, never a guess. No switch value reproduces
+  GLEEC KDF here, and `header_layout_fallback_families: []` now only turns off the
+  full-layout fallback of RIC and MEWC, not this read. Nothing a counterparty
+  observes changes. See CRD ch.37 R37.5.10 and
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.
@@ -473,16 +522,18 @@ R46.2.4, ch.55 R55.4.6):
   project's divergence, and that alone is what the switch hands back to GLEEC
   KDF; the malformed `fork_id` above stays outside it under every setting.
 
-Twelve more behaviors, in the order book and its relaying, peer exchange, fee readings, Electrum
-and the shielded history, differ from GLEEC KDF by default, each with one top-level `MM2.json`
-switch. The value below gives the GLEEC-compatible behavior; the row of each switch in
+Fourteen more behaviors, in the order book and its relaying, peer exchange, fee readings and fee
+quotes, Electrum and the shielded history, differ from GLEEC KDF by default, each with one top-level
+`MM2.json` switch. The value below gives the GLEEC-compatible behavior; the row of each switch in
 [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the full detail:
 
 - `pre_trade_spend_check: false` — no pre-trade spend check.
 - `fee_estimate_cache_secs: 0`, with no per-coin value — no fee reading is reused between
   requests.
 - `electrum_spread_reads: false` — every read-only Electrum query goes to the highest-ranked
-  connected server first.
+  connected server first. The near factor `electrum_spread_near_factor` and the near offset
+  `electrum_spread_near_offset_ms`, which limit spreading to the servers with the shortest round
+  trip, then have no effect.
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
   listed instead of by a random draw.
 - `orderbook_sync_names_held_root: false` — a sync request names the root the maker advertised
@@ -492,6 +543,12 @@ switch. The value below gives the GLEEC-compatible behavior; the row of each swi
   answered at once.
 - `sync_request_retry_ms: 0` — a failed sync request of this node is not asked again before the
   maker's next keep-alive.
+- `sync_request_alternate_relay: false` — a failed or outdated sync answer is not followed by a
+  request to another relay before the maker's next keep-alive.
+- `cancel_final_window_secs: 120` — a received cancel keeps the order out for 120 seconds only, so
+  a relay that missed the cancel can bring the order back after that.
+- `maker_restore_skips_cancelled: false` — at start every stored active order is restored,
+  including one whose record outlived its cancel.
 - `relay_second_copy_priority_only: false` — a relay sends every message it forwards a second
   time, not only cancellations, swap negotiation and messages outside the order book.
 - `p2p_resolve_peer_hostnames: false` — a hostname a peer gives in its list of peer addresses is
@@ -501,8 +558,11 @@ switch. The value below gives the GLEEC-compatible behavior; the row of each swi
   mined.
 - `suppress_unchanged_order_updates: false` — every `update_maker_order` is broadcast, as the GPLv2
   baseline does; what GLEEC KDF does here is not established.
+- `evm_taker_fee_quote_at_limit: false` — the fee to send an EVM taker fee is quoted at the gas
+  estimate, as GLEEC KDF does and as KDF Reloaded did before this switch, instead of at the gas
+  limit the fee is sent with; both send it with that limit.
 
-A thirteenth switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
+A fourteenth switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
 every maker-order message is published at once, and `true` turns on the maker's rate control.
 
 `dns_resolver` has no GLEEC-compatible value: the default matches GLEEC KDF for seeds and

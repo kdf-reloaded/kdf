@@ -127,6 +127,17 @@ pub async fn get_relay_mesh(mut cmd_tx: AdexCmdTx) -> Vec<String> {
     rx.await.expect("Tx should be present")
 }
 
+/// The relays this node is connected to, as peer ID strings. An empty list when the command cannot be sent
+/// or the reply channel is dropped: no relay is known then, which is never an error for the caller.
+pub async fn get_connected_relays(mut cmd_tx: AdexCmdTx) -> Vec<String> {
+    let (result_tx, rx) = oneshot::channel();
+    let cmd = AdexBehaviourCmd::GetConnectedRelays { result_tx };
+    if cmd_tx.send(cmd).await.is_err() {
+        return Vec::new();
+    }
+    rx.await.unwrap_or_default()
+}
+
 #[derive(Debug)]
 pub struct AdexResponseChannel(ResponseChannel<PeerResponse>);
 
@@ -195,6 +206,10 @@ pub enum AdexBehaviourCmd {
         result_tx: oneshot::Sender<HashMap<String, Vec<String>>>,
     },
     GetRelayMesh {
+        result_tx: oneshot::Sender<Vec<String>>,
+    },
+    /// The relays this node is connected to (not only those in the mesh).
+    GetConnectedRelays {
         result_tx: oneshot::Sender<Vec<String>>,
     },
     /// Add a reserved peer to the peer exchange.
@@ -620,6 +635,18 @@ impl AtomicDexBehaviour {
                     .behaviour()
                     .gossipsub
                     .get_relay_mesh()
+                    .into_iter()
+                    .map(|peer| peer.to_string())
+                    .collect();
+                if result_tx.send(result).is_err() {
+                    error!("Result rx is dropped");
+                }
+            },
+            AdexBehaviourCmd::GetConnectedRelays { result_tx } => {
+                let result = swarm
+                    .behaviour()
+                    .gossipsub
+                    .connected_relays()
                     .into_iter()
                     .map(|peer| peer.to_string())
                     .collect();

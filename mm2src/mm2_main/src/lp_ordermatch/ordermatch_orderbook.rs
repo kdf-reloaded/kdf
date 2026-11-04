@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 impl From<(new_protocol::MakerOrderCreated, String)> for OrderbookItem {
     fn from(tuple: (new_protocol::MakerOrderCreated, String)) -> OrderbookItem {
@@ -89,6 +90,9 @@ pub(crate) fn process_trie_delta(
     ops
 }
 
+/// The advertised root of each pair of a keep-alive-driven synchronization request.
+type AdvertisedRoots = HashMap<AlbOrderedOrderbookPair, H64>;
+
 pub(crate) async fn process_orders_keep_alive(
     ctx: MmArc,
     propagated_from_peer: String,
@@ -111,8 +115,9 @@ pub(crate) async fn process_orders_keep_alive(
 
     // `in_flight` ends the record of this request (CRD ch.32 R-Q5b) wherever the function ends: a
     // failed request, an early return or a dropped future all drop it. It lasts through the second
-    // request of R-Q5c as well.
-    let (req, in_flight) = match to_request {
+    // request of R-Q5c as well, and under trigger (a) of R-Q5d it moves to the task of the request to the
+    // other relay.
+    let (req, in_flight, advertised) = match to_request {
         Some(to_request) => to_request,
         // The message was processed, simply forward it
         None => return true,
@@ -123,6 +128,7 @@ pub(crate) async fn process_orders_keep_alive(
         // `keep_alive_sync_request` builds no other request.
         _ => return false,
     };
+    let alternate_relay = sync_request_alternate_relay(&ctx);
     let response = match request_sync_state(
         &ctx,
         &ordermatch_ctx,
@@ -134,31 +140,25 @@ pub(crate) async fn process_orders_keep_alive(
     .await
     {
         Some(response) => response,
-        None => return false,
+        None => {
+            // R-Q5d trigger (a). The result of the keep-alive's handling is not delayed (item 6).
+            if alternate_relay {
+                ordermatch_ctx.sync_log.alt(AltEvent::Failure, &from_pubkey, now_ms());
+                spawn(request_alternate_relay(AlternateRequest {
+                    ctx,
+                    pubkey: from_pubkey,
+                    forwarding_peer: propagated_from_peer,
+                    advertised,
+                    reason: AltReason::Failure,
+                    in_flight,
+                    deferral_ms,
+                }));
+            }
+            return false;
+        },
     };
 
-    // Phase 1: derive all index mutations under the Orderbook lock and enqueue their trie ops
-    // before releasing it (CRD ch.32 R-T3b item 1).
-    let queued_batches = {
-        let mut orderbook = ordermatch_ctx.orderbook.lock();
-        let mut ops = Vec::new();
-        for (pair, diff) in response.pair_orders_diff {
-            let params = ProcessTrieParams {
-                pubkey: &from_pubkey,
-                alb_pair: &pair,
-                protocol_infos: &response.protocol_infos,
-                conf_infos: &response.conf_infos,
-            };
-            let mut pair_ops = match diff {
-                DeltaOrFullTrie::Delta(delta) => process_trie_delta(&mut orderbook, delta, params),
-                DeltaOrFullTrie::FullTrie(values) => process_pubkey_full_trie(&mut orderbook, values, params),
-            };
-            ops.append(&mut pair_ops);
-        }
-        // Phase 2: the worker applies the batch in the background; queued under the guard.
-        orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
-        orderbook.trie_ops_enqueued
-    };
+    let queued_batches = apply_sync_answer(&ordermatch_ctx, &from_pubkey, response);
 
     // The request counts as in flight (CRD ch.32 R-Q5b) until the worker has applied the batch. The
     // forward below does not wait for that (R-F3b): the record ends on a task of its own.
@@ -166,7 +166,185 @@ pub(crate) async fn process_orders_keep_alive(
         in_flight.complete_after_apply(ordermatch_ctx.trie_store.clone(), queued_batches, deferral_ms);
     }
 
+    // R-Q5d trigger (b), on a task of its own.
+    if alternate_relay {
+        spawn(check_divergence_after_answer(
+            ctx,
+            from_pubkey,
+            propagated_from_peer,
+            advertised,
+            queued_batches,
+            deferral_ms,
+        ));
+    }
+
     true
+}
+
+/// Applies the answer to a synchronization request: derives all index mutations under the Orderbook lock
+/// and enqueues their trie ops before releasing it (CRD ch.32 R-T3b item 1; the worker applies the batch in
+/// the background, phase 2). Returns [`Orderbook::trie_ops_enqueued`] right after queueing. No root is
+/// checked against anything (R-GH4 item 3).
+fn apply_sync_answer(ordermatch_ctx: &OrdermatchContext, pubkey: &str, response: SyncPubkeyOrderbookStateRes) -> u64 {
+    let mut orderbook = ordermatch_ctx.orderbook.lock();
+    let mut ops = Vec::new();
+    for (pair, diff) in response.pair_orders_diff {
+        let params = ProcessTrieParams {
+            pubkey,
+            alb_pair: &pair,
+            protocol_infos: &response.protocol_infos,
+            conf_infos: &response.conf_infos,
+        };
+        let mut pair_ops = match diff {
+            DeltaOrFullTrie::Delta(delta) => process_trie_delta(&mut orderbook, delta, params),
+            DeltaOrFullTrie::FullTrie(values) => process_pubkey_full_trie(&mut orderbook, values, params),
+        };
+        ops.append(&mut pair_ops);
+    }
+    orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
+    orderbook.trie_ops_enqueued
+}
+
+/// The longest the divergence check of R-Q5d trigger (b) waits for the trie worker (R-T7).
+const ALTERNATE_WORKER_WAIT_MS: u64 = 5000;
+
+/// R-Q5d trigger (b): once the trie worker has applied the answer of the forwarding peer (`queued_batches`),
+/// the pairs of the request whose held root differs from the advertised one are asked from one other relay.
+/// If the worker is late (5 s), nothing follows.
+async fn check_divergence_after_answer(
+    ctx: MmArc,
+    pubkey: String,
+    forwarding_peer: String,
+    advertised: AdvertisedRoots,
+    queued_batches: u64,
+    deferral_ms: u64,
+) {
+    let ordermatch_ctx = match OrdermatchContext::from_ctx(&ctx) {
+        Ok(ordermatch_ctx) => ordermatch_ctx,
+        Err(e) => {
+            log::error!("Cannot check the root a synchronization answer reached: {}", e);
+            return;
+        },
+    };
+    if !wait_until_applied(&ordermatch_ctx.trie_store, queued_batches, ALTERNATE_WORKER_WAIT_MS).await {
+        ordermatch_ctx.sync_log.alt(AltEvent::WorkerLate, &pubkey, now_ms());
+        return;
+    }
+    let diverged: AdvertisedRoots = {
+        let trie_store = ordermatch_ctx.trie_store.lock();
+        advertised
+            .into_iter()
+            .filter(|(pair, advertised_root)| held_root(&trie_store, &pubkey, pair) != *advertised_root)
+            .collect()
+    };
+    if diverged.is_empty() {
+        return;
+    }
+    ordermatch_ctx.sync_log.alt(AltEvent::Mismatch, &pubkey, now_ms());
+    // No record of R-Q5b is taken for this request: the one for the answer of the forwarding peer has
+    // ended as it always does.
+    request_alternate_relay(AlternateRequest {
+        ctx,
+        pubkey,
+        forwarding_peer,
+        advertised: diverged,
+        reason: AltReason::Mismatch,
+        in_flight: None,
+        deferral_ms,
+    })
+    .await
+}
+
+/// The root this node holds for (`pubkey`, `pair`). A pair with no entry holds nothing, which is the
+/// all-zero root (CRD ch.32 R-Q4: the root of a pair never seen).
+fn held_root(trie_store: &TrieStore, pubkey: &str, pair: &str) -> H64 {
+    trie_store
+        .pubkeys_state
+        .get(pubkey)
+        .and_then(|state| state.trie_roots.get(pair))
+        .copied()
+        .unwrap_or_default()
+}
+
+/// One request to one other relay (CRD ch.32 R-Q5d).
+struct AlternateRequest {
+    ctx: MmArc,
+    pubkey: String,
+    /// The peer the keep-alive came through; never asked.
+    forwarding_peer: String,
+    /// The pairs to ask about, with the roots the keep-alive advertised for them.
+    advertised: AdvertisedRoots,
+    reason: AltReason,
+    /// The record of R-Q5b of the own request, under trigger (a); it ends as it would after a request to the
+    /// forwarding peer.
+    in_flight: Option<SyncInFlight>,
+    deferral_ms: u64,
+}
+
+/// Picks one of `relays` other than `forwarding_peer`, at random.
+fn pick_other_relay(relays: Vec<String>, forwarding_peer: &str) -> Option<String> {
+    use rand::seq::SliceRandom;
+    let others: Vec<String> = relays.into_iter().filter(|relay| relay != forwarding_peer).collect();
+    others.choose(&mut rand::thread_rng()).cloned()
+}
+
+/// R-Q5d items 2 to 4: sends one request naming the pairs of `request` to one other relay and applies its
+/// answer as any answer is. Nothing more follows, whatever the outcome.
+async fn request_alternate_relay(request: AlternateRequest) {
+    let AlternateRequest {
+        ctx,
+        pubkey,
+        forwarding_peer,
+        advertised,
+        reason,
+        in_flight,
+        deferral_ms,
+    } = request;
+    let ordermatch_ctx = match OrdermatchContext::from_ctx(&ctx) {
+        Ok(ordermatch_ctx) => ordermatch_ctx,
+        Err(e) => {
+            log::error!("Cannot ask another relay for a synchronization: {}", e);
+            return;
+        },
+    };
+    let relay = match pick_other_relay(connected_relays(&ctx).await, &forwarding_peer) {
+        Some(relay) => relay,
+        None => {
+            ordermatch_ctx.sync_log.alt(AltEvent::NoRelay, &pubkey, now_ms());
+            return;
+        },
+    };
+
+    // R-Q5d item 3: the root held when the request is built.
+    let named_roots = match SyncRequestRoot::configured(&ctx) {
+        SyncRequestRoot::Held => {
+            let trie_store = ordermatch_ctx.trie_store.lock();
+            advertised
+                .keys()
+                .map(|pair| (pair.clone(), held_root(&trie_store, &pubkey, pair)))
+                .collect()
+        },
+        SyncRequestRoot::Advertised => advertised,
+    };
+    ordermatch_ctx.sync_log.alt(AltEvent::Sent, &pubkey, now_ms());
+    let response = match ask_for_sync_state(
+        &ctx,
+        &ordermatch_ctx,
+        &pubkey,
+        named_roots,
+        &relay,
+        Attempt::Alternate(reason),
+    )
+    .await
+    {
+        Some(response) => response,
+        None => return,
+    };
+    let queued_batches = apply_sync_answer(&ordermatch_ctx, &pubkey, response);
+    ordermatch_ctx.sync_log.alt(AltEvent::Ok, &pubkey, now_ms());
+    if let Some(in_flight) = in_flight {
+        in_flight.complete_after_apply(ordermatch_ctx.trie_store.clone(), queued_batches, deferral_ms);
+    }
 }
 
 /// The keep-alive-driven request of CRD ch.32 R-Q4 to the forwarding `peer`, asked once more after a
@@ -181,7 +359,9 @@ async fn request_sync_state(
     deferral_ms: u64,
 ) -> Option<SyncPubkeyOrderbookStateRes> {
     let sent_ms = now_ms();
-    if let Some(response) = ask_for_sync_state(ctx, ordermatch_ctx, pubkey, trie_roots.clone(), peer, 1).await {
+    if let Some(response) =
+        ask_for_sync_state(ctx, ordermatch_ctx, pubkey, trie_roots.clone(), peer, Attempt::First).await
+    {
         return Some(response);
     }
 
@@ -198,20 +378,21 @@ async fn request_sync_state(
     if still_unsynchronized.is_empty() {
         return None;
     }
-    ask_for_sync_state(ctx, ordermatch_ctx, pubkey, still_unsynchronized, peer, 2).await
+    ask_for_sync_state(ctx, ordermatch_ctx, pubkey, still_unsynchronized, peer, Attempt::Second).await
 }
 
-/// One `SyncPubkeyOrderbookState` request for `trie_roots` of `pubkey` to `peer`; `attempt` is 1 for the
-/// request and 2 for the re-ask. Any outcome but an answer (an error, "no data", a timeout, a transport
+/// One `SyncPubkeyOrderbookState` request for `trie_roots` of `pubkey` to `peer`; `attempt` says which
+/// request of the keep-alive this is (the request, the re-ask of R-Q5c, or the request to one other relay of
+/// R-Q5d). Any outcome but an answer (an error, "no data", a timeout, a transport
 /// failure) is `None`. This is the only place where an own synchronization request is logged:
-/// the first request and the re-ask both pass here.
+/// every request passes here.
 async fn ask_for_sync_state(
     ctx: &MmArc,
     ordermatch_ctx: &OrdermatchContext,
     pubkey: &str,
     trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
     peer: &str,
-    attempt: u8,
+    attempt: Attempt,
 ) -> Option<SyncPubkeyOrderbookStateRes> {
     let pairs = if debug_enabled() {
         pairs_label(trie_roots.keys())
@@ -291,7 +472,7 @@ impl SyncRequestRoot {
 /// With `deferral_ms` above zero (CRD ch.32 R-Q5b) the request comes with the record that marks it as
 /// in flight. The record is made while the trie store is still locked, in the same step that creates
 /// the all-zero placeholder entries of the request, so no request for the placeholder can be seen
-/// without it.
+/// without it. The third part is the root the keep-alive advertised for each pair of the request.
 pub(crate) async fn keep_alive_sync_request(
     ordermatch_ctx: &OrdermatchContext,
     from_pubkey: &str,
@@ -300,7 +481,7 @@ pub(crate) async fn keep_alive_sync_request(
     request_root: SyncRequestRoot,
     catch_up_bound_ms: u64,
     deferral_ms: u64,
-) -> Option<(OrdermatchRequest, Option<SyncInFlight>)> {
+) -> Option<(OrdermatchRequest, Option<SyncInFlight>, AdvertisedRoots)> {
     // CRD ch.32 R-P3: the receiver's own clock, recorded before anything else.
     pubkey_state_mut(&mut ordermatch_ctx.trie_store.lock().pubkeys_state, from_pubkey).last_keep_alive =
         now_ms() / 1000;
@@ -321,6 +502,7 @@ pub(crate) async fn keep_alive_sync_request(
         subs.keys().cloned().collect()
     };
 
+    let advertised_roots = keep_alive.trie_roots.clone();
     let mut trie_store = ordermatch_ctx.trie_store.lock();
     let request = trie_store.prepare_sync_request_for_keep_alive(
         from_pubkey,
@@ -337,7 +519,16 @@ pub(crate) async fn keep_alive_sync_request(
         ),
         _ => None,
     };
-    Some((request, in_flight))
+    // The root the keep-alive advertised for each pair of the request (CRD ch.32 R-Q5d); the request itself
+    // may name the held root (R-Q4a).
+    let advertised = match &request {
+        OrdermatchRequest::SyncPubkeyOrderbookState { trie_roots, .. } => trie_roots
+            .keys()
+            .filter_map(|pair| advertised_roots.get(pair).map(|root| (pair.clone(), *root)))
+            .collect(),
+        _ => AdvertisedRoots::new(),
+    };
+    Some((request, in_flight, advertised))
 }
 
 pub(crate) fn process_maker_order_updated(
@@ -515,7 +706,7 @@ pub(crate) fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) {
         let mut orderbook = ordermatch_ctx.orderbook.lock();
 
         // Record this UUID so that a late-arriving create message won't resurrect the order.
-        orderbook.recently_cancelled.insert(uuid, pubkey.to_string());
+        orderbook.record_cancel(uuid, pubkey);
 
         if let Some(order) = orderbook.order_set.get(&uuid) {
             if order.pubkey == pubkey {
@@ -1958,8 +2149,73 @@ impl OrdermatchContext {
     }
 }
 
-/// How long to remember a cancelled order UUID to guard against out-of-order P2P messages.
+/// How long to remember a cancelled order UUID to guard against out-of-order P2P messages: the reference
+/// value (CRD ch.32 R-K1), which `Orderbook::default` uses. A node built from its configuration uses the
+/// final-cancel window of R-K1b instead ([`cancel_final_window_secs`]).
 const RECENTLY_CANCELLED_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// CRD ch.32 R-K1b item 1: default of the MM2.json integer `cancel_final_window_secs`.
+pub(crate) const DEFAULT_CANCEL_FINAL_WINDOW_SECS: u64 = 3600;
+/// R-K1b item 1: the smallest window, the 120 s of R-K1; a configured value below it is taken as this.
+pub(crate) const MIN_CANCEL_FINAL_WINDOW_SECS: u64 = 120;
+/// R-K1b item 1: the largest window; a configured value above it is taken as this.
+pub(crate) const MAX_CANCEL_FINAL_WINDOW_SECS: u64 = 86400;
+/// R-K1b item 4: default of the MM2.json integer `cancel_final_max_entries`.
+pub(crate) const DEFAULT_CANCEL_FINAL_MAX_ENTRIES: usize = 100_000;
+/// R-K1b item 4: the largest cap; a configured value above it is taken as this.
+pub(crate) const CEILING_CANCEL_FINAL_MAX_ENTRIES: usize = 1_000_000;
+
+/// R-K1b item 1: the final-cancel window, the top-level MM2.json integer `cancel_final_window_secs`, default
+/// `3600`. A value below `120` is taken as `120`, one above `86400` as `86400` (logged once per process); an
+/// absent or non-integer value means the default.
+pub(crate) fn cancel_final_window_secs(ctx: &MmArc) -> u64 {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let configured = match (
+        ctx.conf["cancel_final_window_secs"].as_u64(),
+        ctx.conf["cancel_final_window_secs"].as_i64(),
+    ) {
+        (Some(configured), _) => configured as i128,
+        // A negative integer: below the smallest window.
+        (None, Some(configured)) => configured as i128,
+        (None, None) => return DEFAULT_CANCEL_FINAL_WINDOW_SECS,
+    };
+    let used = configured.clamp(
+        MIN_CANCEL_FINAL_WINDOW_SECS as i128,
+        MAX_CANCEL_FINAL_WINDOW_SECS as i128,
+    ) as u64;
+    if configured != used as i128 && !WARNED.swap(true, AtomicOrdering::Relaxed) {
+        log::warn!(
+            "cancel_final_window_secs is {}, outside {}..={}: {} is used instead",
+            configured,
+            MIN_CANCEL_FINAL_WINDOW_SECS,
+            MAX_CANCEL_FINAL_WINDOW_SECS,
+            used
+        );
+    }
+    used
+}
+
+/// R-K1b item 4: the cap on the guard entries older than 120 s, the top-level MM2.json integer
+/// `cancel_final_max_entries`, default `100000`, at most `1000000` (a larger value is taken as that, logged
+/// once per process). An absent, non-integer or zero value means the default.
+pub(crate) fn cancel_final_max_entries(ctx: &MmArc) -> usize {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let configured = match ctx.conf["cancel_final_max_entries"].as_u64() {
+        Some(configured) if configured > 0 => configured,
+        _ => return DEFAULT_CANCEL_FINAL_MAX_ENTRIES,
+    };
+    if configured <= CEILING_CANCEL_FINAL_MAX_ENTRIES as u64 {
+        return configured as usize;
+    }
+    if !WARNED.swap(true, AtomicOrdering::Relaxed) {
+        log::warn!(
+            "cancel_final_max_entries is {}, above the ceiling: {} is used instead",
+            configured,
+            CEILING_CANCEL_FINAL_MAX_ENTRIES
+        );
+    }
+    CEILING_CANCEL_FINAL_MAX_ENTRIES
+}
 
 pub(crate) struct Orderbook {
     /// A map from (base, rel).
@@ -1971,9 +2227,14 @@ pub(crate) struct Orderbook {
     /// A map from (base, rel).
     pub(crate) unordered: HashMap<(String, String), HashSet<Uuid>>,
     pub(crate) order_set: HashMap<Uuid, OrderbookItem>,
-    /// Recently cancelled order UUIDs mapped to the cancelling pubkey.
-    /// Guards against re-creation when P2P cancel arrives before the create message.
-    pub(crate) recently_cancelled: TimeCache<Uuid, String>,
+    /// Recently cancelled orders, keyed by order UUID and cancelling pubkey (CRD ch.32 R-C5): a cancel
+    /// from another publisher neither creates nor refreshes the entry of the order's publisher.
+    /// Guards against re-creation when P2P cancel arrives before the create message. Its time-to-live is
+    /// the final-cancel window of CRD ch.32 R-K1b.
+    pub(crate) recently_cancelled: TimeCache<(Uuid, String), ()>,
+    /// R-K1b item 4: the number of entries of `recently_cancelled` older than [`RECENTLY_CANCELLED_TIMEOUT`]
+    /// that the guard keeps.
+    pub(crate) cancel_guard_max_entries: usize,
     /// Per-order P2P pubkeys owned by this node (e.g. ZHTLC random keypairs).
     /// Used by `is_my_order()` alongside the persistent secp256k1 pubkey.
     pub(crate) my_p2p_pubkeys: HashSet<String>,
@@ -1992,6 +2253,7 @@ impl Default for Orderbook {
             unordered: HashMap::default(),
             order_set: HashMap::default(),
             recently_cancelled: TimeCache::new(RECENTLY_CANCELLED_TIMEOUT),
+            cancel_guard_max_entries: DEFAULT_CANCEL_FINAL_MAX_ENTRIES,
             my_p2p_pubkeys: HashSet::default(),
             trie_ops_enqueued: 0,
         }
@@ -2001,6 +2263,37 @@ impl Default for Orderbook {
 pub(crate) fn hashed_null_node<T: TrieConfiguration>() -> TrieHash<T> { <T::Codec as NodeCodecT>::hashed_null_node() }
 
 impl Orderbook {
+    /// An order book whose cancellation guard keeps an entry for the final-cancel window and the older
+    /// entries within the cap, both read from the configuration (CRD ch.32 R-K1b items 1 and 4).
+    pub(crate) fn for_ctx(ctx: &MmArc) -> Orderbook {
+        Orderbook {
+            recently_cancelled: TimeCache::new(Duration::from_secs(cancel_final_window_secs(ctx))),
+            cancel_guard_max_entries: cancel_final_max_entries(ctx),
+            ..Default::default()
+        }
+    }
+
+    /// Records the cancel of `uuid` by `pubkey` in the guard (CRD ch.32 R-C5) and applies the cap.
+    pub(crate) fn record_cancel(&mut self, uuid: Uuid, pubkey: &str) {
+        self.recently_cancelled.insert((uuid, pubkey.to_string()), ());
+        self.enforce_cancel_guard_cap();
+    }
+
+    /// CRD ch.32 R-K1b item 4: drops the oldest guard entries while the guard holds more than
+    /// `cancel_guard_max_entries`, but stops at the first entry younger than the 120 s of R-K1, which is
+    /// never dropped for the cap. Each step removes the oldest entry; nothing else is scanned.
+    pub(crate) fn enforce_cancel_guard_cap(&mut self) {
+        while self.recently_cancelled.len() > self.cancel_guard_max_entries {
+            if self
+                .recently_cancelled
+                .pop_oldest_at_least(RECENTLY_CANCELLED_TIMEOUT)
+                .is_none()
+            {
+                break;
+            }
+        }
+    }
+
     /// Queue the trie events of an index mutation for the trie worker (CRD ch.32 R-T3b item 1).
     ///
     /// Takes `&mut self` so that it can only be called while the caller holds the orderbook guard
@@ -2031,11 +2324,15 @@ impl Orderbook {
     /// Index-only method: updates in-memory indices and returns the trie mutations
     /// that must be applied by TrieStore. No trie/memory_db mutation happens here.
     pub(crate) fn index_insert_or_update(&mut self, order: OrderbookItem) -> Vec<TrieOp> {
-        if self.recently_cancelled.get_unexpired(&order.uuid) == Some(&order.pubkey) {
+        if self
+            .recently_cancelled
+            .get_unexpired(&(order.uuid, order.pubkey.clone()))
+            .is_some()
+        {
             log::debug!(
                 "Ignoring a late copy of order {}: it was cancelled less than {} s ago",
                 order.uuid,
-                RECENTLY_CANCELLED_TIMEOUT.as_secs()
+                self.recently_cancelled.ttl().as_secs()
             );
             return Vec::new();
         }

@@ -913,6 +913,25 @@ R59.6.4, D2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta`
   the pair cleared on mismatch, clearing on an advertised zero root and a
   per-pair order on the sender's timestamp; the Reloaded candidates are
   listed under D12.
+- [x] *Done 2026-11-03 (ch. 32 R-Q5d, D12 item 1):* when a node's
+  keep-alive-driven synchronization request fails, timeout included, or the
+  answer leaves a pair out of step with the root the maker advertised, the
+  node asks one other connected relay once, for the pairs concerned, and
+  never empties a pair because of a mismatch; the reference asks only the
+  forwarding peer and waits for the next keep-alive. Wire-compatible; a
+  deliberate divergence with the opt-back switch
+  `sync_request_alternate_relay`.
+- [x] *Done 2026-11-03 (ch. 32 R-K1b, D12 item 2):* a cancel this node
+  received keeps the order out of every later order message and answer for
+  an hour by default; the reference re-admits it after 120 s. Memory is
+  bounded by the last 120 s of cancels plus at most
+  `cancel_final_max_entries` older ones. Wire-compatible; a deliberate
+  divergence with the opt-back switch `cancel_final_window_secs` (`120`).
+- [x] *Done 2026-11-03 (ch. 12 R7c):* at start, a maker does not restore an
+  order whose removal the order history already records, and it retries a
+  failed deletion of a removed order's record; the reference restores every
+  stored active record. A deliberate divergence with the opt-back switch
+  `maker_restore_skips_cancelled`.
 
 ---
 
