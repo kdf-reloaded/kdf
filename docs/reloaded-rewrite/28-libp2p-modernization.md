@@ -736,7 +736,8 @@ exactly two functions for this:
 MessagePack value received from a peer, it MUST check the value against
 two bounds:
 
-- arrays and maps nest at most 64 levels deep;
+- arrays and maps nest at most 64 levels deep. The outermost array or
+  map is level 1, and an empty array or map counts as a level;
 - every declared length and element count fits in the bytes that
   remain.
 
