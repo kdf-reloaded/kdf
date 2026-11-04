@@ -1793,7 +1793,7 @@ fn direct_withdraw_rejected_for_trezor_signer() {
         fee: None,
     };
     let err = block_on(coin.withdraw(req).compat()).unwrap_err();
-    assert!(matches!(err.into_inner(), WithdrawError::UnsupportedUnderTrezor(_)));
+    assert!(matches!(err.into_inner(), WithdrawError::UnsupportedError(_)));
 }
 
 /// R50.20: a TRON-family coin under the Trezor policy is rejected as unsupported
@@ -1803,7 +1803,7 @@ fn direct_withdraw_rejected_for_trezor_signer() {
 fn trezor_withdraw_rejects_tron_without_device() {
     let (_ctx, coin) = trezor_eth_coin_for_test(EthCoinType::Tron);
     let err = crate::eth::eth_trezor_withdraw::ensure_trezor_withdraw_supported(&coin).unwrap_err();
-    assert!(matches!(err.into_inner(), WithdrawError::UnsupportedUnderTrezor(_)));
+    assert!(matches!(err.into_inner(), WithdrawError::UnsupportedError(_)));
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]

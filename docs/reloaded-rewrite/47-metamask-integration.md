@@ -497,6 +497,14 @@ The activation-time rows carry a string `error_data` unless stated otherwise
 names are inherited from each operation's own error contract; this chapter
 binds only the **condition** and its HTTP status class, not new discriminants.
 
+> **Discriminant of the unsupported withdraw (this repository, 2026-11-04; not
+> corpus-sourced).** A withdraw refused as unsupported under the MetaMask
+> policy (the TRON family, R47.5.6a) answers the shared arm of chapter 49
+> R49.27a: `error_type` `UnsupportedError`, HTTP 400, a string `error_data`.
+> **Parity** since PR #XXX, with no switch. Before, Reloaded answered it with
+> its own discriminant `UnsupportedUnderMetamask` (historical; also HTTP 400,
+> with the same text).
+
 > **Reloaded status (informative).** Reloaded selects the MetaMask signer from
 > `priv_key_policy` alone and does not parse `rpc_mode`; the both-or-neither
 > rule of R47.5.1a is not enforced, and `rpc_mode: "Metamask"` on a native
@@ -950,3 +958,9 @@ must be revisited.
     little phrasing beyond the one it uses, and the forced-versus-free test
     resolved that phrasing as dictated or convergent rather than
     discretionary. No finding follows from it.
+- *Clean-side amendment (2026-11-04) -- the discriminant note on the
+  unsupported withdraw.* A session that never read the corpus added the note
+  on the shared `UnsupportedError` arm (PR #XXX). It rests on chapter 49
+  R49.27a, which passed the KDF Dirty Gate on 2026-11-04, and on this
+  repository's own code. It takes no forbidden-class input, so it does not
+  engage chapter 01 R38.

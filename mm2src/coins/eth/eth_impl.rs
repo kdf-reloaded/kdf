@@ -919,8 +919,10 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
         // defensive early rejection rather than a reachable runtime path.)
         #[cfg(target_arch = "wasm32")]
         if matches!(coin.signer, EthSigner::Metamask(_)) {
-            return MmError::err(WithdrawError::UnsupportedUnderMetamask(
-                "TRON withdraw is not supported under the MetaMask signing policy".to_owned(),
+            return MmError::err(WithdrawError::UnsupportedError(
+                "Unsupported under the MetaMask signing policy: TRON withdraw is not supported under the MetaMask \
+                 signing policy"
+                    .to_owned(),
             ));
         }
         let _ = ctx;
