@@ -913,6 +913,14 @@ R59.6.4, D2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta`
   the pair cleared on mismatch, clearing on an advertised zero root and a
   per-pair order on the sender's timestamp; the Reloaded candidates are
   listed under D12.
+- [x] *Done 2026-11-03 (ch. 32 R-Q5d, D12 item 1):* when a node's
+  keep-alive-driven synchronization request fails, timeout included, or the
+  answer leaves a pair out of step with the root the maker advertised, the
+  node asks one other connected relay once, for the pairs concerned, and
+  never empties a pair because of a mismatch; the reference asks only the
+  forwarding peer and waits for the next keep-alive. Wire-compatible; a
+  deliberate divergence with the opt-back switch
+  `sync_request_alternate_relay`.
 
 ---
 

@@ -57,6 +57,12 @@ it and, where one exists, the CRD rule, for readers who want more.
   with an error at once. The limits are the `MM2.json` settings `sync_answer_deferral_max_per_peer`
   and `sync_answer_deferral_max_total` (at most 64 and 8,192). Nothing on the wire changes. Detail:
   PR #205; CRD ch.32 R-Q5b.
+- **A node whose order-book sync from one relay fails, or brings back an outdated set, now asks one
+  other relay.** Before, it waited for the maker's next keep-alive, 30 seconds later, and a relay that
+  had missed a cancellation passed the cancelled order on to every node that asked it. The node now
+  asks one other relay it is connected to, once, for the pairs concerned, and never empties a pair
+  because the sets differ. To restore the old behavior, set `sync_request_alternate_relay` to
+  `false` in `MM2.json`. Detail: PRs #207, #208; CRD ch.32 R-Q5d.
 
 #### UTXO coins and Electrum
 
@@ -99,11 +105,11 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
   now names the gas limits each EVM coin and token will use and where they come from (PR #200);
   options (a) and (b) still wait on the reference maintainers' outcome.
-- [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes keep
-  showing after a lost cancellation; five work packages after the beta, the first being the higher
-  sync limits on relays above (PR #205). What two later packages waited for is now recorded: how a
-  cancelled order can come back on Komodo and GLEEC KDF, and that their makers advertise every
-  non-empty pair at every tick (PR #222).
+- [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes
+  keep showing after a lost cancellation; five work packages after the beta, the first two being the
+  higher sync limits on relays and the request to one other relay above (PRs #205, #207, #208). What
+  two later packages waited for is now recorded: how a cancelled order can come back on Komodo and
+  GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
   with its two switches and their defaults (PR #201), and implemented (PR #215); the SwapLab timing
@@ -161,8 +167,10 @@ lives.
   D9.
 - **Other nodes can keep showing a cancelled order for a while if its cancellation is lost on the
   way.** Such an order cannot be matched or traded, and it disappears once the maker posts again on
-  that pair or goes offline. More in [`ghost-orders`](docs/plans/ghost-orders.md). Detail: PR #188;
-  CRD ch.32 D12.
+  that pair or goes offline. While the maker still has other orders on that pair, a node whose copy
+  differs from the maker's now also asks one other relay, which removes the order if that relay
+  received the cancellation. More in [`ghost-orders`](docs/plans/ghost-orders.md). Detail:
+  PRs #188, #208; CRD ch.32 D12, R-Q5d.
 - **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes.** ARRR now uses a newer
   transaction format (v6, from the Ironwood upgrade) that no other KDF implementation can handle, so a
   swap with a Komodo or GLEEC counterparty cannot complete. A swap between two KDF Reloaded nodes has
