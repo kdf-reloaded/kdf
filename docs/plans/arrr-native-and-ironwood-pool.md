@@ -72,8 +72,8 @@ apart from a Reloaded one. The maintainer decided:
 
 | Part | What | CRD | State |
 |---|---|---|---|
-| Capability word | A generic word after a coin's first value in its protocol information, sent only by coins that opt in. The reader fails closed. The order-match layer carries the bytes unchanged and logs declines. | ch.59 §59.4A (R59.4A.1–R59.4A.7, T13) | CRD drafted; gate-pending |
-| ARRR requirement | ARRR sends `tx_v6` always. Inside the Ironwood window it declines a counterparty without it, on the taker and the maker path, with the per-coin switch `require_v6_counterparty` (default on). One debug line per decline, and at most one warning per coin per hour with the count. | ch.39 R39.6.4f, T39.6.4f | CRD drafted; gate-pending |
+| Capability word | A generic word after a coin's first value in its protocol information, sent only by coins that opt in. The reader fails closed. The order-match layer carries the bytes unchanged and logs declines. | ch.59 §59.4A (R59.4A.1–R59.4A.7, T14) | CRD PR #227 |
+| ARRR requirement | ARRR sends `tx_v6` always. Inside the Ironwood window it declines a counterparty without it, on the taker and the maker path, with the per-coin switch `require_v6_counterparty` (default on). One debug line per decline, and at most one warning per coin per hour with the count. | ch.39 R39.6.4f, T39.6.4f | CRD PR #230 |
 | ARRR predicate code | The shielded coin's protocol information and acceptance check, the switch, and the logs. Stacked on the capability-word code. | — | after the CRD |
 
 ## Open questions

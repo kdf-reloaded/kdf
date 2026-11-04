@@ -260,8 +260,8 @@ every update is then broadcast.
 ## 59.4A Capability words in coin protocol information
 
 *Reloaded-original (2026-11-04, Decisions BM and BO); no forbidden-class
-input. The compatibility note marked gate-pending waits for a Spec Reader
-answer and its Dirty Gate pass; until then it states no reference fact.*
+input. The compatibility note relies only on the reference facts of R59.4.7
+and Chapter 39 R39.5.14, which passed the KDF Dirty Gate.*
 
 Every order and both negotiation messages that R59.3.2 and R59.4.3 check
 carry each coin's **protocol information**:
@@ -272,7 +272,9 @@ carry each coin's **protocol information**:
 - `MakerReserved`.
 
 The order-match layer treats these bytes as opaque: the coin produces
-them, and the coin judges the counterparty's. This section binds one
+them, and the coin judges the counterparty's. What each coin family
+publishes today, and how a counterparty's value is judged, is bound in
+R59.4.7. This section binds one
 generic extension of the bytes, the **capability word**. Through it a
 coin can declare a capability that its counterparty must have before a
 swap starts. The first coin to use it is the shielded coin of
@@ -335,7 +337,7 @@ coin. The keys in use:
 
 | Key | Coin family | Meaning | Required by |
 | --- | --- | --- | --- |
-| `tx_v6` | shielded coin (Chapter 39) | This node builds and spends the version-6 transaction format of the Ironwood upgrade. | Chapter 39 R39.6.4f (gate-pending) |
+| `tx_v6` | shielded coin (Chapter 39) | This node builds and spends the version-6 transaction format of the Ironwood upgrade. | Chapter 39 R39.6.4f |
 
 **R59.4A.5** *Who decides.* The order-match layer shall carry the
 protocol information unchanged in all three messages and in the side
@@ -381,14 +383,19 @@ requirement's, which belongs to the coin (Chapter 39). The word is
 visible to every reader of the order book, like the rest of an order.
 While only Reloaded sends it, it also marks a node as Reloaded.
 
-> **Compatibility (gate-pending).** How the reference release rows treat
-> protocol information that holds a capability word after the first value
-> is recorded here once a Spec Reader answer on it has passed the Dirty
-> Gate. They may read the first value and ignore the rest, or decline
-> bytes they cannot decode whole. The safety of R59.4A.5 does not depend
-> on the answer. A node that requires a capability declines a
-> counterparty without it in both directions, before any swap starts,
-> whatever the counterparty does with our bytes.
+> **Compatibility.** At the reference release rows a counterparty judges
+> a coin's protocol information by its first value alone (R59.4.7 item 2,
+> Chapter 39 R39.5.14). A Komodo DeFi Framework 2.6.0-beta or GLEEC KDF
+> 3.0.0-beta node therefore accepts a value that carries a capability word
+> and matches as before. It never sends a word itself, and it shows the
+> order under the right address. Because the reference refuses a value that
+> does not begin with a decodable first value, the word must follow the
+> first value and never precede or replace it (R59.4A.1). The protection
+> therefore rests on the Reloaded side alone: a node that requires a
+> capability declines a counterparty without it in both roles, before any
+> swap starts (R59.4A.5). A reference taker sees a Reloaded maker's decline
+> only as a request that times out, as with any refusal at the reference
+> (R59.4.7 item 4).
 
 ## 59.5 Bound peer-penalty contract
 
@@ -723,7 +730,7 @@ not hold leaves P's liveness instant unchanged. With `order_messages_refresh_liv
 `false`, P is evicted 90 s after its last keep-alive although its updates keep
 arriving.
 
-**T13.** *Capability words (§59.4A).*
+**T14.** *Capability words (§59.4A).*
 
 - (a) *Writer.* For the set {`tx_v6`} the word is the one-entry map
   `"tx_v6"` → `true`, as fixed bytes. With two keys they are in
@@ -1125,7 +1132,7 @@ its gating is not.*
   2026-11-01). The sentences state no reference fact beyond those bound in
   chapter 32.
 - *Reloaded-original addition (2026-11-04, Decisions BM and BO): §59.4A
-  (R59.4A.1–R59.4A.7), T13 and D5.* The capability word in coin protocol
+  (R59.4A.1–R59.4A.7), T14 and D5.* The capability word in coin protocol
   information, read by the coin's acceptance check, with no switch on the
   sending side. *Inputs:*
   - this repository's own order-match messages, protocol-information
@@ -1134,7 +1141,7 @@ its gating is not.*
     for how values are skipped and decoded;
   - the maintainer's decisions.
 
-  The forbidden corpus was not consulted. The compatibility note marked
-  gate-pending will state a reference fact only after the Spec Reader
-  answer it waits for has passed the Dirty Gate, and states none until
-  then.
+  The forbidden corpus was not consulted for this item. Its compatibility
+  note states no reference fact beyond R59.4.7 and chapter 39 R39.5.14,
+  which the KDF Spec Reader established and which passed the KDF Dirty Gate
+  (batch 0.4.0-2, 2026-11-04). It needs no Dirty Gate pass of its own.
