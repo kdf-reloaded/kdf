@@ -1630,16 +1630,24 @@ impl EthCoin {
                 )))
             },
         };
+        let gas_limit = gas_limit.unwrap_or_else(|| self.gas_limit.clone());
+        let gas_limit_v2 = gas_limit_v2.unwrap_or_else(|| self.gas_limit_v2.clone());
+        // CRD R57.5.5: the gas limits in effect, once the blocks have been accepted. A block the token lacks is
+        // the platform coin's effective one, so its source is named from the platform coin's entry.
+        log_gas_limits(
+            &ticker,
+            &[&conf, &crate::coin_conf(&ctx, &self.ticker)],
+            &gas_limit,
+            &gas_limit_v2,
+            estimate_gas_mult,
+        );
         Ok(self.erc20_token_from_decimals(
             ticker,
             token_addr,
             required_confirmations,
             decimals,
             custom_token,
-            (
-                gas_limit.unwrap_or_else(|| self.gas_limit.clone()),
-                gas_limit_v2.unwrap_or_else(|| self.gas_limit_v2.clone()),
-            ),
+            (gas_limit, gas_limit_v2),
             estimate_gas_mult,
         ))
     }
@@ -1681,6 +1689,7 @@ impl EthCoin {
             gas_limit,
             gas_limit_v2,
             estimate_gas_mult,
+            taker_fee_quote_at_limit: self.taker_fee_quote_at_limit,
             tron_api: None,
             nft_swap_v2_contract: self.nft_swap_v2_contract,
             swap_gas_fee_policy: Mutex::new(self.swap_gas_fee_policy()),

@@ -48,6 +48,12 @@
    `tron-swap-support` carries a note.
 8. **QRC20 rule placement:** it stays in ch. 57 R57.7A.6, with a pointer from
    ch. 38 R38.6.6g (ch. 57 D8).
+9. **Explicit `UtxoFixed` withdraw fee: parity** (Decision 27, 2026-11-03).
+   A UTXO withdraw applies the descriptor exactly like `UtxoPerKbyte`
+   (ch. 38 R38.6.6l item 2). The SLP token withdraw keeps the
+   per-started-kilobyte meaning until the Spec Reader establishes how the
+   reference charges it there (orchestrator's scope call, consistent with
+   this decision).
 
 > **Beta availability (2026-10-26).** By maintainer decision three families
 > take part in no trade in the coming beta: Solana
@@ -80,6 +86,15 @@
   explicit `UtxoFixed` withdraw fee keeps its per-started-kilobyte meaning,
   since no chapter covers it. Swaplab live tests are pending a dedicated
   swaplab session.
+  *Fact (KDF Spec Reader, 2026-11-03; CRD chapter 38 R38.6.6l, Dirty Gate
+  PASS 2026-11-03):* a chapter now covers it. At both reference designations an
+  explicit `UtxoFixed` withdraw fee is applied as a proportional, truncated
+  rate per 1,000 bytes, exactly like `UtxoPerKbyte`; the per-started-kilobyte
+  meaning is the baseline anchor's. Whether this step adopts the reference
+  arithmetic is the maintainer's decision.
+  *Done for UTXO coins (PR #226, decision 9):* the explicit `UtxoFixed` fee is
+  now proportional and truncated on every UTXO withdraw; only the SLP token
+  withdraw keeps the per-started-kilobyte meaning.
 - 3: spend safety merged in PR #73 (2026-10-25): R60.6.4 and R60.6.7 with
   the switch `pre_trade_spend_check`. The Sia miner fee turned out to be
   0.00002 SC, not 0.02 SC as the chapter first said; the chapter is

@@ -27,6 +27,7 @@ mod bchd_grpc;
 #[path = "utxo/pb.rs"]
 mod bchd_pb;
 pub mod header_layout_fallback;
+mod header_time_only;
 pub mod qtum;
 pub mod rpc_clients;
 pub mod slp;
@@ -685,6 +686,9 @@ pub struct UtxoCoinConf {
     /// Set once the fallback has picked a layout for this coin, so the suggestion to pin it with
     /// `header_layout` is logged once per activation.
     pub header_layout_fallback_logged: Arc<AtomicBool>,
+    /// Set once a median-time-past list of this coin was read by size (CRD ch.37 R37.5.10e), so the
+    /// info line is logged once per activation.
+    pub header_time_only_logged: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
