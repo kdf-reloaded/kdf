@@ -163,6 +163,32 @@ R6a. **The two transaction-hash fields carry hashes, and the
 > since a test that only round-trips the payload through the
 > project's own code cannot see the difference.
 
+R6b. **What the fields carry, per coin family (reference contract).**
+     *(Passed the KDF Dirty Gate on 2026-11-04, measure 0.05; Spec Reader 2026-11-04, rows
+     `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at
+     both.)* The taker-fee and taker-payment fields of R6 each carry the
+     transaction's **32-byte identifier in the orientation the coin's
+     own node and Electrum interfaces accept for a lookup**: for a
+     UTXO-family coin the displayed transaction id -- the double-SHA256
+     of the serialized transaction in **reversed** byte order, the same
+     bytes a raw-transaction lookup takes; for an EVM coin the Keccak
+     transaction hash in its natural order. The taker-payment field is
+     therefore 32 bytes too, though only the fee field is length-checked
+     (R6a). The two preimages (§9.5) are: for a UTXO-family coin,
+     complete **signed** transactions spending the respective payment
+     output to the taker's own address, the fee taken from the coin's
+     HTLC-spend estimate at the watcher-preimage stage, the lock time
+     set to the payment's lock time, and the input sequence final for
+     the spend and final minus one for the refund; for an EVM coin, the
+     **payment transaction itself** re-encoded -- the watcher builds the
+     contract spend or refund call on its own, and the "preimage" only
+     identifies the payment; for every other family the trait default,
+     which yields no preimage and so no watcher message (R16, R17). The
+     maker public key in the payload is the maker's per-coin HTLC key of
+     chapter 51 R63, and the payload is signed by the taker's
+     **taker-coin HTLC key** of that swap -- the key a watcher verifies
+     the fee transaction's inputs against (R10b).
+
 R7. **Public-key formats.** The maker's published public key
     on the canonical taker payload shape shall be the
     public-key format the underlying coin's swap script
@@ -257,6 +283,26 @@ R10a. **No watcher assists a no-fee swap.** A taker whose
         length-checked field rather than an accident.
         Recorded as D5.
 
+R10b. **What the watcher's fee validation checks (reference contract).**
+      *(Passed the KDF Dirty Gate on 2026-11-04, measure 0.05; Spec Reader 2026-11-04, rows
+      `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical
+      at both.)* For a UTXO-family coin the Validate-taker-fee state
+      fetches the fee transaction by the payload's fee identifier
+      (retrying a fetch failure a few times, ten seconds apart, before
+      failing the state) and requires all of: every input is signed by
+      the key that signed the watcher payload; the transaction was not
+      confirmed before the swap's taker-coin start block; its lock time
+      is not older than the swap's lock duration; and the output at the
+      **standard fee position** pays the coin's DEX-fee address script.
+      It checks **no amount** and inspects no other output, so the burn
+      output of a burn-form fee (chapter 8) is neither required nor
+      examined, and a fee transaction that pays the right script with
+      any amount passes. For an EVM coin the state reuses the swap's own
+      fee validation with the payload's signer as the expected sender
+      and a zero expected amount, so again the sender and the fee
+      contract's recipient are checked and the amount effectively is
+      not. A no-fee taker (R10a) never reaches this state.
+
 R11. **Compile-time legal transitions.** The set of legal
      transitions shall be fixed at compile time per the
      state-machine runtime's contract; no runtime-only
@@ -343,6 +389,24 @@ R17. **Siacoin is the eligible set today.** *(Amended
      > maintainer decided to withdraw the opt-in until the methods
      > exist (Decision BA); restoring it is part of D3.
 
+     > **Reference position (passed the KDF Dirty Gate on 2026-11-04, measure 0.05; Spec Reader
+     > 2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+     > §2.15A, identical at both).** The reference's UTXO-standard, QTUM
+     > and BCH families opt in **with** implementations of the taker-fee
+     > validation (R10b), the taker-payment validation, both preimage
+     > creators and both preimage senders; the UTXO-standard family's
+     > opt-in is further conditioned on the coin's key policy giving the
+     > node its private key (a single key or a software-HD key), so a
+     > hardware-wallet or external-signer coin opts out. The EVM family
+     > implements the same methods but its opt-in is held behind a
+     > build-environment flag and is off in released binaries. The
+     > shielded, Tendermint, **Sia** and SLP-token families opt out and
+     > carry the trait defaults -- so Reloaded's Sia opt-in above is
+     > Reloaded-original, not parity. A reference node with `is_watcher`
+     > set therefore does watch UTXO-family swaps, which answers the
+     > question the 2026-10-30 amendment left open: restoring the three
+     > families' opt-in (D3) is parity once their methods exist.
+
 R18. **`watcher_reward` field placeholder.** The codebase
      shall carry a `watcher_reward` boolean field on the
      V2-swap refund-argument structures. At the time of
@@ -372,6 +436,27 @@ R21. **Coin-activation-time subscription.** A node shall
      subscribe to a coin's watcher topic at coin-activation
      time, per R3.
 
+R22. **Node-level switches (reference contract).** *(Passed the KDF Dirty
+     Gate on 2026-11-04, measure 0.05; Spec Reader 2026-11-04, rows `v2.6.0-beta` and
+     `v3.0.0-beta` of chapter 02 §2.15A, identical at both.)* Two
+     top-level `MM2.json` booleans govern the substrate on a node:
+     `is_watcher` (default `false`) makes the node **act** as a watcher
+     -- it subscribes to each enabled coin's watcher topic (R21) and
+     runs a state machine per accepted payload (R19) -- and
+     `use_watchers` (default `true`) makes the node, as a **taker**,
+     publish watcher payloads at all; with it `false` the taker builds
+     no preimage and publishes nothing. The two are independent, and a
+     coin pair additionally needs both coins' opt-in (R16).
+
+R23. **A relay's handling of the two swap-helper topics (reference
+     contract).** *(Passed the KDF Dirty Gate on 2026-11-04, measure 0.05; same provenance as R22.)*
+     A node that receives a watcher-topic message processes it only when
+     `is_watcher` is set, and **propagates it onward if it is a relay in
+     every case**, processed or not. The transaction-helper topic of
+     chapter 51 R50B is handled differently, and its reference
+     behavior -- including a finding that makes it inert there -- is
+     recorded under that rule.
+
 ## 9.11 Tests
 
 T1. **Topic-shape test.** The substrate shall include a
@@ -388,6 +473,19 @@ T3. **State-machine transition table coverage.** Each
     legal transition listed in §9.6 shall have at least
     one unit test that exercises it; each illegal
     transition shall be a compile-time error per R11.
+
+T4. **Field contents (R6b).** A taker's published payload for a
+    UTXO-family swap shall carry, in the fee and payment fields, the
+    32-byte displayed transaction ids of the fee and payment
+    transactions (reversed hash order), and its two preimages shall
+    deserialize as signed transactions whose single output pays the
+    taker's own address.
+
+T5. **Switches (R22, R23).** With `use_watchers: false` a taker shall
+    publish no watcher payload; with `is_watcher` absent a node shall
+    neither subscribe to a watcher topic nor start a state machine, and
+    a relay shall still forward a watcher-topic message it does not
+    process.
 
 ## 9.12 Deferred Work
 
@@ -678,3 +776,30 @@ V3. The publish-subscribe overlay the substrate rides on is
   used, the amendment makes no parity claim, and it needs no
   Dirty Gate pass. Whether a reference node watches swaps of
   these families is open and queued for a Spec Reader pass.
+- *Scoped addition (2026-11-04) -- R6b, R10b, R22, R23, T4, T5 and the
+  reference-position note under R17.* **KDF Dirty Gate: PASS on 2026-11-04, measure 0.05.** Prompted
+  by the watcher questions of the 0.4.0 cycle, including the one the
+  2026-10-30 amendment queued. *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish: the orientation and width of the two
+  transaction-identifier fields and what each coin family's two preimages
+  are; which key signs the payload; what the fee validation of the first
+  watcher state checks and does not check, for the UTXO and EVM families;
+  which families opt in at the reference and under which key-policy
+  condition; the two node-level configuration booleans and their defaults;
+  and a relay's processing and propagation of watcher-topic messages. What
+  crosses is behavior, dictated configuration keys (`is_watcher`,
+  `use_watchers`) and wire-observable field properties; no private
+  identifier, function body, helper decomposition, error, log or comment text
+  was reproduced. The T-items are Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.05, no findings. *Extent:* the watcher substrate's payload contents, fee
+  validation, family opt-in, node switches and relay handling, at
+  `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole batch, 30
+  source files and one dependency manifest were read at `v3.0.0-beta`, 29 of
+  them checked by hash against the tagged states of both rows. *Method:* side-
+  by-side reading of the compared regions against every added or changed line,
+  plus that hash check; the gate script was not run because the candidate has
+  no code blocks. *Measure:* 0.05, read against the standard that any
+  discretionary finding fails a file; dictated-interop and public-surface
+  tokens were excluded from the measured set.
