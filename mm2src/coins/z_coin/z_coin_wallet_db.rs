@@ -7379,7 +7379,7 @@ mod lightwalletd_dns_tests {
 
     #[test]
     fn the_server_name_is_resolved_through_the_installed_resolver() {
-        let _guard = install_test_map(&[("lwd.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)])]);
+        let guard = install_test_map(&[("lwd.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)])]);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -7398,6 +7398,9 @@ mod lightwalletd_dns_tests {
             let reached = tokio::time::timeout(Duration::from_secs(3), accepted).await;
             assert!(matches!(reached, Ok(Ok(Ok(_)))), "the listener was not reached");
         });
-        assert_eq!(gauges().unwrap().lookups, 1);
+        // The gauges are process-wide and tests that do not hold the test lock look up names beside this one: the name
+        // counts exactly, the gauge at least.
+        assert_eq!(guard.lookups_of("lwd.test"), 1);
+        assert!(gauges().unwrap().lookups >= 1);
     }
 }

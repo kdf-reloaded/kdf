@@ -681,9 +681,15 @@ async fn system_lookup(name: &str, port: u16, family: DnsFamily) -> io::Result<V
 enum Backend {
     System,
     Servers(Arc<ServerBackend>),
-    /// A fixed table, for tests ([`install_test_map`]). A name it does not list goes to the system lookup.
-    Map(HashMap<String, Vec<IpAddr>>),
+    /// A fixed table, for tests ([`install_test_map`]). A name it does not list goes to the system lookup. The second
+    /// field counts the lookups and the failures per name, so that a test asserts on its own names only.
+    Map(HashMap<String, Vec<IpAddr>>, Arc<TestNameCounts>),
 }
+
+/// The lookups and the failures of the test backend per name (see [`TestResolverGuard::lookups_of`]). The gauges are
+/// process-wide: a test that does not hold the test lock and looks up a name meanwhile moves them, and never moves
+/// the count of a name only the test with the lock uses.
+type TestNameCounts = Mutex<HashMap<String, (u64, u64)>>;
 
 /// The resolver one node start installed, with the counters of the gauges (R45.6B.10).
 struct Installed {
@@ -717,23 +723,26 @@ impl Installed {
         self.lookups.fetch_add(1, Ordering::Relaxed);
         let result = match &self.backend {
             Backend::System => system_lookup(name, port, family).await,
-            Backend::Map(table) => match table.get(&normalize(name)) {
-                Some(addresses) => {
-                    let found: Vec<SocketAddr> = addresses
-                        .iter()
-                        .filter(|address| family.admits(address))
-                        .map(|address| SocketAddr::new(*address, port))
-                        .collect();
-                    if found.is_empty() {
-                        Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            "the name has no address of the family asked for",
-                        ))
-                    } else {
-                        Ok(found)
-                    }
-                },
-                None => system_lookup(name, port, family).await,
+            Backend::Map(table, counts) => {
+                counts.lock().entry(normalize(name)).or_default().0 += 1;
+                match table.get(&normalize(name)) {
+                    Some(addresses) => {
+                        let found: Vec<SocketAddr> = addresses
+                            .iter()
+                            .filter(|address| family.admits(address))
+                            .map(|address| SocketAddr::new(*address, port))
+                            .collect();
+                        if found.is_empty() {
+                            Err(io::Error::new(
+                                io::ErrorKind::NotFound,
+                                "the name has no address of the family asked for",
+                            ))
+                        } else {
+                            Ok(found)
+                        }
+                    },
+                    None => system_lookup(name, port, family).await,
+                }
             },
             Backend::Servers(backend) => match backend.lookup(name, family).await {
                 Ok(found) => {
@@ -751,6 +760,9 @@ impl Installed {
         };
         if let Err(error) = &result {
             self.failures.fetch_add(1, Ordering::Relaxed);
+            if let Backend::Map(_, counts) = &self.backend {
+                counts.lock().entry(normalize(name)).or_default().1 += 1;
+            }
             self.warn_failure(name, error);
         }
         result
@@ -947,6 +959,27 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 #[doc(hidden)]
 pub struct TestResolverGuard {
     _lock: parking_lot::MutexGuard<'static, ()>,
+    /// The per-name counts of the installed test map, if one is installed through this guard.
+    counts: Option<Arc<TestNameCounts>>,
+}
+
+impl TestResolverGuard {
+    /// How many times the installed test map looked up `name` (an address literal makes no lookup). Unlike the
+    /// process-wide gauges, it is not moved by tests that do not hold the test lock, unless they look up the same name.
+    pub fn lookups_of(&self, name: &str) -> u64 {
+        self.counts
+            .as_ref()
+            .and_then(|counts| counts.lock().get(&normalize(name)).map(|count| count.0))
+            .unwrap_or(0)
+    }
+
+    /// How many of the lookups of `name` in the installed test map failed.
+    pub fn failures_of(&self, name: &str) -> u64 {
+        self.counts
+            .as_ref()
+            .and_then(|counts| counts.lock().get(&normalize(name)).map(|count| count.1))
+            .unwrap_or(0)
+    }
 }
 
 fn reset_state() {
@@ -964,23 +997,27 @@ impl Drop for TestResolverGuard {
 pub fn lock_resolver_for_test() -> TestResolverGuard {
     let guard = TestResolverGuard {
         _lock: TEST_LOCK.lock(),
+        counts: None,
     };
     reset_state();
     guard
 }
 
 /// Takes the test lock and installs a test backend that maps the listed names to the listed addresses. A name it does
-/// not list goes to the system lookup. The lookups are counted in the gauges like those of a real mode.
+/// not list goes to the system lookup. The lookups are counted in the gauges like those of a real mode, and per name in the
+/// returned guard ([`TestResolverGuard::lookups_of`]).
 #[doc(hidden)]
 pub fn install_test_map(entries: &[(&str, &[IpAddr])]) -> TestResolverGuard {
-    let guard = lock_resolver_for_test();
+    let mut guard = lock_resolver_for_test();
+    let counts = Arc::new(TestNameCounts::default());
+    guard.counts = Some(counts.clone());
     let table = entries
         .iter()
         .map(|(name, addresses)| (normalize(name), addresses.to_vec()))
         .collect();
     publish(Installed::new(
         DnsMode::System,
-        Backend::Map(table),
+        Backend::Map(table, counts),
         &Options::default(),
     ));
     guard

@@ -246,7 +246,7 @@ mod tests {
     fn a_dns4_dial_reaches_the_address_the_name_resolves_to() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let _guard = install_test_map(&[("seed.test", &[loopback(1)])]);
+        let guard = install_test_map(&[("seed.test", &[loopback(1)])]);
         let rt = runtime();
         let mut transport = ResolvingTransport::new(tcp_transport());
         let stream = dial(&rt, &mut transport, &format!("/dns4/seed.test/tcp/{}", port)).unwrap();
@@ -254,7 +254,10 @@ mod tests {
         drop(accepted);
         assert_eq!(from.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         drop(stream);
-        assert_eq!(common::dns_resolver::gauges().unwrap().lookups, 1);
+        // The gauges are process-wide and tests that do not hold the test lock may look up names beside this one: the
+        // name counts exactly, the gauge at least.
+        assert_eq!(guard.lookups_of("seed.test"), 1);
+        assert!(common::dns_resolver::gauges().unwrap().lookups >= 1);
     }
 
     #[test]
@@ -329,12 +332,13 @@ mod tests {
     fn an_address_without_a_name_is_dialed_as_it_is_and_makes_no_lookup() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let _guard = install_test_map(&[]);
+        let guard = install_test_map(&[]);
         let rt = runtime();
         let mut transport = ResolvingTransport::new(tcp_transport());
         dial(&rt, &mut transport, &format!("/ip4/127.0.0.1/tcp/{}", port)).unwrap();
         listener.accept().unwrap();
-        assert_eq!(common::dns_resolver::gauges().unwrap().lookups, 0);
+        // The gauge is process-wide, so it is not asserted exactly here; the address counts as no lookup of its own.
+        assert_eq!(guard.lookups_of("127.0.0.1"), 0);
     }
 
     // The certificate and the key are the throwaway ones of the vendored WebSocket crate's handshake tests: a
@@ -415,11 +419,12 @@ mod tests {
 
     #[test]
     fn a_wss_dial_to_a_hostname_checks_the_certificate_against_that_hostname() {
-        let _guard = install_test_map(&[("localhost", &[loopback(1)])]);
+        let guard = install_test_map(&[("localhost", &[loopback(1)])]);
         let (server, client) = wss_dial("localhost");
         server.unwrap();
         client.unwrap();
-        assert_eq!(common::dns_resolver::gauges().unwrap().lookups, 1);
+        assert_eq!(guard.lookups_of("localhost"), 1);
+        assert!(common::dns_resolver::gauges().unwrap().lookups >= 1);
     }
 
     #[test]

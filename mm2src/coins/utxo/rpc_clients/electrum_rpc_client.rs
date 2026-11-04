@@ -2181,7 +2181,7 @@ mod tls_tests {
 
     #[test]
     fn a_tcp_server_name_is_resolved_through_the_installed_resolver() {
-        let _guard = install_test_map(&[("electrum.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)])]);
+        let guard = install_test_map(&[("electrum.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)])]);
         run(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let port = listener.local_addr().unwrap().port();
@@ -2197,13 +2197,16 @@ mod tls_tests {
                 .expect("the loopback server accepted the connection");
             drop(session);
         });
-        assert_eq!(gauges().unwrap().lookups, 1);
+        // The gauges are process-wide and the tests that do not hold the test lock look up names beside this one: the
+        // name counts exactly, the gauge at least.
+        assert_eq!(guard.lookups_of("electrum.test"), 1);
+        assert!(gauges().unwrap().lookups >= 1);
     }
 
     #[test]
     fn a_failed_lookup_is_a_recoverable_establishment_failure_that_names_no_server() {
         // The test resolver knows the name and has no address for it.
-        let _guard = install_test_map(&[("empty.test", &[])]);
+        let guard = install_test_map(&[("empty.test", &[])]);
         run(async {
             let spec = spec_of("empty.test:50001".to_owned(), ElectrumProtocol::TCP);
             let (on_end, on_header) = no_op_callbacks();
@@ -2214,12 +2217,13 @@ mod tls_tests {
             assert!(!error.is_empty());
             assert!(!error.contains("empty.test"), "the error names no server: {}", error);
         });
-        assert_eq!(gauges().unwrap().failures, 1);
+        assert_eq!(guard.failures_of("empty.test"), 1);
+        assert!(gauges().unwrap().failures >= 1);
     }
 
     #[test]
     fn a_tls_server_is_checked_against_its_name_and_not_its_address() {
-        let _guard = install_test_map(&[
+        let guard = install_test_map(&[
             ("electrum.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)]),
             ("other.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)]),
         ]);
@@ -2261,7 +2265,9 @@ mod tls_tests {
                 "the certificate check must use the name, not the address"
             );
         });
-        assert_eq!(gauges().unwrap().lookups, 2);
+        assert_eq!(guard.lookups_of("electrum.test"), 1);
+        assert_eq!(guard.lookups_of("other.test"), 1);
+        assert!(gauges().unwrap().lookups >= 2);
     }
 }
 

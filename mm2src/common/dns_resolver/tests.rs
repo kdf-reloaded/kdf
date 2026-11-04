@@ -1163,3 +1163,27 @@ fn a_tcp_connection_tries_every_address_of_the_name_in_turn() {
     );
     assert_eq!(gauges().unwrap().lookups, 1);
 }
+
+#[test]
+fn the_test_map_counts_the_lookups_and_the_failures_per_name_and_in_the_gauges() {
+    // Every test of this crate that looks up a name holds the test lock, so the gauges are exact here. Tests of the
+    // other crates run beside tests that do not hold it, and assert on the per-name counts of their own names.
+    let guard = install_test_map(&[
+        ("listed.test", &[IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))]),
+        ("empty.test", &[]),
+    ]);
+    assert_eq!(guard.lookups_of("listed.test"), 0);
+    block_on(lookup("listed.test", 80, DnsFamily::Any)).unwrap();
+    block_on(lookup("Listed.Test", 80, DnsFamily::Any)).unwrap();
+    block_on(lookup("empty.test", 80, DnsFamily::Any)).unwrap_err();
+    // An address literal makes no lookup.
+    block_on(lookup("192.0.2.9", 80, DnsFamily::Any)).unwrap();
+    assert_eq!(guard.lookups_of("listed.test"), 2);
+    assert_eq!(guard.failures_of("listed.test"), 0);
+    assert_eq!(guard.lookups_of("empty.test"), 1);
+    assert_eq!(guard.failures_of("empty.test"), 1);
+    assert_eq!(guard.lookups_of("192.0.2.9"), 0);
+    assert_eq!(guard.lookups_of("unlisted.test"), 0);
+    let counted = gauges().unwrap();
+    assert_eq!((counted.lookups, counted.failures), (3, 1));
+}
