@@ -72,7 +72,7 @@ apart from a Reloaded one. The maintainer decided:
 
 | Part | What | CRD | State |
 |---|---|---|---|
-| Capability word | A generic word after a coin's first value in its protocol information, sent only by coins that opt in. The reader fails closed. The order-match layer carries the bytes unchanged and logs declines. | ch.59 §59.4A (R59.4A.1–R59.4A.7, T13) | CRD drafted; gate-pending |
+| Capability word | A generic word after a coin's first value in its protocol information, sent only by coins that opt in. The reader fails closed. The order-match layer carries the bytes unchanged and logs declines. | ch.59 §59.4A (R59.4A.1–R59.4A.7, T14) | CRD PR #227 |
 
 ## Open questions
 
