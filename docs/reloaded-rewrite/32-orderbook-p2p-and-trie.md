@@ -410,6 +410,13 @@ two opaque byte strings — one for the base coin, one for the rel
 coin. This is part of the sync-response wire contract
 (R29/R31).
 
+The order-book layer keeps these bytes opaque. A coin may append a
+capability word after its first value
+([Chapter 59](59-legacy-ordermatch-negotiation.md) §59.4A). A relay
+stores and forwards the word unchanged, like the rest of the bytes, and
+since protocol information is not part of the trie leaf (R-W3), the word
+changes no root. *(Reloaded-original, 2026-11-04.)*
+
 **R-W4.** The subsystem MUST support, behaviourally:
 
 - projecting an in-memory record down to the wire record;
@@ -4146,3 +4153,10 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   it rests on, that no path legitimately revives a cancelled identifier,
   is §32.9C.1 R-GH11, which passed the KDF Dirty Gate. No reference
   implementation was consulted, and it needs no Dirty Gate pass.
+- *Reloaded-original addition (2026-11-04) -- the paragraph after
+  §32.5.2 R-W2a.* It points to the capability word of chapter 59 §59.4A
+  and states that a relay carries the word unchanged and that the word
+  changes no root. Written by a context that never read the forbidden
+  corpus, from this repository's own order records, side channel and trie
+  leaf, and from Decision BM. It states no reference fact and needs no
+  Dirty Gate pass.
