@@ -284,15 +284,43 @@ expiry-tick hook (R14) when a TTL-bounded order is drained.
 
 ## 12.8 Bound Expiry-Tick Hook
 
-**R14.** At the start of each iteration of the existing order-matching
-periodic worker, before any other per-order work, the substrate MUST
-drain the container's expired entries under the non-async lock (releasing
-the lock before any awaited work) and route each drained order through
-the pre-existing maker-order cancellation pipeline tagged with the
-auto-expiry reason (R13). Routing through that pipeline preserves its
-established external effects: the P2P maker-order-cancelled broadcast,
-the maker-orders history append (tagged with the auto-expiry reason), and
-the removal of the on-disk active-order record.
+**R14.** *(Amended 2026-11-03 by the KDF Spec Reader from the rows
+`v2.6.0-beta` and `v3.0.0-beta` of [Chapter 02](02-baseline-state.md)
+§2.15A, identical at both; **passed the KDF Dirty Gate on 2026-11-03**,
+measure 0.03, see §12.14. The
+amendment replaces the first sentence's placement of the drain — "at the
+start of each iteration, before any other per-order work" — which did not
+describe the reference; the rest of the rule is unchanged.)* In each pass of
+the existing order-matching periodic worker, **after** the taker-order
+timeout step and the maker-match pruning step
+([Chapter 59](59-legacy-ordermatch-negotiation.md) R59.4.1, R59.4.4) and
+after the pass's own check that cancels a maker order whose available
+amount is below its minimum volume with no match in progress (with the
+insufficient-balance or the fulfilled reason), and **before** the eviction
+sweep of tracked public keys (ch. 59 R59.6.4) and the re-announcement of
+own orders missing from the read index (ch. 59 R59.6.7 item 2;
+[Chapter 60](60-trading-floors-and-refusal-contract.md) R60.4.6 item 5),
+the substrate MUST drain the container's expired entries under the
+non-async lock (releasing the lock before any awaited work) and route each
+drained order through the pre-existing maker-order cancellation pipeline
+tagged with the auto-expiry reason (R13). An order drained in a pass has
+therefore been through that pass's match pruning and balance check, and is
+never visited by that pass's eviction sweep or re-announcement. An order
+whose timeout runs out after the drain step stays in the container for the
+rest of that pass (the re-announcement scan visits it, and publishes only
+if it is missing from the read index) and is drained in the next pass.
+Routing through that pipeline preserves its
+established external effects: the P2P maker-order-cancelled broadcast, the
+maker-orders history append (tagged with the auto-expiry reason), and the
+removal of the on-disk active-order record.
+
+> **As-built (this repository, 2026-11-03; not corpus-sourced).** The
+> periodic worker of `lp_ordermatch/ordermatch_trading.rs` already runs its
+> pass in the order the amended R14 binds: taker-order timeout, maker-match
+> pruning, the balance-and-minimum check, the expiry drain
+> (`cancel_expired_maker_orders`), the eviction sweep and the
+> re-announcement of own orders missing from the read index. The
+> amendment corrects the text, not the code.
 
 **R15.** The substrate MUST NOT bypass the pre-existing cancellation
 pipeline for expired orders; an expired order MUST receive the same
@@ -465,3 +493,15 @@ auto-expiry reason (R13) is purely additive.
   code (the per-order lock sites of the order-matching layer and its
   storage functions). They are Reloaded-original and state no reference
   behavior, so chapter 01 R38 is not engaged.
+- *Spec Reader amendment (2026-11-03), R14's placement sentence:* the
+  position of the expiry drain within the periodic worker's pass was
+  re-derived from the rows `v2.6.0-beta` and `v3.0.0-beta` of
+  [Chapter 02](02-baseline-state.md) §2.15A, which agree. The corpus was
+  consulted **only** for the order of the pass's steps (taker-order
+  timeout, maker-match pruning, balance-and-minimum check, expiry drain,
+  tracked-pubkey eviction, re-announcement); only that order crosses into
+  the chapter, as behavior. **KDF Dirty Gate: PASS on 2026-11-03, measure
+  0.03** for this amendment; the rest of R14 and the chapter are unchanged.
+  The "Forbidden corpus: not consulted" line above holds for every other
+  part of this chapter. The as-built note after R14 rests on this
+  repository's own code only.

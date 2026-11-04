@@ -103,6 +103,10 @@ mod storage {
         // Canonical §7.7 record in the database root.
         let path = wallet_path(ctx, wallet_name).map_err(|e| format!("wallet dir error: {e}"))?;
         if path.exists() {
+            common::log::info!(
+                "Reading wallet record file: {}",
+                crate::mm2::absolute_path_for_log(&path)
+            );
             let bytes = mm2_io::fs::slurp(&path)?;
             let data: EncryptedMnemonicData =
                 serde_json::from_slice(&bytes).map_err(|e| format!("corrupt wallet file: {e}"))?;
@@ -112,6 +116,10 @@ mod storage {
         // Legacy fallback: `<db_root>/wallets/<name>.wallet` (read-only).
         let legacy_path = legacy_wallet_path(ctx, wallet_name);
         if legacy_path.exists() {
+            common::log::info!(
+                "Reading legacy wallet record file: {}",
+                crate::mm2::absolute_path_for_log(&legacy_path)
+            );
             let bytes = mm2_io::fs::slurp(&legacy_path)?;
             let data: LegacyEncryptedMnemonicData =
                 serde_json::from_slice(&bytes).map_err(|e| format!("corrupt legacy wallet file: {e}"))?;
