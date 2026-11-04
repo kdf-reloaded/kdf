@@ -1,6 +1,6 @@
 # Plan: maker-side gossip rate control
 
-**Status:** parked (shipped opt-in in PRs #148, #159, #160, #166; default-on waits for the D9 items and field data) — **Last reviewed:** 2026-10-30
+**Status:** parked (shipped opt-in in PRs #148, #159, #160, #166; default-on waits for the D9 items and field data) — **Last reviewed:** 2026-11-02
 
 > **Context.** A maker that changes its orders faster than its relay can take
 > them no longer gets its keep-alives through. After 90 s without a keep-alive,
@@ -321,6 +321,14 @@ and makers, the outbox was made opt-in: `maker_update_coalescing` defaults to
 listed there come before the outbox becomes the default again: a keep-alive
 that advertises only released state, a close signal that counts only error
 closes, and a synchronization request addressed to the keep-alive's author.
+
+**Queue-signal clear rule (fixed in batch 0.4.0, item P3b).** Field metrics of
+a Reloaded seed on 2026-10-31 showed a raised queue signal that never cleared
+under steady traffic: every queued message restarted the 5 s of empty queue
+that clearing needed. CRD ch.32 R-MP2 item 2 now judges the signal by how long
+a queued message has waited (2 s), so steady traffic neither raises it nor
+holds it. The work is tracked in `p2p-dialing-and-discovery.md`. The three D9
+items above still come before default-on.
 
 - **A budget that reads the TCP send queue.** Toward a relay whose bandwidth is
   limited, the backlog first builds in the kernel's send queue, below the
