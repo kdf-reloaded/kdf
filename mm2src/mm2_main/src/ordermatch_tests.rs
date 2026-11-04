@@ -7229,7 +7229,7 @@ mod keep_alive_receiver_catch_up_tests {
         ));
         assert!(matches!(
             request,
-            Some((OrdermatchRequest::SyncPubkeyOrderbookState { .. }, None))
+            Some((OrdermatchRequest::SyncPubkeyOrderbookState { .. }, None, _))
         ));
     }
 
@@ -10926,7 +10926,7 @@ mod sync_answer_deferral_tests {
                                                           CEILING_MAX_PARKED_TOTAL, DEFAULT_MAX_PARKED_PER_PEER,
                                                           DEFAULT_MAX_PARKED_TOTAL, DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
                                                           DEFAULT_SYNC_REQUEST_RETRY_MS};
-    use crate::mm2::lp_ordermatch::sync_log::RequestClass;
+    use crate::mm2::lp_ordermatch::sync_log::{AltReason, Attempt, RequestClass};
     use futures::channel::oneshot;
     use mm2_p2p::atomicdex_behaviour::AdexResponse;
     use mm2_p2p::request_response::LocalFailure;
@@ -10963,6 +10963,14 @@ mod sync_answer_deferral_tests {
                 },
             }
         }
+    }
+
+    /// `conf` with the request to another relay (R-Q5d) off, unless it sets the switch itself.
+    fn without_alternate_relay(mut conf: Json) -> Json {
+        if let Some(conf) = conf.as_object_mut() {
+            conf.entry("sync_request_alternate_relay").or_insert(json!(false));
+        }
+        conf
     }
 
     fn octx(ctx: &MmArc) -> Arc<OrdermatchContext> { OrdermatchContext::from_ctx(ctx).unwrap() }
@@ -11106,7 +11114,9 @@ mod sync_answer_deferral_tests {
     impl Fixture {
         /// A relay with the given config and a maker node holding `ORDERS` orders for `PAIR`.
         fn new(conf: Json) -> Self {
-            let (relay, relay_cmds) = node(conf);
+            // The tests of R-Q5b and R-Q5c run with no other relay connected (T-Q5c, T-Q6); the tests of
+            // R-Q5d switch the rule on.
+            let (relay, relay_cmds) = node(without_alternate_relay(conf));
             let (maker, _maker_cmds) = node(json!({}));
             let orders = make_random_orders(MAKER.to_owned(), &[0; 32], "C1".into(), "C2".into(), ORDERS);
             let uuids = orders.iter().map(|o| o.uuid).collect();
@@ -11734,7 +11744,7 @@ mod sync_answer_deferral_tests {
         assert_tables_empty(&f.relay);
 
         // The first keep-alive after the stall reaches the relay and, forwarded at once, its subscriber.
-        let (subscriber, mut subscriber_cmds) = node(json!({}));
+        let (subscriber, mut subscriber_cmds) = node(without_alternate_relay(json!({})));
         let started = std::time::Instant::now();
         let mut relay_own = f.start_own_sync();
         let keep_alive = f.keep_alive();
@@ -11990,7 +12000,7 @@ mod sync_answer_deferral_tests {
     }
 
     /// The first request ends as the transport reports, with no re-ask.
-    fn request_class_of(res: Option<AdexResponse>) -> Vec<(u8, RequestClass)> {
+    fn request_class_of(res: Option<AdexResponse>) -> Vec<(Attempt, RequestClass)> {
         let mut f = Fixture::new(no_retry());
         let mut own = f.start_own_sync();
         match res {
@@ -12021,7 +12031,7 @@ mod sync_answer_deferral_tests {
             // The command is dropped without an answer.
             (None, RequestClass::Transport),
         ] {
-            assert_eq!(request_class_of(res), vec![(1, class)], "{:?}", class);
+            assert_eq!(request_class_of(res), vec![(Attempt::First, class)], "{:?}", class);
         }
     }
 
@@ -12032,7 +12042,10 @@ mod sync_answer_deferral_tests {
         let mut own = f.start_own_sync();
         own.answer(&f.maker);
         assert!(own.finish());
-        assert_eq!(octx(&f.relay).sync_log.requests(), vec![(1, RequestClass::Ok)]);
+        assert_eq!(octx(&f.relay).sync_log.requests(), vec![(
+            Attempt::First,
+            RequestClass::Ok
+        )]);
 
         // A quick failure, then the answer to the second request.
         let mut f = Fixture::new(quick_retry());
@@ -12045,8 +12058,8 @@ mod sync_answer_deferral_tests {
         own.answer(&f.maker);
         assert!(own.finish());
         assert_eq!(octx(&f.relay).sync_log.requests(), vec![
-            (1, RequestClass::Timeout),
-            (2, RequestClass::Ok)
+            (Attempt::First, RequestClass::Timeout),
+            (Attempt::Second, RequestClass::Ok)
         ]);
         assert_eq!(octx(&f.relay).sync_log.snapshot().requests_ok, 1);
 
@@ -12063,12 +12076,456 @@ mod sync_answer_deferral_tests {
         });
         assert!(!own.finish());
         assert_eq!(octx(&f.relay).sync_log.requests(), vec![
-            (1, RequestClass::PeerError),
-            (2, RequestClass::Transport)
+            (Attempt::First, RequestClass::PeerError),
+            (Attempt::Second, RequestClass::Transport)
         ]);
         let counters = octx(&f.relay).sync_log.snapshot();
         assert_eq!((counters.requests_peer_error, counters.requests_transport), (1, 1));
         assert_tables_empty(&f.relay);
+    }
+
+    /// CRD ch.32 R-Q5d, T-Q5d: one other relay is asked once when the forwarder's answer fails or leaves the
+    /// pair diverged.
+    mod alternate_relay_tests {
+        use super::*;
+
+        const FORWARDER: &str = "forwarding-peer";
+        const G: &str = "relay-g";
+
+        /// The relay with the request to another relay switched on and no second request to the forwarder.
+        fn alt_conf() -> Json { json!({ "sync_request_alternate_relay": true, "sync_request_retry_ms": 0 }) }
+
+        /// A request that is held until the test decides how it ends.
+        struct HeldRequest {
+            request: Vec<u8>,
+            response_tx: Option<OwnResponseTx>,
+        }
+
+        impl HeldRequest {
+            fn roots(&self) -> HashMap<String, H64> { requested_roots(&self.request) }
+
+            /// The request is answered by `node`.
+            fn answer(&mut self, node: &MmArc) {
+                let (pubkey, trie_roots) = match decode_message::<P2PRequest>(&self.request).unwrap() {
+                    P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState { pubkey, trie_roots }) => {
+                        (pubkey, trie_roots)
+                    },
+                    other => panic!("unexpected request {:?}", other),
+                };
+                let answer = process_sync_pubkey_orderbook_state(node.clone(), pubkey, trie_roots)
+                    .unwrap()
+                    .unwrap();
+                let res = AdexResponse::Ok {
+                    response: encode_message(&answer).unwrap(),
+                };
+                self.response_tx
+                    .take()
+                    .unwrap()
+                    .send(vec![(PeerId::random(), res)])
+                    .unwrap();
+            }
+        }
+
+        impl Fixture {
+            /// The node asks for its relays; `relays` is the answer.
+            fn answer_relay_list(&mut self, relays: &[&str]) {
+                match next_cmd(&mut self.relay_cmds) {
+                    AdexBehaviourCmd::GetConnectedRelays { result_tx } => {
+                        result_tx.send(relays.iter().map(|r| r.to_string()).collect()).unwrap()
+                    },
+                    other => panic!("unexpected command {:?}", other),
+                }
+            }
+
+            /// The node asks for its relays and the reply channel is dropped.
+            fn drop_relay_list_reply(&mut self) {
+                match next_cmd(&mut self.relay_cmds) {
+                    AdexBehaviourCmd::GetConnectedRelays { result_tx } => drop(result_tx),
+                    other => panic!("unexpected command {:?}", other),
+                }
+            }
+
+            /// The request to one other relay, which must be addressed to `peer` alone.
+            fn expect_alternate_request(&mut self, peer: &str) -> HeldRequest {
+                match next_cmd(&mut self.relay_cmds) {
+                    AdexBehaviourCmd::RequestPeers {
+                        req,
+                        peers,
+                        response_tx,
+                    } => {
+                        assert_eq!(peers, vec![peer.to_owned()]);
+                        HeldRequest {
+                            request: req,
+                            response_tx: Some(response_tx),
+                        }
+                    },
+                    other => panic!("unexpected command {:?}", other),
+                }
+            }
+
+            /// No command at all is waiting (to be called once the tasks of the keep-alive have settled).
+            fn assert_no_command(&mut self) {
+                if let Ok(cmd) = self.relay_cmds.try_recv() {
+                    panic!("unexpected command {:?}", cmd);
+                }
+            }
+
+            fn advertised(&self, pair: &str) -> H64 { self.keep_alive().trie_roots[pair] }
+        }
+
+        fn wait_until(what: &str, cond: impl Fn() -> bool) {
+            // Generous: the late worker is noticed after 5 s.
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !cond() {
+                assert!(Instant::now() < deadline, "timed out waiting for {}", what);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        /// The root the trie of `ctx` holds for the maker's `pair`.
+        fn held(ctx: &MmArc, pair: &str) -> Option<H64> {
+            octx(ctx)
+                .trie_store
+                .lock()
+                .pubkeys_state
+                .get(MAKER)
+                .and_then(|s| s.trie_roots.get(pair).copied())
+        }
+
+        /// A node holding the maker's orders but those of `skipped`.
+        fn node_without(f: &Fixture, skipped: &HashSet<Uuid>) -> MmArc {
+            let (node, _cmds) = node(json!({}));
+            let items: Vec<OrderbookItem> = octx(&f.maker).orderbook.lock().order_set.values().cloned().collect();
+            for item in items.into_iter().filter(|i| !skipped.contains(&i.uuid)) {
+                insert_or_update_order(&node, item);
+            }
+            flush_trie(&node);
+            node
+        }
+
+        fn one_of(f: &Fixture, last: bool) -> HashSet<Uuid> {
+            let mut uuids: Vec<Uuid> = f.uuids.iter().copied().collect();
+            uuids.sort();
+            HashSet::from([if last { uuids[uuids.len() - 1] } else { uuids[0] }])
+        }
+
+        fn alt_counters(ctx: &MmArc) -> [u32; 6] {
+            let c = octx(ctx).sync_log.snapshot();
+            [
+                c.alt_failure,
+                c.alt_mismatch,
+                c.alt_no_relay,
+                c.alt_worker_late,
+                c.alt_sent,
+                c.alt_ok,
+            ]
+        }
+
+        #[test]
+        fn a_timeout_at_the_forwarder_is_followed_by_one_request_to_another_relay() {
+            let mut f = Fixture::new(alt_conf());
+            let mut own = f.start_own_sync();
+            let first_roots = requested_roots(&own.request);
+            own.respond(AdexResponse::LocalErr {
+                kind: LocalFailure::Timeout,
+                error: "Timeout".to_owned(),
+            });
+            // The result of the keep-alive's handling does not wait for the request to the other relay.
+            assert!(!own.finish());
+
+            f.answer_relay_list(&[FORWARDER, G]);
+            let mut alt = f.expect_alternate_request(G);
+            assert_eq!(
+                alt.roots(),
+                first_roots,
+                "the pairs of the request, with the held roots"
+            );
+            alt.answer(&f.maker);
+
+            wait_until("the answer of the other relay", || maker_book(&f.relay) == f.uuids);
+            assert_tables_empty(&f.relay);
+            wait_until("the root", || held(&f.relay, PAIR) == Some(f.advertised(PAIR)));
+            f.assert_no_command();
+            assert_eq!(octx(&f.relay).sync_log.requests(), vec![
+                (Attempt::First, RequestClass::Timeout),
+                (Attempt::Alternate(AltReason::Failure), RequestClass::Ok)
+            ]);
+            assert_eq!(alt_counters(&f.relay), [1, 0, 0, 0, 1, 1]);
+            // The request to the other relay is counted among the requests as any request is.
+            assert_eq!(octx(&f.relay).sync_log.snapshot().requests_timeout, 1);
+            assert_eq!(octx(&f.relay).sync_log.snapshot().requests_ok, 1);
+        }
+
+        /// With `orderbook_sync_names_held_root` off, the request names the advertised roots.
+        #[test]
+        fn the_request_to_the_other_relay_names_the_advertised_root_when_configured() {
+            let mut f = Fixture::new(json!({
+                "sync_request_alternate_relay": true,
+                "sync_request_retry_ms": 0,
+                "orderbook_sync_names_held_root": false
+            }));
+            let mut own = f.start_own_sync();
+            let advertised = HashMap::from([(PAIR.to_owned(), f.advertised(PAIR))]);
+            assert_eq!(requested_roots(&own.request), advertised);
+            own.fail();
+            assert!(!own.finish());
+            f.answer_relay_list(&[G, FORWARDER]);
+            let mut alt = f.expect_alternate_request(G);
+            assert_eq!(alt.roots(), advertised);
+            alt.answer(&f.maker);
+            wait_until("the answer of the other relay", || maker_book(&f.relay) == f.uuids);
+            assert_tables_empty(&f.relay);
+        }
+
+        #[test]
+        fn the_other_relay_is_asked_after_the_second_failure_not_the_first() {
+            let mut f =
+                Fixture::new(json!({ "sync_request_alternate_relay": true, "sync_request_retry_ms": RETRY_MS }));
+            let mut own = f.start_own_sync();
+            let first_roots = requested_roots(&own.request);
+            own.respond(AdexResponse::Err {
+                error: "busy".to_owned(),
+            });
+            // The next command is the second request to the forwarder, not the relay list.
+            f.expect_second_request(&mut own);
+            own.respond(AdexResponse::LocalErr {
+                kind: LocalFailure::Transport,
+                error: "ConnectionClosed".to_owned(),
+            });
+            assert!(!own.finish());
+
+            f.answer_relay_list(&[FORWARDER, G]);
+            let mut alt = f.expect_alternate_request(G);
+            assert_eq!(alt.roots(), first_roots);
+            alt.answer(&f.maker);
+            wait_until("the answer of the other relay", || maker_book(&f.relay) == f.uuids);
+            assert_tables_empty(&f.relay);
+            f.assert_no_command();
+            assert_eq!(octx(&f.relay).sync_log.requests(), vec![
+                (Attempt::First, RequestClass::PeerError),
+                (Attempt::Second, RequestClass::Transport),
+                (Attempt::Alternate(AltReason::Failure), RequestClass::Ok)
+            ]);
+        }
+
+        #[test]
+        fn a_diverged_pair_is_asked_from_another_relay_and_never_cleared() {
+            let mut f = Fixture::new(alt_conf());
+            let stale_f = node_without(&f, &one_of(&f, false));
+            let stale_g = node_without(&f, &one_of(&f, true));
+            let advertised = f.advertised(PAIR);
+            let f_root = held(&stale_f, PAIR).unwrap();
+            assert_ne!(f_root, advertised);
+            assert_ne!(held(&stale_g, PAIR).unwrap(), advertised);
+
+            let mut own = f.start_own_sync();
+            own.answer(&stale_f);
+            assert!(own.finish(), "F's answer was applied");
+            wait_until("F's set", || maker_book(&f.relay) == maker_book(&stale_f));
+            wait_until("F's root", || held(&f.relay, PAIR) == Some(f_root));
+
+            f.answer_relay_list(&[G, FORWARDER]);
+            let mut alt = f.expect_alternate_request(G);
+            assert_eq!(
+                alt.roots(),
+                HashMap::from([(PAIR.to_owned(), f_root)]),
+                "only the pair, at the held root"
+            );
+            // F's set stays until G's answer is applied.
+            assert_eq!(maker_book(&f.relay), maker_book(&stale_f));
+            assert_eq!(held(&f.relay, PAIR), Some(f_root));
+
+            // G's answer is applied although the root it reaches differs from the advertised one too.
+            alt.answer(&stale_g);
+            wait_until("G's set", || maker_book(&f.relay) == maker_book(&stale_g));
+            wait_until("G's root", || held(&f.relay, PAIR) == held(&stale_g, PAIR));
+            assert_ne!(held(&f.relay, PAIR), Some(advertised));
+            assert_tables_empty(&f.relay);
+            std::thread::sleep(Duration::from_millis(100));
+            f.assert_no_command();
+            assert_eq!(octx(&f.relay).sync_log.requests(), vec![
+                (Attempt::First, RequestClass::Ok),
+                (Attempt::Alternate(AltReason::Mismatch), RequestClass::Ok)
+            ]);
+            assert_eq!(alt_counters(&f.relay), [0, 1, 0, 0, 1, 1]);
+        }
+
+        #[test]
+        fn a_set_that_reaches_the_advertised_root_asks_no_other_relay() {
+            let mut f = Fixture::new(alt_conf());
+            let mut own = f.start_own_sync();
+            own.answer(&f.maker);
+            assert!(own.finish());
+            let advertised = f.advertised(PAIR);
+            wait_until("the root", || held(&f.relay, PAIR) == Some(advertised));
+            assert_tables_empty(&f.relay);
+            std::thread::sleep(Duration::from_millis(200));
+            f.assert_no_command();
+            assert_eq!(alt_counters(&f.relay), [0; 6]);
+        }
+
+        #[test]
+        fn only_the_diverged_pair_of_two_is_asked_from_another_relay() {
+            let mut f = Fixture::new(alt_conf());
+            let other = make_random_orders(MAKER.to_owned(), &[0; 32], "C3".into(), "C4".into(), 3);
+            let other_uuids: HashSet<Uuid> = other.iter().map(|o| o.uuid).collect();
+            for order in other {
+                insert_or_update_order(&f.maker, order);
+            }
+            flush_trie(&f.maker);
+            // F misses one order of the second pair only.
+            let skipped = HashSet::from([*other_uuids.iter().next().unwrap()]);
+            let stale_f = node_without(&f, &skipped);
+            let (advertised, other_advertised) = (f.advertised(PAIR), f.advertised(OTHER_PAIR));
+            let f_other_root = held(&stale_f, OTHER_PAIR).unwrap();
+            assert_ne!(f_other_root, other_advertised);
+            assert_eq!(held(&stale_f, PAIR), Some(advertised));
+
+            let mut own = f.start_own_sync();
+            assert_eq!(requested_roots(&own.request).len(), 2);
+            own.answer(&stale_f);
+            assert!(own.finish());
+
+            f.answer_relay_list(&[FORWARDER, G]);
+            let mut alt = f.expect_alternate_request(G);
+            assert_eq!(alt.roots(), HashMap::from([(OTHER_PAIR.to_owned(), f_other_root)]));
+            alt.answer(&f.maker);
+            let all_uuids: HashSet<Uuid> = f.uuids.union(&other_uuids).copied().collect();
+            wait_until("G's set", || maker_book(&f.relay) == all_uuids);
+            wait_until("G's root", || held(&f.relay, OTHER_PAIR) == Some(other_advertised));
+            assert_tables_empty(&f.relay);
+            f.assert_no_command();
+        }
+
+        /// The relay's worker never applies the answer: no request follows after 5 s.
+        #[test]
+        fn a_worker_that_is_late_by_five_seconds_asks_no_other_relay() {
+            let mut f = Fixture::new(alt_conf());
+            let (workerless, _held_back) = ordermatch_ctx_without_worker();
+            let workerless = Arc::try_unwrap(workerless).ok().expect("the only reference");
+            mm2_core::mm_ctx::from_ctx(&f.relay.ordermatch_ctx, move || Ok(workerless)).unwrap();
+
+            let mut own = f.start_own_sync();
+            own.answer(&f.maker);
+            assert!(own.finish());
+            assert!(
+                maker_book(&f.relay) == f.uuids,
+                "the index took the answer, the trie did not"
+            );
+            wait_until("the late worker to be noticed", || {
+                octx(&f.relay).sync_log.snapshot().alt_worker_late == 1
+            });
+            assert_tables_empty(&f.relay);
+            f.assert_no_command();
+            assert_eq!(alt_counters(&f.relay), [0, 0, 0, 1, 0, 0]);
+        }
+
+        #[test]
+        fn nothing_beyond_the_second_request_without_another_relay_or_with_the_switch_off() {
+            // Only the forwarder is connected.
+            let mut f = Fixture::new(alt_conf());
+            let mut own = f.start_own_sync();
+            own.fail();
+            assert!(!own.finish());
+            f.answer_relay_list(&[FORWARDER]);
+            assert_tables_empty(&f.relay);
+            f.assert_no_command();
+            assert_eq!(alt_counters(&f.relay), [1, 0, 1, 0, 0, 0]);
+
+            // The reply to the question is dropped: no relay is known.
+            let mut f = Fixture::new(alt_conf());
+            let mut own = f.start_own_sync();
+            own.fail();
+            assert!(!own.finish());
+            f.drop_relay_list_reply();
+            assert_tables_empty(&f.relay);
+            f.assert_no_command();
+            assert_eq!(alt_counters(&f.relay), [1, 0, 1, 0, 0, 0]);
+
+            // The switch is off: the relays are not even asked for.
+            let mut f = Fixture::new(json!({ "sync_request_alternate_relay": false, "sync_request_retry_ms": 0 }));
+            let mut own = f.start_own_sync();
+            own.fail();
+            assert!(!own.finish());
+            assert_tables_empty(&f.relay);
+            f.assert_no_command();
+            assert_eq!(alt_counters(&f.relay), [0; 6]);
+
+            // A divergence with the switch off asks nobody either.
+            let mut f = Fixture::new(json!({ "sync_request_alternate_relay": false }));
+            let stale = node_without(&f, &one_of(&f, false));
+            let mut own = f.start_own_sync();
+            own.answer(&stale);
+            assert!(own.finish());
+            wait_until("the stale set", || maker_book(&f.relay) == maker_book(&stale));
+            assert_tables_empty(&f.relay);
+            std::thread::sleep(Duration::from_millis(100));
+            f.assert_no_command();
+        }
+
+        #[test]
+        fn a_relay_list_without_another_relay_after_a_divergence_sends_nothing() {
+            let mut f = Fixture::new(alt_conf());
+            let stale = node_without(&f, &one_of(&f, false));
+            let mut own = f.start_own_sync();
+            own.answer(&stale);
+            assert!(own.finish());
+            f.answer_relay_list(&[FORWARDER]);
+            wait_until("the missing relay to be counted", || {
+                octx(&f.relay).sync_log.snapshot().alt_no_relay == 1
+            });
+            assert_tables_empty(&f.relay);
+            f.assert_no_command();
+            assert_eq!(alt_counters(&f.relay), [0, 1, 1, 0, 0, 0]);
+        }
+
+        #[test]
+        fn the_keep_alive_returns_before_the_request_to_the_other_relay_ends() {
+            let mut f = Fixture::new(alt_conf());
+            let mut own = f.start_own_sync();
+            own.fail();
+            f.answer_relay_list(&[FORWARDER, G]);
+            let mut alt = f.expect_alternate_request(G);
+            // The request to G is held open, and the keep-alive's task is done.
+            wait_until("the keep-alive task to end", || own.keep_alive_task.is_finished());
+            assert!(!own.finish());
+            // The record of the own request lasts through the request to G.
+            assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 1);
+            alt.answer(&f.maker);
+            wait_until("the answer of the other relay", || maker_book(&f.relay) == f.uuids);
+            assert_tables_empty(&f.relay);
+        }
+
+        #[test]
+        fn a_parked_request_is_answered_with_the_set_of_the_other_relay() {
+            let mut f =
+                Fixture::new(json!({ "sync_request_alternate_relay": true, "sync_request_retry_ms": RETRY_MS }));
+            let (answers_tx, answers) = std_mpsc::channel();
+            let mut own = f.start_own_sync();
+            ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+            assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
+
+            own.respond(AdexResponse::Err {
+                error: "busy".to_owned(),
+            });
+            f.expect_second_request(&mut own);
+            own.respond(AdexResponse::Err {
+                error: "busy".to_owned(),
+            });
+            assert!(!own.finish());
+            // The parked request keeps waiting: the record moved to the request to the other relay.
+            assert!(answers.try_recv().is_err());
+            assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
+            assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 1);
+
+            f.answer_relay_list(&[FORWARDER, G]);
+            let mut alt = f.expect_alternate_request(G);
+            alt.answer(&f.maker);
+            let (id, res) = answered(&answers, 2000);
+            assert_eq!(id, 1);
+            assert_eq!(full_set_len(&res), ORDERS);
+            assert_tables_empty(&f.relay);
+        }
     }
 }
 
@@ -13118,7 +13575,7 @@ mod maker_publication_tests {
                         TRIE_CATCH_UP_BOUND_MS,
                         0,
                     ));
-                    requests.push(request.map(|(request, _in_flight)| request));
+                    requests.push(request.map(|(request, _in_flight, _advertised)| request));
                 },
                 _ => {
                     block_on(process_msg(receiver.clone(), vec![], "peer".into(), &p.bytes, true));

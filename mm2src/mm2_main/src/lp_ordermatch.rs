@@ -61,8 +61,9 @@ use timed_map::TimedMap;
 use trie_db::NodeCodec as NodeCodecT;
 use uuid::Uuid;
 
-use crate::mm2::lp_network::{broadcast_p2p_msg_with_priority, relay_queue_signal, relay_queue_signal_count,
-                             request_any_relay, request_one_peer, subscribe_to_topic, Libp2pPeerId, P2PRequest};
+use crate::mm2::lp_network::{broadcast_p2p_msg_with_priority, connected_relays, relay_queue_signal,
+                             relay_queue_signal_count, request_any_relay, request_one_peer, subscribe_to_topic,
+                             Libp2pPeerId, P2PRequest};
 use crate::mm2::lp_swap::{calc_max_maker_vol, check_balance_for_maker_swap, check_balance_for_taker_swap,
                           check_other_coin_balance_for_swap, insert_new_swap_to_db, is_pubkey_banned,
                           lp_atomic_locktime, run_maker_swap, run_taker_swap, swap_versioning::SwapVersion,
@@ -130,12 +131,13 @@ pub use ordermatch_orderbook::*;
 
 #[path = "lp_ordermatch/sync_answer_deferral.rs"]
 mod sync_answer_deferral;
-pub(crate) use sync_answer_deferral::{answer_sync_request, sync_answer_deferral_ms, sync_request_retry_ms,
-                                      SyncAnswerDeferral, SyncAnswerReply, SyncInFlight};
+pub(crate) use sync_answer_deferral::{answer_sync_request, sync_answer_deferral_ms, sync_request_alternate_relay,
+                                      sync_request_retry_ms, wait_until_applied, SyncAnswerDeferral, SyncAnswerReply,
+                                      SyncInFlight};
 
 #[path = "lp_ordermatch/sync_log.rs"] mod sync_log;
-pub(crate) use sync_log::{classify_sync_request, debug_enabled, pairs_label, AnswerClass, AnswerEvent, AnswerPath,
-                          AtOnce, RequestEvent, SyncLog};
+pub(crate) use sync_log::{classify_sync_request, debug_enabled, pairs_label, AltEvent, AltReason, AnswerClass,
+                          AnswerEvent, AnswerPath, AtOnce, Attempt, RequestEvent, SyncLog};
 
 #[path = "lp_ordermatch/ordermatch_trading.rs"]
 mod ordermatch_trading;

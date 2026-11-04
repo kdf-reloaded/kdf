@@ -333,6 +333,22 @@ value. Producing the report shall never fail or panic the launch (R45.7.1). The
 log text is operator-facing and non-normative: it carries no wire or
 compatibility obligation.
 
+R45.6.7 *Version line (KDF Reloaded original addition; operator
+diagnostics).* The daemon shall state its version in the form
+`KDF-Reloaded DeFi Framework <crate version> (<short commit hash>) DT <build
+datetime>` in the startup banner log line, which is also the output of the
+`--version` and `version` command-line arguments, and in the form
+`Version: <crate version> (<short commit hash>) DT <build datetime>` in the
+second startup log line. The crate version is the version of the released binary
+crate (`mm2_bin_lib`) as built, not that of an internal library crate (a
+pre-release suffix is shown as it is). The short commit hash and the
+build datetime are the same values as before; a build without Git information
+shows its hash value as it does today. This requirement changes nothing else
+that carries the hash: the result of the `version` RPC method and the version
+recorded in swap records stay the bare short hash. The log text is
+operator-facing and non-normative: it carries no wire or compatibility
+obligation.
+
 ## 45.6A Memory Allocator Arena Limit (Reloaded-original)
 
 > **Reloaded-original (2026-10-31, Decision BJ).** This section binds a
@@ -503,6 +519,13 @@ absolute, MUST note an ignored `MM_COINS_PATH` when coins are inline, and MUST
 NOT contain any file content or configuration value (R45.6.6). With a
 `wss_certs` configuration, the report MUST NOT contain either file's path.
 
+T45.15 *Version line.* A formatter test MUST show, for explicit arguments, the
+banner and the second startup line in the forms of R45.6.7, including a
+pre-release crate version, an `UNKNOWN` hash and an empty build datetime; a
+second test MUST show that the banner produced for the running build contains
+the crate version and the short hash of that build, and that the bare short hash
+is unchanged as the value the `version` RPC method returns (R45.6.7).
+
 ## 45.9 Deferred Work
 
 D45.1 A consolidated, typed startup-configuration schema (replacing ad-hoc
@@ -594,8 +617,8 @@ past the first beta.
 - *Section 45.6A (arena limit):* Reloaded-original, written from our own
   measurements (R45.6A.7) and the documentation of the system allocator; no
   reference material was consulted for it.
-- *Addition R45.6.6 / T45.14 (startup path report):* a KDF Reloaded original
-  operator-diagnostics requirement, authored independently from this
+- *Addition R45.6.6 / T45.14 (startup path report) and R45.6.7 / T45.15 (version line):* two KDF Reloaded original
+  operator-diagnostics requirements, authored independently from this
   repository's code and public documentation, without consulting the forbidden
   corpus.
 - *Author of this chapter:* clean-room driving-spec working set.

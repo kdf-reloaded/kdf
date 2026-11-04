@@ -24,7 +24,7 @@
 | ID | What | CRD | Size | State |
 |---|---|---|---|---|
 | B5 | Higher, configurable limits for sync requests a relay holds while its own sync is in flight: 32 per asking peer and 2,048 in all by default (were 8 and 256), with ceilings of 64 and 8,192. | ch.32 R-Q5b item 4 | S | PR #205 |
-| B1 | After the forwarding relay's sync request fails, or its answer leaves a pair out of step with the maker's advertised root, ask one other connected relay once. The pair is never emptied. Switch `sync_request_alternate_relay`. | ch.32 R-Q5d (D12 item 1) | M | CRD and code PRs to follow |
+| B1 | After the forwarding relay's sync request fails, or its answer leaves a pair out of step with the maker's advertised root, ask one other connected relay once. The pair is never emptied. Switch `sync_request_alternate_relay`. | ch.32 R-Q5d (D12 item 1) | M | CRD PR #207, code PR #208 |
 | B2 | A cancel this node received keeps the order out of every later order message and answer for an hour by default (`cancel_final_window_secs`, at least 120 s, at most one day), so a stale relay cannot bring it back. Memory-capped: the cancels of the last 120 s, as on Komodo and GLEEC KDF, plus at most `cancel_final_max_entries` older ones (100,000 by default, about 20 MB); past the cap the oldest fall back to 120 s. Decided 2026-11-03 (Decision 29). | ch.32 R-K1b (D12 item 2) | M | CRD PR #223, code PR #224 |
 | B2a | Restore guard. At start, a maker skips and deletes a stored active order whose removal its order history already records, and it retries a failed deletion of a removed order's record (three tries, 200 ms apart, each failure logged once). Switch `maker_restore_skips_cancelled`, default on; off restores every record as Komodo and GLEEC KDF do. Limits: an order created with `save_in_history: false`, or one whose history write failed together with the deletion, still comes back; taker orders are not covered. Decided 2026-11-03 (Decision 29). | ch.12 R7c (D12 item 2) | S | CRD PR #223, code PR #224 |
 | B3 | Per-pair liveness on the receiver's clock: a pair the maker stops advertising is dropped after the liveness window (`maker_order_timeout`, 90 s) while the maker's other pairs live on. | to be written (D12 item 3) | M | after B1 |
@@ -88,6 +88,16 @@ Each package changes no wire shape and has its own switch, so that a lab can run
 - **B3:** the window assumes that an online maker advertises every non-empty pair at every tick
   (CRD ch.32 R-K2a). Confirmed for the reference release rows on 2026-11-03 (CRD ch.32 R-GH13
   item 1): no pair with a non-empty root is skipped. Any exception would widen the window.
+- **B1, an extra request after a skipped second request.** When a node's first sync request fails
+  quickly and the pairs leave the placeholder before the second request (an order message filled
+  them), no second request is sent, yet the request to another relay still follows, as CRD ch.32
+  R-Q5d reads. It costs one redundant request. It stays as it is unless the lab or field counts show
+  it matters.
+- **B1, a second waiting task per sync.** After each applied sync answer, B1 starts a task that waits
+  for the trie worker before it compares roots, next to the task that already waits to end the
+  record of R-Q5b. Under a resync burst with a lagging worker, this doubles that polling of the trie
+  store. If the large batch-1 run shows the cost (the latency rows or the B1 cost case), a follow-up
+  merges the two into one task.
 - **The known-limitations line** ("other nodes can keep showing a cancelled order for a while") stays
   until B1 and B3 have landed. B1 shortens the case of a pair the maker still advertises; B3 removes
   the case of an emptied pair.
