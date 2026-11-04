@@ -335,7 +335,7 @@ coin. The keys in use:
 
 | Key | Coin family | Meaning | Required by |
 | --- | --- | --- | --- |
-| `tx_v6` | shielded coin (Chapter 39) | This node builds and spends the version-6 transaction format of the Ironwood upgrade. | Chapter 39 (gate-pending) |
+| `tx_v6` | shielded coin (Chapter 39) | This node builds and spends the version-6 transaction format of the Ironwood upgrade. | Chapter 39 R39.6.4f (gate-pending) |
 
 **R59.4A.5** *Who decides.* The order-match layer shall carry the
 protocol information unchanged in all three messages and in the side

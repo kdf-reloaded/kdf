@@ -39,7 +39,9 @@ required-but-unimplemented extensions). Mixed treatment -- see §39.0.
   coin's Ironwood activation height, which is configured or discovered at runtime
   (R39.6.4e). The swap freeze (R39.6.4b) and the build refusal (R39.6.4c) are
   therefore inert in this build. What remains unverified without a broadcast is
-  stated in R39.6.4e's status note.
+  stated in R39.6.4e's status note. From v0.4.0 an ARRR swap also requires the
+  counterparty to declare that it builds version 6 (R39.6.4f, specified 2026-11-04, not
+  implemented).
 - **§39.11 (Part E -- implemented in part):** `lightwalletd` as the **sole**
   backend of a Light-mode shielded coin, with Electrum support for ZHTLC removed.
   **Implemented (ARRR Ironwood plan Step C, the wallet half):** the function table
@@ -1045,6 +1047,80 @@ no Ironwood height anywhere shall keep constructing version 4 at every height.
 > the known limits, the pre-activation quiet window is obsolete -- Ironwood has been active
 > on the main chain since height 4,161,185, so no new transaction is built near the
 > boundary -- and the unpersisted discovered height is deferred (D39.6.b).
+
+R39.6.4f **Counterparty version-6 capability (from v0.4.0).** An ARRR swap shall not start
+with a counterparty that does not declare that it builds version-6 transactions. This rule
+is the shielded coin's use of the capability word of
+[Chapter 59](59-legacy-ordermatch-negotiation.md) §59.4A, key `tx_v6`.
+
+- (a) **Sending.** A shielded coin that has an Ironwood upgrade -- an Ironwood activation
+  time or height known for it, whether configured, built-in or discovered (R39.6.4a,
+  R39.6.4d, R39.6.4e(a)) -- and a build that constructs version-6
+  transactions (R39.6.4e(f)) shall send the capability word with `tx_v6` set to `true`. It
+  goes after its unchanged first value, the encoded address format (R59.4A.1), and it is
+  sent at all times, not only inside the window of (b). A coin without an Ironwood upgrade
+  sends no word, so its protocol information stays byte for byte as before (R59.4A.4).
+- (b) **Requiring.** While the window is open, the coin's acceptance check shall decline a
+  counterparty whose protocol information does not declare `tx_v6` (R59.4A.2; absent,
+  empty, malformed or `false` all count as not declared). This is the predicate that the
+  swap freeze of R39.6.4b already uses, on both the taker's reservation path and the maker's
+  request path (R59.3.2, R59.4.3). The window is open when either:
+  - an Ironwood activation time is known for the coin (configured or built-in) and the wall
+    clock is at or past that time less the freeze margin of R39.6.4b; or
+  - an Ironwood activation height is configured or has been discovered (R39.6.4e(a)).
+
+  For ARRR on the main network the window is therefore always open. It is read from the
+  clock and the recorded height, not from the chain: the check runs without a network read,
+  as the freeze does.
+- (c) **Switch.** `consensus_params` may carry an optional boolean
+  `require_v6_counterparty`, default `true` and optional in both directions like the
+  members of R39.6.4a. With `false` the requirement of (b) does not apply; the coin still
+  sends its word. `ironwood_gate_disabled` (R39.6.4d) has no effect on this rule. The switch
+  is per coin, not node-wide, so it applies to every chain that shares the coin's
+  parameters, the test and regtest chains included.
+- (d) **Logs.** Each decline shall log one debug line naming the coin and the cause (no
+  word, a malformed word, or a word without `tx_v6`). In addition, at most one warning per
+  coin per hour shall report how many counterparties were declined since the previous
+  warning. The check does not see the counterparty's identity; the order and side of each
+  decline are logged by the order-match layer (R59.4A.6).
+- (e) **Effect.** A decline happens before any swap starts. No swap record exists,
+  nothing is paid, and no penalty applies (R59.4A.5). A swap already in progress is not
+  checked again. Who is declined: every node that sends no `tx_v6` word -- the reference
+  release rows, which build nothing the post-Ironwood chain accepts, and also Reloaded
+  0.3.0-beta.1, which builds version 6 but predates the word. Its users upgrade to trade
+  ARRR. The order book shows no capability flag; a more general flag is a later question
+  (Chapter 59 D5).
+
+> **Provenance (2026-11-04).** Reloaded-original, decided by the maintainer: the
+> capability word, its requirement with the switch on by default, beta-1 nodes declined,
+> and no order-book flag. Before this rule, an ARRR swap with a node that cannot build
+> version 6 started normally and failed at that node's first ARRR transaction. Depending on
+> the roles, our side then lost the DEX fee, had its ARRR locked until the refund, or both.
+> No peer-level signal can prevent that, because the counterparty
+> of a swap is never a connected peer (Chapter 59 §59.4A, rationale).
+>
+> **Compatibility.** `require_v6_counterparty: false` admits counterparties without the
+> word again. It does not make an ARRR swap with GLEEC KDF possible, because that node
+> builds nothing the post-Ironwood chain accepts. How the reference treats our longer
+> protocol information is pending a gated question (Chapter 59 §59.4A, compatibility
+> note). The safety of (b) does not depend on the answer.
+
+T39.6.4f *Counterparty version-6 capability.*
+- (a) The protocol information of an ARRR coin is its address-format bytes followed by the
+  word {`tx_v6`: `true`}. A shielded coin without an Ironwood upgrade sends its bytes
+  unchanged.
+- (b) Inside the window, a counterparty without the word, with an empty or absent
+  protocol information, with a malformed word, or with `tx_v6` `false` is declined. With
+  the word it is accepted, on both the reservation and the request path.
+- (c) Before the window opens (an activation time far ahead and no known height), a
+  counterparty without the word is accepted. A coin with only a configured height has the
+  window open.
+- (d) With `require_v6_counterparty` `false`, a counterparty without the word is accepted.
+  `ironwood_gate_disabled` `true` changes none of the outcomes above.
+- (e) Logs, with an injected clock: one debug line per decline, and at most one warning
+  per coin per hour carrying the count.
+- (f) The freeze of R39.6.4b still declines every counterparty for a build without
+  version-6 support, whatever the word says.
 
 R39.6.4 The shielded-coin builder shall source **all** of its Zcash
 network parameters, its shielded HD derivation path, and its sync checkpoint
@@ -6447,3 +6523,16 @@ entries in its list cannot be told apart. Passing the position to the fallback c
     the builder defaults; BIP 113 and zcashd's finality rule, as public specification.
   - *Original to this design:* R39.5.13, D39.5.a and the informative pre-check under
     R39.5.11.
+
+- *Clean-context addition (2026-11-04), §39.6.4:* R39.6.4f with its provenance and
+  compatibility notes, T39.6.4f, and the sentence added to the §39.6.4 scope bullet in
+  §39.0 are Reloaded-original.
+  - *Inputs:* the maintainer's decisions of 2026-11-04 (the capability word, its
+    requirement with the switch on by default, Reloaded 0.3.0-beta.1 declined, no
+    order-book flag); Chapter 59 §59.4A; and this repository's own code (the acceptance
+    check that the swap freeze already uses, and the Ironwood activation time and height).
+  - They take no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+    is required for them. No rule text cleared by the Dirty Gate is edited.
+  - *Pending:* how the reference treats protocol information that carries a word is a Spec
+    Reader question shared with Chapter 59. Its answer reaches this chapter only after the
+    Dirty Gate.
