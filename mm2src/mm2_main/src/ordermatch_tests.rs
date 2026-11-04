@@ -9,7 +9,7 @@ use db_common::sqlite::rusqlite::Connection;
 use futures::{channel::mpsc, lock::Mutex as AsyncMutex, StreamExt};
 use mm2_core::mm_ctx::{MmArc, MmCtx, MmCtxBuilder};
 use mm2_p2p::atomicdex_behaviour::AdexBehaviourCmd;
-use mm2_p2p::{decode_message, PeerId};
+use mm2_p2p::{decode_message, decode_signed, PeerId};
 use mocktopus::mocking::*;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::collections::HashSet;
@@ -12867,5 +12867,345 @@ mod negotiation_failure_penalty {
 
         assert!(!banned(&ctx, maker_key));
         assert_eq!(listed(&ctx), json!({}));
+    }
+}
+
+/// CRD ch.05 §5.12B T13-T16: the refusal of a swap whose key is not the key its coin pays from, under a global-HD
+/// login. What each coin family reports is pinned in the `coins` crate; here `TestCoin` reports it, so the sites
+/// that ask the question run without any network.
+mod t05_12b_swap_key_check_tests {
+    use super::*;
+    use coins::{CoinsContext, MarketCoinOps, MmCoinEnum, SwapKeyDisagreement, SwapOps};
+    use crypto::CryptoCtx;
+
+    const HD_MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    const EVM_REASON: &str = r#"an EVM coin under an HD login ("enable_hd") pays from another key than the one its swaps announce; trade it under a login without "enable_hd""#;
+    const SINGLE_KEY_REASON: &str = r#"it was enabled with a single key (legacy "enable" or "electrum") under an HD login, so it pays from another key than the one its swaps announce; enable it through its HD activation, or log in without "enable_hd""#;
+
+    /// `ETH` is the EVM coin, `RIN` a UTXO coin enabled with a single key, `RINX` a UTXO coin activated at
+    /// address 1, `RINH` a UTXO coin at its first address (no disagreement).
+    fn mock_coins() {
+        TestCoin::swap_key_disagreement.mock_safe(|coin, _node_pubkey| {
+            MockResult::Return(match coin.ticker() {
+                "ETH" => Some(SwapKeyDisagreement::EvmSigner),
+                "RIN" => Some(SwapKeyDisagreement::SingleKey),
+                "RINX" => Some(SwapKeyDisagreement::HdAddress {
+                    activated_path: "m/44'/141'/0'/0/1".to_owned(),
+                    paying_path: "m/44'/141'/0'/0/0".to_owned(),
+                }),
+                _ => None,
+            })
+        });
+        TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(MmNumber::from("0.00000001")));
+    }
+
+    /// A node logged in with the HD mnemonic (`hd`) or the iguana passphrase, with the coins activated.
+    fn ctx_with(conf: Json, hd: bool, tickers: &[&str]) -> MmArc {
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        if hd {
+            CryptoCtx::init_with_global_hd_account(ctx.clone(), HD_MNEMONIC).unwrap();
+        } else {
+            CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "an iguana passphrase of the test").unwrap();
+        }
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for ticker in tickers {
+            block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+        }
+        ctx
+    }
+
+    fn pair(base: &str, rel: &str) -> (MmCoinEnum, MmCoinEnum) {
+        (
+            MmCoinEnum::Test(TestCoin::new(base)),
+            MmCoinEnum::Test(TestCoin::new(rel)),
+        )
+    }
+
+    fn refusal(coin: &str, reason: &str) -> String { format!("{coin} cannot be swapped under this login: {reason}") }
+
+    fn mismatch_of(ctx: &MmArc, base: &str, rel: &str) -> Option<String> {
+        let (base, rel) = pair(base, rel);
+        swap_key_mismatch(ctx, &base, &rel).map(|mismatch| mismatch.to_string())
+    }
+
+    /// R34: the three reasons, word for word, and the coin they name: the first of the pair that fails.
+    #[test]
+    fn the_refusal_text_is_the_one_of_r34() {
+        mock_coins();
+        let ctx = ctx_with(json!({}), true, &[]);
+        assert_eq!(mismatch_of(&ctx, "ETH", "KMD"), Some(refusal("ETH", EVM_REASON)));
+        assert_eq!(mismatch_of(&ctx, "KMD", "ETH"), Some(refusal("ETH", EVM_REASON)));
+        assert_eq!(mismatch_of(&ctx, "RIN", "KMD"), Some(refusal("RIN", SINGLE_KEY_REASON)));
+        assert_eq!(
+            mismatch_of(&ctx, "KMD", "RINX"),
+            Some(refusal(
+                "RINX",
+                "it is activated at m/44'/141'/0'/0/1, but its swaps pay from m/44'/141'/0'/0/0; activate it at account 0, external chain, address 0"
+            ))
+        );
+        // The base coin is named when both fail.
+        assert_eq!(mismatch_of(&ctx, "RIN", "ETH"), Some(refusal("RIN", SINGLE_KEY_REASON)));
+        // A pair whose coins agree passes.
+        assert_eq!(mismatch_of(&ctx, "RINH", "KMD"), None);
+    }
+
+    /// T13: an iguana login passes this check without asking any coin.
+    #[test]
+    fn an_iguana_login_is_never_refused() {
+        TestCoin::swap_key_disagreement.mock_safe(|_, _| panic!("no coin is asked under an iguana login"));
+        let ctx = ctx_with(json!({}), false, &[]);
+        assert_eq!(mismatch_of(&ctx, "ETH", "RIN"), None);
+    }
+
+    /// T16 and R36: only an explicit JSON `false` switches the check off.
+    #[test]
+    fn the_switch_false_disables_the_check() {
+        mock_coins();
+        for (conf, enabled) in [
+            (json!({}), true),
+            (json!({ "swap_key_check": true }), true),
+            (json!({ "swap_key_check": null }), true),
+            (json!({ "swap_key_check": "false" }), true),
+            (json!({ "swap_key_check": false }), false),
+        ] {
+            let ctx = ctx_with(conf.clone(), true, &[]);
+            assert_eq!(swap_key_check_enabled(&ctx), enabled, "{conf}");
+            assert_eq!(mismatch_of(&ctx, "ETH", "RIN").is_some(), enabled, "{conf}");
+        }
+    }
+
+    /// T16: a coin whose swaps are off (wallet only) is not refused by this rule.
+    #[test]
+    fn a_wallet_only_coin_is_exempt() {
+        mock_coins();
+        let ctx = ctx_with(
+            json!({ "coins": [{ "coin": "ETH", "wallet_only": true }, { "coin": "RIN", "wallet_only": true }] }),
+            true,
+            &[],
+        );
+        assert_eq!(mismatch_of(&ctx, "ETH", "RIN"), None);
+        assert_eq!(mismatch_of(&ctx, "ETH", "KMD"), None);
+    }
+
+    /// T13: `setprice`, `buy`, `sell` and `update_maker_order` refuse the pair before any balance check and
+    /// answer the text of R34; an iguana login, and `swap_key_check` false, pass the check.
+    #[test]
+    fn t13_order_creation_and_update_are_refused() {
+        mock_coins();
+        let ctx = ctx_with(json!({}), true, &["ETH", "KMD", "RIN", "RINX"]);
+        for (base, rel, expected) in [
+            ("ETH", "KMD", refusal("ETH", EVM_REASON)),
+            ("KMD", "RIN", refusal("RIN", SINGLE_KEY_REASON)),
+        ] {
+            let req: SetPriceReq =
+                json::from_value(json!({ "base": base, "rel": rel, "price": "1", "volume": "1" })).unwrap();
+            // A legacy error carries the location of its source, as every other legacy refusal does.
+            let refused_with = |err: Option<String>, what: &str| match err {
+                Some(err) if err.ends_with(expected.as_str()) => (),
+                other => panic!("{what} {base}/{rel}: {other:?}"),
+            };
+            refused_with(block_on(create_maker_order(&ctx, req)).err(), "setprice");
+
+            for method in ["buy", "sell"] {
+                let body = json!({ "base": base, "rel": rel, "price": "1", "volume": "1", "method": method });
+                let err = match method {
+                    "buy" => block_on(buy(ctx.clone(), body)),
+                    _ => block_on(sell(ctx.clone(), body)),
+                }
+                .err();
+                refused_with(err, method);
+            }
+        }
+
+        let (base, rel) = pair("ETH", "KMD");
+        let order = MakerOrderBuilder::new(&base, &rel)
+            .with_max_base_vol(1.into())
+            .with_price(1.into())
+            .with_conf_settings(OrderConfirmationsSettings::default())
+            .build_unchecked();
+        OrdermatchContext::from_ctx(&ctx)
+            .unwrap()
+            .maker_orders_ctx
+            .lock()
+            .add_order(&order, Arc::new(AsyncMutex::new(order.clone())));
+        let req = MakerOrderUpdateReq {
+            uuid: order.uuid,
+            new_price: Some(2.into()),
+            max: None,
+            volume_delta: None,
+            min_volume: None,
+            base_confs: None,
+            base_nota: None,
+            rel_confs: None,
+            rel_nota: None,
+        };
+        let err = block_on(update_maker_order(&ctx, req)).err().unwrap();
+        assert!(err.ends_with(&refusal("ETH", EVM_REASON)), "{err}");
+    }
+
+    /// T13: the same requests under an iguana login, and with the switch off, are not refused by this check (they
+    /// stop later, at the first thing `TestCoin` cannot answer).
+    #[test]
+    fn t13_the_same_requests_pass_this_check_when_the_keys_agree_or_the_check_is_off() {
+        mock_coins();
+        for (conf, hd) in [(json!({}), false), (json!({ "swap_key_check": false }), true)] {
+            let ctx = ctx_with(conf, hd, &["ETH", "KMD"]);
+            let req: SetPriceReq =
+                json::from_value(json!({ "base": "ETH", "rel": "KMD", "price": "1", "volume": "1" })).unwrap();
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| block_on(create_maker_order(&ctx, req))));
+            if let Ok(Err(err)) = outcome {
+                assert!(!err.contains("cannot be swapped under this login"), "{err}");
+            }
+        }
+    }
+
+    fn matching_request(base: &str, rel: &str) -> TakerRequest {
+        TakerRequest {
+            base: base.into(),
+            rel: rel.into(),
+            uuid: Uuid::new_v4(),
+            dest_pub_key: H256Json::default(),
+            sender_pubkey: H256Json::default(),
+            base_amount: MmNumber::from(1),
+            rel_amount: MmNumber::from(1),
+            action: TakerAction::Buy,
+            match_by: MatchBy::Any,
+            conf_settings: None,
+            base_protocol_info: None,
+            rel_protocol_info: None,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    /// T15: a stored order of ours whose pair fails the rule gets no reservation when a request matches it. It is
+    /// cancelled once, as an ordinary cancellation that peers see, and no swap starts.
+    #[test]
+    fn t15_an_own_order_that_fails_is_cancelled_at_the_match_check() {
+        mock_coins();
+        let ctx = ctx_with(json!({}), true, &["ETH", "KMD"]);
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        let deleted = Arc::new(Mutex::new(Vec::<String>::new()));
+        let deleted_log = deleted.clone();
+        delete_my_maker_order.mock_safe(move |_, order, reason| {
+            deleted_log.lock().unwrap().push(format!("{} {}", order.uuid, reason));
+            MockResult::Return(Box::new(futures01::future::ok(())))
+        });
+        lp_connect_start_bob.mock_safe(|_, _, _| panic!("no swap starts for a pair that fails the rule"));
+
+        let (base, rel) = pair("ETH", "KMD");
+        let order = MakerOrderBuilder::new(&base, &rel)
+            .with_max_base_vol(1.into())
+            .with_min_base_vol(Some(MmNumber::from("0.01")))
+            .with_price(1.into())
+            .with_conf_settings(OrderConfirmationsSettings::default())
+            .build_unchecked();
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        ordermatch_ctx
+            .maker_orders_ctx
+            .lock()
+            .add_order(&order, Arc::new(AsyncMutex::new(order.clone())));
+
+        let request = matching_request("ETH", "KMD");
+        assert!(matches!(
+            order.match_with_request(&request),
+            OrderMatchResult::Matched(_)
+        ));
+        block_on(process_taker_request(ctx.clone(), H256Json::default(), request.clone()));
+        // A second request finds no order: the cancellation is not repeated.
+        block_on(process_taker_request(ctx.clone(), H256Json::default(), request));
+
+        assert!(!ordermatch_ctx.maker_orders_ctx.lock().contains_key(&order.uuid));
+        assert_eq!(*deleted.lock().unwrap(), vec![format!(
+            "{} {}",
+            order.uuid,
+            MakerOrderCancellationReason::Cancelled
+        )]);
+        // The only message published is the cancellation of the order; no reservation is sent.
+        let mut published = Vec::new();
+        while let Ok(cmd) = p2p_rx.try_recv() {
+            if let AdexBehaviourCmd::PublishMsg { msg, .. } | AdexBehaviourCmd::PublishMsgFrom { msg, .. } = cmd {
+                let (message, ..) = decode_signed::<new_protocol::OrdermatchMessage>(&msg).unwrap();
+                published.push(message);
+            }
+        }
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert!(
+            matches!(&published[0], new_protocol::OrdermatchMessage::MakerOrderCancelled(c) if c.uuid == order.uuid.into()),
+            "{:?}",
+            published[0]
+        );
+    }
+
+    /// R33: no connect message is sent for a reservation whose pair fails the rule; with the keys in agreement
+    /// the same reservation is answered with the connect message, so the setup does reach the send.
+    #[test]
+    fn a_connect_message_is_not_sent_for_a_pair_that_fails() {
+        mock_coins();
+        TestCoin::is_coin_protocol_supported.mock_safe(|_, _| MockResult::Return(true));
+        TestCoin::coin_protocol_info.mock_safe(|_| MockResult::Return(Vec::new()));
+        for (base_ticker, expects_connect) in [("ETH", false), ("KMD", true)] {
+            let ctx = ctx_with(json!({}), true, &[base_ticker, "REL"]);
+            let (tx, mut p2p_rx) = mpsc::channel(100);
+            P2PContext::new(tx).store_to_mm_arc(&ctx);
+            let (base, rel) = pair(base_ticker, "REL");
+            let order = TakerOrderBuilder::new(&base, &rel)
+                .with_base_amount(MmNumber::from(1))
+                .with_rel_amount(MmNumber::from(1))
+                .with_action(TakerAction::Buy)
+                .with_match_by(MatchBy::Any)
+                .with_conf_settings(OrderConfirmationsSettings::default())
+                .with_sender_pubkey(H256Json::from([1u8; 32]))
+                .build_unchecked();
+            let uuid = order.request.uuid;
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+            block_on(ordermatch_ctx.my_taker_orders.lock()).insert(uuid, order);
+
+            let reserved = MakerReserved {
+                base: base_ticker.into(),
+                rel: "REL".into(),
+                base_amount: MmNumber::from(1),
+                rel_amount: MmNumber::from(1),
+                taker_order_uuid: uuid,
+                maker_order_uuid: Uuid::new_v4(),
+                sender_pubkey: H256Json::from([2u8; 32]),
+                dest_pub_key: H256Json::default(),
+                conf_settings: Some(OrderConfirmationsSettings::default()),
+                base_protocol_info: Some(Vec::new()),
+                rel_protocol_info: Some(Vec::new()),
+                swap_version: SwapVersion::default(),
+            };
+            block_on(process_maker_reserved(ctx.clone(), reserved.sender_pubkey, reserved));
+
+            let order = block_on(ordermatch_ctx.my_taker_orders.lock()).remove(&uuid).unwrap();
+            assert_eq!(!order.matches.is_empty(), expects_connect, "{base_ticker}");
+            let mut sent = 0;
+            while let Ok(cmd) = p2p_rx.try_recv() {
+                if matches!(
+                    cmd,
+                    AdexBehaviourCmd::PublishMsg { .. } | AdexBehaviourCmd::PublishMsgFrom { .. }
+                ) {
+                    sent += 1;
+                }
+            }
+            assert_eq!(sent > 0, expects_connect, "{base_ticker}: {sent} messages published");
+        }
+    }
+
+    /// R35: the WARN line.
+    #[test]
+    fn the_cancel_line_is_the_text_of_r35() {
+        let uuid = Uuid::new_v4();
+        let mismatch = SwapKeyMismatch {
+            coin: "ETH".into(),
+            reason: EVM_REASON.into(),
+        };
+        assert_eq!(
+            swap_key_cancel_line(&uuid, &mismatch),
+            format!("Maker order {uuid} cancelled: ETH cannot be swapped under this login: {EVM_REASON}")
+        );
     }
 }

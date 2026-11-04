@@ -14,7 +14,7 @@ use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_
             SavedSwapIo, SavedTradeFee, SwapConfirmationsSettings, SwapError, SwapMsg, SwapsContext,
             TransactionIdentifier, SWAP_WIRE_SECRET_HASH_MIN_LEN, WAIT_CONFIRM_INTERVAL};
 use crate::mm2::lp_network::subscribe_to_topic;
-use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, untradable_coin_ticker, MatchBy,
+use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, swap_key_mismatch, untradable_coin_ticker, MatchBy,
                                 OrderConfirmationsSettings, TakerAction, TakerOrderBuilder};
 use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, retried_refund_rejection, tx_helper_topic, NON_FINAL_REFUND_RETRY_SECS};
 use crate::mm2::MM_VERSION;
@@ -2748,6 +2748,10 @@ pub async fn taker_swap_trade_preimage(
 ) -> TradePreimageRpcResult<TakerTradePreimage> {
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
         return MmError::err(TradePreimageRpcError::TradingNotSupported { coin });
+    }
+    // CRD ch.05 R33: a pair whose swap key is not the key it pays from is refused before any balance check.
+    if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
+        return MmError::err(TradePreimageRpcError::from(mismatch));
     }
     let action = req
         .swap_method

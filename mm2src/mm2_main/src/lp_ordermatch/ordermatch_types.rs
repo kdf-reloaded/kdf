@@ -1,5 +1,7 @@
 use super::*;
+use coins::SwapKeyDisagreement;
 use common::mm_number::DecimalMemo;
+use crypto::KeyPairPolicy;
 use std::sync::LazyLock;
 
 /// Number of entries the memo of unreserved available amounts holds before it is emptied.
@@ -180,6 +182,75 @@ fn is_untradable_coin(coin: &MmCoinEnum) -> bool {
 
 #[cfg(target_arch = "wasm32")]
 fn is_untradable_coin(_coin: &MmCoinEnum) -> bool { false }
+
+/// CRD ch.05 R36: the MM2.json boolean `swap_key_check`, default `true`. Only an explicit JSON `false` turns the
+/// refusal of R32-R35 off, which restores the behavior of earlier builds.
+pub(crate) fn swap_key_check_enabled(ctx: &MmArc) -> bool { ctx.conf["swap_key_check"].as_bool() != Some(false) }
+
+/// A pair that fails the swap-key agreement rule (CRD ch.05 R32, R34): the first coin whose swap key is not the
+/// key it pays from, and the reason. Its text is the refusal that the legacy RPCs answer as their error.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwapKeyMismatch {
+    pub coin: String,
+    pub reason: String,
+}
+
+impl fmt::Display for SwapKeyMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} cannot be swapped under this login: {}", self.coin, self.reason)
+    }
+}
+
+impl SwapKeyMismatch {
+    fn new(coin: &MmCoinEnum, disagreement: SwapKeyDisagreement) -> SwapKeyMismatch {
+        let reason = match disagreement {
+            SwapKeyDisagreement::EvmSigner => {
+                r#"an EVM coin under an HD login ("enable_hd") pays from another key than the one its swaps announce; trade it under a login without "enable_hd""#
+                    .to_owned()
+            },
+            SwapKeyDisagreement::SingleKey => {
+                r#"it was enabled with a single key (legacy "enable" or "electrum") under an HD login, so it pays from another key than the one its swaps announce; enable it through its HD activation, or log in without "enable_hd""#
+                    .to_owned()
+            },
+            SwapKeyDisagreement::HdAddress {
+                activated_path,
+                paying_path,
+            } => format!(
+                "it is activated at {activated_path}, but its swaps pay from {paying_path}; activate it at account 0, external chain, address 0"
+            ),
+        };
+        SwapKeyMismatch {
+            coin: coin.ticker().to_owned(),
+            reason,
+        }
+    }
+}
+
+/// Returns the first coin of the pair whose legacy swap key is not the key it pays from, under a global-HD login
+/// (CRD ch.05 R32-R34). Every place that refuses an untradable coin asks it next to [`untradable_coin_ticker`],
+/// before any balance, fee or volume check, and so do the match and swap-start paths (R33). `None` under an iguana
+/// login, with `swap_key_check` set to `false`, and for a coin the rule does not apply to; a coin that is wallet
+/// only has its swaps switched off.
+pub(crate) fn swap_key_mismatch(ctx: &MmArc, base: &MmCoinEnum, rel: &MmCoinEnum) -> Option<SwapKeyMismatch> {
+    if !swap_key_check_enabled(ctx) {
+        return None;
+    }
+    // A running node always holds a login; without one there is no HD login to check against.
+    let Ok(crypto_ctx) = CryptoCtx::from_ctx(ctx) else {
+        return None;
+    };
+    if !matches!(crypto_ctx.key_pair_policy(), KeyPairPolicy::GlobalHDAccount(_)) {
+        return None;
+    }
+    let node_pubkey = *ctx.secp256k1_key_pair().public();
+    [base, rel].into_iter().find_map(|coin| {
+        if coin.wallet_only(ctx) {
+            return None;
+        }
+        coin.swap_key_disagreement(&node_pubkey)
+            .map(|disagreement| SwapKeyMismatch::new(coin, disagreement))
+    })
+}
 
 /// CRD ch.60 R60.6.7 item 7: the MM2.json boolean `pre_trade_spend_check`, default `true`. Only an explicit
 /// JSON `false` turns the pre-trade spend-safety check off, which is the reference behaviour.
