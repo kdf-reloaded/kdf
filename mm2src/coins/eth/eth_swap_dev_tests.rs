@@ -78,6 +78,7 @@ fn dev_eth_coin(coin_type: EthCoinType, node: &GethDev, swap_contract: Address) 
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
         estimate_gas_mult: None,
+        taker_fee_quote_at_limit: true,
     }));
     (ctx, coin)
 }

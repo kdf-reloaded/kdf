@@ -238,6 +238,37 @@ holding. For one order:
 > `t12_7_order_lock_io_tests`, together with a test of the side-map
 > sweep.
 
+**R7c.** *Restore guard (Reloaded; clean-room original; Decision BK item 2,
+bound 2026-11-03 as Decision 29).* A stored active record that outlives its
+order's removal MUST NOT bring the order back at the next start
+([Chapter 32](32-orderbook-p2p-and-trie.md) §32.9C.1 R-GH11 item 1):
+
+1. at start, before the stored active maker orders enter the container
+   ([Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.7 item 2),
+   each stored active record is checked against the order history. The
+   record is not restored when the history already records the order's
+   removal: the history record a removal writes (R7b item 2), or a
+   filtering-history status that only a removed order carries (a
+   cancellation reason of R13, or the fulfilled status). For such a record
+   the node logs, at warn level, the identifier and the history's status;
+   deletes the stale active record (a failure is logged); publishes
+   nothing for the order; and writes no new history entry. Every other
+   record is restored as before;
+2. an order created with `save_in_history: false` leaves no history
+   entry, so its record is restored as before, and so is one whose
+   history write failed together with the deletion;
+3. the top-level `MM2.json` boolean `maker_restore_skips_cancelled`,
+   default `true`, turns items 1 and 4 off; only a JSON `false` does. Off
+   is the reference's behavior: every stored active record is restored,
+   and a record that outlived its cancel brings the order back;
+4. when an order is removed, the deletion of its active record is tried
+   up to three times, 200 ms apart. A record that is already missing
+   counts as deleted. Each failed attempt is logged once, at warn level;
+   after the third failure one warn line gives up and names the order's
+   identifier; nothing else is logged. The removal's history writes
+   follow as before;
+5. taker records are not affected.
+
 ## 12.5 Bound TTL Semantics
 
 **R8.** Insertion takes one of two backings based on whether a
@@ -284,15 +315,43 @@ expiry-tick hook (R14) when a TTL-bounded order is drained.
 
 ## 12.8 Bound Expiry-Tick Hook
 
-**R14.** At the start of each iteration of the existing order-matching
-periodic worker, before any other per-order work, the substrate MUST
-drain the container's expired entries under the non-async lock (releasing
-the lock before any awaited work) and route each drained order through
-the pre-existing maker-order cancellation pipeline tagged with the
-auto-expiry reason (R13). Routing through that pipeline preserves its
-established external effects: the P2P maker-order-cancelled broadcast,
-the maker-orders history append (tagged with the auto-expiry reason), and
-the removal of the on-disk active-order record.
+**R14.** *(Amended 2026-11-03 by the KDF Spec Reader from the rows
+`v2.6.0-beta` and `v3.0.0-beta` of [Chapter 02](02-baseline-state.md)
+§2.15A, identical at both; **passed the KDF Dirty Gate on 2026-11-03**,
+measure 0.03, see §12.14. The
+amendment replaces the first sentence's placement of the drain — "at the
+start of each iteration, before any other per-order work" — which did not
+describe the reference; the rest of the rule is unchanged.)* In each pass of
+the existing order-matching periodic worker, **after** the taker-order
+timeout step and the maker-match pruning step
+([Chapter 59](59-legacy-ordermatch-negotiation.md) R59.4.1, R59.4.4) and
+after the pass's own check that cancels a maker order whose available
+amount is below its minimum volume with no match in progress (with the
+insufficient-balance or the fulfilled reason), and **before** the eviction
+sweep of tracked public keys (ch. 59 R59.6.4) and the re-announcement of
+own orders missing from the read index (ch. 59 R59.6.7 item 2;
+[Chapter 60](60-trading-floors-and-refusal-contract.md) R60.4.6 item 5),
+the substrate MUST drain the container's expired entries under the
+non-async lock (releasing the lock before any awaited work) and route each
+drained order through the pre-existing maker-order cancellation pipeline
+tagged with the auto-expiry reason (R13). An order drained in a pass has
+therefore been through that pass's match pruning and balance check, and is
+never visited by that pass's eviction sweep or re-announcement. An order
+whose timeout runs out after the drain step stays in the container for the
+rest of that pass (the re-announcement scan visits it, and publishes only
+if it is missing from the read index) and is drained in the next pass.
+Routing through that pipeline preserves its
+established external effects: the P2P maker-order-cancelled broadcast, the
+maker-orders history append (tagged with the auto-expiry reason), and the
+removal of the on-disk active-order record.
+
+> **As-built (this repository, 2026-11-03; not corpus-sourced).** The
+> periodic worker of `lp_ordermatch/ordermatch_trading.rs` already runs its
+> pass in the order the amended R14 binds: taker-order timeout, maker-match
+> pruning, the balance-and-minimum check, the expiry drain
+> (`cancel_expired_maker_orders`), the eviction sweep and the
+> re-announcement of own orders missing from the read index. The
+> amendment corrects the text, not the code.
 
 **R15.** The substrate MUST NOT bypass the pre-existing cancellation
 pipeline for expired orders; an expired order MUST receive the same
@@ -368,6 +427,18 @@ balance-update handler lowers the order's volume while an update's write
 is in progress, the update's announcement, sent after the write, carries
 the lowered available volume. With no change during the write, the
 announcement is the same message the update sent before R7a.
+
+**T9.** *Restore guard (R7c).* (a) An active record whose identifier has a
+history record and a cancelled status is not restored at start; it is
+deleted, no message is published for it and no history entry is added,
+and the other records are restored. (b) The same record, from an order
+created with `save_in_history: false` and with no history entry, is
+restored. (c) With `maker_restore_skips_cancelled: false` the record of
+(a) is restored. (d) A deletion at removal that fails twice and then
+succeeds leaves no record and logs two warn lines; one that fails three
+times logs three warn lines and one give-up line naming the identifier;
+a missing record is not retried. (e) A stored taker record is restored as
+before.
 
 ## 12.11 Deferred Work
 
@@ -465,3 +536,22 @@ auto-expiry reason (R13) is purely additive.
   code (the per-order lock sites of the order-matching layer and its
   storage functions). They are Reloaded-original and state no reference
   behavior, so chapter 01 R38 is not engaged.
+- *Spec Reader amendment (2026-11-03), R14's placement sentence:* the
+  position of the expiry drain within the periodic worker's pass was
+  re-derived from the rows `v2.6.0-beta` and `v3.0.0-beta` of
+  [Chapter 02](02-baseline-state.md) §2.15A, which agree. The corpus was
+  consulted **only** for the order of the pass's steps (taker-order
+  timeout, maker-match pruning, balance-and-minimum check, expiry drain,
+  tracked-pubkey eviction, re-announcement); only that order crosses into
+  the chapter, as behavior. **KDF Dirty Gate: PASS on 2026-11-03, measure
+  0.03** for this amendment; the rest of R14 and the chapter are unchanged.
+  The "Forbidden corpus: not consulted" line above holds for every other
+  part of this chapter. The as-built note after R14 rests on this
+  repository's own code only.
+- *Clean-side addition (2026-11-03), R7c and T9:* written by a context that
+  never read the forbidden corpus, from the maintainer's Decisions BK and
+  29 and from this repository's own restore and storage code. The fact it
+  answers (a stored record that outlives its cancel brings the order back
+  at the next start) is chapter 32 R-GH11 item 1, which passed the KDF
+  Dirty Gate; R7c itself is Reloaded-original and states no further
+  reference behavior.

@@ -1,6 +1,6 @@
 # Plan: where the EVM gas multiplier and the gas limits reach the swap transactions
 
-**Status:** blocked ((c) and (d) decided and written in PR #123; (a) and (b) wait on the reference maintainers' outcome) — **Last reviewed:** 2026-10-29
+**Status:** blocked ((c) and (d) decided and written in PR #123; (a) and (b) wait on the reference maintainers' outcome) — **Last reviewed:** 2026-11-03
 
 > **Context:** an operator running a maker on USDC-MON (Monad) and USDC-BASE set
 > `estimate_gas_mult` and still saw the fixed 210,000 / 150,000 limits on the
@@ -226,7 +226,10 @@ note because the reference does not do it.
   transaction, and that on a chain which charges the gas limit (Monad) the limits
   should be set close to measured use. Deferred: (a)'s tidy-up (R57.5.3b item 5
   naming the V2 allowance approve) and (b), which would be a new rule and a
-  Reloaded-original divergence note with its own tests.
+  Reloaded-original divergence note with its own tests. Added 2026-11-02:
+  R57.5.5, a log line at activation that shows each EVM coin's gas limits in
+  effect and where they come from, so a coins file without the block a chain
+  needs shows at once.
 - **Coins file (separate repository):** the Monad block above, after the direct
   measurement; nothing else.
 - **Documentation:** a short section in the operator-facing docs describing which
@@ -237,5 +240,11 @@ note because the reference does not do it.
 
 1. ~~Pick an option~~ decided: (c)+(d); (a) and (b) wait for the reference maintainers' outcome.
 2. ~~Who carries the Monad block?~~ the coins-file maintainer, by the proposal text.
-3. The taker-fee quote (estimated) against the broadcast (fixed 210,000) is a
-   small inconsistency of its own; leave it, or make the quote follow the limit.
+3. ~~The taker-fee quote (estimated) against the broadcast (fixed 210,000) is a
+   small inconsistency of its own; leave it, or make the quote follow the limit.~~
+   Decided 2026-11-02: the quote follows the limit (ch.57 R57.4.2), with the
+   switch `evm_taker_fee_quote_at_limit` (default `true`; `false` quotes the
+   estimate as before). Reference behavior (ch.57 R57.5.2a, 2026-11-03): GLEEC
+   KDF sends the taker fee with the same fixed limit and quotes it by
+   `eth_estimateGas`, so quoting at the limit diverges in the quote only, under
+   the second arm of the default-side rule; `false` gives GLEEC KDF's quote.

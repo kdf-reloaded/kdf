@@ -138,6 +138,7 @@ pub(super) fn eth_coin_for_test_with_providers(
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
         estimate_gas_mult: None,
+        taker_fee_quote_at_limit: true,
     }));
     (ctx, eth_coin)
 }
@@ -238,6 +239,7 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
         estimate_gas_mult: None,
+        taker_fee_quote_at_limit: true,
     }));
     (ctx, eth_coin, selected_addr)
 }
@@ -418,6 +420,7 @@ fn test_wait_for_payment_spend_timeout() {
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
         estimate_gas_mult: None,
+        taker_fee_quote_at_limit: true,
     };
 
     let coin = EthCoin(Arc::new(coin));
@@ -593,6 +596,7 @@ mod search_for_swap_tx_spend_scripted {
             gas_limit: EthGasLimit::default(),
             gas_limit_v2: EthGasLimitV2::default(),
             estimate_gas_mult: None,
+            taker_fee_quote_at_limit: true,
         }));
         (ctx, coin)
     }
@@ -1107,19 +1111,24 @@ fn get_receiver_trade_preimage() {
 #[test]
 fn test_get_fee_to_send_taker_fee() {
     const DEX_FEE_AMOUNT: u64 = 100_000;
-    const TRANSFER_GAS_LIMIT: u64 = 40_000;
+    const TRANSFER_GAS_LIMIT: u64 = 15_000;
 
     EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(GAS_PRICE.into()))));
     mock_estimation_fee(GAS_PRICE);
     EthCoinImpl::estimate_gas
         .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(TRANSFER_GAS_LIMIT.into()))));
 
-    // fee to send taker fee is `TRANSFER_GAS_LIMIT * gas_price` always.
-    let amount = u256_to_big_decimal((TRANSFER_GAS_LIMIT * GAS_PRICE).into(), 18).expect("!u256_to_big_decimal");
-    let expected_fee = TradeFee {
-        coin: "ETH".to_owned(),
-        amount: amount.into(),
-        paid_from_trading_vol: false,
+    // The fee to send the taker fee is the fixed limit the transfer is sent with times the price, not the node's
+    // estimate (CRD ch.57 R57.4.2): `eth_send_coins` for the platform coin, `eth_send_erc20` for a token.
+    let limits = EthGasLimit::default();
+    assert!(TRANSFER_GAS_LIMIT < limits.eth_send_coins && TRANSFER_GAS_LIMIT < limits.eth_send_erc20);
+    let fee_at = |gas_limit: u64| {
+        let amount = u256_to_big_decimal((gas_limit * GAS_PRICE).into(), 18).expect("!u256_to_big_decimal");
+        TradeFee {
+            coin: "ETH".to_owned(),
+            amount: amount.into(),
+            paid_from_trading_vol: false,
+        }
     };
 
     let dex_fee_amount = u256_to_big_decimal(DEX_FEE_AMOUNT.into(), 18).expect("!u256_to_big_decimal");
@@ -1132,7 +1141,7 @@ fn test_get_fee_to_send_taker_fee() {
             eth_coin_for_test_with_netid(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None, netid);
         let actual = block_on(coin.get_fee_to_send_taker_fee(dex_fee_amount.clone(), FeeApproxStage::WithoutApprox))
             .expect("!get_fee_to_send_taker_fee");
-        assert_eq!(actual, expected_fee, "netid {netid}");
+        assert_eq!(actual, fee_at(limits.eth_send_coins), "netid {netid}");
 
         let (_ctx, coin) = eth_coin_for_test_with_netid(
             EthCoinType::Erc20 {
@@ -1145,7 +1154,7 @@ fn test_get_fee_to_send_taker_fee() {
         );
         let actual = block_on(coin.get_fee_to_send_taker_fee(dex_fee_amount.clone(), FeeApproxStage::WithoutApprox))
             .expect("!get_fee_to_send_taker_fee");
-        assert_eq!(actual, expected_fee, "netid {netid}");
+        assert_eq!(actual, fee_at(limits.eth_send_erc20), "netid {netid}");
     }
 }
 
@@ -1480,6 +1489,7 @@ fn test_message_hash() {
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
         estimate_gas_mult: None,
+        taker_fee_quote_at_limit: true,
     }));
 
     let message_hash = coin.sign_message_hash("test").unwrap();
@@ -1534,6 +1544,7 @@ fn test_sign_verify_message() {
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
         estimate_gas_mult: None,
+        taker_fee_quote_at_limit: true,
     }));
 
     let message = "test";
@@ -1732,6 +1743,7 @@ fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
         estimate_gas_mult: None,
+        taker_fee_quote_at_limit: true,
     }));
     (ctx, eth_coin)
 }
@@ -2329,6 +2341,7 @@ mod swap_send_path_wire_form {
             gas_limit: EthGasLimit::default(),
             gas_limit_v2: EthGasLimitV2::default(),
             estimate_gas_mult: None,
+            taker_fee_quote_at_limit: true,
         }));
         (ctx, coin)
     }
