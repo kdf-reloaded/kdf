@@ -2,6 +2,7 @@
 //! (CRD ch.37 R37.5.9e). The cascade lives here, in the coins layer; `kdf_chain` only offers the
 //! per-layout readers.
 
+use super::header_time_only::TimeOnlyStep;
 use super::UtxoCoinConf;
 use chain::BlockHeader;
 use serialization::CoinVariant;
@@ -210,6 +211,9 @@ impl<E> FallbackReadError<E> {
 pub struct HeaderReadPolicy {
     layout: CoinVariant,
     fallback: Option<HeaderLayoutFallback>,
+    /// Set once a median-time-past list was read by size (CRD ch.37 R37.5.10e), so the info line is
+    /// logged once per coin per activation.
+    time_only_logged: Arc<AtomicBool>,
 }
 
 impl HeaderReadPolicy {
@@ -226,17 +230,40 @@ impl HeaderReadPolicy {
         HeaderReadPolicy {
             layout,
             fallback: HeaderLayoutFallback::for_conf(conf),
+            time_only_logged: conf.header_time_only_logged.clone(),
         }
     }
 
     /// Reads with `layout` only: no fallback.
-    pub(crate) fn with_layout(layout: CoinVariant) -> Self { HeaderReadPolicy { layout, fallback: None } }
+    pub(crate) fn with_layout(layout: CoinVariant) -> Self {
+        HeaderReadPolicy {
+            layout,
+            fallback: None,
+            time_only_logged: Arc::new(AtomicBool::new(false)),
+        }
+    }
 
     /// Reads with the standard layout only: no pinned layout, no fallback.
     pub fn standard() -> Self { Self::with_layout(CoinVariant::Standard) }
 
     /// The layout this policy reads first.
     pub(crate) fn layout(&self) -> CoinVariant { self.layout }
+
+    /// Records that the median-time-past list of `ticker` was read by step 2 or step 3 of CRD ch.37
+    /// R37.5.10a; logs once per coin per activation, at `info` and no higher.
+    pub(crate) fn time_only_chosen(&self, ticker: &str, step: TimeOnlyStep) {
+        if self.time_only_logged.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let how = match step {
+            TimeOnlyStep::EvenSplit { stride } => format!("step 2, the list split at a stride of {stride} bytes"),
+            TimeOnlyStep::Individual => "step 3, each header fetched on its own".to_owned(),
+        };
+        common::log::info!(
+            "{ticker}: the median-time-past headers were read by their size ({how}), not by a layout of the \
+             coin file."
+        );
+    }
 
     /// Reads one header from exactly the bytes served for it.
     pub fn read_header(&self, bytes: &[u8]) -> Result<BlockHeader, FallbackReadError<serialization::Error>> {

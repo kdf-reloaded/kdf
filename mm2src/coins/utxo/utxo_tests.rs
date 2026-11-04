@@ -190,6 +190,7 @@ pub(crate) fn utxo_coin_fields_for_test(
             protocol_header_reader: CoinVariant::Standard,
             header_layout_fallback_families: vec!["BTC".to_owned()],
             header_layout_fallback_logged: Default::default(),
+            header_time_only_logged: Default::default(),
         },
         decimals: TEST_COIN_DECIMALS,
         dust_amount: UTXO_DUST_AMOUNT,
@@ -7603,6 +7604,16 @@ pub(crate) mod header_read_path_tests {
         read: impl Fn(&UtxoStandardCoin, &Fixture) -> Result<u64, String>,
         expected: impl Fn(&Fixture) -> u64,
     ) {
+        run_matrix_with(false, read, expected)
+    }
+
+    /// As [`run_matrix`]; `by_size` is set for the median path, which reads a list its layout rejects
+    /// by the size of its headers (CRD ch.37 R37.5.10) instead of rejecting it.
+    pub(crate) fn run_matrix_with(
+        by_size: bool,
+        read: impl Fn(&UtxoStandardCoin, &Fixture) -> Result<u64, String>,
+        expected: impl Fn(&Fixture) -> u64,
+    ) {
         let (ric, mewc, std80) = (Fixture::riecoin(), Fixture::mewc(), Fixture::standard());
 
         // (a) a pinned coin reads its layout and never logs a fallback.
@@ -7617,20 +7628,35 @@ pub(crate) mod header_read_path_tests {
             assert_eq!(read(&coin, fx), Ok(expected(fx)), "fallback {:?}", fx.layout);
             assert!(logged(&coin));
         }
-        // (c) no key, switch off: rejected as before and nothing is logged.
+        // (c) no key, switch off: rejected as before and nothing is logged. The median path is the
+        // exception (CRD ch.37 R37.5.10f): with the switch off a list the standard layout rejects is read
+        // by the size of its headers, so `ric` yields the true median by the even split.
         for fx in [&ric, &mewc] {
             let coin = coin(Setup::Off);
-            assert!(read(&coin, fx).is_err(), "switch off {:?}", fx.layout);
+            if by_size {
+                if fx.layout == CoinVariant::Riecoin {
+                    assert_eq!(read(&coin, fx), Ok(expected(fx)), "switch off {:?}", fx.layout);
+                }
+            } else {
+                assert!(read(&coin, fx).is_err(), "switch off {:?}", fx.layout);
+            }
             assert!(!logged(&coin));
         }
-        // (d) a pinned coin whose layout does not fit is rejected without the fallback.
+        // (d) a pinned coin whose layout does not fit is rejected without the fallback (the median
+        // path again reads the times by size).
         for (pinned, fx) in [(CoinVariant::Riecoin, &mewc), (CoinVariant::KawpowAuxpowMixed, &ric)] {
             let coin = coin(Setup::Pinned(pinned));
-            assert!(
-                read(&coin, fx).is_err(),
-                "pinned {pinned:?} must reject {:?}",
-                fx.layout
-            );
+            if by_size {
+                if fx.layout == CoinVariant::Riecoin {
+                    assert_eq!(read(&coin, fx), Ok(expected(fx)), "pinned {pinned:?} {:?}", fx.layout);
+                }
+            } else {
+                assert!(
+                    read(&coin, fx).is_err(),
+                    "pinned {pinned:?} must reject {:?}",
+                    fx.layout
+                );
+            }
             assert!(!logged(&coin), "a pinned coin must not consult the fallback");
         }
         // (e) a plain standard-80 header is read by the standard layout and never fallback-parsed.
@@ -7823,7 +7849,7 @@ pub(crate) mod header_read_path_tests {
     }
 
     #[test]
-    fn the_median_path_reads_the_list_under_the_policy() { run_matrix(path_median, |fx| fx.median()); }
+    fn the_median_path_reads_the_list_under_the_policy() { run_matrix_with(true, path_median, |fx| fx.median()); }
 
     #[test]
     fn the_sqlite_store_rereads_stored_headers_under_the_policy() { run_matrix(path_store, |fx| fx.list_time()); }
@@ -7858,7 +7884,28 @@ pub(crate) mod header_read_path_tests {
         assert_eq!(read(coin, fx), Ok(expected(fx)), "{name}: {:?}", fx.layout);
     }
 
+    /// The median path no longer rejects a list that the coin's layout cannot read: steps 2 to 4 of
+    /// CRD ch.37 R37.5.10a read the times by the size of the headers. What it still guarantees, and
+    /// what this asserts for it, is that an accepted read passed the range check.
+    fn median_path_reads_by_size(name: &str) -> bool { name.starts_with("median") }
+
+    fn assert_plausible_time(name: &str, time: u64) {
+        assert!(
+            time >= crate::utxo::header_time_only::EARLIEST_PLAUSIBLE_TIME,
+            "{name}: an accepted median read passed the range check"
+        );
+    }
+
     fn read_err(name: &str, coin: &UtxoStandardCoin, fx: &Fixture, read: PathFn) -> String {
+        if median_path_reads_by_size(name) {
+            return match read(coin, fx) {
+                Ok(time) => {
+                    assert_plausible_time(name, time);
+                    String::new()
+                },
+                Err(e) => e,
+            };
+        }
         read(coin, fx).expect_err(&format!("{name}: {:?} must be rejected", fx.layout))
     }
 
@@ -8167,8 +8214,15 @@ pub(crate) mod header_read_path_tests {
                     ("retrieve_last_headers", path_retrieve_last_headers as PathFn),
                     ("median", path_median as PathFn),
                 ] {
-                    let err = read(&coin, &fx);
-                    assert!(err.is_err(), "{variant}/{what}/{name}: {err:?}");
+                    let outcome = read(&coin, &fx);
+                    if median_path_reads_by_size(name) {
+                        // R37.5.10: the median path reads such a list by the size of its headers.
+                        if let Ok(time) = outcome {
+                            assert_plausible_time(name, time);
+                        }
+                        continue;
+                    }
+                    assert!(outcome.is_err(), "{variant}/{what}/{name}: {outcome:?}");
                 }
             }
         }
@@ -9378,5 +9432,576 @@ mod withdraw_recent_spent {
         };
         let replaced = record.replace_spent_outputs_with_cache([spent].into_iter().collect());
         assert_eq!(replaced, [change].into_iter().collect::<HashSet<_>>());
+    }
+}
+
+// ---- time-only read of the median-time-past window (CRD ch.37 R37.5.10) -----------------------
+
+/// The steps 2 to 4 of the median-time-past list read (R37.5.10a): the even split, the individual
+/// read and the range check, on the pure function with an injectable clock and a fake header
+/// fetcher, and through the Electrum client with mocked requests.
+#[cfg(not(target_arch = "wasm32"))]
+mod header_time_only_tests {
+    use super::header_read_path_tests::{coin_from_protocol, conf_from_protocol, electrum, policy_of};
+    use super::*;
+    use crate::utxo::header_time_only::{check_times, even_split, read_window_times, CLOCK_SLACK_SECS,
+                                        EARLIEST_PLAUSIBLE_TIME};
+    use crate::utxo::rpc_clients::{ElectrumBlockHeadersRes, UtxoRpcError};
+    use rpc::v1::types::Bytes as BytesJson;
+    use std::sync::Mutex;
+
+    const RIC_LIST: &str = include_str!("../../kdf_chain/src/test_data/ric_2658945_x11_v20000000.hex");
+    const MEWC_MIXED: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124756_x11_9native_2auxpow.hex");
+    const MEWC_ALL_NATIVE: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124580_x11_all_native.hex");
+    const MEWC_ALL_AUXPOW: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124789_x6_all_auxpow.hex");
+
+    /// The injected clock: after every time of the fixtures below.
+    const NOW: u64 = 1_800_000_000;
+    const TICKER: &str = "PLUMB";
+    const FROM: u64 = 4_990;
+
+    fn served(hex: &str) -> Vec<u8> { hex::decode(hex.trim()).unwrap() }
+
+    /// A header of `size` bytes: the standard 80 bytes (version 1, the time at byte 68), then a
+    /// trailer of filler bytes up to `size`.
+    fn header(time: u32, size: usize) -> Vec<u8> {
+        let mut bytes = vec![0xA5u8; size];
+        bytes[..4].copy_from_slice(&1u32.to_le_bytes());
+        for (i, b) in bytes[4..68].iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(3).wrapping_add(1);
+        }
+        bytes[68..72].copy_from_slice(&time.to_le_bytes());
+        bytes[72..76].copy_from_slice(&0x1d00ffffu32.to_le_bytes());
+        bytes[76..80].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        bytes
+    }
+
+    /// `n` distinct plausible times in scrambled order: the median is none of the first, the last,
+    /// the smallest and the largest (for `n` > 3).
+    fn scrambled_times(n: usize) -> Vec<u32> {
+        let m = [7usize, 11, 13, 17, 19, 23, 29]
+            .into_iter()
+            .find(|m| n % m != 0)
+            .unwrap();
+        (0..n)
+            .map(|i| 1_600_000_000 + (((i * m + 3) % n) as u32) * 1_000 + 17 * i as u32)
+            .collect()
+    }
+
+    fn true_median(times: &[u32]) -> u32 {
+        let mut sorted = times.to_vec();
+        sorted.sort_unstable();
+        sorted[sorted.len() / 2]
+    }
+
+    /// The served list and the individual headers for headers of the given sizes.
+    fn window(times: &[u32], sizes: &[usize]) -> (Vec<u8>, Vec<Vec<u8>>) {
+        assert_eq!(times.len(), sizes.len());
+        let singles: Vec<Vec<u8>> = times.iter().zip(sizes).map(|(t, s)| header(*t, *s)).collect();
+        (singles.concat(), singles)
+    }
+
+    /// What the fake fetcher does for one height.
+    #[derive(Clone)]
+    enum Serve {
+        Header(Vec<u8>),
+        Fail,
+    }
+
+    struct Run {
+        result: Result<Vec<u32>, MmError<UtxoRpcError>>,
+        /// The heights `blockchain.block.header` was asked for.
+        heights: Vec<u64>,
+    }
+
+    impl Run {
+        fn ok(&self) -> Vec<u32> { self.result.as_ref().expect("the window is read").clone() }
+    }
+
+    /// Runs `read_window_times` with a fetcher that serves `singles[height - FROM]`.
+    fn run_serving(policy: &HeaderReadPolicy, bytes: &[u8], count: usize, now: u64, singles: Vec<Serve>) -> Run {
+        let heights = Mutex::new(Vec::new());
+        let result = block_on(read_window_times(policy, TICKER, bytes, count, FROM, now, |height| {
+            heights.lock().unwrap().push(height);
+            let served = singles.get((height - FROM) as usize).cloned().unwrap_or(Serve::Fail);
+            std::future::ready(match served {
+                Serve::Header(bytes) => Ok(bytes),
+                Serve::Fail => MmError::err(UtxoRpcError::Internal("no such header".to_owned())),
+            })
+        }));
+        Run {
+            result,
+            heights: heights.into_inner().unwrap(),
+        }
+    }
+
+    fn run(policy: &HeaderReadPolicy, bytes: &[u8], count: usize, singles: &[Vec<u8>]) -> Run {
+        run_serving(
+            policy,
+            bytes,
+            count,
+            NOW,
+            singles.iter().cloned().map(Serve::Header).collect(),
+        )
+    }
+
+    fn conf_default() -> UtxoCoinConf { conf_from_protocol(json!({ "type": "UTXO" }), None).unwrap() }
+
+    fn conf_switch_off() -> UtxoCoinConf { conf_from_protocol(json!({ "type": "UTXO" }), Some(&[][..])).unwrap() }
+
+    fn logged(conf: &UtxoCoinConf) -> bool { conf.header_time_only_logged.load(Ordering::Relaxed) }
+
+    fn expect_heights(run: &Run, count: usize) {
+        let mut heights = run.heights.clone();
+        heights.sort_unstable();
+        assert_eq!(heights, (FROM..FROM + count as u64).collect::<Vec<_>>());
+    }
+
+    fn error_text(result: Result<Vec<u32>, MmError<UtxoRpcError>>) -> String {
+        match result.expect_err("the read must be refused").into_inner() {
+            UtxoRpcError::InvalidResponse(text) => text,
+            other => panic!("expected a typed invalid-response error, got {other:?}"),
+        }
+    }
+
+    // ---- even split (R37.5.10a step 2) ----
+
+    #[test]
+    fn eleven_84_byte_headers_are_read_by_the_even_split_and_logged_once() {
+        let times = scrambled_times(11);
+        let median = true_median(&times);
+        assert!(median != times[0] && median != times[10]);
+        assert!(median != *times.iter().min().unwrap() && median != *times.iter().max().unwrap());
+        let (bytes, singles) = window(&times, &[84; 11]);
+        assert_eq!(bytes.len(), 924);
+        let conf = conf_default();
+        let policy = HeaderReadPolicy::for_conf(&conf);
+        assert!(!logged(&conf));
+        let first = run(&policy, &bytes, 11, &singles);
+        assert_eq!(first.ok(), times);
+        assert!(first.heights.is_empty(), "the split makes no header request");
+        assert!(logged(&conf), "the info line is recorded after the first split read");
+        // A second read of the same coin and activation is read the same way.
+        let second = run(&policy, &bytes, 11, &singles);
+        assert_eq!(second.ok(), times);
+        assert!(logged(&conf));
+    }
+
+    #[test]
+    fn the_split_function_reads_byte_68_at_strides_80_84_112_and_120() {
+        for stride in [80usize, 84, 112, 120] {
+            let times = scrambled_times(11);
+            let (bytes, _) = window(&times, &vec![stride; 11]);
+            assert_eq!(even_split(&bytes, 11), Some((stride, times.clone())), "{stride}");
+            assert_eq!(true_median(&times), true_median(&even_split(&bytes, 11).unwrap().1));
+        }
+    }
+
+    #[test]
+    fn strides_below_80_and_above_4096_go_to_step_3() {
+        for stride in [79usize, 4097] {
+            let times = scrambled_times(11);
+            let singles: Vec<Vec<u8>> = times.iter().map(|t| header(*t, 80)).collect();
+            let bytes = vec![0x11u8; 11 * stride];
+            assert_eq!(even_split(&bytes, 11), None, "{stride}");
+            let conf = conf_default();
+            let read = run(&HeaderReadPolicy::for_conf(&conf), &bytes, 11, &singles);
+            assert_eq!(read.ok(), times, "{stride}");
+            expect_heights(&read, 11);
+            assert!(logged(&conf));
+        }
+        // The edges of the allowed range are split.
+        for stride in [80usize, 4096] {
+            assert_eq!(even_split(&vec![0u8; 3 * stride], 3).map(|(s, _)| s), Some(stride));
+        }
+    }
+
+    #[test]
+    fn lists_that_step_1_reads_never_reach_the_split() {
+        let conf = conf_default();
+        let policy = HeaderReadPolicy::for_conf(&conf);
+        // Eleven 80-byte headers: the standard layout. Eleven 112-byte Riecoin headers and eleven
+        // 120-byte KawPoW headers: the structural fallback of R37.5.9e.
+        let eighty = window(&scrambled_times(11), &[80; 11]).0;
+        let ric = served(RIC_LIST);
+        let kawpow = served(MEWC_ALL_NATIVE);
+        for (name, bytes) in [("80", eighty), ("112", ric), ("120", kawpow)] {
+            let read = run(&policy, &bytes, 11, &[]);
+            assert!(read.result.is_ok(), "{name}");
+            assert!(read.heights.is_empty(), "{name}");
+            assert!(!logged(&conf), "{name}: step 1 read it, so there is no step line");
+        }
+        // Six merged-mined 80-byte headers: the standard layout again.
+        let auxpow = served(MEWC_ALL_AUXPOW);
+        assert!(run(&policy, &auxpow, 6, &[]).result.is_ok());
+        assert!(!logged(&conf));
+    }
+
+    #[test]
+    fn a_zcash_family_list_is_consumed_by_step_1() {
+        // Eleven version-4 (Equihash) headers: 140 header bytes, the solution length and 1344
+        // solution bytes, 1487 bytes each. The time sits at byte 100, not at 68.
+        let times = scrambled_times(11);
+        let mut bytes = Vec::new();
+        for time in &times {
+            let mut h = vec![0x42u8; 140];
+            h[..4].copy_from_slice(&4u32.to_le_bytes());
+            h[100..104].copy_from_slice(&time.to_le_bytes());
+            h.extend_from_slice(&[0xfd, 0x40, 0x05]);
+            h.extend(std::iter::repeat(0x7e).take(1344));
+            assert_eq!(h.len(), 1487);
+            bytes.extend(h);
+        }
+        let conf = conf_default();
+        let read = run(&HeaderReadPolicy::for_conf(&conf), &bytes, 11, &[]);
+        assert_eq!(read.ok(), times);
+        assert!(read.heights.is_empty());
+        assert!(!logged(&conf));
+    }
+
+    // ---- individual read (R37.5.10a step 3) ----
+
+    #[test]
+    fn a_window_that_straddles_the_size_change_is_read_header_by_header() {
+        let times = scrambled_times(11);
+        let sizes = [80, 80, 80, 80, 80, 80, 80, 80, 84, 84, 84];
+        let (bytes, singles) = window(&times, &sizes);
+        assert_eq!(bytes.len(), 892);
+        assert_eq!(even_split(&bytes, 11), None);
+        for conf in [conf_default(), conf_switch_off()] {
+            let read = run(&HeaderReadPolicy::for_conf(&conf), &bytes, 11, &singles);
+            let got = read.ok();
+            assert_eq!(got, times);
+            assert_eq!(true_median(&got), true_median(&times));
+            expect_heights(&read, 11);
+            assert!(logged(&conf));
+        }
+    }
+
+    #[test]
+    fn no_odd_count_with_mixed_80_and_84_byte_headers_is_ever_split() {
+        for n in (1..=25usize).step_by(2) {
+            for b in 1..n {
+                let times = scrambled_times(n);
+                let sizes: Vec<usize> = (0..n).map(|i| if i < n - b { 80 } else { 84 }).collect();
+                let (bytes, singles) = window(&times, &sizes);
+                assert_eq!(
+                    even_split(&bytes, n),
+                    None,
+                    "n={n} b={b}: divisibility sends it to step 3"
+                );
+                let conf = conf_default();
+                let read = run(&HeaderReadPolicy::for_conf(&conf), &bytes, n, &singles);
+                assert_eq!(read.ok(), times, "n={n} b={b}");
+                expect_heights(&read, n);
+            }
+        }
+        // The default window of eleven is among them, and a single header is read directly.
+        let times = scrambled_times(1);
+        let (bytes, singles) = window(&times, &[84]);
+        assert_eq!(even_split(&bytes, 1).map(|(s, _)| s), Some(84));
+        assert!(run(&HeaderReadPolicy::standard(), &bytes, 1, &singles).result.is_ok());
+    }
+
+    #[test]
+    fn even_counts_are_read_individually_even_when_uniform() {
+        for n in (2..=24usize).step_by(2) {
+            let times = scrambled_times(n);
+            let (bytes, singles) = window(&times, &vec![84; n]);
+            assert_eq!(even_split(&bytes, n), None, "n={n}");
+            let read = run(&HeaderReadPolicy::standard(), &bytes, n, &singles);
+            assert_eq!(read.ok(), times, "n={n}");
+            expect_heights(&read, n);
+        }
+        // n = 4 with one 84-byte header and three 80-byte ones: 324 bytes, stride 81, where a split
+        // would read the wrong bytes.
+        let times = scrambled_times(4);
+        let (bytes, singles) = window(&times, &[80, 80, 80, 84]);
+        assert_eq!(bytes.len(), 324);
+        assert_eq!(even_split(&bytes, 4), None);
+        let read = run(&HeaderReadPolicy::standard(), &bytes, 4, &singles);
+        assert_eq!(read.ok(), times);
+        expect_heights(&read, 4);
+    }
+
+    #[test]
+    fn the_ambiguity_of_the_structural_fallback_is_read_individually_and_not_split() {
+        // Five headers, 560 bytes: four 120-byte native headers and one 80-byte merged-mined header,
+        // which is also 5 x 112 bytes. Zero bytes everywhere, so a split would read zero times.
+        let mut bytes = vec![0u8; 560];
+        bytes[481] = 0x01;
+        let conf = conf_default();
+        let policy = HeaderReadPolicy::for_conf(&conf);
+        assert!(matches!(
+            policy.read_list(&bytes, 5),
+            Err(crate::utxo::header_layout_fallback::FallbackReadError::Ambiguous(_))
+        ));
+        assert_eq!(
+            even_split(&bytes, 5).map(|(s, _)| s),
+            Some(112),
+            "the split would apply"
+        );
+        let times = scrambled_times(5);
+        let singles: Vec<Vec<u8>> = times.iter().map(|t| header(*t, 80)).collect();
+        let read = run(&policy, &bytes, 5, &singles);
+        assert_eq!(read.ok(), times);
+        expect_heights(&read, 5);
+    }
+
+    #[test]
+    fn a_failed_request_or_a_short_header_fails_step_3_with_a_typed_error_and_no_median() {
+        let times = scrambled_times(11);
+        let (bytes, singles) = window(&times, &[80, 80, 80, 80, 80, 80, 80, 80, 84, 84, 84]);
+        let policy = HeaderReadPolicy::standard();
+        let mut failing: Vec<Serve> = singles.iter().cloned().map(Serve::Header).collect();
+        failing[4] = Serve::Fail;
+        let text = error_text(run_serving(&policy, &bytes, 11, NOW, failing).result);
+        assert!(
+            text.contains(TICKER) && text.contains("892") && text.contains("11"),
+            "{text}"
+        );
+        assert!(
+            text.contains("request") && text.contains(&(FROM + 4).to_string()),
+            "{text}"
+        );
+
+        let mut short: Vec<Serve> = singles.iter().cloned().map(Serve::Header).collect();
+        short[7] = Serve::Header(singles[7][..79].to_vec());
+        let text = error_text(run_serving(&policy, &bytes, 11, NOW, short).result);
+        assert!(
+            text.contains(TICKER) && text.contains("892") && text.contains("shorter than 80"),
+            "{text}"
+        );
+        assert!(text.contains("79"), "{text}");
+    }
+
+    // ---- range check (R37.5.10d, step 4) ----
+
+    #[test]
+    fn bytes_that_are_not_a_time_at_68_are_refused() {
+        let policy = HeaderReadPolicy::standard();
+        for stride in [100usize, 1487] {
+            // A field of zeros.
+            let zeros = vec![0u8; 11 * stride];
+            let text = error_text(run(&policy, &zeros, 11, &[]).result);
+            assert!(text.contains(TICKER) && text.contains("below"), "{stride}: {text}");
+            assert!(text.contains(&(11 * stride).to_string()), "{stride}: {text}");
+            // A hash at byte 68: one that reads as a time in the far future, one as a time of
+            // 1970.
+            for (hash_start, check) in [
+                ([0xDEu8, 0xAD, 0xBE, 0xEF], "above"),
+                ([0x00, 0x01, 0x00, 0x00], "below"),
+            ] {
+                let mut list = vec![0u8; 11 * stride];
+                for header in list.chunks_mut(stride) {
+                    header[68..72].copy_from_slice(&hash_start);
+                    header[72..100].fill(0x5c);
+                }
+                let text = error_text(run(&policy, &list, 11, &[]).result);
+                assert!(text.contains(check), "{stride}/{check}: {text}");
+            }
+        }
+    }
+
+    fn list_with_times(times: &[u32], stride: usize) -> Vec<u8> { window(times, &vec![stride; times.len()]).0 }
+
+    #[test]
+    fn the_range_check_has_exact_edges() {
+        let policy = HeaderReadPolicy::standard();
+        let low = EARLIEST_PLAUSIBLE_TIME as u32;
+        // all equal to 1230768000: accepted; one of 1230767999: rejected.
+        assert!(run(&policy, &list_with_times(&[low; 11], 100), 11, &[]).result.is_ok());
+        let mut one_low = vec![low; 11];
+        one_low[6] = low - 1;
+        let text = error_text(run(&policy, &list_with_times(&one_low, 100), 11, &[]).result);
+        assert!(
+            text.contains(&(low - 1).to_string()) && text.contains("below"),
+            "{text}"
+        );
+        // all equal to clock + 86400: accepted; one of clock + 86401: rejected, naming the check, the
+        // offending time and the clock.
+        let high = (NOW + CLOCK_SLACK_SECS) as u32;
+        assert!(run(&policy, &list_with_times(&[high; 11], 100), 11, &[]).result.is_ok());
+        let mut one_high = vec![high; 11];
+        one_high[0] = high + 1;
+        let text = error_text(run(&policy, &list_with_times(&one_high, 100), 11, &[]).result);
+        assert!(text.contains("above the node clock"), "{text}");
+        assert!(
+            text.contains(&(high + 1).to_string()) && text.contains(&NOW.to_string()),
+            "{text}"
+        );
+        // The same on the function itself.
+        assert!(check_times(TICKER, 1, 1, &[low], NOW).is_ok());
+        assert!(check_times(TICKER, 1, 1, &[low - 1], NOW).is_err());
+        assert!(check_times(TICKER, 1, 1, &[high], NOW).is_ok());
+        assert!(check_times(TICKER, 1, 1, &[high + 1], NOW).is_err());
+    }
+
+    #[test]
+    fn a_drop_of_more_than_a_day_between_neighbours_is_accepted() {
+        let policy = HeaderReadPolicy::standard();
+        let mut times = scrambled_times(11);
+        times[5] = times[4] - 3 * 86_400;
+        times[8] = times[7] - 2 * 86_400;
+        let got = run(&policy, &list_with_times(&times, 100), 11, &[]).ok();
+        assert_eq!(got, times);
+    }
+
+    // ---- switch and key (R37.5.10f) ----
+
+    #[test]
+    fn with_the_switch_off_a_riecoin_list_is_read_by_the_split_and_by_step_1_otherwise() {
+        let ric = served(RIC_LIST);
+        let expected: Vec<u32> = chain::BlockHeader::list_from_served_bytes(&ric, 11, CoinVariant::Riecoin)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.time)
+            .collect();
+        // Switch `[]`: step 1 rejects the 112-byte headers; the split reads the low 32 bits at 68.
+        let off = conf_switch_off();
+        let read = run(&HeaderReadPolicy::for_conf(&off), &ric, 11, &[]);
+        assert_eq!(read.ok(), expected);
+        assert!(read.heights.is_empty());
+        assert!(logged(&off));
+        // Default switch: step 1 reads it and there is no step line.
+        let default = conf_default();
+        let read = run(&HeaderReadPolicy::for_conf(&default), &ric, 11, &[]);
+        assert_eq!(read.ok(), expected);
+        assert!(!logged(&default));
+    }
+
+    #[test]
+    fn with_the_switch_off_an_interleaved_meowcoin_window_is_read_header_by_header() {
+        let mixed = served(MEWC_MIXED);
+        let headers = chain::BlockHeader::list_from_served_bytes(&mixed, 11, CoinVariant::KawpowAuxpowMixed).unwrap();
+        let expected: Vec<u32> = headers.iter().map(|h| h.time).collect();
+        let singles: Vec<Vec<u8>> = headers.iter().map(|h| h.raw().to_vec()).collect();
+        assert_eq!(singles.concat(), mixed);
+        assert_ne!(mixed.len() % 11, 0);
+        let off = conf_switch_off();
+        let read = run(&HeaderReadPolicy::for_conf(&off), &mixed, 11, &singles);
+        assert_eq!(read.ok(), expected);
+        expect_heights(&read, 11);
+        assert!(logged(&off));
+        // Default switch: the mixed layout of step 1 reads it.
+        let default = conf_default();
+        let read = run(&HeaderReadPolicy::for_conf(&default), &mixed, 11, &singles);
+        assert_eq!(read.ok(), expected);
+        assert!(read.heights.is_empty() && !logged(&default));
+    }
+
+    #[test]
+    fn a_pinned_layout_that_rejects_the_list_goes_on_to_steps_2_to_4() {
+        let conf = conf_from_protocol(json!({ "type": "UTXO", "header_layout": "riecoin" }), None).unwrap();
+        assert!(conf.header_layout.is_some());
+        let times = scrambled_times(11);
+        let (bytes, singles) = window(&times, &[84; 11]);
+        let read = run(&HeaderReadPolicy::for_conf(&conf), &bytes, 11, &singles);
+        assert_eq!(read.ok(), times);
+        assert!(logged(&conf));
+        // A list the pinned layout reads is read by step 1.
+        let ric = served(RIC_LIST);
+        let conf = conf_from_protocol(json!({ "type": "UTXO", "header_layout": "riecoin" }), None).unwrap();
+        assert!(run(&HeaderReadPolicy::for_conf(&conf), &ric, 11, &[]).result.is_ok());
+        assert!(!logged(&conf));
+    }
+
+    // ---- through the Electrum client ----
+
+    fn mock_header_list(list: &[u8], count: u64) {
+        let list = list.to_vec();
+        ElectrumClient::blockchain_block_headers.mock_safe(move |_, _, _| {
+            let res: ElectrumBlockHeadersRes =
+                json::from_value(json!({ "count": count, "hex": hex::encode(&list), "max": 2016 })).unwrap();
+            MockResult::Return(Box::new(futures01::future::ok(res)))
+        });
+    }
+
+    /// `blockchain.block.header` serves `singles[height - 4990]` (the window of `get_current_mtp` at
+    /// tip 5000), and the heights asked for are recorded.
+    fn mock_headers(singles: Vec<Option<Vec<u8>>>) -> Arc<Mutex<Vec<u64>>> {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let recorded = asked.clone();
+        ElectrumClient::blockchain_block_header.mock_safe(move |_, height| {
+            recorded.lock().unwrap().push(height);
+            let served = singles.get((height - FROM) as usize).cloned().flatten();
+            let result = match served {
+                Some(bytes) => Ok(BytesJson::from(bytes)),
+                None => Err(common::jsonrpc_client::JsonRpcError {
+                    client_info: "test".to_owned(),
+                    request: common::jsonrpc_client::JsonRpcRequestEnum::Single(
+                        common::jsonrpc_client::JsonRpcRequest {
+                            jsonrpc: "2.0".to_owned(),
+                            id: "0".to_owned(),
+                            method: "blockchain.block.header".to_owned(),
+                            params: Vec::new(),
+                        },
+                    ),
+                    error: common::jsonrpc_client::JsonRpcErrorType::Transport("no such header".to_owned()),
+                }),
+            };
+            MockResult::Return(Box::new(futures01::future::result(result)))
+        });
+        asked
+    }
+
+    fn mtp(coin: &UtxoStandardCoin) -> Result<u32, String> {
+        ElectrumClient::get_block_count.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(5000u64))));
+        block_on(coin.get_current_mtp()).map_err(|e| format!("{e:?}"))
+    }
+
+    #[test]
+    fn the_client_reads_a_bitcoin_atom_shaped_list_by_the_split() {
+        let coin = coin_from_protocol(json!({ "type": "UTXO", "chain_variant": "BTC" }), None);
+        let times = scrambled_times(11);
+        let (bytes, _) = window(&times, &[84; 11]);
+        mock_header_list(&bytes, 11);
+        let asked = mock_headers(vec![]);
+        assert_eq!(mtp(&coin), Ok(true_median(&times)));
+        assert!(asked.lock().unwrap().is_empty());
+        assert!(coin.as_ref().conf.header_time_only_logged.load(Ordering::Relaxed));
+        // The window the client asked for is the same one it would split.
+        let _ = (electrum(&coin), policy_of(&coin));
+    }
+
+    #[test]
+    fn the_client_reads_a_fork_crossing_window_with_eleven_header_requests() {
+        let coin = coin_from_protocol(json!({ "type": "UTXO", "chain_variant": "BTC" }), None);
+        let times = scrambled_times(11);
+        let sizes = [80, 80, 80, 80, 80, 80, 80, 80, 84, 84, 84];
+        let (bytes, singles) = window(&times, &sizes);
+        mock_header_list(&bytes, 11);
+        let asked = mock_headers(singles.into_iter().map(Some).collect());
+        assert_eq!(mtp(&coin), Ok(true_median(&times)));
+        let mut heights = asked.lock().unwrap().clone();
+        heights.sort_unstable();
+        assert_eq!(heights, (4990..=5000).collect::<Vec<_>>());
+        assert!(coin.as_ref().conf.header_time_only_logged.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_client_fails_the_query_when_a_header_request_fails_or_a_header_is_short() {
+        let coin = coin_from_protocol(json!({ "type": "UTXO", "chain_variant": "BTC" }), None);
+        let times = scrambled_times(11);
+        let sizes = [80, 80, 80, 80, 80, 80, 80, 80, 84, 84, 84];
+        let (bytes, singles) = window(&times, &sizes);
+        mock_header_list(&bytes, 11);
+        let mut served: Vec<Option<Vec<u8>>> = singles.iter().cloned().map(Some).collect();
+        served[3] = None;
+        mock_headers(served);
+        let err = mtp(&coin).unwrap_err();
+        assert!(
+            err.contains("InvalidResponse") && err.contains(TICKER) && err.contains("request"),
+            "{err}"
+        );
+        let mut served: Vec<Option<Vec<u8>>> = singles.iter().cloned().map(Some).collect();
+        served[9] = Some(singles[9][..40].to_vec());
+        mock_headers(served);
+        let err = mtp(&coin).unwrap_err();
+        assert!(
+            err.contains("InvalidResponse") && err.contains("shorter than 80"),
+            "{err}"
+        );
+        assert!(!coin.as_ref().conf.header_time_only_logged.load(Ordering::Relaxed));
     }
 }

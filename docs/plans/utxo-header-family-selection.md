@@ -1,6 +1,6 @@
 # Plan: configuration-selected UTXO header families
 
-**Status:** in progress (beta blocker H4a and the fallback H4b landed in PRs #62, #67 and #74; H4 in part in PR #82, its remaining family rules open; H5 open) — **Last reviewed:** 2026-11-03
+**Status:** in progress (beta blocker H4a and the fallback H4b landed in PRs #62, #67 and #74; H4 in part in PR #82, its remaining family rules open; H5 open) — **Last reviewed:** 2026-11-04
 
 > **Context:** this plan closes the open work left by the fix for standard headers whose
 > version collides with a header family (commit `47ede628c`, CRD ch.37
@@ -555,6 +555,8 @@ threading extends it to the other read paths exactly as it extends the key.
 
 ### H6 — Time-only read of the median-time-past window (ch.37 R37.5.10; **0.4.0 batch 1 fix**)
 
+**Status:** CRD merged (PR #220); code in PR #221.
+
 Why: a coin whose Electrum servers serve the standard 80-byte header plus a fixed-length trailer — the
 first one met is Bitcoin Atom (`BCA`, 84 bytes from height 505888) — has a median-time-past list that no
 layout of H4/H4a/H4b reads, so every HTLC spend and refund of the coin fails to build, while activation,
@@ -604,7 +606,7 @@ no switch to turn the fix on.
 | H4b structural fallback and its switch (D3, registry-free leg) | H4a — the layout readers; not H2/H3 (every coin is the `"BTC"` family until H2) | small–medium (switch parse at startup, fallback in the list and single-header entry points, info line, COMPAT docs, key rename) | PRs #67 and #74 |
 | H4 family rules | H3 | medium | PR #82 (LBRY and PIVX readers); the rest open |
 | H5 identity, storage, linkage | H4, H4a, H4b | medium, touches persisted data | open |
-| H6 time-only median read (R37.5.10) | H4b — the cascade it follows | small–medium (one function, one call, a log line, tests with a stub server for the individual requests) | CRD in the 0.4.0 batch-1 PR; code follows |
+| H6 time-only median read (R37.5.10) | H4b — the cascade it follows | small–medium (one function, one call, a log line, tests with a stub server for the individual requests) | CRD **PR #220** (merged); code **PR #221** |
 
 H1+H2 can start immediately; H0 gates nothing any more. Each PR updates ch.37
 §37.5.8 and §37.9 in the same commit as its code, and closes the
