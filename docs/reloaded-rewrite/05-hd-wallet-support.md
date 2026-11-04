@@ -54,7 +54,7 @@ baseline or named after the public specifications the substrate
 expresses. Bound rules R1–R5 cover the crate-level shape; R6–R12
 cover the mnemonic and encryption layer; R13–R19 cover the
 hierarchical-deterministic seed and path machinery; R20–R26 cover
-the central context and the platform-gated extensions. R32–R36
+the central context and the platform-gated extensions. R36–R40
 (§5.12B) are a Reloaded-original refusal rule for swaps whose keys
 do not agree under a global-HD login.
 
@@ -572,11 +572,15 @@ the EVM path).
 > own HD key. A V1 swap leg whose announced key is not the key its
 > coin pays from cannot complete: the other side rejects the dex fee
 > or the payment. This section refuses such a leg before any
-> negotiation. Plan items H3 and H4 later give every coin its own key,
-> and the refusals fall away with them (D6). Under an iguana login the
-> three keys are one key and nothing in this section changes.
+> negotiation. It is a stop-gap with no counterpart at the reference:
+> there the key on the wire is always the key the coin signs with, so
+> no such check exists or is needed (§5.9B R34). Plan items H3 and H4
+> give every coin its own key and the node the internal key as its
+> trading identity, as §5.9B R32--R33 record for the reference, and the
+> refusals fall away with them (D6). Under an iguana login the three
+> keys are one key and nothing in this section changes.
 
-**R32.** *The agreement rule.* Under a global-HD login, a coin MAY
+**R36.** *The agreement rule.* Under a global-HD login, a coin MAY
 take part in a V1 swap only when its **swap key** (the public key the
 V1 machines announce for it: the coin's own HTLC key where the coin
 supplies one, the node's persistent key otherwise) is its **paying
@@ -607,7 +611,7 @@ switched off. Under an iguana login the rule always holds.
 > and a coin whose single key is the passphrase hash (BCH activated
 > together with its tokens).
 
-**R33.** *Where it is checked.* R32 MUST be checked for both coins of
+**R37.** *Where it is checked.* R36 MUST be checked for both coins of
 the pair at every place that refuses an untradable coin (chapter 60
 R60.6.5): every order creation (`setprice`, `buy`, `sell`), every
 `update_maker_order`, and `trade_preimage` in both its legacy and its
@@ -617,7 +621,7 @@ A pair that fails is not negotiated: no reservation and no connect
 message is sent for it. A swap that has already started is never
 stopped by this rule.
 
-**R34.** *Refusal.* A request that fails R32 MUST be refused before any
+**R38.** *Refusal.* A request that fails R36 MUST be refused before any
 balance, fee or volume check of the request, with the text
 
 `<coin> cannot be swapped under this login: <reason>`
@@ -638,30 +642,32 @@ where `<coin>` is the ticker and `<reason>` is one of:
 The legacy RPCs answer this text as their error. `trade_preimage`
 reports `error_type` `SwapKeyMismatch` with `error_data`
 `{ "coin": <ticker>, "reason": <reason> }` and the same text.
-*(Gate-pending, Spec Reader question Q7: if the reference refuses such
-a pair with an existing discriminant, that discriminant replaces
-`SwapKeyMismatch`.)*
+`SwapKeyMismatch` is Reloaded's own discriminant: the reference has no
+refusal for this case (§5.9B R34).
 
-**R35.** *An order of the node's own that fails the rule.* When the
-check before answering a match request (R33) fails for one of the
+**R39.** *An order of the node's own that fails the rule.* When the
+check before answering a match request (R37) fails for one of the
 node's own maker orders, for example an order restored from storage
 after an upgrade, the node MUST send no reservation, MUST cancel the
 order as an ordinary cancellation that peers see, and MUST log one WARN
 line: `Maker order <uuid> cancelled: <coin> cannot be swapped under
 this login: <reason>`.
 
-**R36.** *Switch.* The `MM2.json` boolean `swap_key_check`, default
-`true`, enables R32–R35; `false` restores the behavior of earlier
+**R40.** *Switch.* The `MM2.json` boolean `swap_key_check`, default
+`true`, enables R36–R39; `false` restores the behavior of earlier
 builds, in which such a swap is negotiated and then fails in the coin
 layer. Under `docs/COMPAT_SWITCHES.md`, "The default-side rule", this
 is arm 2: it has no wire effect, affects only the node's own orders and
 swaps, and improves fund safety. The setting is documented next to
 itself and in `docs/GLEEC_COMPATIBILITY.md`.
 
-> **Compatibility (gate-pending, Spec Reader question Q7).** Whether
-> GLEEC KDF refuses these pairs is not established. If it does not,
-> `swap_key_check: false` matches it. If it refuses them the same way,
-> the switch is dropped.
+> **Compatibility.** GLEEC KDF has no such check and needs none: its
+> swaps announce the key the coin signs with (§5.9B R33--R34), so the
+> pairs refused here trade normally there. Setting `swap_key_check` to
+> `false` does not reach that behavior; it restores the behavior of
+> earlier Reloaded builds, in which such a swap is negotiated and then
+> fails in the coin layer. The divergence ends when plan items H3 and
+> H4 land (D6).
 
 ## 5.13 Tests
 
@@ -782,28 +788,28 @@ the account xpub via the software derivation of R30; with a
 hardware context active, the same extraction is asserted to route
 to the device source (R25).
 
-**T13.** *EVM under a global-HD login.* With an EVM coin activated
+**T15.** *EVM under a global-HD login.* With an EVM coin activated
 through `enable_eth_with_tokens`, and again through legacy `enable`,
 `setprice`, `buy`, `sell`, `update_maker_order` and `trade_preimage`
 (both forms) for a pair with that coin are refused with reason 1 of
-R34 before any balance check, and `trade_preimage` carries
+R38 before any balance check, and `trade_preimage` carries
 `SwapKeyMismatch`. The same requests under an iguana login pass this
 check.
 
-**T14.** *UTXO under a global-HD login.* RIN enabled through legacy
+**T16.** *UTXO under a global-HD login.* RIN enabled through legacy
 `electrum` is refused with reason 2. RIN activated through
 `task::enable_utxo` at its first address passes this check. RIN
 activated with `path_to_address` at account `0`, chain `External`,
 address `1` is refused with reason 3, which names both full paths.
 
-**T15.** *Own order that fails the rule.* A maker order for a pair that
-fails R32, present in storage at start-up: a matching request gets no
-reservation, the order is cancelled once with the WARN line of R35, and
+**T17.** *Own order that fails the rule.* A maker order for a pair that
+fails R36, present in storage at start-up: a matching request gets no
+reservation, the order is cancelled once with the WARN line of R39, and
 no swap starts. A swap of such a pair that started before the restart is
 resumed and not stopped.
 
-**T16.** *Switch and exemptions.* With `swap_key_check` set to `false`
-the requests of T13 and T14 pass this check. With the default, a ZHTLC
+**T18.** *Switch and exemptions.* With `swap_key_check` set to `false`
+the requests of T15 and T16 pass this check. With the default, a ZHTLC
 coin, a Sia coin, a coin activated with the Trezor policy, and BCH
 activated together with its tokens are not refused by it.
 
@@ -949,11 +955,12 @@ surface.
   concurrent session ownership, and non-mutating reachability
   probes governed by the underlying transport/device-call
   behaviour); no protected expression crossed.
-- *Reloaded-original addition (2026-11-04) -- §5.12B (R32–R36), T13–T16,
+- *Reloaded-original addition (2026-11-04) -- §5.12B (R36–R40), T15–T18,
   D6 and the last sentence of §5.1.* Written by a context that never
   read the forbidden corpus, from maintainer Decision BL and this
   repository's own swap, ordermatch, coin-key and activation code. The
-  last sentence of R34 and the compatibility note under R36 are
-  gate-pending on the Spec Reader question Q7 of plan
-  `hd-key-unification`; nothing else in the addition depends on the
-  reference, and it needs no Dirty Gate pass.
+  sentences that describe the reference restate §5.9B R32--R34, which
+  passed the KDF Dirty Gate on 2026-11-04; the addition carries no
+  reference content of its own and needs no Dirty Gate pass of its
+  own. *(Renumbered on 2026-11-04 from R32–R36 and
+  T13–T16, which §5.9B took.)*

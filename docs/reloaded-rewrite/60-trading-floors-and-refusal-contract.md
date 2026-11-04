@@ -518,7 +518,7 @@ Solana request shall terminate abnormally.
 
 > *Cross-reference (2026-11-04).* Under a global-HD login, the same
 > places also refuse a pair whose swap key and paying key do not agree
-> ([chapter 05](05-hd-wallet-support.md) §5.12B R32–R34).
+> ([chapter 05](05-hd-wallet-support.md) §5.12B R36–R38).
 
 **R60.6.6** *Minimum transaction amount is frozen parity data.* For every
 family that can swap, reloaded's minimum transaction amount shall equal
