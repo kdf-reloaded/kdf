@@ -100,6 +100,17 @@ it and, where one exists, the CRD rule, for readers who want more.
   `mm2_net` crate now also builds on its own for the browser target. Detail: PR #218; CRD ch.35
   R35.1.14.
 
+#### UTXO coins and Electrum
+
+- **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
+  trailer are read correctly for the median time.** Bitcoin Atom (BCA) serves 84-byte headers from block
+  505888; Reloaded read them as 80 bytes, so the median time it needs before every HTLC spend and refund
+  failed, and no swap of the coin could be completed. When the usual header layouts do not fit, the node
+  now reads the time of each header from the list by the size the list itself shows, or fetches the
+  headers one by one, checks the times for plausibility and fails with an error naming the check instead
+  of guessing. Such a coin needs no new entry in the coins file (header sync and SPV proofs for it are
+  not covered). Detail: CRD ch.37 R37.5.10.
+
 ### Tests
 
 - **The tests run before the next beta will be listed in
@@ -130,6 +141,10 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
   recorded; whether KDF Reloaded follows them stays the maintainer's decision (PR #222).
+- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — new step H6: the
+  median time of a coin whose headers carry a fixed-length trailer (Bitcoin Atom) is read from each
+  header's own bytes; the 1.6 list form of header requests and explicit `header_layout` entries for
+  RIC and MEWC in the coins repository are listed as later items.
 
 ### Known limitations
 
