@@ -663,6 +663,45 @@ itself and in `docs/GLEEC_COMPATIBILITY.md`.
 > `swap_key_check: false` matches it. If it refuses them the same way,
 > the switch is dropped.
 
+> **As built (2026-11-04, clean-side record; no requirement above changes).**
+> *Coin side.* `SwapOps::swap_key_disagreement` (`coins/lp_coins_traits.rs`) answers
+> `None` when a coin's swap key is its paying key and for a coin the rule does not
+> apply to (the default, which covers ZHTLC, Sia, Tendermint, Solana and Lightning).
+> UTXO-family coins (standard, QTUM, BCH, QRC20, SLP tokens) share
+> `utxo_common::swap_key_disagreement`: a single key is compared with the node's
+> persistent key; a coin with an HD key policy is compared by path, its
+> `path_to_address` (now kept in `PrivKeyPolicy::HDWallet`) against account `0`,
+> `External`, address `0`, which is the address `active_utxo_sender_address` funds
+> from; the Trezor policy is out of scope. EVM coins compare the compressed form of
+> the signer's public key with the node's persistent key (`eth_swap_ops.rs`); a
+> hardware signer is out of scope. *Node side.* `swap_key_mismatch` and
+> `swap_key_check_enabled` (`mm2_main/src/lp_ordermatch/ordermatch_types.rs`, next to
+> `untradable_coin_ticker`) apply the rule under a global-HD login and skip a
+> wallet-only coin. They are asked in `buy`, `sell`, `create_maker_order`,
+> `update_maker_order` (`ordermatch_trading.rs`) and in `maker_swap_trade_preimage`
+> and `taker_swap_trade_preimage`, after the untradable-coin refusal and before any
+> balance check; in `process_taker_request` (R35: `RemovedMakerOrder::take_out`, the
+> ordinary cancellation notice, then deletion with the `Cancelled` reason, and the
+> WARN line built by `swap_key_cancel_line`); in `process_maker_reserved` (a
+> reservation of a failing pair is skipped, no connect message); and at the start of
+> `lp_connect_start_bob` and `lp_connected_alice`, before the swap object is built.
+> The resume path of a saved swap does not ask. `TradePreimageRpcError::SwapKeyMismatch`
+> carries `{ coin, reason }`. The order builders' own `build` methods have no node
+> context and are not changed. A legacy error carries the source location that every
+> other legacy refusal carries. *Tests.* T13: `coins`
+> `eth_tests::swap_key_agreement_tests`,
+> `ordermatch_tests::t05_12b_swap_key_check_tests::{the_refusal_text_is_the_one_of_r34,
+> t13_order_creation_and_update_are_refused}`, `trade_preimage::tests::swap_key_mismatch`;
+> T14: `coins` `utxo_tests::swap_key_agreement_tests`; T15:
+> `t15_an_own_order_that_fails_is_cancelled_at_the_match_check`,
+> `a_connect_message_is_not_sent_for_a_pair_that_fails`,
+> `the_cancel_line_is_the_text_of_r35`; T16: `the_switch_false_disables_the_check`,
+> `an_iguana_login_is_never_refused`, `a_wallet_only_coin_is_exempt`, and the Trezor
+> and single-key cases in `coins`. Not covered by a unit test: the exemption of a
+> ZHTLC and a Sia coin (no override of the default, and no coin of either family can
+> be built without a node) and the refusal at swap start; the SwapLab row HD2 of the
+> plan covers the end-to-end behavior.
+
 ## 5.13 Tests
 
 **T1.** *Mnemonic round-trip — Argon2id mode.* A fresh

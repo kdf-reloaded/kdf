@@ -512,12 +512,16 @@ R46.2.4, ch.55 R55.4.6):
   project's divergence, and that alone is what the switch hands back to GLEEC
   KDF; the malformed `fork_id` above stays outside it under every setting.
 
-Fourteen more behaviors, in the order book and its relaying, peer exchange, fee readings and fee
-quotes, Electrum and the shielded history, differ from GLEEC KDF by default, each with one top-level
+More behaviors, in the order book and its relaying, peer exchange, fee readings and fee
+quotes, Electrum, the shielded history and trading under an HD login, differ from GLEEC KDF by default, each with one top-level
 `MM2.json` switch. The value below gives the GLEEC-compatible behavior; the row of each switch in
 [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the full detail:
 
 - `pre_trade_spend_check: false` — no pre-trade spend check.
+- `swap_key_check: false` — under an HD login (`enable_hd`), a swap whose coin announces another
+  key than the one it pays from (every EVM coin, a coin enabled with a single key, a UTXO coin
+  activated away from its first address) is negotiated and fails in the coin layer, instead of
+  being refused up front; whether GLEEC KDF refuses it is not established.
 - `fee_estimate_cache_secs: 0`, with no per-coin value — no fee reading is reused between
   requests.
 - `electrum_spread_reads: false` — every read-only Electrum query goes to the highest-ranked
@@ -552,7 +556,7 @@ quotes, Electrum and the shielded history, differ from GLEEC KDF by default, eac
   estimate, as GLEEC KDF does and as KDF Reloaded did before this switch, instead of at the gas
   limit the fee is sent with; both send it with that limit.
 
-A fourteenth switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
+One more switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
 every maker-order message is published at once, and `true` turns on the maker's rate control.
 
 ## Detail sections
