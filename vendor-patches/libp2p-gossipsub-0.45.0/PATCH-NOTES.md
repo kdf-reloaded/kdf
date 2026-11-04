@@ -149,10 +149,14 @@ cancellations and swap negotiation messages must not wait behind queued order up
 **Queue signal and relay close** (CRD ch.32 §32.9B R-MP2 item 2, ch.28 §28.9B RQ1 item 8, amended
 2026-10-28). The maker publication budget needs two signals that a relay is not keeping up.
 
-5. **`src/send_queue.rs`** -- the *queue signal*: raised when the data queue has held at least one
-   data RPC for 2 seconds without becoming empty, or the pressure level of item 8 is raised; cleared
-   when the data queue has been empty for 5 seconds and the pressure level is cleared. Timing takes
-   the current time as an argument (`update_signal`, `signal_deadline`, `pop_at`).
+5. **`src/send_queue.rs`** -- the *queue signal*: raised when the oldest queued data RPC has waited
+   2 seconds or longer, or the pressure level of item 8 is raised; cleared 5 seconds after the last
+   such wait ended (after the raise, for a pressure-only raise), with the pressure level cleared
+   *(amended 2026-11-02, batch 0.4.0 item P3b; a queue that holds RPCs but writes each within 2
+   seconds neither raises the signal nor holds it raised)*. Timing takes the current time as an
+   argument (`update_signal`, `signal_deadline`, `pop_at`). *(Added 2026-11-02, batch 0.4.0 item P3a:)*
+   `SendQueueStats` also publishes the dropped share, end and series length of the last completed
+   window, and `SendQueueSnapshot` gained `max_window_share_percent` and `max_drop_series`.
 6. **`src/handler.rs`** -- `HandlerEvent::SendQueueSignal { raised }`, reported once per change. The
    handler's timer now serves the earliest of the stuck deadline and the signal deadline.
 7. **`src/behaviour.rs`** -- `Event::SendQueueSignal`, `relay_queue_signal()` (the signal is raised

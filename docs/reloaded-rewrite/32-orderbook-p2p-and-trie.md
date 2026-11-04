@@ -2328,9 +2328,10 @@ messages at no more than the pubkey's current *rate*.
      raised when a data RPC has waited in the data queue of [Chapter
      28](28-libp2p-modernization.md) §28.9B RQ1 toward the relay for 2
      seconds or longer, or while the pressure level of RQ1 item 8 is
-     raised. It clears once 5 seconds have passed in which no queued
-     data RPC has waited 2 seconds or longer, with the level of item 8
-     cleared. It catches a relay that reads slowly while the connection
+     raised. It clears once 5 seconds have passed since a queued data
+     RPC last had waited 2 seconds or longer, or since the signal was
+     raised when the pressure level alone raised it, and the level of
+     item 8 is cleared. It catches a relay that reads slowly while the connection
      stays up: the backlog then sits in that queue, and its oldest RPC
      ages. A queue that holds RPCs but writes each of them within 2
      seconds is not a backlog, so steady traffic neither raises the
@@ -2422,8 +2423,9 @@ values, with no peer identity and no content:
   over live connections whose last window ended within the last two
   window lengths; 0 when there is none *(added 2026-11-02, item P3a)*;
 - `p2p.send_queue.drop_series.max`: the longest current series of
-  counting windows of §28.9B RQ1 item 5 over live connections, 0 to 2
-  before a stuck report *(added 2026-11-02, item P3a)*;
+  counting windows of §28.9B RQ1 item 5, 0 to 2 before a stuck report,
+  over live connections whose last window ended within the last two
+  window lengths; 0 when there is none *(added 2026-11-02, item P3a)*;
 - `p2p.outbox.pending`: pending outbox messages, summed over pubkeys;
 - `p2p.outbox.rate`: the current rate of R-MP2, the lowest over pubkeys;
 - `p2p.outbox.pressure`: 1 while the queue signal of R-MP2 item 2 is

@@ -688,6 +688,18 @@ impl SwarmPollRecorder {
                 queues.max_per_connection as i64
             );
             mm_gauge!(self.ctx.metrics, "p2p.send_queue.dropped.count", queues.dropped as i64);
+            // The dropped share of a recent window and the longest series of counting windows (CRD ch.32 §32.9B
+            // R-MP5, ch.28 §28.9B RQ1 items 6 and 8).
+            mm_gauge!(
+                self.ctx.metrics,
+                "p2p.send_queue.window_share.max",
+                queues.max_window_share_percent as i64
+            );
+            mm_gauge!(
+                self.ctx.metrics,
+                "p2p.send_queue.drop_series.max",
+                i64::from(queues.max_drop_series)
+            );
         }
     }
 }
