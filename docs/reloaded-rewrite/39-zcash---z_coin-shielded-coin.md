@@ -1101,9 +1101,12 @@ is the shielded coin's use of the capability word of
 >
 > **Compatibility.** `require_v6_counterparty: false` admits counterparties without the
 > word again. It does not make an ARRR swap with GLEEC KDF possible, because that node
-> builds nothing the post-Ironwood chain accepts. How the reference treats our longer
-> protocol information is pending a gated question (Chapter 59 §59.4A, compatibility
-> note). The safety of (b) does not depend on the answer.
+> builds nothing the post-Ironwood chain accepts. The reference publishes the bare
+> address-format descriptor for a shielded coin and accepts a value that extends it with
+> trailing bytes, so it matches our longer protocol information as before and never sends
+> the word itself (R39.5.14). The requirement is therefore enforced by this side's check
+> alone, in both roles. A reference taker sees a Reloaded maker's decline only as a
+> request that times out.
 
 T39.6.4f *Counterparty version-6 capability.*
 - (a) The protocol information of an ARRR coin is its address-format bytes followed by the
@@ -6533,6 +6536,6 @@ entries in its list cannot be told apart. Passing the position to the fallback c
     check that the swap freeze already uses, and the Ironwood activation time and height).
   - They take no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
     is required for them. No rule text cleared by the Dirty Gate is edited.
-  - *Pending:* how the reference treats protocol information that carries a word is a Spec
-    Reader question shared with Chapter 59. Its answer reaches this chapter only after the
-    Dirty Gate.
+  - *Reference answer:* how the reference treats protocol information that carries a word
+    is recorded in R39.5.14 (Spec Reader, passed by the Dirty Gate on 2026-11-04). The
+    compatibility note of R39.6.4f cites it and adds no reference fact of its own.
