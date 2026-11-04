@@ -349,11 +349,12 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   `fee: {"type":"UtxoFixed","amount":"<n>"}` pays `<n>` as a rate per 1,000 bytes, in
   proportion to the size and rounded down, exactly like `UtxoPerKbyte`, as the
   reference (Komodo DeFi Framework 2.6.0-beta and GLEEC KDF 3.0.0-beta) does. A
-  `withdraw` of an SLP token on BCH still pays `<n>` for every started kilobyte; how
-  the reference charges it there is not established. No other node sees the
-  difference, because a withdrawal is the node's own transaction. See
-  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
-  [CRD ch.38 R38.6.6l](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md).
+  `withdraw` of an SLP token on BCH still pays `<n>` for every started kilobyte,
+  where the reference charges it in proportion to the size there too; KDF
+  Reloaded will change to the same arithmetic there (planned). No other node
+  sees the difference, because a withdrawal is the node's own transaction.
+  See [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
+  [CRD ch.38 R38.6.6l and R38.6.6m](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md).
   Contract: [CRD ch.38 R38.6.6l](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md).
 
 - **Reloaded never writes a cancelled order's stored record back, with no switch.**
@@ -410,6 +411,14 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   completes or is recovered. Orders and swaps are planned to return in a later
   release. No switch exists: the build constant `TENDERMINT_SWAPS_AVAILABLE`
   (`coins/lp_coins_ops.rs`) is `false`.
+- **A node does not watch swaps of UTXO, BCH and QTUM coins.** The checks a
+  watcher runs are not implemented for these coins yet, so a node with
+  `is_watcher` set does not subscribe to their watcher topics. GLEEC KDF
+  watches swaps of these coins, and does not watch Siacoin swaps, which KDF
+  Reloaded does. No switch exists. Watching for these coins is planned to
+  return with the taker-side watcher hand-off. See
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
+  [CRD ch.09 R17](docs/reloaded-rewrite/09-watcher-reward-infrastructure.md).
 
 ### Work in progress
 
