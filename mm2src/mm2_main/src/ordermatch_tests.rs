@@ -2408,8 +2408,10 @@ fn test_recently_cancelled_allows_different_pubkey() {
 
 /// CRD ch.32 R-K1b, T-K8: a cancel this node received is final for the final-cancel window.
 mod t32_k1b_final_cancel_tests {
+    use super::sync_answer_deferral_tests::assert_tables_empty;
     use super::*;
     use crate::mm2::lp_ordermatch::ordermatch_orderbook::{cancel_final_max_entries, cancel_final_window_secs};
+    use crate::mm2::lp_ordermatch::sync_log::{AltReason, Attempt, RequestClass};
     use mm2_p2p::atomicdex_behaviour::AdexResponse;
     use std::time::Instant;
 
@@ -2792,6 +2794,91 @@ mod t32_k1b_final_cancel_tests {
             "a delta is answered"
         );
         assert_cancelled_kept_out(&relay, &maker);
+    }
+
+    /// The answer of the request to one other relay (R-Q5d), through the whole keep-alive path: the
+    /// forwarder's request fails, the relay list is asked, and the answer of the other relay lists the
+    /// cancelled order with two others.
+    #[test]
+    fn t_k8_b_alternate_relay_answer() {
+        const OTHER_RELAY: &str = "relay-g";
+        let maker = Maker::new("final-cancel-b-alternate");
+        let (maker_ctx, _maker_rx) = maker_node(&maker.all());
+        let (relay, mut relay_rx) = guarding_node(json!({ "sync_request_retry_ms": 0 }), &maker);
+
+        let keep_alive = keep_alive_of(&maker_ctx, &maker.pubkey);
+        let (relay2, pubkey2) = (relay.clone(), maker.pubkey.clone());
+        let task = std::thread::spawn(move || {
+            block_on(process_orders_keep_alive(
+                relay2,
+                FORWARDER.to_owned(),
+                pubkey2,
+                keep_alive,
+                true,
+            ))
+        });
+        // The forwarder's request ends without an answer (R-Q5d trigger (a)).
+        match next_cmd(&mut relay_rx) {
+            AdexBehaviourCmd::RequestPeers { peers, response_tx, .. } => {
+                assert_eq!(peers, vec![FORWARDER.to_owned()]);
+                drop(response_tx);
+            },
+            other => panic!("unexpected command {:?}", other),
+        }
+        assert!(!task.join().unwrap(), "the forwarder's request failed");
+        match next_cmd(&mut relay_rx) {
+            AdexBehaviourCmd::GetConnectedRelays { result_tx } => result_tx
+                .send(vec![FORWARDER.to_owned(), OTHER_RELAY.to_owned()])
+                .unwrap(),
+            other => panic!("unexpected command {:?}", other),
+        }
+        let (req, response_tx) = match next_cmd(&mut relay_rx) {
+            AdexBehaviourCmd::RequestPeers {
+                req,
+                peers,
+                response_tx,
+            } => {
+                assert_eq!(peers, vec![OTHER_RELAY.to_owned()]);
+                (req, response_tx)
+            },
+            other => panic!("unexpected command {:?}", other),
+        };
+        let (pubkey, trie_roots) = match decode_message::<P2PRequest>(&req).unwrap() {
+            P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState { pubkey, trie_roots }) => {
+                (pubkey, trie_roots)
+            },
+            other => panic!("unexpected request {:?}", other),
+        };
+        let answer = process_sync_pubkey_orderbook_state(maker_ctx.clone(), pubkey, trie_roots)
+            .unwrap()
+            .unwrap();
+        assert!(
+            answer
+                .pair_orders_diff
+                .values()
+                .all(|diff| matches!(diff, DeltaOrFullTrie::FullTrie(orders) if orders.len() == 3)),
+            "the answer lists all three orders"
+        );
+        let res = AdexResponse::Ok {
+            response: encode_message(&answer).unwrap(),
+        };
+        response_tx.send(vec![(PeerId::random(), res)]).unwrap();
+
+        // The answer is applied on a task of its own; it is counted once it has been applied.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while octx(&relay).sync_log.snapshot().alt_ok != 1 {
+            assert!(
+                Instant::now() < deadline,
+                "the answer of the other relay was not applied"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(octx(&relay).sync_log.requests(), vec![
+            (Attempt::First, RequestClass::Transport),
+            (Attempt::Alternate(AltReason::Failure), RequestClass::Ok)
+        ]);
+        assert_cancelled_kept_out(&relay, &maker);
+        assert_tables_empty(&relay);
     }
 
     /// The order-book request-and-fill path.
@@ -10976,7 +11063,7 @@ mod sync_answer_deferral_tests {
     fn octx(ctx: &MmArc) -> Arc<OrdermatchContext> { OrdermatchContext::from_ctx(ctx).unwrap() }
 
     /// The tables of the node are empty (the in-flight record ends on a task of its own, so wait for it).
-    fn assert_tables_empty(ctx: &MmArc) {
+    pub(super) fn assert_tables_empty(ctx: &MmArc) {
         let deferral = octx(ctx).sync_answer_deferral.clone();
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline && (deferral.parked_len() != 0 || deferral.in_flight_len() != 0) {
