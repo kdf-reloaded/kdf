@@ -427,7 +427,20 @@ second) for 40 minutes, the same binary each time:
 With the limit the update rate (81.8 against 81.3 updates per second) and the
 processor use (22.3 % against 21.7 % of one core) were the same within noise.
 Whether the growth without the limit levels off in a longer run was not
-measured.
+measured when this table was made; R45.6A.8 reports it.
+
+R45.6A.8 **Measured basis after the first beta (informative).** The measurements deferred as D45.4 and D45.5 were run on
+2026-11-03 with one binary, the key `malloc_arena_max` set to `0` as the arm without the limit. Plateau runs at about 20
+order updates per second on the 8-core setting, 6.5 hours per arm: both arms levelled off by the pre-registered rule
+(minutes 180–360, fixed-phase points: resident memory +0.004 ± 0.003 MB/min with the limit, +0.019 ± 0.009 without;
+60–180 and 180–360 are reported separately in the plan). With the limit, resident memory was about 17 MB lower, entirely in
+memory the allocator keeps after freeing it, with 2 arenas against 36–37. This is an observation of consecutive runs, not a
+pre-registered comparison. The limit is therefore not shown to be necessary for a plateau at that load on 8 cores; it
+removed the growth measured at about 80 updates per second on 256 cores (R45.6A.7). Rows a–c: no cost of the limit was
+resolved on start-up and activation (a UTXO set, an EVM coin with tokens, a shielded coin), on eight swaps (three UTXO
+pairs, one EVM cell; no shielded swap) or on the latency of the query methods and of `update_maker_order` while 100 orders
+were updated at 20 per second; the default of `2` stands. The figures, the deviations from the registered procedure and the
+runs not made are in `docs/plans/malloc-arena-cap.md`.
 
 ## 45.7 No-Panic-On-Launch Obligation (security/robustness)
 
@@ -547,12 +560,14 @@ R45.6A.
 D45.4 Measuring the arena limit under activation and swap workloads (start-up
 time of a UTXO set, an EVM coin with tokens and a shielded coin; swap
 completion; latency of the query methods under order updating) and re-checking
-the default of `2` against them is deferred past the first beta. The release
-that carries R45.6A has only the order-update measurements of R45.6A.7.
+the default of `2` against them was done on 2026-11-03 (R45.6A.8): the default
+stands. A shielded swap was not run and a swap set larger than one per pair and
+arm was not measured.
 
 D45.5 A 3-hour run at about 20 order updates per second, with and without the
-limit, to learn whether the growth without the limit levels off, is deferred
-past the first beta.
+limit, to learn whether the growth without the limit levels off, was done on
+2026-11-03 as two 6.5-hour runs (R45.6A.8): both settings levelled off at that
+load on the 8-core setting.
 
 ## 45.10 External References
 
