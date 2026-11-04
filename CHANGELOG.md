@@ -32,14 +32,14 @@ it and, where one exists, the CRD rule, for readers who want more.
   so the order book, the address format it reports and every coin that asks for nothing behave
   exactly as before, and the word changes no order identity, no order book root and no
   synchronization. A reader that cannot make sense of the word treats it as absent. No coin sends a
-  word yet, so nothing changes on the wire today. Detail: PR #NNN; CRD ch.59 R59.4A.1 to R59.4A.7.
+  word yet, so nothing changes on the wire today. Detail: PR #235; CRD ch.59 R59.4A.1 to R59.4A.7.
 - **The log now says why a reservation or a request was turned down by a coin.** When a coin
   declines the protocol information of a counterparty's reservation (on the taker side) or request
   (on the maker side), the node logs one debug line naming both orders and the coin. When a taker's
   pass over the reservations it received ends without a connect and a coin declined at least one of
   them, one info line names the taker order and the number declined, so an operator whose order
   times out can see why. The protocol information itself is never logged. Nothing else changes in
-  how orders are matched. Detail: PR #NNN; CRD ch.59 R59.4A.6.
+  how orders are matched. Detail: PR #235; CRD ch.59 R59.4A.6.
 
 #### Start-up and configuration
 
@@ -188,7 +188,7 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: the
   capability word that lets ARRR require a counterparty that builds version-6 transactions is
   written (CRD PR #227), and its generic part, the word's writer and fail-closed reader and the
-  decline log lines, is implemented (PR #NNN); the ARRR rule that uses it comes next.
+  decline log lines, is implemented (PR #235); the ARRR rule that uses it comes next.
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
