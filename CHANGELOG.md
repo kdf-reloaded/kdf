@@ -109,7 +109,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   now reads the time of each header from the list by the size the list itself shows, or fetches the
   headers one by one, checks the times for plausibility and fails with an error naming the check instead
   of guessing. Such a coin needs no new entry in the coins file (header sync and SPV proofs for it are
-  not covered). Detail: CRD ch.37 R37.5.10.
+  not covered). Detail: PR #220, PR #221; CRD ch.37 R37.5.10.
 
 ### Tests
 
@@ -144,7 +144,7 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — new step H6: the
   median time of a coin whose headers carry a fixed-length trailer (Bitcoin Atom) is read from each
   header's own bytes; the 1.6 list form of header requests and explicit `header_layout` entries for
-  RIC and MEWC in the coins repository are listed as later items.
+  RIC and MEWC in the coins repository are listed as later items (CRD PR #220, code PR #221).
 
 ### Known limitations
 
