@@ -597,6 +597,40 @@ same gate and report a "too early" error naming the earliest permitted instant.
 > the swap wire are unchanged, so a counterparty sees only when the refund appears. The
 > operator-facing entry is in `docs/GLEEC_COMPATIBILITY.md`, "ZHTLC backend".
 
+R39.5.14 **Protocol information of a shielded coin on the order and match
+messages.** *(Passed the KDF Dirty Gate on 2026-11-04, measure 0.02. Reference fact, Spec Reader
+2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+identical at both.)* A shielded coin publishes, as its per-coin protocol
+information on maker orders and on both match messages, the same value a
+transparent UTXO coin does -- the MessagePack encoding of its transparent
+address-format descriptor, which for a shielded coin is the `standard`
+form -- and judges a counterparty's value by the UTXO rule of chapter 59
+R59.4.7: accepted when absent or when it begins with a decodable descriptor,
+trailing bytes ignored; refused, silently and before any payment, when it
+does not. No matching or negotiation message carries a shielded
+transaction-version or network-upgrade capability at either row, and the
+reference's shielded coin applies no refusal of its own beyond the UTXO rule.
+The orderbook shows such an order with the shielded address outcome of
+R39.5.3 whatever the bytes say.
+
+> **Compatibility (this repository, 2026-11-04; not corpus-sourced).**
+> Reloaded's shielded coin publishes the same descriptor today and adds its
+> own refusal during the Ironwood swap freeze (R39.6.4b). The capability word
+> this project decided to append **after** the descriptor (maintainer
+> Decision BM, 2026-11-04, its switch on by default; bound in chapter 59
+> §59.4A and R39.6.4f; the earlier design notes are a maintainer-local note)
+> has these consequences at the reference: a Komodo DeFi
+> Framework 2.6.0-beta or GLEEC KDF 3.0.0-beta counterparty **accepts** the
+> longer value, because its decoder ignores what follows the descriptor, and
+> matches as before; it never sends the word itself; and it is not confused
+> about the order's address. The protection therefore has to be enforced on
+> the Reloaded side alone, in both roles, and a Reloaded maker's refusal is
+> seen by such a taker only as a request that times out (chapter 59 R59.4.7
+> item 4). The word must follow the descriptor, never replace or precede it:
+> a value that does not begin with the descriptor is refused by every
+> reference node, and a transparent coin's order would in addition be shown
+> under the `standard` format regardless of its real one.
+
 Tests for R39.5.6--R39.5.13:
 
 T39.5.a *Derivation vector.* *(parity.)* For a fixed base private key and the two swap-unique
@@ -639,6 +673,14 @@ after the leg's refund deadline is terminal as in R39.5.12(c). `recover_funds_of
 before the gate opens reports "too early" with the earliest permitted instant and
 broadcasts nothing.
 
+T39.5.g *Protocol information of a shielded coin (R39.5.14).* *(parity.)* A
+shielded coin's published protocol information shall decode as the
+`standard` address-format descriptor; its judgment shall accept that
+descriptor alone and that descriptor followed by trailing bytes, and refuse an
+empty value and a value that begins with anything else; and no matching or
+negotiation message built for a shielded swap shall carry a transaction
+version or upgrade capability beyond this project's own addition, if any.
+
 #### Deferred Work (§39.5)
 
 D39.5.a **Decided 2026-10-28 (maintainer): follow the reference.** Under the HD-wallet policy
@@ -665,6 +707,70 @@ transparent one, so the prefix misleads; in the coins-file cases the detail afte
 `derivation_path`, so the cause stays clear. A dedicated error, or a prefix that names no key kind, changes only the
 text of `error_data.error`: the activation still ends in `CoinCreationError` `{ticker,
 error}` (R39.10.12), and no behavior changes.
+
+---
+
+## 39.5A Address acceptance on `validateaddress` and `withdraw` (reference contract)
+
+*(Passed the KDF Dirty Gate on 2026-11-04, measure 0.02. Spec Reader 2026-11-04, rows `v2.6.0-beta` and
+`v3.0.0-beta` of chapter 02 §2.15A, identical at both.)* This section records
+how the reference answers an address that is not a Sapling payment address of
+the coin -- in particular a Pirate Ironwood address, whose human-readable
+prefix is `pirate` -- so that the compatibility row of this project's own
+Ironwood work can be written against it.
+
+R39.5A.1 *`validateaddress`.* The reference decodes the string as a Bech32
+Sapling payment address under the Sapling payment-address prefix of the
+**Zcash main network** (`zs`) -- a constant, not the coin's configured
+`hrp_sapling_payment_address`. A string with any other prefix, the Ironwood
+`pirate` prefix included, or with any other defect answers `is_valid: false`
+with a `reason` that names the decoding failure; a string that decodes
+answers `is_valid: true` with no reason. There is no second address form the
+method accepts.
+
+R39.5A.2 *`withdraw`.* The reference's shielded coin serves withdrawals
+through `task::withdraw::init` only: the legacy `withdraw` method answers an
+*internal-error* class error for a shielded coin and builds nothing. On the
+task route the destination is decoded exactly as in R39.5A.1; a string that
+does not decode fails the task with the structured withdrawal error whose
+discriminant is `InvalidAddress` (HTTP 400, chapter 49 R49.20), its text
+naming the decoding failure, before any note selection or fee computation. A
+request that carries `from` or `fee` fails before that, with the
+*unsupported-operation* class error, because the reference's shielded coin
+accepts neither a sender selector nor a fee descriptor (chapter 49 R49.27).
+
+*Pointer (2026-11-04; passed the KDF Dirty Gate on 2026-11-04, measure 0.00;
+provenance and clearance in chapter 49 §49.7).* The wire form of those two
+refusals -- `error_type` `UnsupportedError` (one shared discriminant, `fee`
+checked before `from`), HTTP 400, string `error_data`, delivered in
+`result.details` on the task route -- is bound in chapter 49 R49.27a.
+
+> **Compatibility (this repository, 2026-11-04; not corpus-sourced).**
+> Reloaded's shielded coin implements the legacy `withdraw` method and
+> reaches the same code from the task route, and `validateaddress` decodes
+> with the coin's **configured** prefix. The Ironwood work scoped on
+> 2026-11-04 (`docs/plans/arrr-native-and-ironwood-pool.md` §3) will accept
+> an Ironwood `pirate1…` destination as a withdraw-only output: where the
+> reference answers `is_valid: false` and `InvalidAddress`, Reloaded will
+> answer `is_valid: true` and build the transaction. The acceptance is
+> additive and local to this node (a withdraw is the node's own
+> transaction), so arm 1 of `docs/COMPAT_SWITCHES.md` "The default-side
+> rule" does not bind the default; when that work lands, its row goes into
+> `docs/GLEEC_COMPATIBILITY.md`. The reference's use of the Zcash
+> main-network prefix instead of the configured one is harmless for ARRR,
+> whose Sapling prefix is the same `zs`; a shielded coin configured with a
+> different prefix could not validate its own addresses at the reference.
+
+T39.5A.a *Ironwood address under the reference contract.* *(parity record,
+not a Reloaded expectation.)* A test of the Reloaded Ironwood-destination
+work shall record, next to its own acceptance assertions, that the contract
+of R39.5A.1--R39.5A.2 answers `is_valid: false` and `InvalidAddress` for the
+same string, so that the divergence stays documented where it is tested.
+
+T39.5A.b *Sapling strings unchanged.* For a valid `zs1…` address of the coin,
+`validateaddress` shall answer `is_valid: true` and a withdraw shall proceed,
+under both lineages; for a `zs1…` string with a corrupted checksum both shall
+refuse, with the outcomes of R39.5A.1--R39.5A.2.
 
 ---
 
@@ -6447,3 +6553,31 @@ entries in its list cannot be told apart. Passing the position to the fallback c
     the builder defaults; BIP 113 and zcashd's finality rule, as public specification.
   - *Original to this design:* R39.5.13, D39.5.a and the informative pre-check under
     R39.5.11.
+- *Scoped addition (2026-11-04) -- R39.5.14, T39.5.g, §39.5A (R39.5A.1,
+  R39.5A.2, T39.5A.a, T39.5A.b) and the two compatibility notes under
+  them.* **KDF Dirty Gate: PASS on 2026-11-04, measure 0.02.** Prompted by the ARRR version-6
+  counterparty and Ironwood-address questions of the 0.4.0 cycle. *Inputs:*
+  the forbidden corpus at the rows `v2.6.0-beta` and `v3.0.0-beta` of
+  chapter 02 §2.15A, identical at both, consulted **only** to establish: that
+  a shielded coin publishes and judges protocol information by the UTXO rule
+  (chapter 59 R59.4.7) and adds nothing of its own; that no matching or
+  negotiation message carries a transaction-version capability; the address
+  decoding of `validateaddress` and of the task-route withdraw, the prefix it
+  uses, the outcome for a string that does not decode, the absence of a
+  legacy `withdraw` for a shielded coin, and the refusal of `from` and `fee`.
+  What crosses is behavior, public RPC names and dictated response members
+  (`is_valid`, `reason`, `InvalidAddress`); no private identifier, function
+  body, helper decomposition, error, log or comment text was reproduced. The
+  compatibility notes rest on this repository's own code, on chapter 59 and
+  on the maintainer's scope of 2026-11-04; the T-items are Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.02, no findings. *Extent:* the shielded coin's protocol-information
+  publication and judgment, its address validation and its withdraw routes, at
+  `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole batch, 30
+  source files and one dependency manifest were read at `v3.0.0-beta`, 29 of
+  them checked by hash against the tagged states of both rows. *Method:* side-
+  by-side reading of the compared regions against every added or changed line,
+  plus that hash check; the gate script was not run because the candidate has
+  no code blocks. *Measure:* 0.02, read against the standard that any
+  discretionary finding fails a file; dictated-interop and public-surface
+  tokens were excluded from the measured set.
