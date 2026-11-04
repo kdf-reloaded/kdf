@@ -79,6 +79,14 @@ it and, where one exists, the CRD rule, for readers who want more.
   `20`) set the factor and the margin; a factor of `0` spreads over every connected server as
   before. Detail: PR #215; CRD ch.38 R38.6.4a.
 
+#### Start-up and configuration
+
+- **The start-up banner now shows the release version.** The first log line reads like
+  `KDF-Reloaded DeFi Framework 0.4.0-alpha.1 (a1b2c3d4e) DT 2026-11-02T12:00:00+01:00`, with the version
+  of the release package before the short commit hash, so a log tells at once which release it came
+  from. The `version` call and the version stored in swap records still carry the short commit hash
+  only, unchanged. Detail: PR #210; CRD ch.45 R45.6.7.
+
 ### Fixed
 
 #### Node names in logs and errors
@@ -102,6 +110,9 @@ it and, where one exists, the CRD rule, for readers who want more.
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
+- [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
+  the version of the release package (PR #210); where that version should live, and whether the
+  `version` call and swap records should carry it, are listed as open questions for the next round.
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
   now names the gas limits each EVM coin and token will use and where they come from (PR #200);
   options (a) and (b) still wait on the reference maintainers' outcome.
