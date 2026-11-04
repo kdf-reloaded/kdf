@@ -513,8 +513,8 @@ R46.2.4, ch.55 R55.4.6):
   KDF; the malformed `fork_id` above stays outside it under every setting.
 
 More behaviors, in the order book and its relaying, peer exchange, fee readings and fee
-quotes, Electrum, the shielded history and trading under an HD login, differ from GLEEC KDF by default, each with one top-level
-`MM2.json` switch. The value below gives the GLEEC-compatible behavior; the row of each switch in
+quotes, Electrum, the shielded history and trading under an HD login, differ from GLEEC KDF by
+default, each with one top-level `MM2.json` switch. The value below gives the GLEEC-compatible behavior; the row of each switch in
 [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the full detail:
 
 - `pre_trade_spend_check: false` — no pre-trade spend check.
