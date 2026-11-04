@@ -1,6 +1,6 @@
 # Plan: configuration-selected UTXO header families
 
-**Status:** in progress (beta blocker H4a and the fallback H4b landed in PRs #62, #67 and #74; H4 in part in PR #82, its remaining family rules open; H5 open) — **Last reviewed:** 2026-10-29
+**Status:** in progress (beta blocker H4a and the fallback H4b landed in PRs #62, #67 and #74; H4 in part in PR #82, its remaining family rules open; H5 open) — **Last reviewed:** 2026-11-03
 
 > **Context:** this plan closes the open work left by the fix for standard headers whose
 > version collides with a header family (commit `47ede628c`, CRD ch.37
@@ -553,6 +553,36 @@ threading extends it to the other read paths exactly as it extends the key.
   AuxPoW-signalled and let sync rebuild it. Decide this before implementing
   (see open decisions).
 
+### H6 — Time-only read of the median-time-past window (ch.37 R37.5.10; **0.4.0 batch 1 fix**)
+
+Why: a coin whose Electrum servers serve the standard 80-byte header plus a fixed-length trailer — the
+first one met is Bitcoin Atom (`BCA`, 84 bytes from height 505888) — has a median-time-past list that no
+layout of H4/H4a/H4b reads, so every HTLC spend and refund of the coin fails to build, while activation,
+orders and payments work. The maintainer's constraint: no new "known variant" for it, no coins-file key,
+no switch to turn the fix on.
+
+- **Rule (CRD first):** R37.5.10–R37.5.10g, a four-step cascade for the median window only: (1) the
+  layout-aware reads exactly as today (version-inferred Equihash, AuxPoW, KawPoW, ProgPoW, Qtum, and the
+  R37.5.9e fallback); (2) if that failed and the count is odd and the byte count divides by it, split at the
+  stride and read the time at byte 68 of each piece; (3) otherwise fetch the `n` headers individually and read
+  each one's time (lone-header read first, else byte 68); (4) range check on the times (2009-01-01 to clock
+  plus one day), with a typed error naming the failed check. Odd counts make divisibility reject every list
+  that mixes header sizes, so the fork-crossing window is read correctly by step 3 instead of being rejected.
+- **Riecoin and KawPoW:** the time is at byte 68 in the 80, 112 and 120-byte layouts (64 bits wide in Riecoin,
+  the low half is read); the Meowcoin list is not uniform. Their steps stay in step 1 unchanged; a uniform list
+  they cannot read is covered by steps 2 and 3, so `header_layout_fallback_families: []` no longer rejects such a
+  median list (deliberate, R37.5.10f).
+- **Code:** one function for steps 2 to 4 and a call at the end of the median-time-past path of the Electrum
+  client; the log line of R37.5.10e; tests per the ch.37 §37.8 bullets (strides 80/84/112/120, odd-count sweep,
+  even counts, ambiguity, failed requests, range check with an injectable clock).
+- **Later items:** the Electrum protocol 1.6 list form of `blockchain.block.headers` (explicit boundaries,
+  guard that the number of strings equals `n`); moving the `RIC` and `MEWC` registry entries onto an explicit
+  coins-file `header_layout` (a coins-repository change).
+- **Acceptance in the lab:** `get_current_mtp` of the live `BCA` coin equals the median computed independently
+  from the same eleven served headers; later a live `BCA` swap.
+- **Not in scope:** header sync, stores and hash validation for such a coin (H5 and R37.5.7 need the chain's exact
+  bytes and hashes).
+
 ## Out of scope
 
 - The R37.6.1a code-quality finding (`enable_spv_proof` without `spv_conf`).
@@ -574,6 +604,7 @@ threading extends it to the other read paths exactly as it extends the key.
 | H4b structural fallback and its switch (D3, registry-free leg) | H4a — the layout readers; not H2/H3 (every coin is the `"BTC"` family until H2) | small–medium (switch parse at startup, fallback in the list and single-header entry points, info line, COMPAT docs, key rename) | PRs #67 and #74 |
 | H4 family rules | H3 | medium | PR #82 (LBRY and PIVX readers); the rest open |
 | H5 identity, storage, linkage | H4, H4a, H4b | medium, touches persisted data | open |
+| H6 time-only median read (R37.5.10) | H4b — the cascade it follows | small–medium (one function, one call, a log line, tests with a stub server for the individual requests) | CRD in the 0.4.0 batch-1 PR; code follows |
 
 H1+H2 can start immediately; H0 gates nothing any more. Each PR updates ch.37
 §37.5.8 and §37.9 in the same commit as its code, and closes the
