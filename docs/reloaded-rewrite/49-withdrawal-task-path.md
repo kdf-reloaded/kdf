@@ -74,11 +74,21 @@ withdrawal shall fail with a structured withdrawal error whose public
 discriminant identifies an unexpected sender selector. The server shall not
 silently ignore an explicit `from` on a single-key wallet.
 
-R49.4. For HD UTXO-family task withdrawals, `from` is required. If an HD UTXO
-task withdrawal omits `from`, the task shall fail with a structured withdrawal
-error whose public discriminant identifies that no sender address was supplied.
-If `from` is present, the implementation shall resolve it to the selected
-activated HD address and use that address as the only withdrawal sender.
+R49.4. For HD UTXO-family task withdrawals, `from` selects the sender. If
+`from` is present, the implementation shall resolve it to the selected
+activated HD address and use that address as the only withdrawal sender. If an
+HD UTXO task withdrawal omits `from`, the task shall use the enabled address
+(account `0`, chain `External`, address `0`) as the only withdrawal sender
+*(amended 2026-11-04; see the divergence note)*.
+
+> **Reloaded divergence (2026-11-04).** Until this amendment R49.4 required an
+> omitted `from` to fail with a structured error saying that no sender address
+> was supplied. Reloaded has used the enabled address instead since 0.1.x, so
+> that a wallet client whose withdraw preview omits `from` works. The divergence
+> from GLEEC KDF, which rejects an omitted `from`, is recorded in
+> [`RELOADED_VS_GLEEC.md`](../../RELOADED_VS_GLEEC.md). The direct `withdraw`
+> method does not yet serve an HD UTXO wallet; plan
+> [`hd-key-unification`](../plans/hd-key-unification.md) item H5 covers it.
 
 R49.5. EVM-family software-HD native-coin and fungible-token withdrawals shall
 be supported through both direct `withdraw` and `task::withdraw::init`. When
@@ -150,8 +160,8 @@ that resolves to the same activated address as T49.3. The task shall use the
 same sender address.
 
 T49.5. Start an HD UTXO-family withdrawal task without `from`. The task shall
-reach a terminal error status whose public withdrawal-error discriminant
-identifies that the sender address was not supplied.
+use the enabled address (account `0`, chain `External`, address `0`) as the
+sender *(amended 2026-11-04, R49.4)*.
 
 T49.6. Start an HD withdrawal task with a selector for an unknown account, a
 mismatched coin path, or an address that has not been activated. The task shall
@@ -408,6 +418,11 @@ confirm the extra field is simply absent and no error is raised.
   chapter's wire); [Chapter 20](20-siacoin-integration.md) §20.9.1-§20.9.2
   (the Siacoin transaction-carrier and record-identity fields this chapter's
   R49.26 admits as the one present use of an additional coin-family field).
+- *Amendment (2026-11-04) -- R49.4, its divergence note, and T49.5.* They
+  now state the shipped default sender for an HD UTXO task withdrawal that
+  omits `from`. Reloaded-original. *Inputs:* this repository's own withdraw
+  sender selection and `RELOADED_VS_GLEEC.md`. No reference implementation
+  was consulted for this amendment, and it needs no Dirty Gate pass.
 - *Permitted-input classes used:* baseline/as-built source (the shipped
   withdraw wire and shared task-status envelope pattern); cross-chapter
   contracts (Chapters 20, 35, 50); Interop / wire-and-API-bound reuse (R29/R31)

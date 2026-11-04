@@ -158,7 +158,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
 
 These are divergences from GLEEC KDF that are **not** operator-configurable in this release (no compat switch yet). They are logged here and in [`CHANGELOG.md`](CHANGELOG.md) per the convention; a per-feature switch may be added in a later release.
 
-- **Withdraw with an omitted HD `from`.** For an HD-mode UTXO wallet, `task::withdraw` / `withdraw` with no `from` sender defaults to the wallet's enabled address (account 0, external chain, index 0) instead of failing. GLEEC KDF rejects an omitted `from` with `FromAddressNotFound`. This makes the shipped Komodo DeFi wallet's withdraw-preview flow (which omits `from`) work against a reloaded node. An explicit but invalid `from` is still rejected (`UnknownAccount` / `UnexpectedFromAddress`). Code: `coins/utxo/utxo_common/utxo_common_hd.rs` (`get_withdraw_hd_sender`), `utxo_common_helpers.rs` (`validate_task_withdraw_sender`).
+- **Withdraw with an omitted HD `from`.** For an HD-mode UTXO wallet, `task::withdraw` with no `from` sender defaults to the wallet's enabled address (account 0, external chain, index 0) instead of failing. The direct `withdraw` method does not yet serve an HD UTXO wallet (plan [`hd-key-unification`](docs/plans/hd-key-unification.md), item H5). GLEEC KDF rejects an omitted `from` with `FromAddressNotFound`. This makes the shipped Komodo DeFi wallet's withdraw-preview flow (which omits `from`) work against a reloaded node. An explicit but invalid `from` is still rejected (`UnknownAccount` / `UnexpectedFromAddress`). Code: `coins/utxo/utxo_common/utxo_common_hd.rs` (`get_withdraw_hd_sender`), `utxo_common_helpers.rs` (`validate_task_withdraw_sender`).
 - **A Light-mode ZHTLC coin is served by `lightwalletd` alone; Electrum is
   removed, and there is no switch to restore it.** GLEEC KDF requires a
   non-empty `electrum_servers` list in the Light-mode activation payload and
@@ -422,7 +422,7 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   address's event log and tells a spend from a refund (ch.20 D3, closed).
   Still open: the V2 swap protocol is not implemented for SC (ch.20 D5,
   V1 only).
-- HD wallet dispatch in swap/ordermatch paths (legacy iguana-key fallback retained for parity with upstream and GLEEC; documented in code).
+- One key per coin and one trading identity under an HD login. Swaps and ordermatch still use the hash of the passphrase text as the key of every coin that does not supply its own swap key, so EVM swaps and swaps of coins enabled through legacy `enable`/`electrum` do not complete under an HD login. Whether GLEEC KDF does the same is not established. Plan [`hd-key-unification`](docs/plans/hd-key-unification.md).
 
 ### Settings to set for GLEEC-compatible operation
 

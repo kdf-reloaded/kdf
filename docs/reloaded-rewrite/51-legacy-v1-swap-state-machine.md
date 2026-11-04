@@ -1167,6 +1167,24 @@ deployed wire format, not of secp256k1. For a shielded coin, the HTLC key
 behind that public key is derived per swap and never stored
 ([chapter 39](39-zcash---z_coin-shielded-coin.md) R39.5.6--R39.5.9).
 
+> **Reloaded status under an HD login (informative, 2026-11-04).** For a
+> secp256k1 coin the machines resolve the coin's own HTLC key where the coin
+> supplies one, and the node's persistent key otherwise. Under an iguana login
+> these are one key. Under a global-HD login
+> ([chapter 45](45-startup-configuration-and-environment-tolerance.md)
+> R45.4.8) they differ. A UTXO coin activated through the HD task route
+> supplies its activated HD key, and its spend and refund outputs go to that
+> key's address; it funds the swap from its first address (account `0`, chain
+> `External`, address `0`), so the two agree only when it was activated there.
+> A coin that supplies no key of its own gets the node's persistent key, which
+> under HD is the hash of the passphrase text. For EVM coins and for coins
+> enabled through legacy `enable` or `electrum` that is not the key the coin
+> pays from. A swap of such a coin under an HD login does not complete as
+> intended. Plan
+> [`hd-key-unification`](../plans/hd-key-unification.md) first refuses those
+> swaps (item H1), then gives every coin its own key (item H3); chapter 05
+> will carry the rules.
+
 **R64.** *Representation of non-secp256k1 keys — the dictated padding
 convention.* A chain whose native key is not a 33-byte secp256k1 point
 MUST occupy the 33-byte field by a fixed, chain-specific convention
@@ -1934,3 +1952,9 @@ reference rows alike.
   internal decomposition, log or error string, or per-method internal
   table was copied; every rule above is stated as an externally
   observable behavioural or cryptographic requirement.
+- *Reloaded-original note (2026-11-04) -- "Reloaded status under an HD
+  login" under R63.* It records which key the machines resolve per coin
+  under a global-HD login and points to plan `hd-key-unification`. Written
+  by a context that never read the forbidden corpus, from this repository's
+  own swap, coin-key and activation code. No reference implementation was
+  consulted, and it needs no Dirty Gate pass.

@@ -179,6 +179,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   higher sync limits on relays and the request to one other relay above (PRs #205, #207, #208). What
   two later packages waited for is now recorded: how a cancelled order can come back on Komodo and
   GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222).
+- [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
+  swap key per coin and one trading identity for the node. Eight work packages, starting with
+  corrections to the documentation and with refusing up front the swaps that cannot complete.
 - [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — in progress: the 2-arena limit of 0.3.0-beta.1
   was measured in two 6.5-hour runs and on start-up, activation, eight swaps and query latency; no cost
   was resolved and the default stays (PR #225); executor sizing and an allocator comparison are left.
@@ -203,6 +206,18 @@ file carries the detail. "New" means the plan was created in this cycle.
 What does not work yet, or works only in part, in this release. Each item says where more detail
 lives.
 
+- **Under an HD login, swaps of EVM coins, and of coins enabled through legacy `enable` or
+  `electrum`, do not complete.** An HD login is one with `enable_hd` set to `true`, as the Komodo
+  DeFi wallet uses in HD mode. For such a coin the swap announces a different key than the one the
+  coin pays from, so the other side rejects the dex fee or the payment. The dex fee is lost, and a
+  payment already sent comes back only at its refund time. The same holds for a UTXO coin activated
+  at an address other than its first one (`path_to_address`). A UTXO coin such as RIN activated
+  through `task::enable_utxo` at its first address trades normally. Until this is fixed, trade EVM
+  coins under a login without `enable_hd`. The proceeds of a swap of a coin enabled through legacy
+  `enable` under an HD login can land on an address the wallet does not show; logging in with the
+  same passphrase without `enable_hd` reaches them. Whether a maker's orders under an HD login stay
+  visible on other nodes is being checked. More in
+  [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: CRD ch.51, note under R63.
 - **Do not run two KDF instances on the same seed at the same time.** If you do, for any coin (RIN
   included), both instances can pick the same funds for two different transactions. The network
   accepts one and rejects the other, and the instance that loses gets no explanation and may try
