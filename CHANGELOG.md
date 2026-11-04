@@ -57,6 +57,12 @@ it and, where one exists, the CRD rule, for readers who want more.
   with an error at once. The limits are the `MM2.json` settings `sync_answer_deferral_max_per_peer`
   and `sync_answer_deferral_max_total` (at most 64 and 8,192). Nothing on the wire changes. Detail:
   PR #205; CRD ch.32 R-Q5b.
+- **A node whose order-book sync from one relay fails, or brings back an outdated set, now asks one
+  other relay.** Before, it waited for the maker's next keep-alive, 30 seconds later, and a relay that
+  had missed a cancellation passed the cancelled order on to every node that asked it. The node now
+  asks one other relay it is connected to, once, for the pairs concerned, and never empties a pair
+  because the sets differ. To restore the old behavior, set `sync_request_alternate_relay` to
+  `false` in `MM2.json`. Detail: PRs #207, #208; CRD ch.32 R-Q5d.
 
 #### UTXO coins and Electrum
 
@@ -73,6 +79,14 @@ it and, where one exists, the CRD rule, for readers who want more.
   `20`) set the factor and the margin; a factor of `0` spreads over every connected server as
   before. Detail: PR #215; CRD ch.38 R38.6.4a.
 
+#### Start-up and configuration
+
+- **The start-up banner now shows the release version.** The first log line reads like
+  `KDF-Reloaded DeFi Framework 0.4.0-alpha.1 (a1b2c3d4e) DT 2026-11-02T12:00:00+01:00`, with the version
+  of the release package before the short commit hash, so a log tells at once which release it came
+  from. The `version` call and the version stored in swap records still carry the short commit hash
+  only, unchanged. Detail: PR #210; CRD ch.45 R45.6.7.
+
 ### Fixed
 
 #### Node names in logs and errors
@@ -86,6 +100,17 @@ it and, where one exists, the CRD rule, for readers who want more.
   `mm2_net` crate now also builds on its own for the browser target. Detail: PR #218; CRD ch.35
   R35.1.14.
 
+#### UTXO coins and Electrum
+
+- **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
+  trailer are read correctly for the median time.** Bitcoin Atom (BCA) serves 84-byte headers from block
+  505888; Reloaded read them as 80 bytes, so the median time it needs before every HTLC spend and refund
+  failed, and no swap of the coin could be completed. When the usual header layouts do not fit, the node
+  now reads the time of each header from the list by the size the list itself shows, or fetches the
+  headers one by one, checks the times for plausibility and fails with an error naming the check instead
+  of guessing. Such a coin needs no new entry in the coins file (header sync and SPV proofs for it are
+  not covered). Detail: CRD ch.37 R37.5.10.
+
 ### Tests
 
 - **The tests run before the next beta will be listed in
@@ -96,14 +121,17 @@ it and, where one exists, the CRD rule, for readers who want more.
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
+- [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
+  the version of the release package (PR #210); where that version should live, and whether the
+  `version` call and swap records should carry it, are listed as open questions for the next round.
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
   now names the gas limits each EVM coin and token will use and where they come from (PR #200);
   options (a) and (b) still wait on the reference maintainers' outcome.
-- [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes keep
-  showing after a lost cancellation; five work packages after the beta, the first being the higher
-  sync limits on relays above (PR #205). What two later packages waited for is now recorded: how a
-  cancelled order can come back on Komodo and GLEEC KDF, and that their makers advertise every
-  non-empty pair at every tick (PR #222).
+- [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes
+  keep showing after a lost cancellation; five work packages after the beta, the first two being the
+  higher sync limits on relays and the request to one other relay above (PRs #205, #207, #208). What
+  two later packages waited for is now recorded: how a cancelled order can come back on Komodo and
+  GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
   with its two switches and their defaults (PR #201), and implemented (PR #215); the SwapLab timing
@@ -113,6 +141,10 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
   recorded; whether KDF Reloaded follows them stays the maintainer's decision (PR #222).
+- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — new step H6: the
+  median time of a coin whose headers carry a fixed-length trailer (Bitcoin Atom) is read from each
+  header's own bytes; the 1.6 list form of header requests and explicit `header_layout` entries for
+  RIC and MEWC in the coins repository are listed as later items.
 
 ### Known limitations
 
@@ -161,8 +193,10 @@ lives.
   D9.
 - **Other nodes can keep showing a cancelled order for a while if its cancellation is lost on the
   way.** Such an order cannot be matched or traded, and it disappears once the maker posts again on
-  that pair or goes offline. More in [`ghost-orders`](docs/plans/ghost-orders.md). Detail: PR #188;
-  CRD ch.32 D12.
+  that pair or goes offline. While the maker still has other orders on that pair, a node whose copy
+  differs from the maker's now also asks one other relay, which removes the order if that relay
+  received the cancellation. More in [`ghost-orders`](docs/plans/ghost-orders.md). Detail:
+  PRs #188, #208; CRD ch.32 D12, R-Q5d.
 - **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes.** ARRR now uses a newer
   transaction format (v6, from the Ironwood upgrade) that no other KDF implementation can handle, so a
   swap with a Komodo or GLEEC counterparty cannot complete. A swap between two KDF Reloaded nodes has
