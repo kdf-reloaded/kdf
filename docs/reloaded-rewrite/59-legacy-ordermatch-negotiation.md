@@ -312,7 +312,9 @@ No capability is declared when:
 - nothing follows the first value;
 - what follows is not a map with string keys, or is truncated.
 
-A key whose value is `false`, or not a boolean, is not declared. Keys the
+A key whose value is `false`, or not a boolean, is not declared. A key that
+appears more than once is declared when any of its occurrences has the
+value `true`. A word that is an empty map declares nothing. Keys the
 reader does not know are ignored, and so are any bytes after the word.
 Reading never rejects the message itself: it yields the set of declared
 capabilities, which may be empty. A coin that requires a capability
@@ -746,6 +748,9 @@ arriving.
   - {`tx_v6`: `true`, plus an unknown key} followed by trailing bytes:
     {`tx_v6`};
   - `tx_v6` with a non-boolean value: none;
+  - `tx_v6` twice, once `true` and once `false`, in either order:
+    {`tx_v6`};
+  - an empty map as the word: none;
   - a first value that is an integer, a nested array, a map or an
     extension value is skipped whole, and the word after it is read.
 - (c) *The first value reads the same (R59.4A.3).* With the word
