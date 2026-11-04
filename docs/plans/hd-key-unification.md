@@ -32,7 +32,8 @@
    but `orderbook` marks own orders by the internal key, so `is_mine` is false for them. No
    keep-alive goes out for them either: the maker drops each order from its own orderbook after
    the maker-order timeout and sends it again in full, about every 90 s. That keeps the order
-   visible on other nodes (row HD1, 2026-11-04: 60 minutes, no loss).
+   visible on other nodes, apart from short gaps when a node drops it just before the next copy
+   arrives (row HD1, 2026-11-04: three gaps in 60 minutes, none in the iguana control).
 4. **A UTXO coin activated at another `path_to_address`** puts that address's key on the wire
    but funds the swap from account 0, external chain, index 0.
 5. **Funds shown but not spendable:** Sia (`withdraw` ignores `from`) and ERC20 (`from`
