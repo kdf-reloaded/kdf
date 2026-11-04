@@ -1438,6 +1438,8 @@ receiver neither depends on nor notices the second copy (R-F3c).
 > Reloaded logs such a close at INFO, as an idle connection closing, and
 > keeps the warning for the last connection to a peer and for every other
 > cause. Nothing on the wire changes.
+> *(Amended 2026-11-02: the idle close of the last connection to a relay
+> outside this node's relay mesh is logged at INFO too, ch. 28 R27b.)*
 
 > **Consequence for the mesh (informative; rewritten in the second
 > pass).** Because a relay's first forward precedes its own handling, a
@@ -4012,6 +4014,12 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   with reference binaries as black boxes, reported as counts and classes
   only; and the maintainer's decision. No reference implementation was
   consulted for this item, and it needs no Dirty Gate pass.
+- *Scoped amendment (2026-11-02) -- the pointer sentence appended to the
+  note "Consequence for a relay's connections" under §32.8 R-F3b.*
+  Reloaded-original, batch 0.4.0 item P2 (ch. 28 R27b). *Inputs:* this
+  repository's connection-close logging only. The forbidden corpus was
+  not consulted for this amendment, and it needs no Dirty Gate pass of
+  its own.
 - *Scoped addition (2026-11-03) -- §32.9C.1 (R-GH11 to R-GH13, T-GH11 to
   T-GH13) and the pointer sentence appended to §32.0.* **KDF Dirty Gate:
   PASS on 2026-11-03, measure 0.02.** Prompted by the ghost-order

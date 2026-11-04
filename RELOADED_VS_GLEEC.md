@@ -336,6 +336,13 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   Contract: [CRD ch.37 §37.5.1](docs/reloaded-rewrite/37-utxo-spv-and-block-header-validation.md)
   (the key-absent row and the port note under §37.5.8). Code:
   `coins/utxo/header_layout_fallback.rs`, `coins/utxo/utxo_builder/utxo_conf_builder.rs`.
+- **A seed that is already connected is not dialed again.** A node short of relays dials each
+  address at most once per 5 minutes, as GLEEC KDF does. GLEEC KDF also dials a seed that has
+  connected to it by itself, because it compares addresses only, and the extra connection closes
+  unused after two minutes. KDF Reloaded remembers which peer each seed address reached and does
+  not dial it while that peer is connected. Nothing changes on the wire; no switch. Contract:
+  [CRD ch.28 R27a](docs/reloaded-rewrite/28-libp2p-modernization.md). Code:
+  `mm2_p2p/src/redial_guard.rs`.
 
 - **An explicit `UtxoFixed` withdraw fee on an SLP token is charged per started
   kilobyte, with no switch.** Since PR #226 a UTXO coin's `withdraw` with
@@ -358,6 +365,23 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   restart on both, because the failed deletion is logged and not retried. Contract:
   [CRD ch.12 R7b](docs/reloaded-rewrite/12-order-match-state-store.md),
   [ch.32 R-GH11](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md).
+
+- **Median-time-past of coins whose headers carry a fixed-length trailer.**
+  A coin whose Electrum servers serve the standard 80-byte header plus a
+  fixed-length trailer (Bitcoin Atom, 84 bytes from height 505888) has a
+  median-time-past list that no header layout reads, so its HTLC spend and
+  refund fail to build. GLEEC KDF reads such a list as consecutive 80-byte
+  records, so its median is a wrong value (black-box observation, SwapLab
+  2026-11-02, release 3.0.0-beta binary; for BCA 42 minutes early at the tip
+  observed). Reloaded, when the layout-aware reads fail, splits the list at the
+  even stride (odd count, byte count divisible by it, header size 80 to 4096) and
+  reads the time at byte 68 of each header, or else fetches the headers one by one,
+  and checks the times for plausibility; a read that cannot get plausible times
+  fails with an error naming the check, never a guess. No switch value reproduces
+  GLEEC KDF here, and `header_layout_fallback_families: []` now only turns off the
+  full-layout fallback of RIC and MEWC, not this read. Nothing a counterparty
+  observes changes. See CRD ch.37 R37.5.10 and
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
 
 ### Removed / disabled in KDF Reloaded
 

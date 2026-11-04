@@ -1326,7 +1326,9 @@ of R37.6.2 for a coin read under this subsection shall be computed from the
 **parsed timestamp field** of each header the list read of R37.5.9b yields
 — never by slicing a fixed offset out of the served bytes, even though the
 time field happens to sit at bytes 68–72 in all three layouts (§37.5.1
-re-examination). For the Riecoin layout the parsed 64-bit time is used; a
+re-examination). The single exception is the time-only reads of
+R37.5.10, which runs only after every layout of this subsection has failed
+and is guarded by the range check of R37.5.10d. For the Riecoin layout the parsed 64-bit time is used; a
 value above the 32-bit range the standard header's time field spans shall
 be a typed parse error, never truncated. The bytes the header store keeps
 (§37.3) and the header's identity hash follow R37.5.7 unchanged: they are
@@ -1399,7 +1401,11 @@ rule is the registry-free path.
   exactly `count` headers ending exactly at the end of `hex`, or a lone
   header consumed to its last byte. If none does, the list or header is
   rejected exactly as today under R37.5.6 — nothing from it stored or
-  used, the error surfaced on the same path. The fallback **never** runs
+  used, the error surfaced on the same path; **except** that a header list
+  read for the median-time-past window alone then goes on to the further steps
+  of R37.5.10 (the even split and the individual read), which are not governed
+  by this switch, for the lists of a coin whose headers are the standard layout
+  plus a fixed-length trailer. The fallback **never** runs
   when the standard read succeeded, so a list the standard family reads is
   read by it and by nothing else; it never runs for a coin whose family is
   outside the set, and never for a coin that carries the key (R37.5.9a:
@@ -1499,6 +1505,184 @@ rule is the registry-free path.
 > it. The byte layouts the values select are dictated by their chains
 > (§37.5.2). This subsection binds the selection contract, the per-header
 > rule and the fallback contract; it binds no parser structure.
+
+### 37.5.10 Time-only read of the median-time-past window (clean-room-original)
+
+> **Provenance (informative).** R37.5.10–R37.5.10f are clean-room-original,
+> written from public chain facts and from R37.5.1–R37.5.9e of this chapter,
+> without reference to the upstream implementation, in the manner of R37.5.6a.
+> The only statement about the reference's behavior (the Compatibility block
+> below) is a black-box observation of a release binary, not of its code.
+> The chain facts: the Bitcoin Atom chain (ticker `BCA`, `chain_variant`
+> `"BTC"`) serves 80-byte headers up to height 505887 and 84-byte headers from
+> height 505888, the four extra bytes being a flags word appended after a
+> header that is otherwise the standard layout (observed over the whole chain,
+> heights 0 to 1032133 on 2026-11-02: every served chunk was exactly 80 or
+> exactly 84 bytes per header, none mixed, and the time field sat at bytes
+> 68–72 of every header), and the three Electrum servers of the coin's entry
+> serve an eleven-header window as 924 bytes. The entry (`BCA` and `BCA-segwit`)
+> is the one of the coins repository pull request "list Bitcoin Atom (BCA)"
+> (head `b7063cc9`, 2026-11-02), not yet in the registry snapshot `515955ff`;
+> the lab used a verbatim copy. Both entries are protocol `UTXO` with
+> `chain_variant` `"BTC"`, and neither sets `spv_conf`, `enable_spv_proof`,
+> `header_layout` or `mtp_block_count`, so SPV is off and the window is eleven.
+> This subsection applies to the coin once the entry lands.
+> The finding that prompted the rule:
+> without it the median-time-past query of such a coin fails on every
+> post-fork height, so every HTLC spend and refund of the coin fails to build
+> (§37.6 note), while activation, orders, negotiation and payments work.
+
+R37.5.10 **The rule in one sentence.** When the header list of the
+median-time-past window (R37.6.2) is needed only for the **timestamps** of
+its headers, and the reads of R37.5.1–R37.5.9e have not produced them, the
+reader shall obtain each header's time field at byte 68 of that header's own
+bytes — from the list split at an even stride, or from each header fetched
+individually — and accept the `n` times only if they pass the range check of
+R37.5.10d. This is **the general rule for a fixed-length trailer of any size**
+appended to the standard 80-byte header, and for any other header whose first 80
+bytes are the standard layout. It is not a list of known header sizes, it adds
+no `chain_variant` value, no `header_layout` value and no coin-file key, and it
+is not governed by a switch: the 84-byte Bitcoin Atom list is read by it with
+no entry for that chain anywhere. The earlier steps exist for what a time-only
+read cannot give — a layout whose time sits elsewhere or is read from a
+version-inferred structure (Equihash, KawPoW, ProgPoW, Qtum), the exact bytes
+and hash that stored headers need (R37.5.9c) — not as a registry of sizes.
+
+R37.5.10a **The cascade.** The median-time-past list read is a cascade of four
+steps, in this order, and stops at the first that yields `n` times:
+
+1. **The layout-aware read, unchanged:** the standard read of R37.5.1–R37.5.6
+   (with its `count × 80` re-read) and, for a coin with no `header_layout`
+   key whose family is in the set of `header_layout_fallback_families`, the
+   structural fallback of R37.5.9e (Riecoin, then the mixed layout, with its
+   ambiguity rule). Every layout that is chosen from the header's version
+   value (Equihash version 4, AuxPoW bit 8, KawPoW `0x30000000`, ProgPoW, Qtum)
+   stays inside this step and is never read by the later ones when it fits.
+2. **The even split:** applies only if step 1 failed with a plain rejection (not
+   the ambiguity rejection of R37.5.9e), the served count `n` is **odd**, the
+   served byte count `L` is exactly divisible by `n`, and the stride `s = L / n`
+   satisfies `80 ≤ s ≤ 4096` (a sanity ceiling in the manner of R37.5.6a;
+   the largest fixed-size family of §37.5.2 is 180 bytes). The time of header
+   `i` is the little-endian unsigned 32-bit integer at bytes `i·s + 68` …
+   `i·s + 71`.
+3. **The individual read:** applies if step 1 failed and step 2 did not apply
+   (an even `n`, a byte count not divisible by `n`, a stride outside 80 to 4096, or
+   the ambiguity rejection of step 1). The reader fetches the `n` headers
+   individually (`blockchain.block.header`, one request per height, issued
+   together) and takes each header's time as follows: the lone-header read of
+   R37.5.1–R37.5.9e (R37.5.9e fallback included) if it fits, and otherwise,
+   when the served header is at least 80 bytes, the time at byte 68 of its own
+   bytes. A header that cannot be fetched or is shorter than 80 bytes fails the
+   step.
+4. **The range check** of R37.5.10d on the times of step 2 or step 3.
+
+The result of a step 2 or step 3 read is a list of times only. It is never
+stored, hashed or linked, and the sync loop, the SPV proof paths, the header
+stores and the block-timestamp query keep the exact reads of R37.5.1–R37.5.9e
+unchanged.
+
+R37.5.10b **Why the count must be odd for the split.** A list whose headers
+differ in size — for the Bitcoin Atom chain a window that straddles height
+505888, `a` headers of 80 bytes and `b` of 84 bytes, `80n + 4b` bytes in all —
+divides by `n` only when `n` divides `4b`. For an **odd** `n` and `0 < b < n`
+that never happens, so divisibility alone sends every such list to step 3,
+which reads each header at its own length, with certainty. The default window
+of `mtp_block_count` is eleven. For an **even** `n` some mixes divide (`n` = 4
+for every `b`, strides 81 to 83; `n` = 2, 6 and 10 at stride 82), and nothing
+in the bytes tells such a list from a uniform one, so an even `n` skips step 2
+and is read individually. The same argument covers the 80/120-byte mixed list
+of the Meowcoin chain (`80n + 40k` bytes, divisible when `n` divides `40k`, e.g. `n` = 5):
+step 1 reads it by the mixed layout when the fallback is on, and step 3 reads
+it when not; step 2 is never offered a mixed list of an odd `n` that step 1
+could not read, except by the coincidence the range check of R37.5.10d is there
+for.
+
+R37.5.10c **Individual reads and the fork.** Because step 3 reads each header
+from its own served bytes, a window that straddles a change of header size
+(the Bitcoin Atom fork at height 505888, headers of 80 and 84 bytes) is read
+correctly, not rejected. Step 3 costs `n` requests instead of one and runs only
+when step 2 does not apply. A failure of any of its requests is a transient
+backend error of the median-time-past query (the next query asks again); it is
+never a partial median.
+
+R37.5.10d **The range check.** The `n` times of step 2 or step 3 are accepted only
+if **every** time is at least 1230768000 (2009-01-01 00:00:00 UTC, before any
+chain derived from Bitcoin's code existed) and at most the node's wall-clock
+time plus 86400 seconds. The check has one job: to reject a read whose bytes at
+68 are not a time (a zero field, a hash, another field of a layout that is not
+standard in its first 80 bytes, such as the Equihash family, whose time sits at
+byte 100). It is a plausibility check and not a proof: a 32-bit value that is
+not a time passes with probability about 0.13, so all `n` pass with probability
+about 0.13 to the power `n` (about 2·10⁻¹⁰ for eleven), a field of zeros fails
+at once, and for `n` = 1 the check is the only protection. No condition compares
+neighbouring times: consensus bounds a header's time from below by the median of
+its predecessors and not by the header before it, so such a condition would only
+add a way to reject a valid list. The clock dependency is accepted: a node whose
+clock is off by more than a day cannot run swaps safely anyway (lock times).
+A failure is a transient backend/format error of the median-time-past query, of
+the same class as a rejection under R37.5.6. It names the coin, the served byte
+count and the served count, and **which check failed**: step 3 could not obtain
+a header, a header shorter than 80 bytes, a time below 1230768000, or a time
+above the clock plus a day; for the last two the offending time and the node's
+clock.
+
+R37.5.10e **Logging.** A median read by step 2 or step 3 is logged once per
+coin per activation at `info`, naming the coin, the step and (for step 2) the
+stride. The line states that the headers were read by their size, not by a layout
+of the coin file. Later reads of the same coin in the same activation are not
+logged again, and not at a higher level.
+
+R37.5.10f **What it does not change.**
+
+- Riecoin and KawPoW. The time field sits at byte 68 in the standard (80),
+  Riecoin (112) and KawPoW (120) layouts; in the Riecoin layout it is 64 bits
+  wide, so the 32-bit read at byte 68 of step 2 or step 3 returns its low half,
+  which is the time until 2106 (the Riecoin 64-bit range check of R37.5.9c runs
+  only in step 1). The Riecoin and mixed steps of R37.5.9e stay inside step 1
+  and are unchanged, with their ambiguity rule and log line. The switch
+  `header_layout_fallback_families` governs only that fallback; with it set to
+  `[]` a Riecoin or Meowcoin list that step 1 can no longer read is read by step 2
+  or step 3 and is no longer rejected, which is a deliberate change of what `[]`
+  does for the median-time-past list.
+- The `header_layout` key (R37.5.9) is still the deterministic override for
+  full-header consumers. A coin that carries it is read by step 1 under its
+  layout, and a list that layout rejects goes on to steps 2 to 4 for the median.
+- Header storage, SPV proofs and hash validation for a coin whose header
+  carries a trailer are **not** made to work by this rule: they need the chain's
+  exact bytes and identity hash (R37.5.7, §37.9 D2). The Bitcoin Atom flags word
+  is not part of the block hash preimage for work blocks; proof-of-stake blocks
+  add a field to it that hash validation would need.
+- Later items, not part of this rule: the Electrum protocol 1.6 list form of
+  `blockchain.block.headers` (explicit header boundaries; a guard that the
+  number of strings equals `n`), and moving the Riecoin and Meowcoin registry
+  entries onto an explicit `header_layout` in the coins repository.
+
+R37.5.10g **Scope: a Reloaded improvement with no peer-observable change.**
+Like R37.5.9d, this rule restores a path that errors without it (the HTLC spend
+and refund of a coin whose headers carry a trailer, on an Electrum connection)
+and changes nothing a counterparty sees: the lock-time of the spend is formed
+from the correct median instead of the spend being aborted, and no RPC shape, wire
+message, signed preimage or persisted schema changes. By the second arm of the
+default-side rule of `docs/COMPAT_SWITCHES.md` the Reloaded behavior is the
+default; no switch controls the new steps.
+
+> **Compatibility:** *Black-box observation (SwapLab, 2026-11-02, the
+> reference 3.0.0-beta release binary, which is not read, against a stub
+> Electrum server whose header lists were 84-byte, 88-byte, mixed-size and
+> non-divisible, and against the three Electrum servers of the `BCA` entry
+> above):* the reference returned a median equal to the median of reading
+> the first `count × 80` bytes at an 80-byte stride, and failed only when
+> fewer than `count × 80` bytes arrived. For `BCA` itself, `get_current_mtp`
+> returned a median equal to reading the eleven headers at an 80-byte stride,
+> which was wrong against the chain's true median (42 minutes early at the
+> tip observed); with `chain_variant` removed from the entry it failed with the
+> same unexpected-end error as Reloaded does without this subsection. So for a
+> coin whose headers carry a trailer the reference's median-time-past is a
+> wrong value, not an error, and **no switch value reproduces it**: Reloaded
+> reads the list by step 2 or step 3, or rejects it by R37.5.10d. This chapter
+> makes no statement about the reference's code. The behavior is listed on the
+> existing switch's row in `docs/GLEEC_COMPATIBILITY.md` and in
+> `RELOADED_VS_GLEEC.md`.
 
 ## 37.6 Use in swap confirmation & current MTP
 
@@ -1812,6 +1996,50 @@ reported rather than an unbounded walk-back.
     pinned `RIC` list is rejected (family not in the set); with
     `["BTC", "PPC"]` it parses by fallback. Under `"RVN"` the fallback is
     never reached under the default (R37.5.9e).
+  - **Even split (R37.5.10a step 2), no key, default switch.** A coin with
+    `"chain_variant": "BTC"` and no `header_layout` key (the Bitcoin Atom shape)
+    is served an eleven-header list of 924 bytes, each header the standard 80
+    bytes followed by a 4-byte flags word: the median-time-past is the median of
+    the eleven time fields at byte 68 of each 84-byte stride, and an `info` line
+    names the coin, the step and the stride once per activation. Fixtures are
+    built from synthetic headers with distinct, plausible times in scrambled
+    order, so the median differs from the first, last, minimum and maximum time;
+    a lab acceptance run additionally compares `get_current_mtp` of the live coin
+    with the median computed independently from the same eleven served headers.
+  - **The split itself**, tested directly on lists of 11 headers at strides 80,
+    84, 112 and 120: each yields the median of the times at byte 68. Through the
+    full cascade the 80, 112 and 120-byte lists are read by step 1 and steps 2 to 4
+    are **not** reached (no step line); only the 84-byte list reaches step 2. A
+    stride of 79 or less and of 4097 or more sends the list to step 3.
+  - **Individual read (step 3).** Against a stub server: (a) a window of 11
+    headers made of 3 × 84 and 8 × 80 bytes (892 bytes, not divisible by 11),
+    straddling the size change, is read by eleven `blockchain.block.header`
+    requests and yields the true median (each header at its own length); (b) a
+    sweep over every odd count `n` from 1 to 25 (11 named) with every `b` from 1
+    to `n − 1` 84-byte headers among 80-byte ones goes to step 3, never to step 2
+    (divisibility), and yields the true median; (c) every even count from 2 to 24
+    with a uniform 84-byte list is read individually (step 2 skipped), as is `n` =
+    4 with one 84-byte and three 80-byte headers (324 bytes, stride 81) — the
+    case where a split would read the wrong bytes; (d) the ambiguity rejection of
+    R37.5.9e (the five-header 560-byte list) goes to step 3 and is not split; (e)
+    a request that fails or a header shorter than 80 bytes fails the step with a
+    typed transient error and no median.
+  - **Range check (R37.5.10d)**, on the function with an injectable clock: lists
+    at strides 100 and 1487 whose bytes at 68 are zero, and the same with a
+    32-byte hash there, are rejected; a list of times all equal to 1230768000 is
+    accepted and one time of 1230767999 rejects it; times all equal to the clock
+    plus 86400 are accepted and one of the clock plus 86401 rejects it, the error
+    naming the check, the offending time and the clock; a time more than a day
+    below its neighbour with otherwise plausible times is accepted (no neighbour
+    condition).
+  - **Switch and key.** With `header_layout_fallback_families` set to `[]`, a
+    Riecoin eleven-header list (11 × 112) and a Meowcoin interleaved window are
+    read by step 2 and step 3 respectively and yield the true median (the changed
+    meaning of `[]` for the median list, R37.5.10f); the bullets above that name
+    the fallback of R37.5.9e still hold for full-header reads. With `header_layout`
+    present, a list its layout rejects goes on to steps 2 to 4. A list read by
+    step 2 or step 3 is never stored or hashed: the header stores and the lone-header
+    reads of such a coin behave as before this subsection.
 - `get_current_mtp` returns a plausible median-time-past for an SPV-enabled coin
   (R37.6.2).
 - A swap-relevant payment on an Electrum-connected coin with `enable_spv_proof`

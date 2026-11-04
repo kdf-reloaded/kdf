@@ -1,5 +1,6 @@
 use crate::{adex_ping::AdexPing,
             peers_exchange::{strip_p2p_suffix, PeerAddresses, PeersExchange},
+            redial_guard::{RedialGuardConfig, RedialGuards},
             request_response::{build_request_response_behaviour, LocalFailure, PeerRequest, PeerResponse,
                                RequestResponseBehaviour, RequestResponseBehaviourEvent, RequestResponseSender},
             runtime::{SwarmRuntimeOps, SWARM_RUNTIME},
@@ -19,7 +20,8 @@ use libp2p::{core::{ConnectedPoint, Multiaddr, Transport},
              multiaddr::Protocol,
              noise,
              request_response::ResponseChannel,
-             swarm::{ConnectionError, DialError, ListenError, NetworkBehaviour, Swarm, SwarmEvent},
+             swarm::{dial_opts::DialOpts, ConnectionError, DialError, ListenError, NetworkBehaviour, Swarm,
+                     SwarmEvent},
              PeerId};
 use log::{debug, error, info, warn, Level};
 use rand::seq::SliceRandom;
@@ -60,7 +62,7 @@ fn gossipsub_message_id(data: &[u8], sequence_number: Option<u64>) -> MessageId 
 }
 
 pub const PEERS_TOPIC: &str = "PEERS";
-const CONNECTED_RELAYS_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const CONNECTED_RELAYS_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(600);
 const ANNOUNCE_INITIAL_DELAY: Duration = Duration::from_secs(60);
 const CHANNEL_BUF_SIZE: usize = 1024 * 8;
@@ -123,6 +125,17 @@ pub async fn get_relay_mesh(mut cmd_tx: AdexCmdTx) -> Vec<String> {
     let cmd = AdexBehaviourCmd::GetRelayMesh { result_tx };
     cmd_tx.send(cmd).await.expect("Rx should be present");
     rx.await.expect("Tx should be present")
+}
+
+/// The relays this node is connected to, as peer ID strings. An empty list when the command cannot be sent
+/// or the reply channel is dropped: no relay is known then, which is never an error for the caller.
+pub async fn get_connected_relays(mut cmd_tx: AdexCmdTx) -> Vec<String> {
+    let (result_tx, rx) = oneshot::channel();
+    let cmd = AdexBehaviourCmd::GetConnectedRelays { result_tx };
+    if cmd_tx.send(cmd).await.is_err() {
+        return Vec::new();
+    }
+    rx.await.unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -193,6 +206,10 @@ pub enum AdexBehaviourCmd {
         result_tx: oneshot::Sender<HashMap<String, Vec<String>>>,
     },
     GetRelayMesh {
+        result_tx: oneshot::Sender<Vec<String>>,
+    },
+    /// The relays this node is connected to (not only those in the mesh).
+    GetConnectedRelays {
         result_tx: oneshot::Sender<Vec<String>>,
     },
     /// Add a reserved peer to the peer exchange.
@@ -625,6 +642,18 @@ impl AtomicDexBehaviour {
                     error!("Result rx is dropped");
                 }
             },
+            AdexBehaviourCmd::GetConnectedRelays { result_tx } => {
+                let result = swarm
+                    .behaviour()
+                    .gossipsub
+                    .connected_relays()
+                    .into_iter()
+                    .map(|peer| peer.to_string())
+                    .collect();
+                if result_tx.send(result).is_err() {
+                    error!("Result rx is dropped");
+                }
+            },
             AdexBehaviourCmd::AddReservedPeer { peer, addresses } => {
                 swarm
                     .behaviour_mut()
@@ -748,7 +777,20 @@ fn handle_behaviour_event(
 /// Custom types mapping the complex associated types of AtomicDexBehaviour to the ExpandedSwarm
 type AtomicDexSwarm = Swarm<AtomicDexBehaviour>;
 
-fn maintain_connection_to_relays(swarm: &mut AtomicDexSwarm, bootstrap_addresses: &[Multiaddr]) {
+/// How many known peers maintenance considers when it looks for dialable ones. The peers exchange keeps at most about
+/// a hundred known peers, so this takes all of them.
+const MAX_PEER_CANDIDATES: usize = 1024;
+
+/// One tick of the relay-connection maintenance (CRD ch.28 RQ1a item 4). The candidates are chosen among the
+/// addresses that the redial guards of R27a allow: an address dialed less than the guard interval ago (item 1) and a
+/// bootstrap address whose peer is connected (item 2) are filtered out before the candidates are chosen, so that
+/// they do not use up a dial slot.
+fn maintain_connection_to_relays(
+    swarm: &mut AtomicDexSwarm,
+    bootstrap_addresses: &[Multiaddr],
+    guards: &mut RedialGuards,
+    now: Instant,
+) {
     let behaviour = swarm.behaviour();
     let connected_relays = behaviour.gossipsub.connected_relays();
     let mesh_n_low = behaviour.gossipsub.get_config().mesh_n_low();
@@ -763,23 +805,42 @@ fn maintain_connection_to_relays(swarm: &mut AtomicDexSwarm, bootstrap_addresses
         let to_connect_num = mesh_n - connected_relays.len();
         // The node never dials itself (CRD ch.28 R8c item 5): peers exchange does not hold its own entry, and the
         // candidate filter excludes it as well.
-        let to_connect = swarm
+        let known_peers = swarm
             .behaviour_mut()
             .peers_exchange
-            .get_random_peers(to_connect_num, |peer| {
+            .get_random_peers(MAX_PEER_CANDIDATES, |peer| {
                 *peer != local_peer_id && !connected_relays.contains(peer)
             });
+        // A peer with no dialable address is not a candidate (R27a item 1).
+        let dialable_peers: Vec<(PeerId, Vec<Multiaddr>)> = known_peers
+            .into_iter()
+            .filter_map(|(peer, addresses)| {
+                let dialable = guards.dialable_peer_addresses(addresses, now, |addr| {
+                    swarm.behaviour().gossipsub.is_connected_to_addr(addr)
+                });
+                (!dialable.is_empty()).then_some((peer, dialable))
+            })
+            .collect();
+        let to_connect: Vec<(PeerId, Vec<Multiaddr>)> = dialable_peers
+            .choose_multiple(&mut rng, to_connect_num)
+            .cloned()
+            .collect();
 
         // choose some random bootstrap addresses to connect if peers exchange returned not enough peers
         if to_connect.len() < to_connect_num {
             let connect_bootstrap_num = to_connect_num - to_connect.len();
-            let available_bootstrap = bootstrap_addresses
-                .iter()
-                .filter(|addr| !swarm.behaviour().gossipsub.is_connected_to_addr(addr))
-                .collect::<Vec<_>>();
+            let available_bootstrap = guards.dialable_bootstrap(
+                bootstrap_addresses,
+                now,
+                |addr| swarm.behaviour().gossipsub.is_connected_to_addr(addr),
+                |peer| swarm.is_connected(peer),
+            );
 
             if to_connect.is_empty() && available_bootstrap.is_empty() {
-                warn!(
+                // CRD ch.28 R27a item 3: at most once per guard interval while the number of relays is unchanged.
+                let level = guards.short_of_relays.level(connected_relays.len(), now);
+                log::log!(
+                    level,
                     "P2P relays below low watermark: connected {}, need {}; no known peers or seednodes available to dial",
                     connected_relays.len(),
                     mesh_n_low
@@ -798,15 +859,16 @@ fn maintain_connection_to_relays(swarm: &mut AtomicDexSwarm, bootstrap_addresses
                 .map(|addr| (*addr).clone())
                 .collect();
             for addr in selected_bootstrap {
-                dial_bootstrap_addr(swarm, addr, "relay maintenance");
+                dial_bootstrap_addr(swarm, guards, addr, "relay maintenance", now);
             }
         }
         for (peer, addresses) in to_connect {
             for addr in addresses {
-                if swarm.behaviour().gossipsub.is_connected_to_addr(&addr) {
+                // A bootstrap dial of this tick may have dialed the address already.
+                if swarm.behaviour().gossipsub.is_connected_to_addr(&addr) || guards.dialed.is_guarded(&addr, now) {
                     continue;
                 }
-                dial_peer_addr(swarm, peer, addr, "peer exchange relay maintenance");
+                dial_peer_addr(swarm, guards, peer, addr, "peer exchange relay maintenance", now);
             }
         }
     }
@@ -883,14 +945,39 @@ fn listen_on_addr(swarm: &mut AtomicDexSwarm, addr: Multiaddr) -> Result<(), Ade
     }
 }
 
-fn dial_bootstrap_addr(swarm: &mut AtomicDexSwarm, addr: Multiaddr, reason: &str) {
-    match Swarm::dial(swarm, addr.clone()) {
+/// Dials a configured bootstrap address. The dial is recorded for the dial guard (CRD ch.28 R27a item 1) whether or
+/// not it succeeds, and its connection ID is remembered so that the peer it reaches is recorded as the peer of the
+/// address (item 2).
+fn dial_bootstrap_addr(
+    swarm: &mut AtomicDexSwarm,
+    guards: &mut RedialGuards,
+    addr: Multiaddr,
+    reason: &str,
+    now: Instant,
+) {
+    guards.dialed.record(addr.clone(), now);
+    let opts = DialOpts::unknown_peer_id().address(addr.clone()).build();
+    let connection_id = opts.connection_id();
+    guards.seeds.dial_started(addr.clone(), connection_id);
+    match Swarm::dial(swarm, opts) {
         Ok(_) => info!("Dialed {} ({})", addr, reason),
-        Err(e) => error!("P2P bootstrap dial scheduling failed for {} ({}): {}", addr, reason, e),
+        Err(e) => {
+            guards.seeds.dial_not_scheduled(&addr, connection_id);
+            error!("P2P bootstrap dial scheduling failed for {} ({}): {}", addr, reason, e)
+        },
     }
 }
 
-fn dial_peer_addr(swarm: &mut AtomicDexSwarm, peer: PeerId, addr: Multiaddr, reason: &str) {
+/// Dials an address of a known peer. The dial is recorded for the dial guard (CRD ch.28 R27a item 1).
+fn dial_peer_addr(
+    swarm: &mut AtomicDexSwarm,
+    guards: &mut RedialGuards,
+    peer: PeerId,
+    addr: Multiaddr,
+    reason: &str,
+    now: Instant,
+) {
+    guards.dialed.record(addr.clone(), now);
     match Swarm::dial(swarm, addr.clone()) {
         Ok(_) => info!("Dialed peer {} at {} ({})", peer, addr, reason),
         Err(e) => error!(
@@ -1227,9 +1314,30 @@ pub async fn spawn_gossipsub(
     node_type: NodeType,
     on_poll: impl Fn(&AtomicDexSwarm) + Send + 'static,
 ) -> Result<(Sender<AdexBehaviourCmd>, AdexEventRx, PeerId, AbortHandle), AdexBehaviourError> {
+    spawn_gossipsub_with_guards(
+        force_key,
+        spawn_fn,
+        to_dial,
+        node_type,
+        on_poll,
+        RedialGuardConfig::default(),
+    )
+    .await
+}
+
+/// [`spawn_gossipsub`] with the timings of the redial guards (CRD ch.28 R27a) and of the maintenance tick set by the
+/// caller. A test shortens them; production uses the default.
+async fn spawn_gossipsub_with_guards(
+    force_key: Option<[u8; 32]>,
+    spawn_fn: fn(Box<dyn Future<Output = ()> + Send + Unpin + 'static>) -> (),
+    to_dial: Vec<RelayAddress>,
+    node_type: NodeType,
+    on_poll: impl Fn(&AtomicDexSwarm) + Send + 'static,
+    guard_config: RedialGuardConfig,
+) -> Result<(Sender<AdexBehaviourCmd>, AdexEventRx, PeerId, AbortHandle), AdexBehaviourError> {
     let (result_tx, result_rx) = futures::channel::oneshot::channel();
     let fut = async move {
-        let result = start_gossipsub(force_key, spawn_fn, to_dial, node_type, on_poll);
+        let result = start_gossipsub(force_key, spawn_fn, to_dial, node_type, on_poll, guard_config);
         result_tx.send(result).unwrap();
     };
 
@@ -1254,6 +1362,7 @@ fn start_gossipsub(
     to_dial: Vec<RelayAddress>,
     node_type: NodeType,
     on_poll: impl Fn(&AtomicDexSwarm) + Send + 'static,
+    guard_config: RedialGuardConfig,
 ) -> Result<(Sender<AdexBehaviourCmd>, AdexEventRx, PeerId, AbortHandle), AdexBehaviourError> {
     let i_am_relay = node_type.is_relay();
     let mut rng = rand::thread_rng();
@@ -1359,14 +1468,14 @@ fn start_gossipsub(
         _ => (),
     }
 
+    // The start-up dials count for the dial guard (CRD ch.28 R27a item 1).
+    let mut guards = RedialGuards::new(guard_config);
+    let startup = Instant::now();
     for relay in bootstrap.choose_multiple(&mut rng, mesh_n) {
-        dial_bootstrap_addr(&mut swarm, relay.clone(), "initial bootstrap");
+        dial_bootstrap_addr(&mut swarm, &mut guards, relay.clone(), "initial bootstrap", startup);
     }
 
-    let mut check_connected_relays_interval = Interval::new_at(
-        Instant::now() + CONNECTED_RELAYS_CHECK_INTERVAL,
-        CONNECTED_RELAYS_CHECK_INTERVAL,
-    );
+    let mut check_connected_relays_interval = Interval::new_at(Instant::now() + guard_config.tick, guard_config.tick);
     let mut announce_interval = Interval::new_at(Instant::now() + ANNOUNCE_INITIAL_DELAY, ANNOUNCE_INTERVAL);
     let mut listening = false;
     let mut failure_logs = ConnectionFailureLogs::default();
@@ -1383,6 +1492,20 @@ fn start_gossipsub(
             match swarm.poll_next_unpin(cx) {
                 Poll::Ready(Some(event)) => {
                     log_swarm_event(&event, &mut failure_logs);
+                    // The peer that an outbound connection reaches belongs to the bootstrap address that was dialed
+                    // (CRD ch.28 R27a item 2). The connection is matched by its ID, not by its address.
+                    match &event {
+                        SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            connection_id,
+                            endpoint,
+                            ..
+                        } if endpoint.is_dialer() => guards.seeds.connection_established(*connection_id, *peer_id),
+                        SwarmEvent::OutgoingConnectionError { connection_id, .. } => {
+                            guards.seeds.dial_failed(*connection_id)
+                        },
+                        _ => {},
+                    }
                     match event {
                         SwarmEvent::Behaviour(behaviour_event) => {
                             handle_behaviour_event(&mut swarm, &mut event_tx, behaviour_event)
@@ -1430,7 +1553,7 @@ fn start_gossipsub(
         }
 
         while let Poll::Ready(Some(())) = check_connected_relays_interval.poll_next_unpin(cx) {
-            maintain_connection_to_relays(&mut swarm, &bootstrap);
+            maintain_connection_to_relays(&mut swarm, &bootstrap, &mut guards, Instant::now());
         }
 
         if !listening && i_am_relay {
