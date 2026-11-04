@@ -57,6 +57,23 @@ The address form that goes with the new pool: parsing, validation, display, and 
 withdraw destination and as the wallet's own receiving address. To be specified from public
 Pirate Chain documentation.
 
+### 4. Counterparty version-6 capability (decided 2026-11-04)
+
+An ARRR swap must never start with a node that cannot build version-6 transactions. GLEEC KDF
+cannot build for the post-Ironwood chain at all (CRD ch.39), and users cannot tell such a node
+apart from a Reloaded one. The maintainer decided:
+
+- **Decision BM:** ARRR's protocol information carries a capability word saying the node builds
+  version-6 transactions. Reloaded requires the word from the counterparty, with a switch that
+  is on by default.
+- **Decision BN:** Reloaded 0.3.0-beta.1 nodes, which build version 6 but send no word, are
+  declined for ARRR swaps too.
+- **Decision BO:** the order-book answer shows no capability flag.
+
+| Part | What | CRD | State |
+|---|---|---|---|
+| Capability word | A generic word after a coin's first value in its protocol information, sent only by coins that opt in. The reader fails closed. The order-match layer carries the bytes unchanged and logs declines. | ch.59 §59.4A (R59.4A.1–R59.4A.7, T13) | CRD drafted; gate-pending |
+
 ## Open questions
 
 - Which reference behavior, if any, applies? The reference builds no version-6 transactions.
@@ -65,6 +82,9 @@ Pirate Chain documentation.
   outputs, or does scanning that pool need a backend change?
 - Can native mode and light mode share one wallet database for the same seed, or must they stay
   separate?
+- Is the capability word of section 4 temporary, as the maintainer expects (Decision BO)? If
+  capabilities keep being needed, a far more universal flag, for every coin and visible to users,
+  needs its own analysis (CRD ch.59 D5).
 
 ## Not in this plan
 
