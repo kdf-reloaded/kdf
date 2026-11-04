@@ -171,8 +171,9 @@ jobs:
             cmd: cargo test -p coins --lib -- eth::eth_tests::test_addr_from_pubkey_str eth::eth_tests::test_gas_station_data eth::eth_tests::test_u256 eth::eth_tests::test_wei_from eth::eth_tests::test_wei_to
           - name: spv-validation
             cmd: cargo test -p kdf_spv_validation
+          # Also runs the capability-word tests of CRD ch.59 §59.4A T14 (coins side).
           - name: rpc-response
-            cmd: cargo test -p coins --lib rpc_response_tests
+            cmd: cargo test -p coins --lib -- rpc_response_tests coin_protocol_capability::
           # The shielded (ARRR/ZHTLC) store, scan and tree-state tests. Previously
           # unreachable from any matrix cell: the two `coins` cells above filter
           # to `eth::eth_tests::*` and `rpc_response_tests`, so nothing ran the
