@@ -1153,7 +1153,12 @@ queue per connection of the RPCs waiting to be written to that peer.
    dropped since the last line. Closing a peer under item 5 logs one
    warning with the peer ID, the criterion that applied (the time at the
    cap, or the share dropped in the last window), and the total dropped.
-   No message content is logged.
+   *(Added 2026-11-02, batch 0.4.0 item P3a.)* When a 60-second window
+   of item 5 ends with at least 10 % of the data RPCs queued in it
+   dropped, the node logs one DEBUG line with the peer ID, the RPCs
+   queued and dropped in that window, the share, and how many
+   consecutive counting windows the series now holds. No message content
+   is logged.
 7. **Settings.** The two limits, the 60-second period, the 3 windows
    and 25 % share of item 5, and the 30-second interval and 2 remaining
    relays of its guard are fixed values of the vendored gossipsub crate. Its configuration builder
@@ -1168,12 +1173,16 @@ queue per connection of the RPCs waiting to be written to that peer.
 
    Each change is reported once. A closed connection counts as cleared.
    The handler also makes available, for metrics, its data-queue length
-   and its count of dropped data RPCs. The application uses the signal
-   for the maker publication budget of
-   [Chapter 32](32-orderbook-p2p-and-trie.md) §32.9B R-MP2 and the counts
-   for R-MP5. R-MP2 item 2 also reads whether the data queue is empty,
-   for its queue signal *(added 2026-10-28)*. The thresholds are fixed values of the vendored crate,
-   which its configuration builder MAY override for tests.
+   and its count of dropped data RPCs, and *(added 2026-11-02, item
+   P3a)* the dropped share of its last completed window of item 5 and
+   the length of its current series. The application uses the signal for
+   the maker publication budget of [Chapter
+   32](32-orderbook-p2p-and-trie.md) §32.9B R-MP2 and the counts for
+   R-MP5. R-MP2 item 2 also reads how long the oldest queued data RPC
+   has waited, for its queue signal *(added 2026-10-28; amended
+   2026-11-02, item P3b)*. The thresholds are fixed values of the
+   vendored crate, which its configuration builder MAY override for
+   tests.
 9. **Priority lane** *(amendment, maintainer decision AO option C,
    2026-10-28).* A published or forwarded message the application marks
    as *priority* is queued in a separate first-in-first-out lane of the
@@ -1437,6 +1446,14 @@ these differences.)*
     guard condition holding, is closed on every connection.
   - A stuck peer that is not a relay is closed at once.
   - While a relay is held back, its data queue stays within its cap.
+- **T-RQ1.13** *Window shares (item 6 and R-MP5; added 2026-11-02,
+  item P3a).* The windows are shortened by test configuration.
+  - A window that drops 10 % or more of its queued data RPCs logs one
+    DEBUG line with the queued and dropped counts, the share and the
+    series length. A window below 10 % logs none.
+  - The share and series metrics of chapter 32 R-MP5 show the highest
+    share of a recent window and the longest current series, and fall
+    back to 0 two windows after the drops stop.
 
 ## 28.10 Tests (test invariants)
 
@@ -2060,6 +2077,12 @@ hardening carried by the pinned fork).
       2026-10-31.
   - The forbidden corpus was not consulted for this amendment, and it
     needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-11-02) -- §28.9B RQ1 items 6 and 8 and
+  T-RQ1.13.* Reloaded-original, batch 0.4.0 items P3a and P3b, together
+  with chapter 32 R-MP2 item 2 and R-MP5. *Inputs:* this repository's
+  vendored send queue and its metrics, and field metrics of a Reloaded
+  seed on 2026-10-31. The forbidden corpus was not consulted for this
+  amendment, and it needs no Dirty Gate pass of its own.
 - *Scoped addition (2026-11-04) -- the reference-position note under R19.*
   **KDF Dirty Gate: PASS on 2026-11-04, measure 0.02.** *Inputs:* the forbidden corpus at the rows
   `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,

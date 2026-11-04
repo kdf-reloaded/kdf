@@ -89,6 +89,19 @@ it and, where one exists, the CRD rule, for readers who want more.
   public, and `192.0.0.9` and `192.0.0.10` count as public. This applies to the addresses a node
   receives from peers, those it looks up, and the one it announces. Detail: PRs #203, #211; CRD
   ch.28 R24.
+- **A cancellation this node received now keeps the order out for an hour.** Before, 120 seconds
+  after a cancellation, an answer from a relay that had missed it could bring the cancelled order
+  back, and the node then passed it on. Now the order stays out of every later message and answer
+  for an hour. To restore the old behavior, set `cancel_final_window_secs` to `120` in `MM2.json`.
+  Memory stays bounded: cancellations older than two minutes are capped at 100,000, about 20 MB
+  (`cancel_final_max_entries`), and past the cap the oldest fall back to the 120-second behavior.
+  Nothing on the wire changes. Detail: PRs #223, #224; CRD ch.32 R-K1b.
+- **A maker no longer brings back an order it cancelled when the order's stored record could not be
+  deleted.** Before, such an order came back live at the next start and was announced again. Now it
+  is skipped and deleted when the order history records its removal, and a failed deletion is tried
+  three times. An order created with `save_in_history: false` leaves no history entry and is
+  restored as before. To restore the old behavior, set `maker_restore_skips_cancelled` to `false` in
+  `MM2.json`. Detail: PRs #223, #224; CRD ch.12 R7c.
 
 #### UTXO coins and Electrum
 
@@ -178,7 +191,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   keep showing after a lost cancellation; five work packages after the beta, the first two being the
   higher sync limits on relays and the request to one other relay above (PRs #205, #207, #208). What
   two later packages waited for is now recorded: how a cancelled order can come back on Komodo and
-  GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222).
+  GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222). A received
+  cancellation now stays final for an hour, and a maker no longer restores an order it cancelled
+  (PRs #223, #224).
 - [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — in progress: the 2-arena limit of 0.3.0-beta.1
   was measured in two 6.5-hour runs and on start-up, activation, eight swaps and query latency; no cost
   was resolved and the default stays (PR #225); executor sizing and an allocator comparison are left.
