@@ -574,6 +574,7 @@ fn build_trezor_coin(
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
         estimate_gas_mult: None,
+        taker_fee_quote_at_limit: true,
     }))
 }
 

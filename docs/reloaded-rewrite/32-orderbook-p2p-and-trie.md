@@ -44,7 +44,9 @@ This chapter binds, by behaviour and public/dictated interface:
   on (§32.9A);
 - the removal of a maker's stale orders at other nodes — what a
   keep-alive does not say, how an answer is applied, what expires, and
-  the maker's re-pricing flow (§32.9C).
+  the maker's re-pricing flow (§32.9C) — and, in follow-up, the paths by
+  which a cancelled order can reappear, the order-book answer under a
+  lagging trie worker and the maker's two ticks (§32.9C.1).
 
 > **Binding scope (R36).** Throughout this chapter, requirements
 > bind observable *behaviour*, the *public* cross-crate
@@ -172,7 +174,10 @@ on insert so that a `Cancel` message that races ahead of its
 matching `Create` cannot resurrect an order. The guard's TTL is
 bound by [§11.2](11-order-match-cancellation.md) and §32.9; this
 chapter binds only the guard's presence and the obligation to
-consult it on insert. *(Post-2022 component per §32.1.)* How a cancel
+consult it on insert. *(Reloaded, 2026-11-03, with R-K1b: the guard
+entry is keyed by identifier and publisher; a cancel from another
+publisher neither creates nor refreshes the entry for the order's
+publisher.)* *(Post-2022 component per §32.1.)* How a cancel
 that never arrives leaves a stale entry behind, and the paths that
 remove it, are bound in §32.9C R-GH1 and R-GH5.
 
@@ -936,12 +941,23 @@ outlives the longest parked request.
    (R-Q6); a bound at or above that timeout gains nothing, because the
    transport abandons the request first. The value `0` turns deferral off:
    every request is answered at once, as in the reference.
-4. **Limits.** At most 8 requests are parked per requesting peer and at most
-   256 in total, a request counting once whatever the number of pairs it
-   names; a request past either limit is answered at once. The per-peer
-   limit MUST stay below the number of concurrent inbound streams the
-   transport allows on one connection, because a parked request holds its
-   stream open.
+4. **Limits.** Two top-level `MM2.json` integers bound the parked requests:
+   `sync_answer_deferral_max_per_peer`, default `32`, per requesting peer,
+   and `sync_answer_deferral_max_total`, default `2048`, in total. A request
+   counts once whatever the number of pairs it names, and a request past
+   either limit is answered at once. An absent, non-integer or zero value
+   means the default. The per-peer limit MUST stay below the number of
+   inbound streams the transport negotiates concurrently on one connection
+   (128 with the pinned libp2p version), because a parked request holds its
+   stream open: a per-peer value above `64` is taken as `64`, which leaves at
+   least half of those streams to the peer's other requests. A total above
+   `8192` is taken as `8192`. The limits change neither the bound nor any
+   answer, only how many requests can wait.
+   *(Amended 2026-11-02, Decision BK item 4: the limits were 8 and 256 and
+   could not be configured. On 2026-10-31 a Reloaded seed on the public
+   network answered about 1,100 requests in one minute at once because they
+   were full, during a burst of synchronization requests, most likely
+   after makers restarted.)*
 5. Parking does not wait on the inbound networking path (R-T3b item 3). It is
    the one case in which the answer is not built on the task that received
    the request (R-Q5's last paragraph).
@@ -988,8 +1004,9 @@ after such a failure:
    default `1000` (1 s); an absent or non-integer value means the default, and
    `0` turns the second request off. The default leaves 4 s of the default
    bound for the second answer.
-4. The second request is the last: whatever its outcome, nothing more is sent
-   for that keep-alive. The own request's record of R-Q5b covers both requests,
+4. The second request is the last to that peer: whatever its outcome, nothing
+   more is sent to it for that keep-alive (R-Q5d may ask one other relay once).
+   The own request's record of R-Q5b covers both requests,
    so the requests parked behind it wait for the second answer, each still
    within its own bound. An answered second request counts as success, as an
    answered first request does (the boolean of R-F3).
@@ -1012,6 +1029,76 @@ after such a failure:
 > record of it and applies no limit, ban or penalty (R-Q6a). It costs at most
 > one extra request per failed request, and none toward a peer that timed out.
 
+**R-Q5d (Reloaded: one other relay is asked once when the forwarder's
+answer fails or leaves the pair diverged).** *Reloaded-original
+(2026-11-02, Decision BK, §32.10 D12 item 1); no forbidden-class input.* A
+requester asks only the forwarding peer (R-Q4) and applies its answer
+without checking the root the answer reaches (§32.9C R-GH4). A forwarder
+that fails, or that answers from a stale view, therefore leaves the
+requester failed or diverged until the maker's next keep-alive, and a chain
+of relays heals one hop per advertisement interval at best. Reloaded's
+requester MUST ask one other relay once:
+
+1. **Triggers.** For a keep-alive-driven `SyncPubkeyOrderbookState` request
+   to the forwarding peer F:
+   - (a) *failure:* the request ended without an answer — an error answer,
+     "no data", a transport or decode failure, or the 10 s timeout of R-Q6 —
+     and, where R-Q5c sent a second request, that one ended the same way.
+     The pairs asked about are every pair of the request;
+   - (b) *divergence:* an answer from F was applied (R-GH4 items 1 and 2),
+     the trie worker applied its mutation events within 5 s (R-T7), and the
+     root this node then holds for one or more pairs of the request differs
+     from the root the keep-alive advertised for it. The pairs asked about
+     are those pairs. If the worker has not applied the events within 5 s,
+     no request follows.
+2. **Target.** One peer, other than F, that this node is connected to and
+   knows as a relay at that moment, chosen at random. If there is none,
+   nothing is sent.
+3. **Content.** The shape of R-Q4: the pubkey and, for each pair asked
+   about, the root this node holds for it when the request is built (R-Q4a;
+   with `orderbook_sync_names_held_root` set to `false`, the root the
+   keep-alive advertised).
+4. **Application.** The answer is applied as any answer is (R-GH4 items 1
+   to 3); no root check gates it. Whatever its outcome, nothing more is
+   sent for that keep-alive. The pair is **never cleared** on a mismatch,
+   neither before nor after this request (R-GH6 item 4 is not adopted,
+   D12).
+5. **Once.** At most one such request follows one keep-alive, and it is
+   never sent to F. With R-Q5c, at most three requests follow one
+   keep-alive: two to F and one to another relay.
+6. **Timing.** The request does not delay the result of the keep-alive's
+   handling. The boolean of R-F3, and with it the forward of R-F3b, is the
+   one the requests to F produced. The request to the other relay is sent
+   on a task of its own. Under trigger (a) the own request's record of
+   R-Q5b lasts until that request ends the same way it would end for a
+   request to F, so the requests parked behind it wait for its answer, each
+   still within its own bound.
+7. **Switch.** The top-level `MM2.json` boolean `sync_request_alternate_relay`,
+   default `true`; only a JSON `false` turns the rule off, and then the
+   requester behaves as R-Q5c and R-Q6 describe. The switch is independent
+   of `sync_answer_deferral_ms` and `sync_request_retry_ms`.
+
+> **Compatibility:** for behaviour matching GLEEC KDF, set
+> `sync_request_alternate_relay` to `false` (together with
+> `sync_request_retry_ms` set to `0`).
+
+> **Reloaded divergence (2026-11-02).** The reference requester asks only
+> the forwarding peer and never checks the root an answer reaches (R-GH4,
+> R-Q6). On 2026-10-31 one Reloaded seed on the public network saw up to
+> 22 % of its synchronization requests time out for about two and a half
+> hours while another saw none, and during that time other nodes kept
+> showing cancelled orders of a maker that kept advertising. A
+> lab run of this project's own nodes showed a stale view passing from a
+> relay that had missed a cancel to the nodes that asked it. With this rule
+> a requester that meets a failing or stale forwarder asks one other relay
+> in the same round instead of waiting for the next keep-alive. The wire is
+> unchanged: the request has the shape of R-Q4, and a reference relay
+> answers it like any other, keeping no record of it and applying no limit,
+> ban or penalty (R-Q6a). It costs at most one extra request per keep-alive
+> whose request failed or left a pair diverged. A divergence can also come
+> from an order message that arrived while the answer was being applied;
+> the extra request is then redundant, not harmful.
+
 **R-Q6 (transport properties of the request, bound as facts the mesh
 relies on).** The request is a single one-shot request-response
 exchange with F: it times out after **10 seconds** with no answer; there
@@ -1026,8 +1113,10 @@ Reloaded today has the same four properties (parity); the hardening
 candidates that would change them are recorded under §32.10 D6 and
 are not bound here. As a responder, Reloaded answers a request for a pair
 it is still synchronizing later rather than at once (R-Q5b). As a requester,
-Reloaded asks once more after a quick failure (R-Q5c); a timed-out request is
-still not retried.
+Reloaded asks the same peer once more after a quick failure (R-Q5c), and one
+other relay once after a failure, timeout included, or after an answer that
+leaves a pair diverged (R-Q5d); a timed-out request is never sent to the same
+peer again.
 
 **T-Q4** *Request content and target (R-Q4).* A keep-alive for P with a
 single pair entry whose root differs from the held one, delivered as if
@@ -1076,10 +1165,13 @@ when the bound expires. A request for (P, Y) whose placeholder has no own
 request in flight, a request naming a pair the relay does not track, and a
 request for an unknown pubkey are each answered at once, as R-Q5 binds; a
 request for (P, X) and (P, Y) together is answered at once with the
-placeholder error. Past 8 parked requests from one peer, or 256 in all, a
-further request is answered at once. With `sync_answer_deferral_ms` set to
-`0`, every request is answered at once. After every path the parked table is
-empty.
+placeholder error. Past 32 parked requests from one peer, or 2,048 in all, a
+further request is answered at once; with the per-peer limit set to `2` and
+the total to `3`, the third request from one peer and the fourth in all are
+answered at once. A per-peer value of `100` is taken as `64` and a total of
+`10000` as `8192`; an absent, zero or non-integer value gives the default.
+With `sync_answer_deferral_ms` set to `0`, every request is answered at once.
+After every path the parked table is empty.
 
 **T-Q5c** *A quick failure of the own request is asked once more (R-Q5c).*
 A relay holds the all-zero placeholder for (P, X), has its own request for
@@ -1094,12 +1186,42 @@ for (P, X) arriving during the pause: no second request. No second request
 either when the pause is at least the bound, when the first request fails so
 late that the pause would end past the bound, when `sync_request_retry_ms` is
 `0`, or when `sync_answer_deferral_ms` is `0`. After every path the parked and
-in-flight tables are empty.
+in-flight tables are empty. These cases run with no other relay connected;
+T-Q5d covers the request to another relay.
+
+**T-Q5d** *One other relay is asked once (R-Q5d).* A node is connected to
+the relays F and G and receives through F a keep-alive of P naming (P, X)
+with root A, which differs from the root it holds.
+- F's request times out: after the timeout, exactly one request goes to G,
+  naming (P, X) with the held root; G's answer is applied and nothing more
+  is sent for that keep-alive. The same with F answering with an error,
+  where R-Q5c's second request to F fails as well: one request to G follows
+  the second failure, not the first.
+- F answers with a full set whose root, once applied, differs from A: one
+  request goes to G, naming only (P, X); the node's entries for (P, X) are
+  F's set until G's answer is applied, and are never cleared; G's answer is
+  applied even if the root it reaches differs from A too; nothing more is
+  sent.
+- F answers with a set that reaches A: no request goes to G.
+- A request naming (P, X) and (P, Y), where only Y's root differs from its
+  advertised root after F's answer, is followed by a request to G naming
+  only (P, Y).
+- With the worker held back for more than 5 s after F's answer: no request
+  to G.
+- With only F connected, or with `sync_request_alternate_relay` set to
+  `false`: no request beyond those of R-Q5c, as T-Q5c and T-Q6 describe.
+- The keep-alive's handling returns the boolean F's requests produced
+  before G's request ends.
+- A downstream request parked behind the node's own request for the
+  placeholder of (P, X) when F fails quickly twice is answered with G's set
+  when G's answer is applied within its bound.
+- After every path the in-flight and parked tables are empty.
 
 **T-Q6** *No retry, no de-duplication (R-Q6).* With the responder
 silenced (the request times out), one keep-alive produces exactly one request
 and nothing more for at least two advertisement intervals (R-Q5c asks again
-only after a quick failure); two keep-alives for the same
+only after a quick failure; the case runs with no other relay connected, or
+R-Q5d would ask one); two keep-alives for the same
 `(P, pair)` processed concurrently produce two requests.
 
 **R-Q6a (the responder's view of a repeated request).** *(Authored by
@@ -1127,7 +1249,7 @@ behavior the mesh relies on:
    gossip messages and plays no part on the request path, where the
    request is unsigned and names the pubkey asked *about*, not the asker;
    and no backoff or refusal exists for a peer that asks again. (The
-   limits of R-Q5b item 4 -- 8 parked requests per peer, 256 in all --
+   limits of R-Q5b item 4 -- parked requests per peer and in total --
    are Reloaded-original; the reference has no counterpart.)
 3. **A later answer differs only because the state moved.** Two requests
    with the same content a second apart receive the same answer unless
@@ -1731,6 +1853,59 @@ create for the same UUID is suppressed. This value is fixed in
 the current binding; making it operator-configurable is deferred
 (§32.10 D2). *(Post-2022 component per §32.1.)*
 
+**R-K1b (a cancel this node received is final; Reloaded-original,
+Decision BK item 2, bound 2026-11-03 as Decision 29).** *(Established
+against this repository's own order-message handlers, synchronization
+applier and order-book request path; no forbidden-class input. It rests
+on §32.9C.1 R-GH11, which found no reference path by which a maker
+legitimately makes a cancelled identifier live again.)*
+
+1. *Window.* The guard entry a cancel message records (§32.3 R-C5,
+   R-GH5 item 3) lives for the **final-cancel window** instead of the
+   120 s of R-K1: the top-level `MM2.json` integer
+   `cancel_final_window_secs`, default `3600`. A value below `120` is
+   used as `120`, a value above `86400` as `86400`, and an absent or
+   non-integer value means `3600`. With `120` the node behaves as R-K1
+   describes; that is the GLEEC-compatible setting.
+2. *What it keeps out.* While the entry lives, the node inserts no order
+   with that identifier from that publisher, whatever brings it: a
+   created or updated order message (R-GH5 items 1, 2 and 4), a full
+   snapshot or a delta of a synchronization answer (R-GH4 items 1 and 2),
+   the answer of R-Q5d included, or an order-book answer (R-GH1 item 4).
+   Every other order of the message or answer is applied as before. An
+   order with the same identifier from another publisher is not affected
+   ([Chapter 11](11-order-match-cancellation.md) R9).
+3. *What it does not change.* No cancel is repeated, nothing is sent, and
+   no message or answer changes shape. The node's own answers are built
+   from its read index (R-Q5, R-GH12), so they never list a guarded order.
+4. *Memory.* An entry younger than 120 s is kept exactly as R-K1 keeps
+   it. The older entries are capped by the top-level `MM2.json` integer
+   `cancel_final_max_entries`, default `100000`, at most `1000000`; an
+   absent, non-integer or zero value means the default. When a new entry
+   takes the guard above the cap, the oldest entries are dropped until it
+   is back at the cap or the oldest left is younger than 120 s; an entry
+   younger than 120 s is never dropped for the cap. An order whose entry
+   was dropped falls back to the 120 s behavior of R-K1. *The memory
+   bound:* the guard holds the cancels of the last 120 s, as the
+   reference does, plus at most `cancel_final_max_entries` older ones; at
+   about 200 bytes an entry, the older part is about 20 MB at the default
+   and about 200 MB at the ceiling.
+5. *Restart.* The entries are held in memory only; a restart starts with
+   none ([Chapter 11](11-order-match-cancellation.md) D1 unchanged).
+
+*Consequence.* A guarded order can still be covered by the root a maker
+advertises (a reference maker that revived it, R-GH11 item 1) or by the
+set a stale responder sends. The node then never reaches that root for
+the pair: each keep-alive for the pair leads to the usual request (R-Q4)
+and, under R-Q5d, to one request to another relay, until the window ends
+or the maker's root drops the order. That is at most two requests per
+advertisement interval for such a pair.
+
+*Compatibility note.* A GLEEC or Komodo node sees no difference on the
+wire. Apart from the cancel's own 120 s guard, it would re-admit the
+order from a later answer or message; this node keeps it out for the
+window.
+
 **R-K2 (keep-alive advertisement).** Each node MUST periodically
 advertise, per pubkey it makes orders under, its current per-pair
 trie roots in keep-alive messages on the gossip mesh, so that
@@ -1981,6 +2156,27 @@ answered with the full snapshot; one holding a root inside the kept window is
 answered with a delta whose application reaches the advertised root; another
 slice of the same pubkey is unaffected.
 
+**T-K8** *Final cancel (R-K1b).* (a) With the default window, a created
+message for an order this node received a cancel for is dropped 121 s
+and 3,599 s after the cancel and inserted 3,601 s after it; with
+`cancel_final_window_secs: 120` it is inserted at 121 s. (b) A full
+snapshot, a delta, the answer of R-Q5d and an order-book answer that list
+the cancelled order with two other orders of the same pubkey insert the
+other two and not the cancelled one; the node's own synchronization
+answer and order-book answer for the pair then omit it. (c) An order with
+the same identifier from another publisher is inserted. (d) With the cap
+at 3, five cancels older than 120 s leave the three newest guarding;
+three cancels younger than 120 s on top of three older ones all guard,
+and only older entries are dropped. (e) Readers: absent gives 3600, `60`
+gives 120, `100000` gives 86400 and `"x"` gives 3600; for the cap, absent,
+`0` and `"x"` give 100000 and `2000000` gives 1000000. (f) After a restart
+nothing is guarded. (g) A cancel for an order's identifier signed by
+another publisher, followed by the order's own publisher's cancel, leaves
+two guard entries: the order is kept out for its publisher's window,
+counted from its publisher's cancel, and a created message from the other
+publisher with that identifier is kept out only for that publisher's own
+window; neither cancel refreshes the other's entry.
+
 ## 32.9A Bounded and Unbounded State
 
 *(Authored by the KDF Spec Reader 2026-10-28, second pass, from the rows
@@ -2034,6 +2230,10 @@ Since R-K4 (item 4) the cleared-slice part of row 6 is no longer
 parity: Reloaded releases the nodes of a cleared slice, and row 3 and
 the nodes of replaced leaves are released on a timer (R-K4 items 1 and
 3).
+Row 4 is the one row where Reloaded's bound is wider than the
+reference's: under R-K1b the guard keeps the cancels of the last 120 s
+as the reference does, plus at most `cancel_final_max_entries` older ones
+(100,000 by default, about 20 MB), so it stays bounded.
 
 **R-B3 (two growth modes an operator can tell apart).** Rows 6 and 7
 grow with what *this* node applies: every synchronization answer in the
@@ -2712,7 +2912,13 @@ per-pair liveness and no root check after applying an answer**: the
 exposure R-GH1 and R-GH4 describe is the same as at the release rows, and
 the field observation above is consistent with it. Whether to adopt one of
 the remedies of the later reference change, and in what form, is §32.10
-D12.
+D12. *(Since 2026-11-02, §32.7.3 R-Q5d checks the root a pair reaches after
+an applied answer and asks one other relay once when it differs from the
+advertised root or when the forwarder failed; it never clears the pair.
+Reloaded still has no per-pair liveness.)* *(Since 2026-11-03, R-K1b
+keeps a cancelled order out of every later message and answer for the
+final-cancel window, one hour by default, where the release rows re-admit
+it after 120 s (R-GH5 item 4).)*
 
 **T-GH1** *Unnamed pairs are untouched (R-GH1).* A node holding entries of
 P on pairs X and Y receives a keep-alive from P naming only X with X's held
@@ -2774,9 +2980,196 @@ at the loop's tick, not earlier.
 
 **T-GH10** *Reloaded parity (R-GH10).* T-GH1 to T-GH5, T-GH8 and T-GH9
 pass on a Reloaded node with `orderbook_sync_names_held_root` at either
-value and `order_messages_refresh_liveness` at either value; with
+value and `order_messages_refresh_liveness` at either value, and with
+`sync_request_alternate_relay` set to `false` or no other relay connected
+(otherwise T-GH4's requester asks one other relay, T-Q5d); with
 `order_messages_refresh_liveness` at its default, T-GH3's silence is
-counted from the last keep-alive **or order message** of P.
+counted from the last keep-alive **or order message** of P. T-GH5's
+"inserted after" holds with `cancel_final_window_secs: 120`; at the
+default the late duplicate is dropped for the window (T-K8).
+
+### 32.9C.1 Follow-up: resurrection paths, the order-book answer, and the maker's ticks
+
+> *Authored by the KDF Spec Reader 2026-11-03 from the rows `v2.6.0-beta`
+> and `v3.0.0-beta` of [Chapter 02](02-baseline-state.md) §2.15A, identical
+> at both in every surface bound here (the compared regions do not differ
+> between the rows). Prompted by the ghost-order work of the 0.4.0 cycle
+> (§32.10 D12). **Passed the KDF Dirty Gate on 2026-11-03**, measure 0.02;
+> §32.13. Nothing here changes a wire shape. Statements about Reloaded
+> rest on this repository's own code and chapters, not on the reference.*
+
+**R-GH11 (whether a cancelled order identifier can become live again).**
+At both release rows a maker order the maker has cancelled — by
+`cancel_order`, `cancel_all_orders`, `setprice` with `cancel_previous`, the
+per-order timeout ([Chapter 12](12-order-match-state-store.md) R14), the
+balance watch ([Chapter 60](60-trading-floors-and-refusal-contract.md)
+R60.4.5) or the maintenance pass's insufficient-balance or fulfilled cancel
+— leaves the maker's live order set before its cancel message is published
+(R-GH9), and from then on no path of the maker publishes a created or
+updated message for that identifier, except as items 1 and 4 describe. For
+each point the question names:
+
+1. *Restart restore.* At start the node loads every **active-order record**
+   of its storage into the live set, and the first maintenance pass after
+   start finds each restored order absent from the read index, reconciles
+   its volume against a fresh balance read (ch. 60 R60.4.6 item 5) and
+   publishes a **created** message for it under its stored identifier and
+   its stored key ([Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.7
+   item 2). A cancel deletes the order's active-order record; a failure of
+   that deletion is logged, not retried, and the cancel completes all the
+   same. An active-order record that outlives its cancel therefore brings
+   the identifier back at the next start — at other nodes as an ordinary
+   created message (the guard of R-C5 has long expired), and at the maker
+   itself as a live order. This is the only restore-time path: a history
+   record, in either of the history store's forms, is never loaded back
+   into the live set.
+2. *Release of reserved volume.* The pruning of a timed-out, unconnected
+   match (ch. 59 R59.4.4) raises the order's available amount silently: no
+   message is published, and the order was never removed, so nothing is
+   created. A connected match is never pruned; its volume stays reserved
+   for the life of the order, and the order is cancelled with the fulfilled
+   reason once its available amount is below its minimum with no match in
+   progress. No message of this path names a cancelled identifier.
+3. *Balance recovery.* The balance watch and the restore-time
+   reconciliation only **lower** an order's maximum volume (publishing an
+   updated message with the lower available amount) or cancel it; a later
+   higher balance raises nothing and recreates nothing. An order cancelled
+   for insufficient balance is gone for good, subject only to item 1.
+4. *An update of the same identifier.* `update_maker_order` is refused for
+   an identifier that is not in the live set, both at entry and again after
+   its price and balance checks. It then takes the order's lock. An update
+   that passed the second check and takes the lock **after** a concurrent
+   cancel has removed the order finds the order's fields unchanged (a cancel
+   mutates none of them) and proceeds: it writes the updated order to the
+   **active-order storage** — on the file store of a native deployment that
+   write creates the record when it is absent, at both rows; the browser
+   store's replace-by-key write was not verified in this pass — and
+   publishes an **updated** message for the cancelled identifier. The
+   message changes nothing at a node that holds no entry for it (R-GH5 item
+   2) and refreshes the entry at a node that missed the cancel; the storage
+   write recreates the active record, which item 1 then restores at the
+   next start. The same create-when-absent write, with a narrower window,
+   exists in the match-pruning step of item 2, which writes the active
+   record of every order whose matches it pruned, working from a snapshot
+   of the live set taken before the pruning. These are the two paths on
+   which a cancelled identifier is written back to the active-order storage
+   after its cancel.
+5. *Reuse of a per-order key.* A per-order key is drawn at random for each
+   order of a privacy coin at creation (maker and taker orders alike;
+   [Chapter 16](16-swap-v2-pre-burn-output.md)) and stored with the order;
+   it is reused only by that same order — after a restart (item 1) and when
+   a timed-out taker order becomes a maker order, which keeps the taker
+   order's identifier and key (ch. 59 R59.4.1). No other order ever signs
+   under it, so a per-order pubkey's record at a receiver (R-P1) holds
+   entries of exactly one order, and a new order never reuses a cancelled
+   order's identifier or key.
+
+Consequently the only reference paths by which a cancelled identifier
+reappears **live** are items 1 and 4: a persisted active record that
+outlives the cancel, restored at the next start. The record item 1
+restores outlives the cancel when its deletion failed, or when the update
+of item 4 or the match-pruning step of item 2 wrote it back after the
+cancel. A node that received the cancel re-admits the identifier only after the
+120 s guard (R-K1); a node that never received it keeps the entry under
+R-GH1 regardless. *(Reloaded: ch. 12 R7b item 2 — once an order has left
+the container, no write recreates its active record — is Reloaded-original
+and already forbids the storage writes of items 2 and 4; on the restore
+path of item 1, a record whose removal the order history already records
+is not restored (ch. 12 R7c), and a record without such an entry is
+restored at parity, ch. 59 R59.6.7, ch. 60 R60.4.6.)*
+
+**R-GH12 (the order-book answer of a relay whose trie worker lags).** At
+both release rows a responder answers an order-book request (`GetOrderbook`,
+R-Q1) from its **read index**, which every order message and every applied
+answer updates synchronously under the index lock, and reads the trie store
+only for each listed pubkey's record (the per-pubkey receipt time that fills
+the answer's `last_keep_alive` member). The answer is therefore never a
+stale set: it is the index as it stands when the request is handled,
+including entries whose trie insertion the worker has not yet applied and
+excluding entries whose trie removal is still queued. Two conditions make
+the responder fail the **whole** request with an **error answer** (the error
+form of R-Q2, not "no data", not a partial answer): the pair's order count,
+asks and bids together, exceeds 1,000; or a pubkey listed in the index has
+no record in the trie store — which happens when that pubkey's first
+insertion (an order-created message, or an order the responder itself makes
+under a per-order key) is still queued for the worker, because a record is
+created either by that insertion or by the first keep-alive handled from the
+pubkey (R-Q5a item 1). There is no wait. The requester (R-F4, the
+request-and-fill path) asks the relays of its relay mesh
+([Chapter 28](28-libp2p-modernization.md) R10) **one at a time**, moving to
+the next on an error answer, a "no data" answer or the 10 s timeout (R-Q6),
+and stops at the first decoded answer, which it applies as R-GH1 item 4
+describes. If every relay fails: a node that is itself a relay treats the
+request as done (the pair's subscription is recorded as requested and no
+entry changes) and the `orderbook` RPC succeeds with what the node holds; a
+non-relay fails the `orderbook` RPC with an error and leaves the
+subscription as "subscribed, not requested", so the next `orderbook` call
+asks again (R-F6a). *(Reloaded: R-T3b item 2 binds the synchronization
+answer under a lagging worker; the order-book answer is bound here for the
+first time. Whether Reloaded should answer a listed pubkey that has no
+trie record yet — with zero for `last_keep_alive` — instead of failing the
+request is an open question, not bound here and not yet a listed
+candidate; it concerns the same window before a pubkey's record exists as
+the post-beta item 4 of §32.10 D12.)*
+
+**R-GH13 (the maker's two ticks: what is processed, and whom a keep-alive
+reaches).** At both release rows:
+
+1. *Keep-alive tick (30 s, R-K2a).* For each per-order key of a live order,
+   and then for the persistent key, the producer publishes one keep-alive
+   **for every pair in that key's root map whose root is neither all zeros
+   nor the empty-trie root**, each on the pair's topic. It skips no pair
+   because the pair has orders, skips no pair because the previous tick
+   advertised it, and consults the live order set only to collect the
+   per-order keys: a pair with a non-empty root is advertised at every tick
+   for as long as the root stays non-empty. The root map is the trie
+   store's, so the advertised root is whatever the worker has applied
+   (R-GH8).
+2. *Maintenance tick (more than once a second; ch. 59 R59.4.1, R59.4.4,
+   R59.6.4).* Every live maker order is visited in every pass — for the
+   match pruning, the balance-and-minimum check, the expiry drain (ch. 12
+   R14) and the re-announcement of an order missing from the read index.
+   No per-pair skip exists on this tick either.
+3. *Reach.* A keep-alive is a gossip message on the pair's topic. A
+   **relay** receives and forwards every message it is sent regardless of
+   its own subscriptions (ch. 28 R11a, R12; §32.8 R-F3a), so every pair's
+   keep-alive reaches every relay of the maker's relay mesh and, through
+   relay-to-relay forwarding, the relays beyond it. A **non-relay** receives
+   a keep-alive only for a pair whose topic it is subscribed to on the mesh,
+   and forwards nothing (R-F3b). A non-relay therefore never sees the
+   keep-alives of pairs it does not trade, while a relay sees them all and,
+   by R-Q4 item 1, considers every one of them for a synchronization
+   request.
+
+**T-GH11** *Resurrection paths (R-GH11).* (a) With the active-order record
+of a cancelled order left in storage, a restart re-publishes the order's
+created message under its stored identifier and key and lists the order as
+live; with the record deleted, nothing is published and the order stays
+cancelled. (b) Pruning a timed-out match publishes nothing and the order
+stays as it was. (c) A balance that drops and recovers lowers the order
+once and never raises it; a cancel for insufficient balance is not undone
+by the recovery. (d) `update_maker_order` for an identifier not in the live
+set is refused; in Reloaded an update that loses the race with a cancel
+writes no active record (ch. 12 R7b item 2). (e) Two orders of one privacy
+coin have different per-order keys; the key and identifier of a taker order
+that became a maker order are unchanged.
+
+**T-GH12** *Order-book answer (R-GH12).* A responder holding an entry
+whose trie insertion is held back answers an order-book request for the
+pair with an error until the worker applies it, and with the full index
+afterwards; one whose removal is held back omits the order; with the worker
+idle the answer equals the index. A requester with two relays in its mesh,
+the first answering an error, applies the second's answer; with every relay
+failing, a non-relay fails the `orderbook` RPC and asks again on the next
+call, and a relay succeeds with its held set.
+
+**T-GH13** *Ticks (R-GH13).* A maker with orders on pairs X and Y under
+its persistent key and one privacy-coin order under a per-order key on
+pair Z publishes at every keep-alive tick exactly three messages — X and Y
+signed by the persistent key, Z by the per-order key — each on its pair's
+topic, in every tick until a root becomes empty; a relay subscribed to no
+orderbook topic receives all three; a non-relay subscribed to X only
+receives X's.
 
 ## 32.10 Deferred Work
 
@@ -2789,7 +3182,9 @@ D2. **Cancellation-TTL configurability.** §32.9 R-K1 fixes the
     cancellation TTL to a compile-time value. Making it
     operator-configurable (per-coin or per-deployment) is
     deferred; the fixed value has held in production and the
-    deferral is conservative.
+    deferral is conservative. *(Partly bound on 2026-11-03: R-K1b makes
+    the window a deployment-wide setting, with 120 s as its lowest value;
+    per-coin windows stay deferred.)*
 
 D3. **Trie-hash width upgrade.** §32.6 R-T1 picks a 64-bit hash
     for wire compactness. If a future transport makes the saving
@@ -3062,8 +3457,8 @@ D12. **Stale entries of a maker that keeps sending keep-alives (open
     whole. Each adopted candidate is a divergence to record in the
     operator-facing compatibility documents.
 
-    **Decided 2026-11-01 by the maintainer: no candidate before the
-    beta.** The beta's release notes list the behavior as a known
+    **Decided 2026-11-01 by the maintainer (Decision BK): no candidate
+    before the beta.** The beta's release notes list the behavior as a known
     limitation. The decision rests on a lab run of this project's own
     nodes, in which a live pair healed one hop per advertisement interval
     once a keep-alive named it, an emptied pair kept its stale entry until
@@ -3075,18 +3470,22 @@ D12. **Stale entries of a maker that keeps sending keep-alives (open
     1. (b) in this form: one request to a *different* connected relay when
        a request times out or fails, or when the root a pair reaches
        after an applied answer still differs from the advertised one. The
-       pair is never cleared on a mismatch;
+       pair is never cleared on a mismatch *(bound on 2026-11-02 as
+       §32.7.3 R-Q5d)*;
     2. (e) **a cancel this node received is final for synchronization
        answers** (Reloaded-original, added 2026-11-01): an order whose
        cancel the node received is not re-admitted from an answer for a
        window longer than the 120 s of R-K1 (for example one hour), so a
        stale responder cannot bring it back. It is stricter than R-GH5
-       item 4 on the receiving side only;
+       item 4 on the receiving side only *(bound on 2026-11-03 as §32.9
+       R-K1b, for every later message and answer, not answers alone; the
+       restore guard of ch. 12 R7c was added to the same work package)*;
     3. (a);
     4. two changes to the deferral of R-Q5b for start-up and re-post
        bursts: parking a request for a pair named by a keep-alive the
        node is still handling, before its placeholder exists, and a
-       review of the parking limits.
+       review of the parking limits. *(The limits were reviewed first,
+       on 2026-11-02: R-Q5b item 4 as amended.)*
 
     (c) and (d) only if (a) is rejected.
 
@@ -3713,6 +4112,30 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   D12 records the maintainer's decision and adds candidate (e); the D12
   pointers in ch. 59 D2 and in UPSTREAM-PARITY-GAPS.md #20 say it is
   decided. No reference input was used for these edits.
+- *Reloaded-original amendment (2026-11-02, Decision BK item 4) -- R-Q5b
+  item 4, the sentence of T-Q5b on the limits, the parenthesis of R-Q6a
+  item 2, the decision letter and item 4 of §32.10 D12.* The parking limits
+  become two top-level `MM2.json` integers with higher defaults and fixed
+  ceilings. *Inputs:* this repository's own deferral tables and inbound
+  request dispatch, the stream limits of the pinned libp2p crates, this
+  project's own seeds' synchronization summaries of 2026-10-31 as counts,
+  and the maintainer's decision. No reference implementation was consulted
+  for this amendment, and it needs no Dirty Gate pass.
+- *Reloaded-original addition (2026-11-02, Decision BK, D12 item 1):
+  R-Q5d, its divergence note and T-Q5d; the wording of R-Q5c item 4, of
+  R-Q6's last sentence, of T-Q5c and of T-Q6 that named the request to
+  another relay; the parenthesis appended to R-GH10; the clause added to
+  T-GH10; the pointer in D12 item 1.* A requester asks one other relay once
+  after the forwarder's request failed or its answer left a pair diverged,
+  never clearing the pair, with the opt-back setting. *Inputs:* this
+  repository's own keep-alive requester, deferral tables, trie worker and
+  peer-to-peer request layer; the gated rules of this chapter (R-Q4, R-Q4a,
+  R-Q5c, R-Q6, R-Q6a, on whose "no record, no limit, ban or penalty" it
+  relies, and §32.9C R-GH4); this project's own seeds' synchronization
+  summaries of 2026-10-31 as counts; a lab run of this project's own nodes
+  with reference binaries as black boxes, reported as counts and classes
+  only; and the maintainer's decision. No reference implementation was
+  consulted for this item, and it needs no Dirty Gate pass.
 - *Scoped amendment (2026-11-02) -- the pointer sentence appended to the
   note "Consequence for a relay's connections" under §32.8 R-F3b.*
   Reloaded-original, batch 0.4.0 item P2 (ch. 28 R27b). *Inputs:* this
@@ -3726,3 +4149,37 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   use of the queue signal, and field metrics of a Reloaded seed on
   2026-10-31. The forbidden corpus was not consulted for this amendment,
   and it needs no Dirty Gate pass of its own.
+- *Scoped addition (2026-11-03) -- §32.9C.1 (R-GH11 to R-GH13, T-GH11 to
+  T-GH13) and the pointer sentence appended to §32.0.* **KDF Dirty Gate:
+  PASS on 2026-11-03, measure 0.02.** Prompted by the ghost-order
+  follow-up of the 0.4.0 cycle (D12). *Inputs:* the forbidden corpus at the
+  rows `v2.6.0-beta` and `v3.0.0-beta` of [Chapter 02](02-baseline-state.md)
+  §2.15A, which agree in every respect taken, consulted **only** to
+  establish: the paths by which a cancelled order identifier can be
+  published or restored again (restart restore of active-order records, the
+  create-when-absent nature of the active-order storage write, the
+  update-after-cancel race, the silence of match pruning and of balance
+  recovery, the per-order key's random draw and single use); how an
+  order-book request is answered when the trie worker lags (index-sourced
+  set, the two whole-request error conditions, no wait) and how the
+  requester moves across its relay mesh and ends; and the maker's two ticks
+  (every non-empty pair advertised at every keep-alive tick, every order
+  visited at every maintenance pass, relay versus non-relay reach of a
+  topic message). What crosses into this chapter is behavior, public RPC
+  names (`cancel_order`, `cancel_all_orders`, `setprice`, `cancel_previous`,
+  `update_maker_order`, `orderbook`), dictated wire members already bound
+  (`GetOrderbook`, `last_keep_alive`) and numeric values a peer can observe
+  (1,000 orders, 10 s, 30 s, 120 s); no function, type or field name outside
+  those, no helper decomposition, no control-flow transcription, no error,
+  log or comment text was reproduced. The Reloaded statements rest on this
+  repository's own chapters 12, 59 and 60. The T-items are
+  Reloaded-original.
+- *Reloaded-original addition (2026-11-03) -- §32.9 R-K1b, T-K8, the
+  row-4 sentence of §32.9A R-B2, and the notes added to R-C5, R-GH10,
+  T-GH10, R-GH11, D2 and D12 item 2.* Written by a context that never read the
+  forbidden corpus, from the maintainer's Decisions BK and 29 and from this
+  repository's own order-message handlers, synchronization applier,
+  order-book request path and cancellation guard. The one reference fact
+  it rests on, that no path legitimately revives a cancelled identifier,
+  is §32.9C.1 R-GH11, which passed the KDF Dirty Gate. No reference
+  implementation was consulted, and it needs no Dirty Gate pass.

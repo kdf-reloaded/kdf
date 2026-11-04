@@ -1,7 +1,8 @@
 #[cfg(test)] use super::electrum_pool::ServerStateSnapshot;
 use super::electrum_pool::{ElectrumPoolOptions, PoolShared};
 use super::*;
-use crate::utxo::header_layout_fallback::{FallbackReadError, HeaderReadPolicy};
+use crate::utxo::header_layout_fallback::HeaderReadPolicy;
+use crate::utxo::header_time_only::read_window_times;
 use futures::channel::mpsc as futures_mpsc;
 use script::Script;
 use std::collections::{HashMap, HashSet};
@@ -1200,24 +1201,43 @@ impl UtxoRpcClientOps for ElectrumClient {
         } else {
             starting_block - count.get() + 1
         };
-        Box::new(
-            self.blockchain_block_headers(from, count)
-                .map_to_mm_fut(UtxoRpcError::from)
-                .and_then(move |res| {
-                    if res.count == 0 {
-                        return MmError::err(UtxoRpcError::InvalidResponse("Server returned zero count".to_owned()));
+        let selfi = self.clone();
+        let fut = async move {
+            let res = selfi
+                .blockchain_block_headers(from, count)
+                .compat()
+                .await
+                .map_to_mm(UtxoRpcError::from)?;
+            if res.count == 0 {
+                return MmError::err(UtxoRpcError::InvalidResponse("Server returned zero count".to_owned()));
+            }
+            let count = usize::try_from(res.count).map_to_mm(|e| UtxoRpcError::InvalidResponse(e.to_string()))?;
+            // Step 1 is the layout-aware read of the policy; steps 2 to 4 (CRD ch.37 R37.5.10a) run only when
+            // it fails.
+            let mut timestamps = read_window_times(
+                &policy,
+                &selfi.coin_ticker,
+                &res.hex.0,
+                count,
+                from,
+                now_ms() / 1000,
+                |height| {
+                    let client = selfi.clone();
+                    async move {
+                        client
+                            .blockchain_block_header(height)
+                            .compat()
+                            .await
+                            .map(|bytes| bytes.0)
+                            .map_to_mm(UtxoRpcError::from)
                     }
-                    let count =
-                        usize::try_from(res.count).map_to_mm(|e| UtxoRpcError::InvalidResponse(e.to_string()))?;
-                    let headers = policy.read_list(&res.hex.0, count).map_err(|e| match e {
-                        FallbackReadError::Rejected(e) => MmError::new(UtxoRpcError::from(e)),
-                        other => MmError::new(UtxoRpcError::InvalidResponse(other.reason(|e| format!("{:?}", e)))),
-                    })?;
-                    let mut timestamps: Vec<_> = headers.into_iter().map(|block| block.time).collect();
-                    // can unwrap because count is non zero
-                    Ok(median(timestamps.as_mut_slice()).unwrap())
-                }),
-        )
+                },
+            )
+            .await?;
+            // can unwrap because count is non zero
+            Ok(median(timestamps.as_mut_slice()).unwrap())
+        };
+        Box::new(fut.boxed().compat())
     }
 
     async fn get_block_timestamp(&self, height: u64) -> Result<u64, MmError<UtxoRpcError>> {

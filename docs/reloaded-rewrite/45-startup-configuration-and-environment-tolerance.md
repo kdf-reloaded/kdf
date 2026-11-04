@@ -307,6 +307,48 @@ to the default log level and shall never refuse or panic the launch.
 R45.6.5 No environment variable bound in this chapter is *required* for a
 successful launch; each has a bound default or a bound degraded mode.
 
+R45.6.6 *Startup path report (KDF Reloaded original addition; operator
+diagnostics).* After the logger is initialized, startup shall report at INFO
+level, as absolute paths (relative paths resolved against the working directory
+without symlink resolution; the path as given if resolution fails):
+
+- the source of the runtime configuration: the command-line argument, or the
+  configuration file with whether it was selected via `MM_CONF_PATH` or by the
+  default name; a host-supplied configuration (library entry point) is reported
+  as such;
+- the source of the coins list: inline in the configuration (noting an
+  `MM_COINS_PATH` that is set but therefore ignored), or the coins file with
+  whether it was selected via `MM_COINS_PATH` or by the default name;
+- the log file named by a usable `MM_LOG` value (R45.6.3);
+- the database root and the per-identity database directory;
+- the optional file the configuration references, when configured: the
+  named-wallet record file actually read (canonical or legacy). The report
+  names **no** `wss_certs` file: the paths of the certificate and private-key
+  files are not logged by it (the errors that report a bad file name the path
+  as before).
+
+The report names paths and source kinds only; it shall never include the
+contents of any file, the command-line configuration text, or any configuration
+value. Producing the report shall never fail or panic the launch (R45.7.1). The
+log text is operator-facing and non-normative: it carries no wire or
+compatibility obligation.
+
+R45.6.7 *Version line (KDF Reloaded original addition; operator
+diagnostics).* The daemon shall state its version in the form
+`KDF-Reloaded DeFi Framework <crate version> (<short commit hash>) DT <build
+datetime>` in the startup banner log line, which is also the output of the
+`--version` and `version` command-line arguments, and in the form
+`Version: <crate version> (<short commit hash>) DT <build datetime>` in the
+second startup log line. The crate version is the version of the released binary
+crate (`mm2_bin_lib`) as built, not that of an internal library crate (a
+pre-release suffix is shown as it is). The short commit hash and the
+build datetime are the same values as before; a build without Git information
+shows its hash value as it does today. This requirement changes nothing else
+that carries the hash: the result of the `version` RPC method and the version
+recorded in swap records stay the bare short hash. The log text is
+operator-facing and non-normative: it carries no wire or compatibility
+obligation.
+
 ## 45.6A Memory Allocator Arena Limit (Reloaded-original)
 
 > **Reloaded-original (2026-10-31, Decision BJ).** This section binds a
@@ -385,7 +427,20 @@ second) for 40 minutes, the same binary each time:
 With the limit the update rate (81.8 against 81.3 updates per second) and the
 processor use (22.3 % against 21.7 % of one core) were the same within noise.
 Whether the growth without the limit levels off in a longer run was not
-measured.
+measured when this table was made; R45.6A.8 reports it.
+
+R45.6A.8 **Measured basis after the first beta (informative).** The measurements deferred as D45.4 and D45.5 were run on
+2026-11-03 with one binary, the key `malloc_arena_max` set to `0` as the arm without the limit. Plateau runs at about 20
+order updates per second on the 8-core setting, 6.5 hours per arm: both arms levelled off by the pre-registered rule
+(minutes 180–360, fixed-phase points: resident memory +0.004 ± 0.003 MB/min with the limit, +0.019 ± 0.009 without;
+60–180 and 180–360 are reported separately in the plan). With the limit, resident memory was about 17 MB lower, entirely in
+memory the allocator keeps after freeing it, with 2 arenas against 36–37. This is an observation of consecutive runs, not a
+pre-registered comparison. The limit is therefore not shown to be necessary for a plateau at that load on 8 cores; it
+removed the growth measured at about 80 updates per second on 256 cores (R45.6A.7). Rows a–c: no cost of the limit was
+resolved on start-up and activation (a UTXO set, an EVM coin with tokens, a shielded coin), on eight swaps (three UTXO
+pairs, one EVM cell; no shielded swap) or on the latency of the query methods and of `update_maker_order` while 100 orders
+were updated at 20 per second; the default of `2` stands. The figures, the deviations from the registered procedure and the
+runs not made are in `docs/plans/malloc-arena-cap.md`.
 
 ## 45.7 No-Panic-On-Launch Obligation (security/robustness)
 
@@ -469,6 +524,21 @@ memory growth below 0.3 MB per minute from minute 10.
 T45.13 *Invalid key never refuses the launch (R45.6A.4, R45.7.1).* Each invalid
 value listed in T45.10 MUST start the daemon.
 
+T45.14 *Startup path report.* With the configuration taken from the command line,
+from the default-named file, and from an `MM_CONF_PATH` file, and with coins
+inline versus from the default-named file versus from an `MM_COINS_PATH` file,
+the report MUST state the actual source of each, MUST show relative paths as
+absolute, MUST note an ignored `MM_COINS_PATH` when coins are inline, and MUST
+NOT contain any file content or configuration value (R45.6.6). With a
+`wss_certs` configuration, the report MUST NOT contain either file's path.
+
+T45.15 *Version line.* A formatter test MUST show, for explicit arguments, the
+banner and the second startup line in the forms of R45.6.7, including a
+pre-release crate version, an `UNKNOWN` hash and an empty build datetime; a
+second test MUST show that the banner produced for the running build contains
+the crate version and the short hash of that build, and that the bare short hash
+is unchanged as the value the `version` RPC method returns (R45.6.7).
+
 ## 45.9 Deferred Work
 
 D45.1 A consolidated, typed startup-configuration schema (replacing ad-hoc
@@ -490,12 +560,14 @@ R45.6A.
 D45.4 Measuring the arena limit under activation and swap workloads (start-up
 time of a UTXO set, an EVM coin with tokens and a shielded coin; swap
 completion; latency of the query methods under order updating) and re-checking
-the default of `2` against them is deferred past the first beta. The release
-that carries R45.6A has only the order-update measurements of R45.6A.7.
+the default of `2` against them was done on 2026-11-03 (R45.6A.8): the default
+stands. A shielded swap was not run and a swap set larger than one per pair and
+arm was not measured.
 
 D45.5 A 3-hour run at about 20 order updates per second, with and without the
-limit, to learn whether the growth without the limit levels off, is deferred
-past the first beta.
+limit, to learn whether the growth without the limit levels off, was done on
+2026-11-03 as two 6.5-hour runs (R45.6A.8): both settings levelled off at that
+load on the 8-core setting.
 
 ## 45.10 External References
 
@@ -560,6 +632,10 @@ past the first beta.
 - *Section 45.6A (arena limit):* Reloaded-original, written from our own
   measurements (R45.6A.7) and the documentation of the system allocator; no
   reference material was consulted for it.
+- *Addition R45.6.6 / T45.14 (startup path report) and R45.6.7 / T45.15 (version line):* two KDF Reloaded original
+  operator-diagnostics requirements, authored independently from this
+  repository's code and public documentation, without consulting the forbidden
+  corpus.
 - *Author of this chapter:* clean-room driving-spec working set.
 - *Forbidden corpus:* consulted only to recover the externally observable
   startup tolerance contract (which unset/empty/unexpected inputs start the

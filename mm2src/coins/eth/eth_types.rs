@@ -468,6 +468,10 @@ pub struct EthCoinImpl {
     /// parsed. `None` means no scaling. Applied only to the estimated gas limit of the legacy ERC-20 `approve`
     /// that precedes a V1 HTLC payment.
     pub(crate) estimate_gas_mult: Option<f64>,
+    /// Whether the fee to send the taker fee is quoted at the gas limit the transfer is sent with (`true`) or at the
+    /// node's gas estimate (`false`), CRD ch.57 R57.4.2. Read from the `evm_taker_fee_quote_at_limit` key of
+    /// `MM2.json` when the coin is built; a token takes its platform coin's value.
+    pub(crate) taker_fee_quote_at_limit: bool,
     /// HTTP API client for TRON full nodes. Populated only when
     /// `coin_type` is [`EthCoinType::Tron`] or [`EthCoinType::Trc20`].
     /// `None` for ETH/ERC20 coins.
