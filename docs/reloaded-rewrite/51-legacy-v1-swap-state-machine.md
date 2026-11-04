@@ -983,6 +983,37 @@ mempool or in a block), and is logged at debug level only. Which nodes act
 on the topic, and what a reference receiver does with the message, are
 open (D6).
 
+> **Reference behavior of the transaction-helper receiver (passed the KDF
+> Dirty Gate on 2026-11-04, measure 0.04; Spec Reader 2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of
+> chapter 02 §2.15A, identical at both).** The reference subscribes a node to
+> a coin's transaction-helper topic only when that coin is activated through
+> the legacy `enable` method in **native** (local daemon) mode; an Electrum
+> or task-route activation subscribes nothing, so such a node never receives
+> the topic's messages, and a relay that is not subscribed does not forward
+> them. A subscribed receiver, relay or not, looks the coin up by the topic's
+> ticker, requires the message to parse as a raw transaction of that coin,
+> and -- only when the coin is in native mode -- broadcasts it through the
+> coin's daemon; a message that fails to parse is logged and dropped
+> **without propagation**, and a message for a coin the receiver has not
+> enabled is propagated without action. The sender, as R50B says, publishes
+> the transaction **inside the signed envelope of R43**.
+>
+> **Code-quality finding (informative; trigger: a contradiction between two
+> things read side by side, the sender and the receiver).** The reference
+> receiver applies the coin's raw-transaction parser to the **whole received
+> message**, not to the transaction inside the envelope: it neither unwraps
+> nor verifies the envelope. An envelope is not a raw transaction of any
+> coin, so at both reference rows every helper message a reference node
+> receives for a coin it has enabled fails to parse, is dropped, and is
+> neither broadcast nor propagated; the topic is inert on the reference side. This is a finding
+> against the reference, **not** a convergence target: R50B's rule -- decode
+> and verify the envelope, broadcast the transaction inside it -- is the
+> correct behavior, and a Coder shall not adopt the reference's. For D6 it
+> settles the open question: a reference receiver does nothing useful with a
+> helper message in native or Electrum mode, so the topic helps only between
+> Reloaded nodes. Chapter 09 R23 records a relay's handling of the watcher
+> topic, which does propagate.
+
 ## 51.8 Bound Reserved-Funds Semantics
 
 **R51.** *Reservation follows registry membership.* A swap's funds are
@@ -1401,6 +1432,35 @@ carry it.
 > WrongSecretHashLength`, `SiaValidatePaymentInputError::
 > WrongSecretHashLength`) rather than something recovery can act on.
 
+**R74.** *Which key each side puts on the wire under a global-HD login.*
+*(Passed the KDF Dirty Gate on 2026-11-04, measure 0.04. Reference fact, Spec Reader 2026-11-04, rows
+`v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both.)*
+Under a global-HD login (chapter 05 R20) the `persistent_pubkey` of R59, the
+own-key field of the start event and the own-key column of the swap
+statistics record (R50A) are the node's **internal key** of chapter 05 R16;
+each per-coin HTLC public key of R63 is the **coin's own key** -- for a
+UTXO-family, QTUM, BCH, SLP, QRC20, EVM or Tendermint coin the key activated
+at the coin's `path_to_address`, for a shielded coin the per-swap derivation
+of chapter 39 R39.5.6, for Sia the padded account key of R64. No key derived
+by hashing the mnemonic string appears anywhere on the swap wire under a
+global-HD login. Because the two HTLC keys then differ from the persistent
+key, the sender emits shape 3 under R60. The reference performs no
+key-consistency check before a swap (chapter 05 R34): the key on the wire is
+the key that signs. Under the legacy single-key login all of these are the
+one key, and shape 2 results.
+
+> **Compatibility (this repository; not corpus-sourced).** Reloaded's v1
+> machines put a hash of the mnemonic string on the wire as the persistent
+> key and, for every coin that supplies no swap key (EVM; UTXO-family coins
+> activated through the legacy route), as the HTLC key too, so the payments
+> that follow are signed by a different key than the one announced. This is
+> recorded in plan [`hd-key-unification`](../plans/hd-key-unification.md)
+> (items H3 and H4) and is a divergence from R74, not a retained parity
+> behavior. Correcting it changes the key Reloaded
+> announces for its own swaps and is therefore visible to peers and to swap
+> statistics at upgrade; a swap in flight must keep the key its start event
+> recorded.
+
 ## 51.10 Bound Reference-Version Split
 
 **R67.** *The legacy state machine is identical across both reference
@@ -1690,6 +1750,14 @@ transaction's bytes signed as a transaction-helper message yield exactly
 those bytes, which are what is broadcast; a bare transaction and an envelope
 with a changed signed byte are both refused.
 
+**T31.** *HD login keys on the v1 wire (R74).* Under a global-HD login, a v1
+swap of a UTXO coin activated at a non-default `path_to_address` and a v1
+swap of an EVM coin shall each emit a shape-3 negotiation payload whose
+`persistent_pubkey` is the internal key and whose per-coin HTLC key is the
+coin's activated key; the payment, spend and refund transactions of each
+shall verify against that HTLC key; and no field of the payload shall equal
+a key derived by hashing the mnemonic string.
+
 ## 51.13 Deferred Work
 
 **D1.** *Migration of the legacy machines onto the chapter-14 runtime.*
@@ -1731,6 +1799,15 @@ coins broadcasts through the same kind of servers the parties use. Limiting
 the receiver to native-mode coins, and confirming what a reference node does
 with the message (whether it unwraps the envelope, and whether a relay acts
 on a topic it has not subscribed to), are deferred to a Spec Reader pass.
+
+> *Reference answer (2026-11-04; passed the KDF Dirty Gate on 2026-11-04,
+> measure 0.04).* The two
+> questions D6 deferred are answered in the note under R50B: a reference node
+> subscribes only for a native-mode legacy activation, acts only for a
+> native-mode coin, does not unwrap the envelope, and in consequence never
+> broadcasts a helper message and propagates one only for a coin it has not
+> enabled. What remains of D6 is this project's own choice
+> of receiver scope.
 
 ## 51.14 Baseline Verifications
 
@@ -1934,3 +2011,27 @@ reference rows alike.
   internal decomposition, log or error string, or per-method internal
   table was copied; every rule above is stated as an externally
   observable behavioural or cryptographic requirement.
+  (Addition of 2026-11-04, KDF Spec Reader, **KDF Dirty Gate: PASS on 2026-11-04, measure 0.04**:
+  R74, T31, the compatibility note under R74, the reference-behavior note
+  and code-quality finding under R50B, and the answer note under D6 rest on
+  the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at
+  both. The facts taken are: which key is the v1 persistent key and which key
+  each coin family's HTLC public key is under a global-HD login, the
+  consequent negotiation shape, and the absence of any key-consistency check;
+  and, for the transaction-helper topic, who subscribes, what a receiver
+  requires of a message, when it broadcasts, when it propagates, and that the
+  receiver parses the whole message rather than the envelope's content. No
+  private identifier, function body, helper decomposition, log or error
+  literal was reproduced. The compatibility note rests on this repository's
+  own code, as inventoried in plan `hd-key-unification`; T31 is Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.04, no findings. *Extent:* the legacy swap's negotiation keys under a
+  global-HD login and the transaction-helper topic, at `v3.0.0-beta` with
+  `v2.6.0-beta` as cross-check; for the whole batch, 30 source files and one
+  dependency manifest were read at `v3.0.0-beta`, 29 of them checked by hash
+  against the tagged states of both rows. *Method:* side-by-side reading of
+  the compared regions against every added or changed line, plus that hash
+  check; the gate script was not run because the candidate has no code blocks.
+  *Measure:* 0.04, read against the standard that any discretionary finding
+  fails a file; dictated-interop and public-surface tokens were excluded from
+  the measured set.)
