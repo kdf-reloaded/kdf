@@ -64,7 +64,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   read.** Every value a peer sends is checked first: arrays and maps may nest at most 64 levels, and every
   declared length and count must fit in the bytes that follow. A value outside these bounds is
   dropped as malformed and counted in the metric `p2p.payload.malformed`; the encoding is
-  unchanged and honest peers are not affected. Detail: PR #NNN; CRD ch.28 R16a.
+  unchanged and honest peers are not affected. Detail: PR #238; CRD ch.28 R16a.
 
 - **A node waits 5 minutes before it dials the same address again, and no longer dials a seed it
   is already connected to.** A node that holds fewer relays than it needs dials seeds and known
