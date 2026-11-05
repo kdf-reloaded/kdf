@@ -446,6 +446,15 @@ with a typed error; it is never guessed. **No setting restores GLEEC's version-4
 behaviour**, and none is offered, because that behaviour produces nothing the chain
 accepts.
 
+**From v0.4.0 Reloaded also pays Pirate1 addresses.** Pirate Chain's own wallets now
+hand out Pirate1 (Ironwood pool) addresses by default and pay from Ironwood notes.
+Reloaded's ARRR wallet stays Sapling-only, but it accepts a Pirate1 address in
+`validateaddress` and as a `withdraw` destination. It pays from its Sapling notes, at
+Pirate Chain's fixed fee of 0.0001 ARRR, with the change kept in Sapling (CRD ch.39
+§39.6.5). Payments that come from Ironwood wallets arrive like any other (R39.8.0bb).
+GLEEC KDF builds nothing the post-Ironwood chain accepts, so no setting reproduces its
+side.
+
 Because of that, the swap freeze and the build refusal below no longer engage in this
 build, and `ironwood_gate_disabled` has nothing left to switch off. It is still
 accepted, and still describes the older behaviour: for a build that cannot construct
