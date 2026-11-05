@@ -2294,10 +2294,10 @@ impl TestSender {
     }
 }
 
-/// T-MP5: a data queue that stays non-empty for 2 s raises the queue signal, one that empties within 2 s does not,
-/// and the signal clears after 5 s of an empty queue (CRD ch.32 §32.9B R-MP2 item 2).
+/// T-MP5: a data RPC that waits 2 s in the queue raises the queue signal, a burst the receiver takes at once does not,
+/// and the signal clears 5 s after the last wait of 2 s ended (CRD ch.32 §32.9B R-MP2 item 2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn mp5_queue_signal_follows_a_non_empty_queue() {
+async fn mp5_queue_signal_follows_the_waiting_time() {
     let _guard = SERIAL.lock().await;
     start_log_capture();
     let topic = "gsq-mp5-signal";
