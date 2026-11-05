@@ -263,7 +263,7 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   - **Version-2 swaps.** The version-2 swap's event search no longer rescans its whole range on every
     poll.
 
-  Detail: PR #XXX; CRD ch.17 R17.8.3a.
+  Detail: PR #255; CRD ch.17 R17.8.3a.
 
 #### Node names in logs and errors
 
