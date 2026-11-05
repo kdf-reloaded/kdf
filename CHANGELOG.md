@@ -257,6 +257,11 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
+- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: the
+  scope for this release is set. ARRR wallets and swaps stay Sapling-only. Payments from Pirate
+  Chain's Ironwood wallets are found and spent like any other, and a withdrawal may pay a Pirate1
+  address (CRD PR #229; the code follows). Native mode, the rest of the Ironwood pool and Pirate1
+  receiving addresses move to a later release.
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
