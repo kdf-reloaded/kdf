@@ -67,7 +67,10 @@ yanked = "warn"
 # docs/reloaded-rewrite/28-libp2p-modernization.md (OQ2) for the libp2p residue.
 ignore = [
     # --- libp2p 0.52 fork (KomodoPlatform/rust-libp2p k-0.52.12) ---
-    # The fork's own 0.52-era WSS/TLS + trust-dns + tempfile stack pulls these.
+    # The fork's own 0.52-era WSS/TLS + tempfile stack pulls these. (Its DNS layer and
+    # the trust-dns resolver library it pulled in are not built any more: the node
+    # resolves names with its own layer, CRD ch.45 R45.6B.9/R45.6B.11, and the
+    # RUSTSEC-2024-0421 idna ignore went with them.)
     # We must stay on the fork for the relay-mesh gossipsub extension; clearing
     # them requires upstream fork modernization. The WSS rustls/ring/webpki line
     # is additionally coupled to reloaded's futures-rustls transport binding.
@@ -75,7 +78,6 @@ ignore = [
     # libp2p-websocket-0.42.0. No rustls 0.20 consumer remains; the former
     # RUSTSEC-2024-0336 (rustls), RUSTSEC-2023-0052 (webpki) and RUSTSEC-2025-0009
     # (ring) ignores went with it.)
-    "RUSTSEC-2024-0421", # idna (fork libp2p-dns -> trust-dns-proto 0.22)
 
     # --- Misattributed to the libp2p fork; kept, but for a different reason ---
     # CORRECTION (2026-09-23): `cargo tree -i` shows neither of these comes from
@@ -442,6 +444,14 @@ deny = [
     { name = "aws-lc-fips-sys" },
     # rustls 0.23.46 is the patched floor for RUSTSEC-2026-0349.
     { name = "rustls", version = "<0.23.46" },
+    # One DNS library for every hostname the node looks up (CRD ch.45 R45.6B.11):
+    # hickory-proto, via common::dns_resolver (D45.8). The transport library's own DNS
+    # layer and the unmaintained trust-dns resolver stack it pulls in must not come
+    # back into the dependency tree (the node's P2P transport resolves names itself,
+    # ch.28 R0b/R18). T45.21: re-adding the `dns` feature of libp2p fails this check.
+    { name = "libp2p-dns" },
+    { name = "trust-dns-resolver" },
+    { name = "trust-dns-proto" },
 ]
 # NOTE: a curated `skip` list of ~110 entries was removed from here because it is
 # inert under multiple-versions = "allow" and warned once per entry. It survives
