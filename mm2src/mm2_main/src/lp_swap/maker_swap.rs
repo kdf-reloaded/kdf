@@ -538,7 +538,7 @@ impl MakerSwap {
         // derived from the secret hash (CRD ch.39 R39.5.6/R39.5.7) and is not
         // saved with the swap.
         let (maker_coin_htlc_key_pair, maker_coin_htlc_privkey) =
-            match start_htlc_key_pair(&self.maker_coin, &secret_hash) {
+            match start_htlc_key_pair(&self.maker_coin, self.ctx.secp256k1_key_pair().public(), &secret_hash) {
                 Ok(keys) => keys,
                 Err(e) => {
                     return Ok((Some(MakerSwapCommand::Finish), vec![MakerSwapEvent::StartFailed(
@@ -547,7 +547,7 @@ impl MakerSwap {
                 },
             };
         let (taker_coin_htlc_key_pair, taker_coin_htlc_privkey) =
-            match start_htlc_key_pair(&self.taker_coin, &secret_hash) {
+            match start_htlc_key_pair(&self.taker_coin, self.ctx.secp256k1_key_pair().public(), &secret_hash) {
                 Ok(keys) => keys,
                 Err(e) => {
                     return Ok((Some(MakerSwapCommand::Finish), vec![MakerSwapEvent::StartFailed(
@@ -4143,3 +4143,7 @@ mod maker_swap_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "maker_derived_htlc_key_tests.rs"]
 mod maker_derived_htlc_key_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "maker_hd_coin_swap_key_tests.rs"]
+mod maker_hd_coin_swap_key_tests;

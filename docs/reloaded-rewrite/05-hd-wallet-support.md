@@ -768,12 +768,15 @@ itself and in `docs/GLEEC_COMPATIBILITY.md`.
 > `None` when a coin's swap key is its paying key and for a coin the rule does not
 > apply to (the default, which covers ZHTLC, Sia, Tendermint, Solana and Lightning).
 > UTXO-family coins (standard, QTUM, BCH, QRC20, SLP tokens) share
-> `utxo_common::swap_key_disagreement`: a single key is compared with the node's
-> persistent key; a coin with an HD key policy is compared by path, its
-> `path_to_address` (now kept in `PrivKeyPolicy::HDWallet`) against account `0`,
-> `External`, address `0`, which is the address `active_utxo_sender_address` funds
-> from; the Trezor policy is out of scope. EVM coins compare the compressed form of
-> the signer's public key with the node's persistent key (`eth_swap_ops.rs`); a
+> `utxo_common::swap_key_disagreement`. *(As built 2026-11-04: a single key was compared
+> with the node's persistent key; a coin with an HD key policy was compared by path, its
+> `path_to_address` against account `0`, `External`, address `0`, the address
+> `active_utxo_sender_address` funded from. Since §5.12C both comparisons are gone, see the
+> note under §5.12C: the coin announces its own key and pays from its address.)* The Trezor
+> policy is out of scope. EVM coins compared the compressed form of
+> the signer's public key with the node's persistent key (`eth_swap_ops.rs`; since §5.12C a
+> software signer announces its own key, and only a key-less signer is still compared with the
+> node's persistent key); a
 > hardware signer is out of scope. *Node side.* `swap_key_mismatch` and
 > `swap_key_check_enabled` (`mm2_main/src/lp_ordermatch/ordermatch_types.rs`, next to
 > `untradable_coin_ticker`) apply the rule under a global-HD login and skip a
@@ -800,7 +803,8 @@ itself and in `docs/GLEEC_COMPATIBILITY.md`.
 > and single-key cases in `coins`. Not covered by a unit test: the exemption of a
 > ZHTLC and a Sia coin (no override of the default, and no coin of either family can
 > be built without a node) and the refusal at swap start; the SwapLab row HD2 of the
-> plan covers the end-to-end behavior.
+> plan covers the end-to-end behavior. *(Since §5.12C the T15 and T16 refusal cases of the coin
+> tests are agreements; the tests were rewritten, see the note under §5.12C.)*
 
 ## 5.12C One Swap Key per Coin
 
@@ -898,6 +902,61 @@ expected answer. The switch `swap_key_check` (R40) stays, with its default.
 > node built with this section and an earlier Reloaded build negotiates as
 > any shape-3 swap does; the earlier build's own HD swaps still fail as they
 > did.
+
+> **As built (2026-11-05, clean-side record; no requirement above changes).**
+> *R41, key source.* A new `SwapOps::own_signing_key_pair` (`coins/lp_coins_traits.rs`, default
+> `None`) names the key pair a coin with one key of its own signs with: a single-key UTXO coin
+> (`utxo_common::own_signing_key_pair`, used by the standard coin, QTUM, BCH, QRC20 and the SLP
+> token through its platform coin) and an EVM coin with a software signer (`eth_swap_ops.rs`, the
+> signer's secret as a compressed pair; a hardware or key-less signer answers `None`).
+> `SwapOps::get_htlc_key_pair` is unchanged and still answers for an HD key policy, Tendermint and
+> the Trezor policy. *R41 and R43, mechanism.* `start_htlc_key_pair` (`mm2_main/src/lp_swap.rs`)
+> now takes the node's persistent public key. For a coin that does not derive its key it takes
+> `get_htlc_key_pair`, else `own_signing_key_pair` when that pair is not the persistent key, and
+> announces and saves the pair it took in the saved fields `maker_coin_htlc_privkey` and
+> `taker_coin_htlc_privkey`; a coin whose own key is the persistent key (every coin under an
+> iguana login) takes nothing, announces the persistent key and saves nothing, which keeps the
+> wire and the saved swap byte-identical. The maker and taker start paths pass
+> `ctx.secp256k1_key_pair().public()`. Resumption and recovery needed no change: a restored swap
+> holds the saved pair (`restored_htlc_key_pair`), a swap saved without one keeps the
+> persistent key its Started event recorded, and `recover_funds_of_swap` reads the saved pair
+> among its candidates. *R42.* `enabled_hd_address_info` and `try_enabled_hd_address_info`
+> (`utxo_standard_swap_v2.rs`) answer, for a coin with `PrivKeyPolicy::HDWallet`, the address of
+> the activated key with the full derivation path of `path_to_address` (`activated_hd_address_info`);
+> a coin with another policy keeps the first external address of account `0`. Every reader of
+> the helper follows: the V1 and V2 funding and change (`active_utxo_sender_address`,
+> `utxo.rs`), the fee estimate (`trade_preimage_sender_address`, `utxo_common_tx.rs`), the V2
+> spend and refund output (`build_and_broadcast_maker_v2_spend`), and the V2 HTLC key
+> (`get_htlc_pubkey_v2`, `get_htlc_key_pair_v2`, `try_derive_htlc_pubkey_v2`). The V1 spend and
+> refund outputs pay to the address of the swap's own HTLC key and already did. The balance
+> checks read the activated key's address (`my_balance` through `my_public_key`) and the
+> fee estimates the helper, so they agree. *R44.* `utxo_common::swap_key_disagreement` takes the
+> coin's own key as the swap key and, for a coin with an HD wallet, compares its public key
+> with the funding address's: agreement by construction for an HD key policy, a disagreement
+> (`HdAddress` for the HD key policy, else `SingleKey`) only for a coin whose funding address
+> is not its own, or whose funding address cannot be established: the guard fails closed, and
+> the free helper takes no node key any more (the trait method keeps it for the EVM check of a
+> key-less signer). The EVM check takes the signer's own key as the swap key. `swap_key_check`
+> and the node side are unchanged. *Tests.* T19: `eth_tests::swap_key_agreement_tests::
+> t19_an_evm_coin_announces_the_compressed_signer_key`; T20, T21, T22 and T24 (coin side):
+> `utxo_tests::hd_coin_swap_key_tests::{t20_the_funding_address_is_the_one_at_path_to_address,
+> t20_trade_preimage_estimates_from_the_address_at_path_to_address,
+> t20_change_and_spend_outputs_use_the_address_at_path_to_address,
+> t20_the_v2_htlc_key_is_the_key_at_path_to_address, t20_at_the_default_path_the_first_address_is_used,
+> a_coin_without_an_hd_key_policy_keeps_the_first_address_of_its_account,
+> t21_a_single_key_coin_announces_and_funds_from_its_own_key,
+> t22_the_key_sources_are_unchanged_for_the_other_policies, t24_no_coin_of_t16_disagrees}`;
+> T24 guard: `utxo_tests::swap_key_agreement_tests::{a_single_key_other_than_the_node_key_agrees,
+> an_hd_coin_at_another_address_agrees, the_guard_still_refuses_a_constructed_disagreement}` and
+> `eth_tests::swap_key_agreement_tests::an_evm_coin_whose_signer_is_not_the_node_key_agrees`; swap
+> start, resumption and recovery (T19, T21, T22, T23): the module `maker_hd_coin_swap_key_tests`
+> of `mm2_main/src/lp_swap/` (`t22_an_iguana_login_saves_no_pair_and_announces_the_persistent_key`,
+> `t21_a_coin_key_other_than_the_persistent_key_is_announced_and_saved`,
+> `an_hd_key_policy_pair_is_still_saved`,
+> `t23_a_swap_saved_without_a_pair_resumes_with_the_persistent_key`,
+> `t23_a_swap_saved_with_a_pair_resumes_and_recovers_with_that_pair`). The node-side refusals
+> of §5.12B stay covered by their mocked-coin tests (`ordermatch_tests::t05_12b_swap_key_check_tests`,
+> `trade_preimage::tests::swap_key_mismatch`). End-to-end swaps are the SwapLab rows HD3 and HD4.
 
 ## 5.13 Tests
 
