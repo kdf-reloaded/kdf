@@ -12,6 +12,15 @@
 //! cap (a priority RPC past it joins the end of the data queue as a data RPC), and it derives a
 //! *pressure* level from the data queue depth for the application.
 //!
+//! Reloaded change: CRD ch.32 §32.9B R-MP2 item 2 and ch.28 §28.9B RQ1 item 8 (queue signal, batch 0.4.0 item
+//! P3b). The *queue signal* follows how long the oldest queued data RPC has waited, not whether the queue is
+//! empty: a queue that holds RPCs but writes each within the raise time never raises it.
+//!
+//! Reloaded change: CRD ch.28 §28.9B RQ1 items 6 and 8 and ch.32 §32.9B R-MP5 (window shares, batch 0.4.0 item
+//! P3a). Each closed window of the repeated-drops criterion publishes its dropped share and the series length
+//! through [`SendQueueStats`], and a window that dropped 10 % or more of its data RPCs yields a [`WindowReport`]
+//! for one DEBUG line.
+//!
 //! The queue takes the current time as an argument so the stuck-peer logic is testable without
 //! sleeping.
 
@@ -21,7 +30,7 @@ use quick_protobuf::MessageWrite;
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -50,11 +59,16 @@ pub const DEFAULT_SEND_QUEUE_PRESSURE_CLEAR: usize = 64;
 /// Default cap on the queued RPCs of the priority lane (CRD ch.28 §28.9B RQ1 item 9).
 pub const DEFAULT_SEND_QUEUE_PRIORITY_MAX: usize = 256;
 
-/// Default time the data queue must hold something before the queue signal is raised (CRD ch.32 §32.9B R-MP2
-/// item 2).
+/// Default time the oldest queued data RPC must have waited for the queue signal to be raised (CRD ch.32 §32.9B
+/// R-MP2 item 2, ch.28 §28.9B RQ1 item 8).
 pub const DEFAULT_SEND_QUEUE_SIGNAL_RAISE_AFTER: Duration = Duration::from_secs(2);
-/// Default time the data queue must stay empty before the queue signal is cleared.
+/// Default time that must pass with no queued data RPC having waited the raise time before the queue signal is
+/// cleared.
 pub const DEFAULT_SEND_QUEUE_SIGNAL_CLEAR_AFTER: Duration = Duration::from_secs(5);
+
+/// Share, in percent, of the data RPCs queued in a closed window that must have been dropped for the window to be
+/// logged at DEBUG level (CRD ch.28 §28.9B RQ1 item 6).
+const WINDOW_LOG_SHARE_PERCENT: u128 = 10;
 
 /// Limits of the per-connection send queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,10 +95,9 @@ pub struct SendQueueConfig {
     /// Maximum number of queued priority RPCs. A priority RPC past it is queued at the end of the
     /// data queue instead.
     pub priority_max: usize,
-    /// How long the data queue must hold at least one RPC, without becoming empty, before the queue signal is
-    /// raised.
+    /// How long the oldest queued data RPC must have waited before the queue signal is raised.
     pub signal_raise_after: Duration,
-    /// How long the data queue must stay empty before the queue signal is cleared.
+    /// How long no queued data RPC may have waited the raise time before the queue signal is cleared.
     pub signal_clear_after: Duration,
 }
 
@@ -107,18 +120,70 @@ impl Default for SendQueueConfig {
 }
 
 /// Counters of one connection's send queue, readable from outside the handler for metrics.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SendQueueStats {
     queued: AtomicUsize,
     dropped: AtomicU64,
+    /// When the connection's queue was created: the base of `last_window_end`.
+    created: Instant,
+    /// The dropped share, in whole percent, of the last completed window (CRD ch.28 §28.9B RQ1 items 6 and 8).
+    last_window_share: AtomicU64,
+    /// End of that window as milliseconds on the monotonic clock since `created`, plus one; 0 when no window has
+    /// completed.
+    last_window_end: AtomicU64,
+    /// Consecutive counting windows of the repeated-drops series now.
+    drop_series: AtomicU32,
 }
 
 impl SendQueueStats {
+    fn new() -> Self {
+        Self {
+            queued: AtomicUsize::new(0),
+            dropped: AtomicU64::new(0),
+            created: Instant::now(),
+            last_window_share: AtomicU64::new(0),
+            last_window_end: AtomicU64::new(0),
+            drop_series: AtomicU32::new(0),
+        }
+    }
+
+    /// Milliseconds on the monotonic clock from the creation of the queue to `t`, so a time fits an atomic. Times
+    /// before the creation give 0.
+    fn millis(&self, t: Instant) -> u64 {
+        u64::try_from(t.saturating_duration_since(self.created).as_millis()).unwrap_or(u64::MAX)
+    }
     /// Number of queued data RPCs.
     pub fn queued(&self) -> usize { self.queued.load(Ordering::Relaxed) }
 
     /// Number of data RPCs dropped on this connection since it was established.
     pub fn dropped(&self) -> u64 { self.dropped.load(Ordering::Relaxed) }
+
+    /// Whether the last completed window of the repeated-drops criterion ended no more than `within` before `now`.
+    fn window_is_recent(&self, now: Instant, within: Duration) -> bool {
+        let end = self.last_window_end.load(Ordering::Relaxed);
+        end != 0 && u128::from(self.millis(now).saturating_sub(end - 1)) <= within.as_millis()
+    }
+
+    /// The dropped share, in whole percent, of the last completed window of the repeated-drops criterion, if that
+    /// window ended no more than `within` before `now`; 0 otherwise (CRD ch.28 §28.9B RQ1 item 8, ch.32 R-MP5).
+    pub fn recent_window_share_percent(&self, now: Instant, within: Duration) -> u64 {
+        if self.window_is_recent(now, within) {
+            self.last_window_share.load(Ordering::Relaxed)
+        } else {
+            0
+        }
+    }
+
+    /// The length of the current series of counting windows of the repeated-drops criterion, if the last completed
+    /// window ended no more than `within` before `now`; 0 otherwise, like the share: a series that no window has
+    /// extended for that long is over.
+    pub fn recent_drop_series(&self, now: Instant, within: Duration) -> u32 {
+        if self.window_is_recent(now, within) {
+            self.drop_series.load(Ordering::Relaxed)
+        } else {
+            0
+        }
+    }
 }
 
 /// A snapshot of the send queues of all connections, for metrics (CRD ch.28 §28.9B RQ1 item 8).
@@ -130,6 +195,36 @@ pub struct SendQueueSnapshot {
     pub max_per_connection: usize,
     /// Data RPCs dropped since start, summed over all connections, closed ones included.
     pub dropped: u64,
+    /// The highest dropped share, in whole percent, of a live connection's last completed window whose end lies
+    /// within two window lengths; 0 when there is none (CRD ch.32 §32.9B R-MP5).
+    pub max_window_share_percent: u64,
+    /// The longest current series of counting windows over live connections whose last window ended within two
+    /// window lengths; 0 when there is none.
+    pub max_drop_series: u32,
+}
+
+/// A window of the repeated-drops criterion that ended with at least 10 % of its data RPCs dropped; the handler
+/// logs one DEBUG line for it (CRD ch.28 §28.9B RQ1 item 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowReport {
+    /// Data RPCs queued in the window.
+    pub queued: u64,
+    /// Data RPCs dropped in the window.
+    pub dropped: u64,
+    /// The dropped share, in whole percent.
+    pub share_percent: u64,
+    /// Consecutive counting windows the series held when the window closed.
+    pub series: u32,
+}
+
+impl std::fmt::Display for WindowReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} of the {} messages queued in the last window were dropped ({}%), {} consecutive windows counted",
+            self.dropped, self.queued, self.share_percent, self.series
+        )
+    }
 }
 
 /// What the caller should log after a push that dropped data RPCs.
@@ -217,13 +312,16 @@ pub struct SendQueue {
     /// Current pressure level and the level last handed out by `take_pressure_change`.
     pressure: bool,
     pressure_reported: bool,
-    /// The queue signal (CRD ch.32 §32.9B R-MP2 item 2): the data queue has held something for the raise time, or
-    /// the pressure level is raised. It clears once the queue has been empty for the clear time and the pressure
-    /// level is cleared.
+    /// The queue signal (CRD ch.32 §32.9B R-MP2 item 2): the oldest queued data RPC has waited for the raise time,
+    /// or the pressure level is raised. It clears once the clear time has passed since the backlog ended, with no
+    /// backlog now and the pressure level cleared.
     signal: bool,
     signal_reported: bool,
-    nonempty_since: Option<Instant>,
-    empty_since: Option<Instant>,
+    /// When each queued data RPC was queued, in the order of the data RPCs in `queue`.
+    data_times: VecDeque<Instant>,
+    /// While the signal is raised: when the backlog (a queued data RPC that has waited the raise time) last ended,
+    /// or, for a signal raised by pressure alone, when it was raised. `None` while there is a backlog.
+    backlog_ended: Option<Instant>,
     stats: Arc<SendQueueStats>,
     data_count: usize,
     data_bytes: usize,
@@ -239,6 +337,8 @@ pub struct SendQueue {
     /// Consecutive closed windows that dropped at least the configured share, and the share of the last one.
     window_series: u32,
     last_window_share: u64,
+    /// The last window that ended with at least 10 % dropped; handed out once by `take_window_report`.
+    window_report: Option<WindowReport>,
     /// Set when the series reached the configured count; handed out once by `take_stuck`.
     repeated_drops_share: Option<u64>,
     total_dropped: u64,
@@ -259,9 +359,9 @@ impl SendQueue {
             pressure_reported: false,
             signal: false,
             signal_reported: false,
-            nonempty_since: None,
-            empty_since: None,
-            stats: Arc::new(SendQueueStats::default()),
+            data_times: VecDeque::new(),
+            backlog_ended: None,
+            stats: Arc::new(SendQueueStats::new()),
             data_count: 0,
             data_bytes: 0,
             period_start: None,
@@ -271,6 +371,7 @@ impl SendQueue {
             window_dropped: 0,
             window_series: 0,
             last_window_share: 0,
+            window_report: None,
             repeated_drops_share: None,
             total_dropped: 0,
             dropped_since_log: 0,
@@ -319,6 +420,8 @@ impl SendQueue {
     /// Returns what to log, if anything.
     pub fn push(&mut self, rpc: proto::RPC, now: Instant) -> Option<DropLog> {
         self.roll_window(now);
+        // A backlog that built up since the last evaluation counts before this push can evict its oldest RPC.
+        self.update_signal(now);
         let log = self.push_inner(rpc, now);
         self.after_change(now);
         log
@@ -384,31 +487,44 @@ impl SendQueue {
         Some(self.signal)
     }
 
-    /// Re-evaluates the queue signal at `now`.
+    /// Whether the oldest queued data RPC has waited the raise time at `now` (CRD ch.32 §32.9B R-MP2 item 2). The
+    /// queue is first in, first out, so the oldest RPC has waited longest.
+    fn has_backlog(&self, now: Instant) -> bool {
+        self.data_times.front().map_or(false, |queued| {
+            now.saturating_duration_since(*queued) >= self.config.signal_raise_after
+        })
+    }
+
+    /// Re-evaluates the queue signal at `now` (CRD ch.32 §32.9B R-MP2 item 2, ch.28 §28.9B RQ1 item 8). The signal
+    /// is raised while the oldest queued data RPC has waited the raise time, or while the pressure level is raised.
+    /// It clears once the clear time has passed since the backlog ended, with no backlog now and the pressure level
+    /// cleared. A queue that holds RPCs but writes each within the raise time is never a backlog.
     pub fn update_signal(&mut self, now: Instant) {
+        let backlog = self.has_backlog(now);
         if !self.signal {
-            if self.pressure
-                || self
-                    .nonempty_since
-                    .map_or(false, |since| now.saturating_duration_since(since) >= self.config.signal_raise_after)
-            {
+            if backlog || self.pressure {
                 self.signal = true;
+                self.backlog_ended = if backlog { None } else { Some(now) };
             }
-        } else if !self.pressure
-            && self
-                .empty_since
-                .map_or(false, |since| now.saturating_duration_since(since) >= self.config.signal_clear_after)
-        {
-            self.signal = false;
+        } else if backlog {
+            self.backlog_ended = None;
+        } else {
+            let ended = *self.backlog_ended.get_or_insert(now);
+            if !self.pressure && now.saturating_duration_since(ended) >= self.config.signal_clear_after {
+                self.signal = false;
+                self.backlog_ended = None;
+            }
         }
     }
 
-    /// The time at which the queue signal changes by itself, if no RPC is queued or taken before.
+    /// The time at which the queue signal changes by itself, if no RPC is queued or taken before: the raise time
+    /// after the oldest data RPC was queued while the signal is not raised, the clear time after the backlog ended
+    /// while it is raised and the pressure level is cleared.
     pub fn signal_deadline(&self) -> Option<Instant> {
         if !self.signal {
-            self.nonempty_since?.checked_add(self.config.signal_raise_after)
+            self.data_times.front()?.checked_add(self.config.signal_raise_after)
         } else if !self.pressure {
-            self.empty_since?.checked_add(self.config.signal_clear_after)
+            self.backlog_ended?.checked_add(self.config.signal_clear_after)
         } else {
             None
         }
@@ -424,13 +540,6 @@ impl SendQueue {
         }
         self.stats.queued.store(self.data_count, Ordering::Relaxed);
         self.stats.dropped.store(self.total_dropped, Ordering::Relaxed);
-        if self.data_count > 0 {
-            self.empty_since = None;
-            self.nonempty_since.get_or_insert(now);
-        } else {
-            self.nonempty_since = None;
-            self.empty_since.get_or_insert(now);
-        }
         self.update_signal(now);
     }
 
@@ -453,6 +562,7 @@ impl SendQueue {
             dropped += 1;
         }
         self.queue.push_back(Entry { rpc, data_size: Some(size) });
+        self.data_times.push_back(now);
         self.data_count += 1;
         self.data_bytes = self.data_bytes.saturating_add(size);
 
@@ -491,11 +601,14 @@ impl SendQueue {
     /// Like [`Self::pop`], with the current time given.
     pub fn pop_at(&mut self, now: Instant) -> Option<proto::RPC> {
         self.roll_window(now);
+        // The RPC taken now may be the one that has waited the raise time: count it before it leaves.
+        self.update_signal(now);
         if let Some(rpc) = self.priority.pop_front() {
             return Some(rpc);
         }
         let entry = self.queue.pop_front()?;
         if let Some(size) = entry.data_size {
+            self.data_times.pop_front();
             self.data_count -= 1;
             self.data_bytes -= size;
             // The period ends once the data queue is at or below half of both limits.
@@ -508,6 +621,9 @@ impl SendQueue {
         }
         if self.queue.is_empty() && self.queue.capacity() > 16 {
             self.queue.shrink_to_fit();
+        }
+        if self.data_times.is_empty() && self.data_times.capacity() > 16 {
+            self.data_times.shrink_to_fit();
         }
         self.after_change(now);
         Some(entry.rpc)
@@ -563,8 +679,17 @@ impl SendQueue {
         self.window_dropped = 0;
         self.window_series = 0;
         self.last_window_share = 0;
+        self.window_report = None;
         self.repeated_drops_share = None;
+        self.stats.last_window_share.store(0, Ordering::Relaxed);
+        self.stats.last_window_end.store(0, Ordering::Relaxed);
+        self.stats.drop_series.store(0, Ordering::Relaxed);
     }
+
+    /// The window that ended with at least 10 % of its data RPCs dropped since the last call, if any; the handler
+    /// logs it at DEBUG level (CRD ch.28 §28.9B RQ1 item 6). A window closes lazily on a push, a pop or a
+    /// `take_stuck`, so the handler asks after each of them.
+    pub fn take_window_report(&mut self) -> Option<WindowReport> { self.window_report.take() }
 
     /// Closes the current window of the repeated-drops criterion if it has ended at `now`, and starts a new one.
     /// The window is evaluated lazily, on a push, a pop or a `take_stuck`; a drop only happens on a push. If more
@@ -582,25 +707,44 @@ impl SendQueue {
         // dropped share reached the configured one.
         let queued = u128::from(self.window_queued);
         let dropped = u128::from(self.window_dropped);
+        let share = if queued > 0 {
+            u64::try_from(dropped * 100 / queued).unwrap_or(u64::MAX)
+        } else {
+            0
+        };
         if queued > 0 && dropped * 100 >= queued * u128::from(self.config.drop_share_percent) {
             self.window_series = self.window_series.saturating_add(1);
-            self.last_window_share = u64::try_from(dropped * 100 / queued).unwrap_or(u64::MAX);
+            self.last_window_share = share;
             if self.window_series >= self.config.drop_windows && !self.stuck_reported {
                 self.repeated_drops_share.get_or_insert(self.last_window_share);
             }
         } else {
             self.window_series = 0;
         }
+        if queued > 0 && dropped * 100 >= queued * WINDOW_LOG_SHARE_PERCENT {
+            self.window_report = Some(WindowReport {
+                queued: self.window_queued,
+                dropped: self.window_dropped,
+                share_percent: share,
+                series: self.window_series,
+            });
+        }
         self.window_queued = 0;
         self.window_dropped = 0;
+        let window_end = start.checked_add(self.config.drop_window).unwrap_or(now);
+        self.stats.last_window_share.store(share, Ordering::Relaxed);
+        self.stats
+            .last_window_end
+            .store(self.stats.millis(window_end).saturating_add(1), Ordering::Relaxed);
         let two_windows = self.config.drop_window.saturating_mul(2);
         if elapsed >= two_windows {
             // At least one window passed with nothing queued: it breaks the series.
             self.window_series = 0;
             self.window_start = Some(now);
         } else {
-            self.window_start = Some(start.checked_add(self.config.drop_window).unwrap_or(now));
+            self.window_start = Some(window_end);
         }
+        self.stats.drop_series.store(self.window_series, Ordering::Relaxed);
     }
 
     fn evict_oldest_data(&mut self) {
@@ -612,6 +756,7 @@ impl SendQueue {
             ..
         }) = self.queue.remove(pos)
         {
+            self.data_times.pop_front();
             self.data_count -= 1;
             self.data_bytes -= size;
         }
@@ -1399,44 +1544,83 @@ mod tests {
         assert_eq!((q.priority_len(), q.data_count()), (2, 200));
     }
 
+    fn ms(t0: Instant, millis: u64) -> Instant { t0 + Duration::from_millis(millis) }
+
     #[test]
-    fn signal_is_raised_after_two_seconds_of_a_non_empty_queue_and_not_before() {
+    fn signal_is_raised_when_the_oldest_data_rpc_has_waited_two_seconds_and_not_before() {
         let mut q = queue(100, 1 << 20, 60);
         let t0 = Instant::now();
         q.push(data_rpc(1, 10), t0);
-        assert_eq!(q.signal_deadline(), Some(t0 + Duration::from_secs(2)));
-        q.update_signal(t0 + Duration::from_millis(1900));
+        // A younger RPC does not move the deadline: the oldest one counts.
+        q.push(data_rpc(2, 10), ms(t0, 1500));
+        assert_eq!(q.signal_deadline(), Some(at(t0, 2)));
+        q.update_signal(ms(t0, 1900));
         assert_eq!(q.take_signal_change(), None);
-        q.update_signal(t0 + Duration::from_secs(2));
+        q.update_signal(at(t0, 2));
         assert_eq!(q.take_signal_change(), Some(true));
         // Reported once.
-        q.update_signal(t0 + Duration::from_secs(3));
+        q.update_signal(at(t0, 3));
         assert_eq!(q.take_signal_change(), None);
     }
 
     #[test]
-    fn a_queue_that_empties_within_two_seconds_raises_no_signal() {
+    fn a_queue_that_writes_each_rpc_within_two_seconds_never_raises_the_signal() {
         let mut q = queue(100, 1 << 20, 60);
         let t0 = Instant::now();
-        q.push(data_rpc(1, 10), t0);
-        q.pop_at(t0 + Duration::from_millis(1500));
-        // Filling again restarts the two seconds.
-        q.push(data_rpc(2, 10), t0 + Duration::from_secs(2));
-        q.update_signal(t0 + Duration::from_secs(3));
-        q.update_signal(t0 + Duration::from_millis(3900));
-        assert_eq!(q.take_signal_change(), None);
-        q.update_signal(t0 + Duration::from_secs(4));
-        assert_eq!(q.take_signal_change(), Some(true));
+        q.push(data_rpc(0, 10), t0);
+        // One RPC arrives every second and each waits 1.5 s: the queue is never empty, and no RPC waits 2 s.
+        for step in 1..=120u64 {
+            let t = at(t0, step);
+            q.push(data_rpc(1, 10), t);
+            q.update_signal(t);
+            q.pop_at(ms(t0, step * 1000 + 500));
+            q.update_signal(ms(t0, step * 1000 + 999));
+            assert_eq!(q.take_signal_change(), None);
+            assert!(q.data_count() > 0);
+        }
+        assert_eq!(q.signal_deadline(), Some(at(t0, 122)));
     }
 
     #[test]
-    fn signal_clears_after_five_seconds_of_an_empty_queue() {
+    fn control_and_priority_rpcs_do_not_count_toward_the_waiting_time() {
+        let mut q = queue(100, 1 << 20, 60);
+        let t0 = Instant::now();
+        q.push(control_rpc("a"), t0);
+        assert_eq!(q.push_priority(data_rpc(1, 10), t0), PriorityPush::Queued);
+        assert_eq!(q.signal_deadline(), None);
+        q.update_signal(at(t0, 30));
+        assert_eq!(q.take_signal_change(), None);
+    }
+
+    #[test]
+    fn an_evicted_oldest_rpc_hands_the_waiting_time_to_the_next_one() {
+        let mut q = queue(2, 1 << 20, 60);
+        let t0 = Instant::now();
+        q.push(data_rpc(1, 10), t0);
+        q.push(data_rpc(2, 10), at(t0, 1));
+        // The third push evicts the first: the oldest queued RPC is now the one from 1 s. (The eviction starts a
+        // period at the cap, which raises the pressure level and with it the signal, so the waiting time is
+        // checked directly.)
+        q.push(data_rpc(3, 10), ms(t0, 1500));
+        assert!(!q.has_backlog(ms(t0, 2900)));
+        assert!(q.has_backlog(at(t0, 3)));
+    }
+
+    #[test]
+    fn signal_clears_five_seconds_after_the_last_wait_of_two_seconds_ends() {
         let mut q = queue(100, 1 << 20, 60);
         let t0 = Instant::now();
         q.push(data_rpc(1, 10), t0);
-        q.update_signal(t0 + Duration::from_secs(2));
+        q.push(data_rpc(2, 10), ms(t0, 1500));
+        q.update_signal(at(t0, 2));
         assert_eq!(q.take_signal_change(), Some(true));
-        let t1 = t0 + Duration::from_secs(10);
+        // The first RPC is written after 10 s; the second has waited 8.5 s, so the backlog goes on.
+        q.pop_at(at(t0, 10));
+        assert_eq!(q.signal_deadline(), None);
+        q.update_signal(at(t0, 30));
+        assert_eq!(q.take_signal_change(), None);
+        // The second is written at 32 s: the backlog ends there, and the clear time runs from then.
+        let t1 = at(t0, 32);
         q.pop_at(t1);
         assert_eq!(q.signal_deadline(), Some(t1 + Duration::from_secs(5)));
         q.update_signal(t1 + Duration::from_millis(4900));
@@ -1444,8 +1628,51 @@ mod tests {
         q.update_signal(t1 + Duration::from_secs(5));
         assert_eq!(q.take_signal_change(), Some(false));
         // A queue that gets something again starts over.
-        q.push(data_rpc(2, 10), t1 + Duration::from_secs(6));
+        q.push(data_rpc(3, 10), t1 + Duration::from_secs(6));
         assert_eq!(q.signal_deadline(), Some(t1 + Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn a_later_emptying_of_the_queue_does_not_postpone_the_clear_time() {
+        let mut q = queue(100, 1 << 20, 60);
+        let t0 = Instant::now();
+        q.push(data_rpc(1, 10), t0);
+        q.push(data_rpc(2, 10), at(t0, 9));
+        q.update_signal(at(t0, 2));
+        assert_eq!(q.take_signal_change(), Some(true));
+        // The first RPC is written at 10 s; the second has waited 1 s only, so the backlog ended at 10 s.
+        q.pop_at(at(t0, 10));
+        assert_eq!(q.signal_deadline(), Some(at(t0, 15)));
+        // The second is written at 10.5 s and the queue is empty: the clear time still ends at 15 s.
+        q.pop_at(ms(t0, 10500));
+        assert_eq!(q.signal_deadline(), Some(at(t0, 15)));
+        q.update_signal(ms(t0, 14900));
+        assert_eq!(q.take_signal_change(), None);
+        q.update_signal(at(t0, 15));
+        assert_eq!(q.take_signal_change(), Some(false));
+    }
+
+    #[test]
+    fn a_trickle_of_rpcs_written_at_once_lets_the_raised_signal_clear_five_seconds_later() {
+        let mut q = queue(100, 1 << 20, 60);
+        let t0 = Instant::now();
+        q.push(data_rpc(1, 10), t0);
+        q.update_signal(at(t0, 2));
+        assert_eq!(q.take_signal_change(), Some(true));
+        let t1 = at(t0, 10);
+        q.pop_at(t1);
+        // One RPC every 2 s, each written at once: none of them waits, and they do not restart the clear time.
+        for step in 1..=2u64 {
+            let t = t1 + Duration::from_secs(step * 2);
+            q.push(data_rpc(2, 10), t);
+            q.pop_at(t);
+            assert_eq!(q.take_signal_change(), None);
+        }
+        q.update_signal(t1 + Duration::from_millis(4900));
+        assert_eq!(q.take_signal_change(), None);
+        q.push(data_rpc(3, 10), t1 + Duration::from_secs(5));
+        q.update_signal(t1 + Duration::from_secs(5));
+        assert_eq!(q.take_signal_change(), Some(false));
     }
 
     #[test]
@@ -1455,14 +1682,146 @@ mod tests {
         for i in 0..3u8 {
             q.push(data_rpc(i, 10), t0);
         }
-        // The pressure level (3 queued) raises the signal at once.
+        // The pressure level (3 queued) raises the signal at once, with no RPC having waited.
         assert_eq!(q.take_signal_change(), Some(true));
-        // Empty, but the pressure level is cleared only at 1 or fewer: it is, and 5 s must pass.
+        // Empty, and the pressure level is cleared (1 or fewer): 5 s from the raise must still pass.
         let t1 = t0 + Duration::from_secs(1);
         while q.pop_at(t1).is_some() {}
-        q.update_signal(t1 + Duration::from_secs(4));
+        assert_eq!(q.signal_deadline(), Some(t0 + Duration::from_secs(5)));
+        q.update_signal(t0 + Duration::from_millis(4900));
         assert_eq!(q.take_signal_change(), None);
-        q.update_signal(t1 + Duration::from_secs(5));
+        q.update_signal(t0 + Duration::from_secs(5));
         assert_eq!(q.take_signal_change(), Some(false));
+    }
+
+    #[test]
+    fn a_raised_pressure_level_holds_the_signal_past_the_clear_time() {
+        // The raise time is long, so only the pressure level (3 queued) can hold the signal.
+        let mut q = SendQueue::new(SendQueueConfig {
+            pressure_raise: 3,
+            pressure_clear: 1,
+            signal_raise_after: Duration::from_secs(1000),
+            ..SendQueueConfig::default()
+        });
+        let t0 = Instant::now();
+        for i in 0..3u8 {
+            q.push(data_rpc(i, 10), t0);
+        }
+        assert_eq!(q.take_signal_change(), Some(true));
+        q.update_signal(at(t0, 30));
+        assert_eq!(q.take_signal_change(), None);
+        assert_eq!(q.signal_deadline(), None);
+        // Once the pressure level is cleared, the 5 s without a backlog have long passed.
+        while q.pop_at(at(t0, 31)).is_some() {}
+        assert_eq!(q.take_signal_change(), Some(false));
+    }
+
+    #[test]
+    fn closed_windows_publish_their_share_and_the_series_length_in_the_stats() {
+        let mut q = window_queue(6, 600);
+        let stats = q.stats();
+        let t0 = Instant::now();
+        let twenty = Duration::from_secs(20);
+        assert_eq!(
+            (
+                stats.recent_window_share_percent(t0, twenty),
+                stats.recent_drop_series(t0, twenty)
+            ),
+            (0, 0)
+        );
+        // 2 of 8 dropped in the window from 0 s; it closes with the push at 10 s.
+        drop_window_with(&mut q, at(t0, 0), 8);
+        assert_eq!(stats.recent_window_share_percent(at(t0, 9), twenty), 0);
+        drop_window_with(&mut q, at(t0, 10), 8);
+        assert_eq!(
+            (
+                stats.recent_window_share_percent(at(t0, 15), twenty),
+                stats.recent_drop_series(at(t0, 15), twenty)
+            ),
+            (25, 1)
+        );
+        drop_window_with(&mut q, at(t0, 20), 8);
+        assert_eq!(stats.recent_drop_series(at(t0, 21), twenty), 2);
+        // The share counts for two window lengths after its window ended (at 20 s), then falls back to 0.
+        assert_eq!(stats.recent_window_share_percent(at(t0, 39), twenty), 25);
+        assert_eq!(stats.recent_window_share_percent(at(t0, 41), twenty), 0);
+        // The series falls back to 0 the same way, although no later window has counted yet.
+        assert_eq!(stats.recent_drop_series(at(t0, 39), twenty), 2);
+        assert_eq!(stats.recent_drop_series(at(t0, 41), twenty), 0);
+        // A window with no drops sets the share to 0 and breaks the series.
+        drop_window_with(&mut q, at(t0, 30), 5);
+        q.push(data_rpc(0, 10), at(t0, 40));
+        assert_eq!(
+            (
+                stats.recent_window_share_percent(at(t0, 41), twenty),
+                stats.recent_drop_series(at(t0, 41), twenty)
+            ),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn a_restart_clears_the_published_share_and_series() {
+        let mut q = window_queue(6, 600);
+        let stats = q.stats();
+        let t0 = Instant::now();
+        drop_window_with(&mut q, at(t0, 0), 8);
+        drop_window_with(&mut q, at(t0, 10), 8);
+        let minute = Duration::from_secs(60);
+        assert_eq!(stats.recent_drop_series(at(t0, 12), minute), 1);
+        q.restart_stuck(at(t0, 12));
+        assert_eq!(
+            (
+                stats.recent_window_share_percent(at(t0, 12), minute),
+                stats.recent_drop_series(at(t0, 12), minute)
+            ),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn a_window_with_a_tenth_or_more_dropped_is_reported_once_and_a_smaller_share_is_not() {
+        // Cap 9, 10 RPCs: 1 of 10 = 10 %, below the 25 % that counts for the series, but reported.
+        let mut q = window_queue(9, 600);
+        let t0 = Instant::now();
+        drop_window_with(&mut q, at(t0, 0), 10);
+        assert_eq!(q.take_window_report(), None);
+        q.push(data_rpc(0, 10), at(t0, 10));
+        let report = q.take_window_report().unwrap();
+        assert_eq!(report, WindowReport {
+            queued: 10,
+            dropped: 1,
+            share_percent: 10,
+            series: 0
+        });
+        assert_eq!(q.take_window_report(), None);
+        // 2 of 11 = 18 %: reported with its whole-percent share.
+        let mut q = window_queue(9, 600);
+        drop_window_with(&mut q, at(t0, 0), 11);
+        q.pop_at(at(t0, 11));
+        assert_eq!(q.take_window_report().unwrap().share_percent, 18);
+        // 1 of 12 = 8 %, and a window without drops: nothing is reported.
+        let mut q = window_queue(11, 600);
+        drop_window_with(&mut q, at(t0, 0), 12);
+        drop_window_with(&mut q, at(t0, 10), 5);
+        assert_eq!(q.take_window_report(), None);
+        q.push(data_rpc(0, 10), at(t0, 20));
+        assert_eq!(q.take_window_report(), None);
+    }
+
+    #[test]
+    fn a_reported_window_carries_the_series_length_and_reads_as_log_text() {
+        let mut q = window_queue(6, 600);
+        let t0 = Instant::now();
+        drop_window_with(&mut q, at(t0, 0), 8);
+        drop_window_with(&mut q, at(t0, 10), 8);
+        assert_eq!(q.take_window_report().map(|r| r.series), Some(1));
+        q.pop_at(at(t0, 20));
+        let report = q.take_window_report().unwrap();
+        assert_eq!(report.series, 2);
+        assert_eq!(
+            report.to_string(),
+            "2 of the 8 messages queued in the last window were dropped (25%), 2 consecutive windows counted"
+        );
     }
 }
