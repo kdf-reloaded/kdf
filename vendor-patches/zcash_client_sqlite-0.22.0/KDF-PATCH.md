@@ -34,3 +34,20 @@ Drop this patch when the published crate stops panicking without the feature.
 Focused tests: `z_coin::z_note_lock_tests::pirate1_withdraw::t39_6_5e_*` and
 `z_coin::z_ironwood_read_tests::t39_6_5a_the_broadcast_record_reads_the_mainnet_transactions`
 in the `coins` crate.
+
+## Code scanning
+
+Vendoring brings the crate's whole upstream source into this repository, so the
+repository's CodeQL scan also analyses code that this project does not change. On
+2026-11-05 it reported 32 alerts of the rule "Cleartext storage of sensitive information
+in a database", all in `src/pool_migration/store.rs`. That upstream file is untouched by
+the change above.
+
+The same code was part of every build before, compiled from crates.io. No KDF Reloaded
+code calls it. The crate runs it itself at wallet initialization (the tables and index of
+the pool-migration store), on a rewind and during scanning. It only ever touches the
+pool-migration tables, which stay empty, because KDF Reloaded is Sapling-only and never
+starts an Orchard-to-Ironwood pool migration. The maintainer dismissed the alerts as
+"won't fix" on 2026-11-05. Encrypting the wallet database at rest is a separate topic,
+not a property of this patch. Excluding vendored upstream code from the scan is a
+separate change to the CI setup.
