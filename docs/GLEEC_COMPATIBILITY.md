@@ -73,7 +73,7 @@ There is no global "GLEEC mode" switch and no shared JSON object — every setti
 | Shielded (ARRR) native mode in this release | **none -- no switch exists** | Cannot be reproduced in this release. An activation request with `mode.rpc` `Native` is refused with a configuration error saying native mode is not supported in this release and that light mode should be used. GLEEC KDF accepts native mode. KDF Reloaded's native path cannot build a working wallet for a fresh activation, and after Ironwood it could build transactions the network rejects; a switch would only turn on something that does not work. Light mode is unaffected. Native mode is planned to return in a release after v0.4.0 ([plan](plans/arrr-native-and-ironwood-pool.md)); it was moved out of v0.4.0 on 2026-11-04. Decided by the maintainer on 2026-10-28 (third arm of [the default-side rule](COMPAT_SWITCHES.md#the-default-side-rule)). | No | [CRD ch.39 R39.11.1a](reloaded-rewrite/39-zcash---z_coin-shielded-coin.md) |
 | Tendermint (Cosmos) swaps in this beta | **none -- no switch exists** | Cannot be reproduced in this beta. Tendermint coins and tokens are wallet-only in KDF Reloaded: activation, balances and withdrawals work, but `setprice`, `buy`, `sell` and `start_swap` refuse them, they decline to match, and an order with a Tendermint coin saved by an earlier version is cancelled at startup. A swap already in progress still completes. GLEEC KDF lets Tendermint coins with an HTLC module (IRIS, Nucleus) take part in swaps, so a KDF Reloaded node does not trade them with GLEEC KDF peers during this beta; the order book still shows their orders. Swaps are planned to return in a later release (compile-time constant `TENDERMINT_SWAPS_AVAILABLE`). | No | [CRD ch.18](reloaded-rewrite/18-tendermint-ibc-htlc.md), [ch.36](reloaded-rewrite/36-tendermint-v2-activation-rpcs.md) |
 | Electrum call time budget | **none -- no switch exists** | Cannot be reproduced, and none is wanted. KDF Reloaded gives every call that may try several Electrum servers a time budget (60 s by default) and derives the bound of each attempt from that budget and the number of attempts still to make (never below 5 s), so a live server late in the list is reached inside the budget; in GLEEC KDF the per-attempt bounds do not depend on how many servers remain. Enabling a UTXO coin also probes every listed Electrum server at once and succeeds as soon as one connects (the build fails, naming each server, if none does within the budget); GLEEC KDF does not wait at activation. Both rules are Reloaded-only and not peer-visible: only the time a caller waits, and when an unreachable server set is reported, change. | No | [CRD ch.38 R38.6.4j, R38.6.4k-R](reloaded-rewrite/38-utxo-coin-maintenance-and-features.md) |
-| Swap watching for UTXO, BCH and QTUM coins | **none -- no switch exists** | Cannot be reproduced in this release. KDF Reloaded does not act as a swap watcher for these coins: the checks a watcher runs are not implemented for them yet, so the node does not subscribe to their watcher topics and starts no watcher for their swaps. Until this release it subscribed and started watchers that could only stop after a minute without acting, so no swap loses help it had before. Siacoin keeps its watcher. GLEEC KDF watches swaps of these coins on a node with `is_watcher` set, and does not watch Siacoin swaps. Watching for these coins is planned to return together with the taker-side watcher hand-off. | No | [CRD ch.09 R17](reloaded-rewrite/09-watcher-reward-infrastructure.md) |
+| Signed HTLC watcher extension | `watcher_htlc_v2` (top-level boolean) | `false` (default) preserves the pre-extension eligible set. Explicit `true` adds native ARRR and software-key LTC/vARRR through a new envelope that legacy peers do not execute. Both taker and operator must opt in; the operator also needs `is_watcher: true`. Other UTXO tickers, BCH and QTUM remain unsupported. | No | [Operator notes below](#signed-htlc-watcher-delegation), [CRD ch.09 R24-R28](reloaded-rewrite/09-watcher-reward-infrastructure.md) |
 
 ### ZHTLC backend
 
@@ -290,6 +290,31 @@ active. The bounded exposure and rationale are described in CRD chapter 07
 fund-controlling-secret carve-out.
 | Node URLs and credentials in logs, errors and debug output (TRON, Tendermint, Electrum, native UTXO daemon, lightwalletd, Solana, Sia walletd; debug output of the EVM transport) | **none -- no switch exists** | Cannot be reproduced, and none is wanted. KDF Reloaded names every node or server in host-only form (scheme, host and port; Electrum servers as host:port) in every log line, error text and status message, and no log line, error text or debug output prints a password, API key, Authorization or configured header value, or a URL's userinfo, path or query. A Tendermint node's response body is never logged. The native UTXO daemon's and the Sia walletd's error texts carry only the daemon's error code, message and the body's size, never the body. The RPC wire dump (docs/DEV_BUILD.md §4.1) is outside this and keeps its own MM2_RPC_WIRE_DUMP_SECRETS switch. Node access is not peer-visible and the change only protects credentials, so by the second arm of [the default-side rule](COMPAT_SWITCHES.md#the-default-side-rule) Reloaded's variant is the default, and an opt-in to print credentials would be an opt-in to weaken security. A script that parsed a node URL out of an error text no longer finds it. | No | [CRD ch.35 R35.1.17](reloaded-rewrite/35-evm-v2-activation-rpcs.md), ch.21 §21.9, ch.36 §36.5A, ch.38 §38.6.9, ch.39 R39.11.29, ch.40 §40.5A, ch.20 §20.8 |
 | Shielded (ZHTLC) lightwalletd: the endpoint that rejected a broadcast, and suspension of failing endpoints | **none -- no switch exists** | Cannot be reproduced, and none is wanted. KDF Reloaded names the endpoint that rejected a broadcast (host-only) in the error and in a warn log line. An endpoint that fails at transport level is suspended for 20 s, doubling up to 12 hours and reset by its next successful answer, and unsuspended endpoints are tried first, in configured order. Admission still probes every endpoint, and an operation still tries every admitted endpoint before it fails. A rejection never suspends. Only which of the operator's own endpoints is asked first, and what an error text says, change; no wire shape, peer, error_type or HTTP status changes. | No | [CRD ch.39 R39.11.30, R39.11.31](reloaded-rewrite/39-zcash---z_coin-shielded-coin.md) |
+
+## Signed HTLC watcher delegation
+
+`watcher_htlc_v2` is an experimental, Reloaded-original extension, disabled
+by default. It adds ARRR in native builds and software-key LTC/vARRR to the
+watcher set through a new envelope; it does not replace legacy-peer negotiation.
+ARRR lightwalletd mode is covered. This does not enable full-node activation,
+and ARRR's WASM watcher implementation remains disabled.
+Leave it absent or `false` for pre-extension behavior. No setting makes a
+legacy peer understand this new envelope.
+
+For a lab operator, set `is_watcher: true` and `watcher_htlc_v2: true`, then
+activate both coins through their supported APIs. The operator observes
+the public chain with its own connection; it needs no trader private key.
+The taker also sets `watcher_htlc_v2: true`; `use_watchers` defaults to
+`true`, while an explicit `false` prevents all template creation/publishing.
+Both participants must use the same netid; 8762 and 6133 remain separate.
+
+Do not promise offline completion from those flags. A job is published
+after the taker payment, has no operator acknowledgement and is held in
+memory. A partition, unavailable operator, restart, fixed fee or consensus
+upgrade can prevent assistance. The operator cannot redirect a signed
+payout, raise its fee or sign a replacement. The delegation exposes the
+pair, amounts and payment identifiers to topic subscribers; it does not
+contain private keys. See [chapter 09 R24-R28 and D7](reloaded-rewrite/09-watcher-reward-infrastructure.md).
 
 ## Future fork chapters
 

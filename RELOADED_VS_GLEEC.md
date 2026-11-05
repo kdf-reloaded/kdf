@@ -409,14 +409,15 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   completes or is recovered. Orders and swaps are planned to return in a later
   release. No switch exists: the build constant `TENDERMINT_SWAPS_AVAILABLE`
   (`coins/lp_coins_ops.rs`) is `false`.
-- **A node does not watch swaps of UTXO, BCH and QTUM coins.** The checks a
-  watcher runs are not implemented for these coins yet, so a node with
-  `is_watcher` set does not subscribe to their watcher topics. GLEEC KDF
-  watches swaps of these coins, and does not watch Siacoin swaps, which KDF
-  Reloaded does. No switch exists. Watching for these coins is planned to
-  return with the taker-side watcher hand-off. See
-  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
-  [CRD ch.09 R17](docs/reloaded-rewrite/09-watcher-reward-infrastructure.md).
+- **Watcher coverage is limited and opt-in.** Native ARRR and software-key
+  LTC/vARRR can use Reloaded's new signed HTLC delegation when both trader
+  and operator set `watcher_htlc_v2: true`. This envelope is an independent
+  extension; legacy peers do not execute it. The original envelope and
+  Siacoin's partial eligibility remain unchanged. Other UTXO tickers, BCH,
+  QTUM, hardware-wallet coins and V2-protocol swaps gain no coverage.
+  Post-payment publishing has no acknowledgement or durable operator
+  storage, so keep the trader online. See
+  [CRD ch.09 R24-R28 and D7](docs/reloaded-rewrite/09-watcher-reward-infrastructure.md).
 
 ### Work in progress
 

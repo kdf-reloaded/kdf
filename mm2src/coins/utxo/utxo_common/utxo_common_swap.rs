@@ -36,7 +36,7 @@ pub async fn get_htlc_spend_fee<T: UtxoCommonOps>(coin: &T, tx_size: u64) -> Utx
 /// CRD ch.60 R60.6.4, ch.38 R38.6.6c: the value of the single output of an HTLC spend or refund, that is
 /// the HTLC value minus the spend `fee`. A spend whose fee is not smaller than the HTLC value is refused
 /// with an orderly error, before anything is built or broadcast.
-fn htlc_spend_output_value(htlc_value: u64, fee: u64) -> Result<u64, TransactionErr> {
+pub(crate) fn htlc_spend_output_value(htlc_value: u64, fee: u64) -> Result<u64, TransactionErr> {
     if fee >= htlc_value {
         return TX_PLAIN_ERR!(
             "HTLC spend fee {} is not smaller than the HTLC value {}, refusing to spend",

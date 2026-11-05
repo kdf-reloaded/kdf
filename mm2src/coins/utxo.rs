@@ -37,6 +37,7 @@ pub mod utxo_builder;
 pub mod utxo_common;
 pub mod utxo_standard;
 pub mod utxo_standard_swap_v2;
+mod utxo_watcher;
 pub mod utxo_withdraw;
 pub mod wc_integration;
 

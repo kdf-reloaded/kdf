@@ -277,6 +277,7 @@ impl WatcherOps for SiaCoin {
         maker_pub: &[u8],
         secret_hash: &[u8],
         _swap_unique_data: &[u8],
+        _htlc_privkey: &[u8],
     ) -> TransactionFut {
         let coin = self.clone();
         let taker_payment_tx = taker_payment_tx.to_vec();
@@ -304,6 +305,7 @@ impl WatcherOps for SiaCoin {
         &self,
         _time_lock: u32,
         _other_pub: &[u8],
+        _taker_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
         _search_from_block: u64,

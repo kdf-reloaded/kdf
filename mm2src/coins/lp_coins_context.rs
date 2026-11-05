@@ -171,6 +171,17 @@ impl CoinsContext {
         self.activation_locks.lock(tickers).await
     }
 
+    /// Enabled tickers for which this node implements watcher operations.
+    pub async fn watcher_supported_tickers(&self, include_v2: bool) -> Vec<String> {
+        self.coins
+            .lock()
+            .await
+            .values()
+            .filter(|coin| coin.is_supported_by_watchers() && (include_v2 || !coin.supports_watcher_v2()))
+            .map(|coin| coin.ticker().to_owned())
+            .collect()
+    }
+
     pub async fn add_coin(&self, coin: MmCoinEnum) -> Result<(), MmError<CoinIsAlreadyActivatedErr>> {
         let mut coins = self.coins.lock().await;
         if coins.contains_key(coin.ticker()) {

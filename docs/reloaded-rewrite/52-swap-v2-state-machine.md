@@ -945,6 +945,10 @@ broadcast on the watcher topic bound by
 legacy-only (chapter 51 R30, chapter 17 §17.11); a version-two swap has
 no watcher-outcome events and its persisted log MUST NOT contain any.
 
+The independent `TakerSwapWatcherMsgV2` envelope of chapter 09 R24-R28
+does not change R56: it delegates a legacy V1 swap's claim/refund. It is
+not watcher support for the version-two swap protocol.
+
 > **Pointer (added 2026-10-27; passed the KDF Dirty Gate on 2026-10-28 with chapter 51 R50A).**
 > *No terminal status report.* The version-two machines publish no
 > terminal swap-status report of the kind chapter 51 R48/R50A binds for

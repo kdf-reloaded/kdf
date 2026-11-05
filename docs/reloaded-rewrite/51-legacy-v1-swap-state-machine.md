@@ -499,6 +499,15 @@ extraction fails, which is the one post-payment taker failure that does
 *not* enter the refund chain — and otherwise emit `TakerPaymentSpent`
 carrying both the spending transaction and the recovered secret.
 
+**Reloaded watcher extension.** Chapter 09 R24-R28 adds an opt-in signed
+HTLC delegation for native ARRR and software-key LTC/vARRR. It uses the
+agreed per-chain keys and locktimes, actual display-order transaction ids
+and chapter 09's existing ten-second watcher publish cadence. The legacy
+swap negotiation and payment messages are unchanged. This is a V2 watcher
+envelope for this V1 swap machine, not the V2 swap protocol of chapter 52.
+Publishing remains post-payment and unacknowledged; chapter 09 D7 records
+why this alone cannot guarantee offline completion.
+
 **R31.** *Spend maker payment and refund chain.*
 `STAGE-SPEND-MAKER-PAYMENT` MUST broadcast the spend of the maker
 payment using the recovered secret, emitting `MakerPaymentSpent` on

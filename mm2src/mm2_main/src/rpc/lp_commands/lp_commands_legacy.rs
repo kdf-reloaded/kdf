@@ -34,7 +34,7 @@ use std::future::Future;
 use crate::mm2::lp_dispatcher::{dispatch_lp_event, StopCtxEvent};
 use crate::mm2::lp_network::{peer_connection_healthcheck as peer_connection_healthcheck_impl, subscribe_to_topic};
 use crate::mm2::lp_ordermatch::{cancel_orders_by, CancelBy};
-use crate::mm2::lp_swap::{active_swaps_using_coin, tx_helper_topic, watcher_topic};
+use crate::mm2::lp_swap::{active_swaps_using_coin, tx_helper_topic};
 use crate::mm2::MmVersionResult;
 
 /// Attempts to disable the coin
@@ -207,11 +207,6 @@ pub async fn enable(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> 
 
     if coin.is_utxo_in_native_mode() {
         subscribe_to_topic(&ctx, tx_helper_topic(coin.ticker()));
-    }
-
-    // Subscribe to watcher messages for coins that support watchers
-    if coin.is_supported_by_watchers() {
-        subscribe_to_topic(&ctx, watcher_topic(coin.ticker()));
     }
 
     Ok(res)

@@ -159,6 +159,7 @@ mod z_pirate1_tests;
 mod z_tx_read_fixtures;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_v6_construction_tests;
+#[cfg(not(target_arch = "wasm32"))] mod z_watcher;
 
 #[cfg(all(test, feature = "zhtlc-native-tests"))]
 mod z_coin_tests;

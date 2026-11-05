@@ -182,6 +182,10 @@ jobs:
           # docs/plans/arrr-ironwood-compatibility.md.
           - name: shielded
             cmd: "cargo test -p coins --lib z_coin::"
+          - name: watcher-coins
+            cmd: "cargo test -p coins --lib watcher && cargo test -p coins --lib watcher_v6_claim_preserves_real_sapling_proofs -- --ignored"
+          - name: watcher-swaps
+            cmd: "cargo test -p mm2_main --lib watcher"
           # `scripted_node_ports` runs real EVM code against an in-process scripted
           # JSON-RPC node: deterministic, no binary, no network. Previously
           # unreachable from any cell (the `eth-utility` cell names five tests).
@@ -234,6 +238,27 @@ jobs:
           key: test-unit-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             test-unit-${{ matrix.name }}-
+
+      - name: Cache Sapling parameters for watcher proof verification
+        if: matrix.name == 'watcher-coins'
+        uses: actions/cache@v5
+        with:
+          path: ~/.zcash-params
+          key: watcher-sapling-params-v1
+
+      - name: Ensure watcher proof parameters are present
+        if: matrix.name == 'watcher-coins'
+        run: |
+          set -eu
+          dir="$HOME/.zcash-params"
+          mkdir -p "$dir"
+          for name in sapling-spend.params sapling-output.params; do
+            if [ ! -s "$dir/$name" ]; then
+              curl --fail --location --retry 3 --output "$dir/$name" "https://download.z.cash/downloads/$name"
+            fi
+          done
+          # LocalTxProver checks the canonical parameter sizes and hashes.
+          echo "ARRR_SAPLING_PARAMS=$dir" >> "$GITHUB_ENV"
 
       - name: ${{ matrix.name }}
         run: ${{ matrix.cmd }}
