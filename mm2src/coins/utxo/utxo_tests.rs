@@ -10420,6 +10420,32 @@ mod swap_key_agreement_tests {
         );
     }
 
+    /// R44, fail closed: when the funding address cannot be established, the guard answers a disagreement and
+    /// does not let the swap start. Here the single key of the coin has an HD wallet with no account `0`, and
+    /// then one whose accounts are locked.
+    #[test]
+    fn the_guard_fails_closed_when_the_funding_address_cannot_be_established() {
+        let coin = coin_with(
+            PrivKeyPolicy::KeyPair(key_pair_from_seed("the internal key of the test").unwrap()),
+            Some(DerivationMethod::HDWallet(hd_wallet())),
+        );
+        assert_eq!(
+            coin.swap_key_disagreement(&node_pubkey()),
+            Some(SwapKeyDisagreement::SingleKey)
+        );
+
+        let fields: &UtxoCoinFields = coin.as_ref();
+        let wallet = match &fields.derivation_method {
+            DerivationMethod::HDWallet(wallet) => wallet,
+            _ => panic!("an HD wallet"),
+        };
+        let _held = block_on(wallet.accounts.lock());
+        assert_eq!(
+            coin.swap_key_disagreement(&node_pubkey()),
+            Some(SwapKeyDisagreement::SingleKey)
+        );
+    }
+
     /// T18: a coin activated with the Trezor policy is out of the rule's scope.
     #[test]
     fn a_trezor_coin_is_exempt() {

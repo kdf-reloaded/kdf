@@ -3753,6 +3753,21 @@ mod swap_key_agreement_tests {
         }
     }
 
+    /// T22 (R41 item 3, R43), EVM coin: under an iguana login the signer's compressed key is the node's
+    /// persistent key (one secret derives both). The swap start therefore finds that the coin's own pair is the
+    /// persistent key and announces and saves nothing, as before.
+    #[test]
+    fn t22_an_evm_coins_own_key_is_the_persistent_key_under_an_iguana_login() {
+        let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
+        // An iguana login derives the persistent key and the signer from one secret.
+        let persistent = signer_pubkey();
+        let own = coin.own_signing_key_pair().expect("a software signer has a key pair");
+        assert_eq!(*own.public(), persistent);
+        assert_eq!(*own.public(), signer_pubkey());
+        assert_eq!(&compressed_secp256k1_public(&coin.signer.public())[..], &persistent[..]);
+        assert_eq!(coin.swap_key_disagreement(&persistent), None);
+    }
+
     /// A signer that is the node's persistent key agrees, as under an iguana login.
     #[test]
     fn an_evm_coin_whose_signer_is_the_node_key_agrees() {

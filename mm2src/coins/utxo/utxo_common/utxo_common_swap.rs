@@ -1465,8 +1465,9 @@ where
 /// from (R42): for an HD key policy the address at `path_to_address`, so the two agree by construction. They
 /// can differ only when the funding address is not the coin's own, which this answers as a disagreement. A
 /// coin with a single address funds from the address of its own key, and a coin activated with the Trezor
-/// policy is out of the rule's scope.
-pub fn swap_key_disagreement<T>(coin: &T, _node_pubkey: &Public) -> Option<SwapKeyDisagreement>
+/// policy is out of the rule's scope. A funding address that cannot be established is a disagreement too: the
+/// guard fails closed.
+pub fn swap_key_disagreement<T>(coin: &T) -> Option<SwapKeyDisagreement>
 where
     T: AsRef<UtxoCoinFields>,
 {
@@ -1476,22 +1477,33 @@ where
     let DerivationMethod::HDWallet(hd_wallet) = &fields.derivation_method else {
         return None;
     };
-    let paying = crate::utxo::utxo_standard_swap_v2::try_enabled_hd_address_info(
+    let activated_path = match &fields.priv_key_policy {
+        PrivKeyPolicy::HDWallet { path_to_address, .. } => {
+            Some(path_to_address.full_path_text(&hd_wallet.derivation_path))
+        },
+        _ => None,
+    };
+    let disagreement = |paying_path: String| match activated_path.clone() {
+        Some(activated_path) => SwapKeyDisagreement::HdAddress {
+            activated_path,
+            paying_path,
+        },
+        None => SwapKeyDisagreement::SingleKey,
+    };
+    // Fail closed: a guard that cannot establish the funding address must not answer "agree", or a swap that
+    // would pay from another key than it announces would start. An error is answered as a disagreement.
+    let paying = match crate::utxo::utxo_standard_swap_v2::try_enabled_hd_address_info(
         fields,
         hd_wallet,
         "UTXO swap key agreement check",
-    )
-    .ok()?;
+    ) {
+        Ok(paying) => paying,
+        Err(_) => return Some(disagreement("an address that could not be established".to_owned())),
+    };
     if *paying.pubkey == *swap_key {
         return None;
     }
-    match &fields.priv_key_policy {
-        PrivKeyPolicy::HDWallet { path_to_address, .. } => Some(SwapKeyDisagreement::HdAddress {
-            activated_path: path_to_address.full_path_text(&hd_wallet.derivation_path),
-            paying_path: paying.derivation_path.to_string(),
-        }),
-        _ => Some(SwapKeyDisagreement::SingleKey),
-    }
+    Some(disagreement(paying.derivation_path.to_string()))
 }
 
 // ─── V2 swap helpers (chapter 15 §15.4) ─────────────────────────────────────

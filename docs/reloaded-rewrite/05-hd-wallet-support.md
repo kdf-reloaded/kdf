@@ -934,7 +934,9 @@ expected answer. The switch `swap_key_check` (R40) stays, with its default.
 > coin's own key as the swap key and, for a coin with an HD wallet, compares its public key
 > with the funding address's: agreement by construction for an HD key policy, a disagreement
 > (`HdAddress` for the HD key policy, else `SingleKey`) only for a coin whose funding address
-> is not its own. The EVM check takes the signer's own key as the swap key. `swap_key_check`
+> is not its own, or whose funding address cannot be established: the guard fails closed, and
+> the free helper takes no node key any more (the trait method keeps it for the EVM check of a
+> key-less signer). The EVM check takes the signer's own key as the swap key. `swap_key_check`
 > and the node side are unchanged. *Tests.* T19: `eth_tests::swap_key_agreement_tests::
 > t19_an_evm_coin_announces_the_compressed_signer_key`; T20, T21, T22 and T24 (coin side):
 > `utxo_tests::hd_coin_swap_key_tests::{t20_the_funding_address_is_the_one_at_path_to_address,
