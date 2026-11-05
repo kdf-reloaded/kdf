@@ -40,8 +40,8 @@ required-but-unimplemented extensions). Mixed treatment -- see §39.0.
   (R39.6.4e). The swap freeze (R39.6.4b) and the build refusal (R39.6.4c) are
   therefore inert in this build. What remains unverified without a broadcast is
   stated in R39.6.4e's status note. From v0.4.0 an ARRR swap also requires the
-  counterparty to declare that it builds version 6 (R39.6.4f, specified 2026-11-04, not
-  implemented).
+  counterparty to declare that it builds version 6 (R39.6.4f, implemented 2026-11-05 in
+  PR #241).
 - **§39.6.5 Pirate1 withdrawals and R39.8.0bb Ironwood deposits (v0.4.0, specified
   2026-11-04, not implemented):** the wallet stays Sapling-only, receives Sapling
   outputs inside transactions that also carry Ironwood actions (R39.8.0bb), and can
@@ -1223,6 +1223,11 @@ is the shielded coin's use of the capability word of
 > the word itself (R39.5.14). The requirement is therefore enforced by this side's check
 > alone, in both roles. A reference taker sees a Reloaded maker's decline only as a
 > request that times out.
+>
+> **Status (2026-11-05).** Implemented (PR #241), with T39.6.4f (a)--(f) and one test on a
+> light-mode coin that sends, declines and accepts through the coin's own methods. The
+> three decline causes of (d) are told apart by a crate-internal classifier next to the
+> generic reader of Chapter 59 §59.4A, which leaves the reader's result unchanged.
 
 T39.6.4f *Counterparty version-6 capability.*
 - (a) The protocol information of an ARRR coin is its address-format bytes followed by the
