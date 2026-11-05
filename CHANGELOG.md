@@ -249,7 +249,7 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   - **Deadline.** The wait ends at its deadline even while requests fail. The same deadline fix
     applies to the version-2 swap's event search.
 
-  Detail: PR #XXX; CRD ch.17 R17.8.1–R17.8.4.
+  Detail: PR #248; CRD ch.17 R17.8.1–R17.8.4.
 
 #### Node names in logs and errors
 
