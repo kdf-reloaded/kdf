@@ -3,6 +3,8 @@ use super::electrum_pool::{ElectrumPoolOptions, PoolShared};
 use super::*;
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::header_time_only::read_window_times;
+#[cfg(not(target_arch = "wasm32"))]
+use common::dns_resolver::connect_tcp;
 use futures::channel::mpsc as futures_mpsc;
 use script::Script;
 use std::collections::{HashMap, HashSet};
@@ -1528,10 +1530,27 @@ pub(crate) async fn open_session(
     on_end: SessionEnded,
     on_header: HeaderNotified,
 ) -> Result<Session, String> {
+    open_session_with_tls(id, spec, event_handlers, idle_cutoff, on_end, on_header, None).await
+}
+
+/// [`open_session`], with the TLS client configuration of a validating session replaceable. Only the unit tests replace
+/// it (`Some`), to trust a certificate of their own; the node passes `None` and gets the bundled roots.
+#[cfg(not(target_arch = "wasm32"))]
+async fn open_session_with_tls(
+    id: u64,
+    spec: &ServerSpec,
+    event_handlers: Vec<RpcTransportEventHandlerShared>,
+    idle_cutoff: Duration,
+    on_end: SessionEnded,
+    on_header: HeaderNotified,
+    validating_tls_config: Option<Arc<ClientConfig>>,
+) -> Result<Session, String> {
     let addr = spec.addr.clone();
     let connect_f = match &spec.config {
         ElectrumConfig::TCP => {
-            Either::Left(TcpStream::connect((spec.host.as_str(), spec.port)).map_ok(ElectrumStream::Tcp))
+            // The name goes through the node's resolver (CRD ch.45 R45.6B.9 item 4); every address it resolves to is
+            // tried in turn. A failed lookup fails this establishment like a failed connect, inside the same bound.
+            Either::Left(connect_tcp(spec.host.as_str(), spec.port).map_ok(ElectrumStream::Tcp))
         },
         ElectrumConfig::SSL {
             dns_name,
@@ -1540,12 +1559,13 @@ pub(crate) async fn open_session(
             let tls_connector = if *skip_validation {
                 TlsConnector::from(UNSAFE_TLS_CONFIG.clone())
             } else {
-                TlsConnector::from(SAFE_TLS_CONFIG.clone())
+                TlsConnector::from(validating_tls_config.unwrap_or_else(|| SAFE_TLS_CONFIG.clone()))
             };
             let dns_name = dns_name.clone();
 
             Either::Right(
-                TcpStream::connect((spec.host.as_str(), spec.port)).and_then(move |stream| {
+                // `dns_name` (the server name of the TLS handshake) stays the host of the server, not an address.
+                connect_tcp(spec.host.as_str(), spec.port).and_then(move |stream| {
                     // Can use `unwrap` cause `dns_name` is pre-checked.
                     let dns = ServerName::try_from(dns_name).map_err(|e| fomat!([e])).unwrap();
                     tls_connector.connect(dns, stream).map_ok(ElectrumStream::Tls)
@@ -2140,6 +2160,114 @@ mod tls_tests {
         assert!(DnsName::try_from("localhost").is_ok());
         assert!(DnsName::try_from("127.0.0.1").is_err());
         assert!(DnsName::try_from("").is_err());
+    }
+
+    // ---- CRD ch.45 T45.19: the server names go through the node's resolver ----
+
+    use common::dns_resolver::{gauges, install_test_map};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn spec_of(url: String, protocol: ElectrumProtocol) -> ServerSpec {
+        server_spec(&ElectrumRpcRequest {
+            url,
+            protocol,
+            disable_cert_verification: false,
+            timeout_sec: None,
+        })
+        .expect("a server spec")
+    }
+
+    fn no_op_callbacks() -> (SessionEnded, HeaderNotified) { (Arc::new(|_| {}), Arc::new(|_| {})) }
+
+    #[test]
+    fn a_tcp_server_name_is_resolved_through_the_installed_resolver() {
+        let guard = install_test_map(&[("electrum.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)])]);
+        run(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let port = listener.local_addr().unwrap().port();
+            let accepted = tokio::spawn(async move { listener.accept().await.map(|(stream, _)| stream) });
+            let spec = spec_of(format!("electrum.test:{}", port), ElectrumProtocol::TCP);
+            let (on_end, on_header) = no_op_callbacks();
+            let session = open_session(1, &spec, vec![], Duration::from_secs(60), on_end, on_header)
+                .await
+                .expect("the session opens");
+            accepted
+                .await
+                .unwrap()
+                .expect("the loopback server accepted the connection");
+            drop(session);
+        });
+        // The gauges are process-wide and the tests that do not hold the test lock look up names beside this one: the
+        // name counts exactly, the gauge at least.
+        assert_eq!(guard.lookups_of("electrum.test"), 1);
+        assert!(gauges().unwrap().lookups >= 1);
+    }
+
+    #[test]
+    fn a_failed_lookup_is_a_recoverable_establishment_failure_that_names_no_server() {
+        // The test resolver knows the name and has no address for it.
+        let guard = install_test_map(&[("empty.test", &[])]);
+        run(async {
+            let spec = spec_of("empty.test:50001".to_owned(), ElectrumProtocol::TCP);
+            let (on_end, on_header) = no_op_callbacks();
+            let error = open_session(1, &spec, vec![], Duration::from_secs(60), on_end, on_header)
+                .await
+                .err()
+                .expect("the lookup fails");
+            assert!(!error.is_empty());
+            assert!(!error.contains("empty.test"), "the error names no server: {}", error);
+        });
+        assert_eq!(guard.failures_of("empty.test"), 1);
+        assert!(gauges().unwrap().failures >= 1);
+    }
+
+    #[test]
+    fn a_tls_server_is_checked_against_its_name_and_not_its_address() {
+        let guard = install_test_map(&[
+            ("electrum.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+            ("other.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+        ]);
+        run(async {
+            // Two servers, each with a certificate for `electrum.test`: the test server serves one connection at a time and
+            // keeps the first open, so the second dial needs a server of its own.
+            let server = spawn_server(&[&TLS12, &TLS13], &["electrum.test"]).await;
+            let second = spawn_server(&[&TLS12, &TLS13], &["electrum.test"]).await;
+            let (on_end, on_header) = no_op_callbacks();
+
+            // The certificate is for `electrum.test`: the session to that name opens.
+            let spec = spec_of(format!("electrum.test:{}", server.port), ElectrumProtocol::SSL);
+            let opened = open_session_with_tls(
+                1,
+                &spec,
+                vec![],
+                Duration::from_secs(60),
+                on_end.clone(),
+                on_header.clone(),
+                Some(trusting(&server.cert)),
+            )
+            .await;
+            assert!(opened.is_ok(), "{:?}", opened.err());
+
+            // `other.test` resolves to the same address, but the certificate is not for that name.
+            let spec = spec_of(format!("other.test:{}", second.port), ElectrumProtocol::SSL);
+            let refused = open_session_with_tls(
+                2,
+                &spec,
+                vec![],
+                Duration::from_secs(60),
+                on_end,
+                on_header,
+                Some(trusting(&second.cert)),
+            )
+            .await;
+            assert!(
+                refused.is_err(),
+                "the certificate check must use the name, not the address"
+            );
+        });
+        assert_eq!(guard.lookups_of("electrum.test"), 1);
+        assert_eq!(guard.lookups_of("other.test"), 1);
+        assert!(gauges().unwrap().lookups >= 2);
     }
 }
 
