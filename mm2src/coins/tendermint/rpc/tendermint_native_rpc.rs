@@ -341,8 +341,9 @@ impl TryFrom<HttpClientUrl> for http::Uri {
 
 mod sealed {
     use crate::node_url::{host_only, scrub_node_url};
+    use common::dns_resolver::SharedDnsResolve;
     use common::log::debug;
-    use common::wio::https_connector;
+    use common::wio::{http_connector, https_connector};
     use http::{header, HeaderValue, Uri};
     use http_body_util::{BodyExt, Full};
     use hyper::body::Bytes;
@@ -436,12 +437,18 @@ mod sealed {
     /// We offer several variations of `hyper`-based client.
     #[derive(Debug, Clone)]
     pub enum HttpClient {
-        Http(HyperClient<HttpConnector>),
-        Https(HyperClient<HttpsConnector<HttpConnector>>),
+        /// Both variants resolve names through the node's resolver (CRD ch.45 R45.6B.9 item 3).
+        Http(HyperClient<HttpConnector<SharedDnsResolve>>),
+        Https(HyperClient<HttpsConnector<HttpConnector<SharedDnsResolve>>>),
     }
 
     impl HttpClient {
-        pub fn new_http(uri: Uri) -> Self { Self::Http(HyperClient::new(uri, client_builder().build_http())) }
+        pub fn new_http(uri: Uri) -> Self {
+            let mut connector = http_connector();
+            // What `Builder::build_http` does for the default pool: TCP keep-alive at the pool's idle timeout (90 s).
+            connector.set_keepalive(Some(std::time::Duration::from_secs(90)));
+            Self::Http(HyperClient::new(uri, client_builder().build(connector)))
+        }
 
         pub fn new_https(uri: Uri) -> Self {
             Self::Https(HyperClient::new(uri, client_builder().build(https_connector())))

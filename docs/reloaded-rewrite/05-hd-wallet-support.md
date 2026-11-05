@@ -437,6 +437,93 @@ fixed assumption of hardware:
   partially discharged here for the extended-public-key source and
   fully for software UTXO accounts by Chapter 38 §38.8.)
 
+## 5.9B Key Usage of a Global-HD Login, per Surface (reference behavior)
+
+*(Passed the KDF Dirty Gate on 2026-11-04, measure 0.03. Spec Reader 2026-11-04, rows `v2.6.0-beta` and
+`v3.0.0-beta` of chapter 02 §2.15A, identical at both.)* A global-HD login
+holds two secp256k1 keys of interest: the **internal key** of R16, at
+`m/44'/141'/2147483647/0/0`, and, per activated coin, the **coin key** at the
+coin's configured `derivation_path` extended by the activation's
+`path_to_address` (default account 0, external chain, address 0). This
+section records which of the two the reference uses on each surface, and
+what it never uses: **no surface of the reference uses a hash of the
+mnemonic string under a global-HD login.** That key exists only in the
+legacy single-key (`Iguana`) mode, where it is the one key for everything.
+
+**R32.** *The trading identity is the internal key.* Under a global-HD login
+the reference signs maker orders and keep-alive messages, fills
+`sender_pubkey` in `TakerRequest`, `MakerReserved`, `TakerConnect` and
+`MakerConnected`, marks own orders (`is_mine`), exempts own orders from the
+stale sweep (chapter 59 R59.6.5), and derives a relay's own libp2p identity
+(chapter 28 R19) from the **internal key** -- the same key `get_public_key`
+and `get_public_key_hash` report. Privacy-coin orders keep their per-order
+key (chapter 16). The orderbook's `address` for such an order is derived
+from the same public key, so for a UTXO or EVM coin it is the internal key's
+address and not an address of the coin's HD wallet.
+
+**R33.** *The swap's persistent key is the internal key; the HTLC keys are
+the coin keys.* The legacy (v1) swap's persistent public key -- the
+`persistent_pubkey` of chapter 51 R59, the own-key field of the start event
+and of the swap-statistics record (chapter 51 R50A) -- is the **internal
+key**. Each per-coin HTLC public key (chapter 51 R63) is the coin's own: the
+**coin key** for a UTXO-family, QTUM, BCH, SLP (its platform's), QRC20, EVM
+or Tendermint coin; the per-swap derivation of chapter 39 R39.5.6 for a
+shielded coin, whose base key is the coin key; the padded ed25519 account key
+of chapter 51 R64 for Sia. Because the HTLC keys then differ from the
+persistent key, every HD-login negotiation emits shape 3 of chapter 51 R59
+(R60). Payments are sent from, and spends and refunds paid to, the address of
+the same coin key that signs them.
+
+**R34.** *No up-front key-mismatch refusal exists, and none is needed.* The
+reference has no check that a coin's key "matches" the negotiated one: the
+HTLC key it puts on the wire is always the key the coin will sign with, so
+the question does not arise. An implementation that puts any other key on
+the wire is not at parity and cannot be made so by adding a check; the
+remedy is R33.
+
+**R35.** *Per-surface table.* The following holds at both reference rows.
+
+| Surface (global-HD login) | Key or address | Notes |
+| --- | --- | --- |
+| Order signing, keep-alive, `sender_pubkey`, `is_mine`, stale-sweep exemption | internal key (R32) | per-order key for privacy coins |
+| Orderbook `address` of an own order | address of the internal key | shielded outcome for ZHTLC, Sia and Lightning (chapter 32 R-F6b) |
+| v1 `persistent_pubkey`, start-event own key, swap statistics | internal key (R33) | |
+| v1 HTLC public key: UTXO, QTUM, BCH, SLP, QRC20, EVM, Tendermint | coin key at `path_to_address` | the same key funds the payment, signs, and receives spend and refund |
+| v1 HTLC public key: shielded coin | per-swap key from the coin key (chapter 39 R39.5.6) | |
+| v1 HTLC public key: Sia | ed25519 key at the single fixed Sia path, padded (chapter 51 R64) | |
+| Legacy `enable` / `electrum`: UTXO, QTUM, BCH, QRC20, EVM | coin key at `path_to_address` (default 0 / external / 0); the coin's configured `derivation_path` is required | the coin is built and **registered**, then the response fails at its `address` member, because the single-address accessor is refused under HD; the coin stays enabled (chapter 55 R55.4.10) |
+| Legacy `enable`: Tendermint | not routed | mmrpc route only |
+| `enable_bch_with_tokens`, `enable_tendermint_with_assets` | coin key at `path_to_address` under the coin's `derivation_path` | Tendermint: a coin configuration without `derivation_path` fails activation |
+| `task::enable_sia`, legacy `enable` for Sia | ed25519 key at one fixed single-address path | one address; the reference offers no account or address RPCs for Sia |
+| `withdraw` (legacy) and `task::withdraw::init`: UTXO, QTUM, BCH | `from` **required**; the selected address's derived key signs; change returns to it | absent `from`: structured error, sender address not found (chapter 49 R49.4) |
+| `withdraw`: SLP token | platform coin key; `from` refused as unsupported | |
+| `withdraw`: Sia | the single address; `from` **ignored** | chapter 20 R-W1 |
+| `withdraw`: shielded coin | task route only; `from` and `fee` refused as unsupported | chapter 39 R39.5A.2 |
+| `withdraw`: EVM | activated address, or the `from` selector | chapter 49 R49.5 |
+| `withdraw`: Tendermint | activated key, or the key derived at the `from` selector's path | |
+| Legacy `my_balance`, legacy `get_enabled_coins`: UTXO and EVM | **fail** | both read the single-address accessor, refused under HD; `get_enabled_coins` fails for the whole list once one HD UTXO or EVM coin is enabled |
+| `my_tx_history` (v2): UTXO, QTUM, BCH, SLP | `target` must name an account or an address | account: every **known** external and internal address of that account; address: that one activated address; the `Iguana` target is refused under HD, and the two HD targets are refused under a single-key login |
+| `my_tx_history` (v2): Tendermint | the one account of the activated key; `target` ignored | |
+| `my_tx_history` (v2): EVM | not served by the v2 method | legacy history only, from the activated address |
+| Shielded history | own method, one account | chapter 39 §39.8 |
+
+> **Compatibility (this repository, 2026-11-04; not corpus-sourced; the
+> inventory is plan [`hd-key-unification`](../plans/hd-key-unification.md)).**
+> Reloaded departs from R32--R33 under a global-HD login in two ways that are
+> **not** parity, although an entry of `RELOADED_VS_GLEEC.md` described the
+> first as retained for parity (plan item H0 corrects it): (a) the v1 HTLC key falls back to a hash of the mnemonic string
+> for every coin that supplies no swap key -- every EVM swap, and every
+> UTXO-family coin activated through the legacy route -- and the persistent
+> key is that same hash; (b) order signing and `sender_pubkey` use that hash
+> while keep-alive, `is_mine` and the stale sweep use the internal key, so
+> no keep-alive is ever sent for the key the orders carry. The reference does
+> neither. Reloaded's task-route UTXO withdraw without `from` falls back to
+> the enabled address where the reference fails (chapter 49 R49.4 note);
+> Reloaded's legacy `enable` under HD binds the internal key where the
+> reference binds the coin key and then fails the response. Plan
+> `hd-key-unification` carries the fixes; R32--R35 record the reference
+> target for them.
+
 ## 5.10 Bound Hardware-Wallet Path
 
 **R25.** The substrate MUST retain the baseline hardware-wallet
@@ -676,6 +763,17 @@ the account xpub via the software derivation of R30; with a
 hardware context active, the same extraction is asserted to route
 to the device source (R25).
 
+**T13.** *HD trading identity (R32, R33).* Under a global-HD login, a
+posted maker order's public key, the keep-alive's public key, the
+`sender_pubkey` of a taker request and the v1 swap's persistent public key
+shall all equal the internal key of R16, and none shall equal a key derived
+by hashing the mnemonic string.
+
+**T14.** *HD HTLC key is the coin key (R33).* Under a global-HD login with a
+non-default `path_to_address`, a UTXO and an EVM v1 swap shall each put the
+coin key at that path on the wire as the HTLC public key, fund the payment
+from that key's address, and pay the spend or refund to it.
+
 ## 5.14 Deferred Work
 
 **D1.** Per-account hierarchical-deterministic activation
@@ -811,3 +909,30 @@ surface.
   concurrent session ownership, and non-mutating reachability
   probes governed by the underlying transport/device-call
   behaviour); no protected expression crossed.
+- *Scoped addition (2026-11-04) -- §5.9B (R32--R35), T13, T14 and the
+  compatibility note under R35.* **KDF Dirty Gate: PASS on 2026-11-04, measure 0.03.** Prompted by the
+  HD-gaps inventory of the 0.4.0 cycle. *Inputs:* the forbidden corpus at the
+  rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at
+  both, consulted **only** to establish which key a global-HD login uses on
+  each surface of the table: the trading identity and the orderbook address;
+  the v1 persistent key and each family's HTLC key; what the legacy
+  activation methods bind and how their response ends; the keys of the two
+  platform-with-tokens activations and of Sia; the sender rules of the
+  withdraw routes per family; the failure of the two legacy address-reading
+  methods; and the history method's `target` handling per family. What
+  crosses is behavior, public RPC names and dictated request members
+  (`path_to_address`, `from`, `target`, `derivation_path`); no private
+  identifier, function body, helper decomposition, error, log or comment text
+  was reproduced. The compatibility note rests on this repository's own code
+  and inventory; the T-items are Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.03, no findings. *Extent:* the HD key policy under a global-HD login and
+  its trading, swap, legacy-activation, withdraw and history surfaces, at
+  `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole batch, 30
+  source files and one dependency manifest were read at `v3.0.0-beta`, 29 of
+  them checked by hash against the tagged states of both rows. *Method:*
+  side-by-side reading of the compared regions against every added or changed line,
+  plus that hash check; the gate script was not run because the candidate has
+  no code blocks. *Measure:* 0.03, read against the standard that any
+  discretionary finding fails a file; dictated-interop and public-surface
+  tokens were excluded from the measured set.

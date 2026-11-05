@@ -1,6 +1,6 @@
-# Plan: ARRR native mode and the Ironwood pool (v0.4.0)
+# Plan: ARRR native mode and the Ironwood pool
 
-**Status:** planning — **Last reviewed:** 2026-10-28
+**Status:** planning — **Last reviewed:** 2026-11-04
 
 > **Context:** decided by the maintainer on 2026-10-28 (Decision X). Release 0.3.0-beta stays
 > Sapling-only. It builds version-6 transactions that carry a Sapling bundle and an empty Ironwood
@@ -8,8 +8,31 @@
 > (ch.39 R39.11.1a). This plan collects what has to exist before native mode and the Ironwood pool
 > can ship, targeted at v0.4.0. Nothing here is settled design yet. Each item needs its own analysis
 > pass, and the CRD rules come first.
+>
+> **Scope decided on 2026-11-04.** The ARRR wallet and ARRR swaps stay Sapling-only. v0.4.0 takes
+> two items from the Ironwood pool: receiving payments that come from Ironwood wallets, and paying
+> Pirate1 addresses (next section). Native mode, Ironwood scanning and spending, and Pirate1
+> receiving addresses move to a later release. Ironwood swaps are reconsidered only if the reference
+> gains that capability.
 
-## Scope
+## In v0.4.0
+
+Pirate Chain's own wallets hand out Pirate1 (Ironwood) addresses by default, and pay from
+Ironwood notes. A Sapling-only wallet therefore needs these two items to keep working next to them.
+
+| Work package | What it does | CRD | Code | Evidence | State |
+|---|---|---|---|---|---|
+| Ironwood deposits | A Sapling output inside a transaction that also carries Ironwood actions is found, counted (pending, then spendable) and spent like any other. | ch.39 R39.8.0bb, T39.8.0i | tests only: the compact conversion already drops the Ironwood actions | mainnet deposit from an Ironwood wallet to a lab wallet, then spent | specified |
+| Pirate1 withdrawals | `validateaddress` accepts a Pirate1 address; `withdraw` pays it from Sapling notes with one Ironwood output, a real Ironwood anchor, a fixed 0.0001 ARRR fee and Sapling change; the submitted transaction is recorded like any withdrawal. | ch.39 §39.6.5 (R39.6.5a–R39.6.5i, T39.6.5a–T39.6.5e) | address type and network prefix; a withdraw-only Ironwood output; anchor read; fee; broadcast record. No new dependency: the pinned builder already carries the Ironwood output and the prover | mainnet withdrawal from a lab wallet to an Ironwood wallet, seen by that wallet; first proving-key build timed | specified |
+
+- **First step:** T39.6.5a. Parse a mainnet transaction with Ironwood actions, and verify its proof
+  with this project's own verifying key. It shows that the pinned libraries match the chain before
+  any building code is written.
+- **Reference answer (gated 2026-11-04):** the reference refuses a Pirate1 address (ch.39 §39.5A).
+  Reloaded's acceptance is a local, additive divergence without a switch back (maintainer
+  decision, 2026-11-04), recorded in the compatibility row.
+
+## Scope (a later release, except the items above)
 
 ### 1. Native mode (a shielded coin served by its own full node)
 
@@ -39,8 +62,9 @@ What is missing:
 
 ### 2. The Ironwood pool
 
-Today the project builds no Ironwood bundle and does not scan for Ironwood-pool notes. To be
-specified from public Pirate Chain documentation and the dictated transaction format:
+Today the project builds no Ironwood bundle and does not scan for Ironwood-pool notes. v0.4.0
+adds only the withdrawal output and the deposits of the section above. The rest is to be specified
+from public Pirate Chain documentation and the dictated transaction format:
 
 - **Scanning:** detecting and decrypting notes this wallet receives in the Ironwood pool, and
   keeping their witnesses. Balance and history then include them.
@@ -53,9 +77,21 @@ specified from public Pirate Chain documentation and the dictated transaction fo
 
 ### 3. Pirate1 addresses
 
-The address form that goes with the new pool: parsing, validation, display, and use as a
-withdraw destination and as the wallet's own receiving address. To be specified from public
-Pirate Chain documentation.
+The address form that goes with the new pool. Parsing, validation and use as a withdraw
+destination are in v0.4.0 (ch.39 R39.6.5a–R39.6.5c). Use as the wallet's own receiving address,
+which needs Ironwood keys and scanning, stays for a later release.
+
+*Facts established 2026-11-04 (KDF Spec Reader; passed the KDF Dirty Gate on
+2026-11-04, measure 0.00; recorded in chapter 39 §39.5A and R39.5.14, whose
+provenance footer carries the clearance):* the reference answers an
+Ironwood (`pirate1…`) address with `is_valid: false` on `validateaddress` and
+with the `InvalidAddress` error on the task withdraw route, decoding under the
+Zcash main-network Sapling prefix, and has no legacy `withdraw` for a shielded
+coin at all; a shielded coin's per-coin protocol information at the reference
+is the transparent address-format descriptor, and a reference counterparty
+accepts a value that extends that descriptor with trailing bytes and matches as
+before, so a version-6 capability word must be enforced on the Reloaded side in
+both roles.
 
 ### 4. Counterparty version-6 capability (decided 2026-11-04)
 
@@ -81,7 +117,10 @@ apart from a Reloaded one. The maintainer decided:
 - Which reference behavior, if any, applies? The reference builds no version-6 transactions.
   Native-mode parity questions go to the Spec Reader before any CRD rule is written.
 - Do the light-mode backend (lightwalletd) and its compact format already carry Ironwood-pool
-  outputs, or does scanning that pool need a backend change?
+  outputs, or does scanning that pool need a backend change? *Answered 2026-11-04 from Pirate's
+  published lightwalletd source:* they do. Ironwood actions travel in `CompactTx` field 6, and the
+  Ironwood tree in `TreeState.ironwoodTree`. Scanning the pool needs an adapter on this side, not a
+  backend change.
 - Can native mode and light mode share one wallet database for the same seed, or must they stay
   separate?
 - Is the capability word of section 4 temporary, as the maintainer expects (Decision BO)? If
