@@ -51,6 +51,21 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
     `p2p.send_queue.drop_series.max` the longest current run of such minutes.
 
   Detail: PRs #204, #214; CRD ch.28 RQ1 items 6 and 8.
+- **A coin's protocol information can now carry a capability word that other nodes ignore.** The
+  protocol information a coin sends with its orders, requests and reservations may now end with a
+  small extra map that names capabilities the node has, so that a later coin can require a
+  capability of its counterparty before a swap starts. A node reads only the part before the word,
+  so the order book, the address format it reports and every coin that asks for nothing behave
+  exactly as before, and the word changes no order identity, no order book root and no
+  synchronization. A reader that cannot make sense of the word treats it as absent. No coin sends a
+  word yet, so nothing changes on the wire today. Detail: PR #235; CRD ch.59 R59.4A.1 to R59.4A.7.
+- **The log now says why a reservation or a request was turned down by a coin.** When a coin
+  declines the protocol information of a counterparty's reservation (on the taker side) or request
+  (on the maker side), the node logs one debug line naming both orders and the coin. When a taker's
+  pass over the reservations it received ends without a connect and a coin declined at least one of
+  them, one info line names the taker order and the number declined, so an operator whose order
+  times out can see why. The protocol information itself is never logged. Nothing else changes in
+  how orders are matched. Detail: PR #235; CRD ch.59 R59.4A.6.
 
 #### Start-up and configuration
 
@@ -76,6 +91,12 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   Detail: PR #213; CRD ch.57 R57.4.2, R57.5.2a.
 
 #### Order book and peer-to-peer network
+
+- **Messages from other nodes are checked for nesting depth and declared lengths before they are
+  read.** Every value a peer sends is checked first: arrays and maps may nest at most 64 levels, and every
+  declared length and count must fit in the bytes that follow. A value outside these bounds is
+  dropped as malformed and counted in the metric `p2p.payload.malformed`; the encoding is
+  unchanged and honest peers are not affected. Detail: PR #238; CRD ch.28 R16a.
 
 - **A node waits 5 minutes before it dials the same address again, and no longer dials a seed it
   is already connected to.** A node that holds fewer relays than it needs dials seeds and known
@@ -176,6 +197,26 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   Not measured: 256 cores or 80 updates a second over several hours, and a shielded swap. Detail: PR #225; plan
   [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md); CRD ch.45 R45.6A.8; issue #191.
 
+#### Trading under an HD login
+
+- **Under an HD login, a swap that cannot complete is now refused before it starts.** An HD login is
+  one with `enable_hd` set to `true`, as the Komodo DeFi wallet uses in HD mode. Under it, the swap of
+  an EVM coin or token, of a UTXO coin enabled through legacy `enable` or `electrum` (or activated with
+  `priv_key_policy: IguanaPrivKey`), and of a UTXO coin activated at a `path_to_address` other than
+  account 0, External, address 0, announces another key than the one the coin pays from, so the other
+  side rejects the dex fee or the payment. `setprice`, `update_maker_order`, `buy`, `sell` and
+  `trade_preimage` now refuse such a pair before any balance check, with `<coin> cannot be swapped
+  under this login: <reason>`; the reason says what to do (trade the coin under a login without
+  `enable_hd`, enable it through its HD activation, or activate it at the first address), and for a
+  coin at another address it names both derivation paths. `trade_preimage` answers the error type
+  `SwapKeyMismatch` with the coin and the reason. An order of your own that already exists and fails
+  the check, for example one restored after an upgrade, is cancelled when a request matches it, with
+  one warning in the log; no reservation is sent, and no swap is started. A swap that has already
+  started is never stopped. A UTXO coin such as RIN activated through `task::enable_utxo` at its first
+  address, BCH activated together with its tokens, and every login without `enable_hd` are not
+  affected. Set the `MM2.json` boolean `swap_key_check` to `false` to restore the earlier behavior,
+  in which such a swap is negotiated and then fails. Detail: PRs #231, #233; CRD ch.05 R36–R40.
+
 #### Name lookups
 
 - **One setting now chooses the DNS resolver for every name the node looks up.** The setting
@@ -252,6 +293,16 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
 
 - **The tests run before the next beta will be listed in
   [`docs/release-tests/0.4.0-beta.1.md`](docs/release-tests/0.4.0-beta.1.md).**
+- **ARRR is tested against real transactions from Pirate Chain's Ironwood wallets.** Two mainnet
+  ARRR transactions that use the Ironwood pool, one paying into it and one paying out of it into a
+  Sapling address, are read by every part of the node that reads whole transactions, and their
+  Ironwood proofs and signatures verify with the node's own keys. A payment from an Ironwood wallet
+  to the node's address is found, counted once, shown as pending while unconfirmed, and spent like
+  any other. Nothing changes in how the node behaves. Detail: PR #242; CRD ch.39 T39.6.5a, T39.8.0i.
+- **A unit test of the maker's update queue no longer fails at random.** The test of the 10-second
+  keep-alive wait counted the released and the pending orders while the queue kept releasing, so
+  one release between the two counts made it fail now and then. It now stops the queue before
+  counting. The node itself is unchanged. Detail: PR #244; CRD ch.32 T-MP6.
 
 ### Plans touched
 
@@ -263,8 +314,12 @@ file carries the detail. "New" means the plan was created in this cycle.
   they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
   address format, without noticing the marker (PR #232). The scope for this release is set: ARRR
   wallets and swaps stay Sapling-only, payments from Pirate Chain's Ironwood wallets are found and
-  spent like any other, and a withdrawal may pay a Pirate1 address (CRD PR #229; the code follows).
-  Native mode, the rest of the Ironwood pool and Pirate1 receiving addresses move to a later release.
+  spent like any other, and a withdrawal may pay a Pirate1 address (CRD PR #229). The deposits are
+  proven by tests (PR #242); the withdrawal code follows. Native mode, the rest of the Ironwood pool
+  and Pirate1 receiving addresses move to a later release.
+  The capability word that lets ARRR require a counterparty that builds version-6 transactions is
+  written (CRD PR #227), and its generic part, the word's writer and fail-closed reader and the
+  decline log lines, is implemented (PR #235); the ARRR rule that uses it is written (CRD PR #230).
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
@@ -282,9 +337,10 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
-  complete. The maintainer's answers on withdraw, the legacy methods, legacy activation and Sia are
-  recorded in it. `RELOADED_VS_GLEEC.md` now says what GLEEC KDF does under an HD login, and lists
-  the planned change to legacy `enable` and `electrum` with its switch (PR #245).
+  complete, which is now done (item H1: `swap_key_check`, PRs #231, #233). The maintainer's answers on
+  withdraw, the legacy methods, legacy activation and Sia are recorded in it. `RELOADED_VS_GLEEC.md`
+  now says what GLEEC KDF does under an HD login, and lists the planned change to legacy `enable` and
+  `electrum` with its switch (PR #245).
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
@@ -317,18 +373,20 @@ What does not work yet, or works only in part, in this release. Each item says w
 lives.
 
 - **Under an HD login, swaps of EVM coins, and of coins enabled through legacy `enable` or
-  `electrum`, do not complete.** An HD login is one with `enable_hd` set to `true`, as the Komodo
-  DeFi wallet uses in HD mode. For such a coin the swap announces a different key than the one the
-  coin pays from, so the other side rejects the dex fee or the payment. The dex fee is lost, and a
-  payment already sent comes back only at its refund time. The same holds for a UTXO coin activated
-  at an address other than its first one (`path_to_address`). A UTXO coin such as RIN activated
-  through `task::enable_utxo` at its first address trades normally. Until this is fixed, trade EVM
-  coins under a login without `enable_hd`. The proceeds of a swap of a coin enabled through legacy
-  `enable` under an HD login can land on an address the wallet does not show; logging in with the
-  same passphrase without `enable_hd` reaches them. A maker's own `orderbook` does not mark its
-  orders under an HD login as its own (`is_mine` is false); other nodes still see them. More in
-  [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PR #228; CRD ch.51, note under
-  R63.
+  `electrum`, are refused up front.** An HD login is one with `enable_hd` set to `true`, as the Komodo
+  DeFi wallet uses in HD mode. For such a coin the swap would announce a different key than the one
+  the coin pays from, so the other side would reject the dex fee or the payment. `setprice`, `buy`,
+  `sell`, `update_maker_order` and `trade_preimage` now refuse these coins with an error that says
+  what to do (see Changed). The same holds for a UTXO coin activated at an address other than its
+  first one (`path_to_address`). A UTXO coin such as RIN activated through `task::enable_utxo` at its
+  first address trades normally. Until a swap key is given to every coin, trade EVM coins under a
+  login without `enable_hd`. With `swap_key_check` set to `false` the swap is negotiated again, the
+  dex fee is lost, a payment already sent comes back only at its refund time, and the proceeds of a
+  swap of a coin enabled through legacy `enable` can land on an address the wallet does not show;
+  logging in with the same passphrase without `enable_hd` reaches them. A maker's own `orderbook`
+  does not mark its orders under an HD login as its own (`is_mine` is false); other nodes still see
+  them. More in [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PRs #228, #231,
+  #233; CRD ch.05 R36–R40; CRD ch.51, note under R63.
 - **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
   `get_enabled_coins` fails as a whole once such a coin is enabled.** Both report a single address,
   and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for

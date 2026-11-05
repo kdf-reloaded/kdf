@@ -21,8 +21,13 @@ impl From<(new_protocol::MakerOrderCreated, String)> for OrderbookItem {
     }
 }
 
+/// The address format a coin's protocol information (bytes from a peer) names. A value outside the decoding
+/// bounds of CRD ch.28 R16a, like one that does not decode, gives the standard format.
 pub fn addr_format_from_protocol_info(protocol_info: &[u8]) -> AddressFormat {
-    match rmp_serde::from_slice::<AddressFormat>(protocol_info) {
+    let Ok(end) = common::msgpack_bounds::check_peer_value(protocol_info, "addr_format_from_protocol_info") else {
+        return AddressFormat::Standard;
+    };
+    match rmp_serde::from_slice::<AddressFormat>(&protocol_info[..end]) {
         Ok(format) => format,
         Err(_) => AddressFormat::Standard,
     }
@@ -930,7 +935,11 @@ impl TryFromBytes for String {
 
 impl TryFromBytes for OrderbookP2PItem {
     fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, TryFromBytesError> {
-        rmp_serde::from_read(bytes.as_slice()).map_err(|e| ERRL!("{}", e).into())
+        // CRD ch.28 R16a: a value outside the decoding bounds is dropped as malformed.
+        if common::msgpack_bounds::check_peer_value(&bytes, "OrderbookP2PItem::try_from_bytes").is_err() {
+            return Err(ERRL!("value outside the decoding bounds").into());
+        }
+        rmp_serde::from_read_ref(bytes.as_slice()).map_err(|e| ERRL!("{}", e).into())
     }
 }
 

@@ -22,12 +22,14 @@ Ironwood notes. A Sapling-only wallet therefore needs these two items to keep wo
 
 | Work package | What it does | CRD | Code | Evidence | State |
 |---|---|---|---|---|---|
-| Ironwood deposits | A Sapling output inside a transaction that also carries Ironwood actions is found, counted (pending, then spendable) and spent like any other. | ch.39 R39.8.0bb, T39.8.0i | tests only: the compact conversion already drops the Ironwood actions | mainnet deposit from an Ironwood wallet to a lab wallet, then spent | specified |
+| Ironwood deposits | A Sapling output inside a transaction that also carries Ironwood actions is found, counted (pending, then spendable) and spent like any other. | ch.39 R39.8.0bb, T39.8.0i | tests only: the compact conversion already drops the Ironwood actions | mainnet deposit from an Ironwood wallet to a lab wallet, then spent | tests in PR #242; live deposit pending |
 | Pirate1 withdrawals | `validateaddress` accepts a Pirate1 address; `withdraw` pays it from Sapling notes with one Ironwood output, a real Ironwood anchor, a fixed 0.0001 ARRR fee and Sapling change; the submitted transaction is recorded like any withdrawal. | ch.39 §39.6.5 (R39.6.5a–R39.6.5i, T39.6.5a–T39.6.5e) | address type and network prefix; a withdraw-only Ironwood output; anchor read; fee; broadcast record. No new dependency: the pinned builder already carries the Ironwood output and the prover | mainnet withdrawal from a lab wallet to an Ironwood wallet, seen by that wallet; first proving-key build timed | specified |
 
 - **First step:** T39.6.5a. Parse a mainnet transaction with Ironwood actions, and verify its proof
   with this project's own verifying key. It shows that the pinned libraries match the chain before
   any building code is written.
+  *Done 2026-11-05 (PR #242):* the Ironwood bundles of two mainnet transactions verify with
+  this project's own verifying key.
 - **Reference answer (gated 2026-11-04):** the reference refuses a Pirate1 address (ch.39 §39.5A).
   Reloaded's acceptance is a local, additive divergence without a switch back (maintainer
   decision, 2026-11-04), recorded in the compatibility row.
@@ -108,7 +110,9 @@ apart from a Reloaded one. The maintainer decided:
 
 | Part | What | CRD | State |
 |---|---|---|---|
-| Capability word | A generic word after a coin's first value in its protocol information, sent only by coins that opt in. The reader fails closed. The order-match layer carries the bytes unchanged and logs declines. | ch.59 §59.4A (R59.4A.1–R59.4A.7, T14) | CRD PR #227 |
+| Capability word | A generic word after a coin's first value in its protocol information, sent only by coins that opt in. The reader fails closed. The order-match layer carries the bytes unchanged and logs declines. | ch.59 §59.4A (R59.4A.1–R59.4A.7, T14) | CRD PR #227, code PR #235 (generic part) |
+| ARRR requirement | ARRR sends `tx_v6` always. Inside the Ironwood window it declines a counterparty without it, on the taker and the maker path, with the per-coin switch `require_v6_counterparty` (default on). One debug line per decline, and at most one warning per coin per hour with the count. | ch.39 R39.6.4f, T39.6.4f | CRD PR #230 |
+| ARRR predicate code | The shielded coin's protocol information and acceptance check, the switch, and the logs. Stacked on the capability-word code. | — | code PR #241 |
 
 ## Open questions
 
