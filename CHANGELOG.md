@@ -260,7 +260,10 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
   Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
   they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
-  address format, without noticing the marker (PR #232).
+  address format, without noticing the marker (PR #232). The scope for this release is set: ARRR
+  wallets and swaps stay Sapling-only, payments from Pirate Chain's Ironwood wallets are found and
+  spent like any other, and a withdrawal may pay a Pirate1 address (CRD PR #229; the code follows).
+  Native mode, the rest of the Ironwood pool and Pirate1 receiving addresses move to a later release.
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
