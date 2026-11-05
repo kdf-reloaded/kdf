@@ -257,11 +257,13 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
-- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: the
-  scope for this release is set. ARRR wallets and swaps stay Sapling-only. Payments from Pirate
-  Chain's Ironwood wallets are found and spent like any other, and a withdrawal may pay a Pirate1
-  address (CRD PR #229; the code follows). Native mode, the rest of the Ironwood pool and Pirate1
-  receiving addresses move to a later release.
+- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
+  Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
+  they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
+  address format, without noticing the marker (PR #232). The scope for this release is set: ARRR
+  wallets and swaps stay Sapling-only, payments from Pirate Chain's Ironwood wallets are found and
+  spent like any other, and a withdrawal may pay a Pirate1 address (CRD PR #229; the code follows).
+  Native mode, the rest of the Ironwood pool and Pirate1 receiving addresses move to a later release.
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
@@ -294,8 +296,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   new rows for later.
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
-  recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226); the SLP
-  token withdrawal waits for the reference's answer.
+  recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226). On an SLP
+  token withdrawal they charge it in proportion too; that is now recorded, and KDF Reloaded will
+  follow there as well (PR #232).
 - [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — new step H6: the
   median time of a coin whose headers carry a fixed-length trailer (Bitcoin Atom) is read from each
   header's own bytes; the 1.6 list form of header requests and explicit `header_layout` entries for
@@ -323,10 +326,11 @@ lives.
   Detail: PR #181; CRD ch.38 R38.5B.8, D38.5B.2, D38.5B.4.
 - **A fixed fee on an SLP token withdrawal is still charged for every started kilobyte.** When a
   `withdraw` of an SLP token on BCH gives its fee as `{"type":"UtxoFixed","amount":…}`, KDF Reloaded
-  charges that amount for every started kilobyte of the transaction; what Komodo and GLEEC KDF
-  charge there is not yet established. UTXO coins themselves now charge it in proportion to the
-  size, as Komodo and GLEEC KDF do (see Changed). More in the
-  [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PR #226; CRD ch.38 R38.6.6l.
+  charges that amount for every started kilobyte of the transaction. Komodo and GLEEC KDF charge it
+  in proportion to the size there too, and KDF Reloaded will do the same (planned). UTXO coins
+  themselves now charge it in proportion to the size, as Komodo and GLEEC KDF do (see Changed). More
+  in the [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PRs #226, #232; CRD ch.38
+  R38.6.6l, R38.6.6m.
 - **The swap watcher does not work yet.** A watcher is another node that finishes a swap for you
   when you are offline. No swap hands its data to a watcher yet, for any coin (issue #56), so keep
   your node running until your swaps have finished. Bitcoin-family coins (UTXO coins such as RIN,

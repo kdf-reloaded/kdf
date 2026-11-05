@@ -81,6 +81,18 @@ The address form that goes with the new pool. Parsing, validation and use as a w
 destination are in v0.4.0 (ch.39 R39.6.5a–R39.6.5c). Use as the wallet's own receiving address,
 which needs Ironwood keys and scanning, stays for a later release.
 
+*Facts established 2026-11-04 (KDF Spec Reader; passed the KDF Dirty Gate on
+2026-11-04, measure 0.00; recorded in chapter 39 §39.5A and R39.5.14, whose
+provenance footer carries the clearance):* the reference answers an
+Ironwood (`pirate1…`) address with `is_valid: false` on `validateaddress` and
+with the `InvalidAddress` error on the task withdraw route, decoding under the
+Zcash main-network Sapling prefix, and has no legacy `withdraw` for a shielded
+coin at all; a shielded coin's per-coin protocol information at the reference
+is the transparent address-format descriptor, and a reference counterparty
+accepts a value that extends that descriptor with trailing bytes and matches as
+before, so a version-6 capability word must be enforced on the Reloaded side in
+both roles.
+
 ## Open questions
 
 - Which reference behavior, if any, applies? The reference builds no version-6 transactions.

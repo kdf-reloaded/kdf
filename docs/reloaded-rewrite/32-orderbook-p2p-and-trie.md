@@ -410,6 +410,21 @@ two opaque byte strings — one for the base coin, one for the rel
 coin. This is part of the sync-response wire contract
 (R29/R31).
 
+> *Decoder tolerance (reference fact; passed the KDF Dirty Gate on 2026-11-04,
+> measure 0.01; Spec Reader 2026-11-04).* At the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A the reference encodes every gossip message structure -- the order
+> and match messages and the signed envelope of §28.7 alike -- as a
+> positional MessagePack array without field names, and its decoder reads
+> only the fields a structure declares: a **trailing** element appended to a
+> top-level message array, and bytes that follow a complete message, are
+> ignored rather than rejected. That property is what allowed
+> `base_protocol_info`, `rel_protocol_info` and the swap-version member to be
+> appended to messages that older peers still decode. It does not extend to
+> the untagged negotiation payloads of chapter 51 R59, whose three shapes are
+> told apart by field count. The per-coin protocol-information bytes
+> themselves, and how a counterparty's value is judged, are bound in
+> chapter 59 R59.4.7.
+
 **R-W4.** The subsystem MUST support, behaviourally:
 
 - projecting an in-memory record down to the wire record;
@@ -4183,3 +4198,24 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   it rests on, that no path legitimately revives a cancelled identifier,
   is §32.9C.1 R-GH11, which passed the KDF Dirty Gate. No reference
   implementation was consulted, and it needs no Dirty Gate pass.
+- *Scoped addition (2026-11-04) -- the decoder-tolerance note under R-W2a.*
+  **KDF Dirty Gate: PASS on 2026-11-04, measure 0.01.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish the positional encoding of the gossip
+  message structures and the decoder's tolerance of trailing elements and
+  trailing bytes -- the latter confirmed as a property of the pinned public
+  MessagePack library release in that library's published source -- and that
+  the negotiation payload's untagged shapes do not share it. Behavior and
+  dictated wire members only; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.01, no findings. *Extent:* the encoding and decoding of the order-matching
+  gossip messages and their signed envelope, at `v3.0.0-beta` with
+  `v2.6.0-beta` as cross-check; for the whole batch, 30 source files and one
+  dependency manifest were read at `v3.0.0-beta`, 29 of them checked by hash
+  against the tagged states of both rows. *Method:* side-by-side reading of
+  the compared regions against every added or changed line, plus that hash
+  check; the gate script was not run because the candidate has no code blocks.
+  *Measure:* 0.01, read against the standard that any discretionary finding
+  fails a file; dictated-interop and public-surface tokens were excluded from
+  the measured set.
