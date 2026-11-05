@@ -137,15 +137,19 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
         self
     }
 
+    /// Adds inputs that the transaction must spend. CRD ch.38 R38.6.6n: their value is part of the input total
+    /// for every purpose (sufficiency, change, `spent_by_me`, the fee reported), so it returns to the sender as
+    /// change under the ordinary dust rule instead of going to the miner.
     pub fn add_required_inputs(mut self, inputs: impl IntoIterator<Item = UnspentInfo>) -> Self {
-        self.tx
-            .inputs
-            .extend(inputs.into_iter().map(|input| UnsignedTransactionInput {
+        for input in inputs {
+            self.sum_inputs += input.value;
+            self.tx.inputs.push(UnsignedTransactionInput {
                 previous_output: input.outpoint,
                 sequence: SEQUENCE_FINAL,
                 amount: input.value,
                 witness: Vec::new(),
-            }));
+            });
+        }
         self
     }
 
@@ -196,7 +200,7 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
                 if self.sum_inputs >= outputs_plus_fee {
                     self.change = self.sum_inputs - outputs_plus_fee;
                     let mut final_size = v_size;
-                    if self.change > self.dust() {
+                    if Self::is_change_output(self.change, self.dust()) {
                         final_size += P2PKH_OUTPUT_LEN;
                         // there will be change output
                         let change_increase = Self::change_output_fee_increase(actual_tx_fee, v_size);
@@ -219,7 +223,7 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
                 if self.sum_inputs >= self.sum_outputs_value {
                     self.change = self.sum_inputs - self.sum_outputs_value;
                     let mut final_size = v_size;
-                    if self.change > self.dust() {
+                    if Self::is_change_output(self.change, self.dust()) {
                         final_size += P2PKH_OUTPUT_LEN;
                         self.tx_fee += Self::change_output_fee_increase(actual_tx_fee, v_size);
                     }
@@ -252,6 +256,10 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
             },
         }
     }
+
+    /// CRD ch.38 R38.6.6n: a change output is added whenever the change is not below the dust amount (and is
+    /// not nothing); only a change strictly below dust is left to the miner.
+    fn is_change_output(change: u64, dust: u64) -> bool { change > 0 && change >= dust }
 
     fn dust(&self) -> u64 {
         match self.dust {
@@ -315,17 +323,24 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
             None
         };
 
-        for utxo in self.available_inputs.clone() {
-            self.tx.inputs.push(UnsignedTransactionInput {
-                previous_output: utxo.outpoint,
-                sequence: SEQUENCE_FINAL,
-                amount: utxo.value,
-                witness: vec![],
-            });
-            self.sum_inputs += utxo.value;
+        // CRD ch.38 R38.6.6n: the required inputs are already counted in `sum_inputs`; they may cover the
+        // outputs and the fee on their own, and the fee is computed for them before any available input is added.
+        let required_inputs_complete =
+            !self.tx.inputs.is_empty() && self.update_fee_and_check_completeness(&from.addr_format, &actual_tx_fee);
 
-            if self.update_fee_and_check_completeness(&from.addr_format, &actual_tx_fee) {
-                break;
+        if !required_inputs_complete {
+            for utxo in self.available_inputs.clone() {
+                self.tx.inputs.push(UnsignedTransactionInput {
+                    previous_output: utxo.outpoint,
+                    sequence: SEQUENCE_FINAL,
+                    amount: utxo.value,
+                    witness: vec![],
+                });
+                self.sum_inputs += utxo.value;
+
+                if self.update_fee_and_check_completeness(&from.addr_format, &actual_tx_fee) {
+                    break;
+                }
             }
         }
 
@@ -354,7 +369,7 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
         );
 
         let change = self.sum_inputs - self.sum_outputs_value;
-        let unused_change = if change > dust {
+        let unused_change = if Self::is_change_output(change, dust) {
             self.tx.outputs.push({
                 TransactionOutput {
                     value: change,

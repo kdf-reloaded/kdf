@@ -264,6 +264,17 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   (trust-dns 0.22, with an accepted `idna` advisory) are no longer built. The dependency policy
   now bans them. Detail: PRs #216, #219; CRD ch.45 R45.6B.11.
 
+#### Withdrawals
+
+- **A withdrawal refused as unsupported now answers `error_type` `UnsupportedError`, as on Komodo
+  and GLEEC KDF.** Under a Trezor key, an EVM withdrawal through the direct `withdraw` method and a
+  TRON withdrawal answered `UnsupportedUnderTrezor`. In the browser build, a TRON withdrawal under
+  MetaMask answered `UnsupportedUnderMetamask`. Both now answer `UnsupportedError`, still with HTTP
+  400 and the same message text in `error_data`. A `withdraw` of an SLP token that names `from` is
+  now refused the same way; before, `from` was ignored and the token was sent from the BCH
+  wallet's own address. *Upgrade note:* a client that checks `error_type` for either old value
+  must check `UnsupportedError` instead. Detail: PR #236; CRD ch.49 R49.27, R49.27a.
+
 ### Fixed
 
 #### Node names in logs and errors
@@ -301,6 +312,16 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   headers one by one, checks the times for plausibility and fails with an error naming the check instead
   of guessing. Such a coin needs no new entry in the coins file (header sync and SPV proofs for it are
   not covered). Detail: PR #220, PR #221; CRD ch.37 R37.5.10.
+- **SLP token withdrawals and HTLC spends no longer give the BCH of their token inputs to the miner,
+  and the fee they report is complete.** Each SLP token input carries a little BCH, normally 546
+  satoshi, and so does the HTLC output an SLP swap spends or refunds. KDF Reloaded spent these
+  inputs without counting their BCH, so it went to the miner on top of the fee. Token sends and
+  swap payments did the same, and the fee shown for an SLP withdrawal left it out. Now that BCH
+  comes back in the change, and the fee shown is everything the transaction leaves to the miner, as
+  on Komodo and GLEEC KDF. Two smaller cases changed with it. On every UTXO coin, change exactly
+  equal to the coin's dust amount now comes back as a change output instead of going to the miner.
+  The fee shown for an SLP withdrawal now also includes change too small to keep, as it already did
+  for UTXO coins. Detail: PR #236; CRD ch.38 R38.6.6n.
 
 ### Tests
 
@@ -465,6 +486,9 @@ lives.
 - **Radiant (RXD) is only partly usable.** RXD activates and signs, but swaps with it are not
   established. More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
+- **SLP tokens on BCH are untested on mainnet.** The shared coins file lists BCH and tBCH as plain
+  UTXO coins and carries no SLP token entries, so SLP tokens cannot be enabled with it. The SLP
+  changes of this release are covered by unit tests only. Detail: PR #236.
 - **TRON (TRX, TRC20) and Solana (SOL, SPL) cannot be activated in this beta.** Their support is not
   finished. TRON activation answers "TRON support is not available in this build";
   `enable_solana_with_tokens` and `enable_spl` answer "Solana support is not available in this

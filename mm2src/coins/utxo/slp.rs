@@ -763,7 +763,7 @@ mod slp_tests {
     use super::*;
     use crate::utxo::GetUtxoListOps;
     use crate::{utxo::bch::tbch_coin_for_test, TransactionErr};
-    use common::block_on;
+    use common::{block_on, HttpStatusCode};
     use std::mem::discriminant;
 
     // https://slp.dev/specs/slp-token-type-1/#examples
@@ -1111,14 +1111,27 @@ mod slp_tests {
         /// The worst-case size the fee is computed for: the signed transaction with every `scriptSig` at the
         /// 107 bytes that `tx_size_in_v_bytes` assumes for a P2PKH input.
         worst_case_size: u64,
+        /// The sum of the platform values of every input the fixture offered and the transaction spent.
+        inputs_sum: u64,
+        signed: UtxoTx,
         details: TransactionDetails,
     }
 
-    /// Withdraws 0.1 of a mocked SLP token (one SLP unspent of `FEE_TEST_SLP_AMOUNT` base units on a 1,000 base
-    /// unit platform output, plus the plain BCH unspents of `bch_inputs` in the given order) to a fixed
-    /// recipient with the fee descriptor `fee`. The BCH backend is mocked, nothing touches the network, and the
-    /// token has no `bchd` URL so that the SLP validation of the inputs has nothing to ask.
-    fn slp_withdraw_with_fee(fee: WithdrawFee, bch_inputs: &[u64]) -> Result<SlpFeeWithdraw, MmError<WithdrawError>> {
+    /// Withdraws a mocked SLP token to a fixed recipient with the fee descriptor `fee`, and with a `from`
+    /// selector if one is given. The wallet holds the SLP unspents `slp_unspents` (each `(token amount in base
+    /// units, platform value in base units)`, all outputs of one transaction) plus the plain BCH unspents of
+    /// `bch_inputs` in the given order. The withdrawn amount is the sum of the token amounts, so that no SLP
+    /// change output is needed. The BCH backend is mocked, nothing touches the network, and the token has no
+    /// `bchd` URL so that the SLP validation of the inputs has nothing to ask.
+    ///
+    /// The helper asserts the invariant of CRD ch.38 R38.6.6n: the `fee_details` amount equals the platform
+    /// value of the inputs minus the value of the outputs of the signed transaction.
+    fn slp_withdraw_with_unspents(
+        fee: WithdrawFee,
+        slp_unspents: &[(u64, u64)],
+        bch_inputs: &[u64],
+        from: Option<crate::WithdrawFrom>,
+    ) -> Result<SlpFeeWithdraw, MmError<WithdrawError>> {
         use crate::utxo::rpc_clients::UnspentInfo;
         use crate::utxo::VerboseTransactionFrom;
         use chain::TransactionInput;
@@ -1128,8 +1141,11 @@ mod slp_tests {
         let bch = crate::utxo::bch::bch_coin_without_network_for_test();
         let fusd = fee_test_token(bch.clone());
         let token_id = *fusd.token_id();
+        let token_amounts: Vec<u64> = slp_unspents.iter().map(|(amount, _)| *amount).collect();
+        let slp_total: u64 = token_amounts.iter().sum();
 
-        // The transaction that created the SLP unspent: output 0 is the SLP SEND script, output 1 the token.
+        // The transaction that created the SLP unspents: output 0 is the SLP SEND script, output `i + 1` the
+        // token unspent `i`.
         let mut slp_tx = UtxoTx::default();
         slp_tx.inputs.push(TransactionInput {
             previous_output: OutPoint {
@@ -1140,15 +1156,14 @@ mod slp_tests {
             sequence: 0,
             script_witness: vec![],
         });
-        slp_tx.outputs.push(slp_send_output(&token_id, &[FEE_TEST_SLP_AMOUNT]));
-        slp_tx.outputs.push(TransactionOutput {
-            value: 1000,
-            script_pubkey: vec![0x6a].into(),
-        });
-        let slp_outpoint = OutPoint {
-            hash: slp_tx.hash(),
-            index: 1,
-        };
+        slp_tx.outputs.push(slp_send_output(&token_id, &token_amounts));
+        slp_tx
+            .outputs
+            .extend(slp_unspents.iter().map(|(_, value)| TransactionOutput {
+                value: *value,
+                script_pubkey: vec![0x6a].into(),
+            }));
+        let slp_tx_hash_h256 = slp_tx.hash();
         let verbose = rpc::v1::types::Transaction {
             hex: serialize(&slp_tx).take().into(),
             txid: Default::default(),
@@ -1168,11 +1183,21 @@ mod slp_tests {
         };
         let slp_tx_hash: H256Json = slp_tx.hash().reversed().into();
 
-        let mut unspents = vec![UnspentInfo {
-            outpoint: slp_outpoint,
-            value: 1000,
-            height: Some(1),
-        }];
+        let slp_outpoints: Vec<OutPoint> = (0..slp_unspents.len())
+            .map(|i| OutPoint {
+                hash: slp_tx_hash_h256,
+                index: i as u32 + 1,
+            })
+            .collect();
+        let mut unspents: Vec<UnspentInfo> = slp_outpoints
+            .iter()
+            .zip(slp_unspents)
+            .map(|(outpoint, (_, value))| UnspentInfo {
+                outpoint: *outpoint,
+                value: *value,
+                height: Some(1),
+            })
+            .collect();
         unspents.extend(bch_inputs.iter().enumerate().map(|(i, value)| UnspentInfo {
             // Output 0 of a transaction is a plain BCH unspent; no verbose transaction is read for it.
             outpoint: OutPoint {
@@ -1195,8 +1220,8 @@ mod slp_tests {
         });
 
         let req = WithdrawRequest {
-            amount: "0.1".parse().unwrap(),
-            from: None,
+            amount: big_decimal_from_sat_unsigned(slp_total, fusd.decimals()),
+            from,
             to: FEE_TEST_RECIPIENT.to_string(),
             coin: "FUSD".into(),
             max: false,
@@ -1205,33 +1230,45 @@ mod slp_tests {
         let details = fusd.withdraw(req).wait()?;
 
         let signed: UtxoTx = deserialize(details.tx_hex.as_slice()).unwrap();
-        // The required SLP input and every plain input the builder picked.
-        assert_eq!(signed.inputs[0].previous_output, slp_outpoint);
-        assert_eq!(signed.inputs.len(), 1 + bch_inputs.len());
-        // The SLP OP_RETURN, the token output to the recipient and the BCH change output.
-        assert_eq!(signed.outputs.len(), 3);
-        let inputs_sum = 1000 + bch_inputs.iter().sum::<u64>();
+        // Every required SLP input comes first, in order, then every plain input the builder picked.
+        assert_eq!(signed.inputs.len(), slp_unspents.len() + bch_inputs.len());
+        for (input, outpoint) in signed.inputs.iter().zip(&slp_outpoints) {
+            assert_eq!(input.previous_output, *outpoint);
+        }
+        let inputs_sum = slp_unspents.iter().map(|(_, value)| value).sum::<u64>() + bch_inputs.iter().sum::<u64>();
         let outputs_sum: u64 = signed.outputs.iter().map(|output| output.value).sum();
         let slack: u64 = signed
             .inputs
             .iter()
             .map(|input| 107 - input.script_sig.len() as u64)
             .sum();
-        // `fee_details` carries the fee the builder charged. The builder does not count the value of the required
-        // SLP input among its inputs (it is not available for the outputs), so the plain difference of inputs and
-        // outputs of the signed transaction is that fee plus the platform value of the SLP input.
+        // `fee_details` carries the fee the builder charged plus the sub-dust remainder it left to the miner; the
+        // value of the required SLP inputs is part of the input total and returns as change (R38.6.6n), so the
+        // reported amount is the plain difference of the inputs and the outputs of the signed transaction.
         let fee = match details.fee_details.clone() {
             Some(TxFeeDetails::Slp(fee_details)) => {
                 sat_from_big_decimal(&fee_details.amount, FEE_TEST_PLATFORM_DECIMALS).unwrap()
             },
             other => panic!("Unexpected fee details {:?}", other),
         };
-        assert_eq!(inputs_sum - outputs_sum, fee + 1000);
+        assert_eq!(inputs_sum - outputs_sum, fee);
         Ok(SlpFeeWithdraw {
             fee,
             worst_case_size: details.tx_hex.len() as u64 + slack,
+            inputs_sum,
+            signed,
             details,
         })
+    }
+
+    /// Withdraws 0.1 of a mocked SLP token (one SLP unspent of `FEE_TEST_SLP_AMOUNT` base units on a 1,000 base
+    /// unit platform output, plus the plain BCH unspents of `bch_inputs` in the given order) to a fixed
+    /// recipient with the fee descriptor `fee`; see [`slp_withdraw_with_unspents`].
+    fn slp_withdraw_with_fee(fee: WithdrawFee, bch_inputs: &[u64]) -> Result<SlpFeeWithdraw, MmError<WithdrawError>> {
+        let withdraw = slp_withdraw_with_unspents(fee, &[(FEE_TEST_SLP_AMOUNT, 1000)], bch_inputs, None)?;
+        // The SLP OP_RETURN, the token output to the recipient and the BCH change output.
+        assert_eq!(withdraw.signed.outputs.len(), 3);
+        Ok(withdraw)
     }
 
     /// The two transaction shapes of T38.6.6m: `(plain BCH inputs, worst-case size in bytes)`. The worst-case
@@ -1337,6 +1374,88 @@ mod slp_tests {
             Err(err) => err,
         };
         assert!(matches!(err.into_inner(), WithdrawError::InvalidFeePolicy(_)));
+    }
+
+    /// The reference arithmetic of R38.6.6l item 2 with the change-output split of its clean-side note, for a
+    /// transaction of worst-case size `size` that carries a change output.
+    fn fee_test_fee_with_change(size: u64) -> u64 {
+        FEE_TEST_RATE_SAT * (size - 34) / 1000 + FEE_TEST_RATE_SAT * 34 / 1000
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_slp_withdraw_required_inputs_count_toward_change_and_fee() {
+        // T38.6.6n: two token inputs of 546 base units each. Their 1,092 base units are part of the input total,
+        // so they return in the BCH change output, and `fee_details.amount` is the inputs minus the outputs
+        // (asserted by the helper).
+        const PLAIN_INPUT: u64 = 100_000_000;
+        let withdraw = slp_withdraw_with_unspents(
+            WithdrawFee::UtxoFixed {
+                amount: FEE_TEST_RATE.parse().unwrap(),
+            },
+            &[(500, 546), (500, 546)],
+            &[PLAIN_INPUT],
+            None,
+        )
+        .unwrap();
+        // The SLP OP_RETURN, the token output to the recipient (the platform coin's dust) and the BCH change.
+        assert_eq!(withdraw.signed.outputs.len(), 3);
+        assert_eq!(withdraw.signed.outputs[1].value, 1000);
+        let change = withdraw.signed.outputs[2].value;
+        assert_eq!(withdraw.inputs_sum, PLAIN_INPUT + 1092);
+        // The change includes the 1,092 base units of the two token inputs, less the 1,000 of the token output.
+        assert_eq!(change, PLAIN_INPUT + 1092 - 1000 - withdraw.fee);
+        // The fee is the reference arithmetic of the size, not affected by the required inputs' value.
+        assert_eq!(withdraw.fee, fee_test_fee_with_change(withdraw.worst_case_size));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_slp_withdraw_change_below_dust_is_reported_with_the_fee() {
+        // T38.6.6n: the change falls below dust (1,000 on the fixture's BCH), so it is left to the miner and
+        // reported with the fee. The token input carries 1,000 and the plain input 600; the token output takes
+        // 1,000, so the whole 600 is the fee and the remainder.
+        let withdraw = slp_withdraw_with_unspents(
+            WithdrawFee::UtxoFixed {
+                amount: FEE_TEST_RATE.parse().unwrap(),
+            },
+            &[(FEE_TEST_SLP_AMOUNT, 1000)],
+            &[600],
+            None,
+        )
+        .unwrap();
+        // The SLP OP_RETURN and the token output; no change output.
+        assert_eq!(withdraw.signed.outputs.len(), 2);
+        let computed_fee = FEE_TEST_RATE_SAT * withdraw.worst_case_size / 1000;
+        let remainder = 600 - computed_fee;
+        assert!(remainder > 0 && remainder < 1000);
+        assert_eq!(withdraw.fee, computed_fee + remainder);
+        assert_eq!(withdraw.fee, withdraw.inputs_sum - 1000);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_slp_withdraw_with_from_is_unsupported_error() {
+        // T49.27a (SLP row): `from` on an SLP token withdraw answers the shared unsupported-operation arm, HTTP
+        // 400, `error_type` "UnsupportedError" and a string `error_data`. Discriminant and JSON type only.
+        let err = match slp_withdraw_with_unspents(
+            WithdrawFee::UtxoFixed {
+                amount: FEE_TEST_RATE.parse().unwrap(),
+            },
+            &[(FEE_TEST_SLP_AMOUNT, 1000)],
+            &[100_000_000],
+            Some(crate::WithdrawFrom::DerivationPath {
+                derivation_path: "m/44'/145'/0'/0/0".to_owned(),
+            }),
+        ) {
+            Ok(_) => panic!("`from` on an SLP withdraw must be refused"),
+            Err(err) => err.into_inner(),
+        };
+        assert!(matches!(err, WithdrawError::UnsupportedError(_)));
+        assert_eq!(err.status_code(), http::StatusCode::BAD_REQUEST);
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["error_type"], "UnsupportedError");
+        assert!(json["error_data"].is_string());
     }
 
     #[test]

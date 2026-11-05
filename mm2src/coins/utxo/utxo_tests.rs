@@ -683,6 +683,124 @@ fn test_generate_transaction() {
     block_on(builder.build()).unwrap_err();
 }
 
+/// The fixed-rate, 8-decimal fixture of the R38.6.6n builder tests: 1,000 base units per kilobyte, dust 1,000.
+#[cfg(not(target_arch = "wasm32"))]
+fn required_inputs_test_coin() -> UtxoStandardCoin { floor_test_coin("TEST", TxFee::FixedPerKb(1000), 1000, 8) }
+
+#[cfg(not(target_arch = "wasm32"))]
+fn required_inputs_test_unspent(seed: u8, value: u64) -> UnspentInfo {
+    UnspentInfo {
+        value,
+        outpoint: OutPoint {
+            hash: H256::from([seed; 32]),
+            index: 0,
+        },
+        height: Default::default(),
+    }
+}
+
+/// T38.6.6n: the value of a required input counts toward the sufficiency check, the change, `spent_by_me` and the
+/// reported fee, so that the fee equals the inputs minus the outputs and the input's value returns as change.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_generate_transaction_required_input_value_counts_r38_6_6n() {
+    let coin = required_inputs_test_coin();
+    let outputs = vec![TransactionOutput {
+        script_pubkey: vec![].into(),
+        value: 3000,
+    }];
+    let builder = UtxoTxBuilder::new(&coin)
+        .add_required_inputs(vec![required_inputs_test_unspent(1, 2000)])
+        .add_available_inputs(vec![required_inputs_test_unspent(2, 100_000)])
+        .add_outputs(outputs);
+    let (tx, data) = block_on(builder.build()).unwrap();
+
+    // The required input first, then the one available input the outputs and fee needed on top of it.
+    assert_eq!(tx.inputs.len(), 2);
+    assert_eq!(tx.inputs[0].amount, 2000);
+    let inputs_sum = 102_000;
+    let outputs_sum: u64 = tx.outputs.iter().map(|output| output.value).sum();
+    // The payment and the change output, which includes the required input's 2,000.
+    assert_eq!(tx.outputs.len(), 2);
+    assert_eq!(tx.outputs[1].value, inputs_sum - 3000 - data.fee_amount);
+    assert_eq!(data.spent_by_me, inputs_sum);
+    assert_eq!(data.received_by_me, tx.outputs[1].value);
+    assert_eq!(data.unused_change, None);
+    // The fee reported is the inputs minus the outputs.
+    assert_eq!(data.fee_amount, inputs_sum - outputs_sum);
+}
+
+/// T38.6.6n: required inputs that cover the outputs and the fee on their own are enough; no available input is
+/// added, and the fee is computed for the transaction as built.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_generate_transaction_required_inputs_alone_suffice_r38_6_6n() {
+    let coin = required_inputs_test_coin();
+    let outputs = || {
+        vec![TransactionOutput {
+            script_pubkey: vec![].into(),
+            value: 3000,
+        }]
+    };
+    for with_available in [false, true] {
+        let mut builder = UtxoTxBuilder::new(&coin)
+            .add_required_inputs(vec![required_inputs_test_unspent(1, 100_000)])
+            .add_outputs(outputs());
+        if with_available {
+            builder = builder.add_available_inputs(vec![required_inputs_test_unspent(2, 50_000)]);
+        }
+        let (tx, data) = block_on(builder.build()).unwrap();
+        assert_eq!(tx.inputs.len(), 1, "available inputs: {with_available}");
+        let outputs_sum: u64 = tx.outputs.iter().map(|output| output.value).sum();
+        assert_eq!(tx.outputs.len(), 2);
+        assert_eq!(data.spent_by_me, 100_000);
+        assert!(data.fee_amount > 0);
+        assert_eq!(data.fee_amount, 100_000 - outputs_sum);
+    }
+
+    // Required inputs that do not cover the outputs, with nothing available, are not enough.
+    let builder = UtxoTxBuilder::new(&coin)
+        .add_required_inputs(vec![required_inputs_test_unspent(1, 2000)])
+        .add_outputs(outputs());
+    assert!(matches!(
+        block_on(builder.build()).unwrap_err().into_inner(),
+        GenerateTxError::NotEnoughUtxos { sum_utxos: 2000, .. }
+    ));
+}
+
+/// T38.6.6n: a change exactly equal to the dust amount becomes a change output; only a change strictly below dust
+/// is left to the miner.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_generate_transaction_change_equal_to_dust_is_an_output_r38_6_6n() {
+    let coin = required_inputs_test_coin();
+    // One input and an empty-script payment make a 186-byte transaction, 220 bytes with the change output, so the
+    // fee with a change output is 220 base units.
+    let build = |value: u64| {
+        let builder = UtxoTxBuilder::new(&coin)
+            .add_available_inputs(vec![required_inputs_test_unspent(1, 100_000)])
+            .add_outputs(vec![TransactionOutput {
+                script_pubkey: vec![].into(),
+                value,
+            }]);
+        block_on(builder.build()).unwrap()
+    };
+
+    // 100,000 - 98,780 - 220 = 1,000: the change is the dust amount exactly.
+    let (tx, data) = build(98_780);
+    assert_eq!(data.fee_amount, 220);
+    assert_eq!(tx.outputs.len(), 2);
+    assert_eq!(tx.outputs[1].value, 1000);
+    assert_eq!(data.received_by_me, 1000);
+    assert_eq!(data.unused_change, None);
+
+    // One base unit less is below dust: no change output, the remainder is left to the miner.
+    let (tx, data) = build(98_781);
+    assert_eq!(tx.outputs.len(), 1);
+    assert_eq!(data.unused_change, Some(999));
+    assert_eq!(data.received_by_me, 0);
+}
+
 #[test]
 fn test_addresses_from_script() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
@@ -9309,7 +9427,11 @@ mod withdraw_recent_spent {
         assert_eq!(inputs_of(&second), vec![listed_outpoint()]);
 
         // The entry ages out.
-        let created = only_pending_created_ms(&coin);
+        // The second withdraw can carry a later lock_time (the current second) and so be a second entry.
+        let created = {
+            let record = block_on(coin.as_ref().recently_spent_outpoints.lock());
+            record.pending_withdraws.values().map(|p| p.created_ms).max().unwrap()
+        };
         let mut record = block_on(coin.as_ref().recently_spent_outpoints.lock());
         assert!(!record.promote_pending_withdraw_at(created + TTL_MS, &[7, 7, 7]));
         assert!(record.pending_withdraws.is_empty());

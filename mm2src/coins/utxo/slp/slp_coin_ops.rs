@@ -15,6 +15,13 @@ impl MmCoin for SlpToken {
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         let coin = self.clone();
         let fut = async move {
+            // CRD ch.49 R49.27 / R49.27a: the SLP withdraw spends with the platform coin's activated key, so a
+            // request that carries `from` is refused with the shared unsupported-operation arm.
+            if req.from.is_some() {
+                return MmError::err(WithdrawError::UnsupportedError(
+                    "'from' is not supported for SLP token withdraw".to_owned(),
+                ));
+            }
             let my_address = coin
                 .platform_coin
                 .as_ref()
@@ -102,8 +109,11 @@ impl MmCoin for SlpToken {
                 coin.platform_conf().fork_id,
             )
             .mm_err(Into::into)?;
+            // CRD ch.38 R38.6.6n: like the UTXO withdraw, report the forfeited sub-dust remainder with the fee, so
+            // that the amount is the inputs minus the outputs of the signed transaction.
+            let fee_amount = tx_data.fee_amount + tx_data.unused_change.unwrap_or_default();
             let fee_details = SlpFeeDetails {
-                amount: big_decimal_from_sat_unsigned(tx_data.fee_amount, coin.platform_decimals()),
+                amount: big_decimal_from_sat_unsigned(fee_amount, coin.platform_decimals()),
                 coin: coin.platform_coin.ticker().into(),
             };
             let my_address_string = coin.my_address().map_to_mm(WithdrawError::InternalError)?;

@@ -2596,6 +2596,49 @@ base unit below `floor(a × s / 1000)`. The tests of PR #234 assert the two
 descriptors equal and this figure, at 457 and 1,493 bytes; the SLP OP_RETURN
 output makes these sizes differ from T38.6.6l's.
 
+R38.6.6n *Required inputs count toward the input total (reference-bound;
+Spec Reader micro-run 0.4.0-2c, 2026-11-04, rows `v2.6.0-beta` and
+`v3.0.0-beta` of chapter 02 §2.15A, identical at both).* When a UTXO-family
+transaction is built with inputs the caller requires to be spent (the
+token-carrying inputs of an SLP withdraw or SLP send, the HTLC output of an
+SLP spend or refund, or any required input given to the generic send path),
+the value of every required input is part of the transaction's input total
+for all purposes — the sufficiency check, the change computation,
+`spent_by_me`, and the fee reported in `fee_details` — so that a required
+input's coin value returns to the sender as change under the ordinary dust
+rule and `fee_details.amount` equals the sum of all inputs minus the sum of
+all outputs. A change output is added whenever the computed change is not
+below the coin's dust amount; only a change strictly below dust is left to
+the miner, and that remainder is included in the reported fee on every
+withdraw path.
+
+> **Compatibility row (this repository, 2026-11-04; not corpus-sourced).**
+> **Parity** since PR #236 (maintainer-side routing 2026-11-04: a correctness
+> fix, no switch). Before, Reloaded's UTXO transaction builder appended
+> required inputs to the transaction without adding their value to its input
+> total. Their coin value was therefore neither returned as change nor
+> reported: on an SLP withdraw, SLP send, or SLP HTLC spend or refund, the
+> dust each token input or HTLC output carried (546 base units on BCH) went
+> to the miner. `fee_details.amount` and `spent_by_me` of an SLP withdraw
+> omitted it, and the sufficiency check ignored it. Two further differences
+> closed with it: a change exactly equal to the dust amount went to the miner
+> instead of becoming a change output, and the SLP withdraw's `fee_details`
+> left out a sub-dust remainder that the UTXO withdraw already reports. No
+> peer observes either side, because these are the node's own transactions,
+> so arm 1 of `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind
+> the default.
+
+T38.6.6n *Required inputs and the dust boundary (R38.6.6n).* Against a
+mocked BCH backend, an SLP token withdraw spending two token inputs of 546
+base units each shall produce a platform-coin change output whose value
+includes those 1,092 base units, and `fee_details.amount` shall equal the
+transaction's inputs minus outputs; the same shall hold for a generic send
+with one required input. *(Reloaded-original additions.)* A transaction whose
+computed change equals the dust amount exactly shall carry a change output of
+that value; and an SLP token withdraw whose change falls below dust shall
+report in `fee_details.amount` the computed fee plus that remainder, again
+equal to inputs minus outputs.
+
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the
 Spark-specific script/output types) so FIRO activates and transacts. Acceptance:
@@ -3265,6 +3308,24 @@ R38.8.6 **Tests (two-direction, observable).**
   name what remains. Written by a session that never read the corpus, from
   this repository's own activation, account and address code. It takes no
   forbidden-class input and needs no Dirty Gate pass.
+- *Scoped addition (2026-11-04) -- R38.6.6n, T38.6.6n and its compatibility
+  row.* The rule's two sentences and the first sentence of T38.6.6n are the
+  Reloaded-original wording proposed by the Spec Reader micro-run 0.4.0-2c
+  (gated 2026-11-04, micro-run 0.4.0-2c, PASS 0.03) and are placed here
+  verbatim. *Inputs:* the forbidden corpus at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, identical at both, consulted **only** to
+  establish whether the UTXO transaction builder counts the value of inputs
+  the caller requires toward its input total (sufficiency, change,
+  `spent_by_me`, reported fee) and on which side of the dust amount a change
+  output is added. Behavior and public response members only; no private
+  identifier, function body, control flow, error, log or comment text was
+  reproduced. **KDF Dirty Gate:** the report the wording comes from passed;
+  placement gated 2026-11-04, KDF Dirty Gate: PASS, measure 0.02 on the R35
+  discretionary-expression basis; extent = UTXO transaction building, SLP
+  withdraw/HTLC/send and generic send paths at rows `v2.6.0-beta` and
+  `v3.0.0-beta`; method = reading plus mechanical diff. The
+  compatibility row and the Reloaded-original additions to T38.6.6n rest on
+  this repository's own code and take no forbidden-class input.
 - *Clean-side amendment (2026-11-05) -- PR #234, maintainer Decision BV.* After
   the code change, a session that never read the corpus updated the
   compatibility row under R38.6.6m, the resolution sentence in R38.6.6l's row
