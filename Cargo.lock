@@ -1953,6 +1953,7 @@ dependencies = [
  "mm2_test_helpers",
  "mocktopus",
  "num-traits",
+ "orchard",
  "parking_lot 0.12.5",
  "prost 0.12.6",
  "prost 0.14.4",

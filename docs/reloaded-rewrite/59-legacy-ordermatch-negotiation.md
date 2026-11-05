@@ -403,7 +403,7 @@ coin. The keys in use:
 
 | Key | Coin family | Meaning | Required by |
 | --- | --- | --- | --- |
-| `tx_v6` | shielded coin (Chapter 39) | This node builds and spends the version-6 transaction format of the Ironwood upgrade. | Chapter 39 (gate-pending) |
+| `tx_v6` | shielded coin (Chapter 39) | This node builds and spends the version-6 transaction format of the Ironwood upgrade. | Chapter 39 R39.6.4f |
 
 **R59.4A.5** *Who decides.* The order-match layer shall carry the
 protocol information unchanged in all three messages and in the side
@@ -645,7 +645,8 @@ another maker expires on its own at the reference's release rows
 ([Chapter 32](32-orderbook-p2p-and-trie.md) §32.9C R-GH3); the per-pair
 variant of the reference's later, unreleased change is recorded there as
 R-GH6 item 7, and whether Reloaded adopts a form of it is ch. 32 §32.10
-D12.
+D12. Reloaded binds per-pair liveness on the receiver's clock as ch. 32
+§32.9C.2 R-GH14 (switch `pair_liveness`, default on), with this window.
 
 **R59.6.5** *Own public keys are exempt.* The eviction of R59.6.4 shall
 never apply to the node's own persistent public key or to any
@@ -1255,3 +1256,5 @@ its gating is not.*
   R16a under R59.4A.2.* Maintainer decision CD. Written from this
   repository's own decode paths. The forbidden corpus was not consulted,
   and it needs no Dirty Gate pass.
+- *Reloaded-original addition (2026-11-05) -- the pointer to ch. 32 R-GH14
+  under R59.6.4.* No forbidden-class input; it needs no Dirty Gate pass.

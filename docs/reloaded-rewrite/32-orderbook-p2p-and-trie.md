@@ -2034,7 +2034,8 @@ R-P5). Expiry sweeps are part of the subsystem's periodic
 maintenance. This per-pubkey eviction is the only expiry of another
 maker's entries at the reference's release rows; §32.9C R-GH3 binds that
 fact, and R-GH6 item 7 records the per-pair variant of the reference's
-later, unreleased change.
+later, unreleased change. In Reloaded, with `pair_liveness` on (the default), a pair of a
+tracked pubkey also expires on its own (§32.9C.2 R-GH14).
 
 The TTL's concrete value, its operator override, the
 advertisement interval R-K2 runs at, and the exemption of the
@@ -2946,7 +2947,8 @@ advertised root or when the forwarder failed; it never clears the pair.
 Reloaded still has no per-pair liveness.)* *(Since 2026-11-03, R-K1b
 keeps a cancelled order out of every later message and answer for the
 final-cancel window, one hour by default, where the release rows re-admit
-it after 120 s (R-GH5 item 4).)*
+it after 120 s (R-GH5 item 4).)* *(Since 2026-11-05, §32.9C.2 R-GH14 binds per-pair
+liveness on the receiver's clock, switch `pair_liveness`, default on.)*
 
 **T-GH1** *Unnamed pairs are untouched (R-GH1).* A node holding entries of
 P on pairs X and Y receives a keep-alive from P naming only X with X's held
@@ -2954,7 +2956,8 @@ root: Y's entries, root and history are unchanged, no request is sent, and
 only P's receipt time moves. The same with Y's last order cancelled at the
 maker but the cancel never delivered: Y's entries stay through any number
 of keep-alives naming X, and leave only when P's record is evicted 90 s
-after the last keep-alive for any pair.
+after the last keep-alive for any pair. (In Reloaded this holds with
+`pair_liveness: false`; for the default see T-GH14.)
 
 **T-GH2** *An emptied pair is silent (R-GH2).* After the maker cancels
 every order on X, no keep-alive names X (T-K3); a request for (P, X) to the
@@ -2965,7 +2968,8 @@ snapshot, the missing-pair outcome.
 for X only, entries of P on Y, Z are kept indefinitely; when P falls silent,
 every entry of P on every pair is removed at the sweep after 90 s (or the
 configured `maker_order_timeout`), and no entry or pair of P is removed
-before that.
+before that. (In Reloaded this holds with `pair_liveness: false`; for the default
+see T-GH14.)
 
 **T-GH4** *An answer is applied without a root check (R-GH4).* A requester
 holding a stale entry on (P, X) that asks a responder with the correct view
@@ -3198,6 +3202,94 @@ signed by the persistent key, Z by the per-order key — each on its pair's
 topic, in every tick until a root becomes empty; a relay subscribed to no
 orderbook topic receives all three; a non-relay subscribed to X only
 receives X's.
+
+### 32.9C.2 Per-pair liveness (Reloaded-original)
+
+*Reloaded-original (2026-11-05; the maintainer's Decision BK, D12 item 3,
+ghost-orders package B3); no forbidden-class input. It rests on the reference
+facts of R-GH1, R-GH3 and R-GH13, which passed the KDF Dirty Gate.*
+
+**R-GH14 (per-pair liveness on the receiver's clock).** With `pair_liveness`
+on, each pair of another maker's record has a liveness instant of its own,
+on the receiver's clock, next to the pubkey's (R-K3,
+[Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.4):
+
+1. *Set.* The instant of (P, X) is set to the receiver's clock when:
+   - a keep-alive from P names X and the node considers X under R-Q4 item 1
+     (a pair whose topic it is subscribed to, or any pair on a relay),
+     whatever root it advertises, except an all-zero or empty-trie root,
+     which R-Q4 item 2 skips;
+   - an accepted created or updated message inserts or changes an order of P
+     on X;
+   - an applied synchronization answer (a full snapshot, a delta, or the
+     answer of R-Q5d) or an order-book answer leaves at least one order of P
+     on X.
+
+   A pair entry that comes into being without any of these, such as the
+   placeholder of R-Q4 item 3, gets the instant of its creation.
+2. *Prune.* The periodic maintenance sweep (ch. 59 R59.6.4) removes (P, X)
+   once its instant is older than the liveness window of R59.6.4 (90 s, or
+   the `maker_order_timeout` member): every entry of P on X leaves the read
+   index, and the pair's held root and delta history are dropped. P's record
+   and its other pairs stay; the record itself leaves only by R-K3, as
+   before.
+3. *Afterwards.* A later keep-alive naming X finds no held root for it and
+   requests the pair as a new one (R-Q4). The answer refills it, subject to
+   R-K1b.
+4. *Own pubkeys.* No pair of a pubkey the node itself makes orders under,
+   the persistent one or a per-order one, is pruned by this rule.
+5. *Switch.* `pair_liveness` is a top-level boolean, `true` by default; only
+   a JSON `false` turns it off. With `false` no pair has an instant of its
+   own and R-GH3 holds: a pair the maker stops advertising is kept exactly
+   as long as the record.
+6. *Wire.* Nothing on the wire changes, and no message is added.
+
+Rationale: a maker names every pair with a non-empty root at every tick, at
+the reference's release rows and in Reloaded (R-GH13 item 1, R-K2a). A pair
+that goes unnamed for three ticks is therefore either one the maker emptied,
+or one whose keep-alives this node lost. The first is the stale entry R-GH1
+leaves behind: in a lab run of this project's own nodes on 0.4.0-alpha.1, a
+node that missed the cancel of a pair's only order kept the entry for the
+whole 15-minute observation, until the maker posted on that pair again. The
+second costs one synchronization request per pruned pair when its
+keep-alives come back. R-GH6 item 7 prunes in the same way at the reference's
+later, unreleased row. R-GH14 differs from it in three points:
+- the window keeps the `maker_order_timeout` override;
+- a keep-alive refreshes a pair whatever root it advertises, so a diverged
+  pair is requested and kept (R-Q5d), never cleared;
+- the sender's timestamp plays no part (R-P3).
+
+**T-GH14** *Per-pair liveness (R-GH14).*
+
+- (a) *An emptied pair leaves.* P holds orders on X and Y. P's only order on
+  X is cancelled, the node misses the cancel, and P keeps advertising Y
+  only. X's stale entry leaves within the window plus one sweep after the
+  last keep-alive that named X, while Y and P's record stay. With
+  `pair_liveness: false` the entry stays until P's record is evicted
+  (T-GH1).
+- (b) *Lost keep-alives.* With the keep-alives for X withheld for longer than
+  the window, X is pruned. The next keep-alive naming X sends one
+  synchronization request, and the answer restores X's orders.
+- (c) *What refreshes.* Each of these keeps X past the window when it
+  arrives within it:
+  - a keep-alive naming X with a root that differs from the held one (it
+    also requests X);
+  - a created or updated message on X;
+  - an applied answer for X.
+
+  A keep-alive naming X with an all-zero or empty-trie root refreshes
+  nothing.
+- (d) *Considered pairs only.* A non-relay that holds entries on a pair whose
+  topic it is not subscribed to prunes that pair. A relay refreshes every
+  pair a keep-alive names.
+- (e) *Own pubkeys.* Pairs under the node's own persistent pubkey and under
+  its per-order pubkeys are never pruned.
+- (f) *Window.* With `maker_order_timeout: 300`, X is pruned after 300 s, not
+  90 s.
+- (g) *Final cancel.* After X is pruned and refilled, an order whose cancel
+  the node received within the final-cancel window stays out (R-K1b).
+- (h) *Reader.* An absent value gives `true`, `false` gives `false`, and any
+  non-boolean value gives `true`.
 
 ## 32.10 Deferred Work
 
@@ -3508,7 +3600,9 @@ D12. **Stale entries of a maker that keeps sending keep-alives (open
        item 4 on the receiving side only *(bound on 2026-11-03 as §32.9
        R-K1b, for every later message and answer, not answers alone; the
        restore guard of ch. 12 R7c was added to the same work package)*;
-    3. (a);
+    3. (a) *(bound on 2026-11-05 as §32.9C.2 R-GH14, switch
+       `pair_liveness`, default on; the window keeps the
+       `maker_order_timeout` override)*;
     4. two changes to the deferral of R-Q5b for start-up and re-post
        bursts: parking a request for a pair named by a keep-alive the
        node is still handling, before its placeholder exists, and a
@@ -4243,3 +4337,11 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   R16a before R-W5.* Maintainer decision CD. Written from this
   repository's own decode paths. The forbidden corpus was not consulted,
   and it needs no Dirty Gate pass.
+- *Reloaded-original addition (2026-11-05) -- §32.9C.2 R-GH14 and T-GH14,
+  the sentence added to R-K3, the notes under R-GH10, T-GH1 and T-GH3, and
+  the marker on D12 item 3.* Written by a context that never read the
+  forbidden corpus, from the maintainer's Decision BK, from this repository's
+  own keep-alive handling, synchronization applier and maintenance sweep,
+  and from a lab run of this project's own nodes. The reference facts it
+  rests on are R-GH1, R-GH3 and R-GH13, which passed the KDF Dirty Gate. It
+  needs no Dirty Gate pass of its own.

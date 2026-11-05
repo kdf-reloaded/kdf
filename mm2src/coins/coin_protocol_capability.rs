@@ -119,6 +119,31 @@ pub fn declared_capabilities(info: Option<&[u8]>) -> DeclaredCapabilities {
     info.and_then(read_word).unwrap_or_default()
 }
 
+/// How a protocol-information value stands with respect to the capability word, for a coin that
+/// logs why it declined a counterparty (CRD ch.39 R39.6.4f(d)). The reader above yields "nothing
+/// declared" for every one of these; this tells them apart without changing it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CapabilityWordStatus {
+    /// The information is absent or empty, or nothing follows its first value.
+    NoWord,
+    /// The first value cannot be skipped, or what follows it is not a well-formed word.
+    Malformed,
+    /// A well-formed word; it declares whatever the reader finds in it.
+    WellFormed(DeclaredCapabilities),
+}
+
+/// Classifies `info` as [`CapabilityWordStatus`]. Reads exactly as [`declared_capabilities`] does.
+pub(crate) fn classify_capability_word(info: Option<&[u8]>) -> CapabilityWordStatus {
+    let Some(bytes) = info.filter(|bytes| !bytes.is_empty()) else {
+        return CapabilityWordStatus::NoWord;
+    };
+    match skip_value(bytes, 0) {
+        None => CapabilityWordStatus::Malformed,
+        Some(end) if end >= bytes.len() => CapabilityWordStatus::NoWord,
+        Some(_) => read_word(bytes).map_or(CapabilityWordStatus::Malformed, CapabilityWordStatus::WellFormed),
+    }
+}
+
 fn read_word(bytes: &[u8]) -> Option<DeclaredCapabilities> {
     let mut pos = skip_value(bytes, 0)?;
     let entries = read_map_header(bytes, &mut pos)?;
@@ -275,6 +300,39 @@ mod tests {
             &append_capability_word(Vec::new(), &[&long_key])
         )))
         .declares(&long_key));
+    }
+
+    #[test]
+    fn t14_classifier_tells_the_three_causes_apart() {
+        let first = address_formats().remove(0);
+        assert_eq!(classify_capability_word(None), CapabilityWordStatus::NoWord);
+        assert_eq!(classify_capability_word(Some(&[])), CapabilityWordStatus::NoWord);
+        assert_eq!(classify_capability_word(Some(&first)), CapabilityWordStatus::NoWord);
+        // Something after the first value that is not a word, or a truncated word.
+        assert_eq!(
+            classify_capability_word(Some(&with_word(&first, &[0x01]))),
+            CapabilityWordStatus::Malformed
+        );
+        let word = tx_v6_word();
+        assert_eq!(
+            classify_capability_word(Some(&with_word(&first, &word[..word.len() - 1]))),
+            CapabilityWordStatus::Malformed
+        );
+        // A truncated first value.
+        assert_eq!(
+            classify_capability_word(Some(&[0xa5, b'a'])),
+            CapabilityWordStatus::Malformed
+        );
+        // Well-formed words, with and without the key.
+        match classify_capability_word(Some(&with_word(&first, &word))) {
+            CapabilityWordStatus::WellFormed(declared) => assert!(declared.declares(CAPABILITY_TX_V6)),
+            other => panic!("unexpected {other:?}"),
+        }
+        let false_word = [0x81, 0xa5, b't', b'x', b'_', b'v', b'6', 0xc2];
+        match classify_capability_word(Some(&with_word(&first, &false_word))) {
+            CapabilityWordStatus::WellFormed(declared) => assert!(!declared.declares(CAPABILITY_TX_V6)),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]

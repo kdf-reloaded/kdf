@@ -3629,6 +3629,16 @@ pub fn addr_from_raw_pubkey(pubkey: &[u8]) -> Result<Address, String> {
     Ok(public_to_address(&eth_public))
 }
 
+/// The compressed SEC1 form of an EVM signer's `X || Y` public key: the parity of `Y` selects the prefix. The
+/// legacy swap wire carries a secp256k1 key in this form (CRD ch.51 R63).
+pub(crate) fn compressed_secp256k1_public(public: &Public) -> [u8; 33] {
+    let xy: &[u8] = public.as_ref();
+    let mut compressed = [0u8; 33];
+    compressed[0] = 0x02 | (xy[63] & 1);
+    compressed[1..].copy_from_slice(&xy[..32]);
+    compressed
+}
+
 pub fn addr_from_pubkey_str(pubkey: &str) -> Result<String, String> {
     let pubkey_bytes = try_s!(hex::decode(pubkey));
     let addr = try_s!(addr_from_raw_pubkey(&pubkey_bytes));
