@@ -1082,9 +1082,9 @@ no Ironwood height anywhere shall keep constructing version 4 at every height.
   `0x00` for the Orchard slot, and an empty Ironwood bundle**. Sapling survives inside
   version 6; this project builds neither an Orchard nor an Ironwood bundle, so the build
   configuration carries no Orchard or Ironwood anchor. *(Exception from v0.4.0,
-  2026-11-04: a withdrawal to a Pirate1 address carries an Ironwood bundle of output
-  actions and an Ironwood anchor, R39.6.5d--R39.6.5e. Every other transaction keeps
-  the empty Ironwood bundle.)* The transaction identifier is the
+  2026-11-04: a withdrawal to a Pirate1 address carries an output-only Ironwood bundle,
+  with spends disabled and the empty-tree anchor, R39.6.5d--R39.6.5e. Every other
+  transaction keeps the empty Ironwood bundle.)* The transaction identifier is the
   ZIP-244 digest, not a double-SHA256 of the bytes; a Sapling signature is made over the
   shielded signature hash (equal to the identifier for a transaction with no transparent
   inputs).
@@ -1315,11 +1315,13 @@ transaction (R39.6.4e) made of:
 
 - Sapling spends of the selected wallet notes, selected, witnessed and anchored exactly
   as for a withdrawal to a Sapling address;
-- an Ironwood bundle of the Ironwood epoch -- its bundle version, its default flags and
-  the circuit of that epoch, never the insecure pre-NU6.2 circuit -- holding one output
-  to the recipient with an empty memo and no outgoing viewing key, padded to the default
-  minimum of two actions, so that every action carries a dummy spend;
-- the change, if any, as a Sapling output to the wallet's own address;
+- an output-only Ironwood bundle of the Ironwood epoch -- its bundle version and the
+  circuit of that epoch, never the insecure pre-NU6.2 circuit -- with spends disabled and
+  outputs enabled, holding one output to the recipient with an empty memo and no outgoing
+  viewing key, padded to the default minimum of two actions, each with the zero-value
+  dummy spend the circuit requires;
+- the change, if any, as a Sapling output to the wallet's own Sapling address: the
+  change of a Pirate1 withdrawal never enters the Ironwood pool;
 - no transparent inputs or outputs, and the empty Orchard slot of R39.6.4e(b).
 
 The Sapling value balance is the selected notes less the change, and the Ironwood value
@@ -1334,30 +1336,27 @@ outputs, and HTLC spends and refunds stay Sapling (§39.5, and R39.6.5i for the 
 reason), and the type that carries a swap path's outputs shall not be able to express
 an Ironwood recipient.
 
-R39.6.5e **The Ironwood anchor.** The bundle's anchor shall be a real Ironwood
-note-commitment-tree root: the root at the same anchor height the Sapling anchor is
-taken from, read from the backend's tree state at that height (`GetTreeState`, member
-`ironwoodTree`).
+R39.6.5e **The Ironwood anchor.** The bundle spends no Ironwood note, so its anchor
+shall be the root of the empty Ironwood note-commitment tree, as the dictated chain's
+own wallets set it for a bundle that only pays into Ironwood. No tree state is read for
+it, and no other transaction reads one either. The dictated chain accepts the empty-tree
+root at any height, so the anchor cannot go stale.
 
-- A 32-byte value is the root itself.
-- A longer value is the legacy commitment-tree serialization, and the root is computed
-  from it.
-- A value that is empty, all zero, not decodable, or not a valid anchor shall refuse the
-  build with an error naming the coin and the backend that served the tree state.
-
-The build shall never fall back to the empty-tree root or to any other value. This costs
-one tree-state read per Pirate1 withdrawal and none for any other transaction. Because
-only the root is used, the root-for-state hazard that R39.8.0ak guards against for the
-Sapling checkpoint does no harm here: a bare root in `ironwoodTree` is a usable answer.
-
-> **Provenance (2026-11-04).** Reloaded-original, decided by the maintainer. The
-> dictated chain checks the Ironwood anchor of every transaction that carries an
-> Ironwood bundle and rejects an unknown one, and it accepts the empty-tree root at any
-> height (the published node source, `src/coins.cpp` and `src/txdb.cpp` of release
-> 6.0.14). The empty root was rejected all the same: it would show on chain that no
-> Ironwood note was spent, which marks every such withdrawal as built by a Sapling-only
-> wallet. The value amount moving into Ironwood is public in any case, through the
-> Ironwood value balance, as it is for the chain's own wallets.
+> **Provenance (2026-11-05).** Reloaded-original, decided by the maintainer on
+> 2026-11-05, reversing the real-root choice of 2026-11-04. The dictated chain checks the
+> Ironwood anchor of every transaction that carries an Ironwood bundle and accepts the
+> empty-tree root at any height (the published node source, `src/coins.cpp` and
+> `src/txdb.cpp` of release 6.0.14). The earlier choice held that the empty root would
+> mark a withdrawal as built by a Sapling-only wallet. A survey of 30 recent mainnet
+> transactions with Ironwood actions (heights 4193123--4194266), read with this
+> project's own reader, showed the opposite. All 15 bundles with spends disabled pay into
+> Ironwood and anchor at the empty root; all 15 with spends enabled anchor at a real
+> root. Of the 15 transactions that spend Sapling notes, 10 are of the first kind. A
+> mainnet payment from Sapling into Ironwood made by the chain's own wallet (the fixture of
+> T39.6.5a, height 4198585) has exactly this form. The output-only bundle with the empty
+> root is therefore the common form of a payment into Ironwood, and the bundle this
+> rule builds matches it. The value moving into Ironwood is public in any case, through
+> the Ironwood value balance, as it is for the chain's own wallets.
 
 R39.6.5f **The fee.** A transaction that carries an Ironwood output shall pay a fixed
 10,000 base units (0.0001 ARRR), whatever the coin's `txfee`. This is the fixed fee the
@@ -1430,17 +1429,17 @@ T39.5A.a requires, that the reference contract of §39.5A answers `is_valid: fal
 
 T39.6.5c *The built transaction.* Building a Pirate1 withdrawal against a wallet fixture
 yields: a version-6 transaction; the selected Sapling spends; exactly two Ironwood
-actions; a Sapling change output to the wallet's own address; no transparent part; the
-fee of R39.6.5f; and value balances that sum to that fee. The transaction reads back
+actions, with spends disabled and outputs enabled; a Sapling change output to the
+wallet's own address; no transparent part; the fee of R39.6.5f; and value balances that
+sum to that fee. No tree state is read. The transaction reads back
 through the project's reader, and its Ironwood proof verifies with the project's
 verifying key. With `max: true` the amount sent is the spendable balance less
 10,000 base units. A target height below the Ironwood activation height is refused
 before note selection.
 
-T39.6.5d *The anchor.* A 32-byte `ironwoodTree` value is used as the root. A legacy
-serialization yields the root computed from it. An empty, all-zero or undecodable value
-refuses the build with the coin and the backend named, and no build ever uses the
-empty-tree root.
+T39.6.5d *The anchor.* The Ironwood anchor of a built Pirate1 withdrawal is the
+empty-tree root, and its flags disable spends and enable outputs. The mainnet fixture
+of T39.6.5a that pays from Sapling into Ironwood has the same flags and the same anchor.
 
 T39.6.5e *The broadcast record.* A submitted Pirate1 withdrawal is recorded: its fee is
 derived from the bytes, its notes are excluded from the next selection until its block
@@ -1467,7 +1466,8 @@ change counts as non-spendable balance.
 > output, and its broadcast is recorded like a Sapling withdrawal (R39.6.5g, its
 > dependency note). In a debug test build the first Ironwood build of a process takes
 > about a minute and a half, the proving key included. The live round trip with an
-> Ironwood wallet is still to run.
+> Ironwood wallet is still to run. The bundle is output-only with the empty-tree anchor
+> (R39.6.5d, R39.6.5e as amended on 2026-11-05), so no tree state is read.
 >
 > **Compatibility.** The reference answers a Pirate1 address with `is_valid: false` on
 > `validateaddress` and with `InvalidAddress` on its withdrawal route (§39.5A). This
@@ -4004,7 +4004,6 @@ definition -- and are fixed by that specification, not by this project.
 | Chain tip / current block height | `GetLatestBlock` | the admitted endpoints are tried in turn (R39.11.3); the read fails only when every admitted endpoint fails |
 | Compact blocks carrying shielded note data | `GetBlockRange` | as above |
 | Commitment-tree state used as the wallet's sync anchor | `GetTreeState` | as above; the tree bytes are validated per R39.8.0ak before use |
-| Ironwood anchor of a withdrawal to a Pirate1 address (from v0.4.0) | `GetTreeState` at the Sapling anchor height, member `ironwoodTree` | as above; only the root is used, and an unusable value refuses the build (R39.6.5e) |
 | Mempool membership of a shielded transaction, and pending shielded receipts | `GetMempoolTx` | the pending amount degrades to zero (R39.8.0ai) |
 | Block timestamp at a height (resolving a `{"date": T}` sync start) | `GetBlock` | read from the compact block's block-time field (R39.11.4f) |
 | Median time past over a window | `GetBlock` per height in the window | computed locally from the same field (R39.11.4f) |
@@ -6907,3 +6906,15 @@ entries in its list cannot be told apart. Passing the position to the fallback c
     §39.5A (Spec Reader, passed by the Dirty Gate on 2026-11-04). The compatibility note
     of §39.6.5 and the parity record added to T39.6.5b cite that section and add no
     reference fact of their own.
+- *Clean-context addition (2026-11-05), §39.6.5:* the amended Ironwood-bundle bullet of
+  R39.6.5d (output-only, change kept in Sapling), R39.6.5e and its provenance note,
+  T39.6.5c and T39.6.5d, the R39.6.4e(b) parenthetical, the dependency note under
+  R39.6.5g and the update notes under the §39.6.5 and R39.8.0bb status notes are
+  Reloaded-original. The §39.11.1 table row added on 2026-11-04 is removed, because a
+  Pirate1 withdrawal no longer reads a tree state.
+  - *Inputs:* the maintainer's decision of 2026-11-05 (an output-only Ironwood bundle at
+    the empty-tree anchor); a survey of 30 mainnet ARRR transactions with Ironwood
+    actions, fetched from a public lightwalletd endpoint and read with this project's own
+    transaction reader; the published wallet-database crate and this repository's code.
+  - They take no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+    is required.
