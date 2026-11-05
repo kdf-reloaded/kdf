@@ -425,6 +425,13 @@ coin. This is part of the sync-response wire contract
 > themselves, and how a counterparty's value is judged, are bound in
 > chapter 59 R59.4.7.
 
+The order-book layer keeps these bytes opaque. A coin may append a
+capability word after its first value
+([Chapter 59](59-legacy-ordermatch-negotiation.md) §59.4A). A relay
+stores and forwards the word unchanged, like the rest of the bytes, and
+since protocol information is not part of the trie leaf (R-W3), the word
+changes no root. *(Reloaded-original, 2026-11-04.)*
+
 **R-W4.** The subsystem MUST support, behaviourally:
 
 - projecting an in-memory record down to the wire record;
@@ -4225,6 +4232,13 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   *Measure:* 0.01, read against the standard that any discretionary finding
   fails a file; dictated-interop and public-surface tokens were excluded from
   the measured set.
+- *Reloaded-original addition (2026-11-04) -- the paragraph after
+  §32.5.2 R-W2a.* It points to the capability word of chapter 59 §59.4A
+  and states that a relay carries the word unchanged and that the word
+  changes no root. Written by a context that never read the forbidden
+  corpus, from this repository's own order records, side channel and trie
+  leaf, and from Decision BM. It states no reference fact and needs no
+  Dirty Gate pass.
 - *Reloaded-original addition (2026-11-04) -- the pointer to Chapter 28
   R16a before R-W5.* Maintainer decision CD. Written from this
   repository's own decode paths. The forbidden corpus was not consulted,

@@ -37,6 +37,12 @@ separates them deliberately because they fail independently:
 3. **Liveness** (§59.6) — how a node decides an absent peer's rows are
    stale, and whose clock that decision runs on.
 
+A fourth, Reloaded-original section, **capability words** (§59.4A), lets a
+coin declare in its protocol information a capability that its
+counterparty must have before a swap starts. It was added on 2026-11-04
+so that a shielded-coin swap never starts with a node that cannot build
+the transaction format the network now requires.
+
 ## 59.1 Reference designations
 
 | Designation | Role |
@@ -310,6 +316,152 @@ per-coin value produced by the coin itself. At both reference rows:
 > reference counterparty does with a shielded-coin value that Reloaded
 > extends beyond the descriptor. The amount- and lock-aware inputs of R59.4.5
 > change no UTXO-family outcome; D1 stands for the other families.
+
+## 59.4A Capability words in coin protocol information
+
+*Reloaded-original (2026-11-04, Decisions BM and BO); no forbidden-class
+input. The compatibility note relies only on the reference facts of R59.4.7
+and Chapter 39 R39.5.14, which passed the KDF Dirty Gate.*
+
+Every order and both negotiation messages that R59.3.2 and R59.4.3 check
+carry each coin's **protocol information**:
+
+- `MakerOrderCreated`, and the side channel of a synchronization answer
+  ([Chapter 32](32-orderbook-p2p-and-trie.md) §32.5.2, R-W2a);
+- `TakerRequest`;
+- `MakerReserved`.
+
+The order-match layer treats these bytes as opaque: the coin produces
+them, and the coin judges the counterparty's. What each coin family
+publishes today, and how a counterparty's value is judged, is bound in
+R59.4.7. This section binds one
+generic extension of the bytes, the **capability word**. Through it a
+coin can declare a capability that its counterparty must have before a
+swap starts. The first coin to use it is the shielded coin of
+[Chapter 39](39-zcash---z_coin-shielded-coin.md), which declares that it
+builds version-6 transactions after the Ironwood upgrade (Decision BM).
+The rule that requires that capability, its time window and its switch
+are bound in Chapter 39, not here.
+
+**R59.4A.1** *Layout.* A coin that uses a capability word (R59.4A.4)
+shall send as its protocol information:
+
+1. first, exactly the bytes it sends without the word, unchanged: its
+   *first value*. For a UTXO-family coin this is its encoded address
+   format;
+2. immediately after it, one MessagePack map with string keys and
+   boolean values: the capability word.
+
+A writer lists only the capabilities it declares, each with the value
+`true`, with the keys in ascending byte order, so the same set always
+gives the same bytes. Nothing after the word is defined.
+
+**R59.4A.2** *Reading.* A reader shall determine the declared
+capabilities in three steps:
+
+1. skip exactly one complete MessagePack value from the start, whatever
+   its type, without interpreting it;
+2. decode the next value as a map with string keys;
+3. a capability is declared exactly when its key is present with the
+   boolean value `true`.
+
+Steps 1 and 2 read under the bounds of
+[Chapter 28](28-libp2p-modernization.md) R16a, which apply to every value
+the node reads from a peer.
+
+No capability is declared when:
+
+- the protocol information is absent or empty;
+- the first value is truncated or malformed, so the skip fails;
+- nothing follows the first value;
+- what follows is not a map with string keys, or is truncated.
+
+A key whose value is `false`, or not a boolean, is not declared. A key that
+appears more than once is declared when any of its occurrences has the
+value `true`. A word that is an empty map declares nothing. Keys the
+reader does not know are ignored, and so are any bytes after the word.
+Reading never rejects the message itself: it yields the set of declared
+capabilities, which may be empty. A coin that requires a capability
+therefore fails closed: anything other than a well-formed word with that
+key set to `true` counts as "not capable".
+
+**R59.4A.3** *The first value reads the same.* Every reader of a coin's
+first value shall read only that value and ignore what follows it:
+
+- the coin's own acceptance check;
+- the address format the order book reports for an order (Chapter 32).
+
+The reported address format, and the decision of a coin that requires no
+capability, are therefore the same with the word as without it.
+
+**R59.4A.4** *Opt-in per coin.* A coin sends a capability word only if
+its own chapter binds a capability for it. The protocol information of
+every other coin stays byte for byte as it is without this section. A
+further coin opts in only after a Spec Reader answer, passed by the Dirty
+Gate, on how the reference release rows treat the longer bytes for that
+coin. The keys in use:
+
+| Key | Coin family | Meaning | Required by |
+| --- | --- | --- | --- |
+| `tx_v6` | shielded coin (Chapter 39) | This node builds and spends the version-6 transaction format of the Ironwood upgrade. | Chapter 39 (gate-pending) |
+
+**R59.4A.5** *Who decides.* The order-match layer shall carry the
+protocol information unchanged in all three messages and in the side
+channel of Chapter 32 R-W2a. Every decision stays with the coin's
+acceptance check, at the call sites of R59.3.2 and R59.4.3:
+
+- a coin that requires a capability declines, through that check, a
+  counterparty whose word lacks it;
+- a declined reservation is not connected (R59.3.2), and a declined
+  request is not reserved (R59.4.3).
+
+Both happen before any swap starts. No swap record exists, nothing is
+paid, and the penalty of R59.5.2 does not apply.
+
+**R59.4A.6** *Logs.* When an acceptance check declines a message, the
+order-match layer shall log one debug line. It names the order
+identifier, the coin, and whether the message was a reservation or a
+request. When a taker's selection pass (R59.3.2) ends without a connect
+and an acceptance check declined at least one reservation in it, the
+layer shall log one info line naming the taker order and the number of
+reservations declined. An operator whose order times out can then see
+why. The coin logs its own reason (Chapter 39).
+
+**R59.4A.7** *No effect on the trie.* Protocol information is not part of
+the trie leaf (Chapter 32 R-W3). The word therefore changes no root, no
+synchronization and no order identity.
+
+Rationale: the order-match layer has no other channel that reaches the
+counterparty before the first payment.
+
+- Makers and takers are light nodes. They connect to relays, not to each
+  other.
+- A peer-level signal therefore describes only relays: a peer
+  identifier, a version announcement or a direct request.
+- The coin's protocol information is the one per-order, per-coin channel
+  that both sides already check before a swap starts.
+- The word declares a capability, not the software a node runs. It
+  judges an older Reloaded and any other implementation by the same test.
+
+The sending side has no switch. A node that withheld the word would be
+declined by every node that requires it, so the only switch is the
+requirement's, which belongs to the coin (Chapter 39). The word is
+visible to every reader of the order book, like the rest of an order.
+While only Reloaded sends it, it also marks a node as Reloaded.
+
+> **Compatibility.** At the reference release rows a counterparty judges
+> a coin's protocol information by its first value alone (R59.4.7 item 2,
+> Chapter 39 R39.5.14). A Komodo DeFi Framework 2.6.0-beta or GLEEC KDF
+> 3.0.0-beta node therefore accepts a value that carries a capability word
+> and matches as before. It never sends a word itself, and it shows the
+> order under the right address. Because the reference refuses a value that
+> does not begin with a decodable first value, the word must follow the
+> first value and never precede or replace it (R59.4A.1). The protection
+> therefore rests on the Reloaded side alone: a node that requires a
+> capability declines a counterparty without it in both roles, before any
+> swap starts (R59.4A.5). A reference taker sees a Reloaded maker's decline
+> only as a request that times out, as with any refusal at the reference
+> (R59.4.7 item 4).
 
 ## 59.5 Bound peer-penalty contract
 
@@ -653,6 +805,48 @@ the `segwit` format an absent value shall be refused. A refused `TakerRequest`
 shall produce no `MakerReserved`, and a refused `MakerReserved` no
 `TakerConnect`, with no outbound message of any other kind.
 
+**T14.** *Capability words (§59.4A).*
+
+- (a) *Writer.* For the set {`tx_v6`} the word is the one-entry map
+  `"tx_v6"` → `true`, as fixed bytes. With two keys they are in
+  ascending byte order. The first value's bytes come first, unchanged.
+- (b) *Reader.* Each input yields the stated set:
+  - the first value alone, as sent today: none;
+  - the first value followed by {`tx_v6`: `true`}: {`tx_v6`};
+  - the first value followed by {`tx_v6`: `false`}: none;
+  - the first value followed by bytes that are not a map: none;
+  - absent, and empty: none;
+  - the first value truncated in the middle: none;
+  - the word truncated in the middle: none;
+  - {`tx_v6`: `true`, plus an unknown key} followed by trailing bytes:
+    {`tx_v6`};
+  - `tx_v6` with a non-boolean value: none;
+  - `tx_v6` twice, once `true` and once `false`, in either order:
+    {`tx_v6`};
+  - an empty map as the word: none;
+  - a first value that is an integer, a nested array, a map or an
+    extension value is skipped whole, and the word after it is read.
+- (c) *The first value reads the same (R59.4A.3).* With the word
+  appended, the acceptance check of a coin that requires no capability,
+  and the address format the order book reports, give the same results
+  as without it. This holds for both of the node's readers of a UTXO
+  address format.
+- (d) *Opt-in (R59.4A.4).* The protocol information of a coin that does
+  not opt in is byte for byte what it was before: a UTXO coin and one
+  coin of another family.
+- (e) *Carriage (R59.4A.5, R59.4A.7).* `MakerOrderCreated`,
+  `TakerRequest` and `MakerReserved` carry the bytes unchanged through
+  encoding and decoding, and so does the side channel of a
+  synchronization answer. An order's trie root is the same with the word
+  as without it.
+- (f) *Decisions at the call sites.* With a test coin that requires a
+  capability:
+  - a reservation without it is not connected, and the info line of
+    R59.4A.6 counts it;
+  - a request without it is not reserved;
+  - with the capability, both go ahead;
+  - in no case is a swap started or a penalty record created.
+
 ## 59.8 Deferred Work
 
 **D1.** *Amount-and-lock-time-aware protocol support.* The finding under
@@ -691,6 +885,14 @@ contract are bound by
 [Chapter 52](52-swap-v2-state-machine.md); whether V2 inherits R59.3's
 selection contract unchanged, and whether its failures feed the penalty
 of R59.5.2 at all, is not established here.
+
+**D5.** *A universal capability flag (Decision BO).* The capability word
+is per coin, and for now it carries one capability of one coin family.
+The maintainer regards it as temporary and decided not to show it in the
+order-book answer (Decision BO, 2026-11-04). If capabilities keep being
+needed, a node-level or message-level flag that holds for every coin is
+the question to take up then, with its own analysis. The framing of
+§59.4A is not meant to grow into that flag.
 
 ## 59.9 Baseline Verifications
 
@@ -1035,3 +1237,21 @@ its gating is not.*
   no code blocks. *Measure:* 0.03, read against the standard that any
   discretionary finding fails a file; dictated-interop and public-surface
   tokens were excluded from the measured set.
+- *Reloaded-original addition (2026-11-04, Decisions BM and BO): §59.4A
+  (R59.4A.1–R59.4A.7), T14 and D5.* The capability word in coin protocol
+  information, read by the coin's acceptance check, with no switch on the
+  sending side. *Inputs:*
+  - this repository's own order-match messages, protocol-information
+    producers and acceptance checks;
+  - the source of the public MessagePack library this repository uses,
+    for how values are skipped and decoded;
+  - the maintainer's decisions.
+
+  The forbidden corpus was not consulted for this item. Its compatibility
+  note states no reference fact beyond R59.4.7 and chapter 39 R39.5.14,
+  which the KDF Spec Reader established and which passed the KDF Dirty Gate
+  (batch 0.4.0-2, 2026-11-04). It needs no Dirty Gate pass of its own.
+- *Reloaded-original addition (2026-11-05) -- the pointer to Chapter 28
+  R16a under R59.4A.2.* Maintainer decision CD. Written from this
+  repository's own decode paths. The forbidden corpus was not consulted,
+  and it needs no Dirty Gate pass.
