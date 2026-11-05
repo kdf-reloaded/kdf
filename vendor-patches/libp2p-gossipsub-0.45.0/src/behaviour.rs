@@ -3948,11 +3948,20 @@ where
             dropped: self.send_queue_dropped_closed,
             ..SendQueueSnapshot::default()
         };
+        // A window share counts while its window ended within two window lengths (CRD ch.32 §32.9B R-MP5).
+        let recent = self.config.send_queue_config().drop_window.saturating_mul(2);
+        let now = Instant::now();
         for stats in self.send_queue_stats.values() {
             let queued = stats.queued();
             snapshot.queued = snapshot.queued.saturating_add(queued);
             snapshot.max_per_connection = snapshot.max_per_connection.max(queued);
             snapshot.dropped = snapshot.dropped.saturating_add(stats.dropped());
+            snapshot.max_window_share_percent = snapshot
+                .max_window_share_percent
+                .max(stats.recent_window_share_percent(now, recent));
+            snapshot.max_drop_series = snapshot
+                .max_drop_series
+                .max(stats.recent_drop_series(now, recent));
         }
         snapshot
     }

@@ -487,6 +487,11 @@ pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
 pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
     info!("Version: {}", version_text());
 
+    // One resolver for every hostname the node looks up (CRD ch.45 R45.6B.8). The key is read and the resolver installed
+    // before anything below opens a connection by name; an invalid value refuses the launch (R45.6B.2, R45.7.1).
+    #[cfg(not(target_arch = "wasm32"))]
+    install_dns_resolver(&ctx.conf)?;
+
     validate_netid_range(&ctx.conf)?;
     coins::utxo::utxo_builder::header_layout_fallback_families(&ctx).mm_err(|e| {
         MmInitError::ErrorDeserializingConfig {
@@ -602,6 +607,23 @@ pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
     Ok(())
 }
 
+/// Reads `dns_resolver` from the configuration and installs the resolver of its mode: the node's start-up marks the node as started first, so
+/// that a lookup before the installation is caught (CRD ch.45 R45.6B.8 item 3). A later start in the same process
+/// installs its own resolver. A browser build leaves every lookup to the browser and ignores the key (R45.6B.1).
+#[cfg(not(target_arch = "wasm32"))]
+fn install_dns_resolver(conf: &json::Value) -> MmInitResult<()> {
+    use common::dns_resolver::{self, DNS_RESOLVER_KEY};
+
+    let mode = dns_resolver::parse_dns_resolver(conf.get(DNS_RESOLVER_KEY)).map_to_mm(|e| {
+        MmInitError::ErrorDeserializingConfig {
+            field: DNS_RESOLVER_KEY.to_owned(),
+            error: e.to_string(),
+        }
+    })?;
+    dns_resolver::mark_node_started();
+    dns_resolver::install(&mode).map_to_mm(MmInitError::Internal)
+}
+
 async fn kick_start(ctx: MmArc) -> MmInitResult<()> {
     let mut coins_needed_for_kick_start = swap_kick_starts(ctx.clone())
         .await
@@ -688,6 +710,32 @@ impl SwarmPollRecorder {
                 queues.max_per_connection as i64
             );
             mm_gauge!(self.ctx.metrics, "p2p.send_queue.dropped.count", queues.dropped as i64);
+            // The dropped share of a recent window and the longest series of counting windows (CRD ch.32 §32.9B
+            // R-MP5, ch.28 §28.9B RQ1 items 6 and 8).
+            mm_gauge!(
+                self.ctx.metrics,
+                "p2p.send_queue.window_share.max",
+                queues.max_window_share_percent as i64
+            );
+            mm_gauge!(
+                self.ctx.metrics,
+                "p2p.send_queue.drop_series.max",
+                i64::from(queues.max_drop_series)
+            );
+            // The hostname lookups since the resolver was installed (CRD ch.45 R45.6B.10).
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if let Some(dns) = common::dns_resolver::gauges() {
+                    mm_gauge!(self.ctx.metrics, "dns.lookups.count", dns.lookups as i64);
+                    mm_gauge!(self.ctx.metrics, "dns.failures.count", dns.failures as i64);
+                    mm_gauge!(self.ctx.metrics, "dns.stale_served.count", dns.stale_served as i64);
+                    mm_gauge!(
+                        self.ctx.metrics,
+                        "dns.last_known.entries",
+                        dns.last_known_entries as i64
+                    );
+                }
+            }
         }
     }
 }
@@ -950,6 +998,73 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))] use mm2_p2p::NetworkInfo;
     use mm2_p2p::RelayAddress;
     use serde_json::json;
+
+    /// CRD ch.45 T45.16 at the node's start-up: every invalid `dns_resolver` value refuses the launch with a clean
+    /// configuration error that names the key, and installs nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn invalid_dns_resolver_values_refuse_the_launch_cleanly() {
+        use super::install_dns_resolver;
+        let nine: Vec<String> = (1..=9).map(|n| format!("192.0.2.{}", n)).collect();
+        let invalid = [
+            json!("Google"),
+            json!(""),
+            json!("192.0.2.53"),
+            json!([]),
+            json!([""]),
+            json!(["dns.example.com"]),
+            json!(["192.0.2.53:0"]),
+            json!(["192.0.2.53:65536"]),
+            json!([53]),
+            json!(nine),
+            json!(true),
+            json!(5),
+            json!({}),
+        ];
+        let _guard = common::dns_resolver::lock_resolver_for_test();
+        for value in invalid {
+            let err = install_dns_resolver(&json!({ "dns_resolver": value })).unwrap_err();
+            assert!(
+                matches!(
+                    err.get_inner(),
+                    MmInitError::ErrorDeserializingConfig { field, error } if field == "dns_resolver" && error.contains("dns_resolver")
+                ),
+                "{}: {:?}",
+                value,
+                err
+            );
+            assert!(common::dns_resolver::installed_mode().is_none(), "{}", value);
+        }
+    }
+
+    /// A valid value installs the matching mode, and the start-up line is logged once per installation (R45.6B.7,
+    /// R45.6B.8): a second start in the process replaces the resolver.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_valid_dns_resolver_value_installs_its_mode_and_logs_one_line() {
+        use super::install_dns_resolver;
+        use common::dns_resolver::{installed_mode, startup_lines_logged, DnsMode};
+        let _guard = common::dns_resolver::lock_resolver_for_test();
+        let cases = [
+            (json!({}), DnsMode::Google),
+            (json!({ "dns_resolver": null }), DnsMode::Google),
+            (json!({ "dns_resolver": "google" }), DnsMode::Google),
+            (json!({ "dns_resolver": "system" }), DnsMode::System),
+            (
+                json!({ "dns_resolver": ["192.0.2.53:5353", "[2001:db8::53]"] }),
+                DnsMode::Fixed(vec![
+                    "192.0.2.53:5353".parse().unwrap(),
+                    "[2001:db8::53]:53".parse().unwrap(),
+                ]),
+            ),
+        ];
+        for (conf, mode) in cases {
+            let lines_before = startup_lines_logged();
+            install_dns_resolver(&conf).unwrap();
+            assert_eq!(installed_mode(), Some(mode), "{}", conf);
+            assert_eq!(startup_lines_logged(), lines_before + 1, "{}", conf);
+        }
+    }
 
     #[test]
     fn passphrase_absent_is_absent_form() {
