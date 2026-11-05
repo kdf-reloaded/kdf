@@ -497,7 +497,34 @@ own V1 payments to be spent, it searches forward from a cursor.
   as spent while no window has yet returned the spend, one WARN line says so
   for that wait.
 - The V2 search for a funding spend (§17.5.5) likewise checks its deadline
-  after a failed query, so persistent failures cannot keep it from ending.
+  after a failed query, so persistent failures cannot keep it from ending. It
+  also keeps a cursor across its polls, so a poll scans only the windows not
+  yet scanned. Like the V1 wait's, that cursor stays at least 12 blocks below
+  the tip.
+
+**R17.8.3a. The search for a spend or refund of a V1 payment.** The search a
+node runs to learn whether one of its V1 payments was spent or refunded runs in
+bounded time per call, however late the spend or refund came. It is the look on
+the chain of chapter 51 R31a, which runs under a budget of its own, and the
+search of the fund recovery.
+- For each payment, the node keeps the blocks it has already scanned, as a few
+  block intervals, for the rest of its session. The search's low end is the
+  higher of the payment's receipt block, when that is known, and the search's
+  start block.
+- Each call scans the blocks not yet scanned from the tip downwards, newest
+  window first. Each window is the newest `W` blocks of the unscanned range
+  below the previous one. Blocks above the scanned intervals therefore come
+  first, then the gaps below them, down to the low end. A spend or refund that
+  came late, near the tip, is found within the first few windows.
+- The call ends when it finds the spend or the refund, or when no unscanned
+  block is left down to the low end.
+- A window is recorded as scanned after it has been searched without error and
+  without a result. A call cut short by its caller's budget therefore loses no
+  progress, and the next call rescans nothing it has already scanned. When a
+  window has to shrink (R17.8.2), its parts may be queried oldest first.
+- A scan never records blocks closer than 12 below the tip it saw as scanned,
+  the reorganization margin of R17.8.3. The next call scans those blocks
+  again.
 
 **R17.8.4. Compatibility.** No switch. R17.8.1–R17.8.3 correct a defect: a V1
 spend wait that queried from the swap's start block to the tip in one request
@@ -867,9 +894,11 @@ window fails on every node. One node refusing and the next accepting is
 therefore the designed behavior, not a missed reduction.
 
 **T17.8.4. Windows.** With `W` = 1,000 and a range of blocks 0 to 2,499, the
-windows are [0, 999], [1,000, 1,999] and [2,000, 2,499], for every search of
-R17.8.1 (the spend wait, the spend and refund search, the payment-sent search
-and the V2 event search). `W` never exceeds the coin's `logs_block_range`.
+windows of the forward searches (the spend wait, the payment-sent search and the
+V2 event search) are [0, 999], [1,000, 1,999] and [2,000, 2,499]. Those of the
+spend and refund search of R17.8.3a, which runs newest first, are
+[1,500, 2,499], [500, 1,499] and [0, 499]. No block is queried twice, and none is
+skipped. `W` never exceeds the coin's `logs_block_range`.
 
 **T17.8.5. The cursor.** With the payment in block P and the swap's start block
 P − 3,555, the spend wait's first query starts at P.
@@ -883,6 +912,28 @@ its transaction fetch failing, the timeout text names the spend.
 **T17.8.8. The reorganization margin.** The tip block of one poll is scanned
 without the spend, and is then replaced by a block that carries the spend. The
 next poll of the V1 wait finds the spend.
+
+**T17.8.9. A late spend.** On a node that refuses ranges above 100 blocks, with
+the payment 18,000 blocks below the tip and the spend 50 blocks below the tip,
+one search finds the spend within a budget of a few windows. It does not first
+walk up from the payment block.
+
+**T17.8.10. Progress across calls.** With a spend early in a range larger than one
+call can scan before its budget ends, a later call finds it without rescanning
+any window an earlier call scanned, except the newest 12 blocks. Blocks added
+above the scanned interval between calls are scanned first.
+
+**T17.8.11. The V2 cursor.** Across polls, the V2 funding-spend search scans each
+window once, except the newest 12 blocks.
+
+**T17.8.12. A reorganized block.** For the search of R17.8.3a and the V2 cursor:
+a block within 12 of the tip, scanned empty and then replaced by one carrying
+the spend or the event, is found by the next call or poll.
+
+*Lab case (2026-11-05).* The maker is held stopped until the taker's wait for
+the spend has ended at its deadline, then resumed so that it spends the taker
+payment. The taker's look on the chain (chapter 51 R31a) finds the late spend
+within its budget and claims the maker payment.
 
 **T17.8.7. The contract state.** With the contract reporting the payment as
 spent while the logs keep failing, one WARN line is logged for the wait.
@@ -1045,3 +1096,10 @@ The chapter relies on one baseline-state claim:
   behavior (nodes that refuse `eth_getLogs` ranges above a node-specific
   limit). They take no forbidden-class input, so chapter 01 R38 is not
   engaged and no gate pass is required.
+- *Clean-side addition (2026-11-05) -- R17.8.3a, the V2 cursor sentence of
+  R17.8.3 and T17.8.9–T17.8.12.* Reloaded-original. A second-session review of
+  PR #248 found that the look on the chain of chapter 51 R31a could not reach a
+  late spend within its budget. Written by a session that never read the
+  forbidden corpus, from this repository's own code. It takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.

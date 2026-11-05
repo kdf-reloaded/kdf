@@ -3343,20 +3343,41 @@ impl EthCoin {
         use crate::eth::alloy_compat::assert_send_future;
         use alloy::providers::Provider;
 
+        // CRD ch.17 R17.8.3a: the blocks scanned for this payment are remembered for the session, and a call scans
+        // the unscanned blocks from the tip downwards, so a late spend or refund near the tip is found within the
+        // first few windows and a call cut short by its caller's budget loses no progress.
+        let key: PaymentKey = (swap_contract_address, id);
         let mut current_block = try_s!(assert_send_future(self.current_block().compat()).await);
-        if current_block < search_from_block {
-            current_block = search_from_block;
+        let payment_block = match self.logs_window.receipt_block(&key) {
+            Some(block) => Some(block),
+            None => {
+                // The spend cannot precede the payment: the search ends at the payment's block when it is known.
+                let block = self.payment_receipt_block(&tx).await;
+                if let Some(block) = block {
+                    self.logs_window.set_receipt_block(&key, block);
+                }
+                block
+            },
+        };
+        let lowest_block = payment_block.map_or(search_from_block, |block| block.max(search_from_block));
+        if current_block < lowest_block {
+            current_block = lowest_block;
         }
 
-        let mut from_block = search_from_block;
-
-        loop {
-            let to_block = self.log_window_end(from_block, current_block);
+        let mut window_top = current_block;
+        while let Some((unscanned_from, unscanned_to)) =
+            self.logs_window.highest_unscanned(&key, lowest_block, window_top)
+        {
+            // The window is the newest `W` blocks of the unscanned run; `W` is read afresh for every window.
+            let to_block = unscanned_to;
+            let from_block = unscanned_from.max(to_block.saturating_add(1).saturating_sub(self.logs_window()));
 
             let spend_events = try_s!(
                 assert_send_future(self.spend_events(swap_contract_address, from_block, to_block).compat()).await
             );
-            let found = spend_events.iter().find(|event| &event.data.0[..32] == id.as_slice());
+            let found = spend_events
+                .iter()
+                .find(|event| &event.data.0[..32] == key.1.as_slice());
 
             if let Some(event) = found {
                 match event.transaction_hash {
@@ -3393,7 +3414,9 @@ impl EthCoin {
             let refund_events = try_s!(
                 assert_send_future(self.refund_events(swap_contract_address, from_block, to_block).compat()).await
             );
-            let found = refund_events.iter().find(|event| &event.data.0[..32] == id.as_slice());
+            let found = refund_events
+                .iter()
+                .find(|event| &event.data.0[..32] == key.1.as_slice());
 
             if let Some(event) = found {
                 match event.transaction_hash {
@@ -3419,10 +3442,14 @@ impl EthCoin {
                 }
             }
 
-            if to_block >= current_block {
-                break;
+            // Recorded only now, after both queries answered and found nothing: a window whose event was found
+            // is scanned again by the next call, so that a failure to fetch the transaction loses nothing. The
+            // record is done window by window, so a future dropped by the caller's budget keeps its progress.
+            self.logs_window.mark_scanned(&key, from_block, to_block, current_block);
+            match from_block.checked_sub(1) {
+                Some(below) => window_top = below,
+                None => break,
             }
-            from_block = to_block + 1;
         }
 
         Ok(None)

@@ -19,6 +19,7 @@
 //!   the NFT swap_v2 module; renaming requires updating all call sites.
 
 use crate::eth::abi::{Contract, Token};
+use crate::eth::eth_logs_window::REORG_MARGIN_BLOCKS;
 use crate::eth::legacy_tx::{Action, SignedTransaction as SignedEthTx};
 use crate::eth::{decode_contract_call, signed_tx_from_alloy_tx, EthCoin, EthCoinType, Log, Transaction, TransactionErr};
 use crate::{FindPaymentSpendError, MarketCoinOps};
@@ -141,6 +142,10 @@ impl EthCoin {
         &self,
         params: SpendTxSearchParams<'_>,
     ) -> MmResult<H256, FindPaymentSpendError> {
+        // CRD ch.17 R17.8.3: the first block that no poll has scanned yet. A poll starts here and moves it past
+        // every window it scanned without error, but never higher than `REORG_MARGIN_BLOCKS` below the tip it
+        // saw, so the newest blocks are scanned again by the next poll.
+        let mut cursor = params.from_block;
         loop {
             let now_secs = now_ms() / 1000;
             if now_secs > params.wait_until {
@@ -159,7 +164,8 @@ impl EthCoin {
                 },
             };
 
-            let mut window_start = params.from_block;
+            let cursor_cap = current_block.saturating_sub(REORG_MARGIN_BLOCKS - 1);
+            let mut window_start = cursor;
             while window_start <= current_block {
                 let window_end = self.log_window_end(window_start, current_block);
 
@@ -199,6 +205,7 @@ impl EthCoin {
                     }
                 }
 
+                cursor = cursor.max(window_end.saturating_add(1).min(cursor_cap));
                 window_start = window_end + 1;
             }
 

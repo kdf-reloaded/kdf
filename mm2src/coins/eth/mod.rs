@@ -114,7 +114,7 @@ mod wire_types;
 pub use eth_activation::*;
 pub use eth_gas_limit::*;
 pub use eth_impl::*;
-pub(crate) use eth_logs_window::{LogsWindow, SPEND_WAIT_POLL_S};
+pub(crate) use eth_logs_window::{LogsWindow, PaymentKey, SPEND_WAIT_POLL_S};
 pub use eth_mm_coin::EthTxFeeDetails;
 pub use eth_types::*;
 // EVM Trezor activation entrypoints (native, non-iOS).
