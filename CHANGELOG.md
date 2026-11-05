@@ -51,6 +51,19 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Changed
 
+#### ARRR and other shielded coins
+
+- **ARRR now declines a swap with a node that cannot build the Ironwood transaction format, before
+  anything is paid.** An ARRR node now states in its orders and match messages that it builds
+  version-6 transactions, and declines a counterparty that does not, on the taker and the maker side,
+  before the DEX fee or any payment. Until now such a swap started normally and failed at the other
+  node's first ARRR transaction, which cost the DEX fee, locked ARRR until the refund, or both. KDF
+  Reloaded 0.3.0-beta.1 nodes are declined too: they build the format but predate the statement, so
+  their users upgrade to trade ARRR. GLEEC KDF keeps matching as before; a GLEEC taker sees a request
+  that times out. Each decline is logged at debug level with its cause, and at most once an hour a
+  warning gives the number declined. Setting `require_v6_counterparty` to `false` in the coin's
+  `consensus_params` turns the requirement off. Detail: PR #241; CRD ch.39 R39.6.4f.
+
 #### EVM coins
 
 - **The quoted fee for sending an EVM taker fee is now the fee at the gas limit the node sends it
@@ -188,7 +201,8 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: the
   capability word that lets ARRR require a counterparty that builds version-6 transactions is
   written (CRD PR #227), and its generic part, the word's writer and fail-closed reader and the
-  decline log lines, is implemented (PR #235); the ARRR rule that uses it comes next.
+  decline log lines, is implemented (PR #235); the ARRR rule that uses it is written (CRD PR #230)
+  and implemented (PR #241).
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
@@ -269,10 +283,12 @@ lives.
   differs from the maker's now also asks one other relay, which removes the order if that relay
   received the cancellation. More in [`ghost-orders`](docs/plans/ghost-orders.md). Detail:
   PRs #188, #208; CRD ch.32 D12, R-Q5d.
-- **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes.** ARRR now uses a newer
-  transaction format (v6, from the Ironwood upgrade) that no other KDF implementation can handle, so a
-  swap with a Komodo or GLEEC counterparty cannot complete. A swap between two KDF Reloaded nodes has
-  completed on the live chain, including the spend of the locked ARRR (October 2026). More in
+- **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes of this release or later.**
+  ARRR now uses a newer transaction format (v6, from the Ironwood upgrade) that no other KDF
+  implementation can handle, so a swap with a Komodo or GLEEC counterparty cannot complete. An ARRR
+  node therefore declines such a counterparty before the swap starts, and KDF Reloaded 0.3.0-beta.1
+  nodes as well (see Changed). A swap between two KDF Reloaded nodes has completed on the live chain,
+  including the spend of the locked ARRR (October 2026). More in
   [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
 - **Shielded coins such as ARRR cannot be activated in a browser (WASM) build.** Activation ends with
   an error saying shielded activation is not available in the WebAssembly build: the browser build
