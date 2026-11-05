@@ -13788,7 +13788,13 @@ mod maker_publication_tests {
         }
         flush_trie(&maker);
         assert_eq!(pending(&maker), 20);
-        spawn(maker_outbox_loop(maker.clone()));
+        // The loop reports its exit, so the test can stop it and know that no step is half done (see below).
+        let (loop_done_tx, loop_done_rx) = futures::channel::oneshot::channel::<()>();
+        let outbox_loop_ctx = maker.clone();
+        spawn(async move {
+            maker_outbox_loop(outbox_loop_ctx).await;
+            let _ = loop_done_tx.send(());
+        });
         let octx = OrdermatchContext::from_ctx(&maker).unwrap();
         let started = std::time::Instant::now();
         block_on(broadcast_keep_alive_for_pub(&maker, &octx, &pubkey_of(&maker), None));
@@ -13798,6 +13804,12 @@ mod maker_publication_tests {
             "the keep-alives left after {:?}",
             waited
         );
+        // A release leaves the pending set under the outbox lock, and reaches the channel a moment later, in the same
+        // pump step. The running loop could thus release between the drain and the read of `pending`. So the loop is
+        // stopped first, and its exit awaited: a pump step is synchronous, so no step is half done once the loop has
+        // returned, and the two reads below see the same, final state.
+        maker.stop().unwrap();
+        block_on(loop_done_rx).expect("the outbox loop returned");
         let published = drain(&mut rx);
         let released = published.iter().filter(|p| kind(&p.message) == "created").count();
         // 0.5 per second for 10 s, plus the tokens that had refilled and the pump's step.
