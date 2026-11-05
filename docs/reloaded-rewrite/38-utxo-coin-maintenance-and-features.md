@@ -53,10 +53,12 @@ Reloaded ships some of it and lacks the rest, so the chapter is split:
   connection pool of §38.6.4 is partly built (its as-built note of 2026-10-27
   lists what remains), and P2PK (R38.6.3) and
   the Verus-family script label (R38.6.8) are built on dev (see their notes).
-- **§38.8 (T-PORT, required, NOT yet in reloaded):** software (non-hardware)
-  global-HD UTXO accounts -- storage availability, account-`0` bootstrap at
-  activation, `get_new_address` advance, and gap/scan semantics for BIP-44 and
-  BIP-84 coins -- consuming the Chapter 5 §5.9A software-HD crypto substrate.
+- **§38.8 (T-PORT, required, built on dev; status corrected 2026-11-04):**
+  software (non-hardware) global-HD UTXO accounts -- storage availability,
+  account-`0` bootstrap at activation, `get_new_address` advance, and gap/scan
+  semantics for BIP-44 and BIP-84 coins -- consuming the Chapter 5 §5.9A
+  software-HD crypto substrate. The status note at the head of §38.8 lists
+  what remains.
 
 > **Binding scope (R36).** Requirements bind observable behaviour, public RPC
 > method strings / request-response field names, coins-config keys, and dictated
@@ -2797,11 +2799,20 @@ the same for the Sia wallet daemon.
 
 ## 38.8 Software global-HD UTXO accounts & address derivation (T-PORT)
 
-> **Status of §38.8:** required port. The reloaded UTXO HD path can only obtain
-> an account extended public key through a hardware device; a **software**
-> (non-hardware) global-HD account therefore cannot create an HD account or
-> derive HD addresses. This section binds the software-HD UTXO behaviour as
-> first-class, testable requirements. It is the coin-side consumer of Chapter 5
+> **Status of §38.8:** required port, built on dev *(corrected 2026-11-04)*.
+> When this section was written, the reloaded UTXO HD path could only obtain
+> an account extended public key through a hardware device, so a **software**
+> (non-hardware) global-HD account could not create an HD account or derive HD
+> addresses. The software source of Chapter 5 §5.9A, the account-`0`
+> bootstrap, `get_new_address`, the scan and gap-limit rules and
+> `min_addresses_number` are now built. Remaining: `task::create_new_account`
+> for an account other than `0` still fails under a software global-HD login,
+> because it asks for a hardware device first (the Chapter 20 §20.10 D1 note
+> records it); and `path_to_address` is honored for a software global-HD
+> account only, not under the Trezor policy (Chapter 55 §55.5). Both are items
+> of plan [`hd-key-unification`](../plans/hd-key-unification.md). This section
+> binds the software-HD UTXO behaviour as first-class, testable requirements.
+> It is the coin-side consumer of Chapter 5
 > §5.9A (R29–R31), which binds the crypto substrate (software wallet identity,
 > software account-xpub derivation and canonical serialisation, and source
 > selection by key-pair policy). §38.8 binds the UTXO account bootstrap, the
@@ -3319,6 +3330,11 @@ R38.8.6 **Tests (two-direction, observable).**
   *Measure:* 0.02, read against the standard that any discretionary finding
   fails a file; dictated-interop and public-surface tokens were excluded from
   the measured set.
+- *Clean-side correction (2026-11-04) -- the §38.8 bullet of §38.0 and the
+  status note at the head of §38.8.* They now say that §38.8 is built and
+  name what remains. Written by a session that never read the corpus, from
+  this repository's own activation, account and address code. It takes no
+  forbidden-class input and needs no Dirty Gate pass.
 - *Scoped addition (2026-11-04) -- R38.6.6n, T38.6.6n and its compatibility
   row.* The rule's two sentences and the first sentence of T38.6.6n are the
   Reloaded-original wording proposed by the Spec Reader micro-run 0.4.0-2c

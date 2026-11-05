@@ -440,6 +440,12 @@ changes no root. *(Reloaded-original, 2026-11-04.)*
   originating pubkey from the *gossip envelope's signature*
   (the message body does not carry it).
 
+A wire order record or side-channel value that the node decodes from a
+peer's bytes (a gossip message, a synchronization answer or a trie
+entry received from a peer) is read under the bounds of
+[Chapter 28](28-libp2p-modernization.md) R16a. The wire format does
+not change.
+
 **R-W5 (proof-carrying wire item, dictated).** For verifiable
 delivery, the subsystem MUST define a wire form that wraps a wire
 order record together with (a) the most recent signed pubkey-
@@ -4233,3 +4239,7 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   corpus, from this repository's own order records, side channel and trie
   leaf, and from Decision BM. It states no reference fact and needs no
   Dirty Gate pass.
+- *Reloaded-original addition (2026-11-04) -- the pointer to Chapter 28
+  R16a before R-W5.* Maintainer decision CD. Written from this
+  repository's own decode paths. The forbidden corpus was not consulted,
+  and it needs no Dirty Gate pass.
