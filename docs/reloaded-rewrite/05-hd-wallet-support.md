@@ -1002,8 +1002,11 @@ an explicitly named **legacy key** (Decision CR). It MUST be used only:
 1. for a swap that recorded it (R47);
 2. as the seed of the Lightning node, so that a Lightning node keeps its
    identity (Lightning is not enabled in this release);
-3. by the activation of BCH together with its tokens and by the Tendermint
-   activation, until plan item H7 moves them to the coin key (§5.9B R35).
+3. by the shared platform-with-tokens activation, which passes it to the
+   platform coin: BCH together with its tokens and Tendermint, until plan
+   item H7 moves them to the coin key (§5.9B R35), and Solana, which is not
+   enabled in this release. The EVM platform ignores it *(amended
+   2026-11-05: Solana named)*.
 
 No other part of the node may use it.
 
@@ -1055,7 +1058,7 @@ MUST carry an upgrade note for HD logins covering:
 > the passphrase text; the `DEFERRED(hd-dispatch)` comment is gone. `ctx.rmd160` and the database paths already
 > derived from the internal key and are untouched. The legacy accessor is read at exactly three places: the
 > Lightning seed (`coins/lightning/ln_utils.rs`, `init_keys_manager`) and the two family activations
-> (`coins_activation/src/platform_coin_with_tokens.rs`, the BCH-with-tokens and Tendermint paths). Every other
+> (`coins_activation/src/platform_coin_with_tokens.rs`, the BCH-with-tokens and Tendermint paths, and the Solana path, which is not enabled; the EVM path ignores the key). Every other
 > reader of the context key (ordermatch signing and `sender_pubkey`, the swap start, swap messages, the
 > healthcheck, `public_id`) is unchanged code and follows the pin. *R45 item 6.* `relay_p2p_identity_secret`
 > (`mm2_main/src/lp_native_dex.rs`) is the relay's identity secret, the SHA-256 of the node key's secret.
@@ -1513,3 +1516,10 @@ surface.
   chapter 28 R19, which passed the KDF Dirty Gate on 2026-11-04. The addition
   carries no reference content of its own and needs no Dirty Gate pass of its
   own.
+- *Clean-side amendment (2026-11-05) -- R46 item 3 and the as-built note
+  under §5.12D.* They now name the Solana path of the shared
+  platform-with-tokens activation, which also reads the legacy key, and say
+  that the EVM path ignores it. Found in a second-session review of the H4
+  code. Written by a context that never read the corpus, from this
+  repository's activation code. It takes no forbidden-class input and needs
+  no Dirty Gate pass.

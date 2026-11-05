@@ -377,3 +377,83 @@ fn t30_under_an_iguana_login_the_legacy_key_is_the_node_key() {
     let (swap, _) = MakerSwap::load_from_saved(ctx, coin.clone(), coin, saved_swap(None, None)).unwrap();
     assert_eq!(swap.node_key_pair.public(), persistent_pair().public());
 }
+
+/// The error text of a recovery that finds no candidate paying the payment: the swap's negotiated key is
+/// `per_swap_pubkey`, and `saved_keypair` is the private key saved with it.
+fn unrecoverable_text(per_swap_pubkey: &[u8], saved_keypair: Option<KeyPair>) -> String {
+    let coin = mock_coin_signing_with(None);
+    mock_payment_of(vec![0u8; 33]);
+    let ctx = hd_ctx();
+    let stages = RecoveryStages::default();
+    block_on(resolve_recovery_htlc_key(RecoveryKeyRequest {
+        ctx: &ctx,
+        coin: &coin,
+        owner: PaymentOwner::Mine,
+        per_swap_pubkey: H264::from(per_swap_pubkey),
+        derived_keypair: None,
+        saved_keypair,
+        other_pubkey: &[2u8; 33],
+        time_lock: 1,
+        secret_hash: &[7u8; 20],
+        payment_tx: &[1u8; 4],
+        stages: &stages,
+    }))
+    .unwrap_err()
+}
+
+/// T28 (R47): when the swap's own key is the legacy key, the text names the keys that were really tried, in the
+/// order they were tried, whether or not a private key was saved with the swap; when the legacy key is only an
+/// extra candidate, the existing texts stay and the legacy key is added to them.
+#[test]
+fn t28_the_unrecoverable_text_names_the_keys_that_were_tried() {
+    let legacy = legacy_pair();
+
+    // The swap's key is the legacy key and nothing is saved: the node key is tried first, then the legacy key.
+    let text = unrecoverable_text(legacy.public(), None);
+    assert!(
+        text.contains("does not pay the HTLC script this swap negotiated: the persistent key and the legacy passphrase key were tried -- "),
+        "{text}"
+    );
+    assert!(!text.contains("which is also the persistent key"), "{text}");
+
+    // The swap's key is the legacy key and a private key that does not belong to it is saved: legacy first.
+    let text = unrecoverable_text(legacy.public(), Some(coin_pair()));
+    assert!(
+        text.contains("negotiated: the legacy passphrase key and the persistent key were tried -- "),
+        "{text}"
+    );
+
+    // The swap's key is a third key: the existing text, with the legacy key added as an extra candidate.
+    let text = unrecoverable_text(coin_pair().public(), None);
+    assert!(
+        text.contains(
+            "negotiated: the swap's key, which is also the persistent key, was tried, and so was the legacy \
+             passphrase key -- "
+        ),
+        "{text}"
+    );
+
+    // Under an iguana login (the legacy key is the node key) the text is the one of before.
+    let coin = mock_coin_signing_with(None);
+    mock_payment_of(vec![0u8; 33]);
+    let ctx = ctx_of(persistent_pair());
+    let stages = RecoveryStages::default();
+    let text = block_on(resolve_recovery_htlc_key(RecoveryKeyRequest {
+        ctx: &ctx,
+        coin: &coin,
+        owner: PaymentOwner::Mine,
+        per_swap_pubkey: H264::from(&**persistent_pair().public()),
+        derived_keypair: None,
+        saved_keypair: None,
+        other_pubkey: &[2u8; 33],
+        time_lock: 1,
+        secret_hash: &[7u8; 20],
+        payment_tx: &[1u8; 4],
+        stages: &stages,
+    }))
+    .unwrap_err();
+    assert!(
+        text.contains("negotiated: the swap's key, which is also the persistent key, was tried -- "),
+        "{text}"
+    );
+}

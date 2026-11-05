@@ -1377,7 +1377,9 @@ pub(crate) async fn resolve_recovery_htlc_key(req: RecoveryKeyRequest<'_>) -> Re
     if !candidates.iter().any(|(_, pubkey, _)| *pubkey == persistent.pubkey) {
         candidates.push((persistent.kind, persistent.pubkey, Some(persistent.keypair)));
     }
-    if !candidates.iter().any(|(_, pubkey, _)| *pubkey == legacy.pubkey) {
+    // True when the legacy key is a candidate of its own, besides the swap's keys and the node key.
+    let legacy_is_extra = !candidates.iter().any(|(_, pubkey, _)| *pubkey == legacy.pubkey);
+    if legacy_is_extra {
         candidates.push((legacy.kind, legacy.pubkey, Some(legacy.keypair)));
     }
     if let Some(derived) = req.derived_keypair {
@@ -1433,15 +1435,30 @@ pub(crate) async fn resolve_recovery_htlc_key(req: RecoveryKeyRequest<'_>) -> Re
     let Some(payment_id) = other_script_payment else {
         return ERR!("No HTLC key candidate was checked against the payment");
     };
-    let legacy_tried = candidates
-        .iter()
-        .any(|(kind, _, _)| *kind == RecoveryHtlcKeyKind::LegacyPassphrase);
-    let tried = match candidates.len() - usize::from(legacy_tried) {
-        1 => "the swap's key, which is also the persistent key, was tried",
-        2 => "both the swap's per-swap key and the persistent key were tried",
-        _ => "the swap's re-derived key, its saved key and the persistent key were tried",
+    // The swap's own key is the legacy key (a swap of an earlier build under a global-HD login): name the keys that
+    // were really tried, the swap's key as the legacy key it is.
+    let swaps_key_is_legacy = req.per_swap_pubkey == legacy.pubkey && legacy.pubkey != persistent.pubkey;
+    let tried = if swaps_key_is_legacy {
+        let labels: Vec<&str> = candidates
+            .iter()
+            .map(|(kind, pubkey, _)| {
+                if *pubkey == legacy.pubkey {
+                    RecoveryHtlcKeyKind::LegacyPassphrase.label()
+                } else {
+                    kind.label()
+                }
+            })
+            .collect();
+        format!("the {} were tried", labels.join(" and the "))
+    } else {
+        let tried = match candidates.len() - usize::from(legacy_is_extra) {
+            1 => "the swap's key, which is also the persistent key, was tried",
+            2 => "both the swap's per-swap key and the persistent key were tried",
+            _ => "the swap's re-derived key, its saved key and the persistent key were tried",
+        };
+        tried.to_owned()
     };
-    let tried_legacy = if legacy_tried {
+    let tried_legacy = if legacy_is_extra && !swaps_key_is_legacy {
         ", and so was the legacy passphrase key"
     } else {
         ""
