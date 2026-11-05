@@ -816,7 +816,7 @@ another activation untouched when it is cancelled.
 | Field | Type | Required / default | Effect |
 | --- | --- | --- | --- |
 | `mode` | object `{"rpc": "Native"}` or `{"rpc": "Electrum", "rpc_data": {"servers": [...], "min_connected"?: int, "max_connected"?: int}}` | required | backend selection; the list order is the server priority and `min_connected`/`max_connected` bound the maintained set ([Chapter 38](38-utxo-coin-maintenance-and-features.md) R38.6.4b) |
-| `mode.rpc_data.servers[]` | object `{url: string (required), protocol?: "TCP" \| "SSL" \| "WS" \| "WSS", disable_cert_verification?: boolean (default false), timeout_sec?: number}` | at least one for Electrum | Electrum server; `protocol` defaults to `TCP` on native targets and `WSS` on WASM; `timeout_sec` (default 20) bounds connection establishment and version negotiation, not requests (Chapter 38 R38.6.4e) |
+| `mode.rpc_data.servers[]` | object `{url: string (required), protocol?: "TCP" \| "SSL" \| "WS" \| "WSS", disable_cert_verification?: boolean (default false), timeout_sec?: number, spki_sha256?: string \| string[]}` | at least one for Electrum | Electrum server; `protocol` defaults to `TCP` on native targets and `WSS` on WASM; `timeout_sec` (default 20) bounds connection establishment and version negotiation, not requests (Chapter 38 R38.6.4e); `disable_cert_verification` turns off authentication of an `SSL` server but not its encryption (Chapter 38 R38.6.4m); `spki_sha256` is a planned Reloaded addition, a pin on the server's key of 1 to 4 SHA-256 digests (Chapter 38 R38.6.4n) |
 | `utxo_merge_params` | object `{merge_at: int (required), check_every?: number (default 10), max_merge_at_once?: int (default 100)}` | optional | automatic UTXO consolidation |
 | `tx_history` | boolean | optional, default `false` | start history collection on success |
 | `required_confirmations` | integer | optional; default from configuration | swap confirmations |
@@ -1610,3 +1610,8 @@ R55.4.5 and the error body of R55.1.10.
   by a session that never read the corpus, from that decision and this
   repository's own code. The reference facts of R55.4.10 are unchanged. It
   takes no forbidden-class input and needs no Dirty Gate pass.
+- *Clean-context addition (2026-11-05, forbidden corpus not consulted):* the
+  pointers to chapter 38 R38.6.4m and the planned Reloaded key `spki_sha256`
+  (R38.6.4n) in the `mode.rpc_data.servers[]` row of R55.5.10 are
+  Reloaded-original. They add no reference content, so chapter 01 R38 is not
+  engaged and no clearance above is widened.
