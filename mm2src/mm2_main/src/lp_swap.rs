@@ -1012,7 +1012,8 @@ pub fn select_secret_hash_algo(maker_coin: &MmCoinEnum, taker_coin: &MmCoinEnum)
 ///
 /// A secp256k1 chain answers with the key it is handed — its own HTLC keypair
 /// when [`SwapOps::get_htlc_key_pair`] gives one, otherwise this node's
-/// persistent key — so nothing changes for it. A chain that signs with another
+/// persistent key (`node_pubkey`, the swap's own node key, CRD ch.05 R47) —
+/// so nothing changes for it. A chain that signs with another
 /// curve answers with its own key, in the 33-byte form R64 dictates. Neither
 /// the negotiation message nor the swap machines become key-length-polymorphic
 /// in the process: the result is exactly `SWAP_WIRE_PUBKEY_LEN` bytes either
@@ -1023,18 +1024,17 @@ pub fn select_secret_hash_algo(maker_coin: &MmCoinEnum, taker_coin: &MmCoinEnum)
 /// Fails when either coin cannot produce a key of the bound width; the swap
 /// then fails to start rather than negotiating a key it cannot sign with.
 pub fn derive_htlc_pubkeys(
-    ctx: &MmArc,
+    node_pubkey: &Public,
     maker_coin: &MmCoinEnum,
     maker_coin_htlc_key_pair: &Option<KeyPair>,
     taker_coin: &MmCoinEnum,
     taker_coin_htlc_key_pair: &Option<KeyPair>,
 ) -> Result<(H264, H264), String> {
-    let node_pubkey = *ctx.secp256k1_key_pair().public();
     let maker_coin_htlc_pubkey = maker_coin
-        .derive_htlc_pubkey(maker_coin_htlc_key_pair.as_ref().map_or(&node_pubkey, |k| k.public()))
+        .derive_htlc_pubkey(maker_coin_htlc_key_pair.as_ref().map_or(node_pubkey, |k| k.public()))
         .map_err(|e| format!("!{}.derive_htlc_pubkey {}", maker_coin.ticker(), e))?;
     let taker_coin_htlc_pubkey = taker_coin
-        .derive_htlc_pubkey(taker_coin_htlc_key_pair.as_ref().map_or(&node_pubkey, |k| k.public()))
+        .derive_htlc_pubkey(taker_coin_htlc_key_pair.as_ref().map_or(node_pubkey, |k| k.public()))
         .map_err(|e| format!("!{}.derive_htlc_pubkey {}", taker_coin.ticker(), e))?;
 
     Ok((
@@ -1053,6 +1053,9 @@ pub(crate) enum RecoveryHtlcKeyKind {
     PerSwap,
     /// The coin's persistent key.
     Persistent,
+    /// The legacy passphrase key (CRD ch.05 R46, R47): the node key of a swap an earlier build started under a
+    /// global-HD login.
+    LegacyPassphrase,
 }
 
 impl RecoveryHtlcKeyKind {
@@ -1061,6 +1064,7 @@ impl RecoveryHtlcKeyKind {
             RecoveryHtlcKeyKind::Derived => "derived per-swap key",
             RecoveryHtlcKeyKind::PerSwap => "per-swap key",
             RecoveryHtlcKeyKind::Persistent => "persistent key",
+            RecoveryHtlcKeyKind::LegacyPassphrase => "legacy passphrase key",
         }
     }
 }
@@ -1137,6 +1141,50 @@ pub(crate) fn start_htlc_key_pair(
             .filter(|own| **own.public() != **node_pubkey)
     });
     Ok((pair, pair.map(SerializableSecp256k1Keypair::from)))
+}
+
+/// The node key pair a swap that is restored runs with (CRD ch.05 R47, Decision CT): the key pair, out of the
+/// node key (the internal key under a global-HD login) and the legacy passphrase key, whose public key is the
+/// `my_persistent_pub` the swap's Started event recorded. It signs the swap's messages and transaction-helper
+/// messages, is the HTLC key of a coin that saved no pair (R43), and signs the spend and the refund.
+///
+/// # Errors
+///
+/// A recorded key that is neither key is an error naming the swap, and the swap is not resumed.
+pub(crate) fn swap_node_key_pair(ctx: &MmArc, uuid: &Uuid, recorded_persistent_pub: &[u8]) -> Result<KeyPair, String> {
+    let node = ctx.secp256k1_key_pair();
+    if **node.public() == *recorded_persistent_pub {
+        return Ok(*node);
+    }
+    let legacy = ctx.legacy_passphrase_key_pair();
+    if **legacy.public() == *recorded_persistent_pub {
+        return Ok(*legacy);
+    }
+    ERR!(
+        "Swap {}: the persistent key it recorded ({}) is neither the node key nor the legacy passphrase key, \
+         the swap is not resumed",
+        uuid,
+        hex::encode(recorded_persistent_pub)
+    )
+}
+
+/// Test support: the saved maker swap with its Started event recording the persistent key of `ctx`, as a swap
+/// started by the node whose context this is does (CRD ch.05 R47).
+#[cfg(test)]
+pub(crate) fn recorded_by_maker(mut saved: MakerSavedSwap, ctx: &MmArc) -> MakerSavedSwap {
+    if let MakerSwapEvent::Started(ref mut data) = saved.events[0].event {
+        data.my_persistent_pub = H264::from(&**ctx.secp256k1_key_pair().public()).into();
+    }
+    saved
+}
+
+/// Test support: the saved taker swap with its Started event recording the persistent key of `ctx`.
+#[cfg(test)]
+pub(crate) fn recorded_by_taker(mut saved: TakerSavedSwap, ctx: &MmArc) -> TakerSavedSwap {
+    if let TakerSwapEvent::Started(ref mut data) = saved.events[0].event {
+        data.my_persistent_pub = H264::from(&**ctx.secp256k1_key_pair().public()).into();
+    }
+    saved
 }
 
 /// The HTLC key pair a swap holds for a leg after its Started event is replayed (CRD ch.39 R39.5.11).
@@ -1297,8 +1345,15 @@ pub(crate) async fn resolve_recovery_htlc_key(req: RecoveryKeyRequest<'_>) -> Re
         pubkey: H264::from(&**persistent_keypair.public()),
         keypair: *persistent_keypair,
     };
+    // The legacy passphrase key (CRD ch.05 R47) is one more candidate when it is another key than the node key.
+    let legacy_keypair = req.ctx.legacy_passphrase_key_pair();
+    let legacy = RecoveryHtlcKey {
+        kind: RecoveryHtlcKeyKind::LegacyPassphrase,
+        pubkey: H264::from(&**legacy_keypair.public()),
+        keypair: *legacy_keypair,
+    };
     // Each candidate is a public key to match the payment with and, if one is held, the key pair that signs.
-    let mut candidates: Vec<(RecoveryHtlcKeyKind, H264, Option<KeyPair>)> = Vec::with_capacity(3);
+    let mut candidates: Vec<(RecoveryHtlcKeyKind, H264, Option<KeyPair>)> = Vec::with_capacity(4);
     if let Some(derived) = req.derived_keypair {
         let pubkey = try_s!(htlc_pubkey_of_keypair(req.coin, &derived));
         candidates.push((RecoveryHtlcKeyKind::Derived, pubkey, Some(derived)));
@@ -1310,6 +1365,7 @@ pub(crate) async fn resolve_recovery_htlc_key(req: RecoveryKeyRequest<'_>) -> Re
         Some(_) if persistent.pubkey == req.per_swap_pubkey => {
             Some((persistent.kind, persistent.pubkey, Some(persistent.keypair)))
         },
+        Some(_) if legacy.pubkey == req.per_swap_pubkey => Some((legacy.kind, legacy.pubkey, Some(legacy.keypair))),
         Some(_) => Some((RecoveryHtlcKeyKind::PerSwap, req.per_swap_pubkey, None)),
         None => None,
     };
@@ -1320,6 +1376,9 @@ pub(crate) async fn resolve_recovery_htlc_key(req: RecoveryKeyRequest<'_>) -> Re
     }
     if !candidates.iter().any(|(_, pubkey, _)| *pubkey == persistent.pubkey) {
         candidates.push((persistent.kind, persistent.pubkey, Some(persistent.keypair)));
+    }
+    if !candidates.iter().any(|(_, pubkey, _)| *pubkey == legacy.pubkey) {
+        candidates.push((legacy.kind, legacy.pubkey, Some(legacy.keypair)));
     }
     if let Some(derived) = req.derived_keypair {
         let derived_pubkey = try_s!(htlc_pubkey_of_keypair(req.coin, &derived));
@@ -1374,16 +1433,25 @@ pub(crate) async fn resolve_recovery_htlc_key(req: RecoveryKeyRequest<'_>) -> Re
     let Some(payment_id) = other_script_payment else {
         return ERR!("No HTLC key candidate was checked against the payment");
     };
-    let tried = match candidates.len() {
+    let legacy_tried = candidates
+        .iter()
+        .any(|(kind, _, _)| *kind == RecoveryHtlcKeyKind::LegacyPassphrase);
+    let tried = match candidates.len() - usize::from(legacy_tried) {
         1 => "the swap's key, which is also the persistent key, was tried",
         2 => "both the swap's per-swap key and the persistent key were tried",
         _ => "the swap's re-derived key, its saved key and the persistent key were tried",
     };
+    let tried_legacy = if legacy_tried {
+        ", and so was the legacy passphrase key"
+    } else {
+        ""
+    };
     ERR!(
-        "Payment tx {} output 0 does not pay the HTLC script this swap negotiated: {} -- this payment cannot be \
+        "Payment tx {} output 0 does not pay the HTLC script this swap negotiated: {}{} -- this payment cannot be \
          recovered automatically",
         payment_id,
-        tried
+        tried,
+        tried_legacy
     )
 }
 

@@ -4,9 +4,9 @@ use super::pubkey_banning::ban_pubkey_on_failed_swap;
 use super::swap_lock::{SwapLock, SwapLockOps};
 use super::trade_preimage::{TradePreimageRequest, TradePreimageRpcError, TradePreimageRpcResult};
 use super::{already_sent_check_pubkey, check_held_htlc_key, derive_htlc_pubkeys, recover_within, recovery_key_pairs,
-            resolve_recovery_htlc_key, restored_htlc_key_pair, start_htlc_key_pair, validate_wire_field_len,
-            validate_wire_pubkey, HtlcDetectionParams, PaymentOwner, RecoveryHtlcKey, RecoveryKeyRequest,
-            RecoveryStage, RecoveryStages, RECOVER_FUNDS_TOTAL_BOUND};
+            resolve_recovery_htlc_key, restored_htlc_key_pair, start_htlc_key_pair, swap_node_key_pair,
+            validate_wire_field_len, validate_wire_pubkey, HtlcDetectionParams, PaymentOwner, RecoveryHtlcKey,
+            RecoveryKeyRequest, RecoveryStage, RecoveryStages, RECOVER_FUNDS_TOTAL_BOUND};
 use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_coin_balance_for_swap,
             compute_dex_fee_with_taker_pubkey, dex_fee_amount_from_taker_coin, dex_fee_rate, dex_fee_threshold,
             get_locked_amount, recv_swap_msg, swap_topic, AbortOnDropHandle, AtomicSwap, LockedAmount, MySwapInfo,
@@ -556,6 +556,9 @@ pub struct TakerSwap {
     maker_amount: MmNumber,
     taker_amount: MmNumber,
     my_persistent_pub: H264,
+    /// The swap's own node key (CRD ch.05 R45, R47): the node key for a swap started by this build, or the
+    /// legacy passphrase key for a restored swap that recorded it. The public key is `my_persistent_pub`.
+    node_key_pair: KeyPair,
     maker: bits256,
     uuid: Uuid,
     my_order_uuid: Option<Uuid>,
@@ -984,7 +987,7 @@ impl TakerSwap {
         maker: bits256,
         maker_amount: MmNumber,
         taker_amount: MmNumber,
-        my_persistent_pub: H264,
+        node_key_pair: KeyPair,
         uuid: Uuid,
         my_order_uuid: Option<Uuid>,
         conf_settings: SwapConfirmationsSettings,
@@ -998,7 +1001,8 @@ impl TakerSwap {
             taker_coin,
             maker_amount,
             taker_amount,
-            my_persistent_pub,
+            my_persistent_pub: H264::from(&**node_key_pair.public()),
+            node_key_pair,
             maker,
             uuid,
             my_order_uuid,
@@ -1022,10 +1026,10 @@ impl TakerSwap {
                 taker_payment_refund: None,
                 secret_hash: BytesJson::default(),
                 secret: H256Json::default(),
-                my_maker_coin_htlc_keypair: *ctx.secp256k1_key_pair(),
-                my_taker_coin_htlc_keypair: *ctx.secp256k1_key_pair(),
-                my_maker_coin_htlc_pub: H264::from(&**ctx.secp256k1_key_pair().public()),
-                my_taker_coin_htlc_pub: H264::from(&**ctx.secp256k1_key_pair().public()),
+                my_maker_coin_htlc_keypair: node_key_pair,
+                my_taker_coin_htlc_keypair: node_key_pair,
+                my_maker_coin_htlc_pub: H264::from(&**node_key_pair.public()),
+                my_taker_coin_htlc_pub: H264::from(&**node_key_pair.public()),
             }),
             ctx,
         }
@@ -1087,32 +1091,26 @@ impl TakerSwap {
         // A shielded coin's key is derived from the swap uuid (CRD ch.39 R39.5.6/R39.5.7) and is not saved
         // with the swap.
         let swap_unique_input = self.uuid.as_bytes();
-        let (maker_coin_htlc_key_pair, maker_coin_htlc_privkey) = match start_htlc_key_pair(
-            &self.maker_coin,
-            self.ctx.secp256k1_key_pair().public(),
-            swap_unique_input,
-        ) {
-            Ok(keys) => keys,
-            Err(e) => {
-                return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
-                    ERRL!("{}", e).into(),
-                )]))
-            },
-        };
-        let (taker_coin_htlc_key_pair, taker_coin_htlc_privkey) = match start_htlc_key_pair(
-            &self.taker_coin,
-            self.ctx.secp256k1_key_pair().public(),
-            swap_unique_input,
-        ) {
-            Ok(keys) => keys,
-            Err(e) => {
-                return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
-                    ERRL!("{}", e).into(),
-                )]))
-            },
-        };
+        let (maker_coin_htlc_key_pair, maker_coin_htlc_privkey) =
+            match start_htlc_key_pair(&self.maker_coin, self.node_key_pair.public(), swap_unique_input) {
+                Ok(keys) => keys,
+                Err(e) => {
+                    return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
+                        ERRL!("{}", e).into(),
+                    )]))
+                },
+            };
+        let (taker_coin_htlc_key_pair, taker_coin_htlc_privkey) =
+            match start_htlc_key_pair(&self.taker_coin, self.node_key_pair.public(), swap_unique_input) {
+                Ok(keys) => keys,
+                Err(e) => {
+                    return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
+                        ERRL!("{}", e).into(),
+                    )]))
+                },
+            };
         let (maker_coin_htlc_pubkey, taker_coin_htlc_pubkey) = match derive_htlc_pubkeys(
-            &self.ctx,
+            self.node_key_pair.public(),
             &self.maker_coin,
             &maker_coin_htlc_key_pair,
             &self.taker_coin,
@@ -1328,6 +1326,7 @@ impl TakerSwap {
             taker_data,
             NEGOTIATE_TIMEOUT as f64 / 6.,
             self.p2p_privkey,
+            self.node_key_pair,
         );
         let recv_fut = recv_swap_msg(
             self.ctx.clone(),
@@ -1475,6 +1474,7 @@ impl TakerSwap {
             msg,
             MAKER_PAYMENT_WAIT_TIMEOUT as f64 / 6.,
             self.p2p_privkey,
+            self.node_key_pair,
         );
 
         let recv_fut = recv_swap_msg(
@@ -1763,14 +1763,21 @@ impl TakerSwap {
             msg,
             WATCHER_MSG_INTERVAL,
             self.p2p_privkey,
+            self.node_key_pair,
         ))
     }
 
     async fn wait_for_taker_payment_spend(&self) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
         let tx_hex = self.r().taker_payment.as_ref().unwrap().tx_hex.0.clone();
         let msg = SwapMsg::TakerPayment(tx_hex.clone());
-        let send_abort_handle =
-            broadcast_swap_message_every(self.ctx.clone(), swap_topic(&self.uuid), msg, 600., self.p2p_privkey);
+        let send_abort_handle = broadcast_swap_message_every(
+            self.ctx.clone(),
+            swap_topic(&self.uuid),
+            msg,
+            600.,
+            self.p2p_privkey,
+            self.node_key_pair,
+        );
 
         // Broadcast watcher data if both coins support watchers
         let _watcher_abort_handle = self.maybe_broadcast_watcher_data(&tx_hex).await;
@@ -1860,6 +1867,7 @@ impl TakerSwap {
                         tx_helper_topic(self.maker_coin.ticker()),
                         &tx,
                         &self.p2p_privkey,
+                        &self.node_key_pair,
                     );
                 };
 
@@ -1874,6 +1882,7 @@ impl TakerSwap {
             tx_helper_topic(self.maker_coin.ticker()),
             &transaction,
             &self.p2p_privkey,
+            &self.node_key_pair,
         );
 
         let tx_hash = transaction.tx_hash();
@@ -1977,6 +1986,7 @@ impl TakerSwap {
                             tx_helper_topic(self.taker_coin.ticker()),
                             &tx,
                             &self.p2p_privkey,
+                            &self.node_key_pair,
                         );
                     }
 
@@ -1992,6 +2002,7 @@ impl TakerSwap {
             tx_helper_topic(self.taker_coin.ticker()),
             &transaction,
             &self.p2p_privkey,
+            &self.node_key_pair,
         );
 
         let tx_hash = transaction.tx_hash();
@@ -2140,7 +2151,8 @@ impl TakerSwap {
 
         let mut maker = bits256::from([0; 32]);
         maker.bytes = data.maker.0;
-        let my_persistent_pub = H264::from(&**ctx.secp256k1_key_pair().public());
+        // CRD ch.05 R47: the node key pair is the one whose public key the Started event recorded.
+        let node_key_pair = swap_node_key_pair(&ctx, &saved.uuid, &data.my_persistent_pub.0[..])?;
         let conf_settings = SwapConfirmationsSettings {
             maker_coin_confs: data.maker_payment_confirmations,
             maker_coin_nota: data
@@ -2157,7 +2169,7 @@ impl TakerSwap {
             maker,
             data.maker_amount.clone().into(),
             data.taker_amount.clone().into(),
-            my_persistent_pub,
+            node_key_pair,
             saved.uuid,
             Some(saved.uuid),
             conf_settings,
@@ -2442,6 +2454,7 @@ impl TakerSwap {
                             tx_helper_topic(self.maker_coin.ticker()),
                             &tx,
                             &self.p2p_privkey,
+                            &self.node_key_pair,
                         );
                     }
 
@@ -2513,6 +2526,7 @@ impl TakerSwap {
                                     tx_helper_topic(self.maker_coin.ticker()),
                                     &tx,
                                     &self.p2p_privkey,
+                                    &self.node_key_pair,
                                 );
                             }
 
@@ -2592,6 +2606,7 @@ impl TakerSwap {
                                 tx_helper_topic(self.taker_coin.ticker()),
                                 &tx,
                                 &self.p2p_privkey,
+                                &self.node_key_pair,
                             );
                         }
 
@@ -3155,7 +3170,13 @@ mod taker_swap_tests {
             .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
-        let (taker_swap, _) = TakerSwap::load_from_saved(ctx, maker_coin, taker_coin, taker_saved_swap).unwrap();
+        let (taker_swap, _) = TakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+        )
+        .unwrap();
         let actual = block_on(taker_swap.recover_funds()).unwrap();
         let expected = RecoveredSwap {
             action: RecoveredSwapAction::SpentOtherPayment,
@@ -3176,9 +3197,14 @@ mod taker_swap_tests {
         TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
-        TakerSwap::load_from_saved(ctx, maker_coin, taker_coin, taker_saved_swap)
-            .unwrap()
-            .0
+        TakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+        )
+        .unwrap()
+        .0
     }
 
     /// T21 (CRD ch.51 R29): a taker payment already on chain is adopted when the stage is re-entered after the send
@@ -3402,7 +3428,7 @@ mod taker_swap_tests {
             H256Json::default().0.into(),
             1.into(),
             1.into(),
-            H264::default(),
+            key_pair,
             new_uuid(),
             None,
             SwapConfirmationsSettings {
@@ -3556,7 +3582,13 @@ mod taker_swap_tests {
         });
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
-        let (taker_swap, _) = TakerSwap::load_from_saved(ctx, maker_coin, taker_coin, taker_saved_swap).unwrap();
+        let (taker_swap, _) = TakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+        )
+        .unwrap();
         let actual = block_on(taker_swap.recover_funds()).unwrap();
         let expected = RecoveredSwap {
             action: RecoveredSwapAction::RefundedMyPayment,
@@ -3587,7 +3619,13 @@ mod taker_swap_tests {
             .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
-        let (taker_swap, _) = TakerSwap::load_from_saved(ctx, maker_coin, taker_coin, taker_saved_swap).unwrap();
+        let (taker_swap, _) = TakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+        )
+        .unwrap();
         // The swap's per-swap key is a key pair: the saved public key is that pair's public key (R39.5.4).
         let per_swap_key_pair = KeyPair::random_compressed();
         taker_swap.w().my_taker_coin_htlc_keypair = per_swap_key_pair;
@@ -3939,7 +3977,13 @@ mod taker_swap_tests {
         });
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
-        let (taker_swap, _) = TakerSwap::load_from_saved(ctx, maker_coin, taker_coin, taker_saved_swap).unwrap();
+        let (taker_swap, _) = TakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+        )
+        .unwrap();
         let actual = block_on(taker_swap.recover_funds()).unwrap();
         let expected = RecoveredSwap {
             action: RecoveredSwapAction::SpentOtherPayment,
@@ -3977,7 +4021,13 @@ mod taker_swap_tests {
         });
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
-        let (taker_swap, _) = TakerSwap::load_from_saved(ctx, maker_coin, taker_coin, taker_saved_swap).unwrap();
+        let (taker_swap, _) = TakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+        )
+        .unwrap();
         let actual = block_on(taker_swap.recover_funds()).unwrap();
         let expected = RecoveredSwap {
             action: RecoveredSwapAction::RefundedMyPayment,
@@ -4008,7 +4058,13 @@ mod taker_swap_tests {
         });
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
-        let (taker_swap, _) = TakerSwap::load_from_saved(ctx, maker_coin, taker_coin, taker_saved_swap).unwrap();
+        let (taker_swap, _) = TakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+        )
+        .unwrap();
         taker_swap.w().data.taker_payment_lock = (now_ms() / 1000) - 3690;
         assert!(block_on(taker_swap.recover_funds()).is_err());
         assert!(unsafe { SEARCH_TX_SPEND_CALLED });
@@ -4044,7 +4100,13 @@ mod taker_swap_tests {
         });
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
-        let (taker_swap, _) = TakerSwap::load_from_saved(ctx, maker_coin, taker_coin, taker_saved_swap).unwrap();
+        let (taker_swap, _) = TakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+        )
+        .unwrap();
         let actual = block_on(taker_swap.recover_funds()).unwrap();
         let expected = RecoveredSwap {
             action: RecoveredSwapAction::SpentOtherPayment,
@@ -4070,7 +4132,13 @@ mod taker_swap_tests {
         TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
-        let (taker_swap, _) = TakerSwap::load_from_saved(ctx, maker_coin, taker_coin, taker_saved_swap).unwrap();
+        let (taker_swap, _) = TakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+        )
+        .unwrap();
         assert!(block_on(taker_swap.recover_funds()).is_err());
     }
 
@@ -4110,7 +4178,13 @@ mod taker_swap_tests {
         });
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
-        let (taker_swap, _) = TakerSwap::load_from_saved(ctx, maker_coin, taker_coin, taker_saved_swap).unwrap();
+        let (taker_swap, _) = TakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+        )
+        .unwrap();
 
         assert_eq!(unsafe { SWAP_CONTRACT_ADDRESS_CALLED }, 2);
         assert_eq!(
@@ -4141,7 +4215,13 @@ mod taker_swap_tests {
         });
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
-        let (taker_swap, _) = TakerSwap::load_from_saved(ctx, maker_coin, taker_coin, taker_saved_swap).unwrap();
+        let (taker_swap, _) = TakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+        )
+        .unwrap();
 
         assert_eq!(unsafe { SWAP_CONTRACT_ADDRESS_CALLED }, 1);
         let expected_addr = addr_from_str("0xa09ad3cd7e96586ebd05a2607ee56b56fb2db8fd").unwrap();
@@ -4339,7 +4419,13 @@ mod taker_swap_tests {
         TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
         TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from(0)));
 
-        let (swap, _) = TakerSwap::load_from_saved(ctx.clone(), maker_coin, taker_coin, taker_saved_swap).unwrap();
+        let (swap, _) = TakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+        )
+        .unwrap();
         let swaps_ctx = SwapsContext::from_ctx(&ctx).unwrap();
         let arc = Arc::new(swap);
         let _registry_guard = swaps_ctx.register_running_swap(arc.clone());
@@ -4434,7 +4520,13 @@ mod taker_swap_tests {
             TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
             TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from(0)));
 
-            let (swap, _) = TakerSwap::load_from_saved(ctx.clone(), maker_coin, taker_coin, taker_saved_swap).unwrap();
+            let (swap, _) = TakerSwap::load_from_saved(
+                ctx.clone(),
+                maker_coin,
+                taker_coin,
+                crate::mm2::lp_swap::recorded_by_taker(taker_saved_swap, &ctx),
+            )
+            .unwrap();
             let swaps_ctx = SwapsContext::from_ctx(&ctx).unwrap();
             let arc = Arc::new(swap);
             let _registry_guard = swaps_ctx.register_running_swap(arc.clone());
@@ -4484,12 +4576,13 @@ mod taker_swap_tests {
         TestCoin::ticker.mock_safe(|_| MockResult::Return("ticker"));
         TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
 
+        let node_key_pair = *ctx.secp256k1_key_pair();
         TakerSwap::new(
             ctx,
             H256Json::default().0.into(),
             1.into(),
             1.into(),
-            H264::default(),
+            node_key_pair,
             new_uuid(),
             None,
             SwapConfirmationsSettings {

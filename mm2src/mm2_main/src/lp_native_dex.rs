@@ -747,6 +747,13 @@ impl SwarmPollRecorder {
     }
 }
 
+/// The secret a relay's libp2p identity is made of: the SHA-256 of the node key's private key (CRD ch.28 R19,
+/// ch.05 R45 item 6). Under a global-HD login the node key is the internal key; under an iguana login it is the
+/// hash of the passphrase, and the value is the same as before.
+pub(crate) fn relay_p2p_identity_secret(ctx: &MmArc) -> [u8; 32] {
+    sha256(&*ctx.secp256k1_key_pair().private().secret).take()
+}
+
 async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
     let i_am_seed = ctx.conf["i_am_seed"].as_bool().unwrap_or(false);
     if allow_private_addresses(&ctx) {
@@ -767,8 +774,7 @@ async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
     // Written from the swarm poll, read by the maker outbox (CRD ch.32 §32.9B R-MP2 item 2).
     let relay_queue_signal = Arc::new(RelayQueueSignal::default());
     let force_p2p_key = if i_am_seed {
-        let key = sha256(&*ctx.secp256k1_key_pair().private().secret);
-        Some(key.take())
+        Some(relay_p2p_identity_secret(&ctx))
     } else {
         None
     };

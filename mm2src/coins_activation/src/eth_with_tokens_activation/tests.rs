@@ -908,6 +908,36 @@ fn token_confirmations_come_from_the_request_then_the_token_config_then_the_plat
     assert_eq!(confirmations("USDT-ERC20"), 9);
 }
 
+/// CRD ch.05 §5.12D, T29 (R46): under a global-HD login the node key is the internal key, and the key the
+/// BCH-with-tokens and Tendermint activations (and the Lightning seed) read is the passphrase hash, as before.
+#[test]
+fn t29_an_hd_daemon_keeps_the_passphrase_hash_for_the_family_activations() {
+    let ctx = hd_ctx();
+    let crypto_ctx = CryptoCtx::from_ctx(&ctx).unwrap();
+    let hash_ctx = MmCtxBuilder::new()
+        .with_conf(json!({ "coins": coins_conf() }))
+        .into_mm_arc();
+    CryptoCtx::init_with_iguana_passphrase(hash_ctx.clone(), TEST_MNEMONIC).unwrap();
+
+    assert_eq!(
+        ctx.secp256k1_key_pair().public(),
+        crypto_ctx.mm2_internal_key_pair().public()
+    );
+    assert_eq!(
+        ctx.legacy_passphrase_key_pair().private().secret,
+        hash_ctx.secp256k1_key_pair().private().secret
+    );
+    assert_ne!(
+        ctx.legacy_passphrase_key_pair().private().secret,
+        ctx.secp256k1_key_pair().private().secret
+    );
+    // Under an iguana login the two are one key.
+    assert_eq!(
+        hash_ctx.legacy_passphrase_key_pair().private().secret,
+        hash_ctx.secp256k1_key_pair().private().secret
+    );
+}
+
 #[test]
 fn an_hd_daemon_activates_the_address_at_the_coin_derivation_path() {
     use coins::eth::derive_eth_hd_activation_key;
@@ -936,8 +966,8 @@ fn an_hd_daemon_activates_the_address_at_the_coin_derivation_path() {
             .into_mm_arc();
         CryptoCtx::init_with_iguana_passphrase(identity_ctx.clone(), TEST_MNEMONIC).unwrap();
         assert!(
-            identity_ctx.secp256k1_key_pair().private().secret == ctx.secp256k1_key_pair().private().secret,
-            "the key the activation used to bind is the identity key of the HD daemon"
+            identity_ctx.secp256k1_key_pair().private().secret == ctx.legacy_passphrase_key_pair().private().secret,
+            "the key the activation used to bind is the passphrase-hash key of the HD daemon"
         );
         let request = serde_json::from_value(json!({ "coin": PLATFORM })).unwrap();
         let response = block_on(coins::rpc_command::get_my_address::get_my_address_rpc(

@@ -959,7 +959,10 @@ expected answer. The switch `swap_key_check` (R40) stays, with its default.
 > `t23_a_swap_saved_without_a_pair_resumes_with_the_persistent_key`,
 > `t23_a_swap_saved_with_a_pair_resumes_and_recovers_with_that_pair`). The node-side refusals
 > of §5.12B stay covered by their mocked-coin tests (`ordermatch_tests::t05_12b_swap_key_check_tests`,
-> `trade_preimage::tests::swap_key_mismatch`). End-to-end swaps are the SwapLab rows HD3 and HD4.
+> `trade_preimage::tests::swap_key_mismatch`). End-to-end swaps are the SwapLab rows HD3 and HD4. *Update (2026-11-xx, §5.12D).* The persistent key mentioned above is
+> now the node key, which is the internal key under a global-HD login; `start_htlc_key_pair` takes the swap's own
+> node public key, and a swap saved without a pair keeps the node key pair its Started event recorded, chosen by
+> `swap_node_key_pair` (the node key or the legacy passphrase key). Recovery lists both keys among its candidates.
 
 ## 5.12D One Trading Identity under a Global-HD Login
 
@@ -1041,6 +1044,48 @@ MUST carry an upgrade note for HD logins covering:
 > reference never uses the passphrase hash under a global-HD login. Reloaded
 > keeps it only for its own earlier swap records, the Lightning seed, and the
 > two activations that item H7 moves.
+
+> **As built (2026-11-xx, clean-side record; no requirement above changes).**
+> *R45, R46, mechanism.* `MmCtx` (`mm2_core/src/mm_ctx.rs`) keeps two key fields. `secp256k1_key_pair` is the
+> node key and `legacy_passphrase_key_pair` the legacy key, read through the accessor
+> `MmCtx::legacy_passphrase_key_pair()` (it answers the node key when no separate legacy key is held, which is
+> an iguana login and a test context). `CryptoCtx::init_crypto_ctx_with_policy_builder`
+> (`crypto/src/crypto_ctx.rs`) now pins `secp256k1_key_pair` to the key `CryptoCtx` holds (the internal key under
+> a global-HD login, the passphrase hash under an iguana login) and `legacy_passphrase_key_pair` to the hash of
+> the passphrase text; the `DEFERRED(hd-dispatch)` comment is gone. `ctx.rmd160` and the database paths already
+> derived from the internal key and are untouched. The legacy accessor is read at exactly three places: the
+> Lightning seed (`coins/lightning/ln_utils.rs`, `init_keys_manager`) and the two family activations
+> (`coins_activation/src/platform_coin_with_tokens.rs`, the BCH-with-tokens and Tendermint paths). Every other
+> reader of the context key (ordermatch signing and `sender_pubkey`, the swap start, swap messages, the
+> healthcheck, `public_id`) is unchanged code and follows the pin. *R45 item 6.* `relay_p2p_identity_secret`
+> (`mm2_main/src/lp_native_dex.rs`) is the relay's identity secret, the SHA-256 of the node key's secret.
+> *R47, mechanism.* A V1 swap holds its own `node_key_pair` (`MakerSwap`, `TakerSwap`; the constructors take the
+> pair instead of the persistent public key, which is derived from it). A swap started now gets the node key
+> from the order-matching code. A restored swap gets it from `lp_swap::swap_node_key_pair`, which compares the
+> `my_persistent_pub` of its Started event with the node key and then the legacy key and returns the matching
+> pair, or an error naming the swap and the recorded key ("the swap is not resumed"); `load_from_saved` returns
+> that error, so both the resume and `recover_funds` refuse such a swap. The swap's pair is the default HTLC
+> key pair of a coin that saved none (R43), the key for `start_htlc_key_pair` and `derive_htlc_pubkeys` (which
+> now takes the node public key instead of the context), the spend and refund key through the HTLC pair, and
+> the signing key of the swap messages: `broadcast_swap_message(_every)`, `broadcast_p2p_tx_msg` and
+> `broadcast_signed_msg_every` take the pair and sign with it when the swap has no per-swap p2p key
+> (`swap_msg::signing_identity`). Recovery (`resolve_recovery_htlc_key`) adds the legacy key as a last candidate
+> (`RecoveryHtlcKeyKind::LegacyPassphrase`) when it differs from the node key. *R48.* No ordermatch code
+> changed: orders restored by `orders_kick_start` are announced through the same signing path, which now reads
+> the internal key, and the keep-alive, `is_mine` and the stale sweep already used it. *Tests.* T13 and T25:
+> `ordermatch_tests::hd_trading_identity_tests::{t13_t25_the_node_key_is_the_internal_key,
+> t13_rmd160_and_database_path_derive_from_the_internal_key}`; T26: `...::t26_the_relay_identity_comes_from_the_node_key`;
+> T27: `maker_hd_coin_swap_key_tests::{t27_a_swap_that_recorded_the_legacy_key_resumes_and_refunds_with_it,
+> t27_a_swap_that_recorded_the_internal_key_and_a_new_swap_use_it,
+> t27_a_recorded_key_that_matches_neither_key_is_reported, t27_swap_messages_are_signed_with_the_swaps_node_key}` and
+> `taker_derived_htlc_key_tests::t27_a_taker_swap_resumes_with_the_key_it_recorded`; T28:
+> `maker_hd_coin_swap_key_tests::t28_recovery_recovers_a_payment_built_with_the_legacy_key`; T29:
+> `ordermatch_tests::hd_trading_identity_tests::t29_the_legacy_key_is_the_passphrase_hash` and
+> `eth_with_tokens_activation::tests::t29_an_hd_daemon_keeps_the_passphrase_hash_for_the_family_activations`;
+> T30: `ordermatch_tests::hd_trading_identity_tests::t30_an_iguana_login_is_unchanged` and
+> `maker_hd_coin_swap_key_tests::t30_under_an_iguana_login_the_legacy_key_is_the_node_key`. Existing tests that
+> restored a saved swap now record the persistent key of their context in the fixture, because a restored swap
+> whose recorded key matches neither key is refused.
 
 ## 5.13 Tests
 
