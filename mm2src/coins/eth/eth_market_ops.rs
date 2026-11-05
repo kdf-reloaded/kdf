@@ -237,71 +237,19 @@ impl MarketCoinOps for EthCoin {
         };
         let selfi = self.clone();
 
+        // CRD ch.17 R17.8.1 -- R17.8.3: bounded log windows from a cursor, and the deadline is checked on every
+        // poll, also after a failed query.
         let fut = async move {
-            loop {
-                let current_block = match selfi.current_block().compat().await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        log!("Error " (e) " getting block number");
-                        Timer::sleep(5.).await;
-                        continue;
-                    },
-                };
-
-                let events = match selfi
-                    .spend_events(swap_contract_address, from_block, current_block)
-                    .compat()
-                    .await
-                {
-                    Ok(ev) => ev,
-                    Err(e) => {
-                        log!("Error " (e) " getting spend events");
-                        Timer::sleep(5.).await;
-                        continue;
-                    },
-                };
-
-                let found = events.iter().find(|event| &event.data.0[..32] == id.as_slice());
-
-                if let Some(event) = found {
-                    if let Some(tx_hash) = event.transaction_hash {
-                        // LP-17: alloy `Provider::get_transaction_by_hash`
-                        // + `signed_tx_from_alloy_tx` round-trip replaces
-                        // the web3 `transaction(...)` + `signed_tx_from_web3_tx`
-                        // pair. Same wire RPC method (`eth_getTransactionByHash`).
-                        use crate::eth::alloy_compat::assert_send_future;
-                        use alloy::providers::Provider;
-
-                        let provider = selfi.alloy_provider();
-                        let alloy_hash = alloy::primitives::B256::from_slice(&tx_hash.0);
-                        let transaction = match assert_send_future(provider.get_transaction_by_hash(alloy_hash)).await {
-                            Ok(Some(t)) => t,
-                            Ok(None) => {
-                                log!("Tx " (tx_hash) " not found yet");
-                                Timer::sleep(5.).await;
-                                continue;
-                            },
-                            Err(e) => {
-                                log!("Get tx " (tx_hash) " error " (e));
-                                Timer::sleep(5.).await;
-                                continue;
-                            },
-                        };
-
-                        return Ok(TransactionEnum::from(try_tx_s!(signed_tx_from_alloy_tx(transaction))));
-                    }
-                }
-
-                if now_ms() / 1000 > wait_until {
-                    return TX_PLAIN_ERR!(
-                        "Waited too long until {} for transaction {:?} to be spent ",
-                        wait_until,
-                        tx,
-                    );
-                }
-                Timer::sleep(5.).await;
-                continue;
-            }
+            selfi
+                .wait_for_payment_spend(
+                    &tx,
+                    &id,
+                    swap_contract_address,
+                    wait_until,
+                    from_block,
+                    SPEND_WAIT_POLL_S,
+                )
+                .await
         };
         Box::new(fut.boxed().compat())
     }

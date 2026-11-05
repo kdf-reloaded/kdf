@@ -425,24 +425,16 @@ impl EthCoinImpl {
         from_block: u64,
         to_block: u64,
     ) -> Box<dyn Future<Item = Vec<Log>, Error = String> + Send> {
-        let contract_event = try_fus!(SWAP_CONTRACT.event("ReceiverSpent"));
-        let filter = FilterBuilder::default()
-            .topics(Some(vec![contract_event.signature()]), None, None, None)
-            .from_block(BlockNumber::Number(from_block))
-            .to_block(BlockNumber::Number(to_block))
-            .address(vec![swap_contract_address])
-            .build();
+        let topic = try_fus!(SWAP_CONTRACT.event("ReceiverSpent")).signature();
 
-        // LP-17: route eth_getLogs through alloy's RpcClient while
-        // keeping the returned `Vec<web3::types::Log>` shape.
-        let provider = self.alloy_provider();
-        let fut = async move {
-            use crate::eth::alloy_compat::assert_send_future;
-            assert_send_future(provider.client().request::<_, Vec<Log>>("eth_getLogs", (filter,)))
-                .await
-                .map_err(|e| ERRL!("{}", e))
-        };
-        Box::new(fut.boxed().compat())
+        // CRD ch.17 R17.8.1: the range is searched in windows of at most `W` blocks.
+        let querier = self.logs_querier();
+        Box::new(
+            querier
+                .get_logs(topic, swap_contract_address, from_block, to_block)
+                .boxed()
+                .compat(),
+        )
     }
 
     /// Gets `SenderRefunded` events from etomic swap smart contract since `from_block`
@@ -452,24 +444,16 @@ impl EthCoinImpl {
         from_block: u64,
         to_block: u64,
     ) -> Box<dyn Future<Item = Vec<Log>, Error = String> + Send> {
-        let contract_event = try_fus!(SWAP_CONTRACT.event("SenderRefunded"));
-        let filter = FilterBuilder::default()
-            .topics(Some(vec![contract_event.signature()]), None, None, None)
-            .from_block(BlockNumber::Number(from_block))
-            .to_block(BlockNumber::Number(to_block))
-            .address(vec![swap_contract_address])
-            .build();
+        let topic = try_fus!(SWAP_CONTRACT.event("SenderRefunded")).signature();
 
-        // LP-17: route eth_getLogs through alloy's RpcClient while
-        // keeping the returned `Vec<web3::types::Log>` shape.
-        let provider = self.alloy_provider();
-        let fut = async move {
-            use crate::eth::alloy_compat::assert_send_future;
-            assert_send_future(provider.client().request::<_, Vec<Log>>("eth_getLogs", (filter,)))
-                .await
-                .map_err(|e| ERRL!("{}", e))
-        };
-        Box::new(fut.boxed().compat())
+        // CRD ch.17 R17.8.1: the range is searched in windows of at most `W` blocks.
+        let querier = self.logs_querier();
+        Box::new(
+            querier
+                .get_logs(topic, swap_contract_address, from_block, to_block)
+                .boxed()
+                .compat(),
+        )
     }
 
     /// Try to parse address from string.
@@ -919,8 +903,10 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
         // defensive early rejection rather than a reachable runtime path.)
         #[cfg(target_arch = "wasm32")]
         if matches!(coin.signer, EthSigner::Metamask(_)) {
-            return MmError::err(WithdrawError::UnsupportedUnderMetamask(
-                "TRON withdraw is not supported under the MetaMask signing policy".to_owned(),
+            return MmError::err(WithdrawError::UnsupportedError(
+                "Unsupported under the MetaMask signing policy: TRON withdraw is not supported under the MetaMask \
+                 signing policy"
+                    .to_owned(),
             ));
         }
         let _ = ctx;
@@ -1684,6 +1670,7 @@ impl EthCoin {
             required_confirmations: required_confirmations.into(),
             chain_id: self.chain_id,
             logs_block_range: self.logs_block_range,
+            logs_window: self.logs_window.clone(),
             derivation_method: DerivationMethod::Iguana(self.my_address),
             swap_v2_contracts: self.swap_v2_contracts,
             gas_limit,
@@ -3046,24 +3033,16 @@ impl EthCoin {
         from_block: u64,
         to_block: u64,
     ) -> Box<dyn Future<Item = Vec<Log>, Error = String> + Send> {
-        let contract_event = try_fus!(SWAP_CONTRACT.event("PaymentSent"));
-        let filter = FilterBuilder::default()
-            .topics(Some(vec![contract_event.signature()]), None, None, None)
-            .from_block(BlockNumber::Number(from_block))
-            .to_block(BlockNumber::Number(to_block))
-            .address(vec![swap_contract_address])
-            .build();
+        let topic = try_fus!(SWAP_CONTRACT.event("PaymentSent")).signature();
 
-        // LP-17: route eth_getLogs through alloy's RpcClient while
-        // keeping the returned `Vec<web3::types::Log>` shape.
-        let provider = self.alloy_provider();
-        let fut = async move {
-            use crate::eth::alloy_compat::assert_send_future;
-            assert_send_future(provider.client().request::<_, Vec<Log>>("eth_getLogs", (filter,)))
-                .await
-                .map_err(|e| ERRL!("{}", e))
-        };
-        Box::new(fut.boxed().compat())
+        // CRD ch.17 R17.8.1: the range is searched in windows of at most `W` blocks.
+        let querier = self.logs_querier();
+        Box::new(
+            querier
+                .get_logs(topic, swap_contract_address, from_block, to_block)
+                .boxed()
+                .compat(),
+        )
     }
 
     /// Returns events from `from_block` to `to_block` (or latest if None) for a given contract and event.
@@ -3075,21 +3054,21 @@ impl EthCoin {
         to_block: Option<u64>,
         swap_contract: &Contract,
     ) -> MmResult<Vec<Log>, FindPaymentSpendError> {
-        let contract_event = swap_contract.event(event_name)?;
-        let mut filter_builder = FilterBuilder::default()
-            .topics(Some(vec![contract_event.signature()]), None, None, None)
-            .from_block(BlockNumber::Number(from_block))
-            .address(vec![swap_contract_address]);
-        if let Some(block) = to_block {
-            filter_builder = filter_builder.to_block(BlockNumber::Number(block));
-        }
-        let filter = filter_builder.build();
-        // LP-17: alloy raw RPC for eth_getLogs; web3 Log shape kept.
-        use crate::eth::alloy_compat::assert_send_future;
-        let provider = self.alloy_provider();
-        let events_logs = assert_send_future(provider.client().request::<_, Vec<Log>>("eth_getLogs", (filter,)))
+        let topic = swap_contract.event(event_name)?.signature();
+        let to_block = match to_block {
+            Some(block) => block,
+            None => self
+                .current_block()
+                .compat()
+                .await
+                .map_err(FindPaymentSpendError::Transport)?,
+        };
+        // CRD ch.17 R17.8.1: the range is searched in windows of at most `W` blocks.
+        let events_logs = self
+            .logs_querier()
+            .get_logs(topic, swap_contract_address, from_block, to_block)
             .await
-            .map_err(|e| FindPaymentSpendError::Transport(e.to_string()))?;
+            .map_err(FindPaymentSpendError::Transport)?;
         Ok(events_logs)
     }
 
@@ -3374,7 +3353,7 @@ impl EthCoin {
         let mut from_block = search_from_block;
 
         loop {
-            let to_block = current_block.min(from_block + self.logs_block_range);
+            let to_block = self.log_window_end(from_block, current_block);
 
             let spend_events = try_s!(
                 assert_send_future(self.spend_events(swap_contract_address, from_block, to_block).compat()).await
@@ -3445,7 +3424,7 @@ impl EthCoin {
             if to_block >= current_block {
                 break;
             }
-            from_block = to_block;
+            from_block = to_block + 1;
         }
 
         Ok(None)
@@ -3625,6 +3604,16 @@ pub fn addr_from_raw_pubkey(pubkey: &[u8]) -> Result<Address, String> {
     let pubkey = try_s!(PublicKey::from_slice(pubkey).map_err(|e| ERRL!("{:?}", e)));
     let eth_public = Public::from_slice(&pubkey.serialize_uncompressed()[1..65]);
     Ok(public_to_address(&eth_public))
+}
+
+/// The compressed SEC1 form of an EVM signer's `X || Y` public key: the parity of `Y` selects the prefix. The
+/// legacy swap wire carries a secp256k1 key in this form (CRD ch.51 R63).
+pub(crate) fn compressed_secp256k1_public(public: &Public) -> [u8; 33] {
+    let xy: &[u8] = public.as_ref();
+    let mut compressed = [0u8; 33];
+    compressed[0] = 0x02 | (xy[63] & 1);
+    compressed[1..].copy_from_slice(&xy[..32]);
+    compressed
 }
 
 pub fn addr_from_pubkey_str(pubkey: &str) -> Result<String, String> {

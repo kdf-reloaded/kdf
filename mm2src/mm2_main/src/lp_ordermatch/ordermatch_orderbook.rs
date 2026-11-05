@@ -21,8 +21,13 @@ impl From<(new_protocol::MakerOrderCreated, String)> for OrderbookItem {
     }
 }
 
+/// The address format a coin's protocol information (bytes from a peer) names. A value outside the decoding
+/// bounds of CRD ch.28 R16a, like one that does not decode, gives the standard format.
 pub fn addr_format_from_protocol_info(protocol_info: &[u8]) -> AddressFormat {
-    match rmp_serde::from_slice::<AddressFormat>(protocol_info) {
+    let Ok(end) = common::msgpack_bounds::check_peer_value(protocol_info, "addr_format_from_protocol_info") else {
+        return AddressFormat::Standard;
+    };
+    match rmp_serde::from_slice::<AddressFormat>(&protocol_info[..end]) {
         Ok(format) => format,
         Err(_) => AddressFormat::Standard,
     }
@@ -185,9 +190,16 @@ pub(crate) async fn process_orders_keep_alive(
 /// and enqueues their trie ops before releasing it (CRD ch.32 R-T3b item 1; the worker applies the batch in
 /// the background, phase 2). Returns [`Orderbook::trie_ops_enqueued`] right after queueing. No root is
 /// checked against anything (R-GH4 item 3).
-fn apply_sync_answer(ordermatch_ctx: &OrdermatchContext, pubkey: &str, response: SyncPubkeyOrderbookStateRes) -> u64 {
+pub(crate) fn apply_sync_answer(
+    ordermatch_ctx: &OrdermatchContext,
+    pubkey: &str,
+    response: SyncPubkeyOrderbookStateRes,
+) -> u64 {
     let mut orderbook = ordermatch_ctx.orderbook.lock();
     let mut ops = Vec::new();
+    // CRD ch.32 R-GH14 item 1: pairs of a delta that only removed orders but left some of the pubkey's.
+    let mut pairs_left_with_orders = Vec::new();
+    let pair_liveness = &ordermatch_ctx.pair_liveness;
     for (pair, diff) in response.pair_orders_diff {
         let params = ProcessTrieParams {
             pubkey,
@@ -195,11 +207,28 @@ fn apply_sync_answer(ordermatch_ctx: &OrdermatchContext, pubkey: &str, response:
             protocol_infos: &response.protocol_infos,
             conf_infos: &response.conf_infos,
         };
+        let is_delta = matches!(diff, DeltaOrFullTrie::Delta(_));
         let mut pair_ops = match diff {
             DeltaOrFullTrie::Delta(delta) => process_trie_delta(&mut orderbook, delta, params),
             DeltaOrFullTrie::FullTrie(values) => process_pubkey_full_trie(&mut orderbook, values, params),
         };
+        if pair_liveness.is_on()
+            && is_delta
+            && !pair_ops.iter().any(|op| matches!(op, TrieOp::Insert { .. }))
+            && orderbook.pubkey_has_order_on_pair(pubkey, &pair)
+        {
+            pairs_left_with_orders.push(pair);
+        }
         ops.append(&mut pair_ops);
+    }
+    {
+        // The order book lock is held: the maintenance sweep cannot decide on a pair between the answer's
+        // index changes and this instant.
+        let now_secs = now_ms() / 1000;
+        pair_liveness.touch_inserts(&ops, now_secs);
+        for pair in &pairs_left_with_orders {
+            pair_liveness.touch(pubkey, pair, now_secs);
+        }
     }
     orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
     orderbook.trie_ops_enqueued
@@ -547,6 +576,8 @@ pub(crate) fn process_maker_order_updated(
             Some(mut order) => {
                 order.apply_updated(&updated_msg);
                 let ops = orderbook.index_insert_or_update(order);
+                // CRD ch.32 R-GH14 item 1, under the order book lock like the index change itself.
+                ordermatch_ctx.pair_liveness.touch_inserts(&ops, now_ms() / 1000);
                 orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
             },
             None => {
@@ -639,6 +670,9 @@ pub(crate) async fn request_and_fill_orderbook(ctx: &MmArc, base: &str, rel: &st
             all_ops.append(&mut pair_ops);
         }
 
+        // CRD ch.32 R-GH14 item 1: an order-book answer that leaves an order of a pubkey on the pair.
+        ordermatch_ctx.pair_liveness.touch_inserts(&all_ops, now_ms() / 1000);
+
         // Phase 2: queue for background application, still under the guard.
         orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, all_ops);
     }
@@ -664,6 +698,8 @@ pub(crate) fn insert_or_update_order(ctx: &MmArc, item: OrderbookItem) {
     {
         let mut orderbook = ordermatch_ctx.orderbook.lock();
         let ops = orderbook.index_insert_or_update(item);
+        // CRD ch.32 R-GH14 item 1, under the order book lock like the index change itself.
+        ordermatch_ctx.pair_liveness.touch_inserts(&ops, now_ms() / 1000);
         orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
     }
 
@@ -930,7 +966,11 @@ impl TryFromBytes for String {
 
 impl TryFromBytes for OrderbookP2PItem {
     fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, TryFromBytesError> {
-        rmp_serde::from_read(bytes.as_slice()).map_err(|e| ERRL!("{}", e).into())
+        // CRD ch.28 R16a: a value outside the decoding bounds is dropped as malformed.
+        if common::msgpack_bounds::check_peer_value(&bytes, "OrderbookP2PItem::try_from_bytes").is_err() {
+            return Err(ERRL!("value outside the decoding bounds").into());
+        }
+        rmp_serde::from_read_ref(bytes.as_slice()).map_err(|e| ERRL!("{}", e).into())
     }
 }
 
@@ -1523,6 +1563,156 @@ impl OrderbookPubkeyState {
     }
 }
 
+/// The liveness instant of each pair of another maker's record, on the receiver's own clock, in seconds (CRD
+/// ch.32 R-GH14 item 1): one timestamp per (pubkey, pair), next to the per-pubkey state.
+///
+/// It sits behind a lock of its own, a leaf that is never held while another lock is taken, because the
+/// message handlers set instants while they hold the order book lock and must not wait for the trie worker,
+/// which holds the trie store lock while it applies events (R-T3b). With `pair_liveness` off nothing is kept.
+pub(crate) struct PairLiveness {
+    enabled: bool,
+    seen: PaMutex<HashMap<String, HashMap<AlbOrderedOrderbookPair, u64>>>,
+}
+
+impl Default for PairLiveness {
+    fn default() -> Self { PairLiveness::new(true) }
+}
+
+impl PairLiveness {
+    pub(crate) fn new(enabled: bool) -> PairLiveness {
+        PairLiveness {
+            enabled,
+            seen: PaMutex::new(HashMap::new()),
+        }
+    }
+
+    /// Whether the `pair_liveness` switch is on.
+    pub(crate) fn is_on(&self) -> bool { self.enabled }
+
+    fn set(
+        seen: &mut HashMap<String, HashMap<AlbOrderedOrderbookPair, u64>>,
+        pubkey: &str,
+        alb_pair: &str,
+        now_secs: u64,
+        overwrite: bool,
+    ) {
+        match seen.get_mut(pubkey) {
+            Some(pairs) => match pairs.get_mut(alb_pair) {
+                Some(instant) => {
+                    if overwrite {
+                        *instant = now_secs;
+                    }
+                },
+                None => {
+                    pairs.insert(alb_pair.to_owned(), now_secs);
+                },
+            },
+            None => {
+                seen.insert(pubkey.to_owned(), HashMap::from([(alb_pair.to_owned(), now_secs)]));
+            },
+        }
+    }
+
+    /// Sets the instant of (`pubkey`, `alb_pair`) to `now_secs`.
+    pub(crate) fn touch(&self, pubkey: &str, alb_pair: &str, now_secs: u64) {
+        if self.enabled {
+            Self::set(&mut self.seen.lock(), pubkey, alb_pair, now_secs, true);
+        }
+    }
+
+    /// Sets the instant of every pair that `ops` inserts or changes an order on (R-GH14 item 1: an accepted
+    /// created or updated message, or an applied answer that leaves an order of the pubkey).
+    pub(crate) fn touch_inserts(&self, ops: &[TrieOp], now_secs: u64) {
+        if !self.enabled {
+            return;
+        }
+        let mut seen = self.seen.lock();
+        for op in ops {
+            if let TrieOp::Insert { pubkey, alb_pair, .. } = op {
+                Self::set(&mut seen, pubkey, alb_pair, now_secs, true);
+            }
+        }
+    }
+
+    /// Gives the pair the instant of its creation when it has none (R-GH14 item 1, last paragraph).
+    fn create_if_absent(&self, pubkey: &str, alb_pair: &str, now_secs: u64) {
+        if self.enabled {
+            Self::set(&mut self.seen.lock(), pubkey, alb_pair, now_secs, false);
+        }
+    }
+
+    /// Forgets the instant of a pair that was cleared.
+    pub(crate) fn clear_pair(&self, pubkey: &str, alb_pair: &str) {
+        if !self.enabled {
+            return;
+        }
+        let mut seen = self.seen.lock();
+        let emptied = seen.get_mut(pubkey).map(|pairs| {
+            pairs.remove(alb_pair);
+            pairs.is_empty()
+        });
+        if emptied == Some(true) {
+            seen.remove(pubkey);
+        }
+    }
+
+    /// Forgets the instants of a pubkey whose record was removed.
+    fn clear_pubkey(&self, pubkey: &str) {
+        if self.enabled {
+            self.seen.lock().remove(pubkey);
+        }
+    }
+
+    /// The (pubkey, pair) combinations whose instant is `timeout_secs` old or older at `now_secs`, with the
+    /// comparison the per-pubkey eviction makes, for the pubkeys `is_candidate` accepts.
+    pub(crate) fn stale(
+        &self,
+        timeout_secs: u64,
+        now_secs: u64,
+        mut is_candidate: impl FnMut(&str) -> bool,
+    ) -> Vec<(String, String)> {
+        let mut stale = vec![];
+        for (pubkey, pairs) in self.seen.lock().iter() {
+            if !is_candidate(pubkey) {
+                continue;
+            }
+            for (alb_pair, instant) in pairs.iter() {
+                if *instant + timeout_secs <= now_secs {
+                    stale.push((pubkey.clone(), alb_pair.clone()));
+                }
+            }
+        }
+        stale
+    }
+
+    /// The instant of (`pubkey`, `alb_pair`).
+    #[cfg(test)]
+    pub(crate) fn get(&self, pubkey: &str, alb_pair: &str) -> Option<u64> {
+        self.seen
+            .lock()
+            .get(pubkey)
+            .and_then(|pairs| pairs.get(alb_pair))
+            .copied()
+    }
+
+    /// Moves the instant of (`pubkey`, `alb_pair`) `secs` into the past, simulating the passage of time.
+    #[cfg(test)]
+    pub(crate) fn age(&self, pubkey: &str, alb_pair: &str, secs: u64) {
+        if let Some(instant) = self
+            .seen
+            .lock()
+            .get_mut(pubkey)
+            .and_then(|pairs| pairs.get_mut(alb_pair))
+        {
+            *instant -= secs;
+        }
+    }
+
+    /// Whether no instant is kept.
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool { self.seen.lock().is_empty() }
+}
+
 pub(crate) fn get_trie_mut<'a>(
     mem_db: &'a mut MemoryDB<Blake2Hasher64>,
     root: &'a mut H64,
@@ -1644,7 +1834,6 @@ pub(crate) fn collect_trie_store_metrics(ctx: &MmArc, snapshot: &TrieStoreSnapsh
 
 /// Trie-related state extracted from `Orderbook` to reduce contention on the main
 /// order index. All trie operations go through this store via the async TrieOp channel.
-#[derive(Default)]
 pub(crate) struct TrieStore {
     /// A map of orderbook states of known maker pubkeys.
     pub(crate) pubkeys_state: HashMap<String, OrderbookPubkeyState>,
@@ -1663,6 +1852,23 @@ pub(crate) struct TrieStore {
     pub(crate) early_purges: u64,
     /// Deltas dropped by the cap on a pair history so far (`orderbook.history.evicted`, CRD ch.32 R-K6).
     pub(crate) history_evicted: u64,
+    /// The liveness instants of the pairs (CRD ch.32 R-GH14); shared with [`OrdermatchContext::pair_liveness`].
+    pub(crate) pair_liveness: Arc<PairLiveness>,
+}
+
+impl Default for TrieStore {
+    fn default() -> Self {
+        TrieStore {
+            pubkeys_state: HashMap::default(),
+            memory_db: MemoryDB::default(),
+            applied_batches: 0,
+            leaf_updates_since_purge: 0,
+            last_purge_ms: 0,
+            early_purges: 0,
+            history_evicted: 0,
+            pair_liveness: Arc::new(PairLiveness::default()),
+        }
+    }
 }
 
 /// Leaf updates (insertions and removals) after which the worker purges the node store before the
@@ -1680,6 +1886,14 @@ pub(crate) const DRAIN_MAX_BATCHES: usize = 1024;
 pub(crate) const DRAIN_MAX_EVENTS: usize = 2048;
 
 impl TrieStore {
+    /// A trie store that follows the `pair_liveness` switch of the configuration.
+    pub(crate) fn for_ctx(ctx: &MmArc) -> TrieStore {
+        TrieStore {
+            pair_liveness: Arc::new(PairLiveness::new(pair_liveness(ctx))),
+            ..Default::default()
+        }
+    }
+
     /// Apply one queued batch and count it. A batch made only of the test-only `Flush` barrier is not
     /// counted because it is not queued through [`Orderbook::queue_trie_ops`]. The worker applies
     /// everything waiting as one sequence ([`TrieStore::apply_batches`]); this is the one-by-one
@@ -1815,6 +2029,7 @@ impl TrieStore {
                             apply_group(self, &key.0, &key.1, g);
                         }
                     }
+                    self.pair_liveness.clear_pubkey(&pubkey);
                     if let Some(state) = self.pubkeys_state.remove(&pubkey) {
                         for root in state.trie_roots.values() {
                             release_pair_trie(&mut self.memory_db, root);
@@ -1840,6 +2055,7 @@ impl TrieStore {
 
     pub(crate) fn apply_insert(&mut self, pubkey: &str, alb_pair: &str, uuid: Uuid, order: OrderbookItem) {
         let pubkey_state = pubkey_state_mut(&mut self.pubkeys_state, pubkey);
+        self.pair_liveness.create_if_absent(pubkey, alb_pair, now_ms() / 1000);
         let pair_root = order_pair_root_mut(&mut pubkey_state.trie_roots, alb_pair);
         let prev_root = *pair_root;
 
@@ -1872,6 +2088,7 @@ impl TrieStore {
 
     pub(crate) fn apply_remove(&mut self, pubkey: &str, alb_pair: &str, uuid: Uuid) {
         let pubkey_state = pubkey_state_mut(&mut self.pubkeys_state, pubkey);
+        self.pair_liveness.create_if_absent(pubkey, alb_pair, now_ms() / 1000);
         let pair_state = order_pair_root_mut(&mut pubkey_state.trie_roots, alb_pair);
         let old_state = *pair_state;
 
@@ -1903,6 +2120,7 @@ impl TrieStore {
     }
 
     pub(crate) fn apply_clear_pair(&mut self, pubkey: &str, alb_pair: &str) {
+        self.pair_liveness.clear_pair(pubkey, alb_pair);
         if let Some(pubkey_state) = self.pubkeys_state.get_mut(pubkey) {
             pubkey_state.order_pairs_trie_state_history.remove(alb_pair.into());
             pubkey_state.orders_uuids.retain(|(_uuid, pair)| pair != alb_pair);
@@ -1975,7 +2193,8 @@ impl TrieStore {
         let pubkey_state = pubkey_state_mut(&mut self.pubkeys_state, from_pubkey);
         // CRD ch.32 R-P3: expiry is judged on the receiver's own clock; the sender-supplied
         // `message.timestamp` is never stored.
-        pubkey_state.last_keep_alive = now_ms() / 1000;
+        let now_secs = now_ms() / 1000;
+        pubkey_state.last_keep_alive = now_secs;
 
         let mut trie_roots_to_request = HashMap::new();
         for (alb_pair, trie_root) in message.trie_roots {
@@ -1994,6 +2213,9 @@ impl TrieStore {
                 continue;
             }
 
+            // CRD ch.32 R-GH14 item 1: a pair this node considers and the maker names with a non-empty root is
+            // alive, whatever root it advertises; the placeholder below is created with this instant.
+            self.pair_liveness.touch(from_pubkey, &alb_pair, now_secs);
             let actual_trie_root = order_pair_root_mut(&mut pubkey_state.trie_roots, &alb_pair);
             if *actual_trie_root != trie_root {
                 let named_root = match request_root {
@@ -2429,6 +2651,29 @@ impl Orderbook {
         };
 
         Some((order, op))
+    }
+
+    /// The identifiers of the orders `pubkey` has on the alphabetically ordered pair `alb_pair`, in both
+    /// directions, as the read index holds them.
+    pub(crate) fn pubkey_pair_order_uuids(&self, pubkey: &str, alb_pair: &str) -> Vec<Uuid> {
+        let (base, rel) = match alb_pair.split_once(':') {
+            Some((a, b)) => (a, b),
+            None => return Vec::new(),
+        };
+        let mut uuids = Vec::new();
+        for pair in [(base.to_owned(), rel.to_owned()), (rel.to_owned(), base.to_owned())] {
+            for uuid in self.unordered.get(&pair).into_iter().flatten() {
+                if self.order_set.get(uuid).is_some_and(|order| order.pubkey == pubkey) {
+                    uuids.push(*uuid);
+                }
+            }
+        }
+        uuids
+    }
+
+    /// Whether the read index holds an order of `pubkey` on the alphabetically ordered pair `alb_pair`.
+    pub(crate) fn pubkey_has_order_on_pair(&self, pubkey: &str, alb_pair: &str) -> bool {
+        !self.pubkey_pair_order_uuids(pubkey, alb_pair).is_empty()
     }
 
     /// Index-only removal of all orders for a (pubkey, pair). Trie cleanup is handled

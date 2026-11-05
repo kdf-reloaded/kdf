@@ -14,7 +14,7 @@ use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_
             SavedSwapIo, SavedTradeFee, SwapConfirmationsSettings, SwapError, SwapMsg, SwapsContext,
             TransactionIdentifier, SWAP_WIRE_SECRET_HASH_MIN_LEN, WAIT_CONFIRM_INTERVAL};
 use crate::mm2::lp_network::subscribe_to_topic;
-use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, untradable_coin_ticker, MatchBy,
+use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, swap_key_mismatch, untradable_coin_ticker, MatchBy,
                                 OrderConfirmationsSettings, TakerAction, TakerOrderBuilder};
 use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, retried_refund_rejection, tx_helper_topic, NON_FINAL_REFUND_RETRY_SECS};
 use crate::mm2::MM_VERSION;
@@ -1087,24 +1087,30 @@ impl TakerSwap {
         // A shielded coin's key is derived from the swap uuid (CRD ch.39 R39.5.6/R39.5.7) and is not saved
         // with the swap.
         let swap_unique_input = self.uuid.as_bytes();
-        let (maker_coin_htlc_key_pair, maker_coin_htlc_privkey) =
-            match start_htlc_key_pair(&self.maker_coin, swap_unique_input) {
-                Ok(keys) => keys,
-                Err(e) => {
-                    return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
-                        ERRL!("{}", e).into(),
-                    )]))
-                },
-            };
-        let (taker_coin_htlc_key_pair, taker_coin_htlc_privkey) =
-            match start_htlc_key_pair(&self.taker_coin, swap_unique_input) {
-                Ok(keys) => keys,
-                Err(e) => {
-                    return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
-                        ERRL!("{}", e).into(),
-                    )]))
-                },
-            };
+        let (maker_coin_htlc_key_pair, maker_coin_htlc_privkey) = match start_htlc_key_pair(
+            &self.maker_coin,
+            self.ctx.secp256k1_key_pair().public(),
+            swap_unique_input,
+        ) {
+            Ok(keys) => keys,
+            Err(e) => {
+                return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
+                    ERRL!("{}", e).into(),
+                )]))
+            },
+        };
+        let (taker_coin_htlc_key_pair, taker_coin_htlc_privkey) = match start_htlc_key_pair(
+            &self.taker_coin,
+            self.ctx.secp256k1_key_pair().public(),
+            swap_unique_input,
+        ) {
+            Ok(keys) => keys,
+            Err(e) => {
+                return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
+                    ERRL!("{}", e).into(),
+                )]))
+            },
+        };
         let (maker_coin_htlc_pubkey, taker_coin_htlc_pubkey) = match derive_htlc_pubkeys(
             &self.ctx,
             &self.maker_coin,
@@ -2748,6 +2754,10 @@ pub async fn taker_swap_trade_preimage(
 ) -> TradePreimageRpcResult<TakerTradePreimage> {
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
         return MmError::err(TradePreimageRpcError::TradingNotSupported { coin });
+    }
+    // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
+    if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
+        return MmError::err(TradePreimageRpcError::from(mismatch));
     }
     let action = req
         .swap_method

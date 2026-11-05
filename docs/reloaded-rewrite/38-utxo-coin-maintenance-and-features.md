@@ -53,10 +53,12 @@ Reloaded ships some of it and lacks the rest, so the chapter is split:
   connection pool of §38.6.4 is partly built (its as-built note of 2026-10-27
   lists what remains), and P2PK (R38.6.3) and
   the Verus-family script label (R38.6.8) are built on dev (see their notes).
-- **§38.8 (T-PORT, required, NOT yet in reloaded):** software (non-hardware)
-  global-HD UTXO accounts -- storage availability, account-`0` bootstrap at
-  activation, `get_new_address` advance, and gap/scan semantics for BIP-44 and
-  BIP-84 coins -- consuming the Chapter 5 §5.9A software-HD crypto substrate.
+- **§38.8 (T-PORT, required, built on dev; status corrected 2026-11-04):**
+  software (non-hardware) global-HD UTXO accounts -- storage availability,
+  account-`0` bootstrap at activation, `get_new_address` advance, and gap/scan
+  semantics for BIP-44 and BIP-84 coins -- consuming the Chapter 5 §5.9A
+  software-HD crypto substrate. The status note at the head of §38.8 lists
+  what remains.
 
 > **Binding scope (R36).** Requirements bind observable behaviour, public RPC
 > method strings / request-response field names, coins-config keys, and dictated
@@ -2388,6 +2390,30 @@ into a further started kilobyte). Before `v2.6.0-beta` the reference, like
 the baseline anchor (R1) and reloaded today, rounded **every** fixed-fee
 coin's size up to a whole kilobyte.
 
+> **Compatibility row (this repository, 2026-11-05; not corpus-sourced).**
+> **Parity** since PR #247: a transaction with a change output pays the rule
+> above once over its whole size, change output included, under every
+> policy. Before, Reloaded's transaction builder added the change output's
+> share under a dynamic rate (which an explicit `UtxoFixed` or `UtxoPerKbyte`
+> withdraw fee also uses, R38.6.6l, R38.6.6m) as `floor(e × 34 / 1000)`,
+> rounded on its own. The fee was then
+> `floor(e × (s − 34) / 1000) + floor(e × 34 / 1000)`, which can be one base
+> unit below `floor(e × s / 1000)`. A black-box comparison of the release
+> binaries on 2026-11-05 (`docs/release-tests/0.4.0-beta.1.md`) showed the
+> reference charging the single rounding. No peer observes the difference,
+> so arm 1 of `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind
+> the default, and the change has no switch.
+
+T38.6.6b.1 *One rounding with a change output (R38.6.6b).* With a dynamic
+rate, or an explicit `UtxoFixed` or `UtxoPerKbyte` withdraw fee, of
+`e` = 1,234 base units per 1,000 bytes, and P2PKH inputs and outputs, a
+transaction with a change output and an estimated size of 670 bytes shall pay
+826 base units, and one of 2,002 bytes 2,470: `floor(e × s / 1000)` with `s`
+including the change output. They shall not pay 825 and 2,469, the figures
+of a separately rounded change output. Under the plain fixed policy the same
+single rounding holds. Under the whole-kilobyte policy the change output adds
+one more `r` only when it pushes the size into a further started kilobyte.
+
 R38.6.6c *HTLC spend-fee estimate.* The fee estimate for spending or
 refunding a UTXO HTLC — in the legacy protocol and in the version-two
 protocol alike — is R38.6.6b applied to a reference size of 496 bytes,
@@ -2731,7 +2757,8 @@ At both release rows:
 > 2026-10-31 in `docs/release-tests/0.3.0-beta.1.md`). **Open:** the SLP token
 > withdraw on BCH still applies `UtxoFixed` per started kilobyte; how the
 > reference applies a fee descriptor there is not established, and the
-> question is queued for the KDF Spec Reader. No peer observes either
+> question is queued for the KDF Spec Reader. *Answered 2026-11-04:
+> R38.6.6m (proportional, as here); parity on the SLP route since PR #234.* No peer observes either
 > behavior (a `withdraw` is the node's own transaction), so arm 1 of
 > `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind the default.
 
@@ -2751,7 +2778,97 @@ item 2, the figure both descriptors give is
 `floor(a × (s − 34) / 1000) + floor(a × 34 / 1000)`, which can be one base unit
 below `floor(a × s / 1000)`; the test asserts the two descriptors equal and the
 figure this split gives. With P2PKH inputs of 148 bytes the larger size reached
-is 1,429 bytes rather than 1,404.
+is 1,429 bytes rather than 1,404. *Since PR #247 (R38.6.6b, T38.6.6b.1)* the
+builder charges `floor(a × s / 1000)` once, change output included, and the
+tests assert that figure.
+
+R38.6.6m *Explicit fee descriptors on the SLP token withdraw (reference-bound;
+**passed the KDF Dirty Gate on 2026-11-04**, measure 0.02; Spec Reader 2026-11-04, rows `v2.6.0-beta` and
+`v3.0.0-beta` of chapter 02 §2.15A, identical at both).* An SLP token
+`withdraw` accepts the same two descriptors as R38.6.6l, `UtxoFixed` and
+`UtxoPerKbyte`, with `amount` in the platform coin's units, and fails any
+other type with the invalid-fee-policy error. At both rows the arithmetic is
+R38.6.6l item 2 exactly: the descriptor's `amount`, in platform base units,
+is a rate per 1,000 bytes applied **proportionally and truncated**,
+`floor(a × s / 1000)`, under either descriptor; neither is charged per
+started kilobyte. The only started-kilobyte arithmetic the reference's
+transaction builder has is the whole-kilobyte coin policy of R38.6.6a, which
+a withdraw descriptor never selects. The response's `fee_details` reports the
+fee actually charged, in the platform coin and named by its ticker. A request
+that carries `from` fails as unsupported (chapter 49 R49.27).
+
+*Pointer (2026-11-04; passed the KDF Dirty Gate on 2026-11-04, measure 0.00;
+provenance and clearance in chapter 49 §49.7).* The wire form of that
+`from` refusal -- `error_type` `UnsupportedError`, HTTP 400, string
+`error_data` -- and the distinct `InvalidFeePolicy` discriminant of the
+wrong-type descriptor above are bound in chapter 49 R49.27a.
+
+> **Compatibility row (this repository, 2026-11-04; not corpus-sourced).**
+> **Parity** on the SLP token withdraw since PR #234: the maintainer adopted
+> R38.6.6m (Decision BV, 2026-11-04), and Reloaded applies `UtxoFixed` there
+> exactly like `UtxoPerKbyte`, as the UTXO route does since Decision 27. It is
+> a parity change without a switch. Before, Reloaded's SLP withdraw applied
+> `UtxoFixed` per started kilobyte, `a × ceil(s / 1000)` -- the "Open" item of
+> R38.6.6l's row -- so it paid up to one `a` more than the reference and never
+> less. No peer observes either behavior, so arm 1 of
+> `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind the default.
+
+T38.6.6m *Explicit SLP withdraw fee (R38.6.6m).* Against a mocked BCH
+backend, an SLP token withdraw with `fee: {"type":"UtxoFixed","amount":"<a>"}`
+and one with `fee: {"type":"UtxoPerKbyte","amount":"<a>"}` for the same inputs
+and outputs shall charge the same fee `floor(a × s / 1000)` for one
+transaction under and one over 1,000 bytes and report it in `fee_details` in
+the platform coin; a third request with an EVM-form descriptor shall fail with
+the invalid-fee-policy error. *Clean-side note (2026-11-05).* As under
+T38.6.6l, where the builder adds the change output the figure both descriptors
+give is `floor(a × (s − 34) / 1000) + floor(a × 34 / 1000)`, which can be one
+base unit below `floor(a × s / 1000)`. The tests of PR #234 assert the two
+descriptors equal and this figure, at 457 and 1,493 bytes; the SLP OP_RETURN
+output makes these sizes differ from T38.6.6l's. *Since PR #247 (R38.6.6b,
+T38.6.6b.1)* the figure is `floor(a × s / 1000)` once, and the tests assert it.
+
+R38.6.6n *Required inputs count toward the input total (reference-bound;
+Spec Reader micro-run 0.4.0-2c, 2026-11-04, rows `v2.6.0-beta` and
+`v3.0.0-beta` of chapter 02 §2.15A, identical at both).* When a UTXO-family
+transaction is built with inputs the caller requires to be spent (the
+token-carrying inputs of an SLP withdraw or SLP send, the HTLC output of an
+SLP spend or refund, or any required input given to the generic send path),
+the value of every required input is part of the transaction's input total
+for all purposes — the sufficiency check, the change computation,
+`spent_by_me`, and the fee reported in `fee_details` — so that a required
+input's coin value returns to the sender as change under the ordinary dust
+rule and `fee_details.amount` equals the sum of all inputs minus the sum of
+all outputs. A change output is added whenever the computed change is not
+below the coin's dust amount; only a change strictly below dust is left to
+the miner, and that remainder is included in the reported fee on every
+withdraw path.
+
+> **Compatibility row (this repository, 2026-11-04; not corpus-sourced).**
+> **Parity** since PR #236 (maintainer-side routing 2026-11-04: a correctness
+> fix, no switch). Before, Reloaded's UTXO transaction builder appended
+> required inputs to the transaction without adding their value to its input
+> total. Their coin value was therefore neither returned as change nor
+> reported: on an SLP withdraw, SLP send, or SLP HTLC spend or refund, the
+> dust each token input or HTLC output carried (546 base units on BCH) went
+> to the miner. `fee_details.amount` and `spent_by_me` of an SLP withdraw
+> omitted it, and the sufficiency check ignored it. Two further differences
+> closed with it: a change exactly equal to the dust amount went to the miner
+> instead of becoming a change output, and the SLP withdraw's `fee_details`
+> left out a sub-dust remainder that the UTXO withdraw already reports. No
+> peer observes either side, because these are the node's own transactions,
+> so arm 1 of `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind
+> the default.
+
+T38.6.6n *Required inputs and the dust boundary (R38.6.6n).* Against a
+mocked BCH backend, an SLP token withdraw spending two token inputs of 546
+base units each shall produce a platform-coin change output whose value
+includes those 1,092 base units, and `fee_details.amount` shall equal the
+transaction's inputs minus outputs; the same shall hold for a generic send
+with one required input. *(Reloaded-original additions.)* A transaction whose
+computed change equals the dust amount exactly shall carry a change output of
+that value; and an SLP token withdraw whose change falls below dust shall
+report in `fee_details.amount` the computed fee plus that remainder, again
+equal to inputs minus outputs.
 
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the
@@ -2886,11 +3003,20 @@ the same for the Sia wallet daemon.
 
 ## 38.8 Software global-HD UTXO accounts & address derivation (T-PORT)
 
-> **Status of §38.8:** required port. The reloaded UTXO HD path can only obtain
-> an account extended public key through a hardware device; a **software**
-> (non-hardware) global-HD account therefore cannot create an HD account or
-> derive HD addresses. This section binds the software-HD UTXO behaviour as
-> first-class, testable requirements. It is the coin-side consumer of Chapter 5
+> **Status of §38.8:** required port, built on dev *(corrected 2026-11-04)*.
+> When this section was written, the reloaded UTXO HD path could only obtain
+> an account extended public key through a hardware device, so a **software**
+> (non-hardware) global-HD account could not create an HD account or derive HD
+> addresses. The software source of Chapter 5 §5.9A, the account-`0`
+> bootstrap, `get_new_address`, the scan and gap-limit rules and
+> `min_addresses_number` are now built. Remaining: `task::create_new_account`
+> for an account other than `0` still fails under a software global-HD login,
+> because it asks for a hardware device first (the Chapter 20 §20.10 D1 note
+> records it); and `path_to_address` is honored for a software global-HD
+> account only, not under the Trezor policy (Chapter 55 §55.5). Both are items
+> of plan [`hd-key-unification`](../plans/hd-key-unification.md). This section
+> binds the software-HD UTXO behaviour as first-class, testable requirements.
+> It is the coin-side consumer of Chapter 5
 > §5.9A (R29–R31), which binds the crypto substrate (software wallet identity,
 > software account-xpub derivation and canonical serialisation, and source
 > selection by key-pair policy). §38.8 binds the UTXO account bootstrap, the
@@ -3386,6 +3512,64 @@ R38.8.6 **Tests (two-direction, observable).**
   (PR #226). They rest on that
   decision and this repository's code, take no forbidden-class input, and so
   do not engage chapter 01 R38.
+- *Scoped addition (2026-11-04) -- R38.6.6m, T38.6.6m, its compatibility row
+  and the one-sentence resolution appended to R38.6.6l's row.* **KDF Dirty
+  Gate: PASS on 2026-11-04, measure 0.02.** *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`
+  and `v3.0.0-beta` of chapter 02 §2.15A, identical at both, consulted
+  **only** to establish how the SLP token withdraw maps the two explicit fee
+  descriptors onto the transaction builder's rate, the arithmetic that rate
+  produces, the unit and ticker of the reported fee, and the refusal of
+  `from`. Behavior and dictated request and response members only; no private
+  identifier, function body, helper decomposition, error, log or comment text
+  was reproduced. The compatibility row rests on this repository's own code;
+  T38.6.6m is Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.02, no findings. *Extent:* the SLP token withdraw's fee-descriptor
+  handling and the transaction builder's fee arithmetic, at `v3.0.0-beta` with
+  `v2.6.0-beta` as cross-check; for the whole batch, 30 source files and one
+  dependency manifest were read at `v3.0.0-beta`, 29 of them checked by hash
+  against the tagged states of both rows. *Method:* side-by-side reading of
+  the compared regions against every added or changed line, plus that hash
+  check; the gate script was not run because the candidate has no code blocks.
+  *Measure:* 0.02, read against the standard that any discretionary finding
+  fails a file; dictated-interop and public-surface tokens were excluded from
+  the measured set.
+- *Clean-side correction (2026-11-04) -- the §38.8 bullet of §38.0 and the
+  status note at the head of §38.8.* They now say that §38.8 is built and
+  name what remains. Written by a session that never read the corpus, from
+  this repository's own activation, account and address code. It takes no
+  forbidden-class input and needs no Dirty Gate pass.
+- *Scoped addition (2026-11-04) -- R38.6.6n, T38.6.6n and its compatibility
+  row.* The rule's two sentences and the first sentence of T38.6.6n are the
+  Reloaded-original wording proposed by the Spec Reader micro-run 0.4.0-2c
+  (gated 2026-11-04, micro-run 0.4.0-2c, PASS 0.03) and are placed here
+  verbatim. *Inputs:* the forbidden corpus at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, identical at both, consulted **only** to
+  establish whether the UTXO transaction builder counts the value of inputs
+  the caller requires toward its input total (sufficiency, change,
+  `spent_by_me`, reported fee) and on which side of the dust amount a change
+  output is added. Behavior and public response members only; no private
+  identifier, function body, control flow, error, log or comment text was
+  reproduced. **KDF Dirty Gate:** the report the wording comes from passed;
+  placement gated 2026-11-04, KDF Dirty Gate: PASS, measure 0.02 on the R35
+  discretionary-expression basis; extent = UTXO transaction building, SLP
+  withdraw/HTLC/send and generic send paths at rows `v2.6.0-beta` and
+  `v3.0.0-beta`; method = reading plus mechanical diff. The
+  compatibility row and the Reloaded-original additions to T38.6.6n rest on
+  this repository's own code and take no forbidden-class input.
+- *Clean-side amendment (2026-11-05) -- PR #234, maintainer Decision BV.* After
+  the code change, a session that never read the corpus updated the
+  compatibility row under R38.6.6m, the resolution sentence in R38.6.6l's row
+  and the clean-side note under T38.6.6m. They rest on that decision and this
+  repository's code, take no forbidden-class input, and so do not engage
+  chapter 01 R38.
+- *Clean-side amendment (2026-11-05) -- PR #247, the change output under one
+  rounding.* A session that never read the corpus added the compatibility row
+  under R38.6.6b and T38.6.6b.1, and appended a sentence each to the clean-side
+  notes under T38.6.6l and T38.6.6m. They rest on R38.6.6b as cleared above, on
+  a black-box comparison of the release binaries and on this repository's own
+  code. They take no forbidden-class input, so they do not engage chapter 01
+  R38.
 - *Clean-side addition (2026-11-05) -- R38.6.4m, R38.6.4n, T38.6.4m, T38.6.4n,
   D38.6.4m.1, D38.6.4n.1 and D38.6.4n.2.* Written by a session that never read
   the forbidden corpus. The inputs are this repository's own code (the

@@ -9,7 +9,7 @@ use db_common::sqlite::rusqlite::Connection;
 use futures::{channel::mpsc, lock::Mutex as AsyncMutex, StreamExt};
 use mm2_core::mm_ctx::{MmArc, MmCtx, MmCtxBuilder};
 use mm2_p2p::atomicdex_behaviour::AdexBehaviourCmd;
-use mm2_p2p::{decode_message, PeerId};
+use mm2_p2p::{decode_message, decode_signed, PeerId};
 use mocktopus::mocking::*;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::collections::HashSet;
@@ -3161,6 +3161,640 @@ mod t32_k1b_final_cancel_tests {
         assert_eq!(octx(&restarted).orderbook.lock().recently_cancelled.len(), 0);
         assert!(receive(&restarted, &created(&maker.secret, &maker.cancelled)));
         assert!(book(&restarted).contains(&maker.cancelled.uuid));
+    }
+
+    /// CRD ch.32 §32.9C.2 R-GH14, T-GH14: per-pair liveness on the receiver's clock. The passage of time is
+    /// simulated the way the other liveness tests do it: the liveness instant of a pair is moved into the past
+    /// (`age`), and the sweep is driven through `prune_stale_pairs`, which takes the clock reading as an
+    /// argument. The maker's record keeps a fresh instant of its own (it still sends keep-alives for its other
+    /// pairs), so only the pair instants age.
+    mod t_gh14_pair_liveness {
+        use super::*;
+        use crate::mm2::lp_ordermatch::ordermatch_orderbook::apply_sync_answer;
+
+        const X: &str = "C1:C2";
+        const Y: &str = "C1:C3";
+        const WINDOW: u64 = 90;
+        const OWN_PERSISTENT: &str = "own-persistent-pubkey";
+        const OWN_PER_ORDER: &str = "own-per-order-pubkey";
+
+        /// A maker with two orders on X and two on Y.
+        struct Poster {
+            pubkey: String,
+            secret: [u8; 32],
+            x: Vec<OrderbookItem>,
+            y: Vec<OrderbookItem>,
+        }
+
+        impl Poster {
+            fn new(name: &str) -> Poster {
+                let (pubkey, secret) = pubkey_and_secret_for_test(name);
+                let x = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 2);
+                let y = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C3".into(), 2);
+                Poster { pubkey, secret, x, y }
+            }
+
+            fn all(&self) -> Vec<OrderbookItem> { [self.x.clone(), self.y.clone()].concat() }
+        }
+
+        fn uuids(orders: &[OrderbookItem]) -> HashSet<Uuid> { orders.iter().map(|o| o.uuid).collect() }
+
+        /// A node: a keep-alive that requests sends exactly one command (no second request, no alternate relay).
+        fn node_with(conf: Json) -> (MmArc, mpsc::Receiver<AdexBehaviourCmd>) {
+            let mut conf = conf;
+            let members = conf.as_object_mut().unwrap();
+            members.entry("sync_request_retry_ms").or_insert(json!(0));
+            members.entry("sync_request_alternate_relay").or_insert(json!(false));
+            node(conf)
+        }
+
+        /// A node that holds the orders of the poster on both pairs, received as created messages.
+        fn known_node(conf: Json) -> (MmArc, mpsc::Receiver<AdexBehaviourCmd>, Poster) {
+            let (ctx, rx) = node_with(conf);
+            let poster = Poster::new("gh14-poster");
+            for order in poster.all() {
+                assert!(receive(&ctx, &created(&poster.secret, &order)));
+            }
+            (ctx, rx, poster)
+        }
+
+        fn updated(secret: &[u8; 32], uuid: Uuid) -> Vec<u8> {
+            let mut msg = MakerOrderUpdated::new(uuid);
+            msg.with_new_price(BigRational::new(3.into(), 2.into()));
+            encode_and_sign(&new_protocol::OrdermatchMessage::MakerOrderUpdated(msg), secret).unwrap()
+        }
+
+        /// The liveness instant of (`pubkey`, `pair`).
+        fn seen(ctx: &MmArc, pubkey: &str, pair: &str) -> Option<u64> { octx(ctx).pair_liveness.get(pubkey, pair) }
+
+        /// Simulates `secs` passing since the pair's last liveness instant.
+        fn age(ctx: &MmArc, pubkey: &str, pair: &str, secs: u64) {
+            assert!(seen(ctx, pubkey, pair).is_some(), "the pair has an instant");
+            octx(ctx).pair_liveness.age(pubkey, pair, secs);
+        }
+
+        /// One sweep pass at the current reading of the clock, with the window `timeout`.
+        fn prune_with(ctx: &MmArc, timeout: u64) -> Vec<PrunedPair> {
+            let pruned = prune_stale_pairs(ctx, &octx(ctx), OWN_PERSISTENT, timeout, now_ms() / 1000);
+            flush_trie(ctx);
+            pruned
+        }
+
+        fn prune(ctx: &MmArc) -> Vec<PrunedPair> { prune_with(ctx, WINDOW) }
+
+        fn pruned_pairs(pruned: Vec<PrunedPair>) -> Vec<String> {
+            let mut pairs: Vec<String> = pruned.into_iter().map(|p| p.alb_pair).collect();
+            pairs.sort();
+            pairs
+        }
+
+        /// The orders of `pubkey` on `pair` in the read index.
+        fn on_book(ctx: &MmArc, pubkey: &str, pair: &str) -> HashSet<Uuid> {
+            octx(ctx)
+                .orderbook
+                .lock()
+                .pubkey_pair_order_uuids(pubkey, pair)
+                .into_iter()
+                .collect()
+        }
+
+        fn root(ctx: &MmArc, pubkey: &str, pair: &str) -> Option<H64> {
+            let octx = octx(ctx);
+            let trie_store = octx.trie_store.lock();
+            trie_store
+                .pubkeys_state
+                .get(pubkey)
+                .and_then(|state| state.trie_roots.get(pair).copied())
+        }
+
+        fn has_history(ctx: &MmArc, pubkey: &str, pair: &str) -> bool {
+            let octx = octx(ctx);
+            let trie_store = octx.trie_store.lock();
+            trie_store
+                .pubkeys_state
+                .get(pubkey)
+                .is_some_and(|state| state.order_pairs_trie_state_history.get(&pair.to_owned()).is_some())
+        }
+
+        /// The keep-alive from `pubkey` naming `roots`, handled by `ctx` as a relay or as a non-relay. Returns the
+        /// roots of the synchronization request it sent, if any; that request is left unanswered.
+        fn keep_alive(
+            ctx: &MmArc,
+            rx: &mut mpsc::Receiver<AdexBehaviourCmd>,
+            pubkey: &str,
+            roots: HashMap<String, H64>,
+            relay: bool,
+        ) -> Option<HashMap<String, H64>> {
+            let keep_alive = PubkeyKeepAlive {
+                trie_roots: roots,
+                timestamp: now_ms() / 1000,
+            };
+            let (ctx2, pubkey2) = (ctx.clone(), pubkey.to_owned());
+            let task = std::thread::spawn(move || {
+                block_on(process_orders_keep_alive(
+                    ctx2,
+                    FORWARDER.to_owned(),
+                    pubkey2,
+                    keep_alive,
+                    relay,
+                ))
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match rx.try_recv() {
+                    Ok(AdexBehaviourCmd::RequestPeers { req, response_tx, .. }) => {
+                        let trie_roots = match decode_message::<P2PRequest>(&req).unwrap() {
+                            P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState {
+                                trie_roots, ..
+                            }) => trie_roots,
+                            other => panic!("unexpected request {:?}", other),
+                        };
+                        drop(response_tx);
+                        assert!(!task.join().unwrap(), "the unanswered request failed");
+                        return Some(trie_roots);
+                    },
+                    Ok(other) => panic!("unexpected command {:?}", other),
+                    Err(_) if task.is_finished() => {
+                        assert!(task.join().unwrap(), "the keep-alive was handled");
+                        return None;
+                    },
+                    Err(_) => {
+                        assert!(Instant::now() < deadline, "the keep-alive was not handled");
+                        std::thread::sleep(Duration::from_millis(1));
+                    },
+                }
+            }
+        }
+
+        /// The roots a keep-alive naming the pairs `pairs` carries when it advertises what the node holds.
+        fn held_roots(ctx: &MmArc, pubkey: &str, pairs: &[&str]) -> HashMap<String, H64> {
+            pairs
+                .iter()
+                .map(|pair| (pair.to_string(), root(ctx, pubkey, pair).unwrap()))
+                .collect()
+        }
+
+        fn answer_of(pair: &str, diff: DeltaOrFullTrie<Uuid, OrderbookP2PItem>) -> SyncPubkeyOrderbookStateRes {
+            SyncPubkeyOrderbookStateRes {
+                last_signed_pubkey_payload: vec![],
+                pair_orders_diff: HashMap::from([(pair.to_owned(), diff)]),
+                protocol_infos: HashMap::new(),
+                conf_infos: HashMap::new(),
+            }
+        }
+
+        fn apply_answer(ctx: &MmArc, pubkey: &str, answer: SyncPubkeyOrderbookStateRes) {
+            apply_sync_answer(&octx(ctx), pubkey, answer);
+            flush_trie(ctx);
+        }
+
+        // (a)
+
+        #[test]
+        fn t_gh14_a_emptied_pair_leaves_other_pairs_stay() {
+            let (ctx, _rx, p) = known_node(json!({}));
+            assert!(
+                seen(&ctx, &p.pubkey, X).is_some(),
+                "created messages give the pair an instant"
+            );
+            assert!(seen(&ctx, &p.pubkey, Y).is_some());
+            assert!(has_history(&ctx, &p.pubkey, X));
+
+            // P's only orders on X were cancelled, the node missed it, and P advertises Y only: X's last
+            // naming is past the window.
+            age(&ctx, &p.pubkey, X, WINDOW + 5);
+            let pruned = prune(&ctx);
+            assert_eq!(pruned, vec![PrunedPair {
+                pubkey: p.pubkey.clone(),
+                alb_pair: X.to_owned(),
+                removed_orders: 2,
+            }]);
+
+            assert!(on_book(&ctx, &p.pubkey, X).is_empty());
+            assert_eq!(on_book(&ctx, &p.pubkey, Y), uuids(&p.y), "the other pair stays");
+            assert_eq!(book(&ctx), uuids(&p.y));
+            assert_eq!(root(&ctx, &p.pubkey, X), None, "the held root is dropped");
+            assert!(!has_history(&ctx, &p.pubkey, X), "the delta history is dropped");
+            assert_eq!(seen(&ctx, &p.pubkey, X), None);
+            assert!(root(&ctx, &p.pubkey, Y).is_some());
+            assert!(seen(&ctx, &p.pubkey, Y).is_some());
+            assert!(
+                octx(&ctx).trie_store.lock().pubkeys_state.contains_key(&p.pubkey),
+                "the record stays"
+            );
+            assert!(prune(&ctx).is_empty(), "nothing is pruned twice");
+        }
+
+        #[test]
+        fn t_gh14_a_pair_is_pruned_at_the_window_and_not_before() {
+            let (ctx, _rx, p) = known_node(json!({}));
+            age(&ctx, &p.pubkey, X, WINDOW - 5);
+            assert!(prune(&ctx).is_empty(), "within the window");
+            age(&ctx, &p.pubkey, X, 10);
+            assert_eq!(pruned_pairs(prune(&ctx)), vec![X.to_owned()], "past the window");
+        }
+
+        #[test]
+        fn t_gh14_a_switch_off_keeps_the_pair_until_the_record_is_evicted() {
+            let (ctx, _rx, p) = known_node(json!({ "pair_liveness": false }));
+            assert!(octx(&ctx).pair_liveness.is_empty(), "no instant is kept");
+            // Time far past the window: no pair of the record is pruned.
+            let far = now_ms() / 1000 + 10 * WINDOW;
+            assert!(prune_stale_pairs(&ctx, &octx(&ctx), OWN_PERSISTENT, WINDOW, far).is_empty());
+            assert_eq!(book(&ctx), uuids(&p.all()));
+
+            // The entries leave with the record (T-GH1, T-GH3).
+            {
+                let octx = octx(&ctx);
+                octx.trie_store
+                    .lock()
+                    .pubkeys_state
+                    .get_mut(&p.pubkey)
+                    .unwrap()
+                    .last_keep_alive -= WINDOW + 5;
+            }
+            let octx = octx(&ctx);
+            let my_p2p_pubkeys = octx.orderbook.lock().my_p2p_pubkeys.clone();
+            let trie_store = octx.trie_store.lock();
+            let (evicted_orders, evicted_pubkeys) = stale_pubkeys(
+                &trie_store.pubkeys_state,
+                OWN_PERSISTENT,
+                &my_p2p_pubkeys,
+                WINDOW,
+                now_ms() / 1000,
+            );
+            assert_eq!(evicted_pubkeys, vec![p.pubkey.clone()]);
+            assert_eq!(evicted_orders.into_iter().collect::<HashSet<_>>(), uuids(&p.all()));
+        }
+
+        #[test]
+        fn t_gh14_a_switch_off_records_no_instant_for_keep_alives_and_answers() {
+            let (ctx, mut rx, p) = known_node(json!({ "pair_liveness": false }));
+            let roots = HashMap::from([(X.to_owned(), [7; 8])]);
+            assert!(keep_alive(&ctx, &mut rx, &p.pubkey, roots, true).is_some());
+            let values = p.x.iter().map(|o| (o.uuid, o.clone().into())).collect();
+            apply_answer(&ctx, &p.pubkey, answer_of(X, DeltaOrFullTrie::FullTrie(values)));
+            assert!(octx(&ctx).pair_liveness.is_empty());
+        }
+
+        // (b)
+
+        #[test]
+        fn t_gh14_b_lost_keep_alives_prune_then_the_next_keep_alive_refills() {
+            let p = Poster::new("gh14-b");
+            let (maker_ctx, _maker_rx) = maker_node(&p.all());
+            let (relay, mut relay_rx) = node_with(json!({}));
+            assert!(
+                !sync_with(&relay, &mut relay_rx, &maker_ctx, &p.pubkey),
+                "a snapshot is answered"
+            );
+            // The answer is applied to the index at once, to the trie by the worker: a full snapshot clears the
+            // pair and its instant there and creates them again. Aging the instant before that would age nothing.
+            flush_trie(&relay);
+            assert_eq!(book(&relay), uuids(&p.all()));
+            assert!(
+                seen(&relay, &p.pubkey, X).is_some(),
+                "a keep-alive gives the pair an instant"
+            );
+
+            // The keep-alives for X are withheld for longer than the window; Y's keep alive on.
+            age(&relay, &p.pubkey, X, WINDOW + 5);
+            assert_eq!(pruned_pairs(prune(&relay)), vec![X.to_owned()]);
+            assert_eq!(book(&relay), uuids(&p.y));
+            assert_eq!(root(&relay, &p.pubkey, X), None);
+
+            // The next keep-alive naming X and Y requests X as a new pair, and only X: the held root
+            // is gone, so the request names the all-zero root (R-Q4, R-Q4a).
+            let roots = keep_alive_of(&maker_ctx, &p.pubkey).trie_roots;
+            assert_eq!(roots.len(), 2);
+            let request = keep_alive(&relay, &mut relay_rx, &p.pubkey, roots, true).expect("a request is sent");
+            assert_eq!(request, HashMap::from([(X.to_owned(), H64::default())]));
+            assert!(
+                seen(&relay, &p.pubkey, X).is_some(),
+                "the placeholder has its creation instant"
+            );
+
+            // The answer restores the orders: one request, answered with a full snapshot.
+            assert!(!sync_with(&relay, &mut relay_rx, &maker_ctx, &p.pubkey));
+            assert!(relay_rx.try_recv().is_err(), "one request per keep-alive");
+            assert_eq!(book(&relay), uuids(&p.all()));
+            flush_trie(&relay);
+            assert_eq!(root(&relay, &p.pubkey, X), root(&maker_ctx, &p.pubkey, X));
+            assert!(prune(&relay).is_empty());
+        }
+
+        // (c)
+
+        /// The pairs pruned when X is aged by 80 s, `refresh` happens, and X is aged by 80 s again.
+        fn pruned_after(refresh: impl FnOnce(&MmArc, &mut mpsc::Receiver<AdexBehaviourCmd>, &Poster)) -> Vec<String> {
+            let (ctx, mut rx, p) = known_node(json!({}));
+            age(&ctx, &p.pubkey, X, WINDOW - 10);
+            refresh(&ctx, &mut rx, &p);
+            age(&ctx, &p.pubkey, X, WINDOW - 10);
+            pruned_pairs(prune(&ctx))
+        }
+
+        #[test]
+        fn t_gh14_c_without_a_refresh_the_pair_is_pruned() {
+            assert_eq!(pruned_after(|_, _, _| {}), vec![X.to_owned()]);
+        }
+
+        #[test]
+        fn t_gh14_c_keep_alive_with_a_differing_root_refreshes_and_requests() {
+            let pruned = pruned_after(|ctx, rx, p| {
+                let roots = HashMap::from([(X.to_owned(), [7; 8])]);
+                let held = root(ctx, &p.pubkey, X).unwrap();
+                let request = keep_alive(ctx, rx, &p.pubkey, roots, true).expect("the pair is requested");
+                assert_eq!(request, HashMap::from([(X.to_owned(), held)]));
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_keep_alive_with_the_held_root_refreshes() {
+            let pruned = pruned_after(|ctx, rx, p| {
+                let roots = held_roots(ctx, &p.pubkey, &[X]);
+                assert_eq!(keep_alive(ctx, rx, &p.pubkey, roots, true), None);
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_created_message_refreshes() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                let more = make_random_orders(p.pubkey.clone(), &p.secret, "C1".into(), "C2".into(), 1);
+                assert!(receive(ctx, &created(&p.secret, &more[0])));
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_updated_message_refreshes() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                assert!(receive(ctx, &updated(&p.secret, p.x[0].uuid)));
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_updated_message_for_an_unknown_order_refreshes_nothing() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                assert!(!receive(ctx, &updated(&p.secret, Uuid::new_v4())));
+            });
+            assert_eq!(pruned, vec![X.to_owned()]);
+        }
+
+        #[test]
+        fn t_gh14_c_a_created_message_the_guard_drops_refreshes_nothing() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                let order = make_random_orders(p.pubkey.clone(), &p.secret, "C1".into(), "C2".into(), 1).remove(0);
+                assert!(receive(ctx, &cancelled(&p.secret, order.uuid)));
+                receive(ctx, &created(&p.secret, &order));
+                assert!(!book(ctx).contains(&order.uuid));
+            });
+            assert_eq!(pruned, vec![X.to_owned()]);
+        }
+
+        #[test]
+        fn t_gh14_c_applied_full_snapshot_refreshes() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                let values = p.x.iter().map(|o| (o.uuid, o.clone().into())).collect();
+                apply_answer(ctx, &p.pubkey, answer_of(X, DeltaOrFullTrie::FullTrie(values)));
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_applied_delta_that_inserts_refreshes() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                let more = make_random_orders(p.pubkey.clone(), &p.secret, "C1".into(), "C2".into(), 1).remove(0);
+                let delta = HashMap::from([(more.uuid, Some(more.into()))]);
+                apply_answer(ctx, &p.pubkey, answer_of(X, DeltaOrFullTrie::Delta(delta)));
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_applied_delta_that_removes_and_leaves_an_order_refreshes() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                let delta = HashMap::from([(p.x[0].uuid, None)]);
+                apply_answer(ctx, &p.pubkey, answer_of(X, DeltaOrFullTrie::Delta(delta)));
+                assert_eq!(on_book(ctx, &p.pubkey, X), HashSet::from([p.x[1].uuid]));
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_applied_answer_that_leaves_no_order_refreshes_nothing() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                let delta = p.x.iter().map(|o| (o.uuid, None)).collect();
+                apply_answer(ctx, &p.pubkey, answer_of(X, DeltaOrFullTrie::Delta(delta)));
+                assert!(on_book(ctx, &p.pubkey, X).is_empty());
+            });
+            assert_eq!(pruned, vec![X.to_owned()], "the emptied pair is dropped by the sweep");
+
+            // An empty snapshot clears the pair, its root and its instant at once; nothing is left to prune.
+            let (ctx, _rx, p) = known_node(json!({}));
+            age(&ctx, &p.pubkey, X, WINDOW + 5);
+            apply_answer(&ctx, &p.pubkey, answer_of(X, DeltaOrFullTrie::FullTrie(vec![])));
+            assert!(on_book(&ctx, &p.pubkey, X).is_empty());
+            assert_eq!((root(&ctx, &p.pubkey, X), seen(&ctx, &p.pubkey, X)), (None, None));
+            assert!(prune(&ctx).is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_applied_order_book_answer_refreshes() {
+            let pruned = pruned_after(|ctx, rx, p| {
+                let task_ctx = ctx.clone();
+                let task = std::thread::spawn(move || block_on(request_and_fill_orderbook(&task_ctx, "C1", "C2")));
+                let response_tx = match next_cmd(rx) {
+                    AdexBehaviourCmd::RequestAnyRelay { response_tx, .. } => response_tx,
+                    other => panic!("unexpected command {:?}", other),
+                };
+                let item = GetOrderbookPubkeyItem {
+                    orders: p.x.iter().map(|order| (order.uuid, order.clone().into())).collect(),
+                    last_keep_alive: now_ms() / 1000,
+                    last_signed_pubkey_payload: vec![],
+                };
+                let answer = GetOrderbookRes {
+                    pubkey_orders: HashMap::from([(p.pubkey.clone(), item)]),
+                    protocol_infos: HashMap::new(),
+                    conf_infos: p.x.iter().filter_map(|o| Some((o.uuid, o.conf_settings?))).collect(),
+                };
+                response_tx
+                    .send(Some((PeerId::random(), encode_message(&answer).unwrap())))
+                    .unwrap();
+                task.join().unwrap().unwrap();
+                flush_trie(ctx);
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_keep_alive_with_a_zero_or_empty_root_refreshes_nothing() {
+            for advertised in [H64::default(), hashed_null_node::<Layout>()] {
+                let pruned = pruned_after(|ctx, rx, p| {
+                    let roots = HashMap::from([(X.to_owned(), advertised)]);
+                    assert_eq!(keep_alive(ctx, rx, &p.pubkey, roots, true), None, "no request either");
+                });
+                assert_eq!(pruned, vec![X.to_owned()]);
+            }
+        }
+
+        #[test]
+        fn t_gh14_c_keep_alive_that_creates_a_pair_gives_it_the_instant_of_its_creation() {
+            let p = Poster::new("gh14-placeholder");
+            let (ctx, mut rx) = node_with(json!({}));
+            let before = now_ms() / 1000;
+            let request = keep_alive(&ctx, &mut rx, &p.pubkey, HashMap::from([(X.to_owned(), [3; 8])]), true);
+            assert_eq!(request, Some(HashMap::from([(X.to_owned(), H64::default())])));
+            assert_eq!(root(&ctx, &p.pubkey, X), Some(H64::default()), "the placeholder");
+            assert!(seen(&ctx, &p.pubkey, X).unwrap() >= before);
+            // The maker never answers and never names the pair again: the placeholder goes after the window.
+            age(&ctx, &p.pubkey, X, WINDOW + 5);
+            let pruned = prune(&ctx);
+            assert_eq!(pruned.len(), 1);
+            assert_eq!(pruned[0].removed_orders, 0);
+            assert_eq!(root(&ctx, &p.pubkey, X), None);
+        }
+
+        // (d)
+
+        fn subscribe(ctx: &MmArc, pair: &str) {
+            octx(ctx).orderbook_subscriptions.write().insert(
+                orderbook_topic_from_ordered_pair(pair),
+                OrderbookRequestingState::Requested,
+            );
+        }
+
+        /// Pairs pruned after two keep-alives, each within the window of the last, that name X and Y with the
+        /// held roots.
+        fn pruned_after_keep_alives_naming_both(relay: bool) -> Vec<String> {
+            let (ctx, mut rx, p) = known_node(json!({}));
+            subscribe(&ctx, Y);
+            for _ in 0..2 {
+                age(&ctx, &p.pubkey, X, WINDOW - 10);
+                age(&ctx, &p.pubkey, Y, WINDOW - 10);
+                let roots = held_roots(&ctx, &p.pubkey, &[X, Y]);
+                assert_eq!(keep_alive(&ctx, &mut rx, &p.pubkey, roots, relay), None);
+            }
+            age(&ctx, &p.pubkey, X, WINDOW - 10);
+            age(&ctx, &p.pubkey, Y, WINDOW - 10);
+            pruned_pairs(prune(&ctx))
+        }
+
+        #[test]
+        fn t_gh14_d_non_relay_prunes_a_pair_it_is_not_subscribed_to() {
+            assert_eq!(pruned_after_keep_alives_naming_both(false), vec![X.to_owned()]);
+        }
+
+        #[test]
+        fn t_gh14_d_relay_refreshes_every_named_pair() {
+            assert!(pruned_after_keep_alives_naming_both(true).is_empty());
+        }
+
+        // (e)
+
+        #[test]
+        fn t_gh14_e_own_pubkeys_are_never_pruned() {
+            let (ctx, _rx, p) = known_node(json!({}));
+            let own = make_random_orders(OWN_PERSISTENT.into(), &[0; 32], "C1".into(), "C2".into(), 2);
+            let per_order = make_random_orders(OWN_PER_ORDER.into(), &[0; 32], "C1".into(), "C3".into(), 2);
+            for order in own.iter().chain(per_order.iter()) {
+                insert_or_update_order(&ctx, order.clone());
+            }
+            octx(&ctx)
+                .orderbook
+                .lock()
+                .my_p2p_pubkeys
+                .insert(OWN_PER_ORDER.to_owned());
+            flush_trie(&ctx);
+
+            // Nothing has named any of these pairs for far longer than the window.
+            for (pubkey, pair) in [(&p.pubkey, X), (&p.pubkey, Y)] {
+                age(&ctx, pubkey, pair, 10 * WINDOW);
+            }
+            age(&ctx, OWN_PERSISTENT, X, 10 * WINDOW);
+            age(&ctx, OWN_PER_ORDER, Y, 10 * WINDOW);
+
+            let pruned = prune(&ctx);
+            let mut pruned: Vec<(String, String)> = pruned.into_iter().map(|p| (p.pubkey, p.alb_pair)).collect();
+            pruned.sort();
+            let mut expected = vec![(p.pubkey.clone(), X.to_owned()), (p.pubkey.clone(), Y.to_owned())];
+            expected.sort();
+            assert_eq!(pruned, expected, "only the other maker's pairs");
+            assert_eq!(on_book(&ctx, OWN_PERSISTENT, X), uuids(&own));
+            assert_eq!(on_book(&ctx, OWN_PER_ORDER, Y), uuids(&per_order));
+            assert!(root(&ctx, OWN_PERSISTENT, X).is_some());
+            assert!(root(&ctx, OWN_PER_ORDER, Y).is_some());
+        }
+
+        // (f)
+
+        #[test]
+        fn t_gh14_f_window_follows_maker_order_timeout() {
+            let (ctx, _rx, p) = known_node(json!({ "maker_order_timeout": 300 }));
+            age(&ctx, &p.pubkey, X, 200);
+            assert!(prune_with(&ctx, 300).is_empty(), "200 s is within a window of 300 s");
+            age(&ctx, &p.pubkey, X, 105);
+            assert_eq!(
+                pruned_pairs(prune_with(&ctx, 300)),
+                vec![X.to_owned()],
+                "305 s is past it"
+            );
+
+            let (ctx, _rx, p) = known_node(json!({}));
+            age(&ctx, &p.pubkey, X, 200);
+            assert_eq!(
+                pruned_pairs(prune_with(&ctx, WINDOW)),
+                vec![X.to_owned()],
+                "200 s is past the default window"
+            );
+        }
+
+        // (g)
+
+        #[test]
+        fn t_gh14_g_cancelled_order_stays_out_after_prune_and_refill() {
+            let p = Poster::new("gh14-g");
+            // The maker's own view lists both orders on X, as a stale responder's would.
+            let (maker_ctx, _maker_rx) = maker_node(&p.x);
+            let (relay, mut relay_rx) = node_with(json!({}));
+            for order in &p.x {
+                assert!(receive(&relay, &created(&p.secret, order)));
+            }
+            let cancelled_uuid = p.x[0].uuid;
+            assert!(receive(&relay, &cancelled(&p.secret, cancelled_uuid)));
+            assert!(guarded(&relay, cancelled_uuid, &p.pubkey));
+            assert_eq!(book(&relay), HashSet::from([p.x[1].uuid]));
+
+            age(&relay, &p.pubkey, X, WINDOW + 5);
+            let pruned = prune(&relay);
+            assert_eq!(pruned.len(), 1);
+            assert_eq!(pruned[0].removed_orders, 1);
+            assert!(book(&relay).is_empty());
+
+            // The refill: the answer lists the cancelled order, which the final-cancel guard keeps out.
+            assert!(
+                !sync_with(&relay, &mut relay_rx, &maker_ctx, &p.pubkey),
+                "a snapshot is answered"
+            );
+            assert_eq!(book(&relay), HashSet::from([p.x[1].uuid]));
+            assert!(guarded(&relay, cancelled_uuid, &p.pubkey));
+        }
+
+        // (h)
+
+        #[test]
+        fn t_gh14_h_switch_reader() {
+            let on = |conf: Json| pair_liveness(&conf_ctx(conf));
+            assert!(on(json!({})));
+            assert!(on(json!({ "pair_liveness": true })));
+            assert!(on(json!({ "pair_liveness": "false" })));
+            assert!(on(json!({ "pair_liveness": 0 })));
+            assert!(on(json!({ "pair_liveness": null })));
+            assert!(!on(json!({ "pair_liveness": false })));
+        }
     }
 }
 
@@ -6611,11 +7245,14 @@ mod tendermint_saved_orders {
 /// An `OrdermatchContext` without a running trie worker; the test drains the queue by hand.
 fn ordermatch_ctx_without_worker() -> (Arc<OrdermatchContext>, mpsc::UnboundedReceiver<Vec<TrieOp>>) {
     let (trie_ops_tx, rx) = mpsc::unbounded::<Vec<TrieOp>>();
+    let trie_store = TrieStore::default();
+    let pair_liveness = trie_store.pair_liveness.clone();
     let ctx = OrdermatchContext {
         maker_orders_ctx: Default::default(),
         my_taker_orders: Default::default(),
         orderbook: Default::default(),
-        trie_store: Arc::new(parking_lot::Mutex::new(TrieStore::default())),
+        trie_store: Arc::new(parking_lot::Mutex::new(trie_store)),
+        pair_liveness,
         trie_ops_tx,
         orderbook_subscriptions: Default::default(),
         sync_answer_deferral: Default::default(),
@@ -13788,7 +14425,13 @@ mod maker_publication_tests {
         }
         flush_trie(&maker);
         assert_eq!(pending(&maker), 20);
-        spawn(maker_outbox_loop(maker.clone()));
+        // The loop reports its exit, so the test can stop it and know that no step is half done (see below).
+        let (loop_done_tx, loop_done_rx) = futures::channel::oneshot::channel::<()>();
+        let outbox_loop_ctx = maker.clone();
+        spawn(async move {
+            maker_outbox_loop(outbox_loop_ctx).await;
+            let _ = loop_done_tx.send(());
+        });
         let octx = OrdermatchContext::from_ctx(&maker).unwrap();
         let started = std::time::Instant::now();
         block_on(broadcast_keep_alive_for_pub(&maker, &octx, &pubkey_of(&maker), None));
@@ -13798,6 +14441,12 @@ mod maker_publication_tests {
             "the keep-alives left after {:?}",
             waited
         );
+        // A release leaves the pending set under the outbox lock, and reaches the channel a moment later, in the same
+        // pump step. The running loop could thus release between the drain and the read of `pending`. So the loop is
+        // stopped first, and its exit awaited: a pump step is synchronous, so no step is half done once the loop has
+        // returned, and the two reads below see the same, final state.
+        maker.stop().unwrap();
+        block_on(loop_done_rx).expect("the outbox loop returned");
         let published = drain(&mut rx);
         let released = published.iter().filter(|p| kind(&p.message) == "created").count();
         // 0.5 per second for 10 s, plus the tokens that had refilled and the pump's step.
@@ -14063,5 +14712,1212 @@ mod negotiation_failure_penalty {
 
         assert!(!banned(&ctx, maker_key));
         assert_eq!(listed(&ctx), json!({}));
+    }
+}
+
+/// CRD ch.59 §59.4A, T14: capability words in coin protocol information (carriage, trie, decisions).
+mod t14_capability_word_tests {
+    use super::*;
+    use crate::mm2::lp_swap::{active_swaps, list_banned_pubkeys_rpc};
+    use coins::coin_protocol_capability::{append_capability_word, declares_capability, CAPABILITY_TX_V6};
+    use coins::{CoinsContext, MarketCoinOps, MmCoinEnum};
+    use common::mm_number::BigRational;
+    use std::sync::Arc as StdArc;
+
+    /// The first value of a UTXO coin: its encoded address format.
+    fn first_values() -> Vec<Vec<u8>> {
+        [
+            AddressFormat::Standard,
+            AddressFormat::Segwit,
+            AddressFormat::CashAddress {
+                network: "bitcoincash".to_owned(),
+                pub_addr_prefix: 0,
+                p2sh_addr_prefix: 5,
+            },
+        ]
+        .iter()
+        .map(|format| rmp_serde::to_vec(format).unwrap())
+        .collect()
+    }
+
+    fn with_word(first: &[u8]) -> Vec<u8> { append_capability_word(first.to_vec(), &[CAPABILITY_TX_V6]) }
+
+    // --- (c), orderbook-reader half: the address format the order book reports (R59.4A.3) ---
+
+    #[test]
+    fn t14_c_orderbook_address_format_is_the_same_with_the_word() {
+        for first in first_values() {
+            let without = addr_format_from_protocol_info(&first);
+            let with = addr_format_from_protocol_info(&with_word(&first));
+            assert_eq!(without, with);
+        }
+        // The three encodings really differ, so the equality above is not vacuous.
+        let formats: Vec<_> = first_values()
+            .iter()
+            .map(|f| addr_format_from_protocol_info(f))
+            .collect();
+        assert_eq!(formats[0], AddressFormat::Standard);
+        assert_eq!(formats[1], AddressFormat::Segwit);
+        assert!(matches!(formats[2], AddressFormat::CashAddress { .. }));
+    }
+
+    // --- (e) carriage ---
+
+    fn maker_order_created(base_info: Vec<u8>, rel_info: Vec<u8>) -> new_protocol::MakerOrderCreated {
+        new_protocol::MakerOrderCreated {
+            uuid: Uuid::new_v4().into(),
+            base: "BASE".into(),
+            rel: "REL".into(),
+            price: BigRational::from_integer(1.into()),
+            max_volume: BigRational::from_integer(2.into()),
+            min_volume: BigRational::from_integer(1.into()),
+            created_at: 1,
+            conf_settings: OrderConfirmationsSettings::default(),
+            timestamp: 1,
+            pair_trie_root: H64::default(),
+            base_protocol_info: base_info,
+            rel_protocol_info: rel_info,
+        }
+    }
+
+    fn wire_taker_request(base_info: Option<Vec<u8>>, rel_info: Option<Vec<u8>>) -> new_protocol::TakerRequest {
+        new_protocol::TakerRequest {
+            base: "BASE".into(),
+            rel: "REL".into(),
+            base_amount: BigRational::from_integer(1.into()),
+            rel_amount: BigRational::from_integer(1.into()),
+            action: TakerAction::Buy,
+            uuid: Uuid::new_v4().into(),
+            match_by: new_protocol::MatchBy::Any,
+            conf_settings: OrderConfirmationsSettings::default(),
+            base_protocol_info: base_info,
+            rel_protocol_info: rel_info,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    fn wire_maker_reserved(base_info: Option<Vec<u8>>, rel_info: Option<Vec<u8>>) -> new_protocol::MakerReserved {
+        new_protocol::MakerReserved {
+            base: "BASE".into(),
+            rel: "REL".into(),
+            base_amount: BigRational::from_integer(1.into()),
+            rel_amount: BigRational::from_integer(1.into()),
+            taker_order_uuid: Uuid::new_v4().into(),
+            maker_order_uuid: Uuid::new_v4().into(),
+            conf_settings: OrderConfirmationsSettings::default(),
+            base_protocol_info: base_info,
+            rel_protocol_info: rel_info,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    /// Signs, encodes, decodes and verifies a message exactly as the order-match layer does.
+    fn through_the_wire(msg: new_protocol::OrdermatchMessage) -> new_protocol::OrdermatchMessage {
+        let (_, secret) = pubkey_and_secret_for_test("t14-carriage");
+        let encoded = encode_and_sign(&msg, &secret).unwrap();
+        decode_signed::<new_protocol::OrdermatchMessage>(&encoded).unwrap().0
+    }
+
+    #[test]
+    fn t14_e_maker_order_created_carries_the_bytes_unchanged() {
+        let base = with_word(&first_values()[0]);
+        let rel = first_values()[1].clone();
+        let msg = maker_order_created(base.clone(), rel.clone());
+        match through_the_wire(new_protocol::OrdermatchMessage::MakerOrderCreated(msg.clone())) {
+            new_protocol::OrdermatchMessage::MakerOrderCreated(decoded) => {
+                assert_eq!(decoded, msg);
+                assert_eq!(decoded.base_protocol_info, base);
+                assert_eq!(decoded.rel_protocol_info, rel);
+                // And into the order book item the node keeps.
+                let item: OrderbookItem = (decoded, "pubkey".to_owned()).into();
+                assert_eq!(item.base_protocol_info, base);
+                assert_eq!(item.rel_protocol_info, rel);
+            },
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t14_e_taker_request_carries_the_bytes_unchanged() {
+        let base = with_word(&first_values()[1]);
+        let rel = with_word(&first_values()[2]);
+        let msg = wire_taker_request(Some(base.clone()), Some(rel.clone()));
+        match through_the_wire(new_protocol::OrdermatchMessage::TakerRequest(msg)) {
+            new_protocol::OrdermatchMessage::TakerRequest(decoded) => {
+                assert_eq!(decoded.base_protocol_info.as_ref(), Some(&base));
+                assert_eq!(decoded.rel_protocol_info.as_ref(), Some(&rel));
+                let request = TakerRequest::from_new_proto_and_pubkey(decoded, H256Json::default());
+                assert_eq!(request.base_protocol_info.as_ref(), Some(&base));
+                assert_eq!(request.rel_protocol_info.as_ref(), Some(&rel));
+            },
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t14_e_maker_reserved_carries_the_bytes_unchanged() {
+        let base = with_word(&first_values()[2]);
+        let rel = first_values()[0].clone();
+        let msg = wire_maker_reserved(Some(base.clone()), Some(rel.clone()));
+        match through_the_wire(new_protocol::OrdermatchMessage::MakerReserved(msg)) {
+            new_protocol::OrdermatchMessage::MakerReserved(decoded) => {
+                assert_eq!(decoded.base_protocol_info.as_ref(), Some(&base));
+                assert_eq!(decoded.rel_protocol_info.as_ref(), Some(&rel));
+                let reserved = MakerReserved::from_new_proto_and_pubkey(decoded, H256Json::default());
+                assert_eq!(reserved.base_protocol_info.as_ref(), Some(&base));
+                assert_eq!(reserved.rel_protocol_info.as_ref(), Some(&rel));
+                // And back out: the maker's own reservation puts the same bytes into the message.
+                let mut outgoing = reserved;
+                outgoing.conf_settings = Some(OrderConfirmationsSettings::default());
+                match new_protocol::OrdermatchMessage::from(outgoing) {
+                    new_protocol::OrdermatchMessage::MakerReserved(out) => {
+                        assert_eq!(out.base_protocol_info.as_ref(), Some(&base));
+                        assert_eq!(out.rel_protocol_info.as_ref(), Some(&rel));
+                    },
+                    other => panic!("unexpected message {other:?}"),
+                }
+            },
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t14_e_synchronization_answer_side_channel_carries_the_bytes_unchanged() {
+        let uuid = Uuid::new_v4();
+        let info = BaseRelProtocolInfo {
+            base: with_word(&first_values()[0]),
+            rel: with_word(&first_values()[1]),
+        };
+        let answer = SyncPubkeyOrderbookStateRes {
+            last_signed_pubkey_payload: vec![1, 2, 3],
+            pair_orders_diff: HashMap::new(),
+            protocol_infos: HashMap::from_iter(iter::once((uuid, info.clone()))),
+            conf_infos: HashMap::new(),
+        };
+        let encoded = encode_message(&answer).unwrap();
+        let decoded: SyncPubkeyOrderbookStateRes = decode_message(&encoded).unwrap();
+        assert_eq!(decoded.protocol_infos.get(&uuid), Some(&info));
+
+        let full = GetOrderbookRes {
+            pubkey_orders: HashMap::new(),
+            protocol_infos: HashMap::from_iter(iter::once((uuid, info.clone()))),
+            conf_infos: HashMap::new(),
+        };
+        let decoded: GetOrderbookRes = decode_message(&encode_message(&full).unwrap()).unwrap();
+        assert_eq!(decoded.protocol_infos.get(&uuid), Some(&info));
+    }
+
+    #[test]
+    fn t14_e_the_trie_root_and_the_stored_leaf_are_the_same_with_and_without_the_word() {
+        let (ctx_a, pubkey, secret) = make_ctx_for_tests();
+        let (ctx_b, ..) = make_ctx_for_tests();
+        let mut order = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 1).remove(0);
+        order.base_protocol_info = first_values()[0].clone();
+        order.rel_protocol_info = first_values()[1].clone();
+        let mut order_with_word = order.clone();
+        order_with_word.base_protocol_info = with_word(&order.base_protocol_info);
+        order_with_word.rel_protocol_info = with_word(&order.rel_protocol_info);
+        assert_ne!(order.base_protocol_info, order_with_word.base_protocol_info);
+
+        insert_or_update_order(&ctx_a, order.clone());
+        insert_or_update_order(&ctx_b, order_with_word.clone());
+        flush_trie(&ctx_a);
+        flush_trie(&ctx_b);
+
+        let pair = alb_ordered_pair("C1", "C2");
+        assert_eq!(
+            pair_trie_root_by_pub(&ctx_a, &pubkey, &pair),
+            pair_trie_root_by_pub(&ctx_b, &pubkey, &pair)
+        );
+        let octx_a = OrdermatchContext::from_ctx(&ctx_a).unwrap();
+        let octx_b = OrdermatchContext::from_ctx(&ctx_b).unwrap();
+        let leaf_a = trie_value_of(&octx_a, &pubkey, &pair, &order.uuid);
+        assert!(leaf_a.is_some());
+        assert_eq!(leaf_a, trie_value_of(&octx_b, &pubkey, &pair, &order.uuid));
+    }
+
+    // --- (f) decisions at the call sites ---
+
+    /// A test coin that requires `tx_v6` in the counterparty's protocol information. Every consulted
+    /// coin ticker is recorded, in order.
+    fn require_capability() -> StdArc<Mutex<Vec<String>>> {
+        let consulted = StdArc::new(Mutex::new(Vec::new()));
+        let log = consulted.clone();
+        TestCoin::is_coin_protocol_supported.mock_safe(move |coin, info| {
+            log.lock().unwrap().push(coin.ticker().to_owned());
+            MockResult::Return(declares_capability(info, CAPABILITY_TX_V6))
+        });
+        consulted
+    }
+
+    struct Node {
+        ctx: MmArc,
+        rx: mpsc::Receiver<AdexBehaviourCmd>,
+        dbdir: std::path::PathBuf,
+    }
+
+    impl Node {
+        fn new() -> Node {
+            let dbdir = std::env::temp_dir().join(format!("kdf-t14-capability-{}", Uuid::new_v4()));
+            let conf = json!({ "dbdir": dbdir.to_string_lossy(), "pre_trade_spend_check": false });
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            ctx.secp256k1_key_pair
+                .pin(key_pair_from_seed("t14-capability-node").unwrap())
+                .unwrap();
+            let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+            for ticker in ["BASE", "REL"] {
+                block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+            }
+            std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
+            std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+            let (tx, rx) = mpsc::channel(100);
+            P2PContext::new(tx).store_to_mm_arc(&ctx);
+            Node { ctx, rx, dbdir }
+        }
+
+        /// The ordermatch messages published since the last call.
+        fn published(&mut self) -> Vec<new_protocol::OrdermatchMessage> {
+            let mut out = Vec::new();
+            while let Ok(cmd) = self.rx.try_recv() {
+                if let AdexBehaviourCmd::PublishMsg { msg, .. } | AdexBehaviourCmd::PublishMsgFrom { msg, .. } = cmd {
+                    if let Ok((message, ..)) = decode_signed::<new_protocol::OrdermatchMessage>(&msg) {
+                        out.push(message);
+                    }
+                }
+            }
+            out
+        }
+
+        /// No swap is running and no pubkey carries a penalty record (R59.4A.5).
+        fn assert_no_swap_and_no_penalty(&self) {
+            assert!(active_swaps(&self.ctx).unwrap().is_empty());
+            let response = block_on(list_banned_pubkeys_rpc(self.ctx.clone())).unwrap();
+            let listed = json::from_slice::<Json>(response.body()).unwrap();
+            assert_eq!(listed["result"], json!({}));
+        }
+    }
+
+    impl Drop for Node {
+        fn drop(&mut self) { std::fs::remove_dir_all(&self.dbdir).ok(); }
+    }
+
+    fn connects(published: &[new_protocol::OrdermatchMessage]) -> usize {
+        published
+            .iter()
+            .filter(|m| matches!(m, new_protocol::OrdermatchMessage::TakerConnect(_)))
+            .count()
+    }
+
+    fn reservations(published: &[new_protocol::OrdermatchMessage]) -> usize {
+        published
+            .iter()
+            .filter(|m| matches!(m, new_protocol::OrdermatchMessage::MakerReserved(_)))
+            .count()
+    }
+
+    fn taker_request(base_info: Option<Vec<u8>>, rel_info: Option<Vec<u8>>) -> TakerRequest {
+        TakerRequest {
+            base: "BASE".into(),
+            rel: "REL".into(),
+            uuid: Uuid::new_v4(),
+            dest_pub_key: H256Json::default(),
+            sender_pubkey: H256Json::default(),
+            base_amount: 10.into(),
+            rel_amount: 10.into(),
+            action: TakerAction::Buy,
+            match_by: MatchBy::Any,
+            conf_settings: None,
+            base_protocol_info: base_info,
+            rel_protocol_info: rel_info,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    fn reservation_for(
+        taker: &TakerOrder,
+        rel_amount: i32,
+        base_info: Option<Vec<u8>>,
+        rel_info: Option<Vec<u8>>,
+    ) -> MakerReserved {
+        MakerReserved {
+            base: "BASE".into(),
+            rel: "REL".into(),
+            base_amount: 10.into(),
+            rel_amount: rel_amount.into(),
+            sender_pubkey: H256Json::from([rel_amount as u8; 32]),
+            dest_pub_key: H256Json::default(),
+            maker_order_uuid: Uuid::new_v4(),
+            taker_order_uuid: taker.request.uuid,
+            conf_settings: None,
+            base_protocol_info: base_info,
+            rel_protocol_info: rel_info,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    fn add_taker_order(node: &Node) -> TakerOrder {
+        let taker = TakerOrder {
+            request: taker_request(None, None),
+            matches: HashMap::new(),
+            created_at: now_ms(),
+            order_type: OrderType::GoodTillCancelled,
+            min_volume: 0.into(),
+            timeout: 30,
+            save_in_history: false,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+        };
+        let octx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        block_on(octx.my_taker_orders.lock()).insert(taker.request.uuid, taker.clone());
+        taker
+    }
+
+    fn matches_of_taker_order(node: &Node, uuid: &Uuid) -> usize {
+        let octx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        let orders = block_on(octx.my_taker_orders.lock());
+        orders.get(uuid).unwrap().matches.len()
+    }
+
+    fn process_reservations(node: &Node, reservations: Vec<MakerReserved>) {
+        let handlers = reservations
+            .into_iter()
+            .map(|msg| process_maker_reserved(node.ctx.clone(), H256Json::default(), msg));
+        block_on(futures::future::join_all(handlers));
+    }
+
+    fn with_cap() -> Option<Vec<u8>> { Some(with_word(&first_values()[1])) }
+
+    fn without_cap() -> Option<Vec<u8>> { Some(first_values()[1].clone()) }
+
+    #[test]
+    fn t14_f_reservation_without_the_capability_is_not_connected() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let taker = add_taker_order(&node);
+        let reserved = reservation_for(&taker, 10, without_cap(), with_cap());
+        assert_eq!(taker.match_reserved(&reserved), MatchReservedResult::Matched);
+
+        process_reservations(&node, vec![reserved]);
+
+        assert_eq!(connects(&node.published()), 0);
+        assert_eq!(matches_of_taker_order(&node, &taker.request.uuid), 0);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_reservation_declined_by_the_rel_coin_is_not_connected() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let taker = add_taker_order(&node);
+
+        process_reservations(&node, vec![reservation_for(&taker, 10, with_cap(), without_cap())]);
+
+        assert_eq!(connects(&node.published()), 0);
+        assert_eq!(matches_of_taker_order(&node, &taker.request.uuid), 0);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_reservation_with_the_capability_is_connected() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let taker = add_taker_order(&node);
+
+        process_reservations(&node, vec![reservation_for(&taker, 10, with_cap(), with_cap())]);
+
+        assert_eq!(connects(&node.published()), 1);
+        assert_eq!(matches_of_taker_order(&node, &taker.request.uuid), 1);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_declined_reservation_is_skipped_and_the_next_one_is_connected() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let taker = add_taker_order(&node);
+        // The declined one is the cheaper, so it is walked first.
+        let declined = reservation_for(&taker, 9, without_cap(), with_cap());
+        let accepted = reservation_for(&taker, 10, with_cap(), with_cap());
+        let accepted_maker = accepted.maker_order_uuid;
+
+        process_reservations(&node, vec![accepted, declined]);
+
+        assert_eq!(connects(&node.published()), 1);
+        let octx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        let orders = block_on(octx.my_taker_orders.lock());
+        let matches = &orders.get(&taker.request.uuid).unwrap().matches;
+        assert_eq!(matches.len(), 1);
+        assert!(matches.contains_key(&accepted_maker));
+        drop(orders);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_the_rel_check_is_skipped_when_the_base_coin_declines() {
+        let consulted = require_capability();
+        let node = Node::new();
+        let taker = add_taker_order(&node);
+
+        process_reservations(&node, vec![reservation_for(&taker, 10, without_cap(), with_cap())]);
+
+        assert_eq!(*consulted.lock().unwrap(), vec!["BASE".to_owned()]);
+    }
+
+    #[test]
+    fn t14_f_info_line_counts_the_declined_reservations() {
+        // The info line is decided by `declined_reservations_summary` (the log output is not captured here).
+        let uuid = Uuid::new_v4();
+        assert_eq!(declined_reservations_summary(&uuid, 0), None);
+        let one = declined_reservations_summary(&uuid, 1).unwrap();
+        assert!(one.contains(&uuid.to_string()), "{one}");
+        assert!(one.contains("1 reservation(s) declined"), "{one}");
+        let three = declined_reservations_summary(&uuid, 3).unwrap();
+        assert!(three.contains("3 reservation(s) declined"), "{three}");
+    }
+
+    #[test]
+    fn t14_f_declining_coin_is_named_and_the_rel_coin_is_consulted_only_after_the_base_accepted() {
+        let consulted = require_capability();
+        let base = MmCoinEnum::Test(TestCoin::new("BASE"));
+        let rel = MmCoinEnum::Test(TestCoin::new("REL"));
+        let some = |info: Vec<u8>| Some(info);
+
+        let base_declines = declining_coin_ticker(&base, &rel, &some(first_values()[0].clone()), &with_cap());
+        assert_eq!(base_declines.as_deref(), Some("BASE"));
+        let rel_declines = declining_coin_ticker(&base, &rel, &with_cap(), &None);
+        assert_eq!(rel_declines.as_deref(), Some("REL"));
+        assert_eq!(declining_coin_ticker(&base, &rel, &with_cap(), &with_cap()), None);
+        assert_eq!(*consulted.lock().unwrap(), vec!["BASE", "BASE", "REL", "BASE", "REL"]);
+    }
+
+    fn add_maker_order(node: &Node) -> MakerOrder {
+        let base = MmCoinEnum::Test(TestCoin::new("BASE"));
+        let rel = MmCoinEnum::Test(TestCoin::new("REL"));
+        let order = MakerOrderBuilder::new(&base, &rel)
+            .with_max_base_vol(MmNumber::from("100"))
+            .with_min_base_vol(Some(MmNumber::from("1")))
+            .with_price(MmNumber::from("1"))
+            .with_conf_settings(OrderConfirmationsSettings::default())
+            .with_save_in_history(false)
+            .build_unchecked();
+        let octx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        octx.maker_orders_ctx
+            .lock()
+            .add_order(&order, StdArc::new(AsyncMutex::new(order.clone())));
+        order
+    }
+
+    fn matches_of_maker_order(node: &Node, uuid: &Uuid) -> usize {
+        let octx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        let orders = octx.maker_orders_ctx.lock();
+        let order_mutex = orders.get_order(uuid).unwrap();
+        let order = block_on(order_mutex.lock());
+        order.matches.len()
+    }
+
+    fn process_request(node: &Node, request: TakerRequest) {
+        block_on(process_taker_request(node.ctx.clone(), H256Json::default(), request));
+    }
+
+    #[test]
+    fn t14_f_request_without_the_capability_is_not_reserved() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let order = add_maker_order(&node);
+
+        process_request(&node, taker_request(without_cap(), with_cap()));
+
+        assert_eq!(reservations(&node.published()), 0);
+        assert_eq!(matches_of_maker_order(&node, &order.uuid), 0);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_request_declined_by_the_rel_coin_is_not_reserved() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let order = add_maker_order(&node);
+
+        process_request(&node, taker_request(with_cap(), without_cap()));
+
+        assert_eq!(reservations(&node.published()), 0);
+        assert_eq!(matches_of_maker_order(&node, &order.uuid), 0);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_request_with_the_capability_is_reserved() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let order = add_maker_order(&node);
+
+        process_request(&node, taker_request(with_cap(), with_cap()));
+
+        assert_eq!(reservations(&node.published()), 1);
+        assert_eq!(matches_of_maker_order(&node, &order.uuid), 1);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_the_rel_check_of_a_request_is_skipped_when_the_base_coin_declines() {
+        let consulted = require_capability();
+        let node = Node::new();
+        add_maker_order(&node);
+
+        process_request(&node, taker_request(without_cap(), with_cap()));
+
+        assert_eq!(*consulted.lock().unwrap(), vec!["BASE".to_owned()]);
+    }
+
+    #[test]
+    fn t14_f_a_request_that_matched_before_is_not_checked_again() {
+        let consulted = require_capability();
+        let node = Node::new();
+        let order = add_maker_order(&node);
+        let request = taker_request(with_cap(), with_cap());
+
+        process_request(&node, request.clone());
+        let after_first = consulted.lock().unwrap().len();
+        process_request(&node, request);
+
+        assert_eq!(consulted.lock().unwrap().len(), after_first);
+        assert_eq!(matches_of_maker_order(&node, &order.uuid), 1);
+    }
+}
+
+/// CRD ch.28 R16a, T4a: every ordermatch message the node sends passes the bounds check, and the order record
+/// decoded from a peer's bytes is read under the bounds.
+mod t4a_bounded_reading_tests {
+    use super::*;
+    use crate::mm2::lp_network::P2PRequest;
+    use crate::mm2::lp_ordermatch::new_protocol::{MakerConnected, MakerOrderCancelled, MakerOrderCreated,
+                                                  MakerReserved, MatchBy, OrdermatchMessage, TakerConnect,
+                                                  TakerRequest as WireTakerRequest};
+    use common::msgpack_bounds::{check_msgpack_bounds, dropped_peer_values, max_nesting_depth, MAX_PEER_NESTING};
+
+    /// Half of the bound: the deepest value the node sends may reach it.
+    const HALF_BOUND: usize = MAX_PEER_NESTING / 2;
+
+    /// Asserts that `encoded` passes the check up to its last byte and nests at most half of the bound.
+    fn assert_within_half_the_bound(name: &str, encoded: &[u8]) {
+        assert_eq!(check_msgpack_bounds(encoded), Ok(encoded.len()), "{name}");
+        let depth = max_nesting_depth(encoded);
+        println!("t4a depth {name}: {depth}");
+        assert!(depth <= HALF_BOUND, "{name}: depth {depth}");
+    }
+
+    /// The message as published: the payload, and the signed envelope around it.
+    fn assert_ordermatch_message(name: &str, message: OrdermatchMessage) {
+        let payload = encode_message(&message).unwrap();
+        assert_within_half_the_bound(&format!("{name} payload"), &payload);
+        let envelope = encode_and_sign(&message, &[3; 32]).unwrap();
+        assert_within_half_the_bound(&format!("{name} envelope"), &envelope);
+        decode_signed::<OrdermatchMessage>(&envelope).unwrap();
+    }
+
+    fn uuid() -> Uuid { Uuid::new_v4() }
+
+    fn price() -> BigRational { BigRational::new(12345.into(), 1000.into()) }
+
+    fn conf_settings() -> OrderConfirmationsSettings {
+        OrderConfirmationsSettings {
+            base_confs: 6,
+            base_nota: false,
+            rel_confs: 3,
+            rel_nota: true,
+        }
+    }
+
+    #[test]
+    fn t4a_a_ordermatch_messages_nest_within_half_the_bound() {
+        assert_ordermatch_message(
+            "MakerOrderCreated",
+            OrdermatchMessage::MakerOrderCreated(MakerOrderCreated {
+                uuid: uuid().into(),
+                base: "RIN".into(),
+                rel: "KMD".into(),
+                price: price(),
+                max_volume: price(),
+                min_volume: price(),
+                created_at: 1,
+                conf_settings: conf_settings(),
+                timestamp: 2,
+                pair_trie_root: H64::default(),
+                base_protocol_info: vec![1, 2, 3],
+                rel_protocol_info: vec![4, 5, 6],
+            }),
+        );
+
+        let mut updated = new_protocol::MakerOrderUpdated::new(Uuid::new_v4());
+        updated.with_new_price(price());
+        updated.with_new_max_volume(price());
+        updated.with_new_min_volume(price());
+        updated.with_new_conf_settings(conf_settings());
+        assert_ordermatch_message("MakerOrderUpdated", OrdermatchMessage::MakerOrderUpdated(updated));
+
+        assert_ordermatch_message(
+            "MakerOrderCancelled",
+            OrdermatchMessage::MakerOrderCancelled(MakerOrderCancelled {
+                uuid: uuid().into(),
+                timestamp: 3,
+                pair_trie_root: H64::default(),
+            }),
+        );
+
+        let mut orders = HashSet::new();
+        orders.insert(uuid().into());
+        assert_ordermatch_message(
+            "TakerRequest",
+            OrdermatchMessage::TakerRequest(WireTakerRequest {
+                base: "RIN".into(),
+                rel: "KMD".into(),
+                base_amount: price(),
+                rel_amount: price(),
+                action: TakerAction::Buy,
+                uuid: uuid().into(),
+                match_by: MatchBy::Orders(orders),
+                conf_settings: conf_settings(),
+                base_protocol_info: Some(vec![1, 2, 3]),
+                rel_protocol_info: Some(vec![4, 5, 6]),
+                swap_version: SwapVersion::default(),
+            }),
+        );
+
+        assert_ordermatch_message(
+            "MakerReserved",
+            OrdermatchMessage::MakerReserved(MakerReserved {
+                base: "RIN".into(),
+                rel: "KMD".into(),
+                base_amount: price(),
+                rel_amount: price(),
+                taker_order_uuid: uuid().into(),
+                maker_order_uuid: uuid().into(),
+                conf_settings: conf_settings(),
+                base_protocol_info: Some(vec![1, 2, 3]),
+                rel_protocol_info: Some(vec![4, 5, 6]),
+                swap_version: SwapVersion::default(),
+            }),
+        );
+
+        assert_ordermatch_message(
+            "TakerConnect",
+            OrdermatchMessage::TakerConnect(TakerConnect {
+                taker_order_uuid: uuid().into(),
+                maker_order_uuid: uuid().into(),
+            }),
+        );
+
+        assert_ordermatch_message(
+            "MakerConnected",
+            OrdermatchMessage::MakerConnected(MakerConnected {
+                taker_order_uuid: uuid().into(),
+                maker_order_uuid: uuid().into(),
+            }),
+        );
+
+        let mut trie_roots = HashMap::new();
+        trie_roots.insert(alb_ordered_pair("RIN", "KMD"), H64::from([7; 8]));
+        trie_roots.insert(alb_ordered_pair("RIN", "BTC"), H64::from([8; 8]));
+        assert_ordermatch_message(
+            "PubkeyKeepAlive",
+            OrdermatchMessage::PubkeyKeepAlive(PubkeyKeepAlive {
+                trie_roots,
+                timestamp: 4,
+            }),
+        );
+    }
+
+    #[test]
+    fn t4a_a_requests_and_sync_answers_nest_within_half_the_bound() {
+        let mut trie_roots = HashMap::new();
+        trie_roots.insert(alb_ordered_pair("RIN", "KMD"), H64::from([7; 8]));
+        let requests = [
+            P2PRequest::Ordermatch(OrdermatchRequest::GetOrderbook {
+                base: "RIN".into(),
+                rel: "KMD".into(),
+            }),
+            P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState {
+                pubkey: "02".repeat(33),
+                trie_roots,
+            }),
+            P2PRequest::Ordermatch(OrdermatchRequest::BestOrders {
+                coin: "RIN".into(),
+                action: BestOrdersAction::Buy,
+                volume: price(),
+            }),
+            P2PRequest::Ordermatch(OrdermatchRequest::OrderbookDepth {
+                pairs: vec![("RIN".into(), "KMD".into())],
+            }),
+            P2PRequest::Ordermatch(OrdermatchRequest::BestOrdersByNumber {
+                coin: "RIN".into(),
+                action: BestOrdersAction::Sell,
+                number: 10,
+            }),
+            P2PRequest::NetworkInfo(crate::mm2::lp_stats::NetworkInfoRequest::CurrentTimestamp),
+        ];
+        for (i, request) in requests.iter().enumerate() {
+            let encoded = encode_message(request).unwrap();
+            assert_within_half_the_bound(&format!("P2PRequest {i}"), &encoded);
+            assert_eq!(&decode_message::<P2PRequest>(&encoded).unwrap(), request);
+        }
+
+        // A synchronization answer holding a full trie of order records, with side tables.
+        let orders = make_random_orders("".into(), &[1; 32], "RIN".into(), "KMD".into(), 5);
+        let mut answer = SyncPubkeyOrderbookStateRes {
+            last_signed_pubkey_payload: vec![1, 2, 3, 4],
+            pair_orders_diff: HashMap::from_iter(iter::once((
+                alb_ordered_pair("RIN", "KMD"),
+                DeltaOrFullTrie::FullTrie(orders.into_iter().map(|order| (order.uuid, order.into())).collect()),
+            ))),
+            protocol_infos: HashMap::new(),
+            conf_infos: HashMap::new(),
+        };
+        answer.protocol_infos.insert(Uuid::new_v4(), BaseRelProtocolInfo {
+            base: vec![1],
+            rel: vec![2],
+        });
+        answer.conf_infos.insert(Uuid::new_v4(), conf_settings());
+        let encoded = encode_message(&answer).unwrap();
+        assert_within_half_the_bound("SyncPubkeyOrderbookStateRes", &encoded);
+        decode_message::<SyncPubkeyOrderbookStateRes>(&encoded).unwrap();
+
+        // The delta form.
+        let mut delta = HashMap::new();
+        delta.insert(Uuid::new_v4(), None);
+        let answer = SyncPubkeyOrderbookStateRes {
+            last_signed_pubkey_payload: vec![1],
+            pair_orders_diff: HashMap::from_iter(iter::once((
+                alb_ordered_pair("RIN", "KMD"),
+                DeltaOrFullTrie::Delta(delta),
+            ))),
+            protocol_infos: HashMap::new(),
+            conf_infos: HashMap::new(),
+        };
+        let encoded = encode_message(&answer).unwrap();
+        assert_within_half_the_bound("SyncPubkeyOrderbookStateRes delta", &encoded);
+    }
+
+    fn order_record() -> OrderbookP2PItem {
+        let order = make_random_orders("02".repeat(33), &[1; 32], "RIN".into(), "KMD".into(), 1).remove(0);
+        order.into()
+    }
+
+    /// `bytes`, a map, with one more key whose value is `levels` one-element arrays around nil. The first byte
+    /// of `bytes` is a fixmap header.
+    fn map_with_extra_key(bytes: &[u8], levels: usize) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        assert_eq!(out[0] & 0xf0, 0x80, "a fixmap");
+        out[0] += 1;
+        out.extend_from_slice(&[0xa5, b'e', b'x', b't', b'r', b'a']);
+        out.extend(vec![0x91; levels]);
+        out.push(0xc0);
+        out
+    }
+
+    #[test]
+    fn t4a_a_order_record_nests_within_half_the_bound() {
+        let encoded = rmp_serde::to_vec(&order_record()).unwrap();
+        assert_within_half_the_bound("OrderbookP2PItem", &encoded);
+    }
+
+    #[test]
+    fn t4a_f_order_record_beyond_the_bound_is_dropped() {
+        let record = order_record();
+        let encoded = rmp_serde::to_vec(&record).unwrap();
+        assert_eq!(OrderbookP2PItem::try_from_bytes(encoded).unwrap(), record);
+
+        // The same record as a map with one more key; the total nesting is 64 and 65 levels.
+        let named = rmp_serde::to_vec_named(&record).unwrap();
+        assert_eq!(
+            OrderbookP2PItem::try_from_bytes(map_with_extra_key(&named, MAX_PEER_NESTING - 1)).unwrap(),
+            record
+        );
+        let before = dropped_peer_values();
+        assert!(OrderbookP2PItem::try_from_bytes(map_with_extra_key(&named, MAX_PEER_NESTING)).is_err());
+        assert!(OrderbookP2PItem::try_from_bytes(map_with_extra_key(&named, 10_000)).is_err());
+        assert!(dropped_peer_values() >= before + 2);
+
+        // A declared length beyond the bytes present.
+        let mut declared = vec![0x91, 0xdb];
+        declared.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        assert!(OrderbookP2PItem::try_from_bytes(declared).is_err());
+    }
+
+    #[test]
+    fn t4a_f_address_format_of_protocol_info_falls_back_beyond_the_bound() {
+        for format in [
+            AddressFormat::Standard,
+            AddressFormat::Segwit,
+            AddressFormat::CashAddress {
+                network: "bitcoincash".into(),
+                pub_addr_prefix: 0,
+                p2sh_addr_prefix: 5,
+            },
+        ] {
+            let info = rmp_serde::to_vec(&format).unwrap();
+            assert_within_half_the_bound("AddressFormat", &info);
+            assert_eq!(addr_format_from_protocol_info(&info), format);
+
+            // Bytes after the first value are ignored.
+            let mut with_tail = info.clone();
+            with_tail.extend_from_slice(&[0xc1, 0xdd, 0xff, 0xff]);
+            assert_eq!(addr_format_from_protocol_info(&with_tail), format);
+        }
+
+        // A segwit format with one more key: at the bound it is read, beyond it the standard format is the fallback.
+        let named = rmp_serde::to_vec_named(&AddressFormat::Segwit).unwrap();
+        let at_bound = map_with_extra_key(&named, MAX_PEER_NESTING - 1);
+        assert_eq!(addr_format_from_protocol_info(&at_bound), AddressFormat::Segwit);
+        let before = dropped_peer_values();
+        let beyond = map_with_extra_key(&named, MAX_PEER_NESTING);
+        assert_eq!(addr_format_from_protocol_info(&beyond), AddressFormat::Standard);
+        let far_beyond = map_with_extra_key(&named, 10_000);
+        assert_eq!(addr_format_from_protocol_info(&far_beyond), AddressFormat::Standard);
+        assert!(dropped_peer_values() >= before + 2);
+        assert_eq!(
+            addr_format_from_protocol_info(&[0xdd, 0xff, 0xff, 0xff, 0xff]),
+            AddressFormat::Standard
+        );
+    }
+}
+
+/// CRD ch.05 §5.12B T15-T18: the refusal of a swap whose key is not the key its coin pays from, under a global-HD
+/// login. What each coin family reports is pinned in the `coins` crate; here `TestCoin` reports it, so the sites
+/// that ask the question run without any network.
+mod t05_12b_swap_key_check_tests {
+    use super::*;
+    use coins::{CoinsContext, MarketCoinOps, MmCoinEnum, SwapKeyDisagreement, SwapOps};
+    use crypto::CryptoCtx;
+
+    const HD_MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    const EVM_REASON: &str = r#"an EVM coin under an HD login ("enable_hd") pays from another key than the one its swaps announce; trade it under a login without "enable_hd""#;
+    const SINGLE_KEY_REASON: &str = r#"it was enabled with a single key (legacy "enable" or "electrum") under an HD login, so it pays from another key than the one its swaps announce; enable it through its HD activation, or log in without "enable_hd""#;
+
+    /// `ETH` is the EVM coin, `RIN` a UTXO coin enabled with a single key, `RINX` a UTXO coin activated at
+    /// address 1, `RINH` a UTXO coin at its first address (no disagreement).
+    fn mock_coins() {
+        TestCoin::swap_key_disagreement.mock_safe(|coin, _node_pubkey| {
+            MockResult::Return(match coin.ticker() {
+                "ETH" => Some(SwapKeyDisagreement::EvmSigner),
+                "RIN" => Some(SwapKeyDisagreement::SingleKey),
+                "RINX" => Some(SwapKeyDisagreement::HdAddress {
+                    activated_path: "m/44'/141'/0'/0/1".to_owned(),
+                    paying_path: "m/44'/141'/0'/0/0".to_owned(),
+                }),
+                _ => None,
+            })
+        });
+        TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(MmNumber::from("0.00000001")));
+    }
+
+    /// A node logged in with the HD mnemonic (`hd`) or the iguana passphrase, with the coins activated.
+    fn ctx_with(conf: Json, hd: bool, tickers: &[&str]) -> MmArc {
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        if hd {
+            CryptoCtx::init_with_global_hd_account(ctx.clone(), HD_MNEMONIC).unwrap();
+        } else {
+            CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "an iguana passphrase of the test").unwrap();
+        }
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for ticker in tickers {
+            block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+        }
+        ctx
+    }
+
+    fn pair(base: &str, rel: &str) -> (MmCoinEnum, MmCoinEnum) {
+        (
+            MmCoinEnum::Test(TestCoin::new(base)),
+            MmCoinEnum::Test(TestCoin::new(rel)),
+        )
+    }
+
+    fn refusal(coin: &str, reason: &str) -> String { format!("{coin} cannot be swapped under this login: {reason}") }
+
+    fn mismatch_of(ctx: &MmArc, base: &str, rel: &str) -> Option<String> {
+        let (base, rel) = pair(base, rel);
+        swap_key_mismatch(ctx, &base, &rel).map(|mismatch| mismatch.to_string())
+    }
+
+    /// R38: the three reasons, word for word, and the coin they name: the first of the pair that fails.
+    #[test]
+    fn the_refusal_text_is_the_one_of_r38() {
+        mock_coins();
+        let ctx = ctx_with(json!({}), true, &[]);
+        assert_eq!(mismatch_of(&ctx, "ETH", "KMD"), Some(refusal("ETH", EVM_REASON)));
+        assert_eq!(mismatch_of(&ctx, "KMD", "ETH"), Some(refusal("ETH", EVM_REASON)));
+        assert_eq!(mismatch_of(&ctx, "RIN", "KMD"), Some(refusal("RIN", SINGLE_KEY_REASON)));
+        assert_eq!(
+            mismatch_of(&ctx, "KMD", "RINX"),
+            Some(refusal(
+                "RINX",
+                "it is activated at m/44'/141'/0'/0/1, but its swaps pay from m/44'/141'/0'/0/0; activate it at account 0, external chain, address 0"
+            ))
+        );
+        // The base coin is named when both fail.
+        assert_eq!(mismatch_of(&ctx, "RIN", "ETH"), Some(refusal("RIN", SINGLE_KEY_REASON)));
+        // A pair whose coins agree passes.
+        assert_eq!(mismatch_of(&ctx, "RINH", "KMD"), None);
+    }
+
+    /// T15: an iguana login passes this check without asking any coin.
+    #[test]
+    fn an_iguana_login_is_never_refused() {
+        TestCoin::swap_key_disagreement.mock_safe(|_, _| panic!("no coin is asked under an iguana login"));
+        let ctx = ctx_with(json!({}), false, &[]);
+        assert_eq!(mismatch_of(&ctx, "ETH", "RIN"), None);
+    }
+
+    /// T18 and R40: only an explicit JSON `false` switches the check off.
+    #[test]
+    fn the_switch_false_disables_the_check() {
+        mock_coins();
+        for (conf, enabled) in [
+            (json!({}), true),
+            (json!({ "swap_key_check": true }), true),
+            (json!({ "swap_key_check": null }), true),
+            (json!({ "swap_key_check": "false" }), true),
+            (json!({ "swap_key_check": false }), false),
+        ] {
+            let ctx = ctx_with(conf.clone(), true, &[]);
+            assert_eq!(swap_key_check_enabled(&ctx), enabled, "{conf}");
+            assert_eq!(mismatch_of(&ctx, "ETH", "RIN").is_some(), enabled, "{conf}");
+        }
+    }
+
+    /// T18: a coin whose swaps are off (wallet only) is not refused by this rule.
+    #[test]
+    fn a_wallet_only_coin_is_exempt() {
+        mock_coins();
+        let ctx = ctx_with(
+            json!({ "coins": [{ "coin": "ETH", "wallet_only": true }, { "coin": "RIN", "wallet_only": true }] }),
+            true,
+            &[],
+        );
+        assert_eq!(mismatch_of(&ctx, "ETH", "RIN"), None);
+        assert_eq!(mismatch_of(&ctx, "ETH", "KMD"), None);
+    }
+
+    /// T15: `setprice`, `buy`, `sell` and `update_maker_order` refuse the pair before any balance check and
+    /// answer the text of R38; an iguana login, and `swap_key_check` false, pass the check.
+    #[test]
+    fn t15_order_creation_and_update_are_refused() {
+        mock_coins();
+        let ctx = ctx_with(json!({}), true, &["ETH", "KMD", "RIN", "RINX"]);
+        for (base, rel, expected) in [
+            ("ETH", "KMD", refusal("ETH", EVM_REASON)),
+            ("KMD", "RIN", refusal("RIN", SINGLE_KEY_REASON)),
+        ] {
+            let req: SetPriceReq =
+                json::from_value(json!({ "base": base, "rel": rel, "price": "1", "volume": "1" })).unwrap();
+            // A legacy error carries the location of its source, as every other legacy refusal does.
+            let refused_with = |err: Option<String>, what: &str| match err {
+                Some(err) if err.ends_with(expected.as_str()) => (),
+                other => panic!("{what} {base}/{rel}: {other:?}"),
+            };
+            refused_with(block_on(create_maker_order(&ctx, req)).err(), "setprice");
+
+            for method in ["buy", "sell"] {
+                let body = json!({ "base": base, "rel": rel, "price": "1", "volume": "1", "method": method });
+                let err = match method {
+                    "buy" => block_on(buy(ctx.clone(), body)),
+                    _ => block_on(sell(ctx.clone(), body)),
+                }
+                .err();
+                refused_with(err, method);
+            }
+        }
+
+        let (base, rel) = pair("ETH", "KMD");
+        let order = MakerOrderBuilder::new(&base, &rel)
+            .with_max_base_vol(1.into())
+            .with_price(1.into())
+            .with_conf_settings(OrderConfirmationsSettings::default())
+            .build_unchecked();
+        OrdermatchContext::from_ctx(&ctx)
+            .unwrap()
+            .maker_orders_ctx
+            .lock()
+            .add_order(&order, Arc::new(AsyncMutex::new(order.clone())));
+        let req = MakerOrderUpdateReq {
+            uuid: order.uuid,
+            new_price: Some(2.into()),
+            max: None,
+            volume_delta: None,
+            min_volume: None,
+            base_confs: None,
+            base_nota: None,
+            rel_confs: None,
+            rel_nota: None,
+        };
+        let err = block_on(update_maker_order(&ctx, req)).err().unwrap();
+        assert!(err.ends_with(&refusal("ETH", EVM_REASON)), "{err}");
+    }
+
+    /// T15: the same requests under an iguana login, and with the switch off, are not refused by this check (they
+    /// stop later, at the first thing `TestCoin` cannot answer).
+    #[test]
+    fn t15_the_same_requests_pass_this_check_when_the_keys_agree_or_the_check_is_off() {
+        mock_coins();
+        for (conf, hd) in [(json!({}), false), (json!({ "swap_key_check": false }), true)] {
+            let ctx = ctx_with(conf, hd, &["ETH", "KMD"]);
+            let req: SetPriceReq =
+                json::from_value(json!({ "base": "ETH", "rel": "KMD", "price": "1", "volume": "1" })).unwrap();
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| block_on(create_maker_order(&ctx, req))));
+            if let Ok(Err(err)) = outcome {
+                assert!(!err.contains("cannot be swapped under this login"), "{err}");
+            }
+        }
+    }
+
+    fn matching_request(base: &str, rel: &str) -> TakerRequest {
+        TakerRequest {
+            base: base.into(),
+            rel: rel.into(),
+            uuid: Uuid::new_v4(),
+            dest_pub_key: H256Json::default(),
+            sender_pubkey: H256Json::default(),
+            base_amount: MmNumber::from(1),
+            rel_amount: MmNumber::from(1),
+            action: TakerAction::Buy,
+            match_by: MatchBy::Any,
+            conf_settings: None,
+            base_protocol_info: None,
+            rel_protocol_info: None,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    /// T17: a stored order of ours whose pair fails the rule gets no reservation when a request matches it. It is
+    /// cancelled once, as an ordinary cancellation that peers see, and no swap starts.
+    #[test]
+    fn t17_an_own_order_that_fails_is_cancelled_at_the_match_check() {
+        mock_coins();
+        let ctx = ctx_with(json!({}), true, &["ETH", "KMD"]);
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        let deleted = Arc::new(Mutex::new(Vec::<String>::new()));
+        let deleted_log = deleted.clone();
+        delete_my_maker_order.mock_safe(move |_, order, reason| {
+            deleted_log.lock().unwrap().push(format!("{} {}", order.uuid, reason));
+            MockResult::Return(Box::new(futures01::future::ok(())))
+        });
+        lp_connect_start_bob.mock_safe(|_, _, _| panic!("no swap starts for a pair that fails the rule"));
+
+        let (base, rel) = pair("ETH", "KMD");
+        let order = MakerOrderBuilder::new(&base, &rel)
+            .with_max_base_vol(1.into())
+            .with_min_base_vol(Some(MmNumber::from("0.01")))
+            .with_price(1.into())
+            .with_conf_settings(OrderConfirmationsSettings::default())
+            .build_unchecked();
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        ordermatch_ctx
+            .maker_orders_ctx
+            .lock()
+            .add_order(&order, Arc::new(AsyncMutex::new(order.clone())));
+
+        let request = matching_request("ETH", "KMD");
+        assert!(matches!(
+            order.match_with_request(&request),
+            OrderMatchResult::Matched(_)
+        ));
+        block_on(process_taker_request(ctx.clone(), H256Json::default(), request.clone()));
+        // A second request finds no order: the cancellation is not repeated.
+        block_on(process_taker_request(ctx.clone(), H256Json::default(), request));
+
+        assert!(!ordermatch_ctx.maker_orders_ctx.lock().contains_key(&order.uuid));
+        assert_eq!(*deleted.lock().unwrap(), vec![format!(
+            "{} {}",
+            order.uuid,
+            MakerOrderCancellationReason::Cancelled
+        )]);
+        // The only message published is the cancellation of the order; no reservation is sent.
+        let mut published = Vec::new();
+        while let Ok(cmd) = p2p_rx.try_recv() {
+            if let AdexBehaviourCmd::PublishMsg { msg, .. } | AdexBehaviourCmd::PublishMsgFrom { msg, .. } = cmd {
+                let (message, ..) = decode_signed::<new_protocol::OrdermatchMessage>(&msg).unwrap();
+                published.push(message);
+            }
+        }
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert!(
+            matches!(&published[0], new_protocol::OrdermatchMessage::MakerOrderCancelled(c) if c.uuid == order.uuid.into()),
+            "{:?}",
+            published[0]
+        );
+    }
+
+    /// R37: no connect message is sent for a reservation whose pair fails the rule; with the keys in agreement
+    /// the same reservation is answered with the connect message, so the setup does reach the send.
+    #[test]
+    fn a_connect_message_is_not_sent_for_a_pair_that_fails() {
+        mock_coins();
+        TestCoin::is_coin_protocol_supported.mock_safe(|_, _| MockResult::Return(true));
+        TestCoin::coin_protocol_info.mock_safe(|_| MockResult::Return(Vec::new()));
+        for (base_ticker, expects_connect) in [("ETH", false), ("KMD", true)] {
+            let ctx = ctx_with(json!({}), true, &[base_ticker, "REL"]);
+            let (tx, mut p2p_rx) = mpsc::channel(100);
+            P2PContext::new(tx).store_to_mm_arc(&ctx);
+            let (base, rel) = pair(base_ticker, "REL");
+            let order = TakerOrderBuilder::new(&base, &rel)
+                .with_base_amount(MmNumber::from(1))
+                .with_rel_amount(MmNumber::from(1))
+                .with_action(TakerAction::Buy)
+                .with_match_by(MatchBy::Any)
+                .with_conf_settings(OrderConfirmationsSettings::default())
+                .with_sender_pubkey(H256Json::from([1u8; 32]))
+                .build_unchecked();
+            let uuid = order.request.uuid;
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+            block_on(ordermatch_ctx.my_taker_orders.lock()).insert(uuid, order);
+
+            let reserved = MakerReserved {
+                base: base_ticker.into(),
+                rel: "REL".into(),
+                base_amount: MmNumber::from(1),
+                rel_amount: MmNumber::from(1),
+                taker_order_uuid: uuid,
+                maker_order_uuid: Uuid::new_v4(),
+                sender_pubkey: H256Json::from([2u8; 32]),
+                dest_pub_key: H256Json::default(),
+                conf_settings: Some(OrderConfirmationsSettings::default()),
+                base_protocol_info: Some(Vec::new()),
+                rel_protocol_info: Some(Vec::new()),
+                swap_version: SwapVersion::default(),
+            };
+            block_on(process_maker_reserved(ctx.clone(), reserved.sender_pubkey, reserved));
+
+            let order = block_on(ordermatch_ctx.my_taker_orders.lock()).remove(&uuid).unwrap();
+            assert_eq!(!order.matches.is_empty(), expects_connect, "{base_ticker}");
+            let mut sent = 0;
+            while let Ok(cmd) = p2p_rx.try_recv() {
+                if matches!(
+                    cmd,
+                    AdexBehaviourCmd::PublishMsg { .. } | AdexBehaviourCmd::PublishMsgFrom { .. }
+                ) {
+                    sent += 1;
+                }
+            }
+            assert_eq!(sent > 0, expects_connect, "{base_ticker}: {sent} messages published");
+        }
+    }
+
+    /// R39: the WARN line.
+    #[test]
+    fn the_cancel_line_is_the_text_of_r39() {
+        let uuid = Uuid::new_v4();
+        let mismatch = SwapKeyMismatch {
+            coin: "ETH".into(),
+            reason: EVM_REASON.into(),
+        };
+        assert_eq!(
+            swap_key_cancel_line(&uuid, &mismatch),
+            format!("Maker order {uuid} cancelled: ETH cannot be swapped under this login: {EVM_REASON}")
+        );
     }
 }

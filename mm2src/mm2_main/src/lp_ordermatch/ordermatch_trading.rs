@@ -770,6 +770,32 @@ pub(crate) async fn broadcast_keep_alives_for_own_pubkeys(
     broadcast_keep_alive_for_pub(ctx, ordermatch_ctx, persistent_pubsecp, None).await;
 }
 
+/// Runs the two coins' acceptance checks of a counterparty's protocol information and names the coin that
+/// declines (CRD ch.59 R59.4A.5, R59.4A.6). The rel coin is checked only if the base coin accepted, as
+/// before: some coins log from inside their check, so evaluating both would change the number of log lines.
+pub(crate) fn declining_coin_ticker(
+    base_coin: &MmCoinEnum,
+    rel_coin: &MmCoinEnum,
+    base_protocol_info: &Option<Vec<u8>>,
+    rel_protocol_info: &Option<Vec<u8>>,
+) -> Option<String> {
+    if !base_coin.is_coin_protocol_supported(base_protocol_info) {
+        Some(base_coin.ticker().to_owned())
+    } else if !rel_coin.is_coin_protocol_supported(rel_protocol_info) {
+        Some(rel_coin.ticker().to_owned())
+    } else {
+        None
+    }
+}
+
+/// The info line for a taker's selection pass that ended without a connect while at least one reservation
+/// was declined by a coin acceptance check (CRD ch.59 R59.4A.6). `None` when nothing was declined.
+pub(crate) fn declined_reservations_summary(taker_order_uuid: &Uuid, declined: usize) -> Option<String> {
+    (declined > 0).then(|| {
+        format!("Taker order {taker_order_uuid}: {declined} reservation(s) declined by a coin acceptance check")
+    })
+}
+
 pub(crate) fn broadcast_ordermatch_message(
     ctx: &MmArc,
     topics: impl IntoIterator<Item = String>,
@@ -818,6 +844,11 @@ pub(crate) fn lp_connect_start_bob(ctx: MmArc, maker_match: MakerMatch, maker_or
                 return;
             },
         };
+        // CRD ch.05 R37: the swap is not started for a pair whose swap key is not the key it pays from.
+        if let Some(mismatch) = swap_key_mismatch(&ctx, &maker_coin, &taker_coin) {
+            log::warn!("Swap {} not started: {}", maker_match.request.uuid, mismatch);
+            return;
+        }
         let alice = bits256::from(maker_match.request.sender_pubkey.0);
         let maker_amount = maker_match.reserved.get_base_amount().to_decimal();
         let taker_amount = maker_match.reserved.get_rel_amount().to_decimal();
@@ -904,6 +935,15 @@ pub(crate) fn lp_connected_alice(ctx: MmArc, taker_order: TakerOrder, taker_matc
             },
         };
 
+        // CRD ch.05 R37: the swap is not started for a pair whose swap key is not the key it pays from.
+        if let Some(mismatch) = swap_key_mismatch(&ctx, &maker_coin, &taker_coin) {
+            log::warn!(
+                "Swap {} not started: {}",
+                taker_match.reserved.taker_order_uuid,
+                mismatch
+            );
+            return;
+        }
         let privkey = &ctx.secp256k1_key_pair().private().secret;
         let my_persistent_pub = compressed_pub_key_from_priv_raw(&privkey[..], ChecksumType::DSHA256).unwrap();
         let maker_amount = taker_match.reserved.get_base_amount().clone();
@@ -984,6 +1024,115 @@ pub(crate) fn stale_pubkeys(
     (uuids_to_remove, pubkeys_to_remove)
 }
 
+/// A pair of another maker that the maintenance sweep pruned (CRD ch.32 R-GH14 item 2).
+#[derive(Debug, PartialEq)]
+pub(crate) struct PrunedPair {
+    pub(crate) pubkey: String,
+    pub(crate) alb_pair: String,
+    /// How many orders of the pubkey on the pair left the read index.
+    pub(crate) removed_orders: usize,
+}
+
+/// Selects the (pubkey, pair) combinations whose liveness instant is past the window (CRD ch.32 R-GH14 item 2),
+/// with the comparison the per-pubkey eviction makes ([`stale_pubkeys`]).
+///
+/// Three kinds of pubkey are left out: the node's own persistent key and every per-order key it makes orders
+/// under (item 4), a pubkey that is itself past its window, which the per-pubkey eviction removes whole, and
+/// one that has no record.
+pub(crate) fn stale_pairs(
+    pair_liveness: &PairLiveness,
+    pubkeys_state: &HashMap<String, OrderbookPubkeyState>,
+    my_persistent_pubkey: &str,
+    my_p2p_pubkeys: &HashSet<String>,
+    timeout_secs: u64,
+    now_secs: u64,
+) -> Vec<(String, String)> {
+    pair_liveness.stale(timeout_secs, now_secs, |pubkey| {
+        let is_own = pubkey == my_persistent_pubkey || my_p2p_pubkeys.contains(pubkey);
+        !is_own
+            && pubkeys_state
+                .get(pubkey)
+                .is_some_and(|state| state.last_keep_alive + timeout_secs > now_secs)
+    })
+}
+
+/// The per-pair part of the maintenance sweep (CRD ch.32 R-GH14 item 2): every pair of another maker whose
+/// liveness instant is past the window leaves the read index, with the trie events the per-pubkey eviction
+/// queues for an order, and its held root and delta history are dropped by a `ClearPair` event. The maker's
+/// record and its other pairs stay. Does nothing with `pair_liveness` off.
+///
+/// The order book lock is held from the decision to the queueing, so an order message that is being applied
+/// either has its instant recorded before the decision or reaches the trie after the clear (lock order: order
+/// book, trie store, then the instants, which are a leaf).
+pub(crate) fn prune_stale_pairs(
+    ctx: &MmArc,
+    ordermatch_ctx: &OrdermatchContext,
+    my_persistent_pubkey: &str,
+    timeout_secs: u64,
+    now_secs: u64,
+) -> Vec<PrunedPair> {
+    if !ordermatch_ctx.pair_liveness.is_on() {
+        return vec![];
+    }
+    let mut orderbook = ordermatch_ctx.orderbook.lock();
+    let stale = {
+        let trie_store = ordermatch_ctx.trie_store.lock();
+        stale_pairs(
+            &ordermatch_ctx.pair_liveness,
+            &trie_store.pubkeys_state,
+            my_persistent_pubkey,
+            &orderbook.my_p2p_pubkeys,
+            timeout_secs,
+            now_secs,
+        )
+    };
+    if stale.is_empty() {
+        return vec![];
+    }
+
+    let mut ops = Vec::new();
+    let mut pruned = Vec::with_capacity(stale.len());
+    for (pubkey, alb_pair) in stale {
+        let mut removed_orders = 0;
+        for uuid in orderbook.pubkey_pair_order_uuids(&pubkey, &alb_pair) {
+            if let Some((_item, op)) = orderbook.index_remove(uuid) {
+                ops.push(op);
+                removed_orders += 1;
+            }
+        }
+        ops.push(TrieOp::ClearPair {
+            pubkey: pubkey.clone(),
+            alb_pair: alb_pair.clone(),
+        });
+        // The worker forgets it too; doing it here keeps the next pass from selecting the pair again.
+        ordermatch_ctx.pair_liveness.clear_pair(&pubkey, &alb_pair);
+        pruned.push(PrunedPair {
+            pubkey,
+            alb_pair,
+            removed_orders,
+        });
+    }
+    orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
+    collect_orderbook_metrics(ctx, &orderbook);
+    drop(orderbook);
+
+    for pair in &pruned {
+        log::debug!(
+            "Pruned the pair {} of pubkey {}: no keep-alive, order message or answer for {} s, {} order(s) removed",
+            pair.alb_pair,
+            pair.pubkey,
+            timeout_secs,
+            pair.removed_orders
+        );
+    }
+    log::info!(
+        "Pruned {} pair(s) of makers that stopped advertising them ({} order(s) removed)",
+        pruned.len(),
+        pruned.iter().map(|pair| pair.removed_orders).sum::<usize>()
+    );
+    pruned
+}
+
 /// Cancels the maker orders whose own timeout has elapsed (CRD ch.12 §12.8). The order's lock is held for the
 /// announcement only; the deletion from storage runs after it is released (R7a).
 pub(crate) async fn cancel_expired_maker_orders(ctx: &MmArc, ordermatch_ctx: &OrdermatchContext) {
@@ -1057,6 +1206,9 @@ pub async fn lp_ordermatch_loop(ctx: MmArc) {
                 collect_orderbook_metrics(&ctx, &orderbook);
             }
         }
+
+        // CRD ch.32 R-GH14: the pairs a maker no longer advertises, in the same pass as the eviction above.
+        prune_stale_pairs(&ctx, &ordermatch_ctx, &my_pubsecp, maker_order_timeout, now_ms() / 1000);
 
         reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx).await;
 
@@ -1437,13 +1589,41 @@ pub(crate) async fn process_maker_reserved(ctx: MmArc, from_pubkey: H256Json, re
     if let Some(mut reserved_messages) = pending_map.remove(&uuid) {
         reserved_messages.sort_unstable_by_key(|r| r.price());
 
+        let mut declined = 0usize;
         for reserved_msg in reserved_messages {
             // send "connect" message if reserved message targets our pubkey AND
             // reserved amounts match our order AND order is NOT reserved by someone else (empty matches)
-            if (my_order.match_reserved(&reserved_msg) == MatchReservedResult::Matched && my_order.matches.is_empty())
-                && base_coin.is_coin_protocol_supported(&reserved_msg.base_protocol_info)
-                && rel_coin.is_coin_protocol_supported(&reserved_msg.rel_protocol_info)
+            // AND both coins accept the maker's protocol information
+            let accepted = if my_order.match_reserved(&reserved_msg) == MatchReservedResult::Matched
+                && my_order.matches.is_empty()
             {
+                match declining_coin_ticker(
+                    &base_coin,
+                    &rel_coin,
+                    &reserved_msg.base_protocol_info,
+                    &reserved_msg.rel_protocol_info,
+                ) {
+                    Some(ticker) => {
+                        declined += 1;
+                        log::debug!(
+                            "Declined reservation of maker order {} for taker order {}: the acceptance check of {} declined it",
+                            reserved_msg.maker_order_uuid,
+                            reserved_msg.taker_order_uuid,
+                            ticker
+                        );
+                        false
+                    },
+                    None => true,
+                }
+            } else {
+                false
+            };
+            if accepted {
+                // CRD ch.05 R37: no connect message is sent for a pair whose swap key is not the key it pays from.
+                if let Some(mismatch) = swap_key_mismatch(&ctx, &base_coin, &rel_coin) {
+                    log::warn!("Taker order {} sends no connect: {}", uuid, mismatch);
+                    continue;
+                }
                 let connect = TakerConnect {
                     sender_pubkey: H256Json::from(our_public_id.bytes),
                     dest_pub_key: reserved_msg.sender_pubkey,
@@ -1470,6 +1650,9 @@ pub(crate) async fn process_maker_reserved(ctx: MmArc, from_pubkey: H256Json, re
                     .error_log_with_msg("!update_active_taker_order");
                 return;
             }
+        }
+        if let Some(summary) = declined_reservations_summary(&uuid, declined) {
+            log::info!("{summary}");
         }
     }
 }
@@ -1516,6 +1699,11 @@ pub(crate) async fn process_maker_connected(ctx: MmArc, from_pubkey: H256Json, c
         .ok();
 }
 
+/// The WARN line of an own maker order cancelled because its pair fails the swap-key agreement rule (CRD ch.05 R39).
+pub(crate) fn swap_key_cancel_line(uuid: &Uuid, mismatch: &SwapKeyMismatch) -> String {
+    format!("Maker order {uuid} cancelled: {mismatch}")
+}
+
 pub(crate) async fn process_taker_request(ctx: MmArc, from_pubkey: H256Json, taker_request: TakerRequest) {
     let our_public_id: H256Json = ctx.public_id().unwrap().bytes.into();
     if our_public_id == from_pubkey {
@@ -1542,10 +1730,43 @@ pub(crate) async fn process_taker_request(ctx: MmArc, from_pubkey: H256Json, tak
                 _ => return, // attempt to match with deactivated coin
             };
 
-            if !order.matches.contains_key(&taker_request.uuid)
-                && base_coin.is_coin_protocol_supported(taker_request.base_protocol_info_for_maker())
-                && rel_coin.is_coin_protocol_supported(taker_request.rel_protocol_info_for_maker())
-            {
+            // CRD ch.05 R37, R39: an order of ours whose swap key is not the key it pays from gets no
+            // reservation; it is cancelled as any cancellation is, and peers see the cancellation.
+            if let Some(mismatch) = swap_key_mismatch(&ctx, &base_coin, &rel_coin) {
+                let cancelled = RemovedMakerOrder::take_out(&ordermatch_ctx, &order);
+                if cancelled.is_some() {
+                    log::warn!("{}", swap_key_cancel_line(&order.uuid, &mismatch));
+                    maker_order_cancelled_p2p_notify(ctx.clone(), &order);
+                }
+                drop(order);
+                if let Some(cancelled) = cancelled {
+                    cancelled.delete(&ctx, MakerOrderCancellationReason::Cancelled).await;
+                }
+                return;
+            }
+
+            let accepted = if order.matches.contains_key(&taker_request.uuid) {
+                false
+            } else {
+                match declining_coin_ticker(
+                    &base_coin,
+                    &rel_coin,
+                    taker_request.base_protocol_info_for_maker(),
+                    taker_request.rel_protocol_info_for_maker(),
+                ) {
+                    Some(ticker) => {
+                        log::debug!(
+                            "Declined request {} for maker order {}: the acceptance check of {} declined it",
+                            taker_request.uuid,
+                            uuid,
+                            ticker
+                        );
+                        false
+                    },
+                    None => true,
+                }
+            };
+            if accepted {
                 let reserved = MakerReserved {
                     dest_pub_key: taker_request.sender_pubkey,
                     sender_pubkey: our_public_id,
@@ -1885,6 +2106,10 @@ async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
         return ERR!("Trading is not supported for coin {}", coin);
     }
+    // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
+    if let Some(mismatch) = swap_key_mismatch(&ctx, &base_coin, &rel_coin) {
+        return ERR!("{}", mismatch);
+    }
     if base_coin.wallet_only(&ctx) {
         return ERR!("Base coin {} is wallet only", input.base);
     }
@@ -1924,6 +2149,10 @@ async fn sell_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let rel_coin = try_s!(rel_coin.ok_or("Rel coin is not found or inactive"));
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
         return ERR!("Trading is not supported for coin {}", coin);
+    }
+    // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
+    if let Some(mismatch) = swap_key_mismatch(&ctx, &base_coin, &rel_coin) {
+        return ERR!("{}", mismatch);
     }
     if base_coin.wallet_only(&ctx) {
         return ERR!("Base coin {} is wallet only", input.base);
@@ -2337,6 +2566,10 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
         return ERR!("Trading is not supported for coin {}", coin);
     }
+    // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
+    if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
+        return ERR!("{}", mismatch);
+    }
     if base_coin.wallet_only(ctx) {
         return ERR!("Base coin {} is wallet only", req.base);
     }
@@ -2501,6 +2734,10 @@ async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Resul
         Ok(Some(c)) => c,
         _ => return ERR!("Base coin {} and/or rel coin {} are not activated", base, rel),
     };
+    // CRD ch.05 R37: an update of an order whose swap key is not the key it pays from is refused before any other check.
+    if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
+        return ERR!("{}", mismatch);
+    }
 
     let original_conf_settings = order_before_update.conf_settings.unwrap();
     let updated_conf_settings = OrderConfirmationsSettings {

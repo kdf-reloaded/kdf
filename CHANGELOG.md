@@ -31,6 +31,18 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
 
 ### Added
 
+#### ARRR and other shielded coins
+
+- **ARRR can now pay a Pirate1 address.** Pirate Chain's own wallets hand out Pirate1 addresses
+  (`pirate1…`, the address form of its Ironwood pool) by default. `validateaddress` now accepts them,
+  and `withdraw` pays them from the wallet's Sapling balance at Pirate Chain's fixed fee of 0.0001
+  ARRR, keeping the change in Sapling. The withdrawal is recorded at once like any other, so its
+  coins are not offered to the next send and its change shows as pending. The wallet itself stays
+  Sapling-only and has no Pirate1 receiving address, and ARRR swaps are unchanged. The first such
+  withdrawal after a start takes longer, because the node builds the key for the Ironwood proof once.
+  To record these withdrawals the node now carries a patched copy of the `zcash_client_sqlite`
+  crate, with one change. Detail: PR #246; CRD ch.39 §39.6.5.
+
 #### EVM coins
 
 - **The log shows the gas limits each EVM coin and token will use.** At activation, one line names
@@ -51,6 +63,21 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
     `p2p.send_queue.drop_series.max` the longest current run of such minutes.
 
   Detail: PRs #204, #214; CRD ch.28 RQ1 items 6 and 8.
+- **A coin's protocol information can now carry a capability word that other nodes ignore.** The
+  protocol information a coin sends with its orders, requests and reservations may now end with a
+  small extra map that names capabilities the node has, so that a later coin can require a
+  capability of its counterparty before a swap starts. A node reads only the part before the word,
+  so the order book, the address format it reports and every coin that asks for nothing behave
+  exactly as before, and the word changes no order identity, no order book root and no
+  synchronization. A reader that cannot make sense of the word treats it as absent. No coin sends a
+  word yet, so nothing changes on the wire today. Detail: PR #235; CRD ch.59 R59.4A.1 to R59.4A.7.
+- **The log now says why a reservation or a request was turned down by a coin.** When a coin
+  declines the protocol information of a counterparty's reservation (on the taker side) or request
+  (on the maker side), the node logs one debug line naming both orders and the coin. When a taker's
+  pass over the reservations it received ends without a connect and a coin declined at least one of
+  them, one info line names the taker order and the number declined, so an operator whose order
+  times out can see why. The protocol information itself is never logged. Nothing else changes in
+  how orders are matched. Detail: PR #235; CRD ch.59 R59.4A.6.
 
 #### Start-up and configuration
 
@@ -61,6 +88,19 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   contents or configuration values, and no WSS certificate or key path. Detail: PR #209; CRD ch.45 R45.6.6.
 
 ### Changed
+
+#### ARRR and other shielded coins
+
+- **ARRR now declines a swap with a node that cannot build the Ironwood transaction format, before
+  anything is paid.** An ARRR node now states in its orders and match messages that it builds
+  version-6 transactions, and declines a counterparty that does not, on the taker and the maker side,
+  before the DEX fee or any payment. Until now such a swap started normally and failed at the other
+  node's first ARRR transaction, which cost the DEX fee, locked ARRR until the refund, or both. KDF
+  Reloaded 0.3.0-beta.1 nodes are declined too: they build the format but predate the statement, so
+  their users upgrade to trade ARRR. GLEEC KDF keeps matching as before; a GLEEC taker sees a request
+  that times out. Each decline is logged at debug level with its cause, and at most once an hour a
+  warning gives the number declined. Setting `require_v6_counterparty` to `false` in the coin's
+  `consensus_params` turns the requirement off. Detail: PR #241; CRD ch.39 R39.6.4f.
 
 #### EVM coins
 
@@ -76,6 +116,12 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   Detail: PR #213; CRD ch.57 R57.4.2, R57.5.2a.
 
 #### Order book and peer-to-peer network
+
+- **Messages from other nodes are checked for nesting depth and declared lengths before they are
+  read.** Every value a peer sends is checked first: arrays and maps may nest at most 64 levels, and every
+  declared length and count must fit in the bytes that follow. A value outside these bounds is
+  dropped as malformed and counted in the metric `p2p.payload.malformed`; the encoding is
+  unchanged and honest peers are not affected. Detail: PR #238; CRD ch.28 R16a.
 
 - **A node waits 5 minutes before it dials the same address again, and no longer dials a seed it
   is already connected to.** A node that holds fewer relays than it needs dials seeds and known
@@ -131,6 +177,14 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   three times. An order created with `save_in_history: false` leaves no history entry and is
   restored as before. To restore the old behavior, set `maker_restore_skips_cancelled` to `false` in
   `MM2.json`. Detail: PRs #223, #224; CRD ch.12 R7c.
+- **A cancelled order a node missed no longer stays visible once its maker stops advertising that
+  pair.** A maker names every pair it still has orders on in each keep-alive, so a pair that goes
+  unnamed for the liveness window, 90 seconds or the `maker_order_timeout` setting, was either
+  emptied or lost its keep-alives on the way. The node now drops that pair's orders after the window;
+  the maker's other pairs stay. If the keep-alives return, the node asks for the pair as a new one
+  and gets its orders back. Before, the order stayed until the maker posted on that pair again or
+  went offline. Your own orders are never dropped. To restore the old behavior, set `pair_liveness`
+  to `false` in `MM2.json`. Detail: PR #251; CRD ch.32 R-GH14.
 
 #### UTXO coins and Electrum
 
@@ -153,8 +207,9 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   KDF Reloaded charged the amount for every started kilobyte. *Upgrade note:* the same request now
   costs less, and below 1,000 bytes less than the amount entered. A 245-byte KMD withdrawal that
   paid the whole fee now pays about a quarter of it, and a 1,404-byte DOGE withdrawal about 1.4
-  times it instead of twice. A withdrawal without `fee`, swaps and the DEX fee are not affected, and
-  an SLP token withdrawal is unchanged (see Known limitations). Detail: PR #226; CRD ch.38 R38.6.6l.
+  times it instead of twice. A withdrawal without `fee`, swaps and the DEX fee are not affected. A
+  `withdraw` of an SLP token on BCH now charges it the same way, with the amount in BCH (PR #234).
+  Detail: PRs #226, #234; CRD ch.38 R38.6.6l, R38.6.6m.
 
 #### Start-up and configuration
 
@@ -174,6 +229,42 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   updates a second on 256 cores. No cost of the limit was resolved on start-up, activation, eight swaps or query latency.
   Not measured: 256 cores or 80 updates a second over several hours, and a shielded swap. Detail: PR #225; plan
   [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md); CRD ch.45 R45.6A.8; issue #191.
+
+#### Trading under an HD login
+
+- **Under an HD login, each coin's swap now uses the coin's own key.** This is what swaps of EVM
+  coins and of coins enabled with a single key need in order to complete. End-to-end swaps under an
+  HD login with this change are still being tested. An HD login is one with `enable_hd` set to
+  `true`, as the Komodo DeFi wallet uses in HD mode.
+  - **Every coin's swap announces the key it pays from.** For an EVM coin or token that is its
+    signer. For a UTXO coin enabled through legacy `enable` or `electrum` it is the coin's own key.
+  - **A UTXO coin such as RIN activated through `task::enable_utxo` at another address**
+    (`path_to_address`) now funds the swap from that address, takes its change there, and is paid
+    there. The balance a swap checks and the fee `trade_preimage` estimates use the same address.
+    Earlier builds took the coins of the first address (account 0, External, address 0). At the
+    first address nothing changes.
+  - **Swaps already in progress** keep the key they started with.
+  - **An iguana login**, without `enable_hd`, does not change.
+
+  Detail: PR #250; CRD ch.05 R41–R44.
+- **Under an HD login, a swap that cannot complete is now refused before it starts.** An HD login is
+  one with `enable_hd` set to `true`, as the Komodo DeFi wallet uses in HD mode. Under it, the swap of
+  an EVM coin or token, of a UTXO coin enabled through legacy `enable` or `electrum` (or activated with
+  `priv_key_policy: IguanaPrivKey`), and of a UTXO coin activated at a `path_to_address` other than
+  account 0, External, address 0, announces another key than the one the coin pays from, so the other
+  side rejects the dex fee or the payment. `setprice`, `update_maker_order`, `buy`, `sell` and
+  `trade_preimage` now refuse such a pair before any balance check, with `<coin> cannot be swapped
+  under this login: <reason>`; the reason says what to do (trade the coin under a login without
+  `enable_hd`, enable it through its HD activation, or activate it at the first address), and for a
+  coin at another address it names both derivation paths. `trade_preimage` answers the error type
+  `SwapKeyMismatch` with the coin and the reason. An order of your own that already exists and fails
+  the check, for example one restored after an upgrade, is cancelled when a request matches it, with
+  one warning in the log; no reservation is sent, and no swap is started. A swap that has already
+  started is never stopped. A UTXO coin such as RIN activated through `task::enable_utxo` at its first
+  address, BCH activated together with its tokens, and every login without `enable_hd` are not
+  affected. Set the `MM2.json` boolean `swap_key_check` to `false` to restore the earlier behavior,
+  in which such a swap is negotiated and then fails. Since the entry above, no coin is refused any
+  more; the check stays as a guard. Detail: PRs #231, #233; CRD ch.05 R36–R40.
 
 #### Name lookups
 
@@ -209,7 +300,44 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   (trust-dns 0.22, with an accepted `idna` advisory) are no longer built. The dependency policy
   now bans them. Detail: PRs #216, #219; CRD ch.45 R45.6B.11.
 
+#### Siacoin
+
+- **Siacoin (SC) swaps are supported.** Atomic swaps of SC were verified on the live chain on
+  November 4, 2026: between two KDF Reloaded nodes in both directions, including a refund, and
+  with Komodo KDF and GLEEC KDF nodes in the cases that Known limitations does not exclude. Earlier
+  releases said SC swaps were postponed; that statement is withdrawn. Detail: PR #239; CRD ch.20
+  D5, R-S11.
+
+#### Withdrawals
+
+- **A withdrawal refused as unsupported now answers `error_type` `UnsupportedError`, as on Komodo
+  and GLEEC KDF.** Under a Trezor key, an EVM withdrawal through the direct `withdraw` method and a
+  TRON withdrawal answered `UnsupportedUnderTrezor`. In the browser build, a TRON withdrawal under
+  MetaMask answered `UnsupportedUnderMetamask`. Both now answer `UnsupportedError`, still with HTTP
+  400 and the same message text in `error_data`. A `withdraw` of an SLP token that names `from` is
+  now refused the same way; before, `from` was ignored and the token was sent from the BCH
+  wallet's own address. *Upgrade note:* a client that checks `error_type` for either old value
+  must check `UnsupportedError` instead. Detail: PR #236; CRD ch.49 R49.27, R49.27a.
+
 ### Fixed
+
+#### EVM coins
+
+- **A taker on an EVM chain with fast blocks, such as Monad, now finds the maker's spend of its
+  payment.** While waiting for the maker to spend its payment, a taker asked for the swap
+  contract's events from the swap's first block to the newest one in a single request. On Monad,
+  with a block every 0.4 seconds, that range passed what public nodes accept (100 or 1,000 blocks)
+  within minutes. Every request was refused, and the taker never learned the secret. While the
+  requests failed, the taker also never reached the end of its wait, so it did not take its refund
+  path either.
+  - **Windows.** Every event search now runs in windows of at most `logs_block_range` blocks
+    (coins file, default 1,000), and the wait starts at the payment's own block.
+  - **Smaller windows on refusal.** A node that refuses a window's size makes the window smaller
+    for the rest of the session, with one warning in the log.
+  - **Deadline.** The wait ends at its deadline even while requests fail. The same deadline fix
+    applies to the version-2 swap's event search.
+
+  Detail: PR #248; CRD ch.17 R17.8.1–R17.8.4.
 
 #### Node names in logs and errors
 
@@ -246,17 +374,55 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   headers one by one, checks the times for plausibility and fails with an error naming the check instead
   of guessing. Such a coin needs no new entry in the coins file (header sync and SPV proofs for it are
   not covered). Detail: PR #220, PR #221; CRD ch.37 R37.5.10.
+- **SLP token withdrawals and HTLC spends no longer give the BCH of their token inputs to the miner,
+  and the fee they report is complete.** Each SLP token input carries a little BCH, normally 546
+  satoshi, and so does the HTLC output an SLP swap spends or refunds. KDF Reloaded spent these
+  inputs without counting their BCH, so it went to the miner on top of the fee. Token sends and
+  swap payments did the same, and the fee shown for an SLP withdrawal left it out. Now that BCH
+  comes back in the change, and the fee shown is everything the transaction leaves to the miner, as
+  on Komodo and GLEEC KDF. Two smaller cases changed with it. On every UTXO coin, change exactly
+  equal to the coin's dust amount now comes back as a change output instead of going to the miner.
+  The fee shown for an SLP withdrawal now also includes change too small to keep, as it already did
+  for UTXO coins. Detail: PR #236; CRD ch.38 R38.6.6n.
+- **A transaction with a change output now pays its fee rounded once over its whole size, as on
+  Komodo and GLEEC KDF.** KDF Reloaded rounded the change output's share of the fee on its own, so
+  such a transaction could pay one base unit less than the rate gives. A RIN withdrawal of 670
+  bytes at 0.00001234 RIN per 1,000 bytes paid 825 satoshi, where Komodo and GLEEC charge 826.
+  This covers a coin's dynamic fee and an explicit `UtxoFixed` or `UtxoPerKbyte` withdraw fee.
+  Detail: PR #247; CRD ch.38 R38.6.6b, T38.6.6b.1.
 
 ### Tests
 
 - **The tests run before the next beta will be listed in
   [`docs/release-tests/0.4.0-beta.1.md`](docs/release-tests/0.4.0-beta.1.md).**
+- **ARRR is tested against real transactions from Pirate Chain's Ironwood wallets.** Two mainnet
+  ARRR transactions that use the Ironwood pool, one paying into it and one paying out of it into a
+  Sapling address, are read by every part of the node that reads whole transactions, and their
+  Ironwood proofs and signatures verify with the node's own keys. A payment from an Ironwood wallet
+  to the node's address is found, counted once, shown as pending while unconfirmed, and spent like
+  any other. Nothing changes in how the node behaves. Detail: PR #242; CRD ch.39 T39.6.5a, T39.8.0i.
+- **A unit test of the maker's update queue no longer fails at random.** The test of the 10-second
+  keep-alive wait counted the released and the pending orders while the queue kept releasing, so
+  one release between the two counts made it fail now and then. It now stops the queue before
+  counting. The node itself is unchanged. Detail: PR #244; CRD ch.32 T-MP6.
 
 ### Plans touched
 
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
+- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
+  Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
+  they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
+  address format, without noticing the marker (PR #232). The scope for this release is set: ARRR
+  wallets and swaps stay Sapling-only, payments from Pirate Chain's Ironwood wallets are found and
+  spent like any other, and a withdrawal may pay a Pirate1 address (CRD PR #229). The deposits are
+  proven by tests (PR #242), and the withdrawal is implemented (PR #246). Native mode, the rest of
+  the Ironwood pool and Pirate1 receiving addresses move to a later release.
+  The capability word that lets ARRR require a counterparty that builds version-6 transactions is
+  written (CRD PR #227), and its generic part, the word's writer and fail-closed reader and the
+  decline log lines, is implemented (PR #235); the ARRR rule that uses it is written (CRD PR #230)
+  and implemented (PR #241).
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
@@ -274,7 +440,16 @@ file carries the detail. "New" means the plan was created in this cycle.
   two later packages waited for is now recorded: how a cancelled order can come back on Komodo and
   GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222). A received
   cancellation now stays final for an hour, and a maker no longer restores an order it cancelled
-  (PRs #223, #224).
+  (PRs #223, #224). A pair the maker stops advertising is now dropped after the liveness window
+  (CRD PR #243, PR #251).
+- [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
+  swap key per coin and one trading identity for the node. Eight work packages, starting with
+  corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
+  complete, which is now done (item H1: `swap_key_check`, PRs #231, #233), as is one swap key per
+  coin (item H3, PRs #249, #250). The maintainer's answers on
+  withdraw, the legacy methods, legacy activation and Sia are recorded in it. `RELOADED_VS_GLEEC.md`
+  now says what GLEEC KDF does under an HD login, and lists the planned change to legacy `enable` and
+  `electrum` with its switch (PR #245).
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
@@ -293,8 +468,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   new rows for later.
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
-  recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226); the SLP
-  token withdrawal waits for the reference's answer.
+  recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226). On an SLP
+  token withdrawal they charge it in proportion too; that is now recorded (PR #232), and KDF
+  Reloaded now charges it that way there as well (PR #234).
 - [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — new step H6: the
   median time of a coin whose headers carry a fixed-length trailer (Bitcoin Atom) is read from each
   header's own bytes; the 1.6 list form of header requests and explicit `header_layout` entries for
@@ -305,6 +481,21 @@ file carries the detail. "New" means the plan was created in this cycle.
 What does not work yet, or works only in part, in this release. Each item says where more detail
 lives.
 
+- **Under an HD login, a maker's orders and swaps still carry the hash of the passphrase as the
+  node's identity.** An HD login is one with `enable_hd` set to `true`. Each coin now swaps with its
+  own key (see Changed), but orders, `sender_pubkey` and the swap's persistent key do not yet use the
+  internal key that `get_public_key` reports, as GLEEC KDF does.
+  - A maker's own `orderbook` does not mark its orders as its own (`is_mine` is false); other nodes
+    still see them.
+  - The maker re-sends each order about every 90 s instead of sending keep-alives.
+
+  More in [`hd-key-unification`](docs/plans/hd-key-unification.md) (item H4). Detail: PRs #228,
+  #231, #233, #250; CRD ch.05 R36–R44; CRD ch.51, note under R63.
+- **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
+  `get_enabled_coins` fails as a whole once such a coin is enabled.** Both report a single address,
+  and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for
+  the balance and the mmrpc 2.0 `get_enabled_coins` for the list. For an EVM coin both legacy
+  methods answer with the activated address. Detail: PR #228; CRD ch.05 §5.9B R35.
 - **Do not run two KDF instances on the same seed at the same time.** If you do, for any coin (RIN
   included), both instances can pick the same funds for two different transactions. The network
   accepts one and rejects the other, and the instance that loses gets no explanation and may try
@@ -320,12 +511,6 @@ lives.
   coin is offered only once the Electrum server lists it. More in
   [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md).
   Detail: PR #181; CRD ch.38 R38.5B.8, D38.5B.2, D38.5B.4.
-- **A fixed fee on an SLP token withdrawal is still charged for every started kilobyte.** When a
-  `withdraw` of an SLP token on BCH gives its fee as `{"type":"UtxoFixed","amount":…}`, KDF Reloaded
-  charges that amount for every started kilobyte of the transaction; what Komodo and GLEEC KDF
-  charge there is not yet established. UTXO coins themselves now charge it in proportion to the
-  size, as Komodo and GLEEC KDF do (see Changed). More in the
-  [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PR #226; CRD ch.38 R38.6.6l.
 - **The swap watcher does not work yet.** A watcher is another node that finishes a swap for you
   when you are offline. No swap hands its data to a watcher yet, for any coin (issue #56), so keep
   your node running until your swaps have finished. Bitcoin-family coins (UTXO coins such as RIN,
@@ -349,27 +534,40 @@ lives.
   More in [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md). Detail: CRD ch.32
   D9.
 - **Other nodes can keep showing a cancelled order for a while if its cancellation is lost on the
-  way.** Such an order cannot be matched or traded, and it disappears once the maker posts again on
-  that pair or goes offline. While the maker still has other orders on that pair, a node whose copy
-  differs from the maker's now also asks one other relay, which removes the order if that relay
-  received the cancellation. More in [`ghost-orders`](docs/plans/ghost-orders.md). Detail:
-  PRs #188, #208; CRD ch.32 D12, R-Q5d.
-- **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes.** ARRR now uses a newer
-  transaction format (v6, from the Ironwood upgrade) that no other KDF implementation can handle, so a
-  swap with a Komodo or GLEEC counterparty cannot complete. A swap between two KDF Reloaded nodes has
-  completed on the live chain, including the spend of the locked ARRR (October 2026). More in
+  way and the maker still advertises that pair.** Such an order cannot be matched or traded. A pair
+  the maker no longer advertises is dropped after 90 seconds, with the maker's other pairs kept. A
+  pair the maker still advertises heals at its next keep-alive, 30 seconds later, or through another
+  relay: a node whose copy differs from the maker's asks one other relay, which removes the order if
+  that relay received the cancellation. Until then the order stays visible. More in
+  [`ghost-orders`](docs/plans/ghost-orders.md). Detail: PRs #188, #208, #251; CRD ch.32 D12, R-Q5d,
+  R-GH14.
+- **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes of this release or later.**
+  ARRR now uses a newer transaction format (v6, from the Ironwood upgrade) that no other KDF
+  implementation can handle, so a swap with a Komodo or GLEEC counterparty cannot complete. An ARRR
+  node therefore declines such a counterparty before the swap starts, and KDF Reloaded 0.3.0-beta.1
+  nodes as well (see Changed). A swap between two KDF Reloaded nodes has completed on the live chain,
+  including the spend of the locked ARRR (October 2026). More in
   [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
 - **Shielded coins such as ARRR cannot be activated in a browser (WASM) build.** Activation ends with
   an error saying shielded activation is not available in the WebAssembly build: the browser build
   has no shielded wallet database, and building a shielded transaction would also need the Sapling
   prover, which only the native build has. Use a native build for ARRR. Detail: CRD ch.39 R39.10.1,
   §39.6.1.
-- **Siacoin (SC) swaps are not available.** Sending, receiving, the balance and the history work.
-  Atomic swaps of SC are postponed until after the beta; the design is still a draft. More in the
-  [Siacoin swap draft](docs/reloaded-rewrite/54-sia-swap-v2-path.md).
+- **The miner fee of a Siacoin withdrawal is estimated from a transaction length that is smaller than
+  the transaction sent.** Sia nodes accepted these fees in tests. Detail: PR #239; CRD ch.20 D6.
+- **Orders that sell Siacoin (SC) are not shown to Komodo KDF and GLEEC KDF takers, and a GLEEC maker
+  can fail to validate a Siacoin taker fee.** Takers on those two nodes do not see orders whose base
+  coin is SC, so a KDF Reloaded maker that sells SC cannot be matched by them. A GLEEC maker can fail
+  to validate a Siacoin taker fee when the transaction pool of its Sia node holds a transaction it
+  cannot read (a storage proof with an empty proof list); the fix exists in the sia-rust library but
+  not in the GLEEC release, so such swaps fail intermittently. A GLEEC node that sells SC as the order
+  base is not affected. Detail: PR #239.
 - **Radiant (RXD) is only partly usable.** RXD activates and signs, but swaps with it are not
   established. More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
+- **SLP tokens on BCH are untested on mainnet.** The shared coins file lists BCH and tBCH as plain
+  UTXO coins and carries no SLP token entries, so SLP tokens cannot be enabled with it. The SLP
+  changes of this release are covered by unit tests only. Detail: PR #236.
 - **TRON (TRX, TRC20) and Solana (SOL, SPL) cannot be activated in this beta.** Their support is not
   finished. TRON activation answers "TRON support is not available in this build";
   `enable_solana_with_tokens` and `enable_spl` answer "Solana support is not available in this
@@ -390,6 +588,10 @@ lives.
   activation log line says `gas_limit: defaults`. More in
   [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md). Detail: PR #105, PR #200; CRD
   ch.57 R57.5.2, R57.5.3, R57.5.5.
+- **A refund can wait without a log message saying why.** If the node a coin talks to stops advancing,
+  a refund waits until it advances again, and the log does not say so. In a test, a refund started
+  four hours late because the coin's node stood still for that time; the log only repeated
+  "wait refund till" every 24 seconds.
 
 ## [0.3.0-beta.1] — 2026-11-01
 

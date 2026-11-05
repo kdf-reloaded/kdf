@@ -204,6 +204,26 @@ pub trait SwapOps {
 
     fn get_htlc_key_pair(&self) -> Option<KeyPair>;
 
+    /// The key pair this coin signs its swap transactions with, for a coin that holds one key of its own that
+    /// [`SwapOps::get_htlc_key_pair`] does not already supply: a UTXO-family coin with a single key and an EVM
+    /// coin with a software signer (CRD ch.05 R41 items 2 and 3).
+    ///
+    /// The swap announces and saves this pair only when it is not the node's persistent key
+    /// (`lp_swap::start_htlc_key_pair`); a coin whose key is the persistent key announces the persistent key and
+    /// saves nothing, as it always did. The default answers `None`: a coin with an HD key policy, a Tendermint
+    /// coin, a shielded coin, Sia, a hardware or external signer.
+    fn own_signing_key_pair(&self) -> Option<KeyPair> { None }
+
+    /// Whether the key a legacy swap of this coin announces (CRD ch.05 R36, the swap key) differs from the
+    /// key it pays from (the paying key), under a global-HD login. `node_pubkey` is the node's persistent
+    /// key, the swap key of a coin that supplies no [`SwapOps::get_htlc_key_pair`] of its own.
+    ///
+    /// `None` when the two agree and for a coin the rule does not apply to; the default answers `None`:
+    /// a coin that derives a fresh key for every swap, a coin whose key is not a secp256k1 key, a coin
+    /// activated with the Trezor policy, a coin that cannot trade. The caller asks only under a global-HD
+    /// login; under an iguana login the keys are one key.
+    fn swap_key_disagreement(&self, _node_pubkey: &Public) -> Option<SwapKeyDisagreement> { None }
+
     /// Whether this coin's per-swap HTLC key is derived from the swap (CRD ch.39 R39.5.6) rather than
     /// taken from [`SwapOps::get_htlc_key_pair`]. A derived key is never saved with the swap: every
     /// later use derives it again with [`SwapOps::derive_swap_htlc_key_pair`].

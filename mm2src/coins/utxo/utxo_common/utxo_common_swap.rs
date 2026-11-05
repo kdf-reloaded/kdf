@@ -1,7 +1,7 @@
 // utxo_common_swap — HTLC/swap operations, payment scripts, validation
 
 use super::*;
-use crate::SpendSafeAmountError;
+use crate::{SpendSafeAmountError, SwapKeyDisagreement};
 use kdf_crypto::ripemd160;
 use primitives::hash::H160;
 
@@ -1415,13 +1415,13 @@ where
     Ok(lock_time.max(htlc_locktime))
 }
 
-/// Returns `Some(keypair)` when this coin's negotiated V1 HTLC key must be
-/// something other than the node's persistent secp256k1 identity key, `None`
-/// when the persistent key is itself the address that will sign (ch.51 R63).
+/// Returns `Some(keypair)` when this coin's negotiated V1 HTLC key is a key of
+/// an HD key policy, `None` otherwise (ch.51 R63).
 ///
-/// `PrivKeyPolicy::KeyPair` (Iguana/legacy single-address activation) derives
-/// its one and only address straight from the node's persistent key, so
-/// `None` (fall back to it) is correct. `PrivKeyPolicy::HDWallet` is not: its
+/// `PrivKeyPolicy::KeyPair` answers `None` here: a coin with a single key
+/// announces it through [`own_signing_key_pair`], which the swap start takes
+/// only when that key is not the node's persistent key (CRD ch.05 R41 item 2).
+/// `PrivKeyPolicy::HDWallet` answers its activated key: its
 /// `activated_key` is a distinct, path-derived key that both the wallet's
 /// address display and its normal UTXO-selection/signing path already use
 /// for this coin -- returning `None` here used to negotiate the *node's* key
@@ -1440,6 +1440,70 @@ where
         PrivKeyPolicy::HDWallet { activated_key, .. } => Some(*activated_key),
         PrivKeyPolicy::Trezor => Some(KeyPair::random_compressed()),
     }
+}
+
+/// The key pair a UTXO-family coin with a single key signs its swap transactions with (CRD ch.05 R41 item 2):
+/// its own key, whatever login the node has. The swap announces and saves it only when it is not the node's
+/// persistent key (`lp_swap::start_htlc_key_pair`), so under an iguana login, where the coin's key is the
+/// persistent key, nothing changes. A coin with an HD key policy answers through [`get_htlc_key_pair`], and a
+/// coin activated with the Trezor policy keeps its present behavior.
+pub fn own_signing_key_pair<T>(coin: &T) -> Option<KeyPair>
+where
+    T: AsRef<UtxoCoinFields>,
+{
+    match &coin.as_ref().priv_key_policy {
+        PrivKeyPolicy::KeyPair(key_pair) => Some(*key_pair),
+        PrivKeyPolicy::HDWallet { .. } | PrivKeyPolicy::Trezor => None,
+    }
+}
+
+/// CRD ch.05 R36 and R44 for a UTXO-family coin: whether the key a legacy swap announces differs from the key
+/// of the address the coin funds its swap payments from.
+///
+/// The swap key is the coin's own key (R41: [`get_htlc_key_pair`] for an HD key policy, else
+/// [`own_signing_key_pair`]) and the paying key is the key of the address `active_utxo_sender_address` funds
+/// from (R42): for an HD key policy the address at `path_to_address`, so the two agree by construction. They
+/// can differ only when the funding address is not the coin's own, which this answers as a disagreement. A
+/// coin with a single address funds from the address of its own key, and a coin activated with the Trezor
+/// policy is out of the rule's scope. A funding address that cannot be established is a disagreement too: the
+/// guard fails closed.
+pub fn swap_key_disagreement<T>(coin: &T) -> Option<SwapKeyDisagreement>
+where
+    T: AsRef<UtxoCoinFields>,
+{
+    let fields = coin.as_ref();
+    let swap_key = *fields.priv_key_policy.key_pair()?.public();
+    // A single address funds from the address of the coin's own key.
+    let DerivationMethod::HDWallet(hd_wallet) = &fields.derivation_method else {
+        return None;
+    };
+    let activated_path = match &fields.priv_key_policy {
+        PrivKeyPolicy::HDWallet { path_to_address, .. } => {
+            Some(path_to_address.full_path_text(&hd_wallet.derivation_path))
+        },
+        _ => None,
+    };
+    let disagreement = |paying_path: String| match activated_path.clone() {
+        Some(activated_path) => SwapKeyDisagreement::HdAddress {
+            activated_path,
+            paying_path,
+        },
+        None => SwapKeyDisagreement::SingleKey,
+    };
+    // Fail closed: a guard that cannot establish the funding address must not answer "agree", or a swap that
+    // would pay from another key than it announces would start. An error is answered as a disagreement.
+    let paying = match crate::utxo::utxo_standard_swap_v2::try_enabled_hd_address_info(
+        fields,
+        hd_wallet,
+        "UTXO swap key agreement check",
+    ) {
+        Ok(paying) => paying,
+        Err(_) => return Some(disagreement("an address that could not be established".to_owned())),
+    };
+    if *paying.pubkey == *swap_key {
+        return None;
+    }
+    Some(disagreement(paying.derivation_path.to_string()))
 }
 
 // ─── V2 swap helpers (chapter 15 §15.4) ─────────────────────────────────────

@@ -737,6 +737,41 @@ exactly two functions for this:
   and returns the payload alongside the verified signature and public
   key.
 
+**R16a.** *Bounded reading of peer payloads.* Before the node decodes a
+MessagePack value received from a peer, it MUST check the value against
+two bounds:
+
+- arrays and maps nest at most 64 levels deep. The outermost array or
+  map is level 1, and an empty array or map counts as a level;
+- every declared length and element count fits in the bytes that
+  remain.
+
+The check covers:
+
+- every envelope of R16 and the payload inside it;
+- every request and answer exchanged with a peer over request-response,
+  in both directions;
+- the peer addresses of the peers topic;
+- values that a message carries and that the node decodes later: an
+  order record of a synchronization answer
+  ([Chapter 32](32-orderbook-p2p-and-trie.md) §32.5) and a coin's
+  protocol information
+  ([Chapter 59](59-legacy-ordermatch-negotiation.md)).
+
+The check walks one complete value from the start, as the decoder reads
+it, and ignores bytes after that value, as the decoder does. It never
+recurses and it reserves no memory from a declared length. A value that
+fails either bound is dropped as malformed: it is not decoded, the
+caller sees the same kind of error as for any value that does not
+decode, and the node counts it. A protocol-information value that fails
+counts as one that does not decode, as it does today. The encoding does
+not change, and every value an honest peer sends passes.
+
+Rationale: a peer's bytes are untrusted. The node bounds the work and
+the memory it spends on one value before it interprets the value, as it
+already bounds the size of a message (R13). The bound lies far above the
+deepest message the node sends (T4a).
+
 **R17.** This application-payload signing surface is bound as *separate*
 from the proxy-signature substrate of Chapter 27. The two operate on
 different key spaces (raw secp256k1 here; libp2p-identity keypairs for
@@ -761,6 +796,31 @@ target:
 transport-level peer identity authenticated by the libp2p handshake
 and is separate from the secp256k1 key material used for the
 application-payload signing surface in §28.7.
+
+> **Reference position on the identity key (passed the KDF Dirty Gate on
+> 2026-11-04, measure 0.02; Spec Reader 2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A, identical at both).** The reference derives a **relay's** Ed25519
+> identity secret as the SHA-256 of the node's internal secp256k1 signing key
+> (chapter 05 R16), so one passphrase gives one relay peer identifier at every
+> start -- the same derivation this substrate uses, so a relay has the same
+> peer identifier on both lineages for the same passphrase -- and gives every
+> **non-relay** node a fresh random identity at each start. Nothing in the
+> reference pins a relay's peer identifier: its seed-node entries are bare
+> hosts (R21). The identity key types a reference node can decode in the
+> Noise handshake are those compiled into its libp2p build on both targets:
+> Ed25519 and secp256k1; the RSA and ECDSA key types are not compiled in, so
+> a remote presenting one of them fails the handshake. A privacy coin's order
+> and swap messages are published under a per-order secp256k1 key with that
+> key's peer identifier as the gossip author (chapter 16), as here. The
+> reference's composed behavior includes no Identify protocol at either row
+> (R7); only the crate feature is enabled, as R0c records for this substrate.
+>
+> **Reloaded under a global-HD login (2026-11-05).** Under a global-HD login the
+> node's own key is the internal key (chapter 05 R45, plan item H4), so a relay
+> derives its identity as the reference does. A relay built before that took the
+> hash of the passphrase text there. Its peer identifier changes once at
+> upgrade, and peers learn it again through the relay's address (R21; chapter 05
+> R49).
 
 **R20.** The libp2p connection upgrade pipeline is bound to be
 uniform across all targets: multistream-select V1 negotiation,
@@ -1473,6 +1533,27 @@ public key derived from `sk`. Any single-byte mutation of the encoded
 bytes MUST cause `decode_signed` to return an error and MUST NOT
 return a parseable but invalid payload.
 
+**T4a.** *Bounded reading of peer payloads (R16a).*
+
+- (a) Every message type the node sends passes the check and decodes as
+  before, and its deepest nesting is at most half of the bound.
+- (b) A value nested one level beyond the bound is dropped, and so is
+  one nested 10,000 levels deep. A value exactly at the bound passes
+  the check.
+- (c) A bin, str or ext header whose declared length exceeds the
+  remaining bytes is dropped, and so is an array or map header whose
+  count exceeds them. Both are tested at the largest 32-bit value.
+- (d) An envelope of R16 that fails the check is dropped before its
+  signature is examined, and the count rises by one.
+- (e) Bytes after the first complete value are ignored, as before.
+- (f) Each decode site of R16a applies the check:
+  - the envelope and its payload;
+  - request-response in both directions;
+  - the peers topic;
+  - an order record of a synchronization answer;
+  - both readers of a coin's protocol information (the coin's own
+    check and the address format the order book reports).
+
 **T5.** *Topic construction.* `pub_sub_topic("orderbook",
 "KMD:BTC")` MUST return exactly `"orderbook/KMD:BTC"`; the substrate
 MUST NOT perform any URL-encoding or canonicalisation of the inputs.
@@ -2084,3 +2165,35 @@ hardening carried by the pinned fork).
   decisions of 2026-11-02, this repository's transport and peer-exchange
   code and its dependency tree. The forbidden corpus was not consulted
   for this amendment, and it needs no Dirty Gate pass of its own.
+- *Scoped addition (2026-11-04) -- the reference-position note under R19.*
+  **KDF Dirty Gate: PASS on 2026-11-04, measure 0.02.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish the relay and non-relay identity-key
+  derivations, the absence of any pinned relay identifier, the identity key
+  types enabled in the reference's libp2p dependency on both targets, the
+  per-order key and author of privacy-coin messages, and the absence of the
+  Identify protocol from the composed behavior. Behavior and public
+  dependency features only; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.02, no findings. *Extent:* the peer-to-peer identity-key derivation, the
+  identity key types of the libp2p build and the protocols of the composed
+  behavior, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole
+  batch, 30 source files and one dependency manifest were read at
+  `v3.0.0-beta`, 29 of them checked by hash against the tagged states of both
+  rows. *Method:* side-by-side reading of the compared regions against every
+  added or changed line, plus that hash check; the gate script was not run
+  because the candidate has no code blocks. *Measure:* 0.02, read against the
+  standard that any discretionary finding fails a file; dictated-interop and
+  public-surface tokens were excluded from the measured set.
+- *Scoped addition (2026-11-04) -- R16a and T4a.* Reloaded-original,
+  maintainer decision CD of 2026-11-04. *Inputs:* this repository's
+  decode paths for bytes received from peers, and the source of the
+  public MessagePack library this repository uses. The forbidden corpus
+  was not consulted for this addition, and it needs no Dirty Gate pass
+  of its own.
+- *Pointer added 2026-11-05 -- the note "Reloaded under a global-HD login"
+  under R19.* It names chapter 05 R45 and R49 (plan item H4). Written by a
+  context that never read the forbidden corpus, from this repository's own
+  relay-identity code. It carries no reference content of its own and needs
+  no Dirty Gate pass.

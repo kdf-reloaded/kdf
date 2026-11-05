@@ -14,8 +14,8 @@ use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_
             TransactionIdentifier, WAIT_CONFIRM_INTERVAL};
 use crate::mm2::lp_dispatcher::{DispatcherContext, LpEvents};
 use crate::mm2::lp_network::subscribe_to_topic;
-use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, untradable_coin_ticker, MakerOrderBuilder,
-                                OrderConfirmationsSettings};
+use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, swap_key_mismatch, untradable_coin_ticker,
+                                MakerOrderBuilder, OrderConfirmationsSettings};
 use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, retried_refund_rejection, tx_helper_topic, NON_FINAL_REFUND_RETRY_SECS};
 use crate::mm2::MM_VERSION;
 use coins::{CanRefundHtlc, DexFee, FeeApproxStage, FoundSwapTxSpend, MmCoinEnum, PaymentInstructions, TradeFee,
@@ -538,7 +538,7 @@ impl MakerSwap {
         // derived from the secret hash (CRD ch.39 R39.5.6/R39.5.7) and is not
         // saved with the swap.
         let (maker_coin_htlc_key_pair, maker_coin_htlc_privkey) =
-            match start_htlc_key_pair(&self.maker_coin, &secret_hash) {
+            match start_htlc_key_pair(&self.maker_coin, self.ctx.secp256k1_key_pair().public(), &secret_hash) {
                 Ok(keys) => keys,
                 Err(e) => {
                     return Ok((Some(MakerSwapCommand::Finish), vec![MakerSwapEvent::StartFailed(
@@ -547,7 +547,7 @@ impl MakerSwap {
                 },
             };
         let (taker_coin_htlc_key_pair, taker_coin_htlc_privkey) =
-            match start_htlc_key_pair(&self.taker_coin, &secret_hash) {
+            match start_htlc_key_pair(&self.taker_coin, self.ctx.secp256k1_key_pair().public(), &secret_hash) {
                 Ok(keys) => keys,
                 Err(e) => {
                     return Ok((Some(MakerSwapCommand::Finish), vec![MakerSwapEvent::StartFailed(
@@ -2469,6 +2469,10 @@ pub async fn maker_swap_trade_preimage(
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
         return MmError::err(TradePreimageRpcError::TradingNotSupported { coin });
     }
+    // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
+    if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
+        return MmError::err(TradePreimageRpcError::from(mismatch));
+    }
     // CRD ch.60 R60.6.7 item 3: the preview applies the pre-trade spend-safety check of an order with the
     // default minimum volume, as the order the preview describes would carry.
     check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, None, &req.price)
@@ -4139,3 +4143,7 @@ mod maker_swap_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "maker_derived_htlc_key_tests.rs"]
 mod maker_derived_htlc_key_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "maker_hd_coin_swap_key_tests.rs"]
+mod maker_hd_coin_swap_key_tests;

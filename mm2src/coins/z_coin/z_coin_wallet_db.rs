@@ -5606,6 +5606,29 @@ pub(crate) mod tests {
         );
     }
 
+    /// Raw `CompactBlock` protobuf for testnet height 389.
+    const BLOCK_389_HEX: &str = concat!(
+        "1085031a200f74f26e7742237702f44b6548952aee87649d4264e43d8db82b4c314c58030422",
+        "2051ac3c0a025f331fcfdb288f278a45fb424b765086b350cf1c57746dce466406288f9da0d3",
+        "063afe040801122008ced81faa87809f83cd6a4df74b2a956fa3785292116683552e2fba134d",
+        "e9ec22220a20050899d5d9c1fa66ca3e1bce6f0bc9187c08e229a7df1f6b7b0c4fc3d01559c0",
+        "2a7a0a209161e18aad6a412a3c57fd040ac15f532d5296603a7c608d4d9020c7eead82641220",
+        "aadf17949507e6bcbb0e0c4316b56eb59fec0cb1814592dab833db55e401b6e31a34913f9664",
+        "d14935fae8fd1bc6b6b3d7a49fa499d24269aa87099f7adacc4f190879b5d25a8b9e88177b99",
+        "a12e9019be2784bbaafe2a7a0a205e32f4d009420beec8469345c1ae3809735bb5e820b42993",
+        "b3e076562426e62b1220db59b0eb8e21888d871ca951d93cbfcff3709e99a357b7c3e9ea2427",
+        "8df7a72a1a34da12a43877c3a4ce873e52999d011826a46958ed713efbc2bc1b20d2f4410b9b",
+        "2c77882378cf22a381bf7c8d2efdbe4d2f21674b329c010a202caefca055a245598c3d888ecb",
+        "4a978232c79e9cfa1b89000d3f22963a2fb21512209ee073ca70f29bcbfa59bb04f325567cb8",
+        "8a14679cf0f016374c01b72f7d2f141a20d1ef7b44c85f83d17ffc67376eca3c1f7558996e42",
+        "f6de7b2e9e4614467f589f22340180351dac92aca0cdeee51fa7480d77309da90931fa42944f",
+        "374f37821d712294769a0700b6602cf5981503d02b11629ca56f26329c010a2061acce9276ba",
+        "361d4deb56e56fb8aa0e0c3c768c394a902ee4d5a60bcca0080c1220c25fcc41b88ade59fc8b",
+        "d80dd17d6a8104064ad444d5fe6a02b15f640c526b321a20ff503325721da4b314a2622fa428",
+        "1ee1234a7c9df0ab0656bca6add1b206e7182234c63633711fba0bea09b39aa264ebea4e59da",
+        "ab6a410b65f86590a4dc7408b8481f55446b57d0bc5fa4037d120e89b35639990364",
+    );
+
     /// Pirate testnet block 389 -- captured from `testlightwalletd1.cryptoforge.cc`
     /// on 2026-09-28, when that chain was at tip 53 202 with
     /// `branchId=37a5165b`, i.e. **Ironwood already active** (it activates at
@@ -5634,28 +5657,6 @@ pub(crate) mod tests {
     fn a_post_ironwood_v6_block_scans_to_the_same_sapling_tree_lightwalletd_reports() {
         use prost::Message;
 
-        /// Raw `CompactBlock` protobuf for testnet height 389.
-        const BLOCK_389_HEX: &str = concat!(
-            "1085031a200f74f26e7742237702f44b6548952aee87649d4264e43d8db82b4c314c58030422",
-            "2051ac3c0a025f331fcfdb288f278a45fb424b765086b350cf1c57746dce466406288f9da0d3",
-            "063afe040801122008ced81faa87809f83cd6a4df74b2a956fa3785292116683552e2fba134d",
-            "e9ec22220a20050899d5d9c1fa66ca3e1bce6f0bc9187c08e229a7df1f6b7b0c4fc3d01559c0",
-            "2a7a0a209161e18aad6a412a3c57fd040ac15f532d5296603a7c608d4d9020c7eead82641220",
-            "aadf17949507e6bcbb0e0c4316b56eb59fec0cb1814592dab833db55e401b6e31a34913f9664",
-            "d14935fae8fd1bc6b6b3d7a49fa499d24269aa87099f7adacc4f190879b5d25a8b9e88177b99",
-            "a12e9019be2784bbaafe2a7a0a205e32f4d009420beec8469345c1ae3809735bb5e820b42993",
-            "b3e076562426e62b1220db59b0eb8e21888d871ca951d93cbfcff3709e99a357b7c3e9ea2427",
-            "8df7a72a1a34da12a43877c3a4ce873e52999d011826a46958ed713efbc2bc1b20d2f4410b9b",
-            "2c77882378cf22a381bf7c8d2efdbe4d2f21674b329c010a202caefca055a245598c3d888ecb",
-            "4a978232c79e9cfa1b89000d3f22963a2fb21512209ee073ca70f29bcbfa59bb04f325567cb8",
-            "8a14679cf0f016374c01b72f7d2f141a20d1ef7b44c85f83d17ffc67376eca3c1f7558996e42",
-            "f6de7b2e9e4614467f589f22340180351dac92aca0cdeee51fa7480d77309da90931fa42944f",
-            "374f37821d712294769a0700b6602cf5981503d02b11629ca56f26329c010a2061acce9276ba",
-            "361d4deb56e56fb8aa0e0c3c768c394a902ee4d5a60bcca0080c1220c25fcc41b88ade59fc8b",
-            "d80dd17d6a8104064ad444d5fe6a02b15f640c526b321a20ff503325721da4b314a2622fa428",
-            "1ee1234a7c9df0ab0656bca6add1b206e7182234c63633711fba0bea09b39aa264ebea4e59da",
-            "ab6a410b65f86590a4dc7408b8481f55446b57d0bc5fa4037d120e89b35639990364",
-        );
         /// `GetTreeState` at 388 -- the anchor the wallet starts from.
         const TREE_388_HEX: &str = concat!(
             "01fce57d8fee40b8268479aa4839759f951bd7cca5f94237b0193a03e5e9884613001f000000",
@@ -5751,6 +5752,215 @@ pub(crate) mod tests {
             CheckpointOutcome::Accepted,
             "our Sapling tree after the v6 block must equal lightwalletd's own"
         );
+    }
+
+    /// Value of the Sapling note the Ironwood-deposit tests below pay to the test wallet.
+    const IRONWOOD_DEPOSIT_NOTE_VALUE: u64 = WithdrawFixture::NOTE_VALUE;
+
+    /// The two Ironwood actions of the recorded Pirate testnet block 389, as the dictated wire carries
+    /// them: `CompactTx` field 6. The backend crate's message type names field 6 the Orchard actions;
+    /// this project's own definition (`compact_formats.proto`) has no field 6 at all.
+    fn recorded_field_6_actions() -> Vec<zcash_compact::CompactOrchardAction> {
+        let block = zcash_compact::CompactBlock::decode(hex::decode(BLOCK_389_HEX).unwrap().as_slice()).unwrap();
+        let actions = block.vtx[0].actions.clone();
+        assert_eq!(
+            actions.len(),
+            2,
+            "the recorded transaction carries two Ironwood actions"
+        );
+        assert!(block.vtx[0].ironwood_actions.is_empty());
+        actions
+    }
+
+    /// Asserts that wire bytes of `wire_len` carry field 6 (`carried_actions` of them, read with the
+    /// backend crate's message type) and that this project's message definition drops it: the
+    /// message decoded with it is smaller (`decoded_len`, re-encoded).
+    fn assert_field_6_is_dropped(wire_len: usize, carried_actions: usize, decoded_len: usize) {
+        assert_eq!(carried_actions, 2, "the wire bytes must carry the two Ironwood actions");
+        assert!(
+            decoded_len < wire_len,
+            "this project's message definition has no field 6, so decoding must drop it"
+        );
+    }
+
+    /// A compact block paying `extfvk` one Sapling note, in a transaction that also carries two Ironwood
+    /// actions in field 6. It is built as wire bytes and decoded as `z_coin_grpc::CompactBlock`, the
+    /// type production decodes, so the drop of field 6 is exercised rather than skipped.
+    fn ironwood_deposit_block_from_wire(extfvk: &ExtendedFullViewingKey) -> z_coin_grpc::CompactBlock {
+        let mut block = compact_block_with_received_note(11, 11, 9, extfvk, IRONWOOD_DEPOSIT_NOTE_VALUE);
+        block.vtx[0].actions = recorded_field_6_actions();
+        let wire = block.encode_to_vec();
+        let carried = zcash_compact::CompactBlock::decode(wire.as_slice()).unwrap();
+        let decoded = z_coin_grpc::CompactBlock::decode(wire.as_slice()).unwrap();
+        assert_field_6_is_dropped(wire.len(), carried.vtx[0].actions.len(), decoded.encoded_len());
+        assert_eq!(
+            decoded.vtx[0].outputs.len(),
+            1,
+            "the Sapling output survives the decode"
+        );
+        decoded
+    }
+
+    /// The Sapling commitment tree (serialized) after `cmu` is appended to an empty one.
+    fn sapling_tree_with_one_commitment(cmu: &[u8]) -> Vec<u8> {
+        let cmu = sapling::note::ExtractedNoteCommitment::from_bytes(cmu.try_into().unwrap()).unwrap();
+        let mut tree = sapling::CommitmentTree::empty();
+        tree.append(sapling::Node::from_cmu(&cmu)).unwrap();
+        let mut bytes = Vec::new();
+        zcash_primitives::merkle_tree::write_commitment_tree(&tree, &mut bytes).unwrap();
+        bytes
+    }
+
+    /// CRD ch.39 T39.8.0i, scan side (R39.8.0bb): a compact block whose transaction pays the wallet a
+    /// Sapling note and carries Ironwood actions in field 6 scans to the note, the Sapling tree
+    /// lightwalletd would report, and a balance that counts the note once.
+    #[test]
+    fn t39_8_0i_a_deposit_with_ironwood_actions_scans_to_the_note_the_tree_and_the_balance() {
+        let params = test_params_with_zip212();
+        let extsk = ExtendedSpendingKey::master(&[15; 32]);
+        #[allow(deprecated)]
+        let extfvk = extsk.to_extended_full_viewing_key();
+        let checkpoint = CheckPointBlockInfo {
+            height: 10,
+            hash: rpc::v1::types::H256([9u8; 32]),
+            time: 10,
+            sapling_tree: empty_sapling_tree_bytes().into(),
+        };
+        let history = ZCoinShieldedHistory::open_or_create(
+            "ARRR",
+            test_db_dir("ironwood-deposit-scan"),
+            params.clone(),
+            &extfvk,
+            Some(&checkpoint),
+        )
+        .unwrap();
+
+        let block = ironwood_deposit_block_from_wire(&extfvk);
+        let cmu = block.vtx[0].outputs[0].cmu.clone();
+        history
+            .insert_compact_block(convert_compact_block(block).unwrap())
+            .unwrap();
+        assert_eq!(
+            history
+                .scan_cached_blocks_to_height(params.clone(), 11, 1_000, 0, |_, _| {})
+                .unwrap(),
+            11
+        );
+
+        assert_eq!(
+            history.balance(params.clone()).unwrap(),
+            IRONWOOD_DEPOSIT_NOTE_VALUE,
+            "the note counts once: the Ironwood actions add nothing and hide nothing"
+        );
+        // The Sapling tree size: one commitment, as the server's tree for that block would hold. The
+        // Ironwood actions contribute nothing to the Sapling tree.
+        assert_eq!(
+            history
+                .init_wallet_checkpoint_from_tree_state(params, z_coin_grpc::TreeState {
+                    network: "main".to_owned(),
+                    height: 11,
+                    hash: hex::encode([11u8; 32]),
+                    time: 11,
+                    tree: hex::encode(sapling_tree_with_one_commitment(&cmu)),
+                    ..Default::default()
+                })
+                .unwrap(),
+            CheckpointOutcome::Accepted,
+            "our Sapling tree after the deposit block must hold exactly the one Sapling commitment"
+        );
+    }
+
+    /// CRD ch.39 T39.8.0i, spend side (R39.8.0bb): a following build selects the deposited note and
+    /// spends it, under the same anchor and witness rules as any other note.
+    #[test]
+    fn t39_8_0i_a_following_build_spends_the_note_deposited_with_ironwood_actions() {
+        let Some(fixture) = WithdrawFixture::with_block(ironwood_deposit_block_from_wire_converted) else {
+            return;
+        };
+        let tx = fixture.build().unwrap();
+        assert_eq!(sapling_nullifiers(&tx).len(), 1, "the deposited note is the one spent");
+        let recorded = fixture.broadcast(&tx);
+        assert_eq!(recorded.as_ref().map(|t| t.txid()), Some(tx.txid()));
+        assert_eq!(
+            fixture.history.spent_value_of_transaction(tx.txid().as_ref()).unwrap(),
+            IRONWOOD_DEPOSIT_NOTE_VALUE,
+            "the wallet recorded the deposited note as the one this transaction spends"
+        );
+    }
+
+    /// The deposit block as production hands it to the cache: decoded from the wire, then converted.
+    fn ironwood_deposit_block_from_wire_converted(extfvk: &ExtendedFullViewingKey) -> zcash_compact::CompactBlock {
+        convert_compact_block(ironwood_deposit_block_from_wire(extfvk)).unwrap()
+    }
+
+    /// CRD ch.39 T39.8.0i, mempool side (R39.8.0bb, §39.8.0.6): the same transaction offered as a
+    /// `GetMempoolTx` compact transaction counts as pending until its block is scanned, and not after.
+    #[test]
+    fn t39_8_0i_the_same_transaction_in_the_mempool_counts_as_pending() {
+        use sapling::keys::PreparedIncomingViewingKey;
+        use zcash_primitives::transaction::components::sapling::zip212_enforcement;
+
+        let params = test_params_with_zip212();
+        let extsk = ExtendedSpendingKey::master(&[15; 32]);
+        #[allow(deprecated)]
+        let extfvk = extsk.to_extended_full_viewing_key();
+
+        // The streamed message: one compact transaction, field 6 on the wire, decoded as production does.
+        let mut compact = compact_block_with_received_note(11, 11, 9, &extfvk, IRONWOOD_DEPOSIT_NOTE_VALUE)
+            .vtx
+            .remove(0);
+        compact.actions = recorded_field_6_actions();
+        let wire = compact.encode_to_vec();
+        let carried = zcash_compact::CompactTx::decode(wire.as_slice()).unwrap();
+        let streamed = z_coin_grpc::CompactTx::decode(wire.as_slice()).unwrap();
+        assert_field_6_is_dropped(wire.len(), carried.actions.len(), streamed.encoded_len());
+
+        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk.vk.ivk());
+        let enforcement = zip212_enforcement(&ZcoinDecryptionParams::new(params.clone()), BlockHeight::from_u32(11));
+        let receipts = pending_receipts_in_tx(&ivk, enforcement, &streamed);
+        assert_eq!(
+            receipts,
+            vec![PendingReceipt {
+                txid: [68u8; 32],
+                output_index: 0,
+                value: IRONWOOD_DEPOSIT_NOTE_VALUE,
+            }],
+            "the Sapling output is found and its value recovered"
+        );
+
+        // Another wallet's key finds nothing in the same transaction.
+        let other = test_extfvk(31);
+        let other_ivk = PreparedIncomingViewingKey::new(&other.fvk.vk.ivk());
+        assert!(pending_receipts_in_tx(&other_ivk, enforcement, &streamed).is_empty());
+
+        // It counts as pending while the wallet database has not scanned it, and the mined note
+        // replaces it afterwards (R39.8.0ah): one output is never counted from both sources.
+        let checkpoint = CheckPointBlockInfo {
+            height: 10,
+            hash: rpc::v1::types::H256([9u8; 32]),
+            time: 10,
+            sapling_tree: empty_sapling_tree_bytes().into(),
+        };
+        let history = ZCoinShieldedHistory::open_or_create(
+            "ARRR",
+            test_db_dir("ironwood-deposit-mempool"),
+            params.clone(),
+            &extfvk,
+            Some(&checkpoint),
+        )
+        .unwrap();
+        assert!(!history.transaction_is_scanned(&receipts[0].txid).unwrap());
+        history
+            .insert_compact_block(convert_compact_block(ironwood_deposit_block_from_wire(&extfvk)).unwrap())
+            .unwrap();
+        assert_eq!(
+            history
+                .scan_cached_blocks_to_height(params.clone(), 11, 1_000, 0, |_, _| {})
+                .unwrap(),
+            11
+        );
+        assert!(history.transaction_is_scanned(&receipts[0].txid).unwrap());
+        assert_eq!(history.balance(params).unwrap(), IRONWOOD_DEPOSIT_NOTE_VALUE);
     }
 
     #[test]
@@ -6664,6 +6874,14 @@ pub(crate) mod tests {
         const SEND_SAT: u64 = 1_000_000;
 
         fn new() -> Option<WithdrawFixture> {
+            Self::with_block(|extfvk| compact_block_with_received_note(11, 11, 9, extfvk, Self::NOTE_VALUE))
+        }
+
+        /// The same fixture with the note arriving in the block `make_block` builds for the wallet's
+        /// viewing key (a block at height 11 chained to the checkpoint at 10, paying `NOTE_VALUE`).
+        fn with_block(
+            make_block: impl FnOnce(&ExtendedFullViewingKey) -> zcash_compact::CompactBlock,
+        ) -> Option<WithdrawFixture> {
             let dir = std::env::var_os("ARRR_SAPLING_PARAMS")
                 .map(PathBuf::from)
                 .unwrap_or_else(crate::utxo::zcash_params_path);
@@ -6699,9 +6917,7 @@ pub(crate) mod tests {
                 Some(&checkpoint),
             )
             .unwrap();
-            history
-                .insert_compact_block(compact_block_with_received_note(11, 11, 9, &extfvk, Self::NOTE_VALUE))
-                .unwrap();
+            history.insert_compact_block(make_block(&extfvk)).unwrap();
             assert_eq!(
                 history
                     .scan_cached_blocks_to_height(params.clone(), 11, 1_000, 0, |_, _| {})
@@ -6750,9 +6966,16 @@ pub(crate) mod tests {
         fn build(
             &self,
         ) -> Result<zcash_primitives::transaction::Transaction, crate::z_coin::z_coin_errors::GenTxError> {
-            crate::z_coin::z_coin_ops::build_from_wallet_db(&self.inputs(), vec![], vec![self.output()], self.fee(), 12)
-                .map(|(tx, _)| tx)
-                .map_err(|e| e.into_inner())
+            crate::z_coin::z_coin_ops::build_from_wallet_db(
+                &self.inputs(),
+                vec![],
+                vec![self.output()],
+                None,
+                self.fee(),
+                12,
+            )
+            .map(|(tx, _)| tx)
+            .map_err(|e| e.into_inner())
         }
 
         /// The second step of the withdraw contract: the caller submits the serialized transaction
@@ -7033,6 +7256,61 @@ pub(crate) struct PendingReceipt {
     pub(crate) value: u64,
 }
 
+/// The wallet-owned Sapling outputs of one compact mempool transaction, by trial decryption with `ivk`.
+///
+/// Only the Sapling outputs of the compact transaction are read. Any other field of the dictated wire
+/// message, the Ironwood actions of a version-6 transaction included, is not part of this project's
+/// message definition and never reaches this reader (CRD ch.39 R39.8.0bb).
+fn pending_receipts_in_tx(
+    ivk: &sapling::keys::PreparedIncomingViewingKey,
+    enforcement: sapling::note_encryption::Zip212Enforcement,
+    tx: &z_coin_grpc::CompactTx,
+) -> Vec<PendingReceipt> {
+    use sapling::note::ExtractedNoteCommitment;
+    use sapling::note_encryption::{try_sapling_compact_note_decryption, CompactOutputDescription};
+    use sapling::Note;
+    use zcash_note_encryption::{EphemeralKeyBytes, COMPACT_NOTE_SIZE};
+
+    let mut found = Vec::new();
+    let txid: [u8; 32] = match tx.hash.as_slice().try_into() {
+        Ok(hash) => hash,
+        // A malformed identifier cannot be reconciled against the
+        // wallet database later, so the entry is unusable.
+        Err(_) => return Vec::new(),
+    };
+    for (index, output) in tx.outputs.iter().enumerate() {
+        let Some(cmu) = Option::from(ExtractedNoteCommitment::from_bytes(
+            &match output.cmu.as_slice().try_into() {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            },
+        )) else {
+            continue;
+        };
+        let epk: [u8; 32] = match output.epk.as_slice().try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let enc_ciphertext: [u8; COMPACT_NOTE_SIZE] = match output.ciphertext.as_slice().try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let description = CompactOutputDescription {
+            ephemeral_key: EphemeralKeyBytes(epk),
+            cmu,
+            enc_ciphertext,
+        };
+        if let Some((note, _addr)) = try_sapling_compact_note_decryption(ivk, &description, enforcement) {
+            found.push(PendingReceipt {
+                txid,
+                output_index: index as u32,
+                value: Note::value(&note).inner(),
+            });
+        }
+    }
+    found
+}
+
 impl ZCoinShieldedHistory {
     /// Trial-decrypt the backend's current mempool and return every
     /// wallet-owned output it contains that the wallet database has not
@@ -7048,10 +7326,6 @@ impl ZCoinShieldedHistory {
         tip: u64,
     ) -> Vec<PendingReceipt> {
         use sapling::keys::PreparedIncomingViewingKey;
-        use sapling::note::ExtractedNoteCommitment;
-        use sapling::note_encryption::{try_sapling_compact_note_decryption, CompactOutputDescription};
-        use sapling::Note;
-        use zcash_note_encryption::{EphemeralKeyBytes, COMPACT_NOTE_SIZE};
         use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 
         let ivk = PreparedIncomingViewingKey::new(&self.extfvk.fvk.vk.ivk());
@@ -7105,44 +7379,7 @@ impl ZCoinShieldedHistory {
                         break;
                     },
                 };
-                let txid: [u8; 32] = match tx.hash.as_slice().try_into() {
-                    Ok(hash) => hash,
-                    // A malformed identifier cannot be reconciled against the
-                    // wallet database later, so the entry is unusable.
-                    Err(_) => continue,
-                };
-                for (index, output) in tx.outputs.iter().enumerate() {
-                    let Some(cmu) =
-                        Option::from(ExtractedNoteCommitment::from_bytes(
-                            &match output.cmu.as_slice().try_into() {
-                                Ok(bytes) => bytes,
-                                Err(_) => continue,
-                            },
-                        ))
-                    else {
-                        continue;
-                    };
-                    let epk: [u8; 32] = match output.epk.as_slice().try_into() {
-                        Ok(bytes) => bytes,
-                        Err(_) => continue,
-                    };
-                    let enc_ciphertext: [u8; COMPACT_NOTE_SIZE] = match output.ciphertext.as_slice().try_into() {
-                        Ok(bytes) => bytes,
-                        Err(_) => continue,
-                    };
-                    let description = CompactOutputDescription {
-                        ephemeral_key: EphemeralKeyBytes(epk),
-                        cmu,
-                        enc_ciphertext,
-                    };
-                    if let Some((note, _addr)) = try_sapling_compact_note_decryption(&ivk, &description, enforcement) {
-                        found.push(PendingReceipt {
-                            txid,
-                            output_index: index as u32,
-                            value: Note::value(&note).inner(),
-                        });
-                    }
-                }
+                found.extend(pending_receipts_in_tx(&ivk, enforcement, &tx));
             }
             return found;
         }

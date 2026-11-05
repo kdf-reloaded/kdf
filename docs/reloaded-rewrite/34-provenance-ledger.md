@@ -286,6 +286,17 @@ Two provenance statements were tightened after an external audit:
   dependency with an incompatible or missing license fails the build unless it
   is an existing, listed exception.
 
+### 2026-11-05 — `zcash_client_sqlite` vendored for Pirate1 withdrawals
+
+- `vendor-patches/zcash_client_sqlite-0.22.0/` added (PR #246): the published crates.io
+  `zcash_client_sqlite 0.22.0`, wired through `[patch.crates-io]` like the other Zcash
+  patches. The one change replaces two `panic!` calls in
+  `wallet::store_transaction_to_be_sent`, reached when a transaction with an Orchard or
+  Ironwood bundle is recorded without the crate's `orchard` feature, by an empty block, so
+  that a withdrawal to a Pirate1 address can be recorded (chapter 39 R39.6.5g). The
+  published package ships no license files; the MIT and Apache-2.0 texts were copied from
+  the sibling `zcash_transparent 0.10.0` (same upstream repository). See `KDF-PATCH.md`.
+
 ## 34.3 Entries
 
 ### Generated artifacts
@@ -475,6 +486,7 @@ Distinct from the in-tree fragment scheme.
 | `mm2src/testcontainers-vendored/` | vendored-subtree | `artemii235/testcontainers-rs` commit `65e7380`, a fork of `testcontainers-rs` 0.7.0 (see in-tree crate metadata). Vendored in `6c83fec81` (2026-05-28). | MIT, chosen from upstream `MIT OR Apache-2.0`; upstream MIT notice (Copyright 2018 CoBloX) retained in `LICENSE-MIT`. | Vendored for deterministic CI behaviour. Test-only. |
 | `vendor-patches/zcash_primitives-0.30.1/` | vendored-subtree | Published crates.io `zcash_primitives 0.30.1`. Re-vendored from 0.28.0 in `3f2f2bcc0` (2026-10-12). | MIT, chosen from `MIT OR Apache-2.0`; both license texts retained in-tree. | Narrow transaction-builder compatibility extension; see `KDF-PATCH.md`. |
 | `vendor-patches/zcash_transparent-0.10.0/` | vendored-subtree | Published crates.io `zcash_transparent 0.10.0`. Re-vendored from 0.8.0 in `3f2f2bcc0` (2026-10-12). | MIT, chosen from `MIT OR Apache-2.0`; both license texts retained in-tree. | Narrow KDF P2SH/raw-output compatibility extension; see `KDF-PATCH.md`. |
+| `vendor-patches/zcash_client_sqlite-0.22.0/` | vendored-subtree | Published crates.io `zcash_client_sqlite 0.22.0`. Introduced in PR #246 (2026-11-05). | MIT, chosen from `MIT OR Apache-2.0`; the published package ships no license files, so both texts were copied from the sibling `zcash_transparent 0.10.0` (same upstream repository). | Skips the Orchard/Ironwood nullifier marking instead of panicking when built without the `orchard` feature; see `KDF-PATCH.md`. |
 | `vendor-patches/libp2p-gossipsub-0.45.0/` | vendored-subtree | `KomodoPlatform/rust-libp2p` tag `k-0.52.12` (commit `8bcc1fda79d56a2f398df3d45a29729b8ce0148d`), `protocols/gossipsub`. Introduced in `9b18d4140` (2026-09-23). | MIT; upstream per-file MIT notices retained. | Security patch (PRUNE backoff overflow); see `PATCH-NOTES.md`. |
 | `vendor-patches/libp2p-yamux-0.44.0/` | vendored-subtree | `KomodoPlatform/rust-libp2p` tag `k-0.52.12` (commit `8bcc1fda79d56a2f398df3d45a29729b8ce0148d`), `muxers/yamux`. Introduced in `a57e9b834` (2026-09-23). | MIT; upstream per-file MIT notices retained. | Removes the yamux 0.12 path; see `PATCH-NOTES.md`. |
 | `vendor-patches/libp2p-websocket-0.42.0/` | vendored-subtree | `KomodoPlatform/rust-libp2p` tag `k-0.52.12` (commit `8bcc1fda79d56a2f398df3d45a29729b8ce0148d`), `transports/websocket`. | MIT; upstream per-file MIT notices retained. | TLS layer (`tls.rs`, one type in `framed.rs`) ported to rustls 0.23 with the ring provider; `PrivateKey::new` returns a `Result`; see `PATCH-NOTES.md`. The `tests/` directory and `tests/fixtures/` (a throwaway RSA test key) are original to this repository. |
@@ -652,7 +664,7 @@ detail:
 - Cosmos SDK / Ethermint ABCI query paths and `BaseAccount` proto shape.
 - SQLite `CREATE` / `UPDATE` / `DELETE` / `WHERE` / table-constraint
   grammar and the `sql_builder` crate API.
-- The published `zcash_client_backend`, `zcash_primitives`, and
+- The published `zcash_client_backend`, `zcash_client_sqlite`, `zcash_primitives`, and
   `zcash_transparent` crates (MIT OR Apache-2.0).
 - `testcontainers-rs` (vendored subtree, permissive licensing per crate
   metadata).

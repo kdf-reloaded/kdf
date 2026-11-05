@@ -136,7 +136,7 @@ pub use check_balance::{check_other_coin_balance_for_swap, CheckBalanceError};
 pub use swap_msg::*;
 
 #[path = "lp_swap/swap_rpc.rs"] mod swap_rpc;
-use keys::{KeyPair, SECP_SIGN, SECP_VERIFY};
+use keys::{KeyPair, Public, SECP_SIGN, SECP_VERIFY};
 pub use maker_swap::{calc_max_maker_vol, check_balance_for_maker_swap, maker_swap_trade_preimage, run_maker_swap,
                      MakerSavedEvent, MakerSavedSwap, MakerSwap, MakerSwapEvent, MakerSwapStatusChanged,
                      MakerTradePreimage, RunMakerSwapInput};
@@ -1110,14 +1110,20 @@ fn htlc_pubkey_of_keypair(coin: &MmCoinEnum, keypair: &KeyPair) -> Result<H264, 
 }
 
 /// A leg's HTLC key pair at swap start and the private key to save with the swap for it (CRD ch.39
-/// R39.5.6). A coin that derives its key gets the derived pair and nothing is saved: the key is derived
-/// again from `swap_unique_input` for every later use. Any other coin keeps its key and saves it.
+/// R39.5.6, ch.05 R41 and R43). A coin that derives its key gets the derived pair and nothing is saved: the
+/// key is derived again from `swap_unique_input` for every later use. Any other coin keeps its key and saves
+/// it: the pair of [`SwapOps::get_htlc_key_pair`] (an HD key policy, Tendermint) or, for a coin with a single
+/// key of its own ([`SwapOps::own_signing_key_pair`]: a single-key UTXO coin, an EVM coin with a software
+/// signer), that key when it is not the node's persistent key `node_pubkey`. A coin whose key is the
+/// persistent key announces the persistent key and saves nothing, which is what every coin does under an
+/// iguana login.
 ///
 /// # Errors
 ///
 /// Fails when the coin cannot derive its key; the swap then fails to start.
 pub(crate) fn start_htlc_key_pair(
     coin: &MmCoinEnum,
+    node_pubkey: &Public,
     swap_unique_input: &[u8],
 ) -> Result<(Option<KeyPair>, Option<SerializableSecp256k1Keypair>), String> {
     if coin.derives_swap_htlc_key() {
@@ -1126,7 +1132,10 @@ pub(crate) fn start_htlc_key_pair(
             .map_err(|e| format!("!{}.derive_swap_htlc_key_pair {}", coin.ticker(), e))?;
         return Ok((Some(pair), None));
     }
-    let pair = coin.get_htlc_key_pair();
+    let pair = coin.get_htlc_key_pair().or_else(|| {
+        coin.own_signing_key_pair()
+            .filter(|own| **own.public() != **node_pubkey)
+    });
     Ok((pair, pair.map(SerializableSecp256k1Keypair::from)))
 }
 

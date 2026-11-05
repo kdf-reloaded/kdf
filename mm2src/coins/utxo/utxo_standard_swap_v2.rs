@@ -129,11 +129,54 @@ pub(crate) fn enabled_hd_address_from_account(
     enabled_hd_address_info_from_account(fields, addr_format, hd_account, context).map(|info| info.address)
 }
 
+/// CRD ch.05 R41 item 1 and R42: the address of the key an HD-activated coin signs its swap transactions with,
+/// the key at the activation's `path_to_address`, with its full derivation path. `None` when the coin has no HD
+/// key policy (a coin activated with the Trezor policy, or a single-key coin), which keeps the first address of
+/// account `0` as its sender.
+fn activated_hd_address_info(
+    fields: &UtxoCoinFields,
+    hd_wallet: &UtxoHDWallet,
+    context: &str,
+) -> Option<Result<HDAddress<Address, Public>, String>> {
+    let PrivKeyPolicy::HDWallet {
+        activated_key,
+        path_to_address,
+        ..
+    } = &fields.priv_key_policy
+    else {
+        return None;
+    };
+    let derive = || -> Result<HDAddress<Address, Public>, String> {
+        let public = *activated_key.public();
+        let address = address_from_pubkey(fields, &public, hd_wallet.address_format.clone());
+        let child = |id: u32, hardened: bool| {
+            ChildNumber::new(id, hardened)
+                .map_err(|e| format!("Failed to derive the activated HD address for {}: {}", context, e))
+        };
+        let mut derivation_path = hd_wallet.derivation_path.to_derivation_path();
+        derivation_path.push(child(path_to_address.account_id, true)?);
+        derivation_path.push(path_to_address.chain.to_child_number());
+        derivation_path.push(child(path_to_address.address_id, false)?);
+        Ok(HDAddress {
+            address,
+            pubkey: public,
+            derivation_path,
+        })
+    };
+    Some(derive())
+}
+
+/// The address a UTXO coin with an HD wallet funds a swap from, takes its change on, and is paid its spend and
+/// refund on (CRD ch.05 R42): the address of the key at `path_to_address` when the coin has an HD key policy,
+/// else the first external address of account `0`.
 pub(crate) async fn enabled_hd_address_info(
     fields: &UtxoCoinFields,
     hd_wallet: &UtxoHDWallet,
     context: &str,
 ) -> Result<HDAddress<Address, Public>, String> {
+    if let Some(info) = activated_hd_address_info(fields, hd_wallet, context) {
+        return info;
+    }
     let accounts = hd_wallet.accounts.lock().await;
     let default_account = accounts
         .get(&0)
@@ -146,6 +189,9 @@ pub(crate) fn try_enabled_hd_address_info(
     hd_wallet: &UtxoHDWallet,
     context: &str,
 ) -> Result<HDAddress<Address, Public>, String> {
+    if let Some(info) = activated_hd_address_info(fields, hd_wallet, context) {
+        return info;
+    }
     let accounts = hd_wallet
         .accounts
         .try_lock()
