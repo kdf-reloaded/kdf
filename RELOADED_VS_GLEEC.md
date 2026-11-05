@@ -429,7 +429,7 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   address's event log and tells a spend from a refund (ch.20 D3, closed).
   Still open: the V2 swap protocol is not implemented for SC (ch.20 D5,
   V1 only).
-- One key per coin and one trading identity under an HD login. Swaps and ordermatch still use the hash of the passphrase text as the key of every coin that does not supply its own swap key, so EVM swaps and swaps of coins enabled through legacy `enable`/`electrum` cannot complete under an HD login; by default they are now refused up front (`swap_key_check`, see the settings below). GLEEC KDF does not do this: under an HD login it never uses that hash. Its trading identity is the internal key (the key `get_public_key` reports), and each coin's swap key is that coin's own HD key, which also pays and receives. Plan [`hd-key-unification`](docs/plans/hd-key-unification.md); CRD ch.05 §5.9B.
+- One trading identity under an HD login. Each coin now swaps with its own key, which also pays and receives, as in GLEEC KDF (CRD ch.05 §5.12C, PR #250). Orders, `sender_pubkey` and the swap's persistent key still use the hash of the passphrase text. Under an HD login GLEEC KDF never uses that hash: its trading identity is the internal key, the key `get_public_key` reports. Plan [`hd-key-unification`](docs/plans/hd-key-unification.md), item H4; CRD ch.05 §5.9B.
 - **Legacy `enable` and `electrum` under an HD login.** Today KDF Reloaded binds such a coin to the internal key and answers with that key's address. GLEEC KDF builds the coin with the coin's own HD key at `path_to_address` under its `derivation_path`, registers it, and then fails the response; the coin stays enabled. Planned: KDF Reloaded binds the coin's own HD key in the same way and answers successfully with its address. A compatibility switch, on by default, keeps that answer; switched off, the node fails the response as GLEEC KDF does. The switch is named when the work lands. In both positions the address such a coin shows changes at that upgrade, so funds on the old address are moved to an HD address first. A coin configuration without `derivation_path` fails this activation at GLEEC KDF; KDF Reloaded's answer for it is settled with the work. Plan [`hd-key-unification`](docs/plans/hd-key-unification.md), item H7; CRD ch.55 R55.4.10.
 
 ### Settings to set for GLEEC-compatible operation
@@ -550,7 +550,8 @@ behavior, except for `swap_key_check`; the row of each switch in
   from (every EVM coin, a coin enabled with a single key, a UTXO coin activated away from its first
   address) is negotiated and fails in the coin layer, instead of being refused up front. GLEEC KDF
   has no such check and needs none: its swaps announce the key the coin signs with (CRD ch.05 §5.9B
-  R34), so these pairs trade normally there. The divergence ends with plan items H3 and H4.
+  R34), so these pairs trade normally there. Since plan item H3 (PR #250) Reloaded's swaps announce
+  that key too, so the check refuses nothing; `false` only turns off the guard.
 - `fee_estimate_cache_secs: 0`, with no per-coin value — no fee reading is reused between
   requests.
 - `electrum_spread_reads: false` — every read-only Electrum query goes to the highest-ranked

@@ -212,6 +212,19 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
 
 #### Trading under an HD login
 
+- **Under an HD login, swaps of EVM coins and of coins enabled with a single key can now complete.**
+  An HD login is one with `enable_hd` set to `true`, as the Komodo DeFi wallet uses in HD mode.
+  - **Every coin's swap announces the key it pays from.** For an EVM coin or token that is its
+    signer. For a UTXO coin enabled through legacy `enable` or `electrum` it is the coin's own key.
+  - **A UTXO coin such as RIN activated through `task::enable_utxo` at another address**
+    (`path_to_address`) now funds the swap from that address, takes its change there, and is paid
+    there. The balance a swap checks and the fee `trade_preimage` estimates use the same address.
+    Earlier builds took the coins of the first address (account 0, External, address 0). At the
+    first address nothing changes.
+  - **Swaps already in progress** keep the key they started with.
+  - **An iguana login**, without `enable_hd`, does not change.
+
+  Detail: PR #250; CRD ch.05 R41–R44.
 - **Under an HD login, a swap that cannot complete is now refused before it starts.** An HD login is
   one with `enable_hd` set to `true`, as the Komodo DeFi wallet uses in HD mode. Under it, the swap of
   an EVM coin or token, of a UTXO coin enabled through legacy `enable` or `electrum` (or activated with
@@ -228,7 +241,8 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   started is never stopped. A UTXO coin such as RIN activated through `task::enable_utxo` at its first
   address, BCH activated together with its tokens, and every login without `enable_hd` are not
   affected. Set the `MM2.json` boolean `swap_key_check` to `false` to restore the earlier behavior,
-  in which such a swap is negotiated and then fails. Detail: PRs #231, #233; CRD ch.05 R36–R40.
+  in which such a swap is negotiated and then fails. Since the entry above, no coin is refused any
+  more; the check stays as a guard. Detail: PRs #231, #233; CRD ch.05 R36–R40.
 
 #### Name lookups
 
@@ -378,7 +392,8 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
-  complete, which is now done (item H1: `swap_key_check`, PRs #231, #233). The maintainer's answers on
+  complete, which is now done (item H1: `swap_key_check`, PRs #231, #233), as is one swap key per
+  coin (item H3, PRs #249, #250). The maintainer's answers on
   withdraw, the legacy methods, legacy activation and Sia are recorded in it. `RELOADED_VS_GLEEC.md`
   now says what GLEEC KDF does under an HD login, and lists the planned change to legacy `enable` and
   `electrum` with its switch (PR #245).
@@ -413,21 +428,16 @@ file carries the detail. "New" means the plan was created in this cycle.
 What does not work yet, or works only in part, in this release. Each item says where more detail
 lives.
 
-- **Under an HD login, swaps of EVM coins, and of coins enabled through legacy `enable` or
-  `electrum`, are refused up front.** An HD login is one with `enable_hd` set to `true`, as the Komodo
-  DeFi wallet uses in HD mode. For such a coin the swap would announce a different key than the one
-  the coin pays from, so the other side would reject the dex fee or the payment. `setprice`, `buy`,
-  `sell`, `update_maker_order` and `trade_preimage` now refuse these coins with an error that says
-  what to do (see Changed). The same holds for a UTXO coin activated at an address other than its
-  first one (`path_to_address`). A UTXO coin such as RIN activated through `task::enable_utxo` at its
-  first address trades normally. Until a swap key is given to every coin, trade EVM coins under a
-  login without `enable_hd`. With `swap_key_check` set to `false` the swap is negotiated again, the
-  dex fee is lost, a payment already sent comes back only at its refund time, and the proceeds of a
-  swap of a coin enabled through legacy `enable` can land on an address the wallet does not show;
-  logging in with the same passphrase without `enable_hd` reaches them. A maker's own `orderbook`
-  does not mark its orders under an HD login as its own (`is_mine` is false); other nodes still see
-  them. More in [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PRs #228, #231,
-  #233; CRD ch.05 R36–R40; CRD ch.51, note under R63.
+- **Under an HD login, a maker's orders and swaps still carry the hash of the passphrase as the
+  node's identity.** An HD login is one with `enable_hd` set to `true`. Each coin now swaps with its
+  own key (see Changed), but orders, `sender_pubkey` and the swap's persistent key do not yet use the
+  internal key that `get_public_key` reports, as GLEEC KDF does.
+  - A maker's own `orderbook` does not mark its orders as its own (`is_mine` is false); other nodes
+    still see them.
+  - The maker re-sends each order about every 90 s instead of sending keep-alives.
+
+  More in [`hd-key-unification`](docs/plans/hd-key-unification.md) (item H4). Detail: PRs #228,
+  #231, #233, #250; CRD ch.05 R36–R44; CRD ch.51, note under R63.
 - **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
   `get_enabled_coins` fails as a whole once such a coin is enabled.** Both report a single address,
   and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for
