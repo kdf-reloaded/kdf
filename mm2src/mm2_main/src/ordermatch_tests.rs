@@ -15921,3 +15921,169 @@ mod t05_12b_swap_key_check_tests {
         );
     }
 }
+
+/// CRD ch.05 §5.12D (R45, R46, R48; T13, T25, T26, T29, T30): the node key of a global-HD login is the internal
+/// key, and the passphrase hash is only the separate legacy key.
+mod hd_trading_identity_tests {
+    use super::*;
+    use crate::mm2::lp_native_dex::relay_p2p_identity_secret;
+    use crypto::CryptoCtx;
+    use kdf_crypto::sha256;
+
+    /// A valid BIP39 mnemonic used as the passphrase of the HD login.
+    const HD_MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    fn hd_ctx() -> (MmArc, std::sync::Arc<CryptoCtx>, mpsc::Receiver<AdexBehaviourCmd>) {
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json::json!({"netid": 8762}))
+            .into_mm_arc();
+        ctx.init_metrics().unwrap();
+        let crypto_ctx = CryptoCtx::init_with_global_hd_account(ctx.clone(), HD_MNEMONIC).unwrap();
+        let (tx, rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        (ctx, crypto_ctx, rx)
+    }
+
+    fn own_order() -> MakerOrder {
+        MakerOrder {
+            uuid: Uuid::new_v4(),
+            base: "DOC".into(),
+            rel: "MARTY".into(),
+            created_at: now_ms(),
+            updated_at: Some(now_ms()),
+            matches: HashMap::new(),
+            max_base_vol: 10.into(),
+            min_base_vol: 1.into(),
+            price: 1.into(),
+            started_swaps: vec![],
+            conf_settings: Some(OrderConfirmationsSettings::default()),
+            changes_history: None,
+            save_in_history: false,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+            timeout_in_minutes: None,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    /// T13, T25 (R45, R48): under a global-HD login the node key is the internal key, and the passphrase hash is
+    /// another key; the order key (an order announced from storage), `sender_pubkey` and the persistent key all
+    /// read the node key, which is the key `is_mine` and the keep-alive already used.
+    #[test]
+    fn t13_t25_the_node_key_is_the_internal_key() {
+        let (ctx, crypto_ctx, mut rx) = hd_ctx();
+        let internal = *crypto_ctx.mm2_internal_key_pair();
+        let hash_key = key_pair_from_seed(HD_MNEMONIC).unwrap();
+        assert_ne!(
+            internal.public(),
+            hash_key.public(),
+            "the two keys of an HD login differ"
+        );
+
+        assert_eq!(ctx.secp256k1_key_pair().public(), internal.public());
+        assert_eq!(ctx.secp256k1_key_pair().private_bytes(), internal.private_bytes());
+        assert_eq!(ctx.legacy_passphrase_key_pair().public(), hash_key.public());
+        assert_eq!(
+            ctx.legacy_passphrase_key_pair().private_bytes(),
+            hash_key.private_bytes()
+        );
+        // `sender_pubkey` of a taker request and the other ordermatch messages.
+        assert_eq!(ctx.public_id().unwrap().bytes, internal.public()[1..33]);
+        let internal_hex = hex::encode(internal.public_slice());
+        assert_eq!(crypto_ctx.mm2_internal_pubkey_hex(), internal_hex);
+
+        // An order announced from storage at start is announced and signed under the internal key.
+        let order = own_order();
+        reannounce_missing_own_order(&ctx, &order, vec![], vec![]);
+        let mut signers = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            if let AdexBehaviourCmd::PublishMsg { msg, .. } | AdexBehaviourCmd::PublishMsgFrom { msg, .. } = cmd {
+                let (_, _, signer) = decode_signed::<new_protocol::OrdermatchMessage>(&msg).unwrap();
+                signers.push(signer.to_hex());
+            }
+        }
+        assert_eq!(signers, vec![internal_hex.clone()]);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let item = ordermatch_ctx
+            .orderbook
+            .lock()
+            .order_set
+            .get(&order.uuid)
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            item.pubkey, internal_hex,
+            "the orderbook entry carries the internal key"
+        );
+        // `is_mine`, and so the stale-order exemption, hold for it.
+        let my_pub = mm2_internal_pubkey_hex(&ctx).unwrap();
+        assert!(is_my_order(&item.pubkey, &my_pub, &HashSet::new()));
+        assert_eq!(my_pub.as_deref(), Some(internal_hex.as_str()));
+    }
+
+    /// T13, T25: `rmd160` and the database paths already derive from the internal key and are unchanged.
+    #[test]
+    fn t13_rmd160_and_database_path_derive_from_the_internal_key() {
+        let (ctx, crypto_ctx, _rx) = hd_ctx();
+        let internal_rmd160 = crypto_ctx.mm2_internal_key_pair().public().address_hash();
+        assert_eq!(*ctx.rmd160(), internal_rmd160);
+        assert_eq!(
+            ctx.dbdir(),
+            std::path::Path::new("DB").join(hex::encode(*internal_rmd160))
+        );
+        let hash_rmd160 = key_pair_from_seed(HD_MNEMONIC).unwrap().public().address_hash();
+        assert_ne!(*ctx.rmd160(), hash_rmd160);
+    }
+
+    /// T26 (R45 item 6): the relay's libp2p identity secret is the SHA-256 of the internal key under a global-HD
+    /// login, and of the passphrase hash (as before) under an iguana login.
+    #[test]
+    fn t26_the_relay_identity_comes_from_the_node_key() {
+        let (ctx, crypto_ctx, _rx) = hd_ctx();
+        assert_eq!(
+            relay_p2p_identity_secret(&ctx),
+            sha256(&*crypto_ctx.mm2_internal_key_pair().private().secret).take()
+        );
+        assert_ne!(
+            relay_p2p_identity_secret(&ctx),
+            sha256(&*key_pair_from_seed(HD_MNEMONIC).unwrap().private().secret).take()
+        );
+
+        let iguana = MmCtxBuilder::new().into_mm_arc();
+        CryptoCtx::init_with_iguana_passphrase(iguana.clone(), "passphrase").unwrap();
+        assert_eq!(
+            relay_p2p_identity_secret(&iguana),
+            sha256(&*key_pair_from_seed("passphrase").unwrap().private().secret).take()
+        );
+    }
+
+    /// T29 (R46): the legacy key an HD login keeps for the Lightning seed and the BCH-with-tokens and Tendermint
+    /// activations is the passphrase hash, which was the context key before this section.
+    #[test]
+    fn t29_the_legacy_key_is_the_passphrase_hash() {
+        let (ctx, ..) = hd_ctx();
+        let before = key_pair_from_seed(HD_MNEMONIC).unwrap();
+        assert_eq!(
+            ctx.legacy_passphrase_key_pair().private().secret,
+            before.private().secret
+        );
+    }
+
+    /// T30 (R45 to R48): under an iguana login the node key, the legacy key, `rmd160` and the relay identity are
+    /// the passphrase hash, as in the previous build.
+    #[test]
+    fn t30_an_iguana_login_is_unchanged() {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        ctx.init_metrics().unwrap();
+        CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "passphrase").unwrap();
+        let hash_key = key_pair_from_seed("passphrase").unwrap();
+        assert_eq!(ctx.secp256k1_key_pair().private().secret, hash_key.private().secret);
+        assert_eq!(
+            ctx.legacy_passphrase_key_pair().private().secret,
+            hash_key.private().secret
+        );
+        assert_eq!(*ctx.rmd160(), hash_key.public().address_hash());
+    }
+}

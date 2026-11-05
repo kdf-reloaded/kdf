@@ -78,7 +78,13 @@ fn restore(saved: MakerSavedSwap, base: &KeyPair) -> (MakerSwap, KeyPair) {
         .into_mm_arc();
     let maker_coin = MmCoinEnum::Test(TestCoin::default());
     let taker_coin = MmCoinEnum::Test(TestCoin::default());
-    let (swap, _) = MakerSwap::load_from_saved(ctx, maker_coin, taker_coin, saved).unwrap();
+    let (swap, _) = MakerSwap::load_from_saved(
+        ctx.clone(),
+        maker_coin,
+        taker_coin,
+        crate::mm2::lp_swap::recorded_by_maker(saved, &ctx),
+    )
+    .unwrap();
     (swap, persistent)
 }
 
@@ -294,10 +300,10 @@ fn a_coin_that_does_not_derive_keeps_its_saved_private_key() {
         data.maker_coin = "KMD".into();
     }
     let (swap, _) = MakerSwap::load_from_saved(
-        ctx,
+        ctx.clone(),
         MmCoinEnum::Test(TestCoin::default()),
         MmCoinEnum::Test(TestCoin::default()),
-        saved,
+        crate::mm2::lp_swap::recorded_by_maker(saved, &ctx),
     )
     .unwrap();
     assert_eq!(

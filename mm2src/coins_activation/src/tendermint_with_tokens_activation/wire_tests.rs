@@ -154,7 +154,7 @@ fn assert_nothing_registered(ctx: &MmArc, tickers: &[&str]) {
 /// Registers the platform without contacting a node: building the coin needs none.
 fn register_platform(ctx: &MmArc) -> TendermintCoin {
     let conf = coins::coin_conf(ctx, PLATFORM);
-    let priv_key = *ctx.secp256k1_key_pair().private().secret;
+    let priv_key = *ctx.legacy_passphrase_key_pair().private().secret;
     let coin = block_on(coins::tendermint::tendermint_coin_from_conf_and_request(
         ctx,
         PLATFORM.to_owned(),

@@ -852,8 +852,8 @@ pub(crate) fn lp_connect_start_bob(ctx: MmArc, maker_match: MakerMatch, maker_or
         let alice = bits256::from(maker_match.request.sender_pubkey.0);
         let maker_amount = maker_match.reserved.get_base_amount().to_decimal();
         let taker_amount = maker_match.reserved.get_rel_amount().to_decimal();
-        let privkey = &ctx.secp256k1_key_pair().private().secret;
-        let my_persistent_pub = compressed_pub_key_from_priv_raw(&privkey[..], ChecksumType::DSHA256).unwrap();
+        // CRD ch.05 R45: a swap started now runs with the node key, whose public key is its persistent key.
+        let node_key_pair = *ctx.secp256k1_key_pair();
         let uuid = maker_match.request.uuid;
         let my_conf_settings = choose_maker_confs_and_notas(
             maker_order.conf_settings,
@@ -892,7 +892,7 @@ pub(crate) fn lp_connect_start_bob(ctx: MmArc, maker_match: MakerMatch, maker_or
             alice,
             maker_amount,
             taker_amount,
-            my_persistent_pub,
+            node_key_pair,
             uuid,
             Some(maker_order.uuid),
             my_conf_settings,
@@ -944,8 +944,8 @@ pub(crate) fn lp_connected_alice(ctx: MmArc, taker_order: TakerOrder, taker_matc
             );
             return;
         }
-        let privkey = &ctx.secp256k1_key_pair().private().secret;
-        let my_persistent_pub = compressed_pub_key_from_priv_raw(&privkey[..], ChecksumType::DSHA256).unwrap();
+        // CRD ch.05 R45: a swap started now runs with the node key, whose public key is its persistent key.
+        let node_key_pair = *ctx.secp256k1_key_pair();
         let maker_amount = taker_match.reserved.get_base_amount().clone();
         let taker_amount = taker_match.reserved.get_rel_amount().clone();
         let uuid = taker_match.reserved.taker_order_uuid;
@@ -986,7 +986,7 @@ pub(crate) fn lp_connected_alice(ctx: MmArc, taker_order: TakerOrder, taker_matc
             maker,
             maker_amount,
             taker_amount,
-            my_persistent_pub,
+            node_key_pair,
             uuid,
             Some(uuid),
             my_conf_settings,

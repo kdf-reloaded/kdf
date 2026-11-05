@@ -29,6 +29,22 @@ reaches no coin server until you set one of these in `MM2.json`:
 At start the node logs which resolver it uses. A name it cannot resolve is logged with a hint
 that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resolver).
 
+### Upgrade note: a new node identity under an HD login
+
+**If you log in with `enable_hd: true`, other nodes see your node under a new public key after
+this upgrade.** That key is the one `get_public_key` reports. Earlier builds signed orders and
+swaps with a hash of the passphrase text instead.
+- **Open orders** are announced again under the new key when the node starts. The copies that
+  other nodes still hold under the old key expire after the maker-order timeout. You can also
+  cancel your orders before the upgrade.
+- **Swaps in progress** finish on the key they started with.
+- **Swap statistics** show two public keys for your node, one from before the upgrade and one
+  after.
+- **A relay (seed node)** running with an HD login gets a new peer ID. Other nodes learn it again
+  through the relay's address.
+
+A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R49.
+
 ### Added
 
 #### ARRR and other shielded coins
@@ -247,6 +263,17 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   - **An iguana login**, without `enable_hd`, does not change.
 
   Detail: PR #250; CRD ch.05 R41–R44.
+- **Under an HD login, the node now trades under the key `get_public_key` reports.** That key
+  signs the maker's orders and keep-alives, fills `sender_pubkey`, and is the persistent key of
+  every new swap, as in GLEEC KDF.
+  - A maker's own `orderbook` now marks its orders as its own (`is_mine`).
+  - The maker sends one keep-alive per pair every 30 s instead of re-sending each order.
+  - A relay's peer ID comes from the same key.
+  - The hash of the passphrase text is kept only for swaps that recorded it, for a Lightning node's
+    seed, and for activating BCH with its tokens and Tendermint, until those activations move to
+    the coin key.
+
+  See the upgrade note above. Detail: PR #254; CRD ch.05 R45–R49.
 - **Under an HD login, a swap that cannot complete is now refused before it starts.** An HD login is
   one with `enable_hd` set to `true`, as the Komodo DeFi wallet uses in HD mode. Under it, the swap of
   an EVM coin or token, of a UTXO coin enabled through legacy `enable` or `electrum` (or activated with
@@ -442,7 +469,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
   complete, which is now done (item H1: `swap_key_check`, PRs #231, #233), as is one swap key per
-  coin (item H3, PRs #249, #250). The maintainer's answers on
+  coin (item H3, PRs #249, #250) and one trading identity for the node (item H4, PRs #253, #254).
+  The maintainer's answers on
   withdraw, the legacy methods, legacy activation and Sia are recorded in it. `RELOADED_VS_GLEEC.md`
   now says what GLEEC KDF does under an HD login, and lists the planned change to legacy `enable` and
   `electrum` with its switch (PR #245).
@@ -477,16 +505,12 @@ file carries the detail. "New" means the plan was created in this cycle.
 What does not work yet, or works only in part, in this release. Each item says where more detail
 lives.
 
-- **Under an HD login, a maker's orders and swaps still carry the hash of the passphrase as the
-  node's identity.** An HD login is one with `enable_hd` set to `true`. Each coin now swaps with its
-  own key (see Changed), but orders, `sender_pubkey` and the swap's persistent key do not yet use the
-  internal key that `get_public_key` reports, as GLEEC KDF does.
-  - A maker's own `orderbook` does not mark its orders as its own (`is_mine` is false); other nodes
-    still see them.
-  - The maker re-sends each order about every 90 s instead of sending keep-alives.
-
-  More in [`hd-key-unification`](docs/plans/hd-key-unification.md) (item H4). Detail: PRs #228,
-  #231, #233, #250; CRD ch.05 R36–R44; CRD ch.51, note under R63.
+- **Swaps under an HD login are still being tested end to end.** An HD login is one with
+  `enable_hd` set to `true`. Each coin now swaps with its own key, and the node trades under the
+  key `get_public_key` reports (see Changed). The lab swaps that confirm this, in both directions
+  and across an upgrade, are still running. More in
+  [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PRs #228, #231, #233, #250,
+  #254; CRD ch.05 R36–R49; CRD ch.51, note under R63.
 - **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
   `get_enabled_coins` fails as a whole once such a coin is enabled.** Both report a single address,
   and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for

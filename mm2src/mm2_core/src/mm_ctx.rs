@@ -112,9 +112,14 @@ pub struct MmCtx {
     /// namespace shared across the wallets and coins activated under the active
     /// seed. Set once during startup, read-many thereafter.
     pub shared_db_id: Constructible<H160>,
-    /// secp256k1 key pair derived from passphrase.
-    /// cf. `key_pair_from_seed`.
+    /// The node key: the key the node uses as its own for ordermatch signing, the swap persistent key, swap
+    /// messages and the relay identity (CRD ch.05 R45). Under an iguana login it is the key derived from the
+    /// passphrase (cf. `key_pair_from_seed`); under a global-HD login it is the internal key of R16.
     pub secp256k1_key_pair: Constructible<KeyPair>,
+    /// The legacy passphrase key (CRD ch.05 R46): the key derived from the passphrase text, the node key of
+    /// builds before the one trading identity. Equal to the node key under an iguana login. Read it through
+    /// [`MmCtx::legacy_passphrase_key_pair`], never directly.
+    pub legacy_passphrase_key_pair: Constructible<KeyPair>,
     /// Coins that should be enabled to kick start the interrupted swaps and orders.
     pub coins_needed_for_kick_start: Mutex<HashSet<String>>,
     /// The context belonging to the `lp_swap` mod: `SwapsContext`.
@@ -174,6 +179,7 @@ impl MmCtx {
             rmd160: Constructible::default(),
             shared_db_id: Constructible::default(),
             secp256k1_key_pair: Constructible::default(),
+            legacy_passphrase_key_pair: Constructible::default(),
             coins_needed_for_kick_start: Mutex::new(HashSet::new()),
             swaps_ctx: Mutex::new(None),
             stats_ctx: Mutex::new(None),
@@ -347,6 +353,16 @@ impl MmCtx {
             Some(pair) => pair,
             None => panic!("secp256k1_key_pair not available"),
         }
+    }
+
+    /// The legacy passphrase key pair (CRD ch.05 R46, Decision CR): the hash of the passphrase text. It is used
+    /// only for a swap that recorded it (R47), the Lightning seed, and the BCH-with-tokens and Tendermint
+    /// activations. Under an iguana login, and in a context built without a separate legacy key, it is the node
+    /// key. Panics if neither is available.
+    pub fn legacy_passphrase_key_pair(&self) -> &KeyPair {
+        self.legacy_passphrase_key_pair
+            .as_option()
+            .unwrap_or_else(|| self.secp256k1_key_pair())
     }
 
     /// This is our public ID, allowing us to be different from other peers.
@@ -669,6 +685,7 @@ pub struct MmCtxBuilder {
     conf: Option<Json>,
     log_level: LogLevel,
     key_pair: Option<KeyPair>,
+    legacy_key_pair: Option<KeyPair>,
     version: String,
     #[cfg(target_arch = "wasm32")]
     db_namespace: DbNamespaceId,
@@ -689,6 +706,12 @@ impl MmCtxBuilder {
 
     pub fn with_secp256k1_key_pair(mut self, key_pair: KeyPair) -> Self {
         self.key_pair = Some(key_pair);
+        self
+    }
+
+    /// Sets a legacy passphrase key pair that differs from the node key, as under a global-HD login.
+    pub fn with_legacy_passphrase_key_pair(mut self, key_pair: KeyPair) -> Self {
+        self.legacy_key_pair = Some(key_pair);
         self
     }
 
@@ -721,6 +744,9 @@ impl MmCtxBuilder {
         if let Some(key_pair) = self.key_pair {
             ctx.rmd160.pin(key_pair.public().address_hash()).unwrap();
             ctx.secp256k1_key_pair.pin(key_pair).unwrap();
+        }
+        if let Some(key_pair) = self.legacy_key_pair {
+            ctx.legacy_passphrase_key_pair.pin(key_pair).unwrap();
         }
 
         #[cfg(target_arch = "wasm32")]

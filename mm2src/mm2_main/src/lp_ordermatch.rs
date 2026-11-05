@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use best_orders::BestOrdersAction;
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
-use coins::utxo::{compressed_pub_key_from_priv_raw, ChecksumType, UtxoAddressFormat};
+use coins::utxo::UtxoAddressFormat;
 use coins::{coin_conf, find_pair, lp_coinfind, BalanceTradeFeeUpdatedHandler, CoinProtocol, FeeApproxStage, MmCoinEnum};
 use common::executor::{spawn, Timer};
 use common::log::{error, LogOnError};

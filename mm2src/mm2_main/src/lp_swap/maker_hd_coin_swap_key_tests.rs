@@ -57,6 +57,8 @@ fn saved_swap(pubkey: Option<&[u8]>, pair: Option<KeyPair>) -> MakerSavedSwap {
     match saved.events[0].event {
         MakerSwapEvent::Started(ref mut data) => {
             data.secret_hash = Some(vec![7u8; 20].into());
+            // The swap was started by a node whose key is `persistent_pair` (CRD ch.05 R47).
+            data.my_persistent_pub = H264::from(&**persistent_pair().public()).into();
             data.maker_coin_htlc_pubkey = pubkey.map(|p| H264::from(p).into());
             data.maker_coin_htlc_privkey = pair.map(SerializableSecp256k1Keypair::from);
         },
@@ -111,8 +113,7 @@ fn t22_an_iguana_login_saves_no_pair_and_announces_the_persistent_key() {
     assert!(pair.is_none(), "the persistent key is not held as a pair of the coin");
     assert!(saved.is_none(), "an iguana login saves no HTLC key pair");
 
-    let ctx = ctx_of(persistent);
-    let (maker_pub, taker_pub) = derive_htlc_pubkeys(&ctx, &coin, &pair, &coin, &pair).unwrap();
+    let (maker_pub, taker_pub) = derive_htlc_pubkeys(persistent.public(), &coin, &pair, &coin, &pair).unwrap();
     assert_eq!(maker_pub.to_vec(), persistent.public().to_vec());
     assert_eq!(taker_pub.to_vec(), persistent.public().to_vec());
 
@@ -134,8 +135,7 @@ fn t21_a_coin_key_other_than_the_persistent_key_is_announced_and_saved() {
     assert_eq!(pair.unwrap().public(), own.public());
     assert_eq!(saved.unwrap().priv_key(), own.private().secret.take());
 
-    let ctx = ctx_of(persistent);
-    let (maker_pub, taker_pub) = derive_htlc_pubkeys(&ctx, &coin, &pair, &coin, &pair).unwrap();
+    let (maker_pub, taker_pub) = derive_htlc_pubkeys(persistent.public(), &coin, &pair, &coin, &pair).unwrap();
     assert_eq!(maker_pub.to_vec(), own.public().to_vec());
     assert_eq!(taker_pub.to_vec(), own.public().to_vec());
 }
@@ -193,4 +193,267 @@ fn t23_a_swap_saved_with_a_pair_resumes_and_recovers_with_that_pair() {
     assert_eq!(recovered.action, RecoveredSwapAction::RefundedMyPayment);
     assert_eq!(searched_with(), saved_pair.public().to_vec());
     assert_eq!(refund_privkey(), saved_pair.private().secret.to_vec());
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// CRD ch.05 §5.12D (R45, R47; T27, T28): the swap's own node key under a global-HD login.
+// ---------------------------------------------------------------------------------------------------------
+
+/// The passphrase-hash key of an HD login: the node key of earlier builds, now only the legacy key.
+fn legacy_pair() -> KeyPair { key_pair_from_seed("the hash of the passphrase text of an HD login").unwrap() }
+
+/// A global-HD login: the internal key (`persistent_pair`) is the node key, and `legacy_pair` the legacy key.
+fn hd_ctx() -> MmArc {
+    MmCtxBuilder::default()
+        .with_conf(json!({"netid": 8762}))
+        .with_secp256k1_key_pair(persistent_pair())
+        .with_legacy_passphrase_key_pair(legacy_pair())
+        .into_mm_arc()
+}
+
+/// The saved swap of `saved_swap(None, None)`, whose Started event recorded `recorded` as the persistent key.
+fn saved_recording(recorded: &[u8]) -> MakerSavedSwap {
+    let mut saved = saved_swap(None, None);
+    match saved.events[0].event {
+        MakerSwapEvent::Started(ref mut data) => data.my_persistent_pub = H264::from(recorded).into(),
+        _ => unreachable!(),
+    }
+    saved
+}
+
+/// T27 (R47): a swap saved by the previous build under a global-HD login, with the legacy key recorded and no
+/// saved pair, resumes with the legacy key: it is the swap's node key (which signs the swap messages), the HTLC
+/// key of a coin that saved no pair, and the key the refund is signed with.
+#[test]
+fn t27_a_swap_that_recorded_the_legacy_key_resumes_and_refunds_with_it() {
+    let legacy = legacy_pair();
+    let coin = mock_coin_signing_with(Some(coin_pair()));
+    let (swap, _) = MakerSwap::load_from_saved(hd_ctx(), coin.clone(), coin, saved_recording(legacy.public())).unwrap();
+    assert_eq!(swap.node_key_pair.public(), legacy.public());
+    assert_eq!(swap.my_persistent_pub.to_vec(), legacy.public().to_vec());
+    assert_eq!(swap.r().my_maker_coin_htlc_keypair.public(), legacy.public());
+    assert_eq!(swap.r().my_maker_coin_htlc_pub.to_vec(), legacy.public().to_vec());
+
+    mock_payment_of(legacy.public().to_vec());
+    let recovered = block_on(swap.recover_funds()).unwrap();
+    assert_eq!(recovered.action, RecoveredSwapAction::RefundedMyPayment);
+    assert_eq!(searched_with(), legacy.public().to_vec());
+    assert_eq!(refund_privkey(), legacy.private().secret.to_vec());
+}
+
+/// T27 (R47): a swap that recorded the node key (the internal key) resumes with it, and a swap started now runs
+/// with it: its persistent key and its default HTLC key are the node key.
+#[test]
+fn t27_a_swap_that_recorded_the_internal_key_and_a_new_swap_use_it() {
+    let internal = persistent_pair();
+    let coin = mock_coin_signing_with(None);
+    let (swap, _) =
+        MakerSwap::load_from_saved(hd_ctx(), coin.clone(), coin, saved_recording(internal.public())).unwrap();
+    assert_eq!(swap.node_key_pair.public(), internal.public());
+    assert_eq!(swap.r().my_maker_coin_htlc_keypair.public(), internal.public());
+
+    let ctx = hd_ctx();
+    let new_swap = MakerSwap::new(
+        ctx.clone(),
+        bits256::from([1u8; 32]),
+        1.into(),
+        1.into(),
+        *ctx.secp256k1_key_pair(),
+        Uuid::new_v4(),
+        None,
+        SwapConfirmationsSettings {
+            maker_coin_confs: 1,
+            maker_coin_nota: false,
+            taker_coin_confs: 1,
+            taker_coin_nota: false,
+        },
+        mock_coin_signing_with(None),
+        mock_coin_signing_with(None),
+        7800,
+        None,
+    );
+    assert_eq!(new_swap.my_persistent_pub.to_vec(), internal.public().to_vec());
+    assert_eq!(new_swap.r().my_taker_coin_htlc_keypair.public(), internal.public());
+    assert_ne!(new_swap.my_persistent_pub.to_vec(), legacy_pair().public().to_vec());
+}
+
+/// T27 (R47): a recorded key that matches neither key is an error naming the swap, and the swap is not resumed.
+#[test]
+fn t27_a_recorded_key_that_matches_neither_key_is_reported() {
+    let coin = mock_coin_signing_with(None);
+    let other = coin_pair();
+    let saved = saved_recording(other.public());
+    let uuid = saved.uuid;
+    let err = match MakerSwap::load_from_saved(hd_ctx(), coin.clone(), coin, saved) {
+        Ok(_) => panic!("a swap that recorded an unknown key must not resume"),
+        Err(e) => e,
+    };
+    assert!(err.contains(&uuid.to_string()), "{err}");
+    assert!(err.contains(&hex::encode(other.public().to_vec())), "{err}");
+    assert!(err.contains("not resumed"), "{err}");
+}
+
+/// T28 (R47): recovery lists the legacy key among its candidates: a payment of a swap that saved no pair, built
+/// with the legacy key, is recovered with it even though the swap's saved key and the node key are others.
+#[test]
+fn t28_recovery_recovers_a_payment_built_with_the_legacy_key() {
+    let legacy = legacy_pair();
+    let coin = mock_coin_signing_with(None);
+    mock_payment_of(legacy.public().to_vec());
+    let ctx = hd_ctx();
+    let stages = RecoveryStages::default();
+    let key = block_on(resolve_recovery_htlc_key(RecoveryKeyRequest {
+        ctx: &ctx,
+        coin: &coin,
+        owner: PaymentOwner::Mine,
+        per_swap_pubkey: H264::from(coin_pair().public().to_vec().as_slice()),
+        derived_keypair: None,
+        saved_keypair: None,
+        other_pubkey: &[2u8; 33],
+        time_lock: 1,
+        secret_hash: &[7u8; 20],
+        payment_tx: &[1u8; 4],
+        stages: &stages,
+    }))
+    .unwrap();
+    assert_eq!(key.kind, super::super::RecoveryHtlcKeyKind::LegacyPassphrase);
+    assert_eq!(key.keypair.public(), legacy.public());
+
+    // The node key is still a candidate, and is tried before the legacy key.
+    mock_payment_of(persistent_pair().public().to_vec());
+    let key = block_on(resolve_recovery_htlc_key(RecoveryKeyRequest {
+        ctx: &ctx,
+        coin: &coin,
+        owner: PaymentOwner::Mine,
+        per_swap_pubkey: H264::from(coin_pair().public().to_vec().as_slice()),
+        derived_keypair: None,
+        saved_keypair: None,
+        other_pubkey: &[2u8; 33],
+        time_lock: 1,
+        secret_hash: &[7u8; 20],
+        payment_tx: &[1u8; 4],
+        stages: &stages,
+    }))
+    .unwrap();
+    assert_eq!(key.kind, super::super::RecoveryHtlcKeyKind::Persistent);
+    assert_eq!(key.keypair.public(), persistent_pair().public());
+}
+
+/// T27 (R47) and T30: the swap messages are signed with the swap's node key when it has no per-swap key, and
+/// with the per-swap key otherwise; the key a swap that recorded the legacy key signs with is the legacy key.
+#[test]
+fn t27_swap_messages_are_signed_with_the_swaps_node_key() {
+    use super::super::swap_msg::signing_identity;
+    use crate::mm2::lp_network::Libp2pPeerId;
+    let legacy = legacy_pair();
+    let internal = persistent_pair();
+    let (secret, from) = signing_identity(&None, &legacy);
+    assert_eq!(secret, legacy.private_bytes());
+    assert!(from.is_none());
+    let (secret, _) = signing_identity(&None, &internal);
+    assert_eq!(secret, internal.private_bytes());
+    let per_swap = coin_pair();
+    let (secret, from) = signing_identity(&Some(per_swap), &legacy);
+    assert_eq!(secret, per_swap.private_bytes());
+    assert_eq!(from, Some(per_swap.libp2p_peer_id()));
+
+    let coin = mock_coin_signing_with(None);
+    let (swap, _) = MakerSwap::load_from_saved(hd_ctx(), coin.clone(), coin, saved_recording(legacy.public())).unwrap();
+    assert_eq!(
+        signing_identity(&swap.p2p_privkey, &swap.node_key_pair).0,
+        legacy.private_bytes()
+    );
+}
+
+/// T30: under an iguana login the legacy key is the node key, and a swap resumes exactly as before.
+#[test]
+fn t30_under_an_iguana_login_the_legacy_key_is_the_node_key() {
+    let ctx = ctx_of(persistent_pair());
+    assert_eq!(
+        ctx.legacy_passphrase_key_pair().public(),
+        ctx.secp256k1_key_pair().public()
+    );
+    let coin = mock_coin_signing_with(None);
+    let (swap, _) = MakerSwap::load_from_saved(ctx, coin.clone(), coin, saved_swap(None, None)).unwrap();
+    assert_eq!(swap.node_key_pair.public(), persistent_pair().public());
+}
+
+/// The error text of a recovery that finds no candidate paying the payment: the swap's negotiated key is
+/// `per_swap_pubkey`, and `saved_keypair` is the private key saved with it.
+fn unrecoverable_text(per_swap_pubkey: &[u8], saved_keypair: Option<KeyPair>) -> String {
+    let coin = mock_coin_signing_with(None);
+    mock_payment_of(vec![0u8; 33]);
+    let ctx = hd_ctx();
+    let stages = RecoveryStages::default();
+    block_on(resolve_recovery_htlc_key(RecoveryKeyRequest {
+        ctx: &ctx,
+        coin: &coin,
+        owner: PaymentOwner::Mine,
+        per_swap_pubkey: H264::from(per_swap_pubkey),
+        derived_keypair: None,
+        saved_keypair,
+        other_pubkey: &[2u8; 33],
+        time_lock: 1,
+        secret_hash: &[7u8; 20],
+        payment_tx: &[1u8; 4],
+        stages: &stages,
+    }))
+    .unwrap_err()
+}
+
+/// T28 (R47): when the swap's own key is the legacy key, the text names the keys that were really tried, in the
+/// order they were tried, whether or not a private key was saved with the swap; when the legacy key is only an
+/// extra candidate, the existing texts stay and the legacy key is added to them.
+#[test]
+fn t28_the_unrecoverable_text_names_the_keys_that_were_tried() {
+    let legacy = legacy_pair();
+
+    // The swap's key is the legacy key and nothing is saved: the node key is tried first, then the legacy key.
+    let text = unrecoverable_text(legacy.public(), None);
+    assert!(
+        text.contains("does not pay the HTLC script this swap negotiated: the persistent key and the legacy passphrase key were tried -- "),
+        "{text}"
+    );
+    assert!(!text.contains("which is also the persistent key"), "{text}");
+
+    // The swap's key is the legacy key and a private key that does not belong to it is saved: legacy first.
+    let text = unrecoverable_text(legacy.public(), Some(coin_pair()));
+    assert!(
+        text.contains("negotiated: the legacy passphrase key and the persistent key were tried -- "),
+        "{text}"
+    );
+
+    // The swap's key is a third key: the existing text, with the legacy key added as an extra candidate.
+    let text = unrecoverable_text(coin_pair().public(), None);
+    assert!(
+        text.contains(
+            "negotiated: the swap's key, which is also the persistent key, was tried, and so was the legacy \
+             passphrase key -- "
+        ),
+        "{text}"
+    );
+
+    // Under an iguana login (the legacy key is the node key) the text is the one of before.
+    let coin = mock_coin_signing_with(None);
+    mock_payment_of(vec![0u8; 33]);
+    let ctx = ctx_of(persistent_pair());
+    let stages = RecoveryStages::default();
+    let text = block_on(resolve_recovery_htlc_key(RecoveryKeyRequest {
+        ctx: &ctx,
+        coin: &coin,
+        owner: PaymentOwner::Mine,
+        per_swap_pubkey: H264::from(&**persistent_pair().public()),
+        derived_keypair: None,
+        saved_keypair: None,
+        other_pubkey: &[2u8; 33],
+        time_lock: 1,
+        secret_hash: &[7u8; 20],
+        payment_tx: &[1u8; 4],
+        stages: &stages,
+    }))
+    .unwrap_err();
+    assert!(
+        text.contains("negotiated: the swap's key, which is also the persistent key, was tried -- "),
+        "{text}"
+    );
 }
