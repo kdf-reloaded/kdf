@@ -1465,3 +1465,22 @@ async fn a_dropped_detection_leaves_the_endpoint_and_form_it_read_last_and_a_fin
         .unwrap();
     assert_eq!(backend.detection_progress(&hash()), None);
 }
+
+/// CRD ch.39 T39.6.5a (R39.8.0bb): the history reader accepts a delivered mainnet transaction that
+/// carries Ironwood actions, and names it by the chain's identifier. (It has no transparent output, so
+/// it cannot match a watched script; reading it must not turn it into a problem.)
+#[test]
+fn t39_6_5a_the_history_reader_accepts_a_mainnet_transaction_with_ironwood_actions() {
+    use crate::z_coin::z_ironwood_read_tests::{DEPOSIT, WITHDRAW};
+    for recorded in [&WITHDRAW, &DEPOSIT] {
+        let raw = RawTx {
+            data: recorded.bytes(),
+            height: Some(u64::from(recorded.height)),
+        };
+        let tx = decode(&raw).unwrap_or_else(|e| panic!("{}: {}", recorded.txid_display, e));
+        let mut display = *tx.txid().as_ref();
+        display.reverse();
+        assert_eq!(hex::encode(display), recorded.txid_display);
+        assert!(!has_output_with_script(&tx, None, &htlc_script()));
+    }
+}

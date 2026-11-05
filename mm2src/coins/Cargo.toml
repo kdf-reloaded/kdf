@@ -154,6 +154,10 @@ rand_core = "0.6"
 # Test certificates for the Electrum TLS handshake tests. Default features are ring-based in 0.13; the
 # aws-lc-rs backend must not enter the graph.
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+# Used only by z_coin/z_ironwood_read_tests.rs (CRD ch.39 T39.6.5a): the Halo2 verifying key and the batch
+# validator that check a mainnet Ironwood bundle. Already in the tree (version locked) through
+# zcash_primitives, which enables the same `circuit` feature on native targets.
+orchard = { version = "=0.15.5", default-features = false, features = ["circuit"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { version = "0.3.27" }
