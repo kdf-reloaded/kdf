@@ -299,6 +299,10 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   Ironwood proofs and signatures verify with the node's own keys. A payment from an Ironwood wallet
   to the node's address is found, counted once, shown as pending while unconfirmed, and spent like
   any other. Nothing changes in how the node behaves. Detail: PR #242; CRD ch.39 T39.6.5a, T39.8.0i.
+- **A unit test of the maker's update queue no longer fails at random.** The test of the 10-second
+  keep-alive wait counted the released and the pending orders while the queue kept releasing, so
+  one release between the two counts made it fail now and then. It now stops the queue before
+  counting. The node itself is unchanged. Detail: PR #244; CRD ch.32 T-MP6.
 
 ### Plans touched
 
