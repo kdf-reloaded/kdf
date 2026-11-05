@@ -212,3 +212,22 @@ root of the empty tree and the bundle is output-only (spends disabled), which `t
 | `t39_6_5d_the_built_anchor_and_flags_match_the_chain_wallets_form` | T39.6.5d | Built withdrawals, with and without change: empty-tree anchor, spends off and outputs on, exactly the fixture's form; two actions; everything entering Ironwood is the one payment (the change never does); no tree-state read |
 | `t39_6_5e_a_submitted_pirate1_withdrawal_is_recorded` | T39.6.5e, R39.6.5g | Through `send_raw_tx`: the fee read from the bytes (10,000), the note excluded from the next selection, the unmined history row with the final amounts that survives the scan, the change as non-spendable balance, then spendable after the scan. Needs the vendored `zcash_client_sqlite`, which skips the Orchard and Ironwood nullifier marking instead of panicking |
 | `t39_6_5a_the_recorder_stores_the_mainnet_withdrawal_with_its_derived_fee` | T39.6.5a, R39.6.5g | The recorded mainnet withdrawal (Sapling spend, two Ironwood actions) goes through the recorder into a real wallet database: stored with the derived fee 10,000; none of the wallet's notes are marked spent |
+
+## ARRR withdrawal refuses `fee` and `from` (2 tests)
+
+Location: `mm2src/coins/z_coin/z_note_lock_tests/withdraw_unsupported.rs` (a real Light-mode coin over a
+wallet database and the scripted lightwalletd transport of the note-lock harness). CI cell: `shielded`
+(`cargo test -p coins --lib z_coin::`). CRD: chapter 49, R49.27, R49.27a (b) and (c), T49.27a (shielded
+rows).
+
+No refusal reads the backend, decodes the destination or selects a note, so the tests make no proof and
+need no network. They need the Sapling parameter files only because the harness loads them, and skip with
+a message where those are absent (the same arrangement as the other wallet-database tests). Every
+assertion compares the discriminant, the HTTP status and the JSON type of `error_data`, never the text.
+The requests carry a destination that decodes as no address, so a refusal that wins over the decoder was
+decided before it ran.
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `t49_27a_direct_withdraw_refuses_fee_then_from_with_the_shared_arm` | T49.27a, R49.27a (b), (c) | The direct `withdraw` with `fee`, then with `from`: HTTP 400, `error_type` `UnsupportedError`, string `error_data`. With both, the answer is the one for `fee` (the text is that of the `fee` refusal and differs from the `from` one). The backend is not asked anything; nothing is broadcast, locked or spent |
+| `t49_27a_task_route_refuses_fee_and_from_with_the_shared_arm` | T49.27a, R49.27a | `task::withdraw::init` with `fee`, and another with `from`, over a registered coin: the task reaches `status: "Error"` with `details.error_type == "UnsupportedError"` and a string `details.error_data` |

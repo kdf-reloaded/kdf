@@ -2182,3 +2182,4 @@ async fn requires_notarization_has_no_effect_on_a_shielded_coin() {
 }
 
 mod pirate1_withdraw;
+mod withdraw_unsupported;
