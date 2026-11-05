@@ -237,6 +237,7 @@ impl LightCoinFixture {
             wallet_db_scanned_through: AtomicU64::new(scanned_through),
             pending_receipts: Mutex::new(HashMap::new()),
             consensus_params: params.clone(),
+            v6_decline_log: Mutex::new(V6DeclineLog::default()),
             check_point_block: None,
             blocks_per_iteration: 1_000,
             inter_iteration_interval_ms: 0,
@@ -567,6 +568,32 @@ fn production_send_pacing_is_the_reference_budget() {
     assert_eq!(pacing.in_flight_retry_secs, 15.);
     assert_eq!(pacing.confirmation_wait_secs, 4000);
     assert_eq!(pacing.confirmation_check_secs, 10);
+}
+
+/// T39.6.4f (a), (b), (c) on a real coin: the coin has no Ironwood upgrade and so sends its bytes
+/// unchanged and requires nothing; once a height is discovered it sends the word, declines a
+/// counterparty without it and accepts one that declares it. Skipped without the Sapling parameter
+/// files, like the tests around it (the fixture needs them).
+#[test]
+fn t39_6_4f_the_coin_methods_send_decline_and_accept() {
+    let Some(fixture) = LightCoinFixture::with_notes(0, 2) else {
+        return;
+    };
+    let coin = &fixture.coin;
+    let first = coin.coin_protocol_info();
+    let word = append_capability_word(Vec::new(), &[CAPABILITY_TX_V6]);
+
+    // No Ironwood upgrade known: nothing sent, nothing required.
+    assert_eq!(first, rmp_serde::to_vec(coin.addr_format()).unwrap());
+    assert!(coin.is_coin_protocol_supported(&Some(first.clone())));
+    assert!(coin.is_coin_protocol_supported(&None) || coin.addr_format().is_segwit());
+
+    // The shared cell of the consensus parameters: a discovered height opens the window.
+    coin.z_fields.consensus_params.record_discovered_ironwood_height(100);
+    let sent = coin.coin_protocol_info();
+    assert_eq!(sent, [first.as_slice(), word.as_slice()].concat());
+    assert!(!coin.is_coin_protocol_supported(&Some(first.clone())));
+    assert!(coin.is_coin_protocol_supported(&Some(sent)));
 }
 
 /// T39.8.0h, send path baseline (R39.8.0ap, R39.8.0at): a successful send reaches the backend

@@ -1,3 +1,5 @@
+use crate::coin_protocol_capability::{append_capability_word, classify_capability_word, CapabilityWordStatus,
+                                      CAPABILITY_TX_V6};
 use crate::node_url::lightwalletd_endpoint_label;
 use crate::rpc_command::get_my_address::PathToAddress;
 #[cfg(not(target_arch = "wasm32"))]
@@ -309,6 +311,123 @@ fn ironwood_build_refused_at(activation_time: Option<u32>, v6_supported: bool, n
     now_sec >= u64::from(activation_time)
 }
 
+/// The protocol information a shielded coin publishes (CRD ch.39 R39.6.4f(a)): its encoded address
+/// format unchanged, followed by the capability word {`tx_v6`: `true`} when the coin has an Ironwood
+/// upgrade (a time or a height known for it) and the build constructs version-6 transactions. The word
+/// is sent at all times, not only inside the window of [`v6_counterparty_required_at`].
+fn v6_protocol_info(
+    address_format: Vec<u8>,
+    activation_time: Option<u32>,
+    activation_height: Option<u32>,
+    v6_supported: bool,
+) -> Vec<u8> {
+    if v6_supported && (activation_time.is_some() || activation_height.is_some()) {
+        append_capability_word(address_format, &[CAPABILITY_TX_V6])
+    } else {
+        address_format
+    }
+}
+
+/// Whether the acceptance check must require the `tx_v6` word of the counterparty as of `now_sec`
+/// (CRD ch.39 R39.6.4f(b), (c)).
+///
+/// `require_switch` is `require_v6_counterparty`. The window is open when an activation height is
+/// known, or when an activation time is known and `now_sec` is at or past that time less the freeze
+/// margin. The clock is injected and nothing is read from the network, as for
+/// [`ironwood_swap_freeze_active_at`]. `ironwood_gate_disabled` plays no part: the callers pass the
+/// time the gate switch does not suppress.
+fn v6_counterparty_required_at(
+    require_switch: bool,
+    activation_time: Option<u32>,
+    activation_height: Option<u32>,
+    freeze_margin_secs: u64,
+    now_sec: u64,
+) -> bool {
+    if !require_switch {
+        return false;
+    }
+    if activation_height.is_some() {
+        return true;
+    }
+    // Saturating, as in `ironwood_swap_freeze_active_at`.
+    activation_time.is_some_and(|time| now_sec >= u64::from(time).saturating_sub(freeze_margin_secs))
+}
+
+/// Why a counterparty's protocol information does not declare `tx_v6` (CRD ch.39 R39.6.4f(d)).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum V6Decline {
+    /// Absent or empty information, or nothing after the first value.
+    NoWord,
+    /// Something after the first value that is not a well-formed word.
+    MalformedWord,
+    /// A well-formed word in which `tx_v6` is not `true`.
+    WithoutTxV6,
+}
+
+impl V6Decline {
+    fn cause(self) -> &'static str {
+        match self {
+            V6Decline::NoWord => "no capability word",
+            V6Decline::MalformedWord => "a malformed capability word",
+            V6Decline::WithoutTxV6 => "a capability word without tx_v6",
+        }
+    }
+}
+
+/// `Some(cause)` when the counterparty's `info` does not declare `tx_v6`. Fails closed, exactly as
+/// `declares_capability` does; the cause only distinguishes the log line.
+fn v6_decline_cause(info: &Option<Vec<u8>>) -> Option<V6Decline> {
+    match classify_capability_word(info.as_deref()) {
+        CapabilityWordStatus::NoWord => Some(V6Decline::NoWord),
+        CapabilityWordStatus::Malformed => Some(V6Decline::MalformedWord),
+        CapabilityWordStatus::WellFormed(declared) if declared.declares(CAPABILITY_TX_V6) => None,
+        CapabilityWordStatus::WellFormed(_) => Some(V6Decline::WithoutTxV6),
+    }
+}
+
+/// The shortest gap between two warnings about declined counterparties (CRD ch.39 R39.6.4f(d)).
+const V6_DECLINE_WARNING_INTERVAL_SECS: u64 = 3_600;
+
+/// The log lines of one decline.
+#[derive(Debug, Eq, PartialEq)]
+struct V6DeclineLines {
+    /// One per decline.
+    debug: String,
+    /// At most one per coin per [`V6_DECLINE_WARNING_INTERVAL_SECS`], with the number of declines
+    /// since the previous warning (this one included).
+    warning: Option<String>,
+}
+
+/// Per-coin state of the decline warning. The clock is injected so the rate limit is testable.
+#[derive(Debug, Default)]
+struct V6DeclineLog {
+    declined_since_warning: u64,
+    last_warning_sec: Option<u64>,
+}
+
+impl V6DeclineLog {
+    fn record(&mut self, ticker: &str, cause: V6Decline, now_sec: u64) -> V6DeclineLines {
+        self.declined_since_warning += 1;
+        let debug = format!(
+            "{ticker}: declining a swap match -- the counterparty does not declare version-6 support ({})",
+            cause.cause()
+        );
+        let due = self.last_warning_sec.map_or(true, |last| {
+            now_sec.saturating_sub(last) >= V6_DECLINE_WARNING_INTERVAL_SECS
+        });
+        let warning = due.then(|| {
+            let declined = std::mem::take(&mut self.declined_since_warning);
+            self.last_warning_sec = Some(now_sec);
+            format!(
+                "{ticker}: declined {declined} swap match(es) with a counterparty that does not declare version-6 \
+                 support since the previous warning; a shielded swap needs it ahead of the Ironwood network upgrade \
+                 (`require_v6_counterparty` in the coin's consensus_params switches the requirement off)"
+            )
+        });
+        V6DeclineLines { debug, warning }
+    }
+}
+
 /// The warning given wherever `requires_notarization` is asserted for a ZHTLC coin: at activation,
 /// by `set_requires_notarization`, and by a confirmation wait that asks for it. The flag selects a
 /// notarized confirmation count, and a ZHTLC coin has none, so it has no effect
@@ -379,6 +498,13 @@ pub struct ZcoinConsensusParams {
     /// reproduce. Defaults to `false`. See `docs/GLEEC_COMPATIBILITY.md`.
     #[serde(default)]
     ironwood_gate_disabled: bool,
+    /// Whether a swap requires the counterparty to declare that it builds version-6
+    /// transactions (the `tx_v6` capability word), while the Ironwood window is open
+    /// (R39.6.4f). Defaults to `true`. With `false` the requirement does not apply, but the
+    /// coin still sends its own word. Independent of `ironwood_gate_disabled`, and per coin:
+    /// it applies on every chain that shares these parameters, test chains included.
+    #[serde(default = "common::true_f")]
+    require_v6_counterparty: bool,
     /// Ironwood activation height, once the network has derived and published it.
     ///
     /// Optional: the height is unknown until the upgrade is imminent, and a
@@ -462,6 +588,9 @@ impl ZcoinConsensusParams {
 
     /// Whether this coin opts out of Ironwood gating altogether.
     pub(crate) fn ironwood_gate_disabled(&self) -> bool { self.ironwood_gate_disabled }
+
+    /// Whether the counterparty of a swap must declare `tx_v6` while the window is open.
+    pub(crate) fn require_v6_counterparty(&self) -> bool { self.require_v6_counterparty }
 
     fn hrp_sapling_extended_spending_key(&self) -> &str { &self.hrp_sapling_extended_spending_key }
 
@@ -853,6 +982,9 @@ pub struct ZCoinFields {
     /// Zcash consensus/network parameters sourced from `protocol_data`; the
     /// single authority for this coin's network-parameter lookups (R39.6.4).
     consensus_params: ZcoinConsensusParams,
+    /// Rate-limit state of the log lines about counterparties declined for lacking `tx_v6`
+    /// (R39.6.4f(d)).
+    v6_decline_log: Mutex<V6DeclineLog>,
     /// Optional sync-anchor checkpoint sourced from `protocol_data` (R39.1.4).
     check_point_block: Option<CheckPointBlockInfo>,
     /// Sync throughput tuning: blocks to process per iteration (R39.6.2).
@@ -1525,6 +1657,266 @@ mod ironwood_consensus_param_tests {
             BranchId::for_height(&time_only, BlockHeight::from_u32(4_200_000)),
             BranchId::Sapling
         );
+    }
+}
+
+/// CRD ch.39 T39.6.4f: the counterparty version-6 capability (R39.6.4f).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod ironwood_v6_counterparty_tests {
+    use super::*;
+    use crate::coin_protocol_capability::declares_capability;
+
+    /// See `ironwood_swap_freeze_tests::BUILD_WITHOUT_V6`.
+    const BUILD_WITHOUT_V6: bool = false;
+    const ACTIVATION: u32 = ARRR_IRONWOOD_ACTIVATION_TIME;
+    const WINDOW_START: u64 = ACTIVATION as u64 - IRONWOOD_SWAP_FREEZE_MARGIN_SECS;
+    /// The word {"tx_v6": true}: map(1), str(5) "tx_v6", true.
+    const WORD: [u8; 8] = [0x81, 0xa5, b't', b'x', b'_', b'v', b'6', 0xc3];
+    /// The word {"tx_v6": false}.
+    const FALSE_WORD: [u8; 8] = [0x81, 0xa5, b't', b'x', b'_', b'v', b'6', 0xc2];
+
+    fn arrr_params(extra: Json) -> ZcoinConsensusParams {
+        let mut cfg = json!({
+            "overwinter_activation_height": 152855,
+            "sapling_activation_height": 152855,
+            "blossom_activation_height": null,
+            "heartwood_activation_height": null,
+            "canopy_activation_height": null,
+            "coin_type": 133,
+            "hrp_sapling_extended_spending_key": "secret-extended-key-main",
+            "hrp_sapling_extended_full_viewing_key": "zxviews",
+            "hrp_sapling_payment_address": "zs",
+            "b58_pubkey_address_prefix": [0x1c, 0xb8],
+            "b58_script_address_prefix": [0x1c, 0xbd]
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            cfg[key] = value.clone();
+        }
+        serde_json::from_value(cfg).unwrap()
+    }
+
+    /// The first value of a shielded coin: its encoded address format.
+    fn first_value() -> Vec<u8> { rmp_serde::to_vec(&crate::utxo::UtxoAddressFormat::Standard).unwrap() }
+
+    /// The bytes ARRR would send, as the coin methods compute them from `params`.
+    fn sent_by(params: &ZcoinConsensusParams, ticker: &str, v6_supported: bool) -> Vec<u8> {
+        v6_protocol_info(
+            first_value(),
+            configured_or_builtin_ironwood_time(params, ticker),
+            params.effective_ironwood_activation_height(),
+            v6_supported,
+        )
+    }
+
+    /// Whether the acceptance check declines `info` for `params` at `now_sec` (the coin's own method
+    /// composes exactly these two functions around the log).
+    fn declined(params: &ZcoinConsensusParams, ticker: &str, info: &Option<Vec<u8>>, now_sec: u64) -> bool {
+        v6_counterparty_required_at(
+            params.require_v6_counterparty(),
+            configured_or_builtin_ironwood_time(params, ticker),
+            params.effective_ironwood_activation_height(),
+            IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+            now_sec,
+        ) && v6_decline_cause(info).is_some()
+    }
+
+    fn with_word(first: &[u8], word: &[u8]) -> Option<Vec<u8>> { Some([first, word].concat()) }
+
+    #[test]
+    fn t39_6_4f_a_protocol_info_is_the_address_format_then_the_word() {
+        let first = first_value();
+        let arrr = arrr_params(json!({}));
+        let sent = sent_by(&arrr, "ARRR", true);
+        assert_eq!(sent, [first.as_slice(), &WORD].concat());
+        // The first value is untouched, and a reader that stops after it sees the same format.
+        assert_eq!(&sent[..first.len()], first.as_slice());
+        assert!(declares_capability(&Some(sent), CAPABILITY_TX_V6));
+
+        // A configured time or height, or a discovered height, is an upgrade too.
+        for extra in [
+            json!({"ironwood_activation_time": ACTIVATION}),
+            json!({"ironwood_activation_height": 4_161_185u32}),
+        ] {
+            let params = arrr_params(extra);
+            assert_eq!(sent_by(&params, "OTHER", true), [first.as_slice(), &WORD].concat());
+        }
+        let discovered = arrr_params(json!({}));
+        assert_eq!(sent_by(&discovered, "OTHER", true), first);
+        discovered.record_discovered_ironwood_height(4_161_185);
+        assert_eq!(sent_by(&discovered, "OTHER", true), [first.as_slice(), &WORD].concat());
+
+        // A coin without an Ironwood upgrade sends its bytes unchanged.
+        assert_eq!(sent_by(&arrr, "OTHER", true), first);
+        // So does a build that does not construct version 6: it has nothing to declare.
+        assert_eq!(sent_by(&arrr, "ARRR", BUILD_WITHOUT_V6), first);
+    }
+
+    #[test]
+    fn t39_6_4f_b_inside_the_window_a_counterparty_without_the_word_is_declined() {
+        let params = arrr_params(json!({}));
+        let first = first_value();
+        let not_declared: Vec<(Option<Vec<u8>>, V6Decline)> = vec![
+            (None, V6Decline::NoWord),
+            (Some(Vec::new()), V6Decline::NoWord),
+            (Some(first.clone()), V6Decline::NoWord),
+            (with_word(&first, &[0x01]), V6Decline::MalformedWord),
+            (with_word(&first, &WORD[..WORD.len() - 1]), V6Decline::MalformedWord),
+            (with_word(&first, &FALSE_WORD), V6Decline::WithoutTxV6),
+            (with_word(&first, &[0x80]), V6Decline::WithoutTxV6),
+        ];
+        for now in [WINDOW_START, ACTIVATION as u64, ACTIVATION as u64 + 365 * 86_400] {
+            for (info, cause) in &not_declared {
+                assert!(declined(&params, "ARRR", info, now), "{info:?} at {now}");
+                assert_eq!(v6_decline_cause(info), Some(*cause), "{info:?}");
+            }
+            assert!(!declined(&params, "ARRR", &with_word(&first, &WORD), now));
+            // Bytes after the word and other keys are ignored.
+            let extended = [first.as_slice(), &[0x82, 0xa1, b'a', 0xc3], &WORD[1..], &[0xff]].concat();
+            assert!(!declined(&params, "ARRR", &Some(extended), now));
+        }
+    }
+
+    #[test]
+    fn t39_6_4f_c_before_the_window_nothing_is_required_and_a_configured_height_opens_it() {
+        let params = arrr_params(json!({}));
+        let first = Some(first_value());
+        assert!(!declined(&params, "ARRR", &first, WINDOW_START - 1));
+        assert!(declined(&params, "ARRR", &first, WINDOW_START));
+
+        // An activation time far ahead and no height: no window.
+        let far = arrr_params(json!({"ironwood_activation_time": u32::MAX}));
+        assert!(!declined(&far, "ARRR", &first, 1_800_000_000));
+        // A configured height alone opens it, with no time anywhere.
+        let height = arrr_params(json!({"ironwood_activation_height": 100u32}));
+        assert!(declined(&height, "OTHER", &first, 0));
+        // So does a discovered height.
+        let discovered = arrr_params(json!({}));
+        assert!(!declined(&discovered, "OTHER", &first, u64::MAX));
+        discovered.record_discovered_ironwood_height(100);
+        assert!(declined(&discovered, "OTHER", &first, 0));
+        // A coin without an Ironwood upgrade requires nothing.
+        assert!(!declined(&params, "OTHER", &first, u64::MAX));
+        // A time within the margin of the epoch does not wrap.
+        let early = arrr_params(json!({"ironwood_activation_time": 10}));
+        assert!(declined(&early, "OTHER", &first, 0));
+    }
+
+    #[test]
+    fn t39_6_4f_d_the_switch_and_the_gate_switch() {
+        let first = Some(first_value());
+        let now = ACTIVATION as u64;
+        let default = arrr_params(json!({}));
+        assert!(default.require_v6_counterparty());
+        assert!(declined(&default, "ARRR", &first, now));
+
+        // `false`: accepted, but the word is still sent.
+        let off = arrr_params(json!({"require_v6_counterparty": false}));
+        assert!(!off.require_v6_counterparty());
+        assert!(!declined(&off, "ARRR", &first, now));
+        assert!(!declined(&off, "ARRR", &None, now));
+        assert_eq!(sent_by(&off, "ARRR", true), [first_value().as_slice(), &WORD].concat());
+
+        // Optional in both directions: an explicit `true` parses, and so does a payload without the key.
+        assert!(arrr_params(json!({"require_v6_counterparty": true})).require_v6_counterparty());
+        let serialized = serde_json::to_value(&default).unwrap();
+        assert!(serde_json::from_value::<ZcoinConsensusParams>(serialized).is_ok());
+
+        // `ironwood_gate_disabled` changes none of the outcomes, for the word or the requirement.
+        for extra in [
+            json!({"ironwood_gate_disabled": true}),
+            json!({"ironwood_gate_disabled": true, "require_v6_counterparty": false}),
+        ] {
+            let gate = arrr_params(extra.clone());
+            let expected = extra.get("require_v6_counterparty").is_none();
+            assert_eq!(declined(&gate, "ARRR", &first, now), expected);
+            assert!(!declined(&gate, "ARRR", &with_word(&first_value(), &WORD), now));
+            assert_eq!(sent_by(&gate, "ARRR", true), [first_value().as_slice(), &WORD].concat());
+        }
+    }
+
+    #[test]
+    fn t39_6_4f_e_logs_one_debug_per_decline_and_one_warning_per_hour() {
+        let mut log = V6DeclineLog::default();
+        let t0 = 1_800_000_000u64;
+
+        // The first decline warns at once, with a count of one.
+        let first = log.record("ARRR", V6Decline::NoWord, t0);
+        assert!(first.debug.contains("ARRR") && first.debug.contains("no capability word"));
+        let warning = first.warning.expect("first decline warns");
+        assert!(warning.contains("ARRR") && warning.contains("declined 1 "), "{warning}");
+
+        // Within the hour: a debug line each, no warning, and the cause is named.
+        let causes = [
+            (V6Decline::NoWord, "no capability word"),
+            (V6Decline::MalformedWord, "malformed capability word"),
+            (V6Decline::WithoutTxV6, "without tx_v6"),
+        ];
+        for (i, (cause, text)) in causes.iter().enumerate() {
+            let lines = log.record("ARRR", *cause, t0 + 1 + i as u64 * 600);
+            assert!(lines.debug.contains(text), "{}", lines.debug);
+            assert!(lines.warning.is_none());
+        }
+        assert!(log
+            .record("ARRR", V6Decline::NoWord, t0 + V6_DECLINE_WARNING_INTERVAL_SECS - 1)
+            .warning
+            .is_none());
+
+        // At the hour: one warning carrying the 4 declines since the previous warning plus this one.
+        let at_hour = log.record("ARRR", V6Decline::NoWord, t0 + V6_DECLINE_WARNING_INTERVAL_SECS);
+        let warning = at_hour.warning.expect("warns again after an hour");
+        assert!(warning.contains("declined 5 "), "{warning}");
+
+        // The count starts again, and the hour is counted from the last warning.
+        assert!(log
+            .record("ARRR", V6Decline::NoWord, t0 + V6_DECLINE_WARNING_INTERVAL_SECS + 1)
+            .warning
+            .is_none());
+        let next = log.record("ARRR", V6Decline::NoWord, t0 + 2 * V6_DECLINE_WARNING_INTERVAL_SECS);
+        assert!(next.warning.expect("warns").contains("declined 2 "));
+
+        // The state is per coin instance, and a clock that steps back does not warn.
+        let mut other = V6DeclineLog::default();
+        assert!(other.record("ARRR", V6Decline::NoWord, 5).warning.is_some());
+        assert!(other.record("ARRR", V6Decline::NoWord, 0).warning.is_none());
+    }
+
+    #[test]
+    fn t39_6_4f_e_the_log_lines_do_not_carry_the_protocol_information() {
+        let mut log = V6DeclineLog::default();
+        let lines = log.record("ARRR", V6Decline::MalformedWord, 1);
+        let text = format!("{} {}", lines.debug, lines.warning.unwrap());
+        assert!(!text.contains("0x") && !text.contains('['), "{text}");
+    }
+
+    /// `is_coin_protocol_supported` consults the freeze first and returns on it, before it reads the
+    /// counterparty's bytes; the freeze predicate takes no protocol information at all. So for a build
+    /// without version 6 every counterparty is declined inside the window, whatever its word says.
+    #[test]
+    fn t39_6_4f_f_the_freeze_still_declines_everything_for_a_build_without_v6() {
+        let frozen = |now| {
+            ironwood_swap_freeze_active_at(
+                Some(ACTIVATION),
+                BUILD_WITHOUT_V6,
+                IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+                now,
+            )
+        };
+        // Such a build declares nothing itself.
+        assert_eq!(
+            sent_by(&arrr_params(json!({})), "ARRR", BUILD_WITHOUT_V6),
+            first_value()
+        );
+        for now in [WINDOW_START, ACTIVATION as u64, ACTIVATION as u64 + 365 * 86_400] {
+            assert!(frozen(now));
+        }
+        assert!(!frozen(WINDOW_START - 1));
+        // A build with version 6 is not frozen, and then only the word decides.
+        assert!(!ironwood_swap_freeze_active_at(
+            Some(ACTIVATION),
+            true,
+            IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+            ACTIVATION as u64
+        ));
     }
 }
 
@@ -2234,6 +2626,46 @@ impl ZCoin {
         )
     }
 
+    /// The Ironwood activation time and height known for this coin, as R39.6.4f reads them: the time
+    /// configured or built-in, whether or not `ironwood_gate_disabled` is set, and the height
+    /// configured or discovered.
+    fn v6_capability_inputs(&self) -> (Option<u32>, Option<u32>) {
+        let params = &self.z_fields.consensus_params;
+        (
+            configured_or_builtin_ironwood_time(params, &self.utxo_arc.conf.ticker),
+            params.effective_ironwood_activation_height(),
+        )
+    }
+
+    /// R39.6.4f(b): whether `info` is declined for lacking `tx_v6`, as of `now_sec`. Logs a decline
+    /// (R39.6.4f(d)).
+    fn v6_counterparty_declined_at(&self, info: &Option<Vec<u8>>, now_sec: u64) -> bool {
+        let (time, height) = self.v6_capability_inputs();
+        if !v6_counterparty_required_at(
+            self.z_fields.consensus_params.require_v6_counterparty(),
+            time,
+            height,
+            IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+            now_sec,
+        ) {
+            return false;
+        }
+        let Some(cause) = v6_decline_cause(info) else {
+            return false;
+        };
+        let lines = self
+            .z_fields
+            .v6_decline_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record(&self.utxo_arc.conf.ticker, cause, now_sec);
+        log::debug!("{}", lines.debug);
+        if let Some(warning) = lines.warning {
+            log::warn!("{warning}");
+        }
+        true
+    }
+
     /// The Ironwood activation time in force for this coin — configured value,
     /// else the built-in one for its ticker, unless gating is switched off.
     pub(crate) fn effective_ironwood_activation_time(&self) -> Option<u32> {
@@ -2523,6 +2955,7 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for ZCoinBuilder<'a> {
             #[cfg(not(target_arch = "wasm32"))]
             pending_receipts: Mutex::new(HashMap::new()),
             consensus_params,
+            v6_decline_log: Mutex::new(V6DeclineLog::default()),
             check_point_block: self.protocol_info.check_point_block,
             blocks_per_iteration: self.protocol_info.blocks_per_iteration,
             inter_iteration_interval_ms: self.protocol_info.inter_iteration_interval_ms,
@@ -3144,7 +3577,15 @@ impl MmCoin for ZCoin {
 
     fn mature_confirmations(&self) -> Option<u32> { Some(self.utxo_arc.conf.mature_confirmations) }
 
-    fn coin_protocol_info(&self) -> Vec<u8> { utxo_common::coin_protocol_info(self) }
+    fn coin_protocol_info(&self) -> Vec<u8> {
+        let (time, height) = self.v6_capability_inputs();
+        v6_protocol_info(
+            utxo_common::coin_protocol_info(self),
+            time,
+            height,
+            IRONWOOD_V6_SUPPORTED,
+        )
+    }
 
     fn is_coin_protocol_supported(&self, info: &Option<Vec<u8>>) -> bool {
         // `wallet_only` gates the locally initiated paths (`buy`, `sell`,
@@ -3160,7 +3601,11 @@ impl MmCoin for ZCoin {
             );
             return false;
         }
-        utxo_common::is_coin_protocol_supported(self, info)
+        if !utxo_common::is_coin_protocol_supported(self, info) {
+            return false;
+        }
+        // R39.6.4f: the counterparty must declare that it builds version-6 transactions.
+        !self.v6_counterparty_declined_at(info, now_ms() / 1000)
     }
 }
 

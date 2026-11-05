@@ -463,6 +463,10 @@ impl SwapOps for UtxoStandardCoin {
     }
 
     fn get_htlc_key_pair(&self) -> Option<KeyPair> { utxo_common::get_htlc_key_pair(self) }
+
+    fn swap_key_disagreement(&self, node_pubkey: &Public) -> Option<crate::SwapKeyDisagreement> {
+        utxo_common::swap_key_disagreement(self, node_pubkey)
+    }
 }
 
 // No watcher methods are implemented for this family yet, so it does not opt in to watching (CRD ch.09 R17).

@@ -489,6 +489,15 @@ at all, and Pirate's own Ironwood test chain carries mainnet address prefixes an
 `chainName` `main`, so address prefixes alone cannot tell it from the real chain. Today
 the built-in time only feeds the activation-height discovery above. A coin whose ticker this build does not know is unaffected either way.
 
+**From v0.4.0 an ARRR swap starts only with a node that declares version-6 capability.**
+An ARRR node adds a capability word to its order and match messages, and declines a
+counterparty without it before any swap starts (CRD ch.39 R39.6.4f, ch.59 §59.4A). A swap
+with a node that cannot build version 6 used to start, and failed at that node's first
+ARRR transaction, after the DEX fee was paid. GLEEC KDF nodes and KDF Reloaded
+0.3.0-beta.1 nodes send no word and are declined. Set `require_v6_counterparty` to
+`false` in the coin's `consensus_params` to admit them again; an ARRR swap with GLEEC KDF
+still cannot complete.
+
 Two coin-activation behaviours differ from GLEEC KDF by default (CRD ch.46
 R46.2.4, ch.55 R55.4.6):
 
@@ -528,12 +537,19 @@ R46.2.4, ch.55 R55.4.6):
   project's divergence, and that alone is what the switch hands back to GLEEC
   KDF; the malformed `fork_id` above stays outside it under every setting.
 
-Fourteen more behaviors, in the order book and its relaying, peer exchange, fee readings and fee
-quotes, Electrum and the shielded history, differ from GLEEC KDF by default, each with one top-level
-`MM2.json` switch. The value below gives the GLEEC-compatible behavior; the row of each switch in
+More behaviors, in the order book and its relaying, peer exchange, fee readings and fee
+quotes, Electrum, the shielded history and trading under an HD login, differ from GLEEC KDF by
+default, each with one top-level `MM2.json` switch. The value below gives the GLEEC-compatible
+behavior, except for `swap_key_check`; the row of each switch in
 [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the full detail:
 
 - `pre_trade_spend_check: false` — no pre-trade spend check.
+- `swap_key_check: false` — restores the behavior of earlier KDF Reloaded builds, not GLEEC KDF's:
+  under an HD login (`enable_hd`), a swap whose coin announces another key than the one it pays
+  from (every EVM coin, a coin enabled with a single key, a UTXO coin activated away from its first
+  address) is negotiated and fails in the coin layer, instead of being refused up front. GLEEC KDF
+  has no such check and needs none: its swaps announce the key the coin signs with (CRD ch.05 §5.9B
+  R34), so these pairs trade normally there. The divergence ends with plan items H3 and H4.
 - `fee_estimate_cache_secs: 0`, with no per-coin value — no fee reading is reused between
   requests.
 - `electrum_spread_reads: false` — every read-only Electrum query goes to the highest-ranked
@@ -568,7 +584,7 @@ quotes, Electrum and the shielded history, differ from GLEEC KDF by default, eac
   estimate, as GLEEC KDF does and as KDF Reloaded did before this switch, instead of at the gas
   limit the fee is sent with; both send it with that limit.
 
-A fourteenth switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
+One more switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
 every maker-order message is published at once, and `true` turns on the maker's rate control.
 
 `dns_resolver` has no GLEEC-compatible value: the default matches GLEEC KDF for seeds and
