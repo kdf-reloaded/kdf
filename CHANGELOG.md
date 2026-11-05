@@ -273,6 +273,10 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
 
 - **The tests run before the next beta will be listed in
   [`docs/release-tests/0.4.0-beta.1.md`](docs/release-tests/0.4.0-beta.1.md).**
+- **A unit test of the maker's update queue no longer fails at random.** The test of the 10-second
+  keep-alive wait counted the released and the pending orders while the queue kept releasing, so
+  one release between the two counts made it fail now and then. It now stops the queue before
+  counting. The node itself is unchanged. Detail: PR #244; CRD ch.32 T-MP6.
 
 ### Plans touched
 
