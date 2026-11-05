@@ -6581,8 +6581,8 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   publication and judgment, its address validation and its withdraw routes, at
   `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole batch, 30
   source files and one dependency manifest were read at `v3.0.0-beta`, 29 of
-  them checked by hash against the tagged states of both rows. *Method:* side-
-  by-side reading of the compared regions against every added or changed line,
+  them checked by hash against the tagged states of both rows. *Method:*
+  side-by-side reading of the compared regions against every added or changed line,
   plus that hash check; the gate script was not run because the candidate has
   no code blocks. *Measure:* 0.02, read against the standard that any
   discretionary finding fails a file; dictated-interop and public-surface
