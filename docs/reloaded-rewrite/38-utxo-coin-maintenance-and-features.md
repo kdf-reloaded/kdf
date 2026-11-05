@@ -2186,6 +2186,30 @@ into a further started kilobyte). Before `v2.6.0-beta` the reference, like
 the baseline anchor (R1) and reloaded today, rounded **every** fixed-fee
 coin's size up to a whole kilobyte.
 
+> **Compatibility row (this repository, 2026-11-05; not corpus-sourced).**
+> **Parity** since PR #247: a transaction with a change output pays the rule
+> above once over its whole size, change output included, under every
+> policy. Before, Reloaded's transaction builder added the change output's
+> share under a dynamic rate (which an explicit `UtxoFixed` or `UtxoPerKbyte`
+> withdraw fee also uses, R38.6.6l, R38.6.6m) as `floor(e × 34 / 1000)`,
+> rounded on its own. The fee was then
+> `floor(e × (s − 34) / 1000) + floor(e × 34 / 1000)`, which can be one base
+> unit below `floor(e × s / 1000)`. A black-box comparison of the release
+> binaries on 2026-11-05 (`docs/release-tests/0.4.0-beta.1.md`) showed the
+> reference charging the single rounding. No peer observes the difference,
+> so arm 1 of `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind
+> the default, and the change has no switch.
+
+T38.6.6b.1 *One rounding with a change output (R38.6.6b).* With a dynamic
+rate, or an explicit `UtxoFixed` or `UtxoPerKbyte` withdraw fee, of
+`e` = 1,234 base units per 1,000 bytes, and P2PKH inputs and outputs, a
+transaction with a change output and an estimated size of 670 bytes shall pay
+826 base units, and one of 2,002 bytes 2,470: `floor(e × s / 1000)` with `s`
+including the change output. They shall not pay 825 and 2,469, the figures
+of a separately rounded change output. Under the plain fixed policy the same
+single rounding holds. Under the whole-kilobyte policy the change output adds
+one more `r` only when it pushes the size into a further started kilobyte.
+
 R38.6.6c *HTLC spend-fee estimate.* The fee estimate for spending or
 refunding a UTXO HTLC — in the legacy protocol and in the version-two
 protocol alike — is R38.6.6b applied to a reference size of 496 bytes,
@@ -2550,7 +2574,9 @@ item 2, the figure both descriptors give is
 `floor(a × (s − 34) / 1000) + floor(a × 34 / 1000)`, which can be one base unit
 below `floor(a × s / 1000)`; the test asserts the two descriptors equal and the
 figure this split gives. With P2PKH inputs of 148 bytes the larger size reached
-is 1,429 bytes rather than 1,404.
+is 1,429 bytes rather than 1,404. *Since PR #247 (R38.6.6b, T38.6.6b.1)* the
+builder charges `floor(a × s / 1000)` once, change output included, and the
+tests assert that figure.
 
 R38.6.6m *Explicit fee descriptors on the SLP token withdraw (reference-bound;
 **passed the KDF Dirty Gate on 2026-11-04**, measure 0.02; Spec Reader 2026-11-04, rows `v2.6.0-beta` and
@@ -2594,7 +2620,8 @@ T38.6.6l, where the builder adds the change output the figure both descriptors
 give is `floor(a × (s − 34) / 1000) + floor(a × 34 / 1000)`, which can be one
 base unit below `floor(a × s / 1000)`. The tests of PR #234 assert the two
 descriptors equal and this figure, at 457 and 1,493 bytes; the SLP OP_RETURN
-output makes these sizes differ from T38.6.6l's.
+output makes these sizes differ from T38.6.6l's. *Since PR #247 (R38.6.6b,
+T38.6.6b.1)* the figure is `floor(a × s / 1000)` once, and the tests assert it.
 
 R38.6.6n *Required inputs count toward the input total (reference-bound;
 Spec Reader micro-run 0.4.0-2c, 2026-11-04, rows `v2.6.0-beta` and
@@ -3332,3 +3359,10 @@ R38.8.6 **Tests (two-direction, observable).**
   and the clean-side note under T38.6.6m. They rest on that decision and this
   repository's code, take no forbidden-class input, and so do not engage
   chapter 01 R38.
+- *Clean-side amendment (2026-11-05) -- PR #247, the change output under one
+  rounding.* A session that never read the corpus added the compatibility row
+  under R38.6.6b and T38.6.6b.1, and appended a sentence each to the clean-side
+  notes under T38.6.6l and T38.6.6m. They rest on R38.6.6b as cleared above, on
+  a black-box comparison of the release binaries and on this repository's own
+  code. They take no forbidden-class input, so they do not engage chapter 01
+  R38.
