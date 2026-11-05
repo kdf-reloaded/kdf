@@ -501,6 +501,10 @@ own V1 payments to be spent, it searches forward from a cursor.
   also keeps a cursor across its polls, so a poll scans only the windows not
   yet scanned. Like the V1 wait's, that cursor stays at least 12 blocks below
   the tip.
+- The cursor of the V1 wait and that of the V2 search go back to their start
+  at most once every 60 seconds, after a poll that reached the tip without
+  finding the spend or the event. A window that a lagging node answered as
+  empty is therefore searched again within a minute.
 
 **R17.8.3a. The search for a spend or refund of a V1 payment.** The search a
 node runs to learn whether one of its V1 payments was spent or refunded runs in
@@ -509,8 +513,9 @@ the chain of chapter 51 R31a, which runs under a budget of its own, and the
 search of the fund recovery.
 - For each payment, the node keeps the blocks it has already scanned, as a few
   block intervals, for the rest of its session. The search's low end is the
-  higher of the payment's receipt block, when that is known, and the search's
-  start block.
+  higher of the search's start block and 12 blocks below the payment's receipt
+  block, when that is known. A reorganization that moves the payment into an
+  earlier block therefore cannot put the spend below the low end.
 - Each call scans the blocks not yet scanned from the tip downwards, newest
   window first. Each window is the newest `W` blocks of the unscanned range
   below the previous one. Blocks above the scanned intervals therefore come
@@ -522,6 +527,14 @@ search of the fund recovery.
   without a result. A call cut short by its caller's budget therefore loses no
   progress, and the next call rescans nothing it has already scanned. When a
   window has to shrink (R17.8.2), its parts may be queried oldest first.
+- A node that is behind the tip can answer a window above its own head as
+  empty, and the tip and the logs can come from different nodes. So when a
+  call has scanned the whole range down to the low end without finding the
+  spend or the refund, the node forgets that payment's record, and the next
+  call scans the whole range again, newest first. A miss caused by a lagging
+  node costs one more pass, not the rest of the session.
+- A window in which an event matches but carries no transaction hash is not
+  recorded and not passed by a cursor. It is searched again.
 - A scan never records blocks closer than 12 below the tip it saw as scanned,
   the reorganization margin of R17.8.3. The next call scans those blocks
   again.
@@ -929,6 +942,15 @@ window once, except the newest 12 blocks.
 **T17.8.12. A reorganized block.** For the search of R17.8.3a and the V2 cursor:
 a block within 12 of the tip, scanned empty and then replaced by one carrying
 the spend or the event, is found by the next call or poll.
+
+**T17.8.13. A lagging node.** A node answers the window that holds the spend
+as empty once, then answers it correctly.
+- The search of R17.8.3a finds the spend on its next pass, after a pass that
+  reached the low end.
+- The V1 wait and the V2 search find it after their cursor goes back to the
+  start, within 60 seconds.
+- An event without a transaction hash is found again by the next poll or call.
+- The low end lies 12 blocks below the receipt block.
 
 *Lab case (2026-11-05).* The maker is held stopped until the taker's wait for
 the spend has ended at its deadline, then resumed so that it spends the taker

@@ -25,7 +25,7 @@ use crate::eth::{decode_contract_call, signed_tx_from_alloy_tx, EthCoin, EthCoin
 use crate::{FindPaymentSpendError, MarketCoinOps};
 use bigdecimal::BigDecimal;
 use common::executor::Timer;
-use common::log::{error, info};
+use common::log::{error, info, warn};
 use common::now_ms;
 use derive_more::Display;
 use ethereum_types::{Address, H256, U256};
@@ -145,8 +145,12 @@ impl EthCoin {
         // CRD ch.17 R17.8.3: the first block that no poll has scanned yet. A poll starts here and moves it past
         // every window it scanned without error, but never higher than `REORG_MARGIN_BLOCKS` below the tip it
         // saw, so the newest blocks are scanned again by the next poll.
+        // The cursor goes back to `params.from_block` at most once per `cursor_reset_every_ms`, after a poll that
+        // reached the tip without the event: a node that lagged behind the tip can answer a window above its head
+        // as empty, and the window is then searched again within that time.
         let mut cursor = params.from_block;
-        loop {
+        let mut last_reset_ms = now_ms();
+        'polls: loop {
             let now_secs = now_ms() / 1000;
             if now_secs > params.wait_until {
                 return MmError::err(FindPaymentSpendError::Timeout {
@@ -200,8 +204,21 @@ impl EthCoin {
                 };
 
                 if let Some(matched) = events.into_iter().find(|ev| event_matches_swap_id(ev, params.swap_id)) {
-                    if let Some(hash) = matched.transaction_hash {
-                        return Ok(hash);
+                    match matched.transaction_hash {
+                        Some(hash) => return Ok(hash),
+                        None => {
+                            // The window is not passed by the cursor: the next poll searches it again.
+                            warn!(
+                                "[{}] a {} event of the swap in blocks {} to {} carries no transaction hash; \
+                                 the window is searched again",
+                                self.ticker(),
+                                params.event_name,
+                                window_start,
+                                window_end
+                            );
+                            Timer::sleep(params.check_every).await;
+                            continue 'polls;
+                        },
                     }
                 }
 
@@ -209,6 +226,11 @@ impl EthCoin {
                 window_start = window_end + 1;
             }
 
+            let now = now_ms();
+            if now.saturating_sub(last_reset_ms) >= self.logs_window.cursor_reset_every_ms() {
+                cursor = params.from_block;
+                last_reset_ms = now;
+            }
             Timer::sleep(params.check_every).await;
         }
     }

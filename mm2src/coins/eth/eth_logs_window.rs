@@ -26,8 +26,12 @@
 //! - Windows of one range neither overlap nor skip a block.
 //! - Only a refusal of the range's size shrinks `W`; every other failure is returned (a bare -32602 without a
 //!   range or limit phrase can come from a malformed request of our own).
+//! - The cursors of the spend wait and of the V2 search go back to their start at most once per minute, after a
+//!   poll that reached the tip without a result.
 //! - The spend wait checks its deadline on every iteration, after a failed query as after a successful one.
 //! - A scanned interval never contains a block closer than `REORG_MARGIN_BLOCKS` below the tip that the scan saw.
+//! - A search that scans its whole range without a result drops the payment's scanned blocks (a lagging node can have
+//!   answered a window as empty), not its receipt block.
 //! - The scanned blocks are bounded per payment (`SCANNED_INTERVALS_CAP` intervals) and in all
 //!   (`SCANNED_PAYMENTS_CAP` payments, least recently used first out). Forgetting only costs a rescan.
 //! - The log lines name a node by host only: the all-failed error of the transport already carries the host-only
@@ -52,6 +56,10 @@ pub(crate) const REORG_MARGIN_BLOCKS: u64 = 12;
 
 /// Seconds between two polls of the spend wait.
 pub(crate) const SPEND_WAIT_POLL_S: f64 = 5.;
+
+/// The least time between two returns of a wait's cursor to its start (CRD ch.17 R17.8.3), in milliseconds. A
+/// window that a lagging node answered as empty is searched again within this time.
+const CURSOR_RESET_EVERY_MS: u64 = 60_000;
 
 /// How many payments' scanned blocks a coin session keeps (CRD ch.17 R17.8.3a). The least recently used payment is
 /// forgotten first; forgetting a payment costs a rescan of its range, nothing else.
@@ -80,6 +88,9 @@ struct LogsWindowState {
     announced: AtomicBool,
     /// The blocks scanned for each V1 payment (R17.8.3a). The lock is never held across an await.
     payments: Mutex<PaymentScans>,
+    /// The time between two returns of a wait's cursor to its start, in milliseconds; 0 while it has the
+    /// default `CURSOR_RESET_EVERY_MS`. Only a test sets it.
+    cursor_reset_ms: AtomicU64,
 }
 
 /// The blocks already scanned for the spend or the refund of each V1 payment, for the rest of the coin's session
@@ -177,6 +188,30 @@ impl LogsWindow {
     /// The block of the payment's receipt, when an earlier call has read it.
     pub(crate) fn receipt_block(&self, key: &PaymentKey) -> Option<u64> {
         self.with_scans(|scans| scans.payments.get(key).and_then(|scan| scan.receipt_block))
+    }
+
+    /// Forgets the blocks scanned for the payment, not its receipt block (R17.8.3a): a call that scanned the whole
+    /// range without a result can have been misled by a node that lagged behind the tip.
+    pub(crate) fn forget_scanned(&self, key: &PaymentKey) {
+        self.with_scans(|scans| {
+            if let Some(scan) = scans.payments.get_mut(key) {
+                scan.scanned.clear();
+            }
+        });
+    }
+
+    /// The least time between two returns of a wait's cursor to its start, in milliseconds (R17.8.3).
+    pub(crate) fn cursor_reset_every_ms(&self) -> u64 {
+        match self.0.cursor_reset_ms.load(AtomicOrdering::SeqCst) {
+            0 => CURSOR_RESET_EVERY_MS,
+            set => set,
+        }
+    }
+
+    /// Sets the time between two cursor resets (tests).
+    #[cfg(test)]
+    pub(crate) fn set_cursor_reset_every_ms(&self, ms: u64) {
+        self.0.cursor_reset_ms.store(ms, AtomicOrdering::SeqCst);
     }
 
     /// Remembers the block of the payment's receipt.
@@ -417,6 +452,11 @@ enum PollError {
 struct SpendWait {
     /// The first block that has not been searched yet.
     cursor: u64,
+    /// Where the cursor starts: the receipt's block once it is known, else the search's start block. The cursor
+    /// goes back here at most once per `LogsWindow::cursor_reset_every_ms`.
+    start: u64,
+    /// When (UNIX milliseconds) the cursor last went back to its start, or the wait began.
+    last_reset_ms: u64,
     /// Whether the payment's receipt has been read; the cursor then starts at the receipt's block.
     receipt_read: bool,
     /// The transaction a window returned as the spend, while it is being fetched.
@@ -443,6 +483,8 @@ impl EthCoin {
     ) -> Result<TransactionEnum, crate::TransactionErr> {
         let mut wait = SpendWait {
             cursor: from_block,
+            start: from_block,
+            last_reset_ms: now_ms(),
             receipt_read: false,
             found: None,
             spent_warned: false,
@@ -563,6 +605,7 @@ impl EthCoin {
                 Ok(Some(receipt)) => {
                     if let Some(block) = receipt.block_number {
                         wait.cursor = wait.cursor.max(block);
+                        wait.start = wait.start.max(block);
                         wait.receipt_read = true;
                     }
                 },
@@ -594,6 +637,14 @@ impl EthCoin {
                 break;
             }
             next = to_block + 1;
+        }
+        // The poll reached the tip without the spend. A node that lagged behind the tip answers a window above its
+        // head as empty, and the cursor has moved past that window; so at most once per
+        // `cursor_reset_every_ms` the cursor goes back to its start and the next poll scans the range again.
+        let now = now_ms();
+        if now.saturating_sub(wait.last_reset_ms) >= self.logs_window.cursor_reset_every_ms() {
+            wait.cursor = wait.start;
+            wait.last_reset_ms = now;
         }
         Ok(None)
     }
@@ -722,6 +773,21 @@ mod tests {
         window.mark_scanned(&other, 0, 5, 5);
         assert_eq!(window.scanned_intervals(&other), []);
         assert_eq!(window.highest_unscanned(&other, 0, 5), Some((0, 5)));
+    }
+
+    #[test]
+    fn forgetting_the_scanned_blocks_keeps_the_receipt_block() {
+        let window = LogsWindow::default();
+        let key = test_key(3);
+        window.set_receipt_block(&key, 77);
+        window.mark_scanned(&key, 0, 500, 1_000);
+        assert_eq!(window.scanned_intervals(&key), [(0, 500)]);
+        window.forget_scanned(&key);
+        assert_eq!(window.scanned_intervals(&key), []);
+        assert_eq!(window.receipt_block(&key), Some(77));
+        assert_eq!(window.highest_unscanned(&key, 0, 1_000), Some((0, 1_000)));
+        // An unknown payment is not an error.
+        window.forget_scanned(&test_key(4));
     }
 
     #[test]

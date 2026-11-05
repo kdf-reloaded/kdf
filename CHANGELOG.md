@@ -260,6 +260,10 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   - **No rescanning.** It remembers what it has scanned for the rest of the session, so a later look
     goes on where the last one stopped. The newest 12 blocks are always scanned again, in case of
     a reorganization.
+  - **Lagging nodes.** A node behind the newest block can answer a range as empty. So after a full
+    pass that found nothing, the look starts over. The taker's wait for the spend, and the
+    version-2 swap's event search, go back to their start at most once a minute after an empty
+    pass.
   - **Version-2 swaps.** The version-2 swap's event search no longer rescans its whole range on every
     poll.
 

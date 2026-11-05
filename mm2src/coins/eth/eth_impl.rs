@@ -5,6 +5,7 @@ use super::*;
 // LP-17: bring alloy `Provider` trait into scope so `RootProvider`'s
 // inherent + trait methods (`client()`, `get_block_number()`, etc.) are
 // callable from the helpers below.
+use crate::eth::eth_logs_window::REORG_MARGIN_BLOCKS;
 use crate::hd_wallet::{HDAccountOps, HDWalletCoinOps, HDWalletOps};
 use crate::node_url::{host_only, scrub_node_url};
 use crate::{CoinWithDerivationMethod, CryptoCtx, KeyPairPolicy};
@@ -3359,7 +3360,11 @@ impl EthCoin {
                 block
             },
         };
-        let lowest_block = payment_block.map_or(search_from_block, |block| block.max(search_from_block));
+        // The low end is 12 blocks below the receipt block: a reorganization that moves the payment into an earlier
+        // block cannot put the spend below it.
+        let lowest_block = payment_block.map_or(search_from_block, |block| {
+            search_from_block.max(block.saturating_sub(REORG_MARGIN_BLOCKS))
+        });
         if current_block < lowest_block {
             current_block = lowest_block;
         }
@@ -3452,6 +3457,10 @@ impl EthCoin {
             }
         }
 
+        // The whole range down to the low end is scanned and holds no spend or refund. A node that lagged behind
+        // the tip may have answered a window above its head as empty (the tip and the logs can come from
+        // different nodes), so the record is dropped: the next call scans the range again, newest first.
+        self.logs_window.forget_scanned(&key);
         Ok(None)
     }
 
