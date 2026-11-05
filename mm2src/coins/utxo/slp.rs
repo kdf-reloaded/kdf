@@ -1091,6 +1091,254 @@ mod slp_tests {
         };
     }
 
+    /// The platform coin's decimals of the BCH fixture of the SLP withdraw fee tests.
+    const FEE_TEST_PLATFORM_DECIMALS: u8 = 8;
+    /// The slp address of the fixture's recipient.
+    const FEE_TEST_RECIPIENT: &str = "slptest:qzx0llpyp8gxxsmad25twksqnwd62xm3lsg8lecug8";
+    /// The token amount, in the token's base units, of the single SLP unspent. Withdrawing 0.1 of a token with
+    /// 4 decimals spends it entirely, so the transaction has no SLP change output.
+    const FEE_TEST_SLP_AMOUNT: u64 = 1000;
+
+    fn fee_test_token(bch: BchCoin) -> SlpToken {
+        let token_id = H256::from("bb309e48930671582bea508f9a1d9b491e49b69be3d6f372dc08da2ac6e90eb7");
+        SlpToken::new(4, "FUSD".into(), token_id, bch, 0)
+    }
+
+    /// What an SLP withdraw with an explicit fee produced, read from the signed transaction.
+    struct SlpFeeWithdraw {
+        /// The fee of `fee_details`, in platform base units.
+        fee: u64,
+        /// The worst-case size the fee is computed for: the signed transaction with every `scriptSig` at the
+        /// 107 bytes that `tx_size_in_v_bytes` assumes for a P2PKH input.
+        worst_case_size: u64,
+        details: TransactionDetails,
+    }
+
+    /// Withdraws 0.1 of a mocked SLP token (one SLP unspent of `FEE_TEST_SLP_AMOUNT` base units on a 1,000 base
+    /// unit platform output, plus the plain BCH unspents of `bch_inputs` in the given order) to a fixed
+    /// recipient with the fee descriptor `fee`. The BCH backend is mocked, nothing touches the network, and the
+    /// token has no `bchd` URL so that the SLP validation of the inputs has nothing to ask.
+    fn slp_withdraw_with_fee(fee: WithdrawFee, bch_inputs: &[u64]) -> Result<SlpFeeWithdraw, MmError<WithdrawError>> {
+        use crate::utxo::rpc_clients::UnspentInfo;
+        use crate::utxo::VerboseTransactionFrom;
+        use chain::TransactionInput;
+        use mocktopus::mocking::*;
+        use std::collections::HashMap;
+
+        let bch = crate::utxo::bch::bch_coin_without_network_for_test();
+        let fusd = fee_test_token(bch.clone());
+        let token_id = *fusd.token_id();
+
+        // The transaction that created the SLP unspent: output 0 is the SLP SEND script, output 1 the token.
+        let mut slp_tx = UtxoTx::default();
+        slp_tx.inputs.push(TransactionInput {
+            previous_output: OutPoint {
+                hash: H256::from([0xaa; 32]),
+                index: 0,
+            },
+            script_sig: vec![].into(),
+            sequence: 0,
+            script_witness: vec![],
+        });
+        slp_tx.outputs.push(slp_send_output(&token_id, &[FEE_TEST_SLP_AMOUNT]));
+        slp_tx.outputs.push(TransactionOutput {
+            value: 1000,
+            script_pubkey: vec![0x6a].into(),
+        });
+        let slp_outpoint = OutPoint {
+            hash: slp_tx.hash(),
+            index: 1,
+        };
+        let verbose = rpc::v1::types::Transaction {
+            hex: serialize(&slp_tx).take().into(),
+            txid: Default::default(),
+            hash: None,
+            size: Default::default(),
+            vsize: Default::default(),
+            version: 1,
+            locktime: 0,
+            vin: vec![],
+            vout: vec![],
+            blockhash: Default::default(),
+            confirmations: 1,
+            rawconfirmations: None,
+            time: 0,
+            blocktime: 0,
+            height: Some(1),
+        };
+        let slp_tx_hash: H256Json = slp_tx.hash().reversed().into();
+
+        let mut unspents = vec![UnspentInfo {
+            outpoint: slp_outpoint,
+            value: 1000,
+            height: Some(1),
+        }];
+        unspents.extend(bch_inputs.iter().enumerate().map(|(i, value)| UnspentInfo {
+            // Output 0 of a transaction is a plain BCH unspent; no verbose transaction is read for it.
+            outpoint: OutPoint {
+                hash: H256::from([i as u8 + 1; 32]),
+                index: 0,
+            },
+            value: *value,
+            height: Some(1),
+        }));
+        BchCoin::get_all_unspent_ordered_list.mock_safe(move |coin, _| {
+            let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
+            MockResult::Return(Box::pin(futures::future::ok((unspents.clone(), cache))))
+        });
+        BchCoin::get_verbose_transactions_from_cache_or_rpc.mock_safe(move |_, tx_ids| {
+            let expected_ids: std::collections::HashSet<H256Json> = std::iter::once(slp_tx_hash).collect();
+            assert_eq!(tx_ids, expected_ids);
+            let result: HashMap<_, _> =
+                std::iter::once((slp_tx_hash, VerboseTransactionFrom::Cache(verbose.clone()))).collect();
+            MockResult::Return(Box::new(futures01::future::ok(result)))
+        });
+
+        let req = WithdrawRequest {
+            amount: "0.1".parse().unwrap(),
+            from: None,
+            to: FEE_TEST_RECIPIENT.to_string(),
+            coin: "FUSD".into(),
+            max: false,
+            fee: Some(fee),
+        };
+        let details = fusd.withdraw(req).wait()?;
+
+        let signed: UtxoTx = deserialize(details.tx_hex.as_slice()).unwrap();
+        // The required SLP input and every plain input the builder picked.
+        assert_eq!(signed.inputs[0].previous_output, slp_outpoint);
+        assert_eq!(signed.inputs.len(), 1 + bch_inputs.len());
+        // The SLP OP_RETURN, the token output to the recipient and the BCH change output.
+        assert_eq!(signed.outputs.len(), 3);
+        let inputs_sum = 1000 + bch_inputs.iter().sum::<u64>();
+        let outputs_sum: u64 = signed.outputs.iter().map(|output| output.value).sum();
+        let slack: u64 = signed
+            .inputs
+            .iter()
+            .map(|input| 107 - input.script_sig.len() as u64)
+            .sum();
+        // `fee_details` carries the fee the builder charged. The builder does not count the value of the required
+        // SLP input among its inputs (it is not available for the outputs), so the plain difference of inputs and
+        // outputs of the signed transaction is that fee plus the platform value of the SLP input.
+        let fee = match details.fee_details.clone() {
+            Some(TxFeeDetails::Slp(fee_details)) => {
+                sat_from_big_decimal(&fee_details.amount, FEE_TEST_PLATFORM_DECIMALS).unwrap()
+            },
+            other => panic!("Unexpected fee details {:?}", other),
+        };
+        assert_eq!(inputs_sum - outputs_sum, fee + 1000);
+        Ok(SlpFeeWithdraw {
+            fee,
+            worst_case_size: details.tx_hex.len() as u64 + slack,
+            details,
+        })
+    }
+
+    /// The two transaction shapes of T38.6.6m: `(plain BCH inputs, worst-case size in bytes)`. The worst-case
+    /// size is that of the unsigned transaction with the change output and 148 bytes (41 + 107) per P2PKH
+    /// input. The first shape has the SLP input and 1 plain input (457 bytes, under 1,000); the second has the
+    /// SLP input and 8 plain inputs, the first seven of which are too small to cover the fee (1,493 bytes,
+    /// over 1,000). The sizes differ from the UTXO tests' 245 and 1,429 bytes by the SLP OP_RETURN output.
+    fn slp_fee_shapes() -> [(Vec<u64>, u64); 2] {
+        let mut many = vec![100; 7];
+        many.push(100_000_000);
+        [(vec![100_000_000], 457), (many, 1493)]
+    }
+
+    /// The rate used by the SLP withdraw fee tests, 0.00001234 platform coin per 1,000 bytes. Per started
+    /// kilobyte (the arithmetic before R38.6.6m) a transaction under 1,000 bytes would pay 1234 and one over
+    /// 1,000 bytes 2468 base units, far from the proportional figures.
+    const FEE_TEST_RATE: &str = "0.00001234";
+    const FEE_TEST_RATE_SAT: u64 = 1234;
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_slp_withdraw_fixed_and_per_kbyte_fee_are_equal() {
+        // T38.6.6m (a): UtxoFixed and UtxoPerKbyte charge the same fee for one transaction under and one over
+        // 1,000 bytes.
+        let amount: BigDecimal = FEE_TEST_RATE.parse().unwrap();
+        for (bch_inputs, _) in slp_fee_shapes() {
+            let fixed = slp_withdraw_with_fee(WithdrawFee::UtxoFixed { amount: amount.clone() }, &bch_inputs).unwrap();
+            let per_kbyte =
+                slp_withdraw_with_fee(WithdrawFee::UtxoPerKbyte { amount: amount.clone() }, &bch_inputs).unwrap();
+            assert_eq!(fixed.fee, per_kbyte.fee);
+            assert_eq!(fixed.worst_case_size, per_kbyte.worst_case_size);
+            assert_eq!(fixed.details.fee_details, per_kbyte.details.fee_details);
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_slp_withdraw_explicit_fee_reference_arithmetic() {
+        // T38.6.6m (b): the arithmetic asserted is the reference arithmetic of R38.6.6l item 2 with the
+        // change-output split of its clean-side note, `floor(a x (s - 34) / 1000) + floor(a x 34 / 1000)`, for
+        // both descriptors. At a = 1234 it is 562 base units at s = 457 and 1841 at s = 1,493 (the literal
+        // `floor(a x s / 1000)` would give 563 and 1842). It is not the per-started-kilobyte
+        // `a x ceil(s / 1000)`, 1234 and 2468, that `UtxoFixed` was charged before R38.6.6m.
+        let expected_fees = [562, 1841];
+        for ((bch_inputs, size), expected_fee) in slp_fee_shapes().into_iter().zip(expected_fees) {
+            let fixed = slp_withdraw_with_fee(
+                WithdrawFee::UtxoFixed {
+                    amount: FEE_TEST_RATE.parse().unwrap(),
+                },
+                &bch_inputs,
+            )
+            .unwrap();
+            assert_eq!(fixed.worst_case_size, size);
+            let expected = FEE_TEST_RATE_SAT * (size - 34) / 1000 + FEE_TEST_RATE_SAT * 34 / 1000;
+            let started_kb = FEE_TEST_RATE_SAT * ((size + 999) / 1000);
+            assert_eq!(expected, expected_fee);
+            assert_ne!(expected, started_kb);
+            assert_eq!(fixed.fee, expected_fee, "UtxoFixed, worst-case size {size}");
+            let per_kbyte = slp_withdraw_with_fee(
+                WithdrawFee::UtxoPerKbyte {
+                    amount: FEE_TEST_RATE.parse().unwrap(),
+                },
+                &bch_inputs,
+            )
+            .unwrap();
+            assert_eq!(per_kbyte.worst_case_size, size);
+            assert_eq!(per_kbyte.fee, expected_fee, "UtxoPerKbyte, worst-case size {size}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_slp_withdraw_fee_details_are_in_the_platform_coin() {
+        // T38.6.6m (c): fee_details reports the fee actually charged, in the platform coin, named by its ticker.
+        let withdraw = slp_withdraw_with_fee(
+            WithdrawFee::UtxoFixed {
+                amount: FEE_TEST_RATE.parse().unwrap(),
+            },
+            &[100_000_000],
+        )
+        .unwrap();
+        let expected = TxFeeDetails::Slp(SlpFeeDetails {
+            amount: big_decimal_from_sat_unsigned(withdraw.fee, FEE_TEST_PLATFORM_DECIMALS),
+            coin: "BCH".into(),
+        });
+        assert_eq!(withdraw.details.fee_details, Some(expected));
+        // The token's own ticker is not the fee's coin.
+        assert_eq!(withdraw.details.coin, "FUSD");
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_slp_withdraw_evm_fee_descriptor_is_invalid_fee_policy() {
+        // T38.6.6m (d): a descriptor that is neither UtxoFixed nor UtxoPerKbyte is the invalid-fee-policy error.
+        let err = match slp_withdraw_with_fee(
+            WithdrawFee::EthGas {
+                gas_price: "1".parse().unwrap(),
+                gas: 21_000,
+            },
+            &[100_000_000],
+        ) {
+            Ok(_) => panic!("an EVM fee descriptor must be refused"),
+            Err(err) => err,
+        };
+        assert!(matches!(err.into_inner(), WithdrawError::InvalidFeePolicy(_)));
+    }
+
     #[test]
     fn test_sign_message() {
         let bch = tbch_coin_for_test();

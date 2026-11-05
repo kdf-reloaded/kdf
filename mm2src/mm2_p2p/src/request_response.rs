@@ -640,6 +640,52 @@ mod tests {
         ));
     }
 
+    /// CRD ch.28 R16a, T4a (f): requests and answers read from a peer are read under the bounds, in both directions.
+    #[test]
+    fn t4a_f_request_and_response_are_read_under_the_bounds() {
+        use super::{Codec, PeerRequest};
+        use common::msgpack_bounds::{dropped_peer_values, MAX_PEER_NESTING};
+        use futures::executor::block_on;
+        use futures::io::Cursor;
+        use libp2p::core::upgrade::write_length_prefixed;
+        use libp2p::request_response::Codec as RequestResponseCodec;
+
+        let framed = |bytes: &[u8]| {
+            let mut out = Vec::new();
+            block_on(write_length_prefixed(&mut out, bytes)).unwrap();
+            Cursor::new(out)
+        };
+        let nested = |levels: usize| {
+            let mut bytes = vec![0x91; levels];
+            bytes.push(0xc0);
+            bytes
+        };
+        let mut codec = Codec::<Protocol, PeerRequest, PeerResponse>::default();
+        let protocol = Protocol::Version2;
+
+        // Values that fit are read.
+        let request = encode_message(&PeerRequest { req: vec![1, 2, 3] }).unwrap();
+        let read = block_on(codec.read_request(&protocol, &mut framed(&request))).unwrap();
+        assert_eq!(read.req, vec![1, 2, 3]);
+        let response = encode_message(&PeerResponse::Ok { res: vec![4, 5] }).unwrap();
+        assert!(matches!(
+            block_on(codec.read_response(&protocol, &mut framed(&response))).unwrap(),
+            PeerResponse::Ok { res } if res == vec![4, 5]
+        ));
+
+        // One that nests beyond the bound is dropped and counted, whichever direction it comes from.
+        let before = dropped_peer_values();
+        let err = block_on(codec.read_request(&protocol, &mut framed(&nested(MAX_PEER_NESTING + 1)))).unwrap_err();
+        assert!(err.to_string().contains("decoding bounds"), "{err}");
+        let err = block_on(codec.read_response(&protocol, &mut framed(&nested(10_000)))).unwrap_err();
+        assert!(err.to_string().contains("decoding bounds"), "{err}");
+        assert!(dropped_peer_values() >= before + 2);
+
+        // At the bound the value is read as far as the type allows.
+        let err = block_on(codec.read_request(&protocol, &mut framed(&nested(MAX_PEER_NESTING)))).unwrap_err();
+        assert!(!err.to_string().contains("decoding bounds"), "{err}");
+    }
+
     #[test]
     fn a_local_failure_is_never_written_to_a_peer_nor_read_from_one() {
         let local = PeerResponse::LocalErr {

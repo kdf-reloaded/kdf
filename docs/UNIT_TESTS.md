@@ -18,6 +18,12 @@ cargo test -p coins --lib -- eth::eth_tests::test_gas_station_data
 cargo test -p coins --lib -- eth::eth_tests::test_u256
 cargo test -p coins --lib -- eth::eth_tests::test_wei
 cargo test -p coins --lib -- rpc_response_tests coin_protocol_capability::
+
+# Bounds on a value received from a peer (CRD ch.28 R16a, T4a)
+cargo test -p common --lib msgpack_bounds::
+cargo test -p mm2_p2p --features application --lib t4a_
+cargo test -p coins --lib t4a_
+cargo test -p mm2_main --lib t4a_
 ```
 
 ## coins_activation (35 tests)
@@ -90,6 +96,25 @@ They cover CRD chapter 59 §59.4A, test T14.
 | T14 (d) opt-in | A UTXO coin's protocol information is exactly its encoded address format; a coin of another family sends nothing |
 | T14 (e) carriage | The three order-match messages and the synchronization answers carry the bytes unchanged; the trie root is equal with and without the word |
 | T14 (f) decisions | A test coin that requires `tx_v6`: reservations and requests without it are neither connected nor reserved, with it both go ahead, and no swap or penalty record appears |
+
+## Bounds on a value received from a peer (CRD ch.28 R16a, T4a)
+
+Locations: `mm2src/common/msgpack_bounds.rs`, `mm2src/mm2_p2p/src/lib.rs`,
+`mm2src/mm2_p2p/src/atomicdex_behaviour.rs`, `mm2src/coins/utxo/utxo_tests.rs`,
+`mm2src/mm2_main/src/ordermatch_tests.rs`, `mm2src/mm2_main/src/lp_network.rs`,
+`mm2src/mm2_main/src/lp_swap/swap_msg.rs` and `mm2src/mm2_main/src/lp_swap/swap_watcher.rs`.
+
+The tests are named `t4a_<bullet>_...` after the bullets of T4a. All of them run in the `peer-decoding`
+cell of the CI unit tests; the `ordermatch_tests` ones also run in the `ordermatch` cell.
+
+| Bullet | Where | What is tested |
+|--------|-------|----------------|
+| (a) | `mm2_p2p`, `mm2_main` | Every message type the node sends passes the check and nests at most 32 levels |
+| (b) | `common` | Nesting of exactly 64 levels passes; 65 and 10,000 are dropped (positional values, maps, nested maps, mixed, empty containers) |
+| (c) | `common` | bin, str and ext headers declaring 0xFFFFFFF0 bytes, array and map headers declaring 0xFFFFFFFF elements, the reserved marker, every prefix of a valid value, every marker family walked to its exact end |
+| (d) | `mm2_p2p` | An envelope beyond the bounds is dropped before its signature is examined and counted; a normal envelope and the peers-topic addresses still decode |
+| (e) | `common` | Bytes after the first value are ignored |
+| (f) | `mm2_main`, `coins` | The order record, the address format of a protocol-information value and the coin's own check drop or fall back beyond the bounds and are unchanged for the real formats |
 
 ## Pre-existing test compilation fix
 

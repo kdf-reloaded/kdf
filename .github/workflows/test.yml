@@ -208,6 +208,12 @@ jobs:
           # `#[ignore]` (`t_mp8_relay_1_msg_per_s`, `t_mp8_relay_0_3_msg_per_s`).
           - name: maker-outbox
             cmd: "cargo test -p mm2_main --lib -- maker_outbox:: t_mp8_harness"
+          # The bounds on a value received from a peer (CRD ch.28 R16a, T4a): the check itself,
+          # its use by the node's decode sites in `mm2_p2p`, `coins` and `mm2_main`, and the
+          # deepest message the node sends. The `ordermatch_tests` ones also run in the
+          # `ordermatch` cell. `application` enables the request tests of `mm2_p2p`.
+          - name: peer-decoding
+            cmd: "cargo test -p common --lib msgpack_bounds:: && cargo test -p mm2_p2p --features application --lib t4a_ && cargo test -p coins --lib t4a_ && cargo test -p mm2_main --lib t4a_"
 
     steps:
       - uses: actions/checkout@v7
