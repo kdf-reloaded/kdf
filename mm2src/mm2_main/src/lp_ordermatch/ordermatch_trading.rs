@@ -1010,6 +1010,115 @@ pub(crate) fn stale_pubkeys(
     (uuids_to_remove, pubkeys_to_remove)
 }
 
+/// A pair of another maker that the maintenance sweep pruned (CRD ch.32 R-GH14 item 2).
+#[derive(Debug, PartialEq)]
+pub(crate) struct PrunedPair {
+    pub(crate) pubkey: String,
+    pub(crate) alb_pair: String,
+    /// How many orders of the pubkey on the pair left the read index.
+    pub(crate) removed_orders: usize,
+}
+
+/// Selects the (pubkey, pair) combinations whose liveness instant is past the window (CRD ch.32 R-GH14 item 2),
+/// with the comparison the per-pubkey eviction makes ([`stale_pubkeys`]).
+///
+/// Three kinds of pubkey are left out: the node's own persistent key and every per-order key it makes orders
+/// under (item 4), a pubkey that is itself past its window, which the per-pubkey eviction removes whole, and
+/// one that has no record.
+pub(crate) fn stale_pairs(
+    pair_liveness: &PairLiveness,
+    pubkeys_state: &HashMap<String, OrderbookPubkeyState>,
+    my_persistent_pubkey: &str,
+    my_p2p_pubkeys: &HashSet<String>,
+    timeout_secs: u64,
+    now_secs: u64,
+) -> Vec<(String, String)> {
+    pair_liveness.stale(timeout_secs, now_secs, |pubkey| {
+        let is_own = pubkey == my_persistent_pubkey || my_p2p_pubkeys.contains(pubkey);
+        !is_own
+            && pubkeys_state
+                .get(pubkey)
+                .is_some_and(|state| state.last_keep_alive + timeout_secs > now_secs)
+    })
+}
+
+/// The per-pair part of the maintenance sweep (CRD ch.32 R-GH14 item 2): every pair of another maker whose
+/// liveness instant is past the window leaves the read index, with the trie events the per-pubkey eviction
+/// queues for an order, and its held root and delta history are dropped by a `ClearPair` event. The maker's
+/// record and its other pairs stay. Does nothing with `pair_liveness` off.
+///
+/// The order book lock is held from the decision to the queueing, so an order message that is being applied
+/// either has its instant recorded before the decision or reaches the trie after the clear (lock order: order
+/// book, trie store, then the instants, which are a leaf).
+pub(crate) fn prune_stale_pairs(
+    ctx: &MmArc,
+    ordermatch_ctx: &OrdermatchContext,
+    my_persistent_pubkey: &str,
+    timeout_secs: u64,
+    now_secs: u64,
+) -> Vec<PrunedPair> {
+    if !ordermatch_ctx.pair_liveness.is_on() {
+        return vec![];
+    }
+    let mut orderbook = ordermatch_ctx.orderbook.lock();
+    let stale = {
+        let trie_store = ordermatch_ctx.trie_store.lock();
+        stale_pairs(
+            &ordermatch_ctx.pair_liveness,
+            &trie_store.pubkeys_state,
+            my_persistent_pubkey,
+            &orderbook.my_p2p_pubkeys,
+            timeout_secs,
+            now_secs,
+        )
+    };
+    if stale.is_empty() {
+        return vec![];
+    }
+
+    let mut ops = Vec::new();
+    let mut pruned = Vec::with_capacity(stale.len());
+    for (pubkey, alb_pair) in stale {
+        let mut removed_orders = 0;
+        for uuid in orderbook.pubkey_pair_order_uuids(&pubkey, &alb_pair) {
+            if let Some((_item, op)) = orderbook.index_remove(uuid) {
+                ops.push(op);
+                removed_orders += 1;
+            }
+        }
+        ops.push(TrieOp::ClearPair {
+            pubkey: pubkey.clone(),
+            alb_pair: alb_pair.clone(),
+        });
+        // The worker forgets it too; doing it here keeps the next pass from selecting the pair again.
+        ordermatch_ctx.pair_liveness.clear_pair(&pubkey, &alb_pair);
+        pruned.push(PrunedPair {
+            pubkey,
+            alb_pair,
+            removed_orders,
+        });
+    }
+    orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
+    collect_orderbook_metrics(ctx, &orderbook);
+    drop(orderbook);
+
+    for pair in &pruned {
+        log::debug!(
+            "Pruned the pair {} of pubkey {}: no keep-alive, order message or answer for {} s, {} order(s) removed",
+            pair.alb_pair,
+            pair.pubkey,
+            timeout_secs,
+            pair.removed_orders
+        );
+    }
+    log::info!(
+        "Pruned {} pair(s) of makers that stopped advertising them ({} order(s) removed)",
+        pruned.len(),
+        pruned.iter().map(|pair| pair.removed_orders).sum::<usize>()
+    );
+    pruned
+}
+
 /// Cancels the maker orders whose own timeout has elapsed (CRD ch.12 §12.8). The order's lock is held for the
 /// announcement only; the deletion from storage runs after it is released (R7a).
 pub(crate) async fn cancel_expired_maker_orders(ctx: &MmArc, ordermatch_ctx: &OrdermatchContext) {
@@ -1083,6 +1192,9 @@ pub async fn lp_ordermatch_loop(ctx: MmArc) {
                 collect_orderbook_metrics(&ctx, &orderbook);
             }
         }
+
+        // CRD ch.32 R-GH14: the pairs a maker no longer advertises, in the same pass as the eviction above.
+        prune_stale_pairs(&ctx, &ordermatch_ctx, &my_pubsecp, maker_order_timeout, now_ms() / 1000);
 
         reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx).await;
 

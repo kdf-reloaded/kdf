@@ -217,6 +217,11 @@ pub(crate) fn order_messages_refresh_liveness(ctx: &MmArc) -> bool {
     ctx.conf["order_messages_refresh_liveness"].as_bool() != Some(false)
 }
 
+/// CRD ch.32 R-GH14 item 5: the top-level MM2.json boolean `pair_liveness`, default `true`. Only a JSON `false`
+/// turns the per-pair liveness off: no pair of another maker's record then has an instant of its own, and a pair
+/// the maker stops advertising is kept as long as the record, which is the reference behaviour.
+pub(crate) fn pair_liveness(ctx: &MmArc) -> bool { ctx.conf["pair_liveness"].as_bool() != Some(false) }
+
 /// Refusal of the pre-trade spend-safety check (CRD ch.60 R60.6.7 items 4 and 6).
 #[derive(Debug, Display)]
 pub(crate) enum SpendSafetyError {
