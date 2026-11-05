@@ -753,6 +753,39 @@ async fn a_transport_failure_on_broadcast_does_move_on_to_the_next_endpoint() {
     assert_eq!(transport.called("second", "send"), 1);
 }
 
+/// CRD ch.39 T39.6.5a (R39.8.0bb): the identifier `send_raw_transaction` computes from the bytes -- the
+/// service answers with a status only -- is the chain's, for a mainnet transaction that carries Ironwood
+/// actions, and the bytes reach the transport unchanged.
+#[tokio::test]
+async fn t39_6_5a_send_raw_transaction_names_a_mainnet_ironwood_transaction_by_the_chain_identifier() {
+    use crate::utxo::rpc_clients::UtxoRpcClientOps;
+    use crate::z_coin::z_ironwood_read_tests::{DEPOSIT, WITHDRAW};
+    struct Bound;
+    impl WalletBranchStore for Bound {
+        fn state(&self) -> Result<WalletBranchState, String> { Ok(scanned_wallet(IRONWOOD_BRANCH)) }
+
+        fn record(&self, _: u32) -> Result<(), String> { Ok(()) }
+    }
+    for recorded in [&WITHDRAW, &DEPOSIT] {
+        let transport = Arc::new(FakeTransport::default());
+        let mut script = healthy(&[]);
+        script.send = Some(Ok(()));
+        transport.serve("only", script);
+        let backend = backend_over(&transport, &["only"]);
+        backend.bind_wallet(Arc::new(Bound));
+        let client = LightwalletdClient(Arc::new(backend));
+
+        let bytes = recorded.bytes();
+        let txid = client
+            .send_raw_transaction(BytesJson::from(bytes.clone()))
+            .compat()
+            .await
+            .unwrap();
+        assert_eq!(hex::encode(txid.0), recorded.txid_display);
+        assert_eq!(*transport.sent.lock(), vec![bytes]);
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // T39.11.c -- one builder height
 // ---------------------------------------------------------------------------------------------

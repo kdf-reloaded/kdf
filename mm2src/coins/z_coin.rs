@@ -145,6 +145,8 @@ mod z_coin_ops;
 #[cfg(not(target_arch = "wasm32"))] mod z_electrum_fallback;
 #[cfg(not(target_arch = "wasm32"))] mod z_ironwood;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod z_ironwood_read_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_note_lock_tests;
 #[cfg(not(target_arch = "wasm32"))] mod z_refund_gate;
 #[cfg(not(target_arch = "wasm32"))] mod z_swap_ops;
