@@ -299,6 +299,9 @@ lives.
 - **Radiant (RXD) is only partly usable.** RXD activates and signs, but swaps with it are not
   established. More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
+- **SLP tokens on BCH are untested on mainnet.** The shared coins file lists BCH and tBCH as plain
+  UTXO coins and carries no SLP token entries, so SLP tokens cannot be enabled with it. The SLP
+  changes of this release are covered by unit tests only. Detail: PR #236.
 - **TRON (TRX, TRC20) and Solana (SOL, SPL) cannot be activated in this beta.** Their support is not
   finished. TRON activation answers "TRON support is not available in this build";
   `enable_solana_with_tokens` and `enable_spl` answer "Solana support is not available in this
