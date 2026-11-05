@@ -295,7 +295,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   and Pirate1 receiving addresses move to a later release.
   The capability word that lets ARRR require a counterparty that builds version-6 transactions is
   written (CRD PR #227), and its generic part, the word's writer and fail-closed reader and the
-  decline log lines, is implemented (PR #235); the ARRR rule that uses it comes next.
+  decline log lines, is implemented (PR #235); the ARRR rule that uses it is written (CRD PR #230).
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
