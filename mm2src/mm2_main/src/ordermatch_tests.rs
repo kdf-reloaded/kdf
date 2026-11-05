@@ -3162,6 +3162,640 @@ mod t32_k1b_final_cancel_tests {
         assert!(receive(&restarted, &created(&maker.secret, &maker.cancelled)));
         assert!(book(&restarted).contains(&maker.cancelled.uuid));
     }
+
+    /// CRD ch.32 §32.9C.2 R-GH14, T-GH14: per-pair liveness on the receiver's clock. The passage of time is
+    /// simulated the way the other liveness tests do it: the liveness instant of a pair is moved into the past
+    /// (`age`), and the sweep is driven through `prune_stale_pairs`, which takes the clock reading as an
+    /// argument. The maker's record keeps a fresh instant of its own (it still sends keep-alives for its other
+    /// pairs), so only the pair instants age.
+    mod t_gh14_pair_liveness {
+        use super::*;
+        use crate::mm2::lp_ordermatch::ordermatch_orderbook::apply_sync_answer;
+
+        const X: &str = "C1:C2";
+        const Y: &str = "C1:C3";
+        const WINDOW: u64 = 90;
+        const OWN_PERSISTENT: &str = "own-persistent-pubkey";
+        const OWN_PER_ORDER: &str = "own-per-order-pubkey";
+
+        /// A maker with two orders on X and two on Y.
+        struct Poster {
+            pubkey: String,
+            secret: [u8; 32],
+            x: Vec<OrderbookItem>,
+            y: Vec<OrderbookItem>,
+        }
+
+        impl Poster {
+            fn new(name: &str) -> Poster {
+                let (pubkey, secret) = pubkey_and_secret_for_test(name);
+                let x = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 2);
+                let y = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C3".into(), 2);
+                Poster { pubkey, secret, x, y }
+            }
+
+            fn all(&self) -> Vec<OrderbookItem> { [self.x.clone(), self.y.clone()].concat() }
+        }
+
+        fn uuids(orders: &[OrderbookItem]) -> HashSet<Uuid> { orders.iter().map(|o| o.uuid).collect() }
+
+        /// A node: a keep-alive that requests sends exactly one command (no second request, no alternate relay).
+        fn node_with(conf: Json) -> (MmArc, mpsc::Receiver<AdexBehaviourCmd>) {
+            let mut conf = conf;
+            let members = conf.as_object_mut().unwrap();
+            members.entry("sync_request_retry_ms").or_insert(json!(0));
+            members.entry("sync_request_alternate_relay").or_insert(json!(false));
+            node(conf)
+        }
+
+        /// A node that holds the orders of the poster on both pairs, received as created messages.
+        fn known_node(conf: Json) -> (MmArc, mpsc::Receiver<AdexBehaviourCmd>, Poster) {
+            let (ctx, rx) = node_with(conf);
+            let poster = Poster::new("gh14-poster");
+            for order in poster.all() {
+                assert!(receive(&ctx, &created(&poster.secret, &order)));
+            }
+            (ctx, rx, poster)
+        }
+
+        fn updated(secret: &[u8; 32], uuid: Uuid) -> Vec<u8> {
+            let mut msg = MakerOrderUpdated::new(uuid);
+            msg.with_new_price(BigRational::new(3.into(), 2.into()));
+            encode_and_sign(&new_protocol::OrdermatchMessage::MakerOrderUpdated(msg), secret).unwrap()
+        }
+
+        /// The liveness instant of (`pubkey`, `pair`).
+        fn seen(ctx: &MmArc, pubkey: &str, pair: &str) -> Option<u64> { octx(ctx).pair_liveness.get(pubkey, pair) }
+
+        /// Simulates `secs` passing since the pair's last liveness instant.
+        fn age(ctx: &MmArc, pubkey: &str, pair: &str, secs: u64) {
+            assert!(seen(ctx, pubkey, pair).is_some(), "the pair has an instant");
+            octx(ctx).pair_liveness.age(pubkey, pair, secs);
+        }
+
+        /// One sweep pass at the current reading of the clock, with the window `timeout`.
+        fn prune_with(ctx: &MmArc, timeout: u64) -> Vec<PrunedPair> {
+            let pruned = prune_stale_pairs(ctx, &octx(ctx), OWN_PERSISTENT, timeout, now_ms() / 1000);
+            flush_trie(ctx);
+            pruned
+        }
+
+        fn prune(ctx: &MmArc) -> Vec<PrunedPair> { prune_with(ctx, WINDOW) }
+
+        fn pruned_pairs(pruned: Vec<PrunedPair>) -> Vec<String> {
+            let mut pairs: Vec<String> = pruned.into_iter().map(|p| p.alb_pair).collect();
+            pairs.sort();
+            pairs
+        }
+
+        /// The orders of `pubkey` on `pair` in the read index.
+        fn on_book(ctx: &MmArc, pubkey: &str, pair: &str) -> HashSet<Uuid> {
+            octx(ctx)
+                .orderbook
+                .lock()
+                .pubkey_pair_order_uuids(pubkey, pair)
+                .into_iter()
+                .collect()
+        }
+
+        fn root(ctx: &MmArc, pubkey: &str, pair: &str) -> Option<H64> {
+            let octx = octx(ctx);
+            let trie_store = octx.trie_store.lock();
+            trie_store
+                .pubkeys_state
+                .get(pubkey)
+                .and_then(|state| state.trie_roots.get(pair).copied())
+        }
+
+        fn has_history(ctx: &MmArc, pubkey: &str, pair: &str) -> bool {
+            let octx = octx(ctx);
+            let trie_store = octx.trie_store.lock();
+            trie_store
+                .pubkeys_state
+                .get(pubkey)
+                .is_some_and(|state| state.order_pairs_trie_state_history.get(&pair.to_owned()).is_some())
+        }
+
+        /// The keep-alive from `pubkey` naming `roots`, handled by `ctx` as a relay or as a non-relay. Returns the
+        /// roots of the synchronization request it sent, if any; that request is left unanswered.
+        fn keep_alive(
+            ctx: &MmArc,
+            rx: &mut mpsc::Receiver<AdexBehaviourCmd>,
+            pubkey: &str,
+            roots: HashMap<String, H64>,
+            relay: bool,
+        ) -> Option<HashMap<String, H64>> {
+            let keep_alive = PubkeyKeepAlive {
+                trie_roots: roots,
+                timestamp: now_ms() / 1000,
+            };
+            let (ctx2, pubkey2) = (ctx.clone(), pubkey.to_owned());
+            let task = std::thread::spawn(move || {
+                block_on(process_orders_keep_alive(
+                    ctx2,
+                    FORWARDER.to_owned(),
+                    pubkey2,
+                    keep_alive,
+                    relay,
+                ))
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match rx.try_recv() {
+                    Ok(AdexBehaviourCmd::RequestPeers { req, response_tx, .. }) => {
+                        let trie_roots = match decode_message::<P2PRequest>(&req).unwrap() {
+                            P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState {
+                                trie_roots, ..
+                            }) => trie_roots,
+                            other => panic!("unexpected request {:?}", other),
+                        };
+                        drop(response_tx);
+                        assert!(!task.join().unwrap(), "the unanswered request failed");
+                        return Some(trie_roots);
+                    },
+                    Ok(other) => panic!("unexpected command {:?}", other),
+                    Err(_) if task.is_finished() => {
+                        assert!(task.join().unwrap(), "the keep-alive was handled");
+                        return None;
+                    },
+                    Err(_) => {
+                        assert!(Instant::now() < deadline, "the keep-alive was not handled");
+                        std::thread::sleep(Duration::from_millis(1));
+                    },
+                }
+            }
+        }
+
+        /// The roots a keep-alive naming the pairs `pairs` carries when it advertises what the node holds.
+        fn held_roots(ctx: &MmArc, pubkey: &str, pairs: &[&str]) -> HashMap<String, H64> {
+            pairs
+                .iter()
+                .map(|pair| (pair.to_string(), root(ctx, pubkey, pair).unwrap()))
+                .collect()
+        }
+
+        fn answer_of(pair: &str, diff: DeltaOrFullTrie<Uuid, OrderbookP2PItem>) -> SyncPubkeyOrderbookStateRes {
+            SyncPubkeyOrderbookStateRes {
+                last_signed_pubkey_payload: vec![],
+                pair_orders_diff: HashMap::from([(pair.to_owned(), diff)]),
+                protocol_infos: HashMap::new(),
+                conf_infos: HashMap::new(),
+            }
+        }
+
+        fn apply_answer(ctx: &MmArc, pubkey: &str, answer: SyncPubkeyOrderbookStateRes) {
+            apply_sync_answer(&octx(ctx), pubkey, answer);
+            flush_trie(ctx);
+        }
+
+        // (a)
+
+        #[test]
+        fn t_gh14_a_emptied_pair_leaves_other_pairs_stay() {
+            let (ctx, _rx, p) = known_node(json!({}));
+            assert!(
+                seen(&ctx, &p.pubkey, X).is_some(),
+                "created messages give the pair an instant"
+            );
+            assert!(seen(&ctx, &p.pubkey, Y).is_some());
+            assert!(has_history(&ctx, &p.pubkey, X));
+
+            // P's only orders on X were cancelled, the node missed it, and P advertises Y only: X's last
+            // naming is past the window.
+            age(&ctx, &p.pubkey, X, WINDOW + 5);
+            let pruned = prune(&ctx);
+            assert_eq!(pruned, vec![PrunedPair {
+                pubkey: p.pubkey.clone(),
+                alb_pair: X.to_owned(),
+                removed_orders: 2,
+            }]);
+
+            assert!(on_book(&ctx, &p.pubkey, X).is_empty());
+            assert_eq!(on_book(&ctx, &p.pubkey, Y), uuids(&p.y), "the other pair stays");
+            assert_eq!(book(&ctx), uuids(&p.y));
+            assert_eq!(root(&ctx, &p.pubkey, X), None, "the held root is dropped");
+            assert!(!has_history(&ctx, &p.pubkey, X), "the delta history is dropped");
+            assert_eq!(seen(&ctx, &p.pubkey, X), None);
+            assert!(root(&ctx, &p.pubkey, Y).is_some());
+            assert!(seen(&ctx, &p.pubkey, Y).is_some());
+            assert!(
+                octx(&ctx).trie_store.lock().pubkeys_state.contains_key(&p.pubkey),
+                "the record stays"
+            );
+            assert!(prune(&ctx).is_empty(), "nothing is pruned twice");
+        }
+
+        #[test]
+        fn t_gh14_a_pair_is_pruned_at_the_window_and_not_before() {
+            let (ctx, _rx, p) = known_node(json!({}));
+            age(&ctx, &p.pubkey, X, WINDOW - 5);
+            assert!(prune(&ctx).is_empty(), "within the window");
+            age(&ctx, &p.pubkey, X, 10);
+            assert_eq!(pruned_pairs(prune(&ctx)), vec![X.to_owned()], "past the window");
+        }
+
+        #[test]
+        fn t_gh14_a_switch_off_keeps_the_pair_until_the_record_is_evicted() {
+            let (ctx, _rx, p) = known_node(json!({ "pair_liveness": false }));
+            assert!(octx(&ctx).pair_liveness.is_empty(), "no instant is kept");
+            // Time far past the window: no pair of the record is pruned.
+            let far = now_ms() / 1000 + 10 * WINDOW;
+            assert!(prune_stale_pairs(&ctx, &octx(&ctx), OWN_PERSISTENT, WINDOW, far).is_empty());
+            assert_eq!(book(&ctx), uuids(&p.all()));
+
+            // The entries leave with the record (T-GH1, T-GH3).
+            {
+                let octx = octx(&ctx);
+                octx.trie_store
+                    .lock()
+                    .pubkeys_state
+                    .get_mut(&p.pubkey)
+                    .unwrap()
+                    .last_keep_alive -= WINDOW + 5;
+            }
+            let octx = octx(&ctx);
+            let my_p2p_pubkeys = octx.orderbook.lock().my_p2p_pubkeys.clone();
+            let trie_store = octx.trie_store.lock();
+            let (evicted_orders, evicted_pubkeys) = stale_pubkeys(
+                &trie_store.pubkeys_state,
+                OWN_PERSISTENT,
+                &my_p2p_pubkeys,
+                WINDOW,
+                now_ms() / 1000,
+            );
+            assert_eq!(evicted_pubkeys, vec![p.pubkey.clone()]);
+            assert_eq!(evicted_orders.into_iter().collect::<HashSet<_>>(), uuids(&p.all()));
+        }
+
+        #[test]
+        fn t_gh14_a_switch_off_records_no_instant_for_keep_alives_and_answers() {
+            let (ctx, mut rx, p) = known_node(json!({ "pair_liveness": false }));
+            let roots = HashMap::from([(X.to_owned(), [7; 8])]);
+            assert!(keep_alive(&ctx, &mut rx, &p.pubkey, roots, true).is_some());
+            let values = p.x.iter().map(|o| (o.uuid, o.clone().into())).collect();
+            apply_answer(&ctx, &p.pubkey, answer_of(X, DeltaOrFullTrie::FullTrie(values)));
+            assert!(octx(&ctx).pair_liveness.is_empty());
+        }
+
+        // (b)
+
+        #[test]
+        fn t_gh14_b_lost_keep_alives_prune_then_the_next_keep_alive_refills() {
+            let p = Poster::new("gh14-b");
+            let (maker_ctx, _maker_rx) = maker_node(&p.all());
+            let (relay, mut relay_rx) = node_with(json!({}));
+            assert!(
+                !sync_with(&relay, &mut relay_rx, &maker_ctx, &p.pubkey),
+                "a snapshot is answered"
+            );
+            // The answer is applied to the index at once, to the trie by the worker: a full snapshot clears the
+            // pair and its instant there and creates them again. Aging the instant before that would age nothing.
+            flush_trie(&relay);
+            assert_eq!(book(&relay), uuids(&p.all()));
+            assert!(
+                seen(&relay, &p.pubkey, X).is_some(),
+                "a keep-alive gives the pair an instant"
+            );
+
+            // The keep-alives for X are withheld for longer than the window; Y's keep alive on.
+            age(&relay, &p.pubkey, X, WINDOW + 5);
+            assert_eq!(pruned_pairs(prune(&relay)), vec![X.to_owned()]);
+            assert_eq!(book(&relay), uuids(&p.y));
+            assert_eq!(root(&relay, &p.pubkey, X), None);
+
+            // The next keep-alive naming X and Y requests X as a new pair, and only X: the held root
+            // is gone, so the request names the all-zero root (R-Q4, R-Q4a).
+            let roots = keep_alive_of(&maker_ctx, &p.pubkey).trie_roots;
+            assert_eq!(roots.len(), 2);
+            let request = keep_alive(&relay, &mut relay_rx, &p.pubkey, roots, true).expect("a request is sent");
+            assert_eq!(request, HashMap::from([(X.to_owned(), H64::default())]));
+            assert!(
+                seen(&relay, &p.pubkey, X).is_some(),
+                "the placeholder has its creation instant"
+            );
+
+            // The answer restores the orders: one request, answered with a full snapshot.
+            assert!(!sync_with(&relay, &mut relay_rx, &maker_ctx, &p.pubkey));
+            assert!(relay_rx.try_recv().is_err(), "one request per keep-alive");
+            assert_eq!(book(&relay), uuids(&p.all()));
+            flush_trie(&relay);
+            assert_eq!(root(&relay, &p.pubkey, X), root(&maker_ctx, &p.pubkey, X));
+            assert!(prune(&relay).is_empty());
+        }
+
+        // (c)
+
+        /// The pairs pruned when X is aged by 80 s, `refresh` happens, and X is aged by 80 s again.
+        fn pruned_after(refresh: impl FnOnce(&MmArc, &mut mpsc::Receiver<AdexBehaviourCmd>, &Poster)) -> Vec<String> {
+            let (ctx, mut rx, p) = known_node(json!({}));
+            age(&ctx, &p.pubkey, X, WINDOW - 10);
+            refresh(&ctx, &mut rx, &p);
+            age(&ctx, &p.pubkey, X, WINDOW - 10);
+            pruned_pairs(prune(&ctx))
+        }
+
+        #[test]
+        fn t_gh14_c_without_a_refresh_the_pair_is_pruned() {
+            assert_eq!(pruned_after(|_, _, _| {}), vec![X.to_owned()]);
+        }
+
+        #[test]
+        fn t_gh14_c_keep_alive_with_a_differing_root_refreshes_and_requests() {
+            let pruned = pruned_after(|ctx, rx, p| {
+                let roots = HashMap::from([(X.to_owned(), [7; 8])]);
+                let held = root(ctx, &p.pubkey, X).unwrap();
+                let request = keep_alive(ctx, rx, &p.pubkey, roots, true).expect("the pair is requested");
+                assert_eq!(request, HashMap::from([(X.to_owned(), held)]));
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_keep_alive_with_the_held_root_refreshes() {
+            let pruned = pruned_after(|ctx, rx, p| {
+                let roots = held_roots(ctx, &p.pubkey, &[X]);
+                assert_eq!(keep_alive(ctx, rx, &p.pubkey, roots, true), None);
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_created_message_refreshes() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                let more = make_random_orders(p.pubkey.clone(), &p.secret, "C1".into(), "C2".into(), 1);
+                assert!(receive(ctx, &created(&p.secret, &more[0])));
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_updated_message_refreshes() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                assert!(receive(ctx, &updated(&p.secret, p.x[0].uuid)));
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_updated_message_for_an_unknown_order_refreshes_nothing() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                assert!(!receive(ctx, &updated(&p.secret, Uuid::new_v4())));
+            });
+            assert_eq!(pruned, vec![X.to_owned()]);
+        }
+
+        #[test]
+        fn t_gh14_c_a_created_message_the_guard_drops_refreshes_nothing() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                let order = make_random_orders(p.pubkey.clone(), &p.secret, "C1".into(), "C2".into(), 1).remove(0);
+                assert!(receive(ctx, &cancelled(&p.secret, order.uuid)));
+                receive(ctx, &created(&p.secret, &order));
+                assert!(!book(ctx).contains(&order.uuid));
+            });
+            assert_eq!(pruned, vec![X.to_owned()]);
+        }
+
+        #[test]
+        fn t_gh14_c_applied_full_snapshot_refreshes() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                let values = p.x.iter().map(|o| (o.uuid, o.clone().into())).collect();
+                apply_answer(ctx, &p.pubkey, answer_of(X, DeltaOrFullTrie::FullTrie(values)));
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_applied_delta_that_inserts_refreshes() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                let more = make_random_orders(p.pubkey.clone(), &p.secret, "C1".into(), "C2".into(), 1).remove(0);
+                let delta = HashMap::from([(more.uuid, Some(more.into()))]);
+                apply_answer(ctx, &p.pubkey, answer_of(X, DeltaOrFullTrie::Delta(delta)));
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_applied_delta_that_removes_and_leaves_an_order_refreshes() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                let delta = HashMap::from([(p.x[0].uuid, None)]);
+                apply_answer(ctx, &p.pubkey, answer_of(X, DeltaOrFullTrie::Delta(delta)));
+                assert_eq!(on_book(ctx, &p.pubkey, X), HashSet::from([p.x[1].uuid]));
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_applied_answer_that_leaves_no_order_refreshes_nothing() {
+            let pruned = pruned_after(|ctx, _rx, p| {
+                let delta = p.x.iter().map(|o| (o.uuid, None)).collect();
+                apply_answer(ctx, &p.pubkey, answer_of(X, DeltaOrFullTrie::Delta(delta)));
+                assert!(on_book(ctx, &p.pubkey, X).is_empty());
+            });
+            assert_eq!(pruned, vec![X.to_owned()], "the emptied pair is dropped by the sweep");
+
+            // An empty snapshot clears the pair, its root and its instant at once; nothing is left to prune.
+            let (ctx, _rx, p) = known_node(json!({}));
+            age(&ctx, &p.pubkey, X, WINDOW + 5);
+            apply_answer(&ctx, &p.pubkey, answer_of(X, DeltaOrFullTrie::FullTrie(vec![])));
+            assert!(on_book(&ctx, &p.pubkey, X).is_empty());
+            assert_eq!((root(&ctx, &p.pubkey, X), seen(&ctx, &p.pubkey, X)), (None, None));
+            assert!(prune(&ctx).is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_applied_order_book_answer_refreshes() {
+            let pruned = pruned_after(|ctx, rx, p| {
+                let task_ctx = ctx.clone();
+                let task = std::thread::spawn(move || block_on(request_and_fill_orderbook(&task_ctx, "C1", "C2")));
+                let response_tx = match next_cmd(rx) {
+                    AdexBehaviourCmd::RequestAnyRelay { response_tx, .. } => response_tx,
+                    other => panic!("unexpected command {:?}", other),
+                };
+                let item = GetOrderbookPubkeyItem {
+                    orders: p.x.iter().map(|order| (order.uuid, order.clone().into())).collect(),
+                    last_keep_alive: now_ms() / 1000,
+                    last_signed_pubkey_payload: vec![],
+                };
+                let answer = GetOrderbookRes {
+                    pubkey_orders: HashMap::from([(p.pubkey.clone(), item)]),
+                    protocol_infos: HashMap::new(),
+                    conf_infos: p.x.iter().filter_map(|o| Some((o.uuid, o.conf_settings?))).collect(),
+                };
+                response_tx
+                    .send(Some((PeerId::random(), encode_message(&answer).unwrap())))
+                    .unwrap();
+                task.join().unwrap().unwrap();
+                flush_trie(ctx);
+            });
+            assert!(pruned.is_empty());
+        }
+
+        #[test]
+        fn t_gh14_c_keep_alive_with_a_zero_or_empty_root_refreshes_nothing() {
+            for advertised in [H64::default(), hashed_null_node::<Layout>()] {
+                let pruned = pruned_after(|ctx, rx, p| {
+                    let roots = HashMap::from([(X.to_owned(), advertised)]);
+                    assert_eq!(keep_alive(ctx, rx, &p.pubkey, roots, true), None, "no request either");
+                });
+                assert_eq!(pruned, vec![X.to_owned()]);
+            }
+        }
+
+        #[test]
+        fn t_gh14_c_keep_alive_that_creates_a_pair_gives_it_the_instant_of_its_creation() {
+            let p = Poster::new("gh14-placeholder");
+            let (ctx, mut rx) = node_with(json!({}));
+            let before = now_ms() / 1000;
+            let request = keep_alive(&ctx, &mut rx, &p.pubkey, HashMap::from([(X.to_owned(), [3; 8])]), true);
+            assert_eq!(request, Some(HashMap::from([(X.to_owned(), H64::default())])));
+            assert_eq!(root(&ctx, &p.pubkey, X), Some(H64::default()), "the placeholder");
+            assert!(seen(&ctx, &p.pubkey, X).unwrap() >= before);
+            // The maker never answers and never names the pair again: the placeholder goes after the window.
+            age(&ctx, &p.pubkey, X, WINDOW + 5);
+            let pruned = prune(&ctx);
+            assert_eq!(pruned.len(), 1);
+            assert_eq!(pruned[0].removed_orders, 0);
+            assert_eq!(root(&ctx, &p.pubkey, X), None);
+        }
+
+        // (d)
+
+        fn subscribe(ctx: &MmArc, pair: &str) {
+            octx(ctx).orderbook_subscriptions.write().insert(
+                orderbook_topic_from_ordered_pair(pair),
+                OrderbookRequestingState::Requested,
+            );
+        }
+
+        /// Pairs pruned after two keep-alives, each within the window of the last, that name X and Y with the
+        /// held roots.
+        fn pruned_after_keep_alives_naming_both(relay: bool) -> Vec<String> {
+            let (ctx, mut rx, p) = known_node(json!({}));
+            subscribe(&ctx, Y);
+            for _ in 0..2 {
+                age(&ctx, &p.pubkey, X, WINDOW - 10);
+                age(&ctx, &p.pubkey, Y, WINDOW - 10);
+                let roots = held_roots(&ctx, &p.pubkey, &[X, Y]);
+                assert_eq!(keep_alive(&ctx, &mut rx, &p.pubkey, roots, relay), None);
+            }
+            age(&ctx, &p.pubkey, X, WINDOW - 10);
+            age(&ctx, &p.pubkey, Y, WINDOW - 10);
+            pruned_pairs(prune(&ctx))
+        }
+
+        #[test]
+        fn t_gh14_d_non_relay_prunes_a_pair_it_is_not_subscribed_to() {
+            assert_eq!(pruned_after_keep_alives_naming_both(false), vec![X.to_owned()]);
+        }
+
+        #[test]
+        fn t_gh14_d_relay_refreshes_every_named_pair() {
+            assert!(pruned_after_keep_alives_naming_both(true).is_empty());
+        }
+
+        // (e)
+
+        #[test]
+        fn t_gh14_e_own_pubkeys_are_never_pruned() {
+            let (ctx, _rx, p) = known_node(json!({}));
+            let own = make_random_orders(OWN_PERSISTENT.into(), &[0; 32], "C1".into(), "C2".into(), 2);
+            let per_order = make_random_orders(OWN_PER_ORDER.into(), &[0; 32], "C1".into(), "C3".into(), 2);
+            for order in own.iter().chain(per_order.iter()) {
+                insert_or_update_order(&ctx, order.clone());
+            }
+            octx(&ctx)
+                .orderbook
+                .lock()
+                .my_p2p_pubkeys
+                .insert(OWN_PER_ORDER.to_owned());
+            flush_trie(&ctx);
+
+            // Nothing has named any of these pairs for far longer than the window.
+            for (pubkey, pair) in [(&p.pubkey, X), (&p.pubkey, Y)] {
+                age(&ctx, pubkey, pair, 10 * WINDOW);
+            }
+            age(&ctx, OWN_PERSISTENT, X, 10 * WINDOW);
+            age(&ctx, OWN_PER_ORDER, Y, 10 * WINDOW);
+
+            let pruned = prune(&ctx);
+            let mut pruned: Vec<(String, String)> = pruned.into_iter().map(|p| (p.pubkey, p.alb_pair)).collect();
+            pruned.sort();
+            let mut expected = vec![(p.pubkey.clone(), X.to_owned()), (p.pubkey.clone(), Y.to_owned())];
+            expected.sort();
+            assert_eq!(pruned, expected, "only the other maker's pairs");
+            assert_eq!(on_book(&ctx, OWN_PERSISTENT, X), uuids(&own));
+            assert_eq!(on_book(&ctx, OWN_PER_ORDER, Y), uuids(&per_order));
+            assert!(root(&ctx, OWN_PERSISTENT, X).is_some());
+            assert!(root(&ctx, OWN_PER_ORDER, Y).is_some());
+        }
+
+        // (f)
+
+        #[test]
+        fn t_gh14_f_window_follows_maker_order_timeout() {
+            let (ctx, _rx, p) = known_node(json!({ "maker_order_timeout": 300 }));
+            age(&ctx, &p.pubkey, X, 200);
+            assert!(prune_with(&ctx, 300).is_empty(), "200 s is within a window of 300 s");
+            age(&ctx, &p.pubkey, X, 105);
+            assert_eq!(
+                pruned_pairs(prune_with(&ctx, 300)),
+                vec![X.to_owned()],
+                "305 s is past it"
+            );
+
+            let (ctx, _rx, p) = known_node(json!({}));
+            age(&ctx, &p.pubkey, X, 200);
+            assert_eq!(
+                pruned_pairs(prune_with(&ctx, WINDOW)),
+                vec![X.to_owned()],
+                "200 s is past the default window"
+            );
+        }
+
+        // (g)
+
+        #[test]
+        fn t_gh14_g_cancelled_order_stays_out_after_prune_and_refill() {
+            let p = Poster::new("gh14-g");
+            // The maker's own view lists both orders on X, as a stale responder's would.
+            let (maker_ctx, _maker_rx) = maker_node(&p.x);
+            let (relay, mut relay_rx) = node_with(json!({}));
+            for order in &p.x {
+                assert!(receive(&relay, &created(&p.secret, order)));
+            }
+            let cancelled_uuid = p.x[0].uuid;
+            assert!(receive(&relay, &cancelled(&p.secret, cancelled_uuid)));
+            assert!(guarded(&relay, cancelled_uuid, &p.pubkey));
+            assert_eq!(book(&relay), HashSet::from([p.x[1].uuid]));
+
+            age(&relay, &p.pubkey, X, WINDOW + 5);
+            let pruned = prune(&relay);
+            assert_eq!(pruned.len(), 1);
+            assert_eq!(pruned[0].removed_orders, 1);
+            assert!(book(&relay).is_empty());
+
+            // The refill: the answer lists the cancelled order, which the final-cancel guard keeps out.
+            assert!(
+                !sync_with(&relay, &mut relay_rx, &maker_ctx, &p.pubkey),
+                "a snapshot is answered"
+            );
+            assert_eq!(book(&relay), HashSet::from([p.x[1].uuid]));
+            assert!(guarded(&relay, cancelled_uuid, &p.pubkey));
+        }
+
+        // (h)
+
+        #[test]
+        fn t_gh14_h_switch_reader() {
+            let on = |conf: Json| pair_liveness(&conf_ctx(conf));
+            assert!(on(json!({})));
+            assert!(on(json!({ "pair_liveness": true })));
+            assert!(on(json!({ "pair_liveness": "false" })));
+            assert!(on(json!({ "pair_liveness": 0 })));
+            assert!(on(json!({ "pair_liveness": null })));
+            assert!(!on(json!({ "pair_liveness": false })));
+        }
+    }
 }
 
 /// CRD ch.12 R7c, T9: a stored active record that outlived its order's removal is not restored, and the deletion
@@ -6611,11 +7245,14 @@ mod tendermint_saved_orders {
 /// An `OrdermatchContext` without a running trie worker; the test drains the queue by hand.
 fn ordermatch_ctx_without_worker() -> (Arc<OrdermatchContext>, mpsc::UnboundedReceiver<Vec<TrieOp>>) {
     let (trie_ops_tx, rx) = mpsc::unbounded::<Vec<TrieOp>>();
+    let trie_store = TrieStore::default();
+    let pair_liveness = trie_store.pair_liveness.clone();
     let ctx = OrdermatchContext {
         maker_orders_ctx: Default::default(),
         my_taker_orders: Default::default(),
         orderbook: Default::default(),
-        trie_store: Arc::new(parking_lot::Mutex::new(TrieStore::default())),
+        trie_store: Arc::new(parking_lot::Mutex::new(trie_store)),
+        pair_liveness,
         trie_ops_tx,
         orderbook_subscriptions: Default::default(),
         sync_answer_deferral: Default::default(),

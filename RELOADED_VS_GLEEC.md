@@ -575,6 +575,8 @@ behavior, except for `swap_key_check`; the row of each switch in
   a relay that missed the cancel can bring the order back after that.
 - `maker_restore_skips_cancelled: false` — at start every stored active order is restored,
   including one whose record outlived its cancel.
+- `pair_liveness: false` — a pair the maker stops advertising is kept as long as the maker stays
+  online, so a cancelled order this node missed stays visible until the maker's whole record expires.
 - `relay_second_copy_priority_only: false` — a relay sends every message it forwards a second
   time, not only cancellations, swap negotiation and messages outside the order book.
 - `p2p_resolve_peer_hostnames: false` — a hostname a peer gives in its list of peer addresses is
