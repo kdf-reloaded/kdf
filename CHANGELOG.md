@@ -31,6 +31,18 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
 
 ### Added
 
+#### ARRR and other shielded coins
+
+- **ARRR can now pay a Pirate1 address.** Pirate Chain's own wallets hand out Pirate1 addresses
+  (`pirate1…`, the address form of its Ironwood pool) by default. `validateaddress` now accepts them,
+  and `withdraw` pays them from the wallet's Sapling balance at Pirate Chain's fixed fee of 0.0001
+  ARRR, keeping the change in Sapling. The withdrawal is recorded at once like any other, so its
+  coins are not offered to the next send and its change shows as pending. The wallet itself stays
+  Sapling-only and has no Pirate1 receiving address, and ARRR swaps are unchanged. The first such
+  withdrawal after a start takes longer, because the node builds the key for the Ironwood proof once.
+  To record these withdrawals the node now carries a patched copy of the `zcash_client_sqlite`
+  crate, with one change. Detail: PR #246; CRD ch.39 §39.6.5.
+
 #### EVM coins
 
 - **The log shows the gas limits each EVM coin and token will use.** At activation, one line names
@@ -291,8 +303,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   address format, without noticing the marker (PR #232). The scope for this release is set: ARRR
   wallets and swaps stay Sapling-only, payments from Pirate Chain's Ironwood wallets are found and
   spent like any other, and a withdrawal may pay a Pirate1 address (CRD PR #229). The deposits are
-  proven by tests (PR #242); the withdrawal code follows. Native mode, the rest of the Ironwood pool
-  and Pirate1 receiving addresses move to a later release.
+  proven by tests (PR #242), and the withdrawal is implemented (PR #246). Native mode, the rest of
+  the Ironwood pool and Pirate1 receiving addresses move to a later release.
   The capability word that lets ARRR require a counterparty that builds version-6 transactions is
   written (CRD PR #227), and its generic part, the word's writer and fail-closed reader and the
   decline log lines, is implemented (PR #235); the ARRR rule that uses it comes next.

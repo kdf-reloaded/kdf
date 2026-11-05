@@ -1384,6 +1384,13 @@ values the bytes do not carry.
 > until its block is scanned, so a send made in that window is rejected by the network
 > as a duplicate nullifier. In the same window the history has no row for it and the
 > change is not shown as pending.
+>
+> **Dependency (2026-11-05).** The recording relies on this project's patched copy of the
+> wallet-database crate (`vendor-patches/zcash_client_sqlite-0.22.0`). Built without
+> Orchard support, as this project builds it, the published crate stops the process when
+> it records a sent transaction that carries an Ironwood bundle, at the step that marks
+> the bundle's spent notes; a wallet built that way holds no Ironwood notes, so no such
+> spend can be its own. The patch skips that step and changes nothing else.
 
 R39.6.5h **The Ironwood proving key.** The proving key for Ironwood actions shall be
 derived in the process from the circuit, on the first build that needs it, and kept for
@@ -1453,6 +1460,14 @@ change counts as non-spendable balance.
 > circuit -- the proof, the spend-authorization signatures and the binding signature --
 > and a changed proof byte does not. Building that verifying key takes about a minute in a
 > debug test build. R39.6.5a--R39.6.5h are not implemented yet.
+>
+> **Update (2026-11-05).** R39.6.5a--R39.6.5h are implemented (PR #246), with T39.6.5b--
+> T39.6.5e. A built Pirate1 withdrawal reads back through the project's reader, its
+> Ironwood proof verifies with the project's verifying key, its recipient decrypts the
+> output, and its broadcast is recorded like a Sapling withdrawal (R39.6.5g, its
+> dependency note). In a debug test build the first Ironwood build of a process takes
+> about a minute and a half, the proving key included. The live round trip with an
+> Ironwood wallet is still to run.
 >
 > **Compatibility.** The reference answers a Pirate1 address with `is_valid: false` on
 > `validateaddress` and with `InvalidAddress` on its withdrawal route (§39.5A). This
