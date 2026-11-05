@@ -177,6 +177,14 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   three times. An order created with `save_in_history: false` leaves no history entry and is
   restored as before. To restore the old behavior, set `maker_restore_skips_cancelled` to `false` in
   `MM2.json`. Detail: PRs #223, #224; CRD ch.12 R7c.
+- **A cancelled order a node missed no longer stays visible once its maker stops advertising that
+  pair.** A maker names every pair it still has orders on in each keep-alive, so a pair that goes
+  unnamed for the liveness window, 90 seconds or the `maker_order_timeout` setting, was either
+  emptied or lost its keep-alives on the way. The node now drops that pair's orders after the window;
+  the maker's other pairs stay. If the keep-alives return, the node asks for the pair as a new one
+  and gets its orders back. Before, the order stayed until the maker posted on that pair again or
+  went offline. Your own orders are never dropped. To restore the old behavior, set `pair_liveness`
+  to `false` in `MM2.json`. Detail: PR #251; CRD ch.32 R-GH14.
 
 #### UTXO coins and Electrum
 
@@ -428,7 +436,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   two later packages waited for is now recorded: how a cancelled order can come back on Komodo and
   GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222). A received
   cancellation now stays final for an hour, and a maker no longer restores an order it cancelled
-  (PRs #223, #224).
+  (PRs #223, #224). A pair the maker stops advertising is now dropped after the liveness window
+  (CRD PR #243, PR #251).
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
@@ -521,11 +530,13 @@ lives.
   More in [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md). Detail: CRD ch.32
   D9.
 - **Other nodes can keep showing a cancelled order for a while if its cancellation is lost on the
-  way.** Such an order cannot be matched or traded, and it disappears once the maker posts again on
-  that pair or goes offline. While the maker still has other orders on that pair, a node whose copy
-  differs from the maker's now also asks one other relay, which removes the order if that relay
-  received the cancellation. More in [`ghost-orders`](docs/plans/ghost-orders.md). Detail:
-  PRs #188, #208; CRD ch.32 D12, R-Q5d.
+  way and the maker still advertises that pair.** Such an order cannot be matched or traded. A pair
+  the maker no longer advertises is dropped after 90 seconds, with the maker's other pairs kept. A
+  pair the maker still advertises heals at its next keep-alive, 30 seconds later, or through another
+  relay: a node whose copy differs from the maker's asks one other relay, which removes the order if
+  that relay received the cancellation. Until then the order stays visible. More in
+  [`ghost-orders`](docs/plans/ghost-orders.md). Detail: PRs #188, #208, #251; CRD ch.32 D12, R-Q5d,
+  R-GH14.
 - **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes of this release or later.**
   ARRR now uses a newer transaction format (v6, from the Ironwood upgrade) that no other KDF
   implementation can handle, so a swap with a Komodo or GLEEC counterparty cannot complete. An ARRR

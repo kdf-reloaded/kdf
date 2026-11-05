@@ -398,6 +398,8 @@ pub(crate) struct OrdermatchContext {
     pub orderbook: PaMutex<Orderbook>,
     /// Trie data store extracted from `Orderbook` to reduce contention.
     pub trie_store: Arc<PaMutex<TrieStore>>,
+    /// The liveness instants of the pairs of other makers (CRD ch.32 R-GH14), shared with the trie store.
+    pub pair_liveness: Arc<PairLiveness>,
     /// Sender to enqueue trie mutations for background application.
     pub trie_ops_tx: UnboundedSender<Vec<TrieOp>>,
     /// Tracks which orderbook topics we are subscribed to, separate from the order index.
@@ -428,7 +430,9 @@ impl Default for OrdermatchContext {
     /// The receiver side is spawned as a local future (requires an active async
     /// runtime or the `common::executor` threadpool).
     fn default() -> Self {
-        let trie_store = Arc::new(PaMutex::new(TrieStore::default()));
+        let trie_store = TrieStore::default();
+        let pair_liveness = trie_store.pair_liveness.clone();
+        let trie_store = Arc::new(PaMutex::new(trie_store));
         let (trie_ops_tx, trie_ops_rx) = unbounded::<Vec<TrieOp>>();
         // Drive the worker on the common executor so trie ops are applied even in
         // unit-test contexts that don't have a full MmCtx runtime.
@@ -442,6 +446,7 @@ impl Default for OrdermatchContext {
             my_taker_orders: Default::default(),
             orderbook: Default::default(),
             trie_store,
+            pair_liveness,
             trie_ops_tx,
             orderbook_subscriptions: PaRwLock::new(HashMap::default()),
             sync_answer_deferral: Default::default(),
@@ -479,7 +484,9 @@ pub fn init_ordermatch_context(ctx: &MmArc) -> OrdermatchInitResult<()> {
         }
     }
 
-    let trie_store = Arc::new(PaMutex::new(TrieStore::default()));
+    let trie_store = TrieStore::for_ctx(ctx);
+    let pair_liveness = trie_store.pair_liveness.clone();
+    let trie_store = Arc::new(PaMutex::new(trie_store));
     let trie_ops_tx = spawn_trie_store_worker(ctx, trie_store.clone());
 
     let ordermatch_context = OrdermatchContext {
@@ -487,6 +494,7 @@ pub fn init_ordermatch_context(ctx: &MmArc) -> OrdermatchInitResult<()> {
         my_taker_orders: Default::default(),
         orderbook: PaMutex::new(Orderbook::for_ctx(ctx)),
         trie_store,
+        pair_liveness,
         trie_ops_tx,
         orderbook_subscriptions: PaRwLock::new(HashMap::default()),
         sync_answer_deferral: Default::default(),
@@ -511,13 +519,16 @@ impl OrdermatchContext {
     fn from_ctx(ctx: &MmArc) -> Result<Arc<OrdermatchContext>, String> {
         let ctx2 = ctx.clone();
         Ok(try_s!(from_ctx(&ctx.ordermatch_ctx, move || {
-            let trie_store = Arc::new(PaMutex::new(TrieStore::default()));
+            let trie_store = TrieStore::for_ctx(&ctx2);
+            let pair_liveness = trie_store.pair_liveness.clone();
+            let trie_store = Arc::new(PaMutex::new(trie_store));
             let trie_ops_tx = spawn_trie_store_worker(&ctx2, trie_store.clone());
             Ok(OrdermatchContext {
                 maker_orders_ctx: Default::default(),
                 my_taker_orders: Default::default(),
                 orderbook: PaMutex::new(Orderbook::for_ctx(&ctx2)),
                 trie_store,
+                pair_liveness,
                 trie_ops_tx,
                 orderbook_subscriptions: PaRwLock::new(HashMap::default()),
                 sync_answer_deferral: Default::default(),
@@ -535,13 +546,16 @@ impl OrdermatchContext {
     fn from_ctx(ctx: &MmArc) -> Result<Arc<OrdermatchContext>, String> {
         let ctx2 = ctx.clone();
         Ok(try_s!(from_ctx(&ctx.ordermatch_ctx, move || {
-            let trie_store = Arc::new(PaMutex::new(TrieStore::default()));
+            let trie_store = TrieStore::for_ctx(&ctx2);
+            let pair_liveness = trie_store.pair_liveness.clone();
+            let trie_store = Arc::new(PaMutex::new(trie_store));
             let trie_ops_tx = spawn_trie_store_worker(&ctx2, trie_store.clone());
             Ok(OrdermatchContext {
                 maker_orders_ctx: Default::default(),
                 my_taker_orders: Default::default(),
                 orderbook: PaMutex::new(Orderbook::for_ctx(&ctx2)),
                 trie_store,
+                pair_liveness,
                 trie_ops_tx,
                 orderbook_subscriptions: PaRwLock::new(HashMap::default()),
                 sync_answer_deferral: Default::default(),
