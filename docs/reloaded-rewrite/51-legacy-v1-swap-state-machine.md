@@ -1214,8 +1214,9 @@ behind that public key is derived per swap and never stored
 > pays from. A swap of such a coin under an HD login does not complete as
 > intended. Plan
 > [`hd-key-unification`](../plans/hd-key-unification.md) first refuses those
-> swaps (item H1), then gives every coin its own key (item H3); chapter 05
-> will carry the rules.
+> swaps (item H1), then gives every coin its own key (item H3). R74 states
+> the target: the internal key as the persistent key and the coin's own key
+> as each HTLC key; chapter 05 §5.9B tabulates the keys.
 
 **R64.** *Representation of non-secp256k1 keys — the dictated padding
 convention.* A chain whose native key is not a 33-byte secp256k1 point
@@ -2081,4 +2082,6 @@ reference rows alike.
   under a global-HD login and points to plan `hd-key-unification`. Written
   by a context that never read the forbidden corpus, from this repository's
   own swap, coin-key and activation code. No reference implementation was
-  consulted, and it needs no Dirty Gate pass.
+  consulted, and it needs no Dirty Gate pass. *Pointer added 2026-11-05:*
+  its last sentence now names R74 as the target; it carries no reference
+  content of its own.

@@ -87,9 +87,11 @@ HD UTXO task withdrawal omits `from`, the task shall use the enabled address
 > that a wallet client whose withdraw preview omits `from` works. The divergence
 > from GLEEC KDF, which rejects an omitted `from`, is recorded in
 > [`RELOADED_VS_GLEEC.md`](../../RELOADED_VS_GLEEC.md). The maintainer kept it
-> on 2026-11-04. The direct `withdraw` method does not yet serve an HD UTXO
-> wallet; plan [`hd-key-unification`](../plans/hd-key-unification.md) item H5
-> serves it with `from`, and without `from` the same way as the task route.
+> on 2026-11-04 (decision BY in plan
+> [`hd-key-unification`](../plans/hd-key-unification.md)); no switch is
+> planned. The direct `withdraw` method does not yet serve an HD UTXO wallet;
+> plan item H5 serves it with `from`, and without `from` the same way as the
+> task route (decision BZ).
 
 > **Reference behavior (passed the KDF Dirty Gate on 2026-11-04, measure
 > 0.01; Spec Reader 2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of
@@ -103,10 +105,12 @@ HD UTXO task withdrawal omits `from`, the task shall use the enabled address
 > Reloaded's task route uses the enabled address when `from` is absent, a
 > documented divergence (`RELOADED_VS_GLEEC.md`, the 0.1.x interoperability
 > note for the Komodo DeFi wallet, and the CHANGELOG), and its direct
-> `withdraw` does not yet serve an HD UTXO wallet. Plan
-> [`hd-key-unification`](../plans/hd-key-unification.md) brings this rule and
-> that divergence into agreement (item H0) and covers the direct method
-> (item H5).
+> `withdraw` does not yet serve an HD UTXO wallet. R49.4 states that default
+> since 2026-11-04 (plan [`hd-key-unification`](../plans/hd-key-unification.md)
+> item H0), and the maintainer kept it as a divergence on that date (decision
+> BY in that plan). Plan item H5 serves the direct method with `from`, as the
+> reference does, and without `from` the same way as the task route
+> (decision BZ).
 
 R49.5. EVM-family software-HD native-coin and fungible-token withdrawals shall
 be supported through both direct `withdraw` and `task::withdraw::init`. When
@@ -179,7 +183,9 @@ same sender address.
 
 T49.5. Start an HD UTXO-family withdrawal task without `from`. The task shall
 use the enabled address (account `0`, chain `External`, address `0`) as the
-sender *(amended 2026-11-04, R49.4)*.
+sender *(amended 2026-11-04, R49.4)*. This tests the documented divergence of
+R49.4 (decision BY); the reference fails the same request (the
+reference-behavior note under R49.4).
 
 T49.6. Start an HD withdrawal task with a selector for an unknown account, a
 mismatched coin path, or an address that has not been activated. The task shall
@@ -574,3 +580,11 @@ only, never the text.
   identifier, error, log or comment literal, body or control-flow
   transcription fails regardless of volume; dictated wire surface was
   excluded.
+- *Clean-side amendment (2026-11-05) -- the divergence note under R49.4, the
+  compatibility clause of the reference-behavior note under R49.4, and
+  T49.5.* They now cite the maintainer's decisions BY (the fallback stays a
+  documented divergence) and BZ (the direct method with `from`) of
+  2026-11-04, recorded in plan `hd-key-unification`. Written by a session
+  that never read the corpus, from those decisions and this repository's own
+  code. The reference facts of the note are unchanged. It takes no
+  forbidden-class input and needs no Dirty Gate pass.
