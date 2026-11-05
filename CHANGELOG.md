@@ -251,6 +251,12 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
 
 - **The tests run before the next beta will be listed in
   [`docs/release-tests/0.4.0-beta.1.md`](docs/release-tests/0.4.0-beta.1.md).**
+- **ARRR is tested against real transactions from Pirate Chain's Ironwood wallets.** Two mainnet
+  ARRR transactions that use the Ironwood pool, one paying into it and one paying out of it into a
+  Sapling address, are read by every part of the node that reads whole transactions, and their
+  Ironwood proofs and signatures verify with the node's own keys. A payment from an Ironwood wallet
+  to the node's address is found, counted once, shown as pending while unconfirmed, and spent like
+  any other. Nothing changes in how the node behaves. Detail: PR #242; CRD ch.39 T39.6.5a, T39.8.0i.
 
 ### Plans touched
 
@@ -262,8 +268,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
   address format, without noticing the marker (PR #232). The scope for this release is set: ARRR
   wallets and swaps stay Sapling-only, payments from Pirate Chain's Ironwood wallets are found and
-  spent like any other, and a withdrawal may pay a Pirate1 address (CRD PR #229; the code follows).
-  Native mode, the rest of the Ironwood pool and Pirate1 receiving addresses move to a later release.
+  spent like any other, and a withdrawal may pay a Pirate1 address (CRD PR #229). The deposits are
+  proven by tests (PR #242); the withdrawal code follows. Native mode, the rest of the Ironwood pool
+  and Pirate1 receiving addresses move to a later release.
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
