@@ -6966,9 +6966,16 @@ pub(crate) mod tests {
         fn build(
             &self,
         ) -> Result<zcash_primitives::transaction::Transaction, crate::z_coin::z_coin_errors::GenTxError> {
-            crate::z_coin::z_coin_ops::build_from_wallet_db(&self.inputs(), vec![], vec![self.output()], self.fee(), 12)
-                .map(|(tx, _)| tx)
-                .map_err(|e| e.into_inner())
+            crate::z_coin::z_coin_ops::build_from_wallet_db(
+                &self.inputs(),
+                vec![],
+                vec![self.output()],
+                None,
+                self.fee(),
+                12,
+            )
+            .map(|(tx, _)| tx)
+            .map_err(|e| e.into_inner())
         }
 
         /// The second step of the withdraw contract: the caller submits the serialized transaction

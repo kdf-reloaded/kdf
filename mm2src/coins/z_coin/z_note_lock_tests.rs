@@ -59,8 +59,11 @@ fn sapling_params_dir() -> Option<PathBuf> {
 
 /// What each scripted endpoint answers: healthy on the Canopy branch, the chain at `tip`, and a
 /// broadcast that is accepted and then mines the transaction at height 12.
-fn endpoint_script(tip: u64) -> WireScript {
-    let mut server_info = info(u32::from(BranchId::Canopy), u64::from(NOTES_HEIGHT));
+fn endpoint_script(tip: u64, params: &ZcoinConsensusParams) -> WireScript {
+    // The branch the parameters put the chain on at the tip: Canopy for the default test parameters, the
+    // Ironwood branch for parameters with an Ironwood activation height at or below it.
+    let branch = BranchId::for_height(params, BlockHeight::from_u32(tip as u32));
+    let mut server_info = info(u32::from(branch), u64::from(NOTES_HEIGHT));
     // The test parameters' Sapling activation height, which admission holds every endpoint to.
     server_info.sapling_activation_height = 2;
     WireScript {
@@ -89,6 +92,8 @@ struct LightCoinFixture {
     in_flight_wait_secs: u64,
     /// The chain tip the scripted endpoints report.
     tip: u64,
+    /// The coin's configured fee per kilobyte, in base units.
+    fee_sat: u64,
 }
 
 impl LightCoinFixture {
@@ -98,8 +103,18 @@ impl LightCoinFixture {
     /// A wallet holding `notes` notes of 1.25 ARRR each, scanned at height 11, whose sends give up
     /// waiting for an in-flight spend after `in_flight_wait_secs`.
     fn with_notes(notes: usize, in_flight_wait_secs: u64) -> Option<LightCoinFixture> {
+        Self::with_notes_under(notes, in_flight_wait_secs, test_params_with_zip212(), FEE_SAT)
+    }
+
+    /// [`Self::with_notes`] under other consensus parameters and a coin whose configured fee is
+    /// `fee_sat` base units per kilobyte.
+    fn with_notes_under(
+        notes: usize,
+        in_flight_wait_secs: u64,
+        params: ZcoinConsensusParams,
+        fee_sat: u64,
+    ) -> Option<LightCoinFixture> {
         let params_dir = sapling_params_dir()?;
-        let params = test_params_with_zip212();
         let extsk = ExtendedSpendingKey::master(&[15; 32]);
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
@@ -132,6 +147,7 @@ impl LightCoinFixture {
             history,
             in_flight_wait_secs,
             u64::from(NOTES_HEIGHT),
+            fee_sat,
         ))
     }
 
@@ -160,13 +176,14 @@ impl LightCoinFixture {
         history: ZCoinShieldedHistory,
         in_flight_wait_secs: u64,
         tip: u64,
+        fee_sat: u64,
     ) -> LightCoinFixture {
         let history = Arc::new(history);
         let scanned_through = history.scanned_height().unwrap().unwrap_or(0);
 
         let transport = Arc::new(FakeTransport::default());
         for server in SERVERS {
-            transport.serve(server, endpoint_script(tip));
+            transport.serve(server, endpoint_script(tip, &params));
         }
         let client = LightwalletdClient::new(
             transport.clone(),
@@ -181,8 +198,8 @@ impl LightCoinFixture {
         let mut utxo = utxo_coin_fields_for_test(UtxoRpcClientEnum::LightWalletD(client), None, false);
         utxo.conf.ticker = "ARRR".to_owned();
         utxo.decimals = 8;
-        // 0.0001 per kilobyte, as the other wallet-database fixtures pay.
-        utxo.tx_fee = TxFee::FixedPerKb(FEE_SAT);
+        // 0.0001 per kilobyte by default, as the other wallet-database fixtures pay.
+        utxo.tx_fee = TxFee::FixedPerKb(fee_sat);
 
         let (_, my_z_addr) = extsk.default_address();
         let my_z_addr_encoded = encode_payment_address(params.hrp_sapling_payment_address(), &my_z_addr);
@@ -238,6 +255,7 @@ impl LightCoinFixture {
             to_addr,
             in_flight_wait_secs,
             tip,
+            fee_sat,
         }
     }
 
@@ -252,13 +270,23 @@ impl LightCoinFixture {
             extsk,
             in_flight_wait_secs,
             tip,
+            fee_sat,
             ..
         } = self;
         drop(coin);
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let history = Self::open_history(&db_dir, &params, &extfvk);
-        Self::assemble(db_dir, params_dir, params, extsk, history, in_flight_wait_secs, tip)
+        Self::assemble(
+            db_dir,
+            params_dir,
+            params,
+            extsk,
+            history,
+            in_flight_wait_secs,
+            tip,
+            fee_sat,
+        )
     }
 
     fn history(&self) -> &ZCoinShieldedHistory { &self.coin.z_fields.shielded_history }
@@ -2152,3 +2180,5 @@ async fn requires_notarization_has_no_effect_on_a_shielded_coin() {
         );
     }
 }
+
+mod pirate1_withdraw;

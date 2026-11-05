@@ -95,6 +95,7 @@ pub mod nft_swap_v2 {
 mod eth_activation;
 mod eth_gas_limit;
 mod eth_impl;
+mod eth_logs_window;
 mod eth_market_ops;
 mod eth_mm_coin;
 mod eth_swap_ops;
@@ -113,6 +114,7 @@ mod wire_types;
 pub use eth_activation::*;
 pub use eth_gas_limit::*;
 pub use eth_impl::*;
+pub(crate) use eth_logs_window::{LogsWindow, SPEND_WAIT_POLL_S};
 pub use eth_mm_coin::EthTxFeeDetails;
 pub use eth_types::*;
 // EVM Trezor activation entrypoints (native, non-iOS).

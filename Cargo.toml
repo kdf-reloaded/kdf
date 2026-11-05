@@ -54,6 +54,7 @@ members = [
 # first-party workspace members. Excluding them also permits their own focused
 # upstream-style unit tests to be run via `--manifest-path`.
 exclude = [
+    "vendor-patches/zcash_client_sqlite-0.22.0",
     "vendor-patches/zcash_primitives-0.30.1",
     "vendor-patches/zcash_transparent-0.10.0",
     "vendor-patches/libp2p-gossipsub-0.45.0",
@@ -236,7 +237,14 @@ relay_rpc = { path = "vendor-patches/relay_rpc-0.1.0" }
 [patch."https://github.com/KomodoPlatform/tokio-tungstenite-wasm.git"]
 tokio-tungstenite-wasm = { version = "=0.4.0" }
 
+# zcash_client_sqlite 0.22.0 is built without its `orchard` feature (the wallet is Sapling-only), and
+# its `store_transaction_to_be_sent` then panics on a sent transaction that carries an Orchard or
+# Ironwood bundle. A withdrawal to a Pirate1 address carries one (CRD ch.39 R39.6.5g). The vendored
+# copy skips the Orchard and Ironwood nullifier marking in that case, since the wallet holds no notes
+# of those pools; nothing else differs. Drop this patch when the crate stops panicking without the
+# feature. See vendor-patches/zcash_client_sqlite-0.22.0/KDF-PATCH.md.
 [patch.crates-io]
 core2 = { path = "core2-shim" }
+zcash_client_sqlite = { path = "vendor-patches/zcash_client_sqlite-0.22.0" }
 zcash_primitives = { path = "vendor-patches/zcash_primitives-0.30.1" }
 zcash_transparent = { path = "vendor-patches/zcash_transparent-0.10.0" }

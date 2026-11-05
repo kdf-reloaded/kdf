@@ -31,6 +31,18 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
 
 ### Added
 
+#### ARRR and other shielded coins
+
+- **ARRR can now pay a Pirate1 address.** Pirate Chain's own wallets hand out Pirate1 addresses
+  (`pirate1…`, the address form of its Ironwood pool) by default. `validateaddress` now accepts them,
+  and `withdraw` pays them from the wallet's Sapling balance at Pirate Chain's fixed fee of 0.0001
+  ARRR, keeping the change in Sapling. The withdrawal is recorded at once like any other, so its
+  coins are not offered to the next send and its change shows as pending. The wallet itself stays
+  Sapling-only and has no Pirate1 receiving address, and ARRR swaps are unchanged. The first such
+  withdrawal after a start takes longer, because the node builds the key for the Ironwood proof once.
+  To record these withdrawals the node now carries a patched copy of the `zcash_client_sqlite`
+  crate, with one change. Detail: PR #246; CRD ch.39 §39.6.5.
+
 #### EVM coins
 
 - **The log shows the gas limits each EVM coin and token will use.** At activation, one line names
@@ -301,6 +313,24 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
 
 ### Fixed
 
+#### EVM coins
+
+- **A taker on an EVM chain with fast blocks, such as Monad, now finds the maker's spend of its
+  payment.** While waiting for the maker to spend its payment, a taker asked for the swap
+  contract's events from the swap's first block to the newest one in a single request. On Monad,
+  with a block every 0.4 seconds, that range passed what public nodes accept (100 or 1,000 blocks)
+  within minutes. Every request was refused, and the taker never learned the secret. While the
+  requests failed, the taker also never reached the end of its wait, so it did not take its refund
+  path either.
+  - **Windows.** Every event search now runs in windows of at most `logs_block_range` blocks
+    (coins file, default 1,000), and the wait starts at the payment's own block.
+  - **Smaller windows on refusal.** A node that refuses a window's size makes the window smaller
+    for the rest of the session, with one warning in the log.
+  - **Deadline.** The wait ends at its deadline even while requests fail. The same deadline fix
+    applies to the version-2 swap's event search.
+
+  Detail: PR #248; CRD ch.17 R17.8.1–R17.8.4.
+
 #### Node names in logs and errors
 
 - **A node URL that a lower layer writes in another spelling is now shortened to scheme, host and
@@ -379,8 +409,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   address format, without noticing the marker (PR #232). The scope for this release is set: ARRR
   wallets and swaps stay Sapling-only, payments from Pirate Chain's Ironwood wallets are found and
   spent like any other, and a withdrawal may pay a Pirate1 address (CRD PR #229). The deposits are
-  proven by tests (PR #242); the withdrawal code follows. Native mode, the rest of the Ironwood pool
-  and Pirate1 receiving addresses move to a later release.
+  proven by tests (PR #242), and the withdrawal is implemented (PR #246). Native mode, the rest of
+  the Ironwood pool and Pirate1 receiving addresses move to a later release.
   The capability word that lets ARRR require a counterparty that builds version-6 transactions is
   written (CRD PR #227), and its generic part, the word's writer and fail-closed reader and the
   decline log lines, is implemented (PR #235); the ARRR rule that uses it is written (CRD PR #230)

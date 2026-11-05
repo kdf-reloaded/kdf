@@ -100,6 +100,7 @@ fn coin_over_entries_and_conf(
         custom_token: false,
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+        logs_window: Default::default(),
         derivation_method: DerivationMethod::Iguana(my_address),
         swap_v2_contracts: Some(SwapV2Contracts {
             maker_swap_v2_contract: Address::from_str("5Bc1bBDD6A0a722fC9bffC49c921B685ECB84b95").unwrap(),

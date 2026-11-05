@@ -133,6 +133,7 @@ pub(super) fn eth_coin_for_test_with_providers(
         custom_token: false,
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+        logs_window: Default::default(),
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
@@ -229,6 +230,7 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         custom_token: false,
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+        logs_window: Default::default(),
         derivation_method: DerivationMethod::HDWallet(EthHDWallet {
             hd_wallet_storage: HDWalletCoinStorage::default(),
             derivation_path,
@@ -381,7 +383,7 @@ fn test_wait_for_payment_spend_timeout() {
     )
     .unwrap();
     let web3 = crate::eth::alloy_compat::build_provider(
-        crate::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8555".into()]),
+        crate::node_url::listed_nodes("TEST", vec!["http://127.0.0.1:1".into()]),
         vec![],
     )
     .unwrap();
@@ -415,6 +417,7 @@ fn test_wait_for_payment_spend_timeout() {
         custom_token: false,
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+        logs_window: Default::default(),
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
@@ -552,6 +555,11 @@ mod search_for_swap_tx_spend_scripted {
     ];
 
     fn coin(url: &str, coin_type: EthCoinType) -> (MmArc, EthCoin) {
+        coin_with(url, coin_type, "ETH", DEFAULT_LOGS_BLOCK_RANGE)
+    }
+
+    /// As [`coin`], with the ticker (which log lines name) and the coin's `logs_block_range`.
+    fn coin_with(url: &str, coin_type: EthCoinType, ticker: &str, logs_block_range: u64) -> (MmArc, EthCoin) {
         let key_pair = KeyPair::from_secret_slice(
             &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
         )
@@ -576,7 +584,7 @@ mod search_for_swap_tx_spend_scripted {
             signer: EthSigner::Local(key_pair),
             swap_contract_address,
             fallback_swap_contract: None,
-            ticker: "ETH".into(),
+            ticker: ticker.into(),
             web3_instances: vec![Web3Instance {
                 web3: web3.clone(),
                 is_parity: true,
@@ -590,7 +598,8 @@ mod search_for_swap_tx_spend_scripted {
             erc20_tokens_infos: Default::default(),
             custom_token: false,
             chain_id: None,
-            logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+            logs_block_range,
+            logs_window: Default::default(),
             derivation_method: DerivationMethod::Iguana(my_addr),
             swap_v2_contracts: None,
             gas_limit: EthGasLimit::default(),
@@ -709,6 +718,624 @@ mod search_for_swap_tx_spend_scripted {
             .unwrap()
             .unwrap();
         assert_eq!(expected, found);
+    }
+
+    /// CRD ch.17 R17.8.1 -- R17.8.3 (T17.8.1 -- T17.8.7): every swap-path `eth_getLogs` is bounded to windows of
+    /// at most `W` blocks, `W` shrinks when a node refuses a range, and the wait for a payment's spend moves a
+    /// cursor forward and always reaches its deadline. The log-line assertions use one ticker per test, so the
+    /// process-wide log capture of other tests does not interfere.
+    mod bounded_windows {
+        use super::super::scripted_evm_node::{spawn, ScriptedNode};
+        use super::*;
+        use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
+        use crate::eth::eth_logs_window::REORG_MARGIN_BLOCKS;
+        use crate::eth::eth_swap_v2::SpendTxSearchParams;
+        use serde_json::{json, Value as Json};
+
+        type Refusal = Option<(i64, &'static str)>;
+
+        /// One `eth_getLogs` request the node saw.
+        #[derive(Clone, Debug, PartialEq)]
+        struct Req {
+            event: &'static str,
+            from: u64,
+            to: u64,
+            refused: bool,
+        }
+
+        struct Fixture {
+            _node: ScriptedNode,
+            reqs: Arc<Mutex<Vec<Req>>>,
+            methods: Arc<Mutex<Vec<String>>>,
+            coin: EthCoin,
+            payment: SignedEthTx,
+            id: Vec<u8>,
+        }
+
+        impl Fixture {
+            fn windows(&self, event: &str) -> Vec<(u64, u64)> {
+                self.reqs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r.event == event && !r.refused)
+                    .map(|r| (r.from, r.to))
+                    .collect()
+            }
+
+            fn requests(&self) -> Vec<Req> { self.reqs.lock().unwrap().clone() }
+
+            fn calls_of(&self, method: &str) -> usize {
+                self.methods.lock().unwrap().iter().filter(|m| *m == method).count()
+            }
+        }
+
+        fn hex_u64(v: &Json) -> u64 { u64::from_str_radix(v.as_str().unwrap().trim_start_matches("0x"), 16).unwrap() }
+
+        fn topic_of(name: &str) -> String { format!("{:#x}", SWAP_CONTRACT.event(name).unwrap().signature()) }
+
+        fn swap_addr() -> Address { Address::from_str(SWAP_CONTRACT_ADDR).unwrap() }
+
+        fn payment_id(payment: &SignedEthTx) -> Vec<u8> {
+            let decoded = SWAP_CONTRACT
+                .function("ethPayment")
+                .unwrap()
+                .decode_input(&payment.data[4..])
+                .unwrap();
+            let Token::FixedBytes(id) = decoded[0].clone() else {
+                panic!("the payment id is bytes32")
+            };
+            id
+        }
+
+        /// A scripted node. `tip` is its block number; the payment's `ReceiverSpent` log sits in `spend_block`;
+        /// the payment's receipt names `receipt_block`; `eth_call` reports the payment in `state`; `refuse`
+        /// decides, per requested window, whether `eth_getLogs` answers with an error.
+        fn fixture(
+            ticker: &str,
+            logs_block_range: u64,
+            tip: u64,
+            spend_block: Option<u64>,
+            receipt_block: Option<u64>,
+            state: u8,
+            refuse: impl Fn(u64, u64) -> Refusal + Send + Sync + 'static,
+        ) -> Fixture {
+            fixture_with(
+                ticker,
+                logs_block_range,
+                tip,
+                spend_block,
+                receipt_block,
+                state,
+                true,
+                refuse,
+            )
+        }
+
+        /// As [`fixture`]; with `spend_tx_served` false the node does not know the spend transaction
+        /// (`eth_getTransactionByHash` answers null) although a log names it.
+        #[allow(clippy::too_many_arguments)]
+        fn fixture_with(
+            ticker: &str,
+            logs_block_range: u64,
+            tip: u64,
+            spend_block: Option<u64>,
+            receipt_block: Option<u64>,
+            state: u8,
+            spend_tx_served: bool,
+            refuse: impl Fn(u64, u64) -> Refusal + Send + Sync + 'static,
+        ) -> Fixture {
+            let payment = signed_eth_tx_from_bytes(SPENT_PAYMENT_TX).unwrap();
+            let id = payment_id(&payment);
+            let spend = signed_eth_tx_from_bytes(SPEND_TX).unwrap();
+            let spend_json = rpc_tx(&spend);
+            let spend_hash = spend.tx_hash();
+            let (spend_topic, sent_topic, refund_topic) = (
+                topic_of("ReceiverSpent"),
+                topic_of("PaymentSent"),
+                topic_of("SenderRefunded"),
+            );
+            let reqs = Arc::new(Mutex::new(Vec::new()));
+            let methods = Arc::new(Mutex::new(Vec::new()));
+            let (reqs_h, methods_h, id_h, payment_h) = (reqs.clone(), methods.clone(), id.clone(), payment.clone());
+            let node = spawn(move |method, params| {
+                methods_h.lock().unwrap().push(method.to_owned());
+                match method {
+                    "eth_blockNumber" => json!(format!("{:#x}", tip)),
+                    "eth_getLogs" => {
+                        let (from, to) = (hex_u64(&params[0]["fromBlock"]), hex_u64(&params[0]["toBlock"]));
+                        let asked = params[0]["topics"][0].to_string();
+                        let (event, topic) = if asked.contains(&spend_topic) {
+                            ("ReceiverSpent", &spend_topic)
+                        } else if asked.contains(&sent_topic) {
+                            ("PaymentSent", &sent_topic)
+                        } else {
+                            assert!(asked.contains(&refund_topic), "an unexpected event topic: {asked}");
+                            ("SenderRefunded", &refund_topic)
+                        };
+                        let refusal = refuse(from, to);
+                        reqs_h.lock().unwrap().push(Req {
+                            event,
+                            from,
+                            to,
+                            refused: refusal.is_some(),
+                        });
+                        if let Some((code, message)) = refusal {
+                            return json!({"__rpc_error": {"code": code, "message": message}});
+                        }
+                        match spend_block {
+                            Some(block) if event == "ReceiverSpent" && (from..=to).contains(&block) => json!([{
+                                "address": format!("0x{}", SWAP_CONTRACT_ADDR.to_lowercase()),
+                                "topics": [topic],
+                                "data": format!("0x{}", hex::encode(&id_h)),
+                                "blockHash": format!("0x{}", "22".repeat(32)),
+                                "blockNumber": format!("{:#x}", block),
+                                "transactionHash": format!("{:#x}", spend_hash),
+                                "transactionIndex": "0x0",
+                                "logIndex": "0x0",
+                                "removed": false,
+                            }]),
+                            _ => json!([]),
+                        }
+                    },
+                    "eth_getTransactionByHash" if spend_tx_served => spend_json.clone(),
+                    "eth_getTransactionByHash" => Json::Null,
+                    "eth_getTransactionReceipt" => match receipt_block {
+                        Some(block) => json!({
+                            "type": "0x0",
+                            "status": "0x1",
+                            "cumulativeGasUsed": "0x5208",
+                            "logsBloom": format!("0x{}", "00".repeat(256)),
+                            "logs": [],
+                            "transactionHash": format!("{:#x}", payment_h.tx_hash()),
+                            "transactionIndex": "0x0",
+                            "blockHash": format!("0x{}", "22".repeat(32)),
+                            "blockNumber": format!("{:#x}", block),
+                            "gasUsed": "0x5208",
+                            "effectiveGasPrice": "0x1",
+                            "from": format!("{:#x}", payment_h.sender()),
+                            "to": format!("0x{}", SWAP_CONTRACT_ADDR.to_lowercase()),
+                            "contractAddress": Json::Null,
+                        }),
+                        None => Json::Null,
+                    },
+                    // `payments(id)`: payment hash, lock time, state.
+                    "eth_call" => json!(format!("0x{}{}{:064x}", "00".repeat(32), "00".repeat(32), state)),
+                    other => panic!("the scripted node does not serve `{}`", other),
+                }
+            });
+            let (_ctx, coin) = coin_with(&node.url, EthCoinType::Eth, ticker, logs_block_range);
+            Fixture {
+                _node: node,
+                reqs,
+                methods,
+                coin,
+                payment,
+                id,
+            }
+        }
+
+        fn search(fx: &Fixture, from_block: u64) -> Result<Option<FoundSwapTxSpend>, String> {
+            block_on(
+                fx.coin
+                    .search_for_swap_tx_spend(SPENT_PAYMENT_TX, swap_addr(), from_block),
+            )
+        }
+
+        fn wait(fx: &Fixture, wait_until: u64, from_block: u64) -> Result<TransactionEnum, crate::TransactionErr> {
+            block_on(
+                fx.coin
+                    .wait_for_payment_spend(&fx.payment, &fx.id, swap_addr(), wait_until, from_block, 0.05),
+            )
+        }
+
+        fn lines(ticker: &str, level: &str) -> Vec<String> {
+            let tag = format!("[{ticker}]");
+            captured_log_lines()
+                .into_iter()
+                .filter(|l| l.starts_with(level) && l.contains(&tag))
+                .collect()
+        }
+
+        fn too_large_above(blocks: u64, code: i64, message: &'static str) -> impl Fn(u64, u64) -> Refusal {
+            move |from, to| (to - from + 1 > blocks).then_some((code, message))
+        }
+
+        /// T17.8.1.
+        #[test]
+        fn t17_8_1_the_window_shrinks_until_the_node_accepts_it() {
+            let capturing = install_log_capture();
+            let from = CURRENT_BLOCK - 3_600;
+            let fx = fixture(
+                "GLW1",
+                1000,
+                CURRENT_BLOCK,
+                Some(CURRENT_BLOCK - 3_000),
+                None,
+                1,
+                too_large_above(100, -32602, "block range too large"),
+            );
+            let found = search(&fx, from).unwrap().unwrap();
+            assert_eq!(
+                FoundSwapTxSpend::Spent(signed_eth_tx_from_bytes(SPEND_TX).unwrap().into()),
+                found
+            );
+            let refused: Vec<u64> = fx
+                .requests()
+                .iter()
+                .filter(|r| r.refused && r.event == "ReceiverSpent")
+                .map(|r| r.to - r.from + 1)
+                .collect();
+            assert_eq!(refused, [1000, 500, 250, 125]);
+            let first_accepted = fx.windows("ReceiverSpent")[0];
+            assert_eq!(first_accepted, (from, from + 61));
+            assert_eq!(fx.coin.logs_window(), 62);
+            if capturing {
+                let warns = lines("GLW1", "WARN");
+                assert_eq!(warns.len(), 1, "{warns:?}");
+                // The WARN reports the first reduction (1000 -> 500); the later ones are debug lines.
+                assert!(warns[0].contains("now 500 blocks"), "{}", warns[0]);
+                assert!(
+                    warns[0].contains(&format!("(node {})", fx._node.url)),
+                    "the node is named by host only: {}",
+                    warns[0]
+                );
+                // INFO carries the value: once at the first query, then on every change with its cause.
+                let infos = lines("GLW1", "INFO");
+                let windows: Vec<&String> = infos.iter().filter(|l| l.contains("eth_getLogs window is")).collect();
+                assert_eq!(windows.len(), 5, "{infos:?}");
+                assert!(
+                    windows[0].contains("window is 1000 blocks") && !windows[0].contains("was"),
+                    "{}",
+                    windows[0]
+                );
+                for (line, (w, was)) in
+                    windows[1..]
+                        .iter()
+                        .zip([("500", "1000"), ("250", "500"), ("125", "250"), ("62", "125")])
+                {
+                    assert!(line.contains(&format!("window is {w} blocks (was {was})")), "{line}");
+                    assert!(line.contains("block range too large"), "{line}");
+                    assert!(line.contains(&format!("(node {})", fx._node.url)), "{line}");
+                }
+            }
+        }
+
+        /// T17.8.2.
+        #[test]
+        fn t17_8_2_a_named_limit_sets_the_window_at_once() {
+            let from = CURRENT_BLOCK - 3_600;
+            let fx = fixture(
+                "GLW2",
+                1000,
+                CURRENT_BLOCK,
+                Some(CURRENT_BLOCK - 3_000),
+                None,
+                1,
+                too_large_above(100, -32602, "eth_getLogs is limited to 100 blocks"),
+            );
+            search(&fx, from).unwrap().unwrap();
+            let spend_requests: Vec<Req> = fx
+                .requests()
+                .into_iter()
+                .filter(|r| r.event == "ReceiverSpent")
+                .collect();
+            assert_eq!(spend_requests[0].to - spend_requests[0].from + 1, 1000);
+            assert!(spend_requests[0].refused);
+            assert_eq!(spend_requests[1].to - spend_requests[1].from + 1, 100);
+            assert!(!spend_requests[1].refused);
+            assert_eq!(fx.coin.logs_window(), 100);
+        }
+
+        /// T17.8.3: a bare -32602 is an ordinary failure.
+        #[test]
+        fn t17_8_3_a_bare_invalid_params_does_not_shrink() {
+            let fx = fixture("GLW3", 1000, CURRENT_BLOCK, None, None, 1, |_, _| {
+                Some((-32602, "invalid params"))
+            });
+            let err = search(&fx, CURRENT_BLOCK - 3_600).unwrap_err();
+            assert!(err.contains("invalid params"), "{err}");
+            assert_eq!(fx.coin.logs_window(), 1000);
+            assert_eq!(fx.requests().len(), 1, "an ordinary failure is not retried at once");
+        }
+
+        /// T17.8.3: -32005 shrinks whatever its message says.
+        #[test]
+        fn t17_8_3_the_code_32005_always_shrinks() {
+            let fx = fixture(
+                "GLW3B",
+                1000,
+                CURRENT_BLOCK,
+                Some(CURRENT_BLOCK - 3_000),
+                None,
+                1,
+                too_large_above(100, -32005, "something else entirely"),
+            );
+            search(&fx, CURRENT_BLOCK - 3_600).unwrap().unwrap();
+            assert_eq!(fx.coin.logs_window(), 62);
+        }
+
+        /// T17.8.4: the spend and refund search, the payment-sent search and the V2 event search cover
+        /// `[0, 2499]` in `[0, 999]`, `[1000, 1999]`, `[2000, 2499]`.
+        #[test]
+        fn t17_8_4_the_windows_are_inclusive_and_contiguous() {
+            let expected = vec![(0, 999), (1000, 1999), (2000, 2499)];
+            let fx = fixture("GLW4", 1000, 2499, None, None, 1, |_, _| None);
+
+            assert_eq!(search(&fx, 0).unwrap(), None);
+            assert_eq!(fx.windows("ReceiverSpent"), expected);
+            assert_eq!(fx.windows("SenderRefunded"), expected);
+
+            let time_lock = 1_000;
+            let secret_hash = [7u8; 20];
+            let found = block_on(
+                fx.coin
+                    .check_if_my_payment_sent(time_lock, &[], &[], &secret_hash, 0, &fx.coin.swap_contract_address())
+                    .compat(),
+            )
+            .unwrap();
+            assert!(found.is_none());
+            assert_eq!(fx.windows("PaymentSent"), expected);
+
+            // V2 search: a poll covers the same windows (the search then polls until its deadline).
+            let before = fx.windows("ReceiverSpent").len();
+            let swap_id = [9u8; 32];
+            let err = block_on(fx.coin.find_transaction_hash_by_event(SpendTxSearchParams {
+                swap_contract_address: swap_addr(),
+                event_name: "ReceiverSpent",
+                abi_contract: &SWAP_CONTRACT,
+                swap_id: &swap_id,
+                from_block: 0,
+                wait_until: now_ms() / 1000 + 1,
+                check_every: 0.05,
+            }))
+            .unwrap_err();
+            assert!(matches!(err.get_inner(), FindPaymentSpendError::Timeout { .. }));
+            assert_eq!(fx.windows("ReceiverSpent")[before..before + 3], expected[..]);
+        }
+
+        /// T17.8.4: `W` never exceeds the coin's `logs_block_range`.
+        #[test]
+        fn t17_8_4_the_window_never_exceeds_the_configured_range() {
+            let fx = fixture("GLW4B", 7, 20, None, None, 1, |_, _| None);
+            assert_eq!(search(&fx, 0).unwrap(), None);
+            assert_eq!(fx.windows("ReceiverSpent"), vec![(0, 6), (7, 13), (14, 20)]);
+            assert_eq!(fx.coin.logs_window(), 7);
+
+            // A coin configured with a range of 0 still searches, one block at a time.
+            let fx = fixture("GLW4C", 0, 2, None, None, 1, |_, _| None);
+            assert_eq!(search(&fx, 0).unwrap(), None);
+            assert_eq!(fx.windows("ReceiverSpent"), vec![(0, 0), (1, 1), (2, 2)]);
+        }
+
+        /// T17.8.5: the wait's first query starts at the payment's block.
+        #[test]
+        fn t17_8_5_the_cursor_starts_at_the_receipt_block() {
+            let payment_block = CURRENT_BLOCK - 20;
+            let fx = fixture(
+                "GLW5",
+                1000,
+                CURRENT_BLOCK,
+                Some(payment_block + 5),
+                Some(payment_block),
+                2,
+                |_, _| None,
+            );
+            let spend = wait(&fx, now_ms() / 1000 + 60, payment_block - 3_555).unwrap();
+            assert_eq!(spend, signed_eth_tx_from_bytes(SPEND_TX).unwrap().into());
+            let first = fx.requests()[0].clone();
+            assert_eq!((first.from, first.to), (payment_block, CURRENT_BLOCK));
+            assert!(fx.requests().iter().all(|r| r.from >= payment_block));
+        }
+
+        /// R17.8.3: without a receipt the wait starts at the search's start block, and a window scanned without
+        /// error is never scanned again.
+        #[test]
+        fn t17_8_3_the_cursor_moves_past_scanned_windows() {
+            let from = CURRENT_BLOCK - 2_499;
+            let fx = fixture("GLW5B", 1000, CURRENT_BLOCK, None, None, 1, |_, _| None);
+            let err = wait(&fx, now_ms() / 1000 + 1, from).unwrap_err();
+            assert!(format!("{err:?}").contains("Waited too long"), "{err:?}");
+            assert!(fx.calls_of("eth_blockNumber") >= 2, "the wait polled more than once");
+            // The first poll scans the whole range; every later poll scans only the newest blocks again (the
+            // cursor stays `REORG_MARGIN_BLOCKS` short of the tip), never an older window.
+            let windows = fx.windows("ReceiverSpent");
+            assert_eq!(windows[..3], [
+                (from, from + 999),
+                (from + 1000, from + 1999),
+                (from + 2000, CURRENT_BLOCK)
+            ]);
+            let rescanned = (CURRENT_BLOCK - REORG_MARGIN_BLOCKS + 1, CURRENT_BLOCK);
+            assert!(
+                windows.len() > 3 && windows[3..].iter().all(|w| *w == rescanned),
+                "{windows:?}"
+            );
+        }
+
+        /// T17.8.8: the newest blocks of a poll are scanned again, so a spend that a reorganization puts into the
+        /// block that was scanned empty is found by the next poll.
+        #[test]
+        fn t17_8_8_a_reorganized_tip_block_is_scanned_again() {
+            let tip = CURRENT_BLOCK;
+            let payment = signed_eth_tx_from_bytes(SPENT_PAYMENT_TX).unwrap();
+            let id = payment_id(&payment);
+            let spend = signed_eth_tx_from_bytes(SPEND_TX).unwrap();
+            let (spend_json, spend_hash) = (rpc_tx(&spend), spend.tx_hash());
+            let spend_topic = topic_of("ReceiverSpent");
+            let block_number_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let spend_windows = Arc::new(Mutex::new(Vec::new()));
+            let (calls_h, windows_h, id_h) = (block_number_calls.clone(), spend_windows.clone(), id.clone());
+            let node = spawn(move |method, params| match method {
+                // Poll 1 sees the tip `tip`; from poll 2 on, the chain has been reorganized and the tip is one higher.
+                "eth_blockNumber" => {
+                    let n = calls_h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    json!(format!("{:#x}", if n == 0 { tip } else { tip + 1 }))
+                },
+                "eth_getLogs" => {
+                    let (from, to) = (hex_u64(&params[0]["fromBlock"]), hex_u64(&params[0]["toBlock"]));
+                    windows_h.lock().unwrap().push((from, to));
+                    // After the reorganization the block `tip` carries the spend.
+                    let reorganized = calls_h.load(std::sync::atomic::Ordering::SeqCst) >= 2;
+                    if reorganized && (from..=to).contains(&tip) {
+                        json!([{
+                            "address": format!("0x{}", SWAP_CONTRACT_ADDR.to_lowercase()),
+                            "topics": [spend_topic],
+                            "data": format!("0x{}", hex::encode(&id_h)),
+                            "blockHash": format!("0x{}", "33".repeat(32)),
+                            "blockNumber": format!("{:#x}", tip),
+                            "transactionHash": format!("{:#x}", spend_hash),
+                            "transactionIndex": "0x0",
+                            "logIndex": "0x0",
+                            "removed": false,
+                        }])
+                    } else {
+                        json!([])
+                    }
+                },
+                "eth_getTransactionReceipt" => Json::Null,
+                "eth_getTransactionByHash" => spend_json.clone(),
+                "eth_call" => json!(format!("0x{}{}{:064x}", "00".repeat(32), "00".repeat(32), 1)),
+                other => panic!("the scripted node does not serve `{}`", other),
+            });
+            let (_ctx, coin) = coin_with(&node.url, EthCoinType::Eth, "GLW8", 1000);
+            let from = tip - 50;
+            let found =
+                block_on(coin.wait_for_payment_spend(&payment, &id, swap_addr(), now_ms() / 1000 + 60, from, 0.05))
+                    .unwrap();
+            assert_eq!(found, spend.into());
+            // Poll 1 scanned everything up to the tip; poll 2 starts at `tip - 11` (the cursor stayed 12 blocks
+            // short of the tip), not at `tip + 1`.
+            let windows = spend_windows.lock().unwrap().clone();
+            assert_eq!(windows, vec![(from, tip), (tip - 11, tip + 1)]);
+        }
+
+        /// R17.8.3: a window that failed is searched again by the next poll.
+        #[test]
+        fn t17_8_3_a_failed_window_is_not_skipped() {
+            let from = CURRENT_BLOCK - 999;
+            let failed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let fx = fixture(
+                "GLW5C",
+                1000,
+                CURRENT_BLOCK,
+                Some(CURRENT_BLOCK - 10),
+                None,
+                1,
+                move |_, _| (!failed_once.swap(true, std::sync::atomic::Ordering::SeqCst)).then_some((-32000, "boom")),
+            );
+            let spend = wait(&fx, now_ms() / 1000 + 60, from).unwrap();
+            assert_eq!(spend, signed_eth_tx_from_bytes(SPEND_TX).unwrap().into());
+            let spend_requests: Vec<Req> = fx
+                .requests()
+                .into_iter()
+                .filter(|r| r.event == "ReceiverSpent")
+                .collect();
+            assert_eq!(spend_requests.len(), 2);
+            assert_eq!((spend_requests[0].from, spend_requests[1].from), (from, from));
+        }
+
+        /// T17.8.6: with every query failing, the wait returns its timeout error once the deadline has passed.
+        #[test]
+        fn t17_8_6_the_deadline_ends_the_wait_whatever_the_nodes_answer() {
+            let payment = signed_eth_tx_from_bytes(SPENT_PAYMENT_TX).unwrap();
+            let id = payment_id(&payment);
+            let failing = spawn(|_, _| json!({"__rpc_error": {"code": -32000, "message": "boom"}}));
+            for url in [failing.url.as_str(), "http://127.0.0.1:1"] {
+                let (_ctx, coin) = coin_with(url, EthCoinType::Eth, "GLW6", 1000);
+                for wait_until in [now_ms() / 1000 - 1, now_ms() / 1000 + 1] {
+                    let started = std::time::Instant::now();
+                    let err = block_on(coin.wait_for_payment_spend(&payment, &id, swap_addr(), wait_until, 1, 0.05))
+                        .unwrap_err();
+                    assert!(format!("{err:?}").contains("Waited too long"), "{err:?}");
+                    assert!(
+                        started.elapsed() < std::time::Duration::from_secs(8),
+                        "the wait overran"
+                    );
+                }
+            }
+        }
+
+        /// T17.8.6: a poll far behind the tip does not scan every window past the deadline.
+        #[test]
+        fn t17_8_6_the_deadline_is_checked_between_windows() {
+            let tip = CURRENT_BLOCK;
+            let from = tip - 1_000_000;
+            // 1,000 windows of 1,000 blocks; the node takes 20 ms per window, so a full scan would take 20 s.
+            let fx = fixture("GLW6B", 1000, tip, None, None, 1, |_, _| {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                None
+            });
+            let started = std::time::Instant::now();
+            let err = wait(&fx, now_ms() / 1000, from).unwrap_err();
+            assert!(format!("{err:?}").contains("Waited too long"), "{err:?}");
+            let scanned = fx.windows("ReceiverSpent").len();
+            assert!(scanned >= 1, "the first window of a poll is always scanned");
+            assert!(scanned < 200, "the scan went on past the deadline: {scanned} windows");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(8),
+                "the wait overran"
+            );
+        }
+
+        /// R17.8.3: a spend found in the window just scanned wins over the deadline.
+        #[test]
+        fn t17_8_6_a_spend_found_in_the_last_window_wins_over_the_deadline() {
+            let fx = fixture(
+                "GLW6C",
+                1000,
+                CURRENT_BLOCK,
+                Some(CURRENT_BLOCK - 10),
+                None,
+                1,
+                |_, _| None,
+            );
+            let spend = wait(&fx, now_ms() / 1000 - 1, CURRENT_BLOCK - 100).unwrap();
+            assert_eq!(spend, signed_eth_tx_from_bytes(SPEND_TX).unwrap().into());
+        }
+
+        /// R17.8.3: a known spend whose transaction cannot be fetched is named in the timeout error.
+        #[test]
+        fn t17_8_6_the_timeout_names_a_known_spend() {
+            let spend_hash = signed_eth_tx_from_bytes(SPEND_TX).unwrap().tx_hash();
+            let fx = fixture_with(
+                "GLW6D",
+                1000,
+                CURRENT_BLOCK,
+                Some(CURRENT_BLOCK - 10),
+                None,
+                2,
+                false,
+                |_, _| None,
+            );
+            let err = wait(&fx, now_ms() / 1000 + 1, CURRENT_BLOCK - 100).unwrap_err();
+            let text = format!("{err:?}");
+            assert!(text.contains("Waited too long"), "{text}");
+            assert!(
+                text.contains(&format!("(spend {:02x} found but not fetched)", spend_hash)),
+                "{text}"
+            );
+            // Without a known spend the text carries no such note.
+            let fx = fixture("GLW6E", 1000, CURRENT_BLOCK, None, None, 1, |_, _| None);
+            let err = wait(&fx, now_ms() / 1000 - 1, CURRENT_BLOCK - 100).unwrap_err();
+            assert!(!format!("{err:?}").contains("found but not fetched"), "{err:?}");
+        }
+
+        /// T17.8.7: the contract reports the payment as spent while the logs keep failing: one WARN.
+        #[test]
+        fn t17_8_7_a_spent_state_without_a_returned_spend_warns_once() {
+            let capturing = install_log_capture();
+            let fx = fixture("GLW7", 1000, CURRENT_BLOCK, None, None, 2, |_, _| {
+                Some((-32000, "boom"))
+            });
+            let err = wait(&fx, now_ms() / 1000 + 1, CURRENT_BLOCK - 100).unwrap_err();
+            assert!(format!("{err:?}").contains("Waited too long"), "{err:?}");
+            assert!(fx.requests().len() >= 2, "the logs were queried on more than one poll");
+            if capturing {
+                let warns = lines("GLW7", "WARN");
+                assert_eq!(warns.len(), 1, "{warns:?}");
+                assert!(warns[0].contains("reports the payment"), "{}", warns[0]);
+            }
+        }
     }
 }
 
@@ -1484,6 +2111,7 @@ fn test_message_hash() {
         custom_token: false,
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+        logs_window: Default::default(),
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
@@ -1539,6 +2167,7 @@ fn test_sign_verify_message() {
         custom_token: false,
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+        logs_window: Default::default(),
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
@@ -1738,6 +2367,7 @@ fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
         custom_token: false,
         chain_id: Some(1),
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+        logs_window: Default::default(),
         derivation_method: DerivationMethod::Iguana(address),
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
@@ -2336,6 +2966,7 @@ mod swap_send_path_wire_form {
             custom_token: false,
             chain_id: Some(POLYGON_CHAIN_ID),
             logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+            logs_window: Default::default(),
             derivation_method: DerivationMethod::Iguana(my_address),
             swap_v2_contracts: None,
             gas_limit: EthGasLimit::default(),
