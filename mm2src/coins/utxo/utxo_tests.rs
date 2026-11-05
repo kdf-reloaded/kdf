@@ -10333,18 +10333,16 @@ mod swap_key_agreement_tests {
 
     fn node_pubkey() -> keys::Public { *key_pair_from_seed("the passphrase of the test").unwrap().public() }
 
-    /// T16: a coin enabled with a single key that is not the node's persistent key (legacy `enable` or
-    /// `electrum`, or `IguanaPrivKey`) pays from another key than the one its swaps announce.
+    /// T16 after §5.12C (R41 item 2, T24): a coin enabled with a single key that is not the node's persistent
+    /// key (legacy `enable` or `electrum`, or `IguanaPrivKey`, under a global-HD login) announces its own key
+    /// and pays from it, so it agrees.
     #[test]
-    fn a_single_key_other_than_the_node_key_disagrees() {
+    fn a_single_key_other_than_the_node_key_agrees() {
         let coin = coin_with(
             PrivKeyPolicy::KeyPair(key_pair_from_seed("the internal key of the test").unwrap()),
             None,
         );
-        assert_eq!(
-            coin.swap_key_disagreement(&node_pubkey()),
-            Some(SwapKeyDisagreement::SingleKey)
-        );
+        assert_eq!(coin.swap_key_disagreement(&node_pubkey()), None);
     }
 
     /// T18: a single key that is the node's persistent key (BCH activated together with its tokens) agrees.
@@ -10367,22 +10365,17 @@ mod swap_key_agreement_tests {
         assert_eq!(coin.swap_key_disagreement(&node_pubkey()), None);
     }
 
-    /// T16: RIN activated at account 0, External, address 1 disagrees (reason 3), with both paths in full.
+    /// T16 after §5.12C (R42, T24): RIN activated at account 0, External, address 1, or in another account and
+    /// chain, funds from the address of the key at `path_to_address`, so it agrees.
     #[test]
-    fn an_hd_coin_at_another_address_names_both_paths() {
+    fn an_hd_coin_at_another_address_agrees() {
         let at_address_1 = PathToAddress {
             account_id: 0,
             chain: Bip44Chain::External,
             address_id: 1,
         };
         let coin = coin_with(hd_policy(at_address_1), Some(DerivationMethod::HDWallet(hd_wallet())));
-        assert_eq!(
-            coin.swap_key_disagreement(&node_pubkey()),
-            Some(SwapKeyDisagreement::HdAddress {
-                activated_path: "m/44'/141'/0'/0/1".to_owned(),
-                paying_path: "m/44'/141'/0'/0/0".to_owned(),
-            })
-        );
+        assert_eq!(coin.swap_key_disagreement(&node_pubkey()), None);
 
         let in_account_2_internal_5 = PathToAddress {
             account_id: 2,
@@ -10393,12 +10386,37 @@ mod swap_key_agreement_tests {
             hd_policy(in_account_2_internal_5),
             Some(DerivationMethod::HDWallet(hd_wallet())),
         );
+        assert_eq!(coin.swap_key_disagreement(&node_pubkey()), None);
+    }
+
+    /// T24 (R44): the guard still refuses a disagreement it is given. A coin whose single key is not the key of
+    /// the first address of the HD account it funds from announces the one and pays from the other.
+    #[test]
+    fn the_guard_still_refuses_a_constructed_disagreement() {
+        let hd_account = UtxoHDAccount {
+            account_id: 0,
+            extended_pubkey: Secp256k1ExtendedPublicKey::from_str(
+                "xpub6DEHSksajpRPM59RPw7Eg6PKdU7E2ehxJWtYdrfQ6JFmMGBsrR6jA78ANCLgzKYm4s5UqQ4ydLEYPbh3TRVvn5oAZVtWfi4qJLMntpZ8uGJ",
+            )
+            .unwrap(),
+            account_derivation_path: HDPathToAccount::from_str("m/44'/141'/0'").unwrap(),
+            external_addresses_number: 1,
+            internal_addresses_number: 0,
+        };
+        let wallet = UtxoHDWallet {
+            hd_wallet_storage: HDWalletCoinStorage::default(),
+            address_format: UtxoAddressFormat::Standard,
+            derivation_path: HDPathToCoin::from_str("m/44'/141'").unwrap(),
+            accounts: HDAccountsMutex::new(HDAccountsMap::from([(0, hd_account)])),
+            gap_limit: 3,
+        };
+        let coin = coin_with(
+            PrivKeyPolicy::KeyPair(key_pair_from_seed("the internal key of the test").unwrap()),
+            Some(DerivationMethod::HDWallet(wallet)),
+        );
         assert_eq!(
             coin.swap_key_disagreement(&node_pubkey()),
-            Some(SwapKeyDisagreement::HdAddress {
-                activated_path: "m/44'/141'/2'/1/5".to_owned(),
-                paying_path: "m/44'/141'/0'/0/0".to_owned(),
-            })
+            Some(SwapKeyDisagreement::SingleKey)
         );
     }
 
@@ -10419,5 +10437,275 @@ mod swap_key_agreement_tests {
         };
         let coin = coin_with(hd_policy(at_address_1), None);
         assert_eq!(coin.swap_key_disagreement(&node_pubkey()), None);
+    }
+}
+
+/// CRD ch.05 §5.12C (R41 item 1 and 2, R42; T20, T21, T22, T24): one address and one key per UTXO swap leg.
+mod hd_coin_swap_key_tests {
+    use super::*;
+    use crate::rpc_command::get_my_address::PathToAddress;
+    use crate::utxo::utxo_builder::derive_activated_hd_secret;
+    use crate::utxo::utxo_common::get_htlc_pubkey_v2;
+    use crate::SwapOps;
+    use crypto::privkey::key_pair_from_secret;
+    use crypto::{CryptoCtx, DerivationPath, GlobalHDAccountArc};
+
+    const TEST_MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    fn global_hd() -> GlobalHDAccountArc {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        CryptoCtx::init_with_global_hd_account(ctx.clone(), TEST_MNEMONIC).unwrap();
+        match PrivKeyBuildPolicy::detect_priv_key_policy(&ctx).unwrap() {
+            PrivKeyBuildPolicy::GlobalHDAccount(global_hd) => global_hd,
+            _ => panic!("expected a global-HD login"),
+        }
+    }
+
+    fn at_address(address_id: u32) -> PathToAddress {
+        PathToAddress {
+            account_id: 0,
+            chain: Bip44Chain::External,
+            address_id,
+        }
+    }
+
+    /// The key at `m/44'/141'/0'/0/<address_id>` of the test wallet, derived by path.
+    fn key_at(address_id: u32) -> KeyPair {
+        let path = DerivationPath::from_str(&format!("m/44'/141'/0'/0/{}", address_id)).unwrap();
+        let secret = global_hd().derive_secp256k1_secret(&path).unwrap();
+        key_pair_from_secret(secret.as_slice()).unwrap()
+    }
+
+    fn hd_wallet() -> UtxoHDWallet {
+        UtxoHDWallet {
+            hd_wallet_storage: HDWalletCoinStorage::default(),
+            address_format: UtxoAddressFormat::Standard,
+            derivation_path: HDPathToCoin::from_str("m/44'/141'").unwrap(),
+            accounts: HDAccountsMutex::new(HDAccountsMap::new()),
+            gap_limit: 3,
+        }
+    }
+
+    /// The fields of a coin activated through the HD route at `path_to_address`, built the way the builder
+    /// builds them: the activated key is the key at the path, derived from the same wallet.
+    fn hd_fields_at(path_to_address: PathToAddress) -> UtxoCoinFields {
+        let client = native_client_for_test();
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+        let global_hd = global_hd();
+        let coin_path = HDPathToCoin::from_str("m/44'/141'").unwrap();
+        let secret = derive_activated_hd_secret(&global_hd, &coin_path, &path_to_address).unwrap();
+        fields.priv_key_policy = PrivKeyPolicy::HDWallet {
+            activated_key: key_pair_from_secret(secret.as_slice()).unwrap(),
+            bip39_secp_priv_key: global_hd.root_priv_key().clone(),
+            path_to_address,
+        };
+        fields.derivation_method = DerivationMethod::HDWallet(hd_wallet());
+        fields
+    }
+
+    fn address_of(fields: &UtxoCoinFields, key: &KeyPair) -> Address {
+        address_from_pubkey(
+            key.public(),
+            fields.conf.pub_addr_prefix,
+            fields.conf.pub_t_addr_prefix,
+            fields.conf.checksum_type,
+            fields.conf.bech32_hrp.clone(),
+            UtxoAddressFormat::Standard,
+        )
+    }
+
+    /// T20 (R41 item 1, R42): RIN activated at account 0, External, address 1 funds from the address of that
+    /// key and signs with its full derivation path, not from the first address.
+    #[test]
+    fn t20_the_funding_address_is_the_one_at_path_to_address() {
+        let fields = hd_fields_at(at_address(1));
+        let expected = address_of(&fields, &key_at(1));
+        assert_ne!(expected, address_of(&fields, &key_at(0)));
+
+        let sender = block_on(active_utxo_sender_address(&fields, "test")).unwrap();
+        assert_eq!(sender.address, expected);
+        assert_eq!(sender.pubkey, Some(*key_at(1).public()));
+        assert_eq!(
+            sender.derivation_path.unwrap().to_string(),
+            "m/44'/141'/0'/0/1".to_owned()
+        );
+        // The key that signs is the key at the path.
+        let sender = block_on(active_utxo_sender_address(&fields, "test")).unwrap();
+        assert_eq!(
+            active_sender_key_pair(&fields, &sender).unwrap().public(),
+            key_at(1).public()
+        );
+    }
+
+    /// T20 (R42): the fee estimate of `trade_preimage` is taken from the outputs of that address.
+    #[test]
+    fn t20_trade_preimage_estimates_from_the_address_at_path_to_address() {
+        let fields = hd_fields_at(at_address(1));
+        let estimated_from = block_on(trade_preimage_sender_address(&fields)).unwrap();
+        assert_eq!(estimated_from, address_of(&fields, &key_at(1)));
+    }
+
+    /// T20 (R42): the change of a funding transaction returns to the funding address, and a spend or refund
+    /// output pays to it (the helper both read).
+    #[test]
+    fn t20_change_and_spend_outputs_use_the_address_at_path_to_address() {
+        let fields = hd_fields_at(at_address(1));
+        let sender = block_on(active_utxo_sender_address(&fields, "test")).unwrap();
+        let spend_to = block_on(utxo_standard_swap_v2::enabled_hd_address_info(
+            &fields,
+            hd_wallet_of(&fields),
+            "test",
+        ))
+        .unwrap()
+        .address;
+        assert_eq!(spend_to, sender.address);
+
+        let coin = utxo_coin_from_fields(fields);
+        let funding = vec![TransactionOutput {
+            script_pubkey: Builder::build_p2pkh(&Address::from("RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa").hash).to_bytes(),
+            value: 100_000,
+        }];
+        let unspents = vec![UnspentInfo {
+            value: 100_000_000,
+            outpoint: OutPoint::default(),
+            height: Default::default(),
+        }];
+        let (unsigned, _) = block_on(
+            UtxoTxBuilder::new(&coin)
+                .with_from_address(sender.address.clone())
+                .add_available_inputs(unspents)
+                .add_outputs(funding)
+                .build(),
+        )
+        .unwrap();
+        let change_script = Builder::build_p2pkh(&sender.address.hash).to_bytes();
+        assert!(
+            unsigned.outputs.iter().any(|o| o.script_pubkey == change_script),
+            "the change returns to the funding address"
+        );
+    }
+
+    fn hd_wallet_of(fields: &UtxoCoinFields) -> &UtxoHDWallet {
+        match &fields.derivation_method {
+            DerivationMethod::HDWallet(wallet) => wallet,
+            _ => panic!("an HD coin"),
+        }
+    }
+
+    /// T20 (R42): the V2 HTLC public key and key pair are those of the same address.
+    #[test]
+    fn t20_the_v2_htlc_key_is_the_key_at_path_to_address() {
+        let coin = utxo_coin_from_fields(hd_fields_at(at_address(1)));
+        let expected = *key_at(1).public();
+        assert_eq!(get_htlc_pubkey_v2(&coin, &[]).unwrap(), expected);
+        assert_eq!(*get_htlc_key_pair_v2(&coin, &[]).unwrap().public(), expected);
+        assert_eq!(coin.try_derive_htlc_pubkey_v2(&[]).unwrap(), expected);
+    }
+
+    /// T20 (R42): at the default `path_to_address` the funding address is the first address, as before: the
+    /// address the first external key of account 0 has.
+    #[test]
+    fn t20_at_the_default_path_the_first_address_is_used() {
+        let fields = hd_fields_at(PathToAddress::default());
+        let sender = block_on(active_utxo_sender_address(&fields, "test")).unwrap();
+        assert_eq!(sender.address, address_of(&fields, &key_at(0)));
+        assert_eq!(
+            sender.derivation_path.unwrap().to_string(),
+            "m/44'/141'/0'/0/0".to_owned()
+        );
+    }
+
+    /// T20 (R42): a coin without an HD key policy keeps the first address of account 0 of its wallet.
+    #[test]
+    fn a_coin_without_an_hd_key_policy_keeps_the_first_address_of_its_account() {
+        let client = native_client_for_test();
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+        let hd_account = UtxoHDAccount {
+            account_id: 0,
+            extended_pubkey: Secp256k1ExtendedPublicKey::from_str(
+                "xpub6DEHSksajpRPM59RPw7Eg6PKdU7E2ehxJWtYdrfQ6JFmMGBsrR6jA78ANCLgzKYm4s5UqQ4ydLEYPbh3TRVvn5oAZVtWfi4qJLMntpZ8uGJ",
+            )
+            .unwrap(),
+            account_derivation_path: HDPathToAccount::from_str("m/44'/141'/0'").unwrap(),
+            external_addresses_number: 1,
+            internal_addresses_number: 0,
+        };
+        let derived = hd_account
+            .extended_pubkey
+            .derive_child(Bip44Chain::External.to_child_number())
+            .unwrap()
+            .derive_child(ChildNumber::from(0))
+            .unwrap();
+        let first = Public::Compressed(H264::from(derived.public_key().serialize()));
+        let mut wallet = hd_wallet();
+        wallet.accounts = HDAccountsMutex::new(HDAccountsMap::from([(0, hd_account)]));
+        fields.priv_key_policy = PrivKeyPolicy::Trezor;
+        fields.derivation_method = DerivationMethod::HDWallet(wallet);
+        let info = block_on(utxo_standard_swap_v2::enabled_hd_address_info(
+            &fields,
+            hd_wallet_of(&fields),
+            "test",
+        ))
+        .unwrap();
+        assert_eq!(info.pubkey, first);
+        assert_eq!(info.derivation_path.to_string(), "m/44'/141'/0'/0/0".to_owned());
+    }
+
+    /// T21 (R41 item 2): RIN enabled through legacy `electrum` under a global-HD login holds the internal key as
+    /// its single key. It announces that key as its own signing key and funds from that key's address.
+    #[test]
+    fn t21_a_single_key_coin_announces_and_funds_from_its_own_key() {
+        let client = native_client_for_test();
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+        let internal_key = key_at(0);
+        fields.priv_key_policy = PrivKeyPolicy::KeyPair(internal_key);
+        let funding_address = address_of(&fields, &internal_key);
+        fields.derivation_method = DerivationMethod::Iguana(funding_address.clone());
+        let coin = utxo_coin_from_fields(fields);
+
+        // The swap start takes this pair (and saves it when it is not the persistent key).
+        assert_eq!(coin.own_signing_key_pair().unwrap().public(), internal_key.public());
+        assert!(coin.get_htlc_key_pair().is_none());
+        let sender = block_on(active_utxo_sender_address(coin.as_ref(), "test")).unwrap();
+        assert_eq!(sender.address, funding_address);
+        assert_eq!(sender.pubkey, Some(*internal_key.public()));
+    }
+
+    /// T22 (R41): the HD coin supplies its key through `get_htlc_key_pair` as before and has no single key of
+    /// its own; a single-key coin's own key is the iguana key, which the swap start recognizes as the persistent
+    /// key (the `lp_swap` tests).
+    #[test]
+    fn t22_the_key_sources_are_unchanged_for_the_other_policies() {
+        let hd = utxo_coin_from_fields(hd_fields_at(at_address(1)));
+        assert_eq!(hd.get_htlc_key_pair().unwrap().public(), key_at(1).public());
+        assert!(hd.own_signing_key_pair().is_none());
+
+        let client = native_client_for_test();
+        let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+        let iguana_key = match &fields.priv_key_policy {
+            PrivKeyPolicy::KeyPair(key_pair) => *key_pair,
+            _ => panic!("the iguana policy"),
+        };
+        let iguana = utxo_coin_from_fields(fields);
+        assert!(iguana.get_htlc_key_pair().is_none());
+        assert_eq!(iguana.own_signing_key_pair().unwrap().public(), iguana_key.public());
+
+        let mut trezor_fields =
+            utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+        trezor_fields.priv_key_policy = PrivKeyPolicy::Trezor;
+        let trezor = utxo_coin_from_fields(trezor_fields);
+        assert!(trezor.own_signing_key_pair().is_none());
+    }
+
+    /// T24 (R44): under a global-HD login none of the T15 and T16 coins disagrees any more: an HD coin at any
+    /// address, a single-key coin that is not the node's key.
+    #[test]
+    fn t24_no_coin_of_t16_disagrees() {
+        let node_pubkey = *key_pair_from_seed("the passphrase of the test").unwrap().public();
+        for address_id in [0, 1, 7] {
+            let coin = utxo_coin_from_fields(hd_fields_at(at_address(address_id)));
+            assert_eq!(coin.swap_key_disagreement(&node_pubkey), None);
+        }
     }
 }
