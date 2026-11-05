@@ -888,10 +888,12 @@ rather than defects. None is a correctness claim.
   `derivation_method` field, and activation (`sia_activation.rs`)
   currently reports `wallet_balance` via the same generic
   `EnableCoinBalanceOps` shape UTXO/ETH use, branching automatically
-  on Iguana vs. HD-wallet mode. That HD branch is a wire deviation:
-  ch.46 R46.2.4 binds the activation result to the single-address
-  `"Iguana"` form in both modes (the HD account data stays reachable
-  through the post-activation HD RPC surface). Per ch.46 R46.1.3,
+  on Iguana vs. HD-wallet mode. That HD branch is the deliberate
+  divergence of ch.46 R46.2.4 (maintainer decision 2026-10-11): under
+  HD the activation result is the HD report by default, and the
+  compatibility switch `sia_activation_single_address_balance` restores
+  the single-address `"Iguana"` form the reference reports in both
+  modes *(corrected 2026-11-04)*. Per ch.46 R46.1.3,
   activation itself never grows the wallet past account 0; multi-
   account growth happens entirely through the post-activation HD RPC
   surface. `InitCreateHDAccountRpcOps` could not delegate to the
@@ -906,7 +908,8 @@ rather than defects. None is a correctness claim.
   (UTXO/QTUM/ETH included) without a connected hardware wallet --
   Sia inherits this identically once wired. The existing
   single-address activation path is observably unaffected either
-  way. Code: `mm2src/coins/siacoin/sia_hd_wallet.rs`,
+  way. *(Still open on 2026-11-04; plan `hd-key-unification` item H5.)*
+  Code: `mm2src/coins/siacoin/sia_hd_wallet.rs`,
   `siacoin_helpers.rs`, `mod.rs`,
   `mm2src/coins_activation/src/sia_activation.rs`.
 
@@ -1189,3 +1192,9 @@ V3. The unit ratio, ed25519 scheme, address encoding, walletd
   maintainer decision AU of 2026-10-29 (chapter 36 D36.3), on walletd's public
   error format (an error answer carries its message as plain text) and on the
   bound revision of the external Sia library.
+- *Clean-context correction (2026-11-04, forbidden corpus not consulted):*
+  the D1 note now calls the HD activation result the deliberate divergence
+  of chapter 46 R46.2.4 instead of a wire deviation, and records that the
+  account-creation bug is still open. Written from this repository's own
+  code and chapter 46; it takes no forbidden-class input and needs no gate
+  pass.

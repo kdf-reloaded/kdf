@@ -967,8 +967,9 @@ else. Its complete contract:
 > only by statistics stores, the extension breaks no peer, but it should
 > be adopted as a documented Reloaded-original divergence, not silently.
 
-**R50B.** *The transaction-helper topic (Reloaded addition, 2026-10-30,
-Decision BB).* Each side publishes the spend and refund transactions it
+**R50B.** *The transaction-helper topic (2026-10-30, Decision BB; the
+publisher side is parity, the receiver side a Reloaded correction of a
+reference defect -- see the notes below and D6).* Each side publishes the spend and refund transactions it
 builds on the coin's transaction-helper topic (`txhlp/<ticker>`), so that
 other nodes can broadcast them too: after its own broadcast succeeded, and
 also when its own broadcast failed with the transaction at hand. The
@@ -982,6 +983,37 @@ the parties have normally broadcast the transaction already (it is in the
 mempool or in a block), and is logged at debug level only. Which nodes act
 on the topic, and what a reference receiver does with the message, are
 open (D6).
+
+> **Reference behavior of the transaction-helper receiver (passed the KDF
+> Dirty Gate on 2026-11-04, measure 0.04; Spec Reader 2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of
+> chapter 02 §2.15A, identical at both).** The reference subscribes a node to
+> a coin's transaction-helper topic only when that coin is activated through
+> the legacy `enable` method in **native** (local daemon) mode; an Electrum
+> or task-route activation subscribes nothing, so such a node never receives
+> the topic's messages, and a relay that is not subscribed does not forward
+> them. A subscribed receiver, relay or not, looks the coin up by the topic's
+> ticker, requires the message to parse as a raw transaction of that coin,
+> and -- only when the coin is in native mode -- broadcasts it through the
+> coin's daemon; a message that fails to parse is logged and dropped
+> **without propagation**, and a message for a coin the receiver has not
+> enabled is propagated without action. The sender, as R50B says, publishes
+> the transaction **inside the signed envelope of R43**.
+>
+> **Code-quality finding (informative; trigger: a contradiction between two
+> things read side by side, the sender and the receiver).** The reference
+> receiver applies the coin's raw-transaction parser to the **whole received
+> message**, not to the transaction inside the envelope: it neither unwraps
+> nor verifies the envelope. An envelope is not a raw transaction of any
+> coin, so at both reference rows every helper message a reference node
+> receives for a coin it has enabled fails to parse, is dropped, and is
+> neither submitted to the chain nor propagated; the topic is inert on the reference side. This is a finding
+> against the reference, **not** a convergence target: R50B's rule -- decode
+> and verify the envelope, broadcast the transaction inside it -- is the
+> correct behavior, and a Coder shall not adopt the reference's. For D6 it
+> settles the open question: a reference receiver does nothing useful with a
+> helper message in native or Electrum mode, so the topic helps only between
+> Reloaded nodes. Chapter 09 R23 records a relay's handling of the watcher
+> topic, which does propagate.
 
 ## 51.8 Bound Reserved-Funds Semantics
 
@@ -1166,6 +1198,26 @@ be made key-length-polymorphic; the 33-byte width is a property of the
 deployed wire format, not of secp256k1. For a shielded coin, the HTLC key
 behind that public key is derived per swap and never stored
 ([chapter 39](39-zcash---z_coin-shielded-coin.md) R39.5.6--R39.5.9).
+
+> **Reloaded status under an HD login (informative, 2026-11-04).** For a
+> secp256k1 coin the machines resolve the coin's own HTLC key where the coin
+> supplies one, and the node's persistent key otherwise. Under an iguana login
+> these are one key. Under a global-HD login
+> ([chapter 45](45-startup-configuration-and-environment-tolerance.md)
+> R45.4.8) they differ. A UTXO coin activated through the HD task route
+> supplies its activated HD key, and its spend and refund outputs go to that
+> key's address; it funds the swap from its first address (account `0`, chain
+> `External`, address `0`), so the two agree only when it was activated there.
+> A coin that supplies no key of its own gets the node's persistent key, which
+> under HD is the hash of the passphrase text. For EVM coins and for coins
+> enabled through legacy `enable` or `electrum` that is not the key the coin
+> pays from. A swap of such a coin under an HD login does not complete as
+> intended. Plan
+> [`hd-key-unification`](../plans/hd-key-unification.md) first refuses those
+> swaps (item H1, chapter 05 §5.12B R36), then gives every coin its own
+> key (item H3, chapter 05 D6). R74 states the target: the internal key as
+> the persistent key and the coin's own key as each HTLC key; chapter 05
+> §5.9B tabulates the keys.
 
 **R64.** *Representation of non-secp256k1 keys — the dictated padding
 convention.* A chain whose native key is not a 33-byte secp256k1 point
@@ -1400,6 +1452,35 @@ carry it.
 > instead of a raw parse failure (`SiaCheckIfMyPaymentSentArgsError::
 > WrongSecretHashLength`, `SiaValidatePaymentInputError::
 > WrongSecretHashLength`) rather than something recovery can act on.
+
+**R74.** *Which key each side puts on the wire under a global-HD login.*
+*(Passed the KDF Dirty Gate on 2026-11-04, measure 0.04. Reference fact, Spec Reader 2026-11-04, rows
+`v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both.)*
+Under a global-HD login (chapter 05 R20) the `persistent_pubkey` of R59, the
+own-key field of the start event and the own-key column of the swap
+statistics record (R50A) are the node's **internal key** of chapter 05 R16;
+each per-coin HTLC public key of R63 is the **coin's own key** -- for a
+UTXO-family, QTUM, BCH, SLP, QRC20, EVM or Tendermint coin the key activated
+at the coin's `path_to_address`, for a shielded coin the per-swap derivation
+of chapter 39 R39.5.6, for Sia the padded account key of R64. No key derived
+by hashing the mnemonic string appears anywhere on the swap wire under a
+global-HD login. Because the two HTLC keys then differ from the persistent
+key, the sender emits shape 3 under R60. The reference performs no
+key-consistency check before a swap (chapter 05 R34): the key on the wire is
+the key that signs. Under the legacy single-key login all of these are the
+one key, and shape 2 results.
+
+> **Compatibility (this repository; not corpus-sourced).** Reloaded's v1
+> machines put a hash of the mnemonic string on the wire as the persistent
+> key and, for every coin that supplies no swap key (EVM; UTXO-family coins
+> activated through the legacy route), as the HTLC key too, so the payments
+> that follow are signed by a different key than the one announced. This is
+> recorded in plan [`hd-key-unification`](../plans/hd-key-unification.md)
+> (items H3 and H4) and is a divergence from R74, not a retained parity
+> behavior. Correcting it changes the key Reloaded
+> announces for its own swaps and is therefore visible to peers and to swap
+> statistics at upgrade; a swap in flight must keep the key its start event
+> recorded.
 
 ## 51.10 Bound Reference-Version Split
 
@@ -1690,6 +1771,14 @@ transaction's bytes signed as a transaction-helper message yield exactly
 those bytes, which are what is broadcast; a bare transaction and an envelope
 with a changed signed byte are both refused.
 
+**T31.** *HD login keys on the v1 wire (R74).* Under a global-HD login, a v1
+swap of a UTXO coin activated at a non-default `path_to_address` and a v1
+swap of an EVM coin shall each emit a shape-3 negotiation payload whose
+`persistent_pubkey` is the internal key and whose per-coin HTLC key is the
+coin's activated key; the payment, spend and refund transactions of each
+shall verify against that HTLC key; and no field of the payload shall equal
+a key derived by hashing the mnemonic string.
+
 ## 51.13 Deferred Work
 
 **D1.** *Migration of the legacy machines onto the chapter-14 runtime.*
@@ -1731,6 +1820,17 @@ coins broadcasts through the same kind of servers the parties use. Limiting
 the receiver to native-mode coins, and confirming what a reference node does
 with the message (whether it unwraps the envelope, and whether a relay acts
 on a topic it has not subscribed to), are deferred to a Spec Reader pass.
+
+> *Reference answer (2026-11-04; passed the KDF Dirty Gate on 2026-11-04,
+> measure 0.04; last clause corrected after micro-run 0.4.0-2c, PASS 0.03).*
+> The two questions D6 deferred are answered in the note under R50B: a
+> reference node subscribes only for a native-mode legacy activation, acts
+> only for a native-mode coin, does not unwrap the envelope and in
+> consequence never gets a received helper transaction onto the chain; it
+> forwards a received helper message (when it is a relay) only for a coin it
+> has not enabled, and it does publish helper messages itself after its own
+> spend and refund attempts, exactly as R50B describes for Reloaded. What
+> remains of D6 is this project's own choice of receiver scope.
 
 ## 51.14 Baseline Verifications
 
@@ -1934,3 +2034,55 @@ reference rows alike.
   internal decomposition, log or error string, or per-method internal
   table was copied; every rule above is stated as an externally
   observable behavioural or cryptographic requirement.
+  (Addition of 2026-11-04, KDF Spec Reader, **KDF Dirty Gate: PASS on 2026-11-04, measure 0.04**:
+  R74, T31, the compatibility note under R74, the reference-behavior note
+  and code-quality finding under R50B, and the answer note under D6 rest on
+  the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at
+  both. The facts taken are: which key is the v1 persistent key and which key
+  each coin family's HTLC public key is under a global-HD login, the
+  consequent negotiation shape, and the absence of any key-consistency check;
+  and, for the transaction-helper topic, who subscribes, what a receiver
+  requires of a message, when it broadcasts, when it propagates, and that the
+  receiver parses the whole message rather than the envelope's content. No
+  private identifier, function body, helper decomposition, log or error
+  literal was reproduced. The compatibility note rests on this repository's
+  own code, as inventoried in plan `hd-key-unification`; T31 is Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.04, no findings. *Extent:* the legacy swap's negotiation keys under a
+  global-HD login and the transaction-helper topic, at `v3.0.0-beta` with
+  `v2.6.0-beta` as cross-check; for the whole batch, 30 source files and one
+  dependency manifest were read at `v3.0.0-beta`, 29 of them checked by hash
+  against the tagged states of both rows. *Method:* side-by-side reading of
+  the compared regions against every added or changed line, plus that hash
+  check; the gate script was not run because the candidate has no code blocks.
+  *Measure:* 0.04, read against the standard that any discretionary finding
+  fails a file; dictated-interop and public-surface tokens were excluded from
+  the measured set.)
+  (Correction of 2026-11-04, KDF Spec Reader micro-run 0.4.0-2c, gated
+  2026-11-04, **KDF Dirty Gate: PASS on 2026-11-04, measure 0.03**: the last
+  clause of the answer note under D6, the last sentence of the code-quality
+  finding under R50B, and the label of R50B. The micro-run re-read the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  only to establish whether the reference publishes transaction-helper
+  messages itself and when a relay forwards a received one: it publishes after
+  its own spend and refund attempts as R50B states, and it forwards only for a
+  coin it has not enabled or for bytes that parse as a raw transaction of an
+  enabled coin. The corrected wording is Reloaded-original. No private
+  identifier, function body, helper decomposition, log or error literal was
+  reproduced. *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04,
+  measure 0.03, no finding in the passages used here. *Extent:* the
+  transaction-helper topic publisher, including its call sites in the legacy
+  maker and taker swaps and the watcher, and the receiver and relay-forwarding
+  handler for that topic, at `v2.6.0-beta` and `v3.0.0-beta`, within a
+  micro-run that read seven source files at each row. *Method:* reading, plus
+  a mechanical diff between the two rows; the gate script was not run because
+  the candidate has no code blocks. *Measure:* 0.03, read against the judgment
+  standard of chapter 01 R35.)
+- *Reloaded-original note (2026-11-04) -- "Reloaded status under an HD
+  login" under R63.* It records which key the machines resolve per coin
+  under a global-HD login and points to plan `hd-key-unification`. Written
+  by a context that never read the forbidden corpus, from this repository's
+  own swap, coin-key and activation code. No reference implementation was
+  consulted, and it needs no Dirty Gate pass. *Pointer added 2026-11-05:*
+  its last sentence now names R74 as the target; it carries no reference
+  content of its own.

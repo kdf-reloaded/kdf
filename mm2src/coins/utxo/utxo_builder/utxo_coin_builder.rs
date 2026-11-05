@@ -319,6 +319,7 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
         let priv_key_policy = PrivKeyPolicy::HDWallet {
             activated_key: key_pair,
             bip39_secp_priv_key: global_hd_ctx.root_priv_key().clone(),
+            path_to_address,
         };
 
         // Build the HD wallet structure for multi-account support.

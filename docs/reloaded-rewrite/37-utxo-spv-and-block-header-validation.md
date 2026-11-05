@@ -1005,6 +1005,28 @@ parity on R37.5.1–R37.5.4 needs none of them:
 
 <<<SPEC One residual item, needed only for the identity-hash divergence of R37.5.7 and R37.5.7a (§37.9 D2) and not for parity with the reference: the three chain-defined block-identity hashes — the KawPoW-family header hash, the Firo MTP and ProgPoW header hashes, and the Verus header hash — have not been specified from the chains' published definitions. Until they are, R37.5.7's own escape applies and the linkage checks skip those families. SPEC>>>
 
+> **Re-confirmation (2026-11-04; passed the KDF Dirty Gate on 2026-11-04,
+> measure 0.02).** The four
+> resolved rows of the table above were re-read at both rows `v2.6.0-beta`
+> and `v3.0.0-beta` of chapter 02 §2.15A and hold unchanged; the header
+> reader is byte-identical between the two rows. For the record, the exact
+> keys the reference uses -- all of them values the chains themselves
+> publish: the two Firo layouts key on the version value `0x20001000` with
+> the switch timestamp `1635228000` (the MTP fields when the block time is
+> below it, the ProgPoW fields at or above it, no lower bound); the KawPoW
+> layout keys on the version value `0x30000000` **and** the configured
+> `"RVN"` family, with no time comparison; the LBRY and Qtum extensions key
+> on the version value `0x20000000` and their families; the Verus layout is
+> recognized by the served version value `0x00010004`, un-masked to `4` on
+> read and re-masked on write; a coin configured `"PIVX"` always reads one
+> 32-byte field after the nonce; and every family's identity hash is a
+> double-SHA256 of the reader's own re-encoding. The corpus therefore
+> **cannot** supply the remaining `SPEC` item above: it contains no
+> chain-defined identity hash for the KawPoW, Firo or Verus families and no
+> per-network KawPoW activation time. Those must come from the chains'
+> published definitions, as the note already says, and the item stays open
+> for that reason alone.
+
 > **Interop note (R29/R31).** Each family's byte layout is dictated by its
 > chain, and the `chain_variant` key and values are dictated by third-party
 > coin-config files; neither is this project's choice. §37.5 binds the
@@ -3007,3 +3029,23 @@ before the wait is deferred.
   own header-sync loop, found while R55.1.12 of Chapter 55 was implemented.
   It adds no reference content, so chapter 01 R38 is not engaged and no
   clearance above is widened.
+- *Scoped addition (2026-11-04) -- the re-confirmation note in §37.5.7b.*
+  **KDF Dirty Gate: PASS on 2026-11-04, measure 0.02.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical in the
+  header reader, consulted **only** to re-confirm the four resolved rows of
+  §37.5.7b and to record the chain-published version values and the switch
+  timestamp the reader keys on, and that the corpus holds no chain-defined
+  identity hash and no per-network KawPoW activation time. The values named
+  are the chains' own published header constants (chapter 01 R11,
+  external-specification symbols); no private identifier, function body,
+  helper decomposition, error, log or comment text was reproduced.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.02, no findings. *Extent:* the block-header reader's family keys and
+  constants, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole
+  batch, 30 source files and one dependency manifest were read at
+  `v3.0.0-beta`, 29 of them checked by hash against the tagged states of both
+  rows. *Method:* side-by-side reading of the compared regions against every
+  added or changed line, plus that hash check; the gate script was not run
+  because the candidate has no code blocks. *Measure:* 0.02, read against the
+  standard that any discretionary finding fails a file; dictated-interop and
+  public-surface tokens were excluded from the measured set.

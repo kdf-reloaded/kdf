@@ -687,4 +687,38 @@ mod tests {
         let refund_start = data.swap_started_at + (conf.refund_start_factor * data.lock_duration as f64) as u64;
         assert_eq!(refund_start, 1_700_000_000 + 11250);
     }
+
+    /// CRD ch.28 R16a, T4a (a): the watcher message the node sends passes the bounds check.
+    #[test]
+    fn t4a_a_watcher_message_nests_within_half_the_bound() {
+        use common::msgpack_bounds::{check_msgpack_bounds, max_nesting_depth, MAX_PEER_NESTING};
+
+        let msg = SwapWatcherMsg::TakerSwapWatcherMsg(TakerSwapWatcherData {
+            uuid: Uuid::new_v4(),
+            secret_hash: vec![0u8; 20],
+            maker_payment_spend_preimage: vec![1u8; 100],
+            taker_payment_refund_preimage: vec![2u8; 100],
+            swap_started_at: 1_700_000_000,
+            lock_duration: 7500,
+            taker_coin: "BTC".to_string(),
+            taker_fee_hash: vec![3u8; 32],
+            taker_payment_hash: vec![4u8; 32],
+            taker_coin_start_block: 800_000,
+            taker_payment_confirmations: 1,
+            taker_payment_requires_nota: Some(false),
+            maker_coin: "KMD".to_string(),
+            maker_pub: vec![5u8; 33],
+            maker_payment_hash: vec![6u8; 32],
+            maker_coin_start_block: 3_000_000,
+        });
+        let payload = mm2_p2p::encode_message(&msg).unwrap();
+        let envelope = mm2_p2p::encode_and_sign(&msg, &[3; 32]).unwrap();
+        for (what, encoded) in [("payload", &payload), ("envelope", &envelope)] {
+            assert_eq!(check_msgpack_bounds(encoded), Ok(encoded.len()), "{what}");
+            let depth = max_nesting_depth(encoded);
+            println!("t4a depth SwapWatcherMsg {what}: {depth}");
+            assert!(depth <= MAX_PEER_NESTING / 2, "{what}: depth {depth}");
+        }
+        mm2_p2p::decode_signed::<SwapWatcherMsg>(&envelope).unwrap();
+    }
 }

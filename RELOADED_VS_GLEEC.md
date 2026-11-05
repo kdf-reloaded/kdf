@@ -158,7 +158,8 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
 
 These are divergences from GLEEC KDF that are **not** operator-configurable in this release (no compat switch yet). They are logged here and in [`CHANGELOG.md`](CHANGELOG.md) per the convention; a per-feature switch may be added in a later release.
 
-- **Withdraw with an omitted HD `from`.** For an HD-mode UTXO wallet, `task::withdraw` / `withdraw` with no `from` sender defaults to the wallet's enabled address (account 0, external chain, index 0) instead of failing. GLEEC KDF rejects an omitted `from` with `FromAddressNotFound`. This makes the shipped Komodo DeFi wallet's withdraw-preview flow (which omits `from`) work against a reloaded node. An explicit but invalid `from` is still rejected (`UnknownAccount` / `UnexpectedFromAddress`). Code: `coins/utxo/utxo_common/utxo_common_hd.rs` (`get_withdraw_hd_sender`), `utxo_common_helpers.rs` (`validate_task_withdraw_sender`).
+- **Withdraw with an omitted HD `from`.** For an HD-mode UTXO wallet, `task::withdraw` with no `from` sender defaults to the wallet's enabled address (account 0, external chain, index 0) instead of failing. The direct `withdraw` method does not yet serve an HD UTXO wallet (plan [`hd-key-unification`](docs/plans/hd-key-unification.md), item H5). GLEEC KDF rejects an omitted `from` with `FromAddressNotFound`. This makes the shipped Komodo DeFi wallet's withdraw-preview flow (which omits `from`) work against a reloaded node; the maintainer kept it deliberately on 2026-11-04, and no switch is planned. An explicit but invalid `from` is still rejected (`UnknownAccount` / `UnexpectedFromAddress`). Code: `coins/utxo/utxo_common/utxo_common_hd.rs` (`get_withdraw_hd_sender`), `utxo_common_helpers.rs` (`validate_task_withdraw_sender`).
+- **Legacy `my_balance` and `get_enabled_coins` answer for an EVM coin under an HD login.** They report the activated address. GLEEC KDF fails both under an HD login, for EVM coins as for UTXO coins; for a UTXO coin KDF Reloaded fails them too. Code: `coins/eth/eth_market_ops.rs` (`my_address`), `coins/lp_coins_ops.rs` (`get_enabled_coins`). See CRD ch.05 §5.9B R35 and plan [`hd-key-unification`](docs/plans/hd-key-unification.md).
 - **A Light-mode ZHTLC coin is served by `lightwalletd` alone; Electrum is
   removed, and there is no switch to restore it.** GLEEC KDF requires a
   non-empty `electrum_servers` list in the Light-mode activation payload and
@@ -354,18 +355,6 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   Code: `common/dns_resolver.rs` (with `dns_resolver/wire.rs` and `hosts.rs`),
   `mm2_p2p/src/resolving_transport.rs`.
 
-- **An explicit `UtxoFixed` withdraw fee on an SLP token is charged per started
-  kilobyte, with no switch.** Since PR #226 a UTXO coin's `withdraw` with
-  `fee: {"type":"UtxoFixed","amount":"<n>"}` pays `<n>` as a rate per 1,000 bytes, in
-  proportion to the size and rounded down, exactly like `UtxoPerKbyte`, as the
-  reference (Komodo DeFi Framework 2.6.0-beta and GLEEC KDF 3.0.0-beta) does. A
-  `withdraw` of an SLP token on BCH still pays `<n>` for every started kilobyte; how
-  the reference charges it there is not established. No other node sees the
-  difference, because a withdrawal is the node's own transaction. See
-  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
-  [CRD ch.38 R38.6.6l](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md).
-  Contract: [CRD ch.38 R38.6.6l](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md).
-
 - **Reloaded never writes a cancelled order's stored record back, with no switch.**
   On the reference, an order update or the node's own match-pruning step that runs
   into a concurrent cancel can write the cancelled order's stored record back. The
@@ -420,6 +409,14 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   completes or is recovered. Orders and swaps are planned to return in a later
   release. No switch exists: the build constant `TENDERMINT_SWAPS_AVAILABLE`
   (`coins/lp_coins_ops.rs`) is `false`.
+- **A node does not watch swaps of UTXO, BCH and QTUM coins.** The checks a
+  watcher runs are not implemented for these coins yet, so a node with
+  `is_watcher` set does not subscribe to their watcher topics. GLEEC KDF
+  watches swaps of these coins, and does not watch Siacoin swaps, which KDF
+  Reloaded does. No switch exists. Watching for these coins is planned to
+  return with the taker-side watcher hand-off. See
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
+  [CRD ch.09 R17](docs/reloaded-rewrite/09-watcher-reward-infrastructure.md).
 
 ### Work in progress
 
@@ -434,7 +431,8 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   address's event log and tells a spend from a refund (ch.20 D3, closed).
   Still open: the V2 swap protocol is not implemented for SC (ch.20 D5,
   V1 only).
-- HD wallet dispatch in swap/ordermatch paths (legacy iguana-key fallback retained for parity with upstream and GLEEC; documented in code).
+- One key per coin and one trading identity under an HD login. Swaps and ordermatch still use the hash of the passphrase text as the key of every coin that does not supply its own swap key, so EVM swaps and swaps of coins enabled through legacy `enable`/`electrum` cannot complete under an HD login; by default they are now refused up front (`swap_key_check`, see the settings below). GLEEC KDF does not do this: under an HD login it never uses that hash. Its trading identity is the internal key (the key `get_public_key` reports), and each coin's swap key is that coin's own HD key, which also pays and receives. Plan [`hd-key-unification`](docs/plans/hd-key-unification.md); CRD ch.05 §5.9B.
+- **Legacy `enable` and `electrum` under an HD login.** Today KDF Reloaded binds such a coin to the internal key and answers with that key's address. GLEEC KDF builds the coin with the coin's own HD key at `path_to_address` under its `derivation_path`, registers it, and then fails the response; the coin stays enabled. Planned: KDF Reloaded binds the coin's own HD key in the same way and answers successfully with its address. A compatibility switch, on by default, keeps that answer; switched off, the node fails the response as GLEEC KDF does. The switch is named when the work lands. In both positions the address such a coin shows changes at that upgrade, so funds on the old address are moved to an HD address first. A coin configuration without `derivation_path` fails this activation at GLEEC KDF; KDF Reloaded's answer for it is settled with the work. Plan [`hd-key-unification`](docs/plans/hd-key-unification.md), item H7; CRD ch.55 R55.4.10.
 
 ### Settings to set for GLEEC-compatible operation
 
@@ -451,6 +449,15 @@ activation time (CRD ch.39 R39.6.4e). If it cannot be established the build is r
 with a typed error; it is never guessed. **No setting restores GLEEC's version-4-only
 behaviour**, and none is offered, because that behaviour produces nothing the chain
 accepts.
+
+**From v0.4.0 Reloaded also pays Pirate1 addresses.** Pirate Chain's own wallets now
+hand out Pirate1 (Ironwood pool) addresses by default and pay from Ironwood notes.
+Reloaded's ARRR wallet stays Sapling-only, but it accepts a Pirate1 address in
+`validateaddress` and as a `withdraw` destination. It pays from its Sapling notes, at
+Pirate Chain's fixed fee of 0.0001 ARRR, with the change kept in Sapling (CRD ch.39
+§39.6.5). Payments that come from Ironwood wallets arrive like any other (R39.8.0bb).
+GLEEC KDF builds nothing the post-Ironwood chain accepts, so no setting reproduces its
+side.
 
 Because of that, the swap freeze and the build refusal below no longer engage in this
 build, and `ironwood_gate_disabled` has nothing left to switch off. It is still
@@ -484,6 +491,15 @@ unless the parameters describe the real ARRR chain (ticker and Sapling activatio
 at all, and Pirate's own Ironwood test chain carries mainnet address prefixes and reports
 `chainName` `main`, so address prefixes alone cannot tell it from the real chain. Today
 the built-in time only feeds the activation-height discovery above. A coin whose ticker this build does not know is unaffected either way.
+
+**From v0.4.0 an ARRR swap starts only with a node that declares version-6 capability.**
+An ARRR node adds a capability word to its order and match messages, and declines a
+counterparty without it before any swap starts (CRD ch.39 R39.6.4f, ch.59 §59.4A). A swap
+with a node that cannot build version 6 used to start, and failed at that node's first
+ARRR transaction, after the DEX fee was paid. GLEEC KDF nodes and KDF Reloaded
+0.3.0-beta.1 nodes send no word and are declined. Set `require_v6_counterparty` to
+`false` in the coin's `consensus_params` to admit them again; an ARRR swap with GLEEC KDF
+still cannot complete.
 
 Two coin-activation behaviours differ from GLEEC KDF by default (CRD ch.46
 R46.2.4, ch.55 R55.4.6):
@@ -524,12 +540,19 @@ R46.2.4, ch.55 R55.4.6):
   project's divergence, and that alone is what the switch hands back to GLEEC
   KDF; the malformed `fork_id` above stays outside it under every setting.
 
-Fourteen more behaviors, in the order book and its relaying, peer exchange, fee readings and fee
-quotes, Electrum and the shielded history, differ from GLEEC KDF by default, each with one top-level
-`MM2.json` switch. The value below gives the GLEEC-compatible behavior; the row of each switch in
+More behaviors, in the order book and its relaying, peer exchange, fee readings and fee
+quotes, Electrum, the shielded history and trading under an HD login, differ from GLEEC KDF by
+default, each with one top-level `MM2.json` switch. The value below gives the GLEEC-compatible
+behavior, except for `swap_key_check`; the row of each switch in
 [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the full detail:
 
 - `pre_trade_spend_check: false` — no pre-trade spend check.
+- `swap_key_check: false` — restores the behavior of earlier KDF Reloaded builds, not GLEEC KDF's:
+  under an HD login (`enable_hd`), a swap whose coin announces another key than the one it pays
+  from (every EVM coin, a coin enabled with a single key, a UTXO coin activated away from its first
+  address) is negotiated and fails in the coin layer, instead of being refused up front. GLEEC KDF
+  has no such check and needs none: its swaps announce the key the coin signs with (CRD ch.05 §5.9B
+  R34), so these pairs trade normally there. The divergence ends with plan items H3 and H4.
 - `fee_estimate_cache_secs: 0`, with no per-coin value — no fee reading is reused between
   requests.
 - `electrum_spread_reads: false` — every read-only Electrum query goes to the highest-ranked
@@ -564,7 +587,7 @@ quotes, Electrum and the shielded history, differ from GLEEC KDF by default, eac
   estimate, as GLEEC KDF does and as KDF Reloaded did before this switch, instead of at the gas
   limit the fee is sent with; both send it with that limit.
 
-A fourteenth switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
+One more switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
 every maker-order message is published at once, and `true` turns on the maker's rate control.
 
 `dns_resolver` has no GLEEC-compatible value: the default matches GLEEC KDF for seeds and

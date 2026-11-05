@@ -17,6 +17,13 @@ cargo test -p coins --lib -- eth::eth_tests::test_addr
 cargo test -p coins --lib -- eth::eth_tests::test_gas_station_data
 cargo test -p coins --lib -- eth::eth_tests::test_u256
 cargo test -p coins --lib -- eth::eth_tests::test_wei
+cargo test -p coins --lib -- rpc_response_tests coin_protocol_capability::
+
+# Bounds on a value received from a peer (CRD ch.28 R16a, T4a)
+cargo test -p common --lib msgpack_bounds::
+cargo test -p mm2_p2p --features application --lib t4a_
+cargo test -p coins --lib t4a_
+cargo test -p mm2_main --lib t4a_
 ```
 
 ## coins_activation (35 tests)
@@ -74,9 +81,92 @@ Pure tests for ETH utility functions that don't need a node connection.
 | u256_to_big_decimal | 2 | Round-trip, zero |
 | wei_to_gwei_decimal | 1 | Round-trip |
 
+## Capability words in protocol information
+
+Location: `mm2src/coins/coin_protocol_capability.rs` (module `tests`) and the module
+`t14_capability_word_tests` of `mm2src/mm2_main/src/ordermatch_tests.rs`. The coins tests run in the
+`rpc-response` cell of `.github/workflows/test.yml`; the order-match tests run with `ordermatch_tests`.
+They cover CRD chapter 59 §59.4A, test T14.
+
+| Category | What is tested |
+|----------|----------------|
+| T14 (a) writer | Fixed bytes for one and two keys, ascending order, no duplicates, no empty map, first value kept unchanged |
+| T14 (b) reader | Every input of the chapter, plus the nesting bound, over-long declared lengths and counts, the reserved marker, every marker family as a first value |
+| T14 (c) first value | Both readers of a UTXO address format give the same result with the word appended |
+| T14 (d) opt-in | A UTXO coin's protocol information is exactly its encoded address format; a coin of another family sends nothing |
+| T14 (e) carriage | The three order-match messages and the synchronization answers carry the bytes unchanged; the trie root is equal with and without the word |
+| T14 (f) decisions | A test coin that requires `tx_v6`: reservations and requests without it are neither connected nor reserved, with it both go ahead, and no swap or penalty record appears |
+
+## ARRR requires the version-6 capability word
+
+Location: `mm2src/coins/z_coin.rs` (module `ironwood_v6_counterparty_tests`), `mm2src/coins/z_coin/z_note_lock_tests.rs`
+and `mm2src/coins/coin_protocol_capability.rs` (module `tests`). The z_coin tests run in the `shielded`
+cell (`cargo test -p coins --lib z_coin::`); the classifier test runs in the `rpc-response` cell. They
+cover CRD chapter 39 R39.6.4f, test T39.6.4f. The pure functions take the clock as an argument.
+
+| Test | What is tested |
+|------|----------------|
+| T39.6.4f (a) `t39_6_4f_a_protocol_info_is_the_address_format_then_the_word` | ARRR sends its address-format bytes followed by {`tx_v6`: `true`}; a configured time or height, or a discovered height, counts as an upgrade; a coin without one, and a build without version 6, send the bytes unchanged |
+| T39.6.4f (b) `t39_6_4f_b_inside_the_window_a_counterparty_without_the_word_is_declined` | Absent, empty, first-value-only, malformed, truncated, `false` and empty-map information is declined with its cause; the word is accepted, with extra keys and trailing bytes ignored |
+| T39.6.4f (c) `t39_6_4f_c_before_the_window_nothing_is_required_and_a_configured_height_opens_it` | Nothing is required one second before the window and with an activation time far ahead; a configured or discovered height alone opens it; a coin without an upgrade requires nothing; a time near the epoch does not wrap |
+| T39.6.4f (d) `t39_6_4f_d_the_switch_and_the_gate_switch` | `require_v6_counterparty` defaults to `true`, `false` admits a counterparty without the word and still sends its own, and `ironwood_gate_disabled` changes no outcome |
+| T39.6.4f (e) `t39_6_4f_e_logs_one_debug_per_decline_and_one_warning_per_hour`, `t39_6_4f_e_the_log_lines_do_not_carry_the_protocol_information` | One debug line per decline naming coin and cause; the first warning at once, then at most one per hour with the count since the previous one; state per coin instance; a clock stepping back does not warn; no protocol bytes in the lines |
+| T39.6.4f (f) `t39_6_4f_f_the_freeze_still_declines_everything_for_a_build_without_v6` | The freeze predicate, consulted first and without the counterparty's bytes, declines throughout the window for a build without version 6 |
+| T39.6.4f (a)-(c) `t39_6_4f_the_coin_methods_send_decline_and_accept` | On a real light-mode coin (needs the Sapling parameter files, else skipped): unchanged bytes and nothing required without an upgrade; after a height is discovered the word is sent, and `is_coin_protocol_supported` declines the first value alone and accepts the word |
+| `t14_classifier_tells_the_three_causes_apart` | `classify_capability_word` separates no word, a malformed word (and a truncated first value) and a well-formed word, and agrees with the reader |
+
+## Bounds on a value received from a peer (CRD ch.28 R16a, T4a)
+
+Locations: `mm2src/common/msgpack_bounds.rs`, `mm2src/mm2_p2p/src/lib.rs`,
+`mm2src/mm2_p2p/src/atomicdex_behaviour.rs`, `mm2src/coins/utxo/utxo_tests.rs`,
+`mm2src/mm2_main/src/ordermatch_tests.rs`, `mm2src/mm2_main/src/lp_network.rs`,
+`mm2src/mm2_main/src/lp_swap/swap_msg.rs` and `mm2src/mm2_main/src/lp_swap/swap_watcher.rs`.
+
+The tests are named `t4a_<bullet>_...` after the bullets of T4a. All of them run in the `peer-decoding`
+cell of the CI unit tests; the `ordermatch_tests` ones also run in the `ordermatch` cell.
+
+| Bullet | Where | What is tested |
+|--------|-------|----------------|
+| (a) | `mm2_p2p`, `mm2_main` | Every message type the node sends passes the check and nests at most 32 levels |
+| (b) | `common` | Nesting of exactly 64 levels passes; 65 and 10,000 are dropped (positional values, maps, nested maps, mixed, empty containers) |
+| (c) | `common` | bin, str and ext headers declaring 0xFFFFFFF0 bytes, array and map headers declaring 0xFFFFFFFF elements, the reserved marker, every prefix of a valid value, every marker family walked to its exact end |
+| (d) | `mm2_p2p` | An envelope beyond the bounds is dropped before its signature is examined and counted; a normal envelope and the peers-topic addresses still decode |
+| (e) | `common` | Bytes after the first value are ignored |
+| (f) | `mm2_main`, `coins` | The order record, the address format of a protocol-information value and the coin's own check drop or fall back beyond the bounds and are unchanged for the real formats |
+
 ## Pre-existing test compilation fix
 
 The `EthCoinImpl` struct gained a `derivation_method` field that was not present
 in 9 existing test constructors, causing the entire `eth_tests` module to fail
 to compile. All 9 sites now set
 `derivation_method: DerivationMethod::Iguana(my_addr)`.
+
+## ARRR Ironwood transactions: reading and deposits (11 tests)
+
+Locations: `mm2src/coins/z_coin/z_ironwood_read_tests.rs` (fixtures and the full-byte readers),
+`mm2src/coins/z_coin/z_lightwalletd/tests.rs`, `mm2src/coins/z_coin/z_lightwalletd/htlc_index/tests.rs`,
+`mm2src/coins/z_coin/z_coin_wallet_db.rs` (`tests` module). CI cell: `shielded`
+(`cargo test -p coins --lib z_coin::`). CRD: chapter 39, T39.6.5a, R39.8.0bb and T39.8.0i.
+
+The fixtures are two mainnet ARRR transactions fetched once with `GetTransaction` and stored as the
+raw bytes the endpoint returned (`mm2src/coins/z_coin/test-fixtures/arrr-ironwood-*.hex`): a
+withdrawal from an Ironwood wallet (height 4198585, one Sapling spend, two Sapling outputs, two
+Ironwood actions) and a deposit into a Sapling address (height 4198378, no Sapling spend, two
+Sapling outputs, two Ironwood actions). Building the Ironwood verifying key takes roughly a minute (54 to 80 seconds measured)
+in a debug build and happens once per test binary; each bundle then verifies in about 0.3 seconds.
+The Sapling parameter files are needed only by the spend test, which skips with a message when they
+are absent (the same arrangement as the version-6 construction tests).
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `t39_6_5a_the_fixtures_are_the_recorded_bytes` | T39.6.5a | SHA-256 of each fixture, version-6 header and version-group id |
+| `t39_6_5a_the_project_reader_round_trips_and_names_each_mainnet_ironwood_transaction` | T39.6.5a | `z_tx_read::read_tx`: version, branch, shape, byte-identical re-serialization, display and internal identifier |
+| `t39_6_5a_every_other_reader_of_full_bytes_accepts_the_mainnet_transactions` | T39.6.5a | The direct `Transaction::read` of `tx_enum_from_bytes`, `gen_tx` and the commitment-tree loop under two branch arguments; the resulting `TransactionEnum`; the Sapling commitments |
+| `t39_6_5a_the_broadcast_record_reads_the_mainnet_transactions` | T39.6.5a, D39.8.0e | The broadcast record: a deposit has nothing to record; a Sapling spender reaches the fee derivation and is refused there (fee needs the Ironwood value balance) |
+| `t39_6_5a_send_raw_transaction_names_a_mainnet_ironwood_transaction_by_the_chain_identifier` | T39.6.5a | `send_raw_transaction` over the scripted transport: the identifier it returns is the chain's; the bytes reach the transport unchanged |
+| `t39_6_5a_the_history_reader_accepts_a_mainnet_transaction_with_ironwood_actions` | T39.6.5a | The HTLC history reader accepts both transactions and names them |
+| `t39_6_5a_the_ironwood_bundle_of_each_mainnet_transaction_verifies` | T39.6.5a | Halo2 proof, spend-authorization and binding signatures verify with the project's verifying key for the post-NU6.3 circuit; a signature hash off by one bit does not verify |
+| `t39_6_5a_a_changed_proof_byte_does_not_verify` | T39.6.5a | One changed proof byte, with valid signatures, does not verify |
+| `t39_8_0i_a_deposit_with_ironwood_actions_scans_to_the_note_the_tree_and_the_balance` | T39.8.0i, R39.8.0bb | A compact block built as wire bytes with field 6 and decoded as production does: the note is found, the Sapling tree holds exactly one commitment, the balance counts the note once |
+| `t39_8_0i_a_following_build_spends_the_note_deposited_with_ironwood_actions` | T39.8.0i, R39.8.0bb | A build after that scan selects and spends the deposited note; the wallet records it as spent |
+| `t39_8_0i_the_same_transaction_in_the_mempool_counts_as_pending` | T39.8.0i, R39.8.0bb | The same transaction as a `GetMempoolTx` compact transaction: a pending receipt with the right value, none for another key, and not counted again once its block is scanned |

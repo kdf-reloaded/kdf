@@ -919,8 +919,10 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
         // defensive early rejection rather than a reachable runtime path.)
         #[cfg(target_arch = "wasm32")]
         if matches!(coin.signer, EthSigner::Metamask(_)) {
-            return MmError::err(WithdrawError::UnsupportedUnderMetamask(
-                "TRON withdraw is not supported under the MetaMask signing policy".to_owned(),
+            return MmError::err(WithdrawError::UnsupportedError(
+                "Unsupported under the MetaMask signing policy: TRON withdraw is not supported under the MetaMask \
+                 signing policy"
+                    .to_owned(),
             ));
         }
         let _ = ctx;
@@ -3625,6 +3627,16 @@ pub fn addr_from_raw_pubkey(pubkey: &[u8]) -> Result<Address, String> {
     let pubkey = try_s!(PublicKey::from_slice(pubkey).map_err(|e| ERRL!("{:?}", e)));
     let eth_public = Public::from_slice(&pubkey.serialize_uncompressed()[1..65]);
     Ok(public_to_address(&eth_public))
+}
+
+/// The compressed SEC1 form of an EVM signer's `X || Y` public key: the parity of `Y` selects the prefix. The
+/// legacy swap wire carries a secp256k1 key in this form (CRD ch.51 R63).
+pub(crate) fn compressed_secp256k1_public(public: &Public) -> [u8; 33] {
+    let xy: &[u8] = public.as_ref();
+    let mut compressed = [0u8; 33];
+    compressed[0] = 0x02 | (xy[63] & 1);
+    compressed[1..].copy_from_slice(&xy[..32]);
+    compressed
 }
 
 pub fn addr_from_pubkey_str(pubkey: &str) -> Result<String, String> {
