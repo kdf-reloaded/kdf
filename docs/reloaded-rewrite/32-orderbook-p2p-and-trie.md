@@ -410,6 +410,21 @@ two opaque byte strings — one for the base coin, one for the rel
 coin. This is part of the sync-response wire contract
 (R29/R31).
 
+> *Decoder tolerance (reference fact; passed the KDF Dirty Gate on 2026-11-04,
+> measure 0.01; Spec Reader 2026-11-04).* At the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A the reference encodes every gossip message structure -- the order
+> and match messages and the signed envelope of §28.7 alike -- as a
+> positional MessagePack array without field names, and its decoder reads
+> only the fields a structure declares: a **trailing** element appended to a
+> top-level message array, and bytes that follow a complete message, are
+> ignored rather than rejected. That property is what allowed
+> `base_protocol_info`, `rel_protocol_info` and the swap-version member to be
+> appended to messages that older peers still decode. It does not extend to
+> the untagged negotiation payloads of chapter 51 R59, whose three shapes are
+> told apart by field count. The per-coin protocol-information bytes
+> themselves, and how a counterparty's value is judged, are bound in
+> chapter 59 R59.4.7.
+
 **R-W4.** The subsystem MUST support, behaviourally:
 
 - projecting an in-memory record down to the wire record;
@@ -2328,9 +2343,10 @@ messages at no more than the pubkey's current *rate*.
      raised when a data RPC has waited in the data queue of [Chapter
      28](28-libp2p-modernization.md) §28.9B RQ1 toward the relay for 2
      seconds or longer, or while the pressure level of RQ1 item 8 is
-     raised. It clears once 5 seconds have passed in which no queued
-     data RPC has waited 2 seconds or longer, with the level of item 8
-     cleared. It catches a relay that reads slowly while the connection
+     raised. It clears once 5 seconds have passed since a queued data
+     RPC last had waited 2 seconds or longer, or since the signal was
+     raised when the pressure level alone raised it, and the level of
+     item 8 is cleared. It catches a relay that reads slowly while the connection
      stays up: the backlog then sits in that queue, and its oldest RPC
      ages. A queue that holds RPCs but writes each of them within 2
      seconds is not a backlog, so steady traffic neither raises the
@@ -2422,8 +2438,9 @@ values, with no peer identity and no content:
   over live connections whose last window ended within the last two
   window lengths; 0 when there is none *(added 2026-11-02, item P3a)*;
 - `p2p.send_queue.drop_series.max`: the longest current series of
-  counting windows of §28.9B RQ1 item 5 over live connections, 0 to 2
-  before a stuck report *(added 2026-11-02, item P3a)*;
+  counting windows of §28.9B RQ1 item 5, 0 to 2 before a stuck report,
+  over live connections whose last window ended within the last two
+  window lengths; 0 when there is none *(added 2026-11-02, item P3a)*;
 - `p2p.outbox.pending`: pending outbox messages, summed over pubkeys;
 - `p2p.outbox.rate`: the current rate of R-MP2, the lowest over pubkeys;
 - `p2p.outbox.pressure`: 1 while the queue signal of R-MP2 item 2 is
@@ -4181,3 +4198,24 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   it rests on, that no path legitimately revives a cancelled identifier,
   is §32.9C.1 R-GH11, which passed the KDF Dirty Gate. No reference
   implementation was consulted, and it needs no Dirty Gate pass.
+- *Scoped addition (2026-11-04) -- the decoder-tolerance note under R-W2a.*
+  **KDF Dirty Gate: PASS on 2026-11-04, measure 0.01.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish the positional encoding of the gossip
+  message structures and the decoder's tolerance of trailing elements and
+  trailing bytes -- the latter confirmed as a property of the pinned public
+  MessagePack library release in that library's published source -- and that
+  the negotiation payload's untagged shapes do not share it. Behavior and
+  dictated wire members only; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.01, no findings. *Extent:* the encoding and decoding of the order-matching
+  gossip messages and their signed envelope, at `v3.0.0-beta` with
+  `v2.6.0-beta` as cross-check; for the whole batch, 30 source files and one
+  dependency manifest were read at `v3.0.0-beta`, 29 of them checked by hash
+  against the tagged states of both rows. *Method:* side-by-side reading of
+  the compared regions against every added or changed line, plus that hash
+  check; the gate script was not run because the candidate has no code blocks.
+  *Measure:* 0.01, read against the standard that any discretionary finding
+  fails a file; dictated-interop and public-surface tokens were excluded from
+  the measured set.

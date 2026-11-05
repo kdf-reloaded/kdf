@@ -1394,7 +1394,10 @@ R38.6.4e **Timeouts, version negotiation and liveness.**
    removed (R38.6.4d item 3); a version answer the client cannot read is a
    recoverable failure. Two concurrent attempts to establish the same server's
    connection shall not both connect; the second waits for the first (the
-   race-freedom R38.6.4 already requires).
+   race-freedom R38.6.4 already requires). *(Added 2026-11-02.)* The address
+   is resolved through the node's resolver (chapter 45 §45.6B). The addresses
+   it returns are tried in turn within this bound, and the TLS handshake
+   checks the hostname as configured.
 2. A request sent over an established connection shall be answered within
    20 s or fail for that server. `timeout_sec` does not bound requests.
 3. A connection over which no response has arrived for 60 s shall be closed
@@ -2524,7 +2527,8 @@ At both release rows:
 > 2026-10-31 in `docs/release-tests/0.3.0-beta.1.md`). **Open:** the SLP token
 > withdraw on BCH still applies `UtxoFixed` per started kilobyte; how the
 > reference applies a fee descriptor there is not established, and the
-> question is queued for the KDF Spec Reader. No peer observes either
+> question is queued for the KDF Spec Reader. *Answered 2026-11-04:
+> R38.6.6m (proportional, as here); parity on the SLP route since PR #234.* No peer observes either
 > behavior (a `withdraw` is the node's own transaction), so arm 1 of
 > `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind the default.
 
@@ -2545,6 +2549,50 @@ item 2, the figure both descriptors give is
 below `floor(a × s / 1000)`; the test asserts the two descriptors equal and the
 figure this split gives. With P2PKH inputs of 148 bytes the larger size reached
 is 1,429 bytes rather than 1,404.
+
+R38.6.6m *Explicit fee descriptors on the SLP token withdraw (reference-bound;
+**passed the KDF Dirty Gate on 2026-11-04**, measure 0.02; Spec Reader 2026-11-04, rows `v2.6.0-beta` and
+`v3.0.0-beta` of chapter 02 §2.15A, identical at both).* An SLP token
+`withdraw` accepts the same two descriptors as R38.6.6l, `UtxoFixed` and
+`UtxoPerKbyte`, with `amount` in the platform coin's units, and fails any
+other type with the invalid-fee-policy error. At both rows the arithmetic is
+R38.6.6l item 2 exactly: the descriptor's `amount`, in platform base units,
+is a rate per 1,000 bytes applied **proportionally and truncated**,
+`floor(a × s / 1000)`, under either descriptor; neither is charged per
+started kilobyte. The only started-kilobyte arithmetic the reference's
+transaction builder has is the whole-kilobyte coin policy of R38.6.6a, which
+a withdraw descriptor never selects. The response's `fee_details` reports the
+fee actually charged, in the platform coin and named by its ticker. A request
+that carries `from` fails as unsupported (chapter 49 R49.27).
+
+*Pointer (2026-11-04; passed the KDF Dirty Gate on 2026-11-04, measure 0.00;
+provenance and clearance in chapter 49 §49.7).* The wire form of that
+`from` refusal -- `error_type` `UnsupportedError`, HTTP 400, string
+`error_data` -- and the distinct `InvalidFeePolicy` discriminant of the
+wrong-type descriptor above are bound in chapter 49 R49.27a.
+
+> **Compatibility row (this repository, 2026-11-04; not corpus-sourced).**
+> **Parity** on the SLP token withdraw since PR #234: the maintainer adopted
+> R38.6.6m (Decision BV, 2026-11-04), and Reloaded applies `UtxoFixed` there
+> exactly like `UtxoPerKbyte`, as the UTXO route does since Decision 27. It is
+> a parity change without a switch. Before, Reloaded's SLP withdraw applied
+> `UtxoFixed` per started kilobyte, `a × ceil(s / 1000)` -- the "Open" item of
+> R38.6.6l's row -- so it paid up to one `a` more than the reference and never
+> less. No peer observes either behavior, so arm 1 of
+> `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind the default.
+
+T38.6.6m *Explicit SLP withdraw fee (R38.6.6m).* Against a mocked BCH
+backend, an SLP token withdraw with `fee: {"type":"UtxoFixed","amount":"<a>"}`
+and one with `fee: {"type":"UtxoPerKbyte","amount":"<a>"}` for the same inputs
+and outputs shall charge the same fee `floor(a × s / 1000)` for one
+transaction under and one over 1,000 bytes and report it in `fee_details` in
+the platform coin; a third request with an EVM-form descriptor shall fail with
+the invalid-fee-policy error. *Clean-side note (2026-11-05).* As under
+T38.6.6l, where the builder adds the change output the figure both descriptors
+give is `floor(a × (s − 34) / 1000) + floor(a × 34 / 1000)`, which can be one
+base unit below `floor(a × s / 1000)`. The tests of PR #234 assert the two
+descriptors equal and this figure, at 457 and 1,493 bytes; the SLP OP_RETURN
+output makes these sizes differ from T38.6.6l's.
 
 R38.6.6n *Required inputs count toward the input total (reference-bound;
 Spec Reader micro-run 0.4.0-2c, 2026-11-04, rows `v2.6.0-beta` and
@@ -3192,6 +3240,10 @@ R38.8.6 **Tests (two-direction, observable).**
   2026-10-31, its own latency benchmark of 2026-11-01 and this repository's
   code. They take no forbidden-class input, so chapter 01 R38 is not engaged
   and no gate pass is required.
+- *Clean-context addition (2026-11-02, forbidden corpus not consulted):* the
+  sentence on resolving the address in R38.6.4e item 1 is Reloaded-original. It
+  points to chapter 45 §45.6B, from the maintainer's decision of 2026-11-02 and
+  this repository's own code, so chapter 01 R38 is not engaged.
 - *Spec Reader additions (2026-11-03) -- R38.6.6l, T38.6.6l and the
   re-verification note after R38.5B.3.* **KDF Dirty Gate: PASS on
   2026-11-03, measure 0.00.** The forbidden corpus was consulted at the
@@ -3218,6 +3270,28 @@ R38.8.6 **Tests (two-direction, observable).**
   (PR #226). They rest on that
   decision and this repository's code, take no forbidden-class input, and so
   do not engage chapter 01 R38.
+- *Scoped addition (2026-11-04) -- R38.6.6m, T38.6.6m, its compatibility row
+  and the one-sentence resolution appended to R38.6.6l's row.* **KDF Dirty
+  Gate: PASS on 2026-11-04, measure 0.02.** *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`
+  and `v3.0.0-beta` of chapter 02 §2.15A, identical at both, consulted
+  **only** to establish how the SLP token withdraw maps the two explicit fee
+  descriptors onto the transaction builder's rate, the arithmetic that rate
+  produces, the unit and ticker of the reported fee, and the refusal of
+  `from`. Behavior and dictated request and response members only; no private
+  identifier, function body, helper decomposition, error, log or comment text
+  was reproduced. The compatibility row rests on this repository's own code;
+  T38.6.6m is Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.02, no findings. *Extent:* the SLP token withdraw's fee-descriptor
+  handling and the transaction builder's fee arithmetic, at `v3.0.0-beta` with
+  `v2.6.0-beta` as cross-check; for the whole batch, 30 source files and one
+  dependency manifest were read at `v3.0.0-beta`, 29 of them checked by hash
+  against the tagged states of both rows. *Method:* side-by-side reading of
+  the compared regions against every added or changed line, plus that hash
+  check; the gate script was not run because the candidate has no code blocks.
+  *Measure:* 0.02, read against the standard that any discretionary finding
+  fails a file; dictated-interop and public-surface tokens were excluded from
+  the measured set.
 - *Scoped addition (2026-11-04) -- R38.6.6n, T38.6.6n and its compatibility
   row.* The rule's two sentences and the first sentence of T38.6.6n are the
   Reloaded-original wording proposed by the Spec Reader micro-run 0.4.0-2c
@@ -3236,3 +3310,9 @@ R38.8.6 **Tests (two-direction, observable).**
   `v3.0.0-beta`; method = reading plus mechanical diff. The
   compatibility row and the Reloaded-original additions to T38.6.6n rest on
   this repository's own code and take no forbidden-class input.
+- *Clean-side amendment (2026-11-05) -- PR #234, maintainer Decision BV.* After
+  the code change, a session that never read the corpus updated the
+  compatibility row under R38.6.6m, the resolution sentence in R38.6.6l's row
+  and the clean-side note under T38.6.6m. They rest on that decision and this
+  repository's code, take no forbidden-class input, and so do not engage
+  chapter 01 R38.

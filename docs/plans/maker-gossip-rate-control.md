@@ -327,7 +327,7 @@ a Reloaded seed on 2026-10-31 showed a raised queue signal that never cleared
 under steady traffic: every queued message restarted the 5 s of empty queue
 that clearing needed. CRD ch.32 R-MP2 item 2 now judges the signal by how long
 a queued message has waited (2 s), so steady traffic neither raises it nor
-holds it. The work is tracked in `p2p-dialing-and-discovery.md`. The three D9
+holds it (PRs #204, #214). The work is tracked in `p2p-dialing-and-discovery.md`. The three D9
 items above still come before default-on.
 
 - **A budget that reads the TCP send queue.** Toward a relay whose bandwidth is

@@ -442,13 +442,181 @@ pairs, one EVM cell; no shielded swap) or on the latency of the query methods an
 were updated at 20 per second; the default of `2` stands. The figures, the deviations from the registered procedure and the
 runs not made are in `docs/plans/malloc-arena-cap.md`.
 
+## 45.6B Hostname Resolution (Reloaded-original)
+
+> **Reloaded-original (2026-11-02, maintainer decision).** This
+> section binds one setting for every hostname the native daemon looks up when
+> it opens an outgoing connection: seeds and other peers, coin servers and every
+> HTTP(S) service. It changes no wire shape and no order, swap or wallet
+> behavior. It changes which DNS servers learn the names the node connects to.
+> The plan is
+> [`docs/plans/p2p-dialing-and-discovery.md`](../plans/p2p-dialing-and-discovery.md),
+> item P5.
+
+**Why.** Every name the node looks up tells the DNS servers it asks which
+seeds, coins and services the node uses. Before this section the node asked two
+different resolvers: a fixed public resolver for the names of seeds (chapter
+28, the reference note after R8c's rationale, item 4) and the operating
+system's resolver for every other name. Neither was the operator's choice. This
+section gives the operator one setting for all of them, with a default that
+does not depend on the local network's resolver.
+
+R45.6B.1 **Platform.** This section applies to the native daemon, including the
+embedded-library launch path. A browser build leaves every lookup to the
+browser and ignores the key.
+
+R45.6B.2 **The key `dns_resolver`.** Its value selects the *mode*:
+
+| Value | Mode |
+|---|---|
+| absent, `null` or `"google"` | **Google Public DNS**, the default: the servers `8.8.8.8`, `8.8.4.4`, `2001:4860:4860::8888` and `2001:4860:4860::8844`, port 53. |
+| `"system"` | **The system resolver**: every name is looked up by the operating system's own name-lookup service, exactly as an application asks it, with no cache or added behavior of the node's own (R45.6B.4, R45.6B.5 do not apply). |
+| a non-empty array of at most 8 strings | **Fixed servers**: only the listed DNS servers, preferred in the order given. Each string is `"<IPv4>"`, `"<IPv4>:<port>"`, `"<IPv6>"`, `"[<IPv6>]"` or `"[<IPv6>]:<port>"`; the port defaults to 53 and must be 1 to 65535. |
+
+Any other value refuses the launch with a clean configuration error that names
+the key, repeats the value and lists the accepted forms (R45.7.1). That includes
+another string (the keywords are lowercase and exact), an empty array, an array
+with more than 8 entries, an entry that is not a string or not an address in
+one of the forms above (a hostname, for example), a port outside 1 to 65535, a
+number, a boolean and an object. This is a deliberate exception to the
+tolerance rule of §45.5: a resolver the operator did not choose would send every
+name to servers the operator meant to avoid, so a mistyped value is refused,
+never replaced by the default.
+
+R45.6B.3 **Queries in the Google and fixed modes.** The node asks the servers
+of its mode directly, over UDP, and repeats a query over TCP when the answer is
+truncated. Each query waits up to 5 s for an answer, and a lookup as a whole
+fails after at most 15 s. No other server is ever asked: there is no fallback
+to the system resolver or to any other server, in any mode.
+1. *Address families.* For a name with no family given (an HTTP(S) URL, an
+   Electrum or lightwalletd server, a `/dns` address), the node uses the name's
+   IPv4 addresses if it has any, and otherwise its IPv6 addresses. A `/dns4`
+   address uses IPv4 only and a `/dns6` address IPv6 only.
+2. *The local hosts file.* The operating system's hosts file (`/etc/hosts`,
+   and its counterpart on Windows) is read when the resolver is installed
+   (R45.6B.8). A name it lists is answered from it, without a query. A change
+   to the file takes effect at the next start.
+3. *Address literals and `localhost`.* A name that is an IP address needs no
+   lookup, in any mode. In the Google and fixed modes, `localhost` and every
+   name ending in `.localhost` resolve to the loopback addresses without a
+   query, as RFC 6761 reserves them. Without this rule a hosts file that does
+   not list `localhost` (the Windows default) would send it to the servers of
+   the mode.
+4. *Queries.* Each UDP query uses a random query ID and a fresh random source
+   port, and an answer is accepted only for the question asked. A name is
+   looked up as an absolute name: no search domain is appended.
+
+R45.6B.4 **Cache (Google and fixed modes).** Answers are cached in memory for
+at most 1,024 entries.
+1. *Lifetimes.* An answer is kept for the lifetime its records carry, but at
+   least 30 s and at most 1 hour. An answer that the name does not exist or has
+   no address of the family asked for is kept at least 5 s and at most 5
+   minutes.
+2. *Never on disk.* Nothing about lookups is written to disk: a stored cache
+   would reveal which coins the node runs. The cache starts empty at every
+   start.
+
+R45.6B.5 **Last known answer (Google and fixed modes).** For at most 1,024
+names, the oldest dropped first, the node keeps the last successful answer in
+memory.
+1. *When it is used.* When a lookup fails because no server of the mode
+   answered (no answer in time, connection refused, network unreachable) or
+   because the server reported its own failure (a server failure or a refusal),
+   and the name's last known answer expired at most 24 hours ago, the lookup
+   returns that answer.
+2. *When it is not.* Never when a server answered that the name does not exist
+   or has no address. That answer is authoritative, not a glitch.
+3. *Logging.* One WARN line per name per hour states that the last known
+   answer is served for the name, and its age.
+4. *What it is not.* It is not a fallback: no other resolver is asked.
+
+R45.6B.6 **Failure.** A lookup that fails fails only the connection or request
+that needed it. That connection's own logic retries it: the redial guards for
+seeds (chapter 28 R27a), the peer-name record for peer exchange (chapter 28 R8c
+item 7), the server rotation for Electrum (chapter 38 R38.6.4d), and the node
+rotation for EVM and the other HTTP(S) families. A failed lookup never stops the
+node or keeps it from starting. For each name, at most one WARN line per hour
+says that the name could not be resolved, through which mode and why, and that
+`dns_resolver` selects the resolver. The record of names logged holds at most
+1,024 names.
+
+R45.6B.7 **Startup line.** The daemon logs exactly one INFO line at launch that
+names the mode:
+- for the default, that the names of every seed, peer, coin server and service
+  the node connects to are sent to Google Public DNS, and that `dns_resolver`
+  set to `"system"` uses the operating system's resolver instead;
+- for `"system"`, that the operating system's resolver is used;
+- for fixed servers, the servers in order.
+
+R45.6B.8 **One resolver per process, installed at start.**
+1. *Moment.* The node's start-up reads the key and installs the resolver
+   before it starts the peer-to-peer layer and before any coin activation or
+   HTTP(S) request.
+2. *Replacement.* A later node start in the same process (the embedded-library
+   path stops a node and starts another) installs its own resolver, replacing
+   the earlier one together with its cache and last known answers.
+3. *A lookup before installation.* Inside the node this is a programming
+   error, never a mode: a debug build fails an assertion, and a release build
+   logs one ERROR line and looks the name up through the system resolver.
+   Outside the node (unit tests and helper programs that never run the node's
+   start-up), a lookup uses the system resolver.
+
+R45.6B.9 **Where it applies.** In this release the resolver of the mode
+answers:
+1. *Peer-to-peer dials.* Every dial of a `/dns`, `/dns4` or `/dns6` address,
+   by the node's own resolution layer under its TCP and WebSocket transports
+   (chapter 28 R0b, R18). Every address a name resolves to is tried in turn
+   until one connects. A WebSocket dial keeps the hostname for its TLS check.
+   A `/dnsaddr` address is not supported: its dial fails with an error that
+   says so. Configured seeds never produce one (chapter 28 R21), and peer
+   exchange skips it (chapter 28 R8c).
+2. *Peer-exchange names,* the lookups of chapter 28 R8c item 7.
+3. *HTTP(S) requests* of the node's shared HTTP client and of the Tendermint
+   RPC client: EVM nodes (chapter 35), Solana, Tendermint (chapter 36), UTXO
+   native node RPC, the NFT providers, the coins-configuration fetch, the price
+   sources of the simple market maker (chapter 42) and the other HTTP(S)
+   services the node calls through that client.
+4. *Electrum servers* over TCP and TLS (chapter 38 R38.6.4e item 1). TLS keeps
+   the hostname for the server-name indication and the certificate check.
+5. *lightwalletd servers* (chapter 39 R39.2.4). TLS keeps the hostname.
+
+Sia, the WalletConnect relay, Lightning peer addresses and the statistics
+method's address conversion still use the system resolver, whatever the key
+says, until D45.6 is done.
+
+R45.6B.10 **Metrics.** On an existing periodic tick, the node records four
+gauges, each since the resolver was installed: `dns.lookups.count`,
+`dns.failures.count`, `dns.stale_served.count` and `dns.last_known.entries`.
+
+R45.6B.11 **One DNS library.** The node's hostname resolution uses one
+maintained DNS library. The transport library's own DNS layer, and the
+unmaintained resolver library it pulls in, are not built (chapter 28 R0b), and
+the dependency policy bans them, so they cannot return unnoticed.
+
+R45.6B.12 **Limits (informative).**
+- Plain DNS on port 53 is visible to the networks it crosses, and they can
+  block it. Encrypted DNS is deferred (D45.7).
+- The names still appear in the TLS server-name indication and HTTP `Host`
+  headers the node sends to the servers it connects to.
+- In the default mode, Google Public DNS learns every name the node looks up.
+- Seeds and servers given as IP addresses need no lookup in any mode.
+
+R45.6B.13 **Upgrade note (informative).** Before this section, coin servers
+and services were looked up through the operating system's resolver. On a
+network that blocks Google Public DNS (some countries, many company networks,
+captive portals), a node upgraded with the default can resolve no name, coin
+servers included, until `dns_resolver` is set to `"system"` or to a reachable
+server. The startup line (R45.6B.7) and the failure line (R45.6B.6) name the
+key. Seeds were already resolved through Google Public DNS before this section.
+
 ## 45.7 No-Panic-On-Launch Obligation (security/robustness)
 
 R45.7.1 No combination of unset, empty, or unexpected-type configuration fields
 or environment variables shall be able to panic or crash the process during
 startup. A genuinely unrecoverable launch input (R45.3.2, R45.3.5, R45.4.3,
-R45.4.5, R45.5.3, R45.5.5) shall produce a clean, structured configuration
-error and an orderly non-zero exit, not a panic or an aborted backtrace.
+R45.4.5, R45.5.3, R45.5.5, R45.6B.2) shall produce a clean, structured
+configuration error and an orderly non-zero exit, not a panic or an aborted
+backtrace.
 
 R45.7.2 This obligation is the launch-time counterpart of the no-panic-via-RPC
 obligation bound in Chapter 43 R43.4. Any change to the startup path must
@@ -539,6 +707,73 @@ second test MUST show that the banner produced for the running build contains
 the crate version and the short hash of that build, and that the bare short hash
 is unchanged as the value the `version` RPC method returns (R45.6.7).
 
+T45.16 *Resolver key (R45.6B.2).* A table-driven test of the parsing MUST
+cover at least: absent, `null` and `"google"` → Google Public DNS; `"system"` →
+the system resolver; `["192.0.2.53"]`, `["192.0.2.53:5353"]`,
+`["2001:db8::53"]`, `["[2001:db8::53]"]` and `["[2001:db8::53]:5353"]` → fixed servers with the
+right ports, in the given order. Each of `"Google"`, `""`, `"192.0.2.53"` (a
+string, not an array), `[]`, `[""]`, `["dns.example.com"]`, `["192.0.2.53:0"]`,
+`["192.0.2.53:65536"]`, `[53]`, nine entries, `true`, `5` and `{}` MUST refuse
+the launch with a clean configuration error naming the key, and MUST NOT panic
+(R45.7.1).
+
+T45.17 *Cache and last known answer (R45.6B.3 to R45.6B.5).* Against a DNS
+server run by the test on a loopback address, in the fixed mode:
+- an answer with a record lifetime of 0 is served from the cache for 30 s, and
+  one with a lifetime of a day is asked again after 1 hour (a test clock or the
+  configured bounds may stand in for real time);
+- a name the hosts file of the test lists is answered without a query;
+- an IP literal makes no query, and `localhost` and `a.localhost` resolve to
+  loopback with no query;
+- a truncated UDP answer is repeated over TCP, and a first server that does not
+  answer is followed by the second;
+- with the server stopped after a first answer, a lookup after that answer
+  expired returns it and logs the WARN line once; with the server answering
+  that the name does not exist, it does not; an answer that expired more than
+  24 hours ago is not served;
+- a lookup through a server that never answers fails within 15 s, and the
+  failure line of R45.6B.6 appears once per name per hour.
+
+T45.18 *Peer-to-peer resolution (R45.6B.9 item 1).* With a test resolver
+installed, a dial of `/dns4/<name>/tcp/<port>` reaches the address the name
+resolves to; a dial of a name with two addresses, the first unreachable,
+connects to the second; a `/dnsaddr` dial fails with its own error; and a WSS
+dial to a hostname completes its TLS check against that hostname.
+
+T45.19 *Coin and HTTP(S) resolution (R45.6B.9 items 3 to 5).* With a test
+resolver that maps a name to a loopback address, an HTTP(S) request through
+the shared client, an Electrum connection (TCP and TLS) and a lightwalletd
+connection to that name each reach the loopback server, and each lookup is
+counted in `dns.lookups.count`. The TLS cases verify the certificate against
+the name, not the address.
+
+T45.20 *Installation (R45.6B.7, R45.6B.8).* A started node logs the startup
+line of its mode exactly once. A lookup inside the node before the resolver is
+installed fails a debug assertion. A lookup outside the node uses the system
+resolver. A second node start in the same process replaces the resolver.
+
+T45.21 *One DNS library (R45.6B.11).* The dependency policy check fails if the
+transport library's DNS layer or the unmaintained resolver library returns to
+the dependency tree.
+
+T45.22 *Lab (R45.6B.2 to R45.6B.9).* With a lab DNS server that logs every
+query and answers one seed name, one RIN Electrum host, one EVM node host and
+one lightwalletd host, none of them in the hosts file:
+1. default mode, Google unable to answer the lab names: the failure line
+   appears, the dials and activations fail and retry, a seed given by IP
+   connects, and the lab server logs no query;
+2. `"system"` with the system pointed at the lab server: every site resolves
+   and connects, and the lab server logs every name;
+3. fixed `[<lab server>]`: as in case 2;
+4. fixed `[<unreachable address>]`: every site fails and retries, no other
+   server is asked, and the failure line appears once per name per hour;
+5. last known answer: resolve through the lab server, stop it, and reconnect
+   after the answers expired: the last known answer is served with its WARN
+   line, and the connection succeeds;
+6. an invalid value: the node refuses to start;
+7. activation in mode 3 of a UTXO coin over Electrum, an EVM coin, a
+   Tendermint coin, a shielded coin over lightwalletd and Solana.
+
 ## 45.9 Deferred Work
 
 D45.1 A consolidated, typed startup-configuration schema (replacing ad-hoc
@@ -568,6 +803,28 @@ D45.5 A 3-hour run at about 20 order updates per second, with and without the
 limit, to learn whether the growth without the limit levels off, was done on
 2026-11-03 as two 6.5-hour runs (R45.6A.8): both settings levelled off at that
 load on the 8-core setting.
+
+D45.6 Bringing the remaining lookups under R45.6B is deferred to the next
+batch: Sia (its HTTP client sits in a sidecar library), the WalletConnect relay
+connection, Lightning peer addresses (resolved today while a configuration
+value is read, so the lookup must move to the moment of connecting) and the
+statistics method's address conversion. Until then they use the system
+resolver, and the operator documentation says so.
+
+D45.7 Encrypted DNS (DNS over HTTPS or over TLS) for the Google and fixed modes
+is deferred. It is a plan row without an effort estimate.
+
+D45.8 *Library choice (decided 2026-11-03, maintainer decision).* The Google
+and fixed modes are built on the message crate of the hickory DNS project
+(`hickory-proto`, the 0.26 line) and the runtime's own UDP and TCP sockets, not
+on its resolver crate. That resolver crate, from the 0.25 line on, depends on a cache crate
+with files under Apache-2.0 only, which LEGAL/LICENSING-POLICY.md §4 does not
+accept as a new dependency of the GPL-2.0-only combined work. Its 0.24 line has
+no such dependency, but it carries an advisory that is fixed only in 0.26 and
+gets no further fixes. The node therefore keeps its own cache (R45.6B.4), its
+own reading of the hosts file (R45.6B.3 item 2), the server order and the TCP
+retry on truncation (R45.6B.3) on top of that crate. Moving to the resolver
+crate is deferred until it drops that dependency.
 
 ## 45.10 External References
 
@@ -614,6 +871,16 @@ load on the 8-core setting.
 > the no-panic-on-launch obligation; the externally observable result (the node
 > does not run on an invalid network id) is unchanged.
 
+> **Upstream divergence (informative).** The reference resolves seed names
+> through Google Public DNS (chapter 28) and, as far as the source inherited at
+> the anchor shows, every other name (coin servers, HTTP(S) services,
+> lightwalletd) through the operating system's resolver. It has no setting for
+> either. With `dns_resolver` absent, this node resolves every name
+> through Google Public DNS, so coin servers and services diverge. With
+> `"system"`, every name goes through the operating system's resolver, so coin
+> servers match the reference and seeds diverge. No value reproduces the
+> reference's mix; the maintainer chose one resolver for all names (§45.6B).
+
 ## 45.12 Provenance Footer
 
 - *Inputs consulted for this chapter:* the bound configuration surface of
@@ -636,6 +903,16 @@ load on the 8-core setting.
   operator-diagnostics requirements, authored independently from this
   repository's code and public documentation, without consulting the forbidden
   corpus.
+- *Section 45.6B (hostname resolution):* Reloaded-original, written from the
+  maintainer's decisions of 2026-11-02 and 2026-11-03, this repository's own
+  source, the licenses and advisories of the candidate DNS crates, and the
+  documentation of the DNS library and of Google Public DNS; no reference
+  material was consulted for it. Its one statement about the reference, that
+  seed names are resolved through Google Public DNS, restates chapter 28's
+  reference note after R8c's rationale, item 4, which has passed the KDF Dirty
+  Gate. The statement that the reference resolves other names through the
+  operating system restates this repository's own source as inherited at the
+  anchor; later reference releases were not examined for it.
 - *Author of this chapter:* clean-room driving-spec working set.
 - *Forbidden corpus:* consulted only to recover the externally observable
   startup tolerance contract (which unset/empty/unexpected inputs start the

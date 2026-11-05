@@ -80,6 +80,23 @@ error whose public discriminant identifies that no sender address was supplied.
 If `from` is present, the implementation shall resolve it to the selected
 activated HD address and use that address as the only withdrawal sender.
 
+> **Reference behavior (passed the KDF Dirty Gate on 2026-11-04, measure
+> 0.01; Spec Reader 2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of
+> chapter 02 §2.15A, identical at both).** The reference fails an HD
+> UTXO-family withdrawal that omits `from` with the structured error whose
+> discriminant says the sender address was not found (`FromAddressNotFound`,
+> R49.27a), on the task route **and** on the direct `withdraw` method, which
+> share one sender-resolution step; with `from` present, both routes sign
+> with the key derived at the selected address's path and return change to
+> that address. **Compatibility (this repository; not corpus-sourced):**
+> Reloaded's task route uses the enabled address when `from` is absent, a
+> documented divergence (`RELOADED_VS_GLEEC.md`, the 0.1.x interoperability
+> note for the Komodo DeFi wallet, and the CHANGELOG), and its direct
+> `withdraw` does not yet serve an HD UTXO wallet. Plan
+> [`hd-key-unification`](../plans/hd-key-unification.md) brings this rule and
+> that divergence into agreement (item H0) and covers the direct method
+> (item H5).
+
 R49.5. EVM-family software-HD native-coin and fungible-token withdrawals shall
 be supported through both direct `withdraw` and `task::withdraw::init`. When
 `from` is omitted, both paths shall use the activated software key/address for
@@ -394,6 +411,77 @@ confirm that the R49.25 minimum field set is present and unchanged in both, that
 both payloads. Repeat for a coin family that binds no additional field and
 confirm the extra field is simply absent and no error is raised.
 
+R49.27. *Sender selection per coin family under a global-HD login (reference
+contract).* *(Passed the KDF Dirty Gate on 2026-11-04, measure 0.01; Spec Reader 2026-11-04, rows
+`v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both.)*
+Beyond R49.3--R49.5: the SLP token withdraw spends with its platform coin's
+activated key and fails a request that carries `from` with the
+unsupported-operation discriminant; the shielded coin is served by the task
+route only (chapter 39 R39.5A.2) and fails `from` and `fee` the same way;
+the Sia withdraw spends from the coin's single address and **ignores** `from`
+entirely (chapter 20 R-W1); the Tendermint withdraw accepts `from` as an HD
+selector and signs with the key derived at that path, and spends from the
+activated key when `from` is absent. Chapter 05 §5.9B tabulates the keys
+behind these addresses.
+
+T49.27. Under a global-HD login: an SLP withdraw with `from` and a shielded
+task withdraw with `from` shall each fail with the unsupported-operation
+discriminant; a Sia withdraw with a `from` selector shall succeed from the
+coin's single address exactly as without it; a direct UTXO `withdraw` without
+`from` shall fail with the sender-not-found discriminant under the reference
+contract (Reloaded's direct `withdraw` does not yet serve an HD UTXO wallet,
+plan `hd-key-unification` item H5, and its task route uses the enabled address
+-- the test shall state which contract it asserts).
+
+R49.27a. *Wire form of the unsupported-operation refusal (reference
+contract).* *(Passed the KDF Dirty Gate on 2026-11-04, measure 0.01; Spec Reader 2026-11-04, rows
+`v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both
+except where a row is named.)* Every "unsupported" refusal of R49.27 is one
+arm of the structured withdrawal error of R49.20, and the arm is **shared**:
+there is no per-feature discriminant. Its wire form is
+
+- `error_type`: the wire constant `UnsupportedError`;
+- HTTP status **400** on the direct `withdraw` method, where the error is
+  the mmrpc error envelope; on the task route the same object arrives in
+  `result.details` of a status poll whose `status` is `Error` (R49.20);
+- `error_data`: **present**, a plain JSON string of free human-readable text
+  naming the refused operation. The wording is not contract; a client shall
+  classify by `error_type` alone and never parse `error_data`.
+
+The refusals that answer this discriminant at the reference are: (a) `from`
+on an SLP token withdraw; (b) `fee` on a shielded task withdraw and
+(c) `from` on a shielded task withdraw (checked in that order, `fee` first);
+a UTXO-family withdraw whose activated key is a WalletConnect signer or, in
+a WASM build, a browser-extension signer (signing is not available to the
+family); the legacy direct `withdraw` of an EVM coin under a hardware-wallet
+key (the task route of chapter 50 is required); an EVM withdraw under a
+WalletConnect key for a coin configured without a chain identifier; and, at
+the `v3.0.0-beta` row only, a TRON withdraw that carries `memo`, or runs
+under a hardware-wallet, WalletConnect or browser-extension key. A Sia
+withdraw **never** answers it for `from` -- the selector is ignored, as
+R49.27 records; Sia's one arm fires for a key policy other than single-key
+or global-HD, which Sia activation already refuses, so it is unreachable in
+practice. Refusals that are **not** this arm and carry their own
+discriminant, all HTTP 400: a missing required sender
+(`FromAddressNotFound`, T49.27), a sender selector that does not resolve
+(`UnexpectedFromAddress`), an unknown HD account (`UnknownAccount`), a fee
+descriptor of a type the coin does not take (`InvalidFeePolicy`, chapter 38
+R38.6.6l/R38.6.6m), fee values the coin rejects (`InvalidFee`), and a
+destination that does not decode (`InvalidAddress`, chapter 39 R39.5A.2).
+
+T49.27a. *(Reloaded-original.)* Against mocked backends: an SLP token
+`withdraw` carrying `from` shall answer HTTP 400 with
+`error_type: "UnsupportedError"` and a string `error_data`; a shielded
+`task::withdraw::init` carrying `fee`, and another carrying `from`, shall
+each reach `status: "Error"` with `details.error_type == "UnsupportedError"`
+and a string `details.error_data`; a Sia withdraw carrying `from` shall
+succeed; an SLP withdraw with an EVM-form fee descriptor shall answer
+`InvalidFeePolicy`, not `UnsupportedError`; and the direct UTXO withdraw of
+T49.27 without `from` shall answer `FromAddressNotFound`, not
+`UnsupportedError`, where the test asserts the reference contract. Each
+assertion shall compare the discriminant and the JSON type of `error_data`
+only, never the text.
+
 ## 49.7 Provenance Footer
 
 - *Inputs:* the project's own revision history and current tree (the
@@ -426,3 +514,47 @@ confirm the extra field is simply absent and no error is raised.
   by the Spec Reader in the pass that wrote §38.5B. It carries no reference
   content of its own; the facts it points to are recorded, and their
   clearance status tracked, in chapter 38 §38.9.
+- *Scoped addition (2026-11-04) -- the reference-behavior note under R49.4,
+  R49.27 and T49.27.* **KDF Dirty Gate: PASS on 2026-11-04, measure 0.01.** *Inputs:* the forbidden
+  corpus at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+  identical at both, consulted **only** to establish the sender resolution of
+  the direct and task withdraw routes under a global-HD login per coin family
+  (UTXO-family, SLP, shielded, Sia, Tendermint): when `from` is required,
+  refused or ignored, which key signs, and where change returns. Behavior and
+  dictated request members only; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced. The compatibility
+  sentences rest on this repository's own documents; T49.27 is
+  Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.01, no findings. *Extent:* the sender resolution of the direct and task
+  withdraw routes under a global-HD login, per coin family, at `v3.0.0-beta`
+  with `v2.6.0-beta` as cross-check; for the whole batch, 30 source files and
+  one dependency manifest were read at `v3.0.0-beta`, 29 of them checked by
+  hash against the tagged states of both rows. *Method:* side-by-side reading
+  of the compared regions against every added or changed line, plus that hash
+  check; the gate script was not run because the candidate has no code blocks.
+  *Measure:* 0.01, read against the standard that any discretionary finding
+  fails a file; dictated-interop and public-surface tokens were excluded from
+  the measured set.
+- *Scoped addition (2026-11-04) -- R49.27a and T49.27a.* **KDF Dirty Gate:
+  PASS on 2026-11-04, measure 0.01.** *Inputs:* the forbidden corpus at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, consulted **only** to establish the
+  wire form of the withdraw family's unsupported-operation refusal -- the
+  `error_type` discriminant, the HTTP status, the presence and JSON type of
+  `error_data`, which refusals share the discriminant at each row and which
+  carry a distinct one. The discriminant strings are externally visible
+  inter-operability surface (chapter 01 R11, first carve-out class) and are
+  recorded as wire constants under Interop / wire-and-API-bound reuse
+  (R29/R31). No private identifier, function body, helper decomposition,
+  error, log or comment text was reproduced; the human-readable text of
+  `error_data` is deliberately not recorded. T49.27a is Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.01, no findings. *Extent:* the withdrawal-error wire contract and the
+  withdraw entry points of the SLP token, shielded, Sia, UTXO-family and EVM
+  and TRON coin families, at `v2.6.0-beta` and `v3.0.0-beta`; twelve
+  file-states in all. *Method:* reading, with text search at the two tagged states;
+  the gate script was not run because the candidate has no code blocks.
+  *Measure:* 0.01, read against the standard that any discretionary
+  identifier, error, log or comment literal, body or control-flow
+  transcription fails regardless of volume; dictated wire surface was
+  excluded.
