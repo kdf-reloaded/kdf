@@ -53,10 +53,12 @@ Reloaded ships some of it and lacks the rest, so the chapter is split:
   connection pool of §38.6.4 is partly built (its as-built note of 2026-10-27
   lists what remains), and P2PK (R38.6.3) and
   the Verus-family script label (R38.6.8) are built on dev (see their notes).
-- **§38.8 (T-PORT, required, NOT yet in reloaded):** software (non-hardware)
-  global-HD UTXO accounts -- storage availability, account-`0` bootstrap at
-  activation, `get_new_address` advance, and gap/scan semantics for BIP-44 and
-  BIP-84 coins -- consuming the Chapter 5 §5.9A software-HD crypto substrate.
+- **§38.8 (T-PORT, required, built on dev; status corrected 2026-11-04):**
+  software (non-hardware) global-HD UTXO accounts -- storage availability,
+  account-`0` bootstrap at activation, `get_new_address` advance, and gap/scan
+  semantics for BIP-44 and BIP-84 coins -- consuming the Chapter 5 §5.9A
+  software-HD crypto substrate. The status note at the head of §38.8 lists
+  what remains.
 
 > **Binding scope (R36).** Requirements bind observable behaviour, public RPC
 > method strings / request-response field names, coins-config keys, and dictated
@@ -2528,7 +2530,7 @@ At both release rows:
 > withdraw on BCH still applies `UtxoFixed` per started kilobyte; how the
 > reference applies a fee descriptor there is not established, and the
 > question is queued for the KDF Spec Reader. *Answered 2026-11-04:
-> R38.6.6m (proportional, as here).* No peer observes either
+> R38.6.6m (proportional, as here); parity on the SLP route since PR #234.* No peer observes either
 > behavior (a `withdraw` is the node's own transaction), so arm 1 of
 > `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind the default.
 
@@ -2572,14 +2574,14 @@ provenance and clearance in chapter 49 §49.7).* The wire form of that
 wrong-type descriptor above are bound in chapter 49 R49.27a.
 
 > **Compatibility row (this repository, 2026-11-04; not corpus-sourced).**
-> Reloaded's SLP withdraw still applies `UtxoFixed` per started kilobyte,
-> `a × ceil(s / 1000)` -- the "Open" item of R38.6.6l's row -- so it pays up
-> to one `a` more than the reference and never less. The maintainer adopted
-> R38.6.6m (Decision BV, 2026-11-04): the SLP route is to follow it, as the
-> UTXO route follows R38.6.6l since Decision 27, as a parity change without a
-> switch; the code change is planned and not yet made. No peer observes
-> either behavior, so arm 1 of `docs/COMPAT_SWITCHES.md` "The default-side
-> rule" does not bind the default.
+> **Parity** on the SLP token withdraw since PR #234: the maintainer adopted
+> R38.6.6m (Decision BV, 2026-11-04), and Reloaded applies `UtxoFixed` there
+> exactly like `UtxoPerKbyte`, as the UTXO route does since Decision 27. It is
+> a parity change without a switch. Before, Reloaded's SLP withdraw applied
+> `UtxoFixed` per started kilobyte, `a × ceil(s / 1000)` -- the "Open" item of
+> R38.6.6l's row -- so it paid up to one `a` more than the reference and never
+> less. No peer observes either behavior, so arm 1 of
+> `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind the default.
 
 T38.6.6m *Explicit SLP withdraw fee (R38.6.6m).* Against a mocked BCH
 backend, an SLP token withdraw with `fee: {"type":"UtxoFixed","amount":"<a>"}`
@@ -2587,7 +2589,12 @@ and one with `fee: {"type":"UtxoPerKbyte","amount":"<a>"}` for the same inputs
 and outputs shall charge the same fee `floor(a × s / 1000)` for one
 transaction under and one over 1,000 bytes and report it in `fee_details` in
 the platform coin; a third request with an EVM-form descriptor shall fail with
-the invalid-fee-policy error.
+the invalid-fee-policy error. *Clean-side note (2026-11-05).* As under
+T38.6.6l, where the builder adds the change output the figure both descriptors
+give is `floor(a × (s − 34) / 1000) + floor(a × 34 / 1000)`, which can be one
+base unit below `floor(a × s / 1000)`. The tests of PR #234 assert the two
+descriptors equal and this figure, at 457 and 1,493 bytes; the SLP OP_RETURN
+output makes these sizes differ from T38.6.6l's.
 
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the
@@ -2722,11 +2729,20 @@ the same for the Sia wallet daemon.
 
 ## 38.8 Software global-HD UTXO accounts & address derivation (T-PORT)
 
-> **Status of §38.8:** required port. The reloaded UTXO HD path can only obtain
-> an account extended public key through a hardware device; a **software**
-> (non-hardware) global-HD account therefore cannot create an HD account or
-> derive HD addresses. This section binds the software-HD UTXO behaviour as
-> first-class, testable requirements. It is the coin-side consumer of Chapter 5
+> **Status of §38.8:** required port, built on dev *(corrected 2026-11-04)*.
+> When this section was written, the reloaded UTXO HD path could only obtain
+> an account extended public key through a hardware device, so a **software**
+> (non-hardware) global-HD account could not create an HD account or derive HD
+> addresses. The software source of Chapter 5 §5.9A, the account-`0`
+> bootstrap, `get_new_address`, the scan and gap-limit rules and
+> `min_addresses_number` are now built. Remaining: `task::create_new_account`
+> for an account other than `0` still fails under a software global-HD login,
+> because it asks for a hardware device first (the Chapter 20 §20.10 D1 note
+> records it); and `path_to_address` is honored for a software global-HD
+> account only, not under the Trezor policy (Chapter 55 §55.5). Both are items
+> of plan [`hd-key-unification`](../plans/hd-key-unification.md). This section
+> binds the software-HD UTXO behaviour as first-class, testable requirements.
+> It is the coin-side consumer of Chapter 5
 > §5.9A (R29–R31), which binds the crypto substrate (software wallet identity,
 > software account-xpub derivation and canonical serialisation, and source
 > selection by key-pair policy). §38.8 binds the UTXO account bootstrap, the
@@ -3244,3 +3260,14 @@ R38.8.6 **Tests (two-direction, observable).**
   *Measure:* 0.02, read against the standard that any discretionary finding
   fails a file; dictated-interop and public-surface tokens were excluded from
   the measured set.
+- *Clean-side correction (2026-11-04) -- the §38.8 bullet of §38.0 and the
+  status note at the head of §38.8.* They now say that §38.8 is built and
+  name what remains. Written by a session that never read the corpus, from
+  this repository's own activation, account and address code. It takes no
+  forbidden-class input and needs no Dirty Gate pass.
+- *Clean-side amendment (2026-11-05) -- PR #234, maintainer Decision BV.* After
+  the code change, a session that never read the corpus updated the
+  compatibility row under R38.6.6m, the resolution sentence in R38.6.6l's row
+  and the clean-side note under T38.6.6m. They rest on that decision and this
+  repository's code, take no forbidden-class input, and so do not engage
+  chapter 01 R38.

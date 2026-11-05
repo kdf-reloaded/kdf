@@ -55,8 +55,8 @@
    reference charges it there (orchestrator's scope call, consistent with
    this decision). *Established 2026-11-04 (ch. 38 R38.6.6m):* the reference
    applies both descriptors proportionally on the SLP token withdraw too. The
-   maintainer adopted that for KDF Reloaded (Decision BV, 2026-11-04); the
-   code change is planned.
+   maintainer adopted that for KDF Reloaded (Decision BV, 2026-11-04). *Done
+   for the SLP token withdraw (PR #234).*
 
 > **Beta availability (2026-10-26).** By maintainer decision three families
 > take part in no trade in the coming beta: Solana
@@ -96,9 +96,9 @@
   meaning is the baseline anchor's. Whether this step adopts the reference
   arithmetic is the maintainer's decision.
   *Done for UTXO coins (PR #226, decision 9):* the explicit `UtxoFixed` fee is
-  now proportional and truncated on every UTXO withdraw; only the SLP token
-  withdraw keeps the per-started-kilobyte meaning, until the planned change of
-  Decision BV (ch. 38 R38.6.6m).
+  now proportional and truncated on every UTXO withdraw. *Done for the SLP
+  token withdraw (PR #234, Decision BV, ch. 38 R38.6.6m):* it follows the same
+  arithmetic.
 - 3: spend safety merged in PR #73 (2026-10-25): R60.6.4 and R60.6.7 with
   the switch `pre_trade_spend_check`. The Sia miner fee turned out to be
   0.00002 SC, not 0.02 SC as the chapter first said; the chapter is

@@ -146,6 +146,7 @@ pub mod mm_number {
     //! Re-exported from [`mm2_number`].
     pub use mm2_number::*;
 }
+pub mod msgpack_bounds;
 pub mod seri;
 #[path = "patterns/state_machine.rs"] pub mod state_machine;
 pub mod time_cache;
