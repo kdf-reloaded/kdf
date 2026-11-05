@@ -20,6 +20,7 @@
 use coins::register_balance_update_handler;
 use common::executor::{spawn, spawn_boxed, Timer};
 use common::log::{error, info, warn};
+use common::msgpack_bounds::dropped_peer_values;
 use common::now_ms;
 use crypto::{CryptoCtx, CryptoInitError, EncryptedMnemonicData, HwError, HwProcessingError};
 use derive_more::Display;
@@ -721,6 +722,12 @@ impl SwarmPollRecorder {
                 self.ctx.metrics,
                 "p2p.send_queue.drop_series.max",
                 i64::from(queues.max_drop_series)
+            );
+            // Peer values dropped as malformed by the decoding bounds (CRD ch.28 R16a).
+            mm_gauge!(
+                self.ctx.metrics,
+                "p2p.payload.malformed",
+                dropped_peer_values().min(i64::MAX as u64) as i64
             );
             // The hostname lookups since the resolver was installed (CRD ch.45 R45.6B.10).
             #[cfg(not(target_arch = "wasm32"))]
