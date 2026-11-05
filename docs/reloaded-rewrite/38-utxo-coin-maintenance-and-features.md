@@ -2527,7 +2527,8 @@ At both release rows:
 > 2026-10-31 in `docs/release-tests/0.3.0-beta.1.md`). **Open:** the SLP token
 > withdraw on BCH still applies `UtxoFixed` per started kilobyte; how the
 > reference applies a fee descriptor there is not established, and the
-> question is queued for the KDF Spec Reader. No peer observes either
+> question is queued for the KDF Spec Reader. *Answered 2026-11-04:
+> R38.6.6m (proportional, as here).* No peer observes either
 > behavior (a `withdraw` is the node's own transaction), so arm 1 of
 > `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind the default.
 
@@ -2548,6 +2549,45 @@ item 2, the figure both descriptors give is
 below `floor(a × s / 1000)`; the test asserts the two descriptors equal and the
 figure this split gives. With P2PKH inputs of 148 bytes the larger size reached
 is 1,429 bytes rather than 1,404.
+
+R38.6.6m *Explicit fee descriptors on the SLP token withdraw (reference-bound;
+**passed the KDF Dirty Gate on 2026-11-04**, measure 0.02; Spec Reader 2026-11-04, rows `v2.6.0-beta` and
+`v3.0.0-beta` of chapter 02 §2.15A, identical at both).* An SLP token
+`withdraw` accepts the same two descriptors as R38.6.6l, `UtxoFixed` and
+`UtxoPerKbyte`, with `amount` in the platform coin's units, and fails any
+other type with the invalid-fee-policy error. At both rows the arithmetic is
+R38.6.6l item 2 exactly: the descriptor's `amount`, in platform base units,
+is a rate per 1,000 bytes applied **proportionally and truncated**,
+`floor(a × s / 1000)`, under either descriptor; neither is charged per
+started kilobyte. The only started-kilobyte arithmetic the reference's
+transaction builder has is the whole-kilobyte coin policy of R38.6.6a, which
+a withdraw descriptor never selects. The response's `fee_details` reports the
+fee actually charged, in the platform coin and named by its ticker. A request
+that carries `from` fails as unsupported (chapter 49 R49.27).
+
+*Pointer (2026-11-04; passed the KDF Dirty Gate on 2026-11-04, measure 0.00;
+provenance and clearance in chapter 49 §49.7).* The wire form of that
+`from` refusal -- `error_type` `UnsupportedError`, HTTP 400, string
+`error_data` -- and the distinct `InvalidFeePolicy` discriminant of the
+wrong-type descriptor above are bound in chapter 49 R49.27a.
+
+> **Compatibility row (this repository, 2026-11-04; not corpus-sourced).**
+> Reloaded's SLP withdraw still applies `UtxoFixed` per started kilobyte,
+> `a × ceil(s / 1000)` -- the "Open" item of R38.6.6l's row -- so it pays up
+> to one `a` more than the reference and never less. The maintainer adopted
+> R38.6.6m (Decision BV, 2026-11-04): the SLP route is to follow it, as the
+> UTXO route follows R38.6.6l since Decision 27, as a parity change without a
+> switch; the code change is planned and not yet made. No peer observes
+> either behavior, so arm 1 of `docs/COMPAT_SWITCHES.md` "The default-side
+> rule" does not bind the default.
+
+T38.6.6m *Explicit SLP withdraw fee (R38.6.6m).* Against a mocked BCH
+backend, an SLP token withdraw with `fee: {"type":"UtxoFixed","amount":"<a>"}`
+and one with `fee: {"type":"UtxoPerKbyte","amount":"<a>"}` for the same inputs
+and outputs shall charge the same fee `floor(a × s / 1000)` for one
+transaction under and one over 1,000 bytes and report it in `fee_details` in
+the platform coin; a third request with an EVM-form descriptor shall fail with
+the invalid-fee-policy error.
 
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the
@@ -3182,3 +3222,25 @@ R38.8.6 **Tests (two-direction, observable).**
   (PR #226). They rest on that
   decision and this repository's code, take no forbidden-class input, and so
   do not engage chapter 01 R38.
+- *Scoped addition (2026-11-04) -- R38.6.6m, T38.6.6m, its compatibility row
+  and the one-sentence resolution appended to R38.6.6l's row.* **KDF Dirty
+  Gate: PASS on 2026-11-04, measure 0.02.** *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`
+  and `v3.0.0-beta` of chapter 02 §2.15A, identical at both, consulted
+  **only** to establish how the SLP token withdraw maps the two explicit fee
+  descriptors onto the transaction builder's rate, the arithmetic that rate
+  produces, the unit and ticker of the reported fee, and the refusal of
+  `from`. Behavior and dictated request and response members only; no private
+  identifier, function body, helper decomposition, error, log or comment text
+  was reproduced. The compatibility row rests on this repository's own code;
+  T38.6.6m is Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.02, no findings. *Extent:* the SLP token withdraw's fee-descriptor
+  handling and the transaction builder's fee arithmetic, at `v3.0.0-beta` with
+  `v2.6.0-beta` as cross-check; for the whole batch, 30 source files and one
+  dependency manifest were read at `v3.0.0-beta`, 29 of them checked by hash
+  against the tagged states of both rows. *Method:* side-by-side reading of
+  the compared regions against every added or changed line, plus that hash
+  check; the gate script was not run because the candidate has no code blocks.
+  *Measure:* 0.02, read against the standard that any discretionary finding
+  fails a file; dictated-interop and public-surface tokens were excluded from
+  the measured set.
