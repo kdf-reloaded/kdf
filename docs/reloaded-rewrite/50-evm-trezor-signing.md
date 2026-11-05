@@ -152,13 +152,13 @@ per R49.2; an unresolvable or foreign selector shall fail per R50.19.
 > lives on a **local USB/WebUSB device** driven by the Trezor protocol rather
 > than a browser wallet driven by EIP-1193.
 
-> **Reloaded status (informative).** The activation path deviates from R50.2 /
-> R50.3 as recorded in ch. 35 §35.3: a missing hardware-wallet context answers
-> `Transport` and device/coin failures `PlatformCoinCreationError` (both must be
-> `Internal`), the device-confirmation state uses a non-vocabulary value (must be
-> `FollowHwDeviceInstructions`), the one-shot call answers `Transport` instead of
-> `UnexpectedDeviceActivationPolicy`, and the terminal result is single-address
-> shaped instead of the HD shape of ch. 35 R35.1.3(b).
+> **Reloaded status (informative; corrected 2026-11-04).** The deviations from
+> R50.2 / R50.3 recorded here earlier were closed on 2026-10-11, as ch. 35 §35.3
+> records: the hardware-wallet and device failures map to `Internal`, the
+> device-confirmation state is `FollowHwDeviceInstructions`, the one-shot call
+> answers `UnexpectedDeviceActivationPolicy`, and the terminal result has the HD
+> shape of ch. 35 R35.1.3(b). A real Trezor flow is covered only by the
+> emulator-gated tests.
 
 ---
 
@@ -573,3 +573,8 @@ outside the signing-behaviour contract bound here.
   R35.3.3), where the public reference is silent or self-contradictory; no
   private implementation expression is normative in this chapter. The
   remainder was not derived from it.
+- *Correction (2026-11-04) -- the "Reloaded status" note under §50.1.* It
+  now matches ch. 35 §35.3, which recorded the implementation of
+  2026-10-11. Reloaded-original. *Inputs:* this repository's own activation
+  code and ch. 35. No reference implementation was consulted for this
+  correction, and it needs no Dirty Gate pass.

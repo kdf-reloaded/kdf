@@ -365,6 +365,10 @@ capabilities in three steps:
 3. a capability is declared exactly when its key is present with the
    boolean value `true`.
 
+Steps 1 and 2 read under the bounds of
+[Chapter 28](28-libp2p-modernization.md) R16a, which apply to every value
+the node reads from a peer.
+
 No capability is declared when:
 
 - the protocol information is absent or empty;
@@ -1247,3 +1251,7 @@ its gating is not.*
   note states no reference fact beyond R59.4.7 and chapter 39 R39.5.14,
   which the KDF Spec Reader established and which passed the KDF Dirty Gate
   (batch 0.4.0-2, 2026-11-04). It needs no Dirty Gate pass of its own.
+- *Reloaded-original addition (2026-11-05) -- the pointer to Chapter 28
+  R16a under R59.4A.2.* Maintainer decision CD. Written from this
+  repository's own decode paths. The forbidden corpus was not consulted,
+  and it needs no Dirty Gate pass.

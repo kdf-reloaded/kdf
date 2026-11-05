@@ -680,9 +680,13 @@ accessor is refused under HD. The caller receives an error while the coin
 stays enabled with that HD key; the `electrum` deregistration of R55.4.6
 covers only a failed balance read, not this failure. Chapter 05 §5.9B
 tabulates the keys. *Compatibility (this repository; not corpus-sourced):*
-Reloaded's legacy methods under HD bind the internal key and succeed; neither
-behavior is a parity target until the maintainer decides (chapter 05 R35
-note; plan [`hd-key-unification`](../plans/hd-key-unification.md) item H7).
+Reloaded's legacy methods under HD bind the internal key and succeed. The
+maintainer decided on 2026-11-04 (decision CB in plan
+[`hd-key-unification`](../plans/hd-key-unification.md)): item H7 binds the
+coin key as the reference does and answers successfully with that key's
+address, behind a compatibility switch whose default keeps that answer and
+whose off position gives the reference's failed response (chapter 05 R35
+note). The H7 CRD names the switch.
 
 ## 55.5 Standalone-coin task family: shared contract
 
@@ -1599,3 +1603,10 @@ R55.4.5 and the error body of R55.1.10.
   because the candidate has no code blocks. *Measure:* 0.03, read against the
   standard that any discretionary finding fails a file; dictated-interop and
   public-surface tokens were excluded from the measured set.
+- *Clean-side amendment (2026-11-05) -- the compatibility clause under
+  R55.4.10.* It now records the maintainer's decision CB of 2026-11-04 (plan
+  `hd-key-unification` item H7: bind the coin key, answer successfully,
+  compatibility switch) in place of "until the maintainer decides". Written
+  by a session that never read the corpus, from that decision and this
+  repository's own code. The reference facts of R55.4.10 are unchanged. It
+  takes no forbidden-class input and needs no Dirty Gate pass.
