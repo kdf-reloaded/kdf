@@ -1755,6 +1755,162 @@ public servers where it was.
 > **Compatibility:** for behavior matching GLEEC KDF, set
 > `electrum_server_order` to `listed`.
 
+R38.6.4m **TLS server authentication for Electrum servers (Reloaded-original;
+maintainer decision 2026-11-04).**
+
+> **As-built status (2026-11-05).** Items 1–5 and 7–9 describe the code at
+> this chapter's revision. Item 6, the warning, is planned and not yet built;
+> its implementation waits for the maintainer's approval, together with
+> R38.6.4n.
+
+1. *Scope.* This rule governs an Electrum server with `protocol` `SSL` on a
+   native build. `TCP` carries no TLS. On a browser build the TLS of `WSS`
+   belongs to the browser, and neither `disable_cert_verification` nor
+   `spki_sha256` (R38.6.4n) has an effect there; item 9 says how such a server
+   entry is treated.
+2. *Host name.* The address shall name its host as a DNS name. An address
+   whose host is an IP literal is refused before any connection is attempted.
+   This is the "TLS address without a usable host name" of R38.6.4d item 3, so
+   the server is removed for the coin's lifetime. The configured host name is
+   sent as the TLS server name indication (SNI) in every handshake.
+3. *Protocol and algorithms.* The client offers TLS 1.3 and TLS 1.2 and nothing
+   older.
+   - Cipher suites. TLS 1.3: AES-256-GCM, AES-128-GCM and ChaCha20-Poly1305.
+     TLS 1.2: ECDHE with an ECDSA or RSA certificate, and AES-GCM or
+     ChaCha20-Poly1305.
+   - Key exchange groups: X25519, P-256 and P-384.
+   - Handshake signature schemes: ECDSA P-256 with SHA-256, ECDSA P-384 with
+     SHA-384, Ed25519, and RSA PKCS#1 v1.5 and RSA-PSS with SHA-256, SHA-384 or
+     SHA-512, for RSA keys of 2048 to 8192 bits.
+   - Not accepted: SHA-1 schemes, RSA keys below 2048 bits, P-521 keys and DSA
+     keys.
+   - These sets are those of the TLS library's default provider at the version
+     in `Cargo.lock`. A library update that changes them is a change to this
+     rule and is recorded in the CHANGELOG.
+4. *Default verification* (`disable_cert_verification` absent or `false`, no
+   `spki_sha256`). The server's certificate chain shall verify to a root of the
+   bundled `webpki-roots` store. The end-entity certificate shall:
+   - be valid at the time of the handshake;
+   - not be a CA certificate;
+   - allow server authentication, if it carries an extended key usage;
+   - carry the configured host name in its subject alternative names (a
+     common name alone does not count).
+
+   A self-signed certificate therefore fails: as a CA certificate used as an
+   end entity when it is marked as one, otherwise for its unknown issuer.
+5. *`disable_cert_verification` `true`* (no `spki_sha256`).
+   - *Skipped:* every check of item 4, that is the chain, the trust anchor, the
+     validity period, the CA flag, the extended key usage and the name.
+   - *Kept:* the certificate shall still parse as an X.509 version 3
+     certificate, and the server's handshake signature shall verify with that
+     certificate's public key under one of the schemes of item 3.
+   - *Result:* the connection is encrypted and bound to the key the server
+     presented, but the server is not authenticated. A self-signed version 3
+     certificate with an accepted key is accepted. A version 1 certificate, or
+     a key outside item 3, is refused even so.
+6. *Warning (planned).* At activation, a server to which item 5 applies logs
+   one WARN line, once per activation of the coin:
+
+   `<TICKER>: Electrum server <host:port> has disable_cert_verification set: the connection is encrypted, but the server is not authenticated`
+
+   The server is named by host and port only (R38.6.9a). No warning is logged
+   for a `TCP` server or for a server with `spki_sha256` (R38.6.4n item 4).
+7. *Failure class.* A failure under items 3–5 is a TLS handshake failure. It is
+   recoverable, and the server is suspended (R38.6.4d item 1). Its text is the
+   TLS library's description of the failure. It appears, under the server's
+   host and port, in the per-server failure list of R38.6.4i and in the
+   activation error that no Electrum server could be connected.
+8. *Compatibility.* No switch. The default verification of item 4, the meaning
+   of `disable_cert_verification` and the refusal of IP literals are this
+   project's established behavior. Any difference from the reference on a given
+   certificate is recorded from black-box runs of the release binaries, not
+   from this rule.
+9. *Browser build.* On a browser build, a server entry with
+   `disable_cert_verification` `true` has no effect beyond what the browser
+   does, and logs nothing. A server entry with `spki_sha256` on a browser build:
+   R38.6.4n item 6.
+
+R38.6.4n **Electrum server key pin `spki_sha256` (Reloaded-original; planned;
+maintainer decision 2026-11-04).** Opt-in: a server entry without the key
+behaves exactly as R38.6.4m. The implementation waits for the maintainer's
+approval.
+
+1. *Key and value.* Each Electrum server entry may carry `spki_sha256`, next to
+   `url`, `protocol`, `disable_cert_verification` and `timeout_sec`, in the
+   activation request (`mode.rpc_data.servers[]`, chapter 55 R55.5.10) and in
+   the legacy `electrum` request.
+   - The value is a string, or an array of 1 to 4 strings, so that an operator
+     can pin the next key before a server changes it.
+   - Each string is the SHA-256 digest of the DER `SubjectPublicKeyInfo` of the
+     server's end-entity certificate: 64 hexadecimal digits in either case.
+     Colons between byte pairs are accepted and ignored.
+   - The pin is on the key, not the certificate, so it survives a certificate
+     renewal that keeps the key.
+2. *Verification when a pin is set* (`protocol` `SSL`, native build).
+   - The end-entity certificate shall parse as in R38.6.4m item 5, and the
+     SHA-256 of its `SubjectPublicKeyInfo` shall equal one of the configured
+     pins.
+   - The handshake signature shall verify with that key, as in R38.6.4m item 5,
+     so the server proves that it holds the pinned key.
+   - The chain, the trust anchor, the validity period, the CA flag, the
+     extended key usage and the name are not checked; the pin replaces them.
+     This is what lets a self-signed certificate be used safely. It also means
+     that an expired certificate with the pinned key is accepted.
+3. *A pin never widens acceptance beyond the pinned key.* Only a server that
+   holds the private key of a pinned `SubjectPublicKeyInfo` can complete the
+   handshake, with or without `disable_cert_verification`.
+   - A certificate wrongly issued for the host name by a trusted CA, a
+     compromised or wrongly trusted root, and a changed DNS answer are each no
+     longer enough. For that server, a pin is a stronger check than the
+     default verification of R38.6.4m item 4.
+   - What the pin gives up is the expiry check: a pinned key that has leaked
+     stays accepted until the operator removes its pin. The default
+     verification has a comparable gap, because it checks no revocation, so it
+     accepts a leaked key until its certificate expires.
+   - Checking the validity period in addition to the pin was not adopted:
+     self-signed Electrum certificates often run past their dates, and a lapsed
+     date would then lock out a correctly pinned server.
+4. *Interplay with `disable_cert_verification`.* With a pin set, the pin
+   decides, whatever the flag says; the flag is then redundant, and the warning
+   of R38.6.4m item 6 is not logged. The combination is not refused, so that an
+   entry that sets the flag stays usable when a pin is added. One INFO line at
+   activation names the server as pinned:
+
+   `<TICKER>: Electrum server <host:port> is pinned by spki_sha256`
+5. *Error classes.*
+   - *Malformed pin:* a removal-class configuration failure (R38.6.4d item 3),
+     detected when the server entry is read, with no connection attempted. A
+     pin is malformed when a value is not 64 hexadecimal digits once the colons
+     are removed, when the array is empty or has more than 4 entries, or when an
+     entry is not a string. Text: `spki_sha256 is not a 64-digit hexadecimal
+     SHA-256 digest`; the configured value is not echoed.
+   - *Pin on a `TCP` server:* also removal-class, with the text `spki_sha256
+     needs protocol SSL`. A pin that cannot be enforced must not look enforced.
+   - *Mismatch at the handshake:* a TLS handshake failure, recoverable, and the
+     server is suspended (R38.6.4d item 1). A mismatch can come from an attacker
+     on one network path and go away with it; removal would hand that attacker a
+     lasting denial of service. Text: `the server's key does not match
+     spki_sha256`. It is logged at WARN on every occurrence, by host and port,
+     because a mismatch is either a key change or an attack.
+6. *Browser build.* The browser does the TLS of `WSS` and cannot be told to pin,
+   so a server entry with `spki_sha256` on a browser build is removed with the
+   text `spki_sha256 is not supported in a browser`.
+7. *Operator guidance.* The operator documentation gives the value as computed
+   on the server from its key file,
+   `openssl pkey -in server.key -pubout -outform der | sha256sum` (the first 64
+   hexadecimal digits). The server operator publishes it next to the server's
+   address, for example in the coins-file entry. It also gives the variant that
+   reads the key from a running server,
+   `openssl s_client -connect <host>:<port> -servername <host> </dev/null 2>/dev/null | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | sha256sum`,
+   and says that this is trust on first use done by hand: the value is only as
+   good as the network path it was read over, so it is to be compared with the
+   value the server operator publishes. It advises pinning the next key before
+   rotating.
+8. *Compatibility.* An opt-in key that changes nothing unless set; no switch.
+   Whether a reference binary ignores or refuses a server entry carrying the
+   key is measured black-box and recorded in `docs/GLEEC_COMPATIBILITY.md` with
+   the implementation.
+
 T38.6.4.1 *Bounds and validation.* A test shall activate against an in-process
 Electrum test server set with `min_connected` 0, with `min_connected` above
 `max_connected`, and with `max_connected` above the list length, and assert
@@ -2008,6 +2164,37 @@ later notification 2 or more blocks below the other maintained connections, on
 two consecutive notifications, shall trigger P1 for it. Under `random`, the
 same join shall send no header request (R38.6.4l items 1 and 6).
 
+T38.6.4m *TLS server authentication (R38.6.4m).*
+- (a) The default configuration refuses a self-signed certificate, in both the
+  CA-flagged and the unflagged form, and a certificate whose subject
+  alternative names do not match the host name; it accepts a certificate
+  chained to a test trust anchor.
+- (b) With `disable_cert_verification`, a self-signed version 3 certificate, an
+  expired one and one with a mismatched name are accepted, on TLS 1.2 and on
+  TLS 1.3.
+- (c) With `disable_cert_verification`, a version 1 certificate and an RSA-1024
+  certificate are refused. These need static DER fixtures.
+- (d) An IP literal is refused before connecting, and the server is removed.
+- (e) The WARN line of item 6 appears exactly once per activation, names only
+  `host:port`, and does not appear for `TCP` or for a pinned server.
+
+Items (a), (b) and (d) are covered by existing tests; (c) and (e) are new.
+
+T38.6.4n *Electrum server key pin (R38.6.4n).* With test certificates on a
+loopback server:
+- a matching pin is accepted on TLS 1.2 and on TLS 1.3, and a second pin in an
+  array matches;
+- a mismatch is refused with the text of item 5, logged at WARN, and the server
+  is suspended, not removed;
+- a self-signed, expired and misnamed certificate with the pinned key is
+  accepted;
+- a server presenting another key under the same subject is refused;
+- malformed pins and a pin on `TCP` are removed with their texts, with no
+  connection attempted;
+- the flag together with a pin behaves as the pin alone, with no WARN of
+  R38.6.4m item 6;
+- one INFO line of item 4 per activation.
+
 D38.6.4l.1 *(Resolved 2026-10-28, maintainer decision.)* *When `mixed`
 becomes the default.* The plan intends `mixed` as the default and left the
 moment to the maintainer: with the implementation, or after a field run on a
@@ -2085,6 +2272,23 @@ admits them up to (*F* − 1) × *f* further behind. Example: with *f* = 25 ms t
 larger-of form gives 50 ms, the sum 70 ms. The maintainer kept the larger-of
 form of item 6. The latency study of 2026-11-02 found the same near sessions
 under both forms on every one of its 13 sampled coins.
+
+D38.6.4m.1 *(Open, 2026-11-05.)* *A refusal under the flag in the field.* The
+item was raised because a server with `disable_cert_verification` was reported
+refused. A lab run with self-signed servers is planned. If it shows a refusal,
+its cause is classified by items 3 and 5 of R38.6.4m: a version 1 certificate,
+an RSA key below 2048 bits, an IP literal and a TLS version below 1.2 are
+refused by design.
+
+D38.6.4n.1 *(Open, 2026-11-05.)* *Pass-through by the coins file and the
+wallets.* Whether the coins file and the wallet GUIs pass `spki_sha256` through
+to the activation request. Until they do, the pin is usable only from activation
+requests written by hand.
+
+D38.6.4n.2 *(Open, 2026-11-05.)* *Trust on first use.* Whether a node should
+remember the key a server first presents and warn on a change. It is not part of
+R38.6.4n. It would be weaker than a published pin, because the first contact
+itself is not authenticated.
 
 > **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
 > T38.6.4.12 against an in-process stub server set, with two exceptions:
@@ -3182,3 +3386,11 @@ R38.8.6 **Tests (two-direction, observable).**
   (PR #226). They rest on that
   decision and this repository's code, take no forbidden-class input, and so
   do not engage chapter 01 R38.
+- *Clean-side addition (2026-11-05) -- R38.6.4m, R38.6.4n, T38.6.4m, T38.6.4n,
+  D38.6.4m.1, D38.6.4n.1 and D38.6.4n.2.* Written by a session that never read
+  the forbidden corpus. The inputs are this repository's own code (the
+  Electrum TLS configuration, the server specification and the pool), the
+  public documentation and behavior of the TLS crates it depends on (`rustls`,
+  `rustls-webpki`, `ring`, `webpki-roots`) at the versions in `Cargo.lock`, and
+  the maintainer's decision of 2026-11-04. They take no forbidden-class input,
+  so chapter 01 R38 is not engaged and no gate pass is required.
