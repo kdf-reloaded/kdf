@@ -11,6 +11,7 @@ pub mod request_response;
 #[cfg(not(target_arch = "wasm32"))] mod resolving_transport;
 mod runtime;
 
+use common::msgpack_bounds::check_peer_value;
 use lazy_static::lazy_static;
 use secp256k1::ecdsa::Signature;
 use secp256k1::{Message as SecpMessage, PublicKey as Secp256k1Pubkey, Secp256k1, SecretKey, SignOnly, VerifyOnly};
@@ -53,7 +54,22 @@ pub fn encode_message<T: Serialize>(message: &T) -> Result<Vec<u8>, rmp_serde::e
     rmp_serde::to_vec(message)
 }
 
+/// Decodes a MessagePack value received from a peer.
+///
+/// The value is first checked against the bounds of CRD ch.28 R16a: nesting at most
+/// [`MAX_PEER_NESTING`](common::msgpack_bounds::MAX_PEER_NESTING) levels, and every declared
+/// length and count within the remaining bytes. A value outside the bounds is not decoded: it is
+/// counted and the call returns a decoding error.
+///
+/// # Errors
+///
+/// [`rmp_serde::decode::Error`] if the value is outside the bounds or does not decode as `T`.
 pub fn decode_message<'de, T: de::Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, rmp_serde::decode::Error> {
+    if check_peer_value(bytes, "decode_message").is_err() {
+        return Err(rmp_serde::decode::Error::Syntax(
+            "value outside the decoding bounds".into(),
+        ));
+    }
     rmp_serde::from_read_ref(bytes)
 }
 
@@ -177,4 +193,121 @@ fn signed_message_serde() {
 
     let (decoded, ..) = decode_signed::<Vec<u8>>(&signed_encoded).unwrap();
     assert_eq!(decoded, initial_msg);
+}
+
+#[cfg(test)]
+mod t4a_bounded_reading_tests {
+    use super::*;
+    use common::msgpack_bounds::{check_msgpack_bounds, dropped_peer_values, max_nesting_depth, MAX_PEER_NESTING};
+
+    const SECRET: [u8; 32] = [7u8; 32];
+
+    /// The envelope of `encode_and_sign`, re-encoded as a map with one more key. The key's value is
+    /// `levels` one-element arrays around nil, so the envelope's total nesting is `levels + 1`.
+    fn envelope_with_extra_key(envelope: &[u8], levels: usize) -> Vec<u8> {
+        let helper: SignedMessageSerdeHelper = decode_message(envelope).unwrap();
+        let mut named = rmp_serde::to_vec_named(&helper).unwrap();
+        assert_eq!(named[0], 0x83, "a map of three entries");
+        named[0] = 0x84;
+        named.extend_from_slice(&[0xa5, b'e', b'x', b't', b'r', b'a']);
+        named.extend(vec![0x91; levels]);
+        named.push(0xc0);
+        named
+    }
+
+    #[test]
+    fn t4a_d_envelope_beyond_the_bound_is_dropped_and_counted() {
+        let envelope = encode_and_sign(&vec![1u8, 2, 3], &SECRET).unwrap();
+        assert!(decode_signed::<Vec<u8>>(&envelope).is_ok());
+
+        // Total nesting 64: inside the bound, the extra key is ignored by the decoder.
+        let at_bound = envelope_with_extra_key(&envelope, MAX_PEER_NESTING - 1);
+        assert!(decode_signed::<Vec<u8>>(&at_bound).is_ok());
+
+        let before = dropped_peer_values();
+        let beyond = envelope_with_extra_key(&envelope, MAX_PEER_NESTING);
+        let err = decode_signed::<Vec<u8>>(&beyond).unwrap_err();
+        assert!(err.to_string().contains("decoding bounds"), "{err}");
+        assert!(dropped_peer_values() > before);
+    }
+
+    #[test]
+    fn t4a_d_envelope_beyond_the_bound_is_dropped_before_its_signature_is_examined() {
+        // The signature bytes of this envelope are not a signature at all; the error is still the bounds one.
+        let helper = SignedMessageSerdeHelper {
+            pubkey: PublicKey::from(Secp256k1Pubkey::from_secret_key(
+                &*SECP_SIGN,
+                &SecretKey::from_slice(&SECRET).unwrap(),
+            )),
+            signature: &[0u8; 3],
+            payload: &[0xc0],
+        };
+        let mut named = rmp_serde::to_vec_named(&helper).unwrap();
+        named[0] = 0x84;
+        named.extend_from_slice(&[0xa5, b'e', b'x', b't', b'r', b'a']);
+        named.extend(vec![0x91; 10_000]);
+        named.push(0xc0);
+
+        let before = dropped_peer_values();
+        let err = decode_signed::<()>(&named).unwrap_err();
+        assert!(err.to_string().contains("decoding bounds"), "{err}");
+        assert!(dropped_peer_values() > before);
+    }
+
+    #[test]
+    fn t4a_d_payload_beyond_the_bound_is_dropped_after_a_valid_signature() {
+        // A correctly signed payload that nests 65 levels: the envelope passes, the payload does not.
+        let mut payload = vec![0x91; MAX_PEER_NESTING + 1];
+        payload.push(0xc0);
+        let secret = SecretKey::from_slice(&SECRET).unwrap();
+        let sig_hash = SecpMessage::from_digest_slice(&sha256(&payload)).unwrap();
+        let signature = SECP_SIGN.sign_ecdsa(&sig_hash, &secret).serialize_compact();
+        let helper = SignedMessageSerdeHelper {
+            pubkey: PublicKey::from(Secp256k1Pubkey::from_secret_key(&*SECP_SIGN, &secret)),
+            signature: &signature,
+            payload: &payload,
+        };
+        let envelope = encode_message(&helper).unwrap();
+        assert_eq!(check_msgpack_bounds(&envelope), Ok(envelope.len()));
+
+        let before = dropped_peer_values();
+        let err = decode_signed::<()>(&envelope).unwrap_err();
+        assert!(err.to_string().contains("decoding bounds"), "{err}");
+        assert!(dropped_peer_values() > before);
+
+        // At the bound the same payload is read (and then does not fit the type asked for).
+        let mut payload = vec![0x91; MAX_PEER_NESTING];
+        payload.push(0xc0);
+        let sig_hash = SecpMessage::from_digest_slice(&sha256(&payload)).unwrap();
+        let signature = SECP_SIGN.sign_ecdsa(&sig_hash, &secret).serialize_compact();
+        let helper = SignedMessageSerdeHelper {
+            pubkey: PublicKey::from(Secp256k1Pubkey::from_secret_key(&*SECP_SIGN, &secret)),
+            signature: &signature,
+            payload: &payload,
+        };
+        let envelope = encode_message(&helper).unwrap();
+        let err = decode_signed::<()>(&envelope).unwrap_err();
+        assert!(!err.to_string().contains("decoding bounds"), "{err}");
+    }
+
+    #[test]
+    fn t4a_d_peer_addresses_of_the_peers_topic_still_decode() {
+        let mut addresses = PeerAddresses::new();
+        addresses.insert("/ip4/127.0.0.1/tcp/42845".parse().unwrap());
+        addresses.insert("/dns4/example.org/tcp/42845".parse().unwrap());
+        let encoded = rmp_serde::to_vec(&addresses).unwrap();
+        let decoded: PeerAddresses = decode_message(&encoded).unwrap();
+        assert_eq!(decoded, addresses);
+    }
+
+    #[test]
+    fn t4a_a_envelope_and_peer_addresses_pass_the_check_within_half_the_bound() {
+        let mut addresses = PeerAddresses::new();
+        addresses.insert("/ip4/127.0.0.1/tcp/42845".parse().unwrap());
+        let signed = encode_and_sign(&(String::from("payload"), vec![1u8, 2, 3], Some(5u64)), &SECRET).unwrap();
+        for encoded in [signed, rmp_serde::to_vec(&addresses).unwrap()] {
+            assert_eq!(check_msgpack_bounds(&encoded), Ok(encoded.len()));
+            assert!(max_nesting_depth(&encoded) <= MAX_PEER_NESTING / 2);
+        }
+    }
 }

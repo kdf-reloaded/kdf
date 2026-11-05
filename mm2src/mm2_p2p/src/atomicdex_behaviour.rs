@@ -33,8 +33,10 @@ use std::{collections::hash_map::{DefaultHasher, HashMap},
           time::Duration};
 use wasm_timer::{Instant, Interval};
 
+use crate::decode_message;
+#[cfg(feature = "application")] use crate::encode_message;
 #[cfg(feature = "application")]
-use crate::{decode_message, encode_message};
+use common::msgpack_bounds::check_msgpack_bounds;
 #[cfg(feature = "application")] use futures::FutureExt;
 #[cfg(feature = "application")]
 use serde::{Deserialize, Serialize};
@@ -374,6 +376,10 @@ fn gossipsub_event_to_adex(event: GossipsubEvent) -> Option<AdexBehaviourEvent> 
 impl AtomicDexBehaviour {
     #[cfg(feature = "application")]
     fn is_current_timestamp_request(request: &[u8]) -> bool {
+        // A value outside the bounds is dropped, and counted, where the request is decoded for handling.
+        if check_msgpack_bounds(request).is_err() {
+            return false;
+        }
         matches!(
             decode_message::<WireP2PRequest>(request),
             Ok(WireP2PRequest::NetworkInfo(NetworkInfoRequest::CurrentTimestamp))
@@ -725,9 +731,12 @@ fn handle_behaviour_event(
         AtomicDexBehaviourEvent::Floodsub(FloodsubEvent::Message(message)) => {
             for topic in &message.topics {
                 if topic == &FloodsubTopic::new(PEERS_TOPIC) {
-                    let addresses: PeerAddresses = match rmp_serde::from_read_ref(&message.data) {
+                    let addresses: PeerAddresses = match decode_message(&message.data) {
                         Ok(a) => a,
-                        Err(_) => return,
+                        Err(e) => {
+                            debug!("peers topic: dropped a value from {} ({})", message.source, e);
+                            return;
+                        },
                     };
                     swarm
                         .behaviour_mut()
@@ -1832,6 +1841,18 @@ mod application_tests {
             decoded,
             WireP2PRequest::NetworkInfo(NetworkInfoRequest::CurrentTimestamp)
         ));
+    }
+
+    #[test]
+    fn t4a_a_requests_pass_the_check_within_half_the_bound() {
+        use common::msgpack_bounds::{check_msgpack_bounds, max_nesting_depth, MAX_PEER_NESTING};
+        for encoded in [
+            encode_message(&NetworkInfoRequest::CurrentTimestamp).unwrap(),
+            encode_message(&WireP2PRequest::NetworkInfo(NetworkInfoRequest::CurrentTimestamp)).unwrap(),
+        ] {
+            assert_eq!(check_msgpack_bounds(&encoded), Ok(encoded.len()));
+            assert!(max_nesting_depth(&encoded) <= MAX_PEER_NESTING / 2);
+        }
     }
 
     #[test]

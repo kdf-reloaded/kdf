@@ -305,3 +305,43 @@ pub async fn recv_swap_v2_msg<T>(
         }
     }
 }
+
+/// CRD ch.28 R16a, T4a (a): the swap messages the node sends pass the bounds check.
+#[cfg(test)]
+mod t4a_bounded_reading_tests {
+    use super::*;
+    use common::msgpack_bounds::{check_msgpack_bounds, max_nesting_depth, MAX_PEER_NESTING};
+    use mm2_p2p::{decode_signed, encode_and_sign, encode_message};
+
+    #[test]
+    fn t4a_a_swap_messages_nest_within_half_the_bound() {
+        let negotiation = NegotiationDataMsg::V3(NegotiationDataV3 {
+            started_at: 1,
+            payment_locktime: 2,
+            secret_hash: vec![0; 20],
+            maker_coin_swap_contract: vec![1; 20],
+            taker_coin_swap_contract: vec![1; 20],
+            maker_coin_htlc_pub: vec![1; 33],
+            taker_coin_htlc_pub: vec![1; 33],
+        });
+        let messages = [
+            SwapMsg::Negotiation(negotiation.clone()),
+            SwapMsg::NegotiationReply(negotiation),
+            SwapMsg::Negotiated(true),
+            SwapMsg::TakerFee(vec![7; 250]),
+            SwapMsg::MakerPayment(vec![8; 250]),
+            SwapMsg::TakerPayment(vec![9; 250]),
+        ];
+        for (i, message) in messages.iter().enumerate() {
+            let payload = encode_message(message).unwrap();
+            let envelope = encode_and_sign(message, &[3; 32]).unwrap();
+            for (what, encoded) in [("payload", &payload), ("envelope", &envelope)] {
+                assert_eq!(check_msgpack_bounds(encoded), Ok(encoded.len()), "{i} {what}");
+                let depth = max_nesting_depth(encoded);
+                println!("t4a depth SwapMsg {i} {what}: {depth}");
+                assert!(depth <= MAX_PEER_NESTING / 2, "{i} {what}: depth {depth}");
+            }
+            decode_signed::<SwapMsg>(&envelope).unwrap();
+        }
+    }
+}

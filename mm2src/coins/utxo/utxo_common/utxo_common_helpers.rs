@@ -565,7 +565,11 @@ pub fn coin_protocol_info<T: UtxoCommonOps>(coin: &T) -> Vec<u8> {
 
 pub fn is_coin_protocol_supported<T: UtxoCommonOps>(coin: &T, info: &Option<Vec<u8>>) -> bool {
     match info {
-        Some(format) => rmp_serde::from_read_ref::<_, UtxoAddressFormat>(format).is_ok(),
+        // CRD ch.28 R16a: a value outside the decoding bounds counts as one that does not decode.
+        Some(format) => match common::msgpack_bounds::check_peer_value(format, "is_coin_protocol_supported") {
+            Ok(end) => rmp_serde::from_read_ref::<_, UtxoAddressFormat>(&format[..end]).is_ok(),
+            Err(_) => false,
+        },
         None => !coin.addr_format().is_segwit(),
     }
 }
