@@ -1448,6 +1448,12 @@ change counts as non-spendable balance.
 > Pirate1 address, received by that wallet, and the return payment (R39.8.0bb). The
 > time and memory of the first proving-key build are measured in the same run.
 >
+> **Update (2026-11-05).** T39.6.5a is implemented (PR #242): the Ironwood bundles of two
+> mainnet transactions verify with this project's own verifying key for the post-NU6.3
+> circuit -- the proof, the spend-authorization signatures and the binding signature --
+> and a changed proof byte does not. Building that verifying key takes about a minute in a
+> debug test build. R39.6.5a--R39.6.5h are not implemented yet.
+>
 > **Compatibility.** The reference answers a Pirate1 address with `is_valid: false` on
 > `validateaddress` and with `InvalidAddress` on its withdrawal route (§39.5A). This
 > project accepts the address and builds the transaction. The acceptance is additive and
@@ -1862,6 +1868,14 @@ ahead.
 > Not yet proven: an output to the wallet's own key inside such a transaction (T39.8.0i),
 > full-byte readers on a mainnet transaction with Ironwood actions (T39.6.5a), and a live
 > mainnet deposit from an Ironwood wallet.
+>
+> **Update (2026-11-05).** T39.8.0i and T39.6.5a are implemented (PR #242). An output to
+> the wallet's key in a transaction that carries two real Ironwood actions in field 6
+> scans to the note, the Sapling tree and the balance, is spent by a following build, and
+> counts as pending from the mempool. Two mainnet transactions with Ironwood actions, one
+> paying from Sapling into Ironwood and one from Ironwood into Sapling, are read by every
+> full-byte reader. The broadcast record reads both; for one that spends Sapling notes it
+> cannot yet derive the fee, which R39.6.5g closes. Only the live mainnet deposit remains.
 
 R39.8.0p Generated shielded transactions shall coordinate with the scanner so the
 same wallet note is not selected concurrently by multiple sends or swaps. After
