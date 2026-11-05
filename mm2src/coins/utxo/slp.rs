@@ -1307,12 +1307,13 @@ mod slp_tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn test_slp_withdraw_explicit_fee_reference_arithmetic() {
-        // T38.6.6m (b): the arithmetic asserted is the reference arithmetic of R38.6.6l item 2 with the
-        // change-output split of its clean-side note, `floor(a x (s - 34) / 1000) + floor(a x 34 / 1000)`, for
-        // both descriptors. At a = 1234 it is 562 base units at s = 457 and 1841 at s = 1,493 (the literal
-        // `floor(a x s / 1000)` would give 563 and 1842). It is not the per-started-kilobyte
-        // `a x ceil(s / 1000)`, 1234 and 2468, that `UtxoFixed` was charged before R38.6.6m.
-        let expected_fees = [562, 1841];
+        // T38.6.6m (b), T38.6.6b.1: the arithmetic asserted is the reference arithmetic of R38.6.6l item 2, applied
+        // once over the whole size of the transaction, change output included, `floor(a x s / 1000)`, for both
+        // descriptors. At a = 1234 it is 563 base units at s = 457 and 1842 at s = 1,493; the change output's
+        // 34 bytes are not rounded on their own (`floor(a x (s - 34) / 1000) + floor(a x 34 / 1000)` would give
+        // 562 and 1841). It is not the per-started-kilobyte `a x ceil(s / 1000)`, 1234 and 2468, that
+        // `UtxoFixed` was charged before R38.6.6m.
+        let expected_fees = [563, 1842];
         for ((bch_inputs, size), expected_fee) in slp_fee_shapes().into_iter().zip(expected_fees) {
             let fixed = slp_withdraw_with_fee(
                 WithdrawFee::UtxoFixed {
@@ -1322,7 +1323,9 @@ mod slp_tests {
             )
             .unwrap();
             assert_eq!(fixed.worst_case_size, size);
-            let expected = FEE_TEST_RATE_SAT * (size - 34) / 1000 + FEE_TEST_RATE_SAT * 34 / 1000;
+            let expected = FEE_TEST_RATE_SAT * size / 1000;
+            let split = FEE_TEST_RATE_SAT * (size - 34) / 1000 + FEE_TEST_RATE_SAT * 34 / 1000;
+            assert_eq!(expected - split, 1);
             let started_kb = FEE_TEST_RATE_SAT * ((size + 999) / 1000);
             assert_eq!(expected, expected_fee);
             assert_ne!(expected, started_kb);
@@ -1376,11 +1379,9 @@ mod slp_tests {
         assert!(matches!(err.into_inner(), WithdrawError::InvalidFeePolicy(_)));
     }
 
-    /// The reference arithmetic of R38.6.6l item 2 with the change-output split of its clean-side note, for a
-    /// transaction of worst-case size `size` that carries a change output.
-    fn fee_test_fee_with_change(size: u64) -> u64 {
-        FEE_TEST_RATE_SAT * (size - 34) / 1000 + FEE_TEST_RATE_SAT * 34 / 1000
-    }
+    /// The reference arithmetic of R38.6.6l item 2 and R38.6.6b, `floor(a x s / 1000)` once, for a transaction
+    /// of worst-case size `size` that carries a change output (the size includes the change output).
+    fn fee_test_fee_with_change(size: u64) -> u64 { FEE_TEST_RATE_SAT * size / 1000 }
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]

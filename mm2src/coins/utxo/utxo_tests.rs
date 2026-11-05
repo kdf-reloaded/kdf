@@ -1228,13 +1228,20 @@ fn explicit_fee_withdraw(
     }
 }
 
-/// The two transaction shapes of T38.6.6l: `(inputs, value of one input, worst-case size in bytes)`.
+/// The transaction shapes of T38.6.6l and T38.6.6b.1: `(inputs, value of one input, worst-case size in bytes)`.
 /// The size the fee is computed for is the worst case of an unsigned transaction with a change output:
-/// 97 bytes of overwintered overhead and two P2PKH outputs, plus 148 bytes (41 + 107) per input.
+/// 29 bytes of overwintered overhead and two P2PKH outputs (68 bytes), plus 148 bytes (41 + 107) per input.
 /// One input gives 245 bytes. The several-input case has 9 inputs and 1,429 bytes: the input size does
 /// not allow exactly 1,404 bytes. The 9 inputs of 0.12 coin are all needed to cover the 1 coin withdrawn.
+/// The 4 and 13 inputs (689 and 2,021 bytes) are shapes at which the separately rounded change output of
+/// R38.6.6b differs from the single rounding at 1,234 base units per 1,000 bytes.
 #[cfg(not(target_arch = "wasm32"))]
-const EXPLICIT_FEE_SHAPES: [(u8, u64, u64); 2] = [(1, 1_000_000_000, 245), (9, 12_000_000, 1429)];
+const EXPLICIT_FEE_SHAPES: [(u8, u64, u64); 4] = [
+    (1, 1_000_000_000, 245),
+    (9, 12_000_000, 1429),
+    (4, 26_000_000, 689),
+    (13, 8_000_000, 2021),
+];
 
 /// The signed transaction is the worst-case size or shorter by a few signature bytes per input.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1247,15 +1254,16 @@ fn assert_signed_size_near_worst_case(signed_size: u64, worst_case: u64, input_c
 }
 
 /// T38.6.6l: reference arithmetic (R38.6.6l item 2, maintainer decision 27), asserting the fee
-/// floor(a x (s - 34) / 1000) + floor(a x 34 / 1000) for `UtxoFixed` and `UtxoPerKbyte` alike, on a plain-fixed
-/// and a whole-kilobyte coin, at the worst-case sizes `s` of 245 and 1,429 bytes (1,429 stands in for 1,404).
-/// At a = 1001 base units this equals floor(a x s / 1000): 245 and 1430.
+/// floor(a x s / 1000), once over the whole size with the change output (R38.6.6b), for `UtxoFixed` and
+/// `UtxoPerKbyte` alike, on a plain-fixed and a whole-kilobyte coin, at the worst-case sizes `s` of 245, 689,
+/// 1,429 and 2,021 bytes (1,429 stands in for 1,404). At a = 1001 base units the single rounding and a
+/// separately rounded change output coincide: 245, 689, 1430 and 2023.
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_withdraw_explicit_fee_reference_arithmetic() {
     let rate_sat: u64 = 1001;
     for (input_count, input_value, worst_case) in EXPLICIT_FEE_SHAPES {
-        // floor(a x s / 1000): 245 and 1430.
+        // floor(a x s / 1000).
         let expected = rate_sat * worst_case / 1000;
         for whole_kilobyte_coin in [false, true] {
             let fixed = explicit_fee_withdraw(whole_kilobyte_coin, true, "0.00001001", input_count, input_value);
@@ -1274,29 +1282,32 @@ fn test_withdraw_explicit_fee_reference_arithmetic() {
     }
 }
 
-/// T38.6.6l: reference arithmetic (R38.6.6l item 2, maintainer decision 27). With the change allowance
-/// floor(a x 34 / 1000), the fee is floor(a x (s - 34) / 1000) + floor(a x 34 / 1000), not floor(a x s / 1000):
-/// at a = 1234 base units it asserts 301 at 245 bytes and 1762 at 1,429 bytes (302 and 1763 by the literal
-/// formula, which is also what the `FixedPerKb` size-difference allowance would charge).
+/// T38.6.6l, T38.6.6b.1: reference arithmetic (R38.6.6l item 2, maintainer decision 27). The change output is
+/// part of the size the fee is computed for, so the fee is floor(a x s / 1000) once, not
+/// floor(a x (s - 34) / 1000) + floor(a x 34 / 1000): at a = 1234 base units it asserts 302 at 245 bytes, 850 at
+/// 689, 1763 at 1,429 and 2493 at 2,021 bytes (301, 849, 1762 and 2492 if the change output's share were
+/// rounded on its own).
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
-fn test_withdraw_explicit_fee_change_allowance_is_proportional() {
+fn test_withdraw_explicit_fee_change_output_is_rounded_once() {
     let rate_sat: u64 = 1234;
-    for (input_count, input_value, worst_case) in EXPLICIT_FEE_SHAPES {
+    let expected_fees = [302, 1763, 850, 2493];
+    for ((input_count, input_value, worst_case), expected_fee) in EXPLICIT_FEE_SHAPES.into_iter().zip(expected_fees) {
         let without_change = worst_case - 34;
-        let expected = rate_sat * without_change / 1000 + rate_sat * 34 / 1000;
-        let literal = rate_sat * worst_case / 1000;
+        let expected = rate_sat * worst_case / 1000;
+        let separately_rounded = rate_sat * without_change / 1000 + rate_sat * 34 / 1000;
         let plain_fixed_mapping = ActualTxFee::FixedPerKb(rate_sat).fee_for_size(without_change)
             + ActualTxFee::FixedPerKb(rate_sat).change_output_increase(without_change);
-        assert_eq!(literal - expected, 1);
-        assert_eq!(plain_fixed_mapping, literal);
+        assert_eq!(expected, expected_fee);
+        assert_eq!(expected - separately_rounded, 1);
+        assert_eq!(plain_fixed_mapping, expected);
         for whole_kilobyte_coin in [false, true] {
             let fixed = explicit_fee_withdraw(whole_kilobyte_coin, true, "0.00001234", input_count, input_value);
             let per_kbyte = explicit_fee_withdraw(whole_kilobyte_coin, false, "0.00001234", input_count, input_value);
             assert_signed_size_near_worst_case(fixed.signed_size, worst_case, input_count);
             assert_eq!(fixed.fee, expected, "UtxoFixed, {worst_case} bytes");
             assert_eq!(per_kbyte.fee, expected, "UtxoPerKbyte, {worst_case} bytes");
-            assert_ne!(fixed.fee, plain_fixed_mapping);
+            assert_ne!(fixed.fee, separately_rounded);
         }
     }
 }
@@ -3633,6 +3644,71 @@ fn test_tx_builder_fixed_policies_r38_6_6b() {
     assert!(size < 1000);
     let (whole_kb_fee, whole_kb_size) = build(ActualTxFee::FixedPerStartedKb(1000));
     assert_eq!((whole_kb_fee, whole_kb_size), (1000, size));
+}
+
+/// CRD ch.38 T38.6.6b.1: a transaction with a change output pays the policy's fee once over its whole size,
+/// change output included. At a rate of 1,234 base units per 1,000 bytes a dynamic rate and the plain fixed
+/// policy charge 826 at an estimated size of 670 bytes (4 inputs of 148 bytes, a 15-byte payment output and
+/// the 34-byte change output) and 2,470 at 2,002 bytes (13 inputs), not the 825 and 2,469 of a separately
+/// rounded change output. The whole-kilobyte policy adds one more rate only when the change output crosses a
+/// kilobyte boundary.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_tx_builder_change_output_is_rounded_once_t38_6_6b_1() {
+    let coin = floor_test_coin("TEST", TxFee::FixedPerKb(50_000), 1000, 8);
+    // Builds a payment from `input_count` inputs of 100,000 base units each, all of them needed, with a payment
+    // output whose script has `script_len` bytes. Returns the fee and the size of the transaction with the
+    // change output.
+    let build = |policy: ActualTxFee, input_count: u8, script_len: usize| {
+        let unspents = (0..input_count)
+            .map(|i| UnspentInfo {
+                value: 100_000,
+                outpoint: OutPoint {
+                    hash: H256::from([i + 1; 32]),
+                    index: 0,
+                },
+                height: None,
+            })
+            .collect::<Vec<_>>();
+        let outputs = vec![TransactionOutput {
+            value: u64::from(input_count - 1) * 100_000 + 50_000,
+            script_pubkey: vec![0x51; script_len].into(),
+        }];
+        let (tx, data) = block_on(
+            UtxoTxBuilder::new(&coin)
+                .add_available_inputs(unspents)
+                .add_outputs(outputs)
+                .with_fee(policy)
+                .build(),
+        )
+        .unwrap();
+        assert_eq!(tx.inputs.len(), input_count as usize);
+        // The payment and the change output.
+        assert_eq!(tx.outputs.len(), 2);
+        let size = utxo_common::tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(tx)) as u64;
+        (data.fee_amount, size)
+    };
+
+    // (inputs, estimated size with the change output, fee of the single rounding, fee of the split rounding)
+    let cases = [(4u8, 670u64, 826u64, 825u64), (13, 2002, 2470, 2469)];
+    for (input_count, size, expected, split) in cases {
+        assert_eq!(1234 * size / 1000, expected);
+        assert_eq!(1234 * (size - 34) / 1000 + 1234 * 34 / 1000, split);
+        for policy in [ActualTxFee::Dynamic(1234), ActualTxFee::FixedPerKb(1234)] {
+            let (fee, built_size) = build(policy, input_count, 6);
+            assert_eq!(built_size, size);
+            assert_eq!(fee, expected, "{input_count} inputs, size {size}");
+            assert_ne!(fee, split);
+        }
+    }
+
+    // Whole-kilobyte policy: 636 bytes become 670 and 932 become 966, still one started kilobyte; 970 bytes
+    // become 1,004, a further started kilobyte, and the change output adds one more rate.
+    let whole_kb = ActualTxFee::FixedPerStartedKb(1234);
+    assert_eq!(build(whole_kb, 4, 6), (1234, 670));
+    assert_eq!(build(whole_kb, 6, 6), (1234, 966));
+    assert_eq!(build(whole_kb, 6, 44), (2 * 1234, 1004));
+    assert_eq!(build(whole_kb, 13, 6), (3 * 1234, 2002));
 }
 
 /// CRD ch.38 R38.6.6b: the trade-fee preview allows for one change output under each policy's own rule.

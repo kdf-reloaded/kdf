@@ -268,6 +268,12 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   equal to the coin's dust amount now comes back as a change output instead of going to the miner.
   The fee shown for an SLP withdrawal now also includes change too small to keep, as it already did
   for UTXO coins. Detail: PR #236; CRD ch.38 R38.6.6n.
+- **A transaction with a change output now pays its fee rounded once over its whole size, as on
+  Komodo and GLEEC KDF.** KDF Reloaded rounded the change output's share of the fee on its own, so
+  such a transaction could pay one base unit less than the rate gives. A RIN withdrawal of 670
+  bytes at 0.00001234 RIN per 1,000 bytes paid 825 satoshi, where Komodo and GLEEC charge 826.
+  This covers a coin's dynamic fee and an explicit `UtxoFixed` or `UtxoPerKbyte` withdraw fee.
+  Detail: PR #XXX; CRD ch.38 R38.6.6b, T38.6.6b.1.
 
 ### Tests
 

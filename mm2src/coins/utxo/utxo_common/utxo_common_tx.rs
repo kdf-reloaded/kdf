@@ -246,15 +246,12 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
         relay_rate.map(|rate| ActualTxFee::Dynamic(rate).fee_for_size(size))
     }
 
-    /// The fee increase for the change output that is not in the transaction yet. The dynamic rate keeps
-    /// its proportional allowance; the fixed policies use the R38.6.6b increase of the transaction size.
+    /// The fee increase for the change output that is not in the transaction yet. CRD ch.38 R38.6.6b: the
+    /// fee of a transaction with a change output is the policy's rule applied once over its whole size, change
+    /// output included, so the increase is `fee_for_size(v_size + 34) - fee_for_size(v_size)` under every policy
+    /// (dynamic rate included). The change output's share is never rounded on its own.
     fn change_output_fee_increase(actual_tx_fee: &ActualTxFee, v_size: u64) -> u64 {
-        match actual_tx_fee {
-            ActualTxFee::Dynamic(f) => (f * P2PKH_OUTPUT_LEN) / KILO_BYTE,
-            ActualTxFee::FixedPerKb(_) | ActualTxFee::FixedPerStartedKb(_) => {
-                actual_tx_fee.change_output_increase(v_size)
-            },
-        }
+        actual_tx_fee.change_output_increase(v_size)
     }
 
     /// CRD ch.38 R38.6.6n: a change output is added whenever the change is not below the dust amount (and is
