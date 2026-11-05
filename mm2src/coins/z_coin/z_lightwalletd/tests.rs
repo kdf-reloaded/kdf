@@ -423,6 +423,8 @@ pub(crate) struct Script {
     pub(crate) address_error: Option<EndpointError>,
     /// The block hash `GetBlock` answers per height; a height not listed is unscripted.
     pub(crate) block_hashes: HashMap<u64, [u8; 32]>,
+    /// What `GetTreeState` answers per height; a height not listed is unscripted.
+    pub(crate) tree_states: HashMap<u64, Result<TreeStateRead, EndpointError>>,
 }
 
 /// Called with the bytes of every broadcast, before the scripted answer is returned.
@@ -544,6 +546,15 @@ impl LightwalletdTransport for FakeTransport {
             }
         }
         answer
+    }
+
+    async fn tree_state(&self, server: &str, height: u64) -> Result<TreeStateRead, EndpointError> {
+        self.record(server, "tree");
+        self.scripts
+            .lock()
+            .get(server)
+            .and_then(|s| s.tree_states.get(&height).cloned())
+            .unwrap_or_else(|| Err(Self::unscripted()))
     }
 
     async fn taddr_balance(&self, server: &str, addresses: Vec<String>) -> Result<i64, EndpointError> {

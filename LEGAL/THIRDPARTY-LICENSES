@@ -30,12 +30,16 @@ Patched published crates
 The following directories contain published crates.io sources with narrow KDF
 Reloaded patches:
 
+* `vendor-patches/zcash_client_sqlite-0.22.0/`
 * `vendor-patches/zcash_primitives-0.30.1/`
 * `vendor-patches/zcash_transparent-0.10.0/`
 
 Each package is offered upstream under `MIT OR Apache-2.0`. KDF Reloaded relies
 on the MIT option when combining these components with the GPL-2.0-only work.
-Both upstream license texts are retained in each directory, and each local
+Both upstream license texts are retained in each directory (for
+`zcash_client_sqlite` the published crate ships none, so the texts of the
+sibling `zcash_transparent` copy, from the same upstream repository, are
+placed there; see its `KDF-PATCH.md`), and each local
 delta is described by its `KDF-PATCH.md` and the provenance ledger.
 
 Adapted sources

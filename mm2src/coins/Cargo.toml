@@ -154,9 +154,8 @@ rand_core = "0.6"
 # Test certificates for the Electrum TLS handshake tests. Default features are ring-based in 0.13; the
 # aws-lc-rs backend must not enter the graph.
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
-# Used only by z_coin/z_ironwood_read_tests.rs (CRD ch.39 T39.6.5a): the Halo2 verifying key and the batch
-# validator that check a mainnet Ironwood bundle. Already in the tree (version locked) through
-# zcash_primitives, which enables the same `circuit` feature on native targets.
+# Also a normal dependency below (CRD ch.39 R39.6.5a). Here it adds the `circuit` feature the Halo2 verifying key
+# and the batch validator of z_coin/z_ironwood_read_tests.rs (T39.6.5a, T39.6.5c) need.
 orchard = { version = "=0.15.5", default-features = false, features = ["circuit"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -220,6 +219,13 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 tonic = { version = "0.14", default-features = false, features = ["transport", "channel", "codegen", "tls-ring", "tls-webpki-roots"] }
 tonic-prost = "0.14"
 webpki-roots = { version = "1.0" }
+# CRD ch.39 R39.6.5a--R39.6.5e: the Pirate1 (Ironwood) payment address type and the Ironwood anchor of a
+# withdrawal. Already in the tree (same version) through zcash_primitives, whose transaction builder takes
+# this crate's `Address` and `Anchor`. Native only: a WASM build refuses to activate a shielded coin.
+orchard = { version = "=0.15.5", default-features = false }
+# Classic Bech32 (BIP 173) for the Pirate1 address; the Bech32m checksum is refused (R39.6.5a). Already in
+# the tree at this version.
+bech32 = "0.11"
 # 0.24 makes `orchard` a default feature; Ironwood actions live behind it and
 # we neither read nor build that bundle, so default features stay off.
 zcash_client_backend = { version = "=0.24.0", default-features = false, features = ["transparent-inputs", "zcash_proofs"] }

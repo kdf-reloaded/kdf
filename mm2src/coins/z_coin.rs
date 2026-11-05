@@ -146,6 +146,9 @@ mod z_coin_ops;
 mod z_ironwood_read_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_note_lock_tests;
+#[cfg(not(target_arch = "wasm32"))] mod z_pirate1;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod z_pirate1_tests;
 #[cfg(not(target_arch = "wasm32"))] mod z_refund_gate;
 #[cfg(not(target_arch = "wasm32"))] mod z_swap_ops;
 #[cfg(target_arch = "wasm32")] mod z_swap_ops_wasm;
@@ -396,6 +399,11 @@ pub struct ZcoinConsensusParams {
     hrp_sapling_extended_full_viewing_key: String,
     /// Bech32 HRP for shielded payment addresses.
     hrp_sapling_payment_address: String,
+    /// Bech32 HRP of Pirate1 (Ironwood) payment addresses, overriding the built-in prefix of the
+    /// network (R39.6.5a). Optional in both directions: a configuration omitting it takes the built-in
+    /// prefix, and a build that predates it ignores it.
+    #[serde(default)]
+    hrp_ironwood_payment_address: Option<String>,
     /// Base58Check version prefix for transparent p2pkh addresses.
     b58_pubkey_address_prefix: [u8; 2],
     /// Base58Check version prefix for transparent p2sh addresses.
@@ -460,6 +468,10 @@ impl ZcoinConsensusParams {
     fn hrp_sapling_extended_full_viewing_key(&self) -> &str { &self.hrp_sapling_extended_full_viewing_key }
 
     fn hrp_sapling_payment_address(&self) -> &str { &self.hrp_sapling_payment_address }
+
+    /// The configured Pirate1 prefix, when the configuration overrides the built-in one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hrp_ironwood_payment_address(&self) -> Option<&str> { self.hrp_ironwood_payment_address.as_deref() }
 
     fn b58_pubkey_address_prefix(&self) -> [u8; 2] { self.b58_pubkey_address_prefix }
 
@@ -2878,11 +2890,18 @@ impl MmCoin for ZCoin {
                     ));
                 }
 
-                let to_addr =
-                    decode_payment_address(coin.z_fields.consensus_params.hrp_sapling_payment_address(), &req.to)
-                        .map_to_mm(|e| WithdrawError::InvalidAddress(format!("{}", e)))?;
+                let destination =
+                    z_pirate1::decode_destination(&coin.z_fields.consensus_params, coin.ticker(), &req.to)
+                        .map_err(|refusal| MmError::new(WithdrawError::InvalidAddress(refusal.withdraw_reason())))?;
+                let pays_ironwood = matches!(destination, z_pirate1::WithdrawDestination::Ironwood(_));
                 let amount = if req.max {
-                    let fee = coin.get_one_kbyte_tx_fee().await.mm_err(Into::into)?;
+                    // A transaction with an Ironwood output pays the fixed fee, whatever `txfee` says
+                    // (R39.6.5f).
+                    let fee = if pays_ironwood {
+                        big_decimal_from_sat_unsigned(z_pirate1::IRONWOOD_PAYMENT_FEE_SAT, coin.decimals())
+                    } else {
+                        coin.get_one_kbyte_tx_fee().await.mm_err(Into::into)?
+                    };
                     let balance = coin.my_balance().compat().await.mm_err(Into::into)?;
                     // Nothing to send when the spendable balance does not cover the fee; subtracting
                     // anyway yields a negative amount that only fails later, as an internal error.
@@ -2901,17 +2920,30 @@ impl MmCoin for ZCoin {
                     req.amount
                 };
                 let satoshi = sat_from_big_decimal(&amount, coin.decimals()).mm_err(Into::into)?;
-                let z_output = ZOutput {
-                    to_addr,
-                    amount: Amount::from_u64(satoshi)
-                        .map_to_mm(|_| NumConversError(format!("Failed to get ZCash amount from {}", amount)))
-                        .mm_err(Into::into)?,
-                    // TODO add optional viewing_key and memo fields to the WithdrawRequest
-                    viewing_key: None,
-                    memo: None,
-                };
+                let zcash_amount = Amount::from_u64(satoshi)
+                    .map_to_mm(|_| NumConversError(format!("Failed to get ZCash amount from {}", amount)))
+                    .mm_err(Into::into)?;
 
-                let (tx, data) = coin.gen_tx(vec![], vec![z_output]).await.mm_err(Into::into)?;
+                let (tx, data) = match destination {
+                    z_pirate1::WithdrawDestination::Sapling(to_addr) => {
+                        let z_output = ZOutput {
+                            to_addr,
+                            amount: zcash_amount,
+                            // TODO add optional viewing_key and memo fields to the WithdrawRequest
+                            viewing_key: None,
+                            memo: None,
+                        };
+                        coin.gen_tx(vec![], vec![z_output]).await
+                    },
+                    z_pirate1::WithdrawDestination::Ironwood(recipient) => {
+                        coin.gen_ironwood_withdraw_tx(z_pirate1::IronwoodPayment {
+                            recipient,
+                            amount: zcash_amount,
+                        })
+                        .await
+                    },
+                }
+                .mm_err(Into::into)?;
                 let mut tx_bytes = Vec::with_capacity(1024);
                 tx.write(&mut tx_bytes)
                     .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
@@ -2969,6 +3001,22 @@ impl MmCoin for ZCoin {
     }
 
     fn validate_address(&self, address: &str) -> ValidateAddressResult {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // A Sapling address of the coin, or a Pirate1 (Ironwood) address of its network (R39.6.5b).
+            match z_pirate1::decode_destination(&self.z_fields.consensus_params, self.ticker(), address) {
+                Ok(_) => ValidateAddressResult {
+                    is_valid: true,
+                    reason: None,
+                },
+                Err(refusal) => ValidateAddressResult {
+                    is_valid: false,
+                    reason: Some(refusal.validate_reason()),
+                },
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
         match decode_payment_address(self.z_fields.consensus_params.hrp_sapling_payment_address(), address) {
             Ok(_) => ValidateAddressResult {
                 is_valid: true,
