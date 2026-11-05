@@ -511,18 +511,21 @@ remedy is R33.
 > inventory is plan [`hd-key-unification`](../plans/hd-key-unification.md)).**
 > Reloaded departs from R32--R33 under a global-HD login in two ways that are
 > **not** parity, although an entry of `RELOADED_VS_GLEEC.md` described the
-> first as retained for parity (plan item H0 corrects it): (a) the v1 HTLC key falls back to a hash of the mnemonic string
+> first as retained for parity (plan item H0 corrected it on 2026-11-04): (a) the v1 HTLC key falls back to a hash of the mnemonic string
 > for every coin that supplies no swap key -- every EVM swap, and every
 > UTXO-family coin activated through the legacy route -- and the persistent
 > key is that same hash; (b) order signing and `sender_pubkey` use that hash
 > while keep-alive, `is_mine` and the stale sweep use the internal key, so
 > no keep-alive is ever sent for the key the orders carry. The reference does
 > neither. Reloaded's task-route UTXO withdraw without `from` falls back to
-> the enabled address where the reference fails (chapter 49 R49.4 note);
-> Reloaded's legacy `enable` under HD binds the internal key where the
-> reference binds the coin key and then fails the response. Plan
-> `hd-key-unification` carries the fixes; R32--R35 record the reference
-> target for them.
+> the enabled address where the reference fails (chapter 49 R49.4 note); the
+> maintainer kept that divergence on 2026-11-04 (decision BY). Reloaded's
+> legacy `enable` under HD binds the internal key where the reference binds
+> the coin key and then fails the response; plan item H7 binds the coin key
+> and keeps the successful answer behind a switch (decision CB). Plan
+> `hd-key-unification` carries the fixes and records the maintainer's
+> decisions BY to CC on which surfaces stay documented divergences; R32--R35
+> record the reference target for the rest.
 
 ## 5.10 Bound Hardware-Wallet Path
 
@@ -936,3 +939,9 @@ surface.
   no code blocks. *Measure:* 0.03, read against the standard that any
   discretionary finding fails a file; dictated-interop and public-surface
   tokens were excluded from the measured set.
+- *Clean-side amendment (2026-11-05) -- the compatibility note under R35.*
+  Its last sentences now record the maintainer's decisions BY and CB of
+  2026-11-04 (plan `hd-key-unification`), and that plan item H0 corrected the
+  parity claim. Written by a session that never read the corpus, from those
+  decisions and this repository's own code. The reference facts of §5.9B are
+  unchanged. It takes no forbidden-class input and needs no Dirty Gate pass.
