@@ -325,7 +325,7 @@ impl SwapOps for EthCoin {
             let mut from_block = from_block;
 
             loop {
-                let to_block = current_block.min(from_block + selfi.logs_block_range);
+                let to_block = selfi.log_window_end(from_block, current_block);
 
                 let events = try_s!(
                     selfi
@@ -359,7 +359,7 @@ impl SwapOps for EthCoin {
                         if to_block >= current_block {
                             break Ok(None);
                         }
-                        from_block = to_block;
+                        from_block = to_block + 1;
                     },
                 }
             }

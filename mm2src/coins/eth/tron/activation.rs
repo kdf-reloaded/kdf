@@ -158,6 +158,7 @@ pub async fn tron_coin_from_conf_and_request(
         ctx: ctx.weak(),
         chain_id: conf["chain_id"].as_u64(),
         logs_block_range: 0,
+        logs_window: Default::default(),
         derivation_method: DerivationMethod::Iguana(my_address),
         swap_v2_contracts: None,
         // TRON has no V1 or V2 EVM swap and no EVM gas model (energy and bandwidth instead): the gas-limit

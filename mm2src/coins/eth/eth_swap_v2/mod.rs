@@ -161,7 +161,7 @@ impl EthCoin {
 
             let mut window_start = params.from_block;
             while window_start <= current_block {
-                let window_end = std::cmp::min(window_start + self.logs_block_range - 1, current_block);
+                let window_end = self.log_window_end(window_start, current_block);
 
                 let events = match self
                     .events_from_block(
@@ -179,6 +179,15 @@ impl EthCoin {
                             "Error getting {} events from {} to {} block: {}",
                             params.event_name, window_start, window_end, e
                         );
+                        // The deadline is checked after a failed query as well, so that persistent failures
+                        // still end the search (CRD ch.17 R17.8.3 applies the same rule to V1).
+                        let now_secs = now_ms() / 1000;
+                        if now_secs > params.wait_until {
+                            return MmError::err(FindPaymentSpendError::Timeout {
+                                wait_until: params.wait_until,
+                                now: now_secs,
+                            });
+                        }
                         Timer::sleep(params.check_every).await;
                         continue;
                     },
@@ -190,7 +199,7 @@ impl EthCoin {
                     }
                 }
 
-                window_start += self.logs_block_range;
+                window_start = window_end + 1;
             }
 
             Timer::sleep(params.check_every).await;

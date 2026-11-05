@@ -449,6 +449,53 @@ including on a JSON-RPC error body, sticky last-good node, 10 s per-node
 cutoff, host-only node naming), and every signed swap transaction this
 chapter broadcasts follows R35.1.12 there.
 
+**R17.8.1. Bounded log windows (Reloaded-original, 2026-11-05).** Every
+`eth_getLogs` that an EVM swap path issues covers at most `W` blocks, the
+inclusive range `[from, from + W − 1]`. That includes V1 (the payment-sent,
+spend and refund events, and the wait for a payment's spend) and V2 (this
+section). A longer range is searched as consecutive windows that neither
+overlap nor skip a block. `W` starts at the coin's `logs_block_range` (coins
+file, default 1,000) and never rises above it.
+
+**R17.8.2. Shrinking on a range refusal.** When a window fails on every node
+with an answer that refuses its size, `W` shrinks and the window is retried at
+once. An answer refuses the size when its JSON-RPC error code is -32005, or
+when its message names a block range or a limit ("range", "limit",
+"too large", "exceed" or "more than"). A bare -32602 without such a phrase is
+an ordinary failure: it can come from a malformed request of our own, and
+shrinking would hide that.
+- `W` shrinks to the block count the message names, when it names one below
+  `W`; otherwise to half of `W`; never below 1.
+- The reduced `W` holds for the rest of the coin's session. Its first
+  reduction is logged once at WARN, naming the coin, the new `W` and the node
+  by host only (Chapter 35 §35.1.F). Every change of `W` is logged at debug
+  with its value.
+- Any other failure keeps `W` and is retried as before.
+
+**R17.8.3. The wait for a payment's spend.** While a node waits for one of its
+own V1 payments to be spent, it searches forward from a cursor.
+- The cursor starts at the block of the payment's receipt when that is known,
+  because the spend cannot precede the payment; otherwise at the search's
+  start block.
+- Each poll scans windows from the cursor to the current tip, and moves the
+  cursor past every window it scanned without error.
+- The wait's deadline is checked on every poll, also after a failed query.
+  A node whose every query fails therefore still leaves the wait at the
+  deadline and takes the refund path, instead of waiting forever.
+- Each poll also reads the payment's state from the swap contract. It is a
+  signal only: the contract keeps no secret and no block. When the state reads
+  as spent while no window has yet returned the spend, one WARN line says so
+  for that wait.
+- The V2 search for a funding spend (§17.5.5) likewise checks its deadline
+  after a failed query, so persistent failures cannot keep it from ending.
+
+**R17.8.4. Compatibility.** No switch. R17.8.1–R17.8.3 correct a defect: a V1
+spend wait that queried from the swap's start block to the tip in one request
+was refused by nodes that limit `eth_getLogs` ranges on chains with fast
+blocks. It also never reached its deadline, so a taker could neither learn the
+secret nor reach its refund path. Whether the reference bounds these queries
+has not been established.
+
 ---
 
 ## 17.9 NFT variant
@@ -793,6 +840,34 @@ requirements are enumerated in T17.9.1 through T17.9.10 because
 those branches are part of the maker-side state-machine and
 native persistence contract.
 
+**T17.8.1. Shrinking windows.** Against a stub EVM node that refuses any
+`eth_getLogs` range above 100 blocks with -32602 "block range too large", a
+spend search from 3,600 blocks below the tip with `W` = 1,000 shrinks `W` to
+500, 250, 125 and 62, then finds the spend. It logs one WARN and a debug line
+per change of `W`.
+
+**T17.8.2. A named limit.** When the refusal names a limit (for example "limited
+to 100 blocks"), `W` becomes that count at once.
+
+**T17.8.3. Unrelated errors.** A bare -32602 without a range or limit phrase
+leaves `W` unchanged and counts as an ordinary failure. A -32005 shrinks `W`
+whatever its message says.
+
+**T17.8.4. Windows.** With `W` = 1,000 and a range of blocks 0 to 2,499, the
+windows are [0, 999], [1,000, 1,999] and [2,000, 2,499], for every search of
+R17.8.1 (the spend wait, the spend and refund search, the payment-sent search
+and the V2 event search). `W` never exceeds the coin's `logs_block_range`.
+
+**T17.8.5. The cursor.** With the payment in block P and the swap's start block
+P − 3,555, the spend wait's first query starts at P.
+
+**T17.8.6. The deadline.** With every query failing, for any reason, the V1
+spend wait and the V2 funding-spend search each return their timeout error once
+their deadline has passed.
+
+**T17.8.7. The contract state.** With the contract reporting the payment as
+spent while the logs keep failing, one WARN line is logged for the wait.
+
 ---
 
 ## 17.13 Out of scope / known limitations
@@ -945,3 +1020,9 @@ The chapter relies on one baseline-state claim:
     none at six words or more; the 20 of the 509 identifiers that
     appear in the chapter are all serialized-schema tag values or
     public ERC-20 and ABI names.
+- *Clean-side addition (2026-11-05) -- R17.8.1–R17.8.4 and T17.8.1–T17.8.7.*
+  Reloaded-original. Written by a session that never read the forbidden corpus,
+  from this repository's own code and a laboratory observation of public node
+  behavior (nodes that refuse `eth_getLogs` ranges above a node-specific
+  limit). They take no forbidden-class input, so chapter 01 R38 is not
+  engaged and no gate pass is required.
