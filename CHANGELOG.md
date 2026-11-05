@@ -263,7 +263,7 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`electrum-tls-server-authentication`](docs/plans/electrum-tls-server-authentication.md) — new,
   planning: what an `SSL` Electrum server must present, with and without `disable_cert_verification`,
   is now written down. So are a warning at activation when the flag is set and an optional pin on the
-  server's key, `spki_sha256`; both are planned and not built yet (PR #XXX).
+  server's key, `spki_sha256`; both are planned and not built yet (PR #240).
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
   now names the gas limits each EVM coin and token will use and where they come from (PR #200);
   open point 3 is decided, and the fee to send an EVM taker fee is now quoted at the gas limit it
