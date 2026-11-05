@@ -814,6 +814,13 @@ application-payload signing surface in §28.7.
 > key's peer identifier as the gossip author (chapter 16), as here. The
 > reference's composed behavior includes no Identify protocol at either row
 > (R7); only the crate feature is enabled, as R0c records for this substrate.
+>
+> **Reloaded under a global-HD login (2026-11-05).** Under a global-HD login the
+> node's own key is the internal key (chapter 05 R45, plan item H4), so a relay
+> derives its identity as the reference does. A relay built before that took the
+> hash of the passphrase text there. Its peer identifier changes once at
+> upgrade, and peers learn it again through the relay's address (R21; chapter 05
+> R49).
 
 **R20.** The libp2p connection upgrade pipeline is bound to be
 uniform across all targets: multistream-select V1 negotiation,
@@ -2185,3 +2192,8 @@ hardening carried by the pinned fork).
   public MessagePack library this repository uses. The forbidden corpus
   was not consulted for this addition, and it needs no Dirty Gate pass
   of its own.
+- *Pointer added 2026-11-05 -- the note "Reloaded under a global-HD login"
+  under R19.* It names chapter 05 R45 and R49 (plan item H4). Written by a
+  context that never read the forbidden corpus, from this repository's own
+  relay-identity code. It carries no reference content of its own and needs
+  no Dirty Gate pass.

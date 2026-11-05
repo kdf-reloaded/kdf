@@ -1478,8 +1478,9 @@ one key, and shape 2 results.
 > recorded in plan [`hd-key-unification`](../plans/hd-key-unification.md)
 > (items H3 and H4) and is a divergence from R74, not a retained parity
 > behavior. Chapter 05 §5.12C (item H3) binds Reloaded to R74's HTLC keys
-> and to the UTXO funding address; the persistent key follows with item H4
-> (chapter 05 D6). Correcting it changes the key Reloaded
+> and to the UTXO funding address, and §5.12D (item H4) binds it to R74's
+> persistent key. A swap that recorded the passphrase hash keeps it
+> (chapter 05 R47). Correcting it changes the key Reloaded
 > announces for its own swaps and is therefore visible to peers and to swap
 > statistics at upgrade; a swap in flight must keep the key its start event
 > recorded.
@@ -2092,3 +2093,7 @@ reference rows alike.
   compatibility note under R74.* Both now name chapter 05 §5.12C (plan item
   H3). Written by a context that never read the forbidden corpus. It carries
   no reference content of its own and needs no Dirty Gate pass.
+- *Pointer added 2026-11-05 -- the compatibility note under R74.* It names
+  chapter 05 §5.12D and R47 (plan item H4). Written by a context that never
+  read the forbidden corpus. It carries no reference content of its own and
+  needs no Dirty Gate pass.
