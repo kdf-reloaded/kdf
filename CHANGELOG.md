@@ -371,6 +371,24 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
     applies to the version-2 swap's event search.
 
   Detail: PR #248; CRD ch.17 R17.8.1–R17.8.4.
+- **Before refunding on an EVM chain, a taker now finds a late spend of its payment within its time
+  budget.** Before a refund, the taker looks on the chain for a spend of its payment by the maker,
+  under a budget of two minutes. That look always started at the swap's first block. A maker that
+  spent the payment late, near the end of its lock time, left the spend far from the start. On a
+  chain with fast blocks, the look could then run out of time on every try. The taker would keep
+  trying a refund that cannot succeed and never claim the maker's payment.
+  - **Newest blocks first.** The look now scans from the newest blocks down.
+  - **No rescanning.** It remembers what it has scanned for the rest of the session, so a later look
+    goes on where the last one stopped. The newest 12 blocks are always scanned again, in case of
+    a reorganization.
+  - **Lagging nodes.** A node behind the newest block can answer a range as empty. So after a full
+    pass that found nothing, the look starts over. The taker's wait for the spend, and the
+    version-2 swap's event search, go back to their start at most once a minute after an empty
+    pass.
+  - **Version-2 swaps.** The version-2 swap's event search no longer rescans its whole range on every
+    poll.
+
+  Detail: PR #255; CRD ch.17 R17.8.3a.
 
 #### Node names in logs and errors
 

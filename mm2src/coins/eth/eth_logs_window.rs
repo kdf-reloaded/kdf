@@ -1,16 +1,20 @@
 //! Bounded `eth_getLogs` windows of the EVM swap paths and the V1 wait for a payment's spend
-//! (CRD ch.17 R17.8.1 -- R17.8.3).
+//! (CRD ch.17 R17.8.1 -- R17.8.3a).
 //!
 //! # Purpose
 //!
 //! Every `eth_getLogs` that an EVM swap path issues covers at most `W` blocks, the inclusive range
 //! `[from, from + W - 1]`. `W` starts at the coin's `logs_block_range` and shrinks, for the rest of the coin's
 //! session, when a node refuses a range. The wait for one of the node's own V1 payments to be spent searches
-//! forward from a cursor and leaves at its deadline whatever the nodes answer.
+//! forward from a cursor and leaves at its deadline whatever the nodes answer. The search for the spend or the
+//! refund of a V1 payment scans from the tip downwards and remembers, per payment, the blocks it has scanned
+//! (R17.8.3a).
 //!
 //! # Public exports
 //!
 //! - [`LogsWindow`]: the per-coin window state; a token shares its platform's.
+//! - [`PaymentScans`]: the blocks already scanned for each payment, per coin session (R17.8.3a); it lives in the
+//!   [`LogsWindow`] state, so a token shares it with its platform.
 //! - [`range_refusal`]: classifies a JSON-RPC error as a refusal of the range's size (R17.8.2).
 //! - `EthCoinImpl::logs_window`, `EthCoinImpl::log_window_end`, `EthCoinImpl::logs_querier`: the current `W`,
 //!   the end of the window that starts at a block, and the owned handle that runs the bounded query.
@@ -22,13 +26,21 @@
 //! - Windows of one range neither overlap nor skip a block.
 //! - Only a refusal of the range's size shrinks `W`; every other failure is returned (a bare -32602 without a
 //!   range or limit phrase can come from a malformed request of our own).
+//! - The cursors of the spend wait and of the V2 search go back to their start at most once per minute, after a
+//!   poll that reached the tip without a result.
 //! - The spend wait checks its deadline on every iteration, after a failed query as after a successful one.
+//! - A scanned interval never contains a block closer than `REORG_MARGIN_BLOCKS` below the tip that the scan saw.
+//! - A search that scans its whole range without a result drops the payment's scanned blocks (a lagging node can have
+//!   answered a window as empty), not its receipt block.
+//! - The scanned blocks are bounded per payment (`SCANNED_INTERVALS_CAP` intervals) and in all
+//!   (`SCANNED_PAYMENTS_CAP` payments, least recently used first out). Forgetting only costs a rescan.
 //! - The log lines name a node by host only: the all-failed error of the transport already carries the host-only
 //!   label of the node whose answer it renders (CRD ch.35 R35.1.14), and nothing else about a node is added.
 
 use super::*;
 use alloy::rpc::json_rpc::RpcError;
 use common::log::{debug, info, warn};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 
 /// The JSON-RPC code a node answers when a request is too large (EIP-1474 "limit exceeded").
@@ -45,6 +57,22 @@ pub(crate) const REORG_MARGIN_BLOCKS: u64 = 12;
 /// Seconds between two polls of the spend wait.
 pub(crate) const SPEND_WAIT_POLL_S: f64 = 5.;
 
+/// The least time between two returns of a wait's cursor to its start (CRD ch.17 R17.8.3), in milliseconds. A
+/// window that a lagging node answered as empty is searched again within this time.
+const CURSOR_RESET_EVERY_MS: u64 = 60_000;
+
+/// How many payments' scanned blocks a coin session keeps (CRD ch.17 R17.8.3a). The least recently used payment is
+/// forgotten first; forgetting a payment costs a rescan of its range, nothing else.
+pub(crate) const SCANNED_PAYMENTS_CAP: usize = 1024;
+
+/// How many disjoint scanned intervals one payment keeps. A scan cut short leaves its newest windows as a separate
+/// interval above the older one; the next call closes the gap, so more than a few are not expected. Past the cap the
+/// narrowest interval is forgotten.
+const SCANNED_INTERVALS_CAP: usize = 16;
+
+/// What identifies a V1 payment in [`PaymentScans`]: the swap contract and the payment's swap id.
+pub(crate) type PaymentKey = (Address, Vec<u8>);
+
 /// The state of the window `W` of one coin. Clones share it, so a token and its platform share one `W` (they
 /// ask the same nodes).
 #[derive(Clone, Debug, Default)]
@@ -58,6 +86,175 @@ struct LogsWindowState {
     warned: AtomicBool,
     /// Whether the window has been logged at INFO on the coin's first bounded query.
     announced: AtomicBool,
+    /// The blocks scanned for each V1 payment (R17.8.3a). The lock is never held across an await.
+    payments: Mutex<PaymentScans>,
+    /// The time between two returns of a wait's cursor to its start, in milliseconds; 0 while it has the
+    /// default `CURSOR_RESET_EVERY_MS`. Only a test sets it.
+    cursor_reset_ms: AtomicU64,
+}
+
+/// The blocks already scanned for the spend or the refund of each V1 payment, for the rest of the coin's session
+/// (CRD ch.17 R17.8.3a).
+#[derive(Debug, Default)]
+struct PaymentScans {
+    payments: HashMap<PaymentKey, PaymentScan>,
+    /// Counts the uses, to find the least recently used payment.
+    clock: u64,
+}
+
+#[derive(Debug, Default)]
+struct PaymentScan {
+    /// The block of the payment's receipt, once it has been read.
+    receipt_block: Option<u64>,
+    /// The scanned blocks as disjoint, non-adjacent inclusive intervals, ascending.
+    scanned: Vec<(u64, u64)>,
+    last_used: u64,
+}
+
+impl PaymentScans {
+    fn touch(&mut self, key: &PaymentKey) -> &mut PaymentScan {
+        self.clock += 1;
+        let clock = self.clock;
+        if !self.payments.contains_key(key) && self.payments.len() >= SCANNED_PAYMENTS_CAP {
+            let least_recent = self
+                .payments
+                .iter()
+                .min_by_key(|(_, scan)| scan.last_used)
+                .map(|(key, _)| key.clone());
+            if let Some(least_recent) = least_recent {
+                self.payments.remove(&least_recent);
+            }
+        }
+        let scan = self.payments.entry(key.clone()).or_default();
+        scan.last_used = clock;
+        scan
+    }
+}
+
+impl PaymentScan {
+    /// Adds the inclusive interval `[from, to]` to the scanned blocks.
+    fn mark(&mut self, from: u64, to: u64) {
+        self.scanned.push((from, to));
+        self.scanned.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(self.scanned.len());
+        for &(lo, hi) in &self.scanned {
+            match merged.last_mut() {
+                Some(last) if lo <= last.1.saturating_add(1) => last.1 = last.1.max(hi),
+                _ => merged.push((lo, hi)),
+            }
+        }
+        while merged.len() > SCANNED_INTERVALS_CAP {
+            if let Some(narrowest) = (0..merged.len()).min_by_key(|i| merged[*i].1 - merged[*i].0) {
+                merged.remove(narrowest);
+            }
+        }
+        self.scanned = merged;
+    }
+
+    /// The highest run of unscanned blocks in `[floor, end]`, as `(lowest, highest)`; `None` when every block of
+    /// the range is scanned.
+    fn highest_unscanned(&self, floor: u64, end: u64) -> Option<(u64, u64)> {
+        if end < floor {
+            return None;
+        }
+        let mut highest = end;
+        for &(lo, hi) in self.scanned.iter().rev() {
+            if hi < floor {
+                break;
+            }
+            if lo > highest {
+                continue;
+            }
+            if hi >= highest {
+                // The interval covers the top of what is left; continue below it.
+                if lo <= floor {
+                    return None;
+                }
+                highest = lo - 1;
+                continue;
+            }
+            return Some((hi.saturating_add(1).max(floor), highest));
+        }
+        Some((floor, highest))
+    }
+}
+
+impl LogsWindow {
+    fn with_scans<R>(&self, f: impl FnOnce(&mut PaymentScans) -> R) -> R {
+        let mut scans = self.0.payments.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut scans)
+    }
+
+    /// The block of the payment's receipt, when an earlier call has read it.
+    pub(crate) fn receipt_block(&self, key: &PaymentKey) -> Option<u64> {
+        self.with_scans(|scans| scans.payments.get(key).and_then(|scan| scan.receipt_block))
+    }
+
+    /// Forgets the blocks scanned for the payment, not its receipt block (R17.8.3a): a call that scanned the whole
+    /// range without a result can have been misled by a node that lagged behind the tip.
+    pub(crate) fn forget_scanned(&self, key: &PaymentKey) {
+        self.with_scans(|scans| {
+            if let Some(scan) = scans.payments.get_mut(key) {
+                scan.scanned.clear();
+            }
+        });
+    }
+
+    /// The least time between two returns of a wait's cursor to its start, in milliseconds (R17.8.3).
+    pub(crate) fn cursor_reset_every_ms(&self) -> u64 {
+        match self.0.cursor_reset_ms.load(AtomicOrdering::SeqCst) {
+            0 => CURSOR_RESET_EVERY_MS,
+            set => set,
+        }
+    }
+
+    /// Sets the time between two cursor resets (tests).
+    #[cfg(test)]
+    pub(crate) fn set_cursor_reset_every_ms(&self, ms: u64) {
+        self.0.cursor_reset_ms.store(ms, AtomicOrdering::SeqCst);
+    }
+
+    /// Remembers the block of the payment's receipt.
+    pub(crate) fn set_receipt_block(&self, key: &PaymentKey, block: u64) {
+        self.with_scans(|scans| scans.touch(key).receipt_block = Some(block));
+    }
+
+    /// The highest run of blocks in `[floor, end]` that have not been scanned for the payment, as
+    /// `(lowest, highest)`; `None` when the whole range has been scanned.
+    pub(crate) fn highest_unscanned(&self, key: &PaymentKey, floor: u64, end: u64) -> Option<(u64, u64)> {
+        self.with_scans(|scans| match scans.payments.get(key) {
+            Some(scan) => scan.highest_unscanned(floor, end),
+            None => (floor <= end).then_some((floor, end)),
+        })
+    }
+
+    /// Records the inclusive range `[from, to]` as scanned for the payment, without error and without a spend or
+    /// refund. Blocks closer than `REORG_MARGIN_BLOCKS` below `tip` are never recorded (R17.8.3a): a
+    /// reorganization can replace them, so the next call scans them again.
+    pub(crate) fn mark_scanned(&self, key: &PaymentKey, from: u64, to: u64, tip: u64) {
+        let to = to.min(tip.saturating_sub(REORG_MARGIN_BLOCKS));
+        // With a tip below the margin nothing is old enough to record (`tip - margin` would be block 0 itself).
+        if tip < REORG_MARGIN_BLOCKS || from > to {
+            return;
+        }
+        self.with_scans(|scans| scans.touch(key).mark(from, to));
+    }
+
+    /// The scanned intervals of a payment (tests).
+    #[cfg(test)]
+    pub(crate) fn scanned_intervals(&self, key: &PaymentKey) -> Vec<(u64, u64)> {
+        self.with_scans(|scans| {
+            scans
+                .payments
+                .get(key)
+                .map(|scan| scan.scanned.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    /// How many payments are remembered (tests).
+    #[cfg(test)]
+    pub(crate) fn remembered_payments(&self) -> usize { self.with_scans(|scans| scans.payments.len()) }
 }
 
 /// A node's refusal of a range's size (R17.8.2).
@@ -255,6 +452,11 @@ enum PollError {
 struct SpendWait {
     /// The first block that has not been searched yet.
     cursor: u64,
+    /// Where the cursor starts: the receipt's block once it is known, else the search's start block. The cursor
+    /// goes back here at most once per `LogsWindow::cursor_reset_every_ms`.
+    start: u64,
+    /// When (UNIX milliseconds) the cursor last went back to its start, or the wait began.
+    last_reset_ms: u64,
     /// Whether the payment's receipt has been read; the cursor then starts at the receipt's block.
     receipt_read: bool,
     /// The transaction a window returned as the spend, while it is being fetched.
@@ -281,6 +483,8 @@ impl EthCoin {
     ) -> Result<TransactionEnum, crate::TransactionErr> {
         let mut wait = SpendWait {
             cursor: from_block,
+            start: from_block,
+            last_reset_ms: now_ms(),
             receipt_read: false,
             found: None,
             spent_warned: false,
@@ -313,6 +517,23 @@ impl EthCoin {
                 );
             }
             Timer::sleep(poll_every).await;
+        }
+    }
+
+    /// The block of the receipt of `payment_tx`, or `None` when the node does not know it yet or the read failed
+    /// (the caller then falls back to its own start block).
+    pub(crate) async fn payment_receipt_block(&self, payment_tx: &SignedEthTx) -> Option<u64> {
+        use crate::eth::alloy_compat::assert_send_future;
+        use alloy::providers::Provider;
+
+        let provider = self.alloy_provider();
+        let payment_hash = alloy::primitives::B256::from_slice(&payment_tx.tx_hash().0);
+        match assert_send_future(provider.get_transaction_receipt(payment_hash)).await {
+            Ok(receipt) => receipt.and_then(|receipt| receipt.block_number),
+            Err(e) => {
+                debug!("[{}] couldn't read the payment's receipt: {}", self.ticker(), e);
+                None
+            },
         }
     }
 
@@ -384,6 +605,7 @@ impl EthCoin {
                 Ok(Some(receipt)) => {
                     if let Some(block) = receipt.block_number {
                         wait.cursor = wait.cursor.max(block);
+                        wait.start = wait.start.max(block);
                         wait.receipt_read = true;
                     }
                 },
@@ -415,6 +637,14 @@ impl EthCoin {
                 break;
             }
             next = to_block + 1;
+        }
+        // The poll reached the tip without the spend. A node that lagged behind the tip answers a window above its
+        // head as empty, and the cursor has moved past that window; so at most once per
+        // `cursor_reset_every_ms` the cursor goes back to its start and the next poll scans the range again.
+        let now = now_ms();
+        if now.saturating_sub(wait.last_reset_ms) >= self.logs_window.cursor_reset_every_ms() {
+            wait.cursor = wait.start;
+            wait.last_reset_ms = now;
         }
         Ok(None)
     }
@@ -489,6 +719,101 @@ mod tests {
         assert_eq!(named("block range too large"), None);
         // A number that counts something else is not a block count.
         assert_eq!(named("query returned more than 10000 results"), None);
+    }
+
+    fn test_key(id: u8) -> PaymentKey { (Address::zero(), vec![id; 32]) }
+
+    #[test]
+    fn scanned_intervals_merge_when_they_overlap_or_touch() {
+        let mut scan = PaymentScan::default();
+        scan.mark(100, 199);
+        scan.mark(300, 399);
+        assert_eq!(scan.scanned, [(100, 199), (300, 399)]);
+        scan.mark(200, 299);
+        assert_eq!(scan.scanned, [(100, 399)]);
+        scan.mark(150, 160);
+        scan.mark(0, 100);
+        assert_eq!(scan.scanned, [(0, 399)]);
+    }
+
+    #[test]
+    fn the_highest_unscanned_run_is_found_from_the_top() {
+        let mut scan = PaymentScan::default();
+        assert_eq!(scan.highest_unscanned(10, 50), Some((10, 50)));
+        assert_eq!(scan.highest_unscanned(51, 50), None);
+        scan.mark(20, 30);
+        scan.mark(40, 45);
+        assert_eq!(scan.highest_unscanned(10, 50), Some((46, 50)));
+        assert_eq!(scan.highest_unscanned(10, 45), Some((31, 39)));
+        assert_eq!(scan.highest_unscanned(10, 39), Some((31, 39)));
+        assert_eq!(scan.highest_unscanned(10, 30), Some((10, 19)));
+        assert_eq!(scan.highest_unscanned(10, 19), Some((10, 19)));
+        assert_eq!(scan.highest_unscanned(25, 45), Some((31, 39)));
+        assert_eq!(scan.highest_unscanned(25, 30), None);
+        assert_eq!(scan.highest_unscanned(31, 39), Some((31, 39)));
+        assert_eq!(scan.highest_unscanned(46, 50), Some((46, 50)));
+        // A range below every scanned block is whole.
+        assert_eq!(scan.highest_unscanned(0, 5), Some((0, 5)));
+    }
+
+    #[test]
+    fn the_newest_blocks_are_never_recorded_as_scanned() {
+        let window = LogsWindow::default();
+        let key = test_key(1);
+        // Everything up to the tip, but the newest `REORG_MARGIN_BLOCKS` blocks stay unrecorded.
+        window.mark_scanned(&key, 0, 1_000, 1_000);
+        assert_eq!(window.scanned_intervals(&key), [(0, 1_000 - REORG_MARGIN_BLOCKS)]);
+        assert_eq!(
+            window.highest_unscanned(&key, 0, 1_000),
+            Some((1_000 - REORG_MARGIN_BLOCKS + 1, 1_000))
+        );
+        // A window inside the margin records nothing; neither does a tip below the margin.
+        let other = test_key(2);
+        window.mark_scanned(&other, 990, 1_000, 1_000);
+        window.mark_scanned(&other, 0, 5, 5);
+        assert_eq!(window.scanned_intervals(&other), []);
+        assert_eq!(window.highest_unscanned(&other, 0, 5), Some((0, 5)));
+    }
+
+    #[test]
+    fn forgetting_the_scanned_blocks_keeps_the_receipt_block() {
+        let window = LogsWindow::default();
+        let key = test_key(3);
+        window.set_receipt_block(&key, 77);
+        window.mark_scanned(&key, 0, 500, 1_000);
+        assert_eq!(window.scanned_intervals(&key), [(0, 500)]);
+        window.forget_scanned(&key);
+        assert_eq!(window.scanned_intervals(&key), []);
+        assert_eq!(window.receipt_block(&key), Some(77));
+        assert_eq!(window.highest_unscanned(&key, 0, 1_000), Some((0, 1_000)));
+        // An unknown payment is not an error.
+        window.forget_scanned(&test_key(4));
+    }
+
+    #[test]
+    fn the_memory_of_scanned_blocks_is_bounded() {
+        let mut scan = PaymentScan::default();
+        for i in 0..(SCANNED_INTERVALS_CAP as u64 + 10) {
+            scan.mark(i * 1_000, i * 1_000 + 10 + i);
+        }
+        assert_eq!(scan.scanned.len(), SCANNED_INTERVALS_CAP);
+
+        let window = LogsWindow::default();
+        for id in 0..(SCANNED_PAYMENTS_CAP + 5) {
+            let key = (Address::zero(), (id as u64).to_be_bytes().to_vec());
+            window.set_receipt_block(&key, id as u64);
+        }
+        assert_eq!(window.remembered_payments(), SCANNED_PAYMENTS_CAP);
+        // The least recently used payments went first.
+        assert_eq!(
+            window.receipt_block(&(Address::zero(), 0u64.to_be_bytes().to_vec())),
+            None
+        );
+        let newest = SCANNED_PAYMENTS_CAP as u64 + 4;
+        assert_eq!(
+            window.receipt_block(&(Address::zero(), newest.to_be_bytes().to_vec())),
+            Some(newest)
+        );
     }
 
     #[test]
