@@ -283,7 +283,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
   complete. The maintainer's answers on withdraw, the legacy methods, legacy activation and Sia are
-  recorded in it.
+  recorded in it. `RELOADED_VS_GLEEC.md` now says what GLEEC KDF does under an HD login, and lists
+  the planned change to legacy `enable` and `electrum` with its switch.
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
