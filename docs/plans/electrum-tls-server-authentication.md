@@ -22,8 +22,9 @@ D38.6.4m.1, D38.6.4n.1 and D38.6.4n.2; ch.55 R55.5.10 (the `mode.rpc_data.server
    the flag. It names the refusals that stay, and specifies the activation warning. R38.6.4n
    specifies the pin: its value, the verification, the error classes, the browser build and the
    operator guidance. The ch.55 row points to both.
-2. **Lab run.** A SwapLab run with self-signed lab Electrum servers, using the current flag. A
-   refusal it shows is classified by R38.6.4m items 3 and 5 (D38.6.4m.1).
+2. **Lab run.** *Done 2026-11-05 (D38.6.4m.1 resolved).* Seven certificates, three builds, 42 runs:
+   accept and refuse are identical on KDF Reloaded and both references. Under the flag only the
+   version 1 and RSA-1024 certificates are refused, by design (R38.6.4m items 3 and 5).
 3. **Code**, after the maintainer approves the implementation. The warning of R38.6.4m item 6 and
    the pin of R38.6.4n, with T38.6.4m (c) and (e) and T38.6.4n. The code PR carries the
    CHANGELOG entries, a `docs/GLEEC_COMPATIBILITY.md` row, a `RELOADED_VS_GLEEC.md` bullet, a
@@ -33,7 +34,6 @@ D38.6.4m.1, D38.6.4n.1 and D38.6.4n.2; ch.55 R55.5.10 (the `mode.rpc_data.server
 
 ## Open points
 
-- D38.6.4m.1: what the lab run shows.
 - D38.6.4n.1: pass-through by the coins file and the wallet GUIs.
 - D38.6.4n.2: trust on first use. It is not part of this design, because it is weaker than a
   published pin.

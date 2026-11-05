@@ -2275,12 +2275,14 @@ larger-of form gives 50 ms, the sum 70 ms. The maintainer kept the larger-of
 form of item 6. The latency study of 2026-11-02 found the same near sessions
 under both forms on every one of its 13 sampled coins.
 
-D38.6.4m.1 *(Open, 2026-11-05.)* *A refusal under the flag in the field.* The
-item was raised because a server with `disable_cert_verification` was reported
-refused. A lab run with self-signed servers is planned. If it shows a refusal,
-its cause is classified by items 3 and 5 of R38.6.4m: a version 1 certificate,
-an RSA key below 2048 bits, an IP literal and a TLS version below 1.2 are
-refused by design.
+D38.6.4m.1 *(Resolved 2026-11-05 by a lab run.)* *A refusal under the flag in the
+field.* The item was raised because a server with `disable_cert_verification` was
+reported refused. A lab run with seven certificates against this build and two
+reference builds (`docs/release-tests/0.4.0-beta.1.md`, "Electrum TLS") found
+accept and refuse identical on all three. Under the flag, self-signed, expired
+and wrong-name certificates were accepted. Only the refusals by design of items
+3 and 5 of R38.6.4m remained: a version 1 certificate and an RSA key below 2048
+bits. An IP literal and a TLS version below 1.2 are also refused by design.
 
 D38.6.4n.1 *(Open, 2026-11-05.)* *Pass-through by the coins file and the
 wallets.* Whether the coins file and the wallet GUIs pass `spki_sha256` through
