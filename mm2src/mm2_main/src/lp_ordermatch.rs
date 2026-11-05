@@ -72,9 +72,9 @@ use crate::mm2::lp_swap::{calc_max_maker_vol, check_balance_for_maker_swap, chec
 
 pub use best_orders::{best_orders_rpc, best_orders_rpc_v2};
 use maker_balance_watch::{start_maker_balance_watch, BalanceWatches};
-use my_orders_storage::{delete_my_maker_order, delete_my_taker_order, save_my_new_maker_order,
-                        save_my_new_taker_order, MyActiveOrders, MyOrdersFilteringHistory, MyOrdersHistory,
-                        MyOrdersStorage};
+use my_orders_storage::{delete_my_maker_order, delete_my_taker_order, maker_restore_skips_cancelled,
+                        removal_recorded_in_history, save_my_new_maker_order, save_my_new_taker_order, MyActiveOrders,
+                        MyOrdersFilteringHistory, MyOrdersHistory, MyOrdersStorage};
 use order_write_gate::{OrderWriteGate, PublishedState, RemovedMakerOrder};
 pub use orderbook_depth::orderbook_depth_rpc;
 pub use orderbook_rpc::{orderbook_rpc, orderbook_rpc_v2};
@@ -485,7 +485,7 @@ pub fn init_ordermatch_context(ctx: &MmArc) -> OrdermatchInitResult<()> {
     let ordermatch_context = OrdermatchContext {
         maker_orders_ctx: Default::default(),
         my_taker_orders: Default::default(),
-        orderbook: Default::default(),
+        orderbook: PaMutex::new(Orderbook::for_ctx(ctx)),
         trie_store,
         trie_ops_tx,
         orderbook_subscriptions: PaRwLock::new(HashMap::default()),
@@ -516,7 +516,7 @@ impl OrdermatchContext {
             Ok(OrdermatchContext {
                 maker_orders_ctx: Default::default(),
                 my_taker_orders: Default::default(),
-                orderbook: Default::default(),
+                orderbook: PaMutex::new(Orderbook::for_ctx(&ctx2)),
                 trie_store,
                 trie_ops_tx,
                 orderbook_subscriptions: PaRwLock::new(HashMap::default()),
@@ -540,7 +540,7 @@ impl OrdermatchContext {
             Ok(OrdermatchContext {
                 maker_orders_ctx: Default::default(),
                 my_taker_orders: Default::default(),
-                orderbook: Default::default(),
+                orderbook: PaMutex::new(Orderbook::for_ctx(&ctx2)),
                 trie_store,
                 trie_ops_tx,
                 orderbook_subscriptions: PaRwLock::new(HashMap::default()),
