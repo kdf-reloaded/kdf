@@ -264,6 +264,14 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   (trust-dns 0.22, with an accepted `idna` advisory) are no longer built. The dependency policy
   now bans them. Detail: PRs #216, #219; CRD ch.45 R45.6B.11.
 
+#### Siacoin
+
+- **Siacoin (SC) swaps are supported.** Atomic swaps of SC were verified on the live chain on
+  November 4, 2026: between two KDF Reloaded nodes in both directions, including a refund, and
+  with Komodo KDF and GLEEC KDF nodes in the cases that Known limitations does not exclude. Earlier
+  releases said SC swaps were postponed; that statement is withdrawn. Detail: PR #239; CRD ch.20
+  D5, R-S11.
+
 #### Withdrawals
 
 - **A withdrawal refused as unsupported now answers `error_type` `UnsupportedError`, as on Komodo
@@ -488,9 +496,15 @@ lives.
   has no shielded wallet database, and building a shielded transaction would also need the Sapling
   prover, which only the native build has. Use a native build for ARRR. Detail: CRD ch.39 R39.10.1,
   §39.6.1.
-- **Siacoin (SC) swaps are not available.** Sending, receiving, the balance and the history work.
-  Atomic swaps of SC are postponed until after the beta; the design is still a draft. More in the
-  [Siacoin swap draft](docs/reloaded-rewrite/54-sia-swap-v2-path.md).
+- **The miner fee of a Siacoin withdrawal is estimated from a transaction length that is smaller than
+  the transaction sent.** Sia nodes accepted these fees in tests. Detail: PR #239; CRD ch.20 D6.
+- **Orders that sell Siacoin (SC) are not shown to Komodo KDF and GLEEC KDF takers, and a GLEEC maker
+  can fail to validate a Siacoin taker fee.** Takers on those two nodes do not see orders whose base
+  coin is SC, so a KDF Reloaded maker that sells SC cannot be matched by them. A GLEEC maker can fail
+  to validate a Siacoin taker fee when the transaction pool of its Sia node holds a transaction it
+  cannot read (a storage proof with an empty proof list); the fix exists in the sia-rust library but
+  not in the GLEEC release, so such swaps fail intermittently. A GLEEC node that sells SC as the order
+  base is not affected. Detail: PR #239.
 - **Radiant (RXD) is only partly usable.** RXD activates and signs, but swaps with it are not
   established. More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
@@ -517,6 +531,10 @@ lives.
   activation log line says `gas_limit: defaults`. More in
   [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md). Detail: PR #105, PR #200; CRD
   ch.57 R57.5.2, R57.5.3, R57.5.5.
+- **A refund can wait without a log message saying why.** If the node a coin talks to stops advancing,
+  a refund waits until it advances again, and the log does not say so. In a test, a refund started
+  four hours late because the coin's node stood still for that time; the log only repeated
+  "wait refund till" every 24 seconds.
 
 ## [0.3.0-beta.1] — 2026-11-01
 

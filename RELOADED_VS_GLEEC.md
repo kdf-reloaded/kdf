@@ -421,11 +421,13 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
 ### Work in progress
 
 - Hardware wallet — Ledger transport (scaffolding only; crate not built into any artifact).
-- Siacoin V1 atomic-swap operations. No longer a stub: SC now negotiates its
-  own ed25519 HTLC key (ch.51 R-S9), gets the CRD-dictated 32-byte secret
-  hash whenever it is on either side of the pair (ch.51 R71/R72), and has
-  completed real send/spend/refund swaps against UTXO counterparties
-  (confirmed live, both directions). The swap-spend search walks the HTLC
+- Siacoin V1 atomic-swap operations. Supported (lab-verified 2026-11-04: seven
+  swaps completed on the live chain, and a refund between two KDF Reloaded
+  nodes). SC negotiates its own ed25519 HTLC key (ch.51 R-S9), gets the
+  CRD-dictated 32-byte secret hash whenever it is on either side of the pair
+  (ch.51 R71/R72), and has completed real send/spend/refund swaps against UTXO
+  counterparties (confirmed live, both directions). Limits with Komodo KDF and
+  GLEEC KDF nodes: see the changelog's Known limitations. The swap-spend search walks the HTLC
   address's event log and tells a spend from a refund (ch.20 D3, closed).
   Still open: the V2 swap protocol is not implemented for SC (ch.20 D5,
   V1 only).
