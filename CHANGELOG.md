@@ -51,6 +51,21 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
     `p2p.send_queue.drop_series.max` the longest current run of such minutes.
 
   Detail: PRs #204, #214; CRD ch.28 RQ1 items 6 and 8.
+- **A coin's protocol information can now carry a capability word that other nodes ignore.** The
+  protocol information a coin sends with its orders, requests and reservations may now end with a
+  small extra map that names capabilities the node has, so that a later coin can require a
+  capability of its counterparty before a swap starts. A node reads only the part before the word,
+  so the order book, the address format it reports and every coin that asks for nothing behave
+  exactly as before, and the word changes no order identity, no order book root and no
+  synchronization. A reader that cannot make sense of the word treats it as absent. No coin sends a
+  word yet, so nothing changes on the wire today. Detail: PR #235; CRD ch.59 R59.4A.1 to R59.4A.7.
+- **The log now says why a reservation or a request was turned down by a coin.** When a coin
+  declines the protocol information of a counterparty's reservation (on the taker side) or request
+  (on the maker side), the node logs one debug line naming both orders and the coin. When a taker's
+  pass over the reservations it received ends without a connect and a coin declined at least one of
+  them, one info line names the taker order and the number declined, so an operator whose order
+  times out can see why. The protocol information itself is never logged. Nothing else changes in
+  how orders are matched. Detail: PR #235; CRD ch.59 R59.4A.6.
 
 #### Start-up and configuration
 
@@ -76,6 +91,12 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   Detail: PR #213; CRD ch.57 R57.4.2, R57.5.2a.
 
 #### Order book and peer-to-peer network
+
+- **Messages from other nodes are checked for nesting depth and declared lengths before they are
+  read.** Every value a peer sends is checked first: arrays and maps may nest at most 64 levels, and every
+  declared length and count must fit in the bytes that follow. A value outside these bounds is
+  dropped as malformed and counted in the metric `p2p.payload.malformed`; the encoding is
+  unchanged and honest peers are not affected. Detail: PR #238; CRD ch.28 R16a.
 
 - **A node waits 5 minutes before it dials the same address again, and no longer dials a seed it
   is already connected to.** A node that holds fewer relays than it needs dials seeds and known
@@ -285,6 +306,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   wallets and swaps stay Sapling-only, payments from Pirate Chain's Ironwood wallets are found and
   spent like any other, and a withdrawal may pay a Pirate1 address (CRD PR #229; the code follows).
   Native mode, the rest of the Ironwood pool and Pirate1 receiving addresses move to a later release.
+  The capability word that lets ARRR require a counterparty that builds version-6 transactions is
+  written (CRD PR #227), and its generic part, the word's writer and fail-closed reader and the
+  decline log lines, is implemented (PR #235); the ARRR rule that uses it comes next.
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
