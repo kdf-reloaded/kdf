@@ -14,7 +14,7 @@
 //! readers that need a transport are covered next to their fakes (`z_lightwalletd/tests.rs`,
 //! `z_lightwalletd/htlc_index/tests.rs`), which import the fixtures from here.
 
-use super::z_coin_ops::record_broadcast_in_wallet_db;
+use super::z_coin_ops::{broadcast_fee_sat, record_broadcast_in_wallet_db};
 use super::z_coin_wallet_db::tests::test_params_with_zip212;
 use super::z_tx_read::{read_tx, txid_display, txid_internal};
 use crate::{Transaction, TransactionEnum};
@@ -171,10 +171,10 @@ fn t39_6_5a_every_other_reader_of_full_bytes_accepts_the_mainnet_transactions() 
     }
 }
 
-/// T39.6.5a / D39.8.0e: the broadcast record accepts a version-6 transaction with a non-empty Ironwood
-/// bundle. A transaction that spends no Sapling note (a deposit) has nothing to record. A transaction
-/// that spends a Sapling note reaches the fee derivation and is refused there: its fee depends on the
-/// Ironwood value balance too, which `broadcast_fee_sat` does not read (the Pirate1 withdrawal work).
+/// T39.6.5a / D39.8.0e / R39.6.5g: the broadcast record accepts a version-6 transaction with a non-empty
+/// Ironwood bundle. A transaction that spends no Sapling note (a deposit) has nothing to record. A
+/// transaction that spends a Sapling note has its fee derived from the bytes -- the Sapling and Ironwood
+/// value balances, less the transparent outputs (none here).
 #[test]
 fn t39_6_5a_the_broadcast_record_reads_the_mainnet_transactions() {
     let params = test_params_with_zip212();
@@ -187,16 +187,25 @@ fn t39_6_5a_the_broadcast_record_reads_the_mainnet_transactions() {
         "a deposit spends no Sapling note: read, nothing to record"
     );
 
+    // The withdrawal's fee is the sum of its fixture's own value balances: 112.0495 ARRR leave Sapling and
+    // 112.0494 ARRR enter Ironwood, so the fee is 0.0001 ARRR (CRD ch.39 R39.6.5g).
+    let withdraw = read_tx(&WITHDRAW.bytes()).unwrap();
+    let sapling = i64::from(*withdraw.sapling_bundle().unwrap().value_balance());
+    let ironwood = i64::from(*withdraw.ironwood_bundle().unwrap().value_balance());
+    assert_eq!((sapling, ironwood), (11_204_950_000, -11_204_940_000));
+    assert_eq!(broadcast_fee_sat(&withdraw), Some(10_000));
+
+    // So the record no longer stops at the fee: it goes on to the wallet database, which is the thing
+    // that is not there (the vendored `zcash_client_sqlite` records a transaction with an Ironwood bundle
+    // instead of panicking on it; T39.6.5e records one for real).
     let refused = record_broadcast_in_wallet_db(no_database, &params, &WITHDRAW.bytes()).unwrap_err();
-    assert!(
-        refused.contains("spends shielded notes but its fee cannot be derived from its bytes"),
-        "{refused}"
-    );
+    assert!(!refused.contains("its fee cannot be derived"), "{refused}");
+    assert!(refused.contains("Shielded wallet DB is unavailable"), "{refused}");
 }
 
 /// The verifying key of the Ironwood epoch's circuit, built once for the whole test binary: building it
 /// is the expensive part of the check.
-fn ironwood_verifying_key() -> &'static VerifyingKey {
+pub(crate) fn ironwood_verifying_key() -> &'static VerifyingKey {
     static KEY: OnceLock<VerifyingKey> = OnceLock::new();
     KEY.get_or_init(|| {
         let started = Instant::now();
@@ -212,9 +221,19 @@ fn ironwood_verifying_key() -> &'static VerifyingKey {
 
 /// The shielded signature hash of a version-6 transaction with no transparent inputs is its
 /// identifier (R39.6.4e(b)); both fixtures are of that shape, which is asserted where it is used.
-fn shielded_sighash(tx: &ZTransaction) -> [u8; 32] {
+pub(crate) fn shielded_sighash(tx: &ZTransaction) -> [u8; 32] {
     assert!(tx.transparent_bundle().is_none_or(|bundle| bundle.vin.is_empty()));
     *tx.txid().as_ref()
+}
+
+/// Whether the Ironwood bundle of `tx` verifies with the project's verifying key over `sighash`: the Halo2
+/// proof, every spend-authorization signature and the binding signature. Shared with the tests of the
+/// transactions this project builds (T39.6.5c), which are checked exactly as the chain's are.
+pub(crate) fn ironwood_bundle_verifies(tx: &ZTransaction, sighash: [u8; 32]) -> bool {
+    let bundle = tx.ironwood_bundle().expect("an Ironwood bundle");
+    let mut batch = BatchValidator::new(ironwood_verifying_key());
+    batch.add_bundle(bundle, sighash).unwrap();
+    batch.validate(rand::rngs::OsRng)
 }
 
 /// T39.6.5a, the decisive check: the Ironwood bundle of each mainnet transaction verifies with this
