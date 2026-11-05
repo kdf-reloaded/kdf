@@ -2187,7 +2187,7 @@ the baseline anchor (R1) and reloaded today, rounded **every** fixed-fee
 coin's size up to a whole kilobyte.
 
 > **Compatibility row (this repository, 2026-11-05; not corpus-sourced).**
-> **Parity** since PR #XXX: a transaction with a change output pays the rule
+> **Parity** since PR #247: a transaction with a change output pays the rule
 > above once over its whole size, change output included, under every
 > policy. Before, Reloaded's transaction builder added the change output's
 > share under a dynamic rate (which an explicit `UtxoFixed` or `UtxoPerKbyte`
@@ -2574,7 +2574,7 @@ item 2, the figure both descriptors give is
 `floor(a × (s − 34) / 1000) + floor(a × 34 / 1000)`, which can be one base unit
 below `floor(a × s / 1000)`; the test asserts the two descriptors equal and the
 figure this split gives. With P2PKH inputs of 148 bytes the larger size reached
-is 1,429 bytes rather than 1,404. *Since PR #XXX (R38.6.6b, T38.6.6b.1)* the
+is 1,429 bytes rather than 1,404. *Since PR #247 (R38.6.6b, T38.6.6b.1)* the
 builder charges `floor(a × s / 1000)` once, change output included, and the
 tests assert that figure.
 
@@ -2620,7 +2620,7 @@ T38.6.6l, where the builder adds the change output the figure both descriptors
 give is `floor(a × (s − 34) / 1000) + floor(a × 34 / 1000)`, which can be one
 base unit below `floor(a × s / 1000)`. The tests of PR #234 assert the two
 descriptors equal and this figure, at 457 and 1,493 bytes; the SLP OP_RETURN
-output makes these sizes differ from T38.6.6l's. *Since PR #XXX (R38.6.6b,
+output makes these sizes differ from T38.6.6l's. *Since PR #247 (R38.6.6b,
 T38.6.6b.1)* the figure is `floor(a × s / 1000)` once, and the tests assert it.
 
 R38.6.6n *Required inputs count toward the input total (reference-bound;
@@ -3359,7 +3359,7 @@ R38.8.6 **Tests (two-direction, observable).**
   and the clean-side note under T38.6.6m. They rest on that decision and this
   repository's code, take no forbidden-class input, and so do not engage
   chapter 01 R38.
-- *Clean-side amendment (2026-11-05) -- PR #XXX, the change output under one
+- *Clean-side amendment (2026-11-05) -- PR #247, the change output under one
   rounding.* A session that never read the corpus added the compatibility row
   under R38.6.6b and T38.6.6b.1, and appended a sentence each to the clean-side
   notes under T38.6.6l and T38.6.6m. They rest on R38.6.6b as cleared above, on

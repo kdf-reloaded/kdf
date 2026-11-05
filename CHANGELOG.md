@@ -294,7 +294,7 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   such a transaction could pay one base unit less than the rate gives. A RIN withdrawal of 670
   bytes at 0.00001234 RIN per 1,000 bytes paid 825 satoshi, where Komodo and GLEEC charge 826.
   This covers a coin's dynamic fee and an explicit `UtxoFixed` or `UtxoPerKbyte` withdraw fee.
-  Detail: PR #XXX; CRD ch.38 R38.6.6b, T38.6.6b.1.
+  Detail: PR #247; CRD ch.38 R38.6.6b, T38.6.6b.1.
 
 ### Tests
 
