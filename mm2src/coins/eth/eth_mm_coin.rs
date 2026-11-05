@@ -88,11 +88,11 @@ impl MmCoin for EthCoin {
         // Trezor user-action signing; clients must use the `task::withdraw` API.
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
         if matches!(self.signer, EthSigner::Trezor(_)) {
-            return Box::new(futures01::future::err(MmError::new(
-                WithdrawError::UnsupportedUnderTrezor(
-                    "Trezor EVM withdrawals require the 'task::withdraw' API for device user-action signing".to_owned(),
-                ),
-            )));
+            return Box::new(futures01::future::err(MmError::new(WithdrawError::UnsupportedError(
+                "Unsupported under the Trezor signing policy: Trezor EVM withdrawals require the \
+                     'task::withdraw' API for device user-action signing"
+                    .to_owned(),
+            ))));
         }
         Box::new(Box::pin(withdraw_impl(ctx, self.clone(), req)).compat())
     }

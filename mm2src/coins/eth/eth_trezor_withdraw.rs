@@ -139,8 +139,10 @@ async fn trezor_client(
 /// rejection can be asserted without a device or task handle.
 pub(crate) fn ensure_trezor_withdraw_supported(coin: &EthCoin) -> MmResult<(), WithdrawError> {
     if matches!(coin.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
-        return MmError::err(WithdrawError::UnsupportedUnderTrezor(
-            "TRON withdraw is not supported under the Trezor signing policy".to_owned(),
+        return MmError::err(WithdrawError::UnsupportedError(
+            "Unsupported under the Trezor signing policy: TRON withdraw is not supported under the Trezor signing \
+             policy"
+                .to_owned(),
         ));
     }
     Ok(())

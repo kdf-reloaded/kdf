@@ -444,6 +444,17 @@ impl SwapOps for EthCoin {
     }
 
     fn get_htlc_key_pair(&self) -> Option<keys::KeyPair> { None }
+
+    /// An EVM coin announces the node's persistent key (it has no key pair of its own, above) and pays from its
+    /// signer (CRD ch.05 R36 item 2). A hardware signer is out of the rule's scope.
+    fn swap_key_disagreement(&self, node_pubkey: &keys::Public) -> Option<crate::SwapKeyDisagreement> {
+        if self.uses_hardware_signer() {
+            return None;
+        }
+        let node_bytes: &[u8] = node_pubkey;
+        (compressed_secp256k1_public(&self.signer.public())[..] != *node_bytes)
+            .then_some(crate::SwapKeyDisagreement::EvmSigner)
+    }
 }
 
 #[async_trait]

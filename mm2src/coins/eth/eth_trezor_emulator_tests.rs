@@ -889,7 +889,7 @@ fn emulator_trezor_withdraw_tron_unsupported() {
 
     let err = drive_withdraw(&ctx, coin, req, Duration::from_secs(20)).expect_err("TRON must be unsupported");
     println!("TRON_ERR = {:?}", err);
-    assert!(matches!(err, WithdrawError::UnsupportedUnderTrezor(_)));
+    assert!(matches!(err, WithdrawError::UnsupportedError(_)));
 }
 
 /// T50.10: an unresolvable / foreign `from` selector fails with the ch. 49

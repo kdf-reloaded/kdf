@@ -683,6 +683,124 @@ fn test_generate_transaction() {
     block_on(builder.build()).unwrap_err();
 }
 
+/// The fixed-rate, 8-decimal fixture of the R38.6.6n builder tests: 1,000 base units per kilobyte, dust 1,000.
+#[cfg(not(target_arch = "wasm32"))]
+fn required_inputs_test_coin() -> UtxoStandardCoin { floor_test_coin("TEST", TxFee::FixedPerKb(1000), 1000, 8) }
+
+#[cfg(not(target_arch = "wasm32"))]
+fn required_inputs_test_unspent(seed: u8, value: u64) -> UnspentInfo {
+    UnspentInfo {
+        value,
+        outpoint: OutPoint {
+            hash: H256::from([seed; 32]),
+            index: 0,
+        },
+        height: Default::default(),
+    }
+}
+
+/// T38.6.6n: the value of a required input counts toward the sufficiency check, the change, `spent_by_me` and the
+/// reported fee, so that the fee equals the inputs minus the outputs and the input's value returns as change.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_generate_transaction_required_input_value_counts_r38_6_6n() {
+    let coin = required_inputs_test_coin();
+    let outputs = vec![TransactionOutput {
+        script_pubkey: vec![].into(),
+        value: 3000,
+    }];
+    let builder = UtxoTxBuilder::new(&coin)
+        .add_required_inputs(vec![required_inputs_test_unspent(1, 2000)])
+        .add_available_inputs(vec![required_inputs_test_unspent(2, 100_000)])
+        .add_outputs(outputs);
+    let (tx, data) = block_on(builder.build()).unwrap();
+
+    // The required input first, then the one available input the outputs and fee needed on top of it.
+    assert_eq!(tx.inputs.len(), 2);
+    assert_eq!(tx.inputs[0].amount, 2000);
+    let inputs_sum = 102_000;
+    let outputs_sum: u64 = tx.outputs.iter().map(|output| output.value).sum();
+    // The payment and the change output, which includes the required input's 2,000.
+    assert_eq!(tx.outputs.len(), 2);
+    assert_eq!(tx.outputs[1].value, inputs_sum - 3000 - data.fee_amount);
+    assert_eq!(data.spent_by_me, inputs_sum);
+    assert_eq!(data.received_by_me, tx.outputs[1].value);
+    assert_eq!(data.unused_change, None);
+    // The fee reported is the inputs minus the outputs.
+    assert_eq!(data.fee_amount, inputs_sum - outputs_sum);
+}
+
+/// T38.6.6n: required inputs that cover the outputs and the fee on their own are enough; no available input is
+/// added, and the fee is computed for the transaction as built.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_generate_transaction_required_inputs_alone_suffice_r38_6_6n() {
+    let coin = required_inputs_test_coin();
+    let outputs = || {
+        vec![TransactionOutput {
+            script_pubkey: vec![].into(),
+            value: 3000,
+        }]
+    };
+    for with_available in [false, true] {
+        let mut builder = UtxoTxBuilder::new(&coin)
+            .add_required_inputs(vec![required_inputs_test_unspent(1, 100_000)])
+            .add_outputs(outputs());
+        if with_available {
+            builder = builder.add_available_inputs(vec![required_inputs_test_unspent(2, 50_000)]);
+        }
+        let (tx, data) = block_on(builder.build()).unwrap();
+        assert_eq!(tx.inputs.len(), 1, "available inputs: {with_available}");
+        let outputs_sum: u64 = tx.outputs.iter().map(|output| output.value).sum();
+        assert_eq!(tx.outputs.len(), 2);
+        assert_eq!(data.spent_by_me, 100_000);
+        assert!(data.fee_amount > 0);
+        assert_eq!(data.fee_amount, 100_000 - outputs_sum);
+    }
+
+    // Required inputs that do not cover the outputs, with nothing available, are not enough.
+    let builder = UtxoTxBuilder::new(&coin)
+        .add_required_inputs(vec![required_inputs_test_unspent(1, 2000)])
+        .add_outputs(outputs());
+    assert!(matches!(
+        block_on(builder.build()).unwrap_err().into_inner(),
+        GenerateTxError::NotEnoughUtxos { sum_utxos: 2000, .. }
+    ));
+}
+
+/// T38.6.6n: a change exactly equal to the dust amount becomes a change output; only a change strictly below dust
+/// is left to the miner.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_generate_transaction_change_equal_to_dust_is_an_output_r38_6_6n() {
+    let coin = required_inputs_test_coin();
+    // One input and an empty-script payment make a 186-byte transaction, 220 bytes with the change output, so the
+    // fee with a change output is 220 base units.
+    let build = |value: u64| {
+        let builder = UtxoTxBuilder::new(&coin)
+            .add_available_inputs(vec![required_inputs_test_unspent(1, 100_000)])
+            .add_outputs(vec![TransactionOutput {
+                script_pubkey: vec![].into(),
+                value,
+            }]);
+        block_on(builder.build()).unwrap()
+    };
+
+    // 100,000 - 98,780 - 220 = 1,000: the change is the dust amount exactly.
+    let (tx, data) = build(98_780);
+    assert_eq!(data.fee_amount, 220);
+    assert_eq!(tx.outputs.len(), 2);
+    assert_eq!(tx.outputs[1].value, 1000);
+    assert_eq!(data.received_by_me, 1000);
+    assert_eq!(data.unused_change, None);
+
+    // One base unit less is below dust: no change output, the remainder is left to the miner.
+    let (tx, data) = build(98_781);
+    assert_eq!(tx.outputs.len(), 1);
+    assert_eq!(data.unused_change, Some(999));
+    assert_eq!(data.received_by_me, 0);
+}
+
 #[test]
 fn test_addresses_from_script() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
@@ -1110,13 +1228,20 @@ fn explicit_fee_withdraw(
     }
 }
 
-/// The two transaction shapes of T38.6.6l: `(inputs, value of one input, worst-case size in bytes)`.
+/// The transaction shapes of T38.6.6l and T38.6.6b.1: `(inputs, value of one input, worst-case size in bytes)`.
 /// The size the fee is computed for is the worst case of an unsigned transaction with a change output:
-/// 97 bytes of overwintered overhead and two P2PKH outputs, plus 148 bytes (41 + 107) per input.
+/// 29 bytes of overwintered overhead and two P2PKH outputs (68 bytes), plus 148 bytes (41 + 107) per input.
 /// One input gives 245 bytes. The several-input case has 9 inputs and 1,429 bytes: the input size does
 /// not allow exactly 1,404 bytes. The 9 inputs of 0.12 coin are all needed to cover the 1 coin withdrawn.
+/// The 4 and 13 inputs (689 and 2,021 bytes) are shapes at which the separately rounded change output of
+/// R38.6.6b differs from the single rounding at 1,234 base units per 1,000 bytes.
 #[cfg(not(target_arch = "wasm32"))]
-const EXPLICIT_FEE_SHAPES: [(u8, u64, u64); 2] = [(1, 1_000_000_000, 245), (9, 12_000_000, 1429)];
+const EXPLICIT_FEE_SHAPES: [(u8, u64, u64); 4] = [
+    (1, 1_000_000_000, 245),
+    (9, 12_000_000, 1429),
+    (4, 26_000_000, 689),
+    (13, 8_000_000, 2021),
+];
 
 /// The signed transaction is the worst-case size or shorter by a few signature bytes per input.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1129,15 +1254,16 @@ fn assert_signed_size_near_worst_case(signed_size: u64, worst_case: u64, input_c
 }
 
 /// T38.6.6l: reference arithmetic (R38.6.6l item 2, maintainer decision 27), asserting the fee
-/// floor(a x (s - 34) / 1000) + floor(a x 34 / 1000) for `UtxoFixed` and `UtxoPerKbyte` alike, on a plain-fixed
-/// and a whole-kilobyte coin, at the worst-case sizes `s` of 245 and 1,429 bytes (1,429 stands in for 1,404).
-/// At a = 1001 base units this equals floor(a x s / 1000): 245 and 1430.
+/// floor(a x s / 1000), once over the whole size with the change output (R38.6.6b), for `UtxoFixed` and
+/// `UtxoPerKbyte` alike, on a plain-fixed and a whole-kilobyte coin, at the worst-case sizes `s` of 245, 689,
+/// 1,429 and 2,021 bytes (1,429 stands in for 1,404). At a = 1001 base units the single rounding and a
+/// separately rounded change output coincide: 245, 689, 1430 and 2023.
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_withdraw_explicit_fee_reference_arithmetic() {
     let rate_sat: u64 = 1001;
     for (input_count, input_value, worst_case) in EXPLICIT_FEE_SHAPES {
-        // floor(a x s / 1000): 245 and 1430.
+        // floor(a x s / 1000).
         let expected = rate_sat * worst_case / 1000;
         for whole_kilobyte_coin in [false, true] {
             let fixed = explicit_fee_withdraw(whole_kilobyte_coin, true, "0.00001001", input_count, input_value);
@@ -1156,29 +1282,32 @@ fn test_withdraw_explicit_fee_reference_arithmetic() {
     }
 }
 
-/// T38.6.6l: reference arithmetic (R38.6.6l item 2, maintainer decision 27). With the change allowance
-/// floor(a x 34 / 1000), the fee is floor(a x (s - 34) / 1000) + floor(a x 34 / 1000), not floor(a x s / 1000):
-/// at a = 1234 base units it asserts 301 at 245 bytes and 1762 at 1,429 bytes (302 and 1763 by the literal
-/// formula, which is also what the `FixedPerKb` size-difference allowance would charge).
+/// T38.6.6l, T38.6.6b.1: reference arithmetic (R38.6.6l item 2, maintainer decision 27). The change output is
+/// part of the size the fee is computed for, so the fee is floor(a x s / 1000) once, not
+/// floor(a x (s - 34) / 1000) + floor(a x 34 / 1000): at a = 1234 base units it asserts 302 at 245 bytes, 850 at
+/// 689, 1763 at 1,429 and 2493 at 2,021 bytes (301, 849, 1762 and 2492 if the change output's share were
+/// rounded on its own).
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
-fn test_withdraw_explicit_fee_change_allowance_is_proportional() {
+fn test_withdraw_explicit_fee_change_output_is_rounded_once() {
     let rate_sat: u64 = 1234;
-    for (input_count, input_value, worst_case) in EXPLICIT_FEE_SHAPES {
+    let expected_fees = [302, 1763, 850, 2493];
+    for ((input_count, input_value, worst_case), expected_fee) in EXPLICIT_FEE_SHAPES.into_iter().zip(expected_fees) {
         let without_change = worst_case - 34;
-        let expected = rate_sat * without_change / 1000 + rate_sat * 34 / 1000;
-        let literal = rate_sat * worst_case / 1000;
+        let expected = rate_sat * worst_case / 1000;
+        let separately_rounded = rate_sat * without_change / 1000 + rate_sat * 34 / 1000;
         let plain_fixed_mapping = ActualTxFee::FixedPerKb(rate_sat).fee_for_size(without_change)
             + ActualTxFee::FixedPerKb(rate_sat).change_output_increase(without_change);
-        assert_eq!(literal - expected, 1);
-        assert_eq!(plain_fixed_mapping, literal);
+        assert_eq!(expected, expected_fee);
+        assert_eq!(expected - separately_rounded, 1);
+        assert_eq!(plain_fixed_mapping, expected);
         for whole_kilobyte_coin in [false, true] {
             let fixed = explicit_fee_withdraw(whole_kilobyte_coin, true, "0.00001234", input_count, input_value);
             let per_kbyte = explicit_fee_withdraw(whole_kilobyte_coin, false, "0.00001234", input_count, input_value);
             assert_signed_size_near_worst_case(fixed.signed_size, worst_case, input_count);
             assert_eq!(fixed.fee, expected, "UtxoFixed, {worst_case} bytes");
             assert_eq!(per_kbyte.fee, expected, "UtxoPerKbyte, {worst_case} bytes");
-            assert_ne!(fixed.fee, plain_fixed_mapping);
+            assert_ne!(fixed.fee, separately_rounded);
         }
     }
 }
@@ -3515,6 +3644,71 @@ fn test_tx_builder_fixed_policies_r38_6_6b() {
     assert!(size < 1000);
     let (whole_kb_fee, whole_kb_size) = build(ActualTxFee::FixedPerStartedKb(1000));
     assert_eq!((whole_kb_fee, whole_kb_size), (1000, size));
+}
+
+/// CRD ch.38 T38.6.6b.1: a transaction with a change output pays the policy's fee once over its whole size,
+/// change output included. At a rate of 1,234 base units per 1,000 bytes a dynamic rate and the plain fixed
+/// policy charge 826 at an estimated size of 670 bytes (4 inputs of 148 bytes, a 15-byte payment output and
+/// the 34-byte change output) and 2,470 at 2,002 bytes (13 inputs), not the 825 and 2,469 of a separately
+/// rounded change output. The whole-kilobyte policy adds one more rate only when the change output crosses a
+/// kilobyte boundary.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_tx_builder_change_output_is_rounded_once_t38_6_6b_1() {
+    let coin = floor_test_coin("TEST", TxFee::FixedPerKb(50_000), 1000, 8);
+    // Builds a payment from `input_count` inputs of 100,000 base units each, all of them needed, with a payment
+    // output whose script has `script_len` bytes. Returns the fee and the size of the transaction with the
+    // change output.
+    let build = |policy: ActualTxFee, input_count: u8, script_len: usize| {
+        let unspents = (0..input_count)
+            .map(|i| UnspentInfo {
+                value: 100_000,
+                outpoint: OutPoint {
+                    hash: H256::from([i + 1; 32]),
+                    index: 0,
+                },
+                height: None,
+            })
+            .collect::<Vec<_>>();
+        let outputs = vec![TransactionOutput {
+            value: u64::from(input_count - 1) * 100_000 + 50_000,
+            script_pubkey: vec![0x51; script_len].into(),
+        }];
+        let (tx, data) = block_on(
+            UtxoTxBuilder::new(&coin)
+                .add_available_inputs(unspents)
+                .add_outputs(outputs)
+                .with_fee(policy)
+                .build(),
+        )
+        .unwrap();
+        assert_eq!(tx.inputs.len(), input_count as usize);
+        // The payment and the change output.
+        assert_eq!(tx.outputs.len(), 2);
+        let size = utxo_common::tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(tx)) as u64;
+        (data.fee_amount, size)
+    };
+
+    // (inputs, estimated size with the change output, fee of the single rounding, fee of the split rounding)
+    let cases = [(4u8, 670u64, 826u64, 825u64), (13, 2002, 2470, 2469)];
+    for (input_count, size, expected, split) in cases {
+        assert_eq!(1234 * size / 1000, expected);
+        assert_eq!(1234 * (size - 34) / 1000 + 1234 * 34 / 1000, split);
+        for policy in [ActualTxFee::Dynamic(1234), ActualTxFee::FixedPerKb(1234)] {
+            let (fee, built_size) = build(policy, input_count, 6);
+            assert_eq!(built_size, size);
+            assert_eq!(fee, expected, "{input_count} inputs, size {size}");
+            assert_ne!(fee, split);
+        }
+    }
+
+    // Whole-kilobyte policy: 636 bytes become 670 and 932 become 966, still one started kilobyte; 970 bytes
+    // become 1,004, a further started kilobyte, and the change output adds one more rate.
+    let whole_kb = ActualTxFee::FixedPerStartedKb(1234);
+    assert_eq!(build(whole_kb, 4, 6), (1234, 670));
+    assert_eq!(build(whole_kb, 6, 6), (1234, 966));
+    assert_eq!(build(whole_kb, 6, 44), (2 * 1234, 1004));
+    assert_eq!(build(whole_kb, 13, 6), (3 * 1234, 2002));
 }
 
 /// CRD ch.38 R38.6.6b: the trade-fee preview allows for one change output under each policy's own rule.
@@ -9309,7 +9503,11 @@ mod withdraw_recent_spent {
         assert_eq!(inputs_of(&second), vec![listed_outpoint()]);
 
         // The entry ages out.
-        let created = only_pending_created_ms(&coin);
+        // The second withdraw can carry a later lock_time (the current second) and so be a second entry.
+        let created = {
+            let record = block_on(coin.as_ref().recently_spent_outpoints.lock());
+            record.pending_withdraws.values().map(|p| p.created_ms).max().unwrap()
+        };
         let mut record = block_on(coin.as_ref().recently_spent_outpoints.lock());
         assert!(!record.promote_pending_withdraw_at(created + TTL_MS, &[7, 7, 7]));
         assert!(record.pending_withdraws.is_empty());
@@ -10081,5 +10279,145 @@ mod t4a_bounded_reading_tests {
         declared.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
         assert!(!supported(&coin, &declared));
         assert!(dropped_peer_values() >= before + 3);
+    }
+}
+
+/// CRD ch.05 R36, T16: whether the key a UTXO coin's legacy swaps announce is the key it pays from.
+mod swap_key_agreement_tests {
+    use super::*;
+    use crate::rpc_command::get_my_address::PathToAddress;
+    use crate::{SwapKeyDisagreement, SwapOps};
+    use crypto::CryptoCtx;
+
+    const TEST_MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    /// A coin of the test fields whose policy is the given one.
+    fn coin_with(
+        policy: PrivKeyPolicy<KeyPair>,
+        derivation_method: Option<DerivationMethod<Address, UtxoHDWallet>>,
+    ) -> UtxoStandardCoin {
+        let client = native_client_for_test();
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+        fields.priv_key_policy = policy;
+        if let Some(derivation_method) = derivation_method {
+            fields.derivation_method = derivation_method;
+        }
+        utxo_coin_from_fields(fields)
+    }
+
+    fn hd_wallet() -> UtxoHDWallet {
+        UtxoHDWallet {
+            hd_wallet_storage: HDWalletCoinStorage::default(),
+            address_format: UtxoAddressFormat::Standard,
+            derivation_path: HDPathToCoin::from_str("m/44'/141'").unwrap(),
+            accounts: HDAccountsMutex::new(HDAccountsMap::new()),
+            gap_limit: 3,
+        }
+    }
+
+    /// The HD policy of a coin activated at `path_to_address`.
+    fn hd_policy(path_to_address: PathToAddress) -> PrivKeyPolicy<KeyPair> {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        CryptoCtx::init_with_global_hd_account(ctx.clone(), TEST_MNEMONIC).unwrap();
+        let global_hd = match PrivKeyBuildPolicy::detect_priv_key_policy(&ctx).unwrap() {
+            PrivKeyBuildPolicy::GlobalHDAccount(global_hd) => global_hd,
+            _ => panic!("expected a global-HD login"),
+        };
+        PrivKeyPolicy::HDWallet {
+            activated_key: key_pair_from_seed("activated key of the test").unwrap(),
+            bip39_secp_priv_key: global_hd.root_priv_key().clone(),
+            path_to_address,
+        }
+    }
+
+    fn node_pubkey() -> keys::Public { *key_pair_from_seed("the passphrase of the test").unwrap().public() }
+
+    /// T16: a coin enabled with a single key that is not the node's persistent key (legacy `enable` or
+    /// `electrum`, or `IguanaPrivKey`) pays from another key than the one its swaps announce.
+    #[test]
+    fn a_single_key_other_than_the_node_key_disagrees() {
+        let coin = coin_with(
+            PrivKeyPolicy::KeyPair(key_pair_from_seed("the internal key of the test").unwrap()),
+            None,
+        );
+        assert_eq!(
+            coin.swap_key_disagreement(&node_pubkey()),
+            Some(SwapKeyDisagreement::SingleKey)
+        );
+    }
+
+    /// T18: a single key that is the node's persistent key (BCH activated together with its tokens) agrees.
+    #[test]
+    fn a_single_key_that_is_the_node_key_agrees() {
+        let coin = coin_with(
+            PrivKeyPolicy::KeyPair(key_pair_from_seed("the passphrase of the test").unwrap()),
+            None,
+        );
+        assert_eq!(coin.swap_key_disagreement(&node_pubkey()), None);
+    }
+
+    /// T16: RIN activated at its first address through the HD route agrees.
+    #[test]
+    fn an_hd_coin_at_the_first_address_agrees() {
+        let coin = coin_with(
+            hd_policy(PathToAddress::default()),
+            Some(DerivationMethod::HDWallet(hd_wallet())),
+        );
+        assert_eq!(coin.swap_key_disagreement(&node_pubkey()), None);
+    }
+
+    /// T16: RIN activated at account 0, External, address 1 disagrees (reason 3), with both paths in full.
+    #[test]
+    fn an_hd_coin_at_another_address_names_both_paths() {
+        let at_address_1 = PathToAddress {
+            account_id: 0,
+            chain: Bip44Chain::External,
+            address_id: 1,
+        };
+        let coin = coin_with(hd_policy(at_address_1), Some(DerivationMethod::HDWallet(hd_wallet())));
+        assert_eq!(
+            coin.swap_key_disagreement(&node_pubkey()),
+            Some(SwapKeyDisagreement::HdAddress {
+                activated_path: "m/44'/141'/0'/0/1".to_owned(),
+                paying_path: "m/44'/141'/0'/0/0".to_owned(),
+            })
+        );
+
+        let in_account_2_internal_5 = PathToAddress {
+            account_id: 2,
+            chain: Bip44Chain::Internal,
+            address_id: 5,
+        };
+        let coin = coin_with(
+            hd_policy(in_account_2_internal_5),
+            Some(DerivationMethod::HDWallet(hd_wallet())),
+        );
+        assert_eq!(
+            coin.swap_key_disagreement(&node_pubkey()),
+            Some(SwapKeyDisagreement::HdAddress {
+                activated_path: "m/44'/141'/2'/1/5".to_owned(),
+                paying_path: "m/44'/141'/0'/0/0".to_owned(),
+            })
+        );
+    }
+
+    /// T18: a coin activated with the Trezor policy is out of the rule's scope.
+    #[test]
+    fn a_trezor_coin_is_exempt() {
+        let coin = coin_with(PrivKeyPolicy::Trezor, None);
+        assert_eq!(coin.swap_key_disagreement(&node_pubkey()), None);
+    }
+
+    /// An HD key held with a single derived address funds from that address itself.
+    #[test]
+    fn an_hd_key_with_a_single_derived_address_agrees() {
+        let at_address_1 = PathToAddress {
+            account_id: 0,
+            chain: Bip44Chain::External,
+            address_id: 1,
+        };
+        let coin = coin_with(hd_policy(at_address_1), None);
+        assert_eq!(coin.swap_key_disagreement(&node_pubkey()), None);
     }
 }

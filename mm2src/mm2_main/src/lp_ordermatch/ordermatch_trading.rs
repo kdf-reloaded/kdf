@@ -844,6 +844,11 @@ pub(crate) fn lp_connect_start_bob(ctx: MmArc, maker_match: MakerMatch, maker_or
                 return;
             },
         };
+        // CRD ch.05 R37: the swap is not started for a pair whose swap key is not the key it pays from.
+        if let Some(mismatch) = swap_key_mismatch(&ctx, &maker_coin, &taker_coin) {
+            log::warn!("Swap {} not started: {}", maker_match.request.uuid, mismatch);
+            return;
+        }
         let alice = bits256::from(maker_match.request.sender_pubkey.0);
         let maker_amount = maker_match.reserved.get_base_amount().to_decimal();
         let taker_amount = maker_match.reserved.get_rel_amount().to_decimal();
@@ -930,6 +935,15 @@ pub(crate) fn lp_connected_alice(ctx: MmArc, taker_order: TakerOrder, taker_matc
             },
         };
 
+        // CRD ch.05 R37: the swap is not started for a pair whose swap key is not the key it pays from.
+        if let Some(mismatch) = swap_key_mismatch(&ctx, &maker_coin, &taker_coin) {
+            log::warn!(
+                "Swap {} not started: {}",
+                taker_match.reserved.taker_order_uuid,
+                mismatch
+            );
+            return;
+        }
         let privkey = &ctx.secp256k1_key_pair().private().secret;
         let my_persistent_pub = compressed_pub_key_from_priv_raw(&privkey[..], ChecksumType::DSHA256).unwrap();
         let maker_amount = taker_match.reserved.get_base_amount().clone();
@@ -1605,6 +1619,11 @@ pub(crate) async fn process_maker_reserved(ctx: MmArc, from_pubkey: H256Json, re
                 false
             };
             if accepted {
+                // CRD ch.05 R37: no connect message is sent for a pair whose swap key is not the key it pays from.
+                if let Some(mismatch) = swap_key_mismatch(&ctx, &base_coin, &rel_coin) {
+                    log::warn!("Taker order {} sends no connect: {}", uuid, mismatch);
+                    continue;
+                }
                 let connect = TakerConnect {
                     sender_pubkey: H256Json::from(our_public_id.bytes),
                     dest_pub_key: reserved_msg.sender_pubkey,
@@ -1680,6 +1699,11 @@ pub(crate) async fn process_maker_connected(ctx: MmArc, from_pubkey: H256Json, c
         .ok();
 }
 
+/// The WARN line of an own maker order cancelled because its pair fails the swap-key agreement rule (CRD ch.05 R39).
+pub(crate) fn swap_key_cancel_line(uuid: &Uuid, mismatch: &SwapKeyMismatch) -> String {
+    format!("Maker order {uuid} cancelled: {mismatch}")
+}
+
 pub(crate) async fn process_taker_request(ctx: MmArc, from_pubkey: H256Json, taker_request: TakerRequest) {
     let our_public_id: H256Json = ctx.public_id().unwrap().bytes.into();
     if our_public_id == from_pubkey {
@@ -1705,6 +1729,21 @@ pub(crate) async fn process_taker_request(ctx: MmArc, from_pubkey: H256Json, tak
                 Ok(Some(c)) => c,
                 _ => return, // attempt to match with deactivated coin
             };
+
+            // CRD ch.05 R37, R39: an order of ours whose swap key is not the key it pays from gets no
+            // reservation; it is cancelled as any cancellation is, and peers see the cancellation.
+            if let Some(mismatch) = swap_key_mismatch(&ctx, &base_coin, &rel_coin) {
+                let cancelled = RemovedMakerOrder::take_out(&ordermatch_ctx, &order);
+                if cancelled.is_some() {
+                    log::warn!("{}", swap_key_cancel_line(&order.uuid, &mismatch));
+                    maker_order_cancelled_p2p_notify(ctx.clone(), &order);
+                }
+                drop(order);
+                if let Some(cancelled) = cancelled {
+                    cancelled.delete(&ctx, MakerOrderCancellationReason::Cancelled).await;
+                }
+                return;
+            }
 
             let accepted = if order.matches.contains_key(&taker_request.uuid) {
                 false
@@ -2067,6 +2106,10 @@ async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
         return ERR!("Trading is not supported for coin {}", coin);
     }
+    // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
+    if let Some(mismatch) = swap_key_mismatch(&ctx, &base_coin, &rel_coin) {
+        return ERR!("{}", mismatch);
+    }
     if base_coin.wallet_only(&ctx) {
         return ERR!("Base coin {} is wallet only", input.base);
     }
@@ -2106,6 +2149,10 @@ async fn sell_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let rel_coin = try_s!(rel_coin.ok_or("Rel coin is not found or inactive"));
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
         return ERR!("Trading is not supported for coin {}", coin);
+    }
+    // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
+    if let Some(mismatch) = swap_key_mismatch(&ctx, &base_coin, &rel_coin) {
+        return ERR!("{}", mismatch);
     }
     if base_coin.wallet_only(&ctx) {
         return ERR!("Base coin {} is wallet only", input.base);
@@ -2519,6 +2566,10 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
         return ERR!("Trading is not supported for coin {}", coin);
     }
+    // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
+    if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
+        return ERR!("{}", mismatch);
+    }
     if base_coin.wallet_only(ctx) {
         return ERR!("Base coin {} is wallet only", req.base);
     }
@@ -2683,6 +2734,10 @@ async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Resul
         Ok(Some(c)) => c,
         _ => return ERR!("Base coin {} and/or rel coin {} are not activated", base, rel),
     };
+    // CRD ch.05 R37: an update of an order whose swap key is not the key it pays from is refused before any other check.
+    if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
+        return ERR!("{}", mismatch);
+    }
 
     let original_conf_settings = order_before_update.conf_settings.unwrap();
     let updated_conf_settings = OrderConfirmationsSettings {

@@ -615,22 +615,20 @@ pub enum WithdrawError {
     FeeCapBelowBaseFee(FeeCapBelowBaseFee),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
-    /// CRD R47.5.6a / R47.6.7: the requested withdraw is unsupported under the
-    /// MetaMask signing policy (e.g. the non-EVM-keypair TRON family, which the
-    /// delegated EVM `eth_sendTransaction` model cannot drive). WASM-only: the
-    /// MetaMask policy exists only on the browser target.
-    #[cfg(target_arch = "wasm32")]
-    #[display(fmt = "Unsupported under the MetaMask signing policy: {}", _0)]
-    UnsupportedUnderMetamask(String),
-    /// CRD R50.20 / R50.24: the requested withdraw is unsupported under the
-    /// Trezor hardware-wallet signing policy. Used for the TRON family (which
-    /// the EVM Trezor signing path cannot drive) and to steer clients from the
-    /// direct legacy `withdraw` method to the `task::withdraw` API required for
-    /// Trezor device user-action signing. Native, non-iOS only — the Trezor
-    /// signing policy exists only there.
-    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
-    #[display(fmt = "Unsupported under the Trezor signing policy: {}", _0)]
-    UnsupportedUnderTrezor(String),
+    /// CRD ch.49 R49.27a: the one shared arm of every "unsupported operation" refusal of a withdraw; there is no
+    /// per-feature discriminant. On the wire it is `error_type: "UnsupportedError"` (HTTP 400) with `error_data`
+    /// a plain string of free human-readable text naming the refused operation; clients classify by
+    /// `error_type` alone and never parse the text. It answers, among others:
+    /// - `from` on an SLP token withdraw (R49.27);
+    /// - CRD R47.5.6a / R47.6.7: the withdraw is unsupported under the MetaMask signing policy (e.g. the
+    ///   non-EVM-keypair TRON family, which the delegated EVM `eth_sendTransaction` model cannot drive; the
+    ///   policy exists only on the browser target);
+    /// - CRD R50.20 / R50.24: the withdraw is unsupported under the Trezor hardware-wallet signing policy (the
+    ///   TRON family, which the EVM Trezor signing path cannot drive, and the direct legacy `withdraw` method,
+    ///   which is steered to the `task::withdraw` API required for Trezor device user-action signing; the
+    ///   policy exists only on native, non-iOS targets).
+    #[display(fmt = "{}", _0)]
+    UnsupportedError(String),
     /// CRD ch.39 R39.6.4c: the coin's network has activated an upgrade whose
     /// transaction format this build cannot produce, so no withdrawal of it can
     /// be constructed until the build is upgraded.
@@ -638,7 +636,7 @@ pub enum WithdrawError {
     /// Distinct from `InternalError`, which this once was: nothing has gone wrong
     /// inside the process. The condition is foreseeable, permanent until the user
     /// acts, and the action is theirs — which is also why it maps to 400 rather
-    /// than 500, following the two `UnsupportedUnder*` variants above.
+    /// than 500, following `UnsupportedError` above.
     #[display(fmt = "Unsupported after a network upgrade: {}", _0)]
     UnsupportedAfterNetworkUpgrade(String),
 }
@@ -658,15 +656,12 @@ impl HttpStatusCode for WithdrawError {
             | WithdrawError::FromAddressNotFound
             | WithdrawError::UnexpectedFromAddress(_)
             | WithdrawError::UnknownAccount { .. }
+            // CRD ch.49 R49.27a (with R47.6.7 and R50.20 / R50.24): an unsupported operation is
+            // the request's to change, not a server fault.
+            | WithdrawError::UnsupportedError(_)
             // CRD ch.39 R39.6.4c: an upgrade this build cannot transact on is the
             // user's to resolve, not a server fault.
             | WithdrawError::UnsupportedAfterNetworkUpgrade(_) => StatusCode::BAD_REQUEST,
-            // CRD R47.6.7: unsupported operation under MetaMask maps to 400.
-            #[cfg(target_arch = "wasm32")]
-            WithdrawError::UnsupportedUnderMetamask(_) => StatusCode::BAD_REQUEST,
-            // CRD R50.20 / R50.24: unsupported operation under Trezor maps to 400.
-            #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
-            WithdrawError::UnsupportedUnderTrezor(_) => StatusCode::BAD_REQUEST,
             WithdrawError::NoTrezorDeviceAvailable
             | WithdrawError::TrezorDisconnected
             | WithdrawError::FoundUnexpectedDevice(_) => StatusCode::GONE,
@@ -938,4 +933,23 @@ pub enum SearchForFundingSpendErr {
     FromBlockConversionErr(String),
     #[display(fmt = "Internal error: {}", _0)]
     Internal(String),
+}
+
+#[cfg(test)]
+mod withdraw_error_wire_tests {
+    use super::*;
+
+    /// CRD ch.49 T49.27a: the shared unsupported-operation arm answers HTTP 400 with `error_type`
+    /// `UnsupportedError` and `error_data` a plain JSON string. The test compares the discriminant and the JSON
+    /// type of `error_data` only, never its text.
+    #[test]
+    fn unsupported_error_wire_form() {
+        let err = WithdrawError::UnsupportedError("x".to_owned());
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["error_type"], "UnsupportedError");
+        assert!(json["error_data"].is_string());
+        // The wire form is a tagged object with exactly these two members.
+        assert_eq!(json.as_object().unwrap().len(), 2);
+    }
 }

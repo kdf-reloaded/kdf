@@ -221,6 +221,21 @@ pub enum HtlcPubkeyError {
     #[display(fmt = "Coin cannot derive an HTLC public key: {}", _0)]
     NotAvailable(String),
 }
+/// How a coin's legacy swap key differs from the key it pays from under a global-HD login (CRD ch.05 R36, R38).
+/// The three cases are the three reasons of R38.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SwapKeyDisagreement {
+    /// An EVM coin: its signer is not the node's persistent key, which is what its swaps announce.
+    EvmSigner,
+    /// A UTXO coin enabled with a single key (legacy `enable` or `electrum`, or `IguanaPrivKey`): that key
+    /// is not the node's persistent key.
+    SingleKey,
+    /// A UTXO coin activated at an HD address other than the one it pays from. Both paths in full.
+    HdAddress {
+        activated_path: String,
+        paying_path: String,
+    },
+}
 /// Where the burn portion of a DEX fee is sent.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DexFeeBurnDestination {
@@ -471,9 +486,9 @@ pub struct WatcherValidatePaymentInput {
 pub enum WithdrawFee {
     /// UTXO withdraw fee: a rate `amount` per 1,000 bytes, applied exactly like `UtxoPerKbyte` (CRD ch.38
     /// R38.6.6l item 2): proportional and truncated, not per transaction and not per started kilobyte. With a
-    /// change output the fee is `floor(a * (s - 34) / 1000) + floor(a * 34 / 1000)`, up to one unit below
-    /// `floor(a * s / 1000)`. The same holds for the SLP token withdraw (CRD ch.38 R38.6.6m), where `amount` is
-    /// in the platform coin's units.
+    /// change output the fee is `floor(a * s / 1000)` once over the whole size, change output included
+    /// (R38.6.6b); the change output's share is not rounded on its own. The same holds for the SLP token
+    /// withdraw (CRD ch.38 R38.6.6m), where `amount` is in the platform coin's units.
     UtxoFixed {
         amount: BigDecimal,
     },
