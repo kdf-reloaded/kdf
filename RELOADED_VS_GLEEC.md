@@ -343,6 +343,16 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   not dial it while that peer is connected. Nothing changes on the wire; no switch. Contract:
   [CRD ch.28 R27a](docs/reloaded-rewrite/28-libp2p-modernization.md). Code:
   `mm2_p2p/src/redial_guard.rs`.
+- **One DNS resolver for every name, Google Public DNS by default.** GLEEC KDF looks seeds up
+  through Google Public DNS and every other name through the computer's resolver. KDF Reloaded
+  looks every name up through the resolver `dns_resolver` chooses: Google Public DNS by default,
+  `"system"` for the computer's resolver, or DNS servers of the operator's choice. The default
+  matches GLEEC KDF for seeds; `"system"` matches it for coin servers and services; no value
+  matches both. Sia, the WalletConnect relay, Lightning peer addresses and the statistics method
+  still use the computer's resolver in this release. Nothing changes on the wire. Contract:
+  [CRD ch.45 §45.6B](docs/reloaded-rewrite/45-startup-configuration-and-environment-tolerance.md).
+  Code: `common/dns_resolver.rs` (with `dns_resolver/wire.rs` and `hosts.rs`),
+  `mm2_p2p/src/resolving_transport.rs`.
 
 - **An explicit `UtxoFixed` withdraw fee on an SLP token is charged per started
   kilobyte, with no switch.** Since PR #226 a UTXO coin's `withdraw` with
@@ -563,6 +573,10 @@ quotes, Electrum and the shielded history, differ from GLEEC KDF by default, eac
 
 A fourteenth switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
 every maker-order message is published at once, and `true` turns on the maker's rate control.
+
+`dns_resolver` has no GLEEC-compatible value: the default matches GLEEC KDF for seeds and
+`"system"` matches it for coin servers; see its row in
+[`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
 
 ## Detail sections
 

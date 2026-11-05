@@ -5448,7 +5448,8 @@ fn test_send_queue_pressure_and_snapshot() {
         crate::SendQueueSnapshot {
             queued: 3,
             max_per_connection: 3,
-            dropped: 2
+            dropped: 2,
+            ..Default::default()
         }
     );
 
@@ -5477,9 +5478,67 @@ fn test_send_queue_pressure_and_snapshot() {
         crate::SendQueueSnapshot {
             queued: 0,
             max_per_connection: 0,
-            dropped: 2
+            dropped: 2,
+            ..Default::default()
         }
     );
+}
+
+#[test]
+// The snapshot shows the highest dropped share of a recent window and the longest series of counting windows, and
+// both fall back to 0 two windows after the drops stop (CRD ch.28 §28.9B RQ1 item 8, T-RQ1.13; ch.32 R-MP5).
+fn test_send_queue_snapshot_window_share_and_series() {
+    let config = ConfigBuilder::default()
+        .send_queue_max_messages(3)
+        .send_queue_pressure_raise(100)
+        .send_queue_drop_window(Duration::from_millis(200))
+        .build()
+        .unwrap();
+    let (mut gs, _, _) = inject_nodes1()
+        .peer_no(0)
+        .topics(vec![])
+        .to_subscribe(false)
+        .gs_config(config)
+        .create_network();
+    let mut handler = gs
+        .handle_established_outbound_connection(
+            ConnectionId::new_unchecked(7),
+            PeerId::random(),
+            &Multiaddr::empty(),
+            Endpoint::Dialer,
+        )
+        .unwrap();
+    let mut push = |tag: u8| {
+        libp2p_swarm::ConnectionHandler::on_behaviour_event(&mut handler, HandlerIn::Message(proto::RPC {
+            subscriptions: vec![],
+            publish: vec![proto::Message {
+                from: None,
+                data: Some(vec![tag; 10]),
+                seqno: None,
+                topic: "t".into(),
+                signature: None,
+                key: None,
+            }],
+            control: None,
+        }));
+    };
+
+    // Five data RPCs into a queue of three: two of five (40 %) are dropped in the first window.
+    for tag in 0..5u8 {
+        push(tag);
+    }
+    // The window has not ended: nothing is published yet.
+    let snapshot = gs.send_queue_snapshot();
+    assert_eq!((snapshot.max_window_share_percent, snapshot.max_drop_series), (0, 0));
+    // The next push finds the window ended and closes it.
+    std::thread::sleep(Duration::from_millis(250));
+    push(5);
+    let snapshot = gs.send_queue_snapshot();
+    assert_eq!((snapshot.max_window_share_percent, snapshot.max_drop_series), (40, 1));
+    // The drops stop: two window lengths after the window ended both fall back to 0.
+    std::thread::sleep(Duration::from_millis(600));
+    let snapshot = gs.send_queue_snapshot();
+    assert_eq!((snapshot.max_window_share_percent, snapshot.max_drop_series), (0, 0));
 }
 
 #[test]

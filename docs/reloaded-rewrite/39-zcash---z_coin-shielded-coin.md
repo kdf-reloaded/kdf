@@ -192,7 +192,9 @@ fields that sit at the top level (`scan_blocks_per_iteration`, `scan_interval_ms
 `zcash_params_path`) are specified in R39.6.2.
 
 R39.2.4 The light mode shall accept **more than one** lightwalletd endpoint so a
-deployment can list several servers.
+deployment can list several servers. *(Added 2026-11-02.)* An endpoint's hostname
+is resolved through the node's resolver (chapter 45 §45.6B), and TLS checks the
+hostname as configured.
 
 ## 39.3 Activation progress, Trezor & result
 
@@ -6718,7 +6720,10 @@ entries in its list cannot be told apart. Passing the position to the fallback c
     the builder defaults; BIP 113 and zcashd's finality rule, as public specification.
   - *Original to this design:* R39.5.13, D39.5.a and the informative pre-check under
     R39.5.11.
-
+- *Clean-context addition (2026-11-02, forbidden corpus not consulted):* the
+  sentence on resolving an endpoint's hostname in R39.2.4 is Reloaded-original. It
+  points to chapter 45 §45.6B, from the maintainer's decision of 2026-11-02 and
+  this repository's own code, so chapter 01 R38 is not engaged.
 - *Clean-context addition (2026-11-04), §39.6.5 and §39.8.0.3:* §39.6.5 (R39.6.5a --
   R39.6.5i with its notes, T39.6.5a -- T39.6.5e), R39.8.0bb with its status note,
   T39.8.0i, the update notes under R39.8.0n, D39.8.0e and the R39.11.1a provenance, the
