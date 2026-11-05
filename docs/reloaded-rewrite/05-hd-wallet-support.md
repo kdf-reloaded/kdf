@@ -873,6 +873,14 @@ funding.
 - *On resume.* A resumed swap MUST use the key pair saved with it. A swap
   saved without one, started by an earlier build, MUST keep using the
   node's persistent key, which is the key its Started event recorded.
+- *Every later use.* The saved pair is the one every later use of the
+  swap's HTLC key takes: the running swap, its resumption after a
+  restart, and the manual recovery of its funds (`recover_funds_of_swap`,
+  with the key candidates of chapter 39 R39.5.4). A later change of the
+  coin's activation or derivation settings does not change it. For an
+  EVM coin this storage and these recovery semantics are the same as for
+  a UTXO coin; only Sia announces its key without saving a pair (chapter
+  51 R64).
 
 No step of the plan changes the key of a swap that has already started.
 
