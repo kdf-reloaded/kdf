@@ -14065,3 +14065,299 @@ mod negotiation_failure_penalty {
         assert_eq!(listed(&ctx), json!({}));
     }
 }
+
+/// CRD ch.28 R16a, T4a: every ordermatch message the node sends passes the bounds check, and the order record
+/// decoded from a peer's bytes is read under the bounds.
+mod t4a_bounded_reading_tests {
+    use super::*;
+    use crate::mm2::lp_network::P2PRequest;
+    use crate::mm2::lp_ordermatch::new_protocol::{MakerConnected, MakerOrderCancelled, MakerOrderCreated,
+                                                  MakerReserved, MatchBy, OrdermatchMessage, TakerConnect,
+                                                  TakerRequest as WireTakerRequest};
+    use common::msgpack_bounds::{check_msgpack_bounds, dropped_peer_values, max_nesting_depth, MAX_PEER_NESTING};
+
+    /// Half of the bound: the deepest value the node sends may reach it.
+    const HALF_BOUND: usize = MAX_PEER_NESTING / 2;
+
+    /// Asserts that `encoded` passes the check up to its last byte and nests at most half of the bound.
+    fn assert_within_half_the_bound(name: &str, encoded: &[u8]) {
+        assert_eq!(check_msgpack_bounds(encoded), Ok(encoded.len()), "{name}");
+        let depth = max_nesting_depth(encoded);
+        println!("t4a depth {name}: {depth}");
+        assert!(depth <= HALF_BOUND, "{name}: depth {depth}");
+    }
+
+    /// The message as published: the payload, and the signed envelope around it.
+    fn assert_ordermatch_message(name: &str, message: OrdermatchMessage) {
+        let payload = encode_message(&message).unwrap();
+        assert_within_half_the_bound(&format!("{name} payload"), &payload);
+        let envelope = encode_and_sign(&message, &[3; 32]).unwrap();
+        assert_within_half_the_bound(&format!("{name} envelope"), &envelope);
+        decode_signed::<OrdermatchMessage>(&envelope).unwrap();
+    }
+
+    fn uuid() -> Uuid { Uuid::new_v4() }
+
+    fn price() -> BigRational { BigRational::new(12345.into(), 1000.into()) }
+
+    fn conf_settings() -> OrderConfirmationsSettings {
+        OrderConfirmationsSettings {
+            base_confs: 6,
+            base_nota: false,
+            rel_confs: 3,
+            rel_nota: true,
+        }
+    }
+
+    #[test]
+    fn t4a_a_ordermatch_messages_nest_within_half_the_bound() {
+        assert_ordermatch_message(
+            "MakerOrderCreated",
+            OrdermatchMessage::MakerOrderCreated(MakerOrderCreated {
+                uuid: uuid().into(),
+                base: "RIN".into(),
+                rel: "KMD".into(),
+                price: price(),
+                max_volume: price(),
+                min_volume: price(),
+                created_at: 1,
+                conf_settings: conf_settings(),
+                timestamp: 2,
+                pair_trie_root: H64::default(),
+                base_protocol_info: vec![1, 2, 3],
+                rel_protocol_info: vec![4, 5, 6],
+            }),
+        );
+
+        let mut updated = new_protocol::MakerOrderUpdated::new(Uuid::new_v4());
+        updated.with_new_price(price());
+        updated.with_new_max_volume(price());
+        updated.with_new_min_volume(price());
+        updated.with_new_conf_settings(conf_settings());
+        assert_ordermatch_message("MakerOrderUpdated", OrdermatchMessage::MakerOrderUpdated(updated));
+
+        assert_ordermatch_message(
+            "MakerOrderCancelled",
+            OrdermatchMessage::MakerOrderCancelled(MakerOrderCancelled {
+                uuid: uuid().into(),
+                timestamp: 3,
+                pair_trie_root: H64::default(),
+            }),
+        );
+
+        let mut orders = HashSet::new();
+        orders.insert(uuid().into());
+        assert_ordermatch_message(
+            "TakerRequest",
+            OrdermatchMessage::TakerRequest(WireTakerRequest {
+                base: "RIN".into(),
+                rel: "KMD".into(),
+                base_amount: price(),
+                rel_amount: price(),
+                action: TakerAction::Buy,
+                uuid: uuid().into(),
+                match_by: MatchBy::Orders(orders),
+                conf_settings: conf_settings(),
+                base_protocol_info: Some(vec![1, 2, 3]),
+                rel_protocol_info: Some(vec![4, 5, 6]),
+                swap_version: SwapVersion::default(),
+            }),
+        );
+
+        assert_ordermatch_message(
+            "MakerReserved",
+            OrdermatchMessage::MakerReserved(MakerReserved {
+                base: "RIN".into(),
+                rel: "KMD".into(),
+                base_amount: price(),
+                rel_amount: price(),
+                taker_order_uuid: uuid().into(),
+                maker_order_uuid: uuid().into(),
+                conf_settings: conf_settings(),
+                base_protocol_info: Some(vec![1, 2, 3]),
+                rel_protocol_info: Some(vec![4, 5, 6]),
+                swap_version: SwapVersion::default(),
+            }),
+        );
+
+        assert_ordermatch_message(
+            "TakerConnect",
+            OrdermatchMessage::TakerConnect(TakerConnect {
+                taker_order_uuid: uuid().into(),
+                maker_order_uuid: uuid().into(),
+            }),
+        );
+
+        assert_ordermatch_message(
+            "MakerConnected",
+            OrdermatchMessage::MakerConnected(MakerConnected {
+                taker_order_uuid: uuid().into(),
+                maker_order_uuid: uuid().into(),
+            }),
+        );
+
+        let mut trie_roots = HashMap::new();
+        trie_roots.insert(alb_ordered_pair("RIN", "KMD"), H64::from([7; 8]));
+        trie_roots.insert(alb_ordered_pair("RIN", "BTC"), H64::from([8; 8]));
+        assert_ordermatch_message(
+            "PubkeyKeepAlive",
+            OrdermatchMessage::PubkeyKeepAlive(PubkeyKeepAlive {
+                trie_roots,
+                timestamp: 4,
+            }),
+        );
+    }
+
+    #[test]
+    fn t4a_a_requests_and_sync_answers_nest_within_half_the_bound() {
+        let mut trie_roots = HashMap::new();
+        trie_roots.insert(alb_ordered_pair("RIN", "KMD"), H64::from([7; 8]));
+        let requests = [
+            P2PRequest::Ordermatch(OrdermatchRequest::GetOrderbook {
+                base: "RIN".into(),
+                rel: "KMD".into(),
+            }),
+            P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState {
+                pubkey: "02".repeat(33),
+                trie_roots,
+            }),
+            P2PRequest::Ordermatch(OrdermatchRequest::BestOrders {
+                coin: "RIN".into(),
+                action: BestOrdersAction::Buy,
+                volume: price(),
+            }),
+            P2PRequest::Ordermatch(OrdermatchRequest::OrderbookDepth {
+                pairs: vec![("RIN".into(), "KMD".into())],
+            }),
+            P2PRequest::Ordermatch(OrdermatchRequest::BestOrdersByNumber {
+                coin: "RIN".into(),
+                action: BestOrdersAction::Sell,
+                number: 10,
+            }),
+            P2PRequest::NetworkInfo(crate::mm2::lp_stats::NetworkInfoRequest::CurrentTimestamp),
+        ];
+        for (i, request) in requests.iter().enumerate() {
+            let encoded = encode_message(request).unwrap();
+            assert_within_half_the_bound(&format!("P2PRequest {i}"), &encoded);
+            assert_eq!(&decode_message::<P2PRequest>(&encoded).unwrap(), request);
+        }
+
+        // A synchronization answer holding a full trie of order records, with side tables.
+        let orders = make_random_orders("".into(), &[1; 32], "RIN".into(), "KMD".into(), 5);
+        let mut answer = SyncPubkeyOrderbookStateRes {
+            last_signed_pubkey_payload: vec![1, 2, 3, 4],
+            pair_orders_diff: HashMap::from_iter(iter::once((
+                alb_ordered_pair("RIN", "KMD"),
+                DeltaOrFullTrie::FullTrie(orders.into_iter().map(|order| (order.uuid, order.into())).collect()),
+            ))),
+            protocol_infos: HashMap::new(),
+            conf_infos: HashMap::new(),
+        };
+        answer.protocol_infos.insert(Uuid::new_v4(), BaseRelProtocolInfo {
+            base: vec![1],
+            rel: vec![2],
+        });
+        answer.conf_infos.insert(Uuid::new_v4(), conf_settings());
+        let encoded = encode_message(&answer).unwrap();
+        assert_within_half_the_bound("SyncPubkeyOrderbookStateRes", &encoded);
+        decode_message::<SyncPubkeyOrderbookStateRes>(&encoded).unwrap();
+
+        // The delta form.
+        let mut delta = HashMap::new();
+        delta.insert(Uuid::new_v4(), None);
+        let answer = SyncPubkeyOrderbookStateRes {
+            last_signed_pubkey_payload: vec![1],
+            pair_orders_diff: HashMap::from_iter(iter::once((
+                alb_ordered_pair("RIN", "KMD"),
+                DeltaOrFullTrie::Delta(delta),
+            ))),
+            protocol_infos: HashMap::new(),
+            conf_infos: HashMap::new(),
+        };
+        let encoded = encode_message(&answer).unwrap();
+        assert_within_half_the_bound("SyncPubkeyOrderbookStateRes delta", &encoded);
+    }
+
+    fn order_record() -> OrderbookP2PItem {
+        let order = make_random_orders("02".repeat(33), &[1; 32], "RIN".into(), "KMD".into(), 1).remove(0);
+        order.into()
+    }
+
+    /// `bytes`, a map, with one more key whose value is `levels` one-element arrays around nil. The first byte
+    /// of `bytes` is a fixmap header.
+    fn map_with_extra_key(bytes: &[u8], levels: usize) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        assert_eq!(out[0] & 0xf0, 0x80, "a fixmap");
+        out[0] += 1;
+        out.extend_from_slice(&[0xa5, b'e', b'x', b't', b'r', b'a']);
+        out.extend(vec![0x91; levels]);
+        out.push(0xc0);
+        out
+    }
+
+    #[test]
+    fn t4a_a_order_record_nests_within_half_the_bound() {
+        let encoded = rmp_serde::to_vec(&order_record()).unwrap();
+        assert_within_half_the_bound("OrderbookP2PItem", &encoded);
+    }
+
+    #[test]
+    fn t4a_f_order_record_beyond_the_bound_is_dropped() {
+        let record = order_record();
+        let encoded = rmp_serde::to_vec(&record).unwrap();
+        assert_eq!(OrderbookP2PItem::try_from_bytes(encoded).unwrap(), record);
+
+        // The same record as a map with one more key; the total nesting is 64 and 65 levels.
+        let named = rmp_serde::to_vec_named(&record).unwrap();
+        assert_eq!(
+            OrderbookP2PItem::try_from_bytes(map_with_extra_key(&named, MAX_PEER_NESTING - 1)).unwrap(),
+            record
+        );
+        let before = dropped_peer_values();
+        assert!(OrderbookP2PItem::try_from_bytes(map_with_extra_key(&named, MAX_PEER_NESTING)).is_err());
+        assert!(OrderbookP2PItem::try_from_bytes(map_with_extra_key(&named, 10_000)).is_err());
+        assert!(dropped_peer_values() >= before + 2);
+
+        // A declared length beyond the bytes present.
+        let mut declared = vec![0x91, 0xdb];
+        declared.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        assert!(OrderbookP2PItem::try_from_bytes(declared).is_err());
+    }
+
+    #[test]
+    fn t4a_f_address_format_of_protocol_info_falls_back_beyond_the_bound() {
+        for format in [
+            AddressFormat::Standard,
+            AddressFormat::Segwit,
+            AddressFormat::CashAddress {
+                network: "bitcoincash".into(),
+                pub_addr_prefix: 0,
+                p2sh_addr_prefix: 5,
+            },
+        ] {
+            let info = rmp_serde::to_vec(&format).unwrap();
+            assert_within_half_the_bound("AddressFormat", &info);
+            assert_eq!(addr_format_from_protocol_info(&info), format);
+
+            // Bytes after the first value are ignored.
+            let mut with_tail = info.clone();
+            with_tail.extend_from_slice(&[0xc1, 0xdd, 0xff, 0xff]);
+            assert_eq!(addr_format_from_protocol_info(&with_tail), format);
+        }
+
+        // A segwit format with one more key: at the bound it is read, beyond it the standard format is the fallback.
+        let named = rmp_serde::to_vec_named(&AddressFormat::Segwit).unwrap();
+        let at_bound = map_with_extra_key(&named, MAX_PEER_NESTING - 1);
+        assert_eq!(addr_format_from_protocol_info(&at_bound), AddressFormat::Segwit);
+        let before = dropped_peer_values();
+        let beyond = map_with_extra_key(&named, MAX_PEER_NESTING);
+        assert_eq!(addr_format_from_protocol_info(&beyond), AddressFormat::Standard);
+        let far_beyond = map_with_extra_key(&named, 10_000);
+        assert_eq!(addr_format_from_protocol_info(&far_beyond), AddressFormat::Standard);
+        assert!(dropped_peer_values() >= before + 2);
+        assert_eq!(
+            addr_format_from_protocol_info(&[0xdd, 0xff, 0xff, 0xff, 0xff]),
+            AddressFormat::Standard
+        );
+    }
+}

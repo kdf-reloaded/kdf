@@ -10005,3 +10005,81 @@ mod header_time_only_tests {
         assert!(!coin.as_ref().conf.header_time_only_logged.load(Ordering::Relaxed));
     }
 }
+
+/// CRD ch.28 R16a, T4a (f): the coin's own check of a protocol-information value reads it under the bounds.
+#[cfg(not(target_arch = "wasm32"))]
+mod t4a_bounded_reading_tests {
+    use super::*;
+    use common::msgpack_bounds::{check_msgpack_bounds, dropped_peer_values, max_nesting_depth, MAX_PEER_NESTING};
+
+    fn coin() -> UtxoStandardCoin {
+        utxo_coin_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false)
+    }
+
+    fn supported(coin: &UtxoStandardCoin, info: &[u8]) -> bool {
+        utxo_common::is_coin_protocol_supported(coin, &Some(info.to_vec()))
+    }
+
+    /// `bytes`, a map, with one more key whose value is `levels` one-element arrays around nil.
+    fn map_with_extra_key(bytes: &[u8], levels: usize) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        assert_eq!(out[0] & 0xf0, 0x80, "a fixmap");
+        out[0] += 1;
+        out.extend_from_slice(&[0xa5, b'e', b'x', b't', b'r', b'a']);
+        out.extend(vec![0x91; levels]);
+        out.push(0xc0);
+        out
+    }
+
+    #[test]
+    fn t4a_f_protocol_info_of_the_real_formats_is_unchanged() {
+        let coin = coin();
+        for format in [
+            UtxoAddressFormat::Standard,
+            UtxoAddressFormat::Segwit,
+            UtxoAddressFormat::CashAddress {
+                network: "bitcoincash".into(),
+                pub_addr_prefix: 0,
+                p2sh_addr_prefix: 5,
+            },
+        ] {
+            let info = rmp_serde::to_vec(&format).unwrap();
+            assert_eq!(check_msgpack_bounds(&info), Ok(info.len()));
+            assert!(max_nesting_depth(&info) <= MAX_PEER_NESTING / 2);
+            assert!(supported(&coin, &info), "{format:?}");
+
+            // Arbitrary bytes after the first value are ignored.
+            for tail in [&[0xc1][..], &[0xdd, 0xff, 0xff, 0xff, 0xff], &[0x91; 200], &[0x00]] {
+                let mut with_tail = info.clone();
+                with_tail.extend_from_slice(tail);
+                assert!(
+                    supported(&coin, &with_tail),
+                    "{format:?} with a tail of {} bytes",
+                    tail.len()
+                );
+            }
+        }
+
+        // What does not decode is still not supported.
+        assert!(!supported(&coin, &[]));
+        assert!(!supported(&coin, &[0xc0]));
+        assert!(!supported(&coin, b"nonsense"));
+        // `None` keeps its branch: a standard-format coin supports it.
+        assert!(utxo_common::is_coin_protocol_supported(&coin, &None));
+    }
+
+    #[test]
+    fn t4a_f_protocol_info_beyond_the_bound_is_not_supported() {
+        let coin = coin();
+        let named = rmp_serde::to_vec_named(&UtxoAddressFormat::Segwit).unwrap();
+        assert!(supported(&coin, &map_with_extra_key(&named, MAX_PEER_NESTING - 1)));
+
+        let before = dropped_peer_values();
+        assert!(!supported(&coin, &map_with_extra_key(&named, MAX_PEER_NESTING)));
+        assert!(!supported(&coin, &map_with_extra_key(&named, 10_000)));
+        let mut declared = vec![0xdd];
+        declared.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        assert!(!supported(&coin, &declared));
+        assert!(dropped_peer_values() >= before + 3);
+    }
+}
