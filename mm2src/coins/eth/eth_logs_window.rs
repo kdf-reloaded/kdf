@@ -28,7 +28,7 @@
 
 use super::*;
 use alloy::rpc::json_rpc::RpcError;
-use common::log::{debug, warn};
+use common::log::{debug, info, warn};
 use std::sync::atomic::AtomicBool;
 
 /// The JSON-RPC code a node answers when a request is too large (EIP-1474 "limit exceeded").
@@ -36,6 +36,11 @@ const LIMIT_EXCEEDED_CODE: i64 = -32005;
 
 /// The phrases of an error message that name a block range or a limit (R17.8.2), lower case.
 const REFUSAL_PHRASES: [&str; 5] = ["range", "limit", "too large", "exceed", "more than"];
+
+/// How many of the newest blocks of a poll the spend wait's cursor stays behind (CRD ch.17 R17.8.3). A reorganization
+/// can replace the tip block, or one of the newest few, with a block that carries the spend; the next poll scans
+/// these blocks again, so such a spend is still found.
+pub(crate) const REORG_MARGIN_BLOCKS: u64 = 12;
 
 /// Seconds between two polls of the spend wait.
 pub(crate) const SPEND_WAIT_POLL_S: f64 = 5.;
@@ -51,6 +56,8 @@ struct LogsWindowState {
     reduced_to: AtomicU64,
     /// Whether the first reduction has been logged at WARN.
     warned: AtomicBool,
+    /// Whether the window has been logged at INFO on the coin's first bounded query.
+    announced: AtomicBool,
 }
 
 /// A node's refusal of a range's size (R17.8.2).
@@ -151,6 +158,13 @@ impl LogsQuerier {
         use crate::eth::alloy_compat::assert_send_future;
         use alloy::providers::Provider;
 
+        if !self.window.0.announced.swap(true, AtomicOrdering::SeqCst) {
+            info!(
+                "[{}] eth_getLogs window is {} blocks",
+                self.ticker,
+                effective_window(&self.window, self.cap)
+            );
+        }
         let mut logs = Vec::new();
         let mut start = from;
         while start <= to {
@@ -215,9 +229,9 @@ impl LogsQuerier {
             // Another request lowered `W` first; the retry runs with its value if that is below ours.
             return effective_window(&self.window, self.cap) < current;
         }
-        debug!(
-            "[{}] eth_getLogs window is {} blocks (was {})",
-            self.ticker, new, current
+        info!(
+            "[{}] eth_getLogs window is {} blocks (was {}) after {}",
+            self.ticker, new, current, answer
         );
         if !self.window.0.warned.swap(true, AtomicOrdering::SeqCst) {
             warn!(
@@ -253,7 +267,8 @@ impl EthCoin {
     /// Waits until the V1 payment `payment_tx` (swap id `id`) is spent, or `wait_until` (UNIX seconds) passes
     /// (CRD ch.17 R17.8.3). Every `poll_every` seconds it searches the logs forward from a cursor, in windows of
     /// at most `W` blocks; the cursor starts at the block of the payment's receipt when that is known, else at
-    /// `from_block`, and moves past every window scanned without error. The deadline is checked after every
+    /// `from_block`, and moves past every window scanned without error, except for the newest `REORG_MARGIN_BLOCKS`
+    /// blocks of the poll, which the next poll scans again. The deadline is checked after every
     /// poll, whether or not its queries failed.
     pub(crate) async fn wait_for_payment_spend(
         &self,
@@ -272,7 +287,7 @@ impl EthCoin {
         };
         loop {
             match self
-                .poll_payment_spend(&mut wait, payment_tx, id, swap_contract_address)
+                .poll_payment_spend(&mut wait, payment_tx, id, swap_contract_address, wait_until)
                 .await
             {
                 Ok(Some(spend)) => return Ok(spend),
@@ -284,10 +299,17 @@ impl EthCoin {
             }
 
             if now_ms() / 1000 > wait_until {
+                // A spend that a window returned but whose transaction could not be fetched is named, so the log
+                // shows that the secret was on the chain.
+                let known_spend = match wait.found {
+                    Some(spend_hash) => format!("(spend {:02x} found but not fetched)", spend_hash),
+                    None => String::new(),
+                };
                 return TX_PLAIN_ERR!(
-                    "Waited too long until {} for transaction {:?} to be spent ",
+                    "Waited too long until {} for transaction {:?} to be spent {}",
                     wait_until,
                     payment_tx,
+                    known_spend,
                 );
             }
             Timer::sleep(poll_every).await;
@@ -300,12 +322,15 @@ impl EthCoin {
         payment_tx: &SignedEthTx,
         id: &[u8],
         swap_contract_address: Address,
+        wait_until: u64,
     ) -> Result<Option<TransactionEnum>, PollError> {
         if let Some(spend_hash) = wait.found {
             return self.fetch_spend_tx(spend_hash).await;
         }
 
-        let scan = self.scan_for_spend(wait, payment_tx, id, swap_contract_address).await;
+        let scan = self
+            .scan_for_spend(wait, payment_tx, id, swap_contract_address, wait_until)
+            .await;
         if let Ok(Some(spend_hash)) = scan {
             wait.found = Some(spend_hash);
             return self.fetch_spend_tx(spend_hash).await;
@@ -334,13 +359,17 @@ impl EthCoin {
     }
 
     /// Searches the windows from the cursor to the tip for the spend of payment `id`. The cursor moves past each
-    /// window that was scanned without error. Returns the hash of the transaction that spent the payment.
+    /// window that was scanned without error, but never above `tip - REORG_MARGIN_BLOCKS + 1`, so the newest blocks
+    /// are scanned again by the next poll. Returns the hash of the transaction that spent the payment. A poll
+    /// that is far behind the tip scans many windows, so the deadline is checked before every window after the
+    /// first; a spend found in a window still wins over the deadline, because it returns before the next check.
     async fn scan_for_spend(
         &self,
         wait: &mut SpendWait,
         payment_tx: &SignedEthTx,
         id: &[u8],
         swap_contract_address: Address,
+        wait_until: u64,
     ) -> Result<Option<H256>, String> {
         use crate::eth::alloy_compat::assert_send_future;
         use alloy::providers::Provider;
@@ -363,21 +392,29 @@ impl EthCoin {
             }
         }
 
-        while wait.cursor <= tip {
-            let to_block = self.log_window_end(wait.cursor, tip);
-            let events =
-                assert_send_future(self.spend_events(swap_contract_address, wait.cursor, to_block).compat()).await?;
+        // The poll scans up to the tip, but the cursor it leaves behind stays `REORG_MARGIN_BLOCKS` short of it, and
+        // never moves back.
+        let cursor_cap = tip.saturating_sub(REORG_MARGIN_BLOCKS - 1);
+        let mut next = wait.cursor;
+        let mut scanned = 0usize;
+        while next <= tip {
+            if scanned > 0 && now_ms() / 1000 > wait_until {
+                return ERR!("the deadline passed while scanning, the next block is {}", next);
+            }
+            scanned += 1;
+            let to_block = self.log_window_end(next, tip);
+            let events = assert_send_future(self.spend_events(swap_contract_address, next, to_block).compat()).await?;
             if let Some(event) = events.iter().find(|event| event.data.0.get(..32) == Some(id)) {
                 return match event.transaction_hash {
                     Some(spend_hash) => Ok(Some(spend_hash)),
                     None => ERR!("The ReceiverSpent event of the payment has no tx_hash"),
                 };
             }
+            wait.cursor = wait.cursor.max(to_block.saturating_add(1).min(cursor_cap));
             if to_block >= tip {
-                wait.cursor = tip.saturating_add(1);
                 break;
             }
-            wait.cursor = to_block + 1;
+            next = to_block + 1;
         }
         Ok(None)
     }

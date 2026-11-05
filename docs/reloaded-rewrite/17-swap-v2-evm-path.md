@@ -468,8 +468,10 @@ shrinking would hide that.
   `W`; otherwise to half of `W`; never below 1.
 - The reduced `W` holds for the rest of the coin's session. Its first
   reduction is logged once at WARN, naming the coin, the new `W` and the node
-  by host only (Chapter 35 §35.1.F). Every change of `W` is logged at debug
-  with its value.
+  by host only (Chapter 35 §35.1.F).
+- The window in effect is logged at INFO once, when the coin first queries
+  logs, and again at INFO on every change of `W`, with its value. A node
+  operator can therefore read it at the default log level.
 - Any other failure keeps `W` and is retried as before.
 
 **R17.8.3. The wait for a payment's spend.** While a node waits for one of its
@@ -478,10 +480,18 @@ own V1 payments to be spent, it searches forward from a cursor.
   because the spend cannot precede the payment; otherwise at the search's
   start block.
 - Each poll scans windows from the cursor to the current tip, and moves the
-  cursor past every window it scanned without error.
-- The wait's deadline is checked on every poll, also after a failed query.
-  A node whose every query fails therefore still leaves the wait at the
-  deadline and takes the refund path, instead of waiting forever.
+  cursor past every window it scanned without error, but never higher than 12
+  blocks below the tip seen by that poll. A reorganization can replace the
+  newest blocks, so the next poll scans those 12 blocks again; that costs a
+  small part of one window.
+- The wait's deadline is checked on every poll, also after a failed query,
+  and before each window of a poll. A node whose every query fails therefore
+  still leaves the wait at the deadline and takes the refund path, instead of
+  waiting forever, and a poll far behind the tip does not overrun the deadline
+  by its whole scan. A spend found in a window already scanned is returned
+  before the deadline is looked at. When the wait ends at its deadline with a
+  spend found but its transaction not yet fetched, the timeout names that
+  spend.
 - Each poll also reads the payment's state from the swap contract. It is a
   signal only: the contract keeps no secret and no block. When the state reads
   as spent while no window has yet returned the spend, one WARN line says so
@@ -843,15 +853,18 @@ native persistence contract.
 **T17.8.1. Shrinking windows.** Against a stub EVM node that refuses any
 `eth_getLogs` range above 100 blocks with -32602 "block range too large", a
 spend search from 3,600 blocks below the tip with `W` = 1,000 shrinks `W` to
-500, 250, 125 and 62, then finds the spend. It logs one WARN and a debug line
-per change of `W`.
+500, 250, 125 and 62, then finds the spend. It logs the first-use INFO line,
+one WARN, and an INFO line per change of `W`.
 
 **T17.8.2. A named limit.** When the refusal names a limit (for example "limited
 to 100 blocks"), `W` becomes that count at once.
 
-**T17.8.3. Unrelated errors.** A bare -32602 without a range or limit phrase
-leaves `W` unchanged and counts as an ordinary failure. A -32005 shrinks `W`
-whatever its message says.
+**T17.8.3. Unrelated errors and failover.** A bare -32602 without a range or
+limit phrase leaves `W` unchanged and counts as an ordinary failure. A -32005
+shrinks `W` whatever its message says. A node that refuses a window which
+another node accepts causes a failover, not a shrink: `W` shrinks only when the
+window fails on every node. One node refusing and the next accepting is
+therefore the designed behavior, not a missed reduction.
 
 **T17.8.4. Windows.** With `W` = 1,000 and a range of blocks 0 to 2,499, the
 windows are [0, 999], [1,000, 1,999] and [2,000, 2,499], for every search of
@@ -863,7 +876,13 @@ P − 3,555, the spend wait's first query starts at P.
 
 **T17.8.6. The deadline.** With every query failing, for any reason, the V1
 spend wait and the V2 funding-spend search each return their timeout error once
-their deadline has passed.
+their deadline has passed. With many windows still to scan when the deadline passes,
+the V1 wait returns its timeout before scanning them all. With the spend found but
+its transaction fetch failing, the timeout text names the spend.
+
+**T17.8.8. The reorganization margin.** The tip block of one poll is scanned
+without the spend, and is then replaced by a block that carries the spend. The
+next poll of the V1 wait finds the spend.
 
 **T17.8.7. The contract state.** With the contract reporting the payment as
 spent while the logs keep failing, one WARN line is logged for the wait.
