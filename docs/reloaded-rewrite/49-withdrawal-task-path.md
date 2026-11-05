@@ -482,6 +482,21 @@ T49.27 without `from` shall answer `FromAddressNotFound`, not
 assertion shall compare the discriminant and the JSON type of `error_data`
 only, never the text.
 
+> **Compatibility row (this repository, 2026-11-05; not corpus-sourced).**
+> **Parity** since PR #236 for the SLP row and for the hardware-wallet and
+> browser-extension rows that Reloaded serves. An SLP token `withdraw` that
+> carries `from` answers `UnsupportedError`. So do the direct `withdraw` of an
+> EVM coin under a Trezor key, a TRON withdraw under a Trezor key and, on a
+> browser build, a TRON withdraw under MetaMask (chapters 47 and 50), each with
+> its former text kept in `error_data`. Before, Reloaded ignored `from` on an
+> SLP withdraw and spent from the platform coin's activated key, and it
+> answered the Trezor and MetaMask cases with its own discriminants
+> `UnsupportedUnderTrezor` and `UnsupportedUnderMetamask` (historical). The
+> shielded rows, and the other refusals R49.27a lists, are not covered by this
+> row. No peer observes the discriminant, so arm 1 of
+> `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind the default,
+> and the change has no switch.
+
 ## 49.7 Provenance Footer
 
 - *Inputs:* the project's own revision history and current tree (the
@@ -558,3 +573,7 @@ only, never the text.
   identifier, error, log or comment literal, body or control-flow
   transcription fails regardless of volume; dictated wire surface was
   excluded.
+- *Clean-side amendment (2026-11-05) -- PR #236.* A session that never read
+  the corpus added the compatibility row under T49.27a. It rests on R49.27a as
+  gated above and on this repository's own code, takes no forbidden-class
+  input, and so does not engage chapter 01 R38.
