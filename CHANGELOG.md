@@ -317,6 +317,11 @@ file carries the detail. "New" means the plan was created in this cycle.
   GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222). A received
   cancellation now stays final for an hour, and a maker no longer restores an order it cancelled
   (PRs #223, #224).
+- [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
+  swap key per coin and one trading identity for the node. Eight work packages, starting with
+  corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
+  complete. The maintainer's answers on withdraw, the legacy methods, legacy activation and Sia are
+  recorded in it.
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
@@ -348,6 +353,24 @@ file carries the detail. "New" means the plan was created in this cycle.
 What does not work yet, or works only in part, in this release. Each item says where more detail
 lives.
 
+- **Under an HD login, swaps of EVM coins, and of coins enabled through legacy `enable` or
+  `electrum`, do not complete.** An HD login is one with `enable_hd` set to `true`, as the Komodo
+  DeFi wallet uses in HD mode. For such a coin the swap announces a different key than the one the
+  coin pays from, so the other side rejects the dex fee or the payment. The dex fee is lost, and a
+  payment already sent comes back only at its refund time. The same holds for a UTXO coin activated
+  at an address other than its first one (`path_to_address`). A UTXO coin such as RIN activated
+  through `task::enable_utxo` at its first address trades normally. Until this is fixed, trade EVM
+  coins under a login without `enable_hd`. The proceeds of a swap of a coin enabled through legacy
+  `enable` under an HD login can land on an address the wallet does not show; logging in with the
+  same passphrase without `enable_hd` reaches them. A maker's own `orderbook` does not mark its
+  orders under an HD login as its own (`is_mine` is false); other nodes still see them. More in
+  [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PR #228; CRD ch.51, note under
+  R63.
+- **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
+  `get_enabled_coins` fails as a whole once such a coin is enabled.** Both report a single address,
+  and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for
+  the balance and the mmrpc 2.0 `get_enabled_coins` for the list. For an EVM coin both legacy
+  methods answer with the activated address. Detail: PR #228; CRD ch.05 §5.9B R35.
 - **Do not run two KDF instances on the same seed at the same time.** If you do, for any coin (RIN
   included), both instances can pick the same funds for two different transactions. The network
   accepts one and rejects the other, and the instance that loses gets no explanation and may try
