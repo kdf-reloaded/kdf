@@ -57,7 +57,9 @@ hierarchical-deterministic seed and path machinery; R20–R26 cover
 the central context and the platform-gated extensions. R36–R40
 (§5.12B) are a Reloaded-original refusal rule for swaps whose keys
 do not agree under a global-HD login. R41–R44 (§5.12C) make every
-coin announce the key it signs with, so that those keys agree.
+coin announce the key it signs with, so that those keys agree. R45–R49
+(§5.12D) make the internal key the node's own key under a global-HD
+login.
 
 ## 5.2 Subsystem Shape
 
@@ -668,7 +670,7 @@ the EVM path).
 > no such check exists or is needed (§5.9B R34). Plan items H3 and H4
 > give every coin its own key and the node the internal key as its
 > trading identity, as §5.9B R32--R33 record for the reference, and the
-> refusals fall away with them (§5.12C for H3, D6 for H4). Under an iguana login the three
+> refusals fall away with them (§5.12C for H3, §5.12D for H4). Under an iguana login the three
 > keys are one key and nothing in this section changes.
 
 **R36.** *The agreement rule.* Under a global-HD login, a coin MAY
@@ -761,7 +763,7 @@ itself and in `docs/GLEEC_COMPATIBILITY.md`.
 > `false` does not reach that behavior; it restores the behavior of
 > earlier Reloaded builds, in which such a swap is negotiated and then
 > fails in the coin layer. Item H3 (§5.12C) removes the pairs that this
-> section refuses, and the divergence ends when item H4 lands (D6).
+> section refuses, and the divergence ends when item H4 lands (§5.12D).
 
 > **As built (2026-11-04, clean-side record; no requirement above changes).**
 > *Coin side.* `SwapOps::swap_key_disagreement` (`coins/lp_coins_traits.rs`) answers
@@ -876,7 +878,8 @@ funding.
   signing key is the persistent key saves nothing, as today.
 - *On resume.* A resumed swap MUST use the key pair saved with it. A swap
   saved without one, started by an earlier build, MUST keep using the
-  node's persistent key, which is the key its Started event recorded.
+  node's persistent key, which is the key its Started event recorded (once
+  §5.12D is built, R47 chooses that key).
 - *Every later use.* The saved pair is the one every later use of the
   swap's HTLC key takes: the running swap, its resumption after a
   restart, and the manual recovery of its funds (`recover_funds_of_swap`,
@@ -957,6 +960,87 @@ expected answer. The switch `swap_key_check` (R40) stays, with its default.
 > `t23_a_swap_saved_with_a_pair_resumes_and_recovers_with_that_pair`). The node-side refusals
 > of §5.12B stay covered by their mocked-coin tests (`ordermatch_tests::t05_12b_swap_key_check_tests`,
 > `trade_preimage::tests::swap_key_mismatch`). End-to-end swaps are the SwapLab rows HD3 and HD4.
+
+## 5.12D One Trading Identity under a Global-HD Login
+
+> **Scope (Reloaded-original, 2026-11-05).** This section is item H4 of plan
+> [`hd-key-unification`](../plans/hd-key-unification.md), under maintainer
+> Decision BL and decisions CR, CS and CT of 2026-11-05. It brings Reloaded to
+> §5.9B R32 and to the persistent-key half of R33: under a global-HD login the
+> node's own key is the internal key of R16, as at the reference. The
+> passphrase hash stays available only where a record or a family activation
+> still depends on it. Under an iguana login the internal key and the
+> passphrase hash are the node's one key, and nothing changes.
+
+**R45.** *The node key is the internal key.* Under a global-HD login, the
+key the node uses as its own (its **node key**) MUST be the internal key of
+R16, the key `get_public_key` reports. The node key:
+
+1. signs maker orders, keep-alive messages and every ordermatch message sent
+   without a per-order key, and fills `sender_pubkey` (§5.9B R32);
+2. is the `persistent_pubkey` of every V1 swap started from now on: the
+   negotiation, the own-key field of the start event, and the swap-statistics
+   record (chapter 51 R59, R50A);
+3. signs the swap messages and the transaction-helper messages of such a swap
+   when it has no per-swap p2p key (chapter 51 R50B);
+4. is the HTLC key of a coin that supplies none of its own (R43, chapter 51
+   R63);
+5. signs the peer healthcheck probe and its acknowledgment. The receiver checks
+   only that the signature matches the key inside the message, so this has no
+   effect on peers;
+6. on a relay, is the key whose SHA-256 is the relay's libp2p identity secret
+   (chapter 28 R19). An HD relay's peer identifier therefore changes once at
+   upgrade (Decision CS; R49).
+
+**R46.** *The legacy passphrase key.* The hash of the passphrase text, the
+node key of earlier builds under a global-HD login, MUST stay available as
+an explicitly named **legacy key** (Decision CR). It MUST be used only:
+
+1. for a swap that recorded it (R47);
+2. as the seed of the Lightning node, so that a Lightning node keeps its
+   identity (Lightning is not enabled in this release);
+3. by the activation of BCH together with its tokens and by the Tendermint
+   activation, until plan item H7 moves them to the coin key (§5.9B R35).
+
+No other part of the node may use it.
+
+**R47.** *Swaps that recorded the legacy key.* A swap whose Started event
+recorded the legacy key as its own persistent key was started by an earlier
+build. When resumed, it MUST use as its node key the key pair, out of the
+internal key and the legacy key, whose public key equals the recorded one
+(Decision CT). That pair signs the swap's messages and transaction-helper
+messages, serves as the HTLC key of R43 when no pair was saved, and signs its
+spend and refund. Manual recovery (`recover_funds_of_swap`) MUST include the
+legacy key among its key candidates (chapter 39 R39.5.4). A recorded key that
+matches neither key is reported as an error naming the swap, and that swap is
+not resumed.
+
+**R48.** *Ordermatch under a global-HD login.* With R45, the maker's orders
+carry the key that keep-alive, `is_mine` and the stale-order sweep already use.
+- A maker sends one keep-alive per pair every 30 s, and other nodes keep its
+  orders without gaps.
+- Its own `orderbook` marks them `is_mine`.
+- The orderbook `address` of an own order is the internal key's address
+  (§5.9B R32, R35).
+- Orders restored from storage at start are announced under the internal key.
+  The copies other nodes still hold under the legacy key expire after the
+  maker-order timeout.
+
+**R49.** *Operator note at upgrade.* The release that ships this section
+MUST carry an upgrade note for HD logins covering:
+- orders re-announced under the internal key, with the old copies expiring on
+  other nodes after the maker-order timeout;
+- swaps in flight finishing on the key they recorded (R47);
+- swap statistics showing two public keys for the node across the upgrade;
+- an HD relay's new peer identifier (R45 item 6), which peers learn again
+  through the relay's address (chapter 28 R21).
+
+> **Compatibility.** With this section Reloaded's trading identity, persistent
+> key and relay identity under a global-HD login match the reference (§5.9B R32,
+> R33; chapter 28 R19). The legacy key of R46 has no counterpart there: the
+> reference never uses the passphrase hash under a global-HD login. Reloaded
+> keeps it only for its own earlier swap records, the Lightning seed, and the
+> two activations that item H7 moves.
 
 ## 5.13 Tests
 
@@ -1154,6 +1238,35 @@ those of the previous build.
 default `swap_key_check`, none of the requests of T15 and T16 is refused.
 `trade_preimage` answers for them without `SwapKeyMismatch`.
 
+
+**T25.** *Node key under a global-HD login (R45, R48).* T13 holds. In
+addition:
+- the maker's own `orderbook` marks its order `is_mine`;
+- one keep-alive per pair leaves every 30 s, signed with the internal key;
+- the orderbook `address` of the order is the internal key's address.
+
+**T26.** *Relay identity (R45 item 6).* A relay under a global-HD login has
+the peer identifier derived from the internal key. Under an iguana login the
+peer identifier is the same as before.
+
+**T27.** *Legacy key for a recorded swap (R47).* A swap saved by the
+previous build under a global-HD login, with the legacy key recorded and no
+saved pair, resumes with the legacy key: its swap messages are signed with
+it and its refund uses it. A swap started after the upgrade uses the
+internal key. A recorded key that matches neither is reported, and that swap
+is not resumed.
+
+**T28.** *Recovery candidates (R47).* `recover_funds_of_swap` recovers a
+payment of a swap that recorded the legacy key and saved no pair.
+
+**T29.** *What keeps the legacy key (R46).* Under a global-HD login, the
+Lightning seed, and the keys of BCH activated with its tokens and of
+Tendermint, are the same as before. No other use of the legacy key remains.
+
+**T30.** *Iguana login unchanged (R45–R48).* Under an iguana login the node
+key, the relay peer identifier, the wire keys and every saved swap are the
+same as those of the previous build.
+
 ## 5.14 Deferred Work
 
 **D1.** Per-account hierarchical-deterministic activation
@@ -1206,14 +1319,11 @@ chapter's mnemonic module and encryption envelope (§5.4–§5.5) but
 are themselves bound, gated and tested entirely within Chapter 7; no
 further coordinated change to this chapter is required.
 
-**D6.** *One trading identity under a global-HD login* (plan
-[`hd-key-unification`](../plans/hd-key-unification.md), item H4).
-§5.12B refuses the swaps whose keys do not agree, and §5.12C (item H3)
-makes them agree. Item H4 moves the trading identity and the swap's
-persistent key from the passphrase hash to the internal key (§5.9B R32,
-R33). It MUST keep the passphrase-hash key for a swap saved without an
-HTLC key pair (R43), because that is the key such a swap recorded. Its
-rules will be added to this chapter with that item.
+**D6.** *(Resolved 2026-11-05 by §5.12D.)* One trading identity under a
+global-HD login (plan [`hd-key-unification`](../plans/hd-key-unification.md),
+item H4). R45–R49 move the trading identity and the swap's persistent key to
+the internal key, and R46–R47 keep the passphrase-hash key for the swaps that
+recorded it.
 
 ## 5.15 Baseline Verifications
 
@@ -1349,3 +1459,12 @@ surface.
   chapter 51 R74, which passed the KDF Dirty Gate on 2026-11-04. The
   addition carries no reference content of its own and needs no Dirty
   Gate pass of its own.
+- *Reloaded-original addition (2026-11-05) -- §5.12D (R45–R49), T25–T30, D6
+  as resolved, and the pointers in §5.1 and R43.* Written by a context that
+  never read the forbidden corpus. It rests on maintainer Decision BL, on
+  decisions CR, CS and CT of 2026-11-05, and on this repository's own key,
+  ordermatch, swap-message, recovery, relay-identity and healthcheck code. The
+  sentences that describe the reference restate §5.9B R32, R33 and R35 and
+  chapter 28 R19, which passed the KDF Dirty Gate on 2026-11-04. The addition
+  carries no reference content of its own and needs no Dirty Gate pass of its
+  own.
