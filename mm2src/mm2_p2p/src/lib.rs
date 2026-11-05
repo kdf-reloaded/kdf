@@ -8,6 +8,7 @@ pub mod peers_exchange;
 mod redial_guard;
 pub mod relay_address;
 pub mod request_response;
+#[cfg(not(target_arch = "wasm32"))] mod resolving_transport;
 mod runtime;
 
 use common::msgpack_bounds::check_peer_value;

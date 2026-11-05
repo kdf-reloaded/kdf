@@ -1629,12 +1629,15 @@ fn build_dns_ws_transport(
 ) -> Result<BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)>, AdexBehaviourError> {
     use libp2p::websocket::tls as libp2p_tls;
 
-    // The DNS-over-TCP transport is not `Clone` in the 0.52 API, so a fresh instance is built for
-    // the plain and the WebSocket paths.
+    use crate::resolving_transport::ResolvingTransport;
+
+    // The names of the addresses this transport dials are looked up through the node's resolver (CRD ch.28 R0b and
+    // R18, ch.45 R45.6B.9 item 1), not through the transport library's own DNS layer. The TCP transport is not `Clone`
+    // in the 0.52 API, so a fresh instance is built for the plain and the WebSocket paths. The WebSocket layer sits on
+    // top of the resolving one, so a `/wss` dial keeps the hostname for its TLS check.
     let new_dns_tcp = || {
         let tcp = libp2p::tcp::tokio::Transport::new(libp2p::tcp::Config::new().nodelay(true));
-        libp2p::dns::TokioDnsConfig::custom(tcp, libp2p::dns::ResolverConfig::google(), Default::default())
-            .expect("Building the DNS-over-TCP transport should never fail")
+        ResolvingTransport::new(tcp)
     };
 
     let dns_tcp = new_dns_tcp();

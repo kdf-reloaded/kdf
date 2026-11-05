@@ -12,6 +12,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Within each heading, entries are grouped by area. Each entry ends with the pull request that made
 it and, where one exists, the CRD rule, for readers who want more.
 
+### Upgrade note: name lookups go to Google Public DNS
+
+**If your node runs on a network that blocks Google Public DNS, set `dns_resolver` before you
+upgrade.** Some countries, many company networks and captive portals block it.
+
+Earlier builds looked up coin servers and services (Electrum, EVM and other nodes, lightwalletd)
+through your computer's own resolver. This release looks up every name through Google Public DNS
+unless `dns_resolver` says otherwise. Seeds were already looked up that way.
+
+Where Google Public DNS is blocked, an upgraded node with the default resolves no name and
+reaches no coin server until you set one of these in `MM2.json`:
+- `"dns_resolver": "system"`: your computer's resolver, as before for coin servers;
+- `"dns_resolver": ["192.0.2.53"]`: DNS servers of your choice.
+
+At start the node logs which resolver it uses. A name it cannot resolve is logged with a hint
+that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resolver).
+
 ### Added
 
 #### EVM coins
@@ -164,6 +181,40 @@ it and, where one exists, the CRD rule, for readers who want more.
   Not measured: 256 cores or 80 updates a second over several hours, and a shielded swap. Detail: PR #225; plan
   [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md); CRD ch.45 R45.6A.8; issue #191.
 
+#### Name lookups
+
+- **One setting now chooses the DNS resolver for every name the node looks up.** The setting
+  `dns_resolver` covers seeds, names that other peers hand out, Electrum servers, EVM, Solana,
+  Tendermint and UTXO node addresses, lightwalletd servers, NFT providers, the coins-file fetch
+  and price sources.
+  - **Values.** Absent or `"google"`: Google Public DNS, the default. `"system"`: the computer's
+    own resolver. An array of addresses such as `["192.0.2.53", "[2001:db8::53]:5353"]`: those
+    DNS servers only. Any other value stops the node at start with an error naming the key.
+  - **No fallback.** A name that can't be resolved fails only the connection that needed it,
+    which is retried as before. No other resolver is asked, and the node keeps running.
+  - **Cache.** With Google or chosen servers, answers are kept in memory only, for the lifetime
+    the DNS records give, within 30 seconds and 1 hour. While the resolver can't be reached, the
+    last known answer of a name is used for up to 24 hours after it expired, and a warning says
+    so.
+  - **Not yet covered.** Sia, the WalletConnect relay, Lightning peer addresses and the
+    statistics method still use the computer's resolver.
+  - **Logs.** One info line at start names the resolver. A name that can't be resolved is
+    logged at most once an hour.
+  - **Metrics.** `dns.lookups.count`, `dns.failures.count`, `dns.stale_served.count` and
+    `dns.last_known.entries`.
+
+  See the upgrade note above. Detail: PRs #216, #219; CRD ch.45 §45.6B.
+- **Hostnames that other peers hand out are looked up without blocking a worker thread.** The
+  lookup now uses the node's resolver, one at a time, given up after 5 seconds as before.
+  Detail: PRs #216, #219; CRD ch.28 R8c item 7.
+
+#### Transport, TLS and dependencies
+
+- **The old DNS libraries are gone from the build.** The peer-to-peer transport no longer uses
+  its own DNS layer, so that layer and the unmaintained resolver library it pulled in
+  (trust-dns 0.22, with an accepted `idna` advisory) are no longer built. The dependency policy
+  now bans them. Detail: PRs #216, #219; CRD ch.45 R45.6B.11.
+
 ### Fixed
 
 #### Node names in logs and errors
@@ -212,6 +263,10 @@ it and, where one exists, the CRD rule, for readers who want more.
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
+- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
+  Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
+  they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
+  address format, without noticing the marker (PR #232).
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
@@ -238,12 +293,15 @@ file carries the detail. "New" means the plan was created in this cycle.
   rows are next.
 - [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new: the peer-to-peer
   items of 0.4.0. The redial guards are in (PRs #199, #206), and so are the peer-exchange
-  logging, the address ranges and the idle-close log (PRs #203, #211), and the send-queue window
-  shares and the queue-signal fix (PRs #204, #214).
+  logging, the address ranges and the idle-close log (PRs #203, #211), the send-queue window
+  shares and the queue-signal fix (PRs #204, #214), and one resolver for every hostname (PRs #216,
+  #219); the remaining lookups (Sia, WalletConnect, Lightning, statistics) and encrypted DNS are
+  new rows for later.
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
-  recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226); the SLP
-  token withdrawal waits for the reference's answer.
+  recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226). On an SLP
+  token withdrawal they charge it in proportion too; that is now recorded, and KDF Reloaded will
+  follow there as well (PR #232).
 - [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — new step H6: the
   median time of a coin whose headers carry a fixed-length trailer (Bitcoin Atom) is read from each
   header's own bytes; the 1.6 list form of header requests and explicit `header_layout` entries for
@@ -271,16 +329,22 @@ lives.
   Detail: PR #181; CRD ch.38 R38.5B.8, D38.5B.2, D38.5B.4.
 - **A fixed fee on an SLP token withdrawal is still charged for every started kilobyte.** When a
   `withdraw` of an SLP token on BCH gives its fee as `{"type":"UtxoFixed","amount":…}`, KDF Reloaded
-  charges that amount for every started kilobyte of the transaction; what Komodo and GLEEC KDF
-  charge there is not yet established. UTXO coins themselves now charge it in proportion to the
-  size, as Komodo and GLEEC KDF do (see Changed). More in the
-  [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PR #226; CRD ch.38 R38.6.6l.
+  charges that amount for every started kilobyte of the transaction. Komodo and GLEEC KDF charge it
+  in proportion to the size there too, and KDF Reloaded will do the same (planned). UTXO coins
+  themselves now charge it in proportion to the size, as Komodo and GLEEC KDF do (see Changed). More
+  in the [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PRs #226, #232; CRD ch.38
+  R38.6.6l, R38.6.6m.
 - **The swap watcher does not work yet.** A watcher is another node that finishes a swap for you
   when you are offline. No swap hands its data to a watcher yet, for any coin (issue #56), so keep
   your node running until your swaps have finished. Bitcoin-family coins (UTXO coins such as RIN,
   BCH and QTUM) also no longer offer to watch other traders' swaps, because the checks a watcher
   runs are not implemented for them; only Siacoin (SC) offers watching. Detail: PR #177; CRD ch.09
   R17.
+- **Four kinds of connection still look names up through the computer's own resolver,** whatever
+  `dns_resolver` says: Sia, the WalletConnect relay, Lightning peer addresses and the statistics
+  method. They follow in a later release. More in
+  [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md), item P5b. Detail: CRD
+  ch.45 D45.6.
 - **A maker that changes its orders many times a second can drop out of the order book of a relay
   with a slow link.** In a test, a node that kept 480 orders and changed their prices about 80 times
   a second sent its updates to a GLEEC KDF relay whose incoming link was limited to 100 kbit/s. Within

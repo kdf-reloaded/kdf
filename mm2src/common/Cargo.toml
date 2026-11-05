@@ -89,6 +89,11 @@ anyhow = "1.0"
 chrono = "0.4"
 crossterm = "0.20"
 gstuff = { version = "0.7", features = ["crossterm"] }
+# One DNS library for every hostname the node looks up (CRD ch.45 R45.6B.11, D45.8): the message types, the wire
+# format and the IDNA name conversion of hickory-proto. The node's own backend (common::dns_resolver) does the queries
+# over tokio's UDP and TCP sockets, with its own cache and hosts file. No resolver crate, no TLS, HTTPS, QUIC or
+# DNSSEC (encrypted DNS is deferred, D45.7).
+hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
 http-body-util = "0.1"
 hyper = { version = "1", default-features = false }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "http2", "tokio"] }
@@ -105,7 +110,9 @@ libc = { version = "0.2" }
 # first") for why this stays out of the WASM dependency graph.
 lightning = { path = "../../rust-lightning-patched/lightning" }
 log4rs = { version = "1.0", default-features = false, features = ["console_appender", "pattern_encoder"] }
-tokio = { version = "1.7", features = ["io-util", "rt-multi-thread", "net"] }
+# `time` for the lookup bounds of the shared resolver (R45.6B.3).
+tokio = { version = "1.7", features = ["io-util", "rt-multi-thread", "net", "time"] }
+tower-service = "0.3"
 
 [build-dependencies]
 cc = "1.0"

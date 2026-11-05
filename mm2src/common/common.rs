@@ -140,6 +140,7 @@ pub mod big_int_str {
 pub mod crash_reports;
 pub mod custom_futures;
 pub mod custom_iter;
+#[cfg(not(target_arch = "wasm32"))] pub mod dns_resolver;
 pub mod duplex_mutex;
 pub mod mm_number {
     //! Re-exported from [`mm2_number`].
