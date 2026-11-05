@@ -8,8 +8,8 @@
 > value transfers in Sia's native units, and participates in the
 > V1 atomic-swap protocol by realising the HTLC as a native Sia
 > spend policy whose success path is unlocked by a SHA-256
-> preimage and whose refund path is unlocked by a block-height
-> time lock -- conforming on the wire to the public Sia
+> preimage and whose refund path is unlocked by a time lock
+> (a Unix timestamp) -- conforming on the wire to the public Sia
 > consensus/transaction formats and to the walletd HTTP API.
 
 ## 20.0 Executive Summary
@@ -945,7 +945,14 @@ rather than defects. None is a correctness claim.
   implemented for Sia; swaps involving Sia run only over the V1
   protocol ([Chapter 13](13-swap-version-negotiation.md)). Binding
   design drafted in [Chapter 54](54-sia-swap-v2-path.md) (status:
-  DRAFT, not yet approved for implementation).
+  DRAFT, not yet approved for implementation). *Provenance
+  (lab-verified 2026-11-04):* V1 swaps with Sia on one side are
+  supported. On the live chain, seven swaps completed (two between
+  KDF Reloaded nodes, the others against nodes of the two reference
+  designations, with the interop limits recorded in the changelog's
+  Known limitations), and one refund of a Sia payment between two KDF
+  Reloaded nodes was mined. The earlier "postponed until after the
+  beta" statement is withdrawn.
 - **D6 -- Size-aware fee estimation.** *Closed.* The withdraw path
   now estimates the fee from a probe transaction's real serialized
   size (`V2TransactionBuilder::weight()`) times the live
