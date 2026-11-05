@@ -316,14 +316,15 @@ fn start_saves_no_private_key_for_a_derived_key_and_still_saves_any_other() {
     BASE_SECRET.with(|b| b.set(vector_base_key("maker").private().secret.take()));
     mock_deriving_coin();
     let coin = MmCoinEnum::Test(TestCoin::default());
-    let (pair, saved) = start_htlc_key_pair(&coin, &vector_secret_hash()).unwrap();
+    let node_pubkey = *KeyPair::random_compressed().public();
+    let (pair, saved) = start_htlc_key_pair(&coin, &node_pubkey, &vector_secret_hash()).unwrap();
     assert_eq!(pair.unwrap().public().to_vec(), vector_maker_arrr_pub());
     assert!(saved.is_none(), "a derived key is never written to the swap record");
 
     TestCoin::derives_swap_htlc_key.mock_safe(|_| MockResult::Return(false));
     let kept = KeyPair::random_compressed();
     TestCoin::get_htlc_key_pair.mock_safe(move |_| MockResult::Return(Some(kept)));
-    let (pair, saved) = start_htlc_key_pair(&coin, &vector_secret_hash()).unwrap();
+    let (pair, saved) = start_htlc_key_pair(&coin, &node_pubkey, &vector_secret_hash()).unwrap();
     assert_eq!(pair.unwrap().public(), kept.public());
     assert_eq!(saved.unwrap().priv_key(), kept.private().secret.take());
 }

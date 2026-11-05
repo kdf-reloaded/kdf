@@ -3713,15 +3713,14 @@ mod swap_key_agreement_tests {
         assert_eq!(parities.len(), 2, "both parities of Y were exercised");
     }
 
-    /// T15: under a global-HD login the node's persistent key is the passphrase hash, which is not the signer.
+    /// T15 after §5.12C (R41 item 3, T24): under a global-HD login the node's persistent key is the passphrase
+    /// hash, which is not the signer. The coin announces its signer's key, so it agrees, token and platform
+    /// coin alike.
     #[test]
-    fn an_evm_coin_whose_signer_is_not_the_node_key_disagrees() {
+    fn an_evm_coin_whose_signer_is_not_the_node_key_agrees() {
         let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
         let node_pubkey = *key_pair_from_secret(&[7u8; 32]).unwrap().public();
-        assert_eq!(
-            coin.swap_key_disagreement(&node_pubkey),
-            Some(SwapKeyDisagreement::EvmSigner)
-        );
+        assert_eq!(coin.swap_key_disagreement(&node_pubkey), None);
         let (_ctx, token) = eth_coin_for_test(
             EthCoinType::Erc20 {
                 platform: "ETH".into(),
@@ -3730,10 +3729,43 @@ mod swap_key_agreement_tests {
             vec!["http://dummy.dummy".into()],
             None,
         );
-        assert_eq!(
-            token.swap_key_disagreement(&node_pubkey),
-            Some(SwapKeyDisagreement::EvmSigner)
-        );
+        assert_eq!(token.swap_key_disagreement(&node_pubkey), None);
+    }
+
+    /// T19 (R41 item 3): an EVM coin with a software signer announces the compressed public key of its signer
+    /// as its V1 HTLC public key, and offers the signer's pair to be saved with the swap. The pair is the
+    /// signer's own key, so R36 holds for the coin whatever the node's persistent key is.
+    #[test]
+    fn t19_an_evm_coin_announces_the_compressed_signer_key() {
+        for coin_type in [EthCoinType::Eth, EthCoinType::Erc20 {
+            platform: "ETH".into(),
+            token_addr: Address::default(),
+        }] {
+            let (_ctx, coin) = eth_coin_for_test(coin_type, vec!["http://dummy.dummy".into()], None);
+            let own = coin.own_signing_key_pair().expect("a software signer has a key pair");
+            assert_eq!(own.public(), &signer_pubkey());
+            assert!(coin.get_htlc_key_pair().is_none());
+            let on_wire = coin.derive_htlc_pubkey(own.public()).unwrap();
+            assert_eq!(&on_wire[..], &compressed_secp256k1_public(&coin.signer.public())[..]);
+            assert_eq!(on_wire.len(), 33);
+            let other_node_key = *key_pair_from_secret(&[7u8; 32]).unwrap().public();
+            assert_eq!(coin.swap_key_disagreement(&other_node_key), None);
+        }
+    }
+
+    /// T22 (R41 item 3, R43), EVM coin: under an iguana login the signer's compressed key is the node's
+    /// persistent key (one secret derives both). The swap start therefore finds that the coin's own pair is the
+    /// persistent key and announces and saves nothing, as before.
+    #[test]
+    fn t22_an_evm_coins_own_key_is_the_persistent_key_under_an_iguana_login() {
+        let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
+        // An iguana login derives the persistent key and the signer from one secret.
+        let persistent = signer_pubkey();
+        let own = coin.own_signing_key_pair().expect("a software signer has a key pair");
+        assert_eq!(*own.public(), persistent);
+        assert_eq!(*own.public(), signer_pubkey());
+        assert_eq!(&compressed_secp256k1_public(&coin.signer.public())[..], &persistent[..]);
+        assert_eq!(coin.swap_key_disagreement(&persistent), None);
     }
 
     /// A signer that is the node's persistent key agrees, as under an iguana login.
@@ -3743,12 +3775,14 @@ mod swap_key_agreement_tests {
         assert_eq!(coin.swap_key_disagreement(&signer_pubkey()), None);
     }
 
-    /// T18: a coin under the Trezor policy is out of the rule's scope.
+    /// T18: a coin under the Trezor policy is out of the rule's scope, and it has no key pair to offer: it
+    /// keeps announcing the node's persistent key.
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
     #[test]
     fn an_evm_coin_under_the_trezor_policy_is_exempt() {
         let (_ctx, coin) = trezor_eth_coin_for_test(EthCoinType::Eth);
         let node_pubkey = *key_pair_from_secret(&[7u8; 32]).unwrap().public();
         assert_eq!(coin.swap_key_disagreement(&node_pubkey), None);
+        assert!(coin.own_signing_key_pair().is_none());
     }
 }

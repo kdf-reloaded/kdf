@@ -1087,24 +1087,30 @@ impl TakerSwap {
         // A shielded coin's key is derived from the swap uuid (CRD ch.39 R39.5.6/R39.5.7) and is not saved
         // with the swap.
         let swap_unique_input = self.uuid.as_bytes();
-        let (maker_coin_htlc_key_pair, maker_coin_htlc_privkey) =
-            match start_htlc_key_pair(&self.maker_coin, swap_unique_input) {
-                Ok(keys) => keys,
-                Err(e) => {
-                    return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
-                        ERRL!("{}", e).into(),
-                    )]))
-                },
-            };
-        let (taker_coin_htlc_key_pair, taker_coin_htlc_privkey) =
-            match start_htlc_key_pair(&self.taker_coin, swap_unique_input) {
-                Ok(keys) => keys,
-                Err(e) => {
-                    return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
-                        ERRL!("{}", e).into(),
-                    )]))
-                },
-            };
+        let (maker_coin_htlc_key_pair, maker_coin_htlc_privkey) = match start_htlc_key_pair(
+            &self.maker_coin,
+            self.ctx.secp256k1_key_pair().public(),
+            swap_unique_input,
+        ) {
+            Ok(keys) => keys,
+            Err(e) => {
+                return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
+                    ERRL!("{}", e).into(),
+                )]))
+            },
+        };
+        let (taker_coin_htlc_key_pair, taker_coin_htlc_privkey) = match start_htlc_key_pair(
+            &self.taker_coin,
+            self.ctx.secp256k1_key_pair().public(),
+            swap_unique_input,
+        ) {
+            Ok(keys) => keys,
+            Err(e) => {
+                return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
+                    ERRL!("{}", e).into(),
+                )]))
+            },
+        };
         let (maker_coin_htlc_pubkey, taker_coin_htlc_pubkey) = match derive_htlc_pubkeys(
             &self.ctx,
             &self.maker_coin,
