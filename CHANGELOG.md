@@ -212,8 +212,10 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
 
 #### Trading under an HD login
 
-- **Under an HD login, swaps of EVM coins and of coins enabled with a single key can now complete.**
-  An HD login is one with `enable_hd` set to `true`, as the Komodo DeFi wallet uses in HD mode.
+- **Under an HD login, each coin's swap now uses the coin's own key.** This is what swaps of EVM
+  coins and of coins enabled with a single key need in order to complete. End-to-end swaps under an
+  HD login with this change are still being tested. An HD login is one with `enable_hd` set to
+  `true`, as the Komodo DeFi wallet uses in HD mode.
   - **Every coin's swap announces the key it pays from.** For an EVM coin or token that is its
     signer. For a UTXO coin enabled through legacy `enable` or `electrum` it is the coin's own key.
   - **A UTXO coin such as RIN activated through `task::enable_utxo` at another address**
