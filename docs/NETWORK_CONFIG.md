@@ -128,8 +128,8 @@ dial, the warning "P2P relays below low watermark" appears at most once per 5 mi
 ### Hostnames from Other Peers
 
 Nodes ask each other for peer addresses every five minutes, and some peers give a seed by its
-hostname instead of its IP address. KDF Reloaded looks such a name up through the operating
-system's resolver. It does at most one lookup at a time, looks the same name up at most once per
+hostname instead of its IP address. KDF Reloaded looks such a name up through the
+[DNS resolver](#dns-resolver) the node uses. It does at most one lookup at a time, looks the same name up at most once per
 30 minutes, and does no lookup while it is connected to that peer. It keeps the result only if it
 is a public IPv4 address on the network's port (see below for tests), and stores the address,
 never the name. Its own answers to other peers carry only such addresses. To turn this off, set:
@@ -166,11 +166,74 @@ hostname resolves to, and logs a warning at start-up. Do not use this setting in
 > **Compatibility:** GLEEC KDF has no equivalent. Leave at the default to retain GLEEC-equivalent
 > behavior.
 
-Two resolvers are involved:
-- **Hostnames that other peers hand out** are looked up through the operating system's resolver,
-  so `/etc/hosts` entries and a local DNS server both work.
-- **Hostnames in `"seednodes"`** are resolved by the network transport through a fixed public
-  resolver. That resolver honors `/etc/hosts`, but not a local DNS server.
+### DNS Resolver
+
+Every name the node looks up tells the DNS servers it asks which seeds, coins and services you
+use. One setting chooses those servers for every name:
+
+| `dns_resolver` | The node asks |
+|---|---|
+| absent, `null` or `"google"` (the default) | Google Public DNS: `8.8.8.8`, `8.8.4.4`, `2001:4860:4860::8888`, `2001:4860:4860::8844` |
+| `"system"` | your computer's own resolver, exactly as other programs do |
+| an array of up to 8 addresses | only those DNS servers, in the order given |
+
+An address in the array is an IPv4 or IPv6 address, with an optional port (53 by default):
+
+```json
+{
+  "dns_resolver": ["192.0.2.53", "192.0.2.54:5353", "[2001:db8::53]:53"],
+  ...
+}
+```
+
+Any other value (a misspelled keyword, an empty array, a hostname) stops the node at start with
+an error naming the key. The node never falls back to the default: a resolver you did not choose
+would see every name.
+
+**When the node looks names up.** Not only at start:
+- A seed is looked up again each time it is redialed, which includes every reconnect after a
+  dropped connection.
+- A hostname that another peer hands out is looked up when it arrives, at most once per 30
+  minutes.
+- An Electrum or lightwalletd server is looked up at each connect and reconnect, including
+  when the node moves to another server.
+- An EVM, Solana, Tendermint or other HTTP(S) node is looked up whenever a new connection to it
+  is opened, for example after an idle connection was closed or when the node rotates to
+  another node.
+
+**Cache.** With Google Public DNS or your own servers, answers are kept in memory for as long as
+their DNS records allow, but at least 30 seconds and at most an hour. An answer that a name does
+not exist is kept between 5 seconds and 5 minutes. Nothing is written to disk, so a restart
+starts with an empty cache. With `"system"`, your computer's resolver does its own caching.
+
+**When the resolver can't be reached.** With Google Public DNS or your own servers, the node uses
+the last answer it got for a name, for up to 24 hours after that answer expired, and logs a
+warning once an hour. It does that only when no server answered, or a server reported its own
+failure, never when a server answered that the name does not exist. No other resolver is ever
+asked.
+
+**When a name can't be resolved.** Only the connection that needed it fails, and it is retried
+as usual. The node keeps running. A warning, at most once per hour per name, says which resolver
+was asked and that `dns_resolver` chooses it.
+
+**At start** the node logs one line naming the resolver it uses.
+
+**What the setting does not hide:**
+- DNS queries go unencrypted on port 53, so the networks they cross can see and block them.
+- The names still appear in the TLS handshake and the HTTP headers sent to each server.
+- With the default, Google Public DNS learns every name the node looks up.
+- With Google Public DNS or your own servers, the computer's hosts file (`/etc/hosts`) is read
+  first, when the node starts. A name it lists is answered from it, and a later change to the
+  file applies at the next start.
+- Seeds and servers given as IP addresses need no lookup at all.
+
+**Not yet covered.** Sia, the WalletConnect relay, Lightning peer addresses and the statistics
+method still use your computer's resolver, whatever `dns_resolver` says.
+
+> **Compatibility:** GLEEC KDF has no such setting. It looks seeds up through Google Public DNS,
+> as KDF Reloaded's default does, and every other name through the computer's resolver, as
+> `"system"` does. No single value reproduces that mix. See
+> [GLEEC compatibility](GLEEC_COMPATIBILITY.md).
 
 ## Adding a New Network
 

@@ -17,6 +17,11 @@ repository = "https://github.com/libp2p/rust-libp2p"
 keywords = ["peer-to-peer", "libp2p", "networking"]
 categories = ["network-programming", "asynchronous"]
 
+# The doc examples of lib.rs (byte-identical to the fork) build their inner transport with
+# `libp2p-dns`, which is no longer a dependency anywhere (CRD ch.45 R45.6B.11); see PATCH-NOTES.md.
+[lib]
+doctest = false
+
 [dependencies]
 futures-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 either = "1.5.3"
@@ -36,7 +41,6 @@ webpki-roots = "1.0"
 # workspace enabled for these tests through feature unification.
 libp2p-identity = { version = "0.2.1", features = ["rand"] }
 libp2p-tcp = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12", features = ["async-io"] }
-libp2p-dns = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12", features = ["async-std"] }
 async-std = { version = "1.6.5", features = ["attributes"] }
 rcgen = "0.9.3"
 

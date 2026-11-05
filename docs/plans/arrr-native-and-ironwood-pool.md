@@ -57,6 +57,18 @@ The address form that goes with the new pool: parsing, validation, display, and 
 withdraw destination and as the wallet's own receiving address. To be specified from public
 Pirate Chain documentation.
 
+*Facts established 2026-11-04 (KDF Spec Reader; passed the KDF Dirty Gate on
+2026-11-04, measure 0.00; recorded in chapter 39 §39.5A and R39.5.14, whose
+provenance footer carries the clearance):* the reference answers an
+Ironwood (`pirate1…`) address with `is_valid: false` on `validateaddress` and
+with the `InvalidAddress` error on the task withdraw route, decoding under the
+Zcash main-network Sapling prefix, and has no legacy `withdraw` for a shielded
+coin at all; a shielded coin's per-coin protocol information at the reference
+is the transparent address-format descriptor, and a reference counterparty
+accepts a value that extends that descriptor with trailing bytes and matches as
+before, so a version-6 capability word must be enforced on the Reloaded side in
+both roles.
+
 ### 4. Counterparty version-6 capability (decided 2026-11-04)
 
 An ARRR swap must never start with a node that cannot build version-6 transactions. GLEEC KDF

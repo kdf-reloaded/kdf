@@ -666,6 +666,24 @@ one-shot activation of the same ticker (R55.5.7).
 
 ---
 
+**R55.4.10** *The legacy methods under a global-HD login (reference
+contract; **passed the KDF Dirty Gate on 2026-11-04**, measure 0.03; Spec Reader 2026-11-04, rows
+`v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both).*
+Under a global-HD login ([Chapter 05](05-hd-wallet-support.md) R20) the
+reference accepts `enable` and `electrum` for a UTXO-family, QTUM, BCH, QRC20
+or EVM coin, builds the coin in HD mode with the coin key at
+`path_to_address` (default account 0, external, address 0) under the coin's
+configured `derivation_path` -- a configuration without `derivation_path`
+fails the activation -- reads its balance, **registers** it, and then fails
+the response at the `address` member of R55.4.5, because the single-address
+accessor is refused under HD. The caller receives an error while the coin
+stays enabled with that HD key; the `electrum` deregistration of R55.4.6
+covers only a failed balance read, not this failure. Chapter 05 §5.9B
+tabulates the keys. *Compatibility (this repository; not corpus-sourced):*
+Reloaded's legacy methods under HD bind the internal key and succeed; neither
+behavior is a parity target until the maintainer decides (chapter 05 R35
+note; plan [`hd-key-unification`](../plans/hd-key-unification.md) item H7).
+
 ## 55.5 Standalone-coin task family: shared contract
 
 **R55.5.1** *Members.* The standalone-coin task family comprises
@@ -1562,3 +1580,22 @@ R55.4.5 and the error body of R55.1.10.
   repository's own code. They state Reloaded's own behavior and add no
   reference content, so chapter 01 R38 is not engaged and no clearance above
   is widened.
+- *Scoped addition (2026-11-04) -- R55.4.10.* **KDF Dirty Gate: PASS on 2026-11-04, measure 0.03.**
+  *Inputs:* the forbidden corpus at the rows `v2.6.0-beta` and `v3.0.0-beta`
+  of chapter 02 §2.15A, identical at both, consulted **only** to establish
+  what the legacy `enable` and `electrum` methods do under a global-HD login:
+  the key they bind, the configuration they require, the order of
+  registration and response, and where the response fails. Behavior and
+  dictated request members only; no private identifier, function body,
+  helper decomposition, error, log or comment text was reproduced. The
+  compatibility sentence rests on this repository's own code.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.03, no findings. *Extent:* the legacy activation methods under a global-HD
+  login, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole
+  batch, 30 source files and one dependency manifest were read at
+  `v3.0.0-beta`, 29 of them checked by hash against the tagged states of both
+  rows. *Method:* side-by-side reading of the compared regions against every
+  added or changed line, plus that hash check; the gate script was not run
+  because the candidate has no code blocks. *Measure:* 0.03, read against the
+  standard that any discretionary finding fails a file; dictated-interop and
+  public-surface tokens were excluded from the measured set.
