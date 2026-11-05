@@ -78,7 +78,7 @@ crates with `workspace = true`, rather than repeated per crate.
 
 | Target | Bound libp2p feature set |
 | ------ | ------------------------ |
-| Native (`cfg(not(target_arch = "wasm32"))`) | `dns`, `identify`, `floodsub`, `gossipsub`, `noise`, `ping`, `request-response`, `secp256k1`, `tcp`, `tokio`, `websocket`, `macros`, `yamux` |
+| Native (`cfg(not(target_arch = "wasm32"))`) | `identify`, `floodsub`, `gossipsub`, `noise`, `ping`, `request-response`, `secp256k1`, `tcp`, `tokio`, `websocket`, `macros`, `yamux` |
 | WASM (`cfg(target_arch = "wasm32")`) | `identify`, `floodsub`, `noise`, `gossipsub`, `ping`, `request-response`, `secp256k1`, `wasm-ext`, `wasm-ext-websocket`, `macros`, `yamux` |
 
 The runtime-transport feature naming follows the fork's 0.52.x scheme
@@ -87,6 +87,11 @@ The runtime-transport feature naming follows the fork's 0.52.x scheme
 families are now supplied by the fork's feature flags (see the §28.1
 divergence note). The `macros` feature is required for the
 `#[derive(NetworkBehaviour)]` used by R6.
+
+*Amended 2026-11-02 (chapter 45 §45.6B).* The native set no longer
+enables `dns`. The node resolves the hostnames in the addresses it dials
+with its own layer (R18), so the fork's DNS crate and the resolver
+library that crate pulls in are not built.
 
 **R0c.** The `identify` feature is enabled at the crate level on both
 targets even though Identify is deliberately absent from the composed
@@ -298,15 +303,15 @@ name lookup for a received address.
       of an answer before its hostnames. It makes no lookup while it is
       connected to the entry's peer. Otherwise it looks up the same name
       at most once per 30 minutes.
-   2. **How it looks up.** The lookup goes through the operating
-      system's resolver on a blocking worker thread, never on the
-      swarm's own task.
-      - At most one lookup runs at a time. The next one starts only when
-        the previous one has returned, even if its result was given up.
-      - A lookup that has not returned within 5 s stores nothing.
+   2. **How it looks up.** *(Amended 2026-11-02.)* The lookup goes
+      through the node's resolver (chapter 45 §45.6B), as an
+      asynchronous lookup that never runs on the swarm's own task.
+      - At most one lookup runs at a time.
+      - A lookup that has not returned within 5 s is abandoned and
+        stores nothing. The next one may start then.
       - The queue holds at most 64 names. A name that finds it full is
         dropped and logged at DEBUG.
-      - While the queue is empty, no lookup, timer or worker is pending.
+      - While the queue is empty, no lookup or timer is pending.
    3. **Resolve, then check.** Each IPv4 result becomes
       `/ip4/<address>/tcp/<port>` and goes through the same check as a
       received address. The node stores an accepted one under the
@@ -732,6 +737,41 @@ exactly two functions for this:
   and returns the payload alongside the verified signature and public
   key.
 
+**R16a.** *Bounded reading of peer payloads.* Before the node decodes a
+MessagePack value received from a peer, it MUST check the value against
+two bounds:
+
+- arrays and maps nest at most 64 levels deep. The outermost array or
+  map is level 1, and an empty array or map counts as a level;
+- every declared length and element count fits in the bytes that
+  remain.
+
+The check covers:
+
+- every envelope of R16 and the payload inside it;
+- every request and answer exchanged with a peer over request-response,
+  in both directions;
+- the peer addresses of the peers topic;
+- values that a message carries and that the node decodes later: an
+  order record of a synchronization answer
+  ([Chapter 32](32-orderbook-p2p-and-trie.md) §32.5) and a coin's
+  protocol information
+  ([Chapter 59](59-legacy-ordermatch-negotiation.md)).
+
+The check walks one complete value from the start, as the decoder reads
+it, and ignores bytes after that value, as the decoder does. It never
+recurses and it reserves no memory from a declared length. A value that
+fails either bound is dropped as malformed: it is not decoded, the
+caller sees the same kind of error as for any value that does not
+decode, and the node counts it. A protocol-information value that fails
+counts as one that does not decode, as it does today. The encoding does
+not change, and every value an honest peer sends passes.
+
+Rationale: a peer's bytes are untrusted. The node bounds the work and
+the memory it spends on one value before it interprets the value, as it
+already bounds the size of a message (R13). The bound lies far above the
+deepest message the node sends (T4a).
+
 **R17.** This application-payload signing surface is bound as *separate*
 from the proxy-signature substrate of Chapter 27. The two operate on
 different key spaces (raw secp256k1 here; libp2p-identity keypairs for
@@ -747,7 +787,7 @@ target:
 
 | Target  | Bound transport                                                                                       |
 | ------- | ----------------------------------------------------------------------------------------------------- |
-| Native  | TCP plus DNS; optional WebSocket / WSS transport when a WSS port and TLS bundle are configured.        |
+| Native  | TCP, with hostnames resolved by the node's own layer (chapter 45 §45.6B, amended 2026-11-02); optional WebSocket / WSS transport when a WSS port and TLS bundle are configured. |
 | WASM    | Browser WebSocket via the libp2p WASM FFI substrate.                                                  |
 | Testing | An in-process memory transport for the substrate's own integration tests.                              |
 
@@ -756,6 +796,24 @@ target:
 transport-level peer identity authenticated by the libp2p handshake
 and is separate from the secp256k1 key material used for the
 application-payload signing surface in §28.7.
+
+> **Reference position on the identity key (passed the KDF Dirty Gate on
+> 2026-11-04, measure 0.02; Spec Reader 2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A, identical at both).** The reference derives a **relay's** Ed25519
+> identity secret as the SHA-256 of the node's internal secp256k1 signing key
+> (chapter 05 R16), so one passphrase gives one relay peer identifier at every
+> start -- the same derivation this substrate uses, so a relay has the same
+> peer identifier on both lineages for the same passphrase -- and gives every
+> **non-relay** node a fresh random identity at each start. Nothing in the
+> reference pins a relay's peer identifier: its seed-node entries are bare
+> hosts (R21). The identity key types a reference node can decode in the
+> Noise handshake are those compiled into its libp2p build on both targets:
+> Ed25519 and secp256k1; the RSA and ECDSA key types are not compiled in, so
+> a remote presenting one of them fails the handshake. A privacy coin's order
+> and swap messages are published under a per-order secp256k1 key with that
+> key's peer identifier as the gossip author (chapter 16), as here. The
+> reference's composed behavior includes no Identify protocol at either row
+> (R7); only the crate feature is enabled, as R0c records for this substrate.
 
 **R20.** The libp2p connection upgrade pipeline is bound to be
 uniform across all targets: multistream-select V1 negotiation,
@@ -1135,7 +1193,12 @@ queue per connection of the RPCs waiting to be written to that peer.
    dropped since the last line. Closing a peer under item 5 logs one
    warning with the peer ID, the criterion that applied (the time at the
    cap, or the share dropped in the last window), and the total dropped.
-   No message content is logged.
+   *(Added 2026-11-02, batch 0.4.0 item P3a.)* When a 60-second window
+   of item 5 ends with at least 10 % of the data RPCs queued in it
+   dropped, the node logs one DEBUG line with the peer ID, the RPCs
+   queued and dropped in that window, the share, and how many
+   consecutive counting windows the series now holds. No message content
+   is logged.
 7. **Settings.** The two limits, the 60-second period, the 3 windows
    and 25 % share of item 5, and the 30-second interval and 2 remaining
    relays of its guard are fixed values of the vendored gossipsub crate. Its configuration builder
@@ -1150,12 +1213,16 @@ queue per connection of the RPCs waiting to be written to that peer.
 
    Each change is reported once. A closed connection counts as cleared.
    The handler also makes available, for metrics, its data-queue length
-   and its count of dropped data RPCs. The application uses the signal
-   for the maker publication budget of
-   [Chapter 32](32-orderbook-p2p-and-trie.md) §32.9B R-MP2 and the counts
-   for R-MP5. R-MP2 item 2 also reads whether the data queue is empty,
-   for its queue signal *(added 2026-10-28)*. The thresholds are fixed values of the vendored crate,
-   which its configuration builder MAY override for tests.
+   and its count of dropped data RPCs, and *(added 2026-11-02, item
+   P3a)* the dropped share of its last completed window of item 5 and
+   the length of its current series. The application uses the signal for
+   the maker publication budget of [Chapter
+   32](32-orderbook-p2p-and-trie.md) §32.9B R-MP2 and the counts for
+   R-MP5. R-MP2 item 2 also reads how long the oldest queued data RPC
+   has waited, for its queue signal *(added 2026-10-28; amended
+   2026-11-02, item P3b)*. The thresholds are fixed values of the
+   vendored crate, which its configuration builder MAY override for
+   tests.
 9. **Priority lane** *(amendment, maintainer decision AO option C,
    2026-10-28).* A published or forwarded message the application marks
    as *priority* is queued in a separate first-in-first-out lane of the
@@ -1419,6 +1486,14 @@ these differences.)*
     guard condition holding, is closed on every connection.
   - A stuck peer that is not a relay is closed at once.
   - While a relay is held back, its data queue stays within its cap.
+- **T-RQ1.13** *Window shares (item 6 and R-MP5; added 2026-11-02,
+  item P3a).* The windows are shortened by test configuration.
+  - A window that drops 10 % or more of its queued data RPCs logs one
+    DEBUG line with the queued and dropped counts, the share and the
+    series length. A window below 10 % logs none.
+  - The share and series metrics of chapter 32 R-MP5 show the highest
+    share of a recent window and the longest current series, and fall
+    back to 0 two windows after the drops stop.
 
 ## 28.10 Tests (test invariants)
 
@@ -1450,6 +1525,27 @@ return `Ok((value, signature, pubkey))` with `pubkey` matching the
 public key derived from `sk`. Any single-byte mutation of the encoded
 bytes MUST cause `decode_signed` to return an error and MUST NOT
 return a parseable but invalid payload.
+
+**T4a.** *Bounded reading of peer payloads (R16a).*
+
+- (a) Every message type the node sends passes the check and decodes as
+  before, and its deepest nesting is at most half of the bound.
+- (b) A value nested one level beyond the bound is dropped, and so is
+  one nested 10,000 levels deep. A value exactly at the bound passes
+  the check.
+- (c) A bin, str or ext header whose declared length exceeds the
+  remaining bytes is dropped, and so is an array or map header whose
+  count exceeds them. Both are tested at the largest 32-bit value.
+- (d) An envelope of R16 that fails the check is dropped before its
+  signature is examined, and the count rises by one.
+- (e) Bytes after the first complete value are ignored, as before.
+- (f) Each decode site of R16a applies the check:
+  - the envelope and its payload;
+  - request-response in both directions;
+  - the peers topic;
+  - an order record of a synchronization answer;
+  - both readers of a coin's protocol information (the coin's own
+    check and the address format the order book reports).
 
 **T5.** *Topic construction.* `pub_sub_topic("orderbook",
 "KMD:BTC")` MUST return exactly `"orderbook/KMD:BTC"`; the substrate
@@ -1500,9 +1596,10 @@ when `num > 20`, the responder MUST omit the response.
   - A later lookup that returns a different address adds it and removes
     the address the same name stored before.
   - The queue holds 64 names, and a 65th is dropped.
-  - Lookups run one at a time. A lookup that times out stores nothing,
-    and the next one starts only after it has returned.
-  - With an empty queue, no lookup, timer or worker is pending.
+  - Lookups run one at a time, through the installed resolver. A
+    lookup that times out is abandoned at 5 s and stores nothing, and
+    the next one starts after it. *(Amended 2026-11-02.)*
+  - With an empty queue, no lookup or timer is pending.
   - An entry that names this node's own peer ID causes no lookup.
   - A browser build skips every hostname.
   - An answer this node gives carries no hostname, including for a peer
@@ -1684,6 +1781,10 @@ item 4), findings (b) to (d) (R24, R8c's wording, R23 item 3) and the
 idle-close logging (R27b). The asynchronous lookups are dropped from
 0.4.0; the bounded blocking lookup of R8c item 7 stays. The
 transport-resolver evaluation is done and awaits a maintainer decision.
+*Amended 2026-11-02, maintainer decision:* one resolver now answers
+every hostname the node looks up (chapter 45 §45.6B). That settles the
+transport-resolver item, and R8c item 7's lookups become asynchronous
+through that resolver after all.
 
 ## 28.11A Open Questions
 
@@ -1709,7 +1810,10 @@ residue is **not silently accepted**: it is recorded here and formally
 accepted with per-advisory rationale in `deny.toml` (upstream-blocked —
 awaiting KomodoPlatform fork modernization / Solana SDK bumps), and the
 reloaded-owned roots (`libsqlite3-sys` via rusqlite; `metrics-util`) are
-tracked as scheduled migrations.
+tracked as scheduled migrations. *Amended 2026-11-02:* the `idna` entry
+and the trust-dns part of the residue are cleared. The native feature
+set no longer builds the fork's DNS crate (R0b), and the dependency
+policy bans that crate and its resolver library (chapter 45 R45.6B.11).
 
 > **Status (2026-11-02).** The residue is smaller than listed above.
 > `libp2p-websocket` is vendored on rustls 0.23, so no rustls 0.20 consumer
@@ -2042,3 +2146,42 @@ hardening carried by the pinned fork).
       2026-10-31.
   - The forbidden corpus was not consulted for this amendment, and it
     needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-11-02) -- §28.9B RQ1 items 6 and 8 and
+  T-RQ1.13.* Reloaded-original, batch 0.4.0 items P3a and P3b, together
+  with chapter 32 R-MP2 item 2 and R-MP5. *Inputs:* this repository's
+  vendored send queue and its metrics, and field metrics of a Reloaded
+  seed on 2026-10-31. The forbidden corpus was not consulted for this
+  amendment, and it needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-11-02) -- R0b, R18, R8c item 7 sub-item 2,
+  its T6a bullet, D9's status and OQ2.* Reloaded-original, batch 0.4.0
+  item P5, together with chapter 45 §45.6B. *Inputs:* the maintainer's
+  decisions of 2026-11-02, this repository's transport and peer-exchange
+  code and its dependency tree. The forbidden corpus was not consulted
+  for this amendment, and it needs no Dirty Gate pass of its own.
+- *Scoped addition (2026-11-04) -- the reference-position note under R19.*
+  **KDF Dirty Gate: PASS on 2026-11-04, measure 0.02.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish the relay and non-relay identity-key
+  derivations, the absence of any pinned relay identifier, the identity key
+  types enabled in the reference's libp2p dependency on both targets, the
+  per-order key and author of privacy-coin messages, and the absence of the
+  Identify protocol from the composed behavior. Behavior and public
+  dependency features only; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.02, no findings. *Extent:* the peer-to-peer identity-key derivation, the
+  identity key types of the libp2p build and the protocols of the composed
+  behavior, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole
+  batch, 30 source files and one dependency manifest were read at
+  `v3.0.0-beta`, 29 of them checked by hash against the tagged states of both
+  rows. *Method:* side-by-side reading of the compared regions against every
+  added or changed line, plus that hash check; the gate script was not run
+  because the candidate has no code blocks. *Measure:* 0.02, read against the
+  standard that any discretionary finding fails a file; dictated-interop and
+  public-surface tokens were excluded from the measured set.
+- *Scoped addition (2026-11-04) -- R16a and T4a.* Reloaded-original,
+  maintainer decision CD of 2026-11-04. *Inputs:* this repository's
+  decode paths for bytes received from peers, and the source of the
+  public MessagePack library this repository uses. The forbidden corpus
+  was not consulted for this addition, and it needs no Dirty Gate pass
+  of its own.

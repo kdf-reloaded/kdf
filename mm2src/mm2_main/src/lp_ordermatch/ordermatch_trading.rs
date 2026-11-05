@@ -3248,7 +3248,27 @@ pub async fn orders_kick_start(ctx: &MmArc) -> Result<HashSet<String>, String> {
     let saved_maker_orders = try_s!(storage.load_active_maker_orders().await);
     let saved_taker_orders = try_s!(storage.load_active_taker_orders().await);
 
+    // CRD ch.12 R7c item 1: a stored active record whose removal the history already records is not restored.
+    let skip_cancelled = maker_restore_skips_cancelled(ctx);
     for order in saved_maker_orders {
+        if skip_cancelled {
+            if let Some(status) = removal_recorded_in_history(&storage, &order).await {
+                log::warn!(
+                    "Not restoring the stored active record of maker order {}: the history records its removal \
+                     (status {})",
+                    order.uuid,
+                    status
+                );
+                if let Err(e) = storage.delete_active_maker_order(order.uuid).await {
+                    log::warn!(
+                        "Deleting the stale active record of maker order {} failed: {}",
+                        order.uuid,
+                        e
+                    );
+                }
+                continue;
+            }
+        }
         if let Some(message) = tendermint_order_cancel_message(ctx, "maker", &order.uuid, &order.base, &order.rel) {
             log::info!("{}", message);
             delete_my_maker_order(ctx.clone(), order, MakerOrderCancellationReason::Cancelled)

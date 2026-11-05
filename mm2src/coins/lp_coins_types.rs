@@ -487,7 +487,8 @@ pub enum WithdrawFee {
     /// UTXO withdraw fee: a rate `amount` per 1,000 bytes, applied exactly like `UtxoPerKbyte` (CRD ch.38
     /// R38.6.6l item 2): proportional and truncated, not per transaction and not per started kilobyte. With a
     /// change output the fee is `floor(a * (s - 34) / 1000) + floor(a * 34 / 1000)`, up to one unit below
-    /// `floor(a * s / 1000)`.
+    /// `floor(a * s / 1000)`. The same holds for the SLP token withdraw (CRD ch.38 R38.6.6m), where `amount` is
+    /// in the platform coin's units.
     UtxoFixed {
         amount: BigDecimal,
     },

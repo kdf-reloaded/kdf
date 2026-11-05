@@ -410,6 +410,28 @@ two opaque byte strings — one for the base coin, one for the rel
 coin. This is part of the sync-response wire contract
 (R29/R31).
 
+> *Decoder tolerance (reference fact; passed the KDF Dirty Gate on 2026-11-04,
+> measure 0.01; Spec Reader 2026-11-04).* At the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A the reference encodes every gossip message structure -- the order
+> and match messages and the signed envelope of §28.7 alike -- as a
+> positional MessagePack array without field names, and its decoder reads
+> only the fields a structure declares: a **trailing** element appended to a
+> top-level message array, and bytes that follow a complete message, are
+> ignored rather than rejected. That property is what allowed
+> `base_protocol_info`, `rel_protocol_info` and the swap-version member to be
+> appended to messages that older peers still decode. It does not extend to
+> the untagged negotiation payloads of chapter 51 R59, whose three shapes are
+> told apart by field count. The per-coin protocol-information bytes
+> themselves, and how a counterparty's value is judged, are bound in
+> chapter 59 R59.4.7.
+
+The order-book layer keeps these bytes opaque. A coin may append a
+capability word after its first value
+([Chapter 59](59-legacy-ordermatch-negotiation.md) §59.4A). A relay
+stores and forwards the word unchanged, like the rest of the bytes, and
+since protocol information is not part of the trie leaf (R-W3), the word
+changes no root. *(Reloaded-original, 2026-11-04.)*
+
 **R-W4.** The subsystem MUST support, behaviourally:
 
 - projecting an in-memory record down to the wire record;
@@ -417,6 +439,12 @@ coin. This is part of the sync-response wire contract
   "maker-order-created" gossip message, attributing the
   originating pubkey from the *gossip envelope's signature*
   (the message body does not carry it).
+
+A wire order record or side-channel value that the node decodes from a
+peer's bytes (a gossip message, a synchronization answer or a trie
+entry received from a peer) is read under the bounds of
+[Chapter 28](28-libp2p-modernization.md) R16a. The wire format does
+not change.
 
 **R-W5 (proof-carrying wire item, dictated).** For verifiable
 delivery, the subsystem MUST define a wire form that wraps a wire
@@ -2324,13 +2352,24 @@ messages at no more than the pubkey's current *rate*.
 2. **Signals** *(amended 2026-10-28, decision AO direction (a)).* Two
    signals, each judged for every connection to a relay, tell the node
    that a relay is not keeping up:
-   - *Queue signal.* It is raised while the data queue of
-     [Chapter 28](28-libp2p-modernization.md) §28.9B RQ1 toward the relay
-     has held at least one data RPC for 2 seconds without becoming empty,
-     or while the pressure level of RQ1 item 8 is raised. It clears once
-     that queue has been empty for 5 seconds and the level of item 8 is
-     cleared. It catches a relay that reads slowly while the connection
-     stays up: the backlog then sits in that queue.
+   - *Queue signal* *(amended 2026-11-02, batch 0.4.0 item P3b)*. It is
+     raised when a data RPC has waited in the data queue of [Chapter
+     28](28-libp2p-modernization.md) §28.9B RQ1 toward the relay for 2
+     seconds or longer, or while the pressure level of RQ1 item 8 is
+     raised. It clears once 5 seconds have passed since a queued data
+     RPC last had waited 2 seconds or longer, or since the signal was
+     raised when the pressure level alone raised it, and the level of
+     item 8 is cleared. It catches a relay that reads slowly while the connection
+     stays up: the backlog then sits in that queue, and its oldest RPC
+     ages. A queue that holds RPCs but writes each of them within 2
+     seconds is not a backlog, so steady traffic neither raises the
+     signal nor holds it raised.
+     *(Until 2026-11-02 a queue that stayed non-empty for 2 s raised the
+     signal, and only 5 s of an empty queue cleared it. Toward a relay
+     with steady traffic, every queued RPC restarted those 5 s, so a
+     raised signal never cleared. Field metrics of a Reloaded seed on
+     2026-10-31 showed it raised for hours while every queue was
+     empty.)*
    - *Close signal.* It occurs when the node's last connection to a relay
      closes while an outbox holds a pending created or updated message, or
      has released one within the preceding 30 seconds. It catches a relay
@@ -2407,6 +2446,14 @@ values, with no peer identity and no content:
 - `p2p.send_queue.max_per_peer`: the largest single connection's count;
 - `p2p.send_queue.dropped.count`: data RPCs dropped under §28.9B RQ1
   item 4 since start;
+- `p2p.send_queue.window_share.max`: the highest dropped share, in
+  percent, of a connection's last completed window of §28.9B RQ1 item 5,
+  over live connections whose last window ended within the last two
+  window lengths; 0 when there is none *(added 2026-11-02, item P3a)*;
+- `p2p.send_queue.drop_series.max`: the longest current series of
+  counting windows of §28.9B RQ1 item 5, 0 to 2 before a stuck report,
+  over live connections whose last window ended within the last two
+  window lengths; 0 when there is none *(added 2026-11-02, item P3a)*;
 - `p2p.outbox.pending`: pending outbox messages, summed over pubkeys;
 - `p2p.outbox.rate`: the current rate of R-MP2, the lowest over pubkeys;
 - `p2p.outbox.pressure`: 1 while the queue signal of R-MP2 item 2 is
@@ -2533,9 +2580,13 @@ waiting up to 30 seconds for the next tick.
   - a signal 10 s after an earlier log line is logged at once, at warn
     level and with its kind *(added 2026-10-29)*.
 - **T-MP5** *Signals (amended 2026-10-28).* §28.9B T-RQ1.8, and:
-  - a data queue that stays non-empty for 2 s raises the queue signal,
-    and one that empties within 2 s does not;
-  - the signal clears after 5 s of an empty queue;
+  - *(amended 2026-11-02, item P3b)* a data RPC that waits 2 s raises
+    the queue signal; a queue that holds RPCs but writes each within
+    2 s does not, however long it stays non-empty;
+  - the signal clears 5 s after the last data RPC that waited 2 s or
+    longer has been written, once the pressure level is cleared;
+  - after a raise, a trickle of one data RPC every 2 s, each written at
+    once, lets the signal clear 5 s later *(added 2026-11-02)*;
   - the close of the last connection to a relay with a pending message
     yields one close signal; the close of a connection to a non-relay
     peer yields none.
@@ -2570,7 +2621,8 @@ waiting up to 30 seconds for the next tick.
   no merging is visible.
 - **T-MP10** *Metrics.* The R-MP5 values are present and reflect a
   queued backlog, drops, pending outbox messages, the rate and the
-  pressure state.
+  pressure state, and *(added 2026-11-02)* a recent window's dropped
+  share and the current series length (§28.9B T-RQ1.13).
 - **T-MP11** *Switch (amended 2026-10-29).* With no
   `maker_update_coalescing` setting, with `false` and with any value other
   than a JSON `true`, every order message is published at once. With
@@ -3339,6 +3391,12 @@ D9. **The outbox is opt-in (§32.9B R-MP1 item 5; resolved 2026-10-29,
     released messages, a close signal that counts only error closes of
     a relay with this node's data in flight, and a synchronization
     request addressed to the keep-alive's author when connected to it.
+    *(Added 2026-11-02.)* Field metrics of a Reloaded seed on 2026-10-31
+    showed a third flaw: under steady traffic toward a relay, a raised
+    queue signal never cleared, so an opt-in maker would have stayed in
+    degraded mode. Batch 0.4.0 item P3b fixed it in R-MP2 item 2, which
+    judges the signal by how long a queued RPC has waited. The three
+    items above still come before the outbox becomes the default again.
 
 D10. **A single re-ask after a failed synchronization request
     (Reloaded-original; added 2026-10-30; the reference facts it rests on
@@ -4112,6 +4170,13 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   repository's connection-close logging only. The forbidden corpus was
   not consulted for this amendment, and it needs no Dirty Gate pass of
   its own.
+- *Scoped amendment (2026-11-02) -- §32.9B R-MP2 item 2, R-MP5, T-MP5,
+  T-MP10 and the D9 paragraph of 2026-11-02.* Reloaded-original, batch
+  0.4.0 items P3a and P3b, together with chapter 28 §28.9B RQ1 items 6
+  and 8. *Inputs:* this repository's vendored send queue, the outbox's
+  use of the queue signal, and field metrics of a Reloaded seed on
+  2026-10-31. The forbidden corpus was not consulted for this amendment,
+  and it needs no Dirty Gate pass of its own.
 - *Scoped addition (2026-11-03) -- §32.9C.1 (R-GH11 to R-GH13, T-GH11 to
   T-GH13) and the pointer sentence appended to §32.0.* **KDF Dirty Gate:
   PASS on 2026-11-03, measure 0.02.** Prompted by the ghost-order
@@ -4146,3 +4211,35 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   it rests on, that no path legitimately revives a cancelled identifier,
   is §32.9C.1 R-GH11, which passed the KDF Dirty Gate. No reference
   implementation was consulted, and it needs no Dirty Gate pass.
+- *Scoped addition (2026-11-04) -- the decoder-tolerance note under R-W2a.*
+  **KDF Dirty Gate: PASS on 2026-11-04, measure 0.01.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish the positional encoding of the gossip
+  message structures and the decoder's tolerance of trailing elements and
+  trailing bytes -- the latter confirmed as a property of the pinned public
+  MessagePack library release in that library's published source -- and that
+  the negotiation payload's untagged shapes do not share it. Behavior and
+  dictated wire members only; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.01, no findings. *Extent:* the encoding and decoding of the order-matching
+  gossip messages and their signed envelope, at `v3.0.0-beta` with
+  `v2.6.0-beta` as cross-check; for the whole batch, 30 source files and one
+  dependency manifest were read at `v3.0.0-beta`, 29 of them checked by hash
+  against the tagged states of both rows. *Method:* side-by-side reading of
+  the compared regions against every added or changed line, plus that hash
+  check; the gate script was not run because the candidate has no code blocks.
+  *Measure:* 0.01, read against the standard that any discretionary finding
+  fails a file; dictated-interop and public-surface tokens were excluded from
+  the measured set.
+- *Reloaded-original addition (2026-11-04) -- the paragraph after
+  §32.5.2 R-W2a.* It points to the capability word of chapter 59 §59.4A
+  and states that a relay carries the word unchanged and that the word
+  changes no root. Written by a context that never read the forbidden
+  corpus, from this repository's own order records, side channel and trie
+  leaf, and from Decision BM. It states no reference fact and needs no
+  Dirty Gate pass.
+- *Reloaded-original addition (2026-11-04) -- the pointer to Chapter 28
+  R16a before R-W5.* Maintainer decision CD. Written from this
+  repository's own decode paths. The forbidden corpus was not consulted,
+  and it needs no Dirty Gate pass.

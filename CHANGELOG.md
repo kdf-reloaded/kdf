@@ -12,6 +12,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Within each heading, entries are grouped by area. Each entry ends with the pull request that made
 it and, where one exists, the CRD rule, for readers who want more.
 
+### Upgrade note: name lookups go to Google Public DNS
+
+**If your node runs on a network that blocks Google Public DNS, set `dns_resolver` before you
+upgrade.** Some countries, many company networks and captive portals block it.
+
+Earlier builds looked up coin servers and services (Electrum, EVM and other nodes, lightwalletd)
+through your computer's own resolver. This release looks up every name through Google Public DNS
+unless `dns_resolver` says otherwise. Seeds were already looked up that way.
+
+Where Google Public DNS is blocked, an upgraded node with the default resolves no name and
+reaches no coin server until you set one of these in `MM2.json`:
+- `"dns_resolver": "system"`: your computer's resolver, as before for coin servers;
+- `"dns_resolver": ["192.0.2.53"]`: DNS servers of your choice.
+
+At start the node logs which resolver it uses. A name it cannot resolve is logged with a hint
+that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resolver).
+
 ### Added
 
 #### EVM coins
@@ -22,6 +39,18 @@ it and, where one exists, the CRD rule, for readers who want more.
   multiplier when one is set; the full list is logged at debug level. A coins file that lacks the
   limits a chain needs is now visible at once, as it was not when Monad token swaps ran out of gas
   with a coins file older than October 28, 2026. Detail: PR #200; CRD ch.57 R57.5.5.
+
+#### Order book and peer-to-peer network
+
+- **How close a connection comes to being closed as stuck can now be watched.** A node closes a
+  connection whose peer loses at least 25 % of the messages queued for it in each of three
+  consecutive minutes.
+  - **Log.** Each minute in which a connection loses 10 % or more is now logged at debug level,
+    with the counts and how many such minutes in a row it has had.
+  - **Metrics.** `p2p.send_queue.window_share.max` gives the highest recent share, and
+    `p2p.send_queue.drop_series.max` the longest current run of such minutes.
+
+  Detail: PRs #204, #214; CRD ch.28 RQ1 items 6 and 8.
 
 #### Start-up and configuration
 
@@ -89,6 +118,19 @@ it and, where one exists, the CRD rule, for readers who want more.
   public, and `192.0.0.9` and `192.0.0.10` count as public. This applies to the addresses a node
   receives from peers, those it looks up, and the one it announces. Detail: PRs #203, #211; CRD
   ch.28 R24.
+- **A cancellation this node received now keeps the order out for an hour.** Before, 120 seconds
+  after a cancellation, an answer from a relay that had missed it could bring the cancelled order
+  back, and the node then passed it on. Now the order stays out of every later message and answer
+  for an hour. To restore the old behavior, set `cancel_final_window_secs` to `120` in `MM2.json`.
+  Memory stays bounded: cancellations older than two minutes are capped at 100,000, about 20 MB
+  (`cancel_final_max_entries`), and past the cap the oldest fall back to the 120-second behavior.
+  Nothing on the wire changes. Detail: PRs #223, #224; CRD ch.32 R-K1b.
+- **A maker no longer brings back an order it cancelled when the order's stored record could not be
+  deleted.** Before, such an order came back live at the next start and was announced again. Now it
+  is skipped and deleted when the order history records its removal, and a failed deletion is tried
+  three times. An order created with `save_in_history: false` leaves no history entry and is
+  restored as before. To restore the old behavior, set `maker_restore_skips_cancelled` to `false` in
+  `MM2.json`. Detail: PRs #223, #224; CRD ch.12 R7c.
 
 #### UTXO coins and Electrum
 
@@ -111,8 +153,9 @@ it and, where one exists, the CRD rule, for readers who want more.
   KDF Reloaded charged the amount for every started kilobyte. *Upgrade note:* the same request now
   costs less, and below 1,000 bytes less than the amount entered. A 245-byte KMD withdrawal that
   paid the whole fee now pays about a quarter of it, and a 1,404-byte DOGE withdrawal about 1.4
-  times it instead of twice. A withdrawal without `fee`, swaps and the DEX fee are not affected, and
-  an SLP token withdrawal is unchanged (see Known limitations). Detail: PR #226; CRD ch.38 R38.6.6l.
+  times it instead of twice. A withdrawal without `fee`, swaps and the DEX fee are not affected. A
+  `withdraw` of an SLP token on BCH now charges it the same way, with the amount in BCH (PR #234).
+  Detail: PRs #226, #234; CRD ch.38 R38.6.6l, R38.6.6m.
 
 #### Start-up and configuration
 
@@ -153,6 +196,40 @@ it and, where one exists, the CRD rule, for readers who want more.
   affected. Set the `MM2.json` boolean `swap_key_check` to `false` to restore the earlier behavior,
   in which such a swap is negotiated and then fails. Detail: PRs #231, #233; CRD ch.05 R36–R40.
 
+#### Name lookups
+
+- **One setting now chooses the DNS resolver for every name the node looks up.** The setting
+  `dns_resolver` covers seeds, names that other peers hand out, Electrum servers, EVM, Solana,
+  Tendermint and UTXO node addresses, lightwalletd servers, NFT providers, the coins-file fetch
+  and price sources.
+  - **Values.** Absent or `"google"`: Google Public DNS, the default. `"system"`: the computer's
+    own resolver. An array of addresses such as `["192.0.2.53", "[2001:db8::53]:5353"]`: those
+    DNS servers only. Any other value stops the node at start with an error naming the key.
+  - **No fallback.** A name that can't be resolved fails only the connection that needed it,
+    which is retried as before. No other resolver is asked, and the node keeps running.
+  - **Cache.** With Google or chosen servers, answers are kept in memory only, for the lifetime
+    the DNS records give, within 30 seconds and 1 hour. While the resolver can't be reached, the
+    last known answer of a name is used for up to 24 hours after it expired, and a warning says
+    so.
+  - **Not yet covered.** Sia, the WalletConnect relay, Lightning peer addresses and the
+    statistics method still use the computer's resolver.
+  - **Logs.** One info line at start names the resolver. A name that can't be resolved is
+    logged at most once an hour.
+  - **Metrics.** `dns.lookups.count`, `dns.failures.count`, `dns.stale_served.count` and
+    `dns.last_known.entries`.
+
+  See the upgrade note above. Detail: PRs #216, #219; CRD ch.45 §45.6B.
+- **Hostnames that other peers hand out are looked up without blocking a worker thread.** The
+  lookup now uses the node's resolver, one at a time, given up after 5 seconds as before.
+  Detail: PRs #216, #219; CRD ch.28 R8c item 7.
+
+#### Transport, TLS and dependencies
+
+- **The old DNS libraries are gone from the build.** The peer-to-peer transport no longer uses
+  its own DNS layer, so that layer and the unmaintained resolver library it pulled in
+  (trust-dns 0.22, with an accepted `idna` advisory) are no longer built. The dependency policy
+  now bans them. Detail: PRs #216, #219; CRD ch.45 R45.6B.11.
+
 ### Fixed
 
 #### Node names in logs and errors
@@ -165,6 +242,20 @@ it and, where one exists, the CRD rule, for readers who want more.
   the scheme and port the lower layer wrote, and a URL of another host is left as it is. The
   `mm2_net` crate now also builds on its own for the browser target. Detail: PR #218; CRD ch.35
   R35.1.14.
+
+#### Order book and peer-to-peer network
+
+- **A maker with `maker_update_coalescing` on is no longer held at its lowest rate by steady
+  traffic.** The maker slows down when a relay falls behind.
+  - **The old signal.** It was raised once a relay's queue had stayed non-empty for 2 seconds,
+    and cleared only after the queue had been empty for 5 seconds. Toward a busy relay, every new
+    message restarted those 5 seconds, so the signal could stay raised for hours. A seed showed
+    `p2p.outbox.pressure` at 1 while every queue was empty.
+  - **The new signal.** It is judged by how long a queued message has waited: raised at 2
+    seconds, cleared 5 seconds after the last such wait ends. The default
+    (`maker_update_coalescing` off) was never affected.
+
+  Detail: PRs #204, #214; CRD ch.32 R-MP2 item 2.
 
 #### UTXO coins and Electrum
 
@@ -187,6 +278,13 @@ it and, where one exists, the CRD rule, for readers who want more.
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
+- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
+  Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
+  they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
+  address format, without noticing the marker (PR #232). The scope for this release is set: ARRR
+  wallets and swaps stay Sapling-only, payments from Pirate Chain's Ironwood wallets are found and
+  spent like any other, and a withdrawal may pay a Pirate1 address (CRD PR #229; the code follows).
+  Native mode, the rest of the Ironwood pool and Pirate1 receiving addresses move to a later release.
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
@@ -198,11 +296,17 @@ file carries the detail. "New" means the plan was created in this cycle.
   keep showing after a lost cancellation; five work packages after the beta, the first two being the
   higher sync limits on relays and the request to one other relay above (PRs #205, #207, #208). What
   two later packages waited for is now recorded: how a cancelled order can come back on Komodo and
-  GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222).
+  GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222). A received
+  cancellation now stays final for an hour, and a maker no longer restores an order it cancelled
+  (PRs #223, #224).
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
-  complete, which is now done (item H1: `swap_key_check`, PRs #231, #233).
+  complete, which is now done (item H1: `swap_key_check`, PRs #231, #233). The maintainer's answers on
+  withdraw, the legacy methods, legacy activation and Sia are recorded in it.
+- [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
+  queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
+  remain.
 - [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — in progress: the 2-arena limit of 0.3.0-beta.1
   was measured in two 6.5-hour runs and on start-up, activation, eight swaps and query latency; no cost
   was resolved and the default stays (PR #225); executor sizing and an allocator comparison are left.
@@ -212,11 +316,15 @@ file carries the detail. "New" means the plan was created in this cycle.
   rows are next.
 - [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new: the peer-to-peer
   items of 0.4.0. The redial guards are in (PRs #199, #206), and so are the peer-exchange
-  logging, the address ranges and the idle-close log (PRs #203, #211).
+  logging, the address ranges and the idle-close log (PRs #203, #211), the send-queue window
+  shares and the queue-signal fix (PRs #204, #214), and one resolver for every hostname (PRs #216,
+  #219); the remaining lookups (Sia, WalletConnect, Lightning, statistics) and encrypted DNS are
+  new rows for later.
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
-  recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226); the SLP
-  token withdrawal waits for the reference's answer.
+  recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226). On an SLP
+  token withdrawal they charge it in proportion too; that is now recorded (PR #232), and KDF
+  Reloaded now charges it that way there as well (PR #234).
 - [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — new step H6: the
   median time of a coin whose headers carry a fixed-length trailer (Bitcoin Atom) is read from each
   header's own bytes; the 1.6 list form of header requests and explicit `header_layout` entries for
@@ -238,10 +346,15 @@ lives.
   login without `enable_hd`. With `swap_key_check` set to `false` the swap is negotiated again, the
   dex fee is lost, a payment already sent comes back only at its refund time, and the proceeds of a
   swap of a coin enabled through legacy `enable` can land on an address the wallet does not show;
-  logging in with the same passphrase without `enable_hd` reaches them. Whether a maker's orders
-  under an HD login stay visible on other nodes is being checked. More in
-  [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PRs #228, #231, #233; CRD ch.05
-  R36–R40; CRD ch.51, note under R63.
+  logging in with the same passphrase without `enable_hd` reaches them. A maker's own `orderbook`
+  does not mark its orders under an HD login as its own (`is_mine` is false); other nodes still see
+  them. More in [`hd-key-unification`](docs/plans/hd-key-unification.md). Detail: PRs #228, #231,
+  #233; CRD ch.05 R36–R40; CRD ch.51, note under R63.
+- **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
+  `get_enabled_coins` fails as a whole once such a coin is enabled.** Both report a single address,
+  and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for
+  the balance and the mmrpc 2.0 `get_enabled_coins` for the list. For an EVM coin both legacy
+  methods answer with the activated address. Detail: PR #228; CRD ch.05 §5.9B R35.
 - **Do not run two KDF instances on the same seed at the same time.** If you do, for any coin (RIN
   included), both instances can pick the same funds for two different transactions. The network
   accepts one and rejects the other, and the instance that loses gets no explanation and may try
@@ -257,18 +370,17 @@ lives.
   coin is offered only once the Electrum server lists it. More in
   [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md).
   Detail: PR #181; CRD ch.38 R38.5B.8, D38.5B.2, D38.5B.4.
-- **A fixed fee on an SLP token withdrawal is still charged for every started kilobyte.** When a
-  `withdraw` of an SLP token on BCH gives its fee as `{"type":"UtxoFixed","amount":…}`, KDF Reloaded
-  charges that amount for every started kilobyte of the transaction; what Komodo and GLEEC KDF
-  charge there is not yet established. UTXO coins themselves now charge it in proportion to the
-  size, as Komodo and GLEEC KDF do (see Changed). More in the
-  [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PR #226; CRD ch.38 R38.6.6l.
 - **The swap watcher does not work yet.** A watcher is another node that finishes a swap for you
   when you are offline. No swap hands its data to a watcher yet, for any coin (issue #56), so keep
   your node running until your swaps have finished. Bitcoin-family coins (UTXO coins such as RIN,
   BCH and QTUM) also no longer offer to watch other traders' swaps, because the checks a watcher
   runs are not implemented for them; only Siacoin (SC) offers watching. Detail: PR #177; CRD ch.09
   R17.
+- **Four kinds of connection still look names up through the computer's own resolver,** whatever
+  `dns_resolver` says: Sia, the WalletConnect relay, Lightning peer addresses and the statistics
+  method. They follow in a later release. More in
+  [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md), item P5b. Detail: CRD
+  ch.45 D45.6.
 - **A maker that changes its orders many times a second can drop out of the order book of a relay
   with a slow link.** In a test, a node that kept 480 orders and changed their prices about 80 times
   a second sent its updates to a GLEEC KDF relay whose incoming link was limited to 100 kbit/s. Within
