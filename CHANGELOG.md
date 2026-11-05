@@ -159,7 +159,7 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   the maker's other pairs stay. If the keep-alives return, the node asks for the pair as a new one
   and gets its orders back. Before, the order stayed until the maker posted on that pair again or
   went offline. Your own orders are never dropped. To restore the old behavior, set `pair_liveness`
-  to `false` in `MM2.json`. Detail: PR #NNN; CRD ch.32 R-GH14.
+  to `false` in `MM2.json`. Detail: PR #251; CRD ch.32 R-GH14.
 
 #### UTXO coins and Electrum
 
@@ -318,7 +318,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222). A received
   cancellation now stays final for an hour, and a maker no longer restores an order it cancelled
   (PRs #223, #224). A pair the maker stops advertising is now dropped after the liveness window
-  (CRD PR #243, PR #NNN).
+  (CRD PR #243, PR #251).
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
@@ -416,7 +416,7 @@ lives.
   pair the maker still advertises heals at its next keep-alive, 30 seconds later, or through another
   relay: a node whose copy differs from the maker's asks one other relay, which removes the order if
   that relay received the cancellation. Until then the order stays visible. More in
-  [`ghost-orders`](docs/plans/ghost-orders.md). Detail: PRs #188, #208, #NNN; CRD ch.32 D12, R-Q5d,
+  [`ghost-orders`](docs/plans/ghost-orders.md). Detail: PRs #188, #208, #251; CRD ch.32 D12, R-Q5d,
   R-GH14.
 - **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes.** ARRR now uses a newer
   transaction format (v6, from the Ironwood upgrade) that no other KDF implementation can handle, so a
