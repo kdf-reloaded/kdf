@@ -1394,7 +1394,10 @@ R38.6.4e **Timeouts, version negotiation and liveness.**
    removed (R38.6.4d item 3); a version answer the client cannot read is a
    recoverable failure. Two concurrent attempts to establish the same server's
    connection shall not both connect; the second waits for the first (the
-   race-freedom R38.6.4 already requires).
+   race-freedom R38.6.4 already requires). *(Added 2026-11-02.)* The address
+   is resolved through the node's resolver (chapter 45 §45.6B). The addresses
+   it returns are tried in turn within this bound, and the TLS handshake
+   checks the hostname as configured.
 2. A request sent over an established connection shall be answered within
    20 s or fail for that server. `timeout_sec` does not bound requests.
 3. A connection over which no response has arrived for 60 s shall be closed
@@ -3189,6 +3192,10 @@ R38.8.6 **Tests (two-direction, observable).**
   2026-10-31, its own latency benchmark of 2026-11-01 and this repository's
   code. They take no forbidden-class input, so chapter 01 R38 is not engaged
   and no gate pass is required.
+- *Clean-context addition (2026-11-02, forbidden corpus not consulted):* the
+  sentence on resolving the address in R38.6.4e item 1 is Reloaded-original. It
+  points to chapter 45 §45.6B, from the maintainer's decision of 2026-11-02 and
+  this repository's own code, so chapter 01 R38 is not engaged.
 - *Spec Reader additions (2026-11-03) -- R38.6.6l, T38.6.6l and the
   re-verification note after R38.5B.3.* **KDF Dirty Gate: PASS on
   2026-11-03, measure 0.00.** The forbidden corpus was consulted at the

@@ -78,7 +78,7 @@ crates with `workspace = true`, rather than repeated per crate.
 
 | Target | Bound libp2p feature set |
 | ------ | ------------------------ |
-| Native (`cfg(not(target_arch = "wasm32"))`) | `dns`, `identify`, `floodsub`, `gossipsub`, `noise`, `ping`, `request-response`, `secp256k1`, `tcp`, `tokio`, `websocket`, `macros`, `yamux` |
+| Native (`cfg(not(target_arch = "wasm32"))`) | `identify`, `floodsub`, `gossipsub`, `noise`, `ping`, `request-response`, `secp256k1`, `tcp`, `tokio`, `websocket`, `macros`, `yamux` |
 | WASM (`cfg(target_arch = "wasm32")`) | `identify`, `floodsub`, `noise`, `gossipsub`, `ping`, `request-response`, `secp256k1`, `wasm-ext`, `wasm-ext-websocket`, `macros`, `yamux` |
 
 The runtime-transport feature naming follows the fork's 0.52.x scheme
@@ -87,6 +87,11 @@ The runtime-transport feature naming follows the fork's 0.52.x scheme
 families are now supplied by the fork's feature flags (see the §28.1
 divergence note). The `macros` feature is required for the
 `#[derive(NetworkBehaviour)]` used by R6.
+
+*Amended 2026-11-02 (chapter 45 §45.6B).* The native set no longer
+enables `dns`. The node resolves the hostnames in the addresses it dials
+with its own layer (R18), so the fork's DNS crate and the resolver
+library that crate pulls in are not built.
 
 **R0c.** The `identify` feature is enabled at the crate level on both
 targets even though Identify is deliberately absent from the composed
@@ -298,15 +303,15 @@ name lookup for a received address.
       of an answer before its hostnames. It makes no lookup while it is
       connected to the entry's peer. Otherwise it looks up the same name
       at most once per 30 minutes.
-   2. **How it looks up.** The lookup goes through the operating
-      system's resolver on a blocking worker thread, never on the
-      swarm's own task.
-      - At most one lookup runs at a time. The next one starts only when
-        the previous one has returned, even if its result was given up.
-      - A lookup that has not returned within 5 s stores nothing.
+   2. **How it looks up.** *(Amended 2026-11-02.)* The lookup goes
+      through the node's resolver (chapter 45 §45.6B), as an
+      asynchronous lookup that never runs on the swarm's own task.
+      - At most one lookup runs at a time.
+      - A lookup that has not returned within 5 s is abandoned and
+        stores nothing. The next one may start then.
       - The queue holds at most 64 names. A name that finds it full is
         dropped and logged at DEBUG.
-      - While the queue is empty, no lookup, timer or worker is pending.
+      - While the queue is empty, no lookup or timer is pending.
    3. **Resolve, then check.** Each IPv4 result becomes
       `/ip4/<address>/tcp/<port>` and goes through the same check as a
       received address. The node stores an accepted one under the
@@ -747,7 +752,7 @@ target:
 
 | Target  | Bound transport                                                                                       |
 | ------- | ----------------------------------------------------------------------------------------------------- |
-| Native  | TCP plus DNS; optional WebSocket / WSS transport when a WSS port and TLS bundle are configured.        |
+| Native  | TCP, with hostnames resolved by the node's own layer (chapter 45 §45.6B, amended 2026-11-02); optional WebSocket / WSS transport when a WSS port and TLS bundle are configured. |
 | WASM    | Browser WebSocket via the libp2p WASM FFI substrate.                                                  |
 | Testing | An in-process memory transport for the substrate's own integration tests.                              |
 
@@ -1535,9 +1540,10 @@ when `num > 20`, the responder MUST omit the response.
   - A later lookup that returns a different address adds it and removes
     the address the same name stored before.
   - The queue holds 64 names, and a 65th is dropped.
-  - Lookups run one at a time. A lookup that times out stores nothing,
-    and the next one starts only after it has returned.
-  - With an empty queue, no lookup, timer or worker is pending.
+  - Lookups run one at a time, through the installed resolver. A
+    lookup that times out is abandoned at 5 s and stores nothing, and
+    the next one starts after it. *(Amended 2026-11-02.)*
+  - With an empty queue, no lookup or timer is pending.
   - An entry that names this node's own peer ID causes no lookup.
   - A browser build skips every hostname.
   - An answer this node gives carries no hostname, including for a peer
@@ -1719,6 +1725,10 @@ item 4), findings (b) to (d) (R24, R8c's wording, R23 item 3) and the
 idle-close logging (R27b). The asynchronous lookups are dropped from
 0.4.0; the bounded blocking lookup of R8c item 7 stays. The
 transport-resolver evaluation is done and awaits a maintainer decision.
+*Amended 2026-11-02, maintainer decision:* one resolver now answers
+every hostname the node looks up (chapter 45 §45.6B). That settles the
+transport-resolver item, and R8c item 7's lookups become asynchronous
+through that resolver after all.
 
 ## 28.11A Open Questions
 
@@ -1744,7 +1754,10 @@ residue is **not silently accepted**: it is recorded here and formally
 accepted with per-advisory rationale in `deny.toml` (upstream-blocked —
 awaiting KomodoPlatform fork modernization / Solana SDK bumps), and the
 reloaded-owned roots (`libsqlite3-sys` via rusqlite; `metrics-util`) are
-tracked as scheduled migrations.
+tracked as scheduled migrations. *Amended 2026-11-02:* the `idna` entry
+and the trust-dns part of the residue are cleared. The native feature
+set no longer builds the fork's DNS crate (R0b), and the dependency
+policy bans that crate and its resolver library (chapter 45 R45.6B.11).
 
 > **Status (2026-11-02).** The residue is smaller than listed above.
 > `libp2p-websocket` is vendored on rustls 0.23, so no rustls 0.20 consumer
@@ -2083,6 +2096,12 @@ hardening carried by the pinned fork).
   vendored send queue and its metrics, and field metrics of a Reloaded
   seed on 2026-10-31. The forbidden corpus was not consulted for this
   amendment, and it needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-11-02) -- R0b, R18, R8c item 7 sub-item 2,
+  its T6a bullet, D9's status and OQ2.* Reloaded-original, batch 0.4.0
+  item P5, together with chapter 45 §45.6B. *Inputs:* the maintainer's
+  decisions of 2026-11-02, this repository's transport and peer-exchange
+  code and its dependency tree. The forbidden corpus was not consulted
+  for this amendment, and it needs no Dirty Gate pass of its own.
 - *Scoped addition (2026-11-04) -- the reference-position note under R19.*
   **KDF Dirty Gate: PASS on 2026-11-04, measure 0.02.** *Inputs:* the forbidden corpus at the rows
   `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,

@@ -239,16 +239,19 @@ pub enum PeersExchangeResponse {
 /// Lookups of the hostnames in peer-exchange answers (CRD ch.28 R8c item 7, maintainer decision BH). Native builds
 /// only: a browser build skips every hostname.
 ///
-/// A name goes through a bounded queue, and one lookup at a time runs on a blocking worker thread. While nothing is
-/// queued and nothing runs, no timer, worker or task handle exists.
+/// A name goes through a bounded queue, and one lookup at a time runs as an asynchronous task on the swarm's runtime,
+/// through the node's resolver (CRD ch.45 R45.6B.9 item 2). It never runs on the swarm's own task. While nothing is
+/// queued and nothing runs, no timer or task handle exists.
 #[cfg(not(target_arch = "wasm32"))]
 mod hostname_lookup {
     use super::PeerAddresses;
+    use async_trait::async_trait;
+    use common::dns_resolver::{self, DnsFamily};
     use futures::FutureExt;
     use libp2p::{multiaddr::Multiaddr, PeerId};
     use std::collections::VecDeque;
     use std::io;
-    use std::net::{SocketAddr, ToSocketAddrs};
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::task::{Context, Poll};
     use std::time::Duration;
@@ -261,20 +264,23 @@ mod hostname_lookup {
     pub(super) const MAX_NAME_RECORDS: usize = 64;
     /// The least time between two lookups of the same name (item 7.1).
     const RELOOKUP_INTERVAL: Duration = Duration::from_secs(30 * 60);
-    /// A lookup that has not returned after this time stores nothing (item 7.2).
+    /// A lookup that has not returned after this time is abandoned and stores nothing (item 7.2).
     const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-    /// The blocking name lookup. It is a trait so that a test can drive the results and their timing.
+    /// The name lookup. It is a trait so that a test can drive the results and their timing.
+    #[async_trait]
     pub(super) trait HostResolver: Send + Sync + 'static {
-        fn lookup(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>>;
+        async fn lookup(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>>;
     }
 
-    /// The operating system's resolver.
-    struct SystemResolver;
+    /// The node's resolver (`dns_resolver`, CRD ch.45 §45.6B).
+    struct NodeResolver;
 
-    impl HostResolver for SystemResolver {
-        fn lookup(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
-            (name, port).to_socket_addrs().map(|addresses| addresses.collect())
+    #[async_trait]
+    impl HostResolver for NodeResolver {
+        async fn lookup(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+            // Only IPv4 results are kept (item 7.3), so only IPv4 is asked for.
+            dns_resolver::lookup(name, port, DnsFamily::V4).await
         }
     }
 
@@ -327,8 +333,8 @@ mod hostname_lookup {
     struct RunningLookup {
         job: LookupJob,
         handle: JoinHandle<io::Result<Vec<SocketAddr>>>,
-        /// `None` once the 5 s have passed: the result is given up, but the worker thread may still be busy.
-        timeout: Option<Delay>,
+        /// When it fires the lookup is abandoned: its task is dropped, so the next one may start.
+        timeout: Delay,
     }
 
     pub(super) struct HostnameLookups {
@@ -344,7 +350,7 @@ mod hostname_lookup {
     impl Default for HostnameLookups {
         fn default() -> Self {
             HostnameLookups {
-                resolver: Arc::new(SystemResolver),
+                resolver: Arc::new(NodeResolver),
                 timeout: LOOKUP_TIMEOUT,
                 relookup_interval: RELOOKUP_INTERVAL,
                 queue: VecDeque::new(),
@@ -355,7 +361,7 @@ mod hostname_lookup {
     }
 
     impl HostnameLookups {
-        /// Whether no lookup is queued or running, so that no timer, worker or task handle is pending.
+        /// Whether no lookup is queued or running, so that no timer or task handle is pending.
         #[cfg(test)]
         pub(super) fn is_idle(&self) -> bool { self.queue.is_empty() && self.running.is_none() }
 
@@ -413,36 +419,35 @@ mod hostname_lookup {
             }
         }
 
-        /// Drives the running lookup and starts the next queued one when the previous one has returned, even if its
-        /// result was given up. At most one worker thread exists at any time. Returns the lookups that finished.
+        /// Drives the running lookup and starts the next queued one when the previous one has returned or was
+        /// abandoned at the timeout. At most one lookup task exists at any time. Returns the lookups that finished.
         pub(super) fn poll(&mut self, cx: &mut Context, is_connected: impl Fn(&PeerId) -> bool) -> Vec<FinishedLookup> {
             let mut finished = Vec::new();
             loop {
                 if let Some(running) = self.running.as_mut() {
                     if let Poll::Ready(joined) = running.handle.poll_unpin(cx) {
                         let running = self.running.take().expect("the lookup is running");
-                        // A result that was given up at the timeout was reported then.
-                        if running.timeout.is_some() {
-                            let result = match joined {
-                                Ok(Ok(addresses)) => LookupResult::Resolved(addresses),
-                                Ok(Err(error)) => LookupResult::Failed(error.to_string()),
-                                Err(error) => LookupResult::Failed(format!("the lookup task failed: {}", error)),
-                            };
-                            finished.push(FinishedLookup {
-                                job: running.job,
-                                result,
-                            });
-                        }
+                        let result = match joined {
+                            Ok(Ok(addresses)) => LookupResult::Resolved(addresses),
+                            Ok(Err(error)) => LookupResult::Failed(error.to_string()),
+                            Err(error) => LookupResult::Failed(format!("the lookup task failed: {}", error)),
+                        };
+                        finished.push(FinishedLookup {
+                            job: running.job,
+                            result,
+                        });
                         continue;
                     }
-                    if let Some(timeout) = running.timeout.as_mut() {
-                        if timeout.poll_unpin(cx).is_ready() {
-                            running.timeout = None;
-                            finished.push(FinishedLookup {
-                                job: running.job.clone(),
-                                result: LookupResult::TimedOut,
-                            });
-                        }
+                    if running.timeout.poll_unpin(cx).is_ready() {
+                        // The lookup is abandoned and stores nothing: dropping its task drops the future, and the
+                        // next lookup may start now (item 7.2).
+                        let running = self.running.take().expect("the lookup is running");
+                        running.handle.abort();
+                        finished.push(FinishedLookup {
+                            job: running.job,
+                            result: LookupResult::TimedOut,
+                        });
+                        continue;
                     }
                     return finished;
                 }
@@ -460,10 +465,9 @@ mod hostname_lookup {
                 let (name, port) = (job.name.clone(), job.port);
                 self.running = Some(RunningLookup {
                     job,
-                    // The system resolver blocks, so it runs on a blocking worker thread of the swarm's runtime and
-                    // never on the swarm's own task.
-                    handle: tokio::task::spawn_blocking(move || resolver.lookup(&name, port)),
-                    timeout: Some(Delay::new(self.timeout)),
+                    // An asynchronous task of the swarm's runtime, never polled on the swarm's own task.
+                    handle: tokio::spawn(async move { resolver.lookup(&name, port).await }),
+                    timeout: Delay::new(self.timeout),
                 });
             }
         }
@@ -1633,29 +1637,38 @@ mod hostname_tests {
     use super::hostname_lookup::{Enqueued, HostResolver, LookupJob, MAX_NAME_RECORDS, MAX_QUEUED_NAMES};
     use super::{PeerAddresses, PeerIdSerde, PeersExchange};
     use crate::{NetworkInfo, NetworkPorts, PeerId};
-    use futures::task::{waker, ArcWake};
+    use async_trait::async_trait;
+    use futures::task::{waker, ArcWake, AtomicWaker};
     use libp2p::core::Multiaddr;
     use std::collections::{HashMap, HashSet};
     use std::io;
     use std::net::{IpAddr, SocketAddr};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Condvar, Mutex};
-    use std::task::Context;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
     use std::time::Duration;
     use wasm_timer::Instant;
 
     const PORT: u16 = 3000;
 
     /// A resolver that answers from a table, records its calls, and can hold the lookup of chosen names until
-    /// `release` is called.
+    /// `release` is called. The held lookup is a future that stays pending, so abandoning it drops it.
     #[derive(Default)]
     struct ScriptedResolver {
         answers: Mutex<HashMap<String, Vec<IpAddr>>>,
         blocked: Mutex<HashSet<String>>,
-        released: (Mutex<bool>, Condvar),
+        released: AtomicBool,
+        release_waker: AtomicWaker,
         calls: Mutex<Vec<String>>,
         active: AtomicUsize,
         max_active: AtomicUsize,
+    }
+
+    /// Counts a running lookup, and stops counting it when its future finishes or is dropped.
+    struct ActiveLookup<'a>(&'a ScriptedResolver);
+
+    impl Drop for ActiveLookup<'_> {
+        fn drop(&mut self) { self.0.active.fetch_sub(1, Ordering::SeqCst); }
     }
 
     impl ScriptedResolver {
@@ -1667,25 +1680,37 @@ mod hostname_tests {
         fn block(&self, name: &str) { self.blocked.lock().unwrap().insert(name.to_owned()); }
 
         fn release(&self) {
-            *self.released.0.lock().unwrap() = true;
-            self.released.1.notify_all();
+            self.released.store(true, Ordering::SeqCst);
+            self.release_waker.wake();
         }
 
         fn calls(&self) -> Vec<String> { self.calls.lock().unwrap().clone() }
+
+        /// Pending until `release` is called.
+        async fn until_released(&self) {
+            futures::future::poll_fn(|cx| {
+                self.release_waker.register(cx.waker());
+                if self.released.load(Ordering::SeqCst) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await
+        }
     }
 
+    #[async_trait]
     impl HostResolver for ScriptedResolver {
-        fn lookup(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        async fn lookup(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
             self.calls.lock().unwrap().push(name.to_owned());
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
-            if self.blocked.lock().unwrap().contains(name) {
-                let (lock, condvar) = &self.released;
-                let _released = condvar
-                    .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(20), |released| !*released)
-                    .unwrap();
+            let _active = ActiveLookup(self);
+            let blocked = self.blocked.lock().unwrap().contains(name);
+            if blocked {
+                self.until_released().await;
             }
-            self.active.fetch_sub(1, Ordering::SeqCst);
             match self.answers.lock().unwrap().get(name) {
                 Some(ips) => Ok(ips.iter().map(|ip| SocketAddr::new(*ip, port)).collect()),
                 None => Err(io::Error::new(io::ErrorKind::NotFound, "no such host")),
@@ -2200,8 +2225,8 @@ mod hostname_tests {
         wait_for(|| resolver.calls().len() == 1);
         assert_eq!(resolver.calls(), vec!["slow.example.com".to_owned()]);
 
-        // After the timeout the result is given up and reported, but the worker is still busy: the next lookup
-        // does not start.
+        // After the timeout the lookup is abandoned and reported (its future is dropped, nothing is stored), and the
+        // next lookup may start right away.
         let mut finished = Vec::new();
         wait_for(|| {
             finished.extend(poll_once(&mut behaviour));
@@ -2209,22 +2234,17 @@ mod hostname_tests {
         });
         assert_eq!(finished.len(), 1);
         assert!(finished[0].1.as_ref().unwrap().contains("did not return within"));
-        assert!(!behaviour.lookups.is_idle());
-        for _ in 0..5 {
-            assert!(poll_once(&mut behaviour).is_empty());
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(resolver.calls(), vec!["slow.example.com".to_owned()]);
-        assert!(!behaviour.is_known_peer(&slow));
-
-        // The worker returns. Its late result is not stored, and only then does the next lookup start.
-        resolver.release();
         let finished = drain(&mut behaviour);
         assert_eq!(finished, vec![("next.example.com".to_owned(), None)]);
         assert_eq!(resolver.calls(), vec![
             "slow.example.com".to_owned(),
             "next.example.com".to_owned()
         ]);
+        // The abandoned lookup was dropped with its future: it is no longer running, and it never stores anything,
+        // not even when the table could have answered later.
+        wait_for(|| resolver.active.load(Ordering::SeqCst) == 0);
+        resolver.release();
+        std::thread::sleep(Duration::from_millis(50));
         assert!(!behaviour.is_known_peer(&slow));
         assert!(behaviour.request_response.addresses_of_peer(&slow).is_empty());
         assert!(behaviour.is_known_peer(&next));
@@ -2248,7 +2268,7 @@ mod hostname_tests {
         )])]);
         assert!(!behaviour.lookups.is_idle());
         drain(&mut behaviour);
-        // The lookup, its timer and its worker handle are gone with the last name.
+        // The lookup, its timer and its task handle are gone with the last name.
         assert!(behaviour.lookups.is_idle());
         assert!(poll_once(&mut behaviour).is_empty());
         assert!(behaviour.lookups.is_idle());
@@ -2261,7 +2281,7 @@ mod hostname_tests {
     }
 
     /// `PeersExchange::poll_hostname_lookups` starts a name queued by the same poll, and the waker it registered is
-    /// woken when the worker returns.
+    /// woken when the lookup returns.
     #[test]
     fn test_name_queued_in_a_poll_starts_in_that_poll_and_wakes_the_task() {
         let rt = runtime();
