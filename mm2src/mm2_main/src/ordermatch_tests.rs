@@ -3448,6 +3448,9 @@ mod t32_k1b_final_cancel_tests {
                 !sync_with(&relay, &mut relay_rx, &maker_ctx, &p.pubkey),
                 "a snapshot is answered"
             );
+            // The answer is applied to the index at once, to the trie by the worker: a full snapshot clears the
+            // pair and its instant there and creates them again. Aging the instant before that would age nothing.
+            flush_trie(&relay);
             assert_eq!(book(&relay), uuids(&p.all()));
             assert!(
                 seen(&relay, &p.pubkey, X).is_some(),
