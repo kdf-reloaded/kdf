@@ -355,19 +355,6 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   Code: `common/dns_resolver.rs` (with `dns_resolver/wire.rs` and `hosts.rs`),
   `mm2_p2p/src/resolving_transport.rs`.
 
-- **An explicit `UtxoFixed` withdraw fee on an SLP token is charged per started
-  kilobyte, with no switch.** Since PR #226 a UTXO coin's `withdraw` with
-  `fee: {"type":"UtxoFixed","amount":"<n>"}` pays `<n>` as a rate per 1,000 bytes, in
-  proportion to the size and rounded down, exactly like `UtxoPerKbyte`, as the
-  reference (Komodo DeFi Framework 2.6.0-beta and GLEEC KDF 3.0.0-beta) does. A
-  `withdraw` of an SLP token on BCH still pays `<n>` for every started kilobyte,
-  where the reference charges it in proportion to the size there too; KDF
-  Reloaded will change to the same arithmetic there (planned). No other node
-  sees the difference, because a withdrawal is the node's own transaction.
-  See [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
-  [CRD ch.38 R38.6.6l and R38.6.6m](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md).
-  Contract: [CRD ch.38 R38.6.6l](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md).
-
 - **Reloaded never writes a cancelled order's stored record back, with no switch.**
   On the reference, an order update or the node's own match-pruning step that runs
   into a concurrent cancel can write the cancelled order's stored record back. The
@@ -459,6 +446,15 @@ activation time (CRD ch.39 R39.6.4e). If it cannot be established the build is r
 with a typed error; it is never guessed. **No setting restores GLEEC's version-4-only
 behaviour**, and none is offered, because that behaviour produces nothing the chain
 accepts.
+
+**From v0.4.0 Reloaded also pays Pirate1 addresses.** Pirate Chain's own wallets now
+hand out Pirate1 (Ironwood pool) addresses by default and pay from Ironwood notes.
+Reloaded's ARRR wallet stays Sapling-only, but it accepts a Pirate1 address in
+`validateaddress` and as a `withdraw` destination. It pays from its Sapling notes, at
+Pirate Chain's fixed fee of 0.0001 ARRR, with the change kept in Sapling (CRD ch.39
+§39.6.5). Payments that come from Ironwood wallets arrive like any other (R39.8.0bb).
+GLEEC KDF builds nothing the post-Ironwood chain accepts, so no setting reproduces its
+side.
 
 Because of that, the swap freeze and the build refusal below no longer engage in this
 build, and `ironwood_gate_disabled` has nothing left to switch off. It is still
