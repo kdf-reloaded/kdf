@@ -265,6 +265,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   wallets and swaps stay Sapling-only, payments from Pirate Chain's Ironwood wallets are found and
   spent like any other, and a withdrawal may pay a Pirate1 address (CRD PR #229; the code follows).
   Native mode, the rest of the Ironwood pool and Pirate1 receiving addresses move to a later release.
+  The rule that an ARRR swap needs a counterparty that declares version-6 support is written (CRD PR
+  #230).
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
