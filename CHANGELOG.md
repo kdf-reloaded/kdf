@@ -313,6 +313,24 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
 
 ### Fixed
 
+#### EVM coins
+
+- **A taker on an EVM chain with fast blocks, such as Monad, now finds the maker's spend of its
+  payment.** While waiting for the maker to spend its payment, a taker asked for the swap
+  contract's events from the swap's first block to the newest one in a single request. On Monad,
+  with a block every 0.4 seconds, that range passed what public nodes accept (100 or 1,000 blocks)
+  within minutes. Every request was refused, and the taker never learned the secret. While the
+  requests failed, the taker also never reached the end of its wait, so it did not take its refund
+  path either.
+  - **Windows.** Every event search now runs in windows of at most `logs_block_range` blocks
+    (coins file, default 1,000), and the wait starts at the payment's own block.
+  - **Smaller windows on refusal.** A node that refuses a window's size makes the window smaller
+    for the rest of the session, with one warning in the log.
+  - **Deadline.** The wait ends at its deadline even while requests fail. The same deadline fix
+    applies to the version-2 swap's event search.
+
+  Detail: PR #248; CRD ch.17 R17.8.1–R17.8.4.
+
 #### Node names in logs and errors
 
 - **A node URL that a lower layer writes in another spelling is now shortened to scheme, host and

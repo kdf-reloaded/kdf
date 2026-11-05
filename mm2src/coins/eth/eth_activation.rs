@@ -787,6 +787,7 @@ pub(crate) async fn build_eth_coin(
         required_confirmations,
         chain_id: conf["chain_id"].as_u64(),
         logs_block_range: conf["logs_block_range"].as_u64().unwrap_or(DEFAULT_LOGS_BLOCK_RANGE),
+        logs_window: Default::default(),
         derivation_method,
         swap_v2_contracts,
         gas_limit,

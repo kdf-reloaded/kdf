@@ -569,6 +569,7 @@ fn build_trezor_coin(
         custom_token: false,
         chain_id: Some(1),
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+        logs_window: Default::default(),
         derivation_method,
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
