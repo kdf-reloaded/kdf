@@ -1,18 +1,17 @@
 //! Pirate1 (Ironwood) payment destinations of a withdrawal (CRD ch.39 R39.6.5a--R39.6.5f).
 //!
 //! The wallet stays Sapling-only. This module holds the pieces a Sapling wallet needs to *pay* an
-//! Ironwood address: the address form, the withdraw-only payment type, the fixed fee and the Ironwood
-//! anchor. Nothing here lets a swap path express an Ironwood recipient: [`IronwoodPayment`] is not a
-//! [`ZOutput`](super::ZOutput) and no function of the swap paths accepts it.
+//! Ironwood address: the address form, the withdraw-only payment type and the fixed fee. The anchor
+//! and flags of the Ironwood bundle are set where the transaction is built
+//! (`z_coin_ops::build_from_wallet_db`, R39.6.5d--R39.6.5e). Nothing here lets a swap path express an
+//! Ironwood recipient: [`IronwoodPayment`] is not a [`ZOutput`](super::ZOutput) and no function of
+//! the swap paths accepts it.
 
 use super::{configured_or_builtin_ironwood_time, ZcoinConsensusParams};
 use bech32::primitives::decode::UncheckedHrpstring;
 use bech32::{Bech32, Bech32m, Hrp};
 use derive_more::Display;
-use incrementalmerkletree::frontier::CommitmentTree;
-use orchard::tree::MerkleHashOrchard;
 use zcash_keys::encoding::decode_payment_address;
-use zcash_primitives::merkle_tree::read_commitment_tree;
 use zcash_protocol::consensus::NetworkType;
 use zcash_protocol::value::Zatoshis as Amount;
 
@@ -245,43 +244,4 @@ pub(crate) fn decode_destination(
         pirate1_hrp: pirate1_hrp(params),
         has_ironwood_pool: has_ironwood_pool(params, ticker),
     })
-}
-
-/// The root an Ironwood tree state stands for, as the anchor of a withdrawal (R39.6.5e).
-///
-/// `ironwood_tree_hex` is the `ironwoodTree` member of `GetTreeState`. A 32-byte value is the root
-/// itself; a longer one is the legacy commitment-tree serialization, and the root is computed from it.
-/// A value that is empty, all zero, undecodable or not a valid anchor is refused with the cause. The
-/// empty-tree root is never used as a *stand-in* for a value that could not be read; a backend that
-/// itself reports a tree without notes (a fresh regtest chain) is answering with that tree's real root.
-pub(crate) fn ironwood_anchor_from_tree_state(ironwood_tree_hex: &str) -> Result<orchard::Anchor, String> {
-    let hex_text = ironwood_tree_hex.trim();
-    if hex_text.is_empty() {
-        return Err("the tree state carries no Ironwood tree".to_owned());
-    }
-    let bytes = hex::decode(hex_text).map_err(|e| format!("the Ironwood tree is not hexadecimal: {}", e))?;
-    let anchor = if bytes.len() == 32 {
-        let root =
-            <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| "the Ironwood root is not 32 bytes".to_owned())?;
-        if root == [0u8; 32] {
-            return Err("the Ironwood root is all zero".to_owned());
-        }
-        Option::from(orchard::Anchor::from_bytes(root))
-            .ok_or_else(|| "the Ironwood root is not a valid anchor (not a canonical field element)".to_owned())?
-    } else {
-        let mut reader = bytes.as_slice();
-        let tree: CommitmentTree<MerkleHashOrchard, 32> = read_commitment_tree::<MerkleHashOrchard, _, 32>(&mut reader)
-            .map_err(|e| format!("the Ironwood tree is not a legacy commitment-tree serialization: {}", e))?;
-        if !reader.is_empty() {
-            return Err(format!(
-                "the Ironwood tree has {} unread bytes after the commitment-tree serialization",
-                reader.len()
-            ));
-        }
-        orchard::Anchor::from(tree.root())
-    };
-    if anchor.to_bytes() == [0u8; 32] {
-        return Err("the Ironwood root is all zero".to_owned());
-    }
-    Ok(anchor)
 }

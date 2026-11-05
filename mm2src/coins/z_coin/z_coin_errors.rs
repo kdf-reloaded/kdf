@@ -77,19 +77,6 @@ pub enum GenTxError {
         coin: String,
         reason: String,
     },
-    /// The Ironwood anchor of a Pirate1 payment could not be established; the build is refused and never
-    /// falls back to the empty-tree root (CRD ch.39 R39.6.5e).
-    #[display(
-        fmt = "{} cannot build a payment to a Pirate1 (Ironwood) address: the Ironwood anchor from {} is unusable: {}",
-        coin,
-        backend,
-        reason
-    )]
-    IronwoodAnchorUnavailable {
-        coin: String,
-        backend: String,
-        reason: String,
-    },
 }
 
 /// Why a shielded construction path could not obtain its builder target height (CRD ch.39
@@ -164,8 +151,6 @@ impl From<GenTxError> for WithdrawError {
             GenTxError::Rpc(e) => WithdrawError::Transport(e.to_string()),
             // The destination form is not payable by this coin right now (R39.6.5d).
             GenTxError::IronwoodPaymentRefused { .. } => WithdrawError::InvalidAddress(gen_tx.to_string()),
-            // The backend's answer is what is unusable (R39.6.5e).
-            GenTxError::IronwoodAnchorUnavailable { .. } => WithdrawError::Transport(gen_tx.to_string()),
             GenTxError::BuilderHeight(BuilderHeightError::TipUnavailable(e)) => WithdrawError::Transport(e),
             GenTxError::BuilderHeight(BuilderHeightError::IronwoodActivation(_)) => {
                 WithdrawError::InternalError(gen_tx.to_string())

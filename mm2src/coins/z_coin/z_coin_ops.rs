@@ -671,63 +671,7 @@ impl ZCoin {
             my_addr: &self.z_fields.my_z_addr,
             prover: &self.z_fields.z_tx_prover,
         };
-        // The anchor is read from the backend at the height the build picks its Sapling anchor at, which
-        // only the build knows (R39.6.5e). The build runs on a blocking section of the runtime, so the
-        // read is driven from there; it happens for a Pirate1 payment and for nothing else.
-        let runtime = ironwood.is_some().then(tokio::runtime::Handle::current);
-        let anchor_at = |height: BlockHeight| {
-            let runtime = runtime.as_ref().ok_or_else(|| {
-                MmError::new(GenTxError::ShieldedWalletDb(
-                    "no runtime to read the Ironwood anchor".to_owned(),
-                ))
-            })?;
-            tokio::task::block_in_place(|| runtime.block_on(self.ironwood_anchor_at(height.into())))
-        };
-        let ironwood = ironwood.map(|payment| IronwoodSend {
-            payment,
-            anchor_at: &anchor_at,
-        });
         build_from_wallet_db(&inputs, t_outputs, z_outputs, ironwood, tx_fee, builder_height)
-    }
-
-    /// The Ironwood anchor at `height`: the root of the Ironwood note-commitment tree the backend
-    /// reports for that height. Refused, with the coin and the backend named, when the value is empty,
-    /// all zero, undecodable or not a valid anchor; never replaced by the empty-tree root (R39.6.5e).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) async fn ironwood_anchor_at(&self, height: u32) -> Result<orchard::Anchor, MmError<GenTxError>> {
-        let coin = self.ticker().to_owned();
-        let client = self.lightwalletd().ok_or_else(|| {
-            MmError::new(GenTxError::IronwoodAnchorUnavailable {
-                coin: coin.clone(),
-                backend: "the coin's backend".to_owned(),
-                reason: "only a Light-mode coin reads the Ironwood tree state".to_owned(),
-            })
-        })?;
-        let (backend, read) = client
-            .backend()
-            .ironwood_tree_state(u64::from(height))
-            .await
-            .map_err(|e| {
-                MmError::new(GenTxError::IronwoodAnchorUnavailable {
-                    coin: coin.clone(),
-                    backend: "lightwalletd".to_owned(),
-                    reason: e.to_string(),
-                })
-            })?;
-        let unusable = |reason: String| {
-            MmError::new(GenTxError::IronwoodAnchorUnavailable {
-                coin: coin.clone(),
-                backend: backend.clone(),
-                reason,
-            })
-        };
-        if read.height != u64::from(height) {
-            return Err(unusable(format!(
-                "the tree state is for height {}, not the anchor height {}",
-                read.height, height
-            )));
-        }
-        z_pirate1::ironwood_anchor_from_tree_state(&read.ironwood_tree).map_err(unusable)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1039,15 +983,6 @@ pub(crate) struct WalletDbBuild<'a> {
     pub(crate) prover: &'a LocalTxProver,
 }
 
-/// The Ironwood payment of a withdrawal and the way to read the Ironwood anchor for it.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct IronwoodSend<'a> {
-    pub(crate) payment: z_pirate1::IronwoodPayment,
-    /// The Ironwood anchor at the given height, which is the height the build takes its Sapling
-    /// anchor from (R39.6.5e).
-    pub(crate) anchor_at: &'a dyn Fn(BlockHeight) -> Result<orchard::Anchor, MmError<GenTxError>>,
-}
-
 /// Whether a payment to a Pirate1 address can be built now: the coin is in Light mode (native mode
 /// builds nothing in this release, R39.6.4e(e)) and the target height is at or above the Ironwood
 /// activation height, because a version-4 transaction has no Ironwood bundle (R39.6.5d). Decided before
@@ -1089,15 +1024,16 @@ static FIRST_IRONWOOD_BUILD_STARTED: AtomicBool = AtomicBool::new(false);
 /// Builds a transaction from the notes the shielded wallet database offers as spendable.
 /// Records nothing: the caller decides whether and when the notes it spends are locked.
 ///
-/// With an Ironwood payment the transaction also carries an Ironwood bundle of that one output, padded
-/// to the default two actions, and pays the fixed Ironwood fee whatever `tx_fee` says (R39.6.5d,
+/// With an Ironwood payment the transaction also carries an output-only Ironwood bundle (spends
+/// disabled) of that one output, anchored at the empty-tree root and padded to the default two actions,
+/// and pays the fixed Ironwood fee whatever `tx_fee` says (R39.6.5d,
 /// R39.6.5f). The change stays Sapling.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn build_from_wallet_db(
     inputs: &WalletDbBuild<'_>,
     t_outputs: Vec<TxOut>,
     z_outputs: Vec<ZOutput>,
-    ironwood: Option<IronwoodSend<'_>>,
+    ironwood: Option<z_pirate1::IronwoodPayment>,
     tx_fee: BigDecimal,
     builder_height: u32,
 ) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
@@ -1105,7 +1041,7 @@ pub(crate) fn build_from_wallet_db(
     let z_output_sat: u64 = z_outputs
         .iter()
         .fold(0, |cur, out| cur + u64::from(out.amount))
-        .checked_add(ironwood.as_ref().map_or(0, |send| u64::from(send.payment.amount)))
+        .checked_add(ironwood.as_ref().map_or(0, |payment| u64::from(payment.amount)))
         .or_mm_err(|| GenTxError::NumConversion(NumConversError("ZCoin total output overflow".to_owned())))?;
     let tx_fee_sat = z_pirate1::fee_sat(
         ironwood.is_some(),
@@ -1172,11 +1108,6 @@ pub(crate) fn build_from_wallet_db(
         .with_sapling_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))
         .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?
         .or_mm_err(|| GenTxError::ShieldedWalletDb("shielded wallet anchor is unavailable".to_owned()))?;
-    // The Ironwood root is read before any proof is made, and refuses the build when unusable.
-    let ironwood_anchor = ironwood
-        .as_ref()
-        .map(|send| (send.anchor_at)(anchor_height))
-        .transpose()?;
     let mut selected_notes_with_paths = Vec::with_capacity(selected_notes.len());
     for selected in selected_notes {
         let merkle_path = wallet_db
@@ -1191,21 +1122,32 @@ pub(crate) fn build_from_wallet_db(
     // `height` above only selects notes and picks the anchor from the wallet database. The builder
     // takes the single height authority's value so this path and the HTLC spend/refund path can
     // never disagree about a transaction's expiry (R39.11.11).
+    //
+    // A Pirate1 payment carries an output-only Ironwood bundle (spends disabled, outputs enabled) anchored
+    // at the root of the empty Ironwood tree, which it spends nothing of, as the dictated chain's own
+    // wallets build a payment into Ironwood; no tree state is read for it (R39.6.5d, R39.6.5e). The bundle
+    // is padded to the default two actions. Every other transaction carries no Ironwood bundle.
+    let (ironwood_anchor, ironwood_padding) = if ironwood.is_some() {
+        (Some(orchard::Anchor::empty_tree()), BundlePadding::OUTPUT_ONLY)
+    } else {
+        (None, BundlePadding::DEFAULT)
+    };
     let mut tx_builder = ZTxBuilder::new(inputs.params.clone(), builder_height.into(), BuildConfig::Standard {
         sapling_anchor: Some(sapling_anchor.into()),
         orchard_anchor: None,
         ironwood_anchor,
         orchard_padding: BundlePadding::DEFAULT,
-        ironwood_padding: BundlePadding::DEFAULT,
+        ironwood_padding,
     });
     let fvk = FullViewingKey::from_expanded_spending_key(&inputs.spending_key.expsk);
     for (note, merkle_path) in selected_notes_with_paths {
         tx_builder.add_sapling_spend(fvk.clone(), note, merkle_path)?;
     }
     let carries_ironwood = ironwood.is_some();
-    if let Some(send) = ironwood {
-        // No outgoing viewing key and an empty memo (R39.6.5d).
-        tx_builder.add_ironwood_output(None, send.payment.recipient, send.payment.amount, MemoBytes::empty())?;
+    if let Some(payment) = ironwood {
+        // No outgoing viewing key and an empty memo (R39.6.5d). Only this output enters Ironwood: the
+        // change below is a Sapling output to the wallet's own address, never an Ironwood one.
+        tx_builder.add_ironwood_output(None, payment.recipient, payment.amount, MemoBytes::empty())?;
     }
 
     let mut received_by_me = 0u64;

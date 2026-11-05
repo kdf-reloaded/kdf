@@ -1,8 +1,9 @@
-//! Pirate1 (Ironwood) withdrawal destinations that need no coin (CRD ch.39 T39.6.5b, T39.6.5d, and the
+//! Pirate1 (Ironwood) withdrawal destinations that need no coin (CRD ch.39 T39.6.5b, T39.6.5d (the
+//! mainnet fixture's anchor and flags), and the
 //! fee rule of R39.6.5f / the fee derivation of R39.6.5g on bytes).
 //!
 //! The tests that drive a real Light-mode coin over a wallet database (the built transaction, the
-//! broadcast record, the anchor read through the backend) are in `z_note_lock_tests/pirate1_withdraw.rs`,
+//! broadcast record, the built anchor and flags) are in `z_note_lock_tests/pirate1_withdraw.rs`,
 //! next to the harness they use.
 
 use super::z_coin_errors::GenTxError;
@@ -14,8 +15,6 @@ use super::*;
 use bech32::primitives::iter::{ByteIterExt, Fe32IterExt};
 use bech32::{Bech32, Bech32m, Hrp};
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
-use orchard::tree::MerkleHashOrchard;
-use zcash_primitives::merkle_tree::write_commitment_tree;
 
 /// The raw 43 bytes of the address the vectors below encode: key `[7; 32]`, diversifier index 0.
 pub(crate) const RAW_ADDRESS: &str =
@@ -28,8 +27,8 @@ pub(crate) const REGTEST_ADDRESS: &str =
     "pirate-regtest1g4vs98qttkleg8z66xq6tl50gke5vv8jn5xgmkxurnp4wvux7stvkvjpxv2k6u3a7hnz6mj3et4";
 
 /// The root of the empty Ironwood tree, which is also the Ironwood anchor of the mainnet withdrawal
-/// fixture (`WITHDRAW`): a wallet of the dictated chain that spends only Sapling notes anchors its
-/// dummy Ironwood spends at it.
+/// fixture (`WITHDRAW`): a wallet of the dictated chain that pays into Ironwood from Sapling anchors its
+/// output-only bundle at it.
 const EMPTY_TREE_ROOT: &str = "ae2935f1dfd8a24aed7c70df7de3a668eb7a49b1319880dde2bbd9031ae5d82f";
 
 #[derive(Clone, Copy, Debug)]
@@ -402,100 +401,35 @@ fn t39_6_5f_the_fee_is_fixed_for_an_ironwood_output_and_configured_otherwise() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// T39.6.5d: the Ironwood anchor
+// T39.6.5d: the Ironwood anchor and flags
 // ---------------------------------------------------------------------------------------------
 
-fn leaf(n: u8) -> MerkleHashOrchard {
-    let mut bytes = [0u8; 32];
-    bytes[0] = n;
-    Option::from(MerkleHashOrchard::from_bytes(&bytes)).unwrap()
+/// The Ironwood anchor and flags of a transaction: (anchor is the empty-tree root, spends enabled,
+/// outputs enabled).
+pub(crate) fn ironwood_anchor_and_flags(tx: &ZTransaction) -> (bool, bool, bool) {
+    let bundle = tx.ironwood_bundle().expect("an Ironwood bundle");
+    (
+        bundle.anchor().to_bytes() == orchard::Anchor::empty_tree().to_bytes(),
+        bundle.flags().spends_enabled(),
+        bundle.flags().outputs_enabled(),
+    )
 }
 
-/// A legacy commitment-tree serialization of `leaves` leaves, and the root of that tree.
-pub(crate) fn legacy_tree(leaves: u8) -> (String, orchard::Anchor) {
-    let mut tree = incrementalmerkletree::frontier::CommitmentTree::<MerkleHashOrchard, 32>::empty();
-    for n in 1..=leaves {
-        tree.append(leaf(n)).unwrap();
-    }
-    let mut bytes = Vec::new();
-    write_commitment_tree(&tree, &mut bytes).unwrap();
-    (hex::encode(bytes), orchard::Anchor::from(tree.root()))
-}
-
-/// T39.6.5d: a 32-byte `ironwoodTree` value is the root itself.
+/// T39.6.5d: the mainnet fixture of T39.6.5a that pays from Sapling into Ironwood (height 4198585) is an
+/// output-only bundle anchored at the root of the empty tree: the form a Pirate1 withdrawal builds. The
+/// mainnet deposit, which spends an Ironwood note, is the other form: spends enabled, a real anchor. The
+/// built transaction is compared with the first in `pirate1_withdraw` (T39.6.5c, T39.6.5d).
 #[test]
-fn t39_6_5d_a_32_byte_value_is_the_root() {
-    let (_, root) = legacy_tree(5);
-    let anchor = ironwood_anchor_from_tree_state(&hex::encode(root.to_bytes())).unwrap();
-    assert_eq!(anchor, root);
-    // Surrounding whitespace is not part of the value.
+fn t39_6_5d_the_mainnet_payment_into_ironwood_is_output_only_at_the_empty_tree_root() {
+    let withdraw = read_tx(&WITHDRAW.bytes()).unwrap();
     assert_eq!(
-        ironwood_anchor_from_tree_state(&format!(" {}\n", hex::encode(root.to_bytes()))).unwrap(),
-        root
+        hex::encode(withdraw.ironwood_bundle().unwrap().anchor().to_bytes()),
+        EMPTY_TREE_ROOT
     );
-}
+    assert_eq!(ironwood_anchor_and_flags(&withdraw), (true, false, true));
 
-/// T39.6.5d: a legacy serialization yields the root computed from it, for trees of several shapes
-/// (one leaf, an even and an odd count, and a count that fills several levels).
-#[test]
-fn t39_6_5d_a_legacy_serialization_yields_the_root_computed_from_it() {
-    for leaves in [1u8, 2, 3, 5, 8, 13] {
-        let (serialized, root) = legacy_tree(leaves);
-        assert!(serialized.len() > 64, "a serialization, not a root");
-        assert_eq!(
-            ironwood_anchor_from_tree_state(&serialized).unwrap(),
-            root,
-            "{leaves} leaves"
-        );
-    }
-    // Two different trees have two different roots.
-    assert_ne!(legacy_tree(2).1, legacy_tree(3).1);
-}
-
-/// T39.6.5d: an empty, all-zero or undecodable value is refused with the cause, and nothing stands in
-/// for it.
-#[test]
-fn t39_6_5d_an_unusable_value_is_refused() {
-    let (serialized, root) = legacy_tree(5);
-    let mut truncated = serialized.clone();
-    truncated.truncate(serialized.len() - 2);
-    let cases: Vec<(String, &str)> = vec![
-        (String::new(), "no Ironwood tree"),
-        ("   ".to_owned(), "no Ironwood tree"),
-        ("zz".to_owned(), "not hexadecimal"),
-        ("abc".to_owned(), "not hexadecimal"),
-        (hex::encode([0u8; 32]), "all zero"),
-        // Not a canonical field element, so not a valid anchor.
-        (hex::encode([0xffu8; 32]), "not a valid anchor"),
-        (truncated, "not a legacy commitment-tree serialization"),
-        (format!("{serialized}00"), "unread bytes"),
-        ("01".to_owned(), "not a legacy commitment-tree serialization"),
-    ];
-    for (value, cause) in cases {
-        let refused = ironwood_anchor_from_tree_state(&value).unwrap_err();
-        assert!(refused.contains(cause), "{value:?}: {refused}");
-    }
-    // Nothing above produced the empty-tree root or any other value.
-    assert_ne!(root, orchard::Anchor::empty_tree());
-}
-
-/// The empty tree is what the dictated chain's own wallets anchor their dummy Ironwood spends at when
-/// they spend no Ironwood note: the Ironwood anchor of the mainnet withdrawal fixture is the root of the
-/// empty tree. A backend that reports an empty tree is therefore giving the real root (a fresh regtest
-/// chain), and that value is used as reported; only a value that could not be read is refused.
-#[test]
-fn t39_6_5d_the_mainnet_withdrawal_anchors_at_the_empty_tree_root() {
-    let tx = read_tx(&WITHDRAW.bytes()).unwrap();
-    let anchor = tx.ironwood_bundle().unwrap().anchor().to_bytes();
-    assert_eq!(hex::encode(anchor), EMPTY_TREE_ROOT);
-    assert_eq!(anchor, orchard::Anchor::empty_tree().to_bytes());
-    assert_eq!(
-        ironwood_anchor_from_tree_state(EMPTY_TREE_ROOT).unwrap(),
-        orchard::Anchor::empty_tree()
-    );
-    // The mainnet deposit spends an Ironwood note and anchors at a real root.
     let deposit = read_tx(&DEPOSIT.bytes()).unwrap();
-    assert_ne!(deposit.ironwood_bundle().unwrap().anchor().to_bytes(), anchor);
+    assert_eq!(ironwood_anchor_and_flags(&deposit), (false, true, true));
 }
 
 // ---------------------------------------------------------------------------------------------

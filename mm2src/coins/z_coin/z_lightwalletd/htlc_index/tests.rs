@@ -656,10 +656,6 @@ impl LightwalletdTransport for Scripted {
         Err(EndpointError::Transport("not scripted".to_owned()))
     }
 
-    async fn tree_state(&self, _server: &str, _height: u64) -> Result<TreeStateRead, EndpointError> {
-        Err(EndpointError::Transport("not scripted".to_owned()))
-    }
-
     async fn taddr_balance(&self, _server: &str, _addresses: Vec<String>) -> Result<i64, EndpointError> {
         Err(EndpointError::Transport("not scripted".to_owned()))
     }

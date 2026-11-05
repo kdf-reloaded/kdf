@@ -2,15 +2,13 @@
 //! T39.6.5c, T39.6.5d, T39.6.5e).
 //!
 //! The harness is the one of the parent module: a real `ZCoin` over a real `zcash_client_sqlite` wallet
-//! database and the scripted lightwalletd transport, here with an Ironwood activation height and
-//! `GetTreeState` answers. The tests make real Sapling spend proofs and a real Halo2 Ironwood proof, so
+//! database and the scripted lightwalletd transport, here with an Ironwood activation height. The tests make real Sapling spend proofs and a real Halo2 Ironwood proof, so
 //! they need the Sapling parameter files and say so where those are absent.
 
 use super::*;
 use crate::z_coin::z_coin_ops::record_broadcast_in_wallet_db;
 use crate::z_coin::z_ironwood_read_tests::{ironwood_bundle_verifies, shielded_sighash, WITHDRAW};
-use crate::z_coin::z_lightwalletd::TreeStateRead;
-use crate::z_coin::z_pirate1_tests::{legacy_tree, MAIN_ADDRESS, REGTEST_ADDRESS, TEST_ADDRESS};
+use crate::z_coin::z_pirate1_tests::{ironwood_anchor_and_flags, MAIN_ADDRESS, REGTEST_ADDRESS, TEST_ADDRESS};
 use crate::z_coin::z_tx_read::read_tx;
 use crate::{TransactionDetails, TxFeeDetails, WithdrawError, WithdrawRequest};
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
@@ -18,8 +16,6 @@ use sapling::note_encryption::{try_sapling_note_decryption, PreparedIncomingView
 use zcash_primitives::transaction::TxVersion;
 
 const IRONWOOD_HEIGHT: u32 = 5;
-/// The height the wallet takes its Sapling anchor from in this harness: the scanned tip.
-const ANCHOR_HEIGHT: u64 = NOTES_HEIGHT as u64;
 /// The coin's configured fee per kilobyte in these tests, which is not the fixed Ironwood fee.
 const CONFIGURED_FEE_SAT: u64 = 1_000;
 const IRONWOOD_FEE_SAT: u64 = 10_000;
@@ -31,33 +27,22 @@ fn params_with_ironwood(height: Option<u32>) -> ZcoinConsensusParams {
     params
 }
 
-/// A wallet with one note of 1.25 ARRR whose Ironwood activation height is `height`, and whose
-/// backend answers `GetTreeState` at the anchor height with the legacy serialization of a tree and
-/// returns that tree's root.
-fn wallet(height: Option<u32>) -> Option<(LightCoinFixture, orchard::Anchor)> {
-    let fixture = LightCoinFixture::with_notes_under(1, 2, params_with_ironwood(height), CONFIGURED_FEE_SAT)?;
-    let (serialized, root) = legacy_tree(5);
-    serve_tree_state(&fixture, ANCHOR_HEIGHT, ANCHOR_HEIGHT, &serialized);
-    Some((fixture, root))
+/// A wallet with one note of 1.25 ARRR whose Ironwood activation height is `height`. The scripted backend
+/// answers no tree-state request: none exists any more, a Pirate1 withdrawal reads none (R39.6.5e).
+fn wallet(height: Option<u32>) -> Option<LightCoinFixture> {
+    LightCoinFixture::with_notes_under(1, 2, params_with_ironwood(height), CONFIGURED_FEE_SAT)
 }
 
-fn serve_tree_state(fixture: &LightCoinFixture, asked: u64, answered: u64, ironwood_tree: &str) {
-    for script in fixture.transport.scripts.lock().values_mut() {
-        script.tree_states.insert(
-            asked,
-            Ok(TreeStateRead {
-                height: answered,
-                ironwood_tree: ironwood_tree.to_owned(),
-            }),
-        );
-    }
-}
-
+/// How many requests of a kind the scripted backend saw that read a tree state. The transport has no
+/// such method, so this is the number of recorded calls whose name says "tree"; it must stay zero.
 fn tree_reads(fixture: &LightCoinFixture) -> usize {
-    SERVERS
+    fixture
+        .transport
+        .calls
+        .lock()
         .iter()
-        .map(|server| fixture.transport.called(server, "tree"))
-        .sum()
+        .filter(|(_, method)| method.contains("tree"))
+        .count()
 }
 
 fn request(to: &str, amount: &str, max: bool) -> WithdrawRequest {
@@ -109,7 +94,7 @@ fn own_sapling_notes(fixture: &LightCoinFixture, tx: &ZTransaction) -> Vec<(u64,
 /// base units; the transaction pays 10,000.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t39_6_5c_a_withdrawal_to_a_pirate1_address_builds_the_version_6_transaction() {
-    let Some((fixture, root)) = wallet(Some(IRONWOOD_HEIGHT)) else {
+    let Some(fixture) = wallet(Some(IRONWOOD_HEIGHT)) else {
         return;
     };
 
@@ -153,7 +138,9 @@ async fn t39_6_5c_a_withdrawal_to_a_pirate1_address_builds_the_version_6_transac
         2,
         "one output padded to the default two actions"
     );
-    assert_eq!(ironwood.anchor(), &root, "the anchor is the root the backend reported");
+    // An output-only bundle (spends disabled, outputs enabled) anchored at the empty-tree root, which is
+    // the form of the chain's own payment into Ironwood (R39.6.5d, R39.6.5e).
+    assert_eq!(ironwood_anchor_and_flags(&tx), (true, false, true));
 
     // The Sapling change is a single note to the wallet's own address; the Sapling bundle is padded.
     let notes = own_sapling_notes(&fixture, &tx);
@@ -168,7 +155,8 @@ async fn t39_6_5c_a_withdrawal_to_a_pirate1_address_builds_the_version_6_transac
     assert_eq!(sapling_balance(&tx) + ironwood_balance(&tx), IRONWOOD_FEE_SAT as i64);
 
     // The recipient decrypts exactly one output: the amount, to its address, with an empty memo; and the
-    // other action is a dummy.
+    // other action is a dummy. The whole value that enters Ironwood is that amount (checked above through
+    // the value balance): the change is the Sapling note found above and never enters Ironwood.
     let decrypted = ironwood.decrypt_outputs_with_keys(&[recipient_ivk()]);
     assert_eq!(decrypted.len(), 1);
     let (_, _, note, address, memo) = &decrypted[0];
@@ -180,8 +168,8 @@ async fn t39_6_5c_a_withdrawal_to_a_pirate1_address_builds_the_version_6_transac
     assert_eq!(memo[0], 0xf6, "the empty memo");
     assert!(memo[1..].iter().all(|b| *b == 0));
 
-    // One tree-state read, at the anchor height.
-    assert_eq!(tree_reads(&fixture), 1);
+    // No tree state is read for the anchor.
+    assert_eq!(tree_reads(&fixture), 0);
 
     // The Ironwood proof verifies with the project's verifying key; a changed signature hash does not.
     let sighash = shielded_sighash(&tx);
@@ -200,7 +188,7 @@ async fn t39_6_5c_a_withdrawal_to_a_pirate1_address_builds_the_version_6_transac
 /// no Ironwood bundle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t39_6_5c_a_withdrawal_to_a_sapling_address_is_unchanged() {
-    let Some((fixture, _)) = wallet(Some(IRONWOOD_HEIGHT)) else {
+    let Some(fixture) = wallet(Some(IRONWOOD_HEIGHT)) else {
         return;
     };
     let to = encode_payment_address(
@@ -234,7 +222,7 @@ async fn t39_6_5c_a_withdrawal_to_a_sapling_address_is_unchanged() {
 /// T39.6.5c: with `max: true` the amount sent is the spendable balance less 10,000 base units.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t39_6_5c_max_sends_the_spendable_balance_less_the_fixed_fee() {
-    let Some((fixture, _)) = wallet(Some(IRONWOOD_HEIGHT)) else {
+    let Some(fixture) = wallet(Some(IRONWOOD_HEIGHT)) else {
         return;
     };
     let details = withdraw(&fixture, MAIN_ADDRESS, "0", true).await.unwrap();
@@ -258,7 +246,7 @@ async fn t39_6_5c_max_sends_the_spendable_balance_less_the_fixed_fee() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t39_6_5c_a_target_height_below_the_activation_height_is_refused() {
     // The chain is at 11 and the next block is 12; Ironwood activates at 20.
-    let Some((fixture, _)) = wallet(Some(20)) else {
+    let Some(fixture) = wallet(Some(20)) else {
         return;
     };
     let refused = withdraw(&fixture, MAIN_ADDRESS, "0.01", false).await.unwrap_err();
@@ -267,7 +255,7 @@ async fn t39_6_5c_a_target_height_below_the_activation_height_is_refused() {
     };
     assert!(reason.contains("ARRR"), "{reason}");
     assert!(reason.contains("below the Ironwood activation height 20"), "{reason}");
-    assert_eq!(tree_reads(&fixture), 0, "refused before the anchor is read");
+    assert_eq!(tree_reads(&fixture), 0);
     assert_eq!(fixture.broadcasts(), 0);
     assert_eq!(fixture.wallet_balance(), NOTE_VALUE);
     assert!(fixture.in_flight().is_empty());
@@ -281,7 +269,7 @@ async fn t39_6_5c_a_target_height_below_the_activation_height_is_refused() {
 /// a coin without an Ironwood pool refuses it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t39_6_5b_validateaddress_and_withdraw_answer_alike_on_a_coin() {
-    let Some((fixture, _)) = wallet(Some(IRONWOOD_HEIGHT)) else {
+    let Some(fixture) = wallet(Some(IRONWOOD_HEIGHT)) else {
         return;
     };
     let coin = &fixture.coin;
@@ -312,7 +300,7 @@ async fn t39_6_5b_validateaddress_and_withdraw_answer_alike_on_a_coin() {
     assert_eq!(fixture.broadcasts() + tree_reads(&fixture), 0);
 
     // A coin without an Ironwood pool (no height, time or built-in value for these parameters).
-    let Some((without_pool, _)) = wallet(None) else {
+    let Some(without_pool) = wallet(None) else {
         return;
     };
     let answer = without_pool.coin.validate_address(MAIN_ADDRESS);
@@ -325,76 +313,40 @@ async fn t39_6_5b_validateaddress_and_withdraw_answer_alike_on_a_coin() {
     );
 }
 
-/// T39.6.5d: the anchor is read at the height the Sapling anchor is taken from. A 32-byte value is the
-/// root, a legacy serialization yields its root, and an empty, all-zero, undecodable or mismatched
-/// answer refuses the build with the coin and the backend named. No refusal falls back to any other
-/// value.
+/// T39.6.5d: the Ironwood anchor of a built Pirate1 withdrawal is the empty-tree root and its flags
+/// disable spends and enable outputs; the mainnet payment from Sapling into Ironwood (the fixture of
+/// T39.6.5a) has the same anchor and flags, and so do the built ones, with and without change. The
+/// change of the first never enters Ironwood: the Ironwood value balance is minus the amount sent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t39_6_5d_the_anchor_comes_from_the_backend_or_the_build_is_refused() {
-    let Some((fixture, root)) = wallet(Some(IRONWOOD_HEIGHT)) else {
+async fn t39_6_5d_the_built_anchor_and_flags_match_the_chain_wallets_form() {
+    let Some(fixture) = wallet(Some(IRONWOOD_HEIGHT)) else {
         return;
     };
-    let coin = &fixture.coin;
-    let backends: Vec<String> = SERVERS
-        .iter()
-        .map(|server| coin.lightwalletd().unwrap().backend().name(server))
-        .collect();
-
-    // The legacy serialization the fixture serves yields its root; a 32-byte value is the root itself.
-    assert_eq!(coin.ironwood_anchor_at(ANCHOR_HEIGHT as u32).await.unwrap(), root);
-    serve_tree_state(&fixture, ANCHOR_HEIGHT, ANCHOR_HEIGHT, &hex::encode(root.to_bytes()));
-    assert_eq!(coin.ironwood_anchor_at(ANCHOR_HEIGHT as u32).await.unwrap(), root);
-
-    for (served, answered_height, cause) in [
-        (String::new(), ANCHOR_HEIGHT, "no Ironwood tree"),
-        (hex::encode([0u8; 32]), ANCHOR_HEIGHT, "all zero"),
-        ("not hex".to_owned(), ANCHOR_HEIGHT, "not hexadecimal"),
-        (
-            "0102".to_owned(),
-            ANCHOR_HEIGHT,
-            "not a legacy commitment-tree serialization",
-        ),
-        (hex::encode(root.to_bytes()), ANCHOR_HEIGHT + 1, "not the anchor height"),
-    ] {
-        serve_tree_state(&fixture, ANCHOR_HEIGHT, answered_height, &served);
-        let refused = coin
-            .ironwood_anchor_at(ANCHOR_HEIGHT as u32)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            refused.contains("ARRR") && refused.contains(cause),
-            "{served:?}: {refused}"
-        );
-        assert!(
-            backends.iter().any(|backend| refused.contains(backend.as_str())),
-            "{refused}"
-        );
-
-        // The withdrawal itself builds nothing and broadcasts nothing.
-        let withdrawal = withdraw(&fixture, MAIN_ADDRESS, "0.01", false).await.unwrap_err();
-        let WithdrawError::Transport(text) = withdrawal.get_inner() else {
-            panic!("{withdrawal:?}");
-        };
-        assert!(text.contains("ARRR") && text.contains(cause), "{text}");
-    }
-    assert_eq!(fixture.broadcasts(), 0);
-    assert!(fixture.in_flight().is_empty());
-
-    // A backend that does not answer at all is a refusal too, naming the coin.
-    let unanswered = coin
-        .ironwood_anchor_at(ANCHOR_HEIGHT as u32 + 1)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        unanswered.contains("ARRR") && unanswered.contains("GetTreeState"),
-        "{unanswered}"
+    let mainnet = ironwood_anchor_and_flags(&read_tx(&WITHDRAW.bytes()).unwrap());
+    assert_eq!(
+        mainnet,
+        (true, false, true),
+        "the mainnet payment into Ironwood from Sapling"
     );
 
-    // After the answers are good again the same coin builds.
-    serve_tree_state(&fixture, ANCHOR_HEIGHT, ANCHOR_HEIGHT, &hex::encode(root.to_bytes()));
-    assert!(withdraw(&fixture, MAIN_ADDRESS, "0.01", false).await.is_ok());
+    for (amount, max) in [("0.01", false), ("0", true)] {
+        let details = withdraw(&fixture, MAIN_ADDRESS, amount, max).await.unwrap();
+        let tx = read_tx(&details.tx_hex.0).unwrap();
+        assert_eq!(ironwood_anchor_and_flags(&tx), mainnet, "max: {max}");
+        let ironwood = tx.ironwood_bundle().unwrap();
+        assert_eq!(ironwood.actions().len(), 2);
+        assert!(!ironwood.flags().spends_enabled() && ironwood.flags().outputs_enabled());
+        assert_eq!(ironwood.anchor(), &orchard::Anchor::empty_tree());
+        // Everything that enters Ironwood is the one payment to the recipient.
+        let decrypted = ironwood.decrypt_outputs_with_keys(&[recipient_ivk()]);
+        assert_eq!(decrypted.len(), 1);
+        assert_eq!(
+            -ironwood_balance(&tx),
+            i64::try_from(decrypted[0].2.value().inner()).unwrap(),
+            "max: {max}"
+        );
+        assert_eq!(tree_reads(&fixture), 0);
+    }
 }
 
 /// T39.6.5e: a submitted Pirate1 withdrawal is recorded exactly as a Sapling one is: its fee is derived
@@ -403,7 +355,7 @@ async fn t39_6_5d_the_anchor_comes_from_the_backend_or_the_build_is_refused() {
 /// vendored `zcash_client_sqlite` skips the Orchard and Ironwood nullifier marking instead of panicking.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t39_6_5e_a_submitted_pirate1_withdrawal_is_recorded() {
-    let Some((mut fixture, _)) = wallet(Some(IRONWOOD_HEIGHT)) else {
+    let Some(mut fixture) = wallet(Some(IRONWOOD_HEIGHT)) else {
         return;
     };
     let details = withdraw(&fixture, MAIN_ADDRESS, "0.01", false).await.unwrap();
@@ -477,7 +429,7 @@ async fn t39_6_5e_a_submitted_pirate1_withdrawal_is_recorded() {
 /// transaction row carries the derived fee.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t39_6_5a_the_recorder_stores_the_mainnet_withdrawal_with_its_derived_fee() {
-    let Some((fixture, _)) = wallet(Some(IRONWOOD_HEIGHT)) else {
+    let Some(fixture) = wallet(Some(IRONWOOD_HEIGHT)) else {
         return;
     };
     let recorded = record_broadcast_in_wallet_db(

@@ -808,15 +808,6 @@ pub(crate) struct RawTx {
     pub height: Option<u64>,
 }
 
-/// What `GetTreeState` answers for a height, as far as a withdrawal to a Pirate1 address reads it
-/// (R39.6.5e): the height the answer is for and the `ironwoodTree` member.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TreeStateRead {
-    pub height: u64,
-    /// Hexadecimal text: the root itself (32 bytes) or the legacy commitment-tree serialization.
-    pub ironwood_tree: String,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TransparentUtxo {
     /// Internal (wire) byte order.
@@ -875,8 +866,6 @@ pub(crate) trait LightwalletdTransport: Send + Sync + fmt::Debug + 'static {
     /// `txid` is in internal byte order (R39.11.4c).
     async fn transaction(&self, server: &str, txid: [u8; 32]) -> Result<RawTx, EndpointError>;
     async fn send_transaction(&self, server: &str, data: Vec<u8>) -> Result<(), EndpointError>;
-    /// `GetTreeState` at `height`: the Ironwood tree member only (R39.6.5e).
-    async fn tree_state(&self, server: &str, height: u64) -> Result<TreeStateRead, EndpointError>;
     async fn taddr_balance(&self, server: &str, addresses: Vec<String>) -> Result<i64, EndpointError>;
     async fn taddr_txids(&self, server: &str, address: &str, start: u64, end: u64) -> WindowRead;
     async fn address_utxos(&self, server: &str, address: &str) -> Result<Vec<TransparentUtxo>, EndpointError>;
@@ -1080,21 +1069,6 @@ impl LightwalletdTransport for GrpcTransport {
                 })
             }
         });
-        self.evict_on_transport_failure(server, result)
-    }
-
-    async fn tree_state(&self, server: &str, height: u64) -> Result<TreeStateRead, EndpointError> {
-        let mut client = self.client(server).await?;
-        let request = z_coin_grpc::BlockId {
-            height,
-            hash: Vec::new(),
-        };
-        let result = Self::timed(client.get_tree_state(request), "GetTreeState")
-            .await
-            .map(|state| TreeStateRead {
-                height: state.height,
-                ironwood_tree: state.ironwood_tree,
-            });
         self.evict_on_transport_failure(server, result)
     }
 
@@ -1949,22 +1923,6 @@ impl LightwalletdBackend {
             async move { t.send_transaction(&s, data).await }.boxed()
         })
         .await
-    }
-
-    /// The Ironwood tree state at `height` from the first admitted endpoint that answers, with the name
-    /// the logs use for that endpoint (R39.11.29). A Pirate1 withdrawal reads it once, for its anchor
-    /// (R39.6.5e).
-    pub(crate) async fn ironwood_tree_state(&self, height: u64) -> Result<(String, TreeStateRead), LightwalletdError> {
-        let (server, read) = self
-            .call("GetTreeState", move |t, s| {
-                async move {
-                    let read = t.tree_state(&s, height).await?;
-                    Ok((s, read))
-                }
-                .boxed()
-            })
-            .await?;
-        Ok((self.name(&server), read))
     }
 
     fn refuse_script_hash(&self, address: &Address, op: &'static str) -> Result<(), LightwalletdError> {

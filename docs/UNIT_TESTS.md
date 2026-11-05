@@ -153,7 +153,7 @@ are absent (the same arrangement as the version-6 construction tests).
 | `t39_8_0i_a_following_build_spends_the_note_deposited_with_ironwood_actions` | T39.8.0i, R39.8.0bb | A build after that scan selects and spends the deposited note; the wallet records it as spent |
 | `t39_8_0i_the_same_transaction_in_the_mempool_counts_as_pending` | T39.8.0i, R39.8.0bb | The same transaction as a `GetMempoolTx` compact transaction: a pending receipt with the right value, none for another key, and not counted again once its block is scanned |
 
-## ARRR withdrawals to a Pirate1 address (24 tests)
+## ARRR withdrawals to a Pirate1 address (21 tests)
 
 Locations: `mm2src/coins/z_coin/z_pirate1_tests.rs` (no coin needed),
 `mm2src/coins/z_coin/z_note_lock_tests/pirate1_withdraw.rs` (a real Light-mode coin over a wallet
@@ -169,7 +169,7 @@ runs alone (96.5 s measured, 120 s with the other tests of this section, 321 s i
 `z_coin::` cell, where the tests share the cores); the verifying key takes another 34 to 66 seconds,
 also once per binary. Once the keys exist a built Ironwood bundle verifies in about 0.15 seconds. The test vectors are generated from a real
 Orchard-type address (key `[7; 32]`); the Ironwood anchor of the mainnet withdrawal fixture is the
-root of the empty tree, which is recorded in `t39_6_5d_the_mainnet_withdrawal_anchors_at_the_empty_tree_root`.
+root of the empty tree and the bundle is output-only (spends disabled), which `t39_6_5d_the_mainnet_payment_into_ironwood_is_output_only_at_the_empty_tree_root` records.
 
 | Test | CRD | What is tested |
 |------|-----|----------------|
@@ -182,18 +182,15 @@ root of the empty tree, which is recorded in `t39_6_5d_the_mainnet_withdrawal_an
 | `t39_6_5b_sapling_strings_keep_their_answers` | T39.6.5b | Sapling addresses and Sapling defects keep their answers; the withdrawal reason names both accepted forms on a coin with a pool |
 | `t39_5a_a_the_divergence_from_the_reference_is_documented_where_it_is_tested` | T39.5A.a | Parity record (in the doc comment, not asserted): the reference answers `is_valid: false` and `InvalidAddress` for the same strings |
 | `t39_6_5f_the_fee_is_fixed_for_an_ironwood_output_and_configured_otherwise` | R39.6.5f | 10,000 base units with an Ironwood output whatever `txfee` says; the configured fee otherwise |
-| `t39_6_5d_a_32_byte_value_is_the_root` | T39.6.5d | A 32-byte `ironwoodTree` value is the root |
-| `t39_6_5d_a_legacy_serialization_yields_the_root_computed_from_it` | T39.6.5d | Trees of 1 to 13 leaves: the root computed from the legacy serialization |
-| `t39_6_5d_an_unusable_value_is_refused` | T39.6.5d | Empty, blank, non-hex, all-zero, non-canonical, truncated, trailing-byte and one-byte values are refused with their cause |
-| `t39_6_5d_the_mainnet_withdrawal_anchors_at_the_empty_tree_root` | T39.6.5d | The Ironwood anchor of the mainnet withdrawal fixture is the empty-tree root; a backend that reports it is used as reported |
+| `t39_6_5d_the_mainnet_payment_into_ironwood_is_output_only_at_the_empty_tree_root` | T39.6.5d | The mainnet fixture that pays from Sapling into Ironwood: empty-tree anchor, spends disabled, outputs enabled. The mainnet deposit (spends an Ironwood note) is the other form: spends enabled, a real anchor |
 | `t39_6_5c_a_target_height_below_the_activation_height_is_refused_before_note_selection` | T39.6.5c, R39.6.5d | The gate: activation height, unknown height, native mode, with the coin and the reason named |
 | `t39_6_5g_the_fee_is_read_from_the_value_balances_of_the_bytes` | R39.6.5g | The mainnet withdrawal: Sapling plus Ironwood value balance, less transparent outputs |
 | `t39_6_5g_a_transaction_with_transparent_inputs_has_no_derivable_fee` | R39.6.5g | The recorded HTLC refund (transparent input) has no derivable fee |
-| `t39_6_5c_a_withdrawal_to_a_pirate1_address_builds_the_version_6_transaction` | T39.6.5c | Shape, fee, value balances, anchor, recipient output and memo, Sapling change to the wallet, byte-identical read-back, Ironwood proof verifies |
+| `t39_6_5c_a_withdrawal_to_a_pirate1_address_builds_the_version_6_transaction` | T39.6.5c | Shape, fee, value balances, empty-tree anchor with spends off and outputs on, recipient output and memo, Sapling change to the wallet, byte-identical read-back, Ironwood proof verifies |
 | `t39_6_5c_a_withdrawal_to_a_sapling_address_is_unchanged` | T39.6.5c, R39.6.5f | The configured fee, no Ironwood bundle, no tree-state read; `max` with the configured fee |
 | `t39_6_5c_max_sends_the_spendable_balance_less_the_fixed_fee` | T39.6.5c | `max: true` sends the balance less 10,000 base units, no change |
-| `t39_6_5c_a_target_height_below_the_activation_height_is_refused` | T39.6.5c | Refused before the anchor is read or a note selected, naming the coin and the reason |
+| `t39_6_5c_a_target_height_below_the_activation_height_is_refused` | T39.6.5c | Refused before a note is selected, naming the coin and the reason; no tree-state read |
 | `t39_6_5b_validateaddress_and_withdraw_answer_alike_on_a_coin` | T39.6.5b, R39.6.5c | `validateaddress` and the withdrawal on a real coin: accepted, refused, no pool |
-| `t39_6_5d_the_anchor_comes_from_the_backend_or_the_build_is_refused` | T39.6.5d | The anchor read at the Sapling anchor height; empty, zero, undecodable, wrong-height and missing answers refuse the build with the coin and the backend named, and nothing is broadcast |
+| `t39_6_5d_the_built_anchor_and_flags_match_the_chain_wallets_form` | T39.6.5d | Built withdrawals, with and without change: empty-tree anchor, spends off and outputs on, exactly the fixture's form; two actions; everything entering Ironwood is the one payment (the change never does); no tree-state read |
 | `t39_6_5e_a_submitted_pirate1_withdrawal_is_recorded` | T39.6.5e, R39.6.5g | Through `send_raw_tx`: the fee read from the bytes (10,000), the note excluded from the next selection, the unmined history row with the final amounts that survives the scan, the change as non-spendable balance, then spendable after the scan. Needs the vendored `zcash_client_sqlite`, which skips the Orchard and Ironwood nullifier marking instead of panicking |
 | `t39_6_5a_the_recorder_stores_the_mainnet_withdrawal_with_its_derived_fee` | T39.6.5a, R39.6.5g | The recorded mainnet withdrawal (Sapling spend, two Ironwood actions) goes through the recorder into a real wallet database: stored with the derived fee 10,000; none of the wallet's notes are marked spent |
