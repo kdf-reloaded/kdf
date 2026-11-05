@@ -14066,6 +14066,577 @@ mod negotiation_failure_penalty {
     }
 }
 
+/// CRD ch.59 §59.4A, T14: capability words in coin protocol information (carriage, trie, decisions).
+mod t14_capability_word_tests {
+    use super::*;
+    use crate::mm2::lp_swap::{active_swaps, list_banned_pubkeys_rpc};
+    use coins::coin_protocol_capability::{append_capability_word, declares_capability, CAPABILITY_TX_V6};
+    use coins::{CoinsContext, MarketCoinOps, MmCoinEnum};
+    use common::mm_number::BigRational;
+    use std::sync::Arc as StdArc;
+
+    /// The first value of a UTXO coin: its encoded address format.
+    fn first_values() -> Vec<Vec<u8>> {
+        [
+            AddressFormat::Standard,
+            AddressFormat::Segwit,
+            AddressFormat::CashAddress {
+                network: "bitcoincash".to_owned(),
+                pub_addr_prefix: 0,
+                p2sh_addr_prefix: 5,
+            },
+        ]
+        .iter()
+        .map(|format| rmp_serde::to_vec(format).unwrap())
+        .collect()
+    }
+
+    fn with_word(first: &[u8]) -> Vec<u8> { append_capability_word(first.to_vec(), &[CAPABILITY_TX_V6]) }
+
+    // --- (c), orderbook-reader half: the address format the order book reports (R59.4A.3) ---
+
+    #[test]
+    fn t14_c_orderbook_address_format_is_the_same_with_the_word() {
+        for first in first_values() {
+            let without = addr_format_from_protocol_info(&first);
+            let with = addr_format_from_protocol_info(&with_word(&first));
+            assert_eq!(without, with);
+        }
+        // The three encodings really differ, so the equality above is not vacuous.
+        let formats: Vec<_> = first_values()
+            .iter()
+            .map(|f| addr_format_from_protocol_info(f))
+            .collect();
+        assert_eq!(formats[0], AddressFormat::Standard);
+        assert_eq!(formats[1], AddressFormat::Segwit);
+        assert!(matches!(formats[2], AddressFormat::CashAddress { .. }));
+    }
+
+    // --- (e) carriage ---
+
+    fn maker_order_created(base_info: Vec<u8>, rel_info: Vec<u8>) -> new_protocol::MakerOrderCreated {
+        new_protocol::MakerOrderCreated {
+            uuid: Uuid::new_v4().into(),
+            base: "BASE".into(),
+            rel: "REL".into(),
+            price: BigRational::from_integer(1.into()),
+            max_volume: BigRational::from_integer(2.into()),
+            min_volume: BigRational::from_integer(1.into()),
+            created_at: 1,
+            conf_settings: OrderConfirmationsSettings::default(),
+            timestamp: 1,
+            pair_trie_root: H64::default(),
+            base_protocol_info: base_info,
+            rel_protocol_info: rel_info,
+        }
+    }
+
+    fn wire_taker_request(base_info: Option<Vec<u8>>, rel_info: Option<Vec<u8>>) -> new_protocol::TakerRequest {
+        new_protocol::TakerRequest {
+            base: "BASE".into(),
+            rel: "REL".into(),
+            base_amount: BigRational::from_integer(1.into()),
+            rel_amount: BigRational::from_integer(1.into()),
+            action: TakerAction::Buy,
+            uuid: Uuid::new_v4().into(),
+            match_by: new_protocol::MatchBy::Any,
+            conf_settings: OrderConfirmationsSettings::default(),
+            base_protocol_info: base_info,
+            rel_protocol_info: rel_info,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    fn wire_maker_reserved(base_info: Option<Vec<u8>>, rel_info: Option<Vec<u8>>) -> new_protocol::MakerReserved {
+        new_protocol::MakerReserved {
+            base: "BASE".into(),
+            rel: "REL".into(),
+            base_amount: BigRational::from_integer(1.into()),
+            rel_amount: BigRational::from_integer(1.into()),
+            taker_order_uuid: Uuid::new_v4().into(),
+            maker_order_uuid: Uuid::new_v4().into(),
+            conf_settings: OrderConfirmationsSettings::default(),
+            base_protocol_info: base_info,
+            rel_protocol_info: rel_info,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    /// Signs, encodes, decodes and verifies a message exactly as the order-match layer does.
+    fn through_the_wire(msg: new_protocol::OrdermatchMessage) -> new_protocol::OrdermatchMessage {
+        let (_, secret) = pubkey_and_secret_for_test("t14-carriage");
+        let encoded = encode_and_sign(&msg, &secret).unwrap();
+        decode_signed::<new_protocol::OrdermatchMessage>(&encoded).unwrap().0
+    }
+
+    #[test]
+    fn t14_e_maker_order_created_carries_the_bytes_unchanged() {
+        let base = with_word(&first_values()[0]);
+        let rel = first_values()[1].clone();
+        let msg = maker_order_created(base.clone(), rel.clone());
+        match through_the_wire(new_protocol::OrdermatchMessage::MakerOrderCreated(msg.clone())) {
+            new_protocol::OrdermatchMessage::MakerOrderCreated(decoded) => {
+                assert_eq!(decoded, msg);
+                assert_eq!(decoded.base_protocol_info, base);
+                assert_eq!(decoded.rel_protocol_info, rel);
+                // And into the order book item the node keeps.
+                let item: OrderbookItem = (decoded, "pubkey".to_owned()).into();
+                assert_eq!(item.base_protocol_info, base);
+                assert_eq!(item.rel_protocol_info, rel);
+            },
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t14_e_taker_request_carries_the_bytes_unchanged() {
+        let base = with_word(&first_values()[1]);
+        let rel = with_word(&first_values()[2]);
+        let msg = wire_taker_request(Some(base.clone()), Some(rel.clone()));
+        match through_the_wire(new_protocol::OrdermatchMessage::TakerRequest(msg)) {
+            new_protocol::OrdermatchMessage::TakerRequest(decoded) => {
+                assert_eq!(decoded.base_protocol_info.as_ref(), Some(&base));
+                assert_eq!(decoded.rel_protocol_info.as_ref(), Some(&rel));
+                let request = TakerRequest::from_new_proto_and_pubkey(decoded, H256Json::default());
+                assert_eq!(request.base_protocol_info.as_ref(), Some(&base));
+                assert_eq!(request.rel_protocol_info.as_ref(), Some(&rel));
+            },
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t14_e_maker_reserved_carries_the_bytes_unchanged() {
+        let base = with_word(&first_values()[2]);
+        let rel = first_values()[0].clone();
+        let msg = wire_maker_reserved(Some(base.clone()), Some(rel.clone()));
+        match through_the_wire(new_protocol::OrdermatchMessage::MakerReserved(msg)) {
+            new_protocol::OrdermatchMessage::MakerReserved(decoded) => {
+                assert_eq!(decoded.base_protocol_info.as_ref(), Some(&base));
+                assert_eq!(decoded.rel_protocol_info.as_ref(), Some(&rel));
+                let reserved = MakerReserved::from_new_proto_and_pubkey(decoded, H256Json::default());
+                assert_eq!(reserved.base_protocol_info.as_ref(), Some(&base));
+                assert_eq!(reserved.rel_protocol_info.as_ref(), Some(&rel));
+                // And back out: the maker's own reservation puts the same bytes into the message.
+                let mut outgoing = reserved;
+                outgoing.conf_settings = Some(OrderConfirmationsSettings::default());
+                match new_protocol::OrdermatchMessage::from(outgoing) {
+                    new_protocol::OrdermatchMessage::MakerReserved(out) => {
+                        assert_eq!(out.base_protocol_info.as_ref(), Some(&base));
+                        assert_eq!(out.rel_protocol_info.as_ref(), Some(&rel));
+                    },
+                    other => panic!("unexpected message {other:?}"),
+                }
+            },
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t14_e_synchronization_answer_side_channel_carries_the_bytes_unchanged() {
+        let uuid = Uuid::new_v4();
+        let info = BaseRelProtocolInfo {
+            base: with_word(&first_values()[0]),
+            rel: with_word(&first_values()[1]),
+        };
+        let answer = SyncPubkeyOrderbookStateRes {
+            last_signed_pubkey_payload: vec![1, 2, 3],
+            pair_orders_diff: HashMap::new(),
+            protocol_infos: HashMap::from_iter(iter::once((uuid, info.clone()))),
+            conf_infos: HashMap::new(),
+        };
+        let encoded = encode_message(&answer).unwrap();
+        let decoded: SyncPubkeyOrderbookStateRes = decode_message(&encoded).unwrap();
+        assert_eq!(decoded.protocol_infos.get(&uuid), Some(&info));
+
+        let full = GetOrderbookRes {
+            pubkey_orders: HashMap::new(),
+            protocol_infos: HashMap::from_iter(iter::once((uuid, info.clone()))),
+            conf_infos: HashMap::new(),
+        };
+        let decoded: GetOrderbookRes = decode_message(&encode_message(&full).unwrap()).unwrap();
+        assert_eq!(decoded.protocol_infos.get(&uuid), Some(&info));
+    }
+
+    #[test]
+    fn t14_e_the_trie_root_and_the_stored_leaf_are_the_same_with_and_without_the_word() {
+        let (ctx_a, pubkey, secret) = make_ctx_for_tests();
+        let (ctx_b, ..) = make_ctx_for_tests();
+        let mut order = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 1).remove(0);
+        order.base_protocol_info = first_values()[0].clone();
+        order.rel_protocol_info = first_values()[1].clone();
+        let mut order_with_word = order.clone();
+        order_with_word.base_protocol_info = with_word(&order.base_protocol_info);
+        order_with_word.rel_protocol_info = with_word(&order.rel_protocol_info);
+        assert_ne!(order.base_protocol_info, order_with_word.base_protocol_info);
+
+        insert_or_update_order(&ctx_a, order.clone());
+        insert_or_update_order(&ctx_b, order_with_word.clone());
+        flush_trie(&ctx_a);
+        flush_trie(&ctx_b);
+
+        let pair = alb_ordered_pair("C1", "C2");
+        assert_eq!(
+            pair_trie_root_by_pub(&ctx_a, &pubkey, &pair),
+            pair_trie_root_by_pub(&ctx_b, &pubkey, &pair)
+        );
+        let octx_a = OrdermatchContext::from_ctx(&ctx_a).unwrap();
+        let octx_b = OrdermatchContext::from_ctx(&ctx_b).unwrap();
+        let leaf_a = trie_value_of(&octx_a, &pubkey, &pair, &order.uuid);
+        assert!(leaf_a.is_some());
+        assert_eq!(leaf_a, trie_value_of(&octx_b, &pubkey, &pair, &order.uuid));
+    }
+
+    // --- (f) decisions at the call sites ---
+
+    /// A test coin that requires `tx_v6` in the counterparty's protocol information. Every consulted
+    /// coin ticker is recorded, in order.
+    fn require_capability() -> StdArc<Mutex<Vec<String>>> {
+        let consulted = StdArc::new(Mutex::new(Vec::new()));
+        let log = consulted.clone();
+        TestCoin::is_coin_protocol_supported.mock_safe(move |coin, info| {
+            log.lock().unwrap().push(coin.ticker().to_owned());
+            MockResult::Return(declares_capability(info, CAPABILITY_TX_V6))
+        });
+        consulted
+    }
+
+    struct Node {
+        ctx: MmArc,
+        rx: mpsc::Receiver<AdexBehaviourCmd>,
+        dbdir: std::path::PathBuf,
+    }
+
+    impl Node {
+        fn new() -> Node {
+            let dbdir = std::env::temp_dir().join(format!("kdf-t14-capability-{}", Uuid::new_v4()));
+            let conf = json!({ "dbdir": dbdir.to_string_lossy(), "pre_trade_spend_check": false });
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            ctx.secp256k1_key_pair
+                .pin(key_pair_from_seed("t14-capability-node").unwrap())
+                .unwrap();
+            let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+            for ticker in ["BASE", "REL"] {
+                block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+            }
+            std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
+            std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+            let (tx, rx) = mpsc::channel(100);
+            P2PContext::new(tx).store_to_mm_arc(&ctx);
+            Node { ctx, rx, dbdir }
+        }
+
+        /// The ordermatch messages published since the last call.
+        fn published(&mut self) -> Vec<new_protocol::OrdermatchMessage> {
+            let mut out = Vec::new();
+            while let Ok(cmd) = self.rx.try_recv() {
+                if let AdexBehaviourCmd::PublishMsg { msg, .. } | AdexBehaviourCmd::PublishMsgFrom { msg, .. } = cmd {
+                    if let Ok((message, ..)) = decode_signed::<new_protocol::OrdermatchMessage>(&msg) {
+                        out.push(message);
+                    }
+                }
+            }
+            out
+        }
+
+        /// No swap is running and no pubkey carries a penalty record (R59.4A.5).
+        fn assert_no_swap_and_no_penalty(&self) {
+            assert!(active_swaps(&self.ctx).unwrap().is_empty());
+            let response = block_on(list_banned_pubkeys_rpc(self.ctx.clone())).unwrap();
+            let listed = json::from_slice::<Json>(response.body()).unwrap();
+            assert_eq!(listed["result"], json!({}));
+        }
+    }
+
+    impl Drop for Node {
+        fn drop(&mut self) { std::fs::remove_dir_all(&self.dbdir).ok(); }
+    }
+
+    fn connects(published: &[new_protocol::OrdermatchMessage]) -> usize {
+        published
+            .iter()
+            .filter(|m| matches!(m, new_protocol::OrdermatchMessage::TakerConnect(_)))
+            .count()
+    }
+
+    fn reservations(published: &[new_protocol::OrdermatchMessage]) -> usize {
+        published
+            .iter()
+            .filter(|m| matches!(m, new_protocol::OrdermatchMessage::MakerReserved(_)))
+            .count()
+    }
+
+    fn taker_request(base_info: Option<Vec<u8>>, rel_info: Option<Vec<u8>>) -> TakerRequest {
+        TakerRequest {
+            base: "BASE".into(),
+            rel: "REL".into(),
+            uuid: Uuid::new_v4(),
+            dest_pub_key: H256Json::default(),
+            sender_pubkey: H256Json::default(),
+            base_amount: 10.into(),
+            rel_amount: 10.into(),
+            action: TakerAction::Buy,
+            match_by: MatchBy::Any,
+            conf_settings: None,
+            base_protocol_info: base_info,
+            rel_protocol_info: rel_info,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    fn reservation_for(
+        taker: &TakerOrder,
+        rel_amount: i32,
+        base_info: Option<Vec<u8>>,
+        rel_info: Option<Vec<u8>>,
+    ) -> MakerReserved {
+        MakerReserved {
+            base: "BASE".into(),
+            rel: "REL".into(),
+            base_amount: 10.into(),
+            rel_amount: rel_amount.into(),
+            sender_pubkey: H256Json::from([rel_amount as u8; 32]),
+            dest_pub_key: H256Json::default(),
+            maker_order_uuid: Uuid::new_v4(),
+            taker_order_uuid: taker.request.uuid,
+            conf_settings: None,
+            base_protocol_info: base_info,
+            rel_protocol_info: rel_info,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    fn add_taker_order(node: &Node) -> TakerOrder {
+        let taker = TakerOrder {
+            request: taker_request(None, None),
+            matches: HashMap::new(),
+            created_at: now_ms(),
+            order_type: OrderType::GoodTillCancelled,
+            min_volume: 0.into(),
+            timeout: 30,
+            save_in_history: false,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+        };
+        let octx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        block_on(octx.my_taker_orders.lock()).insert(taker.request.uuid, taker.clone());
+        taker
+    }
+
+    fn matches_of_taker_order(node: &Node, uuid: &Uuid) -> usize {
+        let octx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        let orders = block_on(octx.my_taker_orders.lock());
+        orders.get(uuid).unwrap().matches.len()
+    }
+
+    fn process_reservations(node: &Node, reservations: Vec<MakerReserved>) {
+        let handlers = reservations
+            .into_iter()
+            .map(|msg| process_maker_reserved(node.ctx.clone(), H256Json::default(), msg));
+        block_on(futures::future::join_all(handlers));
+    }
+
+    fn with_cap() -> Option<Vec<u8>> { Some(with_word(&first_values()[1])) }
+
+    fn without_cap() -> Option<Vec<u8>> { Some(first_values()[1].clone()) }
+
+    #[test]
+    fn t14_f_reservation_without_the_capability_is_not_connected() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let taker = add_taker_order(&node);
+        let reserved = reservation_for(&taker, 10, without_cap(), with_cap());
+        assert_eq!(taker.match_reserved(&reserved), MatchReservedResult::Matched);
+
+        process_reservations(&node, vec![reserved]);
+
+        assert_eq!(connects(&node.published()), 0);
+        assert_eq!(matches_of_taker_order(&node, &taker.request.uuid), 0);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_reservation_declined_by_the_rel_coin_is_not_connected() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let taker = add_taker_order(&node);
+
+        process_reservations(&node, vec![reservation_for(&taker, 10, with_cap(), without_cap())]);
+
+        assert_eq!(connects(&node.published()), 0);
+        assert_eq!(matches_of_taker_order(&node, &taker.request.uuid), 0);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_reservation_with_the_capability_is_connected() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let taker = add_taker_order(&node);
+
+        process_reservations(&node, vec![reservation_for(&taker, 10, with_cap(), with_cap())]);
+
+        assert_eq!(connects(&node.published()), 1);
+        assert_eq!(matches_of_taker_order(&node, &taker.request.uuid), 1);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_declined_reservation_is_skipped_and_the_next_one_is_connected() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let taker = add_taker_order(&node);
+        // The declined one is the cheaper, so it is walked first.
+        let declined = reservation_for(&taker, 9, without_cap(), with_cap());
+        let accepted = reservation_for(&taker, 10, with_cap(), with_cap());
+        let accepted_maker = accepted.maker_order_uuid;
+
+        process_reservations(&node, vec![accepted, declined]);
+
+        assert_eq!(connects(&node.published()), 1);
+        let octx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        let orders = block_on(octx.my_taker_orders.lock());
+        let matches = &orders.get(&taker.request.uuid).unwrap().matches;
+        assert_eq!(matches.len(), 1);
+        assert!(matches.contains_key(&accepted_maker));
+        drop(orders);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_the_rel_check_is_skipped_when_the_base_coin_declines() {
+        let consulted = require_capability();
+        let node = Node::new();
+        let taker = add_taker_order(&node);
+
+        process_reservations(&node, vec![reservation_for(&taker, 10, without_cap(), with_cap())]);
+
+        assert_eq!(*consulted.lock().unwrap(), vec!["BASE".to_owned()]);
+    }
+
+    #[test]
+    fn t14_f_info_line_counts_the_declined_reservations() {
+        // The info line is decided by `declined_reservations_summary` (the log output is not captured here).
+        let uuid = Uuid::new_v4();
+        assert_eq!(declined_reservations_summary(&uuid, 0), None);
+        let one = declined_reservations_summary(&uuid, 1).unwrap();
+        assert!(one.contains(&uuid.to_string()), "{one}");
+        assert!(one.contains("1 reservation(s) declined"), "{one}");
+        let three = declined_reservations_summary(&uuid, 3).unwrap();
+        assert!(three.contains("3 reservation(s) declined"), "{three}");
+    }
+
+    #[test]
+    fn t14_f_declining_coin_is_named_and_the_rel_coin_is_consulted_only_after_the_base_accepted() {
+        let consulted = require_capability();
+        let base = MmCoinEnum::Test(TestCoin::new("BASE"));
+        let rel = MmCoinEnum::Test(TestCoin::new("REL"));
+        let some = |info: Vec<u8>| Some(info);
+
+        let base_declines = declining_coin_ticker(&base, &rel, &some(first_values()[0].clone()), &with_cap());
+        assert_eq!(base_declines.as_deref(), Some("BASE"));
+        let rel_declines = declining_coin_ticker(&base, &rel, &with_cap(), &None);
+        assert_eq!(rel_declines.as_deref(), Some("REL"));
+        assert_eq!(declining_coin_ticker(&base, &rel, &with_cap(), &with_cap()), None);
+        assert_eq!(*consulted.lock().unwrap(), vec!["BASE", "BASE", "REL", "BASE", "REL"]);
+    }
+
+    fn add_maker_order(node: &Node) -> MakerOrder {
+        let base = MmCoinEnum::Test(TestCoin::new("BASE"));
+        let rel = MmCoinEnum::Test(TestCoin::new("REL"));
+        let order = MakerOrderBuilder::new(&base, &rel)
+            .with_max_base_vol(MmNumber::from("100"))
+            .with_min_base_vol(Some(MmNumber::from("1")))
+            .with_price(MmNumber::from("1"))
+            .with_conf_settings(OrderConfirmationsSettings::default())
+            .with_save_in_history(false)
+            .build_unchecked();
+        let octx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        octx.maker_orders_ctx
+            .lock()
+            .add_order(&order, StdArc::new(AsyncMutex::new(order.clone())));
+        order
+    }
+
+    fn matches_of_maker_order(node: &Node, uuid: &Uuid) -> usize {
+        let octx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        let orders = octx.maker_orders_ctx.lock();
+        let order_mutex = orders.get_order(uuid).unwrap();
+        let order = block_on(order_mutex.lock());
+        order.matches.len()
+    }
+
+    fn process_request(node: &Node, request: TakerRequest) {
+        block_on(process_taker_request(node.ctx.clone(), H256Json::default(), request));
+    }
+
+    #[test]
+    fn t14_f_request_without_the_capability_is_not_reserved() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let order = add_maker_order(&node);
+
+        process_request(&node, taker_request(without_cap(), with_cap()));
+
+        assert_eq!(reservations(&node.published()), 0);
+        assert_eq!(matches_of_maker_order(&node, &order.uuid), 0);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_request_declined_by_the_rel_coin_is_not_reserved() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let order = add_maker_order(&node);
+
+        process_request(&node, taker_request(with_cap(), without_cap()));
+
+        assert_eq!(reservations(&node.published()), 0);
+        assert_eq!(matches_of_maker_order(&node, &order.uuid), 0);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_request_with_the_capability_is_reserved() {
+        let _consulted = require_capability();
+        let mut node = Node::new();
+        let order = add_maker_order(&node);
+
+        process_request(&node, taker_request(with_cap(), with_cap()));
+
+        assert_eq!(reservations(&node.published()), 1);
+        assert_eq!(matches_of_maker_order(&node, &order.uuid), 1);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t14_f_the_rel_check_of_a_request_is_skipped_when_the_base_coin_declines() {
+        let consulted = require_capability();
+        let node = Node::new();
+        add_maker_order(&node);
+
+        process_request(&node, taker_request(without_cap(), with_cap()));
+
+        assert_eq!(*consulted.lock().unwrap(), vec!["BASE".to_owned()]);
+    }
+
+    #[test]
+    fn t14_f_a_request_that_matched_before_is_not_checked_again() {
+        let consulted = require_capability();
+        let node = Node::new();
+        let order = add_maker_order(&node);
+        let request = taker_request(with_cap(), with_cap());
+
+        process_request(&node, request.clone());
+        let after_first = consulted.lock().unwrap().len();
+        process_request(&node, request);
+
+        assert_eq!(consulted.lock().unwrap().len(), after_first);
+        assert_eq!(matches_of_maker_order(&node, &order.uuid), 1);
+    }
+}
+
 /// CRD ch.28 R16a, T4a: every ordermatch message the node sends passes the bounds check, and the order record
 /// decoded from a peer's bytes is read under the bounds.
 mod t4a_bounded_reading_tests {

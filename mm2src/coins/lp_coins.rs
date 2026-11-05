@@ -218,6 +218,7 @@ pub mod activation_locks;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod answer_stub;
 pub mod coin_balance;
+pub mod coin_protocol_capability;
 #[doc(hidden)]
 #[cfg(test)]
 pub mod coins_tests;

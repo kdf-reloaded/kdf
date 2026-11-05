@@ -17,6 +17,7 @@ cargo test -p coins --lib -- eth::eth_tests::test_addr
 cargo test -p coins --lib -- eth::eth_tests::test_gas_station_data
 cargo test -p coins --lib -- eth::eth_tests::test_u256
 cargo test -p coins --lib -- eth::eth_tests::test_wei
+cargo test -p coins --lib -- rpc_response_tests coin_protocol_capability::
 
 # Bounds on a value received from a peer (CRD ch.28 R16a, T4a)
 cargo test -p common --lib msgpack_bounds::
@@ -79,6 +80,22 @@ Pure tests for ETH utility functions that don't need a node connection.
 | GasStationData serde | 3 | Standard format, Matic format (alias), missing field |
 | u256_to_big_decimal | 2 | Round-trip, zero |
 | wei_to_gwei_decimal | 1 | Round-trip |
+
+## Capability words in protocol information
+
+Location: `mm2src/coins/coin_protocol_capability.rs` (module `tests`) and the module
+`t14_capability_word_tests` of `mm2src/mm2_main/src/ordermatch_tests.rs`. The coins tests run in the
+`rpc-response` cell of `.github/workflows/test.yml`; the order-match tests run with `ordermatch_tests`.
+They cover CRD chapter 59 §59.4A, test T14.
+
+| Category | What is tested |
+|----------|----------------|
+| T14 (a) writer | Fixed bytes for one and two keys, ascending order, no duplicates, no empty map, first value kept unchanged |
+| T14 (b) reader | Every input of the chapter, plus the nesting bound, over-long declared lengths and counts, the reserved marker, every marker family as a first value |
+| T14 (c) first value | Both readers of a UTXO address format give the same result with the word appended |
+| T14 (d) opt-in | A UTXO coin's protocol information is exactly its encoded address format; a coin of another family sends nothing |
+| T14 (e) carriage | The three order-match messages and the synchronization answers carry the bytes unchanged; the trie root is equal with and without the word |
+| T14 (f) decisions | A test coin that requires `tx_v6`: reservations and requests without it are neither connected nor reserved, with it both go ahead, and no swap or penalty record appears |
 
 ## Bounds on a value received from a peer (CRD ch.28 R16a, T4a)
 
