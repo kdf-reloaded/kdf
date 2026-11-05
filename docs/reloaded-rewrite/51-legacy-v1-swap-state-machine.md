@@ -1215,7 +1215,7 @@ behind that public key is derived per swap and never stored
 > intended. Plan
 > [`hd-key-unification`](../plans/hd-key-unification.md) first refuses those
 > swaps (item H1, chapter 05 §5.12B R36), then gives every coin its own
-> key (item H3, chapter 05 D6). R74 states the target: the internal key as
+> key (item H3, chapter 05 §5.12C R41–R43). R74 states the target: the internal key as
 > the persistent key and the coin's own key as each HTLC key; chapter 05
 > §5.9B tabulates the keys.
 
@@ -1477,7 +1477,9 @@ one key, and shape 2 results.
 > that follow are signed by a different key than the one announced. This is
 > recorded in plan [`hd-key-unification`](../plans/hd-key-unification.md)
 > (items H3 and H4) and is a divergence from R74, not a retained parity
-> behavior. Correcting it changes the key Reloaded
+> behavior. Chapter 05 §5.12C (item H3) binds Reloaded to R74's HTLC keys
+> and to the UTXO funding address; the persistent key follows with item H4
+> (chapter 05 D6). Correcting it changes the key Reloaded
 > announces for its own swaps and is therefore visible to peers and to swap
 > statistics at upgrade; a swap in flight must keep the key its start event
 > recorded.
@@ -2086,3 +2088,7 @@ reference rows alike.
   consulted, and it needs no Dirty Gate pass. *Pointer added 2026-11-05:*
   its last sentence now names R74 as the target; it carries no reference
   content of its own.
+- *Pointer added 2026-11-05 -- the HD status note under R63 and the
+  compatibility note under R74.* Both now name chapter 05 §5.12C (plan item
+  H3). Written by a context that never read the forbidden corpus. It carries
+  no reference content of its own and needs no Dirty Gate pass.
