@@ -368,6 +368,14 @@ principle of §47.5 (R47.5.13a).
 > unsupported-withdrawal discriminant; only the **condition** (structured
 > unsupported error, no user action) is bound here.
 
+> **Discriminant (this repository, 2026-11-04; not corpus-sourced).** That
+> discriminant is, since PR #236, the shared arm of chapter 49 R49.27a:
+> `error_type` `UnsupportedError`, HTTP 400, a string `error_data`. It also
+> answers the direct `withdraw` method of an EVM coin under a Trezor key,
+> which steers the client to `task::withdraw` (R50.24). **Parity**, with no
+> switch. Before, Reloaded answered both cases with its own discriminant
+> `UnsupportedUnderTrezor` (historical; also HTTP 400, with the same text).
+
 R50.21. All error surfacing shall be structured. Under the withdrawal **task**
 path a terminal failure is reported as `status: "Error"` with the serialized
 withdrawal error in `details` (R49.20); the RPC call itself remains successful
@@ -578,3 +586,9 @@ outside the signing-behaviour contract bound here.
   2026-10-11. Reloaded-original. *Inputs:* this repository's own activation
   code and ch. 35. No reference implementation was consulted for this
   correction, and it needs no Dirty Gate pass.
+- *Clean-side amendment (2026-11-04) -- the discriminant note on the
+  unsupported withdraw.* A session that never read the corpus added the note
+  on the shared `UnsupportedError` arm (PR #236). It rests on chapter 49
+  R49.27a, which passed the KDF Dirty Gate on 2026-11-04, and on this
+  repository's own code. It takes no forbidden-class input, so it does not
+  engage chapter 01 R38.

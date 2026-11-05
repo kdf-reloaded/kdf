@@ -276,6 +276,25 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   (trust-dns 0.22, with an accepted `idna` advisory) are no longer built. The dependency policy
   now bans them. Detail: PRs #216, #219; CRD ch.45 R45.6B.11.
 
+#### Siacoin
+
+- **Siacoin (SC) swaps are supported.** Atomic swaps of SC were verified on the live chain on
+  November 4, 2026: between two KDF Reloaded nodes in both directions, including a refund, and
+  with Komodo KDF and GLEEC KDF nodes in the cases that Known limitations does not exclude. Earlier
+  releases said SC swaps were postponed; that statement is withdrawn. Detail: PR #239; CRD ch.20
+  D5, R-S11.
+
+#### Withdrawals
+
+- **A withdrawal refused as unsupported now answers `error_type` `UnsupportedError`, as on Komodo
+  and GLEEC KDF.** Under a Trezor key, an EVM withdrawal through the direct `withdraw` method and a
+  TRON withdrawal answered `UnsupportedUnderTrezor`. In the browser build, a TRON withdrawal under
+  MetaMask answered `UnsupportedUnderMetamask`. Both now answer `UnsupportedError`, still with HTTP
+  400 and the same message text in `error_data`. A `withdraw` of an SLP token that names `from` is
+  now refused the same way; before, `from` was ignored and the token was sent from the BCH
+  wallet's own address. *Upgrade note:* a client that checks `error_type` for either old value
+  must check `UnsupportedError` instead. Detail: PR #236; CRD ch.49 R49.27, R49.27a.
+
 ### Fixed
 
 #### Node names in logs and errors
@@ -313,6 +332,22 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   headers one by one, checks the times for plausibility and fails with an error naming the check instead
   of guessing. Such a coin needs no new entry in the coins file (header sync and SPV proofs for it are
   not covered). Detail: PR #220, PR #221; CRD ch.37 R37.5.10.
+- **SLP token withdrawals and HTLC spends no longer give the BCH of their token inputs to the miner,
+  and the fee they report is complete.** Each SLP token input carries a little BCH, normally 546
+  satoshi, and so does the HTLC output an SLP swap spends or refunds. KDF Reloaded spent these
+  inputs without counting their BCH, so it went to the miner on top of the fee. Token sends and
+  swap payments did the same, and the fee shown for an SLP withdrawal left it out. Now that BCH
+  comes back in the change, and the fee shown is everything the transaction leaves to the miner, as
+  on Komodo and GLEEC KDF. Two smaller cases changed with it. On every UTXO coin, change exactly
+  equal to the coin's dust amount now comes back as a change output instead of going to the miner.
+  The fee shown for an SLP withdrawal now also includes change too small to keep, as it already did
+  for UTXO coins. Detail: PR #236; CRD ch.38 R38.6.6n.
+- **A transaction with a change output now pays its fee rounded once over its whole size, as on
+  Komodo and GLEEC KDF.** KDF Reloaded rounded the change output's share of the fee on its own, so
+  such a transaction could pay one base unit less than the rate gives. A RIN withdrawal of 670
+  bytes at 0.00001234 RIN per 1,000 bytes paid 825 satoshi, where Komodo and GLEEC charge 826.
+  This covers a coin's dynamic fee and an explicit `UtxoFixed` or `UtxoPerKbyte` withdraw fee.
+  Detail: PR #247; CRD ch.38 R38.6.6b, T38.6.6b.1.
 
 ### Tests
 
@@ -364,7 +399,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
   complete, which is now done (item H1: `swap_key_check`, PRs #231, #233). The maintainer's answers on
-  withdraw, the legacy methods, legacy activation and Sia are recorded in it.
+  withdraw, the legacy methods, legacy activation and Sia are recorded in it. `RELOADED_VS_GLEEC.md`
+  now says what GLEEC KDF does under an HD login, and lists the planned change to legacy `enable` and
+  `electrum` with its switch (PR #245).
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
@@ -471,12 +508,21 @@ lives.
   has no shielded wallet database, and building a shielded transaction would also need the Sapling
   prover, which only the native build has. Use a native build for ARRR. Detail: CRD ch.39 R39.10.1,
   §39.6.1.
-- **Siacoin (SC) swaps are not available.** Sending, receiving, the balance and the history work.
-  Atomic swaps of SC are postponed until after the beta; the design is still a draft. More in the
-  [Siacoin swap draft](docs/reloaded-rewrite/54-sia-swap-v2-path.md).
+- **The miner fee of a Siacoin withdrawal is estimated from a transaction length that is smaller than
+  the transaction sent.** Sia nodes accepted these fees in tests. Detail: PR #239; CRD ch.20 D6.
+- **Orders that sell Siacoin (SC) are not shown to Komodo KDF and GLEEC KDF takers, and a GLEEC maker
+  can fail to validate a Siacoin taker fee.** Takers on those two nodes do not see orders whose base
+  coin is SC, so a KDF Reloaded maker that sells SC cannot be matched by them. A GLEEC maker can fail
+  to validate a Siacoin taker fee when the transaction pool of its Sia node holds a transaction it
+  cannot read (a storage proof with an empty proof list); the fix exists in the sia-rust library but
+  not in the GLEEC release, so such swaps fail intermittently. A GLEEC node that sells SC as the order
+  base is not affected. Detail: PR #239.
 - **Radiant (RXD) is only partly usable.** RXD activates and signs, but swaps with it are not
   established. More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
+- **SLP tokens on BCH are untested on mainnet.** The shared coins file lists BCH and tBCH as plain
+  UTXO coins and carries no SLP token entries, so SLP tokens cannot be enabled with it. The SLP
+  changes of this release are covered by unit tests only. Detail: PR #236.
 - **TRON (TRX, TRC20) and Solana (SOL, SPL) cannot be activated in this beta.** Their support is not
   finished. TRON activation answers "TRON support is not available in this build";
   `enable_solana_with_tokens` and `enable_spl` answer "Solana support is not available in this
@@ -497,6 +543,10 @@ lives.
   activation log line says `gas_limit: defaults`. More in
   [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md). Detail: PR #105, PR #200; CRD
   ch.57 R57.5.2, R57.5.3, R57.5.5.
+- **A refund can wait without a log message saying why.** If the node a coin talks to stops advancing,
+  a refund waits until it advances again, and the log does not say so. In a test, a refund started
+  four hours late because the coin's node stood still for that time; the log only repeated
+  "wait refund till" every 24 seconds.
 
 ## [0.3.0-beta.1] — 2026-11-01
 
