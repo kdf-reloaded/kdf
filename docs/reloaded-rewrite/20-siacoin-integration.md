@@ -266,9 +266,11 @@ contract the module MUST meet:
 
 **R-H1 (HTLC output).** A swap payment MUST fund a transaction
 output locked to a spend policy that encodes: the two
-counterparties' ed25519 public keys, a block-height time lock,
-and the SHA-256 secret hash. The funding output MUST be placed at
-a fixed, deterministic position in the funding transaction so
+counterparties' ed25519 public keys, a time lock given as a Unix
+timestamp (the policy's `after` form; the refund path becomes
+spendable once the chain's median block timestamp has passed it,
+R-H4), and the SHA-256 secret hash. The funding output MUST be
+placed at a fixed, deterministic position in the funding transaction so
 that validation and spend code can locate it positionally without
 scanning.
 
@@ -400,6 +402,24 @@ floor is a maintainer decision (chapter 60 D60.2).
 > The constant is 2 × 10^19 hastings, which is 0.00002 SC. The text now
 > says so. **As built in PR #73:** the legacy refund and the version-two
 > spends and refund refuse a value not above the fee with an orderly error.
+>
+> **Observed rate (2026-11-04, informative).** Walletd's recommended fee
+> (`GET /api/txpool/fee`, hastings per weight unit) was 10^19 on the public
+> mainnet walletd, which is the absolute minimum the recommendation can take
+> (1 SC per 100 KB, walletd/coreutils). The fixed miner fee of this section is
+> 2 x 10^19 hastings in total. In mainnet tests (2026-11-04, seven
+> completed Siacoin swaps and one refund, wire sizes of 912 to 1,735 bytes)
+> every swap and refund transaction paid that fixed fee and was mined in the first block after it was
+> broadcast, also with up to 50 transactions in the pool; the fee was about 450
+> to 850 times below the recommended rate for the transaction's wire size. The
+> txpool has no minimum-fee check on admission (it evicts the lowest fee
+> density first when full). The fixed fee is therefore kept; whether it is
+> enough under congestion, when a spend or refund could wait or be evicted, is a
+> watch item. The size the withdraw estimator multiplies by the rate is the
+> length of the transaction's signature-hash form, which is smaller than its
+> wire form (§20.10 D6); the network accepted the resulting fees. The trade
+> preimage shows 0.00001 SC as the miner fee of a Siacoin payment, half of the
+> fixed fee actually paid.
 
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method
@@ -933,7 +953,14 @@ rather than defects. None is a correctness claim.
   added, rather than a flat constant. Sia's V2 wire encoding writes
   every `Currency` as a fixed-width `u128`, so weight depends only on
   input/output counts, never amounts -- a zero-valued placeholder
-  transaction is exact, not approximate. Commit `836a6278c`.
+  transaction is exact for the amounts. *Known inaccuracy (recorded
+  2026-11-04, informative):* the length measured is the transaction's
+  signature-hash form, in which each input counts only as its 32-byte
+  output id, not the wire form with the input's proof and signatures. On
+  mainnet a withdrawal of one input and two outputs paid for 217 length units
+  while the signed transaction was 1,237 bytes; the network accepted and mined
+  it. The fee stays as built (see R-S11, observed rate).
+  Commit `836a6278c`.
 
 - **D7 -- Watcher eligibility.** *Closed, partial by design.* Four of
   the five non-trivial `WatcherOps` methods are implemented for real:

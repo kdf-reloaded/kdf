@@ -33,7 +33,8 @@ R-W3 states outright that "the request does not carry a fee-override value for
 this path". There is no way to set an SC withdraw fee over RPC.
 
 The fee itself is not the problem. Reloaded estimates it from the transaction's
-real serialized weight times walletd's live `/api/txpool/fee` rate, recomputed
+serialized length (its signature-hash form, which is smaller than the wire form;
+ch.20 §20.10 D6) times walletd's live `/api/txpool/fee` rate, recomputed
 as each input is added (ch.20 R-W3, §20.10 D6 closed). That is a better default
 than the deployed reference's hard-coded constant. What is missing is the
 override.
