@@ -2530,7 +2530,7 @@ At both release rows:
 > withdraw on BCH still applies `UtxoFixed` per started kilobyte; how the
 > reference applies a fee descriptor there is not established, and the
 > question is queued for the KDF Spec Reader. *Answered 2026-11-04:
-> R38.6.6m (proportional, as here).* No peer observes either
+> R38.6.6m (proportional, as here); parity on the SLP route since PR #234.* No peer observes either
 > behavior (a `withdraw` is the node's own transaction), so arm 1 of
 > `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind the default.
 
@@ -2574,14 +2574,14 @@ provenance and clearance in chapter 49 §49.7).* The wire form of that
 wrong-type descriptor above are bound in chapter 49 R49.27a.
 
 > **Compatibility row (this repository, 2026-11-04; not corpus-sourced).**
-> Reloaded's SLP withdraw still applies `UtxoFixed` per started kilobyte,
-> `a × ceil(s / 1000)` -- the "Open" item of R38.6.6l's row -- so it pays up
-> to one `a` more than the reference and never less. The maintainer adopted
-> R38.6.6m (Decision BV, 2026-11-04): the SLP route is to follow it, as the
-> UTXO route follows R38.6.6l since Decision 27, as a parity change without a
-> switch; the code change is planned and not yet made. No peer observes
-> either behavior, so arm 1 of `docs/COMPAT_SWITCHES.md` "The default-side
-> rule" does not bind the default.
+> **Parity** on the SLP token withdraw since PR #234: the maintainer adopted
+> R38.6.6m (Decision BV, 2026-11-04), and Reloaded applies `UtxoFixed` there
+> exactly like `UtxoPerKbyte`, as the UTXO route does since Decision 27. It is
+> a parity change without a switch. Before, Reloaded's SLP withdraw applied
+> `UtxoFixed` per started kilobyte, `a × ceil(s / 1000)` -- the "Open" item of
+> R38.6.6l's row -- so it paid up to one `a` more than the reference and never
+> less. No peer observes either behavior, so arm 1 of
+> `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind the default.
 
 T38.6.6m *Explicit SLP withdraw fee (R38.6.6m).* Against a mocked BCH
 backend, an SLP token withdraw with `fee: {"type":"UtxoFixed","amount":"<a>"}`
@@ -2589,7 +2589,12 @@ and one with `fee: {"type":"UtxoPerKbyte","amount":"<a>"}` for the same inputs
 and outputs shall charge the same fee `floor(a × s / 1000)` for one
 transaction under and one over 1,000 bytes and report it in `fee_details` in
 the platform coin; a third request with an EVM-form descriptor shall fail with
-the invalid-fee-policy error.
+the invalid-fee-policy error. *Clean-side note (2026-11-05).* As under
+T38.6.6l, where the builder adds the change output the figure both descriptors
+give is `floor(a × (s − 34) / 1000) + floor(a × 34 / 1000)`, which can be one
+base unit below `floor(a × s / 1000)`. The tests of PR #234 assert the two
+descriptors equal and this figure, at 457 and 1,493 bytes; the SLP OP_RETURN
+output makes these sizes differ from T38.6.6l's.
 
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the
@@ -3260,3 +3265,9 @@ R38.8.6 **Tests (two-direction, observable).**
   name what remains. Written by a session that never read the corpus, from
   this repository's own activation, account and address code. It takes no
   forbidden-class input and needs no Dirty Gate pass.
+- *Clean-side amendment (2026-11-05) -- PR #234, maintainer Decision BV.* After
+  the code change, a session that never read the corpus updated the
+  compatibility row under R38.6.6m, the resolution sentence in R38.6.6l's row
+  and the clean-side note under T38.6.6m. They rest on that decision and this
+  repository's code, take no forbidden-class input, and so do not engage
+  chapter 01 R38.
