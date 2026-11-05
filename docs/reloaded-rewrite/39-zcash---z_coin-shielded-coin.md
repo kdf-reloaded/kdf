@@ -42,8 +42,8 @@ required-but-unimplemented extensions). Mixed treatment -- see §39.0.
   stated in R39.6.4e's status note. From v0.4.0 an ARRR swap also requires the
   counterparty to declare that it builds version 6 (R39.6.4f, implemented 2026-11-05 in
   PR #241).
-- **§39.6.5 Pirate1 withdrawals and R39.8.0bb Ironwood deposits (v0.4.0, specified
-  2026-11-04, not implemented):** the wallet stays Sapling-only, receives Sapling
+- **§39.6.5 Pirate1 withdrawals and R39.8.0bb Ironwood deposits (v0.4.0, implemented
+  2026-11-05 in PR #242 and PR #246):** the wallet stays Sapling-only, receives Sapling
   outputs inside transactions that also carry Ironwood actions (R39.8.0bb), and can
   pay a Pirate1 (Ironwood) address from its Sapling notes (R39.6.5a--R39.6.5i).
 - **§39.11 (Part E -- implemented in part):** `lightwalletd` as the **sole**
