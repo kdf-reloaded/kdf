@@ -15,19 +15,18 @@
 //! The layout is a wire format that deployed peers read; the bytes of the first value are never
 //! changed, and every reader of the first value ignores what follows it (R59.4A.3).
 //!
-//! The reader works on untrusted bytes. It is iterative, depth-bounded ([`MAX_NESTING`]) and never
-//! allocates from a declared length: every length and count is checked against the bytes that are
-//! actually present before it is used. Any failure yields "nothing declared"; it is never an error
-//! and never a panic.
+//! The reader skips the first value with the bounds check of CRD ch.28 R16a
+//! ([`common::msgpack_bounds`]) and reads the word with the same discipline: every length and count
+//! is checked against the bytes that are actually present before it is used, and nothing is
+//! allocated from it. Any failure yields "nothing declared"; it is never an error and never a
+//! panic.
 
+use common::msgpack_bounds::check_msgpack_bounds;
 use std::collections::BTreeSet;
 
 /// Capability key: this node builds and spends the version-6 transaction format of the Ironwood
 /// upgrade (CRD ch.59 R59.4A.4; the rule that requires it is bound in ch.39).
 pub const CAPABILITY_TX_V6: &str = "tx_v6";
-
-/// The deepest nesting of arrays and maps the skipper accepts; a deeper value counts as malformed.
-const MAX_NESTING: usize = 32;
 
 /// MessagePack marker of `true`, the only value that declares a capability.
 const MARKER_TRUE: u8 = 0xc3;
@@ -186,106 +185,18 @@ fn read_str<'a>(bytes: &'a [u8], pos: &mut usize) -> Option<&'a str> {
 /// Whether `count` more bytes are present from `pos`.
 fn fits(bytes: &[u8], pos: usize, count: u64) -> bool { count <= (bytes.len().saturating_sub(pos)) as u64 }
 
-/// What a marker (with its length field) announces.
-enum Header {
-    /// A value with no children that occupies this many further bytes.
-    Leaf(u64),
-    /// An array or map with this many child values (a map counts twice its entries).
-    Container(u64),
-}
-
-/// Parses the marker at `*pos` and its length field, and advances `*pos` past both.
-fn read_header(bytes: &[u8], pos: &mut usize) -> Option<Header> {
-    let marker = *bytes.get(*pos)?;
-    *pos += 1;
-    Some(match marker {
-        // positive fixint, negative fixint, nil, false, true
-        0x00..=0x7f | 0xe0..=0xff | 0xc0 | 0xc2 | 0xc3 => Header::Leaf(0),
-        // fixmap, fixarray
-        0x80..=0x8f => Header::Container(2 * u64::from(marker & 0x0f)),
-        0x90..=0x9f => Header::Container(u64::from(marker & 0x0f)),
-        // fixstr
-        0xa0..=0xbf => Header::Leaf(u64::from(marker & 0x1f)),
-        // the reserved marker
-        0xc1 => return None,
-        // bin8, bin16, bin32
-        0xc4 => Header::Leaf(read_be(bytes, pos, 1)?),
-        0xc5 => Header::Leaf(read_be(bytes, pos, 2)?),
-        0xc6 => Header::Leaf(read_be(bytes, pos, 4)?),
-        // ext8, ext16, ext32: a type byte follows the length
-        0xc7 => Header::Leaf(read_be(bytes, pos, 1)?.checked_add(1)?),
-        0xc8 => Header::Leaf(read_be(bytes, pos, 2)?.checked_add(1)?),
-        0xc9 => Header::Leaf(read_be(bytes, pos, 4)?.checked_add(1)?),
-        // float32, float64
-        0xca => Header::Leaf(4),
-        0xcb => Header::Leaf(8),
-        // uint8..uint64, int8..int64
-        0xcc | 0xd0 => Header::Leaf(1),
-        0xcd | 0xd1 => Header::Leaf(2),
-        0xce | 0xd2 => Header::Leaf(4),
-        0xcf | 0xd3 => Header::Leaf(8),
-        // fixext1, 2, 4, 8, 16: a type byte plus the data
-        0xd4 => Header::Leaf(2),
-        0xd5 => Header::Leaf(3),
-        0xd6 => Header::Leaf(5),
-        0xd7 => Header::Leaf(9),
-        0xd8 => Header::Leaf(17),
-        // str8, str16, str32
-        0xd9 => Header::Leaf(read_be(bytes, pos, 1)?),
-        0xda => Header::Leaf(read_be(bytes, pos, 2)?),
-        0xdb => Header::Leaf(read_be(bytes, pos, 4)?),
-        // array16, array32, map16, map32
-        0xdc => Header::Container(read_be(bytes, pos, 2)?),
-        0xdd => Header::Container(read_be(bytes, pos, 4)?),
-        0xde => Header::Container(2 * read_be(bytes, pos, 2)?),
-        0xdf => Header::Container(2 * read_be(bytes, pos, 4)?),
-    })
-}
-
 /// Skips exactly one complete MessagePack value that starts at `start` and returns the offset after
-/// it, or `None` if the value is truncated or malformed (R59.4A.2 step 1).
-///
-/// Iterative: the number of values still to skip at each open level lives in a fixed array of
-/// [`MAX_NESTING`] entries, and a value nested deeper than that counts as malformed. A length or
-/// count is checked against the bytes that remain before it is used (a container child takes at
-/// least one byte), and nothing is allocated from it.
+/// it, or `None` if the value is truncated, malformed or outside the bounds of CRD ch.28 R16a
+/// (R59.4A.2 step 1). The walk is the shared one of [`common::msgpack_bounds`].
 pub(crate) fn skip_value(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut open_levels = [0u64; MAX_NESTING];
-    let mut depth = 0usize;
-    let mut remaining = 1u64;
-    let mut pos = start;
-    loop {
-        while remaining == 0 {
-            if depth == 0 {
-                return Some(pos);
-            }
-            depth -= 1;
-            remaining = open_levels[depth];
-        }
-        remaining -= 1;
-        match read_header(bytes, &mut pos)? {
-            Header::Leaf(len) => {
-                if !fits(bytes, pos, len) {
-                    return None;
-                }
-                // `fits` guarantees `len` is at most the remaining byte count, so it fits in `usize`.
-                pos += len as usize;
-            },
-            Header::Container(children) => {
-                if depth == MAX_NESTING || !fits(bytes, pos, children) {
-                    return None;
-                }
-                open_levels[depth] = remaining;
-                depth += 1;
-                remaining = children;
-            },
-        }
-    }
+    let rest = bytes.get(start..)?;
+    check_msgpack_bounds(rest).ok().map(|len| start + len)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::msgpack_bounds::MAX_PEER_NESTING;
 
     fn with_word(first: &[u8], word: &[u8]) -> Vec<u8> { [first, word].concat() }
 
@@ -557,14 +468,14 @@ mod tests {
 
     #[test]
     fn t14_b_first_value_exactly_at_the_nesting_bound_is_skipped() {
-        let first = nested_arrays(MAX_NESTING);
+        let first = nested_arrays(MAX_PEER_NESTING);
         assert_eq!(skip_value(&first, 0), Some(first.len()));
         assert!(declared(&with_word(&first, &tx_v6_word())));
     }
 
     #[test]
     fn t14_b_first_value_one_level_deeper_than_the_bound_declares_nothing() {
-        let first = nested_arrays(MAX_NESTING + 1);
+        let first = nested_arrays(MAX_PEER_NESTING + 1);
         assert_eq!(skip_value(&first, 0), None);
         assert!(!declared(&with_word(&first, &tx_v6_word())));
         // A much deeper value is rejected the same way.
@@ -585,8 +496,8 @@ mod tests {
             out.push(0x01);
             out
         };
-        assert!(skip_value(&make(MAX_NESTING), 0).is_some());
-        assert_eq!(skip_value(&make(MAX_NESTING + 1), 0), None);
+        assert!(skip_value(&make(MAX_PEER_NESTING), 0).is_some());
+        assert_eq!(skip_value(&make(MAX_PEER_NESTING + 1), 0), None);
     }
 
     #[test]
