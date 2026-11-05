@@ -101,6 +101,12 @@ that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resol
   that times out. Each decline is logged at debug level with its cause, and at most once an hour a
   warning gives the number declined. Setting `require_v6_counterparty` to `false` in the coin's
   `consensus_params` turns the requirement off. Detail: PR #241; CRD ch.39 R39.6.4f.
+- **An ARRR withdrawal that sets `fee` or `from` is now refused with the shared "unsupported" error.**
+  The answer is `error_type: "UnsupportedError"` (HTTP 400), as for other withdrawals that ask for
+  something a coin cannot do, and as GLEEC KDF answers. A custom `fee` used to give an internal
+  error (HTTP 500). **A `from` used to be ignored silently**, and the withdrawal was made from the
+  wallet's own address; a client that sends `from` for ARRR now gets this refusal instead. Detail:
+  PR #256; CRD ch.49 R49.27a.
 
 #### EVM coins
 
