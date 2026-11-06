@@ -1,6 +1,6 @@
 # Plan: order-posting latency
 
-**Status:** in progress (all passes merged, Decision AM in PR #149; timing run done 2026-10-31; read spreading by round trip, Decision BI: rule and code written 2026-11-02, swaplab rows next) — **Last reviewed:** 2026-11-02
+**Status:** in progress (all passes merged, Decision AM in PR #149; timing run done 2026-10-31; read spreading by round trip, Decision BI: rule and code written 2026-11-02, swaplab rows run 2026-11-06; floor of two near sessions, Decision CX: rule written 2026-11-06, code next) — **Last reviewed:** 2026-11-06
 
 > **Context:** a market maker found order posting on Reloaded slower than on GLEEC KDF, about 20 % on
 > UTXO and EVM coins and about 100 % on DOGE. Orders carrying `timeout_in_minutes` expired in the
@@ -114,14 +114,20 @@ the second time with the beta head first.
   The larger-of form stays. A latency study over 13 coins with one to six servers found the rule helpful
   where servers differ and neutral where they do not. A check of the chain tip, so that a near server two or more blocks behind stops being near,
   follows in batch 2 (work package 5).
+- **Decision CX (maintainer, 2026-11-06): at least two near sessions.** The swaplab timing rows of
+  2026-11-06 found the near sessions helpful on RIN and about 11 % slower on DOGE, whose two servers each
+  limit a session. One answer at that limit, about 1 s, put a server outside the near limit for a while,
+  and the other then took every read and reached its own limit sooner. A run with the near factor at 0
+  matched 0.3.0-beta.1. Whenever two or more sessions are maintained, at least the two fastest are near
+  (R38.6.4a item 6, D38.6.4a.3), in batch 2 (work package 6). Not a beta blocker.
 - **F6 (operator, no code).** Raise the per-session limits on the operator's own Electrum servers for the
   market maker. This gives relief until the code lands.
 
 ## Open points
 
 - **Monitoring: the near-session rule and its defaults.** Decided but not closed. Revisit on field behavior
-  and user reports. Owner: session 6a. Input: the batch-1 swaplab timing rows and the first user reports on
-  0.4.0.
+  and user reports. Owner: session 6a. Input: the swaplab timing rows of 2026-11-06 (RIN helped, DOGE
+  slowed, now Decision CX), the timing row of work package 6 and the first user reports on 0.4.0.
 
 ## Work packages
 
@@ -131,7 +137,8 @@ the second time with the beta head first.
 | 1 | Coder pass 1: F1 P2PK batching; F4 concurrent gas-price queries plus reuse within one request; F3(a) one fee read per request; F3(b) skip on price-only updates | R38.6.3a, R57.2.1, R57.2.6 item 1, R38.6.6j item 1, R60.6.7 amendment and item 8 | merged 2026-10-28 (PR #114) |
 | 2 | Coder pass 2: F3(c) fee cache `fee_estimate_cache_secs` with per-coin lifetime and per-chain gas price; F5 read spreading `electrum_spread_reads`; spend check on every update again | R38.6.6j items 2–4, R38.6.6k, R57.2.6, R57.2.7, R38.6.4a, R60.6.7 amendment (AC) | implemented (PR #128) |
 | 3 | F2 balance watch (order-bearing base coins, interval, restart seeding) | R60.4.5, R60.4.6 (D60.4 resolved, PR #96) | merged 2026-10-28 (PR #116) |
-| 4 | Read spreading only over the connected servers whose recent round trip is close to the fastest (Decision BI) | R38.6.4a items 6–8, D38.6.4a.1 and D38.6.4a.2 (decided, under monitoring) | rule PR #201; code implemented 2026-11-02 (PR #215); next, the swaplab rows: RIN on its six-server list and its earlier three-server list, DOGE, and RIN under `mixed` and `measured` for D38.6.4l.1 |
+| 4 | Read spreading only over the connected servers whose recent round trip is close to the fastest (Decision BI) | R38.6.4a items 6–8, D38.6.4a.1 and D38.6.4a.2 (decided, under monitoring) | rule PR #201; code implemented 2026-11-02 (PR #215); swaplab rows 2026-11-06: RIN on its six-server list and its earlier three-server list faster, `mixed` and `measured` recorded for D38.6.4l.1, DOGE about 11 % slower (work package 6) |
 | 5 | Tip check for near sessions: a near server two or more blocks behind the best tip stops being near, under every server order (Decision 22, study proposal (c)) | R38.6.4a amendment, to be written | batch 2 |
+| 6 | Floor of two near sessions: whenever two or more sessions are maintained, at least the two fastest take turns (Decision CX) | R38.6.4a item 6 amendment, T38.6.4a.1 new cases, T38.6.4a.8, D38.6.4a.3 | rule written 2026-11-06; code next, then a DOGE timing row against 0.3.0-beta.1; batch 2 |
 
 Each code PR is checked end to end by the swaplab session's timing run once it is built.
