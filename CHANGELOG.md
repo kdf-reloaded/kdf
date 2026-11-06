@@ -207,6 +207,27 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   and gets its orders back. Before, the order stayed until the maker posted on that pair again or
   went offline. Your own orders are never dropped. To restore the old behavior, set `pair_liveness`
   to `false` in `MM2.json`. Detail: PR #251; CRD ch.32 R-GH14.
+- **A relay holds a sync request that reaches it before it has started its own sync for that
+  pair.** A relay passes a maker's keep-alive on before it handles it. When many makers start or
+  re-post at once, the nodes behind it therefore asked for the maker's orders before the relay had
+  started its own sync, got "no data" or "missing pair" at once, and asked again only at the maker's
+  next keep-alive, 30 seconds later for each relay on the way. The relay now holds such a request
+  while it handles that keep-alive, and answers it once its own sync lands, within the same
+  5-second bound and the same limits as the requests it already holds. The keep-alives it is
+  handling are limited by the same two settings; one that finds a limit full is handled as before.
+  The relay's 60-second sync summary line ends with a new `pre_placeholder` part that counts these
+  requests and the keep-alives handled without a hold. To restore the old behavior, set
+  `sync_answer_deferral_before_placeholder` to `false` in `MM2.json`. Nothing on the wire changes.
+  Detail: CRD PR #258; CRD ch.32 R-Q5b item 6.
+- **An order-book request no longer fails at once while a relay is still storing a maker's first
+  orders.** A relay answers an order-book request from its list of orders, and each maker on that
+  list needs a stored record. When many makers post at once, a maker's first orders can be listed
+  before its record is stored, and the whole request used to fail, so the asking node moved on to
+  another relay or, with none left, failed its `orderbook` call. The relay now waits up to 250 ms
+  for the record and answers then; only if it is still behind does the request fail as before. A
+  waiting request counts against the same limits as the sync requests a relay holds. To restore the
+  old behavior, set `orderbook_answer_waits_for_worker` to `false` in `MM2.json`. Nothing on the
+  wire changes. Detail: CRD PR #258; CRD ch.32 R-GH12a.
 
 #### UTXO coins and Electrum
 
@@ -492,7 +513,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222). A received
   cancellation now stays final for an hour, and a maker no longer restores an order it cancelled
   (PRs #223, #224). A pair the maker stops advertising is now dropped after the liveness window
-  (CRD PR #243, PR #251).
+  (CRD PR #243, PR #251). A relay now holds a sync request that reaches it before its own sync for
+  the pair has started, and an order-book answer waits briefly for a relay that is still storing a
+  maker's first orders (CRD PR #258).
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot

@@ -1,6 +1,6 @@
 # Plan: cancelled orders that other nodes keep showing ("ghost orders")
 
-**Status:** planning — **Last reviewed:** 2026-11-03
+**Status:** planning — **Last reviewed:** 2026-11-06
 
 > **Context.** On the public network on 2026-10-31, a maker re-priced its orders with `setprice` and
 > `cancel_previous`, yet other nodes, Reloaded seeds among them, kept showing five of its orders on one
