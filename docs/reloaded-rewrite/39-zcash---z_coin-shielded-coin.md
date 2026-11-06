@@ -1380,7 +1380,8 @@ unchanged.
 
 R39.6.5c **`withdraw` to a Pirate1 address.** A withdrawal request accepts a Pirate1
 address in `to`, on the legacy `withdraw` method and on `task::withdraw::init` alike (in
-this project both reach the same code); no request member is added. As today, a custom `fee` is refused and
+this project both reach the same code); no request member is added. A custom `fee` or a
+`from` is refused with the unsupported-operation arm of Chapter 49 R49.27a, `fee` first, and
 there is no memo member. With `max: true` the amount is the spendable balance less the
 fee of R39.6.5f. The response keeps its shape:
 

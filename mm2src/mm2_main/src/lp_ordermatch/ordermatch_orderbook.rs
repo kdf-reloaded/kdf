@@ -107,6 +107,16 @@ pub(crate) async fn process_orders_keep_alive(
 ) -> bool {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
     let deferral_ms = sync_answer_deferral_ms(&ctx);
+    // CRD ch.32 R-Q5b item 6: from here until the comparison has finished, a request for a pair the keep-alive
+    // names is parked behind this registration. It ends wherever this function ends, a dropped future included.
+    let registration = register_keep_alive_handling(
+        &ctx,
+        &ordermatch_ctx,
+        &propagated_from_peer,
+        &from_pubkey,
+        &keep_alive.trie_roots,
+        i_am_relay,
+    );
     let to_request = keep_alive_sync_request(
         &ordermatch_ctx,
         &from_pubkey,
@@ -117,6 +127,8 @@ pub(crate) async fn process_orders_keep_alive(
         deferral_ms,
     )
     .await;
+    // The comparison has finished, and any own request has its record (item 6 (a)).
+    drop(registration);
 
     // `in_flight` ends the record of this request (CRD ch.32 R-Q5b) wherever the function ends: a
     // failed request, an early return or a dropped future all drop it. It lasts through the second
@@ -1077,44 +1089,84 @@ pub(crate) fn get_pubkeys_orders(orderbook: &Orderbook, base: String, rel: Strin
     }
 }
 
-pub(crate) fn process_get_orderbook_request(ctx: MmArc, base: String, rel: String) -> Result<Option<Vec<u8>>, String> {
-    let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+/// Why an order-book answer could not be built (CRD ch.32 R-GH12).
+#[derive(Debug)]
+pub(crate) enum OrderbookAnswerError {
+    /// The pair holds more than [`MAX_ORDERS_NUMBER_IN_ORDERBOOK_RESPONSE`] orders.
+    TooManyOrders,
+    /// Pubkeys the read index lists for the pair have no record in the trie store yet.
+    MissingRecords(Vec<String>),
+    /// The answer could not be encoded; the text of the failure.
+    Encoding(String),
+}
+
+impl OrderbookAnswerError {
+    /// The error text the requester receives (the error answer of R-GH12).
+    pub(crate) fn text(&self) -> String {
+        match self {
+            OrderbookAnswerError::TooManyOrders => ERRL!("Orderbook too large"),
+            OrderbookAnswerError::MissingRecords(pubkeys) => ERRL!(
+                "TrieStore::pubkeys_state is expected to contain the {:?} pubkey",
+                pubkeys.first().map(String::as_str).unwrap_or_default()
+            ),
+            OrderbookAnswerError::Encoding(text) => text.clone(),
+        }
+    }
+}
+
+/// The answer to an order-book request (R-Q1) as the index and the trie store stand now, or the reason there is
+/// none. It never waits.
+pub(crate) fn build_orderbook_answer(
+    ordermatch_ctx: &OrdermatchContext,
+    base: String,
+    rel: String,
+) -> Result<Vec<u8>, OrderbookAnswerError> {
     let orderbook = ordermatch_ctx.orderbook.lock();
 
     let pubkeys_orders = get_pubkeys_orders(&orderbook, base, rel);
     if pubkeys_orders.total_number_of_orders > MAX_ORDERS_NUMBER_IN_ORDERBOOK_RESPONSE {
-        return ERR!("Orderbook too large");
+        return Err(OrderbookAnswerError::TooManyOrders);
     }
 
     let trie_store = ordermatch_ctx.trie_store.lock();
 
-    let orders_to_send = pubkeys_orders
-        .uuids_by_pubkey
-        .into_iter()
-        .map(|(pubkey, orders)| {
-            let pubkey_state = trie_store.pubkeys_state.get(&pubkey).ok_or(ERRL!(
-                "TrieStore::pubkeys_state is expected to contain the {:?} pubkey",
-                pubkey
-            ))?;
-
-            let item = GetOrderbookPubkeyItem {
-                last_keep_alive: pubkey_state.last_keep_alive,
-                orders,
-                // TODO save last signed payload to pubkey state
-                last_signed_pubkey_payload: vec![],
-            };
-
-            Ok((pubkey, item))
-        })
-        .collect::<Result<HashMap<_, _>, String>>()?;
+    let mut orders_to_send = HashMap::new();
+    let mut missing_records = Vec::new();
+    for (pubkey, orders) in pubkeys_orders.uuids_by_pubkey {
+        let pubkey_state = match trie_store.pubkeys_state.get(&pubkey) {
+            Some(pubkey_state) => pubkey_state,
+            None => {
+                missing_records.push(pubkey);
+                continue;
+            },
+        };
+        let item = GetOrderbookPubkeyItem {
+            last_keep_alive: pubkey_state.last_keep_alive,
+            orders,
+            // TODO save last signed payload to pubkey state
+            last_signed_pubkey_payload: vec![],
+        };
+        orders_to_send.insert(pubkey, item);
+    }
+    if !missing_records.is_empty() {
+        return Err(OrderbookAnswerError::MissingRecords(missing_records));
+    }
 
     let response = GetOrderbookRes {
         pubkey_orders: orders_to_send,
         protocol_infos: pubkeys_orders.protocol_infos,
         conf_infos: pubkeys_orders.conf_infos,
     };
-    let encoded = try_s!(encode_message(&response));
-    Ok(Some(encoded))
+    let encoded = encode_message(&response).map_err(|e| OrderbookAnswerError::Encoding(ERRL!("{}", e)))?;
+    Ok(encoded)
+}
+
+pub(crate) fn process_get_orderbook_request(ctx: MmArc, base: String, rel: String) -> Result<Option<Vec<u8>>, String> {
+    let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+    match build_orderbook_answer(&ordermatch_ctx, base, rel) {
+        Ok(encoded) => Ok(Some(encoded)),
+        Err(e) => Err(e.text()),
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

@@ -82,6 +82,11 @@ pub(crate) enum AnswerPath {
     ParkedWoken,
     /// Parked, and answered at the bound.
     ParkedBound,
+    /// Parked before the placeholder existed (CRD ch.32 R-Q5b item 6), and answered before or at the end of
+    /// the wait.
+    PreParkedWoken,
+    /// Parked before the placeholder existed (R-Q5b item 6), and answered at the bound.
+    PreParkedBound,
 }
 
 impl AnswerPath {
@@ -93,6 +98,8 @@ impl AnswerPath {
             AnswerPath::AtOnce(AtOnce::DeferralOff) => "at_once:deferral_off",
             AnswerPath::ParkedWoken => "parked:woken",
             AnswerPath::ParkedBound => "parked:bound",
+            AnswerPath::PreParkedWoken => "parked_pre:woken",
+            AnswerPath::PreParkedBound => "parked_pre:bound",
         }
     }
 }
@@ -236,11 +243,17 @@ pub(crate) struct SyncCounters {
     pub(crate) placeholder_at_once: u32,
     pub(crate) placeholder_own_not_in_flight: u32,
     pub(crate) placeholder_caps: u32,
+    /// Placeholder answers by the parked paths, of R-Q5b item 1 and of item 6 together.
     pub(crate) placeholder_parked_woken: u32,
     pub(crate) placeholder_parked_bound: u32,
     pub(crate) answers_trie_error: u32,
-    /// Answers of every class that went through the parked path.
+    /// Answers of every class that went through a parked path, of item 1 and of item 6.
     pub(crate) answers_parked: u32,
+    /// Answers of every class to requests parked before the placeholder existed (item 6 (f)), by how they ended.
+    pub(crate) pre_parked_woken: u32,
+    pub(crate) pre_parked_bound: u32,
+    /// Keep-alives handled without a registration because a limit was full (item 6 (c), (f)).
+    pub(crate) registrations_capped: u32,
     pub(crate) requests_ok: u32,
     pub(crate) requests_no_data: u32,
     pub(crate) requests_peer_error: u32,
@@ -270,14 +283,23 @@ impl SyncCounters {
                     },
                     AnswerPath::AtOnce(AtOnce::OwnRequestNotInFlight) => self.placeholder_own_not_in_flight += 1,
                     AnswerPath::AtOnce(AtOnce::CapsFull) => self.placeholder_caps += 1,
-                    AnswerPath::ParkedWoken => self.placeholder_parked_woken += 1,
-                    AnswerPath::ParkedBound => self.placeholder_parked_bound += 1,
+                    AnswerPath::ParkedWoken | AnswerPath::PreParkedWoken => self.placeholder_parked_woken += 1,
+                    AnswerPath::ParkedBound | AnswerPath::PreParkedBound => self.placeholder_parked_bound += 1,
                 }
             },
             AnswerClass::TrieError => self.answers_trie_error += 1,
         }
-        if matches!(path, AnswerPath::ParkedWoken | AnswerPath::ParkedBound) {
-            self.answers_parked += 1;
+        match path {
+            AnswerPath::AtOnce(_) => (),
+            AnswerPath::ParkedWoken | AnswerPath::ParkedBound => self.answers_parked += 1,
+            AnswerPath::PreParkedWoken => {
+                self.answers_parked += 1;
+                self.pre_parked_woken += 1;
+            },
+            AnswerPath::PreParkedBound => {
+                self.answers_parked += 1;
+                self.pre_parked_bound += 1;
+            },
         }
     }
 
@@ -315,6 +337,7 @@ impl SyncCounters {
             + self.requests_decode
             + self.alt_failure
             + self.alt_mismatch
+            + self.registrations_capped
             > 0
     }
 
@@ -327,7 +350,7 @@ impl SyncCounters {
             "sync summary 60s: answers ok={} no_data={} missing_pair={} placeholder={}(at_once={} \
              own_not_in_flight={} caps={} parked_woken={} parked_bound={}) trie_error={} parked={}; requests ok={} \
              no_data={} peer_error={} timeout={} transport={} decode={}; alt failure={} mismatch={} no_relay={} \
-             worker_late={} sent={} ok={}",
+             worker_late={} sent={} ok={}; pre_placeholder parked_woken={} parked_bound={} registrations_capped={}",
             self.answers_ok_delta + self.answers_ok_full,
             self.answers_no_data,
             self.answers_missing_pair,
@@ -351,6 +374,9 @@ impl SyncCounters {
             self.alt_worker_late,
             self.alt_sent,
             self.alt_ok,
+            self.pre_parked_woken,
+            self.pre_parked_bound,
+            self.registrations_capped,
         ))
     }
 }
@@ -474,6 +500,15 @@ impl SyncLog {
     pub(crate) fn alt(&self, event: AltEvent, pubkey: &str, now_ms: u64) {
         log::debug!("sync alternate relay: pubkey={} event={}", pubkey, event.as_str());
         if let Some(summary) = self.record_alt(event, now_ms) {
+            log::info!("{}", summary);
+        }
+    }
+
+    /// Records a keep-alive handled without a registration because a limit of CRD ch.32 R-Q5b item 6 (c) was
+    /// full: its DEBUG line, its count and, when the window has ended, the summary.
+    pub(crate) fn registration_capped(&self, forwarding_peer: &str, pubkey: &str, now_ms: u64) {
+        log::debug!("sync registration capped: peer={} pubkey={}", forwarding_peer, pubkey);
+        if let Some(summary) = self.count(now_ms, |counters| counters.registrations_capped += 1) {
             log::info!("{}", summary);
         }
     }
@@ -658,12 +693,16 @@ mod tests {
             alt_worker_late: 21,
             alt_sent: 22,
             alt_ok: 23,
+            pre_parked_woken: 24,
+            pre_parked_bound: 25,
+            registrations_capped: 26,
         };
         assert_eq!(
             counters.summary_line().unwrap(),
             "sync summary 60s: answers ok=3 no_data=3 missing_pair=4 placeholder=15(at_once=5 own_not_in_flight=6 \
              caps=7 parked_woken=8 parked_bound=9) trie_error=10 parked=11; requests ok=12 no_data=13 peer_error=14 \
-             timeout=15 transport=16 decode=17; alt failure=18 mismatch=19 no_relay=20 worker_late=21 sent=22 ok=23"
+             timeout=15 transport=16 decode=17; alt failure=18 mismatch=19 no_relay=20 worker_late=21 sent=22 ok=23; \
+             pre_placeholder parked_woken=24 parked_bound=25 registrations_capped=26"
         );
     }
 
@@ -680,8 +719,8 @@ mod tests {
                 .count(t0 + SUMMARY_WINDOW_MS, |_| ())
                 .expect("a trigger was counted");
             assert!(
-                summary.ends_with("; alt failure=1 mismatch=0 no_relay=0 worker_late=0 sent=1 ok=1")
-                    || summary.ends_with("; alt failure=0 mismatch=1 no_relay=0 worker_late=0 sent=1 ok=1"),
+                summary.contains("; alt failure=1 mismatch=0 no_relay=0 worker_late=0 sent=1 ok=1;")
+                    || summary.contains("; alt failure=0 mismatch=1 no_relay=0 worker_late=0 sent=1 ok=1;"),
                 "{}",
                 summary
             );

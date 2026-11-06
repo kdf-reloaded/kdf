@@ -492,9 +492,9 @@ fn test_gas_station() {
 /// real function, over the same recorded raw transactions, against a scripted local node. Do not
 /// point them back at a live network.
 ///
-/// The function reads exactly three node methods, all scripted below: `eth_blockNumber`,
-/// `eth_getLogs` (once per window, first for `ReceiverSpent`, then for `SenderRefunded`) and
-/// `eth_getTransactionByHash`.
+/// The function reads exactly four node methods, all scripted below: `eth_blockNumber`,
+/// `eth_getTransactionReceipt` (the payment's block), `eth_getLogs` (once per window, first for
+/// `ReceiverSpent`, then for `SenderRefunded`) and `eth_getTransactionByHash`.
 mod search_for_swap_tx_spend_scripted {
     use super::scripted_evm_node::spawn;
     use super::*;
@@ -688,6 +688,8 @@ mod search_for_swap_tx_spend_scripted {
                 assert_eq!(params[0].as_str().unwrap(), format!("{:#x}", found_hash));
                 found_json.clone()
             },
+            // The search reads the payment's receipt to find the payment's block; the node does not know it.
+            "eth_getTransactionReceipt" => Json::Null,
             other => panic!("the scripted node does not serve `{}`", other),
         });
         let (_ctx, coin) = coin(&node.url, coin_type);
@@ -731,6 +733,7 @@ mod search_for_swap_tx_spend_scripted {
         use crate::eth::eth_logs_window::REORG_MARGIN_BLOCKS;
         use crate::eth::eth_swap_v2::SpendTxSearchParams;
         use serde_json::{json, Value as Json};
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrder};
 
         type Refusal = Option<(i64, &'static str)>;
 
@@ -750,7 +753,19 @@ mod search_for_swap_tx_spend_scripted {
             coin: EthCoin,
             payment: SignedEthTx,
             id: Vec<u8>,
+            /// The node's tip; a test may change it between calls.
+            tip: Arc<AtomicU64>,
+            /// The block that carries the payment's `ReceiverSpent` log; `NO_SPEND` while there is none. A test may
+            /// change it between calls.
+            spend_block: Arc<AtomicU64>,
+            /// How many `eth_getLogs` requests the node has started to handle.
+            started: Arc<AtomicUsize>,
+            /// Whether a `ReceiverSpent` log carries its transaction hash; a test may turn it off to model a node
+            /// that answers a log without one.
+            hash_served: Arc<std::sync::atomic::AtomicBool>,
         }
+
+        const NO_SPEND: u64 = u64::MAX;
 
         impl Fixture {
             fn windows(&self, event: &str) -> Vec<(u64, u64)> {
@@ -838,11 +853,22 @@ mod search_for_swap_tx_spend_scripted {
             let reqs = Arc::new(Mutex::new(Vec::new()));
             let methods = Arc::new(Mutex::new(Vec::new()));
             let (reqs_h, methods_h, id_h, payment_h) = (reqs.clone(), methods.clone(), id.clone(), payment.clone());
+            let tip_cell = Arc::new(AtomicU64::new(tip));
+            let spend_cell = Arc::new(AtomicU64::new(spend_block.unwrap_or(NO_SPEND)));
+            let started = Arc::new(AtomicUsize::new(0));
+            let hash_served = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let (tip_h, spend_h, started_h, hash_h) = (
+                tip_cell.clone(),
+                spend_cell.clone(),
+                started.clone(),
+                hash_served.clone(),
+            );
             let node = spawn(move |method, params| {
                 methods_h.lock().unwrap().push(method.to_owned());
                 match method {
-                    "eth_blockNumber" => json!(format!("{:#x}", tip)),
+                    "eth_blockNumber" => json!(format!("{:#x}", tip_h.load(AtomicOrder::SeqCst))),
                     "eth_getLogs" => {
+                        started_h.fetch_add(1, AtomicOrder::SeqCst);
                         let (from, to) = (hex_u64(&params[0]["fromBlock"]), hex_u64(&params[0]["toBlock"]));
                         let asked = params[0]["topics"][0].to_string();
                         let (event, topic) = if asked.contains(&spend_topic) {
@@ -863,18 +889,24 @@ mod search_for_swap_tx_spend_scripted {
                         if let Some((code, message)) = refusal {
                             return json!({"__rpc_error": {"code": code, "message": message}});
                         }
-                        match spend_block {
-                            Some(block) if event == "ReceiverSpent" && (from..=to).contains(&block) => json!([{
-                                "address": format!("0x{}", SWAP_CONTRACT_ADDR.to_lowercase()),
-                                "topics": [topic],
-                                "data": format!("0x{}", hex::encode(&id_h)),
-                                "blockHash": format!("0x{}", "22".repeat(32)),
-                                "blockNumber": format!("{:#x}", block),
-                                "transactionHash": format!("{:#x}", spend_hash),
-                                "transactionIndex": "0x0",
-                                "logIndex": "0x0",
-                                "removed": false,
-                            }]),
+                        match spend_h.load(AtomicOrder::SeqCst) {
+                            block if block != NO_SPEND && event == "ReceiverSpent" && (from..=to).contains(&block) => {
+                                json!([{
+                                    "address": format!("0x{}", SWAP_CONTRACT_ADDR.to_lowercase()),
+                                    "topics": [topic],
+                                    "data": format!("0x{}", hex::encode(&id_h)),
+                                    "blockHash": format!("0x{}", "22".repeat(32)),
+                                    "blockNumber": format!("{:#x}", block),
+                                    "transactionHash": if hash_h.load(AtomicOrder::SeqCst) {
+                                    json!(format!("{:#x}", spend_hash))
+                                } else {
+                                    Json::Null
+                                },
+                                    "transactionIndex": "0x0",
+                                    "logIndex": "0x0",
+                                    "removed": false,
+                                }])
+                            },
                             _ => json!([]),
                         }
                     },
@@ -912,6 +944,10 @@ mod search_for_swap_tx_spend_scripted {
                 coin,
                 payment,
                 id,
+                tip: tip_cell,
+                spend_block: spend_cell,
+                started,
+                hash_served,
             }
         }
 
@@ -967,8 +1003,10 @@ mod search_for_swap_tx_spend_scripted {
                 .map(|r| r.to - r.from + 1)
                 .collect();
             assert_eq!(refused, [1000, 500, 250, 125]);
+            // The search starts at the newest window (R17.8.3a): the node refused `[tip - 999, tip]`, and the
+            // retry with `W` = 62 starts at that window's low end.
             let first_accepted = fx.windows("ReceiverSpent")[0];
-            assert_eq!(first_accepted, (from, from + 61));
+            assert_eq!(first_accepted, (CURRENT_BLOCK - 999, CURRENT_BLOCK - 999 + 61));
             assert_eq!(fx.coin.logs_window(), 62);
             if capturing {
                 let warns = lines("GLW1", "WARN");
@@ -1055,16 +1093,18 @@ mod search_for_swap_tx_spend_scripted {
             assert_eq!(fx.coin.logs_window(), 62);
         }
 
-        /// T17.8.4: the spend and refund search, the payment-sent search and the V2 event search cover
-        /// `[0, 2499]` in `[0, 999]`, `[1000, 1999]`, `[2000, 2499]`.
+        /// T17.8.4: the payment-sent search and the V2 event search cover `[0, 2499]` in `[0, 999]`, `[1000, 1999]`,
+        /// `[2000, 2499]`; the spend and refund search covers it from the tip downwards (R17.8.3a), in the windows
+        /// `[1500, 2499]`, `[500, 1499]`, `[0, 499]`: inclusive, contiguous, none skipped.
         #[test]
         fn t17_8_4_the_windows_are_inclusive_and_contiguous() {
             let expected = vec![(0, 999), (1000, 1999), (2000, 2499)];
+            let newest_first = vec![(1500, 2499), (500, 1499), (0, 499)];
             let fx = fixture("GLW4", 1000, 2499, None, None, 1, |_, _| None);
 
             assert_eq!(search(&fx, 0).unwrap(), None);
-            assert_eq!(fx.windows("ReceiverSpent"), expected);
-            assert_eq!(fx.windows("SenderRefunded"), expected);
+            assert_eq!(fx.windows("ReceiverSpent"), newest_first);
+            assert_eq!(fx.windows("SenderRefunded"), newest_first);
 
             let time_lock = 1_000;
             let secret_hash = [7u8; 20];
@@ -1099,13 +1139,13 @@ mod search_for_swap_tx_spend_scripted {
         fn t17_8_4_the_window_never_exceeds_the_configured_range() {
             let fx = fixture("GLW4B", 7, 20, None, None, 1, |_, _| None);
             assert_eq!(search(&fx, 0).unwrap(), None);
-            assert_eq!(fx.windows("ReceiverSpent"), vec![(0, 6), (7, 13), (14, 20)]);
+            assert_eq!(fx.windows("ReceiverSpent"), vec![(14, 20), (7, 13), (0, 6)]);
             assert_eq!(fx.coin.logs_window(), 7);
 
             // A coin configured with a range of 0 still searches, one block at a time.
             let fx = fixture("GLW4C", 0, 2, None, None, 1, |_, _| None);
             assert_eq!(search(&fx, 0).unwrap(), None);
-            assert_eq!(fx.windows("ReceiverSpent"), vec![(0, 0), (1, 1), (2, 2)]);
+            assert_eq!(fx.windows("ReceiverSpent"), vec![(2, 2), (1, 1), (0, 0)]);
         }
 
         /// T17.8.5: the wait's first query starts at the payment's block.
@@ -1335,6 +1375,515 @@ mod search_for_swap_tx_spend_scripted {
                 assert_eq!(warns.len(), 1, "{warns:?}");
                 assert!(warns[0].contains("reports the payment"), "{}", warns[0]);
             }
+        }
+
+        // ---- CRD ch.17 R17.8.3a: the search for a spend or refund of a V1 payment, and the V2 cursor ----
+
+        fn payment_key(fx: &Fixture) -> crate::eth::PaymentKey { (swap_addr(), fx.id.clone()) }
+
+        fn spend_found() -> FoundSwapTxSpend {
+            FoundSwapTxSpend::Spent(signed_eth_tx_from_bytes(SPEND_TX).unwrap().into())
+        }
+
+        /// Lets a test cut a search short: the node answers the requests up to a limit as usual, and then holds
+        /// every further request for a while and refuses it, so that a request left behind by a dropped search
+        /// is not recorded as a scanned window.
+        struct Gate {
+            calls: Arc<AtomicUsize>,
+            limit: Arc<AtomicUsize>,
+        }
+
+        fn gate() -> (Gate, impl Fn(u64, u64) -> Refusal + Send + Sync + 'static) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let limit = Arc::new(AtomicUsize::new(usize::MAX));
+            let (calls_h, limit_h) = (calls.clone(), limit.clone());
+            let refuse = move |_: u64, _: u64| {
+                if calls_h.fetch_add(1, AtomicOrder::SeqCst) >= limit_h.load(AtomicOrder::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    Some((-32000, "the caller has gone"))
+                } else {
+                    None
+                }
+            };
+            (Gate { calls, limit }, refuse)
+        }
+
+        /// Runs the search and drops its future once it has scanned `windows` windows without finding anything
+        /// (each costs two requests, the spend query and the refund query) and has started on the next one: a
+        /// caller whose budget ends in the middle of the search.
+        fn search_cut_after(fx: &Fixture, gate: &Gate, from_block: u64, windows: usize) {
+            use futures::future::{select, Either};
+
+            let limit = gate.calls.load(AtomicOrder::SeqCst) + 2 * windows;
+            gate.limit.store(limit, AtomicOrder::SeqCst);
+            block_on(async {
+                let search = fx
+                    .coin
+                    .search_for_swap_tx_spend(SPENT_PAYMENT_TX, swap_addr(), from_block);
+                let watch = async {
+                    while fx.started.load(AtomicOrder::SeqCst) <= limit {
+                        Timer::sleep(0.001).await;
+                    }
+                };
+                futures::pin_mut!(search, watch);
+                match select(search, watch).await {
+                    Either::Left((done, _)) => panic!("the search ended before it was cut: {done:?}"),
+                    Either::Right(_) => (),
+                }
+            });
+            // Let the node finish the held request, then let the next call run freely.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            gate.limit.store(usize::MAX, AtomicOrder::SeqCst);
+        }
+
+        /// T17.8.9: a spend near the tip is found within the first windows, on a node that limits ranges to 100
+        /// blocks, however far below the tip the payment is.
+        #[test]
+        fn t17_8_9_a_late_spend_is_found_in_the_top_windows() {
+            let tip = CURRENT_BLOCK;
+            let payment_block = tip - 18_000;
+
+            // The spend is 50 blocks below the tip: the first window holds it, and nothing else is queried.
+            let fx = fixture(
+                "GLW9",
+                100,
+                tip,
+                Some(tip - 50),
+                Some(payment_block),
+                1,
+                too_large_above(100, -32602, "block range too large"),
+            );
+            assert_eq!(search(&fx, payment_block - 500).unwrap(), Some(spend_found()));
+            assert_eq!(fx.requests().iter().filter(|r| r.refused).count(), 0);
+            assert_eq!(fx.windows("ReceiverSpent"), vec![(tip - 99, tip)]);
+            assert!(fx.windows("SenderRefunded").is_empty());
+
+            // The spend is 250 blocks below the tip: three windows from the tip downwards, and the refund query of
+            // the windows above it.
+            let fx = fixture(
+                "GLW9B",
+                100,
+                tip,
+                Some(tip - 250),
+                Some(payment_block),
+                1,
+                too_large_above(100, -32602, "block range too large"),
+            );
+            assert_eq!(search(&fx, payment_block - 500).unwrap(), Some(spend_found()));
+            assert_eq!(fx.windows("ReceiverSpent"), vec![
+                (tip - 99, tip),
+                (tip - 199, tip - 100),
+                (tip - 299, tip - 200)
+            ]);
+            assert_eq!(fx.windows("SenderRefunded"), vec![
+                (tip - 99, tip),
+                (tip - 199, tip - 100)
+            ]);
+            // The window that carried the spend is not recorded as scanned: a failure to fetch the transaction
+            // must not lose it.
+            assert_eq!(fx.coin.logs_window.scanned_intervals(&payment_key(&fx)), vec![(
+                tip - 199,
+                tip - 12
+            )]);
+
+            // With a coin configured for 1,000 blocks the node's refusal is met in the first window, and nothing
+            // below that window is queried.
+            let fx = fixture(
+                "GLW9C",
+                1000,
+                tip,
+                Some(tip - 50),
+                Some(payment_block),
+                1,
+                too_large_above(100, -32602, "block range too large"),
+            );
+            assert_eq!(search(&fx, payment_block - 500).unwrap(), Some(spend_found()));
+            assert!(fx.requests().iter().all(|r| r.from >= tip - 999));
+        }
+
+        /// Without a receipt the start block bounds the search below.
+        #[test]
+        fn t17_8_9_the_start_block_bounds_the_search_without_a_receipt() {
+            let tip = CURRENT_BLOCK;
+            let fx = fixture("GLW9D", 100, tip, None, None, 1, |_, _| None);
+            assert_eq!(search(&fx, tip - 250).unwrap(), None);
+            assert_eq!(fx.windows("ReceiverSpent"), vec![
+                (tip - 99, tip),
+                (tip - 199, tip - 100),
+                (tip - 250, tip - 200)
+            ]);
+        }
+
+        /// The search's low end is 12 blocks below the receipt's block (R17.8.3a, T17.8.13), and the receipt is read
+        /// once per payment.
+        #[test]
+        fn t17_8_9_the_low_end_is_twelve_below_the_receipt_block_and_the_receipt_is_read_once() {
+            let tip = CURRENT_BLOCK;
+            let fx = fixture("GLW9E", 100, tip, None, Some(tip - 150), 1, |_, _| None);
+            assert_eq!(search(&fx, tip - 10_000).unwrap(), None);
+            assert_eq!(fx.windows("ReceiverSpent"), vec![
+                (tip - 99, tip),
+                (tip - 150 - REORG_MARGIN_BLOCKS, tip - 100)
+            ]);
+            assert_eq!(search(&fx, tip - 10_000).unwrap(), None);
+            assert_eq!(fx.calls_of("eth_getTransactionReceipt"), 1);
+
+            // The start block still bounds the search when it is higher than that.
+            let fx = fixture("GLW9F", 100, tip, None, Some(tip - 150), 1, |_, _| None);
+            assert_eq!(search(&fx, tip - 120).unwrap(), None);
+            assert_eq!(fx.windows("ReceiverSpent"), vec![
+                (tip - 99, tip),
+                (tip - 120, tip - 100)
+            ]);
+        }
+
+        /// Cancellation: a call dropped after K windows leaves the scanned interval covering exactly those K
+        /// windows, less the newest 12 blocks of its tip.
+        #[test]
+        fn t17_8_10_a_cut_call_keeps_the_windows_it_scanned() {
+            let tip = 10_000;
+            let (gate, refuse) = gate();
+            let fx = fixture("GLW10C", 100, tip, None, Some(1_000), 1, refuse);
+            assert_eq!(fx.coin.logs_window.scanned_intervals(&payment_key(&fx)), vec![]);
+
+            search_cut_after(&fx, &gate, 500, 3);
+            assert_eq!(fx.coin.logs_window.scanned_intervals(&payment_key(&fx)), vec![(
+                tip - 299,
+                tip - REORG_MARGIN_BLOCKS
+            )]);
+            assert_eq!(fx.windows("ReceiverSpent"), vec![
+                (tip - 99, tip),
+                (tip - 199, tip - 100),
+                (tip - 299, tip - 200)
+            ]);
+        }
+
+        /// T17.8.10: an early spend in a range larger than one call can scan is found by a later call, and no
+        /// window is queried twice except the newest 12 blocks of a call. Blocks added between calls are scanned
+        /// first.
+        #[test]
+        fn t17_8_10_a_later_call_continues_where_the_earlier_ones_stopped() {
+            let tip = 10_000;
+            let (gate, refuse) = gate();
+            // The payment is in block 1,000 and the spend in block 1,050: 91 windows of 100 blocks from the tip.
+            let fx = fixture("GLW10", 100, tip, Some(1_050), Some(1_000), 1, refuse);
+
+            // Call 1 is cut after 5 windows.
+            search_cut_after(&fx, &gate, 500, 5);
+            let after_first = fx.windows("ReceiverSpent").len();
+            assert_eq!(after_first, 5);
+            assert_eq!(fx.windows("ReceiverSpent")[0], (tip - 99, tip));
+
+            // Thirty blocks are added; call 2 is cut after 7 windows. It scans the added blocks first, together with
+            // the newest 12 blocks of call 1.
+            fx.tip.store(tip + 30, AtomicOrder::SeqCst);
+            search_cut_after(&fx, &gate, 500, 7);
+            let windows = fx.windows("ReceiverSpent");
+            assert_eq!(windows.len(), 5 + 7);
+            assert_eq!(windows[after_first], (tip - REORG_MARGIN_BLOCKS + 1, tip + 30));
+            assert_eq!(windows[after_first + 1], (tip - 599, tip - 500));
+
+            // Call 3 runs to the end and finds the spend; it again starts with the newest 12 blocks.
+            let before_third = windows.len();
+            assert_eq!(search(&fx, 500).unwrap(), Some(spend_found()));
+            let windows = fx.windows("ReceiverSpent");
+            assert_eq!(windows[before_third], (tip + 30 - REORG_MARGIN_BLOCKS + 1, tip + 30));
+            assert_eq!(windows[before_third + 1], (tip - 1_199, tip - 1_100));
+
+            // Across the three calls, a block is queried once, except the newest 12 blocks of the first two calls.
+            let mut times = std::collections::HashMap::<u64, usize>::new();
+            for (from, to) in &windows {
+                for block in *from..=*to {
+                    *times.entry(block).or_default() += 1;
+                }
+            }
+            for (block, count) in times {
+                let rescanned = (tip - REORG_MARGIN_BLOCKS + 1..=tip).contains(&block)
+                    || (tip + 30 - REORG_MARGIN_BLOCKS + 1..=tip + 30).contains(&block);
+                assert_eq!(count, if rescanned { 2 } else { 1 }, "block {block}");
+            }
+        }
+
+        /// R17.8.3a: when a call has scanned the whole range down to the low end with nothing found, the record of
+        /// the payment is dropped: the next call scans the whole range again, newest first, and still answers `None`.
+        #[test]
+        fn t17_8_10_a_full_pass_without_a_result_drops_the_record() {
+            let fx = fixture("GLW10B", 1000, 2499, None, None, 1, |_, _| None);
+            let newest_first = vec![(1500, 2499), (500, 1499), (0, 499)];
+            assert_eq!(search(&fx, 0).unwrap(), None);
+            assert_eq!(fx.windows("ReceiverSpent"), newest_first);
+            assert_eq!(fx.coin.logs_window.scanned_intervals(&payment_key(&fx)), vec![]);
+
+            assert_eq!(search(&fx, 0).unwrap(), None);
+            assert_eq!(fx.windows("ReceiverSpent")[3..], newest_first[..]);
+            assert_eq!(fx.windows("SenderRefunded")[3..], newest_first[..]);
+
+            fx.tip.store(2510, AtomicOrder::SeqCst);
+            assert_eq!(search(&fx, 0).unwrap(), None);
+            assert_eq!(fx.windows("ReceiverSpent")[6], (1511, 2510));
+        }
+
+        /// A window that failed is not recorded as scanned: the next call scans it.
+        #[test]
+        fn t17_8_10_a_failed_window_is_scanned_by_the_next_call() {
+            let tip = 5_000;
+            let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let failing_h = failing.clone();
+            let fx = fixture("GLW10D", 1000, tip, None, None, 1, move |from, _| {
+                (from < 4_000 && failing_h.load(AtomicOrder::SeqCst)).then_some((-32000, "boom"))
+            });
+            let err = search(&fx, 0).unwrap_err();
+            assert!(err.contains("boom"), "{err}");
+            // The newest window was scanned; the failed one was not.
+            assert_eq!(fx.coin.logs_window.scanned_intervals(&payment_key(&fx)), vec![(
+                tip - 999,
+                tip - REORG_MARGIN_BLOCKS
+            )]);
+            failing.store(false, AtomicOrder::SeqCst);
+            assert_eq!(search(&fx, 0).unwrap(), None);
+            let windows = fx.windows("ReceiverSpent");
+            // First call: the newest window, then the failed one (not counted: refused). Second call: the newest 12
+            // blocks, then the window below the one scanned by the first call, and so on down to block 0.
+            assert_eq!(windows[0], (tip - 999, tip));
+            assert_eq!(windows[1], (tip - REORG_MARGIN_BLOCKS + 1, tip));
+            assert_eq!(windows[2], (tip - 1_999, tip - 1_000));
+        }
+
+        /// T17.8.12: a block within 12 of the tip, scanned empty and then served with the spend, is found by the
+        /// next call. The first call is cut short, so its record is kept.
+        #[test]
+        fn t17_8_12_a_reorganized_block_is_found_by_the_next_search() {
+            let tip = 10_000;
+            let (gate, refuse) = gate();
+            let fx = fixture("GLW12", 100, tip, None, Some(1_000), 1, refuse);
+            search_cut_after(&fx, &gate, 500, 2);
+            let first = fx.windows("ReceiverSpent").len();
+            assert_eq!(first, 2);
+
+            fx.spend_block.store(tip - 3, AtomicOrder::SeqCst);
+            assert_eq!(search(&fx, 500).unwrap(), Some(spend_found()));
+            assert_eq!(fx.windows("ReceiverSpent")[first..], [(
+                tip - REORG_MARGIN_BLOCKS + 1,
+                tip
+            )]);
+        }
+
+        /// T17.8.11: across the polls of the V2 funding-spend search, a window is queried once, except the newest
+        /// 12 blocks of a poll.
+        #[test]
+        fn t17_8_11_the_v2_search_scans_each_window_once() {
+            let tip = 999;
+            let fx = fixture("GLW11", 100, tip, None, None, 1, |_, _| None);
+            let swap_id = [9u8; 32];
+            let err = block_on(fx.coin.find_transaction_hash_by_event(SpendTxSearchParams {
+                swap_contract_address: swap_addr(),
+                event_name: "ReceiverSpent",
+                abi_contract: &SWAP_CONTRACT,
+                swap_id: &swap_id,
+                from_block: 0,
+                wait_until: now_ms() / 1000 + 1,
+                check_every: 0.05,
+            }))
+            .unwrap_err();
+            assert!(matches!(err.get_inner(), FindPaymentSpendError::Timeout { .. }));
+            let windows = fx.windows("ReceiverSpent");
+            let first_poll: Vec<(u64, u64)> = (0..10).map(|i| (i * 100, i * 100 + 99)).collect();
+            assert_eq!(windows[..10], first_poll[..]);
+            let rescanned = (tip - REORG_MARGIN_BLOCKS + 1, tip);
+            assert!(
+                windows.len() > 11 && windows[10..].iter().all(|w| *w == rescanned),
+                "{windows:?}"
+            );
+        }
+
+        /// T17.8.12: the same for the V2 search: the poll after the one that scanned a block empty finds the event
+        /// that a reorganization put into it.
+        #[test]
+        fn t17_8_12_a_reorganized_block_is_found_by_the_next_v2_poll() {
+            let tip = 250;
+            let spend = signed_eth_tx_from_bytes(SPEND_TX).unwrap();
+            let flip: Arc<Mutex<Option<Arc<AtomicU64>>>> = Arc::new(Mutex::new(None));
+            let (flip_h, calls) = (flip.clone(), Arc::new(AtomicUsize::new(0)));
+            // The first poll is three windows, one request each (the V2 search asks for one event). The fourth
+            // request, the first of the second poll, is answered after the chain has been reorganized.
+            let fx = fixture("GLW12B", 100, tip, None, None, 1, move |_, _| {
+                if calls.fetch_add(1, AtomicOrder::SeqCst) == 3 {
+                    if let Some(spend_block) = flip_h.lock().unwrap().as_ref() {
+                        spend_block.store(tip - 5, AtomicOrder::SeqCst);
+                    }
+                }
+                None
+            });
+            *flip.lock().unwrap() = Some(fx.spend_block.clone());
+            let swap_id: [u8; 32] = fx.id.clone().try_into().unwrap();
+            let found = block_on(fx.coin.find_transaction_hash_by_event(SpendTxSearchParams {
+                swap_contract_address: swap_addr(),
+                event_name: "ReceiverSpent",
+                abi_contract: &SWAP_CONTRACT,
+                swap_id: &swap_id,
+                from_block: 0,
+                wait_until: now_ms() / 1000 + 30,
+                check_every: 0.05,
+            }))
+            .unwrap();
+            assert_eq!(found, spend.tx_hash());
+            assert_eq!(fx.windows("ReceiverSpent"), vec![
+                (0, 99),
+                (100, 199),
+                (200, 250),
+                (tip - REORG_MARGIN_BLOCKS + 1, tip)
+            ]);
+        }
+
+        /// A node whose request closure sets `spend_block` / `hash_served` of the fixture when it sees its n-th
+        /// `eth_getLogs` (0-based), before it answers: the fixture does not exist yet when the closure is built, so
+        /// the closure reaches the cells through this slot.
+        type Slot = Arc<Mutex<Option<(Arc<AtomicU64>, Arc<std::sync::atomic::AtomicBool>)>>>;
+
+        fn on_request(
+            slot: &Slot,
+            at: usize,
+            action: impl Fn(&AtomicU64, &std::sync::atomic::AtomicBool) + Send + Sync + 'static,
+        ) -> impl Fn(u64, u64) -> Refusal + Send + Sync + 'static {
+            let (slot, calls) = (slot.clone(), Arc::new(AtomicUsize::new(0)));
+            move |_, _| {
+                if calls.fetch_add(1, AtomicOrder::SeqCst) == at {
+                    if let Some((spend_block, hash_served)) = slot.lock().unwrap().as_ref() {
+                        action(spend_block, hash_served);
+                    }
+                }
+                None
+            }
+        }
+
+        fn fill(slot: &Slot, fx: &Fixture) {
+            *slot.lock().unwrap() = Some((fx.spend_block.clone(), fx.hash_served.clone()));
+        }
+
+        /// T17.8.13: the node answers the window that holds the spend as empty once, then correctly. The search of
+        /// R17.8.3a ends its first pass with `None` and drops its record, so the next call finds the spend.
+        #[test]
+        fn t17_8_13_a_lagging_node_costs_the_search_one_more_pass() {
+            let tip = 2_000;
+            let fx = fixture("GLW13", 1000, tip, None, None, 1, |_, _| None);
+            assert_eq!(search(&fx, 0).unwrap(), None);
+            assert_eq!(fx.coin.logs_window.scanned_intervals(&payment_key(&fx)), vec![]);
+            // The node now answers the window holding the spend (block 500) correctly.
+            fx.spend_block.store(500, AtomicOrder::SeqCst);
+            assert_eq!(search(&fx, 0).unwrap(), Some(spend_found()));
+        }
+
+        /// T17.8.13: the V1 wait finds the spend after its cursor has gone back to its start. The reset interval is
+        /// shortened for the test; the default is a minute.
+        #[test]
+        fn t17_8_13_the_v1_wait_finds_the_spend_after_the_cursor_goes_back() {
+            let tip = 250;
+            let slot: Slot = Default::default();
+            // Poll 1 is three requests (the wait asks for the spend only). From the fourth request on the node
+            // serves the spend in block 50, which the cursor has passed.
+            let fx = fixture(
+                "GLW13B",
+                100,
+                tip,
+                None,
+                None,
+                1,
+                on_request(&slot, 3, |spend, _| spend.store(50, AtomicOrder::SeqCst)),
+            );
+            fill(&slot, &fx);
+            fx.coin.logs_window.set_cursor_reset_every_ms(150);
+            let spend = wait(&fx, now_ms() / 1000 + 30, 0).unwrap();
+            assert_eq!(spend, signed_eth_tx_from_bytes(SPEND_TX).unwrap().into());
+            let windows = fx.windows("ReceiverSpent");
+            assert_eq!(windows[..3], [(0, 99), (100, 199), (200, 250)]);
+            assert!(
+                windows[3..windows.len() - 1].iter().all(|w| *w == (239, 250)),
+                "{windows:?}"
+            );
+            assert_eq!(windows[windows.len() - 1], (0, 99));
+        }
+
+        /// T17.8.13: the same for the V2 search.
+        #[test]
+        fn t17_8_13_the_v2_search_finds_the_event_after_the_cursor_goes_back() {
+            let tip = 250;
+            let slot: Slot = Default::default();
+            let fx = fixture(
+                "GLW13C",
+                100,
+                tip,
+                None,
+                None,
+                1,
+                on_request(&slot, 3, |spend, _| spend.store(50, AtomicOrder::SeqCst)),
+            );
+            fill(&slot, &fx);
+            fx.coin.logs_window.set_cursor_reset_every_ms(150);
+            let swap_id: [u8; 32] = fx.id.clone().try_into().unwrap();
+            let found = block_on(fx.coin.find_transaction_hash_by_event(SpendTxSearchParams {
+                swap_contract_address: swap_addr(),
+                event_name: "ReceiverSpent",
+                abi_contract: &SWAP_CONTRACT,
+                swap_id: &swap_id,
+                from_block: 0,
+                wait_until: now_ms() / 1000 + 30,
+                check_every: 0.05,
+            }))
+            .unwrap();
+            assert_eq!(found, signed_eth_tx_from_bytes(SPEND_TX).unwrap().tx_hash());
+            let windows = fx.windows("ReceiverSpent");
+            assert_eq!(windows[..3], [(0, 99), (100, 199), (200, 250)]);
+            assert_eq!(windows[windows.len() - 1], (0, 99));
+        }
+
+        /// With the default interval of a minute the cursor does not go back within a short wait.
+        #[test]
+        fn t17_8_13_the_cursor_goes_back_at_most_once_per_interval() {
+            let fx = fixture("GLW13D", 100, 250, None, None, 1, |_, _| None);
+            assert_eq!(fx.coin.logs_window.cursor_reset_every_ms(), 60_000);
+            let err = wait(&fx, now_ms() / 1000 + 1, 0).unwrap_err();
+            assert!(format!("{err:?}").contains("Waited too long"), "{err:?}");
+            let windows = fx.windows("ReceiverSpent");
+            assert_eq!(windows[..3], [(0, 99), (100, 199), (200, 250)]);
+            assert!(windows[3..].iter().all(|w| *w == (239, 250)), "{windows:?}");
+        }
+
+        /// T17.8.13: a V2 event without a transaction hash is not passed by the cursor; the next poll searches the
+        /// window again and finds the event once the node serves the hash.
+        #[test]
+        fn t17_8_13_a_v2_event_without_a_hash_is_searched_again() {
+            let tip = 250;
+            let slot: Slot = Default::default();
+            let fx = fixture(
+                "GLW13E",
+                100,
+                tip,
+                Some(245),
+                None,
+                1,
+                // The third request answers the log without a hash; the fourth, the retry, with it.
+                on_request(&slot, 3, |_, hash| hash.store(true, AtomicOrder::SeqCst)),
+            );
+            fx.hash_served.store(false, AtomicOrder::SeqCst);
+            fill(&slot, &fx);
+            let swap_id: [u8; 32] = fx.id.clone().try_into().unwrap();
+            let found = block_on(fx.coin.find_transaction_hash_by_event(SpendTxSearchParams {
+                swap_contract_address: swap_addr(),
+                event_name: "ReceiverSpent",
+                abi_contract: &SWAP_CONTRACT,
+                swap_id: &swap_id,
+                from_block: 0,
+                wait_until: now_ms() / 1000 + 30,
+                check_every: 0.05,
+            }))
+            .unwrap();
+            assert_eq!(found, signed_eth_tx_from_bytes(SPEND_TX).unwrap().tx_hash());
+            assert_eq!(fx.windows("ReceiverSpent"), vec![
+                (0, 99),
+                (100, 199),
+                (200, 250),
+                (200, 250)
+            ]);
         }
     }
 }

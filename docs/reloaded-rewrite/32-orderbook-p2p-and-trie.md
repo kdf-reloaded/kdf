@@ -988,10 +988,66 @@ outlives the longest parked request.
    after makers restarted.)*
 5. Parking does not wait on the inbound networking path (R-T3b item 3). It is
    the one case in which the answer is not built on the task that received
-   the request (R-Q5's last paragraph).
+   the request (R-Q5's last paragraph). *(Since 2026-11-05 the order-book
+   answer of §32.9C R-GH12a is a second such case.)*
+6. **Before the placeholder exists.** *(Added 2026-11-05, §32.10 D12 item 4,
+   ghost-orders package B4; Reloaded-original.)* A relay forwards a keep-alive
+   before it handles it (R-F3a), and its handling first waits for the trie
+   worker (R-T3b item 4). During a start-up or re-post burst a downstream
+   request can therefore arrive before the relay holds a root for the pair,
+   and the main paragraph answers it at once: with "no data", with "missing
+   pair", or with the placeholder error while the own request is not yet
+   sent. A relay MUST close that window:
+   - (a) *Registration.* When a relay begins to handle a keep-alive from
+     another pubkey P (its signature checked, before the worker wait of R-T3b
+     item 4), it **registers** (P, pair) for each pair the keep-alive names
+     with a root other than the zero and the empty-trie root (R-Q4 item 2).
+     The registration ends when the comparison of R-Q4 has finished for that
+     keep-alive, and from then on each registered pair either has an own
+     request in flight, whose record under this rule is already made, or needs
+     none. It also ends in every other way the handling can end: an error, an
+     early return, a dropped or failed task. A registration older than the
+     bound of item 3 counts as ended, whatever its task still does.
+   - (b) *Parking.* A request for P that is not deferrable is parked as well
+     when every pair it names either meets the condition of deferral (a held
+     root, and an own request in flight where that root is the placeholder)
+     or has an open registration, and at least one pair has an open
+     registration. It waits for the
+     registrations open when it arrives; a later registration does not
+     extend the wait. When they have ended, a request that is now deferrable
+     waits as item 1 binds, and any other is answered at once with the answer
+     R-Q5 gives at that moment. When the bound of item 3 expires, the request
+     is answered with the answer R-Q5 gives at that moment. Its wait never
+     outlasts that bound, whatever happens to a registration.
+   - (c) *Limits.* Registrations are bounded by the two limits of item 4,
+     counted apart from the parked requests: at most
+     `sync_answer_deferral_max_per_peer` registrations for keep-alives
+     received from one peer, and `sync_answer_deferral_max_total` in all,
+     with the ceilings of item 4. A keep-alive counts once, whatever the
+     number of its pairs. A keep-alive that finds either limit full is handled
+     without a registration, and a request for its pairs is answered as it
+     would be without this item. A flood of keep-alives therefore cannot grow
+     the registrations past the total limit. A request parked under this item
+     counts against the limits of item 4 like any other parked request.
+     In a burst that reaches the relay through one peer, the per-peer limit
+     caps how many keep-alives are registered at once; the count of item (f)
+     shows how often it is full.
+   - (d) *Scope.* Only a relay registers, and never for its own pubkeys. A
+     request naming a pair that no keep-alive being handled names (the relay
+     has not received the keep-alive, or it advertised an empty root) is
+     answered as the main paragraph binds. No wire shape changes.
+   - (e) *Switch.* The top-level `MM2.json` boolean
+     `sync_answer_deferral_before_placeholder`, default `true`; only a JSON
+     `false` turns this item off. With it off, or with
+     `sync_answer_deferral_ms` set to `0`, nothing is registered and every
+     request is answered as items 1 to 5 bind.
+   - (f) *Counting.* The relay's 60 s synchronization summary counts the
+     requests parked under this item, by how they ended, and the keep-alives
+     handled without a registration because a limit was full.
 
 > **Compatibility:** for behaviour matching GLEEC KDF, set
-> `sync_answer_deferral_ms` to `0`.
+> `sync_answer_deferral_ms` to `0`. That turns item 6 off as well; to turn
+> off item 6 alone, set `sync_answer_deferral_before_placeholder` to `false`.
 
 > **Reloaded divergence (2026-10-28).** The reference answers every request
 > at once. Against a relay that has just forwarded a keep-alive and is still
@@ -1005,6 +1061,18 @@ outlives the longest parked request.
 > are unchanged; only its timing differs, and only for a request that would
 > otherwise fail. Reference and Reloaded requesters alike accept a late
 > answer within their timeout. Implemented 2026-10-28.
+
+> **Reloaded divergence, item 6 (2026-11-05).** The main paragraph serves a
+> downstream request only once the relay has created the placeholder and
+> sent its own request. Before that, the request still fails at once, and the
+> requester waits one advertisement interval per relay hop (R-Q6). During a
+> burst that window is no longer short. Many keep-alives arrive together, and
+> each one's handling waits for the trie worker before it compares roots
+> (R-T3b item 4). Meanwhile the forward of R-F3a has already reached the
+> downstream peers, and they ask at once. This is the case §32.10 D12 item 4
+> names. With item 6 they are answered when the relay's own synchronization
+> lands, within the same bound. The wire is unchanged. Only the timing of an
+> answer that would otherwise fail differs, and only on a relay.
 
 **R-Q5c (Reloaded: a quick failure of the own request is asked once more).**
 *Reloaded-original (2026-10-30, Decision AX); no forbidden-class input.*
@@ -1201,6 +1269,40 @@ answered at once. A per-peer value of `100` is taken as `64` and a total of
 With `sync_answer_deferral_ms` set to `0`, every request is answered at once.
 After every path the parked table is empty.
 
+**T-Q5b6** *A request that arrives before the placeholder exists (R-Q5b
+item 6).* A relay R receives through F a keep-alive of a pubkey P that R has
+never seen, naming X and Y with non-empty roots, while R's trie worker is held
+back so that the handling waits in R-T3b item 4.
+- A request for (P, X) from a downstream peer D is parked, and the inbound
+  handler returns without waiting. Once the worker is released, R creates the
+  placeholder and sends its own request. Once that answer is applied, D's
+  request is answered with the full set, within the bound.
+- The same with P known to R and X missing from its record.
+- The same with R already holding X at the root the keep-alive advertises:
+  the comparison sends no request, and D's request is answered from R's held
+  set as soon as the registration ends.
+- The handling task is dropped during the worker wait: the registration ends,
+  D's parked request is answered at once with the failure R-Q5 gives at that
+  moment ("no data" or "missing pair"), and a later request for (P, X) is
+  answered at once.
+- The handling stays blocked past the bound: D's request is answered when its
+  bound expires, never later, and a request arriving after the registration
+  has passed the bound is answered at once.
+- Answered at once, as the main paragraph binds: a request for a pair the
+  keep-alive names with the zero or the empty-trie root, a request for a pair
+  of a pubkey no keep-alive being handled names, a request for one of R's own
+  pubkeys, and a request naming a registered pair together with an
+  unregistered missing pair.
+- With the per-peer limit set to `2` and the total to `3`, the third
+  keep-alive being handled from F and the fourth in all are handled without a
+  registration, and a request for their pairs is answered at once. A request
+  parked under item 6 counts against the parked limits of item 4.
+- On a non-relay, with `sync_answer_deferral_before_placeholder` set to
+  `false`, or with `sync_answer_deferral_ms` set to `0`: nothing is
+  registered, and every such request is answered at once.
+- The summary counts of item (f) match the cases run.
+- After every path the registration and parked tables are empty.
+
 **T-Q5c** *A quick failure of the own request is asked once more (R-Q5c).*
 A relay holds the all-zero placeholder for (P, X), has its own request for
 (P, X) in flight and a downstream request parked behind it. The own request
@@ -1312,7 +1414,11 @@ counts per peer (confirmed 2026-10-30 against this repository's code: the
 inbound request dispatch, the request layer and the synchronization answer
 keep no per-peer record; the only per-peer state of its peer-to-peer layer
 belongs to the ping safeguard and to the clock check, neither of which is on
-the request path). Reloaded's requester differs on item 5: it fails a request at
+the request path). *(Since 2026-11-05 the registrations of R-Q5b item 6 also
+count per peer, under the same two limits. They count the peer a keep-alive
+came from, on the gossip path, not the asking peer. An order-book request
+waiting under §32.9C R-GH12a counts in the parked-request table.)* Reloaded's
+requester differs on item 5: it fails a request at
 once when the connection to the responder closes. The consequence for
 the re-ask is drawn in §32.10 D10 and bound in R-Q5c.
 
@@ -2949,6 +3055,10 @@ keeps a cancelled order out of every later message and answer for the
 final-cancel window, one hour by default, where the release rows re-admit
 it after 120 s (R-GH5 item 4).)* *(Since 2026-11-05, §32.9C.2 R-GH14 binds per-pair
 liveness on the receiver's clock, switch `pair_liveness`, default on.)*
+*(Since 2026-11-05, §32.7.3 R-Q5b item 6 parks a request that reaches a
+relay before the placeholder exists, and R-GH12a lets the order-book answer
+wait briefly for a lagging worker. Both change only the timing of an answer
+that would otherwise fail.)*
 
 **T-GH1** *Unnamed pairs are untouched (R-GH1).* A node holding entries of
 P on pairs X and Y receives a keep-alive from P naming only X with X's held
@@ -3142,7 +3252,55 @@ first time. Whether Reloaded should answer a listed pubkey that has no
 trie record yet — with zero for `last_keep_alive` — instead of failing the
 request is an open question, not bound here and not yet a listed
 candidate; it concerns the same window before a pubkey's record exists as
-the post-beta item 4 of §32.10 D12.)*
+the post-beta item 4 of §32.10 D12.)* *(Decided 2026-11-03 by the
+maintainer (Decision 28) and bound on 2026-11-05 as R-GH12a: a Reloaded
+responder waits briefly for its worker before it fails the request this way.
+It does not answer with zero for `last_keep_alive`.)*
+
+**R-GH12a (Reloaded: the order-book answer waits briefly for a lagging
+worker).** *Reloaded-original (2026-11-05; the maintainer's Decision 28 of
+2026-11-03, ghost-orders package B4a, §32.10 D12 item 4); no forbidden-class
+input. It rests on the reference facts of R-GH12, which passed the KDF Dirty
+Gate.* With `orderbook_answer_waits_for_worker` on, a responder that would fail
+an order-book request (R-Q1) only because one or more pubkeys its read index
+lists for the pair have no record in its trie store yet MUST NOT fail it at
+once:
+
+1. It hands the request's response channel to a task of its own and returns
+   at once, as for a parked synchronization request (R-T3b item 3, §32.7.3
+   R-Q5b item 5).
+2. That task waits until every listed pubkey has a record, or until the short
+   bound the keep-alive receiver waits for the worker (R-T3b item 4) has
+   passed since the request arrived, whichever comes first. It then builds the
+   answer as R-GH12 binds, from the index and the store as they stand at that
+   moment: a pubkey that has left the index meanwhile is no longer listed, and
+   the order-count limit is checked again. If a listed pubkey still has no
+   record, the request fails with the error answer of R-GH12, as it would have
+   at once.
+3. A request whose pair holds more than 1,000 orders fails at once, without
+   the wait.
+4. A waiting request counts against the limits of R-Q5b item 4, together with
+   the parked synchronization requests. Past either limit it fails at once,
+   as without this rule.
+5. The top-level `MM2.json` boolean `orderbook_answer_waits_for_worker`,
+   default `true`; only a JSON `false` turns the rule off, and the responder
+   then fails at once as R-GH12 describes. The switch is independent of
+   `sync_answer_deferral_ms` and of `sync_answer_deferral_before_placeholder`.
+
+> **Compatibility:** for behaviour matching GLEEC KDF, set
+> `orderbook_answer_waits_for_worker` to `false`.
+
+> **Reloaded divergence (2026-11-05).** Both release rows fail the whole
+> order-book request while the first insertion of a listed maker is still
+> queued for the worker (R-GH12). The requester then moves to its next relay;
+> if every relay fails, a non-relay fails its `orderbook` call until the next
+> call (R-F6a). In a start-up burst, when many makers post at once and the
+> worker lags, that failure is most likely on the relays that hold the most
+> orders. With this rule such a relay answers as soon as its worker catches up
+> within the bound. A worker that lags longer still fails the request, as
+> before. The wire is unchanged. Only the timing of an answer that would
+> otherwise fail differs, and it stays far below the requester's 10 s timeout
+> (R-Q6).
 
 **R-GH13 (the maker's two ticks: what is processed, and whom a keep-alive
 reaches).** At both release rows:
@@ -3193,7 +3351,28 @@ afterwards; one whose removal is held back omits the order; with the worker
 idle the answer equals the index. A requester with two relays in its mesh,
 the first answering an error, applies the second's answer; with every relay
 failing, a non-relay fails the `orderbook` RPC and asks again on the next
-call, and a relay succeeds with its held set.
+call, and a relay succeeds with its held set. (In Reloaded the error case
+holds with `orderbook_answer_waits_for_worker: false`, or with the insertion
+held back past the bound; for the default see T-GH12a.)
+
+**T-GH12a** *The order-book answer waits briefly for the worker
+(R-GH12a).* A responder's index lists the order of a maker whose first
+insertion the worker has not applied yet.
+- With the worker released within the bound, the request is not answered at
+  once, and the inbound handler returns without waiting. When the insertion
+  is applied, the answer lists the maker's orders with its `last_keep_alive`,
+  as R-GH12 binds.
+- With the worker held past the bound, the request fails with the error
+  answer of R-GH12 when the bound expires, not before.
+- With the order cancelled while the request waits, the answer omits the
+  maker, and the request does not fail.
+- A pair with more than 1,000 orders fails at once.
+- With `orderbook_answer_waits_for_worker` set to `false`, the request fails
+  at once, as T-GH12 describes.
+- With the parked limits of R-Q5b item 4 set to `2` per peer and `3` in all,
+  and two synchronization requests from one peer parked, an order-book
+  request from that peer fails at once.
+- After every path the parked table is empty.
 
 **T-GH13** *Ticks (R-GH13).* A maker with orders on pairs X and Y under
 its persistent key and one privacy-coin order under a per-order key on
@@ -3607,7 +3786,10 @@ D12. **Stale entries of a maker that keeps sending keep-alives (open
        bursts: parking a request for a pair named by a keep-alive the
        node is still handling, before its placeholder exists, and a
        review of the parking limits. *(The limits were reviewed first,
-       on 2026-11-02: R-Q5b item 4 as amended.)*
+       on 2026-11-02: R-Q5b item 4 as amended. The parking was bound on
+       2026-11-05 as §32.7.3 R-Q5b item 6. With it came §32.9C R-GH12a,
+       which lets the order-book answer wait briefly for a lagging worker
+       (the maintainer's Decision 28 of 2026-11-03).)*
 
     (c) and (d) only if (a) is rejected.
 
@@ -4345,3 +4527,12 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   and from a lab run of this project's own nodes. The reference facts it
   rests on are R-GH1, R-GH3 and R-GH13, which passed the KDF Dirty Gate. It
   needs no Dirty Gate pass of its own.
+- *Reloaded-original addition (2026-11-05): R-Q5b item 6 and T-Q5b6,
+  R-GH12a and T-GH12a, and the notes and markers that point to them.* The
+  notes and markers are those on R-Q5b item 5, R-Q6a, R-GH10, R-GH12, T-GH12
+  and D12 item 4. Written by a context that never read the forbidden corpus.
+  Its sources are the maintainer's Decision BK (D12 item 4) and Decision 28,
+  and this repository's own keep-alive handling, synchronization answer,
+  parked-request table and order-book answer. The reference facts it rests on
+  are R-F3a, R-GH12 and the "no data" and "missing pair" classes of R-Q5a,
+  which passed the KDF Dirty Gate. It needs no Dirty Gate pass of its own.

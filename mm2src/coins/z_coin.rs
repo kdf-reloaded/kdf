@@ -3317,9 +3317,16 @@ impl MmCoin for ZCoin {
         {
             let coin = self.clone();
             let fut = async move {
+                // CRD ch.49 R49.27a (b) and (c): the shared unsupported-operation arm, `fee` checked first.
+                // Both run before the destination is decoded or any note is selected.
                 if req.fee.is_some() {
-                    return MmError::err(WithdrawError::InternalError(
-                        "Setting a custom withdraw fee is not supported for ZCoin yet".to_owned(),
+                    return MmError::err(WithdrawError::UnsupportedError(
+                        "Setting a custom withdraw fee is not supported for ZCoin".to_owned(),
+                    ));
+                }
+                if req.from.is_some() {
+                    return MmError::err(WithdrawError::UnsupportedError(
+                        "Selecting a sender with `from` is not supported for ZCoin".to_owned(),
                     ));
                 }
 

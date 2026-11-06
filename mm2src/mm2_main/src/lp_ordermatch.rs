@@ -131,9 +131,9 @@ pub use ordermatch_orderbook::*;
 
 #[path = "lp_ordermatch/sync_answer_deferral.rs"]
 mod sync_answer_deferral;
-pub(crate) use sync_answer_deferral::{answer_sync_request, sync_answer_deferral_ms, sync_request_alternate_relay,
-                                      sync_request_retry_ms, wait_until_applied, SyncAnswerDeferral, SyncAnswerReply,
-                                      SyncInFlight};
+pub(crate) use sync_answer_deferral::{answer_orderbook_request, answer_sync_request, register_keep_alive_handling,
+                                      sync_answer_deferral_ms, sync_request_alternate_relay, sync_request_retry_ms,
+                                      wait_until_applied, SyncAnswerDeferral, SyncAnswerReply, SyncInFlight};
 
 #[path = "lp_ordermatch/sync_log.rs"] mod sync_log;
 pub(crate) use sync_log::{classify_sync_request, debug_enabled, pairs_label, AltEvent, AltReason, AnswerClass,

@@ -513,6 +513,15 @@ only, never the text.
 > row. No peer observes the discriminant, so arm 1 of
 > `docs/COMPAT_SWITCHES.md` "The default-side rule" does not bind the default,
 > and the change has no switch.
+>
+> **Shielded rows (this repository, 2026-11-05; not corpus-sourced).** **Parity**
+> since PR #256. A shielded withdraw that carries `fee` answers `UnsupportedError`,
+> and so does one that carries `from`, with `fee` checked first, on the direct
+> method and on `task::withdraw::init` alike. Before, Reloaded answered `fee`
+> with an internal error (HTTP 500) and ignored `from`, spending from the
+> wallet's own address. Tests:
+> `z_coin::z_note_lock_tests::withdraw_unsupported`. As for the SLP row, no peer
+> observes the discriminant, and the change has no switch.
 
 ## 49.7 Provenance Footer
 

@@ -117,6 +117,12 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   that times out. Each decline is logged at debug level with its cause, and at most once an hour a
   warning gives the number declined. Setting `require_v6_counterparty` to `false` in the coin's
   `consensus_params` turns the requirement off. Detail: PR #241; CRD ch.39 R39.6.4f.
+- **An ARRR withdrawal that sets `fee` or `from` is now refused with the shared "unsupported" error.**
+  The answer is `error_type: "UnsupportedError"` (HTTP 400), as for other withdrawals that ask for
+  something a coin cannot do, and as GLEEC KDF answers. A custom `fee` used to give an internal
+  error (HTTP 500). **A `from` used to be ignored silently**, and the withdrawal was made from the
+  wallet's own address; a client that sends `from` for ARRR now gets this refusal instead. Detail:
+  PR #256; CRD ch.49 R49.27a.
 
 #### EVM coins
 
@@ -201,6 +207,27 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   and gets its orders back. Before, the order stayed until the maker posted on that pair again or
   went offline. Your own orders are never dropped. To restore the old behavior, set `pair_liveness`
   to `false` in `MM2.json`. Detail: PR #251; CRD ch.32 R-GH14.
+- **A relay holds a sync request that reaches it before it has started its own sync for that
+  pair.** A relay passes a maker's keep-alive on before it handles it. When many makers start or
+  re-post at once, the nodes behind it therefore asked for the maker's orders before the relay had
+  started its own sync, got "no data" or "missing pair" at once, and asked again only at the maker's
+  next keep-alive, 30 seconds later for each relay on the way. The relay now holds such a request
+  while it handles that keep-alive, and answers it once its own sync lands, within the same
+  5-second bound and the same limits as the requests it already holds. The keep-alives it is
+  handling are limited by the same two settings; one that finds a limit full is handled as before.
+  The relay's 60-second sync summary line ends with a new `pre_placeholder` part that counts these
+  requests and the keep-alives handled without a hold. To restore the old behavior, set
+  `sync_answer_deferral_before_placeholder` to `false` in `MM2.json`. Nothing on the wire changes.
+  Detail: CRD PR #258, PR #259; CRD ch.32 R-Q5b item 6.
+- **An order-book request no longer fails at once while a relay is still storing a maker's first
+  orders.** A relay answers an order-book request from its list of orders, and each maker on that
+  list needs a stored record. When many makers post at once, a maker's first orders can be listed
+  before its record is stored, and the whole request used to fail, so the asking node moved on to
+  another relay or, with none left, failed its `orderbook` call. The relay now waits up to 250 ms
+  for the record and answers then; only if it is still behind does the request fail as before. A
+  waiting request counts against the same limits as the sync requests a relay holds. To restore the
+  old behavior, set `orderbook_answer_waits_for_worker` to `false` in `MM2.json`. Nothing on the
+  wire changes. Detail: CRD PR #258, PR #259; CRD ch.32 R-GH12a.
 
 #### UTXO coins and Electrum
 
@@ -365,6 +392,24 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
     applies to the version-2 swap's event search.
 
   Detail: PR #248; CRD ch.17 R17.8.1–R17.8.4.
+- **Before refunding on an EVM chain, a taker now finds a late spend of its payment within its time
+  budget.** Before a refund, the taker looks on the chain for a spend of its payment by the maker,
+  under a budget of two minutes. That look always started at the swap's first block. A maker that
+  spent the payment late, near the end of its lock time, left the spend far from the start. On a
+  chain with fast blocks, the look could then run out of time on every try. The taker would keep
+  trying a refund that cannot succeed and never claim the maker's payment.
+  - **Newest blocks first.** The look now scans from the newest blocks down.
+  - **No rescanning.** It remembers what it has scanned for the rest of the session, so a later look
+    goes on where the last one stopped. The newest 12 blocks are always scanned again, in case of
+    a reorganization.
+  - **Lagging nodes.** A node behind the newest block can answer a range as empty. So after a full
+    pass that found nothing, the look starts over. The taker's wait for the spend, and the
+    version-2 swap's event search, go back to their start at most once a minute after an empty
+    pass.
+  - **Version-2 swaps.** The version-2 swap's event search no longer rescans its whole range on every
+    poll.
+
+  Detail: PR #255; CRD ch.17 R17.8.3a.
 
 #### Node names in logs and errors
 
@@ -457,6 +502,10 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
+- [`electrum-tls-server-authentication`](docs/plans/electrum-tls-server-authentication.md) — new,
+  planning: what an `SSL` Electrum server must present, with and without `disable_cert_verification`,
+  is now written down. So are a warning at activation when the flag is set and an optional pin on the
+  server's key, `spki_sha256`; both are planned and not built yet (PR #240).
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
   now names the gas limits each EVM coin and token will use and where they come from (PR #200);
   open point 3 is decided, and the fee to send an EVM taker fee is now quoted at the gas limit it
@@ -468,7 +517,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222). A received
   cancellation now stays final for an hour, and a maker no longer restores an order it cancelled
   (PRs #223, #224). A pair the maker stops advertising is now dropped after the liveness window
-  (CRD PR #243, PR #251).
+  (CRD PR #243, PR #251). A relay now holds a sync request that reaches it before its own sync for
+  the pair has started, and an order-book answer waits briefly for a relay that is still storing a
+  maker's first orders (CRD PR #258, PR #259).
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot

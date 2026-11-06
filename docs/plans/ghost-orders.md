@@ -1,6 +1,6 @@
 # Plan: cancelled orders that other nodes keep showing ("ghost orders")
 
-**Status:** planning — **Last reviewed:** 2026-11-03
+**Status:** planning — **Last reviewed:** 2026-11-06
 
 > **Context.** On the public network on 2026-10-31, a maker re-priced its orders with `setprice` and
 > `cancel_previous`, yet other nodes, Reloaded seeds among them, kept showing five of its orders on one
@@ -28,8 +28,8 @@
 | B2 | A cancel this node received keeps the order out of every later order message and answer for an hour by default (`cancel_final_window_secs`, at least 120 s, at most one day), so a stale relay cannot bring it back. Memory-capped: the cancels of the last 120 s, as on Komodo and GLEEC KDF, plus at most `cancel_final_max_entries` older ones (100,000 by default, about 20 MB); past the cap the oldest fall back to 120 s. Decided 2026-11-03 (Decision 29). | ch.32 R-K1b (D12 item 2) | M | CRD PR #223, code PR #224 |
 | B2a | Restore guard. At start, a maker skips and deletes a stored active order whose removal its order history already records, and it retries a failed deletion of a removed order's record (three tries, 200 ms apart, each failure logged once). Switch `maker_restore_skips_cancelled`, default on; off restores every record as Komodo and GLEEC KDF do. Limits: an order created with `save_in_history: false`, or one whose history write failed together with the deletion, still comes back; taker orders are not covered. Decided 2026-11-03 (Decision 29). | ch.12 R7c (D12 item 2) | S | CRD PR #223, code PR #224 |
 | B3 | Per-pair liveness on the receiver's clock: a pair the maker stops advertising is dropped after the liveness window (`maker_order_timeout`, 90 s) while the maker's other pairs live on. A keep-alive naming the pair refreshes it whatever root it advertises. Switch `pair_liveness`, default on. | ch.32 §32.9C.2 R-GH14 (D12 item 3) | M | CRD PR #243, code PR #251 |
-| B4 | During start-up and re-post bursts, hold a sync request for a pair the relay is about to sync, instead of answering "missing pair" at once. | to be written (D12 item 4) | M | after B5 and B1 |
-| B4a | Order-book answer under a lagging worker: when an order-book request lists a maker that has no trie record yet, the relay waits briefly (at most the bound a keep-alive already waits, CRD ch.32 R-T3b) for its trie worker and answers then; it fails as today only if the worker is still behind. Own switch, default on; off is the immediate error of Komodo and GLEEC KDF (CRD ch.32 R-GH12). Decided 2026-11-03 (Decision 28). | to be written with B4 (D12 item 4) | S | with B4 |
+| B4 | During start-up and re-post bursts, a relay holds a sync request for a pair named by a keep-alive it is still handling, before it has created the placeholder and sent its own request, instead of answering "no data" or "missing pair" at once. Same bound and limits as the existing parking; the keep-alives being handled are bounded by the same two limits, and one that finds a limit full is handled as today. Switch `sync_answer_deferral_before_placeholder`, default on. | ch.32 R-Q5b item 6 (D12 item 4) | M | CRD PR #258, code PR #259 |
+| B4a | Order-book answer under a lagging worker: when an order-book request lists a maker that has no trie record yet, the relay waits briefly (at most the bound a keep-alive already waits, CRD ch.32 R-T3b) for its trie worker and answers then; it fails as today only if the worker is still behind. Own switch, default on; off is the immediate error of Komodo and GLEEC KDF (CRD ch.32 R-GH12). Decided 2026-11-03 (Decision 28). | ch.32 R-GH12a (D12 item 4) | S | CRD PR #258, code PR #259 |
 | L1 | Lab: a live trigger of the second request after a quick failure (CRD ch.32 R-Q5c) on a chain with 200 ms latency, with the setting on and off. | — | S | after the 0.4.0-alpha.1 bump |
 | L2 | Lab: a chain with one heavily loaded reference relay, as the reproduction of the field case for B1; before and after on the same binary. | — | M | after B1 |
 
@@ -74,7 +74,15 @@ Each package changes no wire shape and has its own switch, so that a lab can run
   alive: without the maker's keep-alives it drops the maker after 90 s, and with them it heals at the
   first one. The rule is covered in-process by CRD ch.32 T-K8 (a) and (b).)*
 - **B2a:** unit tests (CRD ch.12 T9); no lab run.
-- **B4:** the recipe follows with its CRD rule.
+- **B4:** the burst case of B5 (a maker with 40 or more pairs restarts behind one Reloaded relay
+  with three nodes behind it), with the switch on and off on one binary. Count the relay's
+  synchronization answers given at once as "no data", "missing pair" or the placeholder error, the
+  requests parked before the placeholder existed and how they ended, and the keep-alives handled
+  without a registration because a limit was full (all from the relay's 60 s synchronization
+  summary). Passes when the answers given at once fall with the switch on and no parked request
+  outlasts the bound. Unit tests: CRD ch.32 T-Q5b6.
+- **B4a:** unit tests (CRD ch.32 T-GH12a). A lab cannot hold the trie worker back on purpose; the
+  burst run of B4 counts any order-book request that still fails.
 
 ## Open points
 

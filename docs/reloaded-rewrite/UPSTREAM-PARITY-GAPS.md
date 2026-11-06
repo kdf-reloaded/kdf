@@ -932,6 +932,21 @@ R59.6.4, D2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta`
   failed deletion of a removed order's record; the reference restores every
   stored active record. A deliberate divergence with the opt-back switch
   `maker_restore_skips_cancelled`.
+- [x] *Done 2026-11-05 (ch. 32 §32.9C.2 R-GH14, D12 item 3):* each pair of
+  another maker has its own liveness instant on the receiver's clock, and a
+  pair the maker stops advertising is pruned after the liveness window while
+  the maker's other pairs stay; at the reference release rows such a pair
+  stays until the maker's whole record expires. Wire-compatible; a deliberate
+  divergence with the opt-back switch `pair_liveness`.
+- [x] *Done 2026-11-06 (ch. 32 R-Q5b item 6 and R-GH12a, D12 item 4):* a
+  relay holds a synchronization request for a pair named by a keep-alive it
+  is still handling, before it has created the placeholder and sent its own
+  request, and answers it within the bound of R-Q5b; and an order-book answer
+  that lists a maker with no trie record yet waits up to the worker bound of
+  R-T3b before it fails. The reference answers both at once with a failure.
+  Wire-compatible; deliberate divergences with the opt-back switches
+  `sync_answer_deferral_before_placeholder` and
+  `orderbook_answer_waits_for_worker`.
 
 ---
 
