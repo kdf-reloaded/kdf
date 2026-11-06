@@ -505,6 +505,11 @@ fn process_p2p_request(
             return lp_ordermatch::answer_sync_request(&ctx, peer_id, pubkey, trie_roots, reply)
                 .map_to_mm(P2PRequestError::SendError);
         },
+        // CRD ch.32 R-GH12a: the answer may wait briefly for the trie worker, on a task of its own.
+        Ok(P2PRequest::Ordermatch(lp_ordermatch::OrdermatchRequest::GetOrderbook { base, rel })) => {
+            return lp_ordermatch::answer_orderbook_request(&ctx, peer_id, base, rel, reply)
+                .map_to_mm(P2PRequestError::SendError);
+        },
         Ok(request) => {
             let result = match request {
                 P2PRequest::Ordermatch(req) => lp_ordermatch::process_peer_request(ctx.clone(), req),

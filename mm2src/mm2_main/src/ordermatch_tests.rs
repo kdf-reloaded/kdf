@@ -11645,7 +11645,10 @@ mod order_message_liveness {
 /// when the node's own synchronization lands.
 mod sync_answer_deferral_tests {
     use super::*;
-    use crate::mm2::lp_ordermatch::sync_answer_deferral::{sync_answer_deferral_max_per_peer,
+    use crate::mm2::lp_ordermatch::sync_answer_deferral::{answer_orderbook_request_within,
+                                                          orderbook_answer_waits_for_worker,
+                                                          sync_answer_deferral_before_placeholder,
+                                                          sync_answer_deferral_max_per_peer,
                                                           sync_answer_deferral_max_total, CEILING_MAX_PARKED_PER_PEER,
                                                           CEILING_MAX_PARKED_TOTAL, DEFAULT_MAX_PARKED_PER_PEER,
                                                           DEFAULT_MAX_PARKED_TOTAL, DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
@@ -11654,7 +11657,10 @@ mod sync_answer_deferral_tests {
     use futures::channel::oneshot;
     use mm2_p2p::atomicdex_behaviour::AdexResponse;
     use mm2_p2p::request_response::LocalFailure;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::mpsc as std_mpsc;
+    use std::task::Context;
     use std::thread::JoinHandle;
     use std::time::Instant;
 
@@ -11703,12 +11709,19 @@ mod sync_answer_deferral_tests {
     pub(super) fn assert_tables_empty(ctx: &MmArc) {
         let deferral = octx(ctx).sync_answer_deferral.clone();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && (deferral.parked_len() != 0 || deferral.in_flight_len() != 0) {
+        while Instant::now() < deadline
+            && (deferral.parked_len() != 0 || deferral.in_flight_len() != 0 || deferral.registrations_len() != 0)
+        {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(deferral.parked_len(), 0, "parked table");
         assert!(deferral.parked_counts_agree(), "per-peer count of the parked table");
         assert_eq!(deferral.in_flight_len(), 0, "in-flight table");
+        assert_eq!(deferral.registrations_len(), 0, "registrations table");
+        assert!(
+            deferral.registration_counts_agree(),
+            "per-peer count and index of the registrations table"
+        );
     }
 
     /// The uuids of the maker's orders in the node's read index.
@@ -11977,7 +11990,7 @@ mod sync_answer_deferral_tests {
         let started = std::time::Instant::now();
         ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
         assert!(answers.try_recv().is_err());
-        let (_, res) = answered(&answers, 3000);
+        let (_, res) = answered(&answers, 5000);
         let waited = started.elapsed();
         assert!(
             waited >= Duration::from_millis(BOUND_MS - 50),
@@ -13250,6 +13263,674 @@ mod sync_answer_deferral_tests {
             assert_eq!(full_set_len(&res), ORDERS);
             assert_tables_empty(&f.relay);
         }
+    }
+
+    // ---- CRD ch.32 R-Q5b item 6 (T-Q5b6): a request that arrives before the placeholder exists.
+
+    /// The trie worker lags: one batch counts as queued that the worker has not applied, so the handling of a
+    /// keep-alive waits for it at its start (R-T3b item 4). Call it once per node, and release it with
+    /// [`release_worker`].
+    fn hold_worker(ctx: &MmArc) { octx(ctx).orderbook.lock().trie_ops_enqueued += 1; }
+
+    /// The worker applies the batch that [`hold_worker`] counted.
+    fn release_worker(ctx: &MmArc) { octx(ctx).trie_store.lock().applied_batches += 1; }
+
+    /// A root that is neither the zero root nor the empty-trie root.
+    fn some_root() -> H64 { H64::from([7; 8]) }
+
+    fn keep_alive_naming(roots: &[(&str, H64)]) -> PubkeyKeepAlive {
+        PubkeyKeepAlive {
+            trie_roots: roots.iter().map(|(pair, root)| (pair.to_string(), *root)).collect(),
+            timestamp: now_ms() / 1000,
+        }
+    }
+
+    type Handling = Pin<Box<dyn Future<Output = bool> + Send>>;
+
+    /// The handling of a keep-alive of `pubkey` received from `peer`, polled until it waits for the trie worker
+    /// and then left there: the test decides when it ends, by dropping it.
+    fn start_handling(
+        relay: &MmArc,
+        peer: &str,
+        pubkey: &str,
+        keep_alive: PubkeyKeepAlive,
+        i_am_relay: bool,
+    ) -> Handling {
+        let mut task: Handling = Box::pin(process_orders_keep_alive(
+            relay.clone(),
+            peer.to_owned(),
+            pubkey.to_owned(),
+            keep_alive,
+            i_am_relay,
+        ));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            task.as_mut().poll(&mut cx).is_pending(),
+            "the handling should wait for the worker"
+        );
+        task
+    }
+
+    /// Lets a handling that was left waiting by [`start_handling`] run to its end on a thread of its own.
+    fn finish_handling(task: Handling) -> JoinHandle<bool> { std::thread::spawn(move || block_on(task)) }
+
+    fn assert_missing_pair(res: &AdexResponse) {
+        match res {
+            AdexResponse::Err { error } => assert!(error.contains("No pair trie root"), "{}", error),
+            other => panic!("expected the missing-pair failure, got {:?}", other),
+        }
+    }
+
+    /// The request is parked behind a registration, the worker is released, the relay sends its own request
+    /// and the parked request is answered with the full set once that answer is applied.
+    fn assert_parked_before_the_placeholder_then_served(f: &mut Fixture) {
+        let (answers_tx, answers) = std_mpsc::channel();
+        hold_worker(&f.relay);
+        // Polled once on this thread: the registration exists and the handling waits for the worker. It cannot
+        // go on before it is polled again, so nothing below depends on how fast this thread runs.
+        let task = start_handling(&f.relay, "forwarding-peer", MAKER, f.keep_alive(), true);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.registrations_len(), 1);
+
+        let started = Instant::now();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(LONG_BOUND_MS / 10),
+            "the inbound handler waited"
+        );
+        assert!(answers.try_recv().is_err(), "the request is parked, not answered");
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 0);
+
+        release_worker(&f.relay);
+        let task = finish_handling(task);
+        let mut own = match next_cmd(&mut f.relay_cmds) {
+            AdexBehaviourCmd::RequestPeers { req, response_tx, .. } => OwnSync {
+                keep_alive_task: task,
+                request: req,
+                response_tx: Some(response_tx),
+            },
+            other => panic!("unexpected command {:?}", other),
+        };
+        // The registration has ended and the own request is in flight: the request waits for that one.
+        assert!(answers.recv_timeout(Duration::from_millis(100)).is_err());
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 1);
+
+        own.answer(&f.maker);
+        let (id, res) = answered(&answers, 2000);
+        assert_eq!(id, 1);
+        assert_eq!(full_set_len(&res), ORDERS);
+        assert!(own.finish());
+        assert_eq!(maker_book(&f.relay), f.uuids);
+        assert_tables_empty(&f.relay);
+
+        let log = &octx(&f.relay).sync_log;
+        assert_eq!(log.answers(), vec![(AnswerClass::OkFull, AnswerPath::PreParkedWoken)]);
+        let counters = log.snapshot();
+        assert_eq!(
+            (
+                counters.pre_parked_woken,
+                counters.pre_parked_bound,
+                counters.answers_parked,
+                counters.registrations_capped
+            ),
+            (1, 0, 1, 0)
+        );
+    }
+
+    #[test]
+    fn a_request_for_a_pubkey_never_seen_is_parked_until_the_own_sync_lands() {
+        let mut f = Fixture::new(json!({}));
+        assert_parked_before_the_placeholder_then_served(&mut f);
+    }
+
+    #[test]
+    fn a_request_for_a_known_pubkey_with_the_pair_missing_is_parked_until_the_own_sync_lands() {
+        let mut f = Fixture::new(json!({}));
+        add_placeholder(&f.relay, MAKER, OTHER_PAIR);
+        assert_parked_before_the_placeholder_then_served(&mut f);
+    }
+
+    #[test]
+    fn a_request_for_a_pair_held_at_the_advertised_root_is_answered_when_the_registration_ends() {
+        let mut f = Fixture::new(json!({}));
+        let mut own = f.start_own_sync();
+        own.answer(&f.maker);
+        assert!(own.finish());
+        flush_trie(&f.relay);
+        assert_tables_empty(&f.relay);
+
+        // The same keep-alive again: the comparison finds the root held and sends no request.
+        let (answers_tx, answers) = std_mpsc::channel();
+        hold_worker(&f.relay);
+        let task = start_handling(&f.relay, "forwarding-peer", MAKER, f.keep_alive(), true);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.registrations_len(), 1);
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err(), "parked behind the registration");
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
+
+        release_worker(&f.relay);
+        let task = finish_handling(task);
+        assert_eq!(full_set_len(&answered(&answers, 2000).1), ORDERS);
+        assert!(task.join().unwrap(), "the keep-alive is forwarded");
+        f.assert_no_further_request();
+        assert_tables_empty(&f.relay);
+        assert_eq!(octx(&f.relay).sync_log.answers(), vec![(
+            AnswerClass::OkFull,
+            AnswerPath::PreParkedWoken
+        )]);
+    }
+
+    #[test]
+    fn a_dropped_handling_answers_the_parked_request_at_once_and_a_later_request_too() {
+        let f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        hold_worker(&f.relay);
+        let task = start_handling(&f.relay, "forwarding-peer", MAKER, f.keep_alive(), true);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.registrations_len(), 1);
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+
+        drop(task);
+        let (_, res) = answered(&answers, 2000);
+        assert_missing_pair(&res);
+        ask(&f.relay, peer(), 2, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_missing_pair(&answers.try_recv().expect("answered at once").1);
+
+        release_worker(&f.relay);
+        assert_tables_empty(&f.relay);
+        assert_eq!(octx(&f.relay).sync_log.answers(), vec![
+            (AnswerClass::MissingPair, AnswerPath::PreParkedWoken),
+            (AnswerClass::MissingPair, AnswerPath::AtOnce(AtOnce::NotDeferrable)),
+        ]);
+    }
+
+    #[test]
+    fn a_handling_blocked_past_the_bound_does_not_hold_the_request_beyond_it() {
+        const BOUND_MS: u64 = 1000;
+        let f = Fixture::new(json!({ "sync_answer_deferral_ms": BOUND_MS }));
+        let (answers_tx, answers) = std_mpsc::channel();
+        hold_worker(&f.relay);
+        let started = Instant::now();
+        // Polled once and never again: the handling stays where it is, past any bound.
+        let task = start_handling(&f.relay, "forwarding-peer", MAKER, f.keep_alive(), true);
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+
+        // Not answered before the registration expires, and not later than the request's own bound.
+        assert!(answers.recv_timeout(Duration::from_millis(BOUND_MS - 400)).is_err());
+        let (_, res) = answered(&answers, 3000);
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(BOUND_MS - 50),
+            "answered after {:?}",
+            waited
+        );
+        assert!(
+            waited < Duration::from_millis(BOUND_MS * 5),
+            "answered after {:?}",
+            waited
+        );
+        assert_missing_pair(&res);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 0);
+
+        // The handling has not ended, but its registration is older than the bound: it counts as ended.
+        assert_eq!(octx(&f.relay).sync_answer_deferral.registrations_len(), 1);
+        ask(&f.relay, peer(), 2, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_missing_pair(&answers.try_recv().expect("answered at once").1);
+
+        drop(task);
+        release_worker(&f.relay);
+        assert_tables_empty(&f.relay);
+        let log = &octx(&f.relay).sync_log;
+        assert_eq!(log.answers(), vec![
+            (AnswerClass::MissingPair, AnswerPath::PreParkedBound),
+            (AnswerClass::MissingPair, AnswerPath::AtOnce(AtOnce::NotDeferrable)),
+        ]);
+        assert_eq!(log.snapshot().pre_parked_bound, 1);
+    }
+
+    #[test]
+    fn a_pair_named_with_the_zero_or_the_empty_trie_root_is_not_registered() {
+        for root in [H64::default(), hashed_null_node::<Layout>()] {
+            let f = Fixture::new(json!({}));
+            let (answers_tx, answers) = std_mpsc::channel();
+            hold_worker(&f.relay);
+            let task = start_handling(
+                &f.relay,
+                "forwarding-peer",
+                MAKER,
+                keep_alive_naming(&[(PAIR, root)]),
+                true,
+            );
+            assert_eq!(octx(&f.relay).sync_answer_deferral.registrations_len(), 0);
+            ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+            assert_missing_pair(&answers.try_recv().expect("answered at once").1);
+            assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 0);
+
+            drop(task);
+            release_worker(&f.relay);
+            assert_tables_empty(&f.relay);
+        }
+    }
+
+    #[test]
+    fn a_pubkey_no_keep_alive_names_and_a_relay_s_own_pubkey_are_answered_at_once() {
+        let f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        hold_worker(&f.relay);
+        let task = start_handling(&f.relay, "forwarding-peer", MAKER, f.keep_alive(), true);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.registrations_len(), 1);
+
+        // Another pubkey, which no keep-alive being handled names.
+        ask(&f.relay, peer(), 1, "03unknown", &[PAIR], &answers_tx).unwrap();
+        assert_eq!(answers.try_recv().expect("answered at once").1, AdexResponse::None);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 0);
+        drop(task);
+        release_worker(&f.relay);
+        assert_tables_empty(&f.relay);
+
+        // One of the relay's own pubkeys: nothing is registered for it.
+        octx(&f.relay).orderbook.lock().my_p2p_pubkeys.insert(MAKER.to_owned());
+        hold_worker(&f.relay);
+        let task = start_handling(&f.relay, "forwarding-peer", MAKER, f.keep_alive(), true);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.registrations_len(), 0);
+        ask(&f.relay, peer(), 2, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_missing_pair(&answers.try_recv().expect("answered at once").1);
+        drop(task);
+        release_worker(&f.relay);
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn a_registered_pair_together_with_an_unregistered_missing_pair_is_answered_at_once() {
+        let f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        hold_worker(&f.relay);
+        let task = start_handling(&f.relay, "forwarding-peer", MAKER, f.keep_alive(), true);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.registrations_len(), 1);
+
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR, OTHER_PAIR], &answers_tx).unwrap();
+        assert_missing_pair(&answers.try_recv().expect("answered at once").1);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 0);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.registrations_len(), 1);
+
+        drop(task);
+        release_worker(&f.relay);
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn registrations_are_limited_apart_from_the_parked_requests_and_a_parked_one_counts_against_the_latter() {
+        let f = Fixture::new(small_limits(2, 3));
+        let (answers_tx, answers) = std_mpsc::channel();
+        hold_worker(&f.relay);
+        // Two keep-alives from F register, the third from F is over the per-peer limit; G's registers, which
+        // fills the total, and H's is over it.
+        let keep_alives = [
+            ("F", "03a0"),
+            ("F", "03a1"),
+            ("F", "03a2"),
+            ("G", "03a3"),
+            ("H", "03a4"),
+        ];
+        let tasks: Vec<Handling> = keep_alives
+            .iter()
+            .map(|(from, pubkey)| {
+                start_handling(&f.relay, from, pubkey, keep_alive_naming(&[(PAIR, some_root())]), true)
+            })
+            .collect();
+        let deferral = octx(&f.relay).sync_answer_deferral.clone();
+        assert_eq!(deferral.registrations_len(), 3);
+        assert!(deferral.registration_counts_agree());
+        assert_eq!(octx(&f.relay).sync_log.snapshot().registrations_capped, 2);
+
+        // A request for the pairs of the two that were handled without a registration is answered at once.
+        for (id, pubkey) in [(1, "03a2"), (2, "03a4")] {
+            ask(&f.relay, peer(), id, pubkey, &[PAIR], &answers_tx).unwrap();
+            assert_missing_pair(&answers.try_recv().expect("answered at once").1);
+        }
+
+        // Requests for registered pairs are parked, and they count against the parked limits (2 and 3).
+        let asking = peer();
+        ask(&f.relay, asking, 10, "03a0", &[PAIR], &answers_tx).unwrap();
+        ask(&f.relay, asking, 11, "03a1", &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+        assert_eq!(deferral.parked_len(), 2);
+        ask(&f.relay, asking, 12, "03a0", &[PAIR], &answers_tx).unwrap();
+        assert_eq!(answers.try_recv().expect("over the per-peer limit").0, 12);
+        ask(&f.relay, peer(), 13, "03a0", &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+        assert_eq!(deferral.parked_len(), 3);
+        ask(&f.relay, peer(), 14, "03a1", &[PAIR], &answers_tx).unwrap();
+        assert_eq!(answers.try_recv().expect("over the total limit").0, 14);
+        assert_eq!(deferral.parked_len(), 3);
+
+        drop(tasks);
+        let mut ids: Vec<usize> = (0..3)
+            .map(|_| {
+                let (id, res) = answered(&answers, 3000);
+                assert_missing_pair(&res);
+                id
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![10, 11, 13]);
+        release_worker(&f.relay);
+        assert_tables_empty(&f.relay);
+
+        let log = &octx(&f.relay).sync_log;
+        let answers_of_the_window = log.answers();
+        assert_eq!(
+            answers_of_the_window
+                .iter()
+                .filter(|(_, path)| *path == AnswerPath::AtOnce(AtOnce::CapsFull))
+                .count(),
+            2
+        );
+        assert_eq!(
+            answers_of_the_window
+                .iter()
+                .filter(|(_, path)| *path == AnswerPath::PreParkedWoken)
+                .count(),
+            3
+        );
+        let counters = log.snapshot();
+        assert_eq!(
+            (
+                counters.pre_parked_woken,
+                counters.pre_parked_bound,
+                counters.answers_parked,
+                counters.registrations_capped
+            ),
+            (3, 0, 3, 2)
+        );
+        // The part of the summary line that item (f) adds; a capped registration is reported as a failure.
+        assert!(counters
+            .summary_line()
+            .expect("a window with capped registrations is reported")
+            .ends_with("; pre_placeholder parked_woken=3 parked_bound=0 registrations_capped=2"));
+    }
+
+    #[test]
+    fn nothing_is_registered_on_a_non_relay_with_the_switch_off_or_with_a_zero_bound() {
+        let cases = [
+            (json!({}), false),
+            (json!({ "sync_answer_deferral_before_placeholder": false }), true),
+            (json!({ "sync_answer_deferral_ms": 0 }), true),
+        ];
+        for (conf, i_am_relay) in cases {
+            let f = Fixture::new(conf);
+            let (answers_tx, answers) = std_mpsc::channel();
+            hold_worker(&f.relay);
+            let task = start_handling(&f.relay, "forwarding-peer", MAKER, f.keep_alive(), i_am_relay);
+            assert_eq!(octx(&f.relay).sync_answer_deferral.registrations_len(), 0);
+            ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+            assert_missing_pair(&answers.try_recv().expect("answered at once").1);
+            assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 0);
+
+            drop(task);
+            release_worker(&f.relay);
+            assert_tables_empty(&f.relay);
+            let counters = octx(&f.relay).sync_log.snapshot();
+            assert_eq!(
+                (
+                    counters.pre_parked_woken,
+                    counters.pre_parked_bound,
+                    counters.registrations_capped
+                ),
+                (0, 0, 0)
+            );
+        }
+    }
+
+    /// Only a JSON `false` turns the parking before the placeholder exists off.
+    #[test]
+    fn the_before_placeholder_switch_is_off_only_for_a_json_false() {
+        let switch = |conf: Json| {
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            sync_answer_deferral_before_placeholder(&ctx)
+        };
+        assert!(switch(json!({})));
+        assert!(switch(json!({ "sync_answer_deferral_before_placeholder": true })));
+        assert!(!switch(json!({ "sync_answer_deferral_before_placeholder": false })));
+        assert!(switch(json!({ "sync_answer_deferral_before_placeholder": "false" })));
+        assert!(switch(json!({ "sync_answer_deferral_before_placeholder": 0 })));
+        assert!(switch(json!({ "sync_answer_deferral_before_placeholder": null })));
+    }
+
+    // ---- CRD ch.32 R-GH12a (T-GH12a): the order-book answer waits briefly for the trie worker.
+
+    /// Puts `n` orders of `pubkey` for `C1:C2` into the read index of `ctx` and counts their insertion as queued,
+    /// but does not hand it to the trie worker: no record of the pubkey exists until [`apply_held`] is called
+    /// with the returned operations.
+    fn index_without_record(ctx: &MmArc, pubkey: &str, n: usize) -> (Vec<Uuid>, Vec<TrieOp>) {
+        let octx = octx(ctx);
+        let mut orderbook = octx.orderbook.lock();
+        let mut uuids = Vec::new();
+        let mut ops = Vec::new();
+        for order in make_random_orders(pubkey.to_owned(), &[0; 32], "C1".into(), "C2".into(), n) {
+            uuids.push(order.uuid);
+            ops.extend(orderbook.index_insert_or_update(order));
+        }
+        orderbook.trie_ops_enqueued += 1;
+        (uuids, ops)
+    }
+
+    /// The worker applies a batch that [`index_without_record`] (or [`cancel_in_index`]) counted.
+    fn apply_held(ctx: &MmArc, ops: Vec<TrieOp>) { octx(ctx).trie_store.lock().apply_batch(ops); }
+
+    /// The orders are cancelled in the read index; their removal counts as queued as well. Returns the removal.
+    fn cancel_in_index(ctx: &MmArc, uuids: &[Uuid]) -> Vec<TrieOp> {
+        let octx = octx(ctx);
+        let mut orderbook = octx.orderbook.lock();
+        let ops: Vec<TrieOp> = uuids
+            .iter()
+            .filter_map(|uuid| orderbook.index_remove(*uuid).map(|(_, op)| op))
+            .collect();
+        orderbook.trie_ops_enqueued += 1;
+        ops
+    }
+
+    fn ask_orderbook(relay: &MmArc, asking: PeerId, id: usize, answers: &Answers) -> Result<(), String> {
+        let answers = answers.clone();
+        let reply: SyncAnswerReply = Box::new(move |res| answers.send((id, res)).map_err(|e| e.to_string()));
+        answer_orderbook_request(relay, asking, "C1".into(), "C2".into(), reply)
+    }
+
+    fn orderbook_answer(res: &AdexResponse) -> GetOrderbookRes {
+        match res {
+            AdexResponse::Ok { response } => decode_message(response).unwrap(),
+            other => panic!("expected an answer, got {:?}", other),
+        }
+    }
+
+    fn assert_missing_record_error(res: &AdexResponse) {
+        assert_wire_form(res, "TrieStore::pubkeys_state is expected to contain");
+    }
+
+    #[test]
+    fn the_orderbook_answer_waits_for_a_worker_that_catches_up_within_the_bound() {
+        let (relay, _cmds) = node(json!({}));
+        // A bound far longer than the real one: the outcome does not depend on how fast this thread runs.
+        const LONG_WAIT_MS: u64 = 2000;
+        let (uuids, ops) = index_without_record(&relay, MAKER, 1);
+        let (answers_tx, answers) = std_mpsc::channel();
+
+        let started = Instant::now();
+        let reply: SyncAnswerReply = {
+            let answers = answers_tx.clone();
+            Box::new(move |res| answers.send((1, res)).map_err(|e| e.to_string()))
+        };
+        answer_orderbook_request_within(&relay, peer(), "C1".into(), "C2".into(), LONG_WAIT_MS, reply).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(LONG_WAIT_MS / 2),
+            "the inbound handler waited"
+        );
+        assert!(
+            answers.try_recv().is_err(),
+            "the request waits, it is not answered at once"
+        );
+        assert_eq!(octx(&relay).sync_answer_deferral.parked_len(), 1);
+
+        let applied_at_secs = now_ms() / 1000;
+        apply_held(&relay, ops);
+        let (id, res) = answered(&answers, 5000);
+        assert_eq!(id, 1);
+        // The slot is free by the time the answer arrives.
+        assert_eq!(octx(&relay).sync_answer_deferral.parked_len(), 0);
+        let mut answer = orderbook_answer(&res);
+        let item = answer.pubkey_orders.remove(MAKER).expect("the maker is listed");
+        assert_eq!(item.orders.len(), 1);
+        assert_eq!(item.orders[0].0, uuids[0]);
+        assert!(item.last_keep_alive >= applied_at_secs, "{}", item.last_keep_alive);
+        assert!(answer.pubkey_orders.is_empty());
+        assert_tables_empty(&relay);
+    }
+
+    #[test]
+    fn the_orderbook_answer_fails_when_the_worker_is_held_past_the_bound_and_not_before() {
+        let (relay, _cmds) = node(json!({}));
+        let (_, ops) = index_without_record(&relay, MAKER, 1);
+        let (answers_tx, answers) = std_mpsc::channel();
+
+        let started = Instant::now();
+        ask_orderbook(&relay, peer(), 1, &answers_tx).unwrap();
+        assert!(answers
+            .recv_timeout(Duration::from_millis(TRIE_CATCH_UP_BOUND_MS - 100))
+            .is_err());
+        let (_, res) = answered(&answers, 3000);
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(TRIE_CATCH_UP_BOUND_MS - 5),
+            "answered after {:?}",
+            waited
+        );
+        assert!(
+            waited < Duration::from_millis(TRIE_CATCH_UP_BOUND_MS * 8),
+            "{:?}",
+            waited
+        );
+        assert_missing_record_error(&res);
+        assert_tables_empty(&relay);
+        // Keep the node consistent for its worker.
+        apply_held(&relay, ops);
+    }
+
+    #[test]
+    fn an_order_cancelled_while_the_request_waits_is_left_out_and_the_request_does_not_fail() {
+        let (relay, _cmds) = node(json!({}));
+        let (uuids, insertion) = index_without_record(&relay, MAKER, 1);
+        let (answers_tx, answers) = std_mpsc::channel();
+        ask_orderbook(&relay, peer(), 1, &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+
+        // The cancellation reaches the index, and the worker then applies the insertion and the removal.
+        let removal = cancel_in_index(&relay, &uuids);
+        apply_held(&relay, insertion);
+        apply_held(&relay, removal);
+        let (_, res) = answered(&answers, 2000);
+        assert!(orderbook_answer(&res).pubkey_orders.is_empty());
+        assert_tables_empty(&relay);
+    }
+
+    #[test]
+    fn a_cancelled_order_whose_pubkey_never_gets_a_record_is_answered_without_it_at_the_bound() {
+        let (relay, _cmds) = node(json!({}));
+        let (uuids, _insertion) = index_without_record(&relay, MAKER, 1);
+        let (answers_tx, answers) = std_mpsc::channel();
+        let started = Instant::now();
+        ask_orderbook(&relay, peer(), 1, &answers_tx).unwrap();
+        let _removal = cancel_in_index(&relay, &uuids);
+
+        let (_, res) = answered(&answers, 3000);
+        assert!(started.elapsed() >= Duration::from_millis(TRIE_CATCH_UP_BOUND_MS - 5));
+        assert!(orderbook_answer(&res).pubkey_orders.is_empty());
+        assert_tables_empty(&relay);
+    }
+
+    #[test]
+    fn a_pair_with_more_than_1000_orders_fails_at_once() {
+        let (relay, _cmds) = node(json!({}));
+        index_without_record(&relay, MAKER, MAX_ORDERS_NUMBER_IN_ORDERBOOK_RESPONSE + 1);
+        let (answers_tx, answers) = std_mpsc::channel();
+        ask_orderbook(&relay, peer(), 1, &answers_tx).unwrap();
+        assert_wire_form(&answers.try_recv().expect("answered at once").1, "Orderbook too large");
+        assert_eq!(octx(&relay).sync_answer_deferral.parked_len(), 0);
+        assert_tables_empty(&relay);
+    }
+
+    #[test]
+    fn the_orderbook_answer_fails_at_once_with_the_switch_off() {
+        let (relay, _cmds) = node(json!({ "orderbook_answer_waits_for_worker": false }));
+        index_without_record(&relay, MAKER, 1);
+        let (answers_tx, answers) = std_mpsc::channel();
+        ask_orderbook(&relay, peer(), 1, &answers_tx).unwrap();
+        assert_missing_record_error(&answers.try_recv().expect("answered at once").1);
+        assert_eq!(octx(&relay).sync_answer_deferral.parked_len(), 0);
+        assert_tables_empty(&relay);
+    }
+
+    #[test]
+    fn a_waiting_orderbook_request_counts_against_the_parked_limits() {
+        let mut f = Fixture::new(small_limits(2, 3));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        let asking = peer();
+        for id in 0..2 {
+            ask(&f.relay, asking, id, MAKER, &[PAIR], &answers_tx).unwrap();
+        }
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 2);
+
+        // A pubkey the index lists with no record, so that an order-book answer has to wait.
+        let (_, ops) = index_without_record(&f.relay, "03other", 1);
+
+        // The peer already has two parked requests: its order-book request fails at once.
+        ask_orderbook(&f.relay, asking, 100, &answers_tx).unwrap();
+        let (id, res) = answers.try_recv().expect("answered at once");
+        assert_eq!(id, 100);
+        assert_missing_record_error(&res);
+
+        // Another peer's waits, which fills the total; a third peer's fails at once.
+        ask_orderbook(&f.relay, peer(), 101, &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 3);
+        ask_orderbook(&f.relay, peer(), 102, &answers_tx).unwrap();
+        let (id, res) = answers.try_recv().expect("answered at once");
+        assert_eq!(id, 102);
+        assert_missing_record_error(&res);
+
+        // The worker catches up: the waiting order-book request is answered, then the own request lands and
+        // the parked synchronization requests are answered.
+        apply_held(&f.relay, ops);
+        let (id, res) = answered(&answers, 2000);
+        assert_eq!(id, 101);
+        assert!(orderbook_answer(&res).pubkey_orders.contains_key("03other"));
+        own.answer(&f.maker);
+        for _ in 0..2 {
+            assert_eq!(full_set_len(&answered(&answers, 3000).1), ORDERS);
+        }
+        assert!(own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    /// Only a JSON `false` turns the wait of the order-book answer off.
+    #[test]
+    fn the_orderbook_wait_switch_is_off_only_for_a_json_false() {
+        let switch = |conf: Json| {
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            orderbook_answer_waits_for_worker(&ctx)
+        };
+        assert!(switch(json!({})));
+        assert!(switch(json!({ "orderbook_answer_waits_for_worker": true })));
+        assert!(!switch(json!({ "orderbook_answer_waits_for_worker": false })));
+        assert!(switch(json!({ "orderbook_answer_waits_for_worker": "false" })));
+        assert!(switch(json!({ "orderbook_answer_waits_for_worker": 0 })));
+        assert!(switch(json!({ "orderbook_answer_waits_for_worker": null })));
+        // Independent of the switches of R-Q5b.
+        assert!(switch(json!({ "sync_answer_deferral_ms": 0 })));
+        assert!(switch(json!({ "sync_answer_deferral_before_placeholder": false })));
     }
 }
 

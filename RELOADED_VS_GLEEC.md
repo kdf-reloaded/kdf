@@ -571,6 +571,11 @@ behavior, except for `swap_key_check`; the row of each switch in
   maker's next keep-alive.
 - `sync_request_alternate_relay: false` — a failed or outdated sync answer is not followed by a
   request to another relay before the maker's next keep-alive.
+- `sync_answer_deferral_before_placeholder: false` — a relay answers at once a sync request for a
+  maker's pair it has not started synchronizing yet, even while it is handling that maker's
+  keep-alive.
+- `orderbook_answer_waits_for_worker: false` — an order-book request fails at once when a listed
+  maker has no record in the node's order-book store yet, instead of waiting up to 250 ms.
 - `cancel_final_window_secs: 120` — a received cancel keeps the order out for 120 seconds only, so
   a relay that missed the cancel can bring the order back after that.
 - `maker_restore_skips_cancelled: false` — at start every stored active order is restored,
