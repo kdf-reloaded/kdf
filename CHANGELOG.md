@@ -486,7 +486,7 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md) — new, planning: the Bitcoin II
   network has required an extra field in every signature digest since block 57,750, so
   transactions signed the ordinary way are rejected. The rule is written (CRD chapter 61, PR
-  #PRNUM); the signing change, the coins-file entries and the live check follow.
+  #261); the signing change, the coins-file entries and the live check follow.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
   Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
   they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
@@ -634,7 +634,7 @@ lives.
   broadcast ("Signature must be zero for failed CHECK(MULTI)SIG operation"). Komodo KDF
   2.6.0-beta was tested and is refused the same way, so a swap that needs a Komodo KDF node to
   sign BC2 cannot complete either. The fix for KDF Reloaded is specified and planned. More in
-  [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md). Detail: PR #PRNUM; CRD ch.61.
+  [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md). Detail: PR #261; CRD ch.61.
 - **The miner fee of a Siacoin withdrawal is estimated from a transaction length that is smaller than
   the transaction sent.** Sia nodes accepted these fees in tests. Detail: PR #239; CRD ch.20 D6.
 - **Orders that sell Siacoin (SC) are not shown to Komodo KDF and GLEEC KDF takers, and a GLEEC maker
