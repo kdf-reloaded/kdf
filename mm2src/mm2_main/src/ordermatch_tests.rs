@@ -11645,7 +11645,8 @@ mod order_message_liveness {
 /// when the node's own synchronization lands.
 mod sync_answer_deferral_tests {
     use super::*;
-    use crate::mm2::lp_ordermatch::sync_answer_deferral::{orderbook_answer_waits_for_worker,
+    use crate::mm2::lp_ordermatch::sync_answer_deferral::{answer_orderbook_request_within,
+                                                          orderbook_answer_waits_for_worker,
                                                           sync_answer_deferral_before_placeholder,
                                                           sync_answer_deferral_max_per_peer,
                                                           sync_answer_deferral_max_total, CEILING_MAX_PARKED_PER_PEER,
@@ -11989,7 +11990,7 @@ mod sync_answer_deferral_tests {
         let started = std::time::Instant::now();
         ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
         assert!(answers.try_recv().is_err());
-        let (_, res) = answered(&answers, 3000);
+        let (_, res) = answered(&answers, 5000);
         let waited = started.elapsed();
         assert!(
             waited >= Duration::from_millis(BOUND_MS - 50),
@@ -13284,7 +13285,7 @@ mod sync_answer_deferral_tests {
         }
     }
 
-    type Handling = Pin<Box<dyn Future<Output = bool>>>;
+    type Handling = Pin<Box<dyn Future<Output = bool> + Send>>;
 
     /// The handling of a keep-alive of `pubkey` received from `peer`, polled until it waits for the trie worker
     /// and then left there: the test decides when it ends, by dropping it.
@@ -13311,14 +13312,8 @@ mod sync_answer_deferral_tests {
         task
     }
 
-    fn wait_for_registrations(ctx: &MmArc, expected: usize) {
-        let deferral = octx(ctx).sync_answer_deferral.clone();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && deferral.registrations_len() != expected {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert_eq!(deferral.registrations_len(), expected, "registrations");
-    }
+    /// Lets a handling that was left waiting by [`start_handling`] run to its end on a thread of its own.
+    fn finish_handling(task: Handling) -> JoinHandle<bool> { std::thread::spawn(move || block_on(task)) }
 
     fn assert_missing_pair(res: &AdexResponse) {
         match res {
@@ -13332,18 +13327,10 @@ mod sync_answer_deferral_tests {
     fn assert_parked_before_the_placeholder_then_served(f: &mut Fixture) {
         let (answers_tx, answers) = std_mpsc::channel();
         hold_worker(&f.relay);
-        let relay = f.relay.clone();
-        let keep_alive = f.keep_alive();
-        let task = std::thread::spawn(move || {
-            block_on(process_orders_keep_alive(
-                relay,
-                "forwarding-peer".to_owned(),
-                MAKER.to_owned(),
-                keep_alive,
-                true,
-            ))
-        });
-        wait_for_registrations(&f.relay, 1);
+        // Polled once on this thread: the registration exists and the handling waits for the worker. It cannot
+        // go on before it is polled again, so nothing below depends on how fast this thread runs.
+        let task = start_handling(&f.relay, "forwarding-peer", MAKER, f.keep_alive(), true);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.registrations_len(), 1);
 
         let started = Instant::now();
         ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
@@ -13356,6 +13343,7 @@ mod sync_answer_deferral_tests {
         assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 0);
 
         release_worker(&f.relay);
+        let task = finish_handling(task);
         let mut own = match next_cmd(&mut f.relay_cmds) {
             AdexBehaviourCmd::RequestPeers { req, response_tx, .. } => OwnSync {
                 keep_alive_task: task,
@@ -13416,23 +13404,14 @@ mod sync_answer_deferral_tests {
         // The same keep-alive again: the comparison finds the root held and sends no request.
         let (answers_tx, answers) = std_mpsc::channel();
         hold_worker(&f.relay);
-        let relay = f.relay.clone();
-        let keep_alive = f.keep_alive();
-        let task = std::thread::spawn(move || {
-            block_on(process_orders_keep_alive(
-                relay,
-                "forwarding-peer".to_owned(),
-                MAKER.to_owned(),
-                keep_alive,
-                true,
-            ))
-        });
-        wait_for_registrations(&f.relay, 1);
+        let task = start_handling(&f.relay, "forwarding-peer", MAKER, f.keep_alive(), true);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.registrations_len(), 1);
         ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
         assert!(answers.try_recv().is_err(), "parked behind the registration");
         assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
 
         release_worker(&f.relay);
+        let task = finish_handling(task);
         assert_eq!(full_set_len(&answered(&answers, 2000).1), ORDERS);
         assert!(task.join().unwrap(), "the keep-alive is forwarded");
         f.assert_no_further_request();
@@ -13469,7 +13448,7 @@ mod sync_answer_deferral_tests {
 
     #[test]
     fn a_handling_blocked_past_the_bound_does_not_hold_the_request_beyond_it() {
-        const BOUND_MS: u64 = 300;
+        const BOUND_MS: u64 = 1000;
         let f = Fixture::new(json!({ "sync_answer_deferral_ms": BOUND_MS }));
         let (answers_tx, answers) = std_mpsc::channel();
         hold_worker(&f.relay);
@@ -13480,7 +13459,7 @@ mod sync_answer_deferral_tests {
         assert!(answers.try_recv().is_err());
 
         // Not answered before the registration expires, and not later than the request's own bound.
-        assert!(answers.recv_timeout(Duration::from_millis(BOUND_MS - 100)).is_err());
+        assert!(answers.recv_timeout(Duration::from_millis(BOUND_MS - 400)).is_err());
         let (_, res) = answered(&answers, 3000);
         let waited = started.elapsed();
         assert!(
@@ -13774,13 +13753,19 @@ mod sync_answer_deferral_tests {
     #[test]
     fn the_orderbook_answer_waits_for_a_worker_that_catches_up_within_the_bound() {
         let (relay, _cmds) = node(json!({}));
+        // A bound far longer than the real one: the outcome does not depend on how fast this thread runs.
+        const LONG_WAIT_MS: u64 = 2000;
         let (uuids, ops) = index_without_record(&relay, MAKER, 1);
         let (answers_tx, answers) = std_mpsc::channel();
 
         let started = Instant::now();
-        ask_orderbook(&relay, peer(), 1, &answers_tx).unwrap();
+        let reply: SyncAnswerReply = {
+            let answers = answers_tx.clone();
+            Box::new(move |res| answers.send((1, res)).map_err(|e| e.to_string()))
+        };
+        answer_orderbook_request_within(&relay, peer(), "C1".into(), "C2".into(), LONG_WAIT_MS, reply).unwrap();
         assert!(
-            started.elapsed() < Duration::from_millis(TRIE_CATCH_UP_BOUND_MS / 2),
+            started.elapsed() < Duration::from_millis(LONG_WAIT_MS / 2),
             "the inbound handler waited"
         );
         assert!(
@@ -13789,10 +13774,9 @@ mod sync_answer_deferral_tests {
         );
         assert_eq!(octx(&relay).sync_answer_deferral.parked_len(), 1);
 
-        std::thread::sleep(Duration::from_millis(20));
         let applied_at_secs = now_ms() / 1000;
         apply_held(&relay, ops);
-        let (id, res) = answered(&answers, 2000);
+        let (id, res) = answered(&answers, 5000);
         assert_eq!(id, 1);
         // The slot is free by the time the answer arrives.
         assert_eq!(octx(&relay).sync_answer_deferral.parked_len(), 0);

@@ -540,6 +540,43 @@ impl SyncAnswerDeferral {
         Some(wake_rx)
     }
 
+    /// R-Q5b item 6 (a), (b): the earliest time a registration that the parked request `id` still awaits
+    /// expires. A registration that is no longer there counts as expired already. `None` when the request
+    /// awaits nothing.
+    fn earliest_awaited_expiry(&self, id: Id, bound_ms: u64) -> Option<u64> {
+        let tables = self.0.lock();
+        let parked = tables.parked.get(&id)?;
+        parked
+            .waits
+            .iter()
+            .map(|awaited| {
+                tables
+                    .registrations
+                    .get(awaited)
+                    .map_or(0, |registration| registration.started_ms.saturating_add(bound_ms))
+            })
+            .min()
+    }
+
+    /// R-Q5b item 6 (a), (b): remove from what the parked request `id` awaits every registration that is gone
+    /// or older than the bound at `now_ms`. Whether it then awaits nothing. The tables lock is the only one held.
+    fn drop_expired_awaited(&self, id: Id, bound_ms: u64, now_ms: u64) -> bool {
+        let mut tables = self.0.lock();
+        let tables = &mut *tables;
+        match tables.parked.get_mut(&id) {
+            Some(parked) => {
+                parked.waits.retain(|awaited| {
+                    tables
+                        .registrations
+                        .get(awaited)
+                        .is_some_and(|registration| now_ms < registration.started_ms.saturating_add(bound_ms))
+                });
+                parked.waits.is_empty()
+            },
+            None => true,
+        }
+    }
+
     /// R-GH12a item 4: take a slot of the parked table for a waiting order-book request, counted per asking
     /// peer and in total like a parked synchronization request. `None` when either limit is full. Such an
     /// entry waits for nothing and has no channel, so no end of an own request or registration touches it.
@@ -861,13 +898,13 @@ fn park_sync_request(
                     Either::Right(_) => AnswerPath::ParkedBound,
                 }
             },
-            Some(expires_ms) => {
+            Some(_) => {
                 let wait = PreWait {
                     ordermatch_ctx: &ordermatch_ctx,
                     id,
                     pubkey: &pubkey,
                     trie_roots: &trie_roots,
-                    registrations_expire_ms: expires_ms,
+                    bound_ms,
                     bound_ends_ms: parked_at_ms.saturating_add(bound_ms),
                 };
                 wait.run(wake_rx).await
@@ -893,24 +930,25 @@ struct PreWait<'a> {
     id: Id,
     pubkey: &'a str,
     trie_roots: &'a HashMap<AlbOrderedOrderbookPair, H64>,
-    /// When the last registration the request waits for expires; never later than `bound_ends_ms`, because
-    /// every such registration started before the request arrived.
-    registrations_expire_ms: u64,
+    /// The bound of item 3: a registration counts as ended when it is that old.
+    bound_ms: u64,
     /// The arrival of the request plus the bound of item 3, which the whole wait never outlasts.
     bound_ends_ms: u64,
 }
 
 impl PreWait<'_> {
-    /// Phase 1: until the registrations have all ended, or the last of them expires. Then the request is
-    /// classified again under item 1 only: when it is deferrable, the same slot waits for the own requests
-    /// in flight at that moment, until they complete or the bound ends. Any other request is answered at
-    /// once. A registration made after the request arrived never extends the wait.
+    /// Phase 1: until the registrations have all ended. A registration older than the bound counts as ended
+    /// whatever its handling still does (item 6 (a)), so the wait ends at the earliest expiry among the
+    /// registrations still awaited, which are then removed from the set; if others remain, it goes on to the
+    /// next earliest expiry. Then the request is classified again under item 1 only: when it is deferrable,
+    /// the same slot waits for the own requests in flight at that moment, until they complete or the bound
+    /// ends. Any other request is answered at once. A registration made after the request arrived never
+    /// extends the wait.
     ///
-    /// The path says how the wait ended: woken when everything awaited ended, bound when a timer did.
+    /// The path says how the wait ended: woken when everything awaited ended, bound when a timer did (phase 1
+    /// ended by the expiry of the last registration awaited, or phase 2 ran into the bound).
     async fn run(self, registrations_ended: oneshot::Receiver<()>) -> AnswerPath {
-        let phase1_ends_ms = self.registrations_expire_ms.min(self.bound_ends_ms);
-        let timeout = Box::pin(Timer::sleep(seconds_until(phase1_ends_ms)));
-        let mut at_the_bound = matches!(select(registrations_ended, timeout).await, Either::Right(_));
+        let mut at_the_bound = self.wait_for_registrations(registrations_ended).await;
 
         if let Some(own_requests_ended) = self.reclassify() {
             let timeout = Box::pin(Timer::sleep(seconds_until(self.bound_ends_ms)));
@@ -920,6 +958,29 @@ impl PreWait<'_> {
             AnswerPath::PreParkedBound
         } else {
             AnswerPath::PreParkedWoken
+        }
+    }
+
+    /// Phase 1. Whether it ended by a timer and not by the end of the last registration awaited.
+    async fn wait_for_registrations(&self, mut ended: oneshot::Receiver<()>) -> bool {
+        let table = &self.ordermatch_ctx.sync_answer_deferral;
+        loop {
+            // Nothing left to wait for: the last registration ended, and woke the request or is about to.
+            let expiry_ms = match table.earliest_awaited_expiry(self.id, self.bound_ms) {
+                Some(expiry_ms) => expiry_ms,
+                None => return false,
+            };
+            let deadline_ms = expiry_ms.min(self.bound_ends_ms);
+            let timeout = Box::pin(Timer::sleep(seconds_until(deadline_ms)));
+            match select(ended, timeout).await {
+                Either::Left(_) => return false,
+                // The receiver stays usable: the next round waits on the same channel.
+                Either::Right((_, still_waiting)) => ended = still_waiting,
+            }
+            let now = now_ms();
+            if table.drop_expired_awaited(self.id, self.bound_ms, now) || now >= self.bound_ends_ms {
+                return true;
+            }
         }
     }
 
@@ -992,6 +1053,24 @@ pub(crate) fn answer_orderbook_request(
     rel: String,
     reply: SyncAnswerReply,
 ) -> Result<(), String> {
+    answer_orderbook_request_within(ctx, peer, base, rel, TRIE_CATCH_UP_BOUND_MS, reply)
+}
+
+/// [`answer_orderbook_request`] with the wait for the trie worker bound to `wait_bound_ms` from the arrival of the
+/// request. Production passes [`TRIE_CATCH_UP_BOUND_MS`]; a test passes a longer bound to take the timing out of
+/// the case where the worker catches up.
+///
+/// # Errors
+///
+/// The error of `reply` when the answer was sent at once and sending failed.
+pub(crate) fn answer_orderbook_request_within(
+    ctx: &MmArc,
+    peer: PeerId,
+    base: String,
+    rel: String,
+    wait_bound_ms: u64,
+    reply: SyncAnswerReply,
+) -> Result<(), String> {
     log::debug!(
         "Got ordermatch request GetOrderbook {{ base: {:?}, rel: {:?} }}",
         base,
@@ -1017,7 +1096,7 @@ pub(crate) fn answer_orderbook_request(
 
     let arrived_ms = now_ms();
     spawn(async move {
-        let deadline_ms = arrived_ms.saturating_add(TRIE_CATCH_UP_BOUND_MS);
+        let deadline_ms = arrived_ms.saturating_add(wait_bound_ms);
         let mut missing = missing;
         let result = loop {
             // Until every pubkey found missing has a record, or the bound has passed.
@@ -1344,5 +1423,75 @@ mod tests {
         drop(slot);
         assert_eq!(deferral.parked_len(), 0);
         assert!(deferral.parked_counts_agree());
+    }
+
+    /// R-Q5b item 6 (a): a registration older than the bound counts as ended, whatever its handling still does.
+    /// A request waits for A and B. A expires while its guard stays alive; B ends after that and long before its
+    /// own expiry. The request leaves phase 1 when B ends, not when B would expire.
+    #[test]
+    fn an_expired_registration_does_not_hold_the_request_when_the_other_one_ends() {
+        const BOUND_MS: u64 = 2_000;
+        const OTHER_PAIR: &str = "C3:C4";
+        let ctx = OrdermatchContext::default();
+        let deferral = ctx.sync_answer_deferral.clone();
+        let limits = limits(BOUND_MS, 32, 2048);
+        let now = now_ms();
+        // A started 1,500 ms ago and expires in 500 ms; B starts now and would expire in 2,000 ms.
+        let a = deferral
+            .register_keep_alive("F", PUBKEY, vec![PAIR.to_owned()], limits, now - 1_500)
+            .expect("registered");
+        let b = deferral
+            .register_keep_alive("G", PUBKEY, vec![OTHER_PAIR.to_owned()], limits, now)
+            .expect("registered");
+        let roots: HashMap<String, H64> = [PAIR, OTHER_PAIR]
+            .iter()
+            .map(|pair| (pair.to_string(), H64::default()))
+            .collect();
+        let parked = deferral
+            .try_park_request(
+                PeerId::random(),
+                DEFAULT_MAX_PARKED_PER_PEER,
+                DEFAULT_MAX_PARKED_TOTAL,
+                PUBKEY,
+                &roots,
+                &ctx.trie_store.lock(),
+                Some(PreBound {
+                    bound_ms: BOUND_MS,
+                    now_ms: now,
+                }),
+            )
+            .expect("parked behind both registrations");
+        let (id, wake) = (parked.id, parked.wake);
+        let wait = PreWait {
+            ordermatch_ctx: &ctx,
+            id,
+            pubkey: PUBKEY,
+            trie_roots: &roots,
+            bound_ms: BOUND_MS,
+            bound_ends_ms: now + BOUND_MS,
+        };
+
+        // B ends 1,000 ms from now, after A has expired (500 ms) and 1,000 ms before its own expiry.
+        let ending = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1_000));
+            drop(b);
+        });
+        let started = std::time::Instant::now();
+        let path = block_on(wait.run(wake));
+        let waited = started.elapsed();
+        ending.join().unwrap();
+
+        assert!(
+            waited >= Duration::from_millis(900) && waited < Duration::from_millis(1_600),
+            "left phase 1 after {:?}, not when B ended",
+            waited
+        );
+        assert_eq!(path, AnswerPath::PreParkedWoken);
+        // A's guard was alive all along.
+        assert_eq!(deferral.registrations_len(), 1);
+        drop(a);
+        deferral.0.lock().unpark(id);
+        assert!(deferral.parked_counts_agree());
+        assert!(deferral.registration_counts_agree());
     }
 }
