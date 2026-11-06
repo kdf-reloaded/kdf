@@ -320,6 +320,14 @@ whose dialect reloaded does not yet support needs no `chain_variant` at all
 > true as a statement of configuration: Radiant still needs no
 > `chain_variant`. The cleared rule text above is unchanged.
 
+> **Pointer (2026-11-05).** A second signature-digest mechanism, independent
+> of `signature_version` and `fork_id`, is bound in
+> [chapter 61](61-utxo-sighash-suffix.md): a coin entry may name a
+> sighash suffix that is appended after the sighash type in every
+> input digest of the coin (Bitcoin II, from block 57,750). It reaches every
+> signing site, the `sign_raw_transaction` RPC included. The cleared rule text
+> above is unchanged.
+
 ## 38.5A Transaction history: order, persistence, and row identity (T-DOC)
 
 > **Scope.** This section binds the order in which transaction-history rows are

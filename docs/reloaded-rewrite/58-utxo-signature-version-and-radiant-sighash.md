@@ -175,6 +175,13 @@ transaction-version override, no Zcash-style overwintered flags, no
 segwit, and no fee-policy special case. The shipped Radiant entry is an
 ordinary UTXO entry plus the two keys of R58.2.1 and R58.2.5.
 
+> **Pointer (2026-11-05).** The four values of R58.2.1 are not the whole of a
+> coin's signature-digest configuration. A coin entry may also name a
+> sighash suffix, appended after the sighash type in the digest of
+> every version above except the Radiant dialect; it is a separate pair of keys
+> and does not change this section's value set. See
+> [chapter 61](61-utxo-sighash-suffix.md).
+
 ## 58.3 Bound Radiant sighash algorithm (dictated by Radiant)
 
 > **Binding scope.** Everything in this section is the Radiant chain's

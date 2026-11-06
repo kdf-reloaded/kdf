@@ -438,6 +438,10 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
+- [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md) — new, planning: the Bitcoin II
+  network has required an extra field in every signature digest since block 57,750, so
+  transactions signed the ordinary way are rejected. The rule is written (CRD chapter 61, PR
+  #PRNUM); the signing change, the coins-file entries and the live check follow.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
   Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
   they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
@@ -573,6 +577,13 @@ lives.
   has no shielded wallet database, and building a shielded transaction would also need the Sapling
   prover, which only the native build has. Use a native build for ARRR. Detail: CRD ch.39 R39.10.1,
   §39.6.1.
+- **Bitcoin II (BC2) transactions are rejected by the network.** Since block 57,750 the BC2
+  network checks every signature against a digest that includes an extra field of its own. KDF
+  Reloaded does not add it yet, so a BC2 withdrawal or swap payment is refused when it is
+  broadcast ("Signature must be zero for failed CHECK(MULTI)SIG operation"). Komodo KDF
+  2.6.0-beta was tested and is refused the same way, so a swap that needs a Komodo KDF node to
+  sign BC2 cannot complete either. The fix for KDF Reloaded is specified and planned. More in
+  [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md). Detail: PR #PRNUM; CRD ch.61.
 - **The miner fee of a Siacoin withdrawal is estimated from a transaction length that is smaller than
   the transaction sent.** Sia nodes accepted these fees in tests. Detail: PR #239; CRD ch.20 D6.
 - **Orders that sell Siacoin (SC) are not shown to Komodo KDF and GLEEC KDF takers, and a GLEEC maker
