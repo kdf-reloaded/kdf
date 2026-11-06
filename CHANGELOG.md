@@ -218,7 +218,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   The relay's 60-second sync summary line ends with a new `pre_placeholder` part that counts these
   requests and the keep-alives handled without a hold. To restore the old behavior, set
   `sync_answer_deferral_before_placeholder` to `false` in `MM2.json`. Nothing on the wire changes.
-  Detail: CRD PR #258; CRD ch.32 R-Q5b item 6.
+  Detail: CRD PR #258, PR #259; CRD ch.32 R-Q5b item 6.
 - **An order-book request no longer fails at once while a relay is still storing a maker's first
   orders.** A relay answers an order-book request from its list of orders, and each maker on that
   list needs a stored record. When many makers post at once, a maker's first orders can be listed
@@ -227,7 +227,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   for the record and answers then; only if it is still behind does the request fail as before. A
   waiting request counts against the same limits as the sync requests a relay holds. To restore the
   old behavior, set `orderbook_answer_waits_for_worker` to `false` in `MM2.json`. Nothing on the
-  wire changes. Detail: CRD PR #258; CRD ch.32 R-GH12a.
+  wire changes. Detail: CRD PR #258, PR #259; CRD ch.32 R-GH12a.
 
 #### UTXO coins and Electrum
 
@@ -515,7 +515,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   (PRs #223, #224). A pair the maker stops advertising is now dropped after the liveness window
   (CRD PR #243, PR #251). A relay now holds a sync request that reaches it before its own sync for
   the pair has started, and an order-book answer waits briefly for a relay that is still storing a
-  maker's first orders (CRD PR #258).
+  maker's first orders (CRD PR #258, PR #259).
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
