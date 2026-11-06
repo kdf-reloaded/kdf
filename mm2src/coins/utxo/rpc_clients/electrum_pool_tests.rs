@@ -1887,6 +1887,48 @@ fn t38_6_4a_2_reads_avoid_a_far_session() {
     });
 }
 
+/// T38.6.4a.8: with two maintained stubs, a fast one and a far one, each with a sample, the floor of two near
+/// sessions keeps both in turn: 30 reads in a row are answered by both, 15 within one each.
+#[test]
+fn t38_6_4a_8_two_sessions_keep_both_in_turn() {
+    block_on(async {
+        let servers = [
+            StubServer::start(StubBehavior::Answer).await,
+            StubServer::start(StubBehavior::Answer).await,
+        ];
+        for (server, delay) in servers.iter().zip([FAST_MS, SLOW_MS]) {
+            server.set_reply_delay(READ, ms(delay));
+            server.set_reply_delay("server.ping", ms(delay));
+        }
+        let client = pool_client_spreading(
+            servers.iter().map(|server| server.request()).collect(),
+            1,
+            None,
+            near_timings(),
+            ServerOrder::Listed,
+            true,
+            TEST_NEAR_FACTOR,
+            NEAR_OFFSET_DEFAULT_MS,
+        );
+        client.pool.run_pass().await;
+        assert_eq!(maintained(&client).len(), 2);
+        // One ping over both gives each its first sample, whatever the delays are.
+        client.pool.ping_maintained().await;
+        for server in &servers {
+            assert_eq!(snap_of(&client, server).samples, 1);
+        }
+        let mut answered = Vec::new();
+        for _ in 0..30 {
+            answered.push(ask(&client, READ).await.unwrap());
+        }
+        let count = |server: &StubServer| answered.iter().filter(|addr| **addr == server.addr()).count();
+        assert!((14..=16).contains(&count(&servers[0])), "{answered:?}");
+        assert!((14..=16).contains(&count(&servers[1])), "{answered:?}");
+        // The turn goes to the two sessions one after the other.
+        assert!(answered.windows(2).all(|pair| pair[0] != pair[1]), "{answered:?}");
+    });
+}
+
 /// T38.6.4a.3: a far session is still a fallback: with both near stubs failing the read, the far one answers it,
 /// after the near ones were tried.
 #[test]

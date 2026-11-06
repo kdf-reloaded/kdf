@@ -559,7 +559,8 @@ behavior, except for `swap_key_check`; the row of each switch in
 - `electrum_spread_reads: false` — every read-only Electrum query goes to the highest-ranked
   connected server first. The near factor `electrum_spread_near_factor` and the near offset
   `electrum_spread_near_offset_ms`, which limit spreading to the servers with the shortest round
-  trip, then have no effect.
+  trip (reads always take turns among at least the two fastest connected servers when two or more
+  are connected), then have no effect.
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
   listed instead of by a random draw.
 - `orderbook_sync_names_held_root: false` — a sync request names the root the maker advertised
