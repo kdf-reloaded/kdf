@@ -20,7 +20,7 @@ use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, retried_refund_rejection, tx_hel
 use crate::mm2::MM_VERSION;
 use coins::request_fee_scope::with_request_fee_scope;
 use coins::{lp_coinfind, CanRefundHtlc, DexFee, FeeApproxStage, FoundSwapTxSpend, MmCoinEnum, PaymentInstructions,
-            TradeFee, TradePreimageValue, ValidatePaymentInput};
+            TradeFee, TradePreimageValue, TransactionEnum, ValidatePaymentInput};
 use common::custom_futures::FutureTimerExt;
 use common::executor::Timer;
 use common::log::{debug, error, warn};
@@ -1645,9 +1645,20 @@ impl TakerSwap {
     async fn maybe_broadcast_watcher_data(&self, taker_payment_hex: &[u8]) -> Option<AbortOnDropHandle> {
         use super::{broadcast_signed_msg_every,
                     swap_watcher::{SwapWatcherMsg, TakerSwapWatcherData, WATCHER_MSG_INTERVAL},
+                    swap_watcher_v2::TakerSwapWatcherV2,
                     watcher_topic};
 
-        if !self.taker_coin.is_supported_by_watchers() || !self.maker_coin.is_supported_by_watchers() {
+        if !self.ctx.conf["use_watchers"].as_bool().unwrap_or(true)
+            || !self.taker_coin.is_supported_by_watchers()
+            || !self.maker_coin.is_supported_by_watchers()
+        {
+            return None;
+        }
+        let v2_pair = self.taker_coin.supports_watcher_v2() && self.maker_coin.supports_watcher_v2();
+        if v2_pair && self.ctx.conf["watcher_htlc_v2"].as_bool() != Some(true) {
+            return None;
+        }
+        if self.taker_coin.supports_watcher_v2() != self.maker_coin.supports_watcher_v2() {
             return None;
         }
 
@@ -1664,12 +1675,21 @@ impl TakerSwap {
             maker_coin_start_block,
             maker_pub,
             time_lock,
-            my_pub,
+            maker_lock,
+            maker_key,
+            taker_key,
+            taker_claim_pub,
+            maker_payment_hash,
+            taker_fee,
+            maker_amount,
+            taker_amount,
+            maker_confirmations,
+            maker_requires_nota,
         ) = {
             let r = self.r();
             let taker_fee_hash = match &r.taker_fee {
-                Some(fee) => fee.tx_hex.0.clone(),
-                None => {
+                Some(fee) if fee.tx_hash.0.len() == 32 => fee.tx_hash.0.clone(),
+                _ => {
                     warn!("Watcher broadcast skipped: no taker fee tx available");
                     return None;
                 },
@@ -1693,19 +1713,29 @@ impl TakerSwap {
                 r.data.maker_coin_start_block,
                 r.other_maker_coin_htlc_pub.to_vec(),
                 r.data.taker_payment_lock as u32,
-                r.my_taker_coin_htlc_keypair.public_slice().to_vec(),
+                self.maker_payment_lock.load(Ordering::Relaxed) as u32,
+                r.my_maker_coin_htlc_keypair,
+                r.my_taker_coin_htlc_keypair,
+                r.other_taker_coin_htlc_pub.to_vec(),
+                r.maker_payment.as_ref()?.tx_hash.0.clone(),
+                r.taker_fee.as_ref()?.tx_hex.0.clone(),
+                r.data.maker_amount.clone(),
+                r.data.taker_amount.clone(),
+                r.data.maker_payment_confirmations,
+                r.data.maker_payment_requires_nota.unwrap_or(false),
             )
         };
 
         // Compute preimages via WatcherOps — these return futures01
         let maker_preimage_tx = match self
-            .taker_coin
+            .maker_coin
             .create_maker_payment_spend_preimage(
                 &maker_payment_hex,
-                time_lock,
+                maker_lock,
                 &maker_pub,
                 &secret_hash,
-                &[], // swap_unique_data — unused in default/UTXO impls
+                self.uuid.as_bytes(),
+                maker_key.private().secret.as_slice(),
             )
             .compat()
             .await
@@ -1722,9 +1752,10 @@ impl TakerSwap {
             .create_taker_payment_refund_preimage(
                 taker_payment_hex,
                 time_lock,
-                &my_pub,
+                &taker_claim_pub,
                 &secret_hash,
-                &[], // swap_unique_data — unused in default/UTXO impls
+                self.uuid.as_bytes(),
+                taker_key.private().secret.as_slice(),
             )
             .compat()
             .await
@@ -1745,24 +1776,50 @@ impl TakerSwap {
             lock_duration,
             taker_coin: self.taker_coin.ticker().to_owned(),
             taker_fee_hash,
-            taker_payment_hash: taker_payment_hex.to_vec(),
+            taker_payment_hash: self.taker_coin.tx_enum_from_bytes(taker_payment_hex).ok()?.tx_hash().0,
             taker_coin_start_block,
             taker_payment_confirmations,
             taker_payment_requires_nota,
             maker_coin: self.maker_coin.ticker().to_owned(),
-            maker_pub,
-            maker_payment_hash: maker_payment_hex,
+            maker_pub: maker_pub.clone(),
+            maker_payment_hash,
             maker_coin_start_block,
         };
 
         let topic = watcher_topic(self.taker_coin.ticker());
-        let msg = SwapWatcherMsg::TakerSwapWatcherMsg(watcher_data);
+        let msg = if v2_pair {
+            SwapWatcherMsg::TakerSwapWatcherMsgV2(Box::new(TakerSwapWatcherV2 {
+                data: watcher_data,
+                netid: self.ctx.netid(),
+                taker_amount,
+                maker_amount,
+                taker_payment: taker_payment_hex.to_vec(),
+                maker_payment: maker_payment_hex,
+                taker_fee,
+                taker_refund_pub: taker_key.public_slice().to_vec(),
+                taker_claim_pub,
+                maker_refund_pub: maker_pub,
+                maker_claim_pub: maker_key.public_slice().to_vec(),
+                maker_payment_confirmations: maker_confirmations,
+                maker_payment_requires_nota: maker_requires_nota,
+                maker_payment_locktime: maker_lock,
+            }))
+        } else {
+            SwapWatcherMsg::TakerSwapWatcherMsg(watcher_data.into())
+        };
+        // V2 authenticates with the actual taker-coin HTLC key, which can
+        // differ from the node's gossip key under HD or per-swap derivation.
+        let watcher_signer = if matches!(&msg, SwapWatcherMsg::TakerSwapWatcherMsgV2(_)) {
+            Some(taker_key)
+        } else {
+            self.p2p_privkey
+        };
         Some(broadcast_signed_msg_every(
             self.ctx.clone(),
             topic,
             msg,
             WATCHER_MSG_INTERVAL,
-            self.p2p_privkey,
+            watcher_signer,
             self.node_key_pair,
         ))
     }
@@ -1849,7 +1906,50 @@ impl TakerSwap {
         ]))
     }
 
+    async fn observed_watcher_maker_claim(&self) -> Result<Option<TransactionEnum>, String> {
+        if self.ctx.conf["watcher_htlc_v2"].as_bool() != Some(true)
+            || !self.taker_coin.supports_watcher_v2()
+            || !self.maker_coin.supports_watcher_v2()
+        {
+            return Ok(None);
+        }
+        let (payment, claim, refund, hash, from_block) = {
+            let state = self.r();
+            let payment = state
+                .maker_payment
+                .as_ref()
+                .ok_or("maker payment is unavailable during claim reconciliation")?;
+            (
+                payment.tx_hex.0.clone(),
+                state.my_maker_coin_htlc_keypair.public_slice().to_vec(),
+                state.other_maker_coin_htlc_pub.to_vec(),
+                state.secret_hash.0.clone(),
+                state.data.maker_coin_start_block,
+            )
+        };
+        let lock = u32::try_from(self.maker_payment_lock.load(Ordering::Relaxed))
+            .map_err(|_| "maker payment lock exceeds the chain API's range")?;
+        match self
+            .maker_coin
+            .watcher_search_for_swap_tx_spend(lock, &claim, &refund, &hash, &payment, from_block)
+            .timeout_secs(10.0)
+            .await
+            .map_err(|_| "the delegated claim lookup timed out")??
+        {
+            Some(FoundSwapTxSpend::Spent(transaction)) => Ok(Some(transaction)),
+            Some(FoundSwapTxSpend::Refunded(_)) => Err("the maker payment was already refunded".into()),
+            None => Ok(None),
+        }
+    }
+
     async fn spend_maker_payment(&self) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
+        match self.observed_watcher_maker_claim().await {
+            Ok(Some(transaction)) => return Ok(self.maker_payment_spent_outcome(transaction)),
+            Ok(None) => {},
+            // The ordinary signed spend still checks the actual funding output
+            // on the chain. An unavailable read does not fabricate an outcome.
+            Err(error) => debug!("Could not reconcile an earlier maker claim before spending: {}", error),
+        }
         let spend_fut = self.maker_coin.send_taker_spends_maker_payment(
             &self.r().maker_payment.clone().unwrap().tx_hex,
             self.maker_payment_lock.load(Ordering::Relaxed) as u32,
@@ -1861,6 +1961,10 @@ impl TakerSwap {
         let transaction = match spend_fut.compat().await {
             Ok(t) => t,
             Err(err) => {
+                // A watcher can claim between the read above and our broadcast.
+                if let Ok(Some(transaction)) = self.observed_watcher_maker_claim().await {
+                    return Ok(self.maker_payment_spent_outcome(transaction));
+                }
                 if let Some(tx) = err.get_tx() {
                     broadcast_p2p_tx_msg(
                         &self.ctx,
@@ -1877,6 +1981,13 @@ impl TakerSwap {
             },
         };
 
+        Ok(self.maker_payment_spent_outcome(transaction))
+    }
+
+    fn maker_payment_spent_outcome(
+        &self,
+        transaction: TransactionEnum,
+    ) -> (Option<TakerSwapCommand>, Vec<TakerSwapEvent>) {
         broadcast_p2p_tx_msg(
             &self.ctx,
             tx_helper_topic(self.maker_coin.ticker()),
@@ -1892,9 +2003,9 @@ impl TakerSwap {
             tx_hash,
         };
 
-        Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::MakerPaymentSpent(
+        (Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::MakerPaymentSpent(
             tx_ident,
-        )]))
+        )])
     }
 
     async fn refund_taker_payment(&self) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
@@ -3442,6 +3553,183 @@ mod taker_swap_tests {
             7800,
             None,
         )
+    }
+
+    #[test]
+    fn watcher_opt_out_skips_even_the_coin_capability_queries() {
+        use coins::WatcherOps;
+        let mut swap = taker_swap_with_coins("LTC", "ARRR");
+        swap.ctx = MmCtxBuilder::default()
+            .with_conf(json!({"netid": 8762,
+            "use_watchers": false, "watcher_htlc_v2": true}))
+            .into_mm_arc();
+        TestCoin::is_supported_by_watchers.mock_safe(|_| panic!("watchers were explicitly disabled"));
+        assert!(block_on(swap.maybe_broadcast_watcher_data(&[])).is_none());
+    }
+
+    #[test]
+    fn watcher_claim_reconciliation_is_opt_in() {
+        use coins::WatcherOps;
+        let swap = taker_swap_with_coins("LTC", "ARRR");
+        TestCoin::supports_watcher_v2.mock_safe(|_| panic!("the watcher extension is disabled"));
+        assert!(block_on(swap.observed_watcher_maker_claim()).unwrap().is_none());
+    }
+
+    #[test]
+    fn watcher_completed_claim_is_recognized_on_resume_and_during_a_broadcast_race() {
+        use crate::mm2::lp_network::P2PContext;
+        use coins::{TransactionEnum, WatcherOps};
+        use std::sync::atomic::AtomicUsize;
+        for race in [false, true] {
+            let mut swap = taker_swap_with_coins("LTC", "ARRR");
+            swap.ctx = MmCtxBuilder::default()
+                .with_conf(json!({"netid": 8762, "watcher_htlc_v2": true}))
+                .with_secp256k1_key_pair(swap.node_key_pair)
+                .into_mm_arc();
+            let transaction: TransactionEnum = eth_tx_for_test().into();
+            let expected = transaction.tx_hash();
+            {
+                let mut data = swap.w();
+                data.maker_payment = Some(TransactionIdentifier {
+                    tx_hex: transaction.tx_hex().into(),
+                    tx_hash: transaction.tx_hash(),
+                });
+                data.secret_hash = vec![3; 20].into();
+                data.other_maker_coin_htlc_pub = H264::from(&**swap.node_key_pair.public());
+            }
+            let (commands, _receiver) = futures::channel::mpsc::channel(8);
+            P2PContext::new(commands).store_to_mm_arc(&swap.ctx);
+            TestCoin::supports_watcher_v2.mock_safe(|_| MockResult::Return(true));
+            let queries = Arc::new(AtomicUsize::new(0));
+            let calls = queries.clone();
+            TestCoin::watcher_search_for_swap_tx_spend.mock_safe(move |coin, _, _, _, _, _, _| {
+                assert_eq!(coin.ticker(), "LTC");
+                let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                let result = if race && first {
+                    None
+                } else {
+                    Some(FoundSwapTxSpend::Spent(transaction.clone()))
+                };
+                MockResult::Return(Box::pin(async move { Ok(result) }))
+            });
+            TestCoin::send_taker_spends_maker_payment.mock_safe(move |_, _, _, _, _, _, _| {
+                assert!(race, "a completed delegated claim must not be built or sent again");
+                MockResult::Return(Box::new(futures01::future::err(coins::TransactionErr::Plain(
+                    "already spent".into(),
+                ))))
+            });
+            let (next, events) = block_on(swap.spend_maker_payment()).unwrap();
+            assert!(matches!(next, Some(TakerSwapCommand::Finish)));
+            assert!(matches!(&events[0], TakerSwapEvent::MakerPaymentSpent(tx) if tx.tx_hash == expected));
+            assert_eq!(queries.load(Ordering::SeqCst), if race { 2 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn watcher_handoff_uses_the_right_chain_keys_locks_and_display_transaction_ids() {
+        use crate::mm2::lp_network::P2PContext;
+        use crate::mm2::lp_swap::swap_watcher::SwapWatcherMsg;
+        use coins::{TransactionEnum, WatcherOps};
+        use crypto::privkey::key_pair_from_secret;
+        use futures::{FutureExt, StreamExt};
+        use mm2_p2p::atomicdex_behaviour::AdexBehaviourCmd;
+        let mut swap = taker_swap_with_coins("LTC", "ARRR");
+        let signing = key_pair_from_secret(&[1; 32]).unwrap();
+        let claim_signing = key_pair_from_secret(&[2; 32]).unwrap();
+        let maker = key_pair_from_secret(&[3; 32]).unwrap();
+        let counterparty = key_pair_from_secret(&[4; 32]).unwrap();
+        swap.ctx = MmCtxBuilder::default()
+            .with_conf(json!({"netid": 8762,
+            "watcher_htlc_v2": true}))
+            .with_secp256k1_key_pair(swap.node_key_pair)
+            .into_mm_arc();
+        let transaction = UtxoTx {
+            version: 2,
+            inputs: vec![chain::TransactionInput {
+                previous_output: chain::OutPoint {
+                    hash: [8; 32].into(),
+                    index: 0,
+                },
+                script_sig: vec![1, 1].into(),
+                sequence: u32::MAX,
+                script_witness: vec![],
+            }],
+            outputs: vec![chain::TransactionOutput {
+                value: 100_000,
+                script_pubkey: vec![0x51].into(),
+            }],
+            ..UtxoTx::default()
+        };
+        let transaction: TransactionEnum = transaction.into();
+        let raw = transaction.tx_hex();
+        let identifier = TransactionIdentifier {
+            tx_hex: raw.clone().into(),
+            tx_hash: transaction.tx_hash(),
+        };
+        let start = 1_800_000_000;
+        {
+            let mut data = swap.w();
+            data.data.started_at = start;
+            data.data.lock_duration = 7500;
+            data.data.taker_payment_lock = start + 7500;
+            data.data.taker_amount = 10.into();
+            data.data.maker_amount = 20.into();
+            data.taker_fee = Some(identifier.clone());
+            data.maker_payment = Some(identifier);
+            data.my_taker_coin_htlc_keypair = signing;
+            data.my_maker_coin_htlc_keypair = claim_signing;
+            data.other_maker_coin_htlc_pub = H264::from(&**maker.public());
+            data.other_taker_coin_htlc_pub = H264::from(&**counterparty.public());
+            data.secret_hash = vec![5; 20].into();
+        }
+        swap.maker_payment_lock.store(start + 15000 + 15, Ordering::Relaxed);
+        TestCoin::is_supported_by_watchers.mock_safe(|_| MockResult::Return(true));
+        TestCoin::supports_watcher_v2.mock_safe(|_| MockResult::Return(true));
+        TestCoin::create_maker_payment_spend_preimage.mock_safe(move |coin, _, lock, other, _, _, private| {
+            assert_eq!(coin.ticker(), "LTC");
+            assert_eq!(u64::from(lock), start + 15000 + 15);
+            assert_eq!(other, maker.public_slice());
+            assert_eq!(private, claim_signing.private().secret.as_slice());
+            MockResult::Return(Box::new(futures01::future::ok(UtxoTx::default().into())))
+        });
+        TestCoin::create_taker_payment_refund_preimage.mock_safe(move |coin, _, lock, other, _, _, private| {
+            assert_eq!(coin.ticker(), "ARRR");
+            assert_eq!(u64::from(lock), start + 7500);
+            assert_eq!(other, counterparty.public_slice());
+            assert_eq!(private, signing.private().secret.as_slice());
+            MockResult::Return(Box::new(futures01::future::ok(UtxoTx::default().into())))
+        });
+        TestCoin::tx_enum_from_bytes.mock_safe(|_, bytes| {
+            MockResult::Return(
+                serialization::deserialize::<_, UtxoTx>(bytes)
+                    .map(TransactionEnum::UtxoTx)
+                    .map_err(|e| e.to_string()),
+            )
+        });
+        let (commands, mut receiver) = futures::channel::mpsc::channel(8);
+        P2PContext::new(commands).store_to_mm_arc(&swap.ctx);
+        let handle = block_on(swap.maybe_broadcast_watcher_data(&raw)).unwrap();
+        let command = block_on(async {
+            let next = receiver.next().fuse();
+            let timeout = Timer::sleep(5.0).fuse();
+            futures::pin_mut!(next, timeout);
+            futures::select! { command = next => command.unwrap(), _ = timeout => panic!("no watcher handoff was published") }
+        });
+        drop(handle);
+        let AdexBehaviourCmd::PublishMsgFrom { msg, .. } = command else {
+            panic!("expected a signed watcher publish")
+        };
+        let (envelope, _, publisher) = mm2_p2p::decode_signed::<SwapWatcherMsg>(&msg).unwrap();
+        let SwapWatcherMsg::TakerSwapWatcherMsgV2(terms) = envelope else {
+            panic!("expected a V2 handoff")
+        };
+        terms.validate_publisher(8762, &publisher.to_bytes()).unwrap();
+        assert_eq!(terms.taker_refund_pub, signing.public_slice());
+        assert_eq!(terms.maker_claim_pub, claim_signing.public_slice());
+        assert_eq!(terms.data.taker_fee_hash, transaction.tx_hash().0);
+        assert_eq!(terms.data.taker_payment_hash, transaction.tx_hash().0);
+        assert_eq!(terms.data.maker_payment_hash, transaction.tx_hash().0);
+        assert_eq!(terms.maker_payment_locktime, (start + 15000 + 15) as u32);
     }
 
     /// T39.11.s (CRD ch.39 R39.11.28): a taker whose own payment coin cannot be watched is refused at start with

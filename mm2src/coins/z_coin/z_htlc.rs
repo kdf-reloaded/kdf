@@ -140,7 +140,7 @@ impl ZP2SHSpendError {
 fn txid_hex(tx: &ZTransaction) -> String { format!("{:?}", z_tx_read::txid_display(tx)) }
 
 /// Spends P2SH output 0 to the coin's my_z_addr
-pub async fn z_p2sh_spend(
+pub(super) async fn build_z_p2sh_spend(
     coin: &ZCoin,
     p2sh_tx: ZTransaction,
     tx_locktime: u32,
@@ -148,6 +148,7 @@ pub async fn z_p2sh_spend(
     redeem_script: Script,
     script_data: Script,
     htlc_privkey: &[u8],
+    expiry_height: Option<zcash_protocol::consensus::BlockHeight>,
 ) -> Result<ZTransaction, MmError<ZP2SHSpendError>> {
     // The same single height authority the ordinary shielded send path uses, so a spend or refund
     // can never be born expired because its height came from a different source (R39.11.11).
@@ -175,6 +176,9 @@ pub async fn z_p2sh_spend(
         },
     );
     tx_builder.set_lock_time(tx_locktime);
+    if let Some(expiry_height) = expiry_height {
+        tx_builder = tx_builder.with_expiry_height(expiry_height);
+    }
 
     let secp_secret = SecretKey::from_slice(htlc_privkey)
         .map_err(|e| MmError::new(ZP2SHSpendError::InvalidPaymentTx(e.to_string())))?;
@@ -223,6 +227,33 @@ pub async fn z_p2sh_spend(
         )
         .map_to_mm(ZP2SHSpendError::from)?
         .into_transaction();
+
+    Ok(zcash_tx)
+}
+
+/// Builds and broadcasts a normal, locally executed HTLC spend.
+pub async fn z_p2sh_spend(
+    coin: &ZCoin,
+    p2sh_tx: ZTransaction,
+    tx_locktime: u32,
+    input_sequence: u32,
+    redeem_script: Script,
+    script_data: Script,
+    htlc_privkey: &[u8],
+) -> Result<ZTransaction, MmError<ZP2SHSpendError>> {
+    let ticker = &coin.as_ref().conf.ticker;
+    let payment_txid = txid_hex(&p2sh_tx);
+    let zcash_tx = build_z_p2sh_spend(
+        coin,
+        p2sh_tx,
+        tx_locktime,
+        input_sequence,
+        redeem_script,
+        script_data,
+        htlc_privkey,
+        None,
+    )
+    .await?;
 
     let mut tx_buffer = Vec::with_capacity(1024);
     zcash_tx

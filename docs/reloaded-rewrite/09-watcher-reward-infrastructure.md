@@ -25,13 +25,16 @@ between sending its payment and observing the maker's spend
 imposes a multi-hour delay on the maker before the
 maker-payment can be refunded.
 
-The watcher substrate closes that gap by allowing any
+The watcher substrate is intended to help with that gap by allowing any
 volunteering node to monitor a specific in-flight swap and
 to broadcast the taker's own precomputed preimages on the
 taker's behalf. The substrate is **trustless**: the taker
 publishes signed transactions before going offline; the
 watcher only ever rebroadcasts them. A watcher does not
 need (and cannot derive) any signing key from either party.
+This prevents a watcher from redirecting an authorized payout; it does
+not guarantee availability. The post-payment handoff, missing
+acknowledgement and restart limits remain in D7.
 
 Two surfaces are bound:
 
@@ -57,11 +60,11 @@ The substrate has the following behavioural regions:
 | Region                        | Effect                                       |
 |-------------------------------|----------------------------------------------|
 | Per-coin gossip topic         | One topic per taker-coin ticker              |
-| Watcher message envelope      | Versioned enum; presently one variant        |
+| Watcher message envelope      | Legacy variant plus signed HTLC delegation V2 |
 | Taker-published payload       | Preimages + per-swap context                 |
 | Signed-publish authentication | Sender authenticated via the gossip key      |
 | Watcher state machine         | Six states; compile-time fixed transitions   |
-| Per-node de-duplication       | RAII lock keyed by the taker-fee transaction |
+| Per-node de-duplication       | RAII lease keyed by the checked fee identifier |
 | Coin-trait opt-in             | Single per-coin predicate                    |
 | Inactive reward field         | Boolean placeholder, always `false` today    |
 
@@ -78,19 +81,18 @@ R2. **Bound prefix.** The watcher topic prefix is the
     is a wire fact and shall not change without coordinated
     update across every participating node.
 
-R3. **Subscription model.** A node shall subscribe to the
-    watcher topic for a given ticker when, and only when,
-    the corresponding coin is activated locally on that
-    node. This gives operators per-coin opt-out by simply
-    declining to activate the coin.
+R3. **Subscription model.** An operator node with `is_watcher: true`
+    subscribes only after the ticker is registered locally and supports
+    watching. Incoming jobs recheck both coins' current activation;
+    a stale subscription cannot authorize a disabled coin.
 
 ## 9.3 Message Envelope
 
 R4. **Versioned envelope.** The watcher payload shall be
     carried inside a versioned message enum so that
     additional watcher message shapes can be added without
-    a topic split. At the time of writing exactly one
-    variant exists, carrying the taker-published payload.
+    a topic split. The original `TakerSwapWatcherMsg` is preserved;
+    `TakerSwapWatcherMsgV2` adds the explicit chain context of R24.
 
 R5. **Signed publish.** Every watcher message shall be
     wrapped in the codebase's standard signed-envelope
@@ -106,8 +108,8 @@ R6. **Self-contained per-swap context.** The taker's payload
     autonomously: the swap identifier; the secret hash; the
     two preimages (§9.5); the swap-start timestamp and lock
     duration; both coin tickers; the maker's public key; the
-    transaction hashes for the taker-fee and the
-    taker-payment; per-coin start-block, required-
+    transaction hashes for the taker fee, taker payment and
+    maker payment; per-coin start-block, required-
     confirmations, and notarisation-required fields for the
     taker coin; and the start-block for the maker coin.
 
@@ -136,8 +138,8 @@ R6a. **The two transaction-hash fields carry hashes, and the
      of §9.6 is entered. This is a hard length check on the
      field, not a best-effort parse.
 
-> **Code-quality finding (informative) — reloaded violates R6a
-> today.** Reloaded's taker populates both fields with the
+> **Historical code-quality finding (informative), corrected by the
+> independent R24 implementation.** Reloaded's taker populated both fields with the
 > **serialized transaction** rather than with its hash: the
 > taker-fee field receives the fee transaction's raw bytes and
 > the taker-payment field receives the taker-payment
@@ -149,10 +151,11 @@ R6a. **The two transaction-hash fields carry hashes, and the
 > watcher assists any reloaded taker's swap, in either
 > direction, for any coin — which also means the defect has
 > been invisible, because a watcher declining to help looks
-> exactly like no watcher being present. No funds are at risk
-> (the watcher substrate is a fallback, and both parties can
-> always act for themselves), but the whole substrate is inert
-> across the wire until the two fields carry hashes.
+> exactly like no watcher being present. Online parties can still act
+> for themselves. An offline taker has no such fallback: after its
+> payment is claimed, the counterparty can eventually refund the other
+> payment if nobody claims it in time. Watcher availability must not be
+> represented as guaranteed merely because publishing is enabled.
 >
 > The fix is to put each transaction's hash in its field; the
 > hash is already computed on both paths. It is a parity
@@ -361,16 +364,24 @@ R16. **Per-coin opt-in predicate.** The swap-operations
      The watcher substrate shall short-circuit on any coin
      pair where either side reports opt-out.
 
-R17. **Siacoin is the eligible set today.** *(Amended
+R17. **Coin eligibility.** ARRR in native builds and software-key LTC/vARRR
+     implement the V2 delegation of R24-R28. Both coins must support V2;
+     mixing a V2 coin with a legacy-only watcher coin is refused. Other
+     UTXO tickers, hardware-wallet coins, BCH and QTUM remain opted out.
+     ARRR support is native-only; its WASM implementation remains opted out.
+     This is a build-target boundary, not an activation-mode change: the
+     supported ARRR lightwalletd mode is covered, and the restriction on
+     full-node activation in chapter 39 R39.11.1a remains in force.
+
+     **Legacy eligibility record.** *(Amended
      2026-10-30, Decision BA.)* At the time of writing the only
-     eligible family is Siacoin ([Chapter 20](20-siacoin-integration.md)
+     legacy eligible family is Siacoin ([Chapter 20](20-siacoin-integration.md)
      §20.10 D7 — a non-UTXO family that opts in via the per-coin
      predicate of R16 despite its structurally different
      native-spend-policy HTLC), whose opt-in is paired with real
      implementations of four of the five non-trivial methods
-     (Chapter 20 §20.10 D7). Every other coin family, the
-     UTXO-standard, BCH (Bitcoin Cash) and QTUM families
-     included, inherits the opt-out default. A family MUST NOT
+     (Chapter 20 §20.10 D7). Outside the opt-in V2 set above, other
+     families retain the opt-out default. A family MUST NOT
      opt in before it implements the watcher methods its watcher
      states need, at least the taker-fee validation of the first
      state (§9.6): an opted-in family without them subscribes the
@@ -432,9 +443,13 @@ R20. **Outbound broadcast cadence.** A taker, after sending
      10 s) until the swap concludes. The cadence ensures
      newly-joining watchers can pick up an in-flight swap.
 
-R21. **Coin-activation-time subscription.** A node shall
-     subscribe to a coin's watcher topic at coin-activation
-     time, per R3.
+R21. **Subscriptions cover every activation API.** Watcher nodes follow
+     the common coin registry at one-second intervals, so legacy `enable`,
+     `electrum` and asynchronous Z-coin activation all reach R3. Successful
+     subscription commands are remembered for this daemon instance;
+     queue-full commands are retried. Disabling a coin does not unsubscribe
+     an existing topic, but admission checks the live registry. Normal
+     wallets run no subscription loop.
 
 R22. **Node-level switches (reference contract).** *(Passed the KDF Dirty
      Gate on 2026-11-04, measure 0.05; Spec Reader 2026-11-04, rows `v2.6.0-beta` and
@@ -456,6 +471,111 @@ R23. **A relay's handling of the two swap-helper topics (reference
      chapter 51 R50B is handled differently, and its reference
      behavior -- including a finding that makes it inert there -- is
      recorded under that rule.
+
+### Independent signed HTLC delegation extension
+
+R24-R28 are Reloaded-original work for
+[issue #56](https://github.com/kdf-reloaded/kdf/issues/56), derived from
+this repository, the public HTLC scripts and the Zcash transaction APIs.
+They do not claim legacy-peer parity and do not change the original
+envelope or the negotiated V1 swap protocol.
+
+R24. **Explicit V2 terms and authentic publisher.** The new
+     `TakerSwapWatcherMsgV2` wraps the legacy fields with the active
+     netid, both exact decimal amounts, both raw funding transactions,
+     the raw fee transaction, refund and claim public keys for each
+     chain, the agreed maker payment locktime, and maker confirmation
+     and notarisation requirements. Hash fields remain 32-byte
+     display-order identifiers. Its envelope is signed with the actual
+     taker-coin HTLC key; the receiver requires that verified publisher
+     to equal the declared taker refund key. No private keys are sent.
+     Reject an incorrect netid, identical tickers, a nil UUID, nonpositive
+     amounts, invalid compressed keys, malformed hashes or overflowing
+     locktimes. The agreed maker lock can differ by up to sixty seconds
+     from `taker_start + 2 * duration`, matching negotiation's clock
+     tolerance, and must exceed the taker lock. Use the agreed lock,
+     rather than reconstructing it from the taker's clock.
+     The top-level `watcher_htlc_v2` boolean defaults to `false` on both
+     trader and watcher. Only explicit `true` enables this extension;
+     absent/false preserves the pre-extension eligible set. Operators
+     also need `is_watcher: true`, and traders still obey `use_watchers`.
+     This opt-in preserves the default-side compatibility policy while
+     deployment and D7 are reviewed.
+     Before rational fee conversion, bound each amount's coefficient to
+     512 bits and decimal scale to -128..128; a short malicious exponent
+     must not expand into an unbounded power of ten on the operator.
+
+R25. **Validate chain facts and complete authorizations.** Match the
+     three raw transactions to their advertised identifiers. Reuse the
+     ordinary swap fee calculator and `validate_fee` for the active
+     `NetConfig`, its exact fee descriptor and the verified HTLC sender;
+     no zero amount, no-fee bypass or substitute recipient is allowed.
+     Both funding payments must pass their coin's existing on-chain
+     script/amount validation and confirmation checks. Each delegated
+     input spends output zero of its corresponding payment, with the
+     exact redeem script, correct branch selector and a valid SIGHASH_ALL
+     signature from the appropriate HTLC key. The UTXO verifier restores
+     the configured ZIP-243 branch and verified funding amount for vARRR.
+     A claim is final; a refund
+     has a nonfinal sequence and enforces the agreed lock. Templates have
+     no transaction expiry: a refund must not expire before it becomes
+     usable. A signature is still bound to its consensus branch (D7).
+     Confirmation counts are the maximum of the delegation, the operator's
+     coin policy and one; notarisation requirements are combined. Pass the
+     nonzero count to UTXO validation so an enabled SPV policy is not
+     bypassed. Keep retrying initial validation through the agreed maker
+     lock (at least one local retry window for a late job); a block taking
+     longer than sixty seconds is not itself a reason to discard the job.
+
+R26. **Build locally; complete without signing.** The taker builds the
+     maker-payment claim on the maker coin and the taker-payment refund
+     on the taker coin, using each swap's actual private signing key.
+     Building a template broadcasts nothing. The claim omits the secret
+     push; its signed effects and destination are already fixed. After a
+     matching 32-byte secret is observed, the watcher adds only that push,
+     preserving signatures, redeem script, outputs, fees and timelock.
+     A wrong secret or malformed template is rejected. ARRR uses its
+     native v4/v5/v6 reader and existing builder to pay the taker's Sapling
+     address; it is never parsed as a Bitcoin-v4 transaction. The ordinary
+     ARRR spend/refund path retains its normal expiry and broadcast
+     behavior. LTC and vARRR use the ordinary HTLC spend fee and return
+     to the taker's signing-key address.
+     The legacy envelope remains decodable, but execution that would
+     require missing amounts or per-chain keys stops explicitly. It must
+     not pass a fabricated zero into payment validation. Siacoin's
+     incomplete legacy handoff remains deferred under D3.
+
+R27. **Follow the chain until confirmed.** Search for a taker claim
+     before deciding that the refund deadline elapsed. If the maker
+     claims during a refund wait, extract the secret and switch to the
+     claim path. Insert the secret before broadcasting the maker claim.
+     Inspect the payment before each retry, and retry identical signed
+     bytes after an interrupted broadcast or lost acknowledgement. A V2
+     claim or refund is terminal only after its configured confirmations
+     (at least one); a failed confirmation wait returns to observation
+     so a reorg does not masquerade as success.
+     A returning taker recognizes an already-claimed maker payment and
+     records its actual transaction. Recheck after a failed broadcast too,
+     covering a watcher that claims between the first read and the send;
+     do not report that successful delegated claim as a failed trade.
+     This reconciliation runs only with the extension enabled and bounds
+     its chain lookup to ten seconds; a failed lookup falls through to the
+     ordinary local spend, without inventing a successful result.
+
+R28. **Relay promptly and own the job lifetime.** Admission launches a
+     background state machine, allowing a relay to forward the payload
+     immediately per R23. This daemon instance's shutdown cancels the job.
+     Verify the V2 taker key before admission, then de-duplicate by fee
+     identifier, so changing a UUID or publisher cannot create another
+     job for the same fee. Renew
+     the RAII lease every minute while the task lives; an expired owner's
+     drop cannot remove a replacement owner's lease. Legacy keys remain
+     checked fee hashes. `use_watchers: false` skips template construction
+     as well as publishing.
+     Cap each daemon at 256 admitted jobs, including jobs still validating
+     their fee, so untrusted gossip cannot create unbounded background
+     futures. A full operator declines further jobs; capacity is another
+     reason that publishing alone cannot establish coverage (D7).
 
 ## 9.11 Tests
 
@@ -487,6 +607,28 @@ T5. **Switches (R22, R23).** With `use_watchers: false` a taker shall
     a relay shall still forward a watcher-topic message it does not
     process.
 
+T6. **V2 authorization and wire bounds.** On both netids, round-trip the
+    signed V2 envelope and unchanged legacy variant, enforce nesting
+    limits, and reject a wrong publisher, network, key, hash, amount or
+    timelock. Exercise accepted clock skew explicitly.
+
+T7. **Real signatures and shielded proofs.** Build and verify both LTC
+    and vARRR claim/refund signatures; reject changed outputs and a wrong
+    key. Insert a secret and assert all other effects remain unchanged.
+    For ARRR, exercise the native v6 signature hash, zero expiry and
+    secret insertion. With Sapling parameters installed, build real
+    proofs and verify the completed Sapling bundle, including its binding
+    signature and transparent-input digest.
+    The `watcher-coins` CI job installs the canonical parameters and runs
+    this proof test explicitly; its ordinary local ignore is not a CI skip.
+
+T8. **Watcher state regressions.** On both netids and in both ARRR/LTC
+    and ARRR/vARRR directions, follow a claim after the refund deadline.
+    Cover a spend during a refund wait, lost broadcast acknowledgement,
+    lost confirmation and lease ownership. Deterministic chain responses
+    exercise states without user funds; they do not replace a three-node
+    regtest/offline-taker exercise.
+
 ## 9.12 Deferred Work
 
 D1. **Activate the `watcher_reward` field.** Requires (a) a
@@ -508,7 +650,8 @@ D2. **Cryptographically-bound watcher attribution.** R5
     free-riders. Not in scope today.
 
 D3. **Eligible-coin-family expansion.** *Partially
-    discharged.* R17 lists one eligible family today. The three
+    discharged.* R17 records the legacy eligible family; R24-R28 add
+    ARRR in native builds and software-key LTC/vARRR through a new envelope. The three
     UTXO-style families this entry originally described opted
     in until 2026-10-30 without any watcher method and were
     withdrawn by Decision BA; restoring them needs their
@@ -516,7 +659,7 @@ D3. **Eligible-coin-family expansion.** *Partially
     hand-off of R6a. Chapter 20 §20.10 D7 is the record
     of Siacoin's addition, including which of the coin-trait's
     non-trivial watcher methods it implements and which one
-    (`create_maker_payment_spend_preimage`) it judges
+     (`create_maker_payment_spend_preimage`) it judges
     infeasible and deliberately leaves on the trait's own
     graceful default. Adding any further family still requires
     the family's transaction format to permit deterministic
@@ -547,7 +690,9 @@ D5. **Watcher coverage for a no-fee swap.** R10a records that
     defect is fixed, since no watcher assists any reloaded swap
     at all until then.
 
-D6. **Per-node de-duplication keyed on a variable-length field.**
+D6. **Historical variable-length de-duplication.** Admission now checks
+    all three identifier widths before locking. R28 gives V2 a checked
+    key and owned lease. The former concern was:
     R14 keys the one-state-machine-per-swap lock on the
     taker-fee hash. Under R6a that key is a fixed 32 bytes, so
     the keying is sound once the fee field carries a hash. Two
@@ -560,11 +705,26 @@ D6. **Per-node de-duplication keyed on a variable-length field.**
     accepts and the Validate-taker-fee state then rejects
     after its retry budget (R13) has elapsed.
 
+D7. **Operational offline coverage.** Delegation is still published
+    after the taker payment has been broadcast, without a watcher
+    acknowledgement. A trader can disappear before any watcher receives
+    a usable job. Jobs are in memory; a watcher restart loses them unless
+    an online taker republishes. Operator availability, partitions, static
+    fees and a consensus-branch change can also prevent intervention.
+    Before a wallet offers offline completion as a safety guarantee, it
+    needs a pre-funding, acknowledged and durable handoff to available
+    operators, plus real three-node tests for claim, refund, restart and
+    reorg cases. This extension alone does not justify that guarantee or
+    a funded mobile rollout. R10a's no-fee exclusion remains deliberate.
+
 ## 9.13 External References
 
 - The atomic-cross-chain-swap pattern (informal references
   and public wiki) on which the maker/taker
   secret-reveal protocol is based.
+- [ZIP 203: Transaction Expiry](https://zips.z.cash/zip-0203), including
+  the zero-expiry convention used by the independently authored R25/R26
+  delayed transaction templates.
 - The publish-subscribe overlay protocol the substrate
   uses for topic-based gossip (referenced via
   [Chapter 28](28-libp2p-modernization.md)).
@@ -803,3 +963,10 @@ V3. The publish-subscribe overlay the substrate rides on is
   no code blocks. *Measure:* 0.05, read against the standard that any
   discretionary finding fails a file; dictated-interop and public-surface
   tokens were excluded from the measured set.
+
+- *Independent extension, 2026-11-05:* R24-R28, T6-T8 and D7, plus their
+  eligibility/subscription cross-references, are original work based on
+  this Reloaded checkout, public HTLC and Zcash transaction interfaces,
+  and issue #56. Forbidden corpus: not consulted for this extension.
+  The historical clearances above describe the earlier reference-derived
+  sections; they are not a claim of whole-file clean-room provenance.

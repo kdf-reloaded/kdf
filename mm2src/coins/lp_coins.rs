@@ -243,6 +243,7 @@ pub mod sql_tx_history_storage;
 #[doc(hidden)]
 #[allow(unused_variables)]
 pub mod test_coin;
+pub(crate) mod watcher_preimage;
 pub mod z_coin;
 pub use test_coin::TestCoin;
 

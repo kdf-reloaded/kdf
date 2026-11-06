@@ -689,6 +689,18 @@ empty value and a value that begins with anything else; and no matching or
 negotiation message built for a shielded swap shall carry a transaction
 version or upgrade capability beyond this project's own addition, if any.
 
+**Independent watcher extension.** Chapter 09 R24-R28 adds opt-in,
+native ARRR delegation for legacy V1 swaps. A taker prepares its claim
+and refund with the actual per-swap HTLC keys, using the existing native
+transaction builder and Sapling payout path. Only delegated templates
+disable expiry; ordinary local spends retain their normal expiry and
+broadcast behavior. A watcher inserts a verified secret without changing
+transaction effects or taking a private key. The new envelope is not
+support for the V2 swap protocol. Chapter 09 D7 records the unacknowledged
+handoff and operator-availability limits; this is not guaranteed offline
+completion. The ARRR proof regression checks Sapling proofs and the
+binding signature after secret insertion.
+
 #### Deferred Work (§39.5)
 
 D39.5.a **Decided 2026-10-28 (maintainer): follow the reference.** Under the HD-wallet policy
@@ -7015,3 +7027,8 @@ entries in its list cannot be told apart. Passing the position to the fallback c
     transaction reader; the published wallet-database crate and this repository's code.
   - They take no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
     is required.
+
+- *Independent watcher cross-reference, 2026-11-05:* the watcher-extension
+  paragraph in §39.5 records original work in chapter 09 R24-R28 and D7.
+  Its inputs are this Reloaded checkout and the public Zcash transaction
+  APIs. Forbidden corpus: not consulted for this addition.

@@ -464,6 +464,7 @@ pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
     init_ordermatch_context(&ctx).mm_err(Into::into)?;
     init_message_service(&ctx).await.mm_err(Into::into)?;
     init_p2p(ctx.clone()).await.mm_err(Into::into)?;
+    crate::mm2::lp_swap::swap_watcher::start_watcher_subscriptions(&ctx);
 
     let balance_update_ordermatch_handler = BalanceUpdateOrdermatchHandler::new(ctx.clone());
     register_balance_update_handler(ctx.clone(), Box::new(balance_update_ordermatch_handler)).await;

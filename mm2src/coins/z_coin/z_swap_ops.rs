@@ -438,6 +438,3 @@ impl SwapOps for ZCoin {
         Box::new(fut.boxed().compat())
     }
 }
-
-#[async_trait]
-impl WatcherOps for ZCoin {}

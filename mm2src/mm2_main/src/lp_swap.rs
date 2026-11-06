@@ -121,6 +121,7 @@ pub mod nft_maker_swap_v2;
 #[path = "lp_swap/swap_v2_rpcs.rs"] pub(crate) mod swap_v2_rpcs;
 #[path = "lp_swap/swap_versioning.rs"] pub mod swap_versioning;
 #[path = "lp_swap/swap_watcher.rs"] pub mod swap_watcher;
+#[path = "lp_swap/swap_watcher_v2.rs"] mod swap_watcher_v2;
 #[path = "lp_swap/taker_swap.rs"] mod taker_swap;
 #[path = "lp_swap/taker_swap_v2.rs"] pub mod taker_swap_v2;
 #[path = "lp_swap/trade_preimage.rs"] mod trade_preimage;

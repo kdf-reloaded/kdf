@@ -484,13 +484,17 @@ Reference designation: `v2.6.0-beta`.
 
 ---
 
-## #11 — Watcher payload carries transaction bodies where hashes are required — **OPEN**
+## #11 — Watcher payload and delegation — **PARTIALLY ADDRESSED**
 
 CRD reference:
 [`09-watcher-reward-infrastructure.md`](./09-watcher-reward-infrastructure.md)
 R6a / R10a.
 
-- [ ] Reloaded's taker publishes the **serialized transactions** in the
+- [x] Corrected by the independent signed-HTLC extension (ch.09 R24-R28):
+  fee, taker-payment and maker-payment identifier fields carry checked,
+  display-order transaction ids; the new envelope carries raw transactions
+  in separate fields. The sender regression inspects the actual signed
+  message. The former defect was: Reloaded's taker published the **serialized transactions** in the
   watcher payload's taker-fee and taker-payment hash fields. A watcher
   length-checks the fee field for 32 bytes before spawning, so no watcher
   assists any reloaded taker's swap, for any coin, in either direction. The
@@ -507,7 +511,10 @@ R6a / R10a.
   families opted in to watching without any watcher method, so a Reloaded node
   started watchers for them that could only stop. They no longer opt in
   (ch. 09 R17); restoring them needs their watcher methods (ch. 09 D3). Whether a
-  reference node watches swaps of these families is open (Spec Reader queue).
+  reference node watches swaps of these families was answered by ch.09's
+  cleared R17 reference note. Native ARRR and software-key LTC/vARRR now
+  have opt-in V2-envelope delegation; the other families and guaranteed,
+  acknowledged, durable offline coverage remain open (ch.09 D3, D7).
 
 ---
 

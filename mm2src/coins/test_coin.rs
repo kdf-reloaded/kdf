@@ -295,7 +295,61 @@ impl SwapOps for TestCoin {
 }
 
 #[async_trait]
-impl WatcherOps for TestCoin {}
+#[mockable]
+#[allow(forgetting_references, forgetting_copy_types, invalid_reference_casting)]
+impl WatcherOps for TestCoin {
+    fn is_supported_by_watchers(&self) -> bool { false }
+
+    fn supports_watcher_v2(&self) -> bool { false }
+
+    async fn validate_watcher_payment(&self, _input: crate::WatcherPaymentValidation<'_>) -> Result<(), String> {
+        Err("TestCoin has no watcher payment validation implementation".into())
+    }
+
+    fn create_maker_payment_spend_preimage(
+        &self,
+        _payment: &[u8],
+        _lock: u32,
+        _other: &[u8],
+        _hash: &[u8],
+        _unique: &[u8],
+        _private: &[u8],
+    ) -> TransactionFut {
+        Box::new(futures01::future::err(crate::TransactionErr::Plain(
+            "TestCoin has no watcher claim template".into(),
+        )))
+    }
+
+    fn create_taker_payment_refund_preimage(
+        &self,
+        _payment: &[u8],
+        _lock: u32,
+        _other: &[u8],
+        _hash: &[u8],
+        _unique: &[u8],
+        _private: &[u8],
+    ) -> TransactionFut {
+        Box::new(futures01::future::err(crate::TransactionErr::Plain(
+            "TestCoin has no watcher refund template".into(),
+        )))
+    }
+
+    fn complete_watcher_claim(&self, _preimage: &[u8], _secret: &[u8], _secret_hash: &[u8]) -> Result<Vec<u8>, String> {
+        Err("TestCoin has no watcher claim implementation".into())
+    }
+
+    async fn watcher_search_for_swap_tx_spend(
+        &self,
+        _time_lock: u32,
+        _other_pub: &[u8],
+        _taker_pub: &[u8],
+        _secret_hash: &[u8],
+        _tx: &[u8],
+        _search_from_block: u64,
+    ) -> Result<Option<FoundSwapTxSpend>, String> {
+        Err("TestCoin has no watcher spend search implementation".into())
+    }
+}
 
 #[async_trait]
 #[mockable]

@@ -607,10 +607,12 @@ Set it to `true` for the reference behavior: `enable` then leaves the coin
 registered when its balance read fails (`electrum` is unaffected). The switch
 exists to make the reference's inconsistency reproducible; it is not
 recommended.
-After success, `enable` subscribes the node to the coin's transaction-helper
-topic when the coin is a UTXO coin in native mode, and to the coin's watcher
-topic when the node runs as a watcher ([Chapter 09](09-watcher-reward-infrastructure.md));
-`electrum` subscribes to neither.
+After success, `enable` subscribes to the transaction-helper topic when the
+coin is UTXO in native mode; `electrum` does not. Watcher subscriptions are
+independent of these RPC handlers: an `is_watcher` node follows the common
+coin registry, including `electrum` and asynchronous Z-coin activation,
+under [chapter 09 R21-R28](09-watcher-reward-infrastructure.md). The V2
+HTLC watcher set additionally requires `watcher_htlc_v2: true`.
 
 **R55.4.7** *Errors.* Every failure answers per R55.1.10 (HTTP 500,
 `{"error": string}`), including: missing `coin`; coin already active; coin

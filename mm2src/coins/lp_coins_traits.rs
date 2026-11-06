@@ -296,6 +296,25 @@ pub trait WatcherOps {
     /// Whether this coin supports being monitored by watcher nodes.
     fn is_supported_by_watchers(&self) -> bool { false }
 
+    /// Whether this coin implements the version-two delegated HTLC transactions.
+    fn supports_watcher_v2(&self) -> bool { false }
+
+    /// Validate a delegated transaction and its funding output against the chain.
+    ///
+    /// # Errors
+    /// Rejects mismatched scripts, amounts, signing keys, or transaction commitments.
+    async fn validate_watcher_payment(&self, _input: WatcherPaymentValidation<'_>) -> Result<(), String> {
+        Err("delegated watcher payments are not supported for this coin".into())
+    }
+
+    /// Insert a revealed secret into the claim's witness without signing or changing its outputs.
+    ///
+    /// # Errors
+    /// Rejects malformed templates and secrets that do not satisfy the agreed hash lock.
+    fn complete_watcher_claim(&self, _preimage: &[u8], _secret: &[u8], _secret_hash: &[u8]) -> Result<Vec<u8>, String> {
+        Err("delegated watcher claims are not supported for this coin".into())
+    }
+
     /// Watcher-specific taker fee validation (retrieves tx from chain by hash).
     fn watcher_validate_taker_fee(
         &self,
@@ -324,6 +343,7 @@ pub trait WatcherOps {
         _maker_pub: &[u8],
         _secret_hash: &[u8],
         _swap_unique_data: &[u8],
+        _htlc_privkey: &[u8],
     ) -> TransactionFut {
         Box::new(futures01::future::err(TransactionErr::Plain(
             "create_maker_payment_spend_preimage not supported".into(),
@@ -338,6 +358,7 @@ pub trait WatcherOps {
         _maker_pub: &[u8],
         _secret_hash: &[u8],
         _swap_unique_data: &[u8],
+        _htlc_privkey: &[u8],
     ) -> TransactionFut {
         Box::new(futures01::future::err(TransactionErr::Plain(
             "create_taker_payment_refund_preimage not supported".into(),
@@ -349,6 +370,7 @@ pub trait WatcherOps {
         &self,
         _time_lock: u32,
         _other_pub: &[u8],
+        _taker_pub: &[u8],
         _secret_hash: &[u8],
         _tx: &[u8],
         _search_from_block: u64,

@@ -481,6 +481,30 @@ pub struct WatcherValidatePaymentInput {
     pub confirmations: u64,
     pub min_block_number: u64,
 }
+
+/// Which branch of a legacy HTLC a watcher transaction authorizes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WatcherSpendKind {
+    /// A signature prepared before the secret is known. The secret is inserted later.
+    Claim,
+    /// A complete transaction that can be broadcast after the refund gate opens.
+    Refund,
+}
+
+/// Public payment terms and a signed transaction delegated to a watcher.
+/// Keys here are public keys. Signing keys never enter the watcher payload.
+pub struct WatcherPaymentValidation<'a> {
+    pub payment_tx: &'a [u8],
+    pub preimage: &'a [u8],
+    pub time_lock: u32,
+    pub refund_pub: &'a [u8],
+    pub claim_pub: &'a [u8],
+    pub secret_hash: &'a [u8],
+    pub amount: BigDecimal,
+    /// Required confirmations; nonzero so an enabled SPV policy is applied.
+    pub confirmations: u64,
+    pub kind: WatcherSpendKind,
+}
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum WithdrawFee {

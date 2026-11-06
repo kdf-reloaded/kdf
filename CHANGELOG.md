@@ -49,6 +49,17 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 
 #### ARRR and other shielded coins
 
+- **Opt-in watchers can claim or refund legacy ARRR/LTC/vARRR swaps using
+  transactions signed by the taker.** Set `watcher_htlc_v2: true` on the
+  taker and operator, and `is_watcher: true` on the operator. The new
+  envelope carries each chain's real HTLC keys and payment terms; ARRR
+  uses the native transaction reader and keeps the payout in Sapling.
+  Claims insert the revealed secret without signing again. Operators
+  retry interrupted broadcasts and wait for confirmations. Publishing
+  is still post-payment and unacknowledged, so it is not an offline
+  completion guarantee. CI runs watcher regressions and the real Sapling
+  proof check in dedicated jobs. Detail: issue #56; CRD ch.09 R24-R28, D7.
+
 - **ARRR can now pay a Pirate1 address.** Pirate Chain's own wallets hand out Pirate1 addresses
   (`pirate1…`, the address form of its Ironwood pool) by default. `validateaddress` now accepts them,
   and `withdraw` pays them from the wallet's Sapling balance at Pirate Chain's fixed fee of 0.0001
@@ -582,12 +593,12 @@ lives.
   coin is offered only once the Electrum server lists it. More in
   [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md).
   Detail: PR #181; CRD ch.38 R38.5B.8, D38.5B.2, D38.5B.4.
-- **The swap watcher does not work yet.** A watcher is another node that finishes a swap for you
-  when you are offline. No swap hands its data to a watcher yet, for any coin (issue #56), so keep
-  your node running until your swaps have finished. Bitcoin-family coins (UTXO coins such as RIN,
-  BCH and QTUM) also no longer offer to watch other traders' swaps, because the checks a watcher
-  runs are not implemented for them; only Siacoin (SC) offers watching. Detail: PR #177; CRD ch.09
-  R17.
+- **Keep the trader online until a swap finishes.** The opt-in V2 watcher
+  extension covers native ARRR and software-key LTC/vARRR, but receiving
+  a usable job requires an available operator. Publishing has no
+  acknowledgement and begins after the taker payment; watcher jobs do not
+  survive an operator restart. Other coin families and the version-two
+  swap protocol do not gain coverage. Detail: issue #56; CRD ch.09 D7.
 - **Four kinds of connection still look names up through the computer's own resolver,** whatever
   `dns_resolver` says: Sia, the WalletConnect relay, Lightning peer addresses and the statistics
   method. They follow in a later release. More in
