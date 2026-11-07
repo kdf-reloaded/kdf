@@ -177,6 +177,8 @@ pub(crate) fn utxo_coin_fields_for_test(
             checksum_type,
             fork_id: 0,
             signature_version: SignatureVersion::Base,
+            sighash_suffix: 0,
+            sighash_suffix_height: None,
             required_confirmations: 1.into(),
             force_min_relay_fee: false,
             mtp_block_count: NonZeroU64::new(11).unwrap(),
@@ -10733,5 +10735,412 @@ mod hd_coin_swap_key_tests {
             let coin = utxo_coin_from_fields(hd_fields_at(at_address(address_id)));
             assert_eq!(coin.swap_key_disagreement(&node_pubkey), None);
         }
+    }
+}
+
+// ---- The configurable sighash suffix (CRD ch.61, tests T6 and T8) ----
+
+#[cfg(not(target_arch = "wasm32"))]
+mod sighash_suffix_sites {
+    use super::order_posting_latency::{my_address, script_hashes_of_test_coin};
+    use super::*;
+    use crate::utxo::rpc_clients::electrum_rpc_client::electrum_client_over_stub;
+    use crate::utxo::rpc_clients::electrum_stub_server::StubServer;
+    use crate::utxo::swap_proto_v2_scripts::taker_payment_script;
+    use crate::utxo::utxo_common::{build_taker_payment_spend_preimage_tx, generate_swap_payment_outputs,
+                                   generate_taker_fee_tx_outputs, payment_script, send_maker_payment, send_taker_fee,
+                                   sign_taker_payment_spend_input};
+    use crate::{DexFeeBurnDestination, PrevTxns, SignRawTransactionEnum, SignRawTransactionRequest,
+                SignUtxoTransactionParams};
+    use futures::compat::Future01CompatExt;
+    use keys::{Public, Signature};
+    use mm2_net_config::net_config_or_panic;
+    use serialization::serialize;
+
+    /// The Bitcoin II suffix: "BC2" and the suffix version 1.
+    const BC2_SUFFIX: u32 = 0x0132_4342;
+    const LISTED_VALUE: u64 = 900_000;
+    const TIME_LOCK: u32 = 1_700_000_000;
+    const SECRET_HASH: [u8; 20] = [0x11; 20];
+
+    /// The test coin turned into a Bitcoin-II-like entry: plain (not overwintered) Bitcoin transactions, the
+    /// ordinary signature version and fork id, and the given suffix.
+    fn fields_with_suffix(rpc_client: UtxoRpcClientEnum, sighash_suffix: u32) -> UtxoCoinFields {
+        let mut fields = utxo_coin_fields_for_test(rpc_client, None, false);
+        fields.conf.overwintered = false;
+        fields.conf.zcash = false;
+        fields.conf.tx_version = 2;
+        fields.conf.version_group_id = 0;
+        fields.conf.consensus_branch_id = 0;
+        fields.conf.signature_version = SignatureVersion::Base;
+        fields.conf.fork_id = 0;
+        fields.conf.sighash_suffix = sighash_suffix;
+        fields
+    }
+
+    /// A coin on a scripted Electrum server that lists one unspent output of the coin's address and accepts every
+    /// broadcast.
+    fn coin_on_backend(sighash_suffix: u32) -> (UtxoStandardCoin, StubServer) {
+        let (p2pkh_hash, p2pk_hash) = script_hashes_of_test_coin(false);
+        let (client, server) = electrum_client_over_stub(|server| {
+            server.set_scripthash_result(
+                "blockchain.scripthash.listunspent",
+                &p2pkh_hash,
+                json!([{"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": LISTED_VALUE}]),
+            );
+            server.set_scripthash_result("blockchain.scripthash.listunspent", &p2pk_hash, json!([]));
+            server.set_result("blockchain.transaction.broadcast", json!("ab".repeat(32)));
+        });
+        let fields = fields_with_suffix(UtxoRpcClientEnum::Electrum(client), sighash_suffix);
+        (utxo_coin_from_fields(fields), server)
+    }
+
+    fn utxo_tx_of(sent: TransactionEnum) -> UtxoTx {
+        match sent {
+            TransactionEnum::UtxoTx(tx) => tx,
+            _ => panic!("expected a UTXO transaction"),
+        }
+    }
+
+    /// The signature, without its sighash-type byte, that a scriptSig pushes first (`[signature || type]...`). The
+    /// signed sighash-type byte is the ordinary `0x01` (R61.2.4).
+    fn first_signature_of(script_sig: &Bytes) -> Signature {
+        let script = Script::from(script_sig.to_vec());
+        let sig_with_type = script
+            .get_instruction(0)
+            .expect("the scriptSig has a first instruction")
+            .expect("the first instruction decodes")
+            .data
+            .expect("the first instruction is a push")
+            .to_vec();
+        assert_eq!(
+            sig_with_type.last().copied(),
+            Some(0x01),
+            "R61.2.4: the type byte is unchanged"
+        );
+        Signature::from(sig_with_type[..sig_with_type.len() - 1].to_vec())
+    }
+
+    /// Asserts that `signature` signs input `index` of `tx` over the digest with `suffix` and not over the ordinary one,
+    /// recomputing both through the substrate's public routine.
+    fn assert_suffix_digest_only(
+        tx: &UtxoTx,
+        index: usize,
+        amount: u64,
+        script_code: &Script,
+        signature: &Signature,
+        public: &Public,
+        suffix: u32,
+    ) {
+        let digest = |suffix: u32| {
+            TransactionInputSigner::from_transaction(tx.clone(), suffix).signature_hash(
+                index,
+                amount,
+                script_code,
+                SignatureVersion::Base,
+                1,
+            )
+        };
+        let suffixed = digest(suffix);
+        let ordinary = digest(0);
+        assert_ne!(suffixed, ordinary);
+        assert!(
+            public.verify(&suffixed, signature).unwrap(),
+            "input {index}: suffix digest"
+        );
+        assert!(
+            !public.verify(&ordinary, signature).unwrap(),
+            "input {index}: ordinary digest"
+        );
+    }
+
+    /// Every input of `tx` spends a P2PKH output of the coin's own address, of the given amounts.
+    fn assert_p2pkh_inputs_carry_the_suffix(coin: &UtxoStandardCoin, tx: &UtxoTx, amounts: &[u64]) {
+        assert_eq!(tx.inputs.len(), amounts.len());
+        let prev_script = Builder::build_p2pkh(&my_address(coin).hash);
+        for (index, input) in tx.inputs.iter().enumerate() {
+            let script = Script::from(input.script_sig.to_vec());
+            let pubkey_bytes = script
+                .get_instruction(1)
+                .expect("a P2PKH scriptSig has a second instruction")
+                .expect("the second instruction decodes")
+                .data
+                .expect("the second instruction is a push")
+                .to_vec();
+            let public = Public::from_slice(&pubkey_bytes).unwrap();
+            let signature = first_signature_of(&input.script_sig);
+            assert_suffix_digest_only(tx, index, amounts[index], &prev_script, &signature, &public, BC2_SUFFIX);
+        }
+    }
+
+    /// The Bitcoin II output limits from the activation height (CRD ch.61 R61.6): at most one `OP_RETURN` output of
+    /// at most 83 bytes, no `OP_13` inside it, and no bare multisig output.
+    fn assert_bc2_output_limits(outputs: &[TransactionOutput]) {
+        let op_returns: Vec<_> = outputs
+            .iter()
+            .filter(|output| output.script_pubkey.first() == Some(&0x6a))
+            .collect();
+        assert!(op_returns.len() <= 1, "more than one OP_RETURN output: {outputs:?}");
+        for output in op_returns {
+            assert!(
+                output.script_pubkey.len() <= 83,
+                "OP_RETURN script of {} bytes",
+                output.script_pubkey.len()
+            );
+            let script = Script::from(output.script_pubkey.to_vec());
+            assert!(
+                !script.opcodes().filter_map(Result::ok).any(|op| op == Opcode::OP_13),
+                "OP_13 inside an OP_RETURN output"
+            );
+        }
+        for output in outputs {
+            let script = Script::from(output.script_pubkey.to_vec());
+            assert!(!script.is_multisig_script(), "a bare multisig output");
+        }
+    }
+
+    fn withdraw_request() -> WithdrawRequest {
+        WithdrawRequest {
+            amount: "0.001".parse().unwrap(),
+            from: None,
+            to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
+            coin: TEST_COIN_NAME.into(),
+            max: false,
+            fee: None,
+        }
+    }
+
+    /// T8 and T6: the withdraw signs under the suffix digest and builds no restricted output.
+    #[test]
+    fn t8_withdraw_signs_under_the_suffix_digest() {
+        let (coin, _server) = coin_on_backend(BC2_SUFFIX);
+        let details = block_on(coin.withdraw(withdraw_request()).compat()).unwrap();
+        let tx: UtxoTx = deserialize(details.tx_hex.as_slice()).unwrap();
+        assert_p2pkh_inputs_carry_the_suffix(&coin, &tx, &[LISTED_VALUE]);
+        assert_bc2_output_limits(&tx.outputs);
+    }
+
+    /// T8 and T6: the DEX-fee transaction (the plain, the pre-burn and the bare `OP_RETURN` burn forms of its outputs
+    /// for T6, the plain form signed and sent for T8).
+    #[test]
+    fn t8_dex_fee_transaction_signs_under_the_suffix_digest() {
+        let (coin, _server) = coin_on_backend(BC2_SUFFIX);
+        let dex_fee = DexFee::Standard(MmNumber::from((10_000u64, 100_000_000u64)));
+        let sent = block_on(send_taker_fee(coin.clone(), &dex_fee, test_dex_fee_addr_raw_pubkey()).compat()).unwrap();
+        let tx = utxo_tx_of(sent);
+        assert_p2pkh_inputs_carry_the_suffix(&coin, &tx, &[LISTED_VALUE]);
+        assert_bc2_output_limits(&tx.outputs);
+
+        let net_cfg = net_config_or_panic(6133);
+        let fee_address = my_address(&coin);
+        for burn_destination in [
+            DexFeeBurnDestination::KmdOpReturn,
+            DexFeeBurnDestination::PreBurnAccount {
+                burn_pubkey: net_cfg.burn_addr_raw_pubkey().to_vec(),
+            },
+        ] {
+            let with_burn = DexFee::WithBurn {
+                fee_amount: MmNumber::from("0.0075"),
+                burn_amount: MmNumber::from("0.0025"),
+                burn_destination,
+            };
+            let outputs = generate_taker_fee_tx_outputs(&coin, &with_burn, &fee_address).unwrap();
+            assert_bc2_output_limits(&outputs);
+        }
+    }
+
+    /// T8 and T6: the HTLC payment signs under the suffix digest; its one `OP_RETURN` output records the secret hash
+    /// and stays inside the Bitcoin II limits.
+    #[test]
+    fn t8_htlc_payment_signs_under_the_suffix_digest() {
+        let (coin, _server) = coin_on_backend(BC2_SUFFIX);
+        let my_pub = coin.my_public_key().unwrap().to_vec();
+        let other_pub = key_pair_from_seed("ch61 htlc counterparty").unwrap().public().to_vec();
+
+        let outputs = generate_swap_payment_outputs(
+            coin.clone(),
+            TIME_LOCK,
+            &my_pub,
+            &other_pub,
+            &SECRET_HASH,
+            "0.001".parse().unwrap(),
+        )
+        .unwrap()
+        .outputs;
+        assert_bc2_output_limits(&outputs);
+
+        let sent = block_on(
+            send_maker_payment(
+                coin.clone(),
+                TIME_LOCK,
+                &my_pub,
+                &other_pub,
+                &SECRET_HASH,
+                "0.001".parse().unwrap(),
+            )
+            .compat(),
+        )
+        .unwrap();
+        let tx = utxo_tx_of(sent);
+        assert_p2pkh_inputs_carry_the_suffix(&coin, &tx, &[LISTED_VALUE]);
+        assert_bc2_output_limits(&tx.outputs);
+    }
+
+    /// T8 and T6: the HTLC spend and the HTLC refund sign the P2SH input over the redeem script under the suffix
+    /// digest, and their single output is a plain P2PKH.
+    #[test]
+    fn t8_htlc_spend_and_refund_sign_under_the_suffix_digest() {
+        UtxoStandardCoin::get_current_mtp
+            .mock_safe(|_fields| MockResult::Return(Box::pin(futures::future::ok(TIME_LOCK - 1_000))));
+        let (coin, _server) = coin_on_backend(BC2_SUFFIX);
+        let key_pair = key_pair_from_seed("ch61 htlc spender").unwrap();
+        let other = key_pair_from_seed("ch61 htlc counterparty").unwrap();
+        let redeem = payment_script(TIME_LOCK, &SECRET_HASH, key_pair.public(), other.public());
+
+        let mut prev = UtxoTx::default();
+        prev.version = 2;
+        prev.outputs.push(TransactionOutput {
+            value: 1_000_000,
+            script_pubkey: Builder::build_p2sh(&dhash160(&redeem).into()).to_bytes(),
+        });
+        let outputs = vec![TransactionOutput {
+            value: 990_000,
+            script_pubkey: Builder::build_p2pkh(&my_address(&coin).hash).to_bytes(),
+        }];
+
+        let spend_data = Builder::default()
+            .push_data(&[0x22; 32])
+            .push_opcode(Opcode::OP_0)
+            .into_script();
+        let refund_data = Builder::default().push_opcode(Opcode::OP_1).into_script();
+        for (script_data, sequence) in [(spend_data, 0xffff_ffffu32), (refund_data, 0xffff_fffe)] {
+            let tx = block_on(coin.p2sh_spending_tx(
+                prev.clone(),
+                redeem.to_bytes(),
+                outputs.clone(),
+                script_data,
+                sequence,
+                TIME_LOCK,
+                &key_pair,
+            ))
+            .unwrap();
+            let signature = first_signature_of(&tx.inputs[0].script_sig);
+            assert_suffix_digest_only(
+                &tx,
+                0,
+                prev.outputs[0].value,
+                &redeem,
+                &signature,
+                key_pair.public(),
+                BC2_SUFFIX,
+            );
+            assert_bc2_output_limits(&tx.outputs);
+        }
+    }
+
+    /// T8 and R61.2.3: the taker's single-output pre-signature (SIGHASH_SINGLE, signed type byte `0x03`) verifies under
+    /// the suffix digest and not under the ordinary one; the preimage signer carries the coin's suffix. The maker
+    /// side re-derives the digest through the same routine to validate it (R61.4.6).
+    #[test]
+    fn t8_taker_single_output_presignature_signs_under_the_suffix_digest() {
+        let fields = fields_with_suffix(UtxoRpcClientEnum::Native(native_client_for_test()), BC2_SUFFIX);
+        let taker = key_pair_from_seed("ch61 taker").unwrap();
+        let maker = key_pair_from_seed("ch61 maker").unwrap();
+        let redeem = taker_payment_script(TIME_LOCK, &[0xbb; 32], taker.public(), maker.public());
+
+        let mut taker_payment = UtxoTx::default();
+        taker_payment.version = 2;
+        taker_payment.outputs.push(TransactionOutput {
+            value: 1_000_000,
+            script_pubkey: vec![0xaa; 23].into(),
+        });
+        let outputs = vec![TransactionOutput {
+            value: 10_000,
+            script_pubkey: Builder::build_p2pkh(&maker.public().address_hash().into()).to_bytes(),
+        }];
+        let signer = build_taker_payment_spend_preimage_tx(&fields, &taker_payment, outputs).unwrap();
+        assert_eq!(signer.sighash_suffix, BC2_SUFFIX);
+
+        let sighash_type = 3u32;
+        let signature = sign_taker_payment_spend_input(&signer, &redeem, &taker, &fields, sighash_type).unwrap();
+        let mut ordinary_signer = signer.clone();
+        ordinary_signer.sighash_suffix = 0;
+        let digest = |signer: &TransactionInputSigner| {
+            signer.signature_hash(
+                0,
+                signer.inputs[0].amount,
+                &redeem,
+                SignatureVersion::Base,
+                sighash_type,
+            )
+        };
+        assert_ne!(digest(&signer), digest(&ordinary_signer));
+        assert!(taker.public().verify(&digest(&signer), &signature).unwrap());
+        assert!(!taker.public().verify(&digest(&ordinary_signer), &signature).unwrap());
+    }
+
+    /// T8 and T6: the raw-transaction signing RPC signs every input under the suffix digest. The unsigned transaction
+    /// comes in as hex, the input amounts through `prev_txns`.
+    #[test]
+    fn t8_sign_raw_transaction_signs_under_the_suffix_digest() {
+        let (coin, _server) = coin_on_backend(BC2_SUFFIX);
+        let prev_hash = H256::from([7; 32]);
+        let mut unsigned = UtxoTx::default();
+        unsigned.version = 2;
+        unsigned.inputs.push(TransactionInput {
+            previous_output: OutPoint {
+                hash: prev_hash,
+                index: 0,
+            },
+            script_sig: Default::default(),
+            sequence: 0xffff_fffe,
+            script_witness: vec![],
+        });
+        unsigned.outputs.push(TransactionOutput {
+            value: 90_000,
+            script_pubkey: Builder::build_p2pkh(&my_address(&coin).hash).to_bytes(),
+        });
+        let request = SignRawTransactionRequest {
+            coin: TEST_COIN_NAME.into(),
+            tx: SignRawTransactionEnum::UTXO(SignUtxoTransactionParams {
+                tx_hex: hex::encode(serialize(&unsigned).to_vec()),
+                prev_txns: Some(vec![PrevTxns {
+                    tx_hash: hex::encode(prev_hash.to_vec()),
+                    index: 0,
+                    script_pub_key: hex::encode(Builder::build_p2pkh(&my_address(&coin).hash).to_bytes().to_vec()),
+                    amount: "0.001".parse().unwrap(),
+                }]),
+            }),
+        };
+        let signed = block_on(crate::utxo::utxo_common::sign_raw_tx(coin.clone(), request)).unwrap();
+        let tx: UtxoTx = deserialize(signed.tx_hex.as_slice()).unwrap();
+        assert_p2pkh_inputs_carry_the_suffix(&coin, &tx, &[100_000]);
+    }
+
+    /// The suffix of a coin travels with the preimage a peer sends: parsing a preimage takes the receiving coin's own
+    /// suffix, never a value from the peer's bytes.
+    #[test]
+    fn a_parsed_swap_preimage_takes_the_coins_own_suffix() {
+        let (coin, _server) = coin_on_backend(BC2_SUFFIX);
+        let mut tx = UtxoTx::default();
+        tx.version = 2;
+        tx.inputs.push(TransactionInput {
+            previous_output: OutPoint {
+                hash: H256::from([7; 32]),
+                index: 0,
+            },
+            script_sig: Default::default(),
+            sequence: 0xffff_fffe,
+            script_witness: vec![],
+        });
+        tx.outputs.push(TransactionOutput {
+            value: 1_000,
+            script_pubkey: vec![0x51].into(),
+        });
+        let preimage = coin.parse_preimage(&serialize(&tx)).unwrap();
+        assert_eq!(preimage.0.sighash_suffix, BC2_SUFFIX);
+        let (plain_coin, _plain_server) = coin_on_backend(0);
+        let preimage = plain_coin.parse_preimage(&serialize(&tx)).unwrap();
+        assert_eq!(preimage.0.sighash_suffix, 0);
     }
 }

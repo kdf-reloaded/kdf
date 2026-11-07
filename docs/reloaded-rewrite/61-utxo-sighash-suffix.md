@@ -149,7 +149,8 @@ height; a test-network coin entry sets its own `sighash_suffix_height`
 **R61.3.1** *`sighash_suffix`.* A coin entry MAY carry the
 top-level string member `sighash_suffix`, a hexadecimal integer
 with a `0x` prefix that fits in 32 bits, the same shape as `fork_id`
-(R58.2.5). When it is absent the resolved suffix is zero. A present value
+(R58.2.5). When it is absent, or JSON `null` (as for `fork_id`), the resolved
+suffix is zero. A present value
 that is not of that shape fails activation of the coin with an error that
 names the key and the offending value; there is no silent fallback for this
 key, because a wrong suffix signs transactions the network rejects.
@@ -171,7 +172,10 @@ implementation honors this key or only parses and validates it is decision D1.
 hashing step (R58.2.4). The suffix is appended in each of `"base"`,
 `"witness_v0"` and `"fork_id"`, in the same place and the same way. The
 combination of a non-zero suffix with `"fork_id_rxd"` is not defined by any
-network and fails activation with an error naming both keys.
+network and fails activation with an error naming both keys. The same holds
+for a coin whose configuration selects the Zcash-family overwintered digest,
+which this chapter does not bind: a non-zero suffix on such a coin fails
+activation with an error naming the key, instead of being ignored.
 
 **R61.3.4** *The BC2 entries.* The shared coins file carries the two BC2
 entries with the one added member:
@@ -261,12 +265,16 @@ implementer does not mistake them for part of this change:
 - **Restrictions on arbitrary data in transactions.** From that height a BC2
   block is invalid if a transaction has more than one `OP_RETURN` output, an
   `OP_RETURN` output script longer than 83 bytes, the opcode `OP_13` inside an
-  `OP_RETURN` output, or a bare multisig output; and Taproot spends are
-  restricted (no annex, a revealed script of at most 3,600 bytes, no
-  inscription envelope). The project's UTXO transaction builders add an
-  `OP_RETURN` output only for SLP tokens on Bitcoin Cash, and add no bare
-  multisig output, so the transactions the project builds for BC2 carry none of
-  the restricted shapes. T6 pins that.
+  `OP_RETURN` output (the network parses script operations, so the byte value
+  inside a data push does not count), or a bare multisig output; and Taproot
+  spends are restricted (no annex, a revealed script of at most 3,600 bytes, no
+  inscription envelope). The project's UTXO transaction builders add no bare
+  multisig output. They do add an `OP_RETURN` output in some transactions: the
+  HTLC payment and the taker funding carry exactly one, with the secret hash
+  as a data push, and an SLP token transaction on Bitcoin Cash carries one.
+  The BC2 transactions that matter (withdrawal, DEX fee, HTLC payment, spend
+  and refund) therefore stay within the limits: at most one such output, short,
+  data in a push, no `OP_13` operation. T6 pins that.
 - **Nothing for signing.** Neither rule changes a signature digest.
 
 ## 61.7 Tests
@@ -319,8 +327,13 @@ legacy preimage. Transaction
 block 59,500 (one input, one output, signature hash type `0x01`), input 0
 spending output 1 of
 `fffe12821632260920155662f75e956ec63cf9207dfa724fbd168d35939e2ab8` (value 50
-BC2, script `76a914d7b5db7d8660300f994e346e293bf02db5f1441288ac`). The legacy
-digest, with the previous output script substituted for the signed input:
+BC2, script `76a914d7b5db7d8660300f994e346e293bf02db5f1441288ac`). The
+complete signed transaction is
+
+`0200000001b82a9e93358d16bd4f72fa7d20f93cc66e955ef762561520092632168212feff010000006a47304402206c0ff4447390e781fb6c7dc672e613c40ba5022b7eb8da879482037cbdb90bc102204cca745ac02220a00cf3155931632016cd83458d1f7a4de73d2b1d5dd717480f0121026322de337226f79b389060c4144eb88df269b578316919202bffbcf88eda2e3afdffffff0144f1052a01000000160014565aefe7f8efe6d0a28b7478804046cfe9b1bfcd6be80000`
+
+The legacy digest, with the previous output script substituted for the signed
+input:
 
 | Suffix | Digest (hex, as hashed) |
 | --- | --- |
@@ -338,14 +351,16 @@ and not the constant 1; with a zero suffix it equals the constant 1.
 
 **T5.** *Configuration resolution.* `sighash_suffix` absent
 resolves to zero; `"0x01324342"` resolves to that value; a malformed string,
-a value above 32 bits, a non-string and a negative height each fail
+a value above 32 bits, a non-string (JSON `null` counts as absent) and a
+negative height each fail
 activation with an error naming the key (R61.3.1, R61.3.2); the combination
-with `"fork_id_rxd"` fails activation (R61.3.3); each case asserts the
+with `"fork_id_rxd"` or with an overwintered coin fails activation (R61.3.3); each case asserts the
 resolved value or the exact error, not merely success or failure.
 
 **T6.** *Output limits.* The withdrawal, the DEX-fee transaction and the HTLC
-payment, spend and refund transactions built for a BC2 entry contain no
-`OP_RETURN` output and no bare multisig output (R61.6).
+payment, spend and refund transactions built for a BC2 entry have at most one
+`OP_RETURN` output, whose script is at most 83 bytes and contains no `OP_13`
+operation, and no bare multisig output (R61.6).
 
 **T7.** *Hardware wallet.* A coin with a non-zero suffix routed to a
 hardware wallet fails before any device message is built (R61.4.4).
@@ -394,6 +409,42 @@ first acceptance case.
 - **V2** *No suffix support exists.* Neither the routine nor the signers carry
   any sighash-suffix parameter at this date; the sighash type passed in is
   `1 | fork_id`.
+
+## 61.9A As-built Note
+
+*Written with the implementation (2026-11-06). The code was written without being compiled; the
+lab window that builds and runs it decides whether this note still holds.*
+
+- **Where the suffix lives.** The resolved coin configuration carries `sighash_suffix` (`u32`, zero
+  when absent) and `sighash_suffix_height` (`Option<u64>`, validated and carried, never read by a
+  signing site: decision D1). The signing substrate's `TransactionInputSigner` carries
+  `sighash_suffix`, and `signature_hash` is the one place that reads it. The signer has no default
+  and no longer converts from a bare transaction: `TransactionInputSigner::from_transaction(tx,
+  suffix)` replaces that conversion, so every constructor states the suffix and a site added later
+  cannot omit it. Every signer built for a coin takes the coin's own suffix: the transaction
+  builder's preimage, the HTLC spend, the two version-two swap preimage builders, the raw-signing
+  call, and the parse of a counterparty's preimage (which never takes a value from the peer's
+  bytes).
+- **Digest rules as built.** The four suffix bytes follow the 4-byte sighash type in the legacy
+  and the BIP-143 preimage, and in the fork-id form of the latter; nothing is appended when the
+  suffix is zero. The Radiant dialect and the overwintered (ZIP-243) digest take none: activation
+  refuses a non-zero suffix on a coin that selects either, so the routine's zero for them is
+  unreachable from a resolved configuration. The out-of-range `SIGHASH_SINGLE` case follows
+  R61.2.3 in the legacy and in the fork-id form.
+- **R61.4.4 as built.** The refusal is `refuse_sighash_suffix_for_hardware_wallet` in the signer
+  crate. It is called first in the Trezor signer, before the device is contacted in the wallet-funded
+  version-two signing path, and before the device connection of the task withdraw, whose error is
+  `UnsupportedError`. A unit test calls the function; the Trezor signer itself needs a device and
+  has no test.
+- **R61.4.6 as built.** Two paths recompute an input digest to verify a signature: the
+  validators of the version-two funding-spend and taker-payment-spend preimages. Both call
+  `signature_hash` on the signer obtained from the parsed preimage, which carries the receiving
+  coin's suffix, so the suffix applies to them. No other path recomputes a digest.
+- **Tests as built.** T1, T2, T3 and T4 (including a case that builds the out-of-range preimage from a
+  literal byte array) are in `kdf_script` (`suffix_tests`); T5 and the activation warning are in
+  the configuration builder's tests; T7 is in the signer crate; T6 and T8 are in `utxo_tests.rs`
+  (`sighash_suffix_sites`). The Trezor signer itself needs a device and has no test; the shared
+  refusal function is tested.
 
 ## 61.10 External References
 

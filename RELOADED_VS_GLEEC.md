@@ -153,6 +153,31 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   from the defaults, with the gas-estimate multiplier when one is set; a DEBUG
   line lists every member. It is logging only: no request, response or
   transaction changes, so no switch exists. See CRD ch.57 R57.5.5.
+- **Bitcoin II (BC2) transactions are signed the way the BC2 network requires.**
+  Since block 57,750 the BC2 network checks every signature against a digest
+  that carries an extra 4-byte field after the signature-hash type, and refuses
+  a transaction signed the ordinary way ("Signature must be zero for failed
+  CHECK(MULTI)SIG operation"). A coin entry may now carry the top-level key
+  `sighash_suffix`, a `0x`-prefixed hexadecimal value of at most 32 bits; when
+  it is present, every input the node signs for that coin (withdrawals, the
+  DEX-fee transaction, HTLC payments, spends and refunds, the taker's
+  pre-signature of a version-two swap, and `sign_raw_transaction`) is signed
+  over the digest with those four bytes appended. BC2's value is `0x01324342`.
+  The key `sighash_suffix_height` is read and checked but not used yet: the
+  suffix applies at every height. A malformed value fails the activation of
+  the coin with an error naming the key, and so does the combination with
+  Radiant's signature version or with the Zcash-family overwintered signature
+  hash. Hardware wallets cannot add the field, so a coin
+  with a suffix refuses a hardware signing request before the device is
+  contacted. A BC2 entry without the key still activates and logs one warning
+  that the network will refuse its transactions. A coin without the key signs
+  exactly as before. The shared coins list must carry the key on the `BC2` and
+  `BC2-segwit` entries. **No switch exists, and none is wanted:** Komodo KDF
+  2.6.0-beta and GLEEC KDF cannot sign BC2 transactions after block 57,750 at
+  all, so there is no reference behavior to return to. A swap that needs one of
+  them to sign the BC2 side cannot complete on the live network. See
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
+  [`docs/plans/bc2-replay-protection.md`](docs/plans/bc2-replay-protection.md).
 
 ### Behavioural divergences without a compatibility switch
 

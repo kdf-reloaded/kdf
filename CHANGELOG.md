@@ -95,6 +95,21 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   times out can see why. The protocol information itself is never logged. Nothing else changes in
   how orders are matched. Detail: PR #235; CRD ch.59 R59.4A.6.
 
+#### UTXO coins and Electrum
+
+- **A coin entry can now name a "sighash suffix", which Bitcoin II (BC2) needs.** Since block 57,750
+  the BC2 network checks every signature against a digest that carries an extra 4-byte field after the
+  signature-hash type. With the new top-level key `sighash_suffix` (a `0x`-prefixed hexadecimal value
+  of at most 32 bits; BC2's is `0x01324342`) every input the node signs for the coin uses that digest:
+  withdrawals, the DEX-fee transaction, HTLC payments, spends and refunds, the taker's pre-signature
+  of a version-two swap and `sign_raw_transaction`. A coin without the key signs exactly as before. A
+  malformed value, or a value on a Radiant or Zcash-family coin, fails the activation of the coin
+  with an error naming the key, a hardware wallet
+  refuses to sign for such a coin, and a BC2 entry without the key logs one warning that the network
+  will refuse its transactions. The optional key `sighash_suffix_height` is checked but not used yet.
+  The shared coins list still has to carry the key on the `BC2` and `BC2-segwit` entries (see Known
+  limitations). Detail: CRD ch.61.
+
 #### Start-up and configuration
 
 - **The start-up log now lists the files the node uses.** At start the node logs, at INFO and as
@@ -486,7 +501,7 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md) — new, planning: the Bitcoin II
   network has required an extra field in every signature digest since block 57,750, so
   transactions signed the ordinary way are rejected. The rule is written (CRD chapter 61, PR
-  #261); the signing change, the coins-file entries and the live check follow.
+  #261) and the signing change is implemented; the coins-file entries and the live check follow.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
   Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
   they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
@@ -628,12 +643,16 @@ lives.
   has no shielded wallet database, and building a shielded transaction would also need the Sapling
   prover, which only the native build has. Use a native build for ARRR. Detail: CRD ch.39 R39.10.1,
   §39.6.1.
-- **Bitcoin II (BC2) transactions are rejected by the network.** Since block 57,750 the BC2
-  network checks every signature against a digest that includes an extra field of its own. KDF
-  Reloaded does not add it yet, so a BC2 withdrawal or swap payment is refused when it is
-  broadcast ("Signature must be zero for failed CHECK(MULTI)SIG operation"). Komodo KDF
-  2.6.0-beta was tested and is refused the same way, so a swap that needs a Komodo KDF node to
-  sign BC2 cannot complete either. The fix for KDF Reloaded is specified and planned. More in
+- **Bitcoin II (BC2) transactions are still rejected until the coins list carries the new key.**
+  Since block 57,750 the BC2 network checks every signature against a digest that includes an extra
+  field of its own. KDF Reloaded now signs that digest, but only for a coin entry that carries
+  `"sighash_suffix": "0x01324342"`. The shared coins list does not have the key on the `BC2` and
+  `BC2-segwit` entries yet, so until it does a BC2 withdrawal or swap payment is refused when it is
+  broadcast ("Signature must be zero for failed CHECK(MULTI)SIG operation"), and the node logs a
+  warning when BC2 activates without the key. A hardware wallet cannot sign this digest, so BC2
+  cannot be used with one. Komodo KDF 2.6.0-beta was tested and is refused the same way, so a swap
+  that needs a Komodo or GLEEC KDF node to sign BC2 cannot complete either. The live check on the
+  BC2 network is still open. More in
   [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md). Detail: PR #261; CRD ch.61.
 - **The miner fee of a Siacoin withdrawal is estimated from a transaction length that is smaller than
   the transaction sent.** Sia nodes accepted these fees in tests. Detail: PR #239; CRD ch.20 D6.

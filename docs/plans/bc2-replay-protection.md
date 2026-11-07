@@ -1,6 +1,6 @@
 # Plan: Bitcoin II (BC2) sighash suffix in the signature hash
 
-**Status:** planning (CRD chapter 61 written; implementation, coins-file change and live check open) — **Last reviewed:** 2026-11-05
+**Status:** planning (CRD chapter 61 written and signing implemented; coins-file change and live check open) — **Last reviewed:** 2026-11-06
 
 > **Context:** since block 57,750 the Bitcoin II network checks every
 > signature against a digest that carries an extra 4-byte field, the
@@ -13,13 +13,13 @@
 > signers append the field. It is not the Bitcoin-Cash fork id of CRD ch.58:
 > the sighash type stays `SIGHASH_ALL`.
 
-## Where it stands (2026-11-05)
+## Where it stands (2026-11-06)
 
 | Item | State |
 |---|---|
 | Analysis | **done** — the rule, its activation height (57,750) and its value (`0x01324342`) are verified against the mined chain (CRD ch.61 §61.0, T1) |
 | CRD chapter 61 | **this PR** (R61.2–R61.4, tests T1–T9, decisions D1–D5) |
-| Code | **open** — one new input to the digest routine, the two configuration keys, hardware refusal, activation warning, tests T1–T8 |
+| Code | **written, not yet compiled or reviewed** — the suffix enters the one digest routine, both configuration keys are parsed (`sighash_suffix_height` is only validated, decision D1), hardware refusal, activation warning, tests T1–T8 |
 | Coins file | **open** — `sighash_suffix` on the `BC2` and `BC2-segwit` entries (separate change in the shared coins repository) |
 | Live check | **open** — a withdrawal from a native-segwit output and from a P2PKH output accepted and mined; a swap with BC2 on the Reloaded side |
 | Issue #252 | open — the reporter's failure ("Maker payment validate failed") is not yet placed; this change is one confirmed cause of BC2 transactions being rejected, not necessarily the whole report |

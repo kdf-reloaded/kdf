@@ -9,6 +9,10 @@
 //   * "overwintered" — ZIP-243 Zcash Sapling (BLAKE2b personalised
 //     digest tree).
 //
+// The "legacy" and "witness v0" digests (and the fork-id form of the latter) can carry a
+// per-coin sighash suffix (CRD ch.61): four little-endian bytes appended after the 4-byte
+// sighash type, before the final hash. A zero suffix leaves every digest ordinary.
+//
 // Plus the legacy KDF "stake-input" extension (PoS chains with
 // `nTime`) and KMD "Verus" version XOR — these don't change the
 // sighash tree itself; they only change how the underlying transaction
@@ -185,10 +189,18 @@ pub struct TransactionInputSigner {
     pub zcash: bool,
     pub str_d_zeel: Option<String>,
     pub hash_algo: SignerHashAlgo,
+    /// The coin's resolved sighash suffix (CRD ch.61 R61.2.1): appended, little-endian, to the
+    /// legacy and BIP-143 preimages after the sighash type. Zero appends nothing. There is
+    /// deliberately no `Default` and no `From<Transaction>`: every constructor of a signer has to
+    /// state the suffix (R61.4.2), so that a signing site cannot silently omit it.
+    pub sighash_suffix: u32,
 }
 
-impl From<Transaction> for TransactionInputSigner {
-    fn from(t: Transaction) -> Self {
+impl TransactionInputSigner {
+    /// Signer for an already-built transaction (e.g. a decoded raw transaction or a counterparty
+    /// preimage). The suffix is the signing coin's own resolved one, never a value taken from
+    /// the transaction or the peer.
+    pub fn from_transaction(t: Transaction, sighash_suffix: u32) -> Self {
         TransactionInputSigner {
             version: t.version,
             n_time: t.n_time,
@@ -206,6 +218,7 @@ impl From<Transaction> for TransactionInputSigner {
             zcash: t.zcash,
             str_d_zeel: t.str_d_zeel,
             hash_algo: t.tx_hash_algo.into(),
+            sighash_suffix,
         }
     }
 }
@@ -246,7 +259,9 @@ impl From<TransactionInputSigner> for Transaction {
 }
 
 impl TransactionInputSigner {
-    /// Compute the digest that ECDSA will sign for one input.
+    /// Compute the digest that ECDSA will sign for one input. This is the one routine every
+    /// signing and verifying site goes through (CRD ch.61 R61.4.2); the signer's
+    /// `sighash_suffix` enters here.
     pub fn signature_hash(
         &self,
         input_index: usize,
@@ -256,18 +271,24 @@ impl TransactionInputSigner {
         sighashtype: u32,
     ) -> H256 {
         let sighash = Sighash::from_u32(sigversion, sighashtype);
+        // The Radiant dialect has its own digest and takes no suffix; configuration refuses the
+        // combination (R61.3.3), so this zero is unreachable from a resolved coin configuration.
+        let suffix = match sigversion {
+            SignatureVersion::ForkIdRxd => 0,
+            _ => self.sighash_suffix,
+        };
         match sigversion {
             SignatureVersion::ForkId if sighash.fork_id => {
-                self.sighash_fork_id(input_index, input_amount, script_pubkey, sighashtype, sighash)
+                self.sighash_fork_id(input_index, input_amount, script_pubkey, sighashtype, sighash, suffix)
             },
             SignatureVersion::ForkIdRxd if sighash.fork_id => {
                 self.sighash_fork_id_rxd(input_index, input_amount, script_pubkey, sighashtype, sighash)
             },
             SignatureVersion::Base | SignatureVersion::ForkId | SignatureVersion::ForkIdRxd => {
-                self.sighash_legacy(input_index, script_pubkey, sighashtype, sighash)
+                self.sighash_legacy(input_index, script_pubkey, sighashtype, sighash, suffix)
             },
             SignatureVersion::WitnessV0 => {
-                self.sighash_witness_v0(input_index, input_amount, script_pubkey, sighashtype, sighash)
+                self.sighash_witness_v0(input_index, input_amount, script_pubkey, sighashtype, sighash, suffix)
             },
         }
     }
@@ -305,16 +326,23 @@ impl TransactionInputSigner {
         sighashtype: u32,
         sighash: Sighash,
     ) -> H256 {
-        self.sighash_legacy(input_index, script_pubkey, sighashtype, sighash)
+        self.sighash_legacy(input_index, script_pubkey, sighashtype, sighash, self.sighash_suffix)
     }
 
-    fn sighash_legacy(&self, input_index: usize, script_pubkey: &Script, sighashtype: u32, sighash: Sighash) -> H256 {
+    fn sighash_legacy(
+        &self,
+        input_index: usize,
+        script_pubkey: &Script,
+        sighashtype: u32,
+        sighash: Sighash,
+        suffix: u32,
+    ) -> H256 {
         // Out-of-range input index → SIGHASH_ONE_BUG (digest is 0x01...01 little-endian) per Bitcoin Core.
         if input_index >= self.inputs.len() {
             return 1u8.into();
         }
         if sighash.base == SighashBase::Single && input_index >= self.outputs.len() {
-            return 1u8.into();
+            return single_out_of_range_digest(sighashtype, suffix);
         }
         // Zcash sapling diverts to a completely different algorithm.
         if self.version >= 3 && self.overwintered {
@@ -397,6 +425,9 @@ impl TransactionInputSigner {
 
         let mut s = Stream::default();
         s.append(&tx).append(&sighashtype);
+        if suffix != 0 {
+            s.append(&suffix);
+        }
         match self.hash_algo {
             SignerHashAlgo::DSHA256 => dhash256(&s.out()),
             SignerHashAlgo::SHA256 => sha256(&s.out()),
@@ -412,6 +443,7 @@ impl TransactionInputSigner {
         script_pubkey: &Script,
         sighashtype: u32,
         sighash: Sighash,
+        suffix: u32,
     ) -> H256 {
         let prev = hash_prevouts(sighash, &self.inputs);
         let seq = hash_sequence(sighash, &self.inputs);
@@ -429,6 +461,9 @@ impl TransactionInputSigner {
             .append(&outs)
             .append(&self.lock_time)
             .append(&sighashtype); // includes the high 24 bits as fork-id (zero for BCH 0-byte forkid).
+        if suffix != 0 {
+            s.append(&suffix);
+        }
         dhash256(&s.out())
     }
 
@@ -441,14 +476,15 @@ impl TransactionInputSigner {
         script_pubkey: &Script,
         sighashtype: u32,
         sighash: Sighash,
+        suffix: u32,
     ) -> H256 {
         if input_index >= self.inputs.len() {
             return 1u8.into();
         }
         if sighash.base == SighashBase::Single && input_index >= self.outputs.len() {
-            return 1u8.into();
+            return single_out_of_range_digest(sighashtype, suffix);
         }
-        self.sighash_witness_v0(input_index, input_amount, script_pubkey, sighashtype, sighash)
+        self.sighash_witness_v0(input_index, input_amount, script_pubkey, sighashtype, sighash, suffix)
     }
 
     // --- Radiant fork-id sighash (CRD ch.58 §58.3) ---------------
@@ -597,6 +633,19 @@ impl TransactionInputSigner {
 
         Ok(blake2b_personal(&s.out(), &personal))
     }
+}
+
+/// Digest of a `SIGHASH_SINGLE` input whose index has no output. Ordinarily the bare constant 1;
+/// with a non-zero suffix the double SHA-256 of the 32-byte little-endian 1, the 4-byte sighash
+/// type and the 4-byte suffix (CRD ch.61 R61.2.3).
+fn single_out_of_range_digest(sighashtype: u32, suffix: u32) -> H256 {
+    let one: H256 = 1u8.into();
+    if suffix == 0 {
+        return one;
+    }
+    let mut s = Stream::default();
+    s.append(&one).append(&sighashtype).append(&suffix);
+    dhash256(&s.out())
 }
 
 // --- BIP-143 sub-hashes -------------------------------------------
@@ -797,6 +846,7 @@ mod tests {
             zcash: false,
             str_d_zeel: None,
             hash_algo: SignerHashAlgo::DSHA256,
+            sighash_suffix: 0,
         };
         let got = signer.signature_hash(
             0,
@@ -839,7 +889,7 @@ mod tests {
     #[test]
     fn sapling_sighash_zip243_vector_1() {
         let tx: Transaction = "0400008085202f8901a8c685478265f4c14dada651969c45a65e1aeb8cd6791f2f5bb6a1d9952104d9010000006b483045022100a61e5d557568c2ddc1d9b03a7173c6ce7c996c4daecab007ac8f34bee01e6b9702204d38fdc0bcf2728a69fde78462a10fb45a9baa27873e6a5fc45fb5c76764202a01210365ffea3efa3908918a8b8627724af852fc9b86d7375b103ab0543cf418bcaa7ffeffffff02005a6202000000001976a9148132712c3ff19f3a151234616777420a6d7ef22688ac8b959800000000001976a9145453e4698f02a38abdaa521cd1ff2dee6fac187188ac29b0040048b004000000000000000000000000".into();
-        let mut signer = TransactionInputSigner::from(tx);
+        let mut signer = TransactionInputSigner::from_transaction(tx, 0);
         signer.inputs[0].amount = 50_000_000;
         signer.consensus_branch_id = 0x76b8_09bb;
 
@@ -861,7 +911,7 @@ mod tests {
     #[test]
     fn sapling_sighash_dispatch_via_signature_hash() {
         let tx: Transaction = "0400008085202f89012c07a03638d9cf4d2cc837784b3b06aa9a5c8b819f7cb0d373bf711108f4c0f2010000006b483045022100fceec7ffa2686377fa2e13d43aa1d8836c3b5ace5292dd2f65a75befec2660bd02205dc000c13a89975bf3fe85aa9c891fcdea6eb25bd5459ad204fe2946d22e49c3012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff0240420f00000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac7c288800000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac00000000000000000000000000000000000000".into();
-        let mut signer = TransactionInputSigner::from(tx);
+        let mut signer = TransactionInputSigner::from_transaction(tx, 0);
         signer.inputs[0].amount = 9_924_260;
         signer.consensus_branch_id = 0x76b8_09bb;
         let got = signer.signature_hash(
@@ -932,7 +982,7 @@ mod rxd_tests {
 
     fn signer_of(tx_hex: &'static str) -> (Transaction, TransactionInputSigner) {
         let tx: Transaction = tx_hex.into();
-        let signer = TransactionInputSigner::from(tx.clone());
+        let signer = TransactionInputSigner::from_transaction(tx.clone(), 0);
         (tx, signer)
     }
 
@@ -1174,5 +1224,193 @@ mod rxd_tests {
             assert_eq!(tx.hash(), H256::from_reversed_str(id));
             assert_eq!(tx.hash(), dhash256(&serialized));
         }
+    }
+}
+
+#[cfg(test)]
+mod suffix_tests {
+    use super::{SignatureVersion, TransactionInputSigner};
+    use crate::hash::H256;
+    use crate::script::Script;
+    use chain::Transaction;
+    use crypto::dhash256;
+    use keys::{Public, Signature};
+
+    // CRD ch.61 vectors. Provenance: public Bitcoin II mainnet chain data (CRD ch.01 R6); the
+    // digests are the chapter's independent recomputation, and the signature of each transaction
+    // was checked against them.
+    const BC2_SUFFIX: u32 = 0x0132_4342;
+
+    // T1: transaction 51f4c719...9e2d (height 63,161), input 0 spends output 0 of 298537c9...9adf.
+    const T1_TX: &str = "02000000000101df9a1b78185400bdc1913c49cdc34efc5dffe25e8d764bec5110afffc93785290000000000fdffffff02d8d08e3100000000160014e304ff42ba9589959243c887be147c5bc47cd74372c99a3b0000000016001499fbb767396212563f9e77128db1b631cb8b0e940247304402201b7dc4092c3ad3eee587954b3c075c1ffe0cc68196b090e892d1b686c60d724902207c5f0aed3a963afd2f354e74b5ad17a78cb927e581534f2d8ad6a20ab1f527c90121037a546b1f10a5f957c25aad9126a0b12126c8fb76e9290e8aaff371e6ae580ed3b7f60000";
+    const T1_AMOUNT: u64 = 1_831_443_160;
+    const T1_SCRIPT_CODE: &str = "76a914b453f05463845d0b65b37fdabfeb690dd84f13f788ac";
+    const T1_ORDINARY: &str = "442acbd928298e2fe85992269a1f13128f8a511004b91014925bb37795ca9259";
+    const T1_SUFFIXED: &str = "5184d4521d634bb457f7c03b86a9ecb2bd215195d344c128f7085a39dc4dbe50";
+
+    // T3: transaction 873a39fd...3a5f (block 59,500), input 0 spends output 1 of fffe1282...2ab8
+    // (50 BC2, P2PKH).
+    const T3_TX_HEX: &str = "0200000001b82a9e93358d16bd4f72fa7d20f93cc66e955ef762561520092632168212feff010000006a47304402206c0ff4447390e781fb6c7dc672e613c40ba5022b7eb8da879482037cbdb90bc102204cca745ac02220a00cf3155931632016cd83458d1f7a4de73d2b1d5dd717480f0121026322de337226f79b389060c4144eb88df269b578316919202bffbcf88eda2e3afdffffff0144f1052a01000000160014565aefe7f8efe6d0a28b7478804046cfe9b1bfcd6be80000";
+    const T3_AMOUNT: u64 = 5_000_000_000;
+    const T3_SCRIPT_CODE: &str = "76a914d7b5db7d8660300f994e346e293bf02db5f1441288ac";
+    const T3_ORDINARY: &str = "3f028ee0539f39083a83e40e497dc58aae31ade92184ceb4dc12ea0ac0d9692c";
+    const T3_SUFFIXED: &str = "ebbbb47f628fd0d218a931747d43d8e6725c39a25891ab81841629111595868a";
+
+    fn t1_signer(suffix: u32) -> TransactionInputSigner {
+        let tx: Transaction = T1_TX.into();
+        let mut signer = TransactionInputSigner::from_transaction(tx, suffix);
+        signer.inputs[0].amount = T1_AMOUNT;
+        signer
+    }
+
+    fn t1_digest(suffix: u32, version: SignatureVersion, sighashtype: u32) -> H256 {
+        t1_signer(suffix).signature_hash(0, T1_AMOUNT, &Script::from(T1_SCRIPT_CODE), version, sighashtype)
+    }
+
+    /// The signature and public key of T1's witness `[signature || type][pubkey]`; the signed
+    /// sighash-type byte is the ordinary `0x01` (R61.2.4).
+    fn t1_signature_verifies(digest: &H256) -> bool {
+        let tx: Transaction = T1_TX.into();
+        let witness = &tx.inputs[0].script_witness;
+        assert_eq!(witness.len(), 2);
+        let sig_with_type = witness[0].to_vec();
+        assert_eq!(sig_with_type.last().copied(), Some(0x01));
+        let sig = Signature::from(&sig_with_type[..sig_with_type.len() - 1]);
+        let pubkey = Public::from_slice(witness[1].as_ref()).unwrap();
+        pubkey.verify(digest, &sig).unwrap()
+    }
+
+    #[test]
+    fn t1_mined_segwit_vector_verifies_only_under_the_suffix_digest() {
+        let ordinary = t1_digest(0, SignatureVersion::WitnessV0, 1);
+        let suffixed = t1_digest(BC2_SUFFIX, SignatureVersion::WitnessV0, 1);
+        assert_eq!(ordinary, H256::from(T1_ORDINARY));
+        assert_eq!(suffixed, H256::from(T1_SUFFIXED));
+        assert!(!t1_signature_verifies(&ordinary), "the ordinary digest must not verify");
+        assert!(t1_signature_verifies(&suffixed), "the suffix digest must verify");
+    }
+
+    #[test]
+    fn t2_zero_suffix_is_the_ordinary_digest() {
+        // The first row of T1 for every version that shares the BIP-143 preimage: the fork-id form
+        // (same sighash type) gives the witness-v0 digest, with and without the suffix.
+        assert_eq!(t1_digest(0, SignatureVersion::WitnessV0, 1), H256::from(T1_ORDINARY));
+        for suffix in [0, BC2_SUFFIX] {
+            assert_eq!(
+                t1_digest(suffix, SignatureVersion::ForkId, 0x41),
+                t1_digest(suffix, SignatureVersion::WitnessV0, 0x41),
+                "suffix 0x{suffix:08x}"
+            );
+        }
+        // Zero is "append nothing": the preimage differs from the suffixed one in length, so the
+        // digests differ in every version.
+        for (version, sighashtype) in [
+            (SignatureVersion::WitnessV0, 1),
+            (SignatureVersion::ForkId, 0x41),
+            (SignatureVersion::Base, 1),
+        ] {
+            assert_ne!(
+                t1_digest(0, version, sighashtype),
+                t1_digest(BC2_SUFFIX, version, sighashtype),
+                "{version:?}"
+            );
+        }
+        // The legacy zero-suffix digest is pinned by `legacy_sighash_matches_bitcoin_reference`.
+    }
+
+    #[test]
+    fn the_radiant_dialect_ignores_the_suffix() {
+        assert_eq!(
+            t1_digest(0, SignatureVersion::ForkIdRxd, 0x41),
+            t1_digest(BC2_SUFFIX, SignatureVersion::ForkIdRxd, 0x41)
+        );
+    }
+
+    /// `P2PKH` scriptSig `[len][signature || type][len][pubkey]`: the signature without its type
+    /// byte and the public key.
+    fn p2pkh_signature_and_pubkey(script_sig: &[u8]) -> (Signature, Public) {
+        let sig_len = script_sig[0] as usize;
+        let sig_with_type = &script_sig[1..1 + sig_len];
+        let pk_len = script_sig[1 + sig_len] as usize;
+        let pubkey = &script_sig[2 + sig_len..2 + sig_len + pk_len];
+        assert_eq!(script_sig.len(), 2 + sig_len + pk_len);
+        assert_eq!(sig_with_type[sig_len - 1], 0x01);
+        (
+            Signature::from(&sig_with_type[..sig_len - 1]),
+            Public::from_slice(pubkey).unwrap(),
+        )
+    }
+
+    #[test]
+    fn t3_mined_legacy_vector_verifies_only_under_the_suffix_digest() {
+        let tx: Transaction = T3_TX_HEX.into();
+        let (sig, pubkey) = p2pkh_signature_and_pubkey(&tx.inputs[0].script_sig);
+        let digest = |suffix: u32| {
+            let mut signer = TransactionInputSigner::from_transaction(tx.clone(), suffix);
+            signer.inputs[0].amount = T3_AMOUNT;
+            signer.signature_hash(0, T3_AMOUNT, &Script::from(T3_SCRIPT_CODE), SignatureVersion::Base, 1)
+        };
+        let ordinary = digest(0);
+        let suffixed = digest(BC2_SUFFIX);
+        assert_eq!(ordinary, H256::from(T3_ORDINARY));
+        assert_eq!(suffixed, H256::from(T3_SUFFIXED));
+        assert!(
+            !pubkey.verify(&ordinary, &sig).unwrap(),
+            "the ordinary digest must not verify"
+        );
+        assert!(pubkey.verify(&suffixed, &sig).unwrap(), "the suffix digest must verify");
+    }
+
+    #[test]
+    fn t4_out_of_range_single_digest() {
+        let one: H256 = 1u8.into();
+        let expected_with_suffix = |sighashtype: u32| {
+            let mut preimage = one.to_vec();
+            preimage.extend_from_slice(&sighashtype.to_le_bytes());
+            preimage.extend_from_slice(&BC2_SUFFIX.to_le_bytes());
+            dhash256(&preimage)
+        };
+        for (version, sighashtype) in [(SignatureVersion::Base, 3u32), (SignatureVersion::ForkId, 0x43)] {
+            // Input 0 exists, output 0 does not.
+            let mut with_suffix = t1_signer(BC2_SUFFIX);
+            with_suffix.outputs.clear();
+            let mut without_suffix = t1_signer(0);
+            without_suffix.outputs.clear();
+            let script = Script::from(T1_SCRIPT_CODE);
+
+            let got = with_suffix.signature_hash(0, T1_AMOUNT, &script, version, sighashtype);
+            assert_eq!(got, expected_with_suffix(sighashtype), "{version:?}");
+            assert_ne!(got, one, "{version:?}: the bare constant must not be returned");
+
+            let got = without_suffix.signature_hash(0, T1_AMOUNT, &script, version, sighashtype);
+            assert_eq!(got, one, "{version:?}");
+        }
+    }
+
+    /// The byte order of the constant, pinned from a literal array and not from `H256::from(1u8)`: the 32-byte
+    /// little-endian 1, then the sighash type and the suffix, each little-endian (R61.2.3).
+    #[test]
+    fn t4_out_of_range_single_digest_from_literal_bytes() {
+        let mut preimage = [0u8; 40];
+        preimage[0] = 0x01; // 01 00 .. 00 (32 bytes)
+        preimage[32..36].copy_from_slice(&[0x03, 0x00, 0x00, 0x00]); // sighash type 3
+        preimage[36..40].copy_from_slice(&[0x42, 0x43, 0x32, 0x01]); // suffix 0x01324342
+        let expected = dhash256(&preimage);
+
+        let mut signer = t1_signer(BC2_SUFFIX);
+        signer.outputs.clear();
+        let script = Script::from(T1_SCRIPT_CODE);
+        assert_eq!(
+            signer.signature_hash(0, T1_AMOUNT, &script, SignatureVersion::Base, 3),
+            expected
+        );
+        // With a zero suffix the digest is the bare constant, again from literal bytes.
+        let mut constant = [0u8; 32];
+        constant[0] = 0x01;
+        signer.sighash_suffix = 0;
+        assert_eq!(
+            &signer.signature_hash(0, T1_AMOUNT, &script, SignatureVersion::Base, 3)[..],
+            &constant[..]
+        );
     }
 }
