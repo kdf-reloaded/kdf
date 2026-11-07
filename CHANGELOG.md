@@ -375,6 +375,16 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 
 ### Fixed
 
+#### ARRR and other shielded coins
+
+- **An incoming ARRR payment now shows as pending before it is mined.** In light mode the node
+  checks the mempool for payments to the wallet and counts them in the non-spendable part of the
+  balance. It ran that check only after it had scanned a new block. A payment mined in the next
+  block was therefore never shown as pending, and while no block arrived the pending figure could
+  be older than the 30-second sync period. The check now runs on every sync pass, including a pass
+  that finds no new block or fails. Found in a live mainnet test with a deposit from a Pirate1
+  address. Detail: PR #NNN; CRD ch.39 R39.8.0aj1.
+
 #### EVM coins
 
 - **A taker on an EVM chain with fast blocks, such as Monad, now finds the maker's spend of its

@@ -171,6 +171,23 @@ are absent (the same arrangement as the version-6 construction tests).
 | `t39_8_0i_a_following_build_spends_the_note_deposited_with_ironwood_actions` | T39.8.0i, R39.8.0bb | A build after that scan selects and spends the deposited note; the wallet records it as spent |
 | `t39_8_0i_the_same_transaction_in_the_mempool_counts_as_pending` | T39.8.0i, R39.8.0bb | The same transaction as a `GetMempoolTx` compact transaction: a pending receipt with the right value, none for another key, and not counted again once its block is scanned |
 
+## ARRR background sync: every pass refreshes the pending view (6 tests)
+
+Locations: `mm2src/coins/z_coin.rs` (module `shielded_sync_pass_tests`, steps scripted, no network, no
+wallet database) and `mm2src/coins/z_coin/z_note_lock_tests.rs` (a real Light-mode coin over a wallet
+database; it needs the Sapling parameter files and says SKIPPED where they are absent). CI cell:
+`shielded` (`cargo test -p coins --lib z_coin::`). CRD: chapter 39, R39.8.0aj1 and T39.8.0g1. The
+mempool poll itself is a gRPC stream and stays covered by T39.8.0g.
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `t39_8_0g1_a_pass_with_no_new_block_refreshes_once_with_the_tip` | T39.8.0g1, R39.8.0aj1 | Tip equal to the scanned height: no download, no scan, one refresh with the tip as its height |
+| `t39_8_0g1_a_pass_whose_download_fails_still_refreshes` | T39.8.0g1, R39.8.0aj1 | New block, download fails: no scan, the failure recorded, one refresh |
+| `t39_8_0g1_a_pass_whose_scan_fails_still_refreshes_after_the_attempt` | T39.8.0g1, R39.8.0aj1 | New block, scan fails: one refresh, after the scan attempt |
+| `t39_8_0g1_a_pass_that_scans_refreshes_after_the_scan` | T39.8.0g1, R39.8.0aj1, R39.8.0ah | New block, scan succeeds: the refresh comes after the scan, once |
+| `t39_8_0g1_a_pass_that_cannot_read_the_tip_refreshes_with_the_scanned_height` | T39.8.0g1, R39.8.0aj1 | Tip unreadable: the failure recorded, one refresh with the wallet's scanned height |
+| `t39_8_0g1_a_mempool_output_with_the_tip_unchanged_reaches_the_unspendable_balance` | T39.8.0g1, R39.8.0aj1 | A wallet-owned output enters the (scripted) mempool while the tip stays put: unknown to the balance before the next pass, non-spendable balance after it; the spendable figure is untouched |
+
 ## ARRR withdrawals to a Pirate1 address (21 tests)
 
 Locations: `mm2src/coins/z_coin/z_pirate1_tests.rs` (no coin needed),
