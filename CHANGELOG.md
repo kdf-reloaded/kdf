@@ -377,6 +377,23 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   now refused the same way; before, `from` was ignored and the token was sent from the BCH
   wallet's own address. *Upgrade note:* a client that checks `error_type` for either old value
   must check `UnsupportedError` instead. Detail: PR #236; CRD ch.49 R49.27, R49.27a.
+- **Under an HD login, the direct `withdraw` now works for a UTXO coin such as RIN and for QTUM.**
+  With `from` it spends from the address `from` names, as on GLEEC KDF. An account or address the
+  wallet does not hold is refused with `UnknownAccount` or `UnexpectedFromAddress` (HTTP 400), as on
+  `task::withdraw`. Without `from`, both methods spend from the coin's activated address, the
+  address at `path_to_address` (by default account 0, External, address 0), and the change returns
+  there. GLEEC KDF refuses a withdrawal without `from` under an HD login. Until now the direct method
+  answered an internal error under an HD login, and `task::withdraw` without `from` always spent
+  from account 0, External, address 0, whatever `path_to_address` named. Under a Trezor key the
+  direct method still answers an internal error; use `task::withdraw` there. Detail: PR #270; CRD
+  ch.49 R49.4, ch.05 §5.9B R35.
+- **Under an iguana login (without `enable_hd`), a UTXO withdrawal that names `from` is now refused
+  with `UnexpectedFromAddress` (HTTP 400), as on GLEEC KDF.** This covers the direct `withdraw` of a
+  UTXO coin such as RIN, of QTUM and of BCH, whatever address `from` names, the wallet's own
+  included. **Until now the direct method ignored `from`** and spent from the wallet's address;
+  `task::withdraw` already refused it. A withdrawal without `from` does not change. *Upgrade note:*
+  a client that sends `from` under an iguana login stops sending it. Detail: PR #270; CRD ch.49
+  R49.27b.
 
 ### Fixed
 
@@ -566,7 +583,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   swap has used (see Known limitations). The maintainer's answers on
   withdraw, the legacy methods, legacy activation and Sia are recorded in it. `RELOADED_VS_GLEEC.md`
   now says what GLEEC KDF does under an HD login, and lists the planned change to legacy `enable` and
-  `electrum` with its switch (PR #245).
+  `electrum` with its switch (PR #245). The direct `withdraw` under an HD login and the refusal of
+  `from` under an iguana login are done (items H5.1 and H5.5, PR #270); the maintainer set the
+  default sender to the coin's activated address (decision CU).
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
