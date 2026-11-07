@@ -181,10 +181,21 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   contacted. A BC2 entry without the key still activates and logs one warning
   that the network will refuse its transactions. A coin without the key signs
   exactly as before. The shared coins list must carry the key on the `BC2` and
-  `BC2-segwit` entries. **No switch exists, and none is wanted:** Komodo KDF
-  2.6.0-beta and GLEEC KDF cannot sign BC2 transactions after block 57,750 at
-  all, so there is no reference behavior to return to. A swap that needs one of
-  them to sign the BC2 side cannot complete on the live network. See
+  `BC2-segwit` entries. **No switch returns the ordinary signature:** the
+  Komodo DeFi Framework 2.6.0-beta and the GLEEC KDF development build
+  `a12695e` (the two builds measured) cannot sign BC2 transactions after block
+  57,750 at all, so there is no reference behavior to return to. **BC2 swaps
+  require a counterparty that signs with the suffix.** A coin with a suffix
+  adds a capability word to its order and match messages and declines a
+  counterparty without it before any swap starts (CRD ch.61 R61.5A, ch.59
+  §59.4A); nodes that predate the word, and the reference builds, are declined.
+  Set `require_suffix_counterparty` to `false` in the coin entry to admit them;
+  a swap with them still cannot complete when they have to spend BC2. This
+  check is temporary and will be removed as soon as the other implementations
+  support suffix signing. The global coins repository may not carry the
+  `sighash_suffix` key on the `BC2` and `BC2-segwit` entries yet: until it
+  does, add it to your coins file or use the KDF Reloaded coins file, because
+  without it the BC2 network rejects BC2 withdrawals and swaps. See
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
   [`docs/plans/bc2-replay-protection.md`](docs/plans/bc2-replay-protection.md).
 

@@ -109,6 +109,17 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   will refuse its transactions. The optional key `sighash_suffix_height` is checked but not used yet.
   The shared coins list still has to carry the key on the `BC2` and `BC2-segwit` entries (see Known
   limitations). Detail: CRD ch.61.
+- **A swap of a coin with a sighash suffix now starts only with a counterparty that signs with it.**
+  **BC2 trading in KDF Reloaded is incompatible with other Komodo DeFi Framework implementations:**
+  they cannot spend BC2 since block 57,750, and KDF Reloaded declines a BC2 swap with them before it
+  starts. BC2 swaps require a counterparty that signs with the suffix. This check is temporary and
+  will be removed as soon as the other implementations support suffix signing. A coin with a non-zero `sighash_suffix`
+  now states that in its orders and match messages and declines a counterparty that does not, on the
+  taker and the maker side, before anything is paid. KDF Reloaded nodes that predate the statement are
+  declined too; Komodo DeFi Framework and GLEEC KDF keep matching as before, and their taker sees a
+  request that times out. Each decline is logged at debug level with its cause, and at most once an
+  hour a warning gives the number declined. Setting `require_suffix_counterparty` to `false` in the
+  coin entry turns the requirement off. Detail: CRD ch.61 R61.5A; ch.59 §59.4A.
 
 #### Start-up and configuration
 
@@ -694,13 +705,14 @@ lives.
 - **The Komodo DeFi Framework and GLEEC KDF builds available in November 2026 cannot spend BC2
   (Bitcoin II).** Since block 57,750 the BC2 network rejects every spend signed without the chain's
   sighash suffix, and those builds do not sign with it, so they can neither withdraw BC2 nor complete
-  a BC2 swap with any counterparty: a swap with such a node fails when that node has to spend. KDF
-  Reloaded signs with the suffix (PR #264), but only for a coin entry that carries
+  a BC2 swap with any counterparty. KDF Reloaded declines a BC2 swap with such a node before it
+  starts, and signs with the suffix (PR #264), but only for a coin entry that carries
   `"sighash_suffix": "0x01324342"`; until the shared coins list has the key on the `BC2` and
-  `BC2-segwit` entries, a BC2 withdrawal or swap payment is refused at broadcast ("Signature must be
-  zero for failed CHECK(MULTI)SIG operation"), and the node logs a warning when BC2 activates
-  without the key. A hardware wallet cannot sign this digest, so BC2 cannot be used with one. More in
-  [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md). Detail: PR #261; CRD ch.61.
+  `BC2-segwit` entries, a BC2 withdrawal or swap payment is refused at broadcast, and the node logs a
+  warning when BC2 activates without the key. A hardware wallet cannot sign this digest, so BC2 cannot
+  be used with one. The global coins repository may not carry the key yet: add `sighash_suffix`
+  (`"0x01324342"` on `BC2` and `BC2-segwit`) to your coins file or use the KDF Reloaded coins file.
+  Detail: issue #252; CRD PR #261.
 - **The miner fee of a Siacoin withdrawal is estimated from a transaction length that is smaller than
   the transaction sent.** Sia nodes accepted these fees in tests. Detail: PR #239; CRD ch.20 D6.
 - **Orders that sell Siacoin (SC) are not shown to Komodo KDF and GLEEC KDF takers, and a GLEEC maker
