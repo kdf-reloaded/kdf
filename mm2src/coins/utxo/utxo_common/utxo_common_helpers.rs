@@ -648,14 +648,14 @@ pub(crate) fn suffix_decline_lines(
     now_sec: u64,
 ) -> DeclineLines {
     let debug = format!(
-        "{ticker}: declining a swap match -- BC2 swaps require a counterparty that signs with the suffix ({})",
+        "{ticker}: declining a swap match -- a {ticker} swap requires a counterparty that signs with the suffix ({})",
         cause.cause()
     );
     log.record(
         debug,
         |declined| {
             format!(
-                "{ticker}: declined {declined} swap match(es) since the previous warning -- BC2 swaps require a \
+                "{ticker}: declined {declined} swap match(es) since the previous warning -- a {ticker} swap requires a \
                  counterparty that signs with the suffix (`{}` in the coin's configuration switches the requirement \
                  off)",
                 REQUIRE_SUFFIX_COUNTERPARTY_KEY

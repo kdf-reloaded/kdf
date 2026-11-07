@@ -708,8 +708,9 @@ lives.
   a BC2 swap with any counterparty. KDF Reloaded declines a BC2 swap with such a node before it
   starts, and signs with the suffix (PR #264), but only for a coin entry that carries
   `"sighash_suffix": "0x01324342"`; until the shared coins list has the key on the `BC2` and
-  `BC2-segwit` entries, a BC2 withdrawal or swap payment is refused at broadcast, and the node logs a
-  warning when BC2 activates without the key. A hardware wallet cannot sign this digest, so BC2 cannot
+  `BC2-segwit` entries, a BC2 withdrawal or swap payment is refused at broadcast ("Signature must be
+  zero for failed CHECK(MULTI)SIG operation"), and the node logs a warning when BC2 activates
+  without the key. A hardware wallet cannot sign this digest, so BC2 cannot
   be used with one. The global coins repository may not carry the key yet: add `sighash_suffix`
   (`"0x01324342"` on `BC2` and `BC2-segwit`) to your coins file or use the KDF Reloaded coins file.
   Detail: issue #252; CRD PR #261.

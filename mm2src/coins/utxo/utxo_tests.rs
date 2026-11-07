@@ -11479,11 +11479,15 @@ mod sighash_suffix_gate_tests {
             assert!(
                 lines
                     .debug
-                    .contains("BC2 swaps require a counterparty that signs with the suffix"),
+                    .contains("a BC2 swap requires a counterparty that signs with the suffix"),
                 "{}",
                 lines.debug
             );
         }
+        // The text names the coin that declines, whatever its ticker.
+        let other = suffix_decline_lines(&mut DeclineLog::default(), "XYZ", SuffixDecline::NoWord, 1_000);
+        assert!(other.debug.contains("a XYZ swap requires"), "{}", other.debug);
+        assert!(!other.debug.contains("BC2"), "{}", other.debug);
     }
 
     #[test]
