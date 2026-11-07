@@ -386,6 +386,30 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   in which such a swap is negotiated and then fails. Since the entry above, no coin is refused any
   more; the check stays as a guard. Detail: PRs #231, #233; CRD ch.05 R36–R40.
 
+#### Accounts and addresses under an HD login
+
+- **Under an HD login, activation now lists the coin's own address from the start.** A UTXO coin
+  such as RIN or QTUM activated through its task method, and an EVM coin activated with its tokens,
+  list the address at `path_to_address` (by default account 0, External, address 0) with its balance
+  in the activation result, in `account_balance` and in `my_tx_history`, without `get_new_address`.
+  If that address's account does not exist yet, activation creates it and reports only that account.
+  This is what GLEEC KDF does. Until now the coins that a swap paid to that address could stay
+  unlisted until `get_new_address` reached it. An `address_id` of 2^31 or more fails activation with
+  an internal error. Detail: PR #279; CRD ch.05 R35a.
+- **`task::create_new_account` now works under an HD login without a hardware wallet.** It serves a
+  UTXO coin such as RIN, QTUM, EVM coins and Siacoin; until now it asked for a hardware wallet first
+  and failed.
+  - The request takes an optional `account_id`. Without it, the lowest unused account number is
+    taken.
+  - With an `account_id` that is already in use, the task ends with `AccountAlreadyExists` (with the
+    `account_id`) before anything is derived; `task::create_new_account::status` reports it. GLEEC
+    KDF reports an internal error there.
+  - `task::create_new_account::cancel` is now served. Cancelling removes the account the task
+    created if it is the wallet's highest-numbered account.
+  - Under a software login the task reports `Preparing` and then its result.
+
+  Detail: PR #279; CRD ch.05 R35c.
+
 #### Name lookups
 
 - **One setting now chooses the DNS resolver for every name the node looks up.** The setting
@@ -710,7 +734,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   now says what GLEEC KDF does under an HD login, and lists the planned change to legacy `enable` and
   `electrum` with its switch (PR #245). The direct `withdraw` under an HD login and the refusal of
   `from` under an iguana login are done (items H5.1 and H5.5, PR #270); the maintainer set the
-  default sender to the coin's activated address (decision CU).
+  default sender to the coin's activated address (decision CU). Activation lists the address at
+  `path_to_address`, and `task::create_new_account` works without a hardware wallet (items H5.0 and
+  H5.4, PR #279).
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
@@ -749,13 +775,6 @@ file carries the detail. "New" means the plan was created in this cycle.
 What does not work yet, or works only in part, in this release. Each item says where more detail
 lives.
 
-- **Under an HD login, a UTXO coin such as RIN can show no address and no balance although its swap
-  address holds funds.** An HD account lists only the addresses it has handed out. A swap uses the
-  coin's address at `path_to_address` (by default account 0, External, address 0) even when the
-  account has not listed it yet, so the coins a swap pays you can arrive there unlisted. Restarting
-  the node does not change this. Requesting an address with `get_new_address` lists it together with
-  its balance. The funds are not affected. More in
-  [`hd-key-unification`](docs/plans/hd-key-unification.md), item H5.
 - **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
   `get_enabled_coins` fails as a whole once such a coin is enabled.** Both report a single address,
   and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for

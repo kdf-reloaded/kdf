@@ -44,8 +44,8 @@ pub(crate) use super::*;
 pub(crate) use crate::coin_balance::{coin_balance_map_for_ticker, AddressBalanceStatus, HDAddressBalance,
                                      HDWalletBalanceOps};
 pub(crate) use crate::hd_pubkey::{ExtractExtendedPubkey, HDExtractPubkeyError, HDXPubExtractor};
-pub(crate) use crate::hd_wallet::{AccountUpdatingError, AddressDerivingError, HDAccountMut, HDAccountsMap,
-                                  NewAccountCreatingError};
+pub(crate) use crate::hd_wallet::{choose_new_account_id, AccountUpdatingError, AddressDerivingError, HDAccountMut,
+                                  HDAccountsMap, NewAccountCreatingError, NewAccountIndex};
 pub(crate) use crate::hd_wallet_storage::{HDWalletCoinWithStorageOps, HDWalletStorageResult};
 pub(crate) use crate::rpc_command::init_withdraw::WithdrawTaskHandle;
 pub(crate) use crate::utxo::rpc_clients::{electrum_script_hash, BlockHashOrHeight, UnspentInfo, UnspentMap,

@@ -3175,6 +3175,12 @@ the same for the Sia wallet daemon.
 > BIP-84 coins. It cross-references Chapter 5 R15–R20, R29–R31; Chapter 7 R28;
 > §38.3.3 (HD purpose generality); and Chapter 45 R45.4.8 (HD-mode identity
 > selection).
+>
+> *Update (2026-11-07, plan items H5.0 and H5.4).* The first remaining item is
+> built: `task::create_new_account` serves a software global-HD login (Chapter
+> 5 R35c and its as-built note). Activation lists the address at
+> `path_to_address` from the first activation on (Chapter 5 R35a). Under the
+> Trezor policy, `path_to_address` is still not honored for a UTXO coin.
 
 R38.8.1 **Software-HD storage availability.** When a UTXO coin is activated in
 HD mode under a software global-HD account (key-pair policy `GlobalHDAccount`,
