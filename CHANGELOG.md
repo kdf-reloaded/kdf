@@ -494,6 +494,17 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   one release between the two counts made it fail now and then. It now stops the queue before
   counting. The node itself is unchanged. Detail: PR #244; CRD ch.32 T-MP6.
 
+### Documentation
+
+- **The CRD now records more of how Komodo DeFi Framework and GLEEC KDF behave.** It covers HD
+  activation and accounts (the address at `path_to_address`, `fetch_utxos`, `consolidate_utxos` and
+  `task::create_new_account`), the answer to a shielded withdrawal, the Electrum
+  certificate-verification switch, which swap steps publish on the transaction-helper topic, how an
+  order-book sync answer is handled when a newer keep-alive arrives, the activation routes of TRON,
+  and how the gossip layer treats a peer that reads slowly. The node itself is unchanged. Detail:
+  CRD PR #267; CRD ch.05 R35a–R35c, ch.09 R24, ch.21 §21.4, ch.28 RQ1b, ch.32 R-Q6b, ch.38
+  R38.6.4m, ch.39 R39.5A.3, ch.49 R49.27b.
+
 ### Plans touched
 
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
