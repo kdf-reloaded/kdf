@@ -236,6 +236,11 @@ pub struct ElectrumRpcRequest {
     pub protocol: ElectrumProtocol,
     #[serde(default)]
     pub disable_cert_verification: bool,
+    /// The key pin of the server (CRD ch.38 R38.6.4n): a string, or an array of 1 to 4 strings, each the SHA-256 digest of
+    /// the server's `SubjectPublicKeyInfo` in hexadecimal. Kept as it was configured so that a malformed value removes
+    /// this server (R38.6.4n item 5) and does not fail the whole request; it is parsed when the server joins the pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spki_sha256: Option<Json>,
     /// The time to wait for this server to answer a request, in seconds. The default applies when unset.
     #[serde(default)]
     pub timeout_sec: Option<f64>,
@@ -248,6 +253,8 @@ impl fmt::Debug for ElectrumRpcRequest {
             .field("url", &self.name())
             .field("protocol", &self.protocol)
             .field("disable_cert_verification", &self.disable_cert_verification)
+            // Whether a pin is set; the configured value is never printed (it may be malformed).
+            .field("spki_sha256", &self.spki_sha256.is_some())
             .field("timeout_sec", &self.timeout_sec)
             .finish()
     }

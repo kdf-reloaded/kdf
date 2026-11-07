@@ -235,6 +235,80 @@ method still use your computer's resolver, whatever `dns_resolver` says.
 > `"system"` does. No single value reproduces that mix. See
 > [GLEEC compatibility](GLEEC_COMPATIBILITY.md).
 
+### Electrum Servers over TLS
+
+An Electrum server entry with `"protocol": "SSL"` is reached over TLS. The entry sits in the
+`servers` list of the coin's activation request, or in the legacy `electrum` request. A server
+given as an IP address cannot use `SSL`: it needs a host name, which the node also sends as the
+TLS server name.
+
+**By default** the node checks the server's certificate fully. It must chain to a root in the
+node's bundled list of public roots, be valid today, not be a CA certificate, allow server
+authentication and carry the server's host name. A self-signed certificate therefore fails.
+
+**`disable_cert_verification: true`** skips all of those checks. The connection is still
+encrypted, and the server must still prove that it holds the key in the certificate it presents.
+That certificate must be a version 3 certificate with an accepted key (an RSA key of 2048 to
+8192 bits, or a P-256, P-384 or Ed25519 key). A version 1 certificate or a 1024-bit RSA key is
+refused even with the flag set. The server is not authenticated: anyone who can redirect your
+traffic can present a certificate of their own. At activation the node logs one warning for each
+such server, by host and port, once per activation of the coin.
+
+**`spki_sha256`** pins a server to its key. Put it in the same server entry:
+
+```json
+{ "url": "electrum.example.org:50002", "protocol": "SSL",
+  "spki_sha256": "9f2c...64 hexadecimal digits...e1" }
+```
+
+The value is the SHA-256 digest of the server's public key, as 64 hexadecimal digits in upper or
+lower case, with colons between byte pairs allowed. It can also be an array of 1 to 4 such values,
+so that you can pin the next key before a server changes it. It works for `SSL` servers only, and
+not in a browser build, which does its own TLS and cannot pin.
+
+With a pin, the node checks the key and nothing else: the certificate may be self-signed, expired
+or issued for another name, as long as it carries a pinned key and the server proves it holds that
+key. The pin is on the key, not the certificate, so it survives a renewal that keeps the key.
+Every connection to a pinned server makes a full TLS handshake, without resuming an earlier
+session, so the key is checked each time. If
+`disable_cert_verification` is also set, the pin decides and the flag adds nothing; the warning is
+not logged then, and one info line names the server as pinned. A pin never accepts more than the
+pinned key does. What it gives up is the expiry check: a leaked key stays accepted until you
+remove its pin.
+
+To get the value, on the server, from its key file:
+
+```
+openssl pkey -in server.key -pubout -outform der | sha256sum
+```
+
+The first 64 hexadecimal digits are the value. Or, from anywhere, from the running server:
+
+```
+openssl s_client -connect <host>:<port> -servername <host> </dev/null 2>/dev/null | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | sha256sum
+```
+
+The second command is trust on first use done by hand: the value is only as good as the network
+path it was read over. Compare it with the value the server's operator publishes, for example next
+to the server's address, before you rely on it. Before the operator rotates a key, pin the new key
+alongside the current one, so that the switch does not lock you out.
+
+**When it goes wrong.** If the server's key matches none of the pins, the connection fails like any
+other failed handshake, with the text `the server's key does not match spki_sha256`. The server is
+suspended and tried again later, never removed, and every refusal is logged as a warning with the
+server's host and port, because it means either that the key changed or that someone is in the
+way. A pin that is not 64 hexadecimal digits (or an array that is empty, longer than 4, or holds a
+non-string) removes that server from the coin's list at activation, with the text `spki_sha256 is
+not a 64-digit hexadecimal SHA-256 digest`; the configured value is not repeated. A pin on a `TCP`
+server removes it too, with `spki_sha256 needs protocol SSL`, so that a pin that is not enforced
+never looks enforced. The coin's other servers are used.
+
+> **Compatibility:** Komodo DeFi Framework and GLEEC KDF ignore `spki_sha256`, so an entry that
+> carries it still works there, without the pin. See [GLEEC compatibility](GLEEC_COMPATIBILITY.md).
+
+Read more: CRD chapter 38, R38.6.4m (what is checked, with and without the flag) and R38.6.4n (the
+pin).
+
 ## Adding a New Network
 
 1. Create `mm2src/mm2_net_config/src/netid_XXXX.rs`

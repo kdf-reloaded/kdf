@@ -233,8 +233,8 @@ produces a transaction the network rejects. The consequence for a swap
 between a Reloaded node and a reference node is: if the BC2 side must be
 spent by the reference node, the swap cannot complete on the live network;
 if the BC2 side must be spent by the Reloaded node, only the Reloaded node's
-signing matters. This chapter does not add a refusal at order matching for
-that case (D2).
+signing matters. The refusal at order matching for a counterparty that
+cannot sign is bound in R61.5A (D2).
 
 **R61.5.2** *Documentation.* Because the change makes Reloaded able to do
 what the reference cannot, the user-facing documents record it as a Reloaded
@@ -250,6 +250,79 @@ the ordinary transaction version and the ordinary segwit rules; no
 is needed for signing. The shipped entries therefore stay as they are apart
 from R61.3.4. (The network's other consensus rules that began at the same
 height are in §61.6; none of them changes a signature.)
+
+## 61.5A The counterparty requirement (Reloaded-original)
+
+*Reloaded-original; no forbidden-class input. It relies only on the reference
+facts of Chapter 59 R59.4.7 item 2 (passed the KDF Dirty Gate), as
+[Chapter 59](59-legacy-ordermatch-negotiation.md) §59.4A does. Decided by the
+maintainer on 2026-11-07 (the requirement ships together with the signing).*
+
+A swap of a coin with a sighash suffix needs both sides to sign with it. The
+order-match layer therefore declines a counterparty that does not say it does,
+before any swap starts. The one-line rule for users is: **BC2 swaps require a
+counterparty that signs with the suffix.**
+
+**R61.5A.1** *The word.* A UTXO-family coin whose resolved `sighash_suffix`
+(R61.3.1) is non-zero shall send, as its protocol information, its first value
+unchanged followed by the capability word `{"sighash_suffix": true}`
+(Chapter 59 R59.4A.1), in every message that carries protocol information. It
+sends the word at all times; the height of R61.3.2 plays no part. A coin whose
+resolved suffix is zero sends the bytes it sends without this chapter, byte for
+byte (R59.4A.4). The criterion is the resolved suffix, not the ticker, so it
+holds for `BC2` and `BC2-segwit` alike and for any future coin that sets the
+key. The word is a boolean: it declares that the node signs every spend of the
+coin with the coin's configured suffix; it does not carry the value, and a
+counterparty configured with another value is not detected (both sides are
+expected to read the same coins file).
+
+**R61.5A.2** *The requirement.* A coin whose resolved suffix is non-zero, with
+the switch of R61.5A.4 on, shall decline through its acceptance check
+(Chapter 59 R59.4A.5) a counterparty's protocol information for that coin
+unless the information declares `sighash_suffix` (R59.4A.2). The test is in
+addition to the coin's ordinary first-value test, which reads only the first
+value (R59.4A.3). It fails closed: absent or empty information, a first value
+that cannot be skipped, nothing after the first value, a malformed word, and a
+well-formed word without the key (or with the key set to `false`) all decline.
+A coin whose resolved suffix is zero judges the information exactly as before.
+Only the coin's own leg is judged by the coin: in a BC2/DOGE swap the BC2 check
+looks at the BC2 information and the DOGE check at the DOGE information.
+
+**R61.5A.3** *Where it applies.* At the two points of Chapter 59 R59.3.2 and
+R59.4.3 and nowhere else: the maker judges the taker's two values in
+`TakerRequest` before it reserves, the taker judges the maker's two values in
+`MakerReserved` before it connects. A declined request is not reserved and a
+declined reservation is not connected; no swap record exists, nothing is paid
+and the penalty of R59.5.2 does not apply. A reference taker sees a Reloaded
+maker's decline only as a request that times out (R59.4.7 item 4), and a
+reference node accepts a value that carries the word (R59.4.7 item 2).
+
+**R61.5A.4** *The switch.* The coin configuration key
+`require_suffix_counterparty` (boolean, default `true`) switches R61.5A.2 off
+when `false`: the coin then judges the information as before. A value that is
+not a boolean fails activation with an error that names the key. The switch is
+the only way to admit a counterparty without the word; it does not make a swap
+with that counterparty possible (R61.5.1). It is the third arm of the
+default-side rule of `docs/COMPAT_SWITCHES.md`, in the form of the shielded
+coin's `require_v6_counterparty`.
+
+**R61.5A.5** *Logs.* Besides the order-match layer's lines (R59.4A.6), the coin
+shall log one debug line per decline that names the coin and the cause (no
+word, malformed word, or a word without the key), and one warning per coin at
+most once an hour that gives the number of declines since the previous warning
+and names the switch.
+
+**R61.5A.6** *Older nodes.* A node that predates this rule sends no word and is
+declined by a node that requires it, in both roles. Such a node cannot sign
+with the suffix either (R61.5.1), so the decline is intended; the
+compatibility note says so.
+
+**R61.5A.7** *The requirement is temporary.* R61.5A.1 to R61.5A.5 exist because
+the other Komodo DeFi Framework implementations cannot sign the suffix
+(R61.5.1). They are removed, and the capability word with them, as soon as the
+suffix signing is generally supported by those implementations; until then the
+switch of R61.5A.4 is the only opt-out. The user documents say so in plain
+words.
 
 ## 61.6 Other BC2 consensus rules that began at the same height (informative)
 
@@ -376,6 +449,32 @@ the network's memory pool and mined; a swap with BC2 on the Reloaded side
 completes. The 2026-11-05 withdrawal (0.05 BC2 to a legacy address) is the
 first acceptance case.
 
+**T10.** *The word as written.* For a coin with a non-zero suffix, in each
+address-format form (standard, segwit, cashaddress), the protocol information is
+the first value followed by the one-entry map `"sighash_suffix"` → `true`, as
+fixed bytes; the first value still decodes with the ordinary reader and the
+reported address format is unchanged (R59.4A.3). With a zero or absent suffix the
+bytes equal those of the same coin without this chapter. The `BC2` and
+`BC2-segwit` entries both send the word.
+
+**T11.** *The requirement.* With a non-zero own suffix and the switch on, the
+acceptance check accepts information that carries the word and declines absent
+information, empty information, a malformed first value, a first value alone, a
+malformed word, a word without the key and the key with `false`; with the switch
+off it accepts all of them as before. With a zero own suffix it judges every
+input as before.
+
+**T12.** *Both roles.* A maker declines a `TakerRequest` whose BC2 information
+lacks the word (no reservation) and accepts one that carries it; a taker declines
+a `MakerReserved` whose BC2 information lacks the word (no connect) and accepts
+one that carries it. The other coin of the pair does not trigger the decline.
+The order-match layer's debug and info lines of R59.4A.6 appear.
+
+**T13.** *Switch and logs.* `require_suffix_counterparty` is `true` when absent,
+accepts both booleans and fails activation on any other value with an error that
+names the key. The coin's debug line is written per decline, and the warning at
+most once an hour with the count since the previous one (the clock is injected).
+
 ## 61.8 Deferred Work
 
 - **CV** *(decided 2026-11-06)* The key form is a new mechanism-named key,
@@ -387,8 +486,9 @@ first acceptance case.
   networks are far above the activation height, so the gate has no effect on
   any transaction signed today; the recommendation is to parse and validate
   now and implement the gate with the first coin that needs it.
-- **D2** *Refusal for reference counterparties.* Whether an order or swap whose
-  BC2 side the reference node must sign should be refused before it starts.
+- **D2** *Refusal for reference counterparties.* *(Decided 2026-11-07 in favour
+  of the refusal.)* An order or swap with a counterparty that does not declare
+  suffix signing is declined before it starts: R61.5A.
 - **D3** *Taproot digest.* Binding the Schnorr digest (R61.2.5) if the project
   ever signs a Taproot input.
 - **D4** *BC2 header validation.* Whether the changed difficulty rule of §61.6
@@ -409,6 +509,60 @@ first acceptance case.
 - **V2** *No suffix support exists.* Neither the routine nor the signers carry
   any sighash-suffix parameter at this date; the sighash type passed in is
   `1 | fork_id`.
+
+## 61.9A As-built Note
+
+*Written with the implementation (2026-11-06). The code was compiled and its tests ran in the lab
+windows of 2026-11-07, and the signing was accepted by the BC2 network the same day (T9, first case).*
+
+- **Where the suffix lives.** The resolved coin configuration carries `sighash_suffix` (`u32`, zero
+  when absent) and `sighash_suffix_height` (`Option<u64>`, validated and carried, never read by a
+  signing site: decision D1). The signing substrate's `TransactionInputSigner` carries
+  `sighash_suffix`, and `signature_hash` is the one place that reads it. The signer has no default
+  and no longer converts from a bare transaction: `TransactionInputSigner::from_transaction(tx,
+  suffix)` replaces that conversion, so every constructor states the suffix and a site added later
+  cannot omit it. Every signer built for a coin takes the coin's own suffix: the transaction
+  builder's preimage, the HTLC spend, the two version-two swap preimage builders, the raw-signing
+  call, and the parse of a counterparty's preimage (which never takes a value from the peer's
+  bytes).
+- **Digest rules as built.** The four suffix bytes follow the 4-byte sighash type in the legacy
+  and the BIP-143 preimage, and in the fork-id form of the latter; nothing is appended when the
+  suffix is zero. The Radiant dialect and the overwintered (ZIP-243) digest take none: activation
+  refuses a non-zero suffix on a coin that selects either, so the routine's zero for them is
+  unreachable from a resolved configuration. The out-of-range `SIGHASH_SINGLE` case follows
+  R61.2.3 in the legacy and in the fork-id form.
+- **R61.4.4 as built.** The refusal is `refuse_sighash_suffix_for_hardware_wallet` in the signer
+  crate. It is called first in the Trezor signer, before the device is contacted in the wallet-funded
+  version-two signing path, and before the device connection of the task withdraw, whose error is
+  `UnsupportedError`. A unit test calls the function; the Trezor signer itself needs a device and
+  has no test.
+- **R61.4.6 as built.** Two paths recompute an input digest to verify a signature: the
+  validators of the version-two funding-spend and taker-payment-spend preimages. Both call
+  `signature_hash` on the signer obtained from the parsed preimage, which carries the receiving
+  coin's suffix, so the suffix applies to them. No other path recomputes a digest.
+- **Tests as built.** T1, T2, T3 and T4 (including a case that builds the out-of-range preimage from a
+  literal byte array) are in `kdf_script` (`suffix_tests`); T5 and the activation warning are in
+  the configuration builder's tests; T7 is in the signer crate; T6 and T8 are in `utxo_tests.rs`
+  (`sighash_suffix_sites`). The Trezor signer itself needs a device and has no test; the shared
+  refusal function is tested.
+- **Gate as built (§61.5A).** *Compiled and tested in the lab window of 2026-11-07: format, check,
+  clippy, the WebAssembly checks and all tests of this section pass.* The key `sighash_suffix` is the constant `CAPABILITY_SIGHASH_SUFFIX` in
+  `coin_protocol_capability.rs`, next to `tx_v6`. The configuration builder reads
+  `require_suffix_counterparty` (boolean, default `true`; a non-boolean fails activation with an error
+  that names the key) and the resolved configuration carries it. `coin_protocol_info` and
+  `is_coin_protocol_supported` in the UTXO common helpers write and judge the word: the word is
+  appended when the resolved suffix is non-zero, and the check runs after the first-value test only
+  when the suffix is non-zero and the switch is on. These two helpers serve the standard UTXO coin,
+  Bitcoin Cash, Qtum and QRC-20 coins and the shielded coin's transparent part; the SLP token coin and
+  the non-UTXO families have their own methods and are untouched. The decline log is a new generic
+  type in `coin_protocol_capability.rs` (debug line per decline, one warning per hour with the count,
+  clock injected); its per-coin state lives in a process-wide map keyed by ticker behind a mutex in the
+  helpers, the clock is the existing millisecond helper of the `common` crate, and the shielded coin's
+  own decline log is unchanged. Tests: T10, T11 and T13 in the module `sighash_suffix_gate_tests` of
+  `utxo_tests.rs`, T12 and the reader half of T10 in `t14_capability_word_tests` of
+  `ordermatch_tests.rs` (the order-match tests mock the per-coin check, so they prove the two call sites,
+  not the coin check, which T11 proves). The warning of the static map itself is not captured by a test:
+  the rate limit is proved on the log type with an injected clock.
 
 ## 61.10 External References
 
