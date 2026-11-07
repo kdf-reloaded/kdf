@@ -399,11 +399,14 @@ its own chapter binds a capability for it. The protocol information of
 every other coin stays byte for byte as it is without this section. A
 further coin opts in only after a Spec Reader answer, passed by the Dirty
 Gate, on how the reference release rows treat the longer bytes for that
-coin. The keys in use:
+coin; for the UTXO family that answer is R59.4.7 item 2 (the decoder ignores
+what follows the first value), so a UTXO-family coin opts in through its own
+chapter. The keys in use:
 
 | Key | Coin family | Meaning | Required by |
 | --- | --- | --- | --- |
 | `tx_v6` | shielded coin (Chapter 39) | This node builds and spends the version-6 transaction format of the Ironwood upgrade. | Chapter 39 R39.6.4f |
+| `sighash_suffix` | UTXO-family coin with a non-zero sighash suffix (Chapter 61) | This node signs every spend of the coin with the coin's configured sighash suffix. | Chapter 61 R61.5A.2 |
 
 **R59.4A.5** *Who decides.* The order-match layer shall carry the
 protocol information unchanged in all three messages and in the side
