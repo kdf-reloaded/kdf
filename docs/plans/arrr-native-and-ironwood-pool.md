@@ -114,7 +114,7 @@ apart from a Reloaded one. The maintainer decided:
 | ARRR requirement | ARRR sends `tx_v6` always. Inside the Ironwood window it declines a counterparty without it, on the taker and the maker path, with the per-coin switch `require_v6_counterparty` (default on). One debug line per decline, and at most one warning per coin per hour with the count. | ch.39 R39.6.4f, T39.6.4f | CRD PR #230 |
 | ARRR predicate code | The shielded coin's protocol information and acceptance check, the switch, and the logs. Stacked on the capability-word code. | — | code PR #241 |
 
-### 5. Transparent addresses in the shielded history (in progress)
+### 5. Transparent addresses in the shielded history (done for the node's own swap transactions)
 
 `z_coin_tx_history` lists no transparent address. That covers the transparent inputs of
 CRD ch.39 R39.8.9c and the transparent outputs of R39.8.9d: an ARRR swap's payment to its
@@ -140,9 +140,9 @@ What it needs:
 
 Rows from before the change keep their empty sets.
 
-**In progress** (2026-11-07): ch.39 R39.8.9d3 and T39.8.9d3 are written; the code follows in
-PR #277. The transparent addresses of a transaction another wallet built (a payment from a
-transparent address, for example) stay unlisted, because nothing is fetched.
+**Done** (2026-11-07) for the transactions the node builds for a swap: ch.39 R39.8.9d3 and
+T39.8.9d3, PR #277. The transparent addresses of a transaction another wallet built (a payment
+from a transparent address, for example) stay unlisted, because nothing is fetched.
 
 Later, if it matters: each scan pass checks every kept entry of a mined transaction against the
 wallet database, and each history page reads the whole record. Both grow by one entry per
