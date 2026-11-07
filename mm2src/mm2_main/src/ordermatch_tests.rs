@@ -7247,12 +7247,14 @@ fn ordermatch_ctx_without_worker() -> (Arc<OrdermatchContext>, mpsc::UnboundedRe
     let (trie_ops_tx, rx) = mpsc::unbounded::<Vec<TrieOp>>();
     let trie_store = TrieStore::default();
     let pair_liveness = trie_store.pair_liveness.clone();
+    let mismatch_watch = trie_store.mismatch_watch.clone();
     let ctx = OrdermatchContext {
         maker_orders_ctx: Default::default(),
         my_taker_orders: Default::default(),
         orderbook: Default::default(),
         trie_store: Arc::new(parking_lot::Mutex::new(trie_store)),
         pair_liveness,
+        mismatch_watch,
         trie_ops_tx,
         orderbook_subscriptions: Default::default(),
         sync_answer_deferral: Default::default(),
@@ -11722,6 +11724,13 @@ mod sync_answer_deferral_tests {
             deferral.registration_counts_agree(),
             "per-peer count and index of the registrations table"
         );
+        // The watch of the keep-alive requests (it ends with the check of trigger (b), on a task of its own).
+        let watch = octx(ctx).mismatch_watch.clone();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !watch.is_empty() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(watch.is_empty(), "mismatch watch table");
     }
 
     /// The uuids of the maker's orders in the node's read index.
@@ -13084,6 +13093,84 @@ mod sync_answer_deferral_tests {
                 (Attempt::First, RequestClass::Ok),
                 (Attempt::Alternate(AltReason::Mismatch), RequestClass::Ok)
             ]);
+            assert_eq!(alt_counters(&f.relay), [0, 1, 0, 0, 1, 1]);
+        }
+
+        /// The DEBUG tail of the mismatch line (the watch table): a diverged pair with no candidate rule that
+        /// would have skipped it. The request to the other relay is sent as without the watch.
+        #[test]
+        fn the_mismatch_line_counts_no_flag_for_a_plainly_diverged_pair() {
+            let mut f = Fixture::new(alt_conf());
+            octx(&f.relay).mismatch_watch.force_debug();
+            let stale_f = node_without(&f, &one_of(&f, false));
+            let f_root = held(&stale_f, PAIR).unwrap();
+
+            let mut own = f.start_own_sync();
+            assert_eq!(octx(&f.relay).mismatch_watch.len(), 1, "the watch of the request");
+            own.answer(&stale_f);
+            assert!(own.finish(), "F's answer was applied");
+            wait_until("F's root", || held(&f.relay, PAIR) == Some(f_root));
+
+            f.answer_relay_list(&[G, FORWARDER]);
+            let mut alt = f.expect_alternate_request(G);
+            assert_eq!(alt.roots(), HashMap::from([(PAIR.to_owned(), f_root)]));
+            alt.answer(&f.maker);
+            wait_until("G's set", || maker_book(&f.relay) == f.uuids);
+            assert_tables_empty(&f.relay);
+            f.assert_no_command();
+
+            let mut skips = octx(&f.relay).sync_log.skips();
+            assert_eq!(skips.len(), 1);
+            let since_keep_alive_ms = std::mem::take(&mut skips[0].since_keep_alive_ms);
+            assert!(since_keep_alive_ms < 15_000, "{}", since_keep_alive_ms);
+            assert_eq!(skips, vec![SkipCounts {
+                pairs: 1,
+                ..Default::default()
+            }]);
+            assert_eq!(alt_counters(&f.relay), [0, 1, 0, 0, 1, 1]);
+        }
+
+        /// An order message of the maker for the pair, handled after the keep-alive and before the check, is
+        /// candidate (b): the line says so, and the request to the other relay is still sent.
+        #[test]
+        fn the_mismatch_line_counts_an_order_message_handled_after_the_keep_alive() {
+            let mut f = Fixture::new(alt_conf());
+            octx(&f.relay).mismatch_watch.force_debug();
+            let stale_f = node_without(&f, &one_of(&f, false));
+            let f_root = held(&stale_f, PAIR).unwrap();
+
+            let mut own = f.start_own_sync();
+            // The maker's created message reaches the relay while the request is in flight; the answer, which is
+            // no order message, then replaces the pair.
+            let extra = make_random_orders(MAKER.to_owned(), &[0; 32], "C1".into(), "C2".into(), 1).remove(0);
+            insert_or_update_order(&f.relay, extra);
+            own.answer(&stale_f);
+            assert!(own.finish(), "F's answer was applied");
+            wait_until("F's set", || maker_book(&f.relay) == maker_book(&stale_f));
+            wait_until("F's root", || held(&f.relay, PAIR) == Some(f_root));
+
+            f.answer_relay_list(&[G, FORWARDER]);
+            let mut alt = f.expect_alternate_request(G);
+            assert_eq!(
+                alt.roots(),
+                HashMap::from([(PAIR.to_owned(), f_root)]),
+                "the request is sent as without the watch"
+            );
+            alt.answer(&f.maker);
+            wait_until("G's set", || maker_book(&f.relay) == f.uuids);
+            assert_tables_empty(&f.relay);
+            f.assert_no_command();
+
+            let mut skips = octx(&f.relay).sync_log.skips();
+            assert_eq!(skips.len(), 1);
+            let since_keep_alive_ms = std::mem::take(&mut skips[0].since_keep_alive_ms);
+            assert!(since_keep_alive_ms < 15_000, "{}", since_keep_alive_ms);
+            assert_eq!(skips, vec![SkipCounts {
+                pairs: 1,
+                skip_b: 1,
+                skip_ab: 1,
+                ..Default::default()
+            }]);
             assert_eq!(alt_counters(&f.relay), [0, 1, 0, 0, 1, 1]);
         }
 

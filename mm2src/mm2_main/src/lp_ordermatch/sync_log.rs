@@ -392,6 +392,9 @@ struct Window {
     /// The answers recorded so far (tests only).
     #[cfg(test)]
     answers: Vec<(AnswerClass, AnswerPath)>,
+    /// The skip counts of the mismatch lines recorded so far (tests only).
+    #[cfg(test)]
+    skips: Vec<SkipCounts>,
 }
 
 /// The counters of one node (a field of [`OrdermatchContext`]).
@@ -446,6 +449,40 @@ pub(crate) fn pairs_label<'a>(pairs: impl Iterator<Item = &'a String>) -> String
 
 fn cut_error(error: &str) -> String { error.chars().take(MAX_ERROR_CHARS).collect() }
 
+/// The DEBUG line of one step of the request to one other relay: `sync alternate relay: pubkey=<P> event=<event>`
+/// and, for `event=mismatch` with `skips`, the tail of the candidate rules that would have skipped the diverged
+/// pairs (`pairs=<n> skip_a=<k> skip_b=<k> skip_d=<k> skip_ad=<k> skip_ab=<k> since_keep_alive_ms=<ms>`).
+struct AltLine<'a> {
+    event: AltEvent,
+    pubkey: &'a str,
+    skips: Option<&'a SkipCounts>,
+}
+
+impl fmt::Display for AltLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "sync alternate relay: pubkey={} event={}",
+            self.pubkey,
+            self.event.as_str()
+        )?;
+        match (self.event, self.skips) {
+            (AltEvent::Mismatch, Some(skips)) => write!(
+                f,
+                " pairs={} skip_a={} skip_b={} skip_d={} skip_ad={} skip_ab={} since_keep_alive_ms={}",
+                skips.pairs,
+                skips.skip_a,
+                skips.skip_b,
+                skips.skip_d,
+                skips.skip_ad,
+                skips.skip_ab,
+                skips.since_keep_alive_ms
+            ),
+            _ => Ok(()),
+        }
+    }
+}
+
 impl SyncLog {
     /// Records one answer: its DEBUG line, its count and, when the window has ended, the summary.
     pub(crate) fn answer(&self, event: &AnswerEvent<'_>, now_ms: u64) {
@@ -498,7 +535,19 @@ impl SyncLog {
     /// Records one step of the request to one other relay: its DEBUG line, its count and, when the window has
     /// ended, the summary. `pubkey` is the keep-alive's.
     pub(crate) fn alt(&self, event: AltEvent, pubkey: &str, now_ms: u64) {
-        log::debug!("sync alternate relay: pubkey={} event={}", pubkey, event.as_str());
+        self.alt_with_skips(event, pubkey, None, now_ms)
+    }
+
+    /// Like [`SyncLog::alt`]; for [`AltEvent::Mismatch`] the DEBUG line carries the `skips` of the diverged pairs
+    /// when there are any. The counters and the summary are those of `alt`.
+    pub(crate) fn alt_with_skips(&self, event: AltEvent, pubkey: &str, skips: Option<&SkipCounts>, now_ms: u64) {
+        log::debug!("{}", AltLine { event, pubkey, skips });
+        #[cfg(test)]
+        {
+            if let (AltEvent::Mismatch, Some(skips)) = (event, skips) {
+                self.0.lock().skips.push(skips.clone());
+            }
+        }
         if let Some(summary) = self.record_alt(event, now_ms) {
             log::info!("{}", summary);
         }
@@ -558,6 +607,9 @@ impl SyncLog {
 
     #[cfg(test)]
     pub(crate) fn requests(&self) -> Vec<(Attempt, RequestClass)> { self.0.lock().requests.clone() }
+
+    #[cfg(test)]
+    pub(crate) fn skips(&self) -> Vec<SkipCounts> { self.0.lock().skips.clone() }
 }
 
 #[cfg(test)]
@@ -760,6 +812,88 @@ mod tests {
         assert_eq!(log.record_alt(AltEvent::NoRelay, 1_000), None);
         assert_eq!(log.record_alt(AltEvent::WorkerLate, 1_001), None);
         assert_eq!(log.count(1_000 + SUMMARY_WINDOW_MS, |_| ()), None);
+    }
+
+    /// Hex constants only: no value derived from a key pair reaches a logging call.
+    const PUBKEY: &str = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn the_mismatch_line_carries_the_skip_counts_in_the_documented_order() {
+        let skips = SkipCounts {
+            pairs: 5,
+            skip_a: 1,
+            skip_b: 2,
+            skip_d: 3,
+            skip_ad: 4,
+            skip_ab: 3,
+            since_keep_alive_ms: 1234,
+        };
+        assert_eq!(
+            AltLine {
+                event: AltEvent::Mismatch,
+                pubkey: PUBKEY,
+                skips: Some(&skips)
+            }
+            .to_string(),
+            format!(
+                "sync alternate relay: pubkey={} event=mismatch pairs=5 skip_a=1 skip_b=2 skip_d=3 skip_ad=4 \
+                 skip_ab=3 since_keep_alive_ms=1234",
+                PUBKEY
+            )
+        );
+    }
+
+    #[test]
+    fn the_alternate_relay_line_without_counts_is_unchanged() {
+        for event in [
+            AltEvent::Failure,
+            AltEvent::Mismatch,
+            AltEvent::NoRelay,
+            AltEvent::WorkerLate,
+            AltEvent::Sent,
+            AltEvent::Ok,
+        ] {
+            assert_eq!(
+                AltLine {
+                    event,
+                    pubkey: PUBKEY,
+                    skips: None
+                }
+                .to_string(),
+                format!("sync alternate relay: pubkey={} event={}", PUBKEY, event.as_str())
+            );
+        }
+        // The tail belongs to the mismatch line alone.
+        let skips = SkipCounts::default();
+        assert_eq!(
+            AltLine {
+                event: AltEvent::Sent,
+                pubkey: PUBKEY,
+                skips: Some(&skips)
+            }
+            .to_string(),
+            format!("sync alternate relay: pubkey={} event=sent", PUBKEY)
+        );
+        assert_eq!(
+            AltLine {
+                event: AltEvent::Mismatch,
+                pubkey: PUBKEY,
+                skips: None
+            }
+            .to_string(),
+            format!("sync alternate relay: pubkey={} event=mismatch", PUBKEY)
+        );
+    }
+
+    #[test]
+    fn the_skip_counts_do_not_change_the_counters() {
+        let with = SyncLog::default();
+        let without = SyncLog::default();
+        with.alt_with_skips(AltEvent::Mismatch, PUBKEY, Some(&SkipCounts::default()), 1_000);
+        without.alt(AltEvent::Mismatch, PUBKEY, 1_000);
+        assert_eq!(with.snapshot(), without.snapshot());
+        assert_eq!(with.skips(), vec![SkipCounts::default()]);
+        assert!(without.skips().is_empty());
     }
 
     #[test]
