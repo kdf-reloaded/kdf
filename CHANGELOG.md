@@ -565,7 +565,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   payment was sent but not yet confirmed.** The maker payment belongs to the taker once that spend was
   sent. The call now refuses, whether or not the refund time has passed, and builds nothing. A swap with a
   confirmed spend was already refused. A swap whose maker payment is spent or refunded on the chain is
-  answered as before. Detail: PR #TBD; CRD ch.51 R75.
+  answered as before. Detail: PR #284; CRD ch.51 R75.
 
 #### UTXO coins and Electrum
 
@@ -856,7 +856,7 @@ lives.
   never confirms.** If the node's spend of the taker payment was broadcast but dropped from the chain,
   and the other side refunded its payment, `recover_funds_of_swap` refuses to refund the maker payment:
   the other side knows the secret from the broadcast and can still claim it. A refund in that case only,
-  when the other side's refund is shown on its own chain, is under consideration. Detail: PR #TBD; CRD
+  when the other side's refund is shown on its own chain, is under consideration. Detail: PR #284; CRD
   ch.51 R75, D8.
 
 ## [0.3.0-beta.1] — 2026-11-01
