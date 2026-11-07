@@ -419,8 +419,9 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   withdrawal gave the amount spent minus the amount received, a positive number, while the
   transaction's history row, Komodo DeFi Framework and GLEEC KDF give received minus spent, a
   negative number. The answer now gives the negative number too, for a `zs1…` and a Pirate1
-  destination alike. The transaction itself was always correct. Found in a live mainnet test.
-  Detail: PR #271; CRD ch.39 R39.5A.3, R39.6.5c.
+  destination alike. The transaction itself was always correct. Clients that inverted the sign
+  of `my_balance_change` for ARRR withdrawals to compensate must drop that workaround. Found in a
+  live mainnet test. Detail: PR #271; CRD ch.39 R39.5A.3, R39.6.5c.
 
 #### EVM coins
 
