@@ -517,7 +517,8 @@ with a node that cannot build version 6 used to start, and failed at that node's
 ARRR transaction, after the DEX fee was paid. GLEEC KDF nodes and KDF Reloaded
 0.3.0-beta.1 nodes send no word and are declined. Set `require_v6_counterparty` to
 `false` in the coin's `consensus_params` to admit them again; an ARRR swap with GLEEC KDF
-still cannot complete.
+still cannot complete. The capability check is temporary: it will be removed once
+version 6 is generally supported.
 
 Two coin-activation behaviours differ from GLEEC KDF by default (CRD ch.46
 R46.2.4, ch.55 R55.4.6):

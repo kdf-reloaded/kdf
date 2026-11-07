@@ -693,7 +693,10 @@ lives.
   on 2026-10-28: a GLEEC KDF maker's first ARRR payment was rejected at broadcast). An ARRR node
   therefore declines such a counterparty before the swap starts, and KDF Reloaded 0.3.0-beta.1 nodes
   as well (see Changed). A swap between two KDF Reloaded nodes has completed on the live chain,
-  including the spend of the locked ARRR (October 2026). More in
+  including the spend of the locked ARRR (October 2026). The decline rests on a capability
+  statement in the order and match messages (coin setting `require_v6_counterparty`, on by
+  default). This check is temporary: it will be removed once version 6 is generally supported by
+  the other implementations. More in
   [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
 - **Shielded coins such as ARRR cannot be activated in a browser (WASM) build.** Activation ends with
   an error saying shielded activation is not available in the WebAssembly build: the browser build

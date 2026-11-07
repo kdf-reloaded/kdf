@@ -1282,6 +1282,10 @@ is the shielded coin's use of the capability word of
 > light-mode coin that sends, declines and accepts through the coin's own methods. The
 > three decline causes of (d) are told apart by a crate-internal classifier next to the
 > generic reader of Chapter 59 §59.4A, which leaves the reader's result unchanged.
+>
+> **Status (2026-11-07).** The check is temporary, by the maintainer's decision of
+> 2026-11-07: it will be removed once version 6 is generally supported. The user documents
+> (README, changelog, `RELOADED_VS_GLEEC.md`, `docs/GLEEC_COMPATIBILITY.md`) say the same.
 
 T39.6.4f *Counterparty version-6 capability.*
 - (a) The protocol information of an ARRR coin is its address-format bytes followed by the

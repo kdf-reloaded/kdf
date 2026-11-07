@@ -43,6 +43,7 @@ KDF Reloaded is currently in **public beta** (see [`ROADMAP.md`](ROADMAP.md)). A
 - The `kdf` binary is provided for evaluation, testing, and review.
 - Some functionality is missing or limited in this release; see the *Known limitations* list in the [`CHANGELOG`](CHANGELOG.md#known-limitations).
 - Mainnet swaps function on netid `8762` (AtomicDEX network) and netid `6133` (GLEEC network), but you are running unaudited pre-release software.
+- **ARRR (Pirate) swaps work only between KDF Reloaded nodes of 0.4.0 or later.** Since Pirate Chain's Ironwood upgrade, ARRR needs a newer transaction format (version 6) that the other Komodo DeFi Framework implementations cannot build, so a swap with them would fail after the DEX fee was paid. KDF Reloaded therefore declines an ARRR swap, before anything is paid, with a node that does not state it builds version 6 (coin setting `require_v6_counterparty`, on by default). This check is temporary: it will be removed once version 6 is generally supported. More in the [`CHANGELOG`](CHANGELOG.md#known-limitations).
 - Git commits and release tags are GPG-signed by the maintainer (`Takologi <takologi@proton.me>`, fingerprint `FEE1ACA52C65FF3EBF31818CB5595E1752BC2A82`); the public key is at [`docs/keys/takologi.asc`](docs/keys/takologi.asc). Release **binaries** ship with a GPG-signed `SHA256SUMS` manifest; see [`docs/RELEASE.md`](docs/RELEASE.md) and [`SECURITY.md`](SECURITY.md).
 
 ## What it does
