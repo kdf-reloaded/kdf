@@ -1214,6 +1214,69 @@ other relay once after a failure, timeout included, or after an answer that
 leaves a pair diverged (R-Q5d); a timed-out request is never sent to the same
 peer again.
 
+**R-Q6b (an answer is never related to any root; a newer keep-alive is a
+second, independent exchange).** *(Spec Reader 2026-11-07, rows
+`v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both;
+**passed the KDF Dirty Gate on 2026-11-07**, measure 0.03.)* At both rows:
+
+1. **No comparison, no re-request.** When the answer to a keep-alive-driven
+   request arrives, the requester applies it (R-GH4) and does nothing else:
+   it compares the state it reaches neither with the root of the keep-alive
+   that triggered the request nor with the root of any newer keep-alive that
+   arrived meanwhile, and it never sends a second request on account of an
+   answer. The only trigger of a request is the comparison of R-Q4 at the
+   moment a keep-alive is handled.
+2. **Each keep-alive copy is its own exchange.** Every delivered keep-alive
+   is handled on a task of its own (§32.9A R-B1 row 8). A newer keep-alive
+   from P that arrives while a request for an earlier one is in flight is
+   compared against the root held **at that moment** -- still the old root,
+   because the earlier answer has not been applied yet -- so it produces its
+   own request to its own forwarding peer, naming its own advertised root,
+   whenever that root differs from the held one. The two answers are then
+   applied in the order they arrive, each as R-GH4 says; nothing links them,
+   and whichever is applied last decides the held set (R-Q6's "no
+   de-duplication"). With the held-root option of R-Q4a the second request
+   names the same held root as the first, since the first answer has not
+   landed; the responder treats each on its own (R-Q6a).
+3. **Two timeout layers.** A request can end without an answer in two ways,
+   and the requester treats both as the failure of R-F3b item 4: the
+   transport's own request timeout, 10 s from sending, which surfaces as an
+   **error answer**; and the requester's pending-request sweep, which drops a
+   request older than 10 s at its next tick (every 3 s), so between 10 and
+   13 s after sending, which surfaces as a **dropped request** (the "no
+   answer" of R-Q6a item 5). Whichever fires first ends the exchange; a late
+   answer to a request already dropped is discarded with a logged notice and
+   is not applied.
+4. **What a failed request withholds.** On a relay, the application-level
+   forward of R-F3b for that keep-alive copy does not happen (the
+   gossip-layer forward of R-F3a already has); on any node the held root for
+   the pair stays as it was (R-GH4 item 4). The failure is logged as an
+   error and reported to the message handler as such; it has no other
+   effect, and the next keep-alive from P is handled afresh.
+
+> **Why this matters for Reloaded (informative; this repository, not
+> corpus-sourced).** Reloaded's R-Q5d trigger (b) compares the reached root
+> with the root the **triggering** keep-alive advertised; by item 2 a newer
+> keep-alive has by then started an exchange of its own, so a mismatch
+> against the older root is expected whenever the maker changed state between
+> the two keep-alives, and the alternate-relay request that follows is
+> redundant with the newer exchange rather than wrong. The reference has no
+> comparison at all, so the question does not arise there. Any Reloaded rule
+> that compares roots should compare against the **latest** root advertised
+> for the pair, or against none; whether to change R-Q5d is a maintainer
+> decision (§32.10 D12).
+
+**T-Q6b** *Concurrent keep-alives and the answer (R-Q6b).*
+*(Reloaded-original; passed the KDF Dirty Gate with R-Q6b on 2026-11-07.)* Two
+keep-alives for P and pair X with different roots, delivered 100 ms apart
+from peers F and G while neither answer has arrived, produce exactly two
+requests, one to F and one to G, both naming the root held before either
+answer; applying G's answer after F's leaves G's state held; an answer that
+leaves the held root different from either advertised root causes no third
+request under the reference contract (the test states which contract --
+reference or R-Q5d -- it asserts); a request answered 11 s after sending is
+reported as failed and its late answer is not applied.
+
 **T-Q4** *Request content and target (R-Q4).* A keep-alive for P with a
 single pair entry whose root differs from the held one, delivered as if
 from peer F, produces exactly one `SyncPubkeyOrderbookState` to F
@@ -4613,6 +4676,30 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   parked-request table and order-book answer. The reference facts it rests on
   are R-F3a, R-GH12 and the "no data" and "missing pair" classes of R-Q5a,
   which passed the KDF Dirty Gate. It needs no Dirty Gate pass of its own.
+- *Scoped addition (2026-11-07) -- R-Q6b, T-Q6b and the informative note
+  under R-Q6b.* **KDF Dirty Gate: PASS on 2026-11-07, measure 0.03.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish how a requester relates a synchronization
+  answer to the keep-alive that caused it and to a newer keep-alive that
+  arrived meanwhile (no comparison, no re-request, independent handling of
+  each copy), the two timeout layers of the request and what each yields,
+  and what a failed request withholds. Behavior only; no private identifier,
+  function body, helper decomposition, error, log or comment text was
+  reproduced. The informative note rests on this chapter's own R-Q5d; T-Q6b
+  is Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.03, no findings. *Extent:* order-book keep-alive handling, synchronization
+  request and answer handling, the request timeout and the pending-request
+  sweep, and relay forwarding on handler failure, at `v3.0.0-beta` with
+  `v2.6.0-beta` as cross-check; for the whole batch, about 24 source files
+  were read in full or in the relevant regions at the `dev (as of 2026-03-27)`
+  row, whose source tree is identical to `v3.0.0-beta`, and the same modules
+  were diffed against `v2.6.0-beta`. *Method:* reading, with mechanical
+  cross-checks (diffs between the tabled states; pattern searches of the added
+  lines for paths, identifiers and markers); the gate script was not run
+  because the candidate has no code blocks. *Measure:* 0.03, read against the
+  standard that any discretionary finding fails a chapter; dictated-interop
+  and public-surface tokens were excluded from the measured set.
 - *Reloaded-original addition (2026-11-07): R-GH8a and T-GH8a, and the notes
   that point to them.* The notes are those on R-GH10, T-GH8 and T-GH10.
   Written by a context that never read the forbidden corpus. Its sources are
