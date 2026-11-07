@@ -156,6 +156,20 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   the reference behavior. Nothing a counterparty observes changes, so the
   divergence is the default; the shared registry needs no change. See CRD ch.37
   R37.5.9e and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+- **Opt-in: a re-pricing replaces the previous orders only after the new order passes
+  its checks.** By default `setprice` with `cancel_previous` behaves as in GLEEC KDF: it
+  cancels the pair's previous orders first, so a failed balance check or a refused order
+  leaves the pair empty until the next successful `setprice`. Setting the top-level
+  `MM2.json` boolean `setprice_replace_after_checks` to `true` (only the boolean `true`
+  turns it on) runs every check and builds the new order first, and cancels the previous
+  orders only when all of them pass; a failed check returns its error and cancels
+  nothing. The cost is a stale price: after a failed re-pricing the previous orders stay
+  live and matchable at their old price until the next successful `setprice` or a cancel,
+  and an empty pair costs only trades where a stale price can cost funds. That is why the
+  switch is off by default. With it on, a `timeout_in_minutes` on each `setprice` bounds
+  that window: the order is cancelled at the latest that many minutes after it was placed
+  (for an order restored at startup, after the restart). Nothing on the wire changes.
+  See CRD ch.32 R-GH8a and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
 - **EVM coins and tokens log the gas limits they will use.** At activation, one
   INFO line names where each gas-limit block comes from (the coin's own entry,
   its platform coin's entry or the defaults) and lists the members that differ
@@ -609,6 +623,10 @@ behavior, except for `swap_key_check`; the row of each switch in
 
 One more switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
 every maker-order message is published at once, and `true` turns on the maker's rate control.
+
+`setprice_replace_after_checks` also already defaults to the GLEEC-compatible `false`: a
+re-pricing cancels the previous orders before its checks, and `true` keeps them when a check
+fails (at the price of a stale price on the book).
 
 `dns_resolver` has no GLEEC-compatible value: the default matches GLEEC KDF for seeds and
 `"system"` matches it for coin servers; see its row in

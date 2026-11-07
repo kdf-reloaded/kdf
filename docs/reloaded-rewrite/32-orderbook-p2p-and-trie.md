@@ -3154,6 +3154,24 @@ maker that prefers keeping its orders through a failed check turns the switch
 on. (Decision DG of 2026-11-07 supersedes Decision DE, which had chosen the
 opposite default without weighing the stale price.)
 
+> *As built (2026-11-07).* `setprice_replace_after_checks` is read by one
+> function next to the failed-check path of the maker-order creation in
+> `ordermatch_trading.rs`; it is `true` only for a JSON `true`, and the
+> node's configuration is fixed after start, so every read gives the same
+> answer. Two places change, and only when the request carries
+> `cancel_previous`: (a) the helper that cancels the previous orders when
+> a check fails (the IBC-routing minimum balance in a build with that
+> feature, the maximum volume for `max`, the balance check otherwise) no
+> longer cancels, and returns the check's error (item 3); (b) the cancel
+> that came after the checks and before the build of the order moves to
+> after the build and after the order's subscription to its pair's topic,
+> the last step that can still fail, so the order is built before the first
+> cancel (item 2); the save, local insert and publish follow it unchanged.
+> The refusals before the balance checks (item 4) are untouched. The same
+> function serves the market-making bot and `start_swap` with the
+> `SetPrice` method, which both pass `cancel_previous`, so both follow the
+> switch. With the switch at its default, both places keep today's order.
+
 **R-GH10 (Reloaded today).** *Established 2026-11-01 against this
 repository's own keep-alive receiver, synchronization applier, order-
 message handlers, eviction sweep, keep-alive producer and re-pricing path;
@@ -3254,6 +3272,20 @@ on (base, rel), `setprice_replace_after_checks: true`:
 - with the switch absent or `false`, the first case cancels both previous
   orders and creates none (R-GH8);
 - a value that is not a boolean is taken as the default (`false`).
+
+*Coverage (2026-11-07).* The unit tests in `ordermatch_tests.rs`, module
+`t60_7_maker_balance_watch_tests::t_gh8a_replace_after_checks`, with a node
+whose balance read fails once: `t_gh8a_a_failed_balance_check_leaves_the_previous_orders`
+(first bullet: error returned, both orders in the maker's set, in the book and
+under the same held root, nothing published);
+`t_gh8a_b_a_refused_build_leaves_the_previous_orders` (second bullet, the
+checks having run first); `t_gh8a_c_the_next_passing_repricing_replaces_both_orders`
+(third bullet, with T-GH9's order: one cancel per old order, then the created
+message); `t_gh8a_d_at_the_default_a_failed_check_cancels_both_orders` (fourth
+bullet, with the switch absent, `false`, `"true"`, `1` and `null`) and
+`t_gh8a_d_at_the_default_a_refused_build_leaves_the_pair_empty` (R-GH8's build
+case at the default); `t_gh8a_e_only_a_json_true_turns_the_switch_on` (fifth
+bullet); `t_gh8a_without_cancel_previous_nothing_is_cancelled` (item 4).
 
 **T-GH9** *One cancel per replaced order, in order (R-GH9).* The same
 re-pricing publishes exactly two cancel messages, one per old order
