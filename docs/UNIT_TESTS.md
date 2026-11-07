@@ -239,8 +239,9 @@ Light-mode coin over a wallet database and the scripted lightwalletd transport o
 harness). CI cell: `shielded` (`cargo test -p coins --lib z_coin::`). CRD: chapter 39, R39.8.9d1,
 R39.8.9d2, R39.8.9d3, T39.8.9d1, T39.8.9d2, T39.8.9d3.
 
-The recipient comes from a small file of the node's own, `<TICKER>_RELOADED_TX_ADDRESSES.db`, beside
-the wallet database. The tests of the second and third file make real Sapling proofs (the Pirate1 one also
+The recipient and a swap's addresses come from a small file of the node's own,
+`<TICKER>_RELOADED_TX_ADDRESSES.db`, beside the wallet database. The tests of the second and third
+file make real Sapling proofs (the Pirate1 one also
 a real Halo2 proof, with the one-time key derivation described under the Pirate1 withdrawals) and skip
 with a message where the Sapling parameter files are absent. The snapshot transaction used for the
 withdrawal gets a transaction id that is not the same read forwards and backwards, so a missing byte
