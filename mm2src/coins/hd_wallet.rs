@@ -1,6 +1,7 @@
 use crate::coin_balance::HDAddressBalance;
 use crate::hd_pubkey::HDXPubExtractor;
 use crate::hd_wallet_storage::HDWalletStorageError;
+use crate::rpc_command::get_my_address::PathToAddress;
 use crate::{lp_coinfind_or_err, BalanceError, CoinFindError, CoinWithDerivationMethod, MmCoinEnum,
             UnexpectedDerivationMethod, WithdrawError};
 use async_trait::async_trait;
@@ -104,6 +105,11 @@ pub enum NewAccountCreatingError {
     AccountLimitReached {
         max_accounts_number: u32,
     },
+    /// The requested account index is already in use (CRD ch.05 R35c item 1).
+    #[display(fmt = "HD account '{}' already exists", account_id)]
+    AccountAlreadyExists {
+        account_id: u32,
+    },
     #[display(fmt = "Error saving HD account to storage: {}", _0)]
     ErrorSavingAccountToStorage(String),
     #[display(fmt = "Internal error: {}", _0)]
@@ -137,6 +143,9 @@ impl From<NewAccountCreatingError> for HDWalletRpcError {
             NewAccountCreatingError::HardwareWalletError(hw) => HDWalletRpcError::from(hw),
             NewAccountCreatingError::AccountLimitReached { max_accounts_number } => {
                 HDWalletRpcError::AccountLimitReached { max_accounts_number }
+            },
+            NewAccountCreatingError::AccountAlreadyExists { account_id } => {
+                HDWalletRpcError::AccountAlreadyExists { account_id }
             },
             NewAccountCreatingError::ErrorSavingAccountToStorage(e) => {
                 let error = format!("Error uploading HD account info to the storage: {}", e);
@@ -215,6 +224,8 @@ pub enum HDWalletRpcError {
     ErrorDerivingAddress(String),
     #[display(fmt = "Accounts limit reached. Max number of accounts: {}", max_accounts_number)]
     AccountLimitReached { max_accounts_number: u32 },
+    #[display(fmt = "HD account '{}' already exists", account_id)]
+    AccountAlreadyExists { account_id: u32 },
     #[display(fmt = "Addresses limit reached. Max number of addresses: {}", max_addresses_number)]
     AddressLimitReached { max_addresses_number: u32 },
     #[display(fmt = "Electrum/Native RPC invalid response: {}", _0)]
@@ -325,7 +336,8 @@ impl HttpStatusCode for HDWalletRpcError {
             | HDWalletRpcError::InvalidBip44Chain { .. }
             | HDWalletRpcError::ErrorDerivingAddress(_)
             | HDWalletRpcError::AddressLimitReached { .. }
-            | HDWalletRpcError::AccountLimitReached { .. } => StatusCode::BAD_REQUEST,
+            | HDWalletRpcError::AccountLimitReached { .. }
+            | HDWalletRpcError::AccountAlreadyExists { .. } => StatusCode::BAD_REQUEST,
             HDWalletRpcError::TrezorDisconnected
             | HDWalletRpcError::HardwareWalletInternal(_)
             | HDWalletRpcError::NoTrezorDeviceAvailable
@@ -339,6 +351,48 @@ impl HttpStatusCode for HDWalletRpcError {
     }
 }
 
+/// How the index of a new HD account is chosen (CRD ch.05 R35c item 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewAccountIndex {
+    /// The lowest index not in use, counted from `0` up to the highest existing index, or that index plus one.
+    LowestUnused,
+    /// The given index. It is refused when it is at or beyond the hardened-child limit, or already in use.
+    Requested(u32),
+}
+
+/// Chooses the index of a new account among the accounts `accounts` the wallet holds.
+///
+/// This is the one place the UTXO coins, QTUM, the EVM coins and Siacoin pick an account index. It runs before
+/// any key derivation, so a refused index never costs a derivation or a device round trip.
+pub fn choose_new_account_id<Account>(
+    accounts: &HDAccountsMap<Account>,
+    index: NewAccountIndex,
+) -> MmResult<u32, NewAccountCreatingError> {
+    let account_id = match index {
+        NewAccountIndex::Requested(account_id) => account_id,
+        NewAccountIndex::LowestUnused => {
+            let mut lowest_unused = 0u32;
+            // The keys of a `BTreeMap` ascend: the first key that differs from the candidate leaves a gap.
+            for used in accounts.keys() {
+                if *used != lowest_unused {
+                    break;
+                }
+                lowest_unused = lowest_unused.saturating_add(1);
+            }
+            lowest_unused
+        },
+    };
+    if account_id >= ChildNumber::HARDENED_FLAG {
+        return MmError::err(NewAccountCreatingError::AccountLimitReached {
+            max_accounts_number: ChildNumber::HARDENED_FLAG,
+        });
+    }
+    if accounts.contains_key(&account_id) {
+        return MmError::err(NewAccountCreatingError::AccountAlreadyExists { account_id });
+    }
+    Ok(account_id)
+}
+
 pub struct HDAddress<Address, Pubkey> {
     pub address: Address,
     pub pubkey: Pubkey,
@@ -350,6 +404,16 @@ pub struct HDAddressId {
     pub account_id: u32,
     pub chain: Bip44Chain,
     pub address_id: u32,
+}
+
+impl From<&PathToAddress> for HDAddressId {
+    fn from(path: &PathToAddress) -> Self {
+        HDAddressId {
+            account_id: path.account_id,
+            chain: path.chain,
+            address_id: path.address_id,
+        }
+    }
 }
 
 impl From<Bip44DerivationPath> for HDAddressId {
@@ -415,12 +479,16 @@ pub trait HDWalletCoinOps {
         Ok(new_address)
     }
 
-    /// Creates a new HD account, registers it within the given `hd_wallet`
+    /// Creates a new HD account at the index `index` chooses, registers it within the given `hd_wallet`
     /// and returns a mutable reference to the registered account.
+    ///
+    /// An index that is out of range or already in use is refused before any extended public key is derived
+    /// or requested from a device (CRD ch.05 R35c item 1).
     async fn create_new_account<'a, XPubExtractor>(
         &self,
         hd_wallet: &'a Self::HDWallet,
         xpub_extractor: Option<&XPubExtractor>,
+        index: NewAccountIndex,
     ) -> MmResult<HDAccountMut<'a, Self::HDAccount>, NewAccountCreatingError>
     where
         XPubExtractor: HDXPubExtractor + Sync;
@@ -532,6 +600,7 @@ pub async fn get_new_address(
 pub mod common_impl {
     use super::*;
     use crate::coin_balance::HDWalletBalanceOps;
+    use crate::hd_wallet_storage::HDWalletCoinWithStorageOps;
     use crate::MarketCoinOps;
     use crypto::RpcDerivationPath;
     use std::fmt;
@@ -576,5 +645,99 @@ pub mod common_impl {
                 balance: crate::coin_balance::coin_balance_map_for_ticker(coin.ticker(), balance),
             },
         })
+    }
+
+    /// Removes the account `account_id` that a cancelled `task::create_new_account` created, from the storage and
+    /// from the wallet, when it is the wallet's last account (CRD ch.05 R35c item 4). An account that is not the
+    /// last one is kept: a later account may depend on it, and the cancellation did not create that one.
+    ///
+    /// Returns whether the account was removed.
+    pub async fn remove_created_account<Coin>(coin: &Coin, account_id: u32) -> MmResult<bool, HDWalletRpcError>
+    where
+        Coin: HDWalletCoinWithStorageOps
+            + CoinWithDerivationMethod<HDWallet = <Coin as HDWalletCoinOps>::HDWallet>
+            + Sync,
+    {
+        let hd_wallet = coin.derivation_method().hd_wallet_or_err().mm_err(Into::into)?;
+        let mut accounts = hd_wallet.get_accounts_mut().await;
+        if accounts.keys().next_back() != Some(&account_id) {
+            return Ok(false);
+        }
+        // The storage goes first: an account that stays in the storage would be loaded again after a restart.
+        coin.remove_account(hd_wallet, account_id)
+            .await
+            .mm_err(|e| HDWalletRpcError::WalletStorageError(e.to_string()))?;
+        accounts.remove(&account_id);
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod new_account_index_tests {
+    use super::*;
+
+    fn accounts(ids: &[u32]) -> HDAccountsMap<()> { ids.iter().map(|id| (*id, ())).collect() }
+
+    fn chosen(ids: &[u32], index: NewAccountIndex) -> Result<u32, NewAccountCreatingError> {
+        choose_new_account_id(&accounts(ids), index).map_err(|e| e.into_inner())
+    }
+
+    /// CRD ch.05 R35c item 1, T14c: without an index, the lowest index not in use is taken, counted from `0` up to
+    /// the highest existing index, or that index plus one.
+    #[test]
+    fn the_lowest_unused_index_is_taken() {
+        assert_eq!(chosen(&[], NewAccountIndex::LowestUnused).unwrap(), 0);
+        assert_eq!(chosen(&[0], NewAccountIndex::LowestUnused).unwrap(), 1);
+        assert_eq!(chosen(&[0, 1], NewAccountIndex::LowestUnused).unwrap(), 2);
+        // Account 0 comes from activation, 3 was requested: the next call without an index creates account 1,
+        // then account 2.
+        assert_eq!(chosen(&[0, 3], NewAccountIndex::LowestUnused).unwrap(), 1);
+        assert_eq!(chosen(&[0, 1, 3], NewAccountIndex::LowestUnused).unwrap(), 2);
+        assert_eq!(chosen(&[0, 1, 2, 3], NewAccountIndex::LowestUnused).unwrap(), 4);
+        // A wallet without account 0 takes 0.
+        assert_eq!(chosen(&[1, 2], NewAccountIndex::LowestUnused).unwrap(), 0);
+    }
+
+    /// CRD ch.05 R35c item 1: a requested index is used when it is free.
+    #[test]
+    fn a_free_requested_index_is_taken() {
+        assert_eq!(chosen(&[0], NewAccountIndex::Requested(3)).unwrap(), 3);
+        assert_eq!(chosen(&[], NewAccountIndex::Requested(0)).unwrap(), 0);
+        assert_eq!(
+            chosen(&[0], NewAccountIndex::Requested(ChildNumber::HARDENED_FLAG - 1)).unwrap(),
+            ChildNumber::HARDENED_FLAG - 1
+        );
+    }
+
+    /// CRD ch.05 R35c item 1, T14c: an index at or beyond 2^31 answers `AccountLimitReached`, HTTP 400.
+    #[test]
+    fn an_index_at_the_hardened_limit_is_refused() {
+        for index in [ChildNumber::HARDENED_FLAG, ChildNumber::HARDENED_FLAG + 1, u32::MAX] {
+            match chosen(&[0], NewAccountIndex::Requested(index)) {
+                Err(NewAccountCreatingError::AccountLimitReached { max_accounts_number }) => {
+                    assert_eq!(max_accounts_number, ChildNumber::HARDENED_FLAG)
+                },
+                other => panic!("expected AccountLimitReached for {}, got {:?}", index, other),
+            }
+        }
+        let rpc_error = HDWalletRpcError::from(NewAccountCreatingError::AccountLimitReached {
+            max_accounts_number: ChildNumber::HARDENED_FLAG,
+        });
+        assert_eq!(rpc_error.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    /// CRD ch.05 R35c item 1 and the code-quality finding below it, T14c: a requested index that exists is refused
+    /// with `AccountAlreadyExists` and its `account_id`, HTTP 400.
+    #[test]
+    fn a_taken_requested_index_is_a_request_error() {
+        match chosen(&[0, 3], NewAccountIndex::Requested(3)) {
+            Err(NewAccountCreatingError::AccountAlreadyExists { account_id }) => assert_eq!(account_id, 3),
+            other => panic!("expected AccountAlreadyExists, got {:?}", other),
+        }
+        let rpc_error = HDWalletRpcError::from(NewAccountCreatingError::AccountAlreadyExists { account_id: 3 });
+        assert_eq!(rpc_error.status_code(), StatusCode::BAD_REQUEST);
+        let wire = serde_json::to_value(&rpc_error).expect("a serializable error");
+        assert_eq!(wire["error_type"], "AccountAlreadyExists");
+        assert_eq!(wire["error_data"]["account_id"], 3);
     }
 }

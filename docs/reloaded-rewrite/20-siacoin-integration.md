@@ -908,7 +908,10 @@ rather than defects. None is a correctness claim.
   (UTXO/QTUM/ETH included) without a connected hardware wallet --
   Sia inherits this identically once wired. The existing
   single-address activation path is observably unaffected either
-  way. *(Still open on 2026-11-04; plan `hd-key-unification` item H5.)*
+  way. *(Open until 2026-11-07. Plan `hd-key-unification` item H5.4 fixed
+  it: the task builds the hardware-wallet extractor only under a hardware
+  login, so it serves Sia under a software login, as a documented Reloaded
+  extension (decision CC; chapter 05 R35c and its as-built note).)*
   Code: `mm2src/coins/siacoin/sia_hd_wallet.rs`,
   `siacoin_helpers.rs`, `mod.rs`,
   `mm2src/coins_activation/src/sia_activation.rs`.

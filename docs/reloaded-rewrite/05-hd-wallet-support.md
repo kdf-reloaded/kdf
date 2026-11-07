@@ -582,6 +582,29 @@ address `0`) as follows:
 > `get_new_address` reaches it (SwapLab row HD5, 2026-11-06). Item 2 is the
 > parity target; it is the option the plan's preparation note recommends.
 
+> **As built (2026-11-07, clean-side record; plan item H5.0).**
+> `enable_hd_wallet` takes the activated address beside
+> `min_addresses_number`. A software global-HD activation of a UTXO coin, QTUM
+> or an EVM coin passes the address at `path_to_address`; the Trezor policy of
+> a UTXO coin passes none and behaves as before. When the wallet holds no
+> account at the path's `account_id`, activation creates it (the limit of R35c
+> item 1 applies), scans it under `scan_if_new_wallet` or `scan`, and reports
+> that account only; otherwise every stored account is reported and each is
+> scanned only under `scan`. The path's account gets its chain raised to at
+> least `address_id + 1` (External takes the larger of that and
+> `min_addresses_number`); every other account gets `min_addresses_number`
+> alone. The new addresses are persisted, their balances read, and they are
+> listed in the result and afterwards in `account_balance` and
+> `my_tx_history`. Known gap against item 3: an `address_id` at the hardened
+> limit fails activation with the `Internal` arm, because Reloaded's balance
+> error set has no address-limit arm yet (a follow-up); the account created
+> for the path stays stored after such a failure. An EVM coin has no internal
+> chain, so an Internal-chain path raises nothing there. Tests: the `t14a_*`
+> tests in `coins/src/utxo/utxo_tests.rs` (module
+> `hd_accounts_at_index_tests`) and in `coins_activation`'s
+> `eth_with_tokens_activation` tests (module `hd_accounts_at_index`),
+> `t14a_the_path_raises_its_own_chain`, and `new_account_index_tests`.
+
 **R35b.** *UTXO maintenance commands under a global-HD login.* *(Same
 provenance and gate status as R35a.)* At both rows the two commands below
 serve a UTXO coin of the standard family only; for every other coin type
@@ -667,6 +690,27 @@ coin not activated in HD mode, answers `CoinIsActivatedNotWithHDWallet`.
 > for every software-keyed coin (chapter 38 §38.8 status note; chapter 20
 > §20.10 D1 note; plan `hd-key-unification` item H5.4). The behavior above is
 > the parity target.
+
+> **As built (2026-11-07, clean-side record; plan item H5.4).**
+> `task::create_new_account` builds the hardware extractor only under a
+> hardware login; under a software global-HD login the account key is derived
+> in software for UTXO, QTUM, EVM and Siacoin. The request gained an optional
+> `account_id`. `choose_new_account_id` picks the index once, before any
+> derivation: the requested index, or the lowest unused one; an index at or
+> beyond 2^31 answers `AccountLimitReached`; an index in use answers
+> `AccountAlreadyExists` with `account_id`, HTTP 400 (the code-quality finding
+> above; a documented divergence). A coin not in HD mode answers
+> `CoinIsActivatedNotWithHDWallet`. `task::create_new_account::cancel` is
+> routed, and the task's cleanup removes the account it created from the
+> wallet and its storage when it is the wallet's last account; a task dropped
+> between storing the account and recording it can leave the stored row.
+> Differences from items 3 and 5: under a hardware wallet Reloaded reports
+> `WaitingForUserToConfirmPubkey` where item 3 lists
+> `FollowHwDeviceInstructions`; under a software login the task reports
+> `Preparing` and then its result, without `RequestingAccountBalance` or
+> `Finishing`; the error set has no `UnexpectedUserAction` or `HwError`
+> discriminant, and `Timeout` answers HTTP 500. Tests: the `t14c_*` and
+> `r35c_item4_*` tests and `new_account_index_tests`.
 
 ## 5.10 Bound Hardware-Wallet Path
 
