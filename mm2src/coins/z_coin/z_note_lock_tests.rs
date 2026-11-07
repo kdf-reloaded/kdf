@@ -2181,5 +2181,64 @@ async fn requires_notarization_has_no_effect_on_a_shielded_coin() {
     }
 }
 
+/// Steps of one background-sync pass for a coin whose tip has not moved: nothing to download or scan,
+/// and a refresh that installs the scripted mempool view, as the poll rebuilds the pending set.
+struct QuietTipSteps {
+    coin: ZCoin,
+    tip: u64,
+    mempool: HashMap<([u8; 32], u32), u64>,
+    refreshed_at: Mutex<Vec<u64>>,
+}
+
+#[async_trait]
+impl ShieldedSyncPassSteps for QuietTipSteps {
+    async fn chain_tip(&self) -> Result<u64, String> { Ok(self.tip) }
+
+    fn scanned_through(&self) -> u64 {
+        self.coin
+            .z_fields
+            .wallet_db_scanned_through
+            .load(AtomicOrdering::Relaxed)
+    }
+
+    async fn download_blocks(&self, _tip: u64) -> Result<(), String> { panic!("no new block: nothing to download") }
+
+    fn scan(&self, _tip: u64) -> Result<u64, String> { panic!("no new block: nothing to scan") }
+
+    async fn refresh_pending(&self, height: u64) {
+        self.refreshed_at.lock().unwrap().push(height);
+        *self.coin.z_fields.pending_receipts.lock().unwrap() = self.mempool.clone();
+    }
+
+    fn record_error(&self, message: &str) { panic!("no failure expected: {message}") }
+}
+
+/// T39.8.0g1, R39.8.0aj1: a wallet-owned output enters the mempool while the tip stays put. Before the
+/// next pass the balance does not know it; after the pass, which finds no new block, it is reported
+/// as non-spendable balance. The mempool poll itself is a gRPC stream and is covered by T39.8.0g.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t39_8_0g1_a_mempool_output_with_the_tip_unchanged_reaches_the_unspendable_balance() {
+    let Some(fixture) = LightCoinFixture::new() else {
+        return;
+    };
+    let pending_value = 50_000;
+    let steps = QuietTipSteps {
+        coin: fixture.coin.clone(),
+        tip: fixture.tip,
+        mempool: HashMap::from([(([0x33; 32], 0), pending_value)]),
+        refreshed_at: Mutex::new(Vec::new()),
+    };
+    assert_eq!(fixture.reported_balance().await, (sat(NOTE_VALUE), BigDecimal::from(0)));
+
+    run_shielded_sync_pass(&steps, "ARRR").await;
+
+    assert_eq!(*steps.refreshed_at.lock().unwrap(), vec![fixture.tip]);
+    assert_eq!(
+        fixture.reported_balance().await,
+        (sat(NOTE_VALUE), sat(pending_value)),
+        "the spendable figure is untouched; the pending output is non-spendable"
+    );
+}
+
 mod pirate1_withdraw;
 mod withdraw_unsupported;

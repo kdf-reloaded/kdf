@@ -1554,6 +1554,16 @@ change counts as non-spendable balance.
 > Ironwood wallet is still to run. The bundle is output-only with the empty-tree anchor
 > (R39.6.5d, R39.6.5e as amended on 2026-11-05), so no tree state is read.
 >
+> **Update (2026-11-06).** The live mainnet round trip passed (release tests of
+> 0.4.0-beta.1, rows ARRR-L2 to ARRR-L6). A lab wallet sent 0.1 ARRR and then 0.02 ARRR
+> to a Pirate1 address of the Pirate node's own wallet. The node decoded a version-6
+> transaction with two Ironwood actions, spends disabled, outputs enabled and the
+> empty-tree anchor, and its wallet received the note. The return payment from that
+> address arrived as a Sapling deposit (R39.8.0bb). The custom-fee, sender and address
+> refusals answered as specified. The first Ironwood build of the release binary took
+> 22.9 s, the proving key included, and raised peak memory from 128 MB to 277 MB; the
+> next build took 5.5 s. The host was heavily loaded, so both times are upper bounds.
+>
 > **Compatibility.** The reference answers a Pirate1 address with `is_valid: false` on
 > `validateaddress` and with `InvalidAddress` on its withdrawal route (§39.5A). This
 > project accepts the address and builds the transaction. The acceptance is additive and
@@ -1976,6 +1986,13 @@ ahead.
 > paying from Sapling into Ironwood and one from Ironwood into Sapling, are read by every
 > full-byte reader. The broadcast record reads both; for one that spends Sapling notes it
 > cannot yet derive the fee, which R39.6.5g closes. Only the live mainnet deposit remains.
+>
+> **Update (2026-11-06).** The live mainnet deposit passed (release tests of
+> 0.4.0-beta.1, rows ARRR-L3 and ARRR-L4). The Pirate node's wallet sent 0.1199 ARRR from
+> Ironwood notes to a lab wallet's Sapling address, with spends enabled and a real
+> Ironwood anchor. The wallet counted it once after mining, with a final history row, and
+> a following send spent the note. The deposit was not shown as pending before mining;
+> R39.8.0aj1 fixes the schedule that caused it.
 
 R39.8.0p Generated shielded transactions shall coordinate with the scanner so the
 same wallet note is not selected concurrently by multiple sends or swaps. After
@@ -2648,6 +2665,21 @@ pending amount shall not be older than one poll period and shall not be computed
 from a mempool snapshot taken before the wallet-database height it is combined
 with.
 
+R39.8.0aj1 **Every pass refreshes the pending view.** Where the pending view is
+refreshed on the background-sync schedule, every pass shall end with a refresh,
+whatever the pass found. That covers a pass that finds no new block, and a pass whose
+block download or scan fails, as well as a pass that scanned new blocks. A pass that
+scans refreshes after its scan, so a transaction mined in a block that pass scanned is
+already excluded (R39.8.0ah). A pass that could not read the chain tip refreshes too,
+and uses the wallet's last scanned height where it would otherwise use the tip.
+
+> **Provenance and reason (2026-11-06).** Clean-room original. A live mainnet deposit
+> from an Ironwood wallet (release tests of 0.4.0-beta.1, row ARRR-L3) was never shown
+> as pending. The background task refreshed the pending view only after a pass that had
+> scanned a new block. A deposit mined in the next block was therefore never pending,
+> and while no block arrived the view grew older than one poll period, which
+> R39.8.0aj forbids.
+
 #### Tests
 
 T39.8.0f Background-sync tests shall prove that, after a Light activation
@@ -2699,11 +2731,23 @@ transaction observed on repeated polls contributes once; and that an endpoint
 which does not serve `GetMempoolTx` yields a zero pending amount rather than a
 balance error.
 
+T39.8.0g1 Pass-schedule tests shall prove, without a network and with the steps of a
+pass scripted, that:
+
+- a pass that finds no new block still refreshes the pending view, so a wallet-owned
+  output that enters the mempool while the tip stays put is reported in the
+  non-spendable balance after the next pass;
+- a pass whose block download fails, and a pass whose scan fails, still refresh it;
+- a pass that scans refreshes only after its scan;
+- a pass that cannot read the tip refreshes with the wallet's scanned height
+  (R39.8.0aj1).
+
 #### Deferred Work
 
 D39.8.0c *(Resolved 2026-08-09.)* Pending shielded receipts (§39.8.0.6) are
 implemented. The background sync task polls the dictated `GetMempoolTx` stream
-after each wallet scan, trial-decrypts every compact output with the wallet's
+at the end of every pass (R39.8.0aj1; until 2026-11-06 only after a pass that had
+scanned a new block), trial-decrypts every compact output with the wallet's
 incoming viewing key, excludes any transaction the wallet database has already
 scanned, and rebuilds the pending set wholesale so a mined, dropped or expired
 transaction disappears without bespoke invalidation. The total surfaces only in

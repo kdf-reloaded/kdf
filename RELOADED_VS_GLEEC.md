@@ -54,7 +54,16 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   `Shielded`.** GLEEC KDF's legacy `orderbook` fails the whole response when
   the pair carries one shielded-coin (ARRR) order, because its legacy address
   resolver has no shielded outcome; its legacy `best_orders` leaves such orders
-  out. Reloaded routes both legacy methods through the same derivation as the
+  out. Komodo DeFi Framework 2.6.0-beta behaves the same. On live nodes
+  (2026-11-05) of Komodo DeFi Framework 2.6.0-beta and of GLEEC KDF (its
+  3.0.0-beta release and its development build
+  [kdf_a12695e](https://devbuilds.gleec.com/dev/kdf_a12695e-linux-x86-64.zip), a prebuilt binary
+  of its 2.6.0-beta line), a client
+  of the legacy `orderbook` got an error for an ARRR pair while a shielded order
+  was in the book (or an empty book, where the client treats the error as no
+  data), and their mmrpc-2.0 `orderbook` listed the order. KDF Reloaded's legacy
+  `orderbook` lists such orders, the node's own included, as its mmrpc-2.0 call
+  does. Reloaded routes both legacy methods through the same derivation as the
   mmrpc-2.0 methods (CRD ch.32 R-F6d), renders the shielded outcome as the fixed
   string `Shielded` (R-F6e), and leaves out only an order whose coin has no
   address derivation (R-F6c). Tendermint, Siacoin and Lightning orders are now
@@ -559,7 +568,8 @@ behavior, except for `swap_key_check`; the row of each switch in
 - `electrum_spread_reads: false` — every read-only Electrum query goes to the highest-ranked
   connected server first. The near factor `electrum_spread_near_factor` and the near offset
   `electrum_spread_near_offset_ms`, which limit spreading to the servers with the shortest round
-  trip, then have no effect.
+  trip (with spreading on, reads always take turns among at least the two fastest connected
+  servers when two or more are connected), then have no effect.
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
   listed instead of by a random draw.
 - `orderbook_sync_names_held_root: false` — a sync request names the root the maker advertised
