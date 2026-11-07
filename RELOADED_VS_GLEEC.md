@@ -411,6 +411,14 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   full-layout fallback of RIC and MEWC, not this read. Nothing a counterparty
   observes changes. See CRD ch.37 R37.5.10 and
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+- **EVM V1 payment-spend wait.** Both scan the swap contract's logs in windows of
+  `logs_block_range` blocks (default 1,000). GLEEC KDF rescans from the swap's
+  start block on every poll and retries a refused window query. KDF Reloaded
+  checks the deadline on every iteration, including after a failed query, keeps a
+  cursor past the windows already scanned, and shrinks the window when a node
+  reports a range limit. KDF Reloaded's search for an existing spend, refund or
+  own payment uses exact windows where GLEEC KDF's are one block wider; there is
+  no observable difference beyond one duplicate block per window.
 
 ### Removed / disabled in KDF Reloaded
 
