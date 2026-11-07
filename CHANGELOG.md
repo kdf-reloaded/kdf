@@ -273,7 +273,12 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 - **The debug line of a sync request to another relay now says which candidate rule would have
   skipped it.** A node asks one other relay when the root a pair reached after its relay's answer
   differs from the one the maker advertised. Behind a busy relay this happened far more often than
-  expected, most likely because an answer newer than the maker's keep-alive counts as different too.
+  expected. In a separate lab run on 2026-11-07, with the maker repricing every 10 s, all 188 such
+  requests followed a change of the pair by the maker after its keep-alive, so the root the node
+  reached, which included that change, differed from the one the keep-alive advertised. With the
+  repricing finished before the keep-alive, 35 followed, none after such a change and all after a
+  relay had re-established its link; their cause is not established. With the maker not
+  repricing, none followed.
   With debug logging on, the line `sync alternate relay: … event=mismatch` now also counts, among
   the pairs asked about, those that a later keep-alive of the maker advertised with the root the
   node now holds, those that an order message of the maker changed in the meantime, and those whose
@@ -638,9 +643,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   (CRD PR #243, PR #251). A relay now holds a sync request that reaches it before its own sync for
   the pair has started, and an order-book answer waits briefly for a relay that is still storing a
   maker's first orders (CRD PR #258, PR #259). The loaded-relay lab showed the request to one other
-  relay clearing a cancelled order one keep-alive interval earlier in half of its cycles, at a cost
-  in extra requests that is now being measured, starting with a debug line per such request
-  (PR #269).
+  relay clearing a cancelled order one keep-alive interval earlier in half of its cycles. A debug
+  line now counts, per such request, which candidate rule would have skipped it (PR #269). A
+  fault-free run showed no extra requests at all, so the rule stays as it is (PR #274).
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
