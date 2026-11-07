@@ -271,6 +271,13 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   GLEEC KDF, on the legacy stack, is affected by the same underlying divergence.
   No compat switch: the alternative is invisible incoming payments. Code:
   `coins/z_coin.rs`, `coins/z_coin/z_coin_wallet_db.rs`.
+- **An ARRR withdrawal takes no memo.** Reloaded's `withdraw` request has no
+  `memo` member, so a memo sent with it is ignored, the shielded output carries
+  none, and the answer has no `memo` member. GLEEC KDF echoes the request's memo
+  in the answer (CRD ch.39 R39.5A.3). Memo support is a separate, later item,
+  noted under R39.5A.3. No compat switch: there is nothing to switch on yet.
+  Code: `coins/lp_coins_types.rs` (`WithdrawRequest`), `coins/z_coin.rs`
+  (`withdraw`).
 - **Siacoin withdraw populates `internal_id`.** GLEEC KDF leaves `internal_id`
   empty on its SC withdraw response — only its history path fills the field in.
   Reloaded sets it to the raw bytes of the signed transaction's id, the same

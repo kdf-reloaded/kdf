@@ -415,6 +415,13 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   (`<TICKER>_RELOADED_TX_ADDRESSES.db`), and the history lists it. Found in a live mainnet test.
   Detail: PR #268; CRD ch.39 R39.8.9d1, R39.8.9d2.
 
+- **An ARRR withdrawal now answers `my_balance_change` as received minus spent.** The answer to a
+  withdrawal gave the amount spent minus the amount received, a positive number, while the
+  transaction's history row, Komodo DeFi Framework and GLEEC KDF give received minus spent, a
+  negative number. The answer now gives the negative number too, for a `zs1…` and a Pirate1
+  destination alike. The transaction itself was always correct. Found in a live mainnet test.
+  Detail: PR #NNN; CRD ch.39 R39.5A.3, R39.6.5c.
+
 #### EVM coins
 
 - **A taker on an EVM chain with fast blocks, such as Monad, now finds the maker's spend of its
@@ -700,10 +707,10 @@ lives.
   address or the fee address yet; that is scheduled. More in
   [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PR #268;
   CRD ch.39 R39.8.9d2 (d), status note under R39.8.9e.
-- **An ARRR withdrawal answers `my_balance_change` with the wrong sign.** The answer to a withdrawal
-  gives the amount spent minus the amount received, a positive number, where its history row,
-  Komodo DeFi Framework and GLEEC KDF give received minus spent. The transaction itself is correct.
-  Work in progress: a fix is under way.
+- **An ARRR withdrawal takes no memo, and its answer has no `memo` member.** The `withdraw`
+  request has no `memo` field, so a memo sent with it is ignored and the shielded output carries
+  none. Komodo DeFi Framework and GLEEC KDF echo the request's memo in the answer. Memo support is
+  a separate, later item. Detail: PR #NNN; CRD ch.39 status note under R39.5A.3.
 - **Bitcoin II (BC2) transactions are rejected by the network.** Since block 57,750 the BC2
   network checks every signature against a digest that includes an extra field of its own. KDF
   Reloaded does not add it yet, so a BC2 withdrawal or swap payment is refused when it is
