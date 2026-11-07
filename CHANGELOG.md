@@ -545,7 +545,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   flush never finished. The connection, its queue and its memory stayed held, the peer still counted
   as connected, and the node never dialed it again. The close now gives up after 30 seconds, logs the
   peer with the cause "close timed out", and the peer is treated as disconnected, so the usual
-  redial rules apply. Detail: PR #NNN; CRD ch.28 R27c.
+  redial rules apply. Detail: PR #280; CRD ch.28 R27c.
 
 #### UTXO coins and Electrum
 
@@ -592,10 +592,10 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 - **The memory measurement of the order-matching tests builds again.** The test build with the
   `counting-alloc` feature had stopped compiling when the order-matching state gained a field. Its
   test setup now fills every field it does not set itself from the test defaults, so a field added
-  later cannot break it again. The node itself is unchanged. Detail: PR #NNN.
+  later cannot break it again. The node itself is unchanged. Detail: PR #280.
 - **The close deadline of the connection layer is tested in CI.** The tests of the vendored
   multiplexer crate, which carries the 30-second close deadline, now run as their own CI job.
-  Detail: PR #NNN; CRD ch.28 T14.
+  Detail: PR #280; CRD ch.28 T14.
 
 ### Documentation
 
@@ -686,7 +686,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   shares and the queue-signal fix (PRs #204, #214), and one resolver for every hostname (PRs #216,
   #219); the remaining lookups (Sia, WalletConnect, Lightning, statistics) and encrypted DNS are
   new rows for later. A close that a non-reading peer would hold forever now ends after 30 seconds
-  (item P6, PR #NNN).
+  (item P6, PR #280).
 - [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — done: the plan now says
   that the fee estimate uses the transaction's signature-hash length, which is smaller than the
   transaction sent (PR #239; see Known limitations).

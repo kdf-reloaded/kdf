@@ -21,7 +21,7 @@
 | P5 | **One resolver for every hostname.** A `dns_resolver` setting chooses Google Public DNS (the default), the system resolver or fixed servers, for seeds, peer names, coin servers and HTTP(S) services alike. In-memory cache, last known answer for up to 24 hours when the resolver is unreachable, no fallback. The transport library's DNS layer and the old resolver library leave the build. Sia, WalletConnect, Lightning and the statistics method follow in batch 2. | ch.45 §45.6B, T45.16–T45.22, D45.6–D45.8; ch.28 R0b, R18, R8c item 7, D9, OQ2; pointers in ch.35, ch.38, ch.39 | Spec PR #216; code PR #219; lab row T45.22 pending |
 | P5b | **The remaining lookups** under the same resolver: Sia, the WalletConnect relay, Lightning peer addresses, the statistics method. | ch.45 D45.6 | Batch 2 |
 | P5c | **Encrypted DNS** for the Google and fixed modes. | ch.45 D45.7 | Plan row only, no estimate |
-| P6 | **Bounded connection close:** a 30 s deadline on every close, in the vendored yamux wrapper. | ch.28 R27c, RQ1 item 5, D8 | Implemented in batch 3: PR #NNN |
+| P6 | **Bounded connection close:** a 30 s deadline on every close, in the vendored yamux wrapper. | ch.28 R27c, RQ1 item 5, D8 | Implemented in batch 3: PR #280 |
 | P8 | **Lab capture** confirming that GLEEC KDF relays send nothing on the peers topic. | ch.28, note after R8c | Lab only, any time |
 
 Item P7 (asynchronous hostname lookups) was dropped from 0.4.0 on 2026-11-02. P5 brings the
