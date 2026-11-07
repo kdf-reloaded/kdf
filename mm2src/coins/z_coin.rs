@@ -2558,45 +2558,115 @@ async fn post_activation_shielded_sync(coin: ZCoin) {
             None => return,
         };
 
-        let tip = match coin.rpc_client().get_block_count().compat().await {
-            Ok(tip) => tip,
-            Err(e) => {
-                log::warn!("ZCoin periodic sync for {ticker}: could not get block count: {e}");
-                coin.set_shielded_sync_error(&format!("could not reach the chain tip: {e}"));
-                continue;
-            },
-        };
+        run_shielded_sync_pass(&ZCoinShieldedSyncSteps(&coin), &ticker).await;
+    }
+}
 
-        if tip <= coin.z_fields.wallet_db_scanned_through.load(AtomicOrdering::Relaxed) {
-            continue;
-        }
+/// The steps of one pass of [`post_activation_shielded_sync`], behind a trait so that the order of
+/// the steps can be tested without a network (T39.8.0g1).
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
+trait ShieldedSyncPassSteps: Send + Sync {
+    /// The chain tip, or why it could not be read.
+    async fn chain_tip(&self) -> Result<u64, String>;
 
+    /// The height the wallet database has been scanned through.
+    fn scanned_through(&self) -> u64;
+
+    /// Downloads the compact blocks up to `tip` into the wallet database's block cache.
+    async fn download_blocks(&self, tip: u64) -> Result<(), String>;
+
+    /// Scans the downloaded blocks up to `tip`; returns the height scanned through.
+    fn scan(&self, tip: u64) -> Result<u64, String>;
+
+    /// Rebuilds the pending-receipt view, reading the mempool at `height`.
+    async fn refresh_pending(&self, height: u64);
+
+    /// Records why the pass failed, for the reported history-sync state.
+    fn record_error(&self, message: &str);
+}
+
+/// One pass of the background sync. Every pass ends with a refresh of the pending view, whatever
+/// the pass found (R39.8.0aj1): no new block, a failed download, a failed scan, a scan that
+/// succeeded, or a tip that could not be read.
+#[cfg(not(target_arch = "wasm32"))]
+async fn run_shielded_sync_pass<S: ShieldedSyncPassSteps>(steps: &S, ticker: &str) {
+    let refresh_height = match steps.chain_tip().await {
+        Ok(tip) => {
+            if tip > steps.scanned_through() {
+                sync_wallet_db_to_tip(steps, ticker, tip).await;
+            }
+            tip
+        },
+        Err(e) => {
+            log::warn!("ZCoin periodic sync for {ticker}: could not get block count: {e}");
+            steps.record_error(&format!("could not reach the chain tip: {e}"));
+            // Without a tip, the wallet's last scanned height stands in for it.
+            steps.scanned_through()
+        },
+    };
+
+    // Deliberately last, and so after the scan on a pass that scanned: a transaction mined between
+    // the two reads is then already excluded by the scanned-state check of the refresh, so its
+    // value can never be counted from both the wallet database and the pending set (R39.8.0ah).
+    steps.refresh_pending(refresh_height).await;
+}
+
+/// The download and scan part of a pass that found a new block at `tip`.
+#[cfg(not(target_arch = "wasm32"))]
+async fn sync_wallet_db_to_tip<S: ShieldedSyncPassSteps>(steps: &S, ticker: &str, tip: u64) {
+    if let Err(e) = steps.download_blocks(tip).await {
+        log::warn!("ZCoin periodic sync for {ticker}: compact block fetch to height {tip} failed: {e}");
+        steps.record_error(&format!("compact block fetch to height {tip} failed: {e}"));
+        return;
+    }
+
+    match steps.scan(tip) {
+        Ok(scanned_height) => {
+            log::debug!("ZCoin periodic sync for {ticker}: wallet DB scanned through {scanned_height}");
+        },
+        // `scan_shielded_wallet_db_to_height` clears the scan-complete flag on
+        // failure, which blocks spending until a later pass succeeds. That is
+        // the intended conservative behaviour: the wallet's view of its own
+        // notes is incomplete, so it must not build transactions from it.
+        Err(e) => log::warn!("ZCoin periodic sync for {ticker}: wallet DB scan to height {tip} failed: {e}"),
+    }
+}
+
+/// The real steps of a pass: the coin's own chain reads, wallet database and pending view.
+#[cfg(not(target_arch = "wasm32"))]
+struct ZCoinShieldedSyncSteps<'a>(&'a ZCoin);
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
+impl ShieldedSyncPassSteps for ZCoinShieldedSyncSteps<'_> {
+    async fn chain_tip(&self) -> Result<u64, String> {
+        self.0
+            .rpc_client()
+            .get_block_count()
+            .compat()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn scanned_through(&self) -> u64 { self.0.z_fields.wallet_db_scanned_through.load(AtomicOrdering::Relaxed) }
+
+    async fn download_blocks(&self, tip: u64) -> Result<(), String> {
         let no_progress = |_: u64, _: u64| {};
-        if let Err(e) = coin
+        self.0
             .fetch_lightwalletd_compact_blocks_to_height(tip, None, true, &no_progress)
             .await
-        {
-            log::warn!("ZCoin periodic sync for {ticker}: compact block fetch to height {tip} failed: {e}");
-            coin.set_shielded_sync_error(&format!("compact block fetch to height {tip} failed: {e}"));
-            continue;
-        }
-
-        match coin.scan_shielded_wallet_db_to_height(tip, no_progress) {
-            Ok(scanned_height) => {
-                log::debug!("ZCoin periodic sync for {ticker}: wallet DB scanned through {scanned_height}");
-                // Deliberately after the scan: a transaction mined between the
-                // two reads is then already excluded by the scanned-state
-                // check below, so its value can never be counted from both the
-                // wallet database and the pending set (R39.8.0ah).
-                coin.refresh_pending_receipts(tip).await;
-            },
-            // `scan_shielded_wallet_db_to_height` clears the scan-complete flag on
-            // failure, which blocks spending until a later pass succeeds. That is
-            // the intended conservative behaviour: the wallet's view of its own
-            // notes is incomplete, so it must not build transactions from it.
-            Err(e) => log::warn!("ZCoin periodic sync for {ticker}: wallet DB scan to height {tip} failed: {e}"),
-        }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
+
+    fn scan(&self, tip: u64) -> Result<u64, String> {
+        self.0.scan_shielded_wallet_db_to_height(tip, |_: u64, _: u64| {})
+    }
+
+    async fn refresh_pending(&self, height: u64) { self.0.refresh_pending_receipts(height).await }
+
+    fn record_error(&self, message: &str) { self.0.set_shielded_sync_error(message) }
 }
 
 impl ZCoin {
@@ -3809,4 +3879,137 @@ fn derive_z_key_from_mm_seed() {
         encoded_addr,
         "zs1funuwrjr2stlr6fnhkdh7fyz3p7n0p8rxase9jnezdhc286v5mhs6q3myw0phzvad5mvqgfxpam"
     );
+}
+
+/// One pass of the background sync, with its steps scripted (CRD ch.39 T39.8.0g1, R39.8.0aj1).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod shielded_sync_pass_tests {
+    use super::*;
+
+    /// What a pass did, in the order it did it.
+    #[derive(Debug, PartialEq)]
+    enum Call {
+        ChainTip,
+        Download(u64),
+        Scan(u64),
+        RecordError(String),
+        Refresh(u64),
+    }
+
+    /// Steps whose outcomes the test scripts and whose calls it reads back.
+    struct ScriptedSteps {
+        scanned_through: u64,
+        tip: Result<u64, String>,
+        download: Result<(), String>,
+        scan: Result<u64, String>,
+        calls: Mutex<Vec<Call>>,
+    }
+
+    impl ScriptedSteps {
+        /// A wallet scanned through `scanned_through`, a chain at `tip`, and a download and scan that
+        /// succeed.
+        fn new(scanned_through: u64, tip: u64) -> ScriptedSteps {
+            ScriptedSteps {
+                scanned_through,
+                tip: Ok(tip),
+                download: Ok(()),
+                scan: Ok(tip),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn record(&self, call: Call) { self.calls.lock().unwrap().push(call); }
+
+        async fn run(&self) -> Vec<Call> {
+            run_shielded_sync_pass(self, "ARRR").await;
+            std::mem::take(&mut *self.calls.lock().unwrap())
+        }
+    }
+
+    #[async_trait]
+    impl ShieldedSyncPassSteps for ScriptedSteps {
+        async fn chain_tip(&self) -> Result<u64, String> {
+            self.record(Call::ChainTip);
+            self.tip.clone()
+        }
+
+        fn scanned_through(&self) -> u64 { self.scanned_through }
+
+        async fn download_blocks(&self, tip: u64) -> Result<(), String> {
+            self.record(Call::Download(tip));
+            self.download.clone()
+        }
+
+        fn scan(&self, tip: u64) -> Result<u64, String> {
+            self.record(Call::Scan(tip));
+            self.scan.clone()
+        }
+
+        async fn refresh_pending(&self, height: u64) { self.record(Call::Refresh(height)); }
+
+        fn record_error(&self, message: &str) { self.record(Call::RecordError(message.to_owned())); }
+    }
+
+    /// R39.8.0aj1: with no new block the pass downloads and scans nothing, yet refreshes once, with the
+    /// tip as the height.
+    #[tokio::test]
+    async fn t39_8_0g1_a_pass_with_no_new_block_refreshes_once_with_the_tip() {
+        let steps = ScriptedSteps::new(100, 100);
+        assert_eq!(steps.run().await, vec![Call::ChainTip, Call::Refresh(100)]);
+    }
+
+    /// R39.8.0aj1: a failed block download skips the scan and still refreshes, after recording the
+    /// failure.
+    #[tokio::test]
+    async fn t39_8_0g1_a_pass_whose_download_fails_still_refreshes() {
+        let mut steps = ScriptedSteps::new(100, 105);
+        steps.download = Err("no endpoint answered".to_owned());
+        assert_eq!(steps.run().await, vec![
+            Call::ChainTip,
+            Call::Download(105),
+            Call::RecordError("compact block fetch to height 105 failed: no endpoint answered".to_owned()),
+            Call::Refresh(105),
+        ]);
+    }
+
+    /// R39.8.0aj1: a failed scan still refreshes, after the scan attempt.
+    #[tokio::test]
+    async fn t39_8_0g1_a_pass_whose_scan_fails_still_refreshes_after_the_attempt() {
+        let mut steps = ScriptedSteps::new(100, 105);
+        steps.scan = Err("database is locked".to_owned());
+        assert_eq!(steps.run().await, vec![
+            Call::ChainTip,
+            Call::Download(105),
+            Call::Scan(105),
+            Call::Refresh(105),
+        ]);
+    }
+
+    /// R39.8.0aj1, R39.8.0ah: a pass that scans refreshes after its scan, never before, and once.
+    #[tokio::test]
+    async fn t39_8_0g1_a_pass_that_scans_refreshes_after_the_scan() {
+        let steps = ScriptedSteps::new(100, 105);
+        let calls = steps.run().await;
+        assert_eq!(calls, vec![
+            Call::ChainTip,
+            Call::Download(105),
+            Call::Scan(105),
+            Call::Refresh(105),
+        ]);
+        let position = |wanted: &Call| calls.iter().position(|call| call == wanted).unwrap();
+        assert!(position(&Call::Scan(105)) < position(&Call::Refresh(105)));
+    }
+
+    /// R39.8.0aj1: with the tip unreadable the pass records the failure and refreshes once, with the
+    /// wallet's scanned height in place of the tip.
+    #[tokio::test]
+    async fn t39_8_0g1_a_pass_that_cannot_read_the_tip_refreshes_with_the_scanned_height() {
+        let mut steps = ScriptedSteps::new(100, 105);
+        steps.tip = Err("no route to host".to_owned());
+        assert_eq!(steps.run().await, vec![
+            Call::ChainTip,
+            Call::RecordError("could not reach the chain tip: no route to host".to_owned()),
+            Call::Refresh(100),
+        ]);
+    }
 }
