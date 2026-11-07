@@ -546,7 +546,9 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   connection. For that time the connection, its queue and its memory stayed held, the peer still
   counted as connected, and the node did not dial it again. The close now gives up after 30 seconds,
   logs the peer with the cause "close timed out", and the peer is treated as disconnected, so the
-  usual redial rules apply. Detail: PR #280; CRD ch.28 R27c.
+  usual redial rules apply. In a lab test toward a frozen peer, such a close ended after 30 seconds
+  with the deadline; without it, the close stayed open 13 minutes and ended after the peer was
+  resumed. Detail: PR #280; CRD ch.28 R27c.
 
 #### UTXO coins and Electrum
 

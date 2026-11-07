@@ -1014,8 +1014,11 @@ cannot complete while the window stays closed, so the close can last as
 long as the peer's kernel keeps the session. For that time the
 connection, its gossip queue up to the cap of RQ1 item 2 and the
 multiplexer's buffers stay held, the peer counts as connected, and the
-maintenance of R27 does not redial it. In a lab run a stuck peer's close
-took 36 seconds. A healthy close takes milliseconds, and
+maintenance of R27 does not redial it. In the lab row of T14, a build
+without this rule kept such a close open for 13 minutes, and it ended
+after the peer was resumed; with the rule, the close ended after 30
+seconds. A healthy close
+takes milliseconds, and
 flushing a full multiplexer window of 256 KiB at 100 kbit/s takes about
 20 seconds, so 30 seconds leave a slow peer that still reads time to
 finish.
@@ -1888,13 +1891,24 @@ shortened by test configuration.
   an error.
 - A close with the timed-out cause logs at WARN with the peer ID.
 - *Lab row L-CLOSE (black-box).* A relay R and a peer P. P's data queue
-  at R is filled to the cap, then P's process is stopped (`SIGSTOP`), so
-  that P's kernel keeps the socket with a zero receive window. R logs
+  at R is filled to the cap, then P's process is stopped (`SIGSTOP` or a
+  container freeze), so that P's kernel keeps the socket with a zero
+  receive window, with the TCP path to P full: R's unsent bytes toward P
+  stay constant. Small TCP buffers on R and P make the path fill. R logs
   the stuck close (or the ping close), then the closed connection with
   the timed-out cause within 30 s of it. If R is below its low
-  watermark, it redials P at the first tick R27a allows. R's memory
-  returns to its baseline. *Control:* a build without R27c, run the
-  same way, records how long the close lasts without the deadline.
+  watermark, it redials P at the first tick R27a allows. After the
+  close, R's memory stops growing, where the control's keeps growing.
+  *Control:* a build without R27c, run the same way, records how long
+  the close lasts without the deadline. *Clarified after the run
+  (2026-11-07):* the memory line first read "R's memory returns to its
+  baseline"; it was written for a quiet peer, and in this run, which
+  flooded R with orders, R's memory rose by about 25 MB in both builds
+  before the close. *Result (2026-11-07):* the close ended 30.0 s after
+  it started on the R27c build; on the control it stayed open 13 min 4 s
+  and ended after P was resumed. R's memory was flat after
+  the close on the R27c build (57 MB, from a 33.5 MB baseline) and grew
+  to 80 MB on the control, still growing when the run ended.
 
 ## 28.11 Deferred Work
 

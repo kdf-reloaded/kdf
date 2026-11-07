@@ -21,7 +21,7 @@
 | P5 | **One resolver for every hostname.** A `dns_resolver` setting chooses Google Public DNS (the default), the system resolver or fixed servers, for seeds, peer names, coin servers and HTTP(S) services alike. In-memory cache, last known answer for up to 24 hours when the resolver is unreachable, no fallback. The transport library's DNS layer and the old resolver library leave the build. Sia, WalletConnect, Lightning and the statistics method follow in batch 2. | ch.45 §45.6B, T45.16–T45.22, D45.6–D45.8; ch.28 R0b, R18, R8c item 7, D9, OQ2; pointers in ch.35, ch.38, ch.39 | Spec PR #216; code PR #219; lab row T45.22 pending |
 | P5b | **The remaining lookups** under the same resolver: Sia, the WalletConnect relay, Lightning peer addresses, the statistics method. | ch.45 D45.6 | Batch 2 |
 | P5c | **Encrypted DNS** for the Google and fixed modes. | ch.45 D45.7 | Plan row only, no estimate |
-| P6 | **Bounded connection close:** a 30 s deadline on every close, in the vendored yamux wrapper. | ch.28 R27c, RQ1 item 5, D8 | Implemented in batch 3: PR #280 |
+| P6 | **Bounded connection close:** a 30 s deadline on every close, in the vendored yamux wrapper. | ch.28 R27c, RQ1 item 5, D8 | Implemented in batch 3: PR #280; lab row L-CLOSE passed (2026-11-07); its memory criterion was restated after the run, from "back to baseline" to "flat after the close, where the control keeps growing" |
 | P8 | **Lab capture** confirming that GLEEC KDF relays send nothing on the peers topic. | ch.28, note after R8c | Lab only, any time |
 
 Item P7 (asynchronous hostname lookups) was dropped from 0.4.0 on 2026-11-02. P5 brings the
@@ -36,7 +36,10 @@ lookups of R8c item 7 onto the shared resolver, and they become asynchronous wit
   whose only seed restarts soon after connecting waits up to about 5 minutes instead of 30 s.
 - **Bounded close design (P6).** It uses the yamux deadline with no switch. On 2026-11-02 the
   maintainer chose the yamux deadline over a swarm-level one. It is implemented in batch 3 (CRD
-  ch.28 R27c), with the lab row L-CLOSE to follow on the build.
+  ch.28 R27c). The lab row L-CLOSE passed on 2026-11-07: toward a frozen peer the close ended after
+  30 seconds, where a build without the deadline kept it open 13 minutes. Its memory criterion was
+  restated after the run, from "back to baseline" to "flat after the close, where the control keeps
+  growing" (T14). In the 10-second link cuts of the same row the relay started no close.
 - **Resolver (P5), 2026-11-02.**
   - One setting, `dns_resolver`, for every hostname. Google Public DNS is the default for all
     names, `"google"` names it explicitly, and `"system"` is the way back to the operating
@@ -66,4 +69,4 @@ lookups of R8c item 7 onto the shared resolver, and they become asynchronous wit
 | P3 | Trickle test for the clear rule; window-share cases | Optional: a maker with coalescing on whose relay carries steady traffic. |
 | P4 | — | A link that loses at least 25 % of messages per minute without breaking for 180 s or more. |
 | P5 | T45.16–T45.21 | T45.22: a lab DNS server with seven cases, part of the batch-1 lab run. |
-| P6 | Close over a writer that never takes data | A peer process stopped while its queue is at the cap. |
+| P6 | Close over a writer that never takes data | A peer process stopped while its queue is at the cap and the TCP path to it is full; 10-second link cuts. Passed 2026-11-07; the memory criterion was restated after the run (T14). |
