@@ -1,6 +1,6 @@
 # Plan: Electrum TLS server authentication and the key pin
 
-**Status:** planning (the rules are written; the warning and the pin are not built) — **Last reviewed:** 2026-11-05
+**Status:** in progress (the rules are written; the warning and the pin are built, PR #273; the pass-through of step 4 is open) — **Last reviewed:** 2026-11-07
 
 **CRD:** ch.38 R38.6.4m and R38.6.4n (Reloaded-original), with T38.6.4m, T38.6.4n and the open items
 D38.6.4m.1, D38.6.4n.1 and D38.6.4n.2; ch.55 R55.5.10 (the `mode.rpc_data.servers[]` row).
@@ -25,10 +25,12 @@ D38.6.4m.1, D38.6.4n.1 and D38.6.4n.2; ch.55 R55.5.10 (the `mode.rpc_data.server
 2. **Lab run.** *Done 2026-11-05 (D38.6.4m.1 resolved).* Seven certificates, three builds, 42 runs:
    accept and refuse are identical on KDF Reloaded and both references. Under the flag only the
    version 1 and RSA-1024 certificates are refused, by design (R38.6.4m items 3 and 5).
-3. **Code**, after the maintainer approves the implementation. The warning of R38.6.4m item 6 and
-   the pin of R38.6.4n, with T38.6.4m (c) and (e) and T38.6.4n. The code PR carries the
-   CHANGELOG entries, a `docs/GLEEC_COMPATIBILITY.md` row, a `RELOADED_VS_GLEEC.md` bullet, a
-   release-tests row and the operator description of the key with the `openssl` pipeline.
+3. **Code.** *Built and tested 2026-11-07 (PR #273).* The
+   warning of R38.6.4m item 6 and the pin of R38.6.4n, with T38.6.4m (c) and (e) and T38.6.4n. The
+   code PR carries the CHANGELOG entries, a `docs/GLEEC_COMPATIBILITY.md` row (the reference
+   ignores the key, measured 2026-11-07), a `RELOADED_VS_GLEEC.md` bullet and a release-tests row.
+   The operator description of the key, with the `openssl` pipelines of R38.6.4n item 7, is the
+   section "Electrum Servers over TLS" in `docs/NETWORK_CONFIG.md`.
 4. **Pass-through** (D38.6.4n.1): whether the coins file and the wallets pass `spki_sha256` through
    to the activation request.
 
@@ -37,3 +39,12 @@ D38.6.4m.1, D38.6.4n.1 and D38.6.4n.2; ch.55 R55.5.10 (the `mode.rpc_data.server
 - D38.6.4n.1: pass-through by the coins file and the wallet GUIs.
 - D38.6.4n.2: trust on first use. It is not part of this design, because it is weaker than a
   published pin.
+- Follow-ups from the review of PR #273, neither of which changes what is accepted:
+  - The pin parser removes every colon, as R38.6.4n item 5 says, while the user docs describe
+    colons between byte pairs. Either tighten the parser to that form or keep the looser reading.
+  - The mismatch warning is chosen by comparing the error text. A typed marker would keep the
+    warning if a later layer wraps that text; the suspension does not depend on it.
+- Seen 2026-11-07: the coins file's `SSL` entry for tQTUM, `s6.electrum.qtum.site:51002`, presents a
+  version 1 self-signed certificate, so KDF Reloaded never connects to it (R38.6.4m item 5, also with
+  `disable_cert_verification` or a pin). The plain entry on port 51001 works. No coins-file change is
+  proposed from here.

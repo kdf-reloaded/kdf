@@ -19,7 +19,8 @@ use super::electrum_measure::{block_interval_from_conf, eligible_servers, is_slo
                               next_round_at, pick_replacement, rank_after_round, rank_with_replacement, shuffle,
                               stale_limit, Draw, Measurement, Measuring, RoundServer, ServerQuality,
                               NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
-use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, ServerSpec, Session, SessionEnded};
+use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, ServerSpec, Session, SessionEnded,
+                                 TlsNotice};
 use super::*;
 use crate::endpoint_suspension::{Suspension, SUSPENSION_BASE, SUSPENSION_CAP};
 use common::log::{debug, warn};
@@ -626,6 +627,17 @@ impl PoolShared {
         let slot = Arc::new(ServerSlot::new(servers.len(), listed_position, req, &self.timings));
         let removed = slot.removed_reason();
         let label = slot.label.clone();
+        // Once per activation of the coin, a server that skips its certificate checks is flagged, and a pinned one is
+        // named as such (CRD ch.38 R38.6.4m item 6, R38.6.4n item 4). A removed server is never connected, so it gets
+        // neither line.
+        match slot.spec.as_ref().ok().and_then(ServerSpec::tls_notice) {
+            Some(TlsNotice::NotAuthenticated) => warn!(
+                "{}: Electrum server {} has disable_cert_verification set: the connection is encrypted, but the server is not authenticated",
+                self.ticker, label
+            ),
+            Some(TlsNotice::Pinned) => info!("{}: Electrum server {} is pinned by spki_sha256", self.ticker, label),
+            None => (),
+        }
         servers.push(slot);
         match removed {
             Some(reason) => Err((label, reason)),
@@ -796,7 +808,14 @@ impl PoolShared {
                 on_header,
             )
             .await
-            .map_err(EstablishError::Recoverable)?;
+            .map_err(|error| {
+                // A mismatch is either a key change or an attack, so every occurrence is logged (CRD ch.38 R38.6.4n
+                // item 5). The server is suspended like after any handshake failure, not removed.
+                if error == SPKI_MISMATCH {
+                    warn!("{}: Electrum server {}: {}", self.ticker, slot.label, error);
+                }
+                EstablishError::Recoverable(error)
+            })?;
             let session = Arc::new(session);
             // The session is closed again unless the negotiation succeeds, also when this future is dropped.
             let guard = CloseOnDrop(Some(session.clone()));
