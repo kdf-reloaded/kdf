@@ -296,7 +296,9 @@ passed the KDF Dirty Gate with its target on 2026-11-07.)* Under a global-HD log
 reference serves this RPC, `fetch_utxos` and the automatic merge as
 [Chapter 5](05-hd-wallet-support.md) §5.9B R35b records: consolidation and
 the automatic merge on the enabled address only, `fetch_utxos` over every
-known address.
+known address. *As built (2026-11-07, clean-side record; plan item H5.3).*
+Reloaded serves this RPC, `fetch_utxos` and the automatic merge under a
+software global-HD login; the as-built note under Chapter 5 R35b records how.
 
 R38.5.3 The coin's header/byte handling shall use the configuration-selected
 chain-variant model defined in

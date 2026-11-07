@@ -621,6 +621,23 @@ serve a UTXO coin of the standard family only; for every other coin type
 > (plan `hd-key-unification` item H5.3). The behavior above is the parity
 > target.
 
+> **As built (2026-11-07, clean-side record; plan item H5.3).** Reloaded
+> serves both commands and the automatic merge under a software global-HD
+> login. `consolidate_utxos` goes through
+> `utxo_common::merge_utxos_at_enabled_address`: for an HD coin the enabled
+> address comes from `enabled_hd_address_info` (the address at
+> `path_to_address`), and the merge is signed with the key derived at that
+> address's path, through `generate_and_send_tx_from_sender`, or through
+> `active_sender_key_pair` when `broadcast` is `false`. `fetch_utxos` reads
+> every known address of every account on both chains, derives nothing beyond
+> the known counts, and leaves out addresses with no outputs, as for a single
+> address. `merge_utxo_loop` resolves the enabled address on each round and
+> ends with a logged error if it cannot; the loop is shared, so QTUM under HD
+> merges its enabled address too. Under the Trezor policy `consolidate_utxos`
+> answers `InvalidAddress` and the loop ends, so no device is asked to sign;
+> `fetch_utxos` reads such a wallet from its account public keys. Tests: the
+> `t14b_*` and `r35b_*` tests in `rpc_command/utxo_hd_maintenance_tests.rs`.
+
 **R35c.** *`task::create_new_account` under a software global-HD login.*
 *(Same provenance and gate status as R35a.)* At both rows the task is served
 for UTXO-family, QTUM and EVM coins activated in HD mode under a software
