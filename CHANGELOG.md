@@ -243,6 +243,12 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   numbers `electrum_spread_near_factor` (default `2`) and `electrum_spread_near_offset_ms` (default
   `20`) set the factor and the margin; a factor of `0` spreads over every connected server as
   before. Detail: PR #215; CRD ch.38 R38.6.4a.
+- **Electrum reads always keep at least the two fastest connected servers taking turns.** A coin
+  with two servers spreads its reads over both again, as before the round-trip rule above. A server
+  that answers slowly once, for example one that limits each session to about one answer a second,
+  could leave the turn for a while and send every read to the other server, which then reached its
+  own limit sooner. With more servers, a distant one is left out only while two others stay near.
+  Detail: PR #262; CRD ch.38 R38.6.4a.
 - **A fixed withdraw fee on a UTXO coin is now charged in proportion to the transaction's size, as
   on Komodo and GLEEC KDF.** When `withdraw` or `task::withdraw::init` gives its fee as
   `{"type":"UtxoFixed","amount":…}`, the amount is now a rate per 1,000 bytes: a transaction of `s`
@@ -544,7 +550,7 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
   with its two switches and their defaults (PR #201), and implemented (PR #215); the SwapLab timing
-  rows are next.
+  rows ran on 2026-11-06, and the floor of two near servers is written (PR #260) and implemented (PR #262).
 - [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new: the peer-to-peer
   items of 0.4.0. The redial guards are in (PRs #199, #206), and so are the peer-exchange
   logging, the address ranges and the idle-close log (PRs #203, #211), the send-queue window

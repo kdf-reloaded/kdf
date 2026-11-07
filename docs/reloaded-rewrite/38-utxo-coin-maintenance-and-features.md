@@ -1282,6 +1282,11 @@ every maintained session.
 > `electrum_measure.rs` (`near_sessions`). It is also the only place that holds the
 > form of the limit (D38.6.4a.2). The two defaults are one constant each there:
 > `NEAR_FACTOR_DEFAULT` and `NEAR_OFFSET_DEFAULT_MS`.
+> - *The floor of two (2026-11-06, D38.6.4a.3).* The floor of item 6 lives in `near_sessions`
+>   only: after the flags of the limit, when two or more sessions are given and fewer than
+>   two are near, the session with the next-lowest figure after the fastest is set near as
+>   well, the earlier one in priority order between equal figures. `in_turn_for` is
+>   unchanged, since it consumes the flags.
 > - *The turn.* When a read-only query starts, `in_turn_for` in the pool reads each
 >   maintained slot's smoothed latency and asks for the near ones. It rotates them by
 >   the read counter modulo their number, then appends the other maintained slots in
@@ -3627,8 +3632,9 @@ R38.8.6 **Tests (two-direction, observable).**
 - *Reloaded-original amendment (2026-11-06, maintainer Decision CX), clean side.*
   The floor of two in R38.6.4a item 6 and its last sentence, the changed
   sentence of the second rationale, the rationale for the floor, the new cases
-  of T38.6.4a.1, T38.6.4a.8, D38.6.4a.3 and the cross-reference in D38.6.4a.1
-  were written by a session that never read the corpus. They rest on the
+  of T38.6.4a.1, T38.6.4a.8, D38.6.4a.3, the floor bullet of the as-built
+  note for items 6–8 and the cross-reference in D38.6.4a.1 were written by a
+  session that never read the corpus. They rest on the
   maintainer's Decision CX of 2026-11-06, this project's own lab timing runs of
   2026-11-06 and this repository's code. They take no forbidden-class input, so
   chapter 01 R38 is not engaged and no gate pass is required.
