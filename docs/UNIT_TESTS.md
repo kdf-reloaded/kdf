@@ -26,6 +26,28 @@ cargo test -p coins --lib t4a_
 cargo test -p mm2_main --lib t4a_
 ```
 
+## tQTUM tests and their Electrum server
+
+Most of the tests that activate the Qtum testnet coin (`tQTUM`, and `QRC20` on it) read the
+live testnet chain, so they are the exception to "fully offline" above: they need network access
+to one server. The tests are in `mm2src/coins/utxo/utxo_tests.rs` (the `test_qtum_*` ones),
+`mm2src/coins/qrc20/qrc20_tests.rs` and `mm2src/mm2_main/src/mm2_tests.rs`.
+
+- **Server.** All of them list only `s6.electrum.qtum.site:51001` (plain TCP). It is the one
+  public Qtum *testnet* Electrum server. The `qtum.info` hosts used earlier serve Qtum mainnet,
+  so on them the test wallets were empty and no delegation or staker existed. Its TLS port
+  presents an X.509 version 1 certificate, which this project refuses in every mode (CRD ch.38
+  R38.6.4m item 5), so only the plain port is listed.
+- **Slow answers.** The server can be slow to answer for a busy address. A request over an open
+  connection gets a fixed 20 seconds (CRD ch.38 R38.6.4e item 2), which a test cannot raise; the
+  `timeout_sec` of a server entry bounds only the connection set-up. If a test fails on a
+  timeout, run it again before suspecting the code.
+- **No broadcast.** The delegation tests (`add_delegation`, `remove_delegation`) only build and
+  sign a transaction; none of these tests changes chain state.
+- The list lives in one place per test crate: `tqtum_test_servers()` in `utxo_tests.rs` (used by
+  `qrc20_tests.rs` too) and `TQTUM_TEST_SERVERS` in `mm2_tests/electrums.rs`. Add a second testnet
+  server there if one appears.
+
 ## coins_activation (35 tests)
 
 Location: `mm2src/coins_activation/src/tests.rs`

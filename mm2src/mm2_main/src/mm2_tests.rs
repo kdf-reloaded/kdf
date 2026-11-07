@@ -3809,11 +3809,7 @@ fn test_add_delegation_qtum() {
     )
     .unwrap();
 
-    let json = block_on(enable_electrum(&mm, "tQTUM", false, &[
-        "s1.qtum.info:50001",
-        "s4.qtum.info:50001",
-        "s1.qtum.info:50001",
-    ]));
+    let json = block_on(enable_electrum(&mm, "tQTUM", false, TQTUM_TEST_SERVERS));
     println!("{}", json.balance);
 
     let rc = block_on(mm.rpc(&json!({
@@ -3898,11 +3894,7 @@ fn test_remove_delegation_qtum() {
     )
     .unwrap();
 
-    let json = block_on(enable_electrum(&mm, "tQTUM", false, &[
-        "s1.qtum.info:50001",
-        "s4.qtum.info:50001",
-        "s1.qtum.info:50001",
-    ]));
+    let json = block_on(enable_electrum(&mm, "tQTUM", false, TQTUM_TEST_SERVERS));
     println!("{}", json.balance);
 
     let rc = block_on(mm.rpc(&json!({
@@ -3962,11 +3954,7 @@ fn test_get_staking_infos_qtum() {
     )
         .unwrap();
 
-    let json = block_on(enable_electrum(&mm, "tQTUM", false, &[
-        "s1.qtum.info:50001",
-        "s4.qtum.info:50001",
-        "s1.qtum.info:50001",
-    ]));
+    let json = block_on(enable_electrum(&mm, "tQTUM", false, TQTUM_TEST_SERVERS));
     println!("{}", json.balance);
 
     let rc = block_on(mm.rpc(&json!({
@@ -4017,7 +4005,7 @@ fn test_convert_qrc20_address() {
     let _electrum = block_on(enable_qrc20(
         &mm,
         "QRC20",
-        &["s1.qtum.info:50001", "s4.qtum.info:50001", "s1.qtum.info:50001"],
+        TQTUM_TEST_SERVERS,
         "0xba8b71f3544b93e2f681f996da519a98ace0107a",
     ));
 
@@ -4444,7 +4432,7 @@ fn qrc20_activate_electrum() {
     let electrum_json = block_on(enable_qrc20(
         &mm,
         "QRC20",
-        &["s1.qtum.info:50001", "s4.qtum.info:50001", "s1.qtum.info:50001"],
+        TQTUM_TEST_SERVERS,
         "0xba8b71f3544b93e2f681f996da519a98ace0107a",
     ));
     assert_eq!(
@@ -4488,7 +4476,7 @@ fn test_qrc20_withdraw() {
     let electrum_json = block_on(enable_qrc20(
         &mm,
         "QRC20",
-        &["s1.qtum.info:50001", "s4.qtum.info:50001", "s1.qtum.info:50001"],
+        TQTUM_TEST_SERVERS,
         "0xba8b71f3544b93e2f681f996da519a98ace0107a",
     ));
     assert_eq!(
@@ -4564,7 +4552,7 @@ fn test_qrc20_withdraw_error() {
     let electrum_json = block_on(enable_qrc20(
         &mm,
         "QRC20",
-        &["s1.qtum.info:50001", "s4.qtum.info:50001", "s1.qtum.info:50001"],
+        TQTUM_TEST_SERVERS,
         "0xba8b71f3544b93e2f681f996da519a98ace0107a",
     ));
     let balance = electrum_json["balance"].as_str().unwrap();

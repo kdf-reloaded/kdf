@@ -78,11 +78,20 @@ pub fn qtum_electrums() -> Vec<Json> {
     ]
 }
 
+// The server list of the tQTUM and QRC20-on-testnet tests (native builds).
+//
+// There is exactly one public Qtum TESTNET Electrum server, `s6.electrum.qtum.site`, so this is the only entry:
+// - The `s1`, `s3` and `s4` hosts of `qtum.info` on port 50001 serve Qtum MAINNET, so a testnet test pointed at
+//   them reads the wrong chain; they are not listed.
+// - Port 51002 of the same host is TLS, but its certificate is X.509 version 1, which this project refuses in
+//   every mode (CRD ch.38 R38.6.4m item 5); it can never connect, so only plain TCP on port 51001 is listed.
+// - Its history answers can be slow. A request gets a fixed 20 s once the connection is up (R38.6.4e item 2);
+//   the server entry's `timeout_sec` bounds only establishing the connection (R38.6.4e item 1). Run a test that
+//   failed on a slow answer again before suspecting the code.
+//
+// Add a second testnet server here if one appears.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn qtum_electrums() -> Vec<Json> {
-    vec![
-        json!({ "url": "s1.qtum.info:50001" }),
-        json!({ "url": "s4.qtum.info:50001" }),
-        json!({ "url": "s1.qtum.info:50001" }),
-    ]
-}
+pub const TQTUM_TEST_SERVERS: &[&str] = &["s6.electrum.qtum.site:51001"];
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn qtum_electrums() -> Vec<Json> { TQTUM_TEST_SERVERS.iter().map(|url| json!({ "url": url })).collect() }

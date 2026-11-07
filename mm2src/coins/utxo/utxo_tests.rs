@@ -42,6 +42,27 @@ use std::mem::discriminant;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+// The server list of every tQTUM test (the tests that activate the testnet Qtum coin, here and in
+// `qrc20_tests.rs`).
+//
+// There is exactly one public Qtum TESTNET Electrum server, `s6.electrum.qtum.site`, so this is the only entry:
+// - The `s1`, `s3` and `s4` hosts of `qtum.info` on port 50001 serve Qtum MAINNET. A tQTUM test pointed at them
+//   reads the wrong chain (empty wallets, no delegation, no staker), which is why they are not listed.
+// - Port 51002 of the same host is TLS, but its certificate is X.509 version 1. This project refuses a version 1
+//   certificate in every mode, `disable_cert_verification` included (CRD ch.38 R38.6.4m item 5), so that port can
+//   never connect and is not listed. Hence plain TCP on port 51001.
+// - Its history answers can be slow, and the answer for a busy address may miss the 20 s a request gets once the
+//   connection is up (R38.6.4e item 2). That bound is fixed: the server entry's `timeout_sec` bounds only
+//   establishing the connection, including the version negotiation (R38.6.4e item 1), and the activation of a coin
+//   builds its pool with the default timings, so a test cannot raise it. A slow answer shows up as a failure of
+//   that call; run the test again before suspecting the code.
+//
+// Add a second testnet server here if one appears.
+const TQTUM_TEST_SERVER: &str = "s6.electrum.qtum.site:51001";
+
+/// The `servers` value of an Electrum activation request of a tQTUM test; see [`TQTUM_TEST_SERVER`].
+pub(crate) fn tqtum_test_servers() -> serde_json::Value { json!([{ "url": TQTUM_TEST_SERVER }]) }
+
 /// Test-only DEX-fee destination pubkey, resolved through `mm2_net_config`
 /// for the community netid. Replaces direct use of
 /// `common::DEX_FEE_ADDR_RAW_PUBKEY` so test fixtures go through the same
@@ -2605,7 +2626,7 @@ fn test_qtum_generate_pod() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -2624,7 +2645,7 @@ fn test_qtum_add_delegation() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -2663,7 +2684,7 @@ fn test_qtum_add_delegation_on_already_delegating() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -2693,7 +2714,7 @@ fn test_qtum_get_delegation_infos() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -2724,7 +2745,7 @@ fn test_qtum_remove_delegation() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -2782,7 +2803,7 @@ fn test_qtum_my_balance() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -2822,7 +2843,7 @@ fn test_qtum_my_balance_with_check_utxo_maturity_false() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
         "check_utxo_maturity": false,
     });
 
@@ -4522,11 +4543,7 @@ fn test_qtum_without_check_utxo_maturity() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [
-            {"url":"s1.qtum.info:50001"},
-            {"url":"s4.qtum.info:50001"},
-            {"url":"s1.qtum.info:50001"},
-        ],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -4562,11 +4579,7 @@ fn test_qtum_with_check_utxo_maturity_false() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [
-            {"url":"s1.qtum.info:50001"},
-            {"url":"s4.qtum.info:50001"},
-            {"url":"s1.qtum.info:50001"},
-        ],
+        "servers": tqtum_test_servers(),
         "check_utxo_maturity": false,
     });
 
