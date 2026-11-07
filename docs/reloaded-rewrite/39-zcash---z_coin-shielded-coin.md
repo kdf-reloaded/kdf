@@ -790,7 +790,7 @@ follows:
 > wording of R39.6.5c ("`fee_details.amount`") described only its `amount`
 > member and was not a statement that the object is untagged.
 
-> **Status update (reloaded, 2026-11-07).** The sign is fixed by PR #NNN: the
+> **Status update (reloaded, 2026-11-07).** The sign is fixed by PR #271: the
 > withdraw response reports `received_by_me - spent_by_me`, for a Sapling and a
 > Pirate1 destination alike (T39.5A.c). The `memo` member of R39.5A.3 is not
 > implemented. Reloaded's withdraw request has no `memo` member, so a memo sent

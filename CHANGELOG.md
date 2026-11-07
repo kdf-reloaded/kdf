@@ -420,7 +420,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   transaction's history row, Komodo DeFi Framework and GLEEC KDF give received minus spent, a
   negative number. The answer now gives the negative number too, for a `zs1…` and a Pirate1
   destination alike. The transaction itself was always correct. Found in a live mainnet test.
-  Detail: PR #NNN; CRD ch.39 R39.5A.3, R39.6.5c.
+  Detail: PR #271; CRD ch.39 R39.5A.3, R39.6.5c.
 
 #### EVM coins
 
@@ -713,7 +713,7 @@ lives.
 - **An ARRR withdrawal takes no memo, and its answer has no `memo` member.** The `withdraw`
   request has no `memo` field, so a memo sent with it is ignored and the shielded output carries
   none. Komodo DeFi Framework and GLEEC KDF echo the request's memo in the answer. Memo support is
-  a separate, later item. Detail: PR #NNN; CRD ch.39 status note under R39.5A.3.
+  a separate, later item. Detail: PR #271; CRD ch.39 status note under R39.5A.3.
 - **Bitcoin II (BC2) transactions are rejected by the network.** Since block 57,750 the BC2
   network checks every signature against a digest that includes an extra field of its own. KDF
   Reloaded does not add it yet, so a BC2 withdrawal or swap payment is refused when it is
