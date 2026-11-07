@@ -417,8 +417,20 @@ impl ZCoinShieldedHistory {
         expiry_height: u32,
         destination: &str,
     ) -> Result<(), String> {
-        self.tx_addresses
-            .record(txid, expiry_height, AddressSide::To, destination)
+        self.record_address(txid, expiry_height, AddressSide::To, destination)
+    }
+
+    /// Keeps `address` on `side` of the transaction `txid` for its history row (R39.8.9d2 (a),
+    /// R39.8.9d3). `txid` is in the internal byte order of the wallet database. Nothing is recorded
+    /// about notes.
+    pub(crate) fn record_address(
+        &self,
+        txid: &[u8; 32],
+        expiry_height: u32,
+        side: AddressSide,
+        address: &str,
+    ) -> Result<(), String> {
+        self.tx_addresses.record(txid, expiry_height, side, address)
     }
 
     /// Removes the address entries of transactions that expired without being mined (R39.8.9d2 (c)).
@@ -4503,7 +4515,8 @@ pub(crate) mod tests {
     }
 
     /// T39.8.9d2: an entry whose transaction expired and is not mined is removed; the entry of a mined
-    /// transaction is kept however old, and so is one whose expiry has not been passed by the scan.
+    /// transaction is kept however old, and so is one whose expiry has not been passed by the scan and
+    /// one with no expiry height (0).
     #[test]
     fn t39_8_9d2_an_expired_entry_is_removed_unless_its_transaction_is_mined() {
         let history = open_snapshot_history(&test_db_dir("snapshot-prune"));
@@ -4519,7 +4532,7 @@ pub(crate) mod tests {
             ([9; 32], scanned - 1), // expired, never mined: removed
             ([8; 32], scanned),     // the scan has not passed it yet: kept
             ([7; 32], scanned + 1), // kept
-            ([6; 32], 0),           // never expires: kept
+            ([6; 32], 0),           // no expiry height (0), never expires: kept
         ];
         for (txid, expiry) in entries {
             history.record_withdraw_recipient(&txid, expiry, &destination).unwrap();
@@ -4537,6 +4550,63 @@ pub(crate) mod tests {
         assert!(row_of(&page, 1).to.contains(&destination));
         // A second pass has nothing left to remove.
         assert_eq!(history.prune_tx_addresses().unwrap(), 0);
+    }
+
+    /// T39.8.9d3: entries on both sides join the row of their transaction: a `to` entry beside the wallet's
+    /// own address for the change (a payment, a fee payment), and a `from` entry on a row that spends no
+    /// wallet note (a spend or refund, which lists the script address and the wallet as receiver). The sets
+    /// are the same after the store is reopened, and an entry of another transaction does not leak in.
+    #[test]
+    fn t39_8_9d3_entries_on_both_sides_join_the_row_and_survive_a_reopen() {
+        let db_dir = test_db_dir("snapshot-swap-addresses");
+        let history = open_snapshot_history(&db_dir);
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+        let payment = FIXTURE_SPEND_TXID_INTERNAL;
+        let spend = FIXTURE_RECEIVE_TXID_INTERNAL;
+        give_snapshot_row_a_txid(&history, 5, payment);
+        give_snapshot_row_a_txid(&history, 1, spend);
+        history
+            .record_address(&payment, SNAPSHOT_EXPIRY, AddressSide::To, "script-address")
+            .unwrap();
+        history
+            .record_address(&payment, SNAPSHOT_EXPIRY, AddressSide::To, "fee-address")
+            .unwrap();
+        history
+            .record_address(&spend, SNAPSHOT_EXPIRY, AddressSide::From, "script-address")
+            .unwrap();
+        history
+            .record_address(&[0xcd; 32], SNAPSHOT_EXPIRY, AddressSide::From, "unrelated")
+            .unwrap();
+
+        let check = |history: &ZCoinShieldedHistory| {
+            let page = snapshot_page(history, page_number(1), 10, true);
+            assert_eq!(page.total, 5);
+            // The payment row: spends and receives, so the wallet is on both sides, and both recorded
+            // `to` entries are listed.
+            let payment_row = row_of(&page, 5);
+            assert_eq!(payment_row.from, vec!["zs-wallet".to_owned()]);
+            assert_eq!(
+                payment_row.to,
+                sorted(vec![
+                    "fee-address".to_owned(),
+                    "script-address".to_owned(),
+                    "zs-wallet".to_owned()
+                ])
+            );
+            // The spend row spends no wallet note: the script address is the only sender.
+            let spend_row = row_of(&page, 1);
+            assert_eq!(spend_row.from, vec!["script-address".to_owned()]);
+            assert_eq!(spend_row.to, vec!["zs-wallet".to_owned()]);
+            // Nothing leaks onto the other rows.
+            for id in 2..=4 {
+                let other = row_of(&page, id);
+                assert!(other.from.is_empty(), "row {id}");
+                assert_eq!(other.to, vec!["zs-wallet".to_owned()], "row {id}");
+            }
+        };
+        check(&history);
+        drop(history);
+        check(&reopen_snapshot_history(&db_dir));
     }
 
     /// T39.8.9d2: the scan pass is the prune point: after a completed pass the entries whose expiry the

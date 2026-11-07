@@ -41,11 +41,11 @@ fn other_sapling_address(fixture: &LightCoinFixture, seed: u8) -> String {
     )
 }
 
-fn own_address(fixture: &LightCoinFixture) -> String { fixture.coin.z_fields.my_z_addr_encoded.clone() }
+pub(super) fn own_address(fixture: &LightCoinFixture) -> String { fixture.coin.z_fields.my_z_addr_encoded.clone() }
 
 /// The first history page as `z_coin_tx_history` serves it, with the wallet's address in the form
 /// `my_balance` reports.
-fn page(fixture: &LightCoinFixture) -> ZCoinTxHistoryPage {
+pub(super) fn page(fixture: &LightCoinFixture) -> ZCoinTxHistoryPage {
     fixture
         .history()
         .load_page(
@@ -60,7 +60,7 @@ fn page(fixture: &LightCoinFixture) -> ZCoinTxHistoryPage {
         .unwrap()
 }
 
-fn row_of<'a>(page: &'a ZCoinTxHistoryPage, tx: &ZTransaction) -> &'a ZCoinTxHistoryDetails {
+pub(super) fn row_of<'a>(page: &'a ZCoinTxHistoryPage, tx: &ZTransaction) -> &'a ZCoinTxHistoryDetails {
     let hash = tx.txid().to_string();
     page.transactions
         .iter()
@@ -68,7 +68,7 @@ fn row_of<'a>(page: &'a ZCoinTxHistoryPage, tx: &ZTransaction) -> &'a ZCoinTxHis
         .expect("the row of the transaction is served")
 }
 
-fn sorted(mut entries: Vec<String>) -> Vec<String> {
+pub(super) fn sorted(mut entries: Vec<String>) -> Vec<String> {
     entries.sort();
     entries
 }
