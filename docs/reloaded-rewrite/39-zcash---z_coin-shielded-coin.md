@@ -3506,6 +3506,73 @@ when the wallet received shielded notes in the transaction, and shielded
 addresses recoverable from outgoing viewing information for wallet-created
 outputs such as change, swap, fee, or burn outputs.
 
+R39.8.9d1 **The wallet's own address in one form.** Where R39.8.9c or R39.8.9d
+lists the wallet's own shielded address, the row shall list it as a Sapling
+address encoded with the coin's configured prefix, the form `my_balance`
+reports as the wallet's address. No other encoding of an address the wallet
+owns shall appear in `from` or `to`. In particular, the unified-address form
+that the wallet-database crate keeps for its account shall not appear: it
+carries a network prefix that no wallet of the coin accepts.
+
+R39.8.9d2 **The recipient of a withdrawal.** The history row of a transaction
+built by `withdraw` (the legacy method and `task::withdraw::init` alike) shall
+list in `to` the destination of the request exactly as the request gave it: a
+Sapling address or a Pirate1 address (R39.6.5c). The destination is listed
+in the unmined row (R39.8.9i), in the mined row, and after a restart of the
+node; the wallet's own address stays in the set where R39.8.9d puts it (the
+change). The recipient comes from the request, not from the transaction: the
+withdrawal's output carries no outgoing viewing information the wallet can
+open, and the wallet's Sapling keys cannot open a Pirate1 output at all.
+
+- (a) *Record.* When `withdraw` has built a transaction, the node shall keep
+  its transaction id and the destination as given. The store is the node's
+  own, survives a restart and a rebuild of the wallet database, and is kept
+  apart from the wallet-database crate's own tables. It records no notes, so
+  it changes nothing in note selection or in the in-flight exclusion of
+  §39.8.0.7, which records nothing at build time (D39.8.0e).
+- (b) *Use.* A history row whose transaction id has an entry lists that
+  entry's destination in `to`. An entry for a transaction the wallet
+  database does not hold is never shown: a withdrawal that was built but
+  not broadcast leaves no row.
+- (c) *Bound.* An entry may be removed once the wallet's last scanned
+  height has passed its transaction's expiry height and the wallet database
+  holds no mined transaction with that id. An entry of a mined transaction is
+  kept. The scanned height decides, not the chain tip: a rebuilt wallet
+  database holds no mined transaction until its rescan reaches that block.
+- (d) *Limits.* A row with no entry lists no recipient, and that is not an
+  error. This covers a transaction broadcast before this rule was
+  implemented, one built by another instance on the same seed, and one whose
+  entry was lost with the node's data.
+
+> **Provenance and reason (2026-11-07).** Clean-room original; this
+> repository's code and the release tests of 0.4.0-beta.1 (row ARRR-L2),
+> confirmed against the lab wallet's database. Not corpus-sourced, so no gate
+> pass is needed. Every history row listed the wallet's own address twice:
+> once in the Sapling form, and once in the crate's unified-address form with
+> the Zcash network prefix. No withdrawal row named its recipient, Sapling or
+> Pirate1, before or after mining, because the record written at broadcast
+> holds only the outputs the wallet pays itself.
+
+T39.8.9d1 *Own address in one form (R39.8.9d1).* A fixture wallet with a
+deposit row and a withdrawal row with change shall answer `z_coin_tx_history`
+with the wallet's own address in each row only in the form `my_balance`
+reports. No entry of `from` or `to` shall be a unified address.
+
+T39.8.9d2 *Recipient of a withdrawal (R39.8.9d2).* For a withdrawal to a
+Sapling address and one to a Pirate1 address, a test shall prove:
+
+- the unmined row's `to` holds the destination as given, plus the wallet's
+  own address when the withdrawal has change;
+- the mined row's `to` is the same set;
+- after the store is reopened, as at a restart, the same set is served;
+- a withdrawal built and never broadcast adds no row;
+- a row whose transaction has no entry lists no recipient and raises no
+  error;
+- an entry whose expiry height the scanned height has passed, with no
+  mined transaction, is removed, while the entry of a mined transaction is
+  kept;
+- a rebuild of the wallet database leaves the entries in place.
+
 R39.8.9e `transaction_fee` shall be computed from the transparent input value,
 transparent output value, and the Sapling value balance of the full transaction.
 `confirmations` shall be zero when the transaction height is above the backend
@@ -3513,6 +3580,34 @@ tip; otherwise it is `current_block + 1 - block_height`. The `current_block`
 used here is the single lightwalletd tip (R39.11.8(f), R39.11.9), which is also the
 source of the scanned blocks, so an entry cannot be ahead of the height used to
 count its confirmations.
+
+> **Status update (reloaded, 2026-11-07; this repository, not corpus-sourced).**
+> R39.8.9c and R39.8.9d were only partly implemented. Found in the release tests
+> of 0.4.0-beta.1 (row ARRR-L2) and confirmed against the lab wallet's database:
+>
+> - *The wallet's own address in a foreign form.* Every row's `to` set listed
+>   the wallet's own address twice. One copy was in the unified-address form
+>   that the wallet-database crate stores for its account, which no Pirate Chain
+>   wallet accepts. Every row with a received note showed it, deposits included.
+>   R39.8.9d1 binds the fix.
+> - *No recipient for a withdrawal.* A withdrawal's row listed only the wallet's
+>   own address, before and after mining, for a Sapling recipient and a Pirate1
+>   one alike. The record written at broadcast (§39.8.0.7) holds only the outputs
+>   the wallet pays itself, and the compact blocks the scan reads carry nothing
+>   from which an outgoing recipient can be recovered. R39.8.9d2 binds the fix;
+>   rows from before it keep no recipient (R39.8.9d2 (d)).
+> - *No transparent addresses (scheduled).* Neither the transparent input
+>   addresses of R39.8.9c nor the transparent output addresses of R39.8.9d are
+>   listed: a swap payment's script address, a refund's source, a fee output.
+>   The shielded fee address a swap's fee payment pays is not listed either.
+>   `from` holds at most the wallet's own address, and `to` holds only what the
+>   wallet database and the store of R39.8.9d2 hold. This item rests on a
+>   reading of this repository's code; no live row has shown it yet. The fix is
+>   scheduled as a separate change; the plan
+>   [`arrr-native-and-ironwood-pool`](../plans/arrr-native-and-ironwood-pool.md)
+>   tracks it.
+>
+> The amounts, the order and the paging of the rows are not affected.
 
 #### 39.8.5.1 Unmined transactions, same-block order, and amounts of an own send
 
