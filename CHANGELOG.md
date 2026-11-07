@@ -559,6 +559,14 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   one hasting. The Siacoin miner fee shown for a swap is now the 0.00002 SC actually paid, not
   0.00001 SC. Detail: PR #278; CRD ch.20 R-S11, ch.60 R60.6.7.
 
+#### Swap recovery
+
+- **`recover_funds_of_swap` no longer refunds the maker payment of a swap whose spend of the taker
+  payment was sent but not yet confirmed.** The maker payment belongs to the taker once that spend was
+  sent. The call now refuses, whether or not the refund time has passed, and builds nothing. A swap with a
+  confirmed spend was already refused. A swap whose maker payment is spent or refunded on the chain is
+  answered as before. Detail: PR #TBD; CRD ch.51 R75.
+
 #### UTXO coins and Electrum
 
 - **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
@@ -844,6 +852,12 @@ lives.
   a refund waits until it advances again, and the log does not say so. In a test, a refund started
   four hours after the HTLC lock expired, because the coin's node had stood still for almost six
   hours; the log only repeated "wait refund till" every 24 seconds.
+- **A maker payment is not refunded after the spend of the taker payment was sent, even if that spend
+  never confirms.** If the node's spend of the taker payment was broadcast but dropped from the chain,
+  and the other side refunded its payment, `recover_funds_of_swap` refuses to refund the maker payment:
+  the other side knows the secret from the broadcast and can still claim it. A refund in that case only,
+  when the other side's refund is shown on its own chain, is under consideration. Detail: PR #TBD; CRD
+  ch.51 R75, D8.
 
 ## [0.3.0-beta.1] — 2026-11-01
 

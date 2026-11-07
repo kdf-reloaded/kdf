@@ -304,3 +304,19 @@ config and logs) and the module `t14_capability_word_tests` of `mm2src/mm2_main/
 | `t11_with_the_switch_on_the_word_is_accepted`, `t11_with_the_switch_on_everything_without_the_word_is_declined`, `t11_the_decline_names_the_cause`, `t11_with_the_switch_off_the_coin_judges_as_before`, `t11_with_a_zero_suffix_every_input_is_judged_as_before`, `t11_the_first_value_is_tested_before_the_word` | T11, R61.5A.2 | With the switch on, absent, empty, first-value-only, malformed and `false` information is declined and the word is accepted; with the switch off, or with a zero own suffix, every input is judged as before; the first-value test runs first |
 | `t12_maker_*`, `t12_taker_*`, `t12_the_declining_coin_is_named_for_the_log_lines_of_the_order_match_layer` (ordermatch) | T12, R61.5A.3 | A maker declines a request and a taker declines a reservation whose information for the requiring coin lacks the word, and accepts one that carries it; the other coin of the pair does not trigger the decline; the declining coin is named |
 | `t13_the_switch_is_true_when_absent_and_accepts_both_booleans`, `t13_a_switch_that_is_not_a_boolean_fails_activation_naming_the_key`, `t13_each_decline_writes_a_debug_line_that_names_the_coin_and_the_cause`, `t13_the_warning_comes_at_most_once_an_hour_with_the_count_since_the_previous_one`, `t13_the_warning_is_kept_per_coin_and_a_clock_that_goes_back_does_not_panic` | T13, R61.5A.4, R61.5A.5 | `require_suffix_counterparty` defaults to `true`, a non-boolean fails activation naming the key; one debug line per decline, one warning per hour with the count (injected clock) |
+
+## Recovery of a maker swap with a sent spend of the taker payment (5 tests)
+
+Location: the module `tests` of `mm2src/mm2_main/src/lp_swap/maker_swap.rs`, beside the other
+`recover_funds` tests (a `TestCoin` pair with mocked chain searches). CRD: chapter 51, §51.6A, R75 item 2,
+R76, T32 items 7-11. All five use one finished record that holds `TakerPaymentSpent` and not
+`TakerPaymentSpendConfirmed`. Items 1-6 are covered by existing tests (see the chapter).
+Run on 2026-11-07: `cargo test -p mm2_main --lib test_recover_funds` passed (42 tests, these five included).
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `test_recover_funds_sent_spend_unspent_maker_payment_after_the_lock_is_not_refunded` | T32 item 7, R75 item 2, R76 | The maker payment is unspent and the refund time has passed: the call refuses with the text that the spend was sent and the maker payment belongs to the taker; the refund gate is not asked, no refund is built, and the record is as it was |
+| `test_recover_funds_sent_spend_unspent_maker_payment_before_the_lock_gets_the_same_refusal` | T32 item 8, R75 item 2 | The refund time has not passed: the same refusal, not "Too early to refund"; no gate, no refund |
+| `test_recover_funds_sent_spend_spent_maker_payment_still_spends_the_unspent_taker_payment` | T32 item 9, R75 item 2 | The maker payment is spent and the taker payment is not: the spend of the taker payment is built (`SpentOtherPayment`), no refund |
+| `test_recover_funds_sent_spend_spent_maker_payment_and_spent_taker_payment_builds_nothing` | T32 item 10, R75 item 2 | Both payments spent: the call refuses ("Taker payment was already spent"); no spend and no refund is built |
+| `test_recover_funds_sent_spend_refunded_maker_payment_is_refused_as_already_refunded` | T32 item 11, R75 item 2 | The maker payment is refunded on the chain: the call refuses ("Maker payment was already refunded"), not with the sent-spend text; nothing is built |
