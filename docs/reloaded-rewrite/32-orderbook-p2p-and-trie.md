@@ -1206,8 +1206,21 @@ requester MUST ask one other relay once:
 > none followed under either trigger. Behind a heavily loaded forwarding relay
 > that ran the reference, a request to another relay followed 86 % of the
 > first requests with the other relay 3 s away, and 42 % with it 6 s away.
-> Most of these mismatches are most likely answers newer than the triggering
-> keep-alive (the informative note under R-Q6b). The maintainer kept trigger
+> A third run on the same day used the same loaded setup with a second
+> repricing maker added, and compared three schedules of the first maker. In
+> it, the requests followed when that maker changed the pair after the
+> triggering keep-alive, so that the root the node reached included the change
+> (see the informative note under R-Q6b):
+> - with repricing every 10 s, 188 of 443 first requests were followed by such
+>   a request, each after an order message of the maker for the pair that the
+>   node handled after the keep-alive;
+> - with the repricing finished before the keep-alive, none followed an answer
+>   from the same relay;
+> - without repricing, none of 103 first requests was followed.
+>
+> A further 35 requests, in two cycles of the lab's link cuts, came right after
+> a relay had re-established its link, with no later change of the maker;
+> their cause is not established. The maintainer kept trigger
 > (b) as written. The debug line of each such request counts which candidate
 > rule would have skipped it.
 
@@ -4734,7 +4747,7 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   no reference fact and needs no Dirty Gate pass.
 - *Reloaded-original addition (2026-11-07, Decision DA) -- the cost
   paragraph of R-Q5d's divergence note.* Written by a context that never read
-  the forbidden corpus. Its sources are the maintainer's Decision DA and two
+  the forbidden corpus. Its sources are the maintainer's Decision DA and three
   lab runs of this project's own nodes with reference binaries as black boxes,
   reported as counts. It states no reference fact and needs no Dirty Gate
   pass.
