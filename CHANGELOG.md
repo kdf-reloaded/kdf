@@ -119,7 +119,8 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   declined too; Komodo DeFi Framework and GLEEC KDF keep matching as before, and their taker sees a
   request that times out. Each decline is logged at debug level with its cause, and at most once an
   hour a warning gives the number declined. Setting `require_suffix_counterparty` to `false` in the
-  coin entry turns the requirement off. Detail: CRD ch.61 R61.5A; ch.59 §59.4A.
+  coin entry turns the requirement off and restores the earlier behavior, in which a BC2 swap with such
+  a node can fail after a payment has been made. Detail: CRD ch.61 R61.5A; ch.59 §59.4A.
 
 #### Start-up and configuration
 

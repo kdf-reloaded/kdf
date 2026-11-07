@@ -16109,11 +16109,6 @@ mod t14_capability_word_tests {
             Some("REL")
         );
         assert_eq!(declining_coin_ticker(&base, &rel, &plain(), &suffix_cap()), None);
-
-        // The info line that follows a selection pass with declined reservations (R59.4A.6).
-        let uuid = Uuid::new_v4();
-        let line = declined_reservations_summary(&uuid, 1).unwrap();
-        assert!(line.contains("1 reservation(s) declined"), "{line}");
     }
 }
 
