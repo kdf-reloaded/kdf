@@ -27,6 +27,17 @@ corrections). Mixed treatment -- see §42.0.
 > price providers (CoinGecko, CoinMarketCap, etc.) and their APIs are external
 > dictated interop. Private types and helper structure are informative.
 
+> **Price side moved to chapter 62 (added 2026-11-07; chapter 62 passed the
+> KDF Dirty Gate on 2026-11-07).** The endpoint lists, the request,
+> the fallback and rotation rules, the full response contract, the recognized
+> provider set, the pair-rate derivation, the staleness rule, the completion
+> snapshot's fetch moment and failure rule, and the watcher-reward price are
+> bound by [Chapter 62](62-price-service.md). Where this chapter's §42.4–§42.6
+> and chapter 62 differ, chapter 62 governs; in
+> particular the provider statements of §42.5 are superseded by chapter 62
+> R62.5.2 and D62.4 (see chapter 62 §62.9, finding F3). This note takes no
+> forbidden-class input itself; it only points.
+
 ---
 
 ## Part A -- As-built baseline (T-DOC)

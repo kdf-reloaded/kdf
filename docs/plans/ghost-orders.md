@@ -60,7 +60,10 @@ Each package changes no wire shape and has its own switch, so that a lab can run
   was 3 s away. In 2 of 4 cycles the node cleared the cancelled order one keep-alive interval
   earlier than without B1: 33 s from the restore, against at least 57 s. With the other relay 6 s
   away it could not answer within the request's 10 s. No cancelled order stayed visible. The cost
-  of the extra requests is an open point below.)*
+  of the extra requests is an open point below.)* *(Fault-free run on dev 86e1cb358, 2026-11-07: with
+  the maker repricing 32 pairs every 10 s and 50 ms on every link, no node sent a sync request in
+  30 minutes, so B1 added none. The run is void by its floor of 200 first requests, so it gives no
+  ratio. The extra requests were measured behind a loaded forwarding relay, in L2.)*
 - **B3:** the emptied-pair case leaves every Reloaded node within the liveness window plus one sweep.
   A run with a lossy link counts pairs dropped and refilled and the longest gap an order-book poll
   sees. The "before" baseline is a lab run on 0.4.0-alpha.1 in which the maker cancels its only
@@ -144,8 +147,19 @@ Each package changes no wire shape and has its own switch, so that a lab can run
   with it 6 s away, far above the 5 % the verification allows for a fault-free run. No cancelled
   order stayed visible.
   - The check compares the root a pair reaches with the root of the keep-alive that started the
-    request. An answer *newer* than that keep-alive therefore most likely counts as out of step too,
-    for example when the maker repriced in between. This is a reading of the counts, not a trace.
+    request. A lab run on 2026-11-07 (L2's setup at 3 s with a second repricing maker added; the
+    first maker repricing every 10 s, repricing once and finishing before its keep-alive, or not
+    repricing) showed, for that setup, when they occurred:
+    - with repricing every 10 s, 188 of 188 such requests followed an order message of the maker
+      for the pair that the node handled after the keep-alive;
+    - with the repricing finished before the keep-alive, 35 of 273 first requests were followed by
+      such a request, none after a later change of the maker and none in the cycles in which the
+      relay 3 s away answered first;
+    - without repricing, none followed at all.
+
+    The 35 came in two cycles of the lab's link cuts, after a relay had re-established its link;
+    their cause is not established. In that run, unlike L2, the relay 3 s away answered most first
+    requests, so it does not trace L2's own counts.
   - Candidate rules:
     - (a) compare with the maker's latest advertised root;
     - (b) skip the request when an order message for the pair arrived after the keep-alive;
@@ -165,6 +179,9 @@ Each package changes no wire shape and has its own switch, so that a lab can run
     - At or below 5 %: keep the check, and record the cost in CRD ch.32 R-Q5d's divergence note.
       (e) stays the alternative if parity is preferred later.
     - Above 5 %: (a) and (d) first; if they cut too little, (e). Neither (b) nor (b) with (a).
+  - Measured 2026-11-07: the fault-free run sent no sync request at all, so B1 added none. Per
+    Decision DA the check stays as it is, and the cost is recorded in CRD ch.32 R-Q5d's divergence
+    note (PR #274).
 - **B1, the timeout of the request to another relay.** The request has the 10 s timeout of every sync
   request, not the 5 s bound of R-Q5b. An answer after the bound no longer reaches the requests parked
   behind the node's own request, which were answered at their bound, but it still heals the node and
