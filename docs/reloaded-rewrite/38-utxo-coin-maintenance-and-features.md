@@ -291,7 +291,12 @@ signed transaction hex.
 R38.5.2 The public `consolidate_utxos` RPC shall merge many UTXOs of a coin into
 a single self-directed output under configurable merge conditions, with an
 optional broadcast flag; when broadcast is not requested it returns the
-constructed transaction without sending it.
+constructed transaction without sending it. *(Pointer added 2026-11-07;
+passed the KDF Dirty Gate with its target on 2026-11-07.)* Under a global-HD login the
+reference serves this RPC, `fetch_utxos` and the automatic merge as
+[Chapter 5](05-hd-wallet-support.md) §5.9B R35b records: consolidation and
+the automatic merge on the enabled address only, `fetch_utxos` over every
+known address.
 
 R38.5.3 The coin's header/byte handling shall use the configuration-selected
 chain-variant model defined in
@@ -1866,6 +1871,49 @@ maintainer decision 2026-11-04).**
    does, and logs nothing. A server entry with `spki_sha256` on a browser build:
    R38.6.4n item 6.
 
+> **Reference behavior (Spec Reader 2026-11-07, rows `v2.6.0-beta` and
+> `v3.0.0-beta` of chapter 02 §2.15A, identical at both; passed the KDF
+> Dirty Gate on 2026-11-07, measure 0.03).** The
+> reference matches items 1--5, 7 and 9 of R38.6.4m, so there is **no
+> divergence** on what `disable_cert_verification` does, and the black-box lab
+> result of 2026-11-04 (a self-signed version 3 certificate accepted under the
+> flag) is the expected outcome at both rows:
+>
+> - *Per-server TLS surface.* A server entry carries exactly `url`,
+>   `protocol`, `disable_cert_verification` (default `false`) and
+>   `timeout_sec`; there is no other per-server TLS knob -- no pin, no
+>   per-server trust store, no minimum version or cipher setting.
+> - *Skipped under the flag:* the whole server-certificate verification --
+>   chain and trust anchor, validity period, CA flag, extended key usage, and
+>   the host-name match against the certificate.
+> - *Kept under the flag:* the handshake signature is verified with the
+>   presented end-entity certificate's public key under the TLS library's
+>   default schemes (the set of item 3), which requires that certificate to
+>   parse as an X.509 version 3 certificate; the protocol versions (TLS 1.3
+>   and 1.2 only), cipher suites and key-exchange groups of item 3; and the
+>   host-name precheck of item 2, which refuses an IP literal before any
+>   connection as a non-recoverable failure, so the server is dropped from the
+>   pool (R38.6.4d item 3). The configured host name is sent as SNI and is
+>   not checked against the certificate.
+> - *Failure class when a certificate is refused by default* (unknown issuer,
+>   CA certificate used as end entity, expired, name mismatch) and when a
+>   handshake fails under the flag (version 1 certificate, unsupported key or
+>   scheme, no common version or suite): a **temporary**, recoverable
+>   connection failure, so the server is retried under the pool's suspension
+>   rules (item 7; R38.6.4d item 1). Only a malformed address, an IP literal
+>   under `SSL`, a browser-only protocol on a native build and a version
+>   mismatch are non-recoverable.
+> - *Logging.* The reference logs no warning for a server configured with the
+>   flag; the line it logs when a connection is established marks that the
+>   connection was made with certificate verification disabled. Item 6 of
+>   R38.6.4m therefore adds a warning the reference does not have.
+> - *Browser build.* `WSS` is the browser's TLS; the flag has no effect there
+>   (item 9).
+>
+> The TLS library of the reference is an older major version than Reloaded's;
+> the behaviors above are what both versions do, not a statement that the
+> two libraries are identical in every rejection text.
+
 R38.6.4n **Electrum server key pin `spki_sha256` (Reloaded-original; planned;
 maintainer decision 2026-11-04).** Opt-in: a server entry without the key
 behaves exactly as R38.6.4m. The implementation waits for the maintainer's
@@ -3073,7 +3121,12 @@ the same for the Sia wallet daemon.
 > because it asks for a hardware device first (the Chapter 20 §20.10 D1 note
 > records it); and `path_to_address` is honored for a software global-HD
 > account only, not under the Trezor policy (Chapter 55 §55.5). Both are items
-> of plan [`hd-key-unification`](../plans/hd-key-unification.md). This section
+> of plan [`hd-key-unification`](../plans/hd-key-unification.md). *(Pointer
+> added 2026-11-07; passed the KDF Dirty Gate with its target on 2026-11-07.)* The
+> reference contract for both -- and for the listing of the address at
+> `path_to_address` from the first activation on, and for `fetch_utxos`,
+> `consolidate_utxos` and the automatic merge under HD -- is recorded in
+> [Chapter 5](05-hd-wallet-support.md) §5.9B R35a--R35c. This section
 > binds the software-HD UTXO behaviour as first-class, testable requirements.
 > It is the coin-side consumer of Chapter 5
 > §5.9A (R29–R31), which binds the crypto substrate (software wallet identity,
@@ -3646,3 +3699,30 @@ R38.8.6 **Tests (two-direction, observable).**
   maintainer's Decision CX of 2026-11-06, this project's own lab timing runs of
   2026-11-06 and this repository's code. They take no forbidden-class input, so
   chapter 01 R38 is not engaged and no gate pass is required.
+- *Scoped addition (2026-11-07) -- the reference-behavior note under
+  R38.6.4m, and the pointers in R38.5.2 and the §38.8 status note.* **KDF
+  Dirty Gate: PASS on 2026-11-07, measure 0.03.** *Inputs:* the forbidden corpus at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, identical at both, consulted **only**
+  to establish the per-server TLS members of an Electrum server entry, which
+  certificate checks `disable_cert_verification` turns off and which remain,
+  how a refused certificate or failed handshake is classified for the pool,
+  how an IP literal is treated, and whether the flag is warned about; together
+  with the public documentation of the TLS library version the reference pins.
+  Behavior and dictated request members only; no private identifier, function
+  body, helper decomposition, error, log or comment text was reproduced. The
+  two pointers carry no reference content of their own; their targets are
+  chapter 05 R35a--R35c, which passed the same gate on 2026-11-07.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.03, no findings. *Extent:* Electrum per-server TLS settings, the
+  certificate-verification switch, connection-failure classification and the
+  connected-line logging, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check,
+  plus two manifest or lock files for the TLS library version; for the whole
+  batch, about 24 source files were read in full or in the relevant regions at
+  the `dev (as of 2026-03-27)` row, whose source tree is identical to
+  `v3.0.0-beta`, and the same modules were diffed against `v2.6.0-beta`.
+  *Method:* reading, with mechanical cross-checks (diffs between the tabled
+  states; pattern searches of the added lines for paths, identifiers and
+  markers); the gate script was not run because the candidate has no code
+  blocks. *Measure:* 0.03, read against the standard that any discretionary
+  finding fails a chapter; dictated-interop and public-surface tokens were
+  excluded from the measured set.

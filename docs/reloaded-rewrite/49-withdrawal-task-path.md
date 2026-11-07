@@ -523,6 +523,51 @@ only, never the text.
 > `z_coin::z_note_lock_tests::withdraw_unsupported`. As for the SLP row, no peer
 > observes the discriminant, and the change has no switch.
 
+R49.27b. *The `from` selector of a UTXO-family withdraw: what it must name
+(reference contract).* *(Spec Reader 2026-11-07, rows `v2.6.0-beta` and
+`v3.0.0-beta` of chapter 02 §2.15A, identical at both; **passed the KDF
+Dirty Gate on 2026-11-07**, measure 0.02.)* The
+direct `withdraw` method and `task::withdraw::init` resolve the sender of a
+UTXO-family (UTXO, QTUM, BCH) withdraw in one shared step, so the following
+holds on both routes alike, with every refusal an HTTP 400 arm of the
+structured withdrawal error of R49.20:
+
+1. *Single-key login.* An explicit `from` is refused with
+   `UnexpectedFromAddress`, **whatever it names**: the selector is not
+   compared with the login's address, so a selector that names the login's
+   own single address -- in the address-id form or the derivation-path form
+   -- is refused exactly like any other. There is no "accept as no-op". This
+   is R49.3, which the reference satisfies on both routes.
+2. *HD login, `from` absent.* `FromAddressNotFound` (R49.4's reference note).
+3. *HD login, `from` present.* The selector is first turned into an account,
+   chain and index: a derivation-path form that is not a standard
+   five-level address path, or whose coin type is not the coin's, answers
+   `UnexpectedFromAddress`. The account must exist in the wallet, else
+   `UnknownAccount` with `account_id`. The address must be **already known**
+   -- its index below the chain's known-address count -- else
+   `UnexpectedFromAddress`; the step derives the address to report it in the
+   error text but records nothing, so a withdraw never adds an address to the
+   wallet (chapter 05 R35a item 4). A chain the coin does not support is an
+   internal-class failure. When all three hold, the key at the selected path
+   signs and change returns to the selected address (R49.27).
+
+> **Compatibility (this repository, 2026-11-07; not corpus-sourced).** R49.3
+> already requires item 1; whether Reloaded's direct `withdraw` and task route
+> both refuse a selector that names the single address, rather than accepting
+> it as a no-op, is for the clean side to confirm against this repository's
+> code when plan `hd-key-unification` item H5.1 is implemented. Items 2 and 3
+> are the contract behind T49.5 and T49.18.
+
+T49.27b. *(Reloaded-original; passed the KDF Dirty Gate together with
+R49.27b on 2026-11-07.)* Under an iguana login, a direct `withdraw` and a task withdraw
+that each carry `from` naming the login's own address (address-id form, then
+derivation-path form) answer `UnexpectedFromAddress`, HTTP 400, on the
+direct route and in `details.error_type` on the task route; under an HD login
+with three known external addresses in account `0`, a `from` naming
+`address_id: 3` answers `UnexpectedFromAddress` and `account_id: 1`
+answers `UnknownAccount`, and `account_balance` afterwards still lists three
+addresses.
+
 ## 49.7 Provenance Footer
 
 - *Inputs:* the project's own revision history and current tree (the
@@ -612,6 +657,30 @@ only, never the text.
   that never read the corpus, from those decisions and this repository's own
   code. The reference facts of the note are unchanged. It takes no
   forbidden-class input and needs no Dirty Gate pass.
+- *Scoped addition (2026-11-07) -- R49.27b, T49.27b and the compatibility
+  note under R49.27b.* **KDF Dirty Gate: PASS on 2026-11-07, measure 0.02.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish how the shared sender-resolution step of
+  the UTXO-family withdraw treats an explicit `from` under a single-key login
+  (refused regardless of what it names, with which discriminant and status,
+  on both routes) and what a `from` must name under an HD login (an existing
+  account, an already-known address; which discriminants otherwise; that
+  nothing is recorded). Behavior and dictated request members and error
+  discriminants only; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced. The compatibility
+  note rests on this repository's own documents; T49.27b is Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.02, no findings. *Extent:* UTXO-family withdraw sender resolution on the
+  direct and task routes, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check;
+  for the whole batch, about 24 source files were read in full or in the
+  relevant regions at the `dev (as of 2026-03-27)` row, whose source tree is
+  identical to `v3.0.0-beta`, and the same modules were diffed against
+  `v2.6.0-beta`. *Method:* reading, with mechanical cross-checks (diffs
+  between the tabled states; pattern searches of the added lines for paths,
+  identifiers and markers); the gate script was not run because the candidate
+  has no code blocks. *Measure:* 0.02, read against the standard that any
+  discretionary finding fails a chapter; dictated-interop and public-surface
+  tokens were excluded from the measured set.
 - *Clean-side amendment (2026-11-05) -- PR #236.* A session that never read
   the corpus added the compatibility row under T49.27a. It rests on R49.27a as
   gated above and on this repository's own code, takes no forbidden-class

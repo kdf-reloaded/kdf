@@ -1376,7 +1376,12 @@ rejects both there and requires an mmrpc 2.0 activation. Reloaded has no mmrpc
 entirely. Reloaded keeps them on the legacy path as a documented extension: a
 client written for the reference never sends such a request, so it is
 unaffected. Adding the mmrpc 2.0 TRON activation the reference uses is future
-work (the RPC wire-parity plan).
+work (the RPC wire-parity plan). *(Pointer added 2026-11-07.)* The
+reference's routes -- `enable_eth_with_tokens` and `task::enable_eth::*`
+serve TRX and TRC20, the legacy methods refuse them -- are recorded in
+[Chapter 21](21-tron-integration.md) §21.4's reference-behavior note, which
+passed the KDF Dirty Gate on 2026-11-07; chapter 21 §21.4 and chapter 35 R35.1.1 describe
+that target, this item the current tree.
 
 > **Suspended for the beta (maintainer decision, 2026-10-26).** TRON support
 > is not finished, so for the coming beta the extension is switched off: while
@@ -1615,3 +1620,10 @@ R55.4.5 and the error body of R55.1.10.
   (R38.6.4n) in the `mode.rpc_data.servers[]` row of R55.5.10 are
   Reloaded-original. They add no reference content, so chapter 01 R38 is not
   engaged and no clearance above is widened.
+- *Pointer added 2026-11-07 -- the sentence under D55.5 naming chapter 21
+  §21.4's reference-behavior note.* It restates that note's fact in one
+  clause and carries no further reference content; its target passed the KDF
+  Dirty Gate on 2026-11-07, as chapter 21 records. **KDF Dirty Gate: PASS on 2026-11-07, measure 0.00.**
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.00, no findings; the pointer was judged with its target, whose clearance
+  is recorded in chapter 21's provenance footer of the same date.

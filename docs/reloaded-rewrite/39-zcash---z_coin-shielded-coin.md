@@ -753,6 +753,51 @@ refusals -- `error_type` `UnsupportedError` (one shared discriminant, `fee`
 checked before `from`), HTTP 400, string `error_data`, delivered in
 `result.details` on the task route -- is bound in chapter 49 R49.27a.
 
+R39.5A.3 *The shielded withdraw response (reference contract).* *(Spec Reader
+2026-11-07, rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+identical at both; **passed the KDF Dirty Gate on 2026-11-07**, measure 0.01.)* A completed shielded withdrawal answers
+the transaction-details object of chapter 49 §49.6 with these members set as
+follows:
+
+- `from` is a one-element list holding the wallet's own Sapling address; `to`
+  is a one-element list holding the destination exactly as the request gave
+  it;
+- `spent_by_me` is the value of the Sapling notes the transaction spends and
+  `received_by_me` the Sapling change it pays back to the wallet; both are
+  non-negative decimals;
+- `my_balance_change` is **`received_by_me - spent_by_me`**: the same
+  orientation as the history row of §39.8.3 and of every other coin's
+  transaction details, hence **negative** for a withdrawal (the amount sent
+  plus the fee, as a negative number);
+- `total_amount` equals `spent_by_me`;
+- `fee_details` is the **tagged** fee object shared with the transparent
+  UTXO coins: `{"type": "Utxo", "coin": "<TICKER>", "amount": <fee>}`, where
+  `amount` is the transaction's fee; a client that reads `fee_details.amount`
+  therefore keeps working, and one that switches on `fee_details.type` sees
+  the UTXO discriminant, not a shielded-specific one;
+- `block_height` and `timestamp` are `0` (the transaction is unmined and the
+  details are built before broadcast); `memo` echoes the request's `memo`;
+  `transaction_type` is the standard transfer; `kmd_rewards` is absent.
+
+> **Compatibility (this repository, 2026-11-07; not corpus-sourced; from the
+> maintainer's field report of 2026-11-06).** Reloaded's shielded withdraw
+> response reports `my_balance_change` as `spent_by_me - received_by_me`
+> (positive) while its history row reports `received_by_me - spent_by_me`
+> (negative); the reference reports the negative value in both places, so the
+> response's sign is a Reloaded defect against R39.5A.3 and R39.6.5c, not a
+> divergence to document. Reloaded's `fee_details` on a shielded withdraw is
+> already the tagged `Utxo` object, which matches R39.5A.3; the earlier
+> wording of R39.6.5c ("`fee_details.amount`") described only its `amount`
+> member and was not a statement that the object is untagged.
+
+T39.5A.c *Response sign and fee shape (R39.5A.3).* *(Reloaded-original;
+passed the KDF Dirty Gate with R39.5A.3 on 2026-11-07.)* A shielded withdraw of `V` with
+fee `F` and change `C` from notes worth `N = V + F + C` shall answer
+`spent_by_me = N`, `received_by_me = C`, `my_balance_change = -(V + F)`,
+`total_amount = N`, and `fee_details` equal to
+`{"type": "Utxo", "coin": <ticker>, "amount": F}`; the same transaction's row
+in `z_coin_tx_history` shall carry the same `my_balance_change`.
+
 > **Compatibility (this repository, 2026-11-04; not corpus-sourced).**
 > Reloaded's shielded coin implements the legacy `withdraw` method and
 > reaches the same code from the task route, and `validateaddress` decodes
@@ -1387,8 +1432,11 @@ fee of R39.6.5f. The response keeps its shape:
 
 - `from` is the wallet's own Sapling address and `to` the Pirate1 address as given;
 - `spent_by_me` is the value of the selected Sapling notes, `received_by_me` the Sapling
-  change, and `my_balance_change` their difference;
-- `fee_details.amount` is the fee of R39.6.5f;
+  change, and `my_balance_change` is `received_by_me - spent_by_me` -- negative for a
+  withdrawal, the same sign as the history row of §39.8.3 (R39.5A.3; *amended 2026-11-07,
+  passed the KDF Dirty Gate with R39.5A.3 on 2026-11-07*);
+- `fee_details` is the tagged UTXO fee object of R39.5A.3 -- `type: "Utxo"`, `coin`, and
+  `amount` equal to the fee of R39.6.5f;
 - `tx_hex` is the transaction of R39.6.5d, broadcast with `send_raw_transaction` like any
   other withdrawal (R39.6.5g).
 
@@ -7059,3 +7107,28 @@ entries in its list cannot be told apart. Passing the position to the fallback c
     transaction reader; the published wallet-database crate and this repository's code.
   - They take no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
     is required.
+- *Scoped addition (2026-11-07) -- R39.5A.3, T39.5A.c, the compatibility
+  note under R39.5A.3, and the amended `my_balance_change` and `fee_details`
+  items of R39.6.5c.* **KDF Dirty Gate: PASS on 2026-11-07, measure 0.01.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish the members of the shielded withdraw
+  response: the orientation of `my_balance_change`, the values of
+  `spent_by_me`, `received_by_me` and `total_amount`, the shape and
+  discriminant of `fee_details`, and the fixed members (`from`, `to`,
+  `block_height`, `timestamp`, `memo`). Dictated response members and their
+  values only; no private identifier, function body, helper decomposition,
+  error, log or comment text was reproduced. The compatibility note rests on
+  the maintainer's field report and this repository's own code; T39.5A.c is
+  Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.01, no findings. *Extent:* the shielded coin's withdraw response, at
+  `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole batch, about
+  24 source files were read in full or in the relevant regions at the `dev (as
+  of 2026-03-27)` row, whose source tree is identical to `v3.0.0-beta`, and
+  the same modules were diffed against `v2.6.0-beta`. *Method:* reading, with
+  mechanical cross-checks (diffs between the tabled states; pattern searches
+  of the added lines for paths, identifiers and markers); the gate script was
+  not run because the candidate has no code blocks. *Measure:* 0.01, read
+  against the standard that any discretionary finding fails a chapter;
+  dictated-interop and public-surface tokens were excluded from the measured
+  set.

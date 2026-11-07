@@ -407,9 +407,11 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   to return in the next beta. No switch exists: the build constants
   `TRON_ACTIVATION_AVAILABLE` and `SOLANA_ACTIVATION_AVAILABLE`
   (`coins/lp_coins_ops.rs`) are `false`. When TRON returns, Reloaded activates
-  TRX and TRC20 on the legacy methods, which GLEEC KDF `v3.0.0-beta` rejects
-  (it requires an mmrpc 2.0 activation); a client written for GLEEC never sends
-  such a request (CRD ch.21, ch.55 D55.5).
+  TRX and TRC20 on the legacy methods as an extension. GLEEC KDF `v3.0.0-beta`
+  serves them only through the platform-with-tokens activation,
+  `enable_eth_with_tokens` and the `task::enable_eth::*` family, and refuses
+  them on the legacy methods, so a client written for GLEEC never sends such a
+  request (CRD ch.21 §21.4, ch.55 D55.5).
 - **Tendermint (Cosmos) coins and tokens are wallet-only in this beta.**
   Activation, balances and `withdraw` work; `setprice`, `buy`, `sell` and
   `start_swap` refuse the coin with the usual "… is wallet only" answer, and an
