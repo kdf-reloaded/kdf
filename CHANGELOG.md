@@ -110,7 +110,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   servers are used. The log names each pinned server once at activation. A browser build cannot pin
   and removes such a server. Komodo DeFi Framework and GLEEC KDF ignore the key, so an entry that
   carries it still works there, without the pin. How to get the value is described in
-  [Network configuration](docs/NETWORK_CONFIG.md#electrum-servers-over-tls). Detail: PR #TBD;
+  [Network configuration](docs/NETWORK_CONFIG.md#electrum-servers-over-tls). Detail: PR #273;
   CRD ch.38 R38.6.4n.
 
 #### Start-up and configuration
@@ -281,7 +281,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   each `SSL` Electrum server that has `disable_cert_verification` set and no `spki_sha256`, the node
   logs one warning at activation, naming the server by host and port: the connection is encrypted,
   but the server is not authenticated. Which certificates the node accepts and refuses is
-  unchanged. Detail: PR #TBD; CRD ch.38 R38.6.4m.
+  unchanged. Detail: PR #273; CRD ch.38 R38.6.4m.
 
 #### Start-up and configuration
 
@@ -582,7 +582,7 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`electrum-tls-server-authentication`](docs/plans/electrum-tls-server-authentication.md) — new,
   in progress: what an `SSL` Electrum server must present, with and without `disable_cert_verification`,
   is now written down (PR #240). So are a warning at activation when the flag is set and an optional
-  pin on the server's key, `spki_sha256`; both are now built (PR #TBD).
+  pin on the server's key, `spki_sha256`; both are now built (PR #273).
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
   now names the gas limits each EVM coin and token will use and where they come from (PR #200);
   open point 3 is decided, and the fee to send an EVM taker fee is now quoted at the gas limit it
