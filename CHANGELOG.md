@@ -390,6 +390,14 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   that finds no new block or fails. Found in a live mainnet test with a deposit from a Pirate1
   address. Detail: PR #263; CRD ch.39 R39.8.0aj1.
 
+- **The ARRR history now names the recipient of a withdrawal, and lists the wallet's own address
+  once.** Every history row used to list the wallet's own address twice, once in a unified form
+  beginning with `u1` that no ARRR wallet accepts. A withdrawal's row did not name its recipient,
+  before or after mining, whether it paid a `zs1…` or a Pirate1 address. A withdrawal now keeps
+  its destination, exactly as the request gave it, in a small file beside the wallet database
+  (`<TICKER>_RELOADED_TX_ADDRESSES.db`), and the history lists it. Found in a live mainnet test.
+  Detail: PR #NNN; CRD ch.39 R39.8.9d1, R39.8.9d2.
+
 #### EVM coins
 
 - **A taker on an EVM chain with fast blocks, such as Monad, now finds the maker's spend of its
@@ -608,6 +616,13 @@ lives.
   coin is offered only once the Electrum server lists it. More in
   [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md).
   Detail: PR #181; CRD ch.38 R38.5B.8, D38.5B.2, D38.5B.4.
+- **The ARRR history names no recipient for a withdrawal made before this release, or by another
+  node on the same seed, and no address for a swap's transparent parts.** The recipient comes from
+  the node's own record, written when the withdrawal is built, so a row without a record names
+  only the wallet's own address. A swap's payment, spend and refund rows do not list the script
+  address or the fee address yet; that is scheduled. More in
+  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PR #NNN;
+  CRD ch.39 R39.8.9d2 (d), status note under R39.8.9e.
 - **The swap watcher does not work yet.** A watcher is another node that finishes a swap for you
   when you are offline. No swap hands its data to a watcher yet, for any coin (issue #56), so keep
   your node running until your swaps have finished. Bitcoin-family coins (UTXO coins such as RIN,
