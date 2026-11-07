@@ -479,6 +479,15 @@ the corpus, and carries no clean-room restriction.
   covers price sources, which the reference's price path does not have; it is
   a Reloaded extension and unaffected by this chapter.
 
+> **Status update (reloaded, 2026-11-07).** Findings F1, F2 and F3 are fixed by
+> PR #TBD, with the decisions of §62.10 (DO to DU): F1 by the single fetch at the
+> terminal report of a successful own swap, on the sources of D62.1 and the
+> derivation of R62.5.1; F2 by the request key `price_urls` (D62.6); F3 by the
+> reference provider set and the `price_providers` key (D62.4). The bot's
+> per-pair acceptance, staleness window and cancellation stay as described above
+> (parity). One latent defect of the bot is fixed with them: a zero `rel` price
+> now gives no rate (R62.5.1 d) instead of a division by zero.
+
 ## 62.10 Decisions left to the maintainer
 
 **D62.1** *Endpoint list and order.* Which endpoints Reloaded ships, and in
@@ -492,6 +501,28 @@ CORS headers (R62.2.7), which decides the browser default. The maintainer's
 list must also say whether the dead `komodian.info` / `komodo.earth` /
 `komodo.live` hosts are dropped (recommended) or kept at the end.
 
+**Decided 2026-11-07 (Decision DO).** Reloaded ships two *sources*, combined
+under D62.2. A source is one URL or an ordered list of URLs; the first URL of a
+source that answers is the source's answer, with no rotation. Source 1 is
+`https://prices.gleec.com/api/v2/tickers?expire_at=259200`, followed in the same
+source by its cache `https://defistats.gleec.com/api/v3/prices/tickers_v2?expire_at=259200`
+(asked only if the first fails); source 2 is
+`https://prices.cipig.net:1717/api/v2/tickers?expire_at=259200`. The query
+parameter `expire_at` is the greatest age, in seconds (259200 = 72 hours), of
+the tickers the service serves; without it the cipig service serves tickers
+many months old. The dead `komodian.info`, `komodo.earth` and `komodo.live`
+hosts are dropped. One list serves every consumer (the bot and the snapshot).
+A top-level `MM2.json` key `price_urls` replaces the default list for every
+consumer when present: an array whose items are each a URL string (one source)
+or a non-empty array of URL strings (one source with in-order fallback). A
+value that is not such an array, an empty array included, is ignored with one
+WARN that names the key (not its value), and the default applies. The request
+keys of the bot (D62.6) still override the list for that bot. Only the GLEEC
+sources can be read by a browser build (R62.2.7). *Divergence:* the reference
+rotates the bot's list after a success (R62.2.4); Reloaded does not, so T62.1 of
+§62.12 does not apply. Reloaded's sources do not need it: the dead first URL of
+the reference's list was the reason for the rotation.
+
 **D62.2** *Fallback versus combining.* Whether Reloaded (a) keeps the
 reference's first-success rule (R62.2.4/R62.2.5), (b) fetches two sources and
 uses the first only when the second agrees within a tolerance, or (c) fetches
@@ -504,6 +535,22 @@ differed by more than 2 % between two live feeds, several by a factor of 2–60
 (§62.5 observation), so (a) silently prices those pairs from whichever host
 answered first. The reference's answer is (a).
 
+**Decided 2026-11-07 (Decision DP).** Combine, with a 5 % cross-check. All
+sources are fetched in parallel. From every answering source a record is dropped
+if its `price_provider` is not recognized (D62.4) or its
+`last_updated_timestamp` is zero. Then, per ticker: present in one source, it is
+used; present in several sources with (highest price - lowest price) / lowest
+price at most 5 %, the record with the newest timestamp is used, and on a tie
+the earlier source's; above 5 %, the ticker is a *conflict* and is absent from
+the combined table, which the consumers treat like a missing ticker (the pair
+has no rate; the swap is stored without prices). The tolerance is a constant of
+the code, not a setting. The ticker lookup of R62.4.3 applies to the combined
+table. A source that fails is left out and the others are used alone; the fetch
+fails only if no source answered. The figure rests on live data of 2026-11-07:
+same-provider differences stayed below 3.6 % (timing), and the differences above
+5 % that were seen were a factor of two or more with different providers on the
+two sides (for example KMD at 0.00313 against 0.00680 USD).
+
 **D62.3** *Warn-once and back-off.* The reference logs one error per failed
 endpoint per attempt forever (R62.6.7). Reloaded already logs at warn level.
 Options: (a) as the reference; (b) one warn line per endpoint per failure
@@ -513,6 +560,28 @@ a back-off period and keep the rotation of R62.2.4. Whether to apply a
 request-specific timeout (the reference applies none, R62.2.3) belongs here:
 a 10 s per-attempt cap would bound a cycle with a dead first host to about 10 s
 instead of the transport's limit.
+
+**Decided 2026-11-07 (Decision DQ).** Warn once per transition, plus a cap of
+10 seconds per attempt on a native build. The state is kept per endpoint, keyed by its host label
+(scheme, host and port, never the path or query), and is shared node-wide by
+every consumer. One WARN is logged when an endpoint goes from working (or from
+unknown) to failing; DEBUG while it keeps failing; one INFO when it answers
+again. A failure is a transport error, a timeout, a status other than 200, a
+body that is not UTF-8 or a body that does not parse. The same rule applies per
+ticker to conflicts (D62.2): one WARN naming the ticker, both prices, both
+providers and the hosts; DEBUG while the conflict lasts; one INFO when the prices
+agree again; the conflict state is kept per list of sources, so consumers with
+different lists do not end or restart each other's episodes. The bot's own
+"no source answers" case follows the same rule: one ERROR when it starts (with
+the number of orders cancelled), DEBUG while it lasts, one INFO when a source
+answers again; the cancellation itself is unchanged (D62.5). There is no
+back-off. On a native build each attempt on a URL is capped at 10 s by the
+transport's bounded request, which has its own tests. A browser build also
+wraps the fetch in the executor's timer for the same 10 s; no test covers that
+yet, so the cap is not claimed for the browser. The text of an error that
+reaches a log line, the body of a server's answer included, is scrubbed of the
+URL it was asked for, so that a key in a configured URL cannot be echoed into a
+log.
 
 **D62.4** *Known-provider list and its extension.* Options: (a) adopt the
 reference set of R62.5.2 exactly (drop `coinmarketcap`, add
@@ -526,12 +595,34 @@ decision: an unrecognized name means "the aggregator could not source this
 price", and (d) removes that protection. Whichever is chosen, chapter 42 §42.5
 must be rewritten to match (§62.11).
 
+**Decided 2026-11-07 (Decision DR).** The reference set of R62.5.2 is the
+default: `binance`, `coingecko`, `coinpaprika`, `forex`, `livecoinwatch`
+(`coinmarketcap` is dropped, `gleeccex` is not added). A top-level `MM2.json` key
+`price_providers`, an array of strings, replaces the default set when present;
+a value that is not a non-empty array of strings is ignored with one WARN that
+names the key, and the default applies. The literal `unknown` is never
+recognized, even if listed (one WARN if it is). Only `price_provider` is tested,
+against the active set. A wrong list disables pricing for every ticker whose
+provider it leaves out: those records are dropped (D62.2), so the bot quotes no
+pair and the snapshot stores no prices for them. Chapter 42 §42.5 is rewritten
+accordingly.
+
 **D62.5** *Order fate on a lost rate.* Whether Reloaded keeps the reference's
 immediate cancellation of a pair's order when its rate is refused (R62.6.5)
 and of every configured pair's orders — operator-placed ones included — when
 the whole fetch fails (R62.6.6); or introduces a grace of N consecutive
 failed cycles before cancelling; or restricts the all-pairs cancellation to
 orders the bot itself created. The reference's answer is immediate, by pair.
+
+**Decided 2026-11-07 (Decision DS).** Parity: the immediate cancellation of
+R62.6.5 and R62.6.6 is kept, as it is in the reference and as Reloaded's bot
+already does (§62.9). A conflict (D62.2) makes the pair's rate undefined, so the
+pair is refused and its order cancelled in that cycle. **This behavior is under
+observation in v0.4.0 and is to be revisited in the next version**: the known
+side effects are that an order the operator placed by hand on a bot pair is
+cancelled too, and that one failed cycle takes every order of every configured
+pair off the book; a grace period and a restriction to the bot's own orders are
+the options kept for that revisit.
 
 **D62.6** *Config override key and request strictness.* (i) Whether the bot
 accepts the reference's `price_urls` array in addition to Reloaded's
@@ -545,12 +636,35 @@ the bot's request key then overrides it for the bot only. The GLEEC
 compatibility table of `docs/GLEEC_COMPATIBILITY.md` would carry the new key
 under the default-side rule, since no wire value changes.
 
+**Decided 2026-11-07 (Decision DT).** The bot request accepts `price_urls`, an
+array in the form of the `MM2.json` key of D62.1 (a flat array of URL strings
+means independent sources, combined under D62.2; an item that is an array is one
+source with in-order fallback), beside Reloaded's `price_url`, a string of
+comma-separated URLs that is *one* source whose URLs are tried in order. A
+request that carries both keys is refused; a malformed value of either key is
+refused (the error names the key, not its value); neither silently falls back to
+the default. Precedence for the bot: the request key, then the `MM2.json` key
+`price_urls`, then the default. `price_urls` is the key the reference's start
+request uses; `docs/GLEEC_COMPATIBILITY.md` carries the `MM2.json` keys under
+the default-side rule (no wire value changes).
+
 **D62.7** *Snapshot staleness and receive-path fetch.* Whether the snapshot
 consumer applies the bot's 300 s window or a window of its own (the reference
 applies none, R62.7.4), and whether a received report (R62.7.2) is priced at
 receive time as the reference does or only when the report carries no
 prices. The second question also appears in the parity-gaps page under
 chapter 51 R50A item 5.
+
+**Decided 2026-11-07 (Decision DU).** Parity with the reference. The snapshot
+uses the sources of D62.1 and the combination of D62.2, and derives the two
+prices under R62.5.1 (a)-(d) on the active provider set; it applies no age
+window beyond `expire_at`. It fetches once, when the node makes the terminal
+report of one of its own swaps, and only for a successful swap: a failed own swap
+is stored without prices and causes no price request. The publication of the
+report makes no price request of its own. A received report is priced at receive
+time, whether or not the reported swap succeeded, and whatever the report
+carried is not used. A conflict, a missing ticker or a failed fetch stores the
+swap without prices and never fails the swap record.
 
 ## 62.11 Cross-chapter consequences
 
@@ -580,6 +694,14 @@ chapter 51 R50A item 5.
   with `price_urls` of [dead host, local server]: the first cycle logs one
   error for the dead host and prices from the local server; the second cycle
   contacts the local server first (R62.2.4).
+  *Reloaded:* T62.1 does not apply, because Reloaded does not rotate (Decision
+  DO); the equivalent test is that a source asks its first URL first on every
+  fetch. The refusals of T62.2 (up to the missing rate), the lookup of T62.4 and
+  the start-request cases of T62.7 are unit tests of the price service and the
+  bot's start request (`price_service_tests.rs`, `simple_market_maker_tests.rs`);
+  T62.6 is covered by `terminal_report_tests.rs`. The staleness window of T62.3
+  and the cancellation of T62.2 and T62.5 are the bot's existing logic and need
+  a running node; they are lab rows.
 - **T62.2** Serve a document whose record for the rel coin has
   `last_price: "0"`: the pair is refused, and an existing order of the pair
   is cancelled in that cycle (R62.5.1 d, R62.6.5). Repeat with
@@ -647,5 +769,9 @@ chapter 51 R50A item 5.
   on the discretionary-expression basis; no private name, body, control-flow
   transcription, message wording or module tree was found. The four
   reference states named exist as rows of chapter 02 §2.15A.
+- *Reloaded resolutions of 2026-11-07 (§62.9 status update, §62.10 "Decided"
+  paragraphs, §62.12 note):* Reloaded-original maintainer decisions DO to DU,
+  taken after the gated text above. They take no reference input and state no
+  reference fact, so they need no Dirty Gate pass.
 - *Authorship:* KDF Spec Reader, round 0.4.0-4, 2026-11-07; cleared by the
   KDF Dirty Gate on 2026-11-07.

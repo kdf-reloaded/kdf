@@ -90,9 +90,9 @@ cfg_wasm32! {
 #[path = "lp_ordermatch/lp_bot.rs"] mod lp_bot;
 #[path = "lp_ordermatch/maker_balance_watch.rs"]
 mod maker_balance_watch;
+pub use lp_bot::{price_service, start_simple_market_maker_bot, stop_simple_market_maker_bot, TradingBotEvent};
 #[cfg(test)]
-pub use lp_bot::{process_price_request, StartSimpleMakerBotRequest, KMD_PRICE_ENDPOINT};
-pub use lp_bot::{start_simple_market_maker_bot, stop_simple_market_maker_bot, TradingBotEvent};
+pub use lp_bot::{process_price_request, StartSimpleMakerBotRequest};
 
 #[path = "lp_ordermatch/my_orders_storage.rs"]
 mod my_orders_storage;
