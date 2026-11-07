@@ -243,7 +243,12 @@ impl ParseCoinAssocTypes for UtxoStandardCoin {
 
     fn parse_preimage(&self, preimage: &[u8]) -> Result<Self::Preimage, Self::PreimageParseError> {
         let tx: UtxoTx = deserialize(preimage)?;
-        Ok(UtxoTxPreimage(tx.into()))
+        // The suffix is this coin's own (CRD ch.61 R61.4.1), never a value from the peer's bytes.
+        let fields: &UtxoCoinFields = self.as_ref();
+        Ok(UtxoTxPreimage(TransactionInputSigner::from_transaction(
+            tx,
+            fields.conf.sighash_suffix,
+        )))
     }
 
     fn parse_signature(&self, sig: &[u8]) -> Result<Self::Sig, Self::SigParseError> {

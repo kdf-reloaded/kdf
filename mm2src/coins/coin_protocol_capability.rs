@@ -7,7 +7,7 @@
 //!
 //! Public exports:
 //!
-//! - [`CAPABILITY_TX_V6`], the one key in use (R59.4A.4);
+//! - [`CAPABILITY_TX_V6`] and [`CAPABILITY_SIGHASH_SUFFIX`], the keys in use (R59.4A.4);
 //! - [`append_capability_word`], the writer (R59.4A.1);
 //! - [`declared_capabilities`], [`DeclaredCapabilities`] and [`declares_capability`], the fail-closed
 //!   reader (R59.4A.2).
@@ -27,6 +27,49 @@ use std::collections::BTreeSet;
 /// Capability key: this node builds and spends the version-6 transaction format of the Ironwood
 /// upgrade (CRD ch.59 R59.4A.4; the rule that requires it is bound in ch.39).
 pub const CAPABILITY_TX_V6: &str = "tx_v6";
+
+/// Capability key: this node signs every spend of the coin with the coin's configured sighash suffix
+/// (CRD ch.59 R59.4A.4; the rule that requires it is bound in ch.61 R61.5A). BC2 swaps require a
+/// counterparty that signs with the suffix.
+pub const CAPABILITY_SIGHASH_SUFFIX: &str = "sighash_suffix";
+
+/// The shortest gap between two warnings about declined counterparties (CRD ch.61 R61.5A.5).
+pub(crate) const DECLINE_WARNING_INTERVAL_SECS: u64 = 3_600;
+
+/// The log lines of one decline.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct DeclineLines {
+    /// One per decline.
+    pub(crate) debug: String,
+    /// At most one per log per [`DECLINE_WARNING_INTERVAL_SECS`], with the number of declines since the
+    /// previous warning (this one included).
+    pub(crate) warning: Option<String>,
+}
+
+/// Rate-limit state of the declined-counterparty warning of one coin (CRD ch.61 R61.5A.5). The clock is
+/// injected so the limit is testable; the caller supplies the wording.
+#[derive(Debug, Default)]
+pub(crate) struct DeclineLog {
+    declined_since_warning: u64,
+    last_warning_sec: Option<u64>,
+}
+
+impl DeclineLog {
+    /// Records one decline at `now_sec`. `debug` is the line of this decline; `warning` builds the warning
+    /// from the number of declines since the previous one and is called only when a warning is due.
+    pub(crate) fn record(&mut self, debug: String, warning: impl FnOnce(u64) -> String, now_sec: u64) -> DeclineLines {
+        self.declined_since_warning += 1;
+        let due = self.last_warning_sec.map_or(true, |last| {
+            now_sec.saturating_sub(last) >= DECLINE_WARNING_INTERVAL_SECS
+        });
+        let warning = due.then(|| {
+            let declined = std::mem::take(&mut self.declined_since_warning);
+            self.last_warning_sec = Some(now_sec);
+            warning(declined)
+        });
+        DeclineLines { debug, warning }
+    }
+}
 
 /// MessagePack marker of `true`, the only value that declares a capability.
 const MARKER_TRUE: u8 = 0xc3;

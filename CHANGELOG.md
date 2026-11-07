@@ -95,6 +95,33 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   times out can see why. The protocol information itself is never logged. Nothing else changes in
   how orders are matched. Detail: PR #235; CRD ch.59 R59.4A.6.
 
+#### UTXO coins and Electrum
+
+- **A coin entry can now name a "sighash suffix", which Bitcoin II (BC2) needs.** Since block 57,750
+  the BC2 network checks every signature against a digest that carries an extra 4-byte field after the
+  signature-hash type. With the new top-level key `sighash_suffix` (a `0x`-prefixed hexadecimal value
+  of at most 32 bits; BC2's is `0x01324342`) every input the node signs for the coin uses that digest:
+  withdrawals, the DEX-fee transaction, HTLC payments, spends and refunds, the taker's pre-signature
+  of a version-two swap and `sign_raw_transaction`. A coin without the key signs exactly as before. A
+  malformed value, or a value on a Radiant or Zcash-family coin, fails the activation of the coin
+  with an error naming the key, a hardware wallet
+  refuses to sign for such a coin, and a BC2 entry without the key logs one warning that the network
+  will refuse its transactions. The optional key `sighash_suffix_height` is checked but not used yet.
+  The shared coins list still has to carry the key on the `BC2` and `BC2-segwit` entries (see Known
+  limitations). Detail: CRD ch.61.
+- **A swap of a coin with a sighash suffix now starts only with a counterparty that signs with it.**
+  **BC2 trading in KDF Reloaded is incompatible with other Komodo DeFi Framework implementations:**
+  they cannot spend BC2 since block 57,750, and KDF Reloaded declines a BC2 swap with them before it
+  starts. BC2 swaps require a counterparty that signs with the suffix. This check is temporary and
+  will be removed as soon as the other implementations support suffix signing. A coin with a non-zero `sighash_suffix`
+  now states that in its orders and match messages and declines a counterparty that does not, on the
+  taker and the maker side, before anything is paid. KDF Reloaded nodes that predate the statement are
+  declined too; Komodo DeFi Framework and GLEEC KDF keep matching as before, and their taker sees a
+  request that times out. Each decline is logged at debug level with its cause, and at most once an
+  hour a warning gives the number declined. Setting `require_suffix_counterparty` to `false` in the
+  coin entry turns the requirement off and restores the earlier behavior, in which a BC2 swap with such
+  a node can fail after a payment has been made. Detail: CRD ch.61 R61.5A; ch.59 §59.4A.
+
 #### Start-up and configuration
 
 - **The start-up log now lists the files the node uses.** At start the node logs, at INFO and as
@@ -555,7 +582,7 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md) — new, planning: the Bitcoin II
   network has required an extra field in every signature digest since block 57,750, so
   transactions signed the ordinary way are rejected. The rule is written (CRD chapter 61, PR
-  #261); the signing change, the coins-file entries and the live check follow.
+  #261) and the signing change is implemented; the coins-file entries and the live check follow.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
   Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
   they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
@@ -727,13 +754,18 @@ lives.
   request has no `memo` field, so a memo sent with it is ignored and the shielded output carries
   none. Komodo DeFi Framework and GLEEC KDF echo the request's memo in the answer. Memo support is
   a separate, later item. Detail: PR #271; CRD ch.39 status note under R39.5A.3.
-- **Bitcoin II (BC2) transactions are rejected by the network.** Since block 57,750 the BC2
-  network checks every signature against a digest that includes an extra field of its own. KDF
-  Reloaded does not add it yet, so a BC2 withdrawal or swap payment is refused when it is
-  broadcast ("Signature must be zero for failed CHECK(MULTI)SIG operation"). Komodo KDF
-  2.6.0-beta was tested and is refused the same way, so a swap that needs a Komodo KDF node to
-  sign BC2 cannot complete either. The fix for KDF Reloaded is specified and planned. More in
-  [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md). Detail: PR #261; CRD ch.61.
+- **The Komodo DeFi Framework and GLEEC KDF builds available in November 2026 cannot spend BC2
+  (Bitcoin II).** Since block 57,750 the BC2 network rejects every spend signed without the chain's
+  sighash suffix, and those builds do not sign with it, so they can neither withdraw BC2 nor complete
+  a BC2 swap with any counterparty. KDF Reloaded declines a BC2 swap with such a node before it
+  starts, and signs with the suffix (PR #264), but only for a coin entry that carries
+  `"sighash_suffix": "0x01324342"`; until the shared coins list has the key on the `BC2` and
+  `BC2-segwit` entries, a BC2 withdrawal or swap payment is refused at broadcast ("Signature must be
+  zero for failed CHECK(MULTI)SIG operation"), and the node logs a warning when BC2 activates
+  without the key. A hardware wallet cannot sign this digest, so BC2 cannot
+  be used with one. The global coins repository may not carry the key yet: add `sighash_suffix`
+  (`"0x01324342"` on `BC2` and `BC2-segwit`) to your coins file or use the KDF Reloaded coins file.
+  Detail: issue #252; CRD PR #261.
 - **The miner fee of a Siacoin withdrawal is estimated from a transaction length that is smaller than
   the transaction sent.** Sia nodes accepted these fees in tests. Detail: PR #239; CRD ch.20 D6.
 - **Orders that sell Siacoin (SC) are not shown to Komodo KDF and GLEEC KDF takers, and a GLEEC maker
@@ -773,11 +805,6 @@ lives.
   a refund waits until it advances again, and the log does not say so. In a test, a refund started
   four hours after the HTLC lock expired, because the coin's node had stood still for almost six
   hours; the log only repeated "wait refund till" every 24 seconds.
-- **BC2 (Bitcoin II) cannot be withdrawn or swapped since block 57,750.** Since that height the BC2
-  chain adds a fork id to every signature, as replay protection. KDF Reloaded does not sign that way
-  yet, so the network rejects its BC2 transactions; Komodo DeFi Framework 2.6.0-beta is rejected the
-  same way. In the lab, the rejected withdrawals moved no funds. Work in progress: a fix is under
-  way. Detail: issue #252.
 
 ## [0.3.0-beta.1] — 2026-11-01
 
