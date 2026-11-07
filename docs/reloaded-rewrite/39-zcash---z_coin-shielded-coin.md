@@ -790,6 +790,15 @@ follows:
 > wording of R39.6.5c ("`fee_details.amount`") described only its `amount`
 > member and was not a statement that the object is untagged.
 
+> **Status update (reloaded, 2026-11-07).** The sign is fixed by PR #271: the
+> withdraw response reports `received_by_me - spent_by_me`, for a Sapling and a
+> Pirate1 destination alike (T39.5A.c). The `memo` member of R39.5A.3 is not
+> implemented. Reloaded's withdraw request has no `memo` member, so a memo sent
+> with it is ignored, the shielded output carries none, and the response has no
+> `memo` member. Memo support (the request member, the response member and the
+> memo in the Sapling output) is a separate, later item. Until then the absence
+> is listed in `RELOADED_VS_GLEEC.md` and in the changelog's Known limitations.
+
 T39.5A.c *Response sign and fee shape (R39.5A.3).* *(Reloaded-original;
 passed the KDF Dirty Gate with R39.5A.3 on 2026-11-07.)* A shielded withdraw of `V` with
 fee `F` and change `C` from notes worth `N = V + F + C` shall answer
@@ -1273,6 +1282,10 @@ is the shielded coin's use of the capability word of
 > light-mode coin that sends, declines and accepts through the coin's own methods. The
 > three decline causes of (d) are told apart by a crate-internal classifier next to the
 > generic reader of Chapter 59 §59.4A, which leaves the reader's result unchanged.
+>
+> **Status (2026-11-07).** The check is temporary, by the maintainer's decision of
+> 2026-11-07: it will be removed once version 6 is generally supported. The user documents
+> (README, changelog, `RELOADED_VS_GLEEC.md`, `docs/GLEEC_COMPATIBILITY.md`) say the same.
 
 T39.6.4f *Counterparty version-6 capability.*
 - (a) The protocol information of an ARRR coin is its address-format bytes followed by the
