@@ -545,6 +545,20 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 
   Detail: PRs #204, #214; CRD ch.32 R-MP2 item 2.
 
+#### Siacoin
+
+- **A wallet without SC can now receive SC in a swap.** The swap refused to start with "Not enough SC
+  for swap: available 0, required at least 0.00001", although the receiving side spends no wallet
+  funds. The miner fee of the spend is taken from the payment itself, and the node now reports it that
+  way. Detail: PR #278; CRD ch.20 R-S11.
+
+- **Siacoin orders with the default minimum volume are no longer refused.** The minimum trading volume
+  of SC was one hasting, so the default minimum volume of an order could fall under the miner fee and
+  `setprice`, `sell` and `buy` refused it as too small (for example selling 10000 SC). The minimum
+  trading volume of SC is now 0.0002 SC, ten times the miner fee; the minimum transaction amount stays
+  one hasting. The Siacoin miner fee shown for a swap is now the 0.00002 SC actually paid, not
+  0.00001 SC. Detail: PR #278; CRD ch.20 R-S11, ch.60 R60.6.7.
+
 #### UTXO coins and Electrum
 
 - **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
