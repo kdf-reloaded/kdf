@@ -170,7 +170,7 @@ Each package changes no wire shape and has its own switch, so that a lab can run
     - Above 5 %: (a) and (d) first; if they cut too little, (e). Neither (b) nor (b) with (a).
   - Measured 2026-11-07: the fault-free run sent no sync request at all, so B1 added none. Per
     Decision DA the check stays as it is, and the cost is recorded in CRD ch.32 R-Q5d's divergence
-    note (PR #TBD).
+    note (PR #274).
 - **B1, the timeout of the request to another relay.** The request has the 10 s timeout of every sync
   request, not the 5 s bound of R-Q5b. An answer after the bound no longer reaches the requests parked
   behind the node's own request, which were answered at their bound, but it still heals the node and
