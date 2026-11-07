@@ -186,6 +186,7 @@ fn t38_6_4_1_bounds_and_validation() {
                 url: format!("127.0.0.1:{}", 40_000 + i),
                 protocol: Default::default(),
                 disable_cert_verification: false,
+                spki_sha256: None,
                 timeout_sec: None,
             })
             .collect()
@@ -440,18 +441,21 @@ fn t38_6_4_5_permanent_removal() {
             url: "127.0.0.1:1".into(),
             protocol: ElectrumProtocol::WS,
             disable_cert_verification: false,
+            spki_sha256: None,
             timeout_sec: None,
         };
         let unparseable = ElectrumRpcRequest {
             url: "not-an-address".into(),
             protocol: Default::default(),
             disable_cert_verification: false,
+            spki_sha256: None,
             timeout_sec: None,
         };
         let unresolvable = ElectrumRpcRequest {
             url: "no-such-host.invalid:50001".into(),
             protocol: Default::default(),
             disable_cert_verification: false,
+            spki_sha256: None,
             timeout_sec: None,
         };
         // A TLS address needs a host name; an IP literal has none.
@@ -459,6 +463,7 @@ fn t38_6_4_5_permanent_removal() {
             url: "127.0.0.1:50002".into(),
             protocol: ElectrumProtocol::SSL,
             disable_cert_verification: false,
+            spki_sha256: None,
             timeout_sec: None,
         };
         let client = pool_client_of(
@@ -502,6 +507,7 @@ fn t38_6_4_5_a_pool_without_a_usable_server_fails_every_request() {
             url: "127.0.0.1:1".into(),
             protocol: ElectrumProtocol::WS,
             disable_cert_verification: false,
+            spki_sha256: None,
             timeout_sec: None,
         };
         let client = pool_client_of(vec![ws], 1, None, test_timings());

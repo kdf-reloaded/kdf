@@ -729,6 +729,8 @@ this value for every family that can swap.
   refusal. The Sia floor stays at parity; the pre-trade check of ch. 60
   R60.6.7 keeps such a payment from being created (maintainer decision
   2026-10-25, ch. 60 D60.2).
+  Revised 2026-11-07: reloaded raised its Sia minimum trading volume to
+  0.0002 SC, ten times the miner fee (ch. 20 R-S11 revision).
 - Informative, no action: TRON shares the EVM accessor, so PR #66 (#12)
   fixes its value too (ch. 21 §21.11A). Solana has no parity target,
   because neither tree can trade it (ch. 40 §40.6A, finding F6).

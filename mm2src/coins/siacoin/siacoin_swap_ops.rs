@@ -1420,4 +1420,24 @@ mod htlc_miner_fee_refusal_tests {
         assert!(htlc_value_after_miner_fee(safe, Currency::DEFAULT_FEE).is_some());
         assert!(htlc_value_after_miner_fee(Currency(safe.0 - 1), Currency::DEFAULT_FEE).is_none());
     }
+
+    #[test]
+    fn the_miner_fee_is_the_fixed_figure_of_2e19_hastings() {
+        assert_eq!(Currency::DEFAULT_FEE, Currency(20_000_000_000_000_000_000));
+        assert_eq!(
+            hastings_to_siacoin(Currency::DEFAULT_FEE),
+            "0.00002".parse::<BigDecimal>().unwrap()
+        );
+    }
+
+    #[test]
+    fn the_minimum_trading_volume_is_ten_times_the_fee_and_above_the_safe_amount() {
+        assert_eq!(MIN_TRADING_VOL_FEE_MULTIPLIER, 10);
+        assert_eq!(min_trading_vol_amount(), "0.0002".parse::<BigDecimal>().unwrap());
+        assert!(min_trading_vol_amount() >= htlc_safe_amount());
+        // The minimum transaction amount stays one hasting (no dust limit on Sia).
+        let one_hasting: BigDecimal = "0.000000000000000000000001".parse().unwrap();
+        assert_eq!(hastings_to_siacoin(1u64.into()), one_hasting);
+        assert!(min_trading_vol_amount() > hastings_to_siacoin(1u64.into()));
+    }
 }

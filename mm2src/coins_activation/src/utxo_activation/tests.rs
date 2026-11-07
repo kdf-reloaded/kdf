@@ -331,6 +331,8 @@ fn electrum_servers_accept_a_per_server_timeout_and_a_protocol() {
         "mode": { "rpc": "Electrum", "rpc_data": { "servers": [
             { "url": "a:1", "protocol": "SSL", "disable_cert_verification": true, "timeout_sec": 2.5 },
             { "url": "b:2" },
+            { "url": "c:3", "protocol": "SSL", "spki_sha256": "00" },
+            { "url": "d:4", "protocol": "SSL", "spki_sha256": ["00", "11"] },
         ], "min_connected": 1, "max_connected": 2 } },
     }));
     let servers = match params.mode {
@@ -341,6 +343,10 @@ fn electrum_servers_accept_a_per_server_timeout_and_a_protocol() {
     assert!(matches!(servers[0].protocol, ElectrumProtocol::SSL));
     assert!(servers[0].disable_cert_verification);
     assert_eq!(servers[1].request_timeout(), None);
+    // The key pin is kept as configured (a string or an array); checking it is up to the pool (CRD ch.38 R38.6.4n).
+    assert!(servers[0].spki_sha256.is_none() && servers[1].spki_sha256.is_none());
+    assert_eq!(servers[2].spki_sha256, Some(json!("00")));
+    assert_eq!(servers[3].spki_sha256, Some(json!(["00", "11"])));
     #[cfg(not(target_arch = "wasm32"))]
     assert!(matches!(servers[1].protocol, ElectrumProtocol::TCP));
     #[cfg(target_arch = "wasm32")]
