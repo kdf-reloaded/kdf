@@ -257,6 +257,21 @@ reversal between the wallet database's order and the displayed one would fail th
 | `t39_8_9d2_a_pirate1_withdrawal_names_its_recipient_in_every_row` | T39.8.9d2 | The same for a Pirate1 destination, which the wallet's Sapling keys cannot open: the recipient is the request's string |
 | `t39_8_9d2_an_unsubmitted_withdrawal_adds_no_row_and_its_entry_goes_after_expiry` | T39.8.9d2 (b), (c) | A withdrawal that is built and never submitted adds no row and does not appear on the row of another withdrawal; once the scan passes the expiry height its entry is removed while the mined withdrawal's entry stays |
 
+## ARRR withdraw response: `my_balance_change` is received minus spent (2 tests)
+
+Location: `mm2src/coins/z_coin/z_note_lock_tests/withdraw_balance_change.rs` (a real Light-mode coin over
+a wallet database and the scripted lightwalletd transport of the note-lock harness). CI cell: `shielded`
+(`cargo test -p coins --lib z_coin::`). CRD: chapter 39, R39.5A.3, R39.6.5c, T39.5A.c.
+
+The tests make real Sapling spend proofs (the Pirate1 one also a real Halo2 proof, with the one-time key
+derivation described under the Pirate1 withdrawals) and skip with a message where the Sapling parameter
+files are absent.
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `t39_5a_c_a_sapling_withdrawal_reports_received_minus_spent` | T39.5A.c, R39.5A.3 | A real `withdraw` of `V` with fee `F` and change `C` from one note `N = V + F + C`: `spent_by_me = N`, `received_by_me = C`, `my_balance_change = -(V + F)` (negative, equal to received minus spent), `total_amount = N`, the tagged `Utxo` fee with the coin's ticker and `F`, block height and timestamp 0, no `kmd_rewards`. After `send_raw_tx` the history row of the same transaction carries the same `my_balance_change`, `spent_by_me` and `received_by_me`, unmined and after the block that mines it |
+| `t39_5a_c_a_pirate1_withdrawal_reports_received_minus_spent` | T39.5A.c, R39.6.5c | The same for a Pirate1 destination, whose fee is the fixed 10,000 base units whatever the configured fee is |
+
 ## ARRR withdrawal refuses `fee` and `from` (2 tests)
 
 Location: `mm2src/coins/z_coin/z_note_lock_tests/withdraw_unsupported.rs` (a real Light-mode coin over a
