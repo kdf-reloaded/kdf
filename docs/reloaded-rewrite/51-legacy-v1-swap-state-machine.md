@@ -982,7 +982,11 @@ warning. A broadcast that the network refuses is the usual outcome, since
 the parties have normally broadcast the transaction already (it is in the
 mempool or in a block), and is logged at debug level only. Which nodes act
 on the topic, and what a reference receiver does with the message, are
-open (D6).
+open (D6). *(Pointer added 2026-11-07.)* The reference's publishing side --
+which steps of the maker, the taker, their recovery paths and the watcher
+publish, in which outcomes, for which coin kinds, and with which key -- is
+recorded in [Chapter 09](09-watcher-reward-infrastructure.md) R24, which
+passed the KDF Dirty Gate on 2026-11-07.
 
 > **Reference behavior of the transaction-helper receiver (passed the KDF
 > Dirty Gate on 2026-11-04, measure 0.04; Spec Reader 2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of
@@ -2097,3 +2101,9 @@ reference rows alike.
   chapter 05 §5.12D and R47 (plan item H4). Written by a context that never
   read the forbidden corpus. It carries no reference content of its own and
   needs no Dirty Gate pass.
+- *Pointer added 2026-11-07 -- the sentence under R50B naming chapter 09 R24.*
+  It carries no reference content of its own; its target passed the KDF Dirty
+  Gate on 2026-11-07, as chapter 09 records. **KDF Dirty Gate: PASS on 2026-11-07, measure 0.00.**
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.00, no findings; the pointer was judged with its target, whose clearance
+  is recorded in chapter 09's provenance footer of the same date.
