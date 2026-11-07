@@ -484,6 +484,12 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   of `my_balance_change` for ARRR withdrawals to compensate must drop that workaround. Found in a
   live mainnet test. Detail: PR #271; CRD ch.39 R39.5A.3, R39.6.5c.
 
+- **The ARRR history now lists the addresses of a swap's own transactions.** A swap's payment lists
+  the script address it pays, its fee payment lists the fee address, and a spend or a refund lists
+  the script address it spends from. Their rows used to list only the wallet's own address. The
+  node records these addresses when it builds the transaction, in the same file as a withdrawal's
+  recipient, and fetches nothing. Detail: PR #277; CRD ch.39 R39.8.9d3.
+
 #### EVM coins
 
 - **A taker on an EVM chain with fast blocks, such as Monad, now finds the maker's spend of its
@@ -791,12 +797,13 @@ lives.
   prover, which only the native build has. Use a native build for ARRR. Detail: CRD ch.39 R39.10.1,
   §39.6.1.
 - **The ARRR history names no recipient for a withdrawal made before this release, or by another
-  node on the same seed, and no address for a swap's transparent parts.** The recipient comes from
-  the node's own record, written when the withdrawal is built, so a row without a record names
-  only the wallet's own address. A swap's payment, spend and refund rows do not list the script
-  address or the fee address yet; that is scheduled. More in
-  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PR #268;
-  CRD ch.39 R39.8.9d2 (d), status note under R39.8.9e.
+  node on the same seed, and no transparent address of a transaction another wallet built.** The
+  node lists the addresses of the transactions it builds itself, from its own record, so a row
+  without a record names only the wallet's own address. A payment that reaches the wallet from a
+  transparent address does not list that address, because the node reads only compact blocks and
+  fetches nothing more. Swap rows from before this release keep the sets they had. More in
+  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PRs #268,
+  #277; CRD ch.39 R39.8.9d2 (d), R39.8.9d3 (d).
 - **An ARRR withdrawal takes no memo, and its answer has no `memo` member.** The `withdraw`
   request has no `memo` field, so a memo sent with it is ignored and the shielded output carries
   none. Komodo DeFi Framework and GLEEC KDF echo the request's memo in the answer. Memo support is

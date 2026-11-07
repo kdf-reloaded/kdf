@@ -713,7 +713,7 @@ cache keeps its existing compatible name and format:
 | --- | --- | --- |
 | Shielded wallet | `<TICKER>_RELOADED_WALLET.db` | `<TICKER>_WALLET.db` |
 | Compact-block cache | `<TICKER>_RELOADED_COMPACT_BLOCKS.db` | `<TICKER>_COMPACT_BLOCKS.db` |
-| Recipients of the wallet's withdrawals, shown in the history | `<TICKER>_RELOADED_TX_ADDRESSES.db` | none |
+| Addresses of the transactions the node builds (a withdrawal's recipient, a swap's script and fee addresses), shown in the history | `<TICKER>_RELOADED_TX_ADDRESSES.db` | none |
 | Legacy native Sapling-state cache | `<TICKER>_CACHE.db` (shared) | `<TICKER>_CACHE.db` (shared) |
 
 On the first supported Light-mode activation after upgrading, Reloaded creates

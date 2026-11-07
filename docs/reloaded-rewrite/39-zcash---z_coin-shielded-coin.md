@@ -3552,10 +3552,16 @@ open, and the wallet's Sapling keys cannot open a Pirate1 output at all.
   holds no mined transaction with that id. An entry of a mined transaction is
   kept. The scanned height decides, not the chain tip: a rebuilt wallet
   database holds no mined transaction until its rescan reaches that block.
+  A transaction with no expiry height (0) never expires, so its entry is
+  kept.
 - (d) *Limits.* A row with no entry lists no recipient, and that is not an
   error. This covers a transaction broadcast before this rule was
   implemented, one built by another instance on the same seed, and one whose
-  entry was lost with the node's data.
+  entry was lost with the node's data. It also covers a mined transaction whose
+  entry (c) removed because the wallet database, rebuilt to scan from a height
+  above the transaction's block, did not hold it when the scan passed the
+  expiry height: a later rescan from a lower height shows its row with no
+  recipient.
 
 > **Provenance and reason (2026-11-07).** Clean-room original; this
 > repository's code and the release tests of 0.4.0-beta.1 (row ARRR-L2),
@@ -3565,6 +3571,40 @@ open, and the wallet's Sapling keys cannot open a Pirate1 output at all.
 > the Zcash network prefix. No withdrawal row named its recipient, Sapling or
 > Pirate1, before or after mining, because the record written at broadcast
 > holds only the outputs the wallet pays itself.
+
+R39.8.9d3 **The addresses of a swap's own transactions.** The history rows of
+the transactions the node builds for an atomic swap shall list the addresses
+below, in the unmined row where R39.8.9i shows one, in the mined row, and after
+a restart of the node. The node keeps them in the record of R39.8.9d2 (a),
+each with the side it belongs to, once it has built the transaction and before
+the wallet database can show the transaction's row, so an unmined row never
+lacks them. A failure to keep them costs the row its addresses and does not
+fail the swap step. R39.8.9d2 (b)--(d) govern their use, their bound and their
+limits. Nothing is fetched from the light endpoint.
+
+- (a) *Payment to the swap's script.* `to` lists the script's
+  pay-to-script-hash address, encoded as a transparent address of the coin
+  with its configured pay-to-script-hash prefixes. This is the transparent
+  output address of R39.8.9d. The data-carrier output that publishes the
+  script is not an address and is not listed.
+- (b) *Swap fee payment.* `to` lists the fee address as a Sapling address with
+  the coin's configured prefix. This is the shielded fee output of R39.8.9d.
+- (c) *Spend and refund.* The spend of the counterparty's payment and the
+  refund of the node's own payment list in `from` the pay-to-script-hash
+  address of the script the input spends, which follows from the redeem
+  script the input carries. This is the transparent input address of
+  R39.8.9c.
+- (d) *Limits.* The wallet's own address stays where R39.8.9c and R39.8.9d put
+  it, in the form of R39.8.9d1. A transaction another wallet built is not
+  covered: the transparent input addresses of a payment that reaches this
+  wallet from a transparent address, for example, are not listed, because the
+  compact blocks the scan reads carry no transparent data. Rows of
+  transactions built before this rule keep the sets they had.
+
+> **Provenance (2026-11-07).** Clean-room original; this repository's code.
+> Not corpus-sourced, so no gate pass is needed. R39.8.9c and R39.8.9d, the
+> reference contract, name the addresses; this rule binds how this node lists
+> those of its own swap transactions without fetching anything.
 
 T39.8.9d1 *Own address in one form (R39.8.9d1).* A fixture wallet with a
 deposit row and a withdrawal row with change shall answer `z_coin_tx_history`
@@ -3583,8 +3623,21 @@ Sapling address and one to a Pirate1 address, a test shall prove:
   error;
 - an entry whose expiry height the scanned height has passed, with no
   mined transaction, is removed, while the entry of a mined transaction is
-  kept;
+  kept, and so is an entry with no expiry height;
 - a rebuild of the wallet database leaves the entries in place.
+
+T39.8.9d3 *Addresses of a swap's own transactions (R39.8.9d3).* A test shall
+prove, for transactions built by the node's own swap code:
+
+- the row of a payment to the swap's script lists that script's
+  pay-to-script-hash address in `to`, unmined and mined, together with the
+  wallet's own address when the payment has change, and lists nothing for the
+  data-carrier output;
+- the row of a swap fee payment lists the fee address in `to`, in the Sapling
+  form with the coin's prefix;
+- the rows of a spend and of a refund list the pay-to-script-hash address in
+  `from` and the wallet's own address in `to`;
+- after the record is reopened, as at a restart, the same sets are served.
 
 R39.8.9e `transaction_fee` shall be computed from the transparent input value,
 transparent output value, and the Sapling value balance of the full transaction.
@@ -3609,16 +3662,15 @@ count its confirmations.
 >   the wallet pays itself, and the compact blocks the scan reads carry nothing
 >   from which an outgoing recipient can be recovered. R39.8.9d2 binds the fix;
 >   rows from before it keep no recipient (R39.8.9d2 (d)).
-> - *No transparent addresses (scheduled).* Neither the transparent input
->   addresses of R39.8.9c nor the transparent output addresses of R39.8.9d are
->   listed: a swap payment's script address, a refund's source, a fee output.
->   The shielded fee address a swap's fee payment pays is not listed either.
->   `from` holds at most the wallet's own address, and `to` holds only what the
->   wallet database and the store of R39.8.9d2 hold. This item rests on a
->   reading of this repository's code; no live row has shown it yet. The fix is
->   scheduled as a separate change; the plan
->   [`arrr-native-and-ironwood-pool`](../plans/arrr-native-and-ironwood-pool.md)
->   tracks it.
+> - *No transparent addresses.* Neither the transparent input addresses of
+>   R39.8.9c nor the transparent output addresses of R39.8.9d were listed: a
+>   swap payment's script address, the source of a spend or refund. The shielded
+>   fee address a swap's fee payment pays was not listed either. This item
+>   rested on a reading of this repository's code. R39.8.9d3 binds the fix for
+>   the transactions the node builds for a swap (PR #277). The transparent
+>   addresses of a transaction another wallet built stay unlisted
+>   (R39.8.9d3 (d)); listing them would need data the compact blocks do not
+>   carry.
 >
 > The amounts, the order and the paging of the rows are not affected.
 
