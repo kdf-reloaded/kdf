@@ -390,7 +390,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   If that address's account does not exist yet, activation creates it and reports only that account.
   This is what GLEEC KDF does. Until now the coins that a swap paid to that address could stay
   unlisted until `get_new_address` reached it. An `address_id` of 2^31 or more fails activation with
-  an internal error. Detail: PR #NNN; CRD ch.05 R35a.
+  an internal error. Detail: PR #279; CRD ch.05 R35a.
 - **`task::create_new_account` now works under an HD login without a hardware wallet.** It serves a
   UTXO coin such as RIN, QTUM, EVM coins and Siacoin; until now it asked for a hardware wallet first
   and failed.
@@ -402,7 +402,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
     created if it is the wallet's last account.
   - Under a software login the task reports `Preparing` and then its result.
 
-  Detail: PR #NNN; CRD ch.05 R35c.
+  Detail: PR #279; CRD ch.05 R35c.
 
 #### Name lookups
 
@@ -677,7 +677,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   `from` under an iguana login are done (items H5.1 and H5.5, PR #270); the maintainer set the
   default sender to the coin's activated address (decision CU). Activation lists the address at
   `path_to_address`, and `task::create_new_account` works without a hardware wallet (items H5.0 and
-  H5.4, PR #NNN).
+  H5.4, PR #279).
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
