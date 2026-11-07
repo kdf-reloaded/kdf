@@ -532,6 +532,140 @@ remedy is R33.
 > decisions BY to CC on which surfaces stay documented divergences; R32--R35
 > record the reference target for the rest.
 
+**R35a.** *Activation under a global-HD login lists the address at
+`path_to_address` from the first activation on.* *(Spec Reader 2026-11-07,
+rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both;
+**passed the KDF Dirty Gate on 2026-11-07**, measure 0.04.)* At both rows, the HD activation of a UTXO-family, QTUM, BCH
+or EVM coin -- task route and platform-with-tokens route alike -- handles the
+address named by `path_to_address` (default account `0`, chain `External`,
+address `0`) as follows:
+
+1. *Account.* If the wallet's storage holds no account with the path's
+   `account_id`, that account is created at activation, with the path's
+   `account_id` as its index (the limit of R35c item 1 applies), and it is
+   scanned when `scan_policy` is `scan_if_new_wallet` or `scan`; the
+   activation result then reports **that account only**, even when the
+   wallet's storage holds others. When the path's account already exists,
+   every stored account is reported, and each is scanned only under `scan`.
+2. *Known-address count.* For the path's account, the number of known
+   addresses on the path's chain is raised to at least `address_id + 1`,
+   exactly as `min_addresses_number` raises it (chapter 38 R38.8.5); the
+   effective minimum is the larger of the two. Every other account gets
+   `min_addresses_number` alone. The addresses derived to meet the minimum
+   are persisted as known and their balances read, so the address at
+   `path_to_address` is listed -- with its `derivation_path`, `chain` and
+   balance -- in the activation result, and afterwards in `account_balance`
+   and in the account target of `my_tx_history` (R35), from the first
+   activation and after every restart, whether or not `get_new_address` ever
+   handed it out. The wallet's *enabled address* (the swap and consolidation
+   address, R33, R35b) is answered only from the derived set, so this step is
+   also what makes it resolvable.
+3. *No gap-limit bound on the index.* The gap limit governs scanning only.
+   The one bound on `address_id` is the hardened-child limit (2^31
+   addresses per chain): a `path_to_address` at or beyond it fails
+   activation with the address-limit-reached arm of the balance error set.
+4. *Nothing else makes an address known.* A swap uses the enabled address,
+   which item 2 has already listed. A withdraw with `from` requires the
+   selected account to exist and the selected address to be already known
+   (chapter 49 R49.27b); it derives nothing new and lists nothing.
+5. *Hardware wallet.* Items 1--3 hold the same; in addition, once the enabled
+   address is derived, the coin is handed it, and the activation fails if it
+   cannot be resolved.
+
+> **Compatibility (this repository, 2026-11-07; not corpus-sourced; plan
+> [`hd-key-unification`](../plans/hd-key-unification.md) item H5.0).**
+> Reloaded raises the known-address count for `min_addresses_number` only
+> (chapter 38 R38.8.5) and lists only the addresses already handed out, so a
+> swap's funds at a never-requested `path_to_address` stay unlisted until
+> `get_new_address` reaches it (SwapLab row HD5, 2026-11-06). Item 2 is the
+> parity target; it is the option the plan's preparation note recommends.
+
+**R35b.** *UTXO maintenance commands under a global-HD login.* *(Same
+provenance and gate status as R35a.)* At both rows the two commands below
+serve a UTXO coin of the standard family only; for every other coin type
+(QTUM, BCH, tokens, EVM and the rest included) they answer
+`CoinNotSupported`, HTTP 400.
+
+- `fetch_utxos` (request `{coin}`). Under HD it lists the unspent outputs of
+  **every known address of every account** of the wallet, on both chains;
+  under a single-address login, of the one address. Response: `total_count`
+  and `addresses`, a list of `{address, count, utxos, derivation_path?}` whose
+  `utxos` is a list of `{txid, vout, value}`; `derivation_path` is present for
+  an HD address and absent for the single address. Errors (`error_type`, HTTP): `NoSuchCoin`
+  404, `CoinNotSupported` 400, `InvalidAddress` 400, `Internal` 500.
+- `consolidate_utxos` (request `{coin, merge_conditions?: {merge_at,
+  max_merge_at_once}, broadcast?}`; `merge_at` and `max_merge_at_once`
+  default to 50 each, `broadcast` to `false`). Under HD it merges the unspent
+  outputs of the **enabled address only** into one output paid to **that same
+  address**; it offers no account or address selector and never touches
+  another known address. Fewer than `merge_at` unspent outputs, or fewer than
+  two once the `max_merge_at_once` cut is applied, answer
+  `BadMergeConditions` 400; an enabled address that cannot be resolved
+  (R35a item 2 not yet satisfied -- a hardware wallet before derivation)
+  answers `InvalidAddress` 400; the others are `NoSuchCoin` 404,
+  `CoinNotSupported` 400 and `InternalError` 500. Response: `tx` and
+  `consolidated_utxos` (a list of `{txid, vout, value}`), where `tx` is the
+  transaction-details object with `from` and `to` both the enabled address
+  and `fee_details` of the UTXO fee type; with `broadcast: false` the
+  transaction is built and returned but not sent (chapter 38 R38.5.2).
+- The automatic merge loop configured by `utxo_merge_params` (chapter 55
+  R55.5.10) runs under HD on the enabled address only, with the same
+  destination. If the enabled address cannot be resolved when the loop
+  starts, the loop ends with a logged error and no merge runs for the coin's
+  lifetime.
+
+> **Compatibility (this repository, 2026-11-07; not corpus-sourced).**
+> Reloaded refuses both commands and leaves the automatic merge off under HD
+> (plan `hd-key-unification` item H5.3). The behavior above is the parity
+> target.
+
+**R35c.** *`task::create_new_account` under a software global-HD login.*
+*(Same provenance and gate status as R35a.)* At both rows the task is served
+for UTXO-family, QTUM and EVM coins activated in HD mode under a software
+login: no hardware device is sought, and the new account's extended public
+key is derived in software (§5.9A). Under a hardware login the device is
+asked for it, with the progress values of item 3. Any other coin type, or a
+coin not activated in HD mode, answers `CoinIsActivatedNotWithHDWallet`.
+
+1. *Index.* The requested `account_id` when given; otherwise the lowest
+   index not in use, counted from `0` up to the highest existing index, or
+   that index plus one. The limit is 2^31 accounts: an index at or beyond it
+   answers `AccountLimitReached` with `max_accounts_number`. A requested
+   index that already exists is refused only after the key derivation, with
+   the `Internal` arm.
+2. *Scan and result.* The account is persisted first. Then, with `scan`
+   (default `true`), it is scanned for used addresses up to `gap_limit` (the
+   request's value, else the wallet's, default 20; chapter 38 R38.8.4) and
+   the found addresses are listed with their balances; with `scan: false` it
+   is returned with no addresses. The result is the account object of the
+   activation result: `{account_index, derivation_path, total_balance,
+   addresses: [{address, derivation_path, chain, balance}]}`.
+3. *Progress.* In-progress values `Preparing`, `RequestingAccountBalance`,
+   `Finishing`, and, for a hardware wallet, `WaitingForTrezorToConnect` and
+   `FollowHwDeviceInstructions`; awaiting values `EnterTrezorPin` and
+   `EnterTrezorPassphrase`.
+4. *Cancel.* Cancelling after the account was created removes it again if it
+   is the wallet's last account.
+5. *Error set* (`error_type`, HTTP): `HwContextNotInitialized` 400,
+   `NoSuchCoin` 400, `UnexpectedUserAction` 400, `Timeout` 408,
+   `CoinIsActivatedNotWithHDWallet` 400, `InvalidBip44Chain` 400,
+   `AccountLimitReached` 400, `RpcInvalidResponse` 500, `WalletStorageError`
+   500, `HwError` 410, `Transport` 500, `Internal` 500.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort while reading item 1).** A caller that asks for an `account_id`
+> already in use receives the `Internal` arm at the reference, although the
+> condition is a request error: the collision is detected only when the
+> freshly derived account is inserted. Reloaded should answer it with a
+> request-class error (HTTP 400) before deriving anything; the discriminant is
+> a Reloaded choice, since the reference has none for the case.
+
+> **Compatibility (this repository, 2026-11-07; not corpus-sourced).**
+> Reloaded's task asks for a hardware device before anything else, so it fails
+> for every software-keyed coin (chapter 38 §38.8 status note; chapter 20
+> §20.10 D1 note; plan `hd-key-unification` item H5.4). The behavior above is
+> the parity target.
+
 ## 5.10 Bound Hardware-Wallet Path
 
 **R25.** The substrate MUST retain the baseline hardware-wallet
@@ -1220,6 +1354,33 @@ non-default `path_to_address`, a UTXO and an EVM v1 swap shall each put the
 coin key at that path on the wire as the HTLC public key, fund the payment
 from that key's address, and pay the spend or refund to it.
 
+**T14a.** *The enabled address is listed from activation (R35a).*
+*(Reloaded-original; passed the KDF Dirty Gate together with R35a on 2026-11-07.)* A
+fresh HD wallet activates a UTXO coin with the default `path_to_address`,
+and again with `account_id: 1, chain: External, address_id: 3` and no
+`min_addresses_number`: in the first case address `0` of account `0`, in the
+second account `1` with its external addresses `0` to `3`, appear in the
+activation result and in `account_balance` without any `get_new_address`;
+a restart keeps them listed; an `address_id` of 2^31 fails activation with
+the address-limit arm; an iguana login is unchanged.
+
+**T14b.** *UTXO maintenance commands under HD (R35b).* *(Reloaded-original;
+same gate status.)* Under an HD login with two known addresses holding
+outputs, `fetch_utxos` lists both with their derivation paths and the right
+`total_count`; `consolidate_utxos` with `merge_at: 2` and `broadcast: false`
+spends only the enabled address's outputs to itself and returns the
+transaction unsent; a QTUM coin answers `CoinNotSupported` 400; fewer
+outputs than `merge_at` answer `BadMergeConditions` 400.
+
+**T14c.** *Account creation under a software HD login (R35c).*
+*(Reloaded-original; same gate status.)* Under a software HD login,
+`task::create_new_account` for a UTXO, a QTUM and an EVM coin each completes
+without a hardware device: the first call creates account `1`, a call with
+`account_id: 3` creates account `3`, the next call without an index creates
+account `2`; `scan: false` returns no addresses; an index at 2^31 answers
+`AccountLimitReached` 400; a repeated `account_id` is refused with a
+request-class error before any derivation (the finding under R35c).
+
 **T15.** *EVM under a global-HD login.* With an EVM coin activated
 through `enable_eth_with_tokens`, and again through legacy `enable`,
 `setprice`, `buy`, `sell`, `update_maker_order` and `trade_preimage`
@@ -1516,6 +1677,39 @@ surface.
   chapter 28 R19, which passed the KDF Dirty Gate on 2026-11-04. The addition
   carries no reference content of its own and needs no Dirty Gate pass of its
   own.
+- *Scoped addition (2026-11-07) -- §5.9B R35a--R35c, T14a--T14c, the
+  compatibility notes and the code-quality finding under them.* **KDF Dirty
+  Gate: PASS on 2026-11-07, measure 0.04.**
+  *Inputs:* the forbidden corpus at the rows `v2.6.0-beta` and `v3.0.0-beta`
+  of chapter 02 §2.15A, identical at both for every fact taken, consulted
+  **only** to establish: how HD activation treats the account and address of
+  `path_to_address` (creation, scanning, the raised known-address count, the
+  bound on the index, what the result reports); that no swap or withdraw
+  makes an address known; which coin types the two UTXO maintenance commands
+  serve under HD, over which addresses, to which destination, with which
+  request and response members and error discriminants, and how the
+  automatic merge behaves; and how the account-creation task chooses an
+  index, scans, reports progress, cancels and fails under a software HD
+  login. What crosses is behavior, public method names and dictated request,
+  response and error members; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced. The compatibility
+  notes rest on this repository's own code and on plan `hd-key-unification`
+  and its preparation note; T14a--T14c are Reloaded-original. The finding is
+  stated as a behavioral fact.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.04, no findings. *Extent:* HD activation's handling of `path_to_address`
+  (account and address, scan policy, known-address minimum, index bound), the
+  two UTXO maintenance commands and the automatic merge, and the
+  account-creation task, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check;
+  for the whole batch, about 24 source files were read in full or in the
+  relevant regions at the `dev (as of 2026-03-27)` row, whose source tree is
+  identical to `v3.0.0-beta`, and the same modules were diffed against
+  `v2.6.0-beta`. *Method:* reading, with mechanical cross-checks (diffs
+  between the tabled states; pattern searches of the added lines for paths,
+  identifiers and markers); the gate script was not run because the candidate
+  has no code blocks. *Measure:* 0.04, read against the standard that any
+  discretionary finding fails a chapter; dictated-interop and public-surface
+  tokens were excluded from the measured set.
 - *Clean-side amendment (2026-11-05) -- R46 item 3 and the as-built note
   under §5.12D.* They now name the Solana path of the shared
   platform-with-tokens activation, which also reads the legacy key, and say
