@@ -42,6 +42,27 @@ use std::mem::discriminant;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+// The server list of every tQTUM test (the tests that activate the testnet Qtum coin, here and in
+// `qrc20_tests.rs`).
+//
+// There is exactly one public Qtum TESTNET Electrum server, `s6.electrum.qtum.site`, so this is the only entry:
+// - The `s1`, `s3` and `s4` hosts of `qtum.info` on port 50001 serve Qtum MAINNET. A tQTUM test pointed at them
+//   reads the wrong chain (empty wallets, no delegation, no staker), which is why they are not listed.
+// - Port 51002 of the same host is TLS, but its certificate is X.509 version 1. This project refuses a version 1
+//   certificate in every mode, `disable_cert_verification` included (CRD ch.38 R38.6.4m item 5), so that port can
+//   never connect and is not listed. Hence plain TCP on port 51001.
+// - Its history answers can be slow, and the answer for a busy address may miss the 20 s a request gets once the
+//   connection is up (R38.6.4e item 2). That bound is fixed: the server entry's `timeout_sec` bounds only
+//   establishing the connection, including the version negotiation (R38.6.4e item 1), and the activation of a coin
+//   builds its pool with the default timings, so a test cannot raise it. A slow answer shows up as a failure of
+//   that call; run the test again before suspecting the code.
+//
+// Add a second testnet server here if one appears.
+const TQTUM_TEST_SERVER: &str = "s6.electrum.qtum.site:51001";
+
+/// The `servers` value of an Electrum activation request of a tQTUM test; see [`TQTUM_TEST_SERVER`].
+pub(crate) fn tqtum_test_servers() -> serde_json::Value { json!([{ "url": TQTUM_TEST_SERVER }]) }
+
 /// Test-only DEX-fee destination pubkey, resolved through `mm2_net_config`
 /// for the community netid. Replaces direct use of
 /// `common::DEX_FEE_ADDR_RAW_PUBKEY` so test fixtures go through the same
@@ -2608,7 +2629,7 @@ fn test_qtum_generate_pod() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -2627,7 +2648,7 @@ fn test_qtum_add_delegation() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -2666,7 +2687,7 @@ fn test_qtum_add_delegation_on_already_delegating() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -2696,7 +2717,7 @@ fn test_qtum_get_delegation_infos() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -2727,7 +2748,7 @@ fn test_qtum_remove_delegation() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -2785,7 +2806,7 @@ fn test_qtum_my_balance() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -2825,7 +2846,7 @@ fn test_qtum_my_balance_with_check_utxo_maturity_false() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
         "check_utxo_maturity": false,
     });
 
@@ -4525,11 +4546,7 @@ fn test_qtum_without_check_utxo_maturity() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [
-            {"url":"s1.qtum.info:50001"},
-            {"url":"s4.qtum.info:50001"},
-            {"url":"s1.qtum.info:50001"},
-        ],
+        "servers": tqtum_test_servers(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -4565,11 +4582,7 @@ fn test_qtum_with_check_utxo_maturity_false() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [
-            {"url":"s1.qtum.info:50001"},
-            {"url":"s4.qtum.info:50001"},
-            {"url":"s1.qtum.info:50001"},
-        ],
+        "servers": tqtum_test_servers(),
         "check_utxo_maturity": false,
     });
 
@@ -4635,10 +4648,11 @@ fn test_minimum_external_addresses_are_activated_once() {
     };
     let mut addresses = Vec::new();
 
-    block_on(crate::coin_balance::common_impl::ensure_minimum_external_addresses(
+    block_on(crate::coin_balance::common_impl::ensure_minimum_addresses(
         &coin,
         &hd_wallet,
         &mut hd_account,
+        Bip44Chain::External,
         0,
         &mut addresses,
     ))
@@ -4649,10 +4663,11 @@ fn test_minimum_external_addresses_are_activated_once() {
     assert_eq!(storage_updates.load(Ordering::SeqCst), 0);
     assert_eq!(balance_requests.load(Ordering::SeqCst), 0);
 
-    block_on(crate::coin_balance::common_impl::ensure_minimum_external_addresses(
+    block_on(crate::coin_balance::common_impl::ensure_minimum_addresses(
         &coin,
         &hd_wallet,
         &mut hd_account,
+        Bip44Chain::External,
         1,
         &mut addresses,
     ))
@@ -4671,10 +4686,11 @@ fn test_minimum_external_addresses_are_activated_once() {
         crate::coin_balance::coin_balance_map_for_ticker(TEST_COIN_NAME, CoinBalance::default())
     );
 
-    block_on(crate::coin_balance::common_impl::ensure_minimum_external_addresses(
+    block_on(crate::coin_balance::common_impl::ensure_minimum_addresses(
         &coin,
         &hd_wallet,
         &mut hd_account,
+        Bip44Chain::External,
         1,
         &mut addresses,
     ))
@@ -11961,5 +11977,674 @@ mod sighash_suffix_gate_tests {
             suffix_decline_lines(&mut bc2, "BC2", SuffixDecline::NoWord, 100).warning,
             None
         );
+    }
+}
+
+/// CRD ch.05 R35a, R35c, T14a and T14c: HD accounts at a given index. Activation lists the address at
+/// `path_to_address`, and `task::create_new_account` works under a software HD login, for the UTXO standard coin
+/// and for QTUM. The wallet storage is mocked and records what is stored, so that a "restart" is a wallet rebuilt
+/// from the recorded items.
+pub(crate) mod hd_accounts_at_index_tests {
+    use super::*;
+    use crate::coin_balance::{EnableCoinBalance, EnableCoinBalanceError, EnableCoinBalanceOps, EnableCoinScanPolicy,
+                              HDAccountBalance, HDWalletBalance};
+    use crate::hd_pubkey::{HDExtractPubkeyError, HDXPubExtractor};
+    use crate::hd_wallet::{HDAddressId, HDWalletRpcError, NewAccountCreatingError};
+    use crate::hd_wallet_storage::HDAccountStorageItem;
+    use crate::rpc_command::get_my_address::PathToAddress;
+    use crate::rpc_command::init_create_account::{CreateNewAccountParams, CreatedAccount, InitCreateHDAccountRpcOps};
+    use crate::utxo::utxo_builder::derive_activated_hd_secret;
+    use crate::BalanceError;
+    use async_trait::async_trait;
+    use common::HttpStatusCode;
+    use crypto::privkey::key_pair_from_secret;
+    use crypto::trezor::utxo::TrezorUtxoCoin;
+    use crypto::{CryptoCtx, GlobalHDAccountArc, XPub};
+    use std::collections::BTreeMap;
+
+    const TEST_MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const COIN_PATH: &str = "m/44'/141'";
+
+    /// What the mocked wallet storage holds, by account index.
+    pub(crate) type StoredAccounts = Arc<std::sync::Mutex<BTreeMap<u32, HDAccountStorageItem>>>;
+
+    /// A hardware device that counts the requests it gets and answers none of them.
+    pub(crate) struct CountingDevice {
+        pub(crate) calls: AtomicUsize,
+    }
+
+    impl CountingDevice {
+        pub(crate) fn new() -> CountingDevice {
+            CountingDevice {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HDXPubExtractor for CountingDevice {
+        async fn extract_utxo_xpub(
+            &self,
+            _trezor_utxo_coin: TrezorUtxoCoin,
+            _derivation_path: DerivationPath,
+        ) -> MmResult<XPub, HDExtractPubkeyError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            MmError::err(HDExtractPubkeyError::HwContextNotInitialized)
+        }
+    }
+
+    /// Mocks the wallet storage: what is uploaded, updated and removed is recorded in the returned map.
+    pub(crate) fn mock_storage() -> StoredAccounts {
+        let items: StoredAccounts = Arc::default();
+
+        let uploads = items.clone();
+        HDWalletMockStorage::upload_new_account.mock_safe(move |_, _wallet_id, account: HDAccountStorageItem| {
+            uploads.lock().unwrap().insert(account.account_id, account);
+            MockResult::Return(Box::pin(futures::future::ok(())))
+        });
+        let external = items.clone();
+        HDWalletMockStorage::update_external_addresses_number.mock_safe(move |_, _wallet_id, account_id, number| {
+            external
+                .lock()
+                .unwrap()
+                .get_mut(&account_id)
+                .expect("the account is stored")
+                .external_addresses_number = number;
+            MockResult::Return(Box::pin(futures::future::ok(())))
+        });
+        let internal = items.clone();
+        HDWalletMockStorage::update_internal_addresses_number.mock_safe(move |_, _wallet_id, account_id, number| {
+            internal
+                .lock()
+                .unwrap()
+                .get_mut(&account_id)
+                .expect("the account is stored")
+                .internal_addresses_number = number;
+            MockResult::Return(Box::pin(futures::future::ok(())))
+        });
+        let removals = items.clone();
+        HDWalletMockStorage::remove_account.mock_safe(move |_, _wallet_id, account_id| {
+            removals.lock().unwrap().remove(&account_id);
+            MockResult::Return(Box::pin(futures::future::ok(())))
+        });
+        items
+    }
+
+    /// Mocks the node: every address has a zero balance and no history.
+    pub(crate) fn mock_chain() {
+        NativeClient::display_balances.mock_safe(|_, addresses: Vec<Address>, _| {
+            let balances = addresses
+                .into_iter()
+                .map(|address| (address, BigDecimal::from(0)))
+                .collect();
+            MockResult::Return(Box::new(futures01::future::ok(balances)))
+        });
+        NativeClient::list_all_transactions
+            .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(Vec::new()))));
+    }
+
+    fn global_hd() -> GlobalHDAccountArc {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        CryptoCtx::init_with_global_hd_account(ctx.clone(), TEST_MNEMONIC).unwrap();
+        match PrivKeyBuildPolicy::detect_priv_key_policy(&ctx).unwrap() {
+            PrivKeyBuildPolicy::GlobalHDAccount(global_hd) => global_hd,
+            _ => panic!("expected a global-HD login"),
+        }
+    }
+
+    fn path_of(account_id: u32, chain: Bip44Chain, address_id: u32) -> HDAddressId {
+        HDAddressId {
+            account_id,
+            chain,
+            address_id,
+        }
+    }
+
+    /// Account `0` as a previous activation would have stored it.
+    fn account_zero() -> UtxoHDAccount {
+        UtxoHDAccount {
+            account_id: 0,
+            extended_pubkey: Secp256k1ExtendedPublicKey::from_str(
+                "xpub6DEHSksajpRPM59RPw7Eg6PKdU7E2ehxJWtYdrfQ6JFmMGBsrR6jA78ANCLgzKYm4s5UqQ4ydLEYPbh3TRVvn5oAZVtWfi4qJLMntpZ8uGJ",
+            )
+            .unwrap(),
+            account_derivation_path: HDPathToAccount::from_str("m/44'/141'/0'").unwrap(),
+            external_addresses_number: 0,
+            internal_addresses_number: 0,
+        }
+    }
+
+    /// The fields of a coin activated through the software HD route, built the way the builder builds them, over
+    /// a wallet that holds `accounts`.
+    pub(crate) fn hd_fields(accounts: HDAccountsMap<UtxoHDAccount>) -> UtxoCoinFields {
+        let client = native_client_for_test();
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+        let global_hd = global_hd();
+        let coin_path = HDPathToCoin::from_str(COIN_PATH).unwrap();
+        let path_to_address = PathToAddress::default();
+        let secret = derive_activated_hd_secret(&global_hd, &coin_path, &path_to_address).unwrap();
+        fields.priv_key_policy = PrivKeyPolicy::HDWallet {
+            activated_key: key_pair_from_secret(secret.as_slice()).unwrap(),
+            bip39_secp_priv_key: global_hd.root_priv_key().clone(),
+            path_to_address,
+        };
+        fields.derivation_method = DerivationMethod::HDWallet(UtxoHDWallet {
+            hd_wallet_storage: HDWalletCoinStorage::default(),
+            address_format: UtxoAddressFormat::Standard,
+            derivation_path: coin_path,
+            accounts: HDAccountsMutex::new(accounts),
+            gap_limit: 3,
+        });
+        fields
+    }
+
+    pub(crate) fn hd_coin(accounts: HDAccountsMap<UtxoHDAccount>) -> UtxoStandardCoin {
+        utxo_coin_from_fields(hd_fields(accounts))
+    }
+
+    /// A coin over a wallet that holds account `0` only, which is what activation leaves.
+    pub(crate) fn hd_coin_with_account_zero() -> UtxoStandardCoin {
+        hd_coin(HDAccountsMap::from([(0, account_zero())]))
+    }
+
+    /// The coin after a restart: its wallet is rebuilt from what the storage holds.
+    fn reload(items: &StoredAccounts) -> UtxoStandardCoin {
+        let coin_path = HDPathToCoin::from_str(COIN_PATH).unwrap();
+        let accounts: HDAccountsMap<UtxoHDAccount> = items
+            .lock()
+            .unwrap()
+            .values()
+            .map(|item| {
+                let account = UtxoHDAccount::try_from_storage_item(&coin_path, item).unwrap();
+                (account.account_id, account)
+            })
+            .collect();
+        hd_coin(accounts)
+    }
+
+    fn account_ids(coin: &UtxoStandardCoin) -> Vec<u32> {
+        match coin.as_ref().derivation_method {
+            DerivationMethod::HDWallet(UtxoHDWallet { ref accounts, .. }) => {
+                block_on(accounts.lock()).keys().cloned().collect()
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    fn enable(
+        coin: &UtxoStandardCoin,
+        scan_policy: EnableCoinScanPolicy,
+        min_addresses_number: u32,
+        path_to_address: Option<HDAddressId>,
+    ) -> Result<HDWalletBalance, EnableCoinBalanceError> {
+        match block_on(coin.enable_coin_balance(
+            None::<&CountingDevice>,
+            scan_policy,
+            min_addresses_number,
+            path_to_address,
+        )) {
+            Ok(EnableCoinBalance::HD(balance)) => Ok(balance),
+            Ok(other) => panic!("an HD balance is expected, got {:?}", other),
+            Err(e) => Err(e.into_inner()),
+        }
+    }
+
+    fn paths(account: &HDAccountBalance) -> Vec<String> {
+        account
+            .addresses
+            .iter()
+            .map(|address| address.derivation_path.0.to_string())
+            .collect()
+    }
+
+    fn stored(items: &StoredAccounts, account_id: u32) -> HDAccountStorageItem {
+        items
+            .lock()
+            .unwrap()
+            .get(&account_id)
+            .cloned()
+            .unwrap_or_else(|| panic!("account {} is not stored", account_id))
+    }
+
+    fn external_balance_page(coin: &UtxoStandardCoin, account_index: u32) -> HDAccountBalanceResponse {
+        let params = AccountBalanceParams {
+            account_index,
+            chain: Bip44Chain::External,
+            limit: 10,
+            paging_options: PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap()),
+        };
+        block_on(coin.account_balance_rpc(params)).expect("!account_balance_rpc")
+    }
+
+    // -----------------------------------------------------------------------
+    // T14a (R35a)
+    // -----------------------------------------------------------------------
+
+    /// T14a, R35a items 1 and 2: a fresh HD wallet activated at the default `path_to_address` lists address `0` of
+    /// account `0` in the activation result and in `account_balance`, with no `get_new_address` and no
+    /// `min_addresses_number`.
+    #[test]
+    fn t14a_the_default_path_lists_address_zero_of_account_zero() {
+        let items = mock_storage();
+        mock_chain();
+        let coin = hd_coin(HDAccountsMap::new());
+
+        let balance = enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(HDAddressId::from(&PathToAddress::default())),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+
+        assert_eq!(balance.accounts.len(), 1);
+        assert_eq!(balance.accounts[0].account_index, 0);
+        assert_eq!(paths(&balance.accounts[0]), ["m/44'/141'/0'/0/0"]);
+        assert_eq!(stored(&items, 0).external_addresses_number, 1);
+        assert_eq!(stored(&items, 0).internal_addresses_number, 0);
+
+        let page = external_balance_page(&coin, 0);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.addresses.len(), 1);
+    }
+
+    /// T14a, R35a items 1 and 2: with `account_id: 1, chain: External, address_id: 3` and no
+    /// `min_addresses_number`, account `1` is created and reported alone -- although the wallet holds account `0`
+    /// -- with its external addresses `0` to `3`.
+    #[test]
+    fn t14a_a_path_in_account_one_creates_it_and_reports_it_alone() {
+        let items = mock_storage();
+        mock_chain();
+        let coin = hd_coin(HDAccountsMap::new());
+        enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("{}", e));
+        assert_eq!(account_ids(&coin), [0]);
+
+        let balance = enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(1, Bip44Chain::External, 3)),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+
+        assert_eq!(balance.accounts.len(), 1, "the result reports the path's account only");
+        assert_eq!(balance.accounts[0].account_index, 1);
+        assert_eq!(balance.accounts[0].derivation_path.0.to_string(), "m/44'/141'/1'");
+        assert_eq!(paths(&balance.accounts[0]), [
+            "m/44'/141'/1'/0/0",
+            "m/44'/141'/1'/0/1",
+            "m/44'/141'/1'/0/2",
+            "m/44'/141'/1'/0/3"
+        ]);
+        assert_eq!(account_ids(&coin), [0, 1]);
+        assert_eq!(stored(&items, 1).external_addresses_number, 4);
+        assert_eq!(
+            stored(&items, 0).external_addresses_number,
+            1,
+            "account 0 is left alone"
+        );
+        assert_eq!(external_balance_page(&coin, 1).total, 4);
+    }
+
+    /// T14a, R35a item 2: after a restart -- the wallet rebuilt from the storage -- the activated addresses stay
+    /// listed, in the activation result and in `account_balance`, whatever `path_to_address` the next activation
+    /// names and although `get_new_address` never handed them out.
+    #[test]
+    fn t14a_a_restart_keeps_the_addresses_listed() {
+        let items = mock_storage();
+        mock_chain();
+        let coin = hd_coin(HDAccountsMap::new());
+        enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("{}", e));
+        enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(1, Bip44Chain::External, 3)),
+        )
+        .unwrap_or_else(|e| panic!("{}", e));
+
+        let restarted = reload(&items);
+        assert_eq!(account_ids(&restarted), [0, 1]);
+        assert_eq!(external_balance_page(&restarted, 1).total, 4);
+
+        let balance = enable(
+            &restarted,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+        // The path's account exists: every stored account is reported.
+        assert_eq!(balance.accounts.len(), 2);
+        assert_eq!(paths(&balance.accounts[0]), ["m/44'/141'/0'/0/0"]);
+        assert_eq!(balance.accounts[1].account_index, 1);
+        assert_eq!(balance.accounts[1].addresses.len(), 4);
+        assert_eq!(stored(&items, 1).external_addresses_number, 4);
+    }
+
+    /// T14a, R35a item 2: a path on the internal chain raises the internal chain, not the external one.
+    #[test]
+    fn t14a_the_internal_chain_is_raised_not_the_external() {
+        let items = mock_storage();
+        mock_chain();
+        let coin = hd_coin(HDAccountsMap::new());
+
+        let balance = enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(0, Bip44Chain::Internal, 2)),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+
+        assert_eq!(balance.accounts.len(), 1);
+        assert_eq!(paths(&balance.accounts[0]), [
+            "m/44'/141'/0'/1/0",
+            "m/44'/141'/0'/1/1",
+            "m/44'/141'/0'/1/2"
+        ]);
+        assert!(balance.accounts[0]
+            .addresses
+            .iter()
+            .all(|address| address.chain == Bip44Chain::Internal));
+        assert_eq!(stored(&items, 0).internal_addresses_number, 3);
+        assert_eq!(stored(&items, 0).external_addresses_number, 0);
+    }
+
+    /// T14a, R35a item 3: an `address_id` of 2^31 fails activation with the address-limit failure of the balance
+    /// error set, and no address is derived or read.
+    #[test]
+    fn t14a_an_address_at_the_hardened_limit_fails_activation() {
+        let items = mock_storage();
+        NativeClient::list_all_transactions
+            .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(Vec::new()))));
+        NativeClient::display_balances.mock_safe(|_, addresses: Vec<Address>, _| {
+            // The known addresses of the new account are none: only an empty request may reach the node.
+            assert!(
+                addresses.is_empty(),
+                "no balance is read for an address beyond the limit"
+            );
+            MockResult::Return(Box::new(futures01::future::ok(Vec::new())))
+        });
+        let coin = hd_coin(HDAccountsMap::new());
+
+        let error = enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(0, Bip44Chain::External, crypto::ChildNumber::HARDENED_FLAG)),
+        )
+        .err()
+        .expect("the activation must fail");
+
+        assert!(
+            matches!(error, EnableCoinBalanceError::BalanceError(BalanceError::Internal(_))),
+            "the address-limit failure of the balance error set: {}",
+            error
+        );
+        assert_eq!(stored(&items, 0).external_addresses_number, 0);
+    }
+
+    /// T14a, R35a item 2: the account the path names alone is raised to the activated address; every other account
+    /// gets `min_addresses_number` alone.
+    #[test]
+    fn t14a_other_accounts_get_the_minimum_alone() {
+        let items = mock_storage();
+        mock_chain();
+        let coin = hd_coin(HDAccountsMap::new());
+        enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("{}", e));
+        enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(1, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("{}", e));
+
+        let balance = enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            2,
+            Some(path_of(0, Bip44Chain::External, 4)),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+
+        assert_eq!(
+            balance.accounts.len(),
+            2,
+            "the path's account exists: every account is reported"
+        );
+        assert_eq!(balance.accounts[0].addresses.len(), 5);
+        assert_eq!(balance.accounts[1].addresses.len(), 2);
+        assert_eq!(stored(&items, 0).external_addresses_number, 5);
+        assert_eq!(stored(&items, 1).external_addresses_number, 2);
+    }
+
+    /// T14a: an iguana login is unchanged -- a single address, and no account or address is made known.
+    #[test]
+    fn t14a_an_iguana_login_is_unchanged() {
+        let items = mock_storage();
+        NativeClient::display_balance
+            .mock_safe(|_, _: Address, _| MockResult::Return(Box::new(futures01::future::ok(BigDecimal::from(0)))));
+        let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+
+        let balance = block_on(coin.enable_coin_balance(
+            None::<&CountingDevice>,
+            EnableCoinScanPolicy::default(),
+            0,
+            Some(path_of(2, Bip44Chain::External, 7)),
+        ))
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+
+        assert!(matches!(balance, EnableCoinBalance::Iguana(_)));
+        assert!(items.lock().unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // T14c (R35c)
+    // -----------------------------------------------------------------------
+
+    /// The T14c sequence over a wallet that holds account `0`, for one coin type.
+    fn t14c_sequence<Coin>(coin: &Coin, items: &StoredAccounts)
+    where
+        Coin: InitCreateHDAccountRpcOps + Sync,
+    {
+        let created = CreatedAccount::default();
+        let create = |request: Json| -> MmResult<HDAccountBalance, HDWalletRpcError> {
+            let params: CreateNewAccountParams = json::from_value(request).unwrap();
+            block_on(coin.init_create_account_rpc(params, None::<&CountingDevice>, &created))
+        };
+
+        // The first call creates account 1 (account 0 comes from activation), without a hardware device.
+        let first = create(json!({ "scan": false })).unwrap();
+        assert_eq!(first.account_index, 1);
+        assert_eq!(first.derivation_path.0.to_string(), "m/44'/141'/1'");
+        assert!(first.addresses.is_empty(), "`scan: false` returns no addresses");
+        assert_eq!(created.get(), Some(1));
+
+        // A requested index creates that account.
+        let three = create(json!({ "scan": false, "account_id": 3 })).unwrap();
+        assert_eq!(three.account_index, 3);
+        assert_eq!(created.get(), Some(3));
+
+        // The next call without an index creates account 2.
+        let two = create(json!({ "scan": false })).unwrap();
+        assert_eq!(two.account_index, 2);
+
+        // An index at 2^31 answers `AccountLimitReached`, HTTP 400.
+        let error = create(json!({ "scan": false, "account_id": 2_147_483_648u64 }))
+            .unwrap_err()
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::AccountLimitReached {
+                max_accounts_number: 2_147_483_648
+            }),
+            "{:?}",
+            error
+        );
+        assert_eq!(error.status_code(), common::StatusCode::BAD_REQUEST);
+
+        // A repeated `account_id` answers `AccountAlreadyExists`, HTTP 400.
+        let error = create(json!({ "scan": false, "account_id": 3 }))
+            .unwrap_err()
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::AccountAlreadyExists { account_id: 3 }),
+            "{:?}",
+            error
+        );
+        assert_eq!(error.status_code(), common::StatusCode::BAD_REQUEST);
+
+        // ... before any derivation: the device is never asked.
+        let device = CountingDevice::new();
+        let params: CreateNewAccountParams = json::from_value(json!({ "scan": false, "account_id": 3 })).unwrap();
+        let error = block_on(coin.init_create_account_rpc(params, Some(&device), &created))
+            .unwrap_err()
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::AccountAlreadyExists { account_id: 3 }),
+            "{:?}",
+            error
+        );
+        assert_eq!(device.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // The accounts are persisted.
+        let stored_ids: Vec<u32> = items.lock().unwrap().keys().cloned().collect();
+        assert_eq!(stored_ids, [1, 2, 3]);
+    }
+
+    /// T14c, R35c: the UTXO standard coin.
+    #[test]
+    fn t14c_utxo_standard_coin_creates_accounts_without_a_device() {
+        let items = mock_storage();
+        mock_chain();
+        t14c_sequence(&hd_coin_with_account_zero(), &items);
+    }
+
+    /// T14c, R35c: QTUM shares the account creation of the UTXO coins.
+    #[test]
+    fn t14c_qtum_coin_creates_accounts_without_a_device() {
+        let items = mock_storage();
+        mock_chain();
+        let fields = hd_fields(HDAccountsMap::from([(0, account_zero())]));
+        let arc: UtxoArc = fields.into();
+        t14c_sequence(&QtumCoin::from(arc), &items);
+    }
+
+    /// R35c: the extended public key of the new account is derived in software, from the wallet's own key.
+    #[test]
+    fn t14c_the_account_key_is_derived_in_software() {
+        let items = mock_storage();
+        mock_chain();
+        let coin = hd_coin_with_account_zero();
+        let params: CreateNewAccountParams = json::from_value(json!({ "scan": false, "account_id": 5 })).unwrap();
+        block_on(coin.init_create_account_rpc(params, None::<&CountingDevice>, &CreatedAccount::default())).unwrap();
+
+        let expected = crypto::derive_secp256k1_extended_pubkey(
+            global_hd().root_priv_key().clone(),
+            &DerivationPath::from_str("m/44'/141'/5'").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored(&items, 5).account_xpub, expected.to_string(bip32::Prefix::XPUB));
+    }
+
+    /// R35c item 2: `scan` defaults to `true`, `gap_limit` and `account_id` to the wallet's and the lowest unused
+    /// index.
+    #[test]
+    fn r35c_item2_the_request_defaults() {
+        let params: CreateNewAccountParams = json::from_value(json!({})).unwrap();
+        assert!(params.scan);
+        assert_eq!(params.gap_limit, None);
+        assert_eq!(params.account_id, None);
+        let params: CreateNewAccountParams =
+            json::from_value(json!({ "scan": false, "gap_limit": 5, "account_id": 7 })).unwrap();
+        assert!(!params.scan);
+        assert_eq!(params.gap_limit, Some(5));
+        assert_eq!(params.account_id, Some(7));
+    }
+
+    /// R35c item 4: an account a cancelled task created is removed again -- from the wallet and from the
+    /// storage -- when it is the wallet's last account; any other account is kept.
+    #[test]
+    fn r35c_item4_cancelling_removes_the_last_account_only() {
+        let items = mock_storage();
+        mock_chain();
+        let coin = hd_coin_with_account_zero();
+        let created = CreatedAccount::default();
+        for account_id in [1, 3] {
+            let params: CreateNewAccountParams =
+                json::from_value(json!({ "scan": false, "account_id": account_id })).unwrap();
+            block_on(coin.init_create_account_rpc(params, None::<&CountingDevice>, &created)).unwrap();
+        }
+        assert_eq!(account_ids(&coin), [0, 1, 3]);
+
+        // Account 1 is not the last one: it is kept.
+        let removed = block_on(crate::hd_wallet::common_impl::remove_created_account(&coin, 1)).unwrap();
+        assert!(!removed);
+        assert_eq!(account_ids(&coin), [0, 1, 3]);
+
+        // Account 3 is the last one.
+        let removed = block_on(crate::hd_wallet::common_impl::remove_created_account(&coin, 3)).unwrap();
+        assert!(removed);
+        assert_eq!(account_ids(&coin), [0, 1]);
+        let stored_ids: Vec<u32> = items.lock().unwrap().keys().cloned().collect();
+        assert_eq!(stored_ids, [1]);
+
+        // A restart does not bring it back.
+        assert_eq!(account_ids(&reload(&items)), [1]);
+    }
+
+    /// R35c: no hardware context exists under a software login, and none is needed.
+    #[test]
+    fn t14c_no_hardware_context_is_needed_under_a_software_login() {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        CryptoCtx::init_with_global_hd_account(ctx.clone(), TEST_MNEMONIC).unwrap();
+        assert!(!crate::rpc_command::init_create_account::uses_hardware_wallet(&ctx).unwrap());
+    }
+
+    /// The error a refused index becomes at the activation: a coin-creation failure, never a panic.
+    #[test]
+    fn r35a_item1_the_account_limit_applies_to_the_path_account() {
+        let items = mock_storage();
+        mock_chain();
+        let coin = hd_coin(HDAccountsMap::new());
+
+        let error = enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(crypto::ChildNumber::HARDENED_FLAG, Bip44Chain::External, 0)),
+        )
+        .err()
+        .expect("the activation must fail");
+
+        assert!(
+            matches!(
+                error,
+                EnableCoinBalanceError::NewAccountCreatingError(NewAccountCreatingError::AccountLimitReached { .. })
+            ),
+            "{}",
+            error
+        );
+        assert!(items.lock().unwrap().is_empty());
     }
 }

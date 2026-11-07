@@ -77,6 +77,90 @@ actually open multiplexed streams between two nodes
 (`test_publish_reaches_subscriber_via_relay`,
 `test_subscribe_propagates_to_remote_peer`, `test_request_response_ok_three_peers`).
 
+## Patch 2: bounded close (CRD ch.28 R27c)
+
+### Why it exists
+
+A close that this node starts sends yamux's GoAway frame and flushes the socket, and the swarm counts the
+connection as open until `StreamMuxer::poll_close` has finished. Toward a peer that reads nothing (a hung
+process whose kernel keeps the TCP session open with a zero receive window) the flush cannot complete while
+the window stays closed, so the close can last as long as the peer's kernel keeps the session. For that
+time the connection, its gossip queue and the multiplexer's buffers stay held, the peer counts as
+connected, and the relay maintenance does not redial it. In a lab run the close of a stuck peer took 36
+seconds. `libp2p-swarm` (not vendored, by decision) awaits the muxer's close without a deadline, so the
+deadline lives here, in the layer every transport of this node runs (R27c item 5).
+
+R27c: every close this node starts ends within 30 seconds. After that, `poll_close` returns
+`Ready(Err(..))` whose cause is an `std::io::Error` of kind `TimedOut` with the message "close timed out".
+The swarm then reports the connection closed with an IO cause, and drops the muxer and its transport
+stream. Note that `StreamMuxerBox` wraps the muxer's error in an `io::Error` of kind `Other`, so the
+`TimedOut` is the innermost error; the Debug form of the swarm's cause contains both, and the text "close
+timed out" appears in the log line (R27c item 2).
+
+### The hunks
+
+All in `src/lib.rs`. To re-apply after a bump of the fork, look for the comments starting `PATCHED (CRD
+ch.28 R27c`.
+
+1. Imports: `use std::time::Duration;` and `use futures_timer::Delay;`.
+2. `Muxer<C>` gets three private fields, all initialized in `Muxer::new`:
+   `close_timeout: Duration` (= `CLOSE_TIMEOUT`), `close_deadline: Option<Delay>` (= `None`) and
+   `close_timed_out: bool` (= `false`).
+3. New items next to `MAX_BUFFERED_INBOUND_STREAMS`: `const CLOSE_TIMEOUT: Duration =
+   Duration::from_secs(30);` and `fn close_timed_out() -> Error`, which builds
+   `Error(yamux013::ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, "close timed out")))`.
+4. `Muxer::poll_close` is replaced by:
+
+   ```rust
+   let this = &mut *self;
+   if this.close_timed_out {
+       return Poll::Ready(Err(close_timed_out()));
+   }
+   let timeout = this.close_timeout;
+   let deadline = this.close_deadline.get_or_insert_with(|| Delay::new(timeout));
+
+   if let Poll::Ready(result) = this.connection.poll_close(cx) {
+       return Poll::Ready(result.map_err(Error));
+   }
+   if deadline.poll_unpin(cx).is_ready() {
+       this.close_timed_out = true;
+       this.close_deadline = None;
+       return Poll::Ready(Err(close_timed_out()));
+   }
+   Poll::Pending
+   ```
+
+   The deadline starts at the first `poll_close`. The inner close is polled first, so a close that
+   finishes in time behaves exactly as before. After the timeout the inner connection is never polled
+   again.
+5. `Cargo.toml`: `futures-timer = "3.0"`. No new crate enters the graph: `futures-timer` is already
+   resolved for `libp2p-core` and `libp2p-swarm`.
+
+The 30 seconds are a constant of the crate, not a setting. Only the `test` module of the crate can shorten
+them (it assigns the private field `close_timeout`); no public API changed.
+
+On `wasm32`, the deadline is kept on every target. `futures-timer` has a browser implementation behind its
+`wasm-bindgen` feature, and `libp2p-swarm` already uses the same `Delay` type for its own connection
+timers in the browser build. Checked with `cargo tree -i futures-timer --target wasm32-unknown-unknown -e
+features` on 2026-11-07: the feature is on in the workspace's browser build (`gloo-timers`, `send_wrapper`
+and `wasm-bindgen`), and `libp2p-yamux` is one of the direct dependents. The deadline adds no feature of
+its own, so a change that turned the feature off would break the swarm's timers first.
+
+### The tests
+
+In `src/lib.rs`, module `test` (CRD ch.28 T14, crate level), over a transport stream whose writes either
+stay pending forever or are taken at once:
+
+- `close_toward_a_peer_that_reads_nothing_times_out_at_the_deadline`: the close is pending before the
+  deadline and ends with the `TimedOut` "close timed out" error after it, and the inner stream is not
+  touched again afterwards;
+- `close_toward_a_peer_that_reads_ends_at_once`: the close ends at once with `Ok`;
+- `close_deadline_is_thirty_seconds`: the constant is 30 s.
+
+`cargo test --manifest-path vendor-patches/libp2p-yamux-0.44.0/Cargo.toml` runs them together with the
+compliance tests and the GHSA test of the first patch; CI runs it in the `bounded-close` row of the
+`unit-tests` matrix.
+
 ## Removing this patch
 
 Delete the directory, drop the `libp2p-yamux` line from the

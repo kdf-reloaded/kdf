@@ -9,6 +9,7 @@ use super::ZCoin;
 use crate::utxo::rpc_clients::{UtxoRpcClientEnum, UtxoRpcError};
 use crate::utxo::utxo_common::payment_script;
 use crate::utxo::{sat_from_big_decimal, UtxoAddressFormat};
+use crate::z_coin::z_tx_addresses::AddressSide;
 use crate::z_coin::{z_tx_read, BuilderHeightError, SendOutputsErr, ZOutput, DEX_FEE_OVK};
 use crate::{NumConversError, PrivKeyNotAllowed, TransactionEnum};
 use bigdecimal::BigDecimal;
@@ -21,6 +22,7 @@ use mm2_err_handle::prelude::*;
 use script::{Builder as ScriptBuilder, Opcode, Script};
 use secp256k1::SecretKey;
 use std::convert::Infallible;
+use zcash_keys::encoding::encode_payment_address;
 use zcash_primitives::transaction::builder::{BuildConfig, Builder as ZTxBuilder, BundlePadding};
 use zcash_primitives::transaction::fees::fixed::FeeRule as FixedFeeRule;
 use zcash_primitives::transaction::Transaction as ZTransaction;
@@ -34,6 +36,29 @@ use zcash_transparent::bundle::{OutPoint as ZCashOutpoint, TxOut};
 
 type ZTxBuilderError = zcash_primitives::transaction::builder::Error<Infallible>;
 
+/// The pay-to-script-hash address of `redeem_script`, with the coin's configured prefixes (CRD ch.39
+/// R39.8.9d3 (a), (c)). The payment to a swap's script lists it in `to`, and a spend or refund of that
+/// payment lists it in `from`.
+pub(crate) fn p2sh_address(coin: &ZCoin, redeem_script: &[u8]) -> Address {
+    Address {
+        prefix: coin.utxo_arc.conf.p2sh_addr_prefix,
+        t_addr_prefix: coin.utxo_arc.conf.p2sh_t_addr_prefix,
+        hash: dhash160(redeem_script).into(),
+        checksum_type: coin.utxo_arc.conf.checksum_type,
+        addr_format: UtxoAddressFormat::Standard,
+        hrp: None,
+    }
+}
+
+/// The swap fee address as a Sapling address with the coin's prefix, the form the wallet's own address
+/// takes for `my_balance` (CRD ch.39 R39.8.9d3 (b)).
+pub(crate) fn dex_fee_address_string(coin: &ZCoin) -> String {
+    encode_payment_address(
+        coin.z_fields.consensus_params.hrp_sapling_payment_address(),
+        &coin.z_fields.dex_fee_addr,
+    )
+}
+
 /// Sends HTLC output from the coin's my_z_addr
 pub async fn z_send_htlc(
     coin: &ZCoin,
@@ -45,14 +70,7 @@ pub async fn z_send_htlc(
 ) -> Result<ZTransaction, MmError<SendOutputsErr>> {
     let payment_script = payment_script(time_lock, secret_hash, my_pub, other_pub);
     let script_hash = dhash160(&payment_script);
-    let htlc_address = Address {
-        prefix: coin.utxo_arc.conf.p2sh_addr_prefix,
-        t_addr_prefix: coin.utxo_arc.conf.p2sh_t_addr_prefix,
-        hash: script_hash.into(),
-        checksum_type: coin.utxo_arc.conf.checksum_type,
-        addr_format: UtxoAddressFormat::Standard,
-        hrp: None,
-    };
+    let htlc_address = p2sh_address(coin, &payment_script);
 
     let amount_sat = sat_from_big_decimal(&amount, coin.utxo_arc.decimals).mm_err(Into::into)?;
     let address = htlc_address.to_string();
@@ -72,7 +90,14 @@ pub async fn z_send_htlc(
         .into_bytes()
         .take();
     let op_return_out = TxOut::new(Amount::ZERO, ZCashScript(ZCashScriptCode(opret_script)));
-    let mm_tx = coin.send_outputs(vec![htlc_output, op_return_out], vec![]).await?;
+    // The script's address is the one address the payment names; the data-carrier output is not an
+    // address (R39.8.9d3 (a)). The entry is written inside `send_outputs`, once the transaction is built.
+    let mm_tx = coin
+        .send_outputs(vec![htlc_output, op_return_out], vec![], vec![(
+            AddressSide::To,
+            address,
+        )])
+        .await?;
 
     Ok(mm_tx)
 }
@@ -91,7 +116,13 @@ pub async fn z_send_dex_fee(
         memo: Some(MemoBytes::from_bytes(uuid).expect("uuid length < 512")),
     };
 
-    let tx = coin.send_outputs(vec![], vec![dex_fee_out]).await?;
+    // The fee address, in the Sapling form with the coin's prefix (R39.8.9d3 (b)).
+    let tx = coin
+        .send_outputs(vec![], vec![dex_fee_out], vec![(
+            AddressSide::To,
+            dex_fee_address_string(coin),
+        )])
+        .await?;
 
     Ok(tx)
 }
@@ -176,6 +207,9 @@ pub async fn z_p2sh_spend(
     );
     tx_builder.set_lock_time(tx_locktime);
 
+    // The address of the script this input spends (R39.8.9d3 (c)), from the redeem script the input carries.
+    let spent_script_address = p2sh_address(coin, &redeem_script).to_string();
+
     let secp_secret = SecretKey::from_slice(htlc_privkey)
         .map_err(|e| MmError::new(ZP2SHSpendError::InvalidPaymentTx(e.to_string())))?;
     let mut signing_set = TransparentSigningSet::new();
@@ -223,6 +257,11 @@ pub async fn z_p2sh_spend(
         )
         .map_to_mm(ZP2SHSpendError::from)?
         .into_transaction();
+
+    // Recorded when the transaction is built, as a withdrawal's recipient is: a spend spends no wallet
+    // note and shows up only once mined, and a refused broadcast leaves a harmless entry that the scan
+    // removes after the expiry height (R39.8.9d2 (c)).
+    coin.record_tx_addresses(&zcash_tx, &[(AddressSide::From, spent_script_address)]);
 
     let mut tx_buffer = Vec::with_capacity(1024);
     zcash_tx

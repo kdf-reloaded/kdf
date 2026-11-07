@@ -41,8 +41,8 @@ use coins::rpc_command::get_my_address::get_my_address_rpc;
 use coins::rpc_command::get_private_keys::get_private_keys;
 use coins::rpc_command::get_token_info::get_token_info;
 use coins::rpc_command::init_account_balance::{init_account_balance, init_account_balance_status};
-use coins::rpc_command::init_create_account::{init_create_new_account, init_create_new_account_status,
-                                              init_create_new_account_user_action};
+use coins::rpc_command::init_create_account::{init_create_new_account, init_create_new_account_cancel,
+                                              init_create_new_account_status, init_create_new_account_user_action};
 use coins::rpc_command::init_scan_for_new_addresses::{init_scan_for_new_addresses, init_scan_for_new_addresses_status};
 use coins::rpc_command::init_withdraw::{init_withdraw, withdraw_cancel, withdraw_status, withdraw_user_action};
 use coins::rpc_command::swap_gas_fee_policy::{get_swap_gas_fee_policy, set_swap_gas_fee_policy};
@@ -514,6 +514,7 @@ async fn task_dispatcher(request: MmRpcRequest, ctx: MmArc, task_method: &str) -
         "create_new_account::init" => handle_mmrpc(ctx, request, init_create_new_account).await,
         "create_new_account::status" => handle_mmrpc(ctx, request, init_create_new_account_status).await,
         "create_new_account::user_action" => handle_mmrpc(ctx, request, init_create_new_account_user_action).await,
+        "create_new_account::cancel" => handle_mmrpc(ctx, request, init_create_new_account_cancel).await,
         "scan_for_new_addresses::init" => handle_mmrpc(ctx, request, init_scan_for_new_addresses).await,
         "scan_for_new_addresses::status" => handle_mmrpc(ctx, request, init_scan_for_new_addresses_status).await,
         "withdraw::init" => handle_mmrpc(ctx, request, init_withdraw).await,

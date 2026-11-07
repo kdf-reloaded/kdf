@@ -273,7 +273,12 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 - **The debug line of a sync request to another relay now says which candidate rule would have
   skipped it.** A node asks one other relay when the root a pair reached after its relay's answer
   differs from the one the maker advertised. Behind a busy relay this happened far more often than
-  expected, most likely because an answer newer than the maker's keep-alive counts as different too.
+  expected. In a separate lab run on 2026-11-07, with the maker repricing every 10 s, all 188 such
+  requests followed a change of the pair by the maker after its keep-alive, so the root the node
+  reached, which included that change, differed from the one the keep-alive advertised. With the
+  repricing finished before the keep-alive, 35 followed, none after such a change and all after a
+  relay had re-established its link; their cause is not established. With the maker not
+  repricing, none followed.
   With debug logging on, the line `sync alternate relay: … event=mismatch` now also counts, among
   the pairs asked about, those that a later keep-alive of the maker advertised with the root the
   node now holds, those that an order message of the maker changed in the meantime, and those whose
@@ -394,6 +399,30 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   in which such a swap is negotiated and then fails. Since the entry above, no coin is refused any
   more; the check stays as a guard. Detail: PRs #231, #233; CRD ch.05 R36–R40.
 
+#### Accounts and addresses under an HD login
+
+- **Under an HD login, activation now lists the coin's own address from the start.** A UTXO coin
+  such as RIN or QTUM activated through its task method, and an EVM coin activated with its tokens,
+  list the address at `path_to_address` (by default account 0, External, address 0) with its balance
+  in the activation result, in `account_balance` and in `my_tx_history`, without `get_new_address`.
+  If that address's account does not exist yet, activation creates it and reports only that account.
+  This is what GLEEC KDF does. Until now the coins that a swap paid to that address could stay
+  unlisted until `get_new_address` reached it. An `address_id` of 2^31 or more fails activation with
+  an internal error. Detail: PR #279; CRD ch.05 R35a.
+- **`task::create_new_account` now works under an HD login without a hardware wallet.** It serves a
+  UTXO coin such as RIN, QTUM, EVM coins and Siacoin; until now it asked for a hardware wallet first
+  and failed.
+  - The request takes an optional `account_id`. Without it, the lowest unused account number is
+    taken.
+  - With an `account_id` that is already in use, the task ends with `AccountAlreadyExists` (with the
+    `account_id`) before anything is derived; `task::create_new_account::status` reports it. GLEEC
+    KDF reports an internal error there.
+  - `task::create_new_account::cancel` is now served. Cancelling removes the account the task
+    created if it is the wallet's highest-numbered account.
+  - Under a software login the task reports `Preparing` and then its result.
+
+  Detail: PR #279; CRD ch.05 R35c.
+
 #### Name lookups
 
 - **One setting now chooses the DNS resolver for every name the node looks up.** The setting
@@ -492,6 +521,12 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   of `my_balance_change` for ARRR withdrawals to compensate must drop that workaround. Found in a
   live mainnet test. Detail: PR #271; CRD ch.39 R39.5A.3, R39.6.5c.
 
+- **The ARRR history now lists the addresses of a swap's own transactions.** A swap's payment lists
+  the script address it pays, its fee payment lists the fee address, and a spend or a refund lists
+  the script address it spends from. Their rows used to list only the wallet's own address. The
+  node records these addresses when it builds the transaction, in the same file as a withdrawal's
+  recipient, and fetches nothing. Detail: PR #277; CRD ch.39 R39.8.9d3.
+
 #### EVM coins
 
 - **A taker on an EVM chain with fast blocks, such as Monad, now finds the maker's spend of its
@@ -552,6 +587,38 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
     (`maker_update_coalescing` off) was never affected.
 
   Detail: PRs #204, #214; CRD ch.32 R-MP2 item 2.
+- **A connection to a peer that has stopped reading is now closed within 30 seconds.** When the node
+  closes a connection, for example to a stuck peer or after failed pings, it first flushes what is
+  still being sent. Toward a peer whose process hangs while its system keeps the connection open,
+  that flush cannot finish, so the close could last as long as the peer's system kept the
+  connection. For that time the connection, its queue and its memory stayed held, the peer still
+  counted as connected, and the node did not dial it again. The close now gives up after 30 seconds,
+  logs the peer with the cause "close timed out", and the peer is treated as disconnected, so the
+  usual redial rules apply. In a lab test toward a frozen peer, such a close ended after 30 seconds
+  with the deadline; without it, the close stayed open 13 minutes and ended after the peer was
+  resumed. Detail: PR #280; CRD ch.28 R27c.
+
+#### Siacoin
+
+- **A wallet without SC can now receive SC in a swap.** The swap refused to start with "Not enough SC
+  for swap: available 0, required at least 0.00001", although the receiving side spends no wallet
+  funds. The miner fee of the spend is taken from the payment itself, and the node now reports it that
+  way. Detail: PR #278; CRD ch.20 R-S11.
+
+- **Siacoin orders with the default minimum volume are no longer refused.** The minimum trading volume
+  of SC was one hasting, so the default minimum volume of an order could fall under the miner fee and
+  `setprice`, `sell` and `buy` refused it as too small (for example selling 10000 SC). The minimum
+  trading volume of SC is now 0.0002 SC, ten times the miner fee; the minimum transaction amount stays
+  one hasting. The Siacoin miner fee shown for a swap is now the 0.00002 SC actually paid, not
+  0.00001 SC. Detail: PR #278; CRD ch.20 R-S11, ch.60 R60.6.7.
+
+#### Swap recovery
+
+- **`recover_funds_of_swap` no longer refunds the maker payment of a swap whose spend of the taker
+  payment was sent but not yet confirmed.** The maker payment belongs to the taker once that spend was
+  sent. The call now refuses, whether or not the refund time has passed, and builds nothing. A swap with a
+  confirmed spend was already refused. A swap whose maker payment is spent or refunded on the chain is
+  answered as before. Detail: PR #284; CRD ch.51 R75.
 
 #### UTXO coins and Electrum
 
@@ -582,6 +649,14 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 
 ### Tests
 
+- **The Qtum testnet tests now use the one public Qtum testnet server, and the QRC20 docker test
+  set-up mines its own blocks and waits for new contracts.** The tests that activate the testnet
+  Qtum coin pointed at servers that serve Qtum mainnet, so the test wallets looked empty and the
+  delegation and balance tests failed. They now use `s6.electrum.qtum.site`. In the Docker set-up,
+  the Qtum test node now mines a block when a test waits for a confirmation, the set-up waits until
+  a new contract shows its code before the first call to it, and the waits are longer but still
+  bounded. The node itself is unchanged.
+  Detail: PR #283.
 - **The tests run before the next beta are listed in
   [`docs/release-tests/0.4.0-beta.1.md`](docs/release-tests/0.4.0-beta.1.md).** The lab rows of
   the cycle's second batch are recorded there now; the release campaign follows.
@@ -595,6 +670,13 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   keep-alive wait counted the released and the pending orders while the queue kept releasing, so
   one release between the two counts made it fail now and then. It now stops the queue before
   counting. The node itself is unchanged. Detail: PR #244; CRD ch.32 T-MP6.
+- **The memory measurement of the order-matching tests builds again.** The test build with the
+  `counting-alloc` feature had stopped compiling when the order-matching state gained a field. Its
+  test setup now fills every field it does not set itself from the test defaults, so a field added
+  later cannot break it again. The node itself is unchanged. Detail: PR #280.
+- **The close deadline of the connection layer is tested in CI.** The tests of the vendored
+  multiplexer crate, which carries the 30-second close deadline, now run as their own CI job.
+  Detail: PR #280; CRD ch.28 T14.
 
 ### Documentation
 
@@ -651,9 +733,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   (CRD PR #243, PR #251). A relay now holds a sync request that reaches it before its own sync for
   the pair has started, and an order-book answer waits briefly for a relay that is still storing a
   maker's first orders (CRD PR #258, PR #259). The loaded-relay lab showed the request to one other
-  relay clearing a cancelled order one keep-alive interval earlier in half of its cycles, at a cost
-  in extra requests that is now being measured, starting with a debug line per such request
-  (PR #269).
+  relay clearing a cancelled order one keep-alive interval earlier in half of its cycles. A debug
+  line now counts, per such request, which candidate rule would have skipped it (PR #269). A
+  fault-free run showed no extra requests at all, so the rule stays as it is (PR #274).
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
@@ -665,8 +747,10 @@ file carries the detail. "New" means the plan was created in this cycle.
   now says what GLEEC KDF does under an HD login, and lists the planned change to legacy `enable` and
   `electrum` with its switch (PR #245). The direct `withdraw` under an HD login and the refusal of
   `from` under an iguana login are done (items H5.1 and H5.5, PR #270); the maintainer set the
-  default sender to the coin's activated address (decision CU). `fetch_utxos`, `consolidate_utxos`
-  and the automatic merge work under an HD login (item H5.3, PR #281).
+  default sender to the coin's activated address (decision CU). Activation lists the address at
+  `path_to_address`, and `task::create_new_account` works without a hardware wallet (items H5.0 and
+  H5.4, PR #279). `fetch_utxos`, `consolidate_utxos` and the automatic merge work under an HD login
+  (item H5.3, PR #281).
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
@@ -685,7 +769,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   logging, the address ranges and the idle-close log (PRs #203, #211), the send-queue window
   shares and the queue-signal fix (PRs #204, #214), and one resolver for every hostname (PRs #216,
   #219); the remaining lookups (Sia, WalletConnect, Lightning, statistics) and encrypted DNS are
-  new rows for later.
+  new rows for later. A close that a non-reading peer would hold forever now ends after 30 seconds
+  (item P6, PR #280).
 - [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — done: the plan now says
   that the fee estimate uses the transaction's signature-hash length, which is smaller than the
   transaction sent (PR #239; see Known limitations).
@@ -704,13 +789,6 @@ file carries the detail. "New" means the plan was created in this cycle.
 What does not work yet, or works only in part, in this release. Each item says where more detail
 lives.
 
-- **Under an HD login, a UTXO coin such as RIN can show no address and no balance although its swap
-  address holds funds.** An HD account lists only the addresses it has handed out. A swap uses the
-  coin's address at `path_to_address` (by default account 0, External, address 0) even when the
-  account has not listed it yet, so the coins a swap pays you can arrive there unlisted. Restarting
-  the node does not change this. Requesting an address with `get_new_address` lists it together with
-  its balance. The funds are not affected. More in
-  [`hd-key-unification`](docs/plans/hd-key-unification.md), item H5.
 - **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
   `get_enabled_coins` fails as a whole once such a coin is enabled.** Both report a single address,
   and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for
@@ -778,12 +856,13 @@ lives.
   prover, which only the native build has. Use a native build for ARRR. Detail: CRD ch.39 R39.10.1,
   §39.6.1.
 - **The ARRR history names no recipient for a withdrawal made before this release, or by another
-  node on the same seed, and no address for a swap's transparent parts.** The recipient comes from
-  the node's own record, written when the withdrawal is built, so a row without a record names
-  only the wallet's own address. A swap's payment, spend and refund rows do not list the script
-  address or the fee address yet; that is scheduled. More in
-  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PR #268;
-  CRD ch.39 R39.8.9d2 (d), status note under R39.8.9e.
+  node on the same seed, and no transparent address of a transaction another wallet built.** The
+  node lists the addresses of the transactions it builds itself, from its own record, so a row
+  without a record names only the wallet's own address. A payment that reaches the wallet from a
+  transparent address does not list that address, because the node reads only compact blocks and
+  fetches nothing more. Swap rows from before this release keep the sets they had. More in
+  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PRs #268,
+  #277; CRD ch.39 R39.8.9d2 (d), R39.8.9d3 (d).
 - **An ARRR withdrawal takes no memo, and its answer has no `memo` member.** The `withdraw`
   request has no `memo` field, so a memo sent with it is ignored and the shielded output carries
   none. Komodo DeFi Framework and GLEEC KDF echo the request's memo in the answer. Memo support is
@@ -839,6 +918,12 @@ lives.
   a refund waits until it advances again, and the log does not say so. In a test, a refund started
   four hours after the HTLC lock expired, because the coin's node had stood still for almost six
   hours; the log only repeated "wait refund till" every 24 seconds.
+- **A maker payment is not refunded after the spend of the taker payment was sent, even if that spend
+  never confirms.** If the node's spend of the taker payment was broadcast but dropped from the chain,
+  and the other side refunded its payment, `recover_funds_of_swap` refuses to refund the maker payment:
+  the other side knows the secret from the broadcast and can still claim it. A refund in that case only,
+  when the other side's refund is shown on its own chain, is under consideration. Detail: PR #284; CRD
+  ch.51 R75, D8.
 
 ## [0.3.0-beta.1] — 2026-11-01
 

@@ -127,6 +127,9 @@ pub trait HDWalletStorageInternalOps {
         account: HDAccountStorageItem,
     ) -> HDWalletStorageResult<()>;
 
+    /// Deletes the account `account_id` of the wallet. An account the storage does not hold is not an error.
+    async fn remove_account(&self, wallet_id: HDWalletId, account_id: u32) -> HDWalletStorageResult<()>;
+
     async fn clear_accounts(&self, wallet_id: HDWalletId) -> HDWalletStorageResult<()>;
 }
 
@@ -179,6 +182,11 @@ pub trait HDWalletCoinWithStorageOps: HDWalletCoinOps {
     ) -> HDWalletStorageResult<()> {
         let storage = self.hd_wallet_storage(hd_wallet);
         storage.upload_new_account(account_info).await
+    }
+
+    async fn remove_account(&self, hd_wallet: &Self::HDWallet, account_id: u32) -> HDWalletStorageResult<()> {
+        let storage = self.hd_wallet_storage(hd_wallet);
+        storage.remove_account(account_id).await
     }
 
     async fn clear_accounts(&self, hd_wallet: &Self::HDWallet) -> HDWalletStorageResult<()> {
@@ -297,6 +305,11 @@ impl HDWalletCoinStorage {
     async fn upload_new_account(&self, account_info: HDAccountStorageItem) -> HDWalletStorageResult<()> {
         let wallet_id = self.wallet_id();
         self.inner.upload_new_account(wallet_id, account_info).await
+    }
+
+    async fn remove_account(&self, account_id: u32) -> HDWalletStorageResult<()> {
+        let wallet_id = self.wallet_id();
+        self.inner.remove_account(wallet_id, account_id).await
     }
 
     pub async fn clear_accounts(&self) -> HDWalletStorageResult<()> {
@@ -595,6 +608,54 @@ mod tests {
     #[test]
     fn test_delete_accounts() { block_on(test_delete_accounts_impl()) }
 
+    /// CRD ch.05 R35c item 4: removing an account deletes that account of that wallet only, and an account the
+    /// storage does not hold is not an error.
+    async fn test_remove_account_impl() {
+        let account = |account_id: u32, xpub: &str| HDAccountStorageItem {
+            account_id,
+            account_xpub: xpub.to_owned(),
+            external_addresses_number: 1,
+            internal_addresses_number: 2,
+        };
+        let wallet0_account0 = account(0, "xpub6DEHSksajpRPM59RPw7Eg6PKdU7E2ehxJWtYdrfQ6JFmMGBsrR6jA78ANCLgzKYm4s5UqQ4ydLEYPbh3TRVvn5oAZVtWfi4qJLMntpZ8uGJ");
+        let wallet0_account1 = account(1, "xpub6DEHSksajpRPQq2FdGT6JoieiQZUpTZ3WZn8fcuLJhFVmtCpXbuXxp5aPzaokwcLV2V9LE55Dwt8JYkpuMv7jXKwmyD28WbHYjBH2zhbW2p");
+        let wallet1_account1 = account(1, "xpub6EuV33a2DXxAhoJTRTnr8qnysu81AA4YHpLY6o8NiGkEJ8KADJ35T64eJsStWsmRf1xXkEANVjXFXnaUKbRtFwuSPCLfDdZwYNZToh4LBCd");
+
+        let ctx = mm_ctx_with_custom_db();
+        let user_rmd160 = H160::from("0000000000000000000000000000000000000000");
+        let device0_rmd160 = H160::from("0000000000000000000000000000000000000010");
+        let device1_rmd160 = H160::from("0000000000000000000000000000000000000020");
+        let wallet0_db = HDWalletCoinStorage::init_with_rmd160(&ctx, "DOC".to_owned(), user_rmd160, device0_rmd160)
+            .await
+            .expect("!HDWalletCoinStorage::new");
+        let wallet1_db = HDWalletCoinStorage::init_with_rmd160(&ctx, "DOC".to_owned(), user_rmd160, device1_rmd160)
+            .await
+            .expect("!HDWalletCoinStorage::new");
+        for (db, item) in [
+            (&wallet0_db, &wallet0_account0),
+            (&wallet0_db, &wallet0_account1),
+            (&wallet1_db, &wallet1_account1),
+        ] {
+            db.upload_new_account(item.clone())
+                .await
+                .expect("!HDWalletCoinStorage::upload_new_account");
+        }
+
+        wallet0_db
+            .remove_account(1)
+            .await
+            .expect("!HDWalletCoinStorage::remove_account");
+        wallet0_db
+            .remove_account(7)
+            .await
+            .expect("an account the storage does not hold is not an error");
+
+        let actual = wallet0_db.load_all_accounts().await.expect("!load_all_accounts");
+        assert_eq!(actual, vec![wallet0_account0]);
+        let actual = wallet1_db.load_all_accounts().await.expect("!load_all_accounts");
+        assert_eq!(actual, vec![wallet1_account1], "another wallet's account 1 is kept");
+    }
+
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test]
     async fn test_update_account() { test_update_account_impl().await }
@@ -602,4 +663,12 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_update_account() { block_on(test_update_account_impl()) }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test]
+    async fn test_remove_account() { test_remove_account_impl().await }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_remove_account() { block_on(test_remove_account_impl()) }
 }

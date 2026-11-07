@@ -1,10 +1,10 @@
 use crate::coin_balance::{coin_balance_map_for_ticker, AddressBalanceStatus, HDAddressBalance,
                           HDAddressBalanceScanner, HDWalletBalanceOps};
 use crate::hd_pubkey::{ExtractExtendedPubkey, HDExtractPubkeyError, HDXPubExtractor};
-use crate::hd_wallet::{AccountUpdatingError, AddressDerivingError, AsyncMutexGuard, GetNewHDAddressParams,
-                       GetNewHDAddressResponse, HDAccountMut, HDAccountOps, HDAccountsMutex, HDAddress,
-                       HDWalletCoinOps, HDWalletOps, HDWalletRpcError, HDWalletRpcOps, InvalidBip44ChainError,
-                       NewAccountCreatingError, NewAddressDerivingError};
+use crate::hd_wallet::{choose_new_account_id, AccountUpdatingError, AddressDerivingError, AsyncMutexGuard,
+                       GetNewHDAddressParams, GetNewHDAddressResponse, HDAccountMut, HDAccountOps, HDAccountsMutex,
+                       HDAddress, HDAddressId, HDWalletCoinOps, HDWalletOps, HDWalletRpcError, HDWalletRpcOps,
+                       InvalidBip44ChainError, NewAccountCreatingError, NewAccountIndex, NewAddressDerivingError};
 use crate::hd_wallet_storage::{HDAccountStorageItem, HDWalletCoinStorage, HDWalletCoinWithStorageOps,
                                HDWalletStorageResult};
 use crate::{coin_balance, hd_wallet, BalanceError, BalanceResult, CoinBalance, CoinWithDerivationMethod,
@@ -173,11 +173,12 @@ impl HDWalletCoinOps for EthCoin {
         &self,
         hd_wallet: &'a Self::HDWallet,
         xpub_extractor: Option<&XPubExtractor>,
+        index: NewAccountIndex,
     ) -> MmResult<HDAccountMut<'a, Self::HDAccount>, NewAccountCreatingError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
     {
-        create_new_account(self, hd_wallet, xpub_extractor).await
+        create_new_account(self, hd_wallet, xpub_extractor, index).await
     }
 
     async fn set_known_addresses_number(
@@ -199,24 +200,17 @@ async fn create_new_account<'a, XPubExtractor>(
     coin: &EthCoin,
     hd_wallet: &'a EthHDWallet,
     xpub_extractor: Option<&XPubExtractor>,
+    index: NewAccountIndex,
 ) -> MmResult<HDAccountMut<'a, EthHDAccount>, NewAccountCreatingError>
 where
     XPubExtractor: HDXPubExtractor + Sync,
 {
-    const INIT_ACCOUNT_ID: u32 = 0;
-    let new_account_id = hd_wallet
-        .accounts
-        .lock()
-        .await
-        .iter()
-        .last()
-        .map(|(account_id, _)| *account_id + 1)
-        .unwrap_or(INIT_ACCOUNT_ID);
-    if new_account_id >= ChildNumber::HARDENED_FLAG {
-        return MmError::err(NewAccountCreatingError::AccountLimitReached {
-            max_accounts_number: ChildNumber::HARDENED_FLAG,
-        });
-    }
+    // The index is chosen, and an out-of-range or taken one refused, before any key is derived or any device is
+    // asked (CRD ch.05 R35c item 1).
+    let new_account_id = {
+        let accounts = hd_wallet.accounts.lock().await;
+        choose_new_account_id(&*accounts, index)?
+    };
 
     let account_child =
         ChildNumber::new(new_account_id, true).map_to_mm(|e| NewAccountCreatingError::Internal(e.to_string()))?;
@@ -236,11 +230,10 @@ where
 
     let accounts = hd_wallet.accounts.lock().await;
     if accounts.contains_key(&new_account_id) {
-        let error = format!(
-            "Account '{}' has been activated while we proceed the 'create_new_account' function",
-            new_account_id
-        );
-        return MmError::err(NewAccountCreatingError::Internal(error));
+        // The index was free when it was chosen: the account was created while its key was being derived.
+        return MmError::err(NewAccountCreatingError::AccountAlreadyExists {
+            account_id: new_account_id,
+        });
     }
 
     coin.upload_new_account(hd_wallet, new_account.to_storage_item())
@@ -412,12 +405,20 @@ impl HDWalletBalanceOps for EthCoin {
         xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
         min_addresses_number: u32,
+        path_to_address: Option<HDAddressId>,
     ) -> MmResult<HDWalletBalance, EnableCoinBalanceError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
     {
-        coin_balance::common_impl::enable_hd_wallet(self, hd_wallet, xpub_extractor, scan_policy, min_addresses_number)
-            .await
+        coin_balance::common_impl::enable_hd_wallet(
+            self,
+            hd_wallet,
+            xpub_extractor,
+            scan_policy,
+            min_addresses_number,
+            path_to_address,
+        )
+        .await
     }
 
     async fn scan_for_new_addresses(
@@ -611,7 +612,7 @@ impl AccountBalanceRpcOps for EthCoin {
 use crate::coin_balance::HDAccountBalance;
 use crate::rpc_command::init_account_balance::{self as init_account_balance_mod, InitAccountBalanceParams,
                                                InitAccountBalanceRpcOps};
-use crate::rpc_command::init_create_account::{self, CreateNewAccountParams, InitCreateHDAccountRpcOps};
+use crate::rpc_command::init_create_account::{self, CreateNewAccountParams, CreatedAccount, InitCreateHDAccountRpcOps};
 
 #[async_trait]
 impl InitAccountBalanceRpcOps for EthCoin {
@@ -628,12 +629,14 @@ impl InitCreateHDAccountRpcOps for EthCoin {
     async fn init_create_account_rpc<XPubExtractor>(
         &self,
         params: CreateNewAccountParams,
-        xpub_extractor: &XPubExtractor,
+        xpub_extractor: Option<&XPubExtractor>,
+        created_account: &CreatedAccount,
     ) -> MmResult<HDAccountBalance, HDWalletRpcError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
     {
-        init_create_account::common_impl::init_create_new_account_rpc(self, params, xpub_extractor).await
+        init_create_account::common_impl::init_create_new_account_rpc(self, params, xpub_extractor, created_account)
+            .await
     }
 }
 

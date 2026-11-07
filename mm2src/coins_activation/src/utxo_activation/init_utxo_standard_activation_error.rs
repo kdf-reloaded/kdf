@@ -143,7 +143,8 @@ impl InitUtxoStandardError {
                 NewAccountCreatingError::HwContextNotInitialized
                 | NewAccountCreatingError::HDWalletUnavailable
                 | NewAccountCreatingError::CoinDoesntSupportTrezor
-                | NewAccountCreatingError::AccountLimitReached { .. } => InitUtxoStandardError::CoinCreationError {
+                | NewAccountCreatingError::AccountLimitReached { .. }
+                | NewAccountCreatingError::AccountAlreadyExists { .. } => InitUtxoStandardError::CoinCreationError {
                     ticker,
                     error: account_err.to_string(),
                 },

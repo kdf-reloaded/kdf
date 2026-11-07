@@ -10,10 +10,10 @@
 //! rescan, a divergence, the legacy-schema rename of R39.8.0ad) renames only that file, so the
 //! entries survive and serve the rows the rescan finds again.
 //!
-//! One transaction can hold several addresses, each on a side, `from` or `to`. Only a withdrawal
-//! writes today, with one `to` entry. The transparent addresses of R39.8.9c and R39.8.9d and the
-//! shielded recipient of a swap's fee can be added later as more rows of the same table, with no
-//! change to the schema.
+//! One transaction can hold several addresses, each on a side, `from` or `to`. A withdrawal writes one
+//! `to` entry (R39.8.9d2); the transactions the node builds for a swap write theirs (R39.8.9d3): the
+//! script address of a payment and the fee address of a fee payment in `to`, the script address a spend
+//! or refund spends in `from`.
 //!
 //! An entry never touches note selection or the in-flight exclusion of §39.8.0.7: it holds a
 //! transaction id, an expiry height and a string, and nothing the wallet database does reads it.
@@ -33,9 +33,7 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS tx_addresses (
 /// Which side of a transaction an address is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AddressSide {
-    /// Not written yet: the later change that records the transparent inputs of R39.8.9c uses it. The
-    /// reader and the schema already carry it.
-    #[allow(dead_code)]
+    /// The address a transaction spends from: the script address of a swap's spend or refund (R39.8.9d3 (c)).
     From,
     To,
 }

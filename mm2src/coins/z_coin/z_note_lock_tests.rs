@@ -327,7 +327,9 @@ impl LightCoinFixture {
     }
 
     async fn send(&self, amount_sat: u64) -> Result<ZTransaction, MmError<SendOutputsErr>> {
-        self.coin.send_outputs(vec![], vec![self.output(amount_sat)]).await
+        self.coin
+            .send_outputs(vec![], vec![self.output(amount_sat)], vec![])
+            .await
     }
 
     /// A withdrawal-side build: selected and signed, nothing broadcast.
@@ -868,8 +870,8 @@ async fn two_overlapping_sends_select_different_notes_and_neither_reuses_a_nulli
 
     let (first_coin, second_coin) = (fixture.coin.clone(), fixture.coin.clone());
     let (first_out, second_out) = (fixture.output(100_000_000), fixture.output(100_000_000));
-    let first_send = tokio::spawn(async move { first_coin.send_outputs(vec![], vec![first_out]).await });
-    let second_send = tokio::spawn(async move { second_coin.send_outputs(vec![], vec![second_out]).await });
+    let first_send = tokio::spawn(async move { first_coin.send_outputs(vec![], vec![first_out], vec![]).await });
+    let second_send = tokio::spawn(async move { second_coin.send_outputs(vec![], vec![second_out], vec![]).await });
     let first = first_send.await.unwrap().expect("the first send succeeds");
     let second = second_send.await.unwrap().expect("the second send succeeds");
 
@@ -908,7 +910,7 @@ async fn a_waiting_send_re_selects_when_the_scan_frees_the_change() {
 
     let waiting_coin = fixture.coin.clone();
     let output = fixture.output(10_000_000);
-    let waiting = tokio::spawn(async move { waiting_coin.send_outputs(vec![], vec![output]).await });
+    let waiting = tokio::spawn(async move { waiting_coin.send_outputs(vec![], vec![output], vec![]).await });
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(!waiting.is_finished(), "the send is short until the change is scanned");
@@ -2241,6 +2243,7 @@ async fn t39_8_0g1_a_mempool_output_with_the_tip_unchanged_reaches_the_unspendab
 }
 
 mod pirate1_withdraw;
+mod swap_addresses;
 mod withdraw_balance_change;
 mod withdraw_recipient;
 mod withdraw_unsupported;
