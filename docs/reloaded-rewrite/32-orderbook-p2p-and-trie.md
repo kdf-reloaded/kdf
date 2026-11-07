@@ -1168,7 +1168,11 @@ requester MUST ask one other relay once:
    on a task of its own. Under trigger (a) the own request's record of
    R-Q5b lasts until that request ends the same way it would end for a
    request to F, so the requests parked behind it wait for its answer, each
-   still within its own bound.
+   still within its own bound. The request has the 10 s timeout of R-Q6
+   under either trigger, not the bound of R-Q5b. An answer that arrives
+   after a parked request's bound no longer reaches that request, which was
+   answered at its bound. It is applied as any answer is, and serves this
+   node and the requests that come later.
 7. **Switch.** The top-level `MM2.json` boolean `sync_request_alternate_relay`,
    default `true`; only a JSON `false` turns the rule off, and then the
    requester behaves as R-Q5c and R-Q6 describe. The switch is independent
@@ -4536,3 +4540,11 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   parked-request table and order-book answer. The reference facts it rests on
   are R-F3a, R-GH12 and the "no data" and "missing pair" classes of R-Q5a,
   which passed the KDF Dirty Gate. It needs no Dirty Gate pass of its own.
+- *Reloaded-original addition (2026-11-07, Decision DA) -- the last three
+  sentences of R-Q5d item 6.* They state the timeout the request to another
+  relay already has, and what an answer after a parked request's bound still
+  serves. Written by a context that never read the forbidden corpus. Its
+  sources are the maintainer's Decision DA, this repository's own keep-alive
+  requester and parked-request table, and a lab run of this project's own
+  nodes with reference binaries as black boxes, reported as counts. It states
+  no reference fact and needs no Dirty Gate pass.
