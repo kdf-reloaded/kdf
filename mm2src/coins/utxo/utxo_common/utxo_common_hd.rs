@@ -340,7 +340,8 @@ pub async fn get_withdraw_hd_sender<T>(
     hd_wallet: &T::HDWallet,
 ) -> MmResult<WithdrawSenderAddress<Address, Public>, WithdrawError>
 where
-    T: HDWalletCoinOps<Address = Address, Pubkey = Public>,
+    T: HDWalletCoinOps<Address = Address, Pubkey = Public, HDWallet = UtxoHDWallet, HDAccount = UtxoHDAccount>
+        + AsRef<UtxoCoinFields>,
 {
     let HDAddressId {
         account_id,
@@ -376,10 +377,26 @@ where
             },
         },
         None => {
-            // Compatibility divergence from upstream: when `from` is omitted for an HD wallet,
-            // default to the single enabled/active address (account 0, External chain, address 0)
-            // — the same address used for balance and swaps — so clients that don't send `from`
-            // can still preview and withdraw. Upstream rejects an omitted `from`.
+            // Compatibility divergence from upstream (CRD ch.49 R49.4, decisions BY, BZ and CU): when `from` is
+            // omitted for an HD wallet, the sender is the coin's activated address, the address at the
+            // activation's `path_to_address` with its full derivation path -- the address the coin's swaps use
+            // (CRD ch.05 R42) -- so clients that don't send `from` can still preview and withdraw. Upstream
+            // rejects an omitted `from`. This one place serves the task route and the direct `withdraw` method.
+            let fields: &UtxoCoinFields = coin.as_ref();
+            if let PrivKeyPolicy::HDWallet { path_to_address, .. } = &fields.priv_key_policy {
+                // The account of the activated address must be held, as for any other sender.
+                hd_wallet
+                    .get_account(path_to_address.account_id)
+                    .await
+                    .or_mm_err(|| WithdrawError::FromAddressNotFound)?;
+                let hd_address =
+                    crate::utxo::utxo_standard_swap_v2::enabled_hd_address_info(fields, hd_wallet, "withdraw")
+                        .await
+                        .map_to_mm(WithdrawError::InternalError)?;
+                return Ok(WithdrawSenderAddress::from(hd_address));
+            }
+            // A coin without a software HD key policy (the Trezor policy, which does not honor
+            // `path_to_address`) keeps account 0, External chain, address 0.
             let default_account = hd_wallet
                 .get_account(0)
                 .await

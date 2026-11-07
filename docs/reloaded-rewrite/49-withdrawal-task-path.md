@@ -120,6 +120,39 @@ account `0`, chain `External`, address `0`. *(Amended 2026-11-04 and
 > direct method with `from`, as the reference does, and without `from` the
 > same way as the task route (decision BZ).
 
+> **As built (2026-11-07, clean-side record).** Plan item H5.1.
+> `MmCoin::withdraw` of the UTXO standard coin and QTUM calls
+> `utxo_common::withdraw_with_hd_sender`. Under a software HD key policy with
+> an HD derivation method it builds
+> `StandardUtxoWithdraw::new_with_hd_sender`. Every other coin keeps the
+> single-key `StandardUtxoWithdraw::new`, including a coin under the Trezor
+> policy (which answers as before, with the internal error that the Iguana key
+> is unavailable, and uses no device) and BCH. The sender comes from
+> `resolve_withdraw_sender`, which both this route and `InitUtxoWithdraw::new`
+> call. It calls `get_withdraw_sender_address` → `get_withdraw_hd_sender`, the
+> single place that decides `from` and the default. The key that signs is
+> derived at the sender's path by `hd_sender_key_pair`, which the task route's
+> HD signing arm also uses, and the change returns to the sender. Without
+> `from`, under a software HD policy, the sender is `enabled_hd_address_info`,
+> the address at `path_to_address` with its full path; if its account is not
+> held, the answer is `FromAddressNotFound`. Under the Trezor policy it stays
+> account `0`, chain `External`, address `0`. BCH has no HD policy in this
+> repository (its activation always builds the Iguana key), so it is not
+> served under HD here (plan item H7). Tests, in module
+> `utxo_tests::hd_coin_swap_key_tests::direct_withdraw`:
+> - T49.3 and T49.4:
+>   `t49_3_direct_address_id_selector_spends_from_that_activated_address`,
+>   `t49_4_direct_derivation_path_selector_resolves_to_the_same_sender`.
+> - T49.5: `t49_5_direct_without_from_default_path_spends_from_address_zero`,
+>   `t49_5_direct_without_from_non_default_path_spends_from_that_address`,
+>   `t49_5_the_shared_sender_step_without_from_is_the_activated_address`,
+>   `t49_5_trezor_policy_default_is_unchanged_and_the_direct_route_does_not_sign_with_a_device`,
+>   `t49_5_direct_without_from_and_a_missing_activated_account_answers_from_address_not_found`.
+> - T49.6: `t49_6_direct_unknown_account_answers_unknown_account`,
+>   `t49_6_direct_address_not_activated_answers_unexpected_from_address`,
+>   `t49_6_direct_mismatched_coin_type_answers_unexpected_from_address`.
+> - QTUM: `qtum_direct_withdraw_with_from_spends_from_the_selected_address`.
+
 R49.5. EVM-family software-HD native-coin and fungible-token withdrawals shall
 be supported through both direct `withdraw` and `task::withdraw::init`. When
 `from` is omitted, both paths shall use the activated software key/address for
@@ -573,6 +606,19 @@ structured withdrawal error of R49.20:
 > it as a no-op, is for the clean side to confirm against this repository's
 > code when plan `hd-key-unification` item H5.1 is implemented. Items 2 and 3
 > are the contract behind T49.5 and T49.18.
+
+> **As built (2026-11-07, plan item H5.1, which also covers H5.5).**
+> `refuse_from_for_single_key` (`utxo_withdraw.rs`) answers any explicit
+> `from` with `UnexpectedFromAddress` for a coin with a single-address
+> derivation method. The task route's `get_withdraw_iguana_sender` and the
+> direct route's `StandardUtxoWithdraw::new` share it. The direct `withdraw`
+> of the UTXO standard coin, of QTUM and of BCH therefore refuses a selector
+> that names the login's own address, in either form, before any unspent
+> output is listed. Before H5.1, the direct route ignored `from`. Tests:
+> - `t49_27b_single_key_direct_withdraw_refuses_from_utxo_standard`, `_qtum`
+>   and `_bch`;
+> - `t49_27b_single_key_shared_sender_step_refuses_from`;
+> - the HD refusal tests `t49_6_direct_*`.
 
 T49.27b. *(Reloaded-original; passed the KDF Dirty Gate together with
 R49.27b on 2026-11-07.)* Under an iguana login, a direct `withdraw` and a task withdraw
