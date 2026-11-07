@@ -493,7 +493,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 - **The ARRR history now reports the fee of the wallet's own sends.** A withdrawal, a swap payment
   and a swap fee payment show the fee they paid in `transaction_fee`, before and after mining. Every
   row used to report 0. The fee comes from the record the node writes when the backend accepts the
-  broadcast. Found in a live test. Detail: PR #NNN; CRD ch.39 R39.8.9e1.
+  broadcast. Found in a live test. Detail: PR #288; CRD ch.39 R39.8.9e1.
 
 #### EVM coins
 
@@ -681,7 +681,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   decline log lines, is implemented (PR #235); the ARRR rule that uses it is written (CRD PR #230)
   and implemented (PR #241).
   The shielded history gained two items: the addresses of a swap's own transactions (PR #277) and
-  the fee of an own send (PR #NNN).
+  the fee of an own send (PR #288).
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
@@ -840,7 +840,7 @@ lives.
 - **The ARRR history reports a fee of 0 where the node does not know the fee.** That is the case
   for a transaction another wallet built, such as a deposit, for a swap's spend or refund, and for
   an own send that a rebuilt wallet database found by scanning. The node reads compact blocks,
-  which carry no fee data, and fetches nothing more. Detail: PR #NNN; CRD ch.39 R39.8.9e1 (b), (c).
+  which carry no fee data, and fetches nothing more. Detail: PR #288; CRD ch.39 R39.8.9e1 (b), (c).
 - **An ARRR withdrawal takes no memo, and its answer has no `memo` member.** The `withdraw`
   request has no `memo` field, so a memo sent with it is ignored and the shielded output carries
   none. Komodo DeFi Framework and GLEEC KDF echo the request's memo in the answer. Memo support is

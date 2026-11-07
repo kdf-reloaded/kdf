@@ -156,7 +156,7 @@ cost only the new entries.
 names its fee. A live withdrawal in the release tests showed it on 2026-11-07. CRD ch.39 R39.8.9e
 computes the fee from the full transaction, which a Light-mode wallet does not have.
 
-**Done** (decided 2026-11-07) in PR #NNN, ch.39 R39.8.9e1: an own send (a withdrawal, a swap
+**Done** (decided 2026-11-07) in PR #288, ch.39 R39.8.9e1: an own send (a withdrawal, a swap
 payment, a swap fee payment) reports the fee the node recorded at broadcast. A transaction
 another wallet built, a swap spend or refund, and an own send found again after a rebuild of the
 wallet database report 0.
