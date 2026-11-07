@@ -154,6 +154,7 @@ mod z_pirate1_tests;
 #[cfg(not(target_arch = "wasm32"))] mod z_refund_gate;
 #[cfg(not(target_arch = "wasm32"))] mod z_swap_ops;
 #[cfg(target_arch = "wasm32")] mod z_swap_ops_wasm;
+#[cfg(not(target_arch = "wasm32"))] mod z_tx_addresses;
 #[cfg(not(target_arch = "wasm32"))] mod z_tx_read;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_tx_read_fixtures;
@@ -3459,6 +3460,23 @@ impl MmCoin for ZCoin {
                     .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
                 let mut tx_hash = tx.txid().as_ref().to_vec();
                 tx_hash.reverse();
+
+                // Keep the destination as the request gave it, for the history row of this transaction
+                // (CRD ch.39 R39.8.9d2 (a)). A failure only costs the row its recipient, so the
+                // withdrawal is not failed for it.
+                if let Err(e) = coin.z_fields.shielded_history.record_withdraw_recipient(
+                    tx.txid().as_ref(),
+                    u32::from(tx.expiry_height()),
+                    &req.to,
+                ) {
+                    log::warn!(
+                        "ZCoin {}: could not record the destination of the withdrawal {}: {}. \
+                         Its history row will not list the recipient.",
+                        coin.ticker(),
+                        hex::encode(&tx_hash),
+                        e
+                    );
+                }
 
                 let my_balance_change = data.spent_by_me - data.received_by_me;
 
