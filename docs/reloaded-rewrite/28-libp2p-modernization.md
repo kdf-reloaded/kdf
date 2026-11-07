@@ -1031,6 +1031,28 @@ finish.
 > (R9, R27, RP2). The pinned fork's public swarm crate (MIT), which both
 > reference rows bind (RQ1b), awaits the multiplexer's close without a
 > deadline.
+>
+> **As built (2026-11-07, clean-side record; plan item P6).** The deadline
+> is in `Muxer::poll_close` of `vendor-patches/libp2p-yamux-0.44.0/src/lib.rs`,
+> the second patch in its `PATCH-NOTES.md`. The constant `CLOSE_TIMEOUT` is
+> 30 s. The first `poll_close` of a connection starts a
+> `futures_timer::Delay`; the inner close is polled first, and if it is
+> still pending when the delay fires, `poll_close` returns an `io::Error` of
+> kind `TimedOut` with the message "close timed out" and never polls the
+> inner connection again. The boxed muxer wraps that error in an I/O error
+> of kind `Other`, so the swarm's cause carries both; its debug text, which
+> the WARN line of R27b prints with the peer ID, contains "close timed
+> out". The deadline holds on every target: on `wasm32`, `futures-timer`
+> runs on the browser timer, through a feature that the shared dependency
+> graph enables, not this crate. Only the crate's own tests shorten the
+> deadline, through a private field. Tests:
+> `close_toward_a_peer_that_reads_nothing_times_out_at_the_deadline`,
+> `close_toward_a_peer_that_reads_ends_at_once` and
+> `close_deadline_is_thirty_seconds` in the yamux crate (CI row
+> `bounded-close`); `close_timed_out_is_a_warn_that_carries_the_cause` and
+> the extended
+> `connection_closed_is_classified_by_cause_type_and_remaining_connections`
+> in `mm2_p2p`.
 
 ## 28.9A Required Port — Peer Health-check, Time-sync Admission, Expirable Bans (driving-spec)
 

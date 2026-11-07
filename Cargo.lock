@@ -5365,6 +5365,7 @@ name = "libp2p-yamux"
 version = "0.44.0"
 dependencies = [
  "futures 0.3.32",
+ "futures-timer",
  "libp2p-core",
  "thiserror 1.0.69",
  "tracing",

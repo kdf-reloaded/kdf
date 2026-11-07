@@ -2048,6 +2048,12 @@ mod connection_failure_log_tests {
             ConnectionClosedLog::Error(cause) => assert!(format!("{:?}", cause).starts_with("IO(")),
             _ => panic!("an IO error must be a WARN"),
         }
+        // CRD ch.28 T14 (R27c): a close that timed out is an IO cause too, and carries its text.
+        let timed_out = ConnectionError::<()>::IO(std::io::Error::new(std::io::ErrorKind::TimedOut, "close timed out"));
+        match connection_closed_log(Some(&timed_out), 1, false) {
+            ConnectionClosedLog::Error(cause) => assert!(format!("{:?}", cause).contains("close timed out")),
+            _ => panic!("a close that timed out must be a WARN"),
+        }
         match connection_closed_log(Some(&handler), 1, false) {
             ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "Handler(())"),
             _ => panic!("a handler error must be a WARN"),
@@ -2060,6 +2066,33 @@ mod connection_failure_log_tests {
             connection_closed_log::<()>(None, 0, false),
             ConnectionClosedLog::Clean
         ));
+    }
+
+    /// CRD ch.28 T14 (R27c), the log: a close abandoned at its deadline reaches the swarm event as an IO cause of
+    /// kind `TimedOut`, "close timed out" (inside the swarm's wrapper of kind `Other`, as the boxed multiplexer
+    /// delivers it). It is a WARN that carries the cause whatever the connections left and the relay input are, so
+    /// the log line shows the text and the peer ID of the event.
+    #[test]
+    fn close_timed_out_is_a_warn_that_carries_the_cause() {
+        let timed_out = || std::io::Error::new(std::io::ErrorKind::TimedOut, "close timed out");
+        let bare = ConnectionError::<()>::IO(timed_out());
+        let boxed = ConnectionError::<()>::IO(std::io::Error::other(timed_out()));
+
+        for cause in [&bare, &boxed] {
+            for remaining in [0, 1] {
+                for relay_outside_mesh in [false, true] {
+                    match connection_closed_log(Some(cause), remaining, relay_outside_mesh) {
+                        ConnectionClosedLog::Error(cause) => {
+                            let text = format!("{:?}", cause);
+                            assert!(text.starts_with("IO("), "{text}");
+                            assert!(text.contains("TimedOut"), "{text}");
+                            assert!(text.contains("close timed out"), "{text}");
+                        },
+                        _ => panic!("a close that timed out must be a WARN that carries the cause"),
+                    }
+                }
+            }
+        }
     }
 
     /// CRD ch.28 T13 (R27b), tested on its inputs: the idle close of the last connection to a connected relay
