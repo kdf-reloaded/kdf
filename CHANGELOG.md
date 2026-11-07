@@ -95,6 +95,24 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   times out can see why. The protocol information itself is never logged. Nothing else changes in
   how orders are matched. Detail: PR #235; CRD ch.59 R59.4A.6.
 
+#### UTXO coins and Electrum
+
+- **An Electrum server can now be pinned by its key.** A server entry with `protocol` `SSL` may
+  carry `spki_sha256`: the SHA-256 digest of the server's public key in hexadecimal (64 digits,
+  colons between byte pairs allowed), or a list of up to four, so the next key can be pinned before
+  a server changes it. With a pin the node accepts the server only if it proves that it holds a
+  pinned key. The certificate's chain, dates and name are no longer checked, so a self-signed
+  certificate can be used and still be authenticated, and the pin decides whether or not
+  `disable_cert_verification` is also set. A key that does not match is refused like any failed
+  handshake: the server is suspended and tried again later, never removed, and every refusal is
+  logged as a warning with the server's host and port. A malformed value, or a pin on a `TCP`
+  server, removes that server from the coin's list at activation, with a log line, and the other
+  servers are used. The log names each pinned server once at activation. A browser build cannot pin
+  and removes such a server. Komodo DeFi Framework and GLEEC KDF ignore the key, so an entry that
+  carries it still works there, without the pin. How to get the value is described in
+  [Network configuration](docs/NETWORK_CONFIG.md#electrum-servers-over-tls). Detail: PR #TBD;
+  CRD ch.38 R38.6.4n.
+
 #### Start-up and configuration
 
 - **The start-up log now lists the files the node uses.** At start the node logs, at INFO and as
@@ -259,6 +277,11 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   times it instead of twice. A withdrawal without `fee`, swaps and the DEX fee are not affected. A
   `withdraw` of an SLP token on BCH now charges it the same way, with the amount in BCH (PR #234).
   Detail: PRs #226, #234; CRD ch.38 R38.6.6l, R38.6.6m.
+- **A server that skips its certificate checks is now flagged when the coin is activated.** For
+  each `SSL` Electrum server that has `disable_cert_verification` set and no `spki_sha256`, the node
+  logs one warning at activation, naming the server by host and port: the connection is encrypted,
+  but the server is not authenticated. Which certificates the node accepts and refuses is
+  unchanged. Detail: PR #TBD; CRD ch.38 R38.6.4m.
 
 #### Start-up and configuration
 
@@ -557,9 +580,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
 - [`electrum-tls-server-authentication`](docs/plans/electrum-tls-server-authentication.md) — new,
-  planning: what an `SSL` Electrum server must present, with and without `disable_cert_verification`,
-  is now written down. So are a warning at activation when the flag is set and an optional pin on the
-  server's key, `spki_sha256`; both are planned and not built yet (PR #240).
+  in progress: what an `SSL` Electrum server must present, with and without `disable_cert_verification`,
+  is now written down (PR #240). So are a warning at activation when the flag is set and an optional
+  pin on the server's key, `spki_sha256`; both are now built (PR #TBD).
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
   now names the gas limits each EVM coin and token will use and where they come from (PR #200);
   open point 3 is decided, and the fee to send an EVM taker fee is now quoted at the gas limit it

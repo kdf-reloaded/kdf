@@ -56,6 +56,7 @@ cfg_native! {
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::crypto::{ring as rustls_ring, verify_tls12_signature, verify_tls13_signature, CryptoProvider};
     use rustls::pki_types::{CertificateDer, DnsName, ServerName, UnixTime};
+    use rustls::server::ParsedCertificate;
     use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
     use std::convert::TryFrom;
     use std::pin::Pin;
@@ -134,6 +135,84 @@ impl ServerCertVerifier for NoCertificateVerification {
         _: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// The text of a failed key pin check (CRD ch.38 R38.6.4n item 5).
+pub(crate) const SPKI_MISMATCH: &str = "the server's key does not match spki_sha256";
+
+/// Verifies a server by its key instead of by its certificate chain (CRD ch.38 R38.6.4n item 2).
+///
+/// The end-entity certificate has to parse (as an X.509 version 3 certificate) and the SHA-256 digest of its DER
+/// `SubjectPublicKeyInfo` has to be one of the configured pins. The chain, the trust anchor, the validity period, the
+/// CA flag, the extended key usage and the name are not checked: the pin replaces them. The handshake signature is
+/// still verified with the presented certificate's public key, as in [`NoCertificateVerification`], so the server
+/// proves that it holds the pinned key.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct PinnedKeyVerification {
+    provider: Arc<CryptoProvider>,
+    pins: Vec<[u8; 32]>,
+    /// Set when the presented key matched none of the pins, so that the caller can tell a pin mismatch from any other
+    /// handshake failure and report it in the words of R38.6.4n item 5.
+    mismatch: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PinnedKeyVerification {
+    pub fn new(
+        provider: Arc<CryptoProvider>,
+        pins: Vec<[u8; 32]>,
+        mismatch: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        PinnedKeyVerification {
+            provider,
+            pins,
+            mismatch,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ServerCertVerifier for PinnedKeyVerification {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _: &[CertificateDer<'_>],
+        _: &ServerName<'_>,
+        _: &[u8],
+        _: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let cert = ParsedCertificate::try_from(end_entity)?;
+        let spki = cert.subject_public_key_info();
+        let digest = Sha256::digest(&spki);
+        if self.pins.iter().any(|pin| pin.as_slice() == digest.as_slice()) {
+            return Ok(ServerCertVerified::assertion());
+        }
+        self.mismatch.store(true, AtomicOrdering::SeqCst);
+        Err(rustls::Error::General(SPKI_MISMATCH.to_owned()))
     }
 
     fn verify_tls12_signature(

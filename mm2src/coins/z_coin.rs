@@ -2081,6 +2081,7 @@ mod light_backend_tests {
                 url: "127.0.0.1:1".to_owned(),
                 protocol: Default::default(),
                 disable_cert_verification: false,
+                spki_sha256: None,
                 timeout_sec: None,
             };
             let backend = ZcoinBackend::Light {

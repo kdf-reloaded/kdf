@@ -162,6 +162,23 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   from the defaults, with the gas-estimate multiplier when one is set; a DEBUG
   line lists every member. It is logging only: no request, response or
   transaction changes, so no switch exists. See CRD ch.57 R57.5.5.
+- **Electrum servers can be pinned by their key, and a server that skips its
+  certificate checks is flagged at activation.** A server entry with `protocol`
+  `SSL` may carry `spki_sha256`: the SHA-256 digest of the server's public key
+  (`SubjectPublicKeyInfo`), or an array of 1 to 4 of them. With a pin the node
+  accepts the server only if it proves that it holds a pinned key; the chain,
+  the dates and the name of its certificate are not checked, so a self-signed
+  certificate can be used and still be authenticated. A mismatch is a handshake
+  failure that suspends the server and is logged at WARN; a malformed pin or a
+  pin on a `TCP` server removes that server. GLEEC KDF and Komodo DeFi
+  Framework ignore the key (measured 2026-11-07), so an entry that carries it
+  works there, unpinned. The key is opt-in and changes nothing unless set, so no
+  switch exists. Separately, at activation Reloaded logs one WARN line for each
+  `SSL` server that has `disable_cert_verification` set and no pin: the
+  connection is encrypted, but the server is not authenticated. The reference
+  logs no such line. What `disable_cert_verification` accepts and refuses is
+  the same on both. See CRD ch.38 R38.6.4m and R38.6.4n and
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
 
 ### Behavioural divergences without a compatibility switch
 
