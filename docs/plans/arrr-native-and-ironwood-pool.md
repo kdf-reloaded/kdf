@@ -114,6 +114,32 @@ apart from a Reloaded one. The maintainer decided:
 | ARRR requirement | ARRR sends `tx_v6` always. Inside the Ironwood window it declines a counterparty without it, on the taker and the maker path, with the per-coin switch `require_v6_counterparty` (default on). One debug line per decline, and at most one warning per coin per hour with the count. | ch.39 R39.6.4f, T39.6.4f | CRD PR #230 |
 | ARRR predicate code | The shielded coin's protocol information and acceptance check, the switch, and the logs. Stacked on the capability-word code. | — | code PR #241 |
 
+### 5. Transparent addresses in the shielded history (scheduled)
+
+`z_coin_tx_history` lists no transparent address. That covers the transparent inputs of
+CRD ch.39 R39.8.9c and the transparent outputs of R39.8.9d: an ARRR swap's payment to its
+script address, the spend or refund from it, and fee outputs. The shielded fee address that
+a swap's fee payment pays is not listed either. Those rows show an empty or wallet-only `from`
+and `to`, so a user reconciling a swap sees funds leave or arrive with no counterpart address.
+The status note under ch.39 R39.8.9e records the gap, which was found by reading the code; no
+live row has shown it yet.
+
+**Scheduled** (decided 2026-11-07) as a separate change, after the fix that lists the wallet's
+own address in one form and names a withdrawal's recipient (ch.39 R39.8.9d1, R39.8.9d2).
+Size: S–M.
+
+What it needs:
+
+- the addresses, recorded at broadcast from the transaction this node built: the outputs of a
+  swap payment and a fee payment, the script address a spend or refund spends (it follows
+  from the redeem script the input carries), and the shielded fee address. They go into the
+  store of ch.39 R39.8.9d2, with several addresses per transaction, each on its `from` or `to`
+  side. Nothing is fetched from the light endpoint;
+- an as-built note and tests in ch.39 (the rules exist);
+- one live swap in the lab, to see the payment, spend or refund rows.
+
+Rows from before the change keep their empty sets.
+
 ## Open questions
 
 - Which reference behavior, if any, applies? The reference builds no version-6 transactions.
