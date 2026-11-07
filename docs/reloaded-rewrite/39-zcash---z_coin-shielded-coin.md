@@ -3478,17 +3478,19 @@ open, and the wallet's Sapling keys cannot open a Pirate1 output at all.
 
 - (a) *Record.* When `withdraw` has built a transaction, the node shall keep
   its transaction id and the destination as given. The store is the node's
-  own, survives a restart, and is kept apart from the wallet-database crate's
-  own tables. It records no notes, so it changes nothing in note selection or
-  in the in-flight exclusion of §39.8.0.7, which records nothing at build
-  time (D39.8.0e).
+  own, survives a restart and a rebuild of the wallet database, and is kept
+  apart from the wallet-database crate's own tables. It records no notes, so
+  it changes nothing in note selection or in the in-flight exclusion of
+  §39.8.0.7, which records nothing at build time (D39.8.0e).
 - (b) *Use.* A history row whose transaction id has an entry lists that
   entry's destination in `to`. An entry for a transaction the wallet
   database does not hold is never shown: a withdrawal that was built but
   not broadcast leaves no row.
-- (c) *Bound.* An entry may be removed once its transaction's expiry
-  height has passed and the wallet database holds no mined transaction with
-  that id. An entry of a mined transaction is kept.
+- (c) *Bound.* An entry may be removed once the wallet's last scanned
+  height has passed its transaction's expiry height and the wallet database
+  holds no mined transaction with that id. An entry of a mined transaction is
+  kept. The scanned height decides, not the chain tip: a rebuilt wallet
+  database holds no mined transaction until its rescan reaches that block.
 - (d) *Limits.* A row with no entry lists no recipient, and that is not an
   error. This covers a transaction broadcast before this rule was
   implemented, one built by another instance on the same seed, and one whose
@@ -3518,8 +3520,10 @@ Sapling address and one to a Pirate1 address, a test shall prove:
 - a withdrawal built and never broadcast adds no row;
 - a row whose transaction has no entry lists no recipient and raises no
   error;
-- an entry past its transaction's expiry height with no mined transaction
-  is removed, while the entry of a mined transaction is kept.
+- an entry whose expiry height the scanned height has passed, with no
+  mined transaction, is removed, while the entry of a mined transaction is
+  kept;
+- a rebuild of the wallet database leaves the entries in place.
 
 R39.8.9e `transaction_fee` shall be computed from the transparent input value,
 transparent output value, and the Sapling value balance of the full transaction.
