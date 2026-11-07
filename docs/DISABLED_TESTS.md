@@ -80,8 +80,24 @@ Re-enable path: fresh electrum URLs + a network-gated CI job. Flaky by nature.
 
 - `segwit_address_in_the_orderbook`, `test_trade_qrc20_utxo`,
   `test_trade_utxo_qrc20` (`mm2_main/src/docker_tests/qrc20_tests.rs`) —
-  QRC20/QTUM docker swaps. Effort: med (stabilize the QTUM fixture). Lost
-  coverage: QRC20 atomic-swap regressions.
+  QRC20/QTUM docker swaps. Effort: low to med (the fixture is hardened, see
+  below; re-enable once docker runs show it stable). Lost coverage: QRC20
+  atomic-swap regressions.
+
+  The QTUM fixture (`docker_tests/docker_tests_common.rs`, `docker_tests/qrc20_tests.rs`)
+  now mines a block on the regtest node when a test waits for a confirmation, instead
+  of waiting for the node's own timer; mines while it waits for the fee estimator;
+  waits until the node returns a new contract's code before the first call to it; and
+  waits at least 90 s (was 30 s) for a QTUM-node confirmation or fee estimate. These
+  are aimed at the intermittent `docker-tests` failures seen since 2026-10-30:
+  confirmation and node timeouts, a missing fee estimate, and `sendtocontract` answering
+  "contract address does not exist" for the QICK token. Whether they cure those failures
+  shows only in CI runs. The tests stay ignored until a CI run shows them green.
+
+The tQTUM tests (`coins/utxo/utxo_tests.rs`, `coins/qrc20/qrc20_tests.rs`,
+`mm2_main/src/mm2_tests.rs`) are not disabled. They need the one public Qtum testnet
+Electrum server, `s6.electrum.qtum.site:51001`, so like the live-infra tests of Group 3
+they can fail when that server is down or slow, without any fault in the code. See [UNIT_TESTS.md](UNIT_TESTS.md#tqtum-tests-and-their-electrum-server).
 
 ## Group 5 — Hardware / WIP / delete candidates
 
