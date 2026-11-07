@@ -162,6 +162,23 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   from the defaults, with the gas-estimate multiplier when one is set; a DEBUG
   line lists every member. It is logging only: no request, response or
   transaction changes, so no switch exists. See CRD ch.57 R57.5.5.
+- **Electrum servers can be pinned by their key, and a server that skips its
+  certificate checks is flagged at activation.** A server entry with `protocol`
+  `SSL` may carry `spki_sha256`: the SHA-256 digest of the server's public key
+  (`SubjectPublicKeyInfo`), or an array of 1 to 4 of them. With a pin the node
+  accepts the server only if it proves that it holds a pinned key; the chain,
+  the dates and the name of its certificate are not checked, so a self-signed
+  certificate can be used and still be authenticated. A mismatch is a handshake
+  failure that suspends the server and is logged at WARN; a malformed pin or a
+  pin on a `TCP` server removes that server. GLEEC KDF and Komodo DeFi
+  Framework ignore the key (measured 2026-11-07), so an entry that carries it
+  works there, unpinned. The key is opt-in and changes nothing unless set, so no
+  switch exists. Separately, at activation Reloaded logs one WARN line for each
+  `SSL` server that has `disable_cert_verification` set and no pin: the
+  connection is encrypted, but the server is not authenticated. The reference
+  logs no such line. What `disable_cert_verification` accepts and refuses is
+  the same on both. See CRD ch.38 R38.6.4m and R38.6.4n and
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
 - **Bitcoin II (BC2) transactions are signed the way the BC2 network requires.**
   Since block 57,750 the BC2 network checks every signature against a digest
   that carries an extra 4-byte field after the signature-hash type, and refuses
@@ -437,6 +454,14 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   full-layout fallback of RIC and MEWC, not this read. Nothing a counterparty
   observes changes. See CRD ch.37 R37.5.10 and
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+- **EVM V1 payment-spend wait.** Both scan the swap contract's logs in windows of
+  `logs_block_range` blocks (default 1,000). GLEEC KDF rescans from the swap's
+  start block on every poll and retries a refused window query. KDF Reloaded
+  checks the deadline on every iteration, including after a failed query, keeps a
+  cursor past the windows already scanned, and shrinks the window when a node
+  reports a range limit. KDF Reloaded's search for an existing spend, refund or
+  own payment uses exact windows where GLEEC KDF's are one block wider; there is
+  no observable difference beyond one duplicate block per window.
 
 ### Removed / disabled in KDF Reloaded
 
