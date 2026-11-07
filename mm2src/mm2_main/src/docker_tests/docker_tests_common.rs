@@ -619,7 +619,19 @@ pub fn wait_for_estimate_smart_fee(timeout: u64) -> Result<(), String> {
         _ => panic!("Expected NativeClient"),
     };
     // The estimator answers once enough blocks have passed, so mine them on demand while waiting.
-    let mining_address = get_address_by_label(&coin, QTUM_ADDRESS_LABEL);
+    // Mining is best effort: if the address cannot be had, log once and rely on the node's own blocks.
+    // `get_address_by_label` panics, and a panic here would poison `LOCK` for later callers.
+    let mining_address = match client.get_addresses_by_label(QTUM_ADDRESS_LABEL).wait() {
+        Ok(addresses) if addresses.len() == 1 => addresses.into_iter().next().map(|(addr, _purpose)| addr),
+        Ok(addresses) => {
+            log!({ "wait_for_estimate_smart_fee: expected one address by {:?}, got {}; not mining", QTUM_ADDRESS_LABEL, addresses.len() });
+            None
+        },
+        Err(e) => {
+            log!({ "wait_for_estimate_smart_fee: getaddressesbylabel failed, not mining: {:?}", e });
+            None
+        },
+    };
     while now_ms() / 1000 < timeout {
         if let Ok(res) = client.estimate_smart_fee(&None, 1).wait() {
             if res.errors.is_empty() {
@@ -627,7 +639,9 @@ pub fn wait_for_estimate_smart_fee(timeout: u64) -> Result<(), String> {
                 return Ok(());
             }
         }
-        mine_qtum_blocks(client, &mining_address, 1);
+        if let Some(ref mining_address) = mining_address {
+            mine_qtum_blocks(client, mining_address, 1);
+        }
         thread::sleep(Duration::from_secs(1));
     }
 

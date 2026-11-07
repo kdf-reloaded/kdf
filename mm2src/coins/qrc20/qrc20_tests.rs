@@ -21,7 +21,7 @@ fn test_dex_fee_addr_raw_pubkey() -> &'static [u8] {
 }
 
 /// The coin's fixed fee rate: 1000 satoshi per kilobyte. The fee of a built transaction is this rate in proportion
-/// to the transaction's size, truncated (CRD ch.38 R38.6.6a), so the amounts below are exact byte counts.
+/// to the transaction's size, truncated (CRD ch.38 R38.6.6b), so the amounts below are exact byte counts.
 const EXPECTED_TX_FEE: i64 = 1000;
 const CONTRACT_CALL_GAS_FEE: i64 = (QRC20_GAS_LIMIT_DEFAULT * QRC20_GAS_PRICE_DEFAULT) as i64;
 const SWAP_PAYMENT_GAS_FEE: i64 = (QRC20_PAYMENT_GAS_LIMIT * QRC20_GAS_PRICE_DEFAULT) as i64;
@@ -110,7 +110,7 @@ fn test_withdraw_impl_fee_details() {
         "coin": "QTUM",
         // 299 satoshi, where decimals = 8:
         // 1000 satoshi per kilobyte in proportion to the size of the built transaction,
-        // which is 299 bytes (CRD ch.38 R38.6.6a)
+        // which is 299 bytes (CRD ch.38 R38.6.6b)
         "miner_fee": "0.00000299",
         "gas_limit": 2_500_000,
         "gas_price": 40,
@@ -692,7 +692,7 @@ fn test_sender_trade_preimage_zero_allowance() {
     assert_eq!(allowance, 0.into());
 
     // The miner fee is 1000 satoshi per kilobyte in proportion to the size of each built transaction
-    // (CRD ch.38 R38.6.6a). The `erc20Payment` transaction (with the `approve` output) and the refund transaction
+    // (CRD ch.38 R38.6.6b). The `erc20Payment` transaction (with the `approve` output) and the refund transaction
     // are 931 bytes in all, so their miner fees are 931 satoshi in all.
     const TX_SIZES_TOTAL: i64 = 931;
     let erc20_payment_fee_with_one_approve =
@@ -731,7 +731,7 @@ fn test_sender_trade_preimage_with_allowance() {
     assert_eq!(allowance, 300_000_000.into());
 
     // The miner fee is 1000 satoshi per kilobyte in proportion to the size of each built transaction
-    // (CRD ch.38 R38.6.6a). Without an `approve` output, the `erc20Payment` transaction and the refund transaction
+    // (CRD ch.38 R38.6.6b). Without an `approve` output, the `erc20Payment` transaction and the refund transaction
     // are 1120 bytes in all, so their miner fees are 1120 satoshi in all.
     const TX_SIZES_TOTAL: i64 = 1120;
     let erc20_payment_fee_without_approve = big_decimal_from_sat(SWAP_PAYMENT_GAS_FEE, coin.utxo.decimals);
@@ -797,7 +797,7 @@ fn test_receiver_trade_preimage() {
         .expect("!get_receiver_trade_fee");
     // only one contract call should be included into the expected trade fee
     // The miner fee is 1000 satoshi per kilobyte in proportion to the size of the built transaction
-    // (CRD ch.38 R38.6.6a). The `receiverSpend` transaction is 544 bytes, so its miner fee is 544 satoshi.
+    // (CRD ch.38 R38.6.6b). The `receiverSpend` transaction is 544 bytes, so its miner fee is 544 satoshi.
     let expected_receiver_fee = big_decimal_from_sat(CONTRACT_CALL_GAS_FEE + 544, coin.utxo.decimals);
     let expected = TradeFee {
         coin: "QTUM".to_owned(),
@@ -830,7 +830,7 @@ fn test_taker_fee_tx_fee() {
         .expect("!get_fee_to_send_taker_fee");
     // only one contract call should be included into the expected trade fee
     // The miner fee is 1000 satoshi per kilobyte in proportion to the size of the built transaction
-    // (CRD ch.38 R38.6.6a). The taker fee transaction is 447 bytes, so its miner fee is 447 satoshi.
+    // (CRD ch.38 R38.6.6b). The taker fee transaction is 447 bytes, so its miner fee is 447 satoshi.
     let expected_receiver_fee = big_decimal_from_sat(CONTRACT_CALL_GAS_FEE + 447, coin.utxo.decimals);
     let expected = TradeFee {
         coin: "QTUM".to_owned(),

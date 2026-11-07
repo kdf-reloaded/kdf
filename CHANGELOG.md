@@ -521,7 +521,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   the Qtum test node now mines a block when a test waits for a confirmation, the set-up waits until
   a new contract shows its code before the first call to it, and the waits are longer but still
   bounded. The node itself is unchanged.
-  Detail: PR #TBD.
+  Detail: PR #283.
 - **The tests run before the next beta are listed in
   [`docs/release-tests/0.4.0-beta.1.md`](docs/release-tests/0.4.0-beta.1.md).** The lab rows of
   the cycle's second batch are recorded there now; the release campaign follows.
