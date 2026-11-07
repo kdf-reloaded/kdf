@@ -63,7 +63,7 @@ Each package changes no wire shape and has its own switch, so that a lab can run
   of the extra requests is an open point below.)* *(Fault-free run on dev 86e1cb358, 2026-11-07: with
   the maker repricing 32 pairs every 10 s and 50 ms on every link, no node sent a sync request in
   30 minutes, so B1 added none. The run is void by its floor of 200 first requests, so it gives no
-  ratio; the cost exists only behind a loaded forwarding relay.)*
+  ratio. The extra requests were measured behind a loaded forwarding relay, in L2.)*
 - **B3:** the emptied-pair case leaves every Reloaded node within the liveness window plus one sweep.
   A run with a lossy link counts pairs dropped and refilled and the longest gap an order-book poll
   sees. The "before" baseline is a lab run on 0.4.0-alpha.1 in which the maker cancels its only
