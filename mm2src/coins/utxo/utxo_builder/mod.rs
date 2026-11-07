@@ -7,5 +7,6 @@ pub(crate) use utxo_coin_builder::{build_electrum_client, derive_activated_hd_se
 pub use utxo_coin_builder::{UtxoCoinBuildError, UtxoCoinBuildResult, UtxoCoinBuilder, UtxoCoinBuilderCommonOps,
                             UtxoCoinWithIguanaPrivKeyBuilder, UtxoFieldsWithGlobalHDBuilder,
                             UtxoFieldsWithHardwareWalletBuilder, UtxoFieldsWithIguanaPrivKeyBuilder};
+pub(crate) use utxo_conf_builder::REQUIRE_SUFFIX_COUNTERPARTY_KEY;
 pub use utxo_conf_builder::{header_layout_fallback_families, unrecognised_enum_policy, UnrecognisedEnumPolicy,
                             UtxoConfBuilder, UtxoConfError, UtxoConfResult, COIN_CONF_UNRECOGNISED_ENUM_FALLS_BACK_KEY};

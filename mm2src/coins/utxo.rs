@@ -661,6 +661,9 @@ pub struct UtxoCoinConf {
     /// The optional `sighash_suffix_height` key, validated at activation. No signing site gates on it yet
     /// (CRD ch.61 decision D1): the suffix applies at every height.
     pub sighash_suffix_height: Option<u64>,
+    /// The `require_suffix_counterparty` key (CRD ch.61 R61.5A.4, default `true`): whether a coin with a
+    /// non-zero `sighash_suffix` declines a counterparty that does not declare suffix signing.
+    pub require_suffix_counterparty: bool,
     pub required_confirmations: AtomicU64,
     /// if set to true MM2 will check whether calculated fee is lower than relay fee and use
     /// relay fee amount instead of calculated

@@ -179,6 +179,7 @@ pub(crate) fn utxo_coin_fields_for_test(
             signature_version: SignatureVersion::Base,
             sighash_suffix: 0,
             sighash_suffix_height: None,
+            require_suffix_counterparty: true,
             required_confirmations: 1.into(),
             force_min_relay_fee: false,
             mtp_block_count: NonZeroU64::new(11).unwrap(),
@@ -11142,5 +11143,410 @@ mod sighash_suffix_sites {
         let (plain_coin, _plain_server) = coin_on_backend(0);
         let preimage = plain_coin.parse_preimage(&serialize(&tx)).unwrap();
         assert_eq!(preimage.0.sighash_suffix, 0);
+    }
+}
+
+// ---- BC2 swaps require a counterparty that signs with the suffix (CRD ch.61 §61.5A, tests T10-T13) ----
+
+#[cfg(not(target_arch = "wasm32"))]
+mod sighash_suffix_gate_tests {
+    use super::*;
+    use crate::coin_protocol_capability::{append_capability_word, declared_capabilities, DeclineLog,
+                                          CAPABILITY_SIGHASH_SUFFIX, CAPABILITY_TX_V6, DECLINE_WARNING_INTERVAL_SECS};
+    use crate::utxo::utxo_common::{suffix_counterparty_decline, suffix_decline_lines, SuffixDecline};
+    use common::msgpack_bounds::{check_msgpack_bounds, check_peer_value};
+    use serde_json::Value as Json;
+
+    /// The Bitcoin II suffix: "BC2" and the suffix version 1.
+    const BC2_SUFFIX: u32 = 0x0132_4342;
+
+    /// The capability word `{"sighash_suffix": true}` as fixed bytes: map(1), str(14), the key, true.
+    fn suffix_word() -> Vec<u8> { [&[0x81, 0xae][..], b"sighash_suffix", &[0xc3]].concat() }
+
+    /// The word with the key set to `false`.
+    fn false_word() -> Vec<u8> { [&[0x81, 0xae][..], b"sighash_suffix", &[0xc2]].concat() }
+
+    /// The word `{"tx_v6": true}`: well-formed, without the key.
+    fn other_key_word() -> Vec<u8> { append_capability_word(Vec::new(), &[CAPABILITY_TX_V6]) }
+
+    fn address_formats() -> Vec<UtxoAddressFormat> {
+        vec![
+            UtxoAddressFormat::Standard,
+            UtxoAddressFormat::Segwit,
+            UtxoAddressFormat::CashAddress {
+                network: "bitcoincash".to_owned(),
+                pub_addr_prefix: 0,
+                p2sh_addr_prefix: 5,
+            },
+        ]
+    }
+
+    fn encoded(format: &UtxoAddressFormat) -> Vec<u8> { rmp_serde::to_vec(format).unwrap() }
+
+    /// A coin whose own address format is `format`, with the given resolved suffix and switch.
+    fn coin_with(format: &UtxoAddressFormat, suffix: u32, require_switch: bool) -> UtxoStandardCoin {
+        let client = UtxoRpcClientEnum::Native(native_client_for_test());
+        let mut fields = utxo_coin_fields_for_test(client, None, false);
+        fields.conf.sighash_suffix = suffix;
+        fields.conf.require_suffix_counterparty = require_switch;
+        if let DerivationMethod::Iguana(address) = &mut fields.derivation_method {
+            address.addr_format = format.clone();
+        }
+        utxo_coin_from_fields(fields)
+    }
+
+    fn standard_coin(suffix: u32, require_switch: bool) -> UtxoStandardCoin {
+        coin_with(&UtxoAddressFormat::Standard, suffix, require_switch)
+    }
+
+    fn supported(coin: &UtxoStandardCoin, info: &Option<Vec<u8>>) -> bool {
+        utxo_common::is_coin_protocol_supported(coin, info)
+    }
+
+    /// The judgment of the coin's ordinary first-value test alone, as it was before the gate existed.
+    fn first_value_only(coin: &UtxoStandardCoin, info: &Option<Vec<u8>>) -> bool {
+        match info {
+            Some(bytes) => match check_peer_value(bytes, "is_coin_protocol_supported") {
+                Ok(end) => rmp_serde::from_read_ref::<_, UtxoAddressFormat>(&bytes[..end]).is_ok(),
+                Err(_) => false,
+            },
+            None => !coin.addr_format().is_segwit(),
+        }
+    }
+
+    /// Counterparty information that carries the word, for a standard-format counterparty.
+    fn with_word() -> Option<Vec<u8>> { Some([encoded(&UtxoAddressFormat::Standard), suffix_word()].concat()) }
+
+    /// Information that a coin requiring the word declines, with the cause of the decline. The first value of each
+    /// entry decodes, except where the case is the first value itself.
+    fn lacking_the_word() -> Vec<(&'static str, Option<Vec<u8>>, SuffixDecline)> {
+        let first = encoded(&UtxoAddressFormat::Standard);
+        let word = suffix_word();
+        vec![
+            ("absent", None, SuffixDecline::NoWord),
+            ("empty", Some(Vec::new()), SuffixDecline::NoWord),
+            ("first value alone", Some(first.clone()), SuffixDecline::NoWord),
+            ("malformed first value", Some(vec![0xc1]), SuffixDecline::MalformedWord),
+            (
+                "malformed word",
+                Some([first.clone(), word[..word.len() - 1].to_vec()].concat()),
+                SuffixDecline::MalformedWord,
+            ),
+            (
+                "bytes that are not a word",
+                Some([first.clone(), vec![0x01]].concat()),
+                SuffixDecline::MalformedWord,
+            ),
+            (
+                "word without the key",
+                Some([first.clone(), other_key_word()].concat()),
+                SuffixDecline::WithoutSuffix,
+            ),
+            (
+                "key set to false",
+                Some([first, false_word()].concat()),
+                SuffixDecline::WithoutSuffix,
+            ),
+        ]
+    }
+
+    // --- T10: the word as written ---
+
+    #[test]
+    fn t10_a_coin_with_a_suffix_sends_the_first_value_then_the_word_as_fixed_bytes() {
+        for format in address_formats() {
+            let coin = coin_with(&format, BC2_SUFFIX, true);
+            let info = utxo_common::coin_protocol_info(&coin);
+            let first = encoded(&format);
+            assert_eq!(info, [first.clone(), suffix_word()].concat(), "{format:?}");
+            // The word itself, byte for byte: map(1), str(14) "sighash_suffix", true.
+            assert_eq!(
+                &info[first.len()..],
+                &[
+                    0x81, 0xae, b's', b'i', b'g', b'h', b'a', b's', b'h', b'_', b's', b'u', b'f', b'f', b'i', b'x',
+                    0xc3
+                ][..],
+                "{format:?}"
+            );
+            // The first value still decodes with the ordinary reader and is the same address format.
+            assert_eq!(check_msgpack_bounds(&info), Ok(first.len()), "{format:?}");
+            assert_eq!(
+                rmp_serde::from_read_ref::<_, UtxoAddressFormat>(&info[..first.len()]).unwrap(),
+                format
+            );
+            assert!(declared_capabilities(Some(&info)).declares(CAPABILITY_SIGHASH_SUFFIX));
+            assert!(!declared_capabilities(Some(&info)).declares(CAPABILITY_TX_V6));
+        }
+    }
+
+    #[test]
+    fn t10_a_zero_suffix_sends_the_bytes_of_the_address_format_alone() {
+        for format in address_formats() {
+            for require_switch in [true, false] {
+                let coin = coin_with(&format, 0, require_switch);
+                let info = utxo_common::coin_protocol_info(&coin);
+                assert_eq!(info, encoded(&format), "{format:?}");
+                assert!(declared_capabilities(Some(&info)).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn t10_the_word_is_sent_whatever_the_switch_says() {
+        for format in address_formats() {
+            let on = utxo_common::coin_protocol_info(&coin_with(&format, BC2_SUFFIX, true));
+            let off = utxo_common::coin_protocol_info(&coin_with(&format, BC2_SUFFIX, false));
+            assert_eq!(on, off, "{format:?}");
+            assert!(declared_capabilities(Some(&off)).declares(CAPABILITY_SIGHASH_SUFFIX));
+        }
+    }
+
+    #[test]
+    fn t10_the_bc2_and_bc2_segwit_entries_both_send_the_word() {
+        let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+        for (ticker, is_segwit, format) in [
+            ("BC2", false, UtxoAddressFormat::Standard),
+            ("BC2-segwit", true, UtxoAddressFormat::Segwit),
+        ] {
+            let coin_conf = json!({ "coin": ticker, "sighash_suffix": "0x01324342" });
+            let conf = UtxoConfBuilder::new(&coin_conf, &params, ticker).build().unwrap();
+            assert_eq!(conf.sighash_suffix, BC2_SUFFIX);
+            let client = UtxoRpcClientEnum::Native(native_client_for_test());
+            let mut fields = utxo_coin_fields_for_test(client, None, is_segwit);
+            fields.conf = conf;
+            let coin = utxo_coin_from_fields(fields);
+            assert_eq!(
+                utxo_common::coin_protocol_info(&coin),
+                [encoded(&format), suffix_word()].concat(),
+                "{ticker}"
+            );
+        }
+    }
+
+    // --- T11: the requirement ---
+
+    #[test]
+    fn t11_with_the_switch_on_the_word_is_accepted() {
+        for format in address_formats() {
+            let coin = coin_with(&format, BC2_SUFFIX, true);
+            let info = Some([encoded(&format), suffix_word()].concat());
+            assert!(supported(&coin, &info), "{format:?}");
+        }
+        assert!(supported(&standard_coin(BC2_SUFFIX, true), &with_word()));
+    }
+
+    #[test]
+    fn t11_with_the_switch_on_everything_without_the_word_is_declined() {
+        let coin = standard_coin(BC2_SUFFIX, true);
+        for (name, info, _cause) in lacking_the_word() {
+            assert!(!supported(&coin, &info), "{name}");
+        }
+    }
+
+    #[test]
+    fn t11_the_decline_names_the_cause() {
+        for (name, info, cause) in lacking_the_word() {
+            assert_eq!(
+                suffix_counterparty_decline(BC2_SUFFIX, true, &info),
+                Some(cause),
+                "{name}"
+            );
+        }
+        assert_eq!(suffix_counterparty_decline(BC2_SUFFIX, true, &with_word()), None);
+    }
+
+    #[test]
+    fn t11_with_the_switch_off_the_coin_judges_as_before() {
+        let off = standard_coin(BC2_SUFFIX, false);
+        for (name, info, _cause) in lacking_the_word() {
+            assert_eq!(supported(&off, &info), first_value_only(&off, &info), "{name}");
+            assert_eq!(suffix_counterparty_decline(BC2_SUFFIX, false, &info), None, "{name}");
+        }
+        // Those whose first value decodes are accepted: the switch admits a counterparty without the word.
+        for name in [
+            "absent",
+            "first value alone",
+            "malformed word",
+            "word without the key",
+            "key set to false",
+        ] {
+            let (_, info, _) = lacking_the_word().into_iter().find(|(n, ..)| *n == name).unwrap();
+            assert!(supported(&off, &info), "{name}");
+        }
+        assert!(supported(&off, &with_word()));
+    }
+
+    #[test]
+    fn t11_with_a_zero_suffix_every_input_is_judged_as_before() {
+        for require_switch in [true, false] {
+            let coin = standard_coin(0, require_switch);
+            let mut inputs: Vec<Option<Vec<u8>>> = lacking_the_word().into_iter().map(|(_, info, _)| info).collect();
+            inputs.push(with_word());
+            inputs.push(Some([vec![0xc1], suffix_word()].concat()));
+            for format in address_formats() {
+                inputs.push(Some(encoded(&format)));
+            }
+            for info in inputs {
+                assert_eq!(supported(&coin, &info), first_value_only(&coin, &info), "{info:?}");
+            }
+            assert!(supported(&coin, &Some(encoded(&UtxoAddressFormat::Standard))));
+        }
+    }
+
+    #[test]
+    fn t11_the_first_value_is_tested_before_the_word() {
+        // A word cannot make an undecodable first value acceptable, with the switch on or off.
+        let with_garbage_first = Some([vec![0xc1], suffix_word()].concat());
+        for require_switch in [true, false] {
+            assert!(!supported(
+                &standard_coin(BC2_SUFFIX, require_switch),
+                &with_garbage_first
+            ));
+        }
+        // A segwit coin without information is judged by its own format first.
+        let segwit = coin_with(&UtxoAddressFormat::Segwit, BC2_SUFFIX, true);
+        assert!(!supported(&segwit, &None));
+    }
+
+    // --- T13: the switch and the logs ---
+
+    fn build_conf(coin_conf: Json) -> UtxoConfResult<UtxoCoinConf> {
+        let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+        UtxoConfBuilder::new(&coin_conf, &params, "XYZ").build()
+    }
+
+    #[test]
+    fn t13_the_switch_is_true_when_absent_and_accepts_both_booleans() {
+        assert!(
+            build_conf(json!({ "coin": "XYZ" }))
+                .unwrap()
+                .require_suffix_counterparty
+        );
+        assert!(
+            build_conf(json!({ "coin": "XYZ", "require_suffix_counterparty": null }))
+                .unwrap()
+                .require_suffix_counterparty
+        );
+        assert!(
+            build_conf(json!({ "coin": "XYZ", "require_suffix_counterparty": true }))
+                .unwrap()
+                .require_suffix_counterparty
+        );
+        assert!(
+            !build_conf(json!({ "coin": "XYZ", "sighash_suffix": "0x01324342", "require_suffix_counterparty": false }))
+                .unwrap()
+                .require_suffix_counterparty
+        );
+    }
+
+    #[test]
+    fn t13_a_switch_that_is_not_a_boolean_fails_activation_naming_the_key() {
+        for bad in [
+            json!("true"),
+            json!("false"),
+            json!(1),
+            json!(0),
+            json!(""),
+            json!([true]),
+            json!({"a": 1}),
+        ] {
+            let err = build_conf(json!({ "coin": "XYZ", "require_suffix_counterparty": bad }))
+                .err()
+                .unwrap_or_else(|| panic!("require_suffix_counterparty {bad} must fail"))
+                .into_inner();
+            assert!(
+                matches!(&err, UtxoConfError::InvalidRequireSuffixCounterparty { found } if *found == bad.to_string()),
+                "{bad}: {err:?}"
+            );
+            assert!(
+                err.to_string().contains("'require_suffix_counterparty'"),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn t13_each_decline_writes_a_debug_line_that_names_the_coin_and_the_cause() {
+        let mut log = DeclineLog::default();
+        for (cause, text) in [
+            (SuffixDecline::NoWord, "no capability word"),
+            (SuffixDecline::MalformedWord, "a malformed capability word"),
+            (SuffixDecline::WithoutSuffix, "a capability word without sighash_suffix"),
+        ] {
+            let lines = suffix_decline_lines(&mut log, "BC2", cause, 1_000);
+            assert!(lines.debug.contains("BC2"), "{}", lines.debug);
+            assert!(lines.debug.contains(text), "{}", lines.debug);
+            assert!(
+                lines
+                    .debug
+                    .contains("BC2 swaps require a counterparty that signs with the suffix"),
+                "{}",
+                lines.debug
+            );
+        }
+    }
+
+    #[test]
+    fn t13_the_warning_comes_at_most_once_an_hour_with_the_count_since_the_previous_one() {
+        let mut log = DeclineLog::default();
+        let start = 10_000;
+        let first = suffix_decline_lines(&mut log, "BC2", SuffixDecline::NoWord, start);
+        let warning = first.warning.expect("the first decline warns");
+        assert!(warning.contains("BC2"), "{warning}");
+        assert!(warning.contains("declined 1 swap match(es)"), "{warning}");
+        assert!(warning.contains("require_suffix_counterparty"), "{warning}");
+
+        // Declines inside the hour write their debug line and no warning.
+        for at in [start + 1, start + 2, start + DECLINE_WARNING_INTERVAL_SECS - 1] {
+            let lines = suffix_decline_lines(&mut log, "BC2", SuffixDecline::NoWord, at);
+            assert!(!lines.debug.is_empty());
+            assert_eq!(lines.warning, None, "at {at}");
+        }
+        // At the hour the warning comes back with the four declines since the previous one.
+        let due = suffix_decline_lines(
+            &mut log,
+            "BC2",
+            SuffixDecline::MalformedWord,
+            start + DECLINE_WARNING_INTERVAL_SECS,
+        );
+        let warning = due.warning.expect("a warning is due after an hour");
+        assert!(warning.contains("declined 4 swap match(es)"), "{warning}");
+        // The count starts again after a warning, and the hour restarts from it.
+        let next = suffix_decline_lines(
+            &mut log,
+            "BC2",
+            SuffixDecline::NoWord,
+            start + DECLINE_WARNING_INTERVAL_SECS + 1,
+        );
+        assert_eq!(next.warning, None);
+        let later = suffix_decline_lines(
+            &mut log,
+            "BC2",
+            SuffixDecline::NoWord,
+            start + 2 * DECLINE_WARNING_INTERVAL_SECS,
+        );
+        assert!(later
+            .warning
+            .expect("a warning is due again")
+            .contains("declined 2 swap match(es)"));
+    }
+
+    #[test]
+    fn t13_the_warning_is_kept_per_coin_and_a_clock_that_goes_back_does_not_panic() {
+        let mut bc2 = DeclineLog::default();
+        let mut bc2_segwit = DeclineLog::default();
+        assert!(suffix_decline_lines(&mut bc2, "BC2", SuffixDecline::NoWord, 500)
+            .warning
+            .is_some());
+        assert!(
+            suffix_decline_lines(&mut bc2_segwit, "BC2-segwit", SuffixDecline::NoWord, 501)
+                .warning
+                .is_some()
+        );
+        // An earlier time than the last warning gives no warning and no underflow.
+        assert_eq!(
+            suffix_decline_lines(&mut bc2, "BC2", SuffixDecline::NoWord, 100).warning,
+            None
+        );
     }
 }

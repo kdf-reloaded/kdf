@@ -248,3 +248,17 @@ decided before it ran.
 |------|-----|----------------|
 | `t49_27a_direct_withdraw_refuses_fee_then_from_with_the_shared_arm` | T49.27a, R49.27a (b), (c) | The direct `withdraw` with `fee`, then with `from`: HTTP 400, `error_type` `UnsupportedError`, string `error_data`. With both, the answer is the one for `fee` (the text is that of the `fee` refusal and differs from the `from` one). The backend is not asked anything; nothing is broadcast, locked or spent |
 | `t49_27a_task_route_refuses_fee_and_from_with_the_shared_arm` | T49.27a, R49.27a | `task::withdraw::init` with `fee`, and another with `from`, over a registered coin: the task reaches `status: "Error"` with `details.error_type == "UnsupportedError"` and a string `details.error_data` |
+
+## BC2 requires a counterparty that signs with the suffix
+
+Location: the module `sighash_suffix_gate_tests` of `mm2src/coins/utxo/utxo_tests.rs` (writer, check,
+config and logs) and the module `t14_capability_word_tests` of `mm2src/mm2_main/src/ordermatch_tests.rs`
+(both roles). They cover CRD chapter 61 §61.5A, tests T10-T13.
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `t10_a_coin_with_a_suffix_sends_the_first_value_then_the_word_as_fixed_bytes`, `t10_a_zero_suffix_sends_the_bytes_of_the_address_format_alone`, `t10_the_word_is_sent_whatever_the_switch_says`, `t10_the_bc2_and_bc2_segwit_entries_both_send_the_word` | T10, R61.5A.1 | A coin with a non-zero suffix sends its address-format bytes followed by the fixed bytes of {`sighash_suffix`: `true`} for the standard, segwit and cashaddress forms; the first value still decodes to the same format; a zero suffix sends today's bytes; the `BC2` and `BC2-segwit` entries both send the word |
+| `t10_orderbook_address_format_is_the_same_with_the_suffix_word` (ordermatch) | T10, R59.4A.3 | The order book reports the same address format with and without the word |
+| `t11_with_the_switch_on_the_word_is_accepted`, `t11_with_the_switch_on_everything_without_the_word_is_declined`, `t11_the_decline_names_the_cause`, `t11_with_the_switch_off_the_coin_judges_as_before`, `t11_with_a_zero_suffix_every_input_is_judged_as_before`, `t11_the_first_value_is_tested_before_the_word` | T11, R61.5A.2 | With the switch on, absent, empty, first-value-only, malformed and `false` information is declined and the word is accepted; with the switch off, or with a zero own suffix, every input is judged as before; the first-value test runs first |
+| `t12_maker_*`, `t12_taker_*`, `t12_the_declining_coin_is_named_for_the_log_lines_of_the_order_match_layer` (ordermatch) | T12, R61.5A.3 | A maker declines a request and a taker declines a reservation whose information for the requiring coin lacks the word, and accepts one that carries it; the other coin of the pair does not trigger the decline; the declining coin is named |
+| `t13_the_switch_is_true_when_absent_and_accepts_both_booleans`, `t13_a_switch_that_is_not_a_boolean_fails_activation_naming_the_key`, `t13_each_decline_writes_a_debug_line_that_names_the_coin_and_the_cause`, `t13_the_warning_comes_at_most_once_an_hour_with_the_count_since_the_previous_one`, `t13_the_warning_is_kept_per_coin_and_a_clock_that_goes_back_does_not_panic` | T13, R61.5A.4, R61.5A.5 | `require_suffix_counterparty` defaults to `true`, a non-boolean fails activation naming the key; one debug line per decline, one warning per hour with the count (injected clock) |

@@ -28,6 +28,9 @@ const SIGHASH_SUFFIX_KEY: &str = "sighash_suffix";
 /// The coin-configuration key of the optional sighash-suffix activation height (CRD ch.61 R61.3.2).
 const SIGHASH_SUFFIX_HEIGHT_KEY: &str = "sighash_suffix_height";
 
+/// The coin-configuration key that switches the counterparty requirement of CRD ch.61 R61.5A.4 off.
+pub(crate) const REQUIRE_SUFFIX_COUNTERPARTY_KEY: &str = "require_suffix_counterparty";
+
 /// The Bitcoin II tickers the missing-suffix warning looks for (CRD ch.61 R61.4.5).
 const BC2_TICKERS: [&str; 2] = ["BC2", "BC2-segwit"];
 
@@ -121,6 +124,14 @@ pub enum UtxoConfError {
         found
     )]
     InvalidSighashSuffixHeight {
+        found: String,
+    },
+    #[display(
+        fmt = "Invalid 'require_suffix_counterparty' {}: expected the boolean true or false, or omit the key \
+               for the default true",
+        found
+    )]
+    InvalidRequireSuffixCounterparty {
         found: String,
     },
     #[display(
@@ -285,6 +296,7 @@ impl<'a> UtxoConfBuilder<'a> {
         let signature_version = self.signature_version(fork_id, &mut warnings)?;
         let sighash_suffix = self.sighash_suffix()?;
         let sighash_suffix_height = self.sighash_suffix_height()?;
+        let require_suffix_counterparty = self.require_suffix_counterparty()?;
         if sighash_suffix != 0 && signature_version == SignatureVersion::ForkIdRxd {
             return MmError::err(UtxoConfError::SighashSuffixWithRadiantDialect {
                 suffix: self.conf[SIGHASH_SUFFIX_KEY].to_string(),
@@ -352,6 +364,7 @@ impl<'a> UtxoConfBuilder<'a> {
             fork_id,
             sighash_suffix,
             sighash_suffix_height,
+            require_suffix_counterparty,
             required_confirmations: required_confirmations.into(),
             force_min_relay_fee,
             mtp_block_count,
@@ -556,6 +569,20 @@ impl<'a> UtxoConfBuilder<'a> {
             .as_u64()
             .map(Some)
             .or_mm_err(|| UtxoConfError::InvalidSighashSuffixHeight {
+                found: value.to_string(),
+            })
+    }
+
+    /// Reads the counterparty-requirement switch (CRD ch.61 R61.5A.4): a boolean, `true` when absent (or JSON
+    /// `null`). Any other value fails under every [`UnrecognisedEnumPolicy`].
+    fn require_suffix_counterparty(&self) -> UtxoConfResult<bool> {
+        let value = &self.conf[REQUIRE_SUFFIX_COUNTERPARTY_KEY];
+        if value.is_null() {
+            return Ok(true);
+        }
+        value
+            .as_bool()
+            .or_mm_err(|| UtxoConfError::InvalidRequireSuffixCounterparty {
                 found: value.to_string(),
             })
     }
