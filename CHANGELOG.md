@@ -550,6 +550,16 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
     (`maker_update_coalescing` off) was never affected.
 
   Detail: PRs #204, #214; CRD ch.32 R-MP2 item 2.
+- **A connection to a peer that has stopped reading is now closed within 30 seconds.** When the node
+  closes a connection, for example to a stuck peer or after failed pings, it first flushes what is
+  still being sent. Toward a peer whose process hangs while its system keeps the connection open,
+  that flush cannot finish, so the close could last as long as the peer's system kept the
+  connection. For that time the connection, its queue and its memory stayed held, the peer still
+  counted as connected, and the node did not dial it again. The close now gives up after 30 seconds,
+  logs the peer with the cause "close timed out", and the peer is treated as disconnected, so the
+  usual redial rules apply. In a lab test toward a frozen peer, such a close ended after 30 seconds
+  with the deadline; without it, the close stayed open 13 minutes and ended after the peer was
+  resumed. Detail: PR #280; CRD ch.28 R27c.
 
 #### Siacoin
 
@@ -623,6 +633,13 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   keep-alive wait counted the released and the pending orders while the queue kept releasing, so
   one release between the two counts made it fail now and then. It now stops the queue before
   counting. The node itself is unchanged. Detail: PR #244; CRD ch.32 T-MP6.
+- **The memory measurement of the order-matching tests builds again.** The test build with the
+  `counting-alloc` feature had stopped compiling when the order-matching state gained a field. Its
+  test setup now fills every field it does not set itself from the test defaults, so a field added
+  later cannot break it again. The node itself is unchanged. Detail: PR #280.
+- **The close deadline of the connection layer is tested in CI.** The tests of the vendored
+  multiplexer crate, which carries the 30-second close deadline, now run as their own CI job.
+  Detail: PR #280; CRD ch.28 T14.
 
 ### Documentation
 
@@ -712,7 +729,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   logging, the address ranges and the idle-close log (PRs #203, #211), the send-queue window
   shares and the queue-signal fix (PRs #204, #214), and one resolver for every hostname (PRs #216,
   #219); the remaining lookups (Sia, WalletConnect, Lightning, statistics) and encrypted DNS are
-  new rows for later.
+  new rows for later. A close that a non-reading peer would hold forever now ends after 30 seconds
+  (item P6, PR #280).
 - [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — done: the plan now says
   that the fee estimate uses the transaction's signature-hash length, which is smaller than the
   transaction sent (PR #239; see Known limitations).
