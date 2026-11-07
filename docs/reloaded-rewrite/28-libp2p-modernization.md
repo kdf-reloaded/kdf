@@ -1297,7 +1297,9 @@ would lose the latest updates and leave the peer with stale orders until
 the keep-alive synchronization.
 
 > **Reloaded divergence (informative).** The reference leaves the
-> per-peer send queue unbounded. The wire is unchanged: no message format
+> per-peer send queue unbounded. It also writes the newest queued RPC first under a
+> backlog, detects no slow peer and never closes a connection from the gossip layer (RQ1b).
+> The wire is unchanged: no message format
 > changes and nothing new is sent. Only a peer that cannot keep up
 > observes a difference: it may miss gossip messages, and after 60
 > seconds at the cap it is disconnected. Under the reference the sending
@@ -1421,6 +1423,110 @@ reference client with one relay is back in at most 30 s once the
 does not come back until it is short of relays. *(Amended 2026-11-02:
 R27a item 1 adopts the 5-minute dial guard, which ends the second of
 these differences.)*
+
+**RQ1b. The reference's per-peer send path (reference facts).** *(Authored by the KDF Spec Reader
+2026-11-07 from the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A — identical at both,
+since both bind the same libp2p fork tag of R0a — and from the public gossipsub library of that fork;
+compared with the baseline anchor (R1) and with the fork's own public upstream library.
+**Passed the KDF Dirty Gate on 2026-11-07**, measure 0.01; §28.14. Prompted by maintainer
+decision DC (a): whether the clean side may take the public upstream library's slow-peer behavior as its reference.)* At both rows the reference's gossip layer
+behaves as follows toward a peer that reads slowly or not at all.
+
+1. **The send queue is unbounded.** Each connection keeps one queue of the RPCs waiting to be
+   written to that peer. It has no count limit, no byte limit and no age limit, and the
+   configuration surface offers none. Nothing in the gossip layer ever drops a queued RPC; the
+   queue grows for as long as the peer does not read. The only point at which a non-reading peer
+   stalls the writer is the multiplexer's per-stream flow-control window: one window's worth of
+   data is accepted by the transport, and everything after it accumulates in the queue. Memory
+   held toward one such peer is the encoded size of every queued RPC plus a small per-RPC
+   overhead, and it is held separately for every slow peer.
+2. **Under a backlog, newest first.** When more than one RPC is queued, the RPC queued last is
+   written first. A peer that keeps up never sees this, because at most one RPC waits at a time.
+   A peer that falls behind receives the most recent messages before the older ones and, once it
+   catches up, has processed the stream in reverse order; an older update of an order can
+   therefore overwrite a newer one at that peer until the next keep-alive synchronization of
+   chapter 32. At the baseline anchor the in-tree gossipsub wrote oldest first; the reversal came
+   with the public library version the fork derives from, not with the fork.
+3. **No slow-peer detection.** The reference has no notion of a slow peer at the gossip layer: no
+   event, no per-peer failure count, no queue-length metric, and no signal to the application.
+   The optional peer-scoring extension of the library, which is off at both rows (R14), has no
+   slowness term at this version either. A peer that answers pings but reads no gossip is never
+   detected and never closed by the reference (the third bullet of the RQ1 rationale is a
+   reference fact as well as a fact about Reloaded before RQ1).
+4. **No full-queue behavior exists.** Because the queue has no limit, the reference has no
+   "queue full" branch: it neither drops a message, nor drops the peer, nor applies
+   back-pressure to the publisher. The one indirect limit is the swarm's hand-off channel between
+   the behavior and each connection's task, which holds 32 pending commands per connection; when
+   it is full the whole behavior pauses its outgoing hand-offs until that connection accepts the
+   next one. The connection's task moves commands into the unbounded queue of item 1 whenever it
+   runs, so a peer that merely reads slowly does not fill this channel; it fills only if the
+   connection's task is itself starved. In practice the path is unbounded.
+5. **Mesh membership ignores slowness.** Grafting and pruning in the per-topic mesh follow only the
+   watermarks and the library's eligibility rules: at each 1 s heartbeat a topic mesh below its low
+   watermark is filled with randomly chosen eligible peers up to the middle watermark; a mesh above
+   its high watermark is cut back to the middle watermark by removing randomly chosen peers while
+   keeping at least two outbound-dialed peers; a mesh at or above the low watermark but with fewer
+   than two outbound-dialed peers grafts outbound-dialed peers to make two. Score-based removal and
+   opportunistic grafting exist in the library but need peer scoring, which is off. The relay mesh
+   of R10/R11 is maintained on its own 10 s tick by its watermarks alone. A peer leaves every mesh
+   only when its last connection closes (RQ1a item 1) or by a PRUNE it receives. The gossip layer
+   itself never closes a connection; at both rows every close is initiated by the application:
+   its ping safeguard (R9), its relay-count maintenance (R27) and its peer-clock admission check
+   (RP2), which disconnects a peer whose reported time is outside the tolerance.
+6. **Adjacent facts of the pinned library version** *(informative, for completeness; unchanged
+   from the public library)*: after five failed attempts to negotiate the gossip protocol on one
+   connection, the gossip handler of that connection switches itself off, reports the peer as not
+   supporting gossipsub, and discards every RPC queued to it afterwards; and the gossip handler
+   holds a connection open while the peer is in a topic mesh or a write is pending, and otherwise
+   only for 120 s after the last gossip traffic — other protocols on the same connection may hold
+   it longer. Membership in the relay mesh alone does not hold a connection open at the gossip
+   layer.
+7. **Knobs.** The gossip configuration surface at both rows offers no setting for a queue bound,
+   a queue age, or slow-peer handling. The settings the application sets are those of R12 and R13
+   (relay flag, mesh watermarks, message-id function, permissive validation, manual propagation,
+   maximum transmit size); all swarm-level buffer sizes stay at the library defaults.
+
+*Change since the baseline anchor (V5, V6).* In the areas of this rule the move from the anchor's
+in-tree gossipsub to the pinned fork changed only: the drain order under a backlog (oldest-first
+to newest-first, item 2); the handler's self-disable after repeated negotiation failures and its
+idle keep-alive rule (item 6; the anchor's handler never disabled itself and held the connection
+until the peer closed its stream); and the arrival of the gossipsub v1.1 mesh machinery
+(prune backoff, outbound-peer minimum, optional peer exchange, optional scoring, per-peer IHAVE and
+IWANT caps of R13a). The queue stayed unbounded and slow peers stayed undetected throughout. The
+fork's own additions to the library — the relay mesh of R10–R12, a record of every source of a
+duplicate message, and bookkeeping of topic membership — touch none of this.
+
+*The fork's public upstream (informative; for maintainer decision DC).* The fork derives from the
+public gossipsub library at crate version 0.45.0, the version shipped with the public libp2p
+0.52 line. That version has the same unbounded, newest-first queue and no slow-peer handling; the
+fork did not change the handler at all. The public library first bounded its send queue,
+penalized slow peers and expired stale queued messages in its gossipsub crate version 0.48.0
+(shipped with the libp2p 0.55 line; the change landed in late November 2024) and has
+refined it since; the design as the public library stands today is:
+
+- three lanes per connection, written in this order: an unbounded lane for subscribe and
+  unsubscribe; a lane for GRAFT, PRUNE and IDONTWANT bounded at 20,000 entries; and a lane for
+  published and forwarded messages, IHAVE and IWANT bounded by a configuration value with default
+  **5,000** entries (a count, not a byte size);
+- when a bounded lane is full the **new** RPC is refused, not queued (the oldest stays), and the
+  refusal is counted per peer, separately for the two bounded lanes;
+- each queued message carries a deadline, **5 s** for an own publish and **1 s** for a forward
+  (both configurable); a message taken from the queue after its deadline is not written and is
+  counted as failed for that peer;
+- at each heartbeat the per-peer failure counts are reported to the application as one
+  slow-peer event per peer and then reset; the library itself neither closes nor prunes the peer
+  for it;
+- only if peer scoring is enabled does each failure also add a decaying slow-peer penalty to the
+  peer's score (default weight −0.2 per excess failure, threshold 0, decay factor 0.2 per decay
+  interval), through which the ordinary score-based heartbeat prune can remove the peer; with
+  scoring off, the event is the only consequence.
+
+Reloaded's RQ1 keeps its own design (FIFO, oldest dropped, a count and a byte cap, a stuck-peer
+close, a priority lane) and records in its provenance that this public design was read and not
+adopted. RQ1b adds that neither reference row implements any of it: taking the public upstream's
+behavior as "the reference behavior" would describe a library version no reference peer runs.
+No wire shape differs between any of these designs; a peer observes only which messages arrive
+and in which order.
 
 **RQ1 test items.**
 
@@ -1899,6 +2005,19 @@ consumer's propagate call — a relay's immediate forward on receipt
 IHAVE without per-peer caps (the caps of R13a are post-baseline
 hardening carried by the pinned fork).
 
+**V6.** The baseline in-tree gossipsub MUST be confirmed, against the gossipsub library of the
+libp2p fork the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A bind (R0a), to differ in
+the per-peer send path only as RQ1b records: at the baseline anchor (R1) the per-connection send
+queue is written oldest first, the gossip handler never switches itself off after failed protocol
+negotiations, and it holds the connection open until the peer closes its stream; at both rows the
+queue is written newest first under a backlog, the handler switches itself off after five failed
+negotiations and discards what is queued to it afterwards, and it holds a connection open only
+while the peer is in a topic mesh, a write is pending, or for 120 s after the last gossip traffic.
+Both states MUST be confirmed to leave the queue unbounded, to detect no slow peer, and to let no
+gossip-layer condition close a connection; the arrival of the gossipsub v1.1 mesh machinery between
+the two states (prune backoff, outbound-peer minimum, optional peer exchange, optional scoring, the
+per-peer IHAVE and IWANT caps of R13a) MUST be confirmed to add no rule that reacts to slowness.
+
 ## 28.14 Provenance Footer
 
 - *Inputs consulted for this chapter:* the baseline tree at project
@@ -2197,3 +2316,34 @@ hardening carried by the pinned fork).
   context that never read the forbidden corpus, from this repository's own
   relay-identity code. It carries no reference content of its own and needs
   no Dirty Gate pass.
+- *Scoped addition (2026-11-07) -- §28.9B RQ1b, its sentence in the RQ1
+  divergence note, and §28.13 V6.* **KDF Dirty Gate: PASS on 2026-11-07, measure 0.01.**
+  Prompted by maintainer decision DC (a). *Inputs:* the rows `v2.6.0-beta`
+  and `v3.0.0-beta` of chapter 02 §2.15A (identical at both for this rule);
+  the public gossipsub library of the libp2p fork both rows bind (R0a) and
+  that fork's public upstream library at the version the fork derives from
+  and at its current development state; the baseline anchor (R1) for V5 and
+  V6. Third-party license as recorded in the fork's own package metadata:
+  MIT. Behavior, gossipsub control-message names and public library defaults
+  only; no private identifier, function body, helper decomposition, error,
+  log or comment text was reproduced. V6 restates RQ1b as a baseline
+  verification.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.01, no findings, followed the same day by a light re-gate of the revised
+  lines, PASS, measure 0.01, no findings. *Extent:* in the forbidden corpus,
+  the gossipsub dependency binding and composed-behavior configuration, the
+  absence of any slow-peer or send-queue handling, and the
+  application-initiated connection closes, at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` (two dependency manifests or lockfiles and three source files
+  at each row, with the diff between the rows), plus the baseline anchor's
+  in-tree gossipsub handler and its manifest; as permitted MIT input, the
+  pinned fork's gossipsub and swarm defaults, its upstream base handler and
+  the fork-versus-base diff, and the public upstream's gossipsub files at its
+  development state. *Method:* side-by-side reading of the compared regions
+  against every candidate line, with backticked, identifier-shaped,
+  hexadecimal, numeric and path-shaped tokens extracted mechanically and
+  tested against the corpus rows and the third-party trees; the gate script
+  was not run because the candidate has no code blocks. *Measure:* 0.01, read
+  against the standard that any discretionary finding fails a file;
+  dictated-interop tokens, public library defaults and constants, and
+  Reloaded-original text were excluded from the measured set.

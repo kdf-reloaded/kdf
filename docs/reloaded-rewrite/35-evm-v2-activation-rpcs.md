@@ -174,6 +174,16 @@ reference version at all. A malformed value in any of these five fields shall
 **not** fail activation; the field is then treated as absent. When well-formed,
 `tx_history` and the gas-station fields shall have the documented effect.
 
+> **TRON platform in the `ticker` row (pointer added 2026-11-07).** That the
+> reference serves a TRX platform and its TRC20 tokens through this method and
+> the `task::enable_eth::*` family, and refuses them on the legacy methods, is
+> recorded in [Chapter 21](21-tron-integration.md) §21.4's reference-behavior
+> note, which passed the KDF Dirty Gate on 2026-11-07. In this repository the row is a
+> target: Reloaded's implementation of this method does not accept the TRON
+> platform protocol today, and TRX/TRC20 are reachable only through the legacy
+> methods, behind the availability constant
+> ([Chapter 55](55-coin-activation-wire-contract.md) D55.5).
+
 ### 35.1.B Activation flow and failure precedence
 
 R35.1.2 Activation shall proceed through the following phases, and when a
@@ -2480,3 +2490,11 @@ tests it.
   paragraph on resolving a node's hostname after R35.1.8 is Reloaded-original.
   It points to chapter 45 §45.6B, from the maintainer's decision of 2026-11-02
   and this repository's own code, so chapter 01 R38 is not engaged.
+- *Pointer added 2026-11-07 -- the note under the R35.1.1 table on the TRON
+  platform protocol.* It restates chapter 21 §21.4's reference-behavior note
+  in one clause and records this repository's as-built state from chapter 55
+  D55.5; its reference clause passed the KDF Dirty Gate with its target in
+  chapter 21. **KDF Dirty Gate: PASS on 2026-11-07, measure 0.00.**
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.00, no findings; the pointer was judged with its target, whose clearance
+  is recorded in chapter 21's provenance footer of the same date.

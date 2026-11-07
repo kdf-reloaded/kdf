@@ -753,6 +753,51 @@ refusals -- `error_type` `UnsupportedError` (one shared discriminant, `fee`
 checked before `from`), HTTP 400, string `error_data`, delivered in
 `result.details` on the task route -- is bound in chapter 49 R49.27a.
 
+R39.5A.3 *The shielded withdraw response (reference contract).* *(Spec Reader
+2026-11-07, rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+identical at both; **passed the KDF Dirty Gate on 2026-11-07**, measure 0.01.)* A completed shielded withdrawal answers
+the transaction-details object of chapter 49 §49.6 with these members set as
+follows:
+
+- `from` is a one-element list holding the wallet's own Sapling address; `to`
+  is a one-element list holding the destination exactly as the request gave
+  it;
+- `spent_by_me` is the value of the Sapling notes the transaction spends and
+  `received_by_me` the Sapling change it pays back to the wallet; both are
+  non-negative decimals;
+- `my_balance_change` is **`received_by_me - spent_by_me`**: the same
+  orientation as the history row of §39.8.3 and of every other coin's
+  transaction details, hence **negative** for a withdrawal (the amount sent
+  plus the fee, as a negative number);
+- `total_amount` equals `spent_by_me`;
+- `fee_details` is the **tagged** fee object shared with the transparent
+  UTXO coins: `{"type": "Utxo", "coin": "<TICKER>", "amount": <fee>}`, where
+  `amount` is the transaction's fee; a client that reads `fee_details.amount`
+  therefore keeps working, and one that switches on `fee_details.type` sees
+  the UTXO discriminant, not a shielded-specific one;
+- `block_height` and `timestamp` are `0` (the transaction is unmined and the
+  details are built before broadcast); `memo` echoes the request's `memo`;
+  `transaction_type` is the standard transfer; `kmd_rewards` is absent.
+
+> **Compatibility (this repository, 2026-11-07; not corpus-sourced; from the
+> maintainer's field report of 2026-11-06).** Reloaded's shielded withdraw
+> response reports `my_balance_change` as `spent_by_me - received_by_me`
+> (positive) while its history row reports `received_by_me - spent_by_me`
+> (negative); the reference reports the negative value in both places, so the
+> response's sign is a Reloaded defect against R39.5A.3 and R39.6.5c, not a
+> divergence to document. Reloaded's `fee_details` on a shielded withdraw is
+> already the tagged `Utxo` object, which matches R39.5A.3; the earlier
+> wording of R39.6.5c ("`fee_details.amount`") described only its `amount`
+> member and was not a statement that the object is untagged.
+
+T39.5A.c *Response sign and fee shape (R39.5A.3).* *(Reloaded-original;
+passed the KDF Dirty Gate with R39.5A.3 on 2026-11-07.)* A shielded withdraw of `V` with
+fee `F` and change `C` from notes worth `N = V + F + C` shall answer
+`spent_by_me = N`, `received_by_me = C`, `my_balance_change = -(V + F)`,
+`total_amount = N`, and `fee_details` equal to
+`{"type": "Utxo", "coin": <ticker>, "amount": F}`; the same transaction's row
+in `z_coin_tx_history` shall carry the same `my_balance_change`.
+
 > **Compatibility (this repository, 2026-11-04; not corpus-sourced).**
 > Reloaded's shielded coin implements the legacy `withdraw` method and
 > reaches the same code from the task route, and `validateaddress` decodes
@@ -1387,8 +1432,11 @@ fee of R39.6.5f. The response keeps its shape:
 
 - `from` is the wallet's own Sapling address and `to` the Pirate1 address as given;
 - `spent_by_me` is the value of the selected Sapling notes, `received_by_me` the Sapling
-  change, and `my_balance_change` their difference;
-- `fee_details.amount` is the fee of R39.6.5f;
+  change, and `my_balance_change` is `received_by_me - spent_by_me` -- negative for a
+  withdrawal, the same sign as the history row of §39.8.3 (R39.5A.3; *amended 2026-11-07,
+  passed the KDF Dirty Gate with R39.5A.3 on 2026-11-07*);
+- `fee_details` is the tagged UTXO fee object of R39.5A.3 -- `type: "Utxo"`, `coin`, and
+  `amount` equal to the fee of R39.6.5f;
 - `tx_hex` is the transaction of R39.6.5d, broadcast with `send_raw_transaction` like any
   other withdrawal (R39.6.5g).
 
@@ -3458,6 +3506,73 @@ when the wallet received shielded notes in the transaction, and shielded
 addresses recoverable from outgoing viewing information for wallet-created
 outputs such as change, swap, fee, or burn outputs.
 
+R39.8.9d1 **The wallet's own address in one form.** Where R39.8.9c or R39.8.9d
+lists the wallet's own shielded address, the row shall list it as a Sapling
+address encoded with the coin's configured prefix, the form `my_balance`
+reports as the wallet's address. No other encoding of an address the wallet
+owns shall appear in `from` or `to`. In particular, the unified-address form
+that the wallet-database crate keeps for its account shall not appear: it
+carries a network prefix that no wallet of the coin accepts.
+
+R39.8.9d2 **The recipient of a withdrawal.** The history row of a transaction
+built by `withdraw` (the legacy method and `task::withdraw::init` alike) shall
+list in `to` the destination of the request exactly as the request gave it: a
+Sapling address or a Pirate1 address (R39.6.5c). The destination is listed
+in the unmined row (R39.8.9i), in the mined row, and after a restart of the
+node; the wallet's own address stays in the set where R39.8.9d puts it (the
+change). The recipient comes from the request, not from the transaction: the
+withdrawal's output carries no outgoing viewing information the wallet can
+open, and the wallet's Sapling keys cannot open a Pirate1 output at all.
+
+- (a) *Record.* When `withdraw` has built a transaction, the node shall keep
+  its transaction id and the destination as given. The store is the node's
+  own, survives a restart and a rebuild of the wallet database, and is kept
+  apart from the wallet-database crate's own tables. It records no notes, so
+  it changes nothing in note selection or in the in-flight exclusion of
+  §39.8.0.7, which records nothing at build time (D39.8.0e).
+- (b) *Use.* A history row whose transaction id has an entry lists that
+  entry's destination in `to`. An entry for a transaction the wallet
+  database does not hold is never shown: a withdrawal that was built but
+  not broadcast leaves no row.
+- (c) *Bound.* An entry may be removed once the wallet's last scanned
+  height has passed its transaction's expiry height and the wallet database
+  holds no mined transaction with that id. An entry of a mined transaction is
+  kept. The scanned height decides, not the chain tip: a rebuilt wallet
+  database holds no mined transaction until its rescan reaches that block.
+- (d) *Limits.* A row with no entry lists no recipient, and that is not an
+  error. This covers a transaction broadcast before this rule was
+  implemented, one built by another instance on the same seed, and one whose
+  entry was lost with the node's data.
+
+> **Provenance and reason (2026-11-07).** Clean-room original; this
+> repository's code and the release tests of 0.4.0-beta.1 (row ARRR-L2),
+> confirmed against the lab wallet's database. Not corpus-sourced, so no gate
+> pass is needed. Every history row listed the wallet's own address twice:
+> once in the Sapling form, and once in the crate's unified-address form with
+> the Zcash network prefix. No withdrawal row named its recipient, Sapling or
+> Pirate1, before or after mining, because the record written at broadcast
+> holds only the outputs the wallet pays itself.
+
+T39.8.9d1 *Own address in one form (R39.8.9d1).* A fixture wallet with a
+deposit row and a withdrawal row with change shall answer `z_coin_tx_history`
+with the wallet's own address in each row only in the form `my_balance`
+reports. No entry of `from` or `to` shall be a unified address.
+
+T39.8.9d2 *Recipient of a withdrawal (R39.8.9d2).* For a withdrawal to a
+Sapling address and one to a Pirate1 address, a test shall prove:
+
+- the unmined row's `to` holds the destination as given, plus the wallet's
+  own address when the withdrawal has change;
+- the mined row's `to` is the same set;
+- after the store is reopened, as at a restart, the same set is served;
+- a withdrawal built and never broadcast adds no row;
+- a row whose transaction has no entry lists no recipient and raises no
+  error;
+- an entry whose expiry height the scanned height has passed, with no
+  mined transaction, is removed, while the entry of a mined transaction is
+  kept;
+- a rebuild of the wallet database leaves the entries in place.
+
 R39.8.9e `transaction_fee` shall be computed from the transparent input value,
 transparent output value, and the Sapling value balance of the full transaction.
 `confirmations` shall be zero when the transaction height is above the backend
@@ -3465,6 +3580,34 @@ tip; otherwise it is `current_block + 1 - block_height`. The `current_block`
 used here is the single lightwalletd tip (R39.11.8(f), R39.11.9), which is also the
 source of the scanned blocks, so an entry cannot be ahead of the height used to
 count its confirmations.
+
+> **Status update (reloaded, 2026-11-07; this repository, not corpus-sourced).**
+> R39.8.9c and R39.8.9d were only partly implemented. Found in the release tests
+> of 0.4.0-beta.1 (row ARRR-L2) and confirmed against the lab wallet's database:
+>
+> - *The wallet's own address in a foreign form.* Every row's `to` set listed
+>   the wallet's own address twice. One copy was in the unified-address form
+>   that the wallet-database crate stores for its account, which no Pirate Chain
+>   wallet accepts. Every row with a received note showed it, deposits included.
+>   R39.8.9d1 binds the fix.
+> - *No recipient for a withdrawal.* A withdrawal's row listed only the wallet's
+>   own address, before and after mining, for a Sapling recipient and a Pirate1
+>   one alike. The record written at broadcast (§39.8.0.7) holds only the outputs
+>   the wallet pays itself, and the compact blocks the scan reads carry nothing
+>   from which an outgoing recipient can be recovered. R39.8.9d2 binds the fix;
+>   rows from before it keep no recipient (R39.8.9d2 (d)).
+> - *No transparent addresses (scheduled).* Neither the transparent input
+>   addresses of R39.8.9c nor the transparent output addresses of R39.8.9d are
+>   listed: a swap payment's script address, a refund's source, a fee output.
+>   The shielded fee address a swap's fee payment pays is not listed either.
+>   `from` holds at most the wallet's own address, and `to` holds only what the
+>   wallet database and the store of R39.8.9d2 hold. This item rests on a
+>   reading of this repository's code; no live row has shown it yet. The fix is
+>   scheduled as a separate change; the plan
+>   [`arrr-native-and-ironwood-pool`](../plans/arrr-native-and-ironwood-pool.md)
+>   tracks it.
+>
+> The amounts, the order and the paging of the rows are not affected.
 
 #### 39.8.5.1 Unmined transactions, same-block order, and amounts of an own send
 
@@ -7059,3 +7202,28 @@ entries in its list cannot be told apart. Passing the position to the fallback c
     transaction reader; the published wallet-database crate and this repository's code.
   - They take no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
     is required.
+- *Scoped addition (2026-11-07) -- R39.5A.3, T39.5A.c, the compatibility
+  note under R39.5A.3, and the amended `my_balance_change` and `fee_details`
+  items of R39.6.5c.* **KDF Dirty Gate: PASS on 2026-11-07, measure 0.01.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish the members of the shielded withdraw
+  response: the orientation of `my_balance_change`, the values of
+  `spent_by_me`, `received_by_me` and `total_amount`, the shape and
+  discriminant of `fee_details`, and the fixed members (`from`, `to`,
+  `block_height`, `timestamp`, `memo`). Dictated response members and their
+  values only; no private identifier, function body, helper decomposition,
+  error, log or comment text was reproduced. The compatibility note rests on
+  the maintainer's field report and this repository's own code; T39.5A.c is
+  Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.01, no findings. *Extent:* the shielded coin's withdraw response, at
+  `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole batch, about
+  24 source files were read in full or in the relevant regions at the `dev (as
+  of 2026-03-27)` row, whose source tree is identical to `v3.0.0-beta`, and
+  the same modules were diffed against `v2.6.0-beta`. *Method:* reading, with
+  mechanical cross-checks (diffs between the tabled states; pattern searches
+  of the added lines for paths, identifiers and markers); the gate script was
+  not run because the candidate has no code blocks. *Measure:* 0.01, read
+  against the standard that any discretionary finding fails a chapter;
+  dictated-interop and public-surface tokens were excluded from the measured
+  set.

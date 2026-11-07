@@ -417,6 +417,29 @@ where
     StandardUtxoWithdraw::new(coin, req)?.build().await
 }
 
+/// The direct `withdraw` of a coin that can be activated under a software global-HD login (UTXO standard and QTUM).
+///
+/// CRD ch.49 R49.4: under a software HD key policy the sender is resolved by the step the task route uses
+/// (`GetWithdrawSenderAddress`): `from` as given, and without it the coin's activated address; the key derived at the
+/// sender's path signs, and the change returns to the sender. Every other coin keeps the single-key withdraw
+/// unchanged, including a coin under the Trezor policy, which this route does not sign with a device (CRD ch.49
+/// R49.6 is the EVM analogue) and which answers as before.
+pub async fn withdraw_with_hd_sender<T>(coin: T, req: WithdrawRequest) -> WithdrawResult
+where
+    T: UtxoCommonOps
+        + GetUtxoListOps
+        + MarketCoinOps
+        + CoinWithDerivationMethod
+        + GetWithdrawSenderAddress<Address = Address, Pubkey = Public>,
+{
+    // Both conditions: a coin with an HD key policy but a single address (derivation method Iguana) keeps the
+    // single-key withdraw, and `new_with_hd_sender` must only see a sender with a derivation path.
+    if coin.has_hd_wallet_derivation_method() && coin.as_ref().priv_key_policy.is_hd_wallet() {
+        return StandardUtxoWithdraw::new_with_hd_sender(coin, req).await?.build().await;
+    }
+    StandardUtxoWithdraw::new(coin, req)?.build().await
+}
+
 pub async fn init_withdraw<T>(
     ctx: MmArc,
     coin: T,
@@ -439,9 +462,10 @@ where
     T: CoinWithDerivationMethod,
 {
     // Compatibility divergence from upstream: an omitted `from` for an HD wallet is intentionally
-    // NOT rejected here. `get_withdraw_hd_sender` resolves a missing `from` to the single enabled
-    // address (account 0 / External / 0) so clients that don't send `from` can still preview and
-    // withdraw. Upstream rejects an omitted `from`; this default keeps basic withdraw flows working.
+    // NOT rejected here. `get_withdraw_hd_sender` resolves a missing `from` to the coin's activated
+    // address (CRD ch.49 R49.4), for the task route and the direct `withdraw` alike, so clients that
+    // don't send `from` can still preview and withdraw. Upstream rejects an omitted `from`; this
+    // default keeps basic withdraw flows working.
     Ok(())
 }
 
@@ -451,7 +475,7 @@ pub async fn get_withdraw_from_address<T>(
 ) -> MmResult<WithdrawSenderAddress<Address, Public>, WithdrawError>
 where
     T: CoinWithDerivationMethod<Address = Address, HDWallet = <T as HDWalletCoinOps>::HDWallet>
-        + HDWalletCoinOps<Address = Address, Pubkey = Public>
+        + HDWalletCoinOps<Address = Address, Pubkey = Public, HDWallet = UtxoHDWallet, HDAccount = UtxoHDAccount>
         + UtxoCommonOps,
 {
     match coin.derivation_method() {
@@ -465,10 +489,7 @@ pub fn get_withdraw_iguana_sender<T: UtxoCommonOps>(
     req: &WithdrawRequest,
     my_address: &Address,
 ) -> MmResult<WithdrawSenderAddress<Address, Public>, WithdrawError> {
-    if req.from.is_some() {
-        let error = "'from' is not supported if the coin is initialized with an Iguana private key";
-        return MmError::err(WithdrawError::UnexpectedFromAddress(error.to_owned()));
-    }
+    crate::utxo::utxo_withdraw::refuse_from_for_single_key(req)?;
     let pubkey = coin
         .my_public_key()
         .mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
@@ -763,7 +784,7 @@ mod tests {
     #[test]
     fn task_withdraw_hd_wallet_allows_omitted_sender() {
         // An omitted `from` is accepted at the validation gate; the sender is resolved to the
-        // enabled address (account 0 / External / 0) later by `get_withdraw_hd_sender`.
+        // coin's activated address later by `get_withdraw_hd_sender`.
         let coin = DummyDerivationCoin {
             derivation_method: DerivationMethod::HDWallet(()),
         };

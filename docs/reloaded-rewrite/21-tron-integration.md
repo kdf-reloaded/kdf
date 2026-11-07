@@ -180,6 +180,29 @@ public method strings are part of the external API contract
 > available in this build". The flow below is the target for when
 > TRON returns, planned for the next beta.
 
+> **Reference behavior and as-built route (Spec Reader 2026-11-07, rows
+> `v3.0.0-beta` and `feat/tron-swap-support (as of 2026-04-23)` of
+> chapter 02 §2.15A, identical on this point; passed the KDF Dirty
+> Gate on 2026-11-07, measure 0.01).** At
+> the reference the three method strings of the table above are the
+> **only** activation routes for TRX and TRC20: the one-shot
+> `enable_eth_with_tokens` and the task family `task::enable_eth::init`
+> / `status` / `user_action` / `cancel` accept a platform whose
+> configured protocol is the TRON platform protocol and activate its
+> TRC20 tokens from the same token list the EVM family uses; a request
+> that also carries an NFT request is refused for a TRON platform. The
+> legacy `enable` and `electrum` methods **refuse** a coin whose
+> protocol is `TRX` or `TRC20` as a protocol they do not serve. There
+> is no TRON-specific method on either row. *As built (this repository,
+> not corpus-sourced):* Reloaded today has the opposite shape -- TRX
+> and TRC20 are reachable only through legacy `enable` / `electrum`
+> (behind the availability constant), and its `enable_eth_with_tokens`
+> and `task::enable_eth::*` do not accept the TRON platform protocol
+> ([Chapter 55](55-coin-activation-wire-contract.md) D55.5). The
+> mmrpc-2.0 route of the table is therefore the parity target, and the
+> legacy route a documented Reloaded extension; chapter 35 R35.1.1's
+> `ticker` row describes the target, not the current tree.
+
 > **Binding scope (R36).** The method strings above are dictated
 > public API (R33). The Tron coin is activated by supplying
 > `"ticker": "TRX"`, a `nodes` array whose entries each carry a
@@ -560,3 +583,26 @@ V3. The address encoding, protobuf transaction/contract formats,
   with its status remark, is Reloaded-original. It rests on the maintainer
   decision of 2026-10-26 (host-only node naming everywhere, except the RPC
   wire dump) and on this repository's code; its test is chapter 35 T35.36.
+- *Scoped addition (2026-11-07) -- the reference-behavior note in §21.4.*
+  **KDF Dirty Gate: PASS on 2026-11-07, measure 0.01.** *Inputs:* the forbidden corpus at the rows `v3.0.0-beta` and
+  `feat/tron-swap-support (as of 2026-04-23)` of chapter 02 §2.15A, identical
+  on this point, consulted **only** to establish which activation methods
+  serve the TRX platform coin and TRC20 tokens and which refuse them, and
+  that an NFT request is refused for a TRON platform. Public method names and
+  behavior only; no private identifier, function body, helper decomposition,
+  error, log or comment text was reproduced. The as-built clause rests on
+  this repository's own code and chapter 55 D55.5.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.01, no findings. *Extent:* the activation routes that serve or refuse the
+  TRON platform and its tokens, at `v3.0.0-beta`, with the activation and
+  legacy-initialization modules of `feat/tron-swap-support (as of 2026-04-23)`
+  diffed against it (no difference); for the whole batch, about 24 source
+  files were read in full or in the relevant regions at the `dev (as of
+  2026-03-27)` row, whose source tree is identical to `v3.0.0-beta`, and the
+  same modules were diffed against `v2.6.0-beta`. *Method:* reading, with
+  mechanical cross-checks (diffs between the tabled states; pattern searches
+  of the added lines for paths, identifiers and markers); the gate script was
+  not run because the candidate has no code blocks. *Measure:* 0.01, read
+  against the standard that any discretionary finding fails a chapter;
+  dictated-interop and public-surface tokens were excluded from the measured
+  set.

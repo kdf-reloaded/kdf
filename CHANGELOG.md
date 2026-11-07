@@ -386,6 +386,23 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   now refused the same way; before, `from` was ignored and the token was sent from the BCH
   wallet's own address. *Upgrade note:* a client that checks `error_type` for either old value
   must check `UnsupportedError` instead. Detail: PR #236; CRD ch.49 R49.27, R49.27a.
+- **Under an HD login, the direct `withdraw` now works for a UTXO coin such as RIN and for QTUM.**
+  With `from` it spends from the address `from` names, as on GLEEC KDF. An account or address the
+  wallet does not hold is refused with `UnknownAccount` or `UnexpectedFromAddress` (HTTP 400), as on
+  `task::withdraw`. Without `from`, both methods spend from the coin's activated address, the
+  address at `path_to_address` (by default account 0, External, address 0), and the change returns
+  there. GLEEC KDF refuses a withdrawal without `from` under an HD login. Until now the direct method
+  answered an internal error under an HD login, and `task::withdraw` without `from` always spent
+  from account 0, External, address 0, whatever `path_to_address` named. Under a Trezor key the
+  direct method still answers an internal error; use `task::withdraw` there. Detail: PR #270; CRD
+  ch.49 R49.4, ch.05 §5.9B R35.
+- **Under an iguana login (without `enable_hd`), a UTXO withdrawal that names `from` is now refused
+  with `UnexpectedFromAddress` (HTTP 400), as on GLEEC KDF.** This covers the direct `withdraw` of a
+  UTXO coin such as RIN, of QTUM and of BCH, whatever address `from` names, the wallet's own
+  included. **Until now the direct method ignored `from`** and spent from the wallet's address;
+  `task::withdraw` already refused it. A withdrawal without `from` does not change. *Upgrade note:*
+  a client that sends `from` under an iguana login stops sending it. Detail: PR #270; CRD ch.49
+  R49.27b.
 
 ### Fixed
 
@@ -398,6 +415,14 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   be older than the 30-second sync period. The check now runs on every sync pass, including a pass
   that finds no new block or fails. Found in a live mainnet test with a deposit from a Pirate1
   address. Detail: PR #263; CRD ch.39 R39.8.0aj1.
+
+- **The ARRR history now names the recipient of a withdrawal, and lists the wallet's own address
+  once.** Every history row used to list the wallet's own address twice, once in a unified form
+  beginning with `u1` that no ARRR wallet accepts. A withdrawal's row did not name its recipient,
+  before or after mining, whether it paid a `zs1…` or a Pirate1 address. A withdrawal now keeps
+  its destination, exactly as the request gave it, in a small file beside the wallet database
+  (`<TICKER>_RELOADED_TX_ADDRESSES.db`), and the history lists it. Found in a live mainnet test.
+  Detail: PR #268; CRD ch.39 R39.8.9d1, R39.8.9d2.
 
 #### EVM coins
 
@@ -503,11 +528,26 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   one release between the two counts made it fail now and then. It now stops the queue before
   counting. The node itself is unchanged. Detail: PR #244; CRD ch.32 T-MP6.
 
+### Documentation
+
+- **The CRD now records more of how Komodo DeFi Framework and GLEEC KDF behave.** It covers HD
+  activation and accounts (the address at `path_to_address`, `fetch_utxos`, `consolidate_utxos` and
+  `task::create_new_account`), the answer to a shielded withdrawal, the Electrum
+  certificate-verification switch, which swap steps publish on the transaction-helper topic, how an
+  order-book sync answer is handled when a newer keep-alive arrives, the activation routes of TRON,
+  and how the gossip layer treats a peer that reads slowly. The node itself is unchanged. Detail:
+  CRD PR #267; CRD ch.05 R35a–R35c, ch.09 R24, ch.21 §21.4, ch.28 RQ1b, ch.32 R-Q6b, ch.38
+  R38.6.4m, ch.39 R39.5A.3, ch.49 R49.27b.
+
 ### Plans touched
 
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
+- [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md) — new, planning: the Bitcoin II
+  network has required an extra field in every signature digest since block 57,750, so
+  transactions signed the ordinary way are rejected. The rule is written (CRD chapter 61, PR
+  #261); the signing change, the coins-file entries and the live check follow.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
   Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
   they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
@@ -555,7 +595,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   swap has used (see Known limitations). The maintainer's answers on
   withdraw, the legacy methods, legacy activation and Sia are recorded in it. `RELOADED_VS_GLEEC.md`
   now says what GLEEC KDF does under an HD login, and lists the planned change to legacy `enable` and
-  `electrum` with its switch (PR #245).
+  `electrum` with its switch (PR #245). The direct `withdraw` under an HD login and the refusal of
+  `from` under an iguana login are done (items H5.1 and H5.5, PR #270); the maintainer set the
+  default sender to the coin's activated address (decision CU).
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
@@ -663,16 +705,24 @@ lives.
   has no shielded wallet database, and building a shielded transaction would also need the Sapling
   prover, which only the native build has. Use a native build for ARRR. Detail: CRD ch.39 R39.10.1,
   §39.6.1.
-- **The ARRR history does not show a withdrawal's recipient, and lists the wallet's own address
-  twice.** A withdrawal's row lists only the wallet's own addresses, before and after mining, whether
-  it paid a Sapling or a Pirate1 (Ironwood) address. Every ARRR history row, deposits included, also
-  lists the wallet's own address in a unified `u1…` form, which ARRR wallets do not accept. The
-  answer to a withdrawal names its recipient correctly, and no funds are affected. Work in progress:
-  a fix is under way.
+- **The ARRR history names no recipient for a withdrawal made before this release, or by another
+  node on the same seed, and no address for a swap's transparent parts.** The recipient comes from
+  the node's own record, written when the withdrawal is built, so a row without a record names
+  only the wallet's own address. A swap's payment, spend and refund rows do not list the script
+  address or the fee address yet; that is scheduled. More in
+  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PR #268;
+  CRD ch.39 R39.8.9d2 (d), status note under R39.8.9e.
 - **An ARRR withdrawal answers `my_balance_change` with the wrong sign.** The answer to a withdrawal
   gives the amount spent minus the amount received, a positive number, where its history row,
   Komodo DeFi Framework and GLEEC KDF give received minus spent. The transaction itself is correct.
   Work in progress: a fix is under way.
+- **Bitcoin II (BC2) transactions are rejected by the network.** Since block 57,750 the BC2
+  network checks every signature against a digest that includes an extra field of its own. KDF
+  Reloaded does not add it yet, so a BC2 withdrawal or swap payment is refused when it is
+  broadcast ("Signature must be zero for failed CHECK(MULTI)SIG operation"). Komodo KDF
+  2.6.0-beta was tested and is refused the same way, so a swap that needs a Komodo KDF node to
+  sign BC2 cannot complete either. The fix for KDF Reloaded is specified and planned. More in
+  [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md). Detail: PR #261; CRD ch.61.
 - **The miner fee of a Siacoin withdrawal is estimated from a transaction length that is smaller than
   the transaction sent.** Sia nodes accepted these fees in tests. Detail: PR #239; CRD ch.20 D6.
 - **Orders that sell Siacoin (SC) are not shown to Komodo KDF and GLEEC KDF takers, and a GLEEC maker

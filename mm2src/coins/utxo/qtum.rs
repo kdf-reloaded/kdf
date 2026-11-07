@@ -808,7 +808,7 @@ impl MmCoin for QtumCoin {
     }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
-        Box::new(utxo_common::withdraw(self.clone(), req).boxed().compat())
+        Box::new(utxo_common::withdraw_with_hd_sender(self.clone(), req).boxed().compat())
     }
 
     fn decimals(&self) -> u8 { utxo_common::decimals(&self.utxo_arc) }

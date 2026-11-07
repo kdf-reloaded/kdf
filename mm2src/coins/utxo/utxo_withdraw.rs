@@ -14,7 +14,7 @@ use crypto::trezor::client::TrezorClient;
 use crypto::trezor::{TrezorError, TrezorProcessingError};
 use crypto::{derive_secp256k1_secret, Bip32Error, CryptoCtx, CryptoCtxError, CryptoInitError, DerivationPath, HwError,
              HwProcessingError};
-use keys::{Public as PublicKey, Type as ScriptType};
+use keys::{KeyPair, Public as PublicKey, Type as ScriptType};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use rpc::v1::types::ToTxHash;
@@ -268,6 +268,83 @@ where
     }
 }
 
+/// CRD ch.49 R49.3 and R49.27b item 1: a coin with a single address (an Iguana derivation method) refuses any explicit
+/// `from` with `UnexpectedFromAddress`, whatever the selector names -- the selector is not compared with the coin's
+/// own address, so one that names it is refused like any other. The task route
+/// (`get_withdraw_iguana_sender`) and the direct route (`StandardUtxoWithdraw::new`, which every single-key direct
+/// UTXO withdraw passes, BCH included) share this check.
+pub(crate) fn refuse_from_for_single_key(req: &WithdrawRequest) -> MmResult<(), WithdrawError> {
+    if req.from.is_some() {
+        let error = "'from' is not supported if the coin is initialized with an Iguana private key";
+        return MmError::err(WithdrawError::UnexpectedFromAddress(error.to_owned()));
+    }
+    Ok(())
+}
+
+/// The sender of a withdrawal from an HD wallet, as `GetWithdrawSenderAddress` resolves it: the address, how it is
+/// displayed, the derivation path of its key and its public key.
+///
+/// Both routes build their withdrawal from it: the task route (`InitUtxoWithdraw`) and the direct `withdraw` method
+/// (`StandardUtxoWithdraw::new_with_hd_sender`). The default sender without `from` is decided in one place,
+/// `get_withdraw_hd_sender` (CRD ch.49 R49.4).
+pub(crate) struct ResolvedWithdrawSender {
+    pub(crate) address: Address,
+    pub(crate) address_string: String,
+    pub(crate) derivation_path: DerivationPath,
+    pub(crate) pubkey: PublicKey,
+}
+
+/// Resolves the sender of `req` through `GetWithdrawSenderAddress`, the step both withdraw routes share.
+pub(crate) async fn resolve_withdraw_sender<Coin>(
+    coin: &Coin,
+    req: &WithdrawRequest,
+) -> Result<ResolvedWithdrawSender, MmError<WithdrawError>>
+where
+    Coin: CoinWithDerivationMethod + GetWithdrawSenderAddress<Address = Address, Pubkey = PublicKey>,
+{
+    let from = coin.get_withdraw_sender_address(req).await?;
+    let address_string = from.address.display_address().map_to_mm(WithdrawError::InternalError)?;
+
+    let derivation_path = match from.derivation_path {
+        Some(der_path) => der_path,
+        // [`WithdrawSenderAddress::derivation_path`] is not set, but the coin is initialized with an HD wallet derivation method.
+        None if coin.has_hd_wallet_derivation_method() => {
+            let error = "Cannot determine 'from' address derivation path".to_owned();
+            return MmError::err(WithdrawError::UnexpectedFromAddress(error));
+        },
+        // Temporary initialize the derivation path by default since this field is not used without Trezor.
+        None => DerivationPath::default(),
+    };
+
+    Ok(ResolvedWithdrawSender {
+        address: from.address,
+        address_string,
+        derivation_path,
+        pubkey: from.pubkey,
+    })
+}
+
+/// The key pair of the HD address at `derivation_path`, derived from the BIP-32 root that a software HD key policy
+/// holds. The path is the full path of the sender address, so that the signing key matches the funded UTXO's
+/// locking script. Both withdraw routes sign an HD sender with this key.
+fn hd_sender_key_pair(
+    priv_key_policy: &PrivKeyPolicy<KeyPair>,
+    derivation_path: &DerivationPath,
+) -> MmResult<KeyPair, WithdrawError> {
+    let bip39_secp_priv_key = match priv_key_policy {
+        PrivKeyPolicy::HDWallet {
+            bip39_secp_priv_key, ..
+        } => bip39_secp_priv_key.clone(),
+        _ => {
+            let error = "The HD sender key can only be derived under a software HD key policy".to_owned();
+            return MmError::err(WithdrawError::InternalError(error));
+        },
+    };
+    let secret = derive_secp256k1_secret(bip39_secp_priv_key, derivation_path)
+        .mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
+    key_pair_from_secret(secret.as_slice()).mm_err(|e| WithdrawError::InternalError(e.to_string()))
+}
+
 pub struct InitUtxoWithdraw<'a, Coin> {
     ctx: MmArc,
     coin: Coin,
@@ -365,14 +442,9 @@ where
         let hd_child_key_pair; // extend lifetime beyond the match arm
         let sign_policy = match self.coin.as_ref().priv_key_policy {
             PrivKeyPolicy::KeyPair(ref key_pair) => SignPolicy::WithKeyPair(key_pair),
-            PrivKeyPolicy::HDWallet {
-                ref bip39_secp_priv_key,
-                ..
-            } => {
-                let secret = derive_secp256k1_secret(bip39_secp_priv_key.clone(), &self.from_derivation_path)
-                    .mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
+            PrivKeyPolicy::HDWallet { .. } => {
                 hd_child_key_pair =
-                    key_pair_from_secret(secret.as_slice()).mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
+                    hd_sender_key_pair(&self.coin.as_ref().priv_key_policy, &self.from_derivation_path)?;
                 SignPolicy::WithKeyPair(&hd_child_key_pair)
             },
             PrivKeyPolicy::Trezor => {
@@ -400,19 +472,7 @@ impl<'a, Coin> InitUtxoWithdraw<'a, Coin> {
     where
         Coin: CoinWithDerivationMethod + GetWithdrawSenderAddress<Address = Address, Pubkey = PublicKey>,
     {
-        let from = coin.get_withdraw_sender_address(&req).await?;
-        let from_address_string = from.address.display_address().map_to_mm(WithdrawError::InternalError)?;
-
-        let from_derivation_path = match from.derivation_path {
-            Some(der_path) => der_path,
-            // [`WithdrawSenderAddress::derivation_path`] is not set, but the coin is initialized with an HD wallet derivation method.
-            None if coin.has_hd_wallet_derivation_method() => {
-                let error = "Cannot determine 'from' address derivation path".to_owned();
-                return MmError::err(WithdrawError::UnexpectedFromAddress(error));
-            },
-            // Temporary initialize the derivation path by default since this field is not used without Trezor.
-            None => DerivationPath::default(),
-        };
+        let from = resolve_withdraw_sender(&coin, &req).await?;
 
         Ok(InitUtxoWithdraw {
             ctx,
@@ -420,8 +480,8 @@ impl<'a, Coin> InitUtxoWithdraw<'a, Coin> {
             task_handle,
             req,
             from_address: from.address,
-            from_address_string,
-            from_derivation_path,
+            from_address_string: from.address_string,
+            from_derivation_path: from.derivation_path,
             from_pubkey: from.pubkey,
         })
     }
@@ -459,6 +519,9 @@ pub struct StandardUtxoWithdraw<Coin> {
     req: WithdrawRequest,
     my_address: Address,
     my_address_string: String,
+    /// The derivation path of the sender's key under a software HD key policy (CRD ch.49 R49.4); `None` for a
+    /// coin that spends from its single key.
+    hd_derivation_path: Option<DerivationPath>,
 }
 
 #[async_trait]
@@ -483,12 +546,21 @@ where
         unsigned_tx: TransactionInputSigner,
         p2pk_outpoints: &HashSet<OutPoint>,
     ) -> Result<UtxoTx, MmError<WithdrawError>> {
-        let key_pair = self
-            .coin
-            .as_ref()
-            .priv_key_policy
-            .key_pair_or_err()
-            .mm_err(Into::into)?;
+        // An HD sender is signed with the key derived at its own path, like the task route does; the coin's
+        // activated key is only the key of the single-key coin.
+        let hd_key_pair; // extend lifetime beyond the match arm
+        let key_pair = match self.hd_derivation_path {
+            Some(ref derivation_path) => {
+                hd_key_pair = hd_sender_key_pair(&self.coin.as_ref().priv_key_policy, derivation_path)?;
+                &hd_key_pair
+            },
+            None => self
+                .coin
+                .as_ref()
+                .priv_key_policy
+                .key_pair_or_err()
+                .mm_err(Into::into)?,
+        };
         Ok(with_key_pair::sign_tx_with_p2pk(
             unsigned_tx,
             key_pair,
@@ -512,12 +584,38 @@ where
             .iguana_or_err()
             .mm_err(Into::into)?
             .clone();
+        // Checked after the derivation method, so a coin with an HD derivation method (the Trezor policy)
+        // answers as before; before any unspent output is listed.
+        refuse_from_for_single_key(&req)?;
         let my_address_string = coin.my_address().map_to_mm(WithdrawError::InternalError)?;
         Ok(StandardUtxoWithdraw {
             coin,
             req,
             my_address,
             my_address_string,
+            hd_derivation_path: None,
+        })
+    }
+}
+
+impl<Coin> StandardUtxoWithdraw<Coin>
+where
+    Coin: AsRef<UtxoCoinFields>
+        + CoinWithDerivationMethod
+        + GetWithdrawSenderAddress<Address = Address, Pubkey = PublicKey>,
+{
+    /// The direct `withdraw` of a coin under a software HD key policy (CRD ch.49 R49.4). The sender is resolved by
+    /// the step the task route uses (`GetWithdrawSenderAddress`), so that `from` and the default sender without it
+    /// are decided in one place; the key that signs is the key derived at the sender's path, and the change returns
+    /// to the sender.
+    pub async fn new_with_hd_sender(coin: Coin, req: WithdrawRequest) -> Result<Self, MmError<WithdrawError>> {
+        let from = resolve_withdraw_sender(&coin, &req).await?;
+        Ok(StandardUtxoWithdraw {
+            coin,
+            req,
+            my_address: from.address,
+            my_address_string: from.address_string,
+            hd_derivation_path: Some(from.derivation_path),
         })
     }
 }
