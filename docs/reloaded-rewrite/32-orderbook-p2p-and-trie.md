@@ -3030,6 +3030,54 @@ the entry under R-GH1 until the next keep-alive for the pair triggers a
 request to a peer whose view is correct — or indefinitely, if every peer it
 asks shares its stale view.
 
+**R-GH8a (Reloaded: the previous orders are replaced only after the new
+order passes its checks).** *Reloaded-original (2026-11-07, the maintainer's
+Decisions DB and DE); no forbidden-class input. It rests on R-GH8 and R-GH9,
+which passed the KDF Dirty Gate, and on this repository's own re-pricing
+path.* With `setprice_replace_after_checks` on, `setprice` with
+`cancel_previous`:
+1. *Checks first.* Runs every check of the new order before it touches the
+   previous orders: the balance and volume checks of R-GH8 (for `max`, the
+   maximum volume) and the build of the order itself (its volume, minimum
+   volume and price).
+2. *Then the replacement.* Only when all of them pass does it replace the
+   previous orders of the directed pair, exactly as R-GH8 and R-GH9 say: the
+   same orders, the same local removal from the maker's own set, read index
+   and trie, one cancel per replaced order, and all cancels before the
+   created message of the new order.
+3. *A failed check leaves the pair as it was.* When any check fails, the
+   request returns that check's error and the previous orders stay: no cancel
+   message is published, and neither the maker's set nor the advertised root
+   changes.
+4. *Unchanged either way.* The refusals that come before the balance checks
+   and already leave the previous orders alone (an unknown, untradable or
+   wallet-only coin, a swap-key mismatch, the pre-trade spend check of
+   [Chapter 60](60-trading-floors-and-refusal-contract.md) R60.6.7 item 3) are not
+   affected, and neither is `setprice` without `cancel_previous`.
+5. *Switch.* `setprice_replace_after_checks` is a top-level boolean, `true` by
+   default; only a JSON `false` turns it off. With `false`, R-GH8 holds as
+   written: a failed balance check cancels the previous orders, and a build
+   that fails after the cancel leaves the pair without an order.
+6. *Wire.* Nothing on the wire changes, and no message is added. A peer sees
+   either the previous orders unchanged or the replacement, never a pair
+   emptied by a failed re-pricing.
+
+*Rationale.* On 2026-10-30 a fee estimate that lagged the chain's base fee
+failed the balance check of an EVM re-pricing in the field. The maker's
+orders on the pair were cancelled and nothing replaced them until the next
+round. Decision AZ made that trigger rarer, but any other transient failure
+of the checks, such as a node error or a balance read that times out, still
+emptied the pair. A previous order that is no longer fundable does not stand
+for long either way: the balance watch of [Chapter 60](60-trading-floors-and-refusal-contract.md)
+R60.4.5 re-reads the base coin of every pair with maker orders every 30 s and
+corrects or cancels such orders.
+
+*Default side (Decision DE).* The default is the Reloaded behavior. This is
+a project-team decision under arm 3 of `docs/COMPAT_SWITCHES.md`, "The
+default-side rule": the change touches no wire format, a peer only keeps
+seeing an order the maker had already published, and the balance watch
+bounds how long an order that can no longer be funded stays visible.
+
 **R-GH10 (Reloaded today).** *Established 2026-11-01 against this
 repository's own keep-alive receiver, synchronization applier, order-
 message handlers, eviction sweep, keep-alive producer and re-pricing path;
@@ -3058,7 +3106,10 @@ liveness on the receiver's clock, switch `pair_liveness`, default on.)*
 *(Since 2026-11-05, §32.7.3 R-Q5b item 6 parks a request that reaches a
 relay before the placeholder exists, and R-GH12a lets the order-book answer
 wait briefly for a lagging worker. Both change only the timing of an answer
-that would otherwise fail.)*
+that would otherwise fail.)* *(Since 2026-11-07, R-GH8a: with
+`setprice_replace_after_checks` on, the default, a re-pricing whose checks
+fail leaves the previous orders as they were; R-GH8's last sentence holds
+with `false`.)*
 
 **T-GH1** *Unnamed pairs are untouched (R-GH1).* A node holding entries of
 P on pairs X and Y receives a keep-alive from P naming only X with X's held
@@ -3110,8 +3161,23 @@ worker is idle, the pair's held root covers the two new orders and neither
 old one; the keep-alive of the next tick advertises that root; with the
 worker held back across a tick, Reloaded skips or delays the advertisement
 (R-T3b item 2) rather than advertising a root covering an old order. Orders
-of (rel, base) are untouched; a failed balance check still cancels the old
-orders and creates none.
+of (rel, base) are untouched. With `setprice_replace_after_checks: false`, a
+failed balance check still cancels the old orders and creates none; for the
+default see T-GH8a.
+
+**T-GH8a** *Replace only after the checks (R-GH8a).* A maker with two orders
+on (base, rel), `setprice_replace_after_checks` at its default:
+- a re-pricing with `cancel_previous` whose balance check fails once (a coin
+  that answers the check with an error) returns that error; both previous
+  orders are still in the maker's set and in the pair's held root, and no
+  cancel message is published;
+- a re-pricing whose new order the builder refuses (a volume below the
+  order's minimum) behaves the same;
+- the next re-pricing whose checks pass replaces both orders as T-GH8 and
+  T-GH9 say;
+- with `setprice_replace_after_checks: false`, the first case cancels both
+  previous orders and creates none (R-GH8);
+- a value that is not a boolean is taken as the default (`true`).
 
 **T-GH9** *One cancel per replaced order, in order (R-GH9).* The same
 re-pricing publishes exactly two cancel messages, one per old order
@@ -3128,7 +3194,9 @@ value and `order_messages_refresh_liveness` at either value, and with
 `order_messages_refresh_liveness` at its default, T-GH3's silence is
 counted from the last keep-alive **or order message** of P. T-GH5's
 "inserted after" holds with `cancel_final_window_secs: 120`; at the
-default the late duplicate is dropped for the window (T-K8).
+default the late duplicate is dropped for the window (T-K8). T-GH8's
+failed-check case holds with `setprice_replace_after_checks: false`; at the
+default T-GH8a applies.
 
 ### 32.9C.1 Follow-up: resurrection paths, the order-book answer, and the maker's ticks
 
@@ -4536,3 +4604,10 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   parked-request table and order-book answer. The reference facts it rests on
   are R-F3a, R-GH12 and the "no data" and "missing pair" classes of R-Q5a,
   which passed the KDF Dirty Gate. It needs no Dirty Gate pass of its own.
+- *Reloaded-original addition (2026-11-07): R-GH8a and T-GH8a, and the notes
+  that point to them.* The notes are those on R-GH10, T-GH8 and T-GH10.
+  Written by a context that never read the forbidden corpus. Its sources are
+  the maintainer's Decisions DB and DE of 2026-11-07, a field report of
+  2026-10-30 and this repository's own re-pricing path and balance watch. The
+  reference facts it rests on are R-GH8 and R-GH9, which passed the KDF Dirty
+  Gate. It needs no Dirty Gate pass of its own.

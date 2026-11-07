@@ -1,6 +1,6 @@
 # Plan: order-posting latency
 
-**Status:** in progress (all passes merged, Decision AM in PR #149; timing run done 2026-10-31; read spreading by round trip, Decision BI: rule and code written 2026-11-02, swaplab rows run 2026-11-06; floor of two near sessions, Decision CX: rule written 2026-11-06 (PR #260), code implemented 2026-11-06 (PR #262)) — **Last reviewed:** 2026-11-06
+**Status:** in progress (all passes merged, Decision AM in PR #149; timing run done 2026-10-31; read spreading by round trip, Decision BI: rule and code written 2026-11-02, swaplab rows run 2026-11-06; floor of two near sessions, Decision CX: rule written 2026-11-06 (PR #260), code implemented 2026-11-06 (PR #262), DOGE timing row passed 2026-11-07; re-pricing keeps the previous orders when the new one fails its checks, Decisions DB and DE: rule written 2026-11-07, code next) — **Last reviewed:** 2026-11-07
 
 > **Context:** a market maker found order posting on Reloaded slower than on GLEEC KDF, about 20 % on
 > UTXO and EVM coins and about 100 % on DOGE. Orders carrying `timeout_in_minutes` expired in the
@@ -120,6 +120,12 @@ the second time with the beta head first.
   and the other then took every read and reached its own limit sooner. A run with the near factor at 0
   matched 0.3.0-beta.1. Whenever two or more sessions are maintained, at least the two fastest are near
   (R38.6.4a item 6, D38.6.4a.3), in batch 2 (work package 6). Not a beta blocker.
+- **Decisions DB and DE (maintainer, 2026-11-07): replace only after the checks.** In the field on
+  2026-10-30, a fee estimate that lagged the base fee failed the balance check of an EVM re-pricing, and
+  `setprice` with `cancel_previous` cancelled the pair's orders without replacing them, as the reference
+  does. With `setprice_replace_after_checks` on, the default, the previous orders are replaced only after
+  the new order has passed every check, and a failed check leaves them as they were; `false` restores the
+  reference behavior (ch.32 R-GH8a, work package 7). Not a beta blocker.
 - **F6 (operator, no code).** Raise the per-session limits on the operator's own Electrum servers for the
   market maker. This gives relief until the code lands.
 
@@ -139,6 +145,7 @@ the second time with the beta head first.
 | 3 | F2 balance watch (order-bearing base coins, interval, restart seeding) | R60.4.5, R60.4.6 (D60.4 resolved, PR #96) | merged 2026-10-28 (PR #116) |
 | 4 | Read spreading only over the connected servers whose recent round trip is close to the fastest (Decision BI) | R38.6.4a items 6–8, D38.6.4a.1 and D38.6.4a.2 (decided, under monitoring) | rule PR #201; code implemented 2026-11-02 (PR #215); swaplab rows 2026-11-06: RIN on its six-server list and its earlier three-server list faster, `mixed` and `measured` recorded for D38.6.4l.1, DOGE about 11 % slower (work package 6) |
 | 5 | Tip check for near sessions: a near server two or more blocks behind the best tip stops being near, under every server order (Decision 22, study proposal (c)) | R38.6.4a amendment, to be written | batch 2 |
-| 6 | Floor of two near sessions: whenever two or more sessions are maintained, at least the two fastest take turns (Decision CX) | R38.6.4a item 6 amendment, T38.6.4a.1 new cases, T38.6.4a.8, D38.6.4a.3 | rule written 2026-11-06 (PR #260); code implemented 2026-11-06 (PR #262), then a DOGE timing row against 0.3.0-beta.1; batch 2 |
+| 6 | Floor of two near sessions: whenever two or more sessions are maintained, at least the two fastest take turns (Decision CX) | R38.6.4a item 6 amendment, T38.6.4a.1 new cases, T38.6.4a.8, D38.6.4a.3 | rule written 2026-11-06 (PR #260); code implemented 2026-11-06 (PR #262), DOGE timing row against 0.3.0-beta.1 passed 2026-11-07; batch 2 |
+| 7 | Re-pricing replaces the previous orders only after the new order passes its checks, switch `setprice_replace_after_checks`, default on (Decisions DB and DE) | ch.32 R-GH8a, T-GH8a, notes on R-GH10, T-GH8 and T-GH10 | rule written 2026-11-07; code next (unit tests and one lab row with a node that fails one check); batch 3 |
 
 Each code PR is checked end to end by the swaplab session's timing run once it is built.
