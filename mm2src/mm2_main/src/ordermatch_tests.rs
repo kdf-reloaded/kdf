@@ -7247,12 +7247,14 @@ fn ordermatch_ctx_without_worker() -> (Arc<OrdermatchContext>, mpsc::UnboundedRe
     let (trie_ops_tx, rx) = mpsc::unbounded::<Vec<TrieOp>>();
     let trie_store = TrieStore::default();
     let pair_liveness = trie_store.pair_liveness.clone();
+    let mismatch_watch = trie_store.mismatch_watch.clone();
     let ctx = OrdermatchContext {
         maker_orders_ctx: Default::default(),
         my_taker_orders: Default::default(),
         orderbook: Default::default(),
         trie_store: Arc::new(parking_lot::Mutex::new(trie_store)),
         pair_liveness,
+        mismatch_watch,
         trie_ops_tx,
         orderbook_subscriptions: Default::default(),
         sync_answer_deferral: Default::default(),
@@ -11722,6 +11724,13 @@ mod sync_answer_deferral_tests {
             deferral.registration_counts_agree(),
             "per-peer count and index of the registrations table"
         );
+        // The watch of the keep-alive requests (it ends with the check of trigger (b), on a task of its own).
+        let watch = octx(ctx).mismatch_watch.clone();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !watch.is_empty() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(watch.is_empty(), "mismatch watch table");
     }
 
     /// The uuids of the maker's orders in the node's read index.
@@ -13084,6 +13093,84 @@ mod sync_answer_deferral_tests {
                 (Attempt::First, RequestClass::Ok),
                 (Attempt::Alternate(AltReason::Mismatch), RequestClass::Ok)
             ]);
+            assert_eq!(alt_counters(&f.relay), [0, 1, 0, 0, 1, 1]);
+        }
+
+        /// The DEBUG tail of the mismatch line (the watch table): a diverged pair with no candidate rule that
+        /// would have skipped it. The request to the other relay is sent as without the watch.
+        #[test]
+        fn the_mismatch_line_counts_no_flag_for_a_plainly_diverged_pair() {
+            let mut f = Fixture::new(alt_conf());
+            octx(&f.relay).mismatch_watch.force_debug();
+            let stale_f = node_without(&f, &one_of(&f, false));
+            let f_root = held(&stale_f, PAIR).unwrap();
+
+            let mut own = f.start_own_sync();
+            assert_eq!(octx(&f.relay).mismatch_watch.len(), 1, "the watch of the request");
+            own.answer(&stale_f);
+            assert!(own.finish(), "F's answer was applied");
+            wait_until("F's root", || held(&f.relay, PAIR) == Some(f_root));
+
+            f.answer_relay_list(&[G, FORWARDER]);
+            let mut alt = f.expect_alternate_request(G);
+            assert_eq!(alt.roots(), HashMap::from([(PAIR.to_owned(), f_root)]));
+            alt.answer(&f.maker);
+            wait_until("G's set", || maker_book(&f.relay) == f.uuids);
+            assert_tables_empty(&f.relay);
+            f.assert_no_command();
+
+            let mut skips = octx(&f.relay).sync_log.skips();
+            assert_eq!(skips.len(), 1);
+            let since_keep_alive_ms = std::mem::take(&mut skips[0].since_keep_alive_ms);
+            assert!(since_keep_alive_ms < 15_000, "{}", since_keep_alive_ms);
+            assert_eq!(skips, vec![SkipCounts {
+                pairs: 1,
+                ..Default::default()
+            }]);
+            assert_eq!(alt_counters(&f.relay), [0, 1, 0, 0, 1, 1]);
+        }
+
+        /// An order message of the maker for the pair, handled after the keep-alive and before the check, is
+        /// candidate (b): the line says so, and the request to the other relay is still sent.
+        #[test]
+        fn the_mismatch_line_counts_an_order_message_handled_after_the_keep_alive() {
+            let mut f = Fixture::new(alt_conf());
+            octx(&f.relay).mismatch_watch.force_debug();
+            let stale_f = node_without(&f, &one_of(&f, false));
+            let f_root = held(&stale_f, PAIR).unwrap();
+
+            let mut own = f.start_own_sync();
+            // The maker's created message reaches the relay while the request is in flight; the answer, which is
+            // no order message, then replaces the pair.
+            let extra = make_random_orders(MAKER.to_owned(), &[0; 32], "C1".into(), "C2".into(), 1).remove(0);
+            insert_or_update_order(&f.relay, extra);
+            own.answer(&stale_f);
+            assert!(own.finish(), "F's answer was applied");
+            wait_until("F's set", || maker_book(&f.relay) == maker_book(&stale_f));
+            wait_until("F's root", || held(&f.relay, PAIR) == Some(f_root));
+
+            f.answer_relay_list(&[G, FORWARDER]);
+            let mut alt = f.expect_alternate_request(G);
+            assert_eq!(
+                alt.roots(),
+                HashMap::from([(PAIR.to_owned(), f_root)]),
+                "the request is sent as without the watch"
+            );
+            alt.answer(&f.maker);
+            wait_until("G's set", || maker_book(&f.relay) == f.uuids);
+            assert_tables_empty(&f.relay);
+            f.assert_no_command();
+
+            let mut skips = octx(&f.relay).sync_log.skips();
+            assert_eq!(skips.len(), 1);
+            let since_keep_alive_ms = std::mem::take(&mut skips[0].since_keep_alive_ms);
+            assert!(since_keep_alive_ms < 15_000, "{}", since_keep_alive_ms);
+            assert_eq!(skips, vec![SkipCounts {
+                pairs: 1,
+                skip_b: 1,
+                skip_ab: 1,
+                ..Default::default()
+            }]);
             assert_eq!(alt_counters(&f.relay), [0, 1, 0, 0, 1, 1]);
         }
 
@@ -15400,7 +15487,8 @@ mod negotiation_failure_penalty {
 mod t14_capability_word_tests {
     use super::*;
     use crate::mm2::lp_swap::{active_swaps, list_banned_pubkeys_rpc};
-    use coins::coin_protocol_capability::{append_capability_word, declares_capability, CAPABILITY_TX_V6};
+    use coins::coin_protocol_capability::{append_capability_word, declares_capability, CAPABILITY_SIGHASH_SUFFIX,
+                                          CAPABILITY_TX_V6};
     use coins::{CoinsContext, MarketCoinOps, MmCoinEnum};
     use common::mm_number::BigRational;
     use std::sync::Arc as StdArc;
@@ -15964,6 +16052,150 @@ mod t14_capability_word_tests {
 
         assert_eq!(consulted.lock().unwrap().len(), after_first);
         assert_eq!(matches_of_maker_order(&node, &order.uuid), 1);
+    }
+
+    // --- CRD ch.61 R61.5A, T10 (reader half) and T12: BC2 swaps require a counterparty that signs with the suffix ---
+
+    fn with_suffix_word(first: &[u8]) -> Vec<u8> {
+        append_capability_word(first.to_vec(), &[CAPABILITY_SIGHASH_SUFFIX])
+    }
+
+    fn suffix_cap() -> Option<Vec<u8>> { Some(with_suffix_word(&first_values()[1])) }
+
+    fn plain() -> Option<Vec<u8>> { Some(first_values()[1].clone()) }
+
+    /// Test coins where the coin with the ticker `requiring` demands the `sighash_suffix` word of the counterparty
+    /// and every other coin judges as a coin with a zero suffix does (it accepts the information). Every consulted
+    /// coin ticker is recorded, in order.
+    fn require_suffix_on(requiring: &'static str) -> StdArc<Mutex<Vec<String>>> {
+        let consulted = StdArc::new(Mutex::new(Vec::new()));
+        let log = consulted.clone();
+        TestCoin::is_coin_protocol_supported.mock_safe(move |coin, info| {
+            log.lock().unwrap().push(coin.ticker().to_owned());
+            MockResult::Return(coin.ticker() != requiring || declares_capability(info, CAPABILITY_SIGHASH_SUFFIX))
+        });
+        consulted
+    }
+
+    #[test]
+    fn t10_orderbook_address_format_is_the_same_with_the_suffix_word() {
+        for first in first_values() {
+            assert_eq!(
+                addr_format_from_protocol_info(&first),
+                addr_format_from_protocol_info(&with_suffix_word(&first))
+            );
+        }
+    }
+
+    #[test]
+    fn t12_maker_declines_a_request_whose_base_information_lacks_the_word() {
+        let _consulted = require_suffix_on("BASE");
+        let mut node = Node::new();
+        let order = add_maker_order(&node);
+
+        process_request(&node, taker_request(plain(), plain()));
+
+        assert_eq!(reservations(&node.published()), 0);
+        assert_eq!(matches_of_maker_order(&node, &order.uuid), 0);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t12_maker_accepts_a_request_that_carries_the_word_and_the_other_coin_does_not_trigger() {
+        let consulted = require_suffix_on("BASE");
+        let mut node = Node::new();
+        let order = add_maker_order(&node);
+
+        // REL carries no word and BASE does: only BASE requires it.
+        process_request(&node, taker_request(suffix_cap(), plain()));
+
+        assert_eq!(reservations(&node.published()), 1);
+        assert_eq!(matches_of_maker_order(&node, &order.uuid), 1);
+        // Both coins were asked, and REL accepted information without the word.
+        assert!(consulted.lock().unwrap().iter().any(|ticker| ticker == "REL"));
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t12_maker_declines_when_the_rel_coin_requires_the_word_and_its_information_lacks_it() {
+        let _consulted = require_suffix_on("REL");
+        let mut node = Node::new();
+        let order = add_maker_order(&node);
+
+        // BASE carries no word and is not required to.
+        process_request(&node, taker_request(plain(), plain()));
+        assert_eq!(reservations(&node.published()), 0);
+        assert_eq!(matches_of_maker_order(&node, &order.uuid), 0);
+
+        process_request(&node, taker_request(plain(), suffix_cap()));
+        assert_eq!(reservations(&node.published()), 1);
+        assert_eq!(matches_of_maker_order(&node, &order.uuid), 1);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t12_taker_declines_a_reservation_whose_base_information_lacks_the_word() {
+        let _consulted = require_suffix_on("BASE");
+        let mut node = Node::new();
+        let taker = add_taker_order(&node);
+
+        process_reservations(&node, vec![reservation_for(&taker, 10, plain(), plain())]);
+
+        assert_eq!(connects(&node.published()), 0);
+        assert_eq!(matches_of_taker_order(&node, &taker.request.uuid), 0);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t12_taker_accepts_a_reservation_that_carries_the_word_and_the_other_coin_does_not_trigger() {
+        let consulted = require_suffix_on("BASE");
+        let mut node = Node::new();
+        let taker = add_taker_order(&node);
+
+        // REL carries no word and BASE does: only BASE requires it.
+        process_reservations(&node, vec![reservation_for(&taker, 10, suffix_cap(), plain())]);
+
+        assert_eq!(connects(&node.published()), 1);
+        assert_eq!(matches_of_taker_order(&node, &taker.request.uuid), 1);
+        // Both coins were asked, and REL accepted information without the word.
+        assert!(consulted.lock().unwrap().iter().any(|ticker| ticker == "REL"));
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t12_taker_declines_when_the_rel_coin_requires_the_word_and_its_information_lacks_it() {
+        let _consulted = require_suffix_on("REL");
+        let mut node = Node::new();
+        let taker = add_taker_order(&node);
+
+        process_reservations(&node, vec![reservation_for(&taker, 10, plain(), plain())]);
+        assert_eq!(connects(&node.published()), 0);
+        assert_eq!(matches_of_taker_order(&node, &taker.request.uuid), 0);
+
+        process_reservations(&node, vec![reservation_for(&taker, 10, plain(), suffix_cap())]);
+        assert_eq!(connects(&node.published()), 1);
+        assert_eq!(matches_of_taker_order(&node, &taker.request.uuid), 1);
+        node.assert_no_swap_and_no_penalty();
+    }
+
+    #[test]
+    fn t12_the_declining_coin_is_named_for_the_log_lines_of_the_order_match_layer() {
+        let base = MmCoinEnum::Test(TestCoin::new("BASE"));
+        let rel = MmCoinEnum::Test(TestCoin::new("REL"));
+
+        let _consulted = require_suffix_on("BASE");
+        assert_eq!(
+            declining_coin_ticker(&base, &rel, &plain(), &plain()).as_deref(),
+            Some("BASE")
+        );
+        assert_eq!(declining_coin_ticker(&base, &rel, &suffix_cap(), &plain()), None);
+
+        let _consulted = require_suffix_on("REL");
+        assert_eq!(
+            declining_coin_ticker(&base, &rel, &plain(), &plain()).as_deref(),
+            Some("REL")
+        );
+        assert_eq!(declining_coin_ticker(&base, &rel, &plain(), &suffix_cap()), None);
     }
 }
 

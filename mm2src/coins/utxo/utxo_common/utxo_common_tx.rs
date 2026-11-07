@@ -500,6 +500,7 @@ pub async fn p2sh_spending_tx<T: UtxoCommonOps>(
         zcash: coin.as_ref().conf.zcash,
         str_d_zeel,
         hash_algo,
+        sighash_suffix: coin.as_ref().conf.sighash_suffix,
     };
     let signed_input = try_s!(p2sh_spend(
         &unsigned,
@@ -1351,7 +1352,7 @@ async fn sign_raw_utxo_tx<T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps>(
         .mm_err(|e| RawTransactionError::InternalError(e.to_string()))?;
 
     // Build TransactionInputSigner from the decoded tx
-    let mut input_signer = TransactionInputSigner::from(tx);
+    let mut input_signer = TransactionInputSigner::from_transaction(tx, coin.as_ref().conf.sighash_suffix);
     input_signer.consensus_branch_id = coin.as_ref().conf.consensus_branch_id;
 
     // Set amounts on each input

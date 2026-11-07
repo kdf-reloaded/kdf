@@ -179,6 +179,42 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   logs no such line. What `disable_cert_verification` accepts and refuses is
   the same on both. See CRD ch.38 R38.6.4m and R38.6.4n and
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+- **Bitcoin II (BC2) transactions are signed the way the BC2 network requires.**
+  Since block 57,750 the BC2 network checks every signature against a digest
+  that carries an extra 4-byte field after the signature-hash type, and refuses
+  a transaction signed the ordinary way ("Signature must be zero for failed
+  CHECK(MULTI)SIG operation"). A coin entry may now carry the top-level key
+  `sighash_suffix`, a `0x`-prefixed hexadecimal value of at most 32 bits; when
+  it is present, every input the node signs for that coin (withdrawals, the
+  DEX-fee transaction, HTLC payments, spends and refunds, the taker's
+  pre-signature of a version-two swap, and `sign_raw_transaction`) is signed
+  over the digest with those four bytes appended. BC2's value is `0x01324342`.
+  The key `sighash_suffix_height` is read and checked but not used yet: the
+  suffix applies at every height. A malformed value fails the activation of
+  the coin with an error naming the key, and so does the combination with
+  Radiant's signature version or with the Zcash-family overwintered signature
+  hash. Hardware wallets cannot add the field, so a coin
+  with a suffix refuses a hardware signing request before the device is
+  contacted. A BC2 entry without the key still activates and logs one warning
+  that the network will refuse its transactions. A coin without the key signs
+  exactly as before. The shared coins list must carry the key on the `BC2` and
+  `BC2-segwit` entries. **No switch returns the ordinary signature:** the
+  Komodo DeFi Framework 2.6.0-beta and the GLEEC KDF development build
+  `a12695e` (the two builds measured) cannot sign BC2 transactions after block
+  57,750 at all, so there is no reference behavior to return to. **BC2 swaps
+  require a counterparty that signs with the suffix.** A coin with a suffix
+  adds a capability word to its order and match messages and declines a
+  counterparty without it before any swap starts (CRD ch.61 R61.5A, ch.59
+  §59.4A); nodes that predate the word, and the reference builds, are declined.
+  Set `require_suffix_counterparty` to `false` in the coin entry to admit them;
+  a swap with them still cannot complete when they have to spend BC2. This
+  check is temporary and will be removed as soon as the other implementations
+  support suffix signing. The global coins repository may not carry the
+  `sighash_suffix` key on the `BC2` and `BC2-segwit` entries yet: until it
+  does, add it to your coins file or use the KDF Reloaded coins file, because
+  without it the BC2 network rejects BC2 withdrawals and swaps. See
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
+  [`docs/plans/bc2-replay-protection.md`](docs/plans/bc2-replay-protection.md).
 
 ### Behavioural divergences without a compatibility switch
 
@@ -288,6 +324,13 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   GLEEC KDF, on the legacy stack, is affected by the same underlying divergence.
   No compat switch: the alternative is invisible incoming payments. Code:
   `coins/z_coin.rs`, `coins/z_coin/z_coin_wallet_db.rs`.
+- **An ARRR withdrawal takes no memo.** Reloaded's `withdraw` request has no
+  `memo` member, so a memo sent with it is ignored, the shielded output carries
+  none, and the answer has no `memo` member. GLEEC KDF echoes the request's memo
+  in the answer (CRD ch.39 R39.5A.3). Memo support is a separate, later item,
+  noted under R39.5A.3. No compat switch: there is nothing to switch on yet.
+  Code: `coins/lp_coins_types.rs` (`WithdrawRequest`), `coins/z_coin.rs`
+  (`withdraw`).
 - **Siacoin withdraw populates `internal_id`.** GLEEC KDF leaves `internal_id`
   empty on its SC withdraw response — only its history path fills the field in.
   Reloaded sets it to the raw bytes of the signed transaction's id, the same
@@ -535,7 +578,8 @@ with a node that cannot build version 6 used to start, and failed at that node's
 ARRR transaction, after the DEX fee was paid. GLEEC KDF nodes and KDF Reloaded
 0.3.0-beta.1 nodes send no word and are declined. Set `require_v6_counterparty` to
 `false` in the coin's `consensus_params` to admit them again; an ARRR swap with GLEEC KDF
-still cannot complete.
+still cannot complete. The capability check is temporary: it will be removed once
+version 6 is generally supported.
 
 Two coin-activation behaviours differ from GLEEC KDF by default (CRD ch.46
 R46.2.4, ch.55 R55.4.6):

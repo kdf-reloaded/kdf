@@ -111,7 +111,8 @@ async fn t39_6_5c_a_withdrawal_to_a_pirate1_address_builds_the_version_6_transac
     assert_eq!(details.to, vec![MAIN_ADDRESS.to_owned()]);
     assert_eq!(details.spent_by_me, sat(NOTE_VALUE));
     assert_eq!(details.received_by_me, sat(change));
-    assert_eq!(details.my_balance_change, sat(NOTE_VALUE - change));
+    // Received minus spent, negative for a withdrawal (R39.5A.3, R39.6.5c).
+    assert_eq!(details.my_balance_change, -sat(SEND_SAT + IRONWOOD_FEE_SAT));
     assert_eq!(
         fee_of(&details),
         sat(IRONWOOD_FEE_SAT),

@@ -3479,7 +3479,12 @@ impl MmCoin for ZCoin {
                     );
                 }
 
-                let my_balance_change = data.spent_by_me - data.received_by_me;
+                // Received minus spent, negative for a withdrawal: the orientation of the history row
+                // (CRD ch.39 R39.5A.3). The two amounts are unsigned, so the difference is taken on the
+                // decimals.
+                let spent_by_me = big_decimal_from_sat_unsigned(data.spent_by_me, coin.decimals());
+                let received_by_me = big_decimal_from_sat_unsigned(data.received_by_me, coin.decimals());
+                let my_balance_change = received_by_me.clone() - spent_by_me.clone();
 
                 Ok(TransactionDetails {
                     tx_json: None,
@@ -3487,10 +3492,10 @@ impl MmCoin for ZCoin {
                     tx_hash: tx_hash.to_tx_hash(),
                     from: vec![coin.z_fields.my_z_addr_encoded.clone()],
                     to: vec![req.to],
-                    total_amount: big_decimal_from_sat_unsigned(data.spent_by_me, coin.decimals()),
-                    spent_by_me: big_decimal_from_sat_unsigned(data.spent_by_me, coin.decimals()),
-                    received_by_me: big_decimal_from_sat_unsigned(data.received_by_me, coin.decimals()),
-                    my_balance_change: big_decimal_from_sat_unsigned(my_balance_change, coin.decimals()),
+                    total_amount: spent_by_me.clone(),
+                    spent_by_me,
+                    received_by_me,
+                    my_balance_change,
                     block_height: 0,
                     timestamp: 0,
                     fee_details: Some(TxFeeDetails::Utxo(UtxoFeeDetails {

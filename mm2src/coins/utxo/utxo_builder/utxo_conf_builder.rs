@@ -22,6 +22,18 @@ use std::sync::Arc;
 /// The `signature_version` values the `SignatureVersion` enum deserializes; keep in step with it.
 const ACCEPTED_SIGNATURE_VERSIONS: &str = "\"base\", \"witness_v0\", \"fork_id\", \"fork_id_rxd\"";
 
+/// The coin-configuration key of the sighash suffix (CRD ch.61 R61.3.1).
+const SIGHASH_SUFFIX_KEY: &str = "sighash_suffix";
+
+/// The coin-configuration key of the optional sighash-suffix activation height (CRD ch.61 R61.3.2).
+const SIGHASH_SUFFIX_HEIGHT_KEY: &str = "sighash_suffix_height";
+
+/// The coin-configuration key that switches the counterparty requirement of CRD ch.61 R61.5A.4 off.
+pub(crate) const REQUIRE_SUFFIX_COUNTERPARTY_KEY: &str = "require_suffix_counterparty";
+
+/// The Bitcoin II tickers the missing-suffix warning looks for (CRD ch.61 R61.4.5).
+const BC2_TICKERS: [&str; 2] = ["BC2", "BC2-segwit"];
+
 /// The top-level `MM2.json` compatibility switch that selects what a coin-configuration key holding an
 /// unrecognised enumeration member does: `false` (the default) fails the activation, the boolean `true` warns
 /// once per activation and falls back to the key's default, as the reference does. Only the boolean `true`
@@ -98,6 +110,45 @@ pub enum UtxoConfError {
     )]
     InvalidSignatureVersion {
         found: String,
+    },
+    #[display(
+        fmt = "Invalid 'sighash_suffix' {}: expected a hexadecimal string with a 0x prefix such as \"0x01324342\" \
+               that fits 32 bits, or omit the key for no suffix",
+        found
+    )]
+    InvalidSighashSuffix {
+        found: String,
+    },
+    #[display(
+        fmt = "Invalid 'sighash_suffix_height' {}: expected a non-negative integer, or omit the key",
+        found
+    )]
+    InvalidSighashSuffixHeight {
+        found: String,
+    },
+    #[display(
+        fmt = "Invalid 'require_suffix_counterparty' {}: expected the boolean true or false, or omit the key \
+               for the default true",
+        found
+    )]
+    InvalidRequireSuffixCounterparty {
+        found: String,
+    },
+    #[display(
+        fmt = "'sighash_suffix' {} cannot be combined with 'signature_version' \"fork_id_rxd\": the Radiant \
+               signature dialect takes no sighash suffix",
+        suffix
+    )]
+    SighashSuffixWithRadiantDialect {
+        suffix: String,
+    },
+    #[display(
+        fmt = "'sighash_suffix' {} cannot be set on a coin whose configuration selects the overwintered (Zcash-family) \
+               signature hash: that digest takes no sighash suffix",
+        suffix
+    )]
+    SighashSuffixWithOverwinteredDigest {
+        suffix: String,
     },
     InvalidAddressFormat(String),
     InvalidSpvConf(String),
@@ -243,6 +294,30 @@ impl<'a> UtxoConfBuilder<'a> {
         let consensus_branch_id = self.consensus_branch_id(tx_version)?;
         let fork_id = self.fork_id()?;
         let signature_version = self.signature_version(fork_id, &mut warnings)?;
+        let sighash_suffix = self.sighash_suffix()?;
+        let sighash_suffix_height = self.sighash_suffix_height()?;
+        let require_suffix_counterparty = self.require_suffix_counterparty()?;
+        if sighash_suffix != 0 && signature_version == SignatureVersion::ForkIdRxd {
+            return MmError::err(UtxoConfError::SighashSuffixWithRadiantDialect {
+                suffix: self.conf[SIGHASH_SUFFIX_KEY].to_string(),
+            });
+        }
+        if sighash_suffix != 0 && overwintered {
+            return MmError::err(UtxoConfError::SighashSuffixWithOverwinteredDigest {
+                suffix: self.conf[SIGHASH_SUFFIX_KEY].to_string(),
+            });
+        }
+        // The callers that read only address-related fields never sign, so the warning is not for them.
+        if sighash_suffix == 0
+            && BC2_TICKERS.contains(&self.ticker)
+            && self.unrecognised_enum_policy != UnrecognisedEnumPolicy::NotUsed
+        {
+            warnings.push(format!(
+                "{}: the coin configuration has no '{}', so the transactions of this coin will be rejected by the \
+                 network from block 57,750 on; add \"{}\": \"0x01324342\" to the coin entry",
+                self.ticker, SIGHASH_SUFFIX_KEY, SIGHASH_SUFFIX_KEY
+            ));
+        }
 
         // should be sufficient to detect zcash by overwintered flag
         let zcash = overwintered;
@@ -287,6 +362,9 @@ impl<'a> UtxoConfBuilder<'a> {
             checksum_type,
             signature_version,
             fork_id,
+            sighash_suffix,
+            sighash_suffix_height,
+            require_suffix_counterparty,
             required_confirmations: required_confirmations.into(),
             force_min_relay_fee,
             mtp_block_count,
@@ -457,6 +535,56 @@ impl<'a> UtxoConfBuilder<'a> {
         };
         let hex_string = value.as_str().or_mm_err(invalid)?;
         u32::from_str_radix(hex_string.trim_start_matches("0x"), 16).map_to_mm(|_| invalid())
+    }
+
+    /// Reads the sighash suffix (CRD ch.61 R61.3.1). An absent key (or JSON `null`) is no suffix, zero. A
+    /// present value must be a hexadecimal string with a `0x` prefix that fits 32 bits: a malformed value fails
+    /// under every [`UnrecognisedEnumPolicy`], because a wrong suffix signs transactions the network rejects.
+    fn sighash_suffix(&self) -> UtxoConfResult<u32> {
+        let value = &self.conf[SIGHASH_SUFFIX_KEY];
+        if value.is_null() {
+            return Ok(0);
+        }
+        let invalid = || UtxoConfError::InvalidSighashSuffix {
+            found: value.to_string(),
+        };
+        let text = value.as_str().or_mm_err(invalid)?;
+        let digits = text.strip_prefix("0x").or_mm_err(invalid)?;
+        // `from_str_radix` also accepts a leading sign; only plain hexadecimal digits are valid here.
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return MmError::err(invalid());
+        }
+        u32::from_str_radix(digits, 16).map_to_mm(|_| invalid())
+    }
+
+    /// Reads the optional sighash-suffix activation height (CRD ch.61 R61.3.2): a non-negative integer. The
+    /// first implementation validates it and carries it on the configuration, but no signing site gates on it
+    /// (decision D1).
+    fn sighash_suffix_height(&self) -> UtxoConfResult<Option<u64>> {
+        let value = &self.conf[SIGHASH_SUFFIX_HEIGHT_KEY];
+        if value.is_null() {
+            return Ok(None);
+        }
+        value
+            .as_u64()
+            .map(Some)
+            .or_mm_err(|| UtxoConfError::InvalidSighashSuffixHeight {
+                found: value.to_string(),
+            })
+    }
+
+    /// Reads the counterparty-requirement switch (CRD ch.61 R61.5A.4): a boolean, `true` when absent (or JSON
+    /// `null`). Any other value fails under every [`UnrecognisedEnumPolicy`].
+    fn require_suffix_counterparty(&self) -> UtxoConfResult<bool> {
+        let value = &self.conf[REQUIRE_SUFFIX_COUNTERPARTY_KEY];
+        if value.is_null() {
+            return Ok(true);
+        }
+        value
+            .as_bool()
+            .or_mm_err(|| UtxoConfError::InvalidRequireSuffixCounterparty {
+                found: value.to_string(),
+            })
     }
 
     fn required_confirmations(&self) -> u64 {
@@ -829,5 +957,222 @@ mod tests {
         )
         .unwrap();
         assert_eq!(conf.signature_version, SignatureVersion::ForkId);
+    }
+
+    const BC2_SUFFIX_ERROR_TAIL: &str =
+        "expected a hexadecimal string with a 0x prefix such as \"0x01324342\" that fits 32 bits, or omit the key for no suffix";
+
+    /// CRD ch.61 T5: the suffix resolves to the exact value, an absent or `null` key to zero, and the height key
+    /// is carried unchanged.
+    #[test]
+    fn t5_sighash_suffix_resolves_to_the_exact_value() {
+        let conf = build("XYZ", json!({"coin": "XYZ"})).unwrap();
+        assert_eq!(conf.sighash_suffix, 0);
+        assert_eq!(conf.sighash_suffix_height, None);
+        let conf = build(
+            "XYZ",
+            json!({"coin": "XYZ", "sighash_suffix": null, "sighash_suffix_height": null}),
+        )
+        .unwrap();
+        assert_eq!(conf.sighash_suffix, 0);
+        assert_eq!(conf.sighash_suffix_height, None);
+
+        for (text, want) in [
+            ("0x01324342", 0x0132_4342u32),
+            ("0x1324342", 0x0132_4342),
+            ("0x0", 0),
+            ("0x00000000", 0),
+            ("0x1", 1),
+            ("0xffffffff", u32::MAX),
+            ("0xFFFFFFFF", u32::MAX),
+        ] {
+            let conf = build("XYZ", json!({"coin": "XYZ", "sighash_suffix": text})).unwrap();
+            assert_eq!(conf.sighash_suffix, want, "{text}");
+            // The suffix key does not move the other signing keys.
+            assert_eq!(conf.fork_id, 0, "{text}");
+            assert_eq!(conf.signature_version, SignatureVersion::Base, "{text}");
+        }
+
+        for (height, want) in [(json!(57750), 57750u64), (json!(0), 0)] {
+            let conf = build(
+                "XYZ",
+                json!({"coin": "XYZ", "sighash_suffix": "0x01324342", "sighash_suffix_height": height}),
+            )
+            .unwrap();
+            assert_eq!(conf.sighash_suffix, 0x0132_4342);
+            assert_eq!(conf.sighash_suffix_height, Some(want));
+        }
+    }
+
+    /// CRD ch.61 T5: a malformed value, a value above 32 bits and a non-string fail with the exact error naming
+    /// the key and the value, under every policy.
+    #[test]
+    fn t5_a_malformed_sighash_suffix_fails_naming_the_key_under_every_policy() {
+        let bad_values = [
+            json!("0xZZ"),
+            json!(""),
+            json!("0x"),
+            json!("01324342"),
+            json!("0X01324342"),
+            json!("0x1ffffffff"),
+            json!("0x+1"),
+            json!("0x-1"),
+            json!(" 0x1"),
+            json!(19088194),
+            json!(true),
+            json!(["0x01324342"]),
+            json!({"a": 1}),
+        ];
+        for policy in [
+            UnrecognisedEnumPolicy::Fail,
+            UnrecognisedEnumPolicy::WarnAndFallBack,
+            UnrecognisedEnumPolicy::NotUsed,
+        ] {
+            for bad in &bad_values {
+                let err = build_with("XYZ", json!({"coin": "XYZ", "sighash_suffix": bad}), policy)
+                    .err()
+                    .unwrap_or_else(|| panic!("sighash_suffix {bad} must fail under {policy:?}"))
+                    .into_inner();
+                assert!(
+                    matches!(&err, UtxoConfError::InvalidSighashSuffix { found } if *found == bad.to_string()),
+                    "{bad}: {err:?}"
+                );
+                assert_eq!(
+                    err.to_string(),
+                    format!("Invalid 'sighash_suffix' {bad}: {BC2_SUFFIX_ERROR_TAIL}")
+                );
+            }
+        }
+    }
+
+    /// CRD ch.61 T5: a height that is not a non-negative integer fails the activation, naming the key.
+    #[test]
+    fn t5_a_malformed_sighash_suffix_height_fails_naming_the_key() {
+        for bad in [json!(-1), json!(1.5), json!("57750"), json!(true), json!([57750])] {
+            let err = build(
+                "XYZ",
+                json!({"coin": "XYZ", "sighash_suffix": "0x01324342", "sighash_suffix_height": bad}),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("sighash_suffix_height {bad} must fail"))
+            .into_inner();
+            assert!(
+                matches!(&err, UtxoConfError::InvalidSighashSuffixHeight { found } if *found == bad.to_string()),
+                "{bad}: {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                format!("Invalid 'sighash_suffix_height' {bad}: expected a non-negative integer, or omit the key")
+            );
+        }
+    }
+
+    /// CRD ch.61 R61.3.3 / T5: a non-zero suffix with the Radiant dialect fails naming both keys; a zero suffix
+    /// does not, and a non-zero one with another version resolves.
+    #[test]
+    fn t5_a_suffix_with_the_radiant_dialect_fails_naming_both_keys() {
+        for policy in [
+            UnrecognisedEnumPolicy::Fail,
+            UnrecognisedEnumPolicy::WarnAndFallBack,
+            UnrecognisedEnumPolicy::NotUsed,
+        ] {
+            let conf = json!({"coin": "RXD", "fork_id": "0x40", "signature_version": "fork_id_rxd",
+                              "sighash_suffix": "0x01324342"});
+            let err = build_with("RXD", conf, policy)
+                .err()
+                .unwrap_or_else(|| panic!("the combination must fail under {policy:?}"))
+                .into_inner();
+            assert!(
+                matches!(&err, UtxoConfError::SighashSuffixWithRadiantDialect { suffix } if suffix == "\"0x01324342\""),
+                "{err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "'sighash_suffix' \"0x01324342\" cannot be combined with 'signature_version' \"fork_id_rxd\": the \
+                 Radiant signature dialect takes no sighash suffix"
+            );
+        }
+
+        let conf = build(
+            "RXD",
+            json!({"coin": "RXD", "fork_id": "0x40", "signature_version": "fork_id_rxd", "sighash_suffix": "0x0"}),
+        )
+        .unwrap();
+        assert_eq!(conf.sighash_suffix, 0);
+        assert_eq!(conf.signature_version, SignatureVersion::ForkIdRxd);
+
+        for name in ["base", "witness_v0", "fork_id"] {
+            let conf = build(
+                "XYZ",
+                json!({"coin": "XYZ", "signature_version": name, "sighash_suffix": "0x01324342"}),
+            )
+            .unwrap();
+            assert_eq!(conf.sighash_suffix, 0x0132_4342, "{name}");
+        }
+    }
+
+    /// CRD ch.61 R61.3.3 / T5: a non-zero suffix on a coin that selects the overwintered (Zcash-family) digest
+    /// fails naming the key, under every policy; a zero suffix, or no suffix, does not.
+    #[test]
+    fn t5_a_suffix_on_an_overwintered_coin_fails_naming_the_key() {
+        for policy in [
+            UnrecognisedEnumPolicy::Fail,
+            UnrecognisedEnumPolicy::WarnAndFallBack,
+            UnrecognisedEnumPolicy::NotUsed,
+        ] {
+            let conf = json!({"coin": "ZXY", "overwintered": 1, "txversion": 4, "sighash_suffix": "0x01324342"});
+            let err = build_with("ZXY", conf, policy)
+                .err()
+                .unwrap_or_else(|| panic!("the combination must fail under {policy:?}"))
+                .into_inner();
+            assert!(
+                matches!(&err, UtxoConfError::SighashSuffixWithOverwinteredDigest { suffix } if suffix == "\"0x01324342\""),
+                "{err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "'sighash_suffix' \"0x01324342\" cannot be set on a coin whose configuration selects the overwintered \
+                 (Zcash-family) signature hash: that digest takes no sighash suffix"
+            );
+        }
+
+        for conf in [
+            json!({"coin": "ZXY", "overwintered": 1, "txversion": 4}),
+            json!({"coin": "ZXY", "overwintered": 1, "txversion": 4, "sighash_suffix": "0x0"}),
+            json!({"coin": "ZXY", "overwintered": 1, "txversion": 4, "sighash_suffix": null}),
+        ] {
+            let conf = build("ZXY", conf).unwrap();
+            assert_eq!(conf.sighash_suffix, 0);
+        }
+    }
+
+    /// CRD ch.61 R61.4.5: a Bitcoin II coin without the suffix warns once; with the suffix, or for any other
+    /// coin, there is no warning.
+    #[test]
+    fn a_bc2_coin_without_the_suffix_warns_once() {
+        for policy in [UnrecognisedEnumPolicy::Fail, UnrecognisedEnumPolicy::WarnAndFallBack] {
+            for ticker in ["BC2", "BC2-segwit"] {
+                let (conf, warnings) = warnings_of(ticker, json!({"coin": ticker}), policy);
+                assert_eq!(conf.sighash_suffix, 0);
+                assert_eq!(warnings.len(), 1, "{ticker}: {warnings:?}");
+                assert!(warnings[0].contains(ticker), "{}", warnings[0]);
+                assert!(warnings[0].contains("sighash_suffix"), "{}", warnings[0]);
+                assert!(warnings[0].contains("57,750"), "{}", warnings[0]);
+
+                let (conf, warnings) = warnings_of(ticker, json!({"coin": ticker, "sighash_suffix": "0x0"}), policy);
+                assert_eq!(conf.sighash_suffix, 0);
+                assert_eq!(warnings.len(), 1, "an explicit zero is still no suffix: {warnings:?}");
+
+                let (conf, warnings) =
+                    warnings_of(ticker, json!({"coin": ticker, "sighash_suffix": "0x01324342"}), policy);
+                assert_eq!(conf.sighash_suffix, 0x0132_4342);
+                assert!(warnings.is_empty(), "{ticker}: {warnings:?}");
+            }
+            let (_, warnings) = warnings_of("XYZ", json!({"coin": "XYZ"}), policy);
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
+        // A reader of the address fields only never signs and is not warned.
+        let (_, warnings) = warnings_of("BC2", json!({"coin": "BC2"}), UnrecognisedEnumPolicy::NotUsed);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }

@@ -135,6 +135,9 @@ pub(crate) use sync_answer_deferral::{answer_orderbook_request, answer_sync_requ
                                       sync_answer_deferral_ms, sync_request_alternate_relay, sync_request_retry_ms,
                                       wait_until_applied, SyncAnswerDeferral, SyncAnswerReply, SyncInFlight};
 
+#[path = "lp_ordermatch/mismatch_watch.rs"] mod mismatch_watch;
+pub(crate) use mismatch_watch::{MismatchWatch, SkipCounts, WatchGuard};
+
 #[path = "lp_ordermatch/sync_log.rs"] mod sync_log;
 pub(crate) use sync_log::{classify_sync_request, debug_enabled, pairs_label, AltEvent, AltReason, AnswerClass,
                           AnswerEvent, AnswerPath, AtOnce, Attempt, RequestEvent, SyncLog};
@@ -400,6 +403,9 @@ pub(crate) struct OrdermatchContext {
     pub trie_store: Arc<PaMutex<TrieStore>>,
     /// The liveness instants of the pairs of other makers (CRD ch.32 R-GH14), shared with the trie store.
     pub pair_liveness: Arc<PairLiveness>,
+    /// The watch behind the DEBUG tail of the trigger (b) line of CRD ch.32 R-Q5d (logging is left to the
+    /// implementation, R36), shared with the trie store.
+    pub mismatch_watch: Arc<MismatchWatch>,
     /// Sender to enqueue trie mutations for background application.
     pub trie_ops_tx: UnboundedSender<Vec<TrieOp>>,
     /// Tracks which orderbook topics we are subscribed to, separate from the order index.
@@ -432,6 +438,7 @@ impl Default for OrdermatchContext {
     fn default() -> Self {
         let trie_store = TrieStore::default();
         let pair_liveness = trie_store.pair_liveness.clone();
+        let mismatch_watch = trie_store.mismatch_watch.clone();
         let trie_store = Arc::new(PaMutex::new(trie_store));
         let (trie_ops_tx, trie_ops_rx) = unbounded::<Vec<TrieOp>>();
         // Drive the worker on the common executor so trie ops are applied even in
@@ -447,6 +454,7 @@ impl Default for OrdermatchContext {
             orderbook: Default::default(),
             trie_store,
             pair_liveness,
+            mismatch_watch,
             trie_ops_tx,
             orderbook_subscriptions: PaRwLock::new(HashMap::default()),
             sync_answer_deferral: Default::default(),
@@ -486,6 +494,7 @@ pub fn init_ordermatch_context(ctx: &MmArc) -> OrdermatchInitResult<()> {
 
     let trie_store = TrieStore::for_ctx(ctx);
     let pair_liveness = trie_store.pair_liveness.clone();
+    let mismatch_watch = trie_store.mismatch_watch.clone();
     let trie_store = Arc::new(PaMutex::new(trie_store));
     let trie_ops_tx = spawn_trie_store_worker(ctx, trie_store.clone());
 
@@ -495,6 +504,7 @@ pub fn init_ordermatch_context(ctx: &MmArc) -> OrdermatchInitResult<()> {
         orderbook: PaMutex::new(Orderbook::for_ctx(ctx)),
         trie_store,
         pair_liveness,
+        mismatch_watch,
         trie_ops_tx,
         orderbook_subscriptions: PaRwLock::new(HashMap::default()),
         sync_answer_deferral: Default::default(),
@@ -521,6 +531,7 @@ impl OrdermatchContext {
         Ok(try_s!(from_ctx(&ctx.ordermatch_ctx, move || {
             let trie_store = TrieStore::for_ctx(&ctx2);
             let pair_liveness = trie_store.pair_liveness.clone();
+            let mismatch_watch = trie_store.mismatch_watch.clone();
             let trie_store = Arc::new(PaMutex::new(trie_store));
             let trie_ops_tx = spawn_trie_store_worker(&ctx2, trie_store.clone());
             Ok(OrdermatchContext {
@@ -529,6 +540,7 @@ impl OrdermatchContext {
                 orderbook: PaMutex::new(Orderbook::for_ctx(&ctx2)),
                 trie_store,
                 pair_liveness,
+                mismatch_watch,
                 trie_ops_tx,
                 orderbook_subscriptions: PaRwLock::new(HashMap::default()),
                 sync_answer_deferral: Default::default(),
@@ -548,6 +560,7 @@ impl OrdermatchContext {
         Ok(try_s!(from_ctx(&ctx.ordermatch_ctx, move || {
             let trie_store = TrieStore::for_ctx(&ctx2);
             let pair_liveness = trie_store.pair_liveness.clone();
+            let mismatch_watch = trie_store.mismatch_watch.clone();
             let trie_store = Arc::new(PaMutex::new(trie_store));
             let trie_ops_tx = spawn_trie_store_worker(&ctx2, trie_store.clone());
             Ok(OrdermatchContext {
@@ -556,6 +569,7 @@ impl OrdermatchContext {
                 orderbook: PaMutex::new(Orderbook::for_ctx(&ctx2)),
                 trie_store,
                 pair_liveness,
+                mismatch_watch,
                 trie_ops_tx,
                 orderbook_subscriptions: PaRwLock::new(HashMap::default()),
                 sync_answer_deferral: Default::default(),

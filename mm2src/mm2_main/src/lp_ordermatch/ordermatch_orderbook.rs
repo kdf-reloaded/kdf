@@ -98,6 +98,13 @@ pub(crate) fn process_trie_delta(
 /// The advertised root of each pair of a keep-alive-driven synchronization request.
 type AdvertisedRoots = HashMap<AlbOrderedOrderbookPair, H64>;
 
+/// The roots a keep-alive advertised for the pairs of its request, with the guard of the mismatch watch of the
+/// request (`None` unless the watch is on, see [`MismatchWatch::start`]). Dropping it ends the watch.
+pub(crate) struct AdvertisedRequest {
+    roots: AdvertisedRoots,
+    watch: Option<WatchGuard>,
+}
+
 pub(crate) async fn process_orders_keep_alive(
     ctx: MmArc,
     propagated_from_peer: String,
@@ -139,6 +146,11 @@ pub(crate) async fn process_orders_keep_alive(
         // The message was processed, simply forward it
         None => return true,
     };
+    // The watch ends wherever this function ends, except under trigger (b), where it moves to the check.
+    let AdvertisedRequest {
+        roots: advertised,
+        watch,
+    } = advertised;
 
     let trie_roots = match req {
         OrdermatchRequest::SyncPubkeyOrderbookState { trie_roots, .. } => trie_roots,
@@ -192,6 +204,7 @@ pub(crate) async fn process_orders_keep_alive(
             advertised,
             queued_batches,
             deferral_ms,
+            watch,
         ));
     }
 
@@ -259,6 +272,7 @@ async fn check_divergence_after_answer(
     advertised: AdvertisedRoots,
     queued_batches: u64,
     deferral_ms: u64,
+    watch: Option<WatchGuard>,
 ) {
     let ordermatch_ctx = match OrdermatchContext::from_ctx(&ctx) {
         Ok(ordermatch_ctx) => ordermatch_ctx,
@@ -271,17 +285,33 @@ async fn check_divergence_after_answer(
         ordermatch_ctx.sync_log.alt(AltEvent::WorkerLate, &pubkey, now_ms());
         return;
     }
-    let diverged: AdvertisedRoots = {
+    let (diverged, skips): (AdvertisedRoots, Option<SkipCounts>) = {
         let trie_store = ordermatch_ctx.trie_store.lock();
-        advertised
+        let diverged: AdvertisedRoots = advertised
             .into_iter()
             .filter(|(pair, advertised_root)| held_root(&trie_store, &pubkey, pair) != *advertised_root)
-            .collect()
+            .collect();
+        // The watch lock is taken last, under the trie store lock, and released at once.
+        let skips = match &watch {
+            Some(watch) if !diverged.is_empty() => {
+                ordermatch_ctx
+                    .mismatch_watch
+                    .counts(watch, now_ms(), diverged.keys().map(String::as_str), |pair| {
+                        held_root(&trie_store, &pubkey, pair)
+                    })
+            },
+            _ => None,
+        };
+        (diverged, skips)
     };
+    // The entry ends before the request to the other relay is awaited, and on every path above.
+    drop(watch);
     if diverged.is_empty() {
         return;
     }
-    ordermatch_ctx.sync_log.alt(AltEvent::Mismatch, &pubkey, now_ms());
+    ordermatch_ctx
+        .sync_log
+        .alt_with_skips(AltEvent::Mismatch, &pubkey, skips.as_ref(), now_ms());
     // No record of R-Q5b is taken for this request: the one for the answer of the forwarding peer has
     // ended as it always does.
     request_alternate_relay(AlternateRequest {
@@ -522,7 +552,7 @@ pub(crate) async fn keep_alive_sync_request(
     request_root: SyncRequestRoot,
     catch_up_bound_ms: u64,
     deferral_ms: u64,
-) -> Option<(OrdermatchRequest, Option<SyncInFlight>, AdvertisedRoots)> {
+) -> Option<(OrdermatchRequest, Option<SyncInFlight>, AdvertisedRequest)> {
     // CRD ch.32 R-P3: the receiver's own clock, recorded before anything else.
     pubkey_state_mut(&mut ordermatch_ctx.trie_store.lock().pubkeys_state, from_pubkey).last_keep_alive =
         now_ms() / 1000;
@@ -544,6 +574,11 @@ pub(crate) async fn keep_alive_sync_request(
     };
 
     let advertised_roots = keep_alive.trie_roots.clone();
+    // The roots of this keep-alive are compared from here on. A newer keep-alive tells the watches of the
+    // earlier ones about its roots, whether or not it builds a request, and before it makes a watch of its own.
+    ordermatch_ctx
+        .mismatch_watch
+        .note_keep_alive(from_pubkey, &advertised_roots);
     let mut trie_store = ordermatch_ctx.trie_store.lock();
     let request = trie_store.prepare_sync_request_for_keep_alive(
         from_pubkey,
@@ -569,7 +604,11 @@ pub(crate) async fn keep_alive_sync_request(
             .collect(),
         _ => AdvertisedRoots::new(),
     };
-    Some((request, in_flight, advertised))
+    let watch = ordermatch_ctx.mismatch_watch.start(from_pubkey, &advertised, now_ms());
+    Some((request, in_flight, AdvertisedRequest {
+        roots: advertised,
+        watch,
+    }))
 }
 
 pub(crate) fn process_maker_order_updated(
@@ -590,6 +629,7 @@ pub(crate) fn process_maker_order_updated(
                 let ops = orderbook.index_insert_or_update(order);
                 // CRD ch.32 R-GH14 item 1, under the order book lock like the index change itself.
                 ordermatch_ctx.pair_liveness.touch_inserts(&ops, now_ms() / 1000);
+                ordermatch_ctx.mismatch_watch.note_order_ops(&ops);
                 orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
             },
             None => {
@@ -712,6 +752,7 @@ pub(crate) fn insert_or_update_order(ctx: &MmArc, item: OrderbookItem) {
         let ops = orderbook.index_insert_or_update(item);
         // CRD ch.32 R-GH14 item 1, under the order book lock like the index change itself.
         ordermatch_ctx.pair_liveness.touch_inserts(&ops, now_ms() / 1000);
+        ordermatch_ctx.mismatch_watch.note_order_ops(&ops);
         orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
     }
 
@@ -760,6 +801,7 @@ pub(crate) fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) {
             if order.pubkey == pubkey {
                 let topic = orderbook_topic_from_base_rel(&order.base, &order.rel);
                 orderbook.index_remove(uuid).map(|(_removed, op)| {
+                    ordermatch_ctx.mismatch_watch.note_order_ops(std::slice::from_ref(&op));
                     orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, vec![op]);
                     topic
                 })
@@ -1906,6 +1948,9 @@ pub(crate) struct TrieStore {
     pub(crate) history_evicted: u64,
     /// The liveness instants of the pairs (CRD ch.32 R-GH14); shared with [`OrdermatchContext::pair_liveness`].
     pub(crate) pair_liveness: Arc<PairLiveness>,
+    /// The watch behind the DEBUG tail of the trigger (b) line (CRD ch.32 R-Q5d); shared with
+    /// [`OrdermatchContext::mismatch_watch`]. The worker reports the end of every group to it.
+    pub(crate) mismatch_watch: Arc<MismatchWatch>,
 }
 
 impl Default for TrieStore {
@@ -1919,6 +1964,7 @@ impl Default for TrieStore {
             early_purges: 0,
             history_evicted: 0,
             pair_liveness: Arc::new(PairLiveness::default()),
+            mismatch_watch: Arc::new(MismatchWatch::default()),
         }
     }
 }
@@ -1942,6 +1988,7 @@ impl TrieStore {
     pub(crate) fn for_ctx(ctx: &MmArc) -> TrieStore {
         TrieStore {
             pair_liveness: Arc::new(PairLiveness::new(pair_liveness(ctx))),
+            mismatch_watch: Arc::new(MismatchWatch::new(sync_request_alternate_relay(ctx))),
             ..Default::default()
         }
     }
@@ -2041,6 +2088,10 @@ impl TrieStore {
             for (_, uuid) in removes {
                 store.apply_remove(pubkey, alb_pair, uuid);
             }
+            // The end of the group: the watches of keep-alive requests see the root the pair holds now.
+            store
+                .mismatch_watch
+                .note_group_end(pubkey, alb_pair, || held_root(store, pubkey, alb_pair));
         }
 
         let mut groups: HashMap<(String, String), Group> = HashMap::new();
