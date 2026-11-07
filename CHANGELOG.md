@@ -231,9 +231,12 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 - **The debug line of a sync request to another relay now says which candidate rule would have
   skipped it.** A node asks one other relay when the root a pair reached after its relay's answer
   differs from the one the maker advertised. Behind a busy relay this happened far more often than
-  expected. In a lab run on 2026-11-07 the requests followed when the maker changed the pair after
-  its keep-alive, so the root the node reached, which included that change, differed from the one
-  the keep-alive advertised. With the maker not repricing, none followed.
+  expected. In a separate lab run on 2026-11-07, with the maker repricing every 10 s, all 188 such
+  requests followed a change of the pair by the maker after its keep-alive, so the root the node
+  reached, which included that change, differed from the one the keep-alive advertised. With the
+  repricing finished before the keep-alive, 35 followed, none after such a change and all after a
+  relay had re-established its link; their cause is not established. With the maker not
+  repricing, none followed.
   With debug logging on, the line `sync alternate relay: … event=mismatch` now also counts, among
   the pairs asked about, those that a later keep-alive of the maker advertised with the root the
   node now holds, those that an order message of the maker changed in the meantime, and those whose

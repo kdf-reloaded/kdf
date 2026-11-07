@@ -149,15 +149,17 @@ Each package changes no wire shape and has its own switch, so that a lab can run
   - The check compares the root a pair reaches with the root of the keep-alive that started the
     request. A lab run on 2026-11-07 (L2's setup at 3 s with a second repricing maker added; the
     first maker repricing every 10 s, repricing once and finishing before its keep-alive, or not
-    repricing) showed the reason:
+    repricing) showed, for that setup, when they occurred:
     - with repricing every 10 s, 188 of 188 such requests followed an order message of the maker
       for the pair that the node handled after the keep-alive;
-    - with the repricing finished before the keep-alive, no request followed an answer from the same
-      relay;
+    - with the repricing finished before the keep-alive, 35 of 273 first requests were followed by
+      such a request, none after a later change of the maker and none in the cycles in which the
+      relay 3 s away answered first;
     - without repricing, none followed at all.
 
-    A further 35 requests, in two cycles of the lab's link cuts, came right after a relay had
-    re-established its link, with no later change of the maker; their cause is not established.
+    The 35 came in two cycles of the lab's link cuts, after a relay had re-established its link;
+    their cause is not established. In that run, unlike L2, the relay 3 s away answered most first
+    requests, so it does not trace L2's own counts.
   - Candidate rules:
     - (a) compare with the maker's latest advertised root;
     - (b) skip the request when an order message for the pair arrived after the keep-alive;
