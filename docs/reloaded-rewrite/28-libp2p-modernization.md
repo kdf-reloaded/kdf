@@ -1010,11 +1010,12 @@ requests.
 socket, and the connection counts as open until that has finished.
 Toward a peer that reads nothing, for example a hung process whose
 kernel keeps the TCP session open with a zero receive window, the flush
-never completes. The connection, its gossip queue up to the cap of RQ1
-item 2 and the multiplexer's buffers then stay held, the peer counts as
-connected, and the maintenance of R27 never redials it. In a lab run a
-stuck peer's close took 36 seconds and ended only because the peer's
-kernel reset the connection. A healthy close takes milliseconds, and
+cannot complete while the window stays closed, so the close can last as
+long as the peer's kernel keeps the session. For that time the
+connection, its gossip queue up to the cap of RQ1 item 2 and the
+multiplexer's buffers stay held, the peer counts as connected, and the
+maintenance of R27 does not redial it. In a lab run a stuck peer's close
+took 36 seconds. A healthy close takes milliseconds, and
 flushing a full multiplexer window of 256 KiB at 100 kbit/s takes about
 20 seconds, so 30 seconds leave a slow peer that still reads time to
 finish.
@@ -1892,8 +1893,8 @@ shortened by test configuration.
   the stuck close (or the ping close), then the closed connection with
   the timed-out cause within 30 s of it. If R is below its low
   watermark, it redials P at the first tick R27a allows. R's memory
-  returns to its baseline. *Control:* a build without R27c shows the
-  close hanging until P's kernel resets the connection.
+  returns to its baseline. *Control:* a build without R27c, run the
+  same way, records how long the close lasts without the deadline.
 
 ## 28.11 Deferred Work
 

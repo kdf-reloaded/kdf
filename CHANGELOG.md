@@ -541,11 +541,12 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   Detail: PRs #204, #214; CRD ch.32 R-MP2 item 2.
 - **A connection to a peer that has stopped reading is now closed within 30 seconds.** When the node
   closes a connection, for example to a stuck peer or after failed pings, it first flushes what is
-  still being sent. Toward a peer whose process hangs while its system keeps the connection open, that
-  flush never finished. The connection, its queue and its memory stayed held, the peer still counted
-  as connected, and the node never dialed it again. The close now gives up after 30 seconds, logs the
-  peer with the cause "close timed out", and the peer is treated as disconnected, so the usual
-  redial rules apply. Detail: PR #280; CRD ch.28 R27c.
+  still being sent. Toward a peer whose process hangs while its system keeps the connection open,
+  that flush cannot finish, so the close could last as long as the peer's system kept the
+  connection. For that time the connection, its queue and its memory stayed held, the peer still
+  counted as connected, and the node did not dial it again. The close now gives up after 30 seconds,
+  logs the peer with the cause "close timed out", and the peer is treated as disconnected, so the
+  usual redial rules apply. Detail: PR #280; CRD ch.28 R27c.
 
 #### UTXO coins and Electrum
 

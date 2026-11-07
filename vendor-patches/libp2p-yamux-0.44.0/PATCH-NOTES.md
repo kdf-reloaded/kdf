@@ -83,12 +83,12 @@ actually open multiplexed streams between two nodes
 
 A close that this node starts sends yamux's GoAway frame and flushes the socket, and the swarm counts the
 connection as open until `StreamMuxer::poll_close` has finished. Toward a peer that reads nothing (a hung
-process whose kernel keeps the TCP session open with a zero receive window) the flush never completes. The
-connection, its gossip queue and the multiplexer's buffers stay held, the peer counts as connected, and the
-relay maintenance never redials it. In a lab run the close of a stuck peer took 36 seconds and ended only
-because the peer's kernel reset the connection. `libp2p-swarm` (not vendored, by decision) awaits the
-muxer's close without a deadline, so the deadline lives here, in the layer every transport of this node
-runs (R27c item 5).
+process whose kernel keeps the TCP session open with a zero receive window) the flush cannot complete while
+the window stays closed, so the close can last as long as the peer's kernel keeps the session. For that
+time the connection, its gossip queue and the multiplexer's buffers stay held, the peer counts as
+connected, and the relay maintenance does not redial it. In a lab run the close of a stuck peer took 36
+seconds. `libp2p-swarm` (not vendored, by decision) awaits the muxer's close without a deadline, so the
+deadline lives here, in the layer every transport of this node runs (R27c item 5).
 
 R27c: every close this node starts ends within 30 seconds. After that, `poll_close` returns
 `Ready(Err(..))` whose cause is an `std::io::Error` of kind `TimedOut` with the message "close timed out".
