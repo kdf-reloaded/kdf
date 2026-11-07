@@ -583,9 +583,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   (CRD PR #243, PR #251). A relay now holds a sync request that reaches it before its own sync for
   the pair has started, and an order-book answer waits briefly for a relay that is still storing a
   maker's first orders (CRD PR #258, PR #259). The loaded-relay lab showed the request to one other
-  relay clearing a cancelled order one keep-alive interval earlier in half of its cycles, at a cost
-  in extra requests that is now being measured, starting with a debug line per such request
-  (PR #269).
+  relay clearing a cancelled order one keep-alive interval earlier in half of its cycles. A debug
+  line now counts, per such request, which candidate rule would have skipped it (PR #269). A
+  fault-free run showed no extra requests at all, so the rule stays as it is (PR #TBD).
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot

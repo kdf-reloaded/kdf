@@ -1198,6 +1198,18 @@ requester MUST ask one other relay once:
 > whose request failed or left a pair diverged. A divergence can also come
 > from an order message that arrived while the answer was being applied;
 > the extra request is then redundant, not harmful.
+>
+> *Cost (measured 2026-11-07; Decision DA).* Two lab runs of this project's
+> own nodes, with a maker that repriced its 32 pairs every 10 s, measured the
+> requests that trigger (b) adds. On a healthy network, with 50 ms on every
+> link and no loss, no node sent a synchronization request in 30 minutes, so
+> none followed under either trigger. Behind a heavily loaded forwarding relay
+> that ran the reference, a request to another relay followed 86 % of the
+> first requests with the other relay 3 s away, and 42 % with it 6 s away.
+> Most of these mismatches are most likely answers newer than the triggering
+> keep-alive (the informative note under R-Q6b). The maintainer kept trigger
+> (b) as written. The debug line of each such request counts which candidate
+> rule would have skipped it.
 
 **R-Q6 (transport properties of the request, bound as facts the mesh
 relies on).** The request is a single one-shot request-response
@@ -4720,3 +4732,9 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   requester and parked-request table, and a lab run of this project's own
   nodes with reference binaries as black boxes, reported as counts. It states
   no reference fact and needs no Dirty Gate pass.
+- *Reloaded-original addition (2026-11-07, Decision DA) -- the cost
+  paragraph of R-Q5d's divergence note.* Written by a context that never read
+  the forbidden corpus. Its sources are the maintainer's Decision DA and two
+  lab runs of this project's own nodes with reference binaries as black boxes,
+  reported as counts. It states no reference fact and needs no Dirty Gate
+  pass.

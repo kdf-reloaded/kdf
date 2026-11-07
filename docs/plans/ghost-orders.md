@@ -60,7 +60,10 @@ Each package changes no wire shape and has its own switch, so that a lab can run
   was 3 s away. In 2 of 4 cycles the node cleared the cancelled order one keep-alive interval
   earlier than without B1: 33 s from the restore, against at least 57 s. With the other relay 6 s
   away it could not answer within the request's 10 s. No cancelled order stayed visible. The cost
-  of the extra requests is an open point below.)*
+  of the extra requests is an open point below.)* *(Fault-free run on dev 86e1cb358, 2026-11-07: with
+  the maker repricing 32 pairs every 10 s and 50 ms on every link, no node sent a sync request in
+  30 minutes, so B1 added none. The run is void by its floor of 200 first requests, so it gives no
+  ratio; the cost exists only behind a loaded forwarding relay.)*
 - **B3:** the emptied-pair case leaves every Reloaded node within the liveness window plus one sweep.
   A run with a lossy link counts pairs dropped and refilled and the longest gap an order-book poll
   sees. The "before" baseline is a lab run on 0.4.0-alpha.1 in which the maker cancels its only
@@ -165,6 +168,9 @@ Each package changes no wire shape and has its own switch, so that a lab can run
     - At or below 5 %: keep the check, and record the cost in CRD ch.32 R-Q5d's divergence note.
       (e) stays the alternative if parity is preferred later.
     - Above 5 %: (a) and (d) first; if they cut too little, (e). Neither (b) nor (b) with (a).
+  - Measured 2026-11-07: the fault-free run sent no sync request at all, so B1 added none. Per
+    Decision DA the check stays as it is, and the cost is recorded in CRD ch.32 R-Q5d's divergence
+    note (PR #TBD).
 - **B1, the timeout of the request to another relay.** The request has the 10 s timeout of every sync
   request, not the 5 s bound of R-Q5b. An answer after the bound no longer reaches the requests parked
   behind the node's own request, which were answered at their bound, but it still heals the node and
