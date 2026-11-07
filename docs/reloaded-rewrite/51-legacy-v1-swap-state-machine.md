@@ -715,6 +715,68 @@ the taker's refusal handling produces `NegotiateFailed`, which is in the
 taker's penalty set. Refusal is therefore correct behaviour but not
 cost-free, and MUST NOT be emitted outside R34's seven conditions.
 
+## 51.6A Bound Manual Recovery of a Finished Maker Swap
+
+> **Status (Reloaded-original; Spec Reader question pending).** These rules
+> record no claim about the reference implementation. They close a path on
+> which a maker whose swap reached `Finished` has no way to take back a
+> payment that nobody spent. Whether the reference refuses the same call is a
+> question for a Spec Reader pass; until it is answered, the rules are
+> Reloaded behavior that is strictly more recoverable than a refusal.
+
+A swap can reach `Finished` while its maker payment is still unspent on the
+chain: the maker spent the taker payment (so its record ends in
+`TakerPaymentSpent` and `TakerPaymentSpendConfirmed`), and the taker never
+spent the maker payment. The event log of such a swap is complete and its
+status is a success, but the maker's coins stay locked in the contract until
+the locktime passes, after which only the maker can take them back.
+
+**R75.** *A confirmed spend of the taker payment does not block recovery.*
+`recover_funds_of_swap` for a maker swap whose log ends in `Finished` MUST
+NOT refuse only because the maker's own spend of the taker payment is
+confirmed. It MUST decide from the chain, with the checks the call already
+makes for a swap that is not finished, what the state of the maker payment
+is, and answer exactly one of:
+
+1. *spent* (by the taker, or by a watcher): the call refuses, and the text
+   of the refusal says that the maker payment is spent, so that the
+   refusal names its real reason;
+2. *refunded* (by the swap record, or found on the chain): the call
+   refuses as it does today, naming the refund transaction when it was
+   found on the chain;
+3. *unspent and the refund time has not been reached*: the call refuses as
+   it does today for a swap that is not finished, stating the time to wait
+   for;
+4. *unspent, the refund time has passed and the chain allows the refund*
+   (the refundability check of chapter 39 R39.5.13 for a coin that has
+   one): the call builds and broadcasts the refund of the maker payment
+   exactly as for a swap that is not finished, and answers with that
+   transaction in the unchanged response shape.
+
+The two guards that precede the chain look stay: the swap MUST be
+finished, and a swap whose record already holds the refund of the maker
+payment MUST be refused as not recoverable.
+
+**R76.** *The call records nothing.* The recovery is an action of the RPC
+call. It MUST NOT append an event to the log of a finished swap, change
+its status or its recoverable flag, or write the swap record; the event
+set, the resume map (R19, R32) and the persisted log shape of chapter 44
+are unchanged. The response is the existing one (chapter 39 R39.5.4): no
+field is added.
+
+**R77.** *The taker payment is not touched.* A maker whose own spend of the
+taker payment is confirmed MUST NOT build another spend of it. The path
+that spends the taker payment from `recover_funds_of_swap` stays reachable
+only when the maker payment is spent and the taker payment is not, as for
+a swap that is not finished.
+
+**R78.** *Repeating the call is safe.* Calling again after the refund was
+mined MUST answer item 2 of R75. Calling again before it was mined MUST
+give the answer the call gives today for a swap that is not finished. The
+recoverable flag a swap shows in its status is derived from its events
+(R76) and is not a statement about the chain; it is not changed, and the
+call does not consult it.
+
 ## 51.7 Bound Message Contract
 
 **R41.** *Six message kinds, one envelope.* The legacy swap message
@@ -1542,6 +1604,7 @@ and the 33-byte key width of R62 MUST NOT be relaxed, on either netid.
 | Maker locktime uses the multiplier; taker locktime does not            | R10, R22, R25 |
 | A negative negotiation acknowledgement is transmitted, once, on seven conditions | R33, R34, R35 |
 | A taker in its refund chain claims a taker payment the maker has spent, instead of failing the refund | R31a |
+| A finished maker swap whose maker payment is unspent can be refunded by a manual recovery after the refund time, with no event recorded | R75, R76, R77, R78 |
 | Refusal is broadcast before the failure event is persisted             | R36           |
 | No refusal message exists after the negotiation stage                  | R38           |
 | Refusal causes the refused taker to penalise the maker for one hour    | R40           |
@@ -1786,6 +1849,23 @@ coin's activated key; the payment, spend and refund transactions of each
 shall verify against that HTLC key; and no field of the payload shall equal
 a key derived by hashing the mnemonic string.
 
+**T32.** *Manual recovery of a finished maker swap (R75-R78).* A maker swap
+whose log ends in `TakerPaymentSpendConfirmed` and `Finished`:
+
+1. with its maker payment unspent and the refund time passed, a call builds
+   and broadcasts the refund of the maker payment and answers with it; the
+   swap's log, status and recoverable flag are unchanged afterwards;
+2. with its maker payment unspent and the refund time not passed, a call
+   refuses and states the time to wait for;
+3. with its maker payment spent, a call refuses, the text says the maker
+   payment is spent, and no spend of the taker payment is built;
+4. with its maker payment refunded (on the chain or in the record), a call
+   refuses and builds nothing;
+5. called again after the refund is mined, a call answers as in item 4;
+6. a swap that is not finished is refused as before, and a swap that is not
+   finished and has its payment unspent is recovered as before (the existing
+   cases do not change).
+
 ## 51.13 Deferred Work
 
 **D1.** *Migration of the legacy machines onto the chapter-14 runtime.*
@@ -1838,6 +1918,17 @@ on a topic it has not subscribed to), are deferred to a Spec Reader pass.
 > has not enabled, and it does publish helper messages itself after its own
 > spend and refund attempts, exactly as R50B describes for Reloaded. What
 > remains of D6 is this project's own choice of receiver scope.
+
+**D7.** *An automatic refund of a finished maker swap.* R75 makes the
+refund of an unspent maker payment of a finished swap possible by a manual
+call, and nothing looks at that payment again on its own after `Finished`:
+the swap leaves the run loop. An automatic watch (at start-up and at a fixed
+interval, over the finished maker swaps whose maker payment was never seen
+spent, refunding after the locktime) needs a persisted marker or a bounded
+scan, and touches the search call of every coin family; it is deferred. A
+log line at the end of a swap that finishes with its maker payment not yet
+known to be spent is the first, small step and is part of the same change as
+R75.
 
 ## 51.14 Baseline Verifications
 
@@ -1950,6 +2041,7 @@ reference rows alike.
   project must inter-operate with), R6 (behavioural observation of
   public networks), R7 (independent work).
 - *Sibling-allowlist consultations:* none.
+- *Addition of 2026-11-07 (Reloaded-original, no Spec Reader input):* §51.6A (R75-R78), T32 and D7 rest on the project's own code reading of the manual-recovery call and on a lab observation of a finished maker swap whose maker payment was never spent; they record no claim about the reference implementation.
 - *Forbidden corpus:* (addition of 2026-10-25: the informative pointer
   after R38 restates chapter 60's corpus-sourced finding that no volume
   check precedes or accompanies negotiation; cleared by the Dirty Gate
