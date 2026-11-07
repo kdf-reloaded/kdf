@@ -236,7 +236,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   the pairs asked about, those that a later keep-alive of the maker advertised with the root the
   node now holds, those that an order message of the maker changed in the meantime, and those whose
   advertised root the node held at some moment since the keep-alive. Nothing the node sends
-  changes, and with debug logging off nothing extra is kept. Detail: PR #TBD; CRD ch.32 R-Q5d.
+  changes, and with debug logging off nothing extra is kept. Detail: PR #269; CRD ch.32 R-Q5d.
 
 #### UTXO coins and Electrum
 
@@ -545,7 +545,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   maker's first orders (CRD PR #258, PR #259). The loaded-relay lab showed the request to one other
   relay clearing a cancelled order one keep-alive interval earlier in half of its cycles, at a cost
   in extra requests that is now being measured, starting with a debug line per such request
-  (PR #TBD).
+  (PR #269).
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot

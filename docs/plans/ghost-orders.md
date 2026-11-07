@@ -159,7 +159,7 @@ Each package changes no wire shape and has its own switch, so that a lab can run
     measurements:
     - a fault-free run judged against the 5 % rule;
     - a debug line that counts, per such request, which candidate rule would have skipped it
-      (PR #TBD).
+      (PR #269).
 
     Then:
     - At or below 5 %: keep the check, and record the cost in CRD ch.32 R-Q5d's divergence note.
@@ -170,7 +170,7 @@ Each package changes no wire shape and has its own switch, so that a lab can run
   behind the node's own request, which were answered at their bound, but it still heals the node and
   serves later requests. In L2 with the other relay 3 s away, the answers most likely took longer
   than 5 s, so a 5 s limit would probably have removed the earlier clearing seen there. Decided
-  2026-11-07 (Decision DA): keep 10 s; CRD ch.32 R-Q5d item 6 now says so (PR #TBD).
+  2026-11-07 (Decision DA): keep 10 s; CRD ch.32 R-Q5d item 6 now says so (PR #269).
 - **The known-limitations line** ("other nodes can keep showing a cancelled order for a while") stays
   until B1 and B3 have landed. B1 shortens the case of a pair the maker still advertises; B3 removes
   the case of an emptied pair.
