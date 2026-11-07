@@ -141,7 +141,7 @@ What it needs:
 Rows from before the change keep their empty sets.
 
 **In progress** (2026-11-07): ch.39 R39.8.9d3 and T39.8.9d3 are written; the code follows in
-PR #NNN. The transparent addresses of a transaction another wallet built (a payment from a
+PR #277. The transparent addresses of a transaction another wallet built (a payment from a
 transparent address, for example) stay unlisted, because nothing is fetched.
 
 Later, if it matters: each scan pass checks every kept entry of a mined transaction against the

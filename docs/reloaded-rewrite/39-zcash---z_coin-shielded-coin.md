@@ -3667,7 +3667,7 @@ count its confirmations.
 >   swap payment's script address, the source of a spend or refund. The shielded
 >   fee address a swap's fee payment pays was not listed either. This item
 >   rested on a reading of this repository's code. R39.8.9d3 binds the fix for
->   the transactions the node builds for a swap (PR #NNN). The transparent
+>   the transactions the node builds for a swap (PR #277). The transparent
 >   addresses of a transaction another wallet built stay unlisted
 >   (R39.8.9d3 (d)); listing them would need data the compact blocks do not
 >   carry.

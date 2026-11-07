@@ -483,7 +483,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   the script address it pays, its fee payment lists the fee address, and a spend or a refund lists
   the script address it spends from. Their rows used to list only the wallet's own address. The
   node records these addresses when it builds the transaction, in the same file as a withdrawal's
-  recipient, and fetches nothing. Detail: PR #NNN; CRD ch.39 R39.8.9d3.
+  recipient, and fetches nothing. Detail: PR #277; CRD ch.39 R39.8.9d3.
 
 #### EVM coins
 
@@ -776,7 +776,7 @@ lives.
   transparent address does not list that address, because the node reads only compact blocks and
   fetches nothing more. Swap rows from before this release keep the sets they had. More in
   [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PRs #268,
-  #NNN; CRD ch.39 R39.8.9d2 (d), R39.8.9d3 (d).
+  #277; CRD ch.39 R39.8.9d2 (d), R39.8.9d3 (d).
 - **An ARRR withdrawal takes no memo, and its answer has no `memo` member.** The `withdraw`
   request has no `memo` field, so a memo sent with it is ignored and the shielded output carries
   none. Komodo DeFi Framework and GLEEC KDF echo the request's memo in the answer. Memo support is
