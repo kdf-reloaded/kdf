@@ -396,10 +396,11 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   and failed.
   - The request takes an optional `account_id`. Without it, the lowest unused account number is
     taken.
-  - An `account_id` that is already in use answers `AccountAlreadyExists` (HTTP 400) before anything
-    is derived. GLEEC KDF answers an internal error there.
+  - With an `account_id` that is already in use, the task ends with `AccountAlreadyExists` (with the
+    `account_id`) before anything is derived; `task::create_new_account::status` reports it. GLEEC
+    KDF reports an internal error there.
   - `task::create_new_account::cancel` is now served. Cancelling removes the account the task
-    created if it is the wallet's last account.
+    created if it is the wallet's highest-numbered account.
   - Under a software login the task reports `Preparing` and then its result.
 
   Detail: PR #279; CRD ch.05 R35c.

@@ -698,11 +698,15 @@ coin not activated in HD mode, answers `CoinIsActivatedNotWithHDWallet`.
 > `account_id`. `choose_new_account_id` picks the index once, before any
 > derivation: the requested index, or the lowest unused one; an index at or
 > beyond 2^31 answers `AccountLimitReached`; an index in use answers
-> `AccountAlreadyExists` with `account_id`, HTTP 400 (the code-quality finding
-> above; a documented divergence). A coin not in HD mode answers
+> `AccountAlreadyExists` with `account_id`, an error type that maps to HTTP 400
+> (the code-quality finding above; a documented divergence). Like every error
+> of the task, these are read from `task::create_new_account::status`; `init`
+> answers with a task id. A coin not in HD mode answers
 > `CoinIsActivatedNotWithHDWallet`. `task::create_new_account::cancel` is
 > routed, and the task's cleanup removes the account it created from the
-> wallet and its storage when it is the wallet's last account; a task dropped
+> wallet and its storage when it is the wallet's last account, the one with
+> the highest number (an account created while a higher-numbered one exists
+> stays); a task dropped
 > between storing the account and recording it can leave the stored row.
 > Differences from items 3 and 5: under a hardware wallet Reloaded reports
 > `WaitingForUserToConfirmPubkey` where item 3 lists
