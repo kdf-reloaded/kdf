@@ -645,6 +645,7 @@ fn single_out_of_range_digest(sighashtype: u32, suffix: u32) -> H256 {
     }
     let mut s = Stream::default();
     s.append(&one).append(&sighashtype).append(&suffix);
+    // The double SHA-256 is deliberate (R61.2.3), as for every other digest here.
     dhash256(&s.out())
 }
 
