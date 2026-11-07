@@ -383,7 +383,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   block was therefore never shown as pending, and while no block arrived the pending figure could
   be older than the 30-second sync period. The check now runs on every sync pass, including a pass
   that finds no new block or fails. Found in a live mainnet test with a deposit from a Pirate1
-  address. Detail: PR #NNN; CRD ch.39 R39.8.0aj1.
+  address. Detail: PR #263; CRD ch.39 R39.8.0aj1.
 
 #### EVM coins
 
