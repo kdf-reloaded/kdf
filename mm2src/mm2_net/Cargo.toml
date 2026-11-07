@@ -6,6 +6,11 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+# Runs the test that needs a public server. Off by default, so that the test is marked `ignore`. See
+# docs/UNIT_TESTS.md ("Tests that need public servers").
+live-network-tests = []
+
 [dependencies]
 async-trait = "0.1"
 serde = "1"

@@ -73,8 +73,23 @@ Run best-effort in the `external-network-tests` CI job.
 - `test_electrum_tx_history` (`mm2_main/src/mm2_tests.rs`) — external electrum.
 - `test_tx_details_kmd_rewards`, `test_tx_details_kmd_rewards_claimed_by_other`
   (`coins/utxo/utxo_tests.rs`) — live KMD electrum + specific historical txs.
+- `firo_lelantus_tx_details` (`coins/utxo/utxo_tests.rs`) — stale. It fetched two Firo
+  transactions from a live ElectrumX server and expected their fee from the `nFees` field of
+  their Lelantus inputs. The server (ElectrumX 1.19.0) no longer sends `nFees` for these two
+  transactions, so the fee path cannot be checked against them. The fee path of a Lelantus spend
+  is covered offline by `firo_lelantus_tx_details_offline`, which runs `tx_details_by_hash` on
+  a verbose answer of the old shape with the node call mocked. `firo_lelantus_tx` (the plain
+  fetch of the verbose answer) stays, behind the feature below. Lost coverage: the check that a
+  live Firo server still answers with `nFees`. Delete candidate.
 
 Re-enable path: fresh electrum URLs + a network-gated CI job. Flaky by nature.
+
+The other tests that need public servers are not in this list. They are not `#[ignore]` in the
+source: each carries `cfg_attr(not(feature = "live-network-tests"), ignore = ...)`, so a plain
+`cargo test` ignores them and `--features live-network-tests` runs them. See
+[UNIT_TESTS.md](UNIT_TESTS.md#tests-that-need-public-servers-live-network-tests). The tests of
+this group keep a plain `#[ignore]` because CI runs them on purpose in the
+`external-network-tests` job with `--include-ignored`, or because they no longer pass.
 
 ## Group 4 — Docker swap tests (need a QTUM docker node)
 

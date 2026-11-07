@@ -13,6 +13,7 @@ mod tests {
     use http::HeaderMap;
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     #[cfg(not(target_arch = "wasm32"))]
     fn test_process_price_request() { let _resp = block_on(process_price_request(KMD_PRICE_ENDPOINT)).unwrap(); }
 

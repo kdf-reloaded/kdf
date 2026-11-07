@@ -5,6 +5,10 @@ license = "GPL-2.0-only"
 edition = "2021"
 
 [features]
+# Runs the unit tests that need public servers (Electrum, Solana and BCHD nodes). Off by default: such a test
+# fails whenever a server is down or has changed, so without this feature it is marked `ignore`. See
+# docs/UNIT_TESTS.md ("Tests that need public servers").
+live-network-tests = []
 zhtlc-native-tests = []
 zhtlc = []
 # UDP transport for the Trezor emulator (native only, off by default). Lets

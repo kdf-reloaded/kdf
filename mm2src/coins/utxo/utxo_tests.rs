@@ -575,6 +575,7 @@ fn test_v2_trezor_htlc_keypair_reports_unsupported_script_mode() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_extract_secret() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
@@ -587,6 +588,7 @@ fn test_extract_secret() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_send_maker_spends_taker_payment_recoverable_tx() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
@@ -616,6 +618,7 @@ fn test_send_maker_spends_taker_payment_recoverable_tx() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_generate_transaction() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
@@ -826,6 +829,7 @@ fn test_generate_transaction_change_equal_to_dust_is_an_output_r38_6_6n() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_addresses_from_script() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
@@ -1012,6 +1016,7 @@ fn test_wait_for_payment_spend_timeout_electrum() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_search_for_swap_tx_spend_electrum_was_spent() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
@@ -1046,6 +1051,7 @@ fn test_search_for_swap_tx_spend_electrum_was_spent() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_search_for_swap_tx_spend_electrum_was_refunded() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
@@ -1914,6 +1920,7 @@ fn test_withdraw_doc_rewards_none() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_utxo_lock() {
     // send several transactions concurrently to check that they are not using same inputs
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
@@ -1933,6 +1940,7 @@ fn test_utxo_lock() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_spv_proof() {
     // RICK, the chain this test used before, is retired. DOC is its successor
     // test chain in the same family (Komodo asset chain, Equihash headers,
@@ -1961,6 +1969,7 @@ fn list_since_block_btc_serde() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/587
 fn get_tx_details_coinbase_transaction() {
     let client = electrum_client_for_test(&[
@@ -1975,8 +1984,9 @@ fn get_tx_details_coinbase_transaction() {
     );
 
     let fut = async move {
-        // hash of coinbase transaction https://morty.explorer.dexstats.info/tx/b59b093ed97c1798f2a88ee3375a0c11d0822b6e4468478777f899891abd34a5
-        let hash = hex::decode("b59b093ed97c1798f2a88ee3375a0c11d0822b6e4468478777f899891abd34a5").unwrap();
+        // hash of a MARTY coinbase transaction (height 1389279). The coinbase the test used before is no longer
+        // served by the MARTY servers; any coinbase transaction that they serve does as well.
+        let hash = hex::decode("2338196dcc82061707803c6ec9f78d27aafd09fd1a6ad08907939897d93a949c").unwrap();
 
         let mut input_transactions = HistoryUtxoTxMap::new();
         let tx_details = coin.tx_details_by_hash(&hash, &mut input_transactions).await.unwrap();
@@ -1987,6 +1997,7 @@ fn get_tx_details_coinbase_transaction() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_electrum_rpc_client_error() {
     let client = electrum_client_for_test(&["electrum1.cipig.net:10060"]);
 
@@ -2263,6 +2274,7 @@ fn test_generate_tx_fee_is_correct_when_dynamic_fee_is_larger_than_relay() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_get_median_time_past_from_electrum_kmd() {
     let client = electrum_client_for_test(&[
         "electrum1.cipig.net:10001",
@@ -2279,6 +2291,7 @@ fn test_get_median_time_past_from_electrum_kmd() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_get_median_time_past_from_electrum_btc() {
     let client = electrum_client_for_test(&[
         "electrum1.cipig.net:10000",
@@ -2367,6 +2380,7 @@ fn test_get_median_time_past_from_native_does_not_have_median_in_get_block() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_cashaddresses_in_tx_details_by_hash() {
     let conf = json!({
         "coin": "BCH",
@@ -2414,6 +2428,7 @@ fn test_cashaddresses_in_tx_details_by_hash() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_address_from_str_with_cashaddress_activated() {
     let conf = json!({
         "coin": "BCH",
@@ -2450,6 +2465,7 @@ fn test_address_from_str_with_cashaddress_activated() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_address_from_str_with_legacy_address_activated() {
     let conf = json!({
         "coin": "BCH",
@@ -2621,6 +2637,7 @@ fn test_one_unavailable_electrum_proto_version() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_generate_pod() {
     let priv_key = [
         3, 98, 177, 3, 108, 39, 234, 144, 131, 178, 103, 103, 127, 80, 230, 166, 53, 68, 147, 215, 42, 216, 144, 72,
@@ -2643,6 +2660,7 @@ fn test_qtum_generate_pod() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_add_delegation() {
     let keypair = key_pair_from_seed("asthma turtle lizard tone genuine tube hunt valley soap cloth urge alpha amazing frost faculty cycle mammal leaf normal bright topple avoid pulse buffalo").unwrap();
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
@@ -2682,6 +2700,7 @@ fn test_qtum_add_delegation() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_add_delegation_on_already_delegating() {
     let keypair = key_pair_from_seed("federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron").unwrap();
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
@@ -2711,6 +2730,7 @@ fn test_qtum_add_delegation_on_already_delegating() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_get_delegation_infos() {
     let keypair =
         key_pair_from_seed("federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron").unwrap();
@@ -2743,6 +2763,7 @@ fn test_qtum_get_delegation_infos() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_remove_delegation() {
     let keypair = key_pair_from_seed("federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron").unwrap();
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
@@ -2766,6 +2787,7 @@ fn test_qtum_remove_delegation() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_my_balance() {
     QtumCoin::get_mature_unspent_ordered_list.mock_safe(move |coin, _address| {
         let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
@@ -2827,6 +2849,7 @@ fn test_qtum_my_balance() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_my_balance_with_check_utxo_maturity_false() {
     const DISPLAY_BALANCE: u64 = 68;
     // The qtum address is legacy and belongs to the activated key, so its P2PKH balance and P2PK lookup are one
@@ -2875,7 +2898,11 @@ fn test_get_mature_unspent_ordered_map_from_cache_impl(
     expected_height: Option<u64>,
     expected_confs: u32,
 ) {
-    const TX_HASH: &str = "0a0fda88364b960000f445351fe7678317a1e0c80584de0413377ede00ba696f";
+    // A DOC coinbase transaction (height 1405347, one output). The transaction the test used before is no
+    // longer served by the DOC servers. The unspent list, the block count, the cached verbose transaction and
+    // the maturity check are mocked below, so the live server is asked only for `get_verbose_transaction`
+    // of this hash, and any transaction the servers serve as verbose does.
+    const TX_HASH: &str = "ee6afde5fb0e4898f3ad9991d3ffb98561201b32ef4fd2453364fedd66bf479e";
     let tx_hash: H256Json = hex::decode(TX_HASH).unwrap().as_slice().into();
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let mut verbose = client.get_verbose_transaction(&tx_hash).wait().unwrap();
@@ -2883,7 +2910,9 @@ fn test_get_mature_unspent_ordered_map_from_cache_impl(
     verbose.height = cached_height;
 
     // prepare mocks
-    ElectrumClient::list_unspent.mock_safe(move |_, _, _| {
+    // The address is the coin's own legacy address, so `get_all_unspent_ordered_list` reads the unspents through
+    // `ElectrumClient::list_unspent_with_p2pk` and never calls `UtxoRpcClientOps::list_unspent`.
+    ElectrumClient::list_unspent_with_p2pk.mock_safe(move |_, _, _| {
         let unspents = vec![UnspentInfo {
             outpoint: OutPoint {
                 hash: H256::from_reversed_str(TX_HASH),
@@ -2922,6 +2951,7 @@ fn test_get_mature_unspent_ordered_map_from_cache_impl(
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_get_mature_unspents_ordered_map_from_cache() {
     let unspent_height = None;
     let cached_height = None;
@@ -3803,6 +3833,7 @@ fn test_htlc_spend_fee_r38_6_6c() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_validate_fee_wrong_sender() {
     let rpc_client = electrum_client_for_test(&[
         "marty.electrum1.cipig.net:10021",
@@ -3829,6 +3860,7 @@ fn test_validate_fee_wrong_sender() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_validate_fee_min_block() {
     let rpc_client = electrum_client_for_test(&[
         "marty.electrum1.cipig.net:10021",
@@ -3856,6 +3888,7 @@ fn test_validate_fee_min_block() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/857
 fn test_validate_fee_bch_70_bytes_signature() {
     let rpc_client = electrum_client_for_test(&[
@@ -3925,6 +3958,7 @@ fn firo_verbose_block_deserialize() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn firo_lelantus_tx() {
     // https://explorer.firo.org/tx/06ed4b75010edcf404a315be70903473f44050c978bc37fbcee90e0b49114ba8
     let tx_hash = "06ed4b75010edcf404a315be70903473f44050c978bc37fbcee90e0b49114ba8".into();
@@ -3937,6 +3971,8 @@ fn firo_lelantus_tx() {
 }
 
 #[test]
+#[ignore = "stale: the live Firo answer no longer carries nFees; see docs/DISABLED_TESTS.md. \
+            The offline test firo_lelantus_tx_details_offline covers the fee path."]
 fn firo_lelantus_tx_details() {
     // https://explorer.firo.org/tx/06ed4b75010edcf404a315be70903473f44050c978bc37fbcee90e0b49114ba8
     let electrum = electrum_client_for_test(&[
@@ -3966,7 +4002,90 @@ fn firo_lelantus_tx_details() {
     assert_eq!(Some(expected_fee), tx_details.fee_details);
 }
 
+/// The fee of a FIRO Lelantus spend, without a server.
+///
+/// A Lelantus spend has no previous output to read an amount from: its input is a null previous output, so the
+/// input amount of the transaction is zero, and its verbose form carries the fee of each such input in `nFees`.
+/// `tx_details_by_hash` takes the fee as the sum of the `nFees` of the Lelantus inputs in that case. This runs
+/// that real function over a verbose answer of the shape Firo gave, with the node call mocked.
+///
+/// `firo_lelantus_tx_details` made the same check against a live Firo server, whose answer no longer carries
+/// `nFees` (see docs/DISABLED_TESTS.md).
 #[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn firo_lelantus_tx_details_offline() {
+    const P2PKH: &str = "76a91405aab5342166f8594baf17a7d9bef5d56744332788ac";
+    // A null previous output, a one-byte scriptSig (the Lelantus spend opcode) and the final sequence.
+    let null_input = format!("{}ffffffff01c9ffffffff", "00".repeat(32));
+    // Version 1, two such inputs, one output of 100000 satoshi to a P2PKH script, lock time 0.
+    let tx_hex = format!("0100000002{null_input}{null_input}01a08601000000000019{P2PKH}00000000");
+
+    let lelantus_input = |n_fees: f64, serial: &str| {
+        json!({
+            "scriptSig": { "asm": "OP_LELANTUSJOINSPLIT", "hex": "c9" },
+            "nFees": n_fees,
+            "serials": [serial],
+            "sequence": 4294967295u32,
+        })
+    };
+    let verbose: RpcTransaction = json::from_value(json!({
+        "hex": tx_hex,
+        "txid": "4242424242424242424242424242424242424242424242424242424242424242",
+        "version": 1,
+        "locktime": 0,
+        "vin": [
+            lelantus_input(0.00003793, "0a0b0c0d"),
+            lelantus_input(0.00045778, "0e0f1011"),
+        ],
+        "vout": [{
+            "value": 0.001,
+            "n": 0,
+            "scriptPubKey": {
+                "asm": "OP_DUP OP_HASH160 05aab5342166f8594baf17a7d9bef5d567443327 OP_EQUALVERIFY OP_CHECKSIG",
+                "hex": P2PKH,
+                "reqSigs": 1,
+                "type": "pubkeyhash",
+                "addresses": ["R9o9xTocqr6CeEDGDH6mEYpwLoMz6jNjMW"],
+            },
+        }],
+        "blockhash": "4343434343434343434343434343434343434343434343434343434343434343",
+        "confirmations": 10,
+        "time": 1700000000,
+        "blocktime": 1700000000,
+        "height": 1000,
+    }))
+    .unwrap();
+    // Both inputs parse as the Lelantus variant, not as a signed, coinbase or Sigma input.
+    assert_eq!(verbose.vin.len(), 2);
+    assert!(verbose
+        .vin
+        .iter()
+        .all(|input| matches!(input, rpc::v1::types::TransactionInputEnum::Lelantus(_))));
+
+    let tx_hash = [0x42u8; 32];
+    NativeClient::get_verbose_transaction.mock_safe(move |_client, txid| {
+        assert_eq!(*txid, H256Json::from(&tx_hash[..]));
+        MockResult::Return(Box::new(futures01::future::ok(verbose.clone())))
+    });
+
+    let client = NativeClient(Arc::new(NativeClientImpl::default()));
+    let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
+    let mut map = HashMap::new();
+    let tx_details = block_on(coin.tx_details_by_hash(&tx_hash, &mut map)).unwrap();
+
+    // No input has an amount to read, so the fee is the sum of the `nFees` of the two inputs.
+    let expected_fee = TxFeeDetails::Utxo(UtxoFeeDetails {
+        coin: Some(TEST_COIN_NAME.into()),
+        amount: "0.00049571".parse().unwrap(),
+    });
+    assert_eq!(Some(expected_fee), tx_details.fee_details);
+    assert_eq!(tx_details.total_amount, BigDecimal::from(0));
+    assert_eq!(tx_details.spent_by_me, BigDecimal::from(0));
+    assert!(tx_details.from.is_empty());
+}
+
+#[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_generate_tx_doge_fee() {
     // DOGE is plain fixed 1,000,000 per kB with a forced minimum relay fee; both are proportional (R38.6.6b).
     let config = json!({
@@ -4031,6 +4150,7 @@ fn test_generate_tx_doge_fee() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn doge_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrum1.cipig.net:10060",
@@ -4045,6 +4165,7 @@ fn doge_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn firo_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrumx01.firo.org:50001",
@@ -4059,6 +4180,7 @@ fn firo_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn verus_mtp() {
     let electrum = electrum_client_for_test(&["el0.verus.io:17485", "el1.verus.io:17485", "el2.verus.io:17485"]);
     let mtp = electrum
@@ -4069,6 +4191,7 @@ fn verus_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn sys_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrum1.cipig.net:10064",
@@ -4083,6 +4206,7 @@ fn sys_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn btc_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrum1.cipig.net:10000",
@@ -4097,6 +4221,7 @@ fn btc_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn rvn_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrum1.cipig.net:10051",
@@ -4111,6 +4236,7 @@ fn rvn_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn qtum_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrum1.cipig.net:10050",
@@ -4125,6 +4251,7 @@ fn qtum_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn zer_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrum1.cipig.net:10065",
@@ -4203,6 +4330,7 @@ fn test_tx_details_kmd_rewards_claimed_by_other() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_tx_details_bch_no_rewards() {
     let electrum = electrum_client_for_test(&[
         "bitcoin-cash.devmole.eu:5001",
@@ -4226,6 +4354,7 @@ fn test_tx_details_bch_no_rewards() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_update_kmd_rewards() {
     // 535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024
     const OUTDATED_TX_DETAILS: &str = r#"{"tx_hex":"0400008085202f8901afcadb73880bc1c9e7ce96b8274c2e2a4547415e649f425f98791685be009b73020000006b483045022100b8fbb77efea482b656ad16fc53c5a01d289054c2e429bf1d7bab16c3e822a83602200b87368a95c046b2ce6d0d092185138a3f234a7eb0d7f8227b196ef32358b93f012103b1e544ce2d860219bc91314b5483421a553a7b33044659eff0be9214ed58adddffffffff01dd15c293000000001976a91483762a373935ca241d557dfce89171d582b486de88ac99fe9960000000000000000000000000000000","tx_hash":"535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024","from":["RMGJ9tRST45RnwEKHPGgBLuY3moSYP7Mhk"],"to":["RMGJ9tRST45RnwEKHPGgBLuY3moSYP7Mhk"],"total_amount":"24.68539379","spent_by_me":"24.68539379","received_by_me":"24.78970333","my_balance_change":"0.10430954","block_height":2387532,"timestamp":1620705483,"fee_details":{"type":"Utxo","amount":"-0.10430954"},"coin":"KMD","internal_id":"535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024"}"#;
@@ -4258,6 +4387,7 @@ fn test_update_kmd_rewards() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_update_kmd_rewards_claimed_not_by_me() {
     // The custom 535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024 transaction with the additional 'from' address.
     const OUTDATED_TX_DETAILS: &str = r#"{"tx_hex":"0400008085202f8901afcadb73880bc1c9e7ce96b8274c2e2a4547415e649f425f98791685be009b73020000006b483045022100b8fbb77efea482b656ad16fc53c5a01d289054c2e429bf1d7bab16c3e822a83602200b87368a95c046b2ce6d0d092185138a3f234a7eb0d7f8227b196ef32358b93f012103b1e544ce2d860219bc91314b5483421a553a7b33044659eff0be9214ed58adddffffffff01dd15c293000000001976a91483762a373935ca241d557dfce89171d582b486de88ac99fe9960000000000000000000000000000000","tx_hash":"535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024","from":["RMGJ9tRST45RnwEKHPGgBLuY3moSYP7Mhk", "RMDc4fvQeekJwrXxuaw1R2b7CTPEuVguMP"],"to":["RMGJ9tRST45RnwEKHPGgBLuY3moSYP7Mhk"],"total_amount":"24.68539379","spent_by_me":"24.68539379","received_by_me":"24.78970333","my_balance_change":"0.10430954","block_height":2387532,"timestamp":1620705483,"fee_details":{"type":"Utxo","amount":"-0.10430954"},"coin":"KMD","internal_id":"535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024"}"#;
@@ -4453,6 +4583,7 @@ fn test_withdraw_to_p2wpkh() {
 /// `UtxoStandardCoin` has to check UTXO maturity if `check_utxo_maturity` is `true`.
 /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_utxo_standard_with_check_utxo_maturity_true() {
     /// Whether [`UtxoStandardCoin::get_mature_unspent_ordered_list`] is called or not.
     static mut GET_MATURE_UNSPENT_ORDERED_LIST_CALLED: bool = false;
@@ -4491,6 +4622,7 @@ fn test_utxo_standard_with_check_utxo_maturity_true() {
 /// `UtxoStandardCoin` hasn't to check UTXO maturity if `check_utxo_maturity` is not set.
 /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_utxo_standard_without_check_utxo_maturity() {
     /// Whether [`UtxoStandardCoin::get_all_unspent_ordered_list`] is called or not.
     static mut GET_ALL_UNSPENT_ORDERED_LIST_CALLED: bool = false;
@@ -4533,6 +4665,7 @@ fn test_utxo_standard_without_check_utxo_maturity() {
 /// `QtumCoin` has to check UTXO maturity if `check_utxo_maturity` is not set.
 /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_without_check_utxo_maturity() {
     /// Whether [`QtumCoin::get_mature_unspent_ordered_list`] is called or not.
     static mut GET_MATURE_UNSPENT_ORDERED_LIST_CALLED: bool = false;
@@ -4563,6 +4696,7 @@ fn test_qtum_without_check_utxo_maturity() {
 /// `QtumCoin` hasn't to check UTXO maturity if `check_utxo_maturity` is `false`.
 /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_with_check_utxo_maturity_false() {
     /// Whether [`QtumCoin::get_all_unspent_ordered_list`] is called or not.
     static mut GET_ALL_UNSPENT_ORDERED_LIST_CALLED: bool = false;
@@ -5277,6 +5411,7 @@ fn test_electrum_balance_deserializing() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_electrum_display_balances() {
     let rpc_client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     block_on(utxo_common_tests::test_electrum_display_balances(&rpc_client));
@@ -5342,6 +5477,7 @@ fn test_native_display_balances() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_message_hash() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
@@ -5356,6 +5492,7 @@ fn test_message_hash() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_sign_verify_message() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
@@ -5377,6 +5514,7 @@ fn test_sign_verify_message() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_sign_verify_message_segwit() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(

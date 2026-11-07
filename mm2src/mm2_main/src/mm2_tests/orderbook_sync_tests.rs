@@ -5,6 +5,7 @@ use mm2_test_helpers::for_tests::orderbook_v2;
 
 /// https://github.com/artemii235/SuperNET/issues/241
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn alice_can_see_the_active_order_after_connection() {
     let coins = json!([
         {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
@@ -205,6 +206,7 @@ fn alice_can_see_the_active_order_after_connection() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn alice_can_see_the_active_order_after_orderbook_sync_segwit() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
@@ -405,6 +407,7 @@ fn alice_can_see_the_active_order_after_orderbook_sync_segwit() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_orderbook_segwit() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
@@ -588,6 +591,7 @@ fn test_get_orderbook_with_same_orderbook_ticker() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_conf_settings_in_orderbook() {
     let coins = json!([
         {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"required_confirmations":10,"requires_notarization":true,"protocol":{"type":"UTXO"}},
@@ -692,6 +696,7 @@ fn test_conf_settings_in_orderbook() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn alice_can_see_confs_in_orderbook_after_sync() {
     let bob_coins = json!([
         {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"required_confirmations":10,"requires_notarization":true,"protocol":{"type":"UTXO"}},
@@ -816,6 +821,7 @@ fn alice_can_see_confs_in_orderbook_after_sync() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/859
 fn orderbook_extended_data() {
     let coins = json!([
@@ -928,6 +934,7 @@ fn orderbook_extended_data() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn orderbook_should_display_base_rel_volumes() {
     let coins = json!([
         {"coin":"DOC","asset":"DOC","protocol":{"type":"UTXO"}},
@@ -1025,6 +1032,7 @@ fn orderbook_should_display_base_rel_volumes() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/670
 fn orderbook_should_work_without_coins_activation() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
@@ -1113,6 +1121,7 @@ fn orderbook_should_work_without_coins_activation() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/511
 fn test_all_orders_per_pair_per_node_must_be_displayed_in_orderbook() {
     let coins = json!([
@@ -1196,6 +1205,7 @@ fn test_all_orders_per_pair_per_node_must_be_displayed_in_orderbook() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/473
 fn setprice_min_volume_should_be_displayed_in_orderbook() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
