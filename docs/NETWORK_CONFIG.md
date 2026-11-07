@@ -268,7 +268,9 @@ not in a browser build, which does its own TLS and cannot pin.
 
 With a pin, the node checks the key and nothing else: the certificate may be self-signed, expired
 or issued for another name, as long as it carries a pinned key and the server proves it holds that
-key. The pin is on the key, not the certificate, so it survives a renewal that keeps the key. If
+key. The pin is on the key, not the certificate, so it survives a renewal that keeps the key.
+Every connection to a pinned server makes a full TLS handshake, without resuming an earlier
+session, so the key is checked each time. If
 `disable_cert_verification` is also set, the pin decides and the flag adds nothing; the warning is
 not logged then, and one info line names the server as pinned. A pin never accepts more than the
 pinned key does. What it gives up is the expiry check: a leaked key stays accepted until you

@@ -1932,7 +1932,10 @@ behaves exactly as R38.6.4m.
 > library's own parser, hashes the DER `SubjectPublicKeyInfo` that parser
 > returns, and compares it with the pins; the handshake signature is verified as
 > in item 5. A connection to a pinned server builds its own TLS configuration,
-> so that the verifier can tell the session that the key matched no pin. On that
+> so that the verifier can tell the session that the key matched no pin. A
+> pinned server therefore never resumes a TLS session: every connection makes a
+> full handshake, and the key is checked each time. The configuration is not to
+> be shared between connections, because it carries that signal. On that
 > signal the session reports exactly the text of item 5, and `establish` in
 > `electrum_pool.rs` logs the WARN of item 5 once for every refusal. The INFO line
 > of item 4 is logged next to the warning of R38.6.4m item 6, where the server

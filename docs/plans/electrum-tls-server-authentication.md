@@ -39,3 +39,12 @@ D38.6.4m.1, D38.6.4n.1 and D38.6.4n.2; ch.55 R55.5.10 (the `mode.rpc_data.server
 - D38.6.4n.1: pass-through by the coins file and the wallet GUIs.
 - D38.6.4n.2: trust on first use. It is not part of this design, because it is weaker than a
   published pin.
+- Follow-ups from the review of PR #273, neither of which changes what is accepted:
+  - The pin parser removes every colon, as R38.6.4n item 5 says, while the user docs describe
+    colons between byte pairs. Either tighten the parser to that form or keep the looser reading.
+  - The mismatch warning is chosen by comparing the error text. A typed marker would keep the
+    warning if a later layer wraps that text; the suspension does not depend on it.
+- Seen 2026-11-07: the coins file's `SSL` entry for tQTUM, `s6.electrum.qtum.site:51002`, presents a
+  version 1 self-signed certificate, so KDF Reloaded never connects to it (R38.6.4m item 5, also with
+  `disable_cert_verification` or a pin). The plain entry on port 51001 works. No coins-file change is
+  proposed from here.
