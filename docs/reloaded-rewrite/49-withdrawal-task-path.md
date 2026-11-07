@@ -74,12 +74,17 @@ withdrawal shall fail with a structured withdrawal error whose public
 discriminant identifies an unexpected sender selector. The server shall not
 silently ignore an explicit `from` on a single-key wallet.
 
-R49.4. For HD UTXO-family task withdrawals, `from` selects the sender. If
-`from` is present, the implementation shall resolve it to the selected
-activated HD address and use that address as the only withdrawal sender. If an
-HD UTXO task withdrawal omits `from`, the task shall use the enabled address
-(account `0`, chain `External`, address `0`) as the only withdrawal sender
-*(amended 2026-11-04; see the divergence note)*.
+R49.4. For HD UTXO-family withdrawals, on `task::withdraw::init` and on the
+direct `withdraw` method alike, `from` selects the sender. If `from` is
+present, the implementation shall resolve it to the selected activated HD
+address and use that address as the only withdrawal sender. If `from` is
+omitted, the withdrawal shall use the coin's activated address as the only
+withdrawal sender. That is the address at the activation's `path_to_address`,
+by default account `0`, chain `External`, address `0`, the same address the
+coin's swaps use (chapter 05 §5.12C R42). Under the hardware-wallet policy,
+which does not honor `path_to_address` (chapter 55 §55.5), the default stays
+account `0`, chain `External`, address `0`. *(Amended 2026-11-04 and
+2026-11-06; see the divergence note.)*
 
 > **Reloaded divergence (2026-11-04).** Until this amendment R49.4 required an
 > omitted `from` to fail with a structured error saying that no sender address
@@ -89,9 +94,12 @@ HD UTXO task withdrawal omits `from`, the task shall use the enabled address
 > [`RELOADED_VS_GLEEC.md`](../../RELOADED_VS_GLEEC.md). The maintainer kept it
 > on 2026-11-04 (decision BY in plan
 > [`hd-key-unification`](../plans/hd-key-unification.md)); no switch is
-> planned. The direct `withdraw` method does not yet serve an HD UTXO wallet;
-> plan item H5 serves it with `from`, and without `from` the same way as the
-> task route (decision BZ).
+> planned. On 2026-11-06 the maintainer set the default sender to the coin's
+> activated address, the address at `path_to_address` (decision CU). Before,
+> it was always account `0`, chain `External`, address `0`; the two differ
+> only for a non-default `path_to_address`. The direct `withdraw` method
+> serves an HD UTXO wallet in the same way: with `from` as at the reference,
+> and without `from` like the task route (decision BZ, plan item H5).
 
 > **Reference behavior (passed the KDF Dirty Gate on 2026-11-04, measure
 > 0.01; Spec Reader 2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of
@@ -102,15 +110,48 @@ HD UTXO task withdrawal omits `from`, the task shall use the enabled address
 > share one sender-resolution step; with `from` present, both routes sign
 > with the key derived at the selected address's path and return change to
 > that address. **Compatibility (this repository; not corpus-sourced):**
-> Reloaded's task route uses the enabled address when `from` is absent, a
-> documented divergence (`RELOADED_VS_GLEEC.md`, the 0.1.x interoperability
-> note for the Komodo DeFi wallet, and the CHANGELOG), and its direct
-> `withdraw` does not yet serve an HD UTXO wallet. R49.4 states that default
+> when `from` is absent, Reloaded uses the coin's activated address on both
+> routes, where the reference fails. This is a documented divergence,
+> recorded in `RELOADED_VS_GLEEC.md`, in the 0.1.x interoperability note for
+> the Komodo DeFi wallet, and in the CHANGELOG. R49.4 states that default
 > since 2026-11-04 (plan [`hd-key-unification`](../plans/hd-key-unification.md)
-> item H0), and the maintainer kept it as a divergence on that date (decision
-> BY in that plan). Plan item H5 serves the direct method with `from`, as the
-> reference does, and without `from` the same way as the task route
-> (decision BZ).
+> item H0). The maintainer kept it as a divergence on that date (decision BY)
+> and set the address on 2026-11-06 (decision CU). Plan item H5 serves the
+> direct method with `from`, as the reference does, and without `from` the
+> same way as the task route (decision BZ).
+
+> **As built (2026-11-07, clean-side record).** Plan item H5.1.
+> `MmCoin::withdraw` of the UTXO standard coin and QTUM calls
+> `utxo_common::withdraw_with_hd_sender`. Under a software HD key policy with
+> an HD derivation method it builds
+> `StandardUtxoWithdraw::new_with_hd_sender`. Every other coin keeps the
+> single-key `StandardUtxoWithdraw::new`, including a coin under the Trezor
+> policy (which answers as before, with the internal error that the Iguana key
+> is unavailable, and uses no device) and BCH. The sender comes from
+> `resolve_withdraw_sender`, which both this route and `InitUtxoWithdraw::new`
+> call. It calls `get_withdraw_sender_address` → `get_withdraw_hd_sender`, the
+> single place that decides `from` and the default. The key that signs is
+> derived at the sender's path by `hd_sender_key_pair`, which the task route's
+> HD signing arm also uses, and the change returns to the sender. Without
+> `from`, under a software HD policy, the sender is `enabled_hd_address_info`,
+> the address at `path_to_address` with its full path; if its account is not
+> held, the answer is `FromAddressNotFound`. Under the Trezor policy it stays
+> account `0`, chain `External`, address `0`. BCH has no HD policy in this
+> repository (its activation always builds the Iguana key), so it is not
+> served under HD here (plan item H7). Tests, in module
+> `utxo_tests::hd_coin_swap_key_tests::direct_withdraw`:
+> - T49.3 and T49.4:
+>   `t49_3_direct_address_id_selector_spends_from_that_activated_address`,
+>   `t49_4_direct_derivation_path_selector_resolves_to_the_same_sender`.
+> - T49.5: `t49_5_direct_without_from_default_path_spends_from_address_zero`,
+>   `t49_5_direct_without_from_non_default_path_spends_from_that_address`,
+>   `t49_5_the_shared_sender_step_without_from_is_the_activated_address`,
+>   `t49_5_trezor_policy_default_is_unchanged_and_the_direct_route_does_not_sign_with_a_device`,
+>   `t49_5_direct_without_from_and_a_missing_activated_account_answers_from_address_not_found`.
+> - T49.6: `t49_6_direct_unknown_account_answers_unknown_account`,
+>   `t49_6_direct_address_not_activated_answers_unexpected_from_address`,
+>   `t49_6_direct_mismatched_coin_type_answers_unexpected_from_address`.
+> - QTUM: `qtum_direct_withdraw_with_from_spends_from_the_selected_address`.
 
 R49.5. EVM-family software-HD native-coin and fungible-token withdrawals shall
 be supported through both direct `withdraw` and `task::withdraw::init`. When
@@ -181,11 +222,18 @@ T49.4. Start an HD UTXO-family withdrawal task with a derivation-path selector
 that resolves to the same activated address as T49.3. The task shall use the
 same sender address.
 
-T49.5. Start an HD UTXO-family withdrawal task without `from`. The task shall
-use the enabled address (account `0`, chain `External`, address `0`) as the
-sender *(amended 2026-11-04, R49.4)*. This tests the documented divergence of
-R49.4 (decision BY); the reference fails the same request (the
-reference-behavior note under R49.4).
+T49.5. Start an HD UTXO-family withdrawal without `from`, on
+`task::withdraw::init` and on the direct `withdraw` method. Each shall use the
+coin's activated address (R49.4) as the sender:
+- account `0`, chain `External`, address `0` for a coin activated with the
+  default `path_to_address`;
+- for a coin activated with a non-default `path_to_address` (for example
+  account `0`, chain `External`, address `1`), that address and not address
+  `0`.
+
+*(Amended 2026-11-04 and 2026-11-06, R49.4.)* This tests the documented
+divergence of R49.4 (decisions BY, BZ and CU). The reference fails the same
+request (the reference-behavior note under R49.4).
 
 T49.6. Start an HD withdrawal task with a selector for an unknown account, a
 mismatched coin path, or an address that has not been activated. The task shall
@@ -446,9 +494,10 @@ task withdraw with `from` shall each fail with the unsupported-operation
 discriminant; a Sia withdraw with a `from` selector shall succeed from the
 coin's single address exactly as without it; a direct UTXO `withdraw` without
 `from` shall fail with the sender-not-found discriminant under the reference
-contract (Reloaded's direct `withdraw` does not yet serve an HD UTXO wallet,
-plan `hd-key-unification` item H5, and its task route uses the enabled address
--- the test shall state which contract it asserts).
+contract (Reloaded's direct `withdraw` serves an HD UTXO wallet since plan
+`hd-key-unification` item H5 and, like its task route, uses the coin's
+activated address when `from` is absent, R49.4 -- the test shall state which
+contract it asserts).
 
 R49.27a. *Wire form of the unsupported-operation refusal (reference
 contract).* *(Passed the KDF Dirty Gate on 2026-11-04, measure 0.01; Spec Reader 2026-11-04, rows
@@ -557,6 +606,19 @@ structured withdrawal error of R49.20:
 > it as a no-op, is for the clean side to confirm against this repository's
 > code when plan `hd-key-unification` item H5.1 is implemented. Items 2 and 3
 > are the contract behind T49.5 and T49.18.
+
+> **As built (2026-11-07, plan item H5.1, which also covers H5.5).**
+> `refuse_from_for_single_key` (`utxo_withdraw.rs`) answers any explicit
+> `from` with `UnexpectedFromAddress` for a coin with a single-address
+> derivation method. The task route's `get_withdraw_iguana_sender` and the
+> direct route's `StandardUtxoWithdraw::new` share it. The direct `withdraw`
+> of the UTXO standard coin, of QTUM and of BCH therefore refuses a selector
+> that names the login's own address, in either form, before any unspent
+> output is listed. Before H5.1, the direct route ignored `from`. Tests:
+> - `t49_27b_single_key_direct_withdraw_refuses_from_utxo_standard`, `_qtum`
+>   and `_bch`;
+> - `t49_27b_single_key_shared_sender_step_refuses_from`;
+> - the HD refusal tests `t49_6_direct_*`.
 
 T49.27b. *(Reloaded-original; passed the KDF Dirty Gate together with
 R49.27b on 2026-11-07.)* Under an iguana login, a direct `withdraw` and a task withdraw
@@ -685,3 +747,12 @@ addresses.
   the corpus added the compatibility row under T49.27a. It rests on R49.27a as
   gated above and on this repository's own code, takes no forbidden-class
   input, and so does not engage chapter 01 R38.
+- *Clean-side amendment (2026-11-06) -- R49.4, its divergence note, the
+  compatibility clause of the reference-behavior note under R49.4, T49.5 and
+  T49.27.* They record decision CU of 2026-11-06 (the default sender without
+  `from` is the coin's activated address, the address at `path_to_address`)
+  and decision BZ (the direct method serves an HD UTXO wallet), both in plan
+  `hd-key-unification`. Written by a session that never read the corpus,
+  from those decisions and this repository's own code. The reference facts
+  of the note under R49.4 are unchanged. It takes no forbidden-class input
+  and needs no Dirty Gate pass.

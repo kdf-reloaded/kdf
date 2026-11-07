@@ -522,13 +522,15 @@ remedy is R33.
 > key is that same hash; (b) order signing and `sender_pubkey` use that hash
 > while keep-alive, `is_mine` and the stale sweep use the internal key, so
 > no keep-alive is ever sent for the key the orders carry. The reference does
-> neither. Reloaded's task-route UTXO withdraw without `from` falls back to
-> the enabled address where the reference fails (chapter 49 R49.4 note); the
-> maintainer kept that divergence on 2026-11-04 (decision BY). Reloaded's
-> legacy `enable` under HD binds the internal key where the reference binds
-> the coin key and then fails the response; plan item H7 binds the coin key
-> and keeps the successful answer behind a switch (decision CB). Plan
-> `hd-key-unification` carries the fixes and records the maintainer's
+> neither. When `from` is absent, Reloaded's UTXO withdraw uses the coin's
+> activated address, the address at `path_to_address`, on the task route and,
+> since plan item H5, on the direct method. The reference fails such a
+> withdrawal (chapter 49 R49.4 note). The maintainer kept that divergence on
+> 2026-11-04 (decision BY) and set the address on 2026-11-06 (decision CU).
+> Reloaded's legacy `enable` under HD binds the internal key where the
+> reference binds the coin key and then fails the response; plan item H7 binds
+> the coin key and keeps the successful answer behind a switch (decision CB).
+> Plan `hd-key-unification` carries the fixes and records the maintainer's
 > decisions BY to CC on which surfaces stay documented divergences; R32--R35
 > record the reference target for the rest.
 
@@ -1717,3 +1719,10 @@ surface.
   code. Written by a context that never read the corpus, from this
   repository's activation code. It takes no forbidden-class input and needs
   no Dirty Gate pass.
+- *Clean-side amendment (2026-11-06) -- one sentence of the compatibility
+  note under R35.* It records decision CU of 2026-11-06 (the default sender
+  of a UTXO withdraw without `from` is the coin's activated address) and
+  that plan item H5 serves the direct method. Written by a session that
+  never read the corpus, from that decision and this repository's own code.
+  The reference facts of §5.9B are unchanged. It takes no forbidden-class
+  input and needs no Dirty Gate pass.

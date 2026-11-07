@@ -203,7 +203,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
 
 These are divergences from GLEEC KDF that are **not** operator-configurable in this release (no compat switch yet). They are logged here and in [`CHANGELOG.md`](CHANGELOG.md) per the convention; a per-feature switch may be added in a later release.
 
-- **Withdraw with an omitted HD `from`.** For an HD-mode UTXO wallet, `task::withdraw` with no `from` sender defaults to the wallet's enabled address (account 0, external chain, index 0) instead of failing. The direct `withdraw` method does not yet serve an HD UTXO wallet (plan [`hd-key-unification`](docs/plans/hd-key-unification.md), item H5). GLEEC KDF rejects an omitted `from` with `FromAddressNotFound`. This makes the shipped Komodo DeFi wallet's withdraw-preview flow (which omits `from`) work against a reloaded node; the maintainer kept it deliberately on 2026-11-04, and no switch is planned. An explicit but invalid `from` is still rejected (`UnknownAccount` / `UnexpectedFromAddress`). Code: `coins/utxo/utxo_common/utxo_common_hd.rs` (`get_withdraw_hd_sender`), `utxo_common_helpers.rs` (`validate_task_withdraw_sender`).
+- **Withdraw with an omitted HD `from`.** For an HD-mode UTXO wallet, `withdraw` and `task::withdraw` with no `from` sender spend from the coin's activated address, the address at `path_to_address` (by default account 0, external chain, index 0), instead of failing. GLEEC KDF rejects an omitted `from` with `FromAddressNotFound`. This makes the shipped Komodo DeFi wallet's withdraw-preview flow (which omits `from`) work against a reloaded node; the maintainer kept it deliberately on 2026-11-04, set the address on 2026-11-06, and no switch is planned. An explicit but invalid `from` is still rejected (`UnknownAccount` / `UnexpectedFromAddress`) on both methods. Until plan [`hd-key-unification`](docs/plans/hd-key-unification.md) item H5 (PR #270), the fallback was always account 0, external chain, index 0, and the direct `withdraw` method refused an HD UTXO wallet. Code: `coins/utxo/utxo_common/utxo_common_hd.rs` (`get_withdraw_hd_sender`), `utxo_withdraw.rs` (`resolve_withdraw_sender`), `utxo_common_helpers.rs` (`withdraw_with_hd_sender`, `validate_task_withdraw_sender`).
 - **Legacy `my_balance` and `get_enabled_coins` answer for an EVM coin under an HD login.** They report the activated address. GLEEC KDF fails both under an HD login, for EVM coins as for UTXO coins; for a UTXO coin KDF Reloaded fails them too. Code: `coins/eth/eth_market_ops.rs` (`my_address`), `coins/lp_coins_ops.rs` (`get_enabled_coins`). See CRD ch.05 §5.9B R35 and plan [`hd-key-unification`](docs/plans/hd-key-unification.md).
 - **A Light-mode ZHTLC coin is served by `lightwalletd` alone; Electrum is
   removed, and there is no switch to restore it.** GLEEC KDF requires a
@@ -307,6 +307,13 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   GLEEC KDF, on the legacy stack, is affected by the same underlying divergence.
   No compat switch: the alternative is invisible incoming payments. Code:
   `coins/z_coin.rs`, `coins/z_coin/z_coin_wallet_db.rs`.
+- **An ARRR withdrawal takes no memo.** Reloaded's `withdraw` request has no
+  `memo` member, so a memo sent with it is ignored, the shielded output carries
+  none, and the answer has no `memo` member. GLEEC KDF echoes the request's memo
+  in the answer (CRD ch.39 R39.5A.3). Memo support is a separate, later item,
+  noted under R39.5A.3. No compat switch: there is nothing to switch on yet.
+  Code: `coins/lp_coins_types.rs` (`WithdrawRequest`), `coins/z_coin.rs`
+  (`withdraw`).
 - **Siacoin withdraw populates `internal_id`.** GLEEC KDF leaves `internal_id`
   empty on its SC withdraw response — only its history path fills the field in.
   Reloaded sets it to the raw bytes of the signed transaction's id, the same
@@ -546,7 +553,8 @@ with a node that cannot build version 6 used to start, and failed at that node's
 ARRR transaction, after the DEX fee was paid. GLEEC KDF nodes and KDF Reloaded
 0.3.0-beta.1 nodes send no word and are declined. Set `require_v6_counterparty` to
 `false` in the coin's `consensus_params` to admit them again; an ARRR swap with GLEEC KDF
-still cannot complete.
+still cannot complete. The capability check is temporary: it will be removed once
+version 6 is generally supported.
 
 Two coin-activation behaviours differ from GLEEC KDF by default (CRD ch.46
 R46.2.4, ch.55 R55.4.6):
@@ -680,6 +688,7 @@ cache keeps its existing compatible name and format:
 | --- | --- | --- |
 | Shielded wallet | `<TICKER>_RELOADED_WALLET.db` | `<TICKER>_WALLET.db` |
 | Compact-block cache | `<TICKER>_RELOADED_COMPACT_BLOCKS.db` | `<TICKER>_COMPACT_BLOCKS.db` |
+| Recipients of the wallet's withdrawals, shown in the history | `<TICKER>_RELOADED_TX_ADDRESSES.db` | none |
 | Legacy native Sapling-state cache | `<TICKER>_CACHE.db` (shared) | `<TICKER>_CACHE.db` (shared) |
 
 On the first supported Light-mode activation after upgrading, Reloaded creates

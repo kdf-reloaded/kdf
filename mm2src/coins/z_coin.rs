@@ -154,6 +154,7 @@ mod z_pirate1_tests;
 #[cfg(not(target_arch = "wasm32"))] mod z_refund_gate;
 #[cfg(not(target_arch = "wasm32"))] mod z_swap_ops;
 #[cfg(target_arch = "wasm32")] mod z_swap_ops_wasm;
+#[cfg(not(target_arch = "wasm32"))] mod z_tx_addresses;
 #[cfg(not(target_arch = "wasm32"))] mod z_tx_read;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_tx_read_fixtures;
@@ -3460,7 +3461,29 @@ impl MmCoin for ZCoin {
                 let mut tx_hash = tx.txid().as_ref().to_vec();
                 tx_hash.reverse();
 
-                let my_balance_change = data.spent_by_me - data.received_by_me;
+                // Keep the destination as the request gave it, for the history row of this transaction
+                // (CRD ch.39 R39.8.9d2 (a)). A failure only costs the row its recipient, so the
+                // withdrawal is not failed for it.
+                if let Err(e) = coin.z_fields.shielded_history.record_withdraw_recipient(
+                    tx.txid().as_ref(),
+                    u32::from(tx.expiry_height()),
+                    &req.to,
+                ) {
+                    log::warn!(
+                        "ZCoin {}: could not record the destination of the withdrawal {}: {}. \
+                         Its history row will not list the recipient.",
+                        coin.ticker(),
+                        hex::encode(&tx_hash),
+                        e
+                    );
+                }
+
+                // Received minus spent, negative for a withdrawal: the orientation of the history row
+                // (CRD ch.39 R39.5A.3). The two amounts are unsigned, so the difference is taken on the
+                // decimals.
+                let spent_by_me = big_decimal_from_sat_unsigned(data.spent_by_me, coin.decimals());
+                let received_by_me = big_decimal_from_sat_unsigned(data.received_by_me, coin.decimals());
+                let my_balance_change = received_by_me.clone() - spent_by_me.clone();
 
                 Ok(TransactionDetails {
                     tx_json: None,
@@ -3468,10 +3491,10 @@ impl MmCoin for ZCoin {
                     tx_hash: tx_hash.to_tx_hash(),
                     from: vec![coin.z_fields.my_z_addr_encoded.clone()],
                     to: vec![req.to],
-                    total_amount: big_decimal_from_sat_unsigned(data.spent_by_me, coin.decimals()),
-                    spent_by_me: big_decimal_from_sat_unsigned(data.spent_by_me, coin.decimals()),
-                    received_by_me: big_decimal_from_sat_unsigned(data.received_by_me, coin.decimals()),
-                    my_balance_change: big_decimal_from_sat_unsigned(my_balance_change, coin.decimals()),
+                    total_amount: spent_by_me.clone(),
+                    spent_by_me,
+                    received_by_me,
+                    my_balance_change,
                     block_height: 0,
                     timestamp: 0,
                     fee_details: Some(TxFeeDetails::Utxo(UtxoFeeDetails {

@@ -23,7 +23,7 @@ Ironwood notes. A Sapling-only wallet therefore needs these two items to keep wo
 | Work package | What it does | CRD | Code | Evidence | State |
 |---|---|---|---|---|---|
 | Ironwood deposits | A Sapling output inside a transaction that also carries Ironwood actions is found, counted (pending, then spendable) and spent like any other. | ch.39 R39.8.0bb, T39.8.0i | tests only: the compact conversion already drops the Ironwood actions | mainnet deposit from an Ironwood wallet to a lab wallet, then spent | tests in PR #242; live deposit passed 2026-11-06 (release tests, rows ARRR-L3 and ARRR-L4); the missing pending display before mining is fixed in PR #263 |
-| Pirate1 withdrawals | `validateaddress` accepts a Pirate1 address; `withdraw` pays it from Sapling notes with one Ironwood output in an output-only bundle anchored at the empty tree, a fixed 0.0001 ARRR fee and Sapling change; the submitted transaction is recorded like any withdrawal. | ch.39 §39.6.5 (R39.6.5a–R39.6.5i, T39.6.5a–T39.6.5e) | address type and network prefix; a withdraw-only Ironwood output; a spends-disabled option in the vendored builder; fee; broadcast record. No new dependency: the pinned builder already carries the Ironwood output and the prover | mainnet withdrawal from a lab wallet to an Ironwood wallet, seen by that wallet; first proving-key build timed | code in PR #246; live round trip passed 2026-11-06 (release tests, rows ARRR-L2 to ARRR-L6) |
+| Pirate1 withdrawals | `validateaddress` accepts a Pirate1 address; `withdraw` pays it from Sapling notes with one Ironwood output in an output-only bundle anchored at the empty tree, a fixed 0.0001 ARRR fee and Sapling change; the submitted transaction is recorded like any withdrawal. | ch.39 §39.6.5 (R39.6.5a–R39.6.5i, T39.6.5a–T39.6.5e) | address type and network prefix; a withdraw-only Ironwood output; a spends-disabled option in the vendored builder; fee; broadcast record. No new dependency: the pinned builder already carries the Ironwood output and the prover | mainnet withdrawal from a lab wallet to an Ironwood wallet, seen by that wallet; first proving-key build timed | code in PR #246; live round trip passed 2026-11-06 (release tests, rows ARRR-L2 to ARRR-L6); the history row names the Pirate1 recipient since PR #268 (ch.39 R39.8.9d2) |
 
 - **First step:** T39.6.5a. Parse a mainnet transaction with Ironwood actions, and verify its proof
   with this project's own verifying key. It shows that the pinned libraries match the chain before
@@ -113,6 +113,32 @@ apart from a Reloaded one. The maintainer decided:
 | Capability word | A generic word after a coin's first value in its protocol information, sent only by coins that opt in. The reader fails closed. The order-match layer carries the bytes unchanged and logs declines. | ch.59 §59.4A (R59.4A.1–R59.4A.7, T14) | CRD PR #227, code PR #235 (generic part) |
 | ARRR requirement | ARRR sends `tx_v6` always. Inside the Ironwood window it declines a counterparty without it, on the taker and the maker path, with the per-coin switch `require_v6_counterparty` (default on). One debug line per decline, and at most one warning per coin per hour with the count. | ch.39 R39.6.4f, T39.6.4f | CRD PR #230 |
 | ARRR predicate code | The shielded coin's protocol information and acceptance check, the switch, and the logs. Stacked on the capability-word code. | — | code PR #241 |
+
+### 5. Transparent addresses in the shielded history (scheduled)
+
+`z_coin_tx_history` lists no transparent address. That covers the transparent inputs of
+CRD ch.39 R39.8.9c and the transparent outputs of R39.8.9d: an ARRR swap's payment to its
+script address, the spend or refund from it, and fee outputs. The shielded fee address that
+a swap's fee payment pays is not listed either. Those rows show an empty or wallet-only `from`
+and `to`, so a user reconciling a swap sees funds leave or arrive with no counterpart address.
+The status note under ch.39 R39.8.9e records the gap, which was found by reading the code; no
+live row has shown it yet.
+
+**Scheduled** (decided 2026-11-07) as a separate change, after the fix that lists the wallet's
+own address in one form and names a withdrawal's recipient (ch.39 R39.8.9d1, R39.8.9d2).
+Size: S–M.
+
+What it needs:
+
+- the addresses, recorded at broadcast from the transaction this node built: the outputs of a
+  swap payment and a fee payment, the script address a spend or refund spends (it follows
+  from the redeem script the input carries), and the shielded fee address. They go into the
+  store of ch.39 R39.8.9d2, with several addresses per transaction, each on its `from` or `to`
+  side. Nothing is fetched from the light endpoint;
+- an as-built note and tests in ch.39 (the rules exist);
+- one live swap in the lab, to see the payment, spend or refund rows.
+
+Rows from before the change keep their empty sets.
 
 ## Open questions
 

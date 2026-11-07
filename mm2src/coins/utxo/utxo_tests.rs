@@ -10737,6 +10737,415 @@ mod hd_coin_swap_key_tests {
             assert_eq!(coin.swap_key_disagreement(&node_pubkey), None);
         }
     }
+
+    /// CRD ch.49 R49.4, R49.27a (T49.3 to T49.6, T49.27) and ch.05 §5.9B R35: the direct `withdraw` method serves a
+    /// UTXO coin under a software global-HD login, with `from` and without it, like `task::withdraw::init`.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod direct_withdraw {
+        use super::*;
+        use crate::utxo::utxo_withdraw::resolve_withdraw_sender;
+        use crate::{GetWithdrawSenderAddress, HDAddressId, TransactionDetails, WithdrawError, WithdrawFrom};
+        use common::HttpStatusCode;
+        use mocktopus::mocking::{MockResult, Mockable};
+
+        const RECEIVER: &str = "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa";
+
+        /// The sender addresses the mocked unspent listing was asked for.
+        type Seen = Arc<Mutex<Vec<Address>>>;
+
+        /// A wallet holding account 0 of the test mnemonic, with `external_addresses_number` known external addresses.
+        fn hd_wallet_with_account(external_addresses_number: u32) -> UtxoHDWallet {
+            let account_path = "m/44'/141'/0'";
+            let extended_pubkey = global_hd()
+                .derive_account_extended_pubkey(&DerivationPath::from_str(account_path).unwrap())
+                .unwrap();
+            let account = UtxoHDAccount {
+                account_id: 0,
+                extended_pubkey,
+                account_derivation_path: HDPathToAccount::from_str(account_path).unwrap(),
+                external_addresses_number,
+                internal_addresses_number: 0,
+            };
+            let mut wallet = hd_wallet();
+            wallet.accounts = HDAccountsMutex::new(HDAccountsMap::from([(0, account)]));
+            wallet
+        }
+
+        /// An HD coin activated at `path_to_address`, whose wallet holds account 0 with `known` external addresses.
+        fn fields_at(path_to_address: PathToAddress, known: u32) -> UtxoCoinFields {
+            let mut fields = hd_fields_at(path_to_address);
+            fields.derivation_method = DerivationMethod::HDWallet(hd_wallet_with_account(known));
+            fields
+        }
+
+        fn request(from: Option<WithdrawFrom>) -> WithdrawRequest {
+            WithdrawRequest {
+                amount: 1u64.into(),
+                from,
+                to: RECEIVER.to_string(),
+                coin: TEST_COIN_NAME.into(),
+                max: false,
+                fee: None,
+            }
+        }
+
+        fn address_id(account_id: u32, address_id: u32) -> WithdrawFrom {
+            WithdrawFrom::AddressId(HDAddressId {
+                account_id,
+                chain: Bip44Chain::External,
+                address_id,
+            })
+        }
+
+        fn derivation_path(path: &str) -> WithdrawFrom {
+            WithdrawFrom::DerivationPath {
+                derivation_path: path.to_owned(),
+            }
+        }
+
+        fn listed_unspents() -> Vec<UnspentInfo> {
+            vec![UnspentInfo {
+                outpoint: OutPoint {
+                    hash: 1.into(),
+                    index: 0,
+                },
+                value: 1_000_000_000,
+                height: Default::default(),
+            }]
+        }
+
+        /// Scripts the unspent listing of `UtxoStandardCoin` and records the address it is asked for.
+        fn mock_standard_unspents() -> Seen {
+            let seen = Seen::default();
+            let recorded = seen.clone();
+            UtxoStandardCoin::get_unspent_ordered_list.mock_safe(move |coin, address| {
+                recorded.lock().unwrap().push(address.clone());
+                let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
+                MockResult::Return(Box::pin(futures::future::ok((listed_unspents(), cache))))
+            });
+            seen
+        }
+
+        /// The direct `withdraw` method, as `coins::withdraw` calls it.
+        fn direct(
+            coin: &UtxoStandardCoin,
+            from: Option<WithdrawFrom>,
+        ) -> Result<TransactionDetails, MmError<WithdrawError>> {
+            coin.withdraw(request(from)).wait()
+        }
+
+        fn tx_of(details: &TransactionDetails) -> UtxoTx { deserialize(details.tx_hex.as_slice()).unwrap() }
+
+        fn signed_by(tx: &UtxoTx, key: &KeyPair) -> bool {
+            let script_sig: &[u8] = &tx.inputs[0].script_sig;
+            let pubkey: &[u8] = key.public();
+            script_sig.windows(pubkey.len()).any(|window| window == pubkey)
+        }
+
+        /// The withdrawal spends from `sender`: it is the listed address and the displayed sender, the key at its
+        /// path signs (and not the key `other`), and the change returns to it.
+        fn assert_spent_from(details: &TransactionDetails, sender: &Address, key: &KeyPair, other: &KeyPair) {
+            assert_eq!(details.from, vec![sender.display_address().unwrap()]);
+            let tx = tx_of(details);
+            let change_script = Builder::build_p2pkh(&sender.hash).to_bytes();
+            assert!(
+                tx.outputs.iter().any(|output| output.script_pubkey == change_script),
+                "the change returns to the sender"
+            );
+            assert!(signed_by(&tx, key), "the key at the sender's path signs");
+            assert!(!signed_by(&tx, other), "no other key signs");
+        }
+
+        /// T49.3, direct route: an activated external address named by an address-id selector is the sender, the
+        /// key at its path signs, and the change returns to it.
+        #[test]
+        fn t49_3_direct_address_id_selector_spends_from_that_activated_address() {
+            let fields = fields_at(PathToAddress::default(), 2);
+            let sender = address_of(&fields, &key_at(1));
+            assert_ne!(sender, address_of(&fields, &key_at(0)));
+            let seen = mock_standard_unspents();
+            let coin = utxo_coin_from_fields(fields);
+
+            let details = direct(&coin, Some(address_id(0, 1))).unwrap();
+
+            assert_eq!(*seen.lock().unwrap(), vec![sender.clone()]);
+            assert_spent_from(&details, &sender, &key_at(1), &key_at(0));
+        }
+
+        /// T49.4, direct route: a derivation-path selector that resolves to the same activated address gives the
+        /// same sender as the address-id selector of T49.3.
+        #[test]
+        fn t49_4_direct_derivation_path_selector_resolves_to_the_same_sender() {
+            let fields = fields_at(PathToAddress::default(), 2);
+            let sender = address_of(&fields, &key_at(1));
+            let seen = mock_standard_unspents();
+            let coin = utxo_coin_from_fields(fields);
+
+            let by_path = direct(&coin, Some(derivation_path("m/44'/141'/0'/0/1"))).unwrap();
+            let by_id = direct(&coin, Some(address_id(0, 1))).unwrap();
+
+            assert_eq!(*seen.lock().unwrap(), vec![sender.clone(), sender.clone()]);
+            assert_spent_from(&by_path, &sender, &key_at(1), &key_at(0));
+            assert_eq!(by_path.from, by_id.from);
+        }
+
+        /// T49.5 (decisions BY, BZ and CU), direct route, the default `path_to_address`: without `from` the sender
+        /// is account 0, External, address 0.
+        #[test]
+        fn t49_5_direct_without_from_default_path_spends_from_address_zero() {
+            let fields = fields_at(PathToAddress::default(), 2);
+            let sender = address_of(&fields, &key_at(0));
+            let seen = mock_standard_unspents();
+            let coin = utxo_coin_from_fields(fields);
+
+            let details = direct(&coin, None).unwrap();
+
+            assert_eq!(*seen.lock().unwrap(), vec![sender.clone()]);
+            assert_spent_from(&details, &sender, &key_at(0), &key_at(1));
+        }
+
+        /// T49.5 (decision CU), direct route, a non-default `path_to_address` (account 0, External, address 1): without
+        /// `from` the sender is that address and not address 0.
+        #[test]
+        fn t49_5_direct_without_from_non_default_path_spends_from_that_address() {
+            let fields = fields_at(at_address(1), 2);
+            let sender = address_of(&fields, &key_at(1));
+            assert_ne!(sender, address_of(&fields, &key_at(0)));
+            let seen = mock_standard_unspents();
+            let coin = utxo_coin_from_fields(fields);
+
+            let details = direct(&coin, None).unwrap();
+
+            assert_eq!(*seen.lock().unwrap(), vec![sender.clone()]);
+            assert_spent_from(&details, &sender, &key_at(1), &key_at(0));
+        }
+
+        /// T49.5 (decisions BY, BZ and CU), task route: `InitUtxoWithdraw::new` takes its sender from
+        /// `resolve_withdraw_sender`, the step the direct route takes its sender from too. Without `from` it is the
+        /// coin's activated address with its full derivation path: address 0 for the default `path_to_address`,
+        /// the address at `path_to_address` for a non-default one.
+        #[test]
+        fn t49_5_the_shared_sender_step_without_from_is_the_activated_address() {
+            for (path_to_address, known, address_id) in [(PathToAddress::default(), 1, 0), (at_address(1), 2, 1)] {
+                let fields = fields_at(path_to_address, known);
+                let expected = address_of(&fields, &key_at(address_id));
+                let coin = utxo_coin_from_fields(fields);
+
+                let sender = block_on(resolve_withdraw_sender(&coin, &request(None))).unwrap();
+
+                assert_eq!(sender.address, expected);
+                assert_eq!(sender.pubkey, *key_at(address_id).public());
+                assert_eq!(
+                    sender.derivation_path.to_string(),
+                    format!("m/44'/141'/0'/0/{}", address_id)
+                );
+                // The step is the trait method of the coin; the task route reaches it through the same function.
+                let through_trait = block_on(coin.get_withdraw_sender_address(&request(None))).unwrap();
+                assert_eq!(through_trait.address, sender.address);
+            }
+        }
+
+        /// T49.5, Trezor policy: the default stays account 0, External, address 0 (the Trezor policy does not honor
+        /// `path_to_address`), and the direct route does not sign with a device: it answers the refusal it gave
+        /// before this change, and does not list the unspents.
+        #[test]
+        fn t49_5_trezor_policy_default_is_unchanged_and_the_direct_route_does_not_sign_with_a_device() {
+            let mut fields = fields_at(at_address(1), 2);
+            fields.priv_key_policy = PrivKeyPolicy::Trezor;
+            let expected = address_of(&fields, &key_at(0));
+            let seen = mock_standard_unspents();
+            let coin = utxo_coin_from_fields(fields);
+
+            let sender = block_on(resolve_withdraw_sender(&coin, &request(None))).unwrap();
+            assert_eq!(sender.address, expected);
+            assert_eq!(sender.derivation_path.to_string(), "m/44'/141'/0'/0/0");
+
+            let err = direct(&coin, None).unwrap_err().into_inner();
+            assert!(matches!(err, WithdrawError::InternalError(_)), "{:?}", err);
+            assert!(seen.lock().unwrap().is_empty(), "no signing was reached");
+        }
+
+        /// Runs a direct withdraw that is refused before any unspent is listed and returns the refusal, after
+        /// checking its HTTP status (R49.27a: 400).
+        fn refusal(from: Option<WithdrawFrom>, path_to_address: PathToAddress, known: u32) -> WithdrawError {
+            let seen = mock_standard_unspents();
+            let coin = utxo_coin_from_fields(fields_at(path_to_address, known));
+
+            let err = direct(&coin, from).unwrap_err().into_inner();
+
+            assert!(seen.lock().unwrap().is_empty(), "refused before listing the unspents");
+            assert_eq!(err.status_code(), http::StatusCode::BAD_REQUEST);
+            // A withdraw never adds an address to the wallet (T49.27b: `account_balance` still lists them all).
+            let accounts = block_on(hd_wallet_of(coin.as_ref()).accounts.lock());
+            assert_eq!(accounts.get(&0).unwrap().external_addresses_number, known);
+            err
+        }
+
+        /// T49.6 and T49.27b (HD), direct route: with three known external addresses in account 0, `account_id: 1`
+        /// answers `UnknownAccount`, `error_data` an object; the wallet still holds three addresses.
+        #[test]
+        fn t49_6_direct_unknown_account_answers_unknown_account() {
+            let err = refusal(Some(address_id(1, 0)), PathToAddress::default(), 3);
+            assert!(matches!(err, WithdrawError::UnknownAccount { .. }), "{:?}", err);
+            let json = serde_json::to_value(&err).unwrap();
+            assert_eq!(json["error_type"], "UnknownAccount");
+            assert!(json["error_data"].is_object());
+        }
+
+        /// T49.6 and T49.27b (HD), direct route: with three known external addresses in account 0, `address_id: 3`
+        /// (not known) answers `UnexpectedFromAddress`, `error_data` a string; the wallet still holds three.
+        #[test]
+        fn t49_6_direct_address_not_activated_answers_unexpected_from_address() {
+            let err = refusal(Some(address_id(0, 3)), PathToAddress::default(), 3);
+            assert!(matches!(err, WithdrawError::UnexpectedFromAddress(_)), "{:?}", err);
+            let json = serde_json::to_value(&err).unwrap();
+            assert_eq!(json["error_type"], "UnexpectedFromAddress");
+            assert!(json["error_data"].is_string());
+        }
+
+        /// T49.6, direct route: a derivation path of another coin type answers `UnexpectedFromAddress`,
+        /// `error_data` a string.
+        #[test]
+        fn t49_6_direct_mismatched_coin_type_answers_unexpected_from_address() {
+            let err = refusal(Some(derivation_path("m/44'/0'/0'/0/1")), PathToAddress::default(), 3);
+            assert!(matches!(err, WithdrawError::UnexpectedFromAddress(_)), "{:?}", err);
+            let json = serde_json::to_value(&err).unwrap();
+            assert_eq!(json["error_type"], "UnexpectedFromAddress");
+            assert!(json["error_data"].is_string());
+        }
+
+        /// R49.4: without `from`, if the account of the activated address is not held, the direct route answers
+        /// `FromAddressNotFound` (400), as the task route does.
+        #[test]
+        fn t49_5_direct_without_from_and_a_missing_activated_account_answers_from_address_not_found() {
+            let activated_in_account_1 = PathToAddress {
+                account_id: 1,
+                chain: Bip44Chain::External,
+                address_id: 0,
+            };
+            let err = refusal(None, activated_in_account_1, 1);
+            assert!(matches!(err, WithdrawError::FromAddressNotFound), "{:?}", err);
+            let json = serde_json::to_value(&err).unwrap();
+            assert_eq!(json["error_type"], "FromAddressNotFound");
+            assert!(json["error_data"].is_null());
+        }
+
+        /// QTUM: the direct `withdraw` under a software HD login spends from the selected address.
+        #[test]
+        fn qtum_direct_withdraw_with_from_spends_from_the_selected_address() {
+            let fields = fields_at(PathToAddress::default(), 2);
+            let sender = address_of(&fields, &key_at(1));
+            let seen = Seen::default();
+            let recorded = seen.clone();
+            QtumCoin::get_unspent_ordered_list.mock_safe(move |coin, address| {
+                recorded.lock().unwrap().push(address.clone());
+                let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
+                MockResult::Return(Box::pin(futures::future::ok((listed_unspents(), cache))))
+            });
+            let arc: UtxoArc = fields.into();
+            let coin = QtumCoin::from(arc);
+
+            let details = coin.withdraw(request(Some(address_id(0, 1)))).wait().unwrap();
+
+            assert_eq!(*seen.lock().unwrap(), vec![sender.clone()]);
+            assert_spent_from(&details, &sender, &key_at(1), &key_at(0));
+        }
+
+        /// Scripts the unspent listing of the coin type `$coin` and records the address it is asked for.
+        macro_rules! mock_listing {
+            ($coin:ident) => {{
+                let seen = Seen::default();
+                let recorded = seen.clone();
+                $coin::get_unspent_ordered_list.mock_safe(move |coin, address| {
+                    recorded.lock().unwrap().push(address.clone());
+                    let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
+                    MockResult::Return(Box::pin(futures::future::ok((listed_unspents(), cache))))
+                });
+                seen
+            }};
+        }
+
+        /// The selectors that name the login's own address under an iguana login, in both forms.
+        fn own_address_selectors() -> [WithdrawFrom; 2] { [address_id(0, 0), derivation_path("m/44'/141'/0'/0/0")] }
+
+        /// R49.27b item 1: `UnexpectedFromAddress`, HTTP 400, `error_data` a string.
+        fn assert_single_key_refusal(err: WithdrawError) {
+            assert!(matches!(err, WithdrawError::UnexpectedFromAddress(_)), "{:?}", err);
+            assert_eq!(err.status_code(), http::StatusCode::BAD_REQUEST);
+            let json = serde_json::to_value(&err).unwrap();
+            assert_eq!(json["error_type"], "UnexpectedFromAddress");
+            assert!(json["error_data"].is_string());
+        }
+
+        /// T49.27b (single-key), direct route, UTXO standard coin: any `from`, the login's own address in both
+        /// selector forms included, is refused before the unspents are listed; without `from` the withdraw is
+        /// unchanged.
+        #[test]
+        fn t49_27b_single_key_direct_withdraw_refuses_from_utxo_standard() {
+            let seen = mock_listing!(UtxoStandardCoin);
+            let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+
+            for from in own_address_selectors() {
+                assert_single_key_refusal(direct(&coin, Some(from)).unwrap_err().into_inner());
+            }
+            assert!(seen.lock().unwrap().is_empty(), "refused before listing the unspents");
+
+            direct(&coin, None).unwrap();
+            assert_eq!(seen.lock().unwrap().len(), 1);
+        }
+
+        /// T49.27b (single-key), direct route, QTUM.
+        #[test]
+        fn t49_27b_single_key_direct_withdraw_refuses_from_qtum() {
+            let seen = mock_listing!(QtumCoin);
+            let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+            let arc: UtxoArc = fields.into();
+            let coin = QtumCoin::from(arc);
+
+            for from in own_address_selectors() {
+                let err = coin.withdraw(request(Some(from))).wait().unwrap_err().into_inner();
+                assert_single_key_refusal(err);
+            }
+            assert!(seen.lock().unwrap().is_empty(), "refused before listing the unspents");
+
+            coin.withdraw(request(None)).wait().unwrap();
+            assert_eq!(seen.lock().unwrap().len(), 1);
+        }
+
+        /// T49.27b (single-key), direct route, BCH, which has no HD wallet and passes the same single-key
+        /// constructor.
+        #[test]
+        fn t49_27b_single_key_direct_withdraw_refuses_from_bch() {
+            use crate::utxo::bch::{bch_coin_without_network_for_test, BchCoin};
+
+            let seen = mock_listing!(BchCoin);
+            let coin = bch_coin_without_network_for_test();
+
+            for from in own_address_selectors() {
+                let err = coin.withdraw(request(Some(from))).wait().unwrap_err().into_inner();
+                assert_single_key_refusal(err);
+            }
+            assert!(seen.lock().unwrap().is_empty(), "refused before listing the unspents");
+        }
+
+        /// T49.27b (single-key), task route: the shared sender step refuses the same two selectors with
+        /// `UnexpectedFromAddress`, and still resolves the login's own address without `from`.
+        #[test]
+        fn t49_27b_single_key_shared_sender_step_refuses_from() {
+            let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+
+            for from in own_address_selectors() {
+                let err = block_on(resolve_withdraw_sender(&coin, &request(Some(from))))
+                    .err()
+                    .expect("an explicit `from` is refused under an iguana login")
+                    .into_inner();
+                assert_single_key_refusal(err);
+            }
+
+            let sender = block_on(resolve_withdraw_sender(&coin, &request(None))).unwrap();
+            assert_eq!(&sender.address, coin.as_ref().derivation_method.unwrap_iguana());
+        }
+    }
 }
 
 // ---- The configurable sighash suffix (CRD ch.61, tests T6 and T8) ----
