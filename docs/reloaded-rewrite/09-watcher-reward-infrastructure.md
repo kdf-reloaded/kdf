@@ -457,6 +457,56 @@ R23. **A relay's handling of the two swap-helper topics (reference
      behavior -- including a finding that makes it inert there -- is
      recorded under that rule.
 
+R24. **The publishing side of the transaction-helper topic (reference
+     contract).** *(Spec Reader 2026-11-07, rows `v2.6.0-beta` and
+     `v3.0.0-beta` of chapter 02 §2.15A, identical at both; **passed the
+     KDF Dirty Gate on 2026-11-07**, measure 0.02.)* The second swap-helper topic, `txhlp/<TICKER>` (chapter 51
+     R50B), is fed by the legacy (v1) swaps and by the watcher, and by
+     nothing else:
+
+     1. *Which steps publish.* Every **spend of the counterparty's payment**
+        and every **refund of the node's own payment** that a legacy swap
+        or the watcher attempts, in the running swap, in the recovery of a
+        stuck swap, and in the watcher's two actions:
+        - maker: the spend of the taker payment (on the taker coin's
+          topic), the refund of the maker payment (maker coin), and the
+          recovery refund of the maker payment (maker coin);
+        - taker: the spend of the maker payment (maker coin), the refund
+          of the taker payment (taker coin), and the recovery spend of the
+          maker payment and recovery refund of the taker payment (their
+          coins' topics);
+        - watcher: the maker-payment spend it performs for the taker
+          (maker coin) and the taker-payment refund (taker coin).
+        The topic is always that of the coin the transaction belongs to.
+     2. *When.* Once after the attempt, in both outcomes: when the node's
+        own broadcast succeeded, the transaction is published; when the
+        attempt failed **with a built transaction at hand** (a broadcast
+        the node's backend refused), that transaction is published all the
+        same, so that another node may broadcast it; an attempt that
+        failed before a transaction existed publishes nothing. There is no
+        repetition and no re-broadcast interval (contrast R20).
+     3. *What is never published.* The taker fee, the maker payment and the
+        taker payment -- the node's own payments -- are not published; nor
+        is anything from the v2 swap protocol (chapter 52), which uses the
+        topic on neither side.
+     4. *Coin kinds.* A transaction of any coin family is published except a
+        Lightning payment, which has no broadcastable transaction; on a
+        browser build nothing is excluded.
+     5. *Envelope and key.* The message is the raw transaction bytes in the
+        signed envelope of chapter 51 R43, signed by the key that signs the
+        swap's own messages -- the swap's per-swap P2P key when it has one,
+        otherwise the node key; the watcher signs with the node key.
+     6. *Receiver.* What a receiving node and a relay do with the message,
+        who subscribes, and the finding that leaves the topic inert at the
+        reference, are bound in chapter 51 R50B and D6 and are not
+        restated here.
+
+> **Compatibility (this repository, 2026-11-07; not corpus-sourced).**
+> Reloaded publishes at the same steps (chapter 51 R50B, Decision BB) and,
+> unlike the reference receiver, unwraps the envelope before broadcasting.
+> R24 records the reference's publishing side so that chapter 51 R50B's
+> "publisher side is parity" has its contract written down.
+
 ## 9.11 Tests
 
 T1. **Topic-shape test.** The substrate shall include a
@@ -486,6 +536,16 @@ T5. **Switches (R22, R23).** With `use_watchers: false` a taker shall
     neither subscribe to a watcher topic nor start a state machine, and
     a relay shall still forward a watcher-topic message it does not
     process.
+
+T6. **Publishing side of the transaction-helper topic (R24).**
+    *(Reloaded-original; passed the KDF Dirty Gate with R24 on 2026-11-07.)* In a
+    scripted legacy swap, the maker's taker-payment spend and the taker's
+    maker-payment spend shall each produce exactly one message on the
+    spent coin's `txhlp/` topic, signed as R24 item 5 says, carrying the
+    transaction's bytes; a refund path shall produce one on the refunded
+    coin's topic; a spend whose broadcast the backend refuses shall still
+    produce one; the taker fee and the two payments shall produce none;
+    and a v2 swap shall produce none at all.
 
 ## 9.12 Deferred Work
 
@@ -803,3 +863,28 @@ V3. The publish-subscribe overlay the substrate rides on is
   no code blocks. *Measure:* 0.05, read against the standard that any
   discretionary finding fails a file; dictated-interop and public-surface
   tokens were excluded from the measured set.
+- *Scoped addition (2026-11-07) -- R24, T6 and the compatibility note under
+  R24.* **KDF Dirty Gate: PASS on 2026-11-07, measure 0.02.** *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`
+  and `v3.0.0-beta` of chapter 02 §2.15A, identical at both, consulted
+  **only** to establish the publishing side of the transaction-helper topic:
+  which swap steps publish, on success and on failure, in the legacy maker
+  and taker swaps, their recovery paths and the watcher; which transactions
+  never are; which coin kinds are excluded; which key signs; and that the v2
+  swap protocol publishes nothing on the topic. Behavior and the dictated
+  topic shape only; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced. The receiver
+  facts R24 points to are those of chapter 51 R50B, gated 2026-11-04. T6 is
+  Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.02, no findings. *Extent:* the publishing side of the transaction-helper
+  topic in the legacy maker and taker swaps, their recovery paths, the watcher
+  and the v2 swaps, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for
+  the whole batch, about 24 source files were read in full or in the relevant
+  regions at the `dev (as of 2026-03-27)` row, whose source tree is identical
+  to `v3.0.0-beta`, and the same modules were diffed against `v2.6.0-beta`.
+  *Method:* reading, with mechanical cross-checks (diffs between the tabled
+  states; pattern searches of the added lines for paths, identifiers and
+  markers); the gate script was not run because the candidate has no code
+  blocks. *Measure:* 0.02, read against the standard that any discretionary
+  finding fails a chapter; dictated-interop and public-surface tokens were
+  excluded from the measured set.

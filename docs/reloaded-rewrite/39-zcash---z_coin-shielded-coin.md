@@ -753,6 +753,51 @@ refusals -- `error_type` `UnsupportedError` (one shared discriminant, `fee`
 checked before `from`), HTTP 400, string `error_data`, delivered in
 `result.details` on the task route -- is bound in chapter 49 R49.27a.
 
+R39.5A.3 *The shielded withdraw response (reference contract).* *(Spec Reader
+2026-11-07, rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+identical at both; **passed the KDF Dirty Gate on 2026-11-07**, measure 0.01.)* A completed shielded withdrawal answers
+the transaction-details object of chapter 49 §49.6 with these members set as
+follows:
+
+- `from` is a one-element list holding the wallet's own Sapling address; `to`
+  is a one-element list holding the destination exactly as the request gave
+  it;
+- `spent_by_me` is the value of the Sapling notes the transaction spends and
+  `received_by_me` the Sapling change it pays back to the wallet; both are
+  non-negative decimals;
+- `my_balance_change` is **`received_by_me - spent_by_me`**: the same
+  orientation as the history row of §39.8.3 and of every other coin's
+  transaction details, hence **negative** for a withdrawal (the amount sent
+  plus the fee, as a negative number);
+- `total_amount` equals `spent_by_me`;
+- `fee_details` is the **tagged** fee object shared with the transparent
+  UTXO coins: `{"type": "Utxo", "coin": "<TICKER>", "amount": <fee>}`, where
+  `amount` is the transaction's fee; a client that reads `fee_details.amount`
+  therefore keeps working, and one that switches on `fee_details.type` sees
+  the UTXO discriminant, not a shielded-specific one;
+- `block_height` and `timestamp` are `0` (the transaction is unmined and the
+  details are built before broadcast); `memo` echoes the request's `memo`;
+  `transaction_type` is the standard transfer; `kmd_rewards` is absent.
+
+> **Compatibility (this repository, 2026-11-07; not corpus-sourced; from the
+> maintainer's field report of 2026-11-06).** Reloaded's shielded withdraw
+> response reports `my_balance_change` as `spent_by_me - received_by_me`
+> (positive) while its history row reports `received_by_me - spent_by_me`
+> (negative); the reference reports the negative value in both places, so the
+> response's sign is a Reloaded defect against R39.5A.3 and R39.6.5c, not a
+> divergence to document. Reloaded's `fee_details` on a shielded withdraw is
+> already the tagged `Utxo` object, which matches R39.5A.3; the earlier
+> wording of R39.6.5c ("`fee_details.amount`") described only its `amount`
+> member and was not a statement that the object is untagged.
+
+T39.5A.c *Response sign and fee shape (R39.5A.3).* *(Reloaded-original;
+passed the KDF Dirty Gate with R39.5A.3 on 2026-11-07.)* A shielded withdraw of `V` with
+fee `F` and change `C` from notes worth `N = V + F + C` shall answer
+`spent_by_me = N`, `received_by_me = C`, `my_balance_change = -(V + F)`,
+`total_amount = N`, and `fee_details` equal to
+`{"type": "Utxo", "coin": <ticker>, "amount": F}`; the same transaction's row
+in `z_coin_tx_history` shall carry the same `my_balance_change`.
+
 > **Compatibility (this repository, 2026-11-04; not corpus-sourced).**
 > Reloaded's shielded coin implements the legacy `withdraw` method and
 > reaches the same code from the task route, and `validateaddress` decodes
@@ -1387,8 +1432,11 @@ fee of R39.6.5f. The response keeps its shape:
 
 - `from` is the wallet's own Sapling address and `to` the Pirate1 address as given;
 - `spent_by_me` is the value of the selected Sapling notes, `received_by_me` the Sapling
-  change, and `my_balance_change` their difference;
-- `fee_details.amount` is the fee of R39.6.5f;
+  change, and `my_balance_change` is `received_by_me - spent_by_me` -- negative for a
+  withdrawal, the same sign as the history row of §39.8.3 (R39.5A.3; *amended 2026-11-07,
+  passed the KDF Dirty Gate with R39.5A.3 on 2026-11-07*);
+- `fee_details` is the tagged UTXO fee object of R39.5A.3 -- `type: "Utxo"`, `coin`, and
+  `amount` equal to the fee of R39.6.5f;
 - `tx_hex` is the transaction of R39.6.5d, broadcast with `send_raw_transaction` like any
   other withdrawal (R39.6.5g).
 
@@ -1553,6 +1601,16 @@ change counts as non-spendable balance.
 > about a minute and a half, the proving key included. The live round trip with an
 > Ironwood wallet is still to run. The bundle is output-only with the empty-tree anchor
 > (R39.6.5d, R39.6.5e as amended on 2026-11-05), so no tree state is read.
+>
+> **Update (2026-11-06).** The live mainnet round trip passed (release tests of
+> 0.4.0-beta.1, rows ARRR-L2 to ARRR-L6). A lab wallet sent 0.1 ARRR and then 0.02 ARRR
+> to a Pirate1 address of the Pirate node's own wallet. The node decoded a version-6
+> transaction with two Ironwood actions, spends disabled, outputs enabled and the
+> empty-tree anchor, and its wallet received the note. The return payment from that
+> address arrived as a Sapling deposit (R39.8.0bb). The custom-fee, sender and address
+> refusals answered as specified. The first Ironwood build of the release binary took
+> 22.9 s, the proving key included, and raised peak memory from 128 MB to 277 MB; the
+> next build took 5.5 s. The host was heavily loaded, so both times are upper bounds.
 >
 > **Compatibility.** The reference answers a Pirate1 address with `is_valid: false` on
 > `validateaddress` and with `InvalidAddress` on its withdrawal route (§39.5A). This
@@ -1976,6 +2034,13 @@ ahead.
 > paying from Sapling into Ironwood and one from Ironwood into Sapling, are read by every
 > full-byte reader. The broadcast record reads both; for one that spends Sapling notes it
 > cannot yet derive the fee, which R39.6.5g closes. Only the live mainnet deposit remains.
+>
+> **Update (2026-11-06).** The live mainnet deposit passed (release tests of
+> 0.4.0-beta.1, rows ARRR-L3 and ARRR-L4). The Pirate node's wallet sent 0.1199 ARRR from
+> Ironwood notes to a lab wallet's Sapling address, with spends enabled and a real
+> Ironwood anchor. The wallet counted it once after mining, with a final history row, and
+> a following send spent the note. The deposit was not shown as pending before mining;
+> R39.8.0aj1 fixes the schedule that caused it.
 
 R39.8.0p Generated shielded transactions shall coordinate with the scanner so the
 same wallet note is not selected concurrently by multiple sends or swaps. After
@@ -2648,6 +2713,21 @@ pending amount shall not be older than one poll period and shall not be computed
 from a mempool snapshot taken before the wallet-database height it is combined
 with.
 
+R39.8.0aj1 **Every pass refreshes the pending view.** Where the pending view is
+refreshed on the background-sync schedule, every pass shall end with a refresh,
+whatever the pass found. That covers a pass that finds no new block, and a pass whose
+block download or scan fails, as well as a pass that scanned new blocks. A pass that
+scans refreshes after its scan, so a transaction mined in a block that pass scanned is
+already excluded (R39.8.0ah). A pass that could not read the chain tip refreshes too,
+and uses the wallet's last scanned height where it would otherwise use the tip.
+
+> **Provenance and reason (2026-11-06).** Clean-room original. A live mainnet deposit
+> from an Ironwood wallet (release tests of 0.4.0-beta.1, row ARRR-L3) was never shown
+> as pending. The background task refreshed the pending view only after a pass that had
+> scanned a new block. A deposit mined in the next block was therefore never pending,
+> and while no block arrived the view grew older than one poll period, which
+> R39.8.0aj forbids.
+
 #### Tests
 
 T39.8.0f Background-sync tests shall prove that, after a Light activation
@@ -2699,11 +2779,23 @@ transaction observed on repeated polls contributes once; and that an endpoint
 which does not serve `GetMempoolTx` yields a zero pending amount rather than a
 balance error.
 
+T39.8.0g1 Pass-schedule tests shall prove, without a network and with the steps of a
+pass scripted, that:
+
+- a pass that finds no new block still refreshes the pending view, so a wallet-owned
+  output that enters the mempool while the tip stays put is reported in the
+  non-spendable balance after the next pass;
+- a pass whose block download fails, and a pass whose scan fails, still refresh it;
+- a pass that scans refreshes only after its scan;
+- a pass that cannot read the tip refreshes with the wallet's scanned height
+  (R39.8.0aj1).
+
 #### Deferred Work
 
 D39.8.0c *(Resolved 2026-08-09.)* Pending shielded receipts (§39.8.0.6) are
 implemented. The background sync task polls the dictated `GetMempoolTx` stream
-after each wallet scan, trial-decrypts every compact output with the wallet's
+at the end of every pass (R39.8.0aj1; until 2026-11-06 only after a pass that had
+scanned a new block), trial-decrypts every compact output with the wallet's
 incoming viewing key, excludes any transaction the wallet database has already
 scanned, and rebuilds the pending set wholesale so a mined, dropped or expired
 transaction disappears without bespoke invalidation. The total surfaces only in
@@ -7015,3 +7107,28 @@ entries in its list cannot be told apart. Passing the position to the fallback c
     transaction reader; the published wallet-database crate and this repository's code.
   - They take no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
     is required.
+- *Scoped addition (2026-11-07) -- R39.5A.3, T39.5A.c, the compatibility
+  note under R39.5A.3, and the amended `my_balance_change` and `fee_details`
+  items of R39.6.5c.* **KDF Dirty Gate: PASS on 2026-11-07, measure 0.01.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish the members of the shielded withdraw
+  response: the orientation of `my_balance_change`, the values of
+  `spent_by_me`, `received_by_me` and `total_amount`, the shape and
+  discriminant of `fee_details`, and the fixed members (`from`, `to`,
+  `block_height`, `timestamp`, `memo`). Dictated response members and their
+  values only; no private identifier, function body, helper decomposition,
+  error, log or comment text was reproduced. The compatibility note rests on
+  the maintainer's field report and this repository's own code; T39.5A.c is
+  Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.01, no findings. *Extent:* the shielded coin's withdraw response, at
+  `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole batch, about
+  24 source files were read in full or in the relevant regions at the `dev (as
+  of 2026-03-27)` row, whose source tree is identical to `v3.0.0-beta`, and
+  the same modules were diffed against `v2.6.0-beta`. *Method:* reading, with
+  mechanical cross-checks (diffs between the tabled states; pattern searches
+  of the added lines for paths, identifiers and markers); the gate script was
+  not run because the candidate has no code blocks. *Measure:* 0.01, read
+  against the standard that any discretionary finding fails a chapter;
+  dictated-interop and public-surface tokens were excluded from the measured
+  set.

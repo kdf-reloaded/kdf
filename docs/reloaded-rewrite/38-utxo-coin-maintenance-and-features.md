@@ -291,7 +291,12 @@ signed transaction hex.
 R38.5.2 The public `consolidate_utxos` RPC shall merge many UTXOs of a coin into
 a single self-directed output under configurable merge conditions, with an
 optional broadcast flag; when broadcast is not requested it returns the
-constructed transaction without sending it.
+constructed transaction without sending it. *(Pointer added 2026-11-07;
+passed the KDF Dirty Gate with its target on 2026-11-07.)* Under a global-HD login the
+reference serves this RPC, `fetch_utxos` and the automatic merge as
+[Chapter 5](05-hd-wallet-support.md) §5.9B R35b records: consolidation and
+the automatic merge on the enabled address only, `fetch_utxos` over every
+known address.
 
 R38.5.3 The coin's header/byte handling shall use the configuration-selected
 chain-variant model defined in
@@ -1140,7 +1145,9 @@ does not stall block-count discovery.
 R38.6.4a *Spreading read-only queries across sessions (Reloaded-original,
 maintainer Decision R of 2026-10-27; passed the KDF Dirty Gate on 2026-10-27.
 Items 6–8 and the changes to items 1 and 3 were added on 2026-11-02 on the
-clean side, maintainer Decision BI, with no forbidden-class input.)*
+clean side, maintainer Decision BI, with no forbidden-class input. The floor
+of two in item 6 was added on 2026-11-06 on the clean side, maintainer
+Decision CX, with no forbidden-class input.)*
 1. *What spreads.* With `electrum_spread_reads` enabled, the client sends
    each read-only query of a coin to the next connected session in turn,
    round-robin over the near sessions (item 6) of the sessions R38.6.4 keeps
@@ -1166,11 +1173,17 @@ clean side, maintainer Decision BI, with no forbidden-class input.)*
    when it has no smoothed latency yet, or when its smoothed latency is at
    most the larger of *F* × *f* and *f* + *A*, where *F* is the near factor
    and *A* the near offset of item 8. When no maintained session has a smoothed latency, every
-   maintained session is near. The near sessions are judged when the query
-   starts, from the figures at that moment, and the turn of item 1 runs over
-   them in priority order. A session that is not near still answers a query
-   when the near sessions fail (item 3), and it becomes near again as soon as
-   its smoothed latency is within the limit.
+   maintained session is near. *At least two are near:* when two or more
+   sessions are maintained and the limit leaves only one of them near, the
+   maintained session with the next-lowest smoothed latency is near as well;
+   between equal figures, the one earlier in priority order is. A coin with
+   two maintained sessions therefore always spreads over both, and one with
+   more always over at least its two fastest. The near sessions are judged
+   when the query starts, from the figures at that moment, and the turn of
+   item 1 runs over them in priority order. A session that is not near still
+   answers a query when the near sessions fail (item 3), and it becomes near
+   again as soon as its smoothed latency is within the limit or it is among
+   the two fastest.
 7. *Latency under every order.* The smoothed latency of R38.6.4l item 2
    (*While running*) is kept for every maintained session, whatever
    `electrum_server_order` says. Every ordinary request and every
@@ -1208,12 +1221,25 @@ RIN's later list of six servers the medians of a balance read from the lab
 host were about 25, 27 and 32 ms for three servers, 108 ms for a fourth, and
 230 and 266 ms for the last two. Spreading over all six costs about 114 ms per
 read on average; over the three near ones, about 28 ms. With *F* = 2 the limit
-is the larger of 50 ms and 45 ms, which keeps exactly the three. A session
-that a server's per-session limit slows down (R38.6.3a) leaves the near set and
-recovers its budget while the ping keeps measuring it. When every session is
+is the larger of 50 ms and 45 ms, which keeps exactly the three. While at
+least two other sessions stay near, a session that a server's per-session
+limit slows down (R38.6.3a) leaves the near set and recovers its budget while
+the ping keeps measuring it. When every session is
 slowed, all of them stay near, so a coin whose servers all limit each session
 keeps the full spread. The offset (20 ms by default) keeps sessions within a
 few milliseconds of a very fast one near.
+
+*Rationale for the floor of two (this project's own lab runs, 2026-11-06).*
+Some servers answer a session about once a second after its first few
+requests (R38.6.3a). One such answer, about 1,000 ms, lifts the smoothed
+latency of a server that otherwise answers in about 40 ms past the near limit
+for a while. With two servers, the other one then takes every read until the
+first comes back, and reaches its own limit sooner. In a lab loop of 200 DOGE
+orders against two such servers, the same build took 336 s with items 6–8,
+about 12 % longer than its 300 s with the near factor at 0, which matches
+0.3.0-beta.1. With the floor, a coin with two servers spreads over both, as before items
+6–8, and a coin with more servers leaves a distant one out only while two
+others stay near.
 
 *Herding (informative).* Nodes in one region find the same servers near and
 spread over them. That concentrates load by region, not globally. The
@@ -1269,6 +1295,11 @@ every maintained session.
 > `electrum_measure.rs` (`near_sessions`). It is also the only place that holds the
 > form of the limit (D38.6.4a.2). The two defaults are one constant each there:
 > `NEAR_FACTOR_DEFAULT` and `NEAR_OFFSET_DEFAULT_MS`.
+> - *The floor of two (2026-11-06, D38.6.4a.3).* The floor of item 6 lives in `near_sessions`
+>   only: after the flags of the limit, when two or more sessions are given and fewer than
+>   two are near, the session with the next-lowest figure after the fastest is set near as
+>   well, the earlier one in priority order between equal figures. `in_turn_for` is
+>   unchanged, since it consumes the flags.
 > - *The turn.* When a read-only query starts, `in_turn_for` in the pool reads each
 >   maintained slot's smoothed latency and asks for the near ones. It rotates them by
 >   the read counter modulo their number, then appends the other maintained slots in
@@ -1840,6 +1871,49 @@ maintainer decision 2026-11-04).**
    does, and logs nothing. A server entry with `spki_sha256` on a browser build:
    R38.6.4n item 6.
 
+> **Reference behavior (Spec Reader 2026-11-07, rows `v2.6.0-beta` and
+> `v3.0.0-beta` of chapter 02 §2.15A, identical at both; passed the KDF
+> Dirty Gate on 2026-11-07, measure 0.03).** The
+> reference matches items 1--5, 7 and 9 of R38.6.4m, so there is **no
+> divergence** on what `disable_cert_verification` does, and the black-box lab
+> result of 2026-11-04 (a self-signed version 3 certificate accepted under the
+> flag) is the expected outcome at both rows:
+>
+> - *Per-server TLS surface.* A server entry carries exactly `url`,
+>   `protocol`, `disable_cert_verification` (default `false`) and
+>   `timeout_sec`; there is no other per-server TLS knob -- no pin, no
+>   per-server trust store, no minimum version or cipher setting.
+> - *Skipped under the flag:* the whole server-certificate verification --
+>   chain and trust anchor, validity period, CA flag, extended key usage, and
+>   the host-name match against the certificate.
+> - *Kept under the flag:* the handshake signature is verified with the
+>   presented end-entity certificate's public key under the TLS library's
+>   default schemes (the set of item 3), which requires that certificate to
+>   parse as an X.509 version 3 certificate; the protocol versions (TLS 1.3
+>   and 1.2 only), cipher suites and key-exchange groups of item 3; and the
+>   host-name precheck of item 2, which refuses an IP literal before any
+>   connection as a non-recoverable failure, so the server is dropped from the
+>   pool (R38.6.4d item 3). The configured host name is sent as SNI and is
+>   not checked against the certificate.
+> - *Failure class when a certificate is refused by default* (unknown issuer,
+>   CA certificate used as end entity, expired, name mismatch) and when a
+>   handshake fails under the flag (version 1 certificate, unsupported key or
+>   scheme, no common version or suite): a **temporary**, recoverable
+>   connection failure, so the server is retried under the pool's suspension
+>   rules (item 7; R38.6.4d item 1). Only a malformed address, an IP literal
+>   under `SSL`, a browser-only protocol on a native build and a version
+>   mismatch are non-recoverable.
+> - *Logging.* The reference logs no warning for a server configured with the
+>   flag; the line it logs when a connection is established marks that the
+>   connection was made with certificate verification disabled. Item 6 of
+>   R38.6.4m therefore adds a warning the reference does not have.
+> - *Browser build.* `WSS` is the browser's TLS; the flag has no effect there
+>   (item 9).
+>
+> The TLS library of the reference is an older major version than Reloaded's;
+> the behaviors above are what both versions do, not a statement that the
+> two libraries are identical in every rejection text.
+
 R38.6.4n **Electrum server key pin `spki_sha256` (Reloaded-original; planned;
 maintainer decision 2026-11-04).** Opt-in: a server entry without the key
 behaves exactly as R38.6.4m. The implementation waits for the maintainer's
@@ -2032,7 +2106,14 @@ alone (R38.6.4a item 6), with smoothed latencies given in milliseconds:
   offset term (20 ms by default);
 - one session without a smoothed latency among the six of the first case: it
   is near as well;
-- no session with a smoothed latency: all are near.
+- no session with a smoothed latency: all are near;
+- 38 and 230 with *F* = 2: both are near (the floor of two);
+- 25, 230 and 266 with *F* = 2: the first two are near, the third is not;
+- 230, 25 and 230 with *F* = 2: the first two are near (the lowest figure,
+  then the earlier of the two equal ones), the third is not;
+- 25, 230 and no smoothed latency with *F* = 2: the first and the third are
+  near, the second is not;
+- a single session with 230: it is near.
 
 T38.6.4a.2 *Reads avoid a far session.* With three maintained stubs, two
 answering in about 5 ms and one in about 200 ms, and each with at least one
@@ -2067,6 +2148,11 @@ follow the priority order whatever the two values.
 T38.6.4a.7 *Writes keep their routing.* In the setting of T38.6.4a.2 with the
 slow stub first in priority, a broadcast and a subscription shall go to the
 slow stub.
+
+T38.6.4a.8 *Two sessions keep both in turn.* With two maintained stubs, one
+answering in about 5 ms and one in about 200 ms, and each with at least one
+sample, 30 read-only queries in a row shall be answered by both stubs in
+turn, each answering 15 within one.
 
 The tests of R38.6.4l run in-process against the stub Electrum server of
 `mm2src/coins/utxo/rpc_clients/electrum_stub_server.rs`, with the per-method
@@ -2263,8 +2349,8 @@ naming the value" can be read as a warning for an absent switch too. This
 rule keeps R38.6.4b-R item 1: no warning when the switch is absent.
 
 D38.6.4a.1 *(Decided 2026-11-02, maintainer Decisions 8 and 22; under
-monitoring.)* *The defaults of item 8.* The near sessions of item 6 are on by
-default, with *F* = 2 and *A* = 20 ms. A latency study of 2026-11-02 checked
+monitoring; item 6 amended by D38.6.4a.3.)* *The defaults of item 8.* The
+near sessions of item 6 are on by default, with *F* = 2 and *A* = 20 ms. A latency study of 2026-11-02 checked
 the rule against the server lists coins actually carry, on 13 coins with one to
 six servers. It found the rule helpful where a coin's servers differ and
 neutral where they do not, and the maintainer kept the rule and both defaults.
@@ -2282,6 +2368,17 @@ admits them up to (*F* − 1) × *f* further behind. Example: with *f* = 25 ms t
 larger-of form gives 50 ms, the sum 70 ms. The maintainer kept the larger-of
 form of item 6. The latency study of 2026-11-02 found the same near sessions
 under both forms on every one of its 13 sampled coins.
+
+D38.6.4a.3 *(Decided 2026-11-06, maintainer Decision CX.)* *A floor of two
+near sessions.* The DOGE row of the read-spreading timing runs
+(`docs/release-tests/0.4.0-beta.1.md`) found a loop of 200 orders about 11 %
+slower under items 6–8 than on 0.3.0-beta.1, on a coin with two servers that
+each limit a session. A run of the same build with the near factor at 0 took
+the time of 0.3.0-beta.1, and the default setting reproduced the slowdown, so
+item 6 was the cause. The maintainer chose a floor of two near sessions, over
+keeping item 6 as it was, over a hysteresis on leaving the near set, and over
+the factor 0 as the default. The defaults of D38.6.4a.1 stay, under
+monitoring.
 
 D38.6.4m.1 *(Resolved 2026-11-05 by a lab run.)* *A refusal under the flag in the
 field.* The item was raised because a server with `disable_cert_verification` was
@@ -3024,7 +3121,12 @@ the same for the Sia wallet daemon.
 > because it asks for a hardware device first (the Chapter 20 §20.10 D1 note
 > records it); and `path_to_address` is honored for a software global-HD
 > account only, not under the Trezor policy (Chapter 55 §55.5). Both are items
-> of plan [`hd-key-unification`](../plans/hd-key-unification.md). This section
+> of plan [`hd-key-unification`](../plans/hd-key-unification.md). *(Pointer
+> added 2026-11-07; passed the KDF Dirty Gate with its target on 2026-11-07.)* The
+> reference contract for both -- and for the listing of the address at
+> `path_to_address` from the first activation on, and for `fetch_utxos`,
+> `consolidate_utxos` and the automatic merge under HD -- is recorded in
+> [Chapter 5](05-hd-wallet-support.md) §5.9B R35a--R35c. This section
 > binds the software-HD UTXO behaviour as first-class, testable requirements.
 > It is the coin-side consumer of Chapter 5
 > §5.9A (R29–R31), which binds the crypto substrate (software wallet identity,
@@ -3588,3 +3690,39 @@ R38.8.6 **Tests (two-direction, observable).**
   `rustls-webpki`, `ring`, `webpki-roots`) at the versions in `Cargo.lock`, and
   the maintainer's decision of 2026-11-04. They take no forbidden-class input,
   so chapter 01 R38 is not engaged and no gate pass is required.
+- *Reloaded-original amendment (2026-11-06, maintainer Decision CX), clean side.*
+  The floor of two in R38.6.4a item 6 and its last sentence, the changed
+  sentence of the second rationale, the rationale for the floor, the new cases
+  of T38.6.4a.1, T38.6.4a.8, D38.6.4a.3, the floor bullet of the as-built
+  note for items 6–8 and the cross-reference in D38.6.4a.1 were written by a
+  session that never read the corpus. They rest on the
+  maintainer's Decision CX of 2026-11-06, this project's own lab timing runs of
+  2026-11-06 and this repository's code. They take no forbidden-class input, so
+  chapter 01 R38 is not engaged and no gate pass is required.
+- *Scoped addition (2026-11-07) -- the reference-behavior note under
+  R38.6.4m, and the pointers in R38.5.2 and the §38.8 status note.* **KDF
+  Dirty Gate: PASS on 2026-11-07, measure 0.03.** *Inputs:* the forbidden corpus at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, identical at both, consulted **only**
+  to establish the per-server TLS members of an Electrum server entry, which
+  certificate checks `disable_cert_verification` turns off and which remain,
+  how a refused certificate or failed handshake is classified for the pool,
+  how an IP literal is treated, and whether the flag is warned about; together
+  with the public documentation of the TLS library version the reference pins.
+  Behavior and dictated request members only; no private identifier, function
+  body, helper decomposition, error, log or comment text was reproduced. The
+  two pointers carry no reference content of their own; their targets are
+  chapter 05 R35a--R35c, which passed the same gate on 2026-11-07.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.03, no findings. *Extent:* Electrum per-server TLS settings, the
+  certificate-verification switch, connection-failure classification and the
+  connected-line logging, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check,
+  plus two manifest or lock files for the TLS library version; for the whole
+  batch, about 24 source files were read in full or in the relevant regions at
+  the `dev (as of 2026-03-27)` row, whose source tree is identical to
+  `v3.0.0-beta`, and the same modules were diffed against `v2.6.0-beta`.
+  *Method:* reading, with mechanical cross-checks (diffs between the tabled
+  states; pattern searches of the added lines for paths, identifiers and
+  markers); the gate script was not run because the candidate has no code
+  blocks. *Measure:* 0.03, read against the standard that any discretionary
+  finding fails a chapter; dictated-interop and public-surface tokens were
+  excluded from the measured set.

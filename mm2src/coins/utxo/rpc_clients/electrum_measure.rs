@@ -231,16 +231,36 @@ pub(super) const NEAR_OFFSET_DEFAULT_MS: f64 = 20.0;
 /// this line is the only place that holds it). Without any figure, and with a `factor` of `0`, every session is
 /// near. A `factor` above `0` and below `1` acts as `1`: `factor` x *f* is then below *f* + `offset_ms`, which
 /// decides.
+///
+/// The floor of two (R38.6.4a item 6, D38.6.4a.3): when two or more sessions are given and the limit leaves fewer
+/// than two of them near, the session with the next-lowest figure after the fastest is near as well, and between
+/// equal figures the one earlier in the list, which is the priority order. A coin with two sessions therefore
+/// always spreads over both, and one with more over at least its two fastest. This too is held here only.
 pub(super) fn near_sessions(figures: &[Option<f64>], factor: f64, offset_ms: f64) -> Vec<bool> {
     let fastest = figures.iter().flatten().copied().reduce(f64::min);
     let Some(fastest) = fastest.filter(|_| factor > 0.) else {
         return vec![true; figures.len()];
     };
     let limit = (factor * fastest).max(fastest + offset_ms);
-    figures
+    let mut near: Vec<bool> = figures
         .iter()
         .map(|figure| figure.map_or(true, |figure| figure <= limit))
-        .collect()
+        .collect();
+    if near.len() >= 2 && near.iter().filter(|near| **near).count() < 2 {
+        // Only the fastest is near, so every other session has a figure. `min_by` keeps the first of equal
+        // figures, which is the earlier one in priority order.
+        let next = figures
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !near[*i])
+            .filter_map(|(i, figure)| figure.map(|figure| (i, figure)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i);
+        if let Some(i) = next {
+            near[i] = true;
+        }
+    }
+    near
 }
 
 /// P2 (R38.6.4l item 6): after at least 5 samples, the smoothed latency exceeds all three of 4 times the
@@ -386,6 +406,23 @@ mod tests {
         assert!(near_sessions(&[], 2., 20.).is_empty());
     }
 
+    /// T38.6.4a.1: the floor of two near sessions (R38.6.4a item 6, D38.6.4a.3).
+    #[test]
+    fn t38_6_4a_1_at_least_two_sessions_are_near() {
+        // 38 and 230: the limit is 76 ms, and the floor keeps both.
+        assert_eq!(near_for(&[38., 230.], 2.), [true, true]);
+        // 25, 230, 266: the fastest and the next-fastest.
+        assert_eq!(near_for(&[25., 230., 266.], 2.), [true, true, false]);
+        // 230, 25, 230: the lowest figure, then the earlier of the two equal ones.
+        assert_eq!(near_for(&[230., 25., 230.], 2.), [true, true, false]);
+        // 25, 230 and none: the one without a figure is near already, so the floor adds nothing.
+        assert_eq!(near_sessions(&[Some(25.), Some(230.), None], 2., 20.), [
+            true, false, true
+        ]);
+        // A single session is near.
+        assert_eq!(near_for(&[230.], 2.), [true]);
+    }
+
     /// T38.6.4a.1: with the offset at 0 the factor alone decides; with 50 a session up to 50 ms behind the
     /// fastest is near.
     #[test]
@@ -394,8 +431,9 @@ mod tests {
         assert_eq!(near_with_offset(&[25., 50., 50.1], 2., 0.), [true, true, false]);
         assert_eq!(near_with_offset(&[25., 25., 25.1], 1., 0.), [true, true, false]);
         assert_eq!(near_for(&[25., 25., 25.1], 1.), [true, true, true]);
-        // A factor between 0 and 1 then admits only the fastest figure, and 0 still turns the rule off.
-        assert_eq!(near_with_offset(&[25., 27., 32.], 0.5, 0.), [true, false, false]);
+        // A factor between 0 and 1 then makes the limit admit only the fastest figure; the floor of two near
+        // sessions (D38.6.4a.3) adds the next-fastest one. A factor of 0 still turns the rule off.
+        assert_eq!(near_with_offset(&[25., 27., 32.], 0.5, 0.), [true, true, false]);
         assert_eq!(near_with_offset(&RIN_FIGURES, 0., 0.), [true; 6]);
         // Offset 50: f = 25 admits up to 75 ms (the factor gives 50), and 76 ms is out.
         assert_eq!(near_with_offset(&[25., 27., 32., 75., 76., 108.], 2., 50.), [
