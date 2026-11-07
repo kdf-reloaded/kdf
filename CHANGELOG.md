@@ -616,13 +616,6 @@ lives.
   coin is offered only once the Electrum server lists it. More in
   [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md).
   Detail: PR #181; CRD ch.38 R38.5B.8, D38.5B.2, D38.5B.4.
-- **The ARRR history names no recipient for a withdrawal made before this release, or by another
-  node on the same seed, and no address for a swap's transparent parts.** The recipient comes from
-  the node's own record, written when the withdrawal is built, so a row without a record names
-  only the wallet's own address. A swap's payment, spend and refund rows do not list the script
-  address or the fee address yet; that is scheduled. More in
-  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PR #NNN;
-  CRD ch.39 R39.8.9d2 (d), status note under R39.8.9e.
 - **The swap watcher does not work yet.** A watcher is another node that finishes a swap for you
   when you are offline. No swap hands its data to a watcher yet, for any coin (issue #56), so keep
   your node running until your swaps have finished. Bitcoin-family coins (UTXO coins such as RIN,
@@ -666,12 +659,13 @@ lives.
   has no shielded wallet database, and building a shielded transaction would also need the Sapling
   prover, which only the native build has. Use a native build for ARRR. Detail: CRD ch.39 R39.10.1,
   §39.6.1.
-- **The ARRR history does not show a withdrawal's recipient, and lists the wallet's own address
-  twice.** A withdrawal's row lists only the wallet's own addresses, before and after mining, whether
-  it paid a Sapling or a Pirate1 (Ironwood) address. Every ARRR history row, deposits included, also
-  lists the wallet's own address in a unified `u1…` form, which ARRR wallets do not accept. The
-  answer to a withdrawal names its recipient correctly, and no funds are affected. Work in progress:
-  a fix is under way.
+- **The ARRR history names no recipient for a withdrawal made before this release, or by another
+  node on the same seed, and no address for a swap's transparent parts.** The recipient comes from
+  the node's own record, written when the withdrawal is built, so a row without a record names
+  only the wallet's own address. A swap's payment, spend and refund rows do not list the script
+  address or the fee address yet; that is scheduled. More in
+  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PR #NNN;
+  CRD ch.39 R39.8.9d2 (d), status note under R39.8.9e.
 - **An ARRR withdrawal answers `my_balance_change` with the wrong sign.** The answer to a withdrawal
   gives the amount spent minus the amount received, a positive number, where its history row,
   Komodo DeFi Framework and GLEEC KDF give received minus spent. The transaction itself is correct.
