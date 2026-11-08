@@ -567,7 +567,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   pool.** The pool reply is now read one transaction at a time and a transaction the library cannot read
   is left out, so the fee validation of a swap, the raw-transaction lookup and the wait for a spend no
   longer fail because of it. Before, one such transaction made the whole reply fail. A left-out
-  transaction is logged only at debug level by the Sia library. Detail: PR #TBD; CRD ch.20 R-N4.
+  transaction is logged only at debug level by the Sia library. Detail: PR #291; CRD ch.20 R-N4.
 
 - **A wallet without SC can now receive SC in a swap.** The swap refused to start with "Not enough SC
   for swap: available 0, required at least 0.00001", although the receiving side spends no wallet
