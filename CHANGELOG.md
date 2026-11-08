@@ -159,7 +159,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 - **A warning when the full key export is switched on.** With `allow_insecure_key_export: true`
   in `MM2.json`, the node now logs a warning at start-up that says `get_private_keys` can export the
   keys of every configured coin, and another warning for each call that uses the full export, with
-  the mode and the number of coins asked for. Neither warning contains a key. Detail: PR #NNN; CRD
+  the mode and the number of coins asked for. Neither warning contains a key. Detail: PR #305; CRD
   ch.07 R-K1.
 - **The start-up log now lists the files the node uses.** At start the node logs, at INFO and as
   absolute paths, where its configuration came from (the command line, the default file or the file
