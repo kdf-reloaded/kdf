@@ -216,7 +216,12 @@ risk.
 > altered), which the reference release does not do; and a legacy request
 > whose method the legacy table does not know is answered as a legacy error,
 > whereas the reference release retries such a request on the mmrpc 2.0
-> dispatcher. Neither affects a bound field of this chapter.
+> dispatcher. Neither affects a bound field of this chapter. The
+> envelope-selection rule behind the second difference, the strictness of
+> the versioned envelope, and the surfaces on which the order-management
+> methods exist are bound in Chapter 43 §43.1A (added 2026-11-08; passed the
+> KDF Dirty Gate on 2026-11-08), which also records that a versioned request for a
+> legacy-only method answers `NoSuchMethod` in the reference as it does here.
 
 ---
 
