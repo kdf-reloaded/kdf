@@ -325,6 +325,10 @@ pub(crate) struct EthTrezorSigner {
     pub(crate) address: Address,
     /// Uncompressed secp256k1 public key (64-byte `X || Y`) for the address.
     pub(crate) public: Public,
+    /// The hardware context the activation used. Its device digest (CRD ch.05 R51) is the identity the coin keeps
+    /// for the lifetime of its activation; every device operation compares the current context with it first
+    /// (CRD ch.05 R58a).
+    pub(crate) hw_ctx: crypto::HardwareWalletArc,
 }
 
 impl std::fmt::Debug for EthSigner {

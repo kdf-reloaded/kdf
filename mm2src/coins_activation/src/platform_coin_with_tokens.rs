@@ -474,6 +474,8 @@ impl HDXPubExtractor for NoXPubExtractor {
     ) -> MmResult<crypto::XPub, coins::hd_pubkey::HDExtractPubkeyError> {
         MmError::err(coins::hd_pubkey::HDExtractPubkeyError::HwContextNotInitialized)
     }
+
+    fn hardware_context(&self) -> Option<crypto::HardwareWalletArc> { None }
 }
 
 /// Shared post-build activation tail: enable the inline tokens, enumerate

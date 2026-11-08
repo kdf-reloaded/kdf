@@ -454,7 +454,7 @@ where
             PrivKeyPolicy::Trezor => {
                 // CRD ch.61 R61.4.4: refuse before the device is contacted.
                 refuse_sighash_suffix_for_hardware_wallet(sighash_suffix).mm_err(WithdrawError::from)?;
-                let trezor_client = self.trezor_client().await?;
+                let trezor_client = self.trezor_client(self.coin.as_ref().hw_ctx.as_ref()).await?;
                 SignPolicy::WithTrezor(trezor_client)
             },
         };
@@ -492,14 +492,17 @@ impl<'a, Coin> InitUtxoWithdraw<'a, Coin> {
         })
     }
 
+    /// `activated_with` is the hardware context the coin was activated with.
+    ///
     /// # Fail
     ///
-    /// The method fails if [`CryptoCtx::hw_ctx`] is not initialized yet.
-    async fn trezor_client(&self) -> MmResult<TrezorClient, WithdrawError> {
-        let crypto_ctx = CryptoCtx::from_ctx(&self.ctx).mm_err(Into::into)?;
-        let hw_ctx = crypto_ctx
-            .hw_ctx()
-            .or_mm_err(|| WithdrawError::NoTrezorDeviceAvailable)?;
+    /// The method fails if [`CryptoCtx::hw_ctx`] is not initialized yet, and with `FoundUnexpectedDevice`, before
+    /// the device is contacted, if it holds another device than `activated_with` (CRD ch.05 R58a).
+    async fn trezor_client(
+        &self,
+        activated_with: Option<&crypto::HardwareWalletArc>,
+    ) -> MmResult<TrezorClient, WithdrawError> {
+        let hw_ctx = crate::hd_pubkey::hardware_context_for_signing(&self.ctx, activated_with)?;
 
         let trezor_connect_processor = TrezorRpcTaskConnectProcessor::new(self.task_handle, HwConnectStatuses {
             on_connect: WithdrawInProgressStatus::WaitingForTrezorToConnect,

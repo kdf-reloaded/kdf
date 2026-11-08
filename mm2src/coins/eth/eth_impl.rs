@@ -103,6 +103,16 @@ impl EthCoinImpl {
             && self.hardware_derivation_path().is_none()
     }
 
+    /// The hardware context a hardware-wallet coin was activated with (CRD ch.05 R58a); `None` for a coin that
+    /// does not sign with a hardware wallet.
+    pub fn activation_hardware_context(&self) -> Option<crypto::HardwareWalletArc> {
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+        if let EthSigner::Trezor(signer) = &self.signer {
+            return Some(signer.hw_ctx.clone());
+        }
+        None
+    }
+
     /// The derivation path of the enabled address of a hardware-wallet coin.
     pub fn hardware_derivation_path(&self) -> Option<crypto::DerivationPath> {
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]

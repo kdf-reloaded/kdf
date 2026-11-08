@@ -584,8 +584,9 @@ pub trait HDWalletRpcOps {
 }
 
 /// A coin of the Trezor key policy needs the hardware context at call time: the context slot is looked up when
-/// the call is made, and an empty slot answers `HwContextNotInitialized` (CRD ch.05 §5.10B R54, T35). A coin of any
-/// other policy never consults the slot, whether or not it is filled.
+/// the call is made, and an empty slot answers `HwContextNotInitialized` (CRD ch.05 §5.10B R54, T35). A filled
+/// slot must hold the device the coin was activated with, otherwise the call answers `FoundUnexpectedDevice`
+/// (CRD ch.05 R58a). A coin of any other policy never consults the slot, whether or not it is filled.
 pub(crate) fn require_hardware_context_for_trezor_policy_coin(
     ctx: &MmArc,
     coin: &MmCoinEnum,
@@ -594,10 +595,11 @@ pub(crate) fn require_hardware_context_for_trezor_policy_coin(
         return Ok(());
     }
     let crypto_ctx = crypto::CryptoCtx::from_ctx(ctx).mm_err(|e| HDWalletRpcError::Internal(e.to_string()))?;
-    crypto_ctx
+    let hw_ctx = crypto_ctx
         .hw_ctx()
         .or_mm_err(|| HDWalletRpcError::HwContextNotInitialized)?;
-    Ok(())
+    crate::hd_pubkey::require_same_device(coin.activation_hardware_context().as_ref(), &hw_ctx)
+        .map_to_mm(HDWalletRpcError::from)
 }
 
 pub async fn get_new_address(

@@ -692,6 +692,14 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   changed since its accounts were stored. The device re-creates its own: the next activation for the
   Trezor creates the account it activates, and any other account appears again after
   `task::create_new_account` for its number. Detail: PR #293; CRD ch.05 §5.10B R52–R55, R35a, R35c.
+- **A coin activated for a Trezor refuses to work with a different Trezor.** A node accepts
+  `task::init_trezor` again while it runs, and a new init can replace the device. Until now such a coin
+  read new account keys from the second device and signed withdrawals with it, against accounts that
+  belong to the first, and stored the second device's accounts under the first one's identity. Now such
+  a coin remembers the device it was activated with and answers `FoundUnexpectedDevice`,
+  `get_new_address` included, before it asks the device or writes anything; it works again with its own
+  device, or after it is activated anew with the other one. A swap keeps signing with the coin's own
+  device and refuses any other. Detail: PR #302; CRD ch.05 §5.10B R58a and R58a.1.
 - **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
   trailer are read correctly for the median time.** Bitcoin Atom (BCA) serves 84-byte headers from block
   505888; Reloaded read them as 80 bytes, so the median time it needs before every HTLC spend and refund

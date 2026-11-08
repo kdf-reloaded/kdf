@@ -400,8 +400,9 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         let derivation_path = self.derivation_path().mm_err(Into::into)?;
 
         // The Trezor-policy coin: its accounts belong to the device identity, also when a software global-HD
-        // login runs beside the hardware context (CRD ch.05 R29).
-        let hd_wallet_storage = HDWalletCoinStorage::init(self.ctx(), ticker, HDWalletStorageKeyPolicy::Hardware)
+        // login runs beside the hardware context (CRD ch.05 R29). The storage is opened for the very context the
+        // coin records below, so that both name one device (CRD ch.05 R58a).
+        let hd_wallet_storage = HDWalletCoinStorage::init_for_device(self.ctx(), ticker, &hw_ctx)
             .await
             .mm_err(Into::into)?;
 

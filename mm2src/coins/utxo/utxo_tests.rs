@@ -12164,15 +12164,26 @@ pub(crate) mod hd_accounts_at_index_tests {
     /// What the mocked wallet storage holds, by account index.
     pub(crate) type StoredAccounts = Arc<std::sync::Mutex<BTreeMap<u32, HDAccountStorageItem>>>;
 
-    /// A hardware device that counts the requests it gets and answers none of them.
+    /// A hardware device that counts the requests it gets and answers none of them. It reads from the hardware
+    /// context it was given, if any (CRD ch.05 R58a).
     pub(crate) struct CountingDevice {
         pub(crate) calls: AtomicUsize,
+        hw_ctx: Option<crypto::HardwareWalletArc>,
     }
 
     impl CountingDevice {
         pub(crate) fn new() -> CountingDevice {
             CountingDevice {
                 calls: AtomicUsize::new(0),
+                hw_ctx: None,
+            }
+        }
+
+        /// A device that reads from `hw_ctx`, as the extractor of a running task does.
+        pub(crate) fn with_context(hw_ctx: crypto::HardwareWalletArc) -> CountingDevice {
+            CountingDevice {
+                calls: AtomicUsize::new(0),
+                hw_ctx: Some(hw_ctx),
             }
         }
     }
@@ -12187,6 +12198,8 @@ pub(crate) mod hd_accounts_at_index_tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             MmError::err(HDExtractPubkeyError::HwContextNotInitialized)
         }
+
+        fn hardware_context(&self) -> Option<crypto::HardwareWalletArc> { self.hw_ctx.clone() }
     }
 
     /// Mocks the wallet storage: what is uploaded, updated and removed is recorded in the returned map.
@@ -12954,7 +12967,7 @@ pub(crate) mod hd_accounts_at_index_tests {
     // R54 / T35: the hardware context is looked up at call time, for a coin of the Trezor policy only
     // -----------------------------------------------------------------------
 
-    const DEVICE_PUBKEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    pub(crate) const DEVICE_PUBKEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
     /// A node under the software global-HD login, with `device` deciding whether the hardware slot is filled,
     /// and with `coins` registered as activated. The wallet storage holds account `0` of each coin.
@@ -12993,11 +13006,28 @@ pub(crate) mod hd_accounts_at_index_tests {
             .mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::ok(BigDecimal::from(0)))));
     }
 
-    fn trezor_policy_hd_coin() -> UtxoStandardCoin {
+    /// A device with the public key `pubkey`: the hardware context an activation would have used, minted on a node
+    /// of its own. Two contexts of the same public key are the same device (CRD ch.05 R51).
+    pub(crate) fn device_context(pubkey: &str) -> crypto::HardwareWalletArc {
+        use primitives::hash::H264;
+
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let crypto_ctx = CryptoCtx::init_with_global_hd_account(ctx, TEST_MNEMONIC).unwrap();
+        crypto_ctx.init_trezor_ctx_for_tests(H264::from_str(pubkey).unwrap(), None)
+    }
+
+    /// A coin of the Trezor policy activated with `device` (CRD ch.05 R58a).
+    fn trezor_policy_hd_coin_activated_with(device: Option<crypto::HardwareWalletArc>) -> UtxoStandardCoin {
         let mut fields = hd_fields(HDAccountsMap::from([(0, account_zero())]));
         fields.priv_key_policy = PrivKeyPolicy::Trezor;
         fields.conf.trezor_coin = Some(TrezorUtxoCoin::Komodo);
+        fields.hw_ctx = device;
         utxo_coin_from_fields(fields)
+    }
+
+    /// A coin of the Trezor policy activated with device A (`DEVICE_PUBKEY`).
+    fn trezor_policy_hd_coin() -> UtxoStandardCoin {
+        trezor_policy_hd_coin_activated_with(Some(device_context(DEVICE_PUBKEY)))
     }
 
     fn new_address_request(ticker: &str) -> crate::hd_wallet::GetNewHDAddressRequest {
@@ -13055,5 +13085,281 @@ pub(crate) mod hd_accounts_at_index_tests {
             ))
             .unwrap_or_else(|e| panic!("{}: the new address must be given: {:?}", ticker, e));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // R58a / T36: a coin of the Trezor policy keeps the identity of the device it was activated with
+    // -----------------------------------------------------------------------
+
+    /// A second device, with another seed than `DEVICE_PUBKEY` (CRD ch.05 R51).
+    pub(crate) const DEVICE_PUBKEY_B: &str = "03774ae7f858a9411e5ef4246b70c65aac5649980be5c17891bbec17895da008cb";
+
+    /// Replaces the device of the hardware slot of `ctx` with device B, as a new `task::init_trezor::init` does.
+    fn replace_the_device_with_b(ctx: &mm2_core::mm_ctx::MmArc) {
+        use primitives::hash::H264;
+
+        CryptoCtx::from_ctx(ctx)
+            .unwrap()
+            .init_trezor_ctx_for_tests(H264::from_str(DEVICE_PUBKEY_B).unwrap(), None);
+    }
+
+    fn account_request(account_id: u32) -> CreateNewAccountParams {
+        json::from_value(json!({ "scan": false, "account_id": account_id })).unwrap()
+    }
+
+    /// R58a, T36: after the device was replaced, `get_new_address` of the Trezor-policy coin answers
+    /// `FoundUnexpectedDevice` and changes nothing in the storage. With device A current it works, and the
+    /// software coin of the same node is not affected by the change.
+    #[test]
+    fn r58a_t36_get_new_address_refuses_a_replaced_device() {
+        let items = mock_storage();
+        mock_chain();
+        mock_address_balance();
+        let ctx = node_with_hd_coins(
+            true,
+            vec![("TRZ", trezor_policy_hd_coin()), ("DOC", hd_coin_with_account_zero())],
+            &items,
+        );
+
+        // Device A is still current: the address is given.
+        block_on(crate::hd_wallet::get_new_address(
+            ctx.clone(),
+            new_address_request("TRZ"),
+        ))
+        .unwrap_or_else(|e| panic!("the device of the activation is current: {:?}", e));
+        let stored_with_device_a = items.lock().unwrap().clone();
+
+        replace_the_device_with_b(&ctx);
+
+        let error = block_on(crate::hd_wallet::get_new_address(
+            ctx.clone(),
+            new_address_request("TRZ"),
+        ))
+        .err()
+        .expect("the replaced device must be refused")
+        .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::FoundUnexpectedDevice(_)),
+            "{:?}",
+            error
+        );
+        assert_eq!(error.status_code(), common::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(*items.lock().unwrap(), stored_with_device_a, "the storage is unchanged");
+
+        block_on(crate::hd_wallet::get_new_address(ctx, new_address_request("DOC")))
+            .unwrap_or_else(|e| panic!("a software coin is not affected by a device change: {:?}", e));
+    }
+
+    /// R58a, T36: after the device was replaced, `task::create_new_account` of the Trezor-policy coin answers
+    /// `FoundUnexpectedDevice`; the device is asked 0 times and nothing is stored. The same holds for the read of
+    /// the account's extended public key itself.
+    #[test]
+    fn r58a_t36_account_creation_and_xpub_read_refuse_a_replaced_device() {
+        use crate::hd_pubkey::ExtractExtendedPubkey;
+
+        let items = mock_storage();
+        mock_chain();
+        let coin = trezor_policy_hd_coin();
+        // The extractor of the running task reads from the current context, which holds device B.
+        let device_b = CountingDevice::with_context(device_context(DEVICE_PUBKEY_B));
+
+        let error =
+            block_on(coin.init_create_account_rpc(account_request(5), Some(&device_b), &CreatedAccount::default()))
+                .unwrap_err()
+                .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::FoundUnexpectedDevice(_)),
+            "{:?}",
+            error
+        );
+        assert_eq!(device_b.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(items.lock().unwrap().is_empty(), "nothing is stored");
+
+        let xpub_error =
+            block_on(coin.extract_extended_pubkey(Some(&device_b), DerivationPath::from_str("m/44'/141'/5'").unwrap()))
+                .err()
+                .expect("the replaced device must be refused")
+                .into_inner();
+        assert!(matches!(
+            xpub_error,
+            HDExtractPubkeyError::HardwareWalletError(crypto::HwError::FoundUnexpectedDevice { .. })
+        ));
+        assert_eq!(device_b.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// R58a, T36: the account an activation creates is read from the device too, so a replaced device is refused
+    /// there as well.
+    #[test]
+    fn r58a_t36_the_account_an_activation_creates_refuses_a_replaced_device() {
+        let items = mock_storage();
+        mock_chain();
+        let mut fields = hd_fields(HDAccountsMap::new());
+        fields.priv_key_policy = PrivKeyPolicy::Trezor;
+        fields.conf.trezor_coin = Some(TrezorUtxoCoin::Komodo);
+        fields.hw_ctx = Some(device_context(DEVICE_PUBKEY));
+        let coin = utxo_coin_from_fields(fields);
+        let device_b = CountingDevice::with_context(device_context(DEVICE_PUBKEY_B));
+
+        match block_on(coin.enable_coin_balance(
+            Some(&device_b),
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )) {
+            Err(e) => match e.into_inner() {
+                EnableCoinBalanceError::NewAccountCreatingError(NewAccountCreatingError::HardwareWalletError(
+                    crypto::HwError::FoundUnexpectedDevice { .. },
+                )) => (),
+                other => panic!("FoundUnexpectedDevice is expected, got {}", other),
+            },
+            Ok(other) => panic!("the replaced device must be refused, got {:?}", other),
+        }
+        assert_eq!(device_b.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(items.lock().unwrap().is_empty(), "nothing is stored");
+    }
+
+    /// R58a: with the device of the activation current, the calls pass the check: the account creation reaches the
+    /// device (which answers nothing in this test).
+    #[test]
+    fn r58a_the_device_of_the_activation_is_accepted() {
+        let items = mock_storage();
+        mock_chain();
+        let coin = trezor_policy_hd_coin();
+        let device_a = CountingDevice::with_context(device_context(DEVICE_PUBKEY));
+
+        let error =
+            block_on(coin.init_create_account_rpc(account_request(5), Some(&device_a), &CreatedAccount::default()))
+                .unwrap_err()
+                .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::HwContextNotInitialized),
+            "the device's own answer is expected: {:?}",
+            error
+        );
+        assert_eq!(device_a.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!items.lock().unwrap().contains_key(&5));
+    }
+
+    /// R58a, R54: an empty slot still answers `HwContextNotInitialized`, whatever device the coin was activated with.
+    #[test]
+    fn r58a_an_empty_slot_still_answers_hw_context_not_initialized() {
+        let items = mock_storage();
+        mock_chain();
+        mock_address_balance();
+        let ctx = node_with_hd_coins(false, vec![("TRZ", trezor_policy_hd_coin())], &items);
+
+        let error = block_on(crate::hd_wallet::get_new_address(ctx, new_address_request("TRZ")))
+            .err()
+            .expect("the Trezor-policy coin needs the device")
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::HwContextNotInitialized),
+            "{:?}",
+            error
+        );
+
+        let error = block_on(trezor_policy_hd_coin().init_create_account_rpc(
+            account_request(5),
+            None::<&CountingDevice>,
+            &CreatedAccount::default(),
+        ))
+        .unwrap_err()
+        .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::HwContextNotInitialized),
+            "{:?}",
+            error
+        );
+    }
+
+    /// R58a: a software coin is not affected by a device change: it takes its account key from the seed, the
+    /// device is asked 0 times, and it never compares a device.
+    #[test]
+    fn r58a_a_software_coin_is_not_affected_by_a_device_change() {
+        let items = mock_storage();
+        mock_chain();
+        let coin = hd_coin_with_account_zero();
+        let device_b = CountingDevice::with_context(device_context(DEVICE_PUBKEY_B));
+
+        let account =
+            block_on(coin.init_create_account_rpc(account_request(5), Some(&device_b), &CreatedAccount::default()))
+                .unwrap_or_else(|e| panic!("the account creation failed: {:?}", e));
+
+        assert_eq!(account.account_index, 5);
+        assert_eq!(device_b.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(stored(&items, 5).account_xpub, software_xpub("m/44'/141'/5'"));
+    }
+
+    /// R58a: a coin of the Trezor policy that keeps no record of its device (no activated coin is in that state)
+    /// is refused rather than trusted, by the account read and by `get_new_address`; the device is not asked.
+    #[test]
+    fn r58a_a_coin_without_a_record_of_its_device_is_refused() {
+        let items = mock_storage();
+        mock_chain();
+        mock_address_balance();
+        let device_a = CountingDevice::with_context(device_context(DEVICE_PUBKEY));
+
+        let error = block_on(trezor_policy_hd_coin_activated_with(None).init_create_account_rpc(
+            account_request(5),
+            Some(&device_a),
+            &CreatedAccount::default(),
+        ))
+        .unwrap_err()
+        .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::HardwareWalletInternal(_)),
+            "{:?}",
+            error
+        );
+        assert_eq!(device_a.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let ctx = node_with_hd_coins(true, vec![("TRZ", trezor_policy_hd_coin_activated_with(None))], &items);
+        let error = block_on(crate::hd_wallet::get_new_address(ctx, new_address_request("TRZ")))
+            .err()
+            .expect("a coin without a record of its device is refused")
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::HardwareWalletInternal(_)),
+            "{:?}",
+            error
+        );
+    }
+
+    /// R58a, T36: signing takes its hardware context through one check. The device of the activation passes, an
+    /// empty slot answers `NoTrezorDeviceAvailable` as before, and another device answers `FoundUnexpectedDevice`
+    /// (HTTP 410 of the withdraw error class), all before any device is contacted. Both withdraw routes, the UTXO
+    /// one (`InitUtxoWithdraw::trezor_client`) and the EVM one (`eth_trezor_withdraw::trezor_client`), call this
+    /// check; they need a task handle to run, so only the check itself is run here.
+    #[test]
+    fn r58a_t36_signing_refuses_a_replaced_device_before_the_device_is_contacted() {
+        use crate::hd_pubkey::hardware_context_for_signing;
+        use crate::WithdrawError;
+
+        let items = mock_storage();
+        let ctx = node_with_hd_coins(true, vec![], &items);
+        let activated_with = device_context(DEVICE_PUBKEY);
+
+        assert!(hardware_context_for_signing(&ctx, Some(&activated_with)).is_ok());
+
+        replace_the_device_with_b(&ctx);
+        let error = hardware_context_for_signing(&ctx, Some(&activated_with))
+            .err()
+            .expect("the replaced device must be refused")
+            .into_inner();
+        assert!(matches!(error, WithdrawError::FoundUnexpectedDevice(_)), "{:?}", error);
+        assert_eq!(error.status_code(), common::StatusCode::GONE);
+
+        let error = hardware_context_for_signing(&ctx, None)
+            .err()
+            .expect("a coin without a record of its device is refused")
+            .into_inner();
+        assert!(matches!(error, WithdrawError::HardwareWalletInternal(_)), "{:?}", error);
+
+        CryptoCtx::from_ctx(&ctx).unwrap().reset_hw_ctx();
+        let error = hardware_context_for_signing(&ctx, Some(&activated_with))
+            .err()
+            .expect("an empty slot has no device")
+            .into_inner();
+        assert!(matches!(error, WithdrawError::NoTrezorDeviceAvailable), "{:?}", error);
     }
 }

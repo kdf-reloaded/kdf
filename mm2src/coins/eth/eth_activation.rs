@@ -423,6 +423,41 @@ pub async fn build_eth_hd_wallet(
     let hd_wallet_storage = HDWalletCoinStorage::init(ctx, ticker.to_owned(), key_policy)
         .await
         .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
+    load_eth_hd_wallet(ctx, derivation_path, gap_limit, key_policy, hd_wallet_storage).await
+}
+
+/// [`build_eth_hd_wallet`] for a Trezor-policy coin, over the storage of the device that `hw_ctx` identifies. The
+/// activation took `hw_ctx` once and uses it for the storage, the device read and the coin's record (CRD ch.05
+/// R58a).
+pub async fn build_eth_hd_wallet_for_device(
+    ctx: &MmArc,
+    ticker: &str,
+    conf: &Json,
+    gap_limit: u32,
+    hw_ctx: &crypto::HardwareWalletArc,
+) -> Result<EthHDWallet, MmError<EthCoinBuildError>> {
+    let derivation_path = eth_path_to_coin(conf)?;
+    let hd_wallet_storage = HDWalletCoinStorage::init_for_device(ctx, ticker.to_owned(), hw_ctx)
+        .await
+        .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
+    load_eth_hd_wallet(
+        ctx,
+        derivation_path,
+        gap_limit,
+        HDWalletStorageKeyPolicy::Hardware,
+        hd_wallet_storage,
+    )
+    .await
+}
+
+/// Loads the stored accounts of an opened storage into the HD wallet of an EVM coin.
+async fn load_eth_hd_wallet(
+    ctx: &MmArc,
+    derivation_path: Bip44PathToCoin,
+    gap_limit: u32,
+    key_policy: HDWalletStorageKeyPolicy,
+    hd_wallet_storage: HDWalletCoinStorage,
+) -> Result<EthHDWallet, MmError<EthCoinBuildError>> {
     // A coin of the software policy loads only the accounts its seed derived; the rows it did not derive are
     // removed (CRD ch.05 R55 (1)). A coin of the Trezor policy loads its rows as stored: its keys need the device.
     let stored = match key_policy {

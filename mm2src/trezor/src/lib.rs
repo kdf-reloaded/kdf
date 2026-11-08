@@ -9,6 +9,7 @@ pub mod ethereum;
 pub mod response;
 mod response_processor;
 mod result_handler;
+#[cfg(feature = "test-helpers")] pub mod scripted_device;
 pub mod transport;
 pub mod trezor_rpc_task;
 pub mod user_interaction;
