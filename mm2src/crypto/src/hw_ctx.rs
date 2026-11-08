@@ -237,6 +237,118 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // The device check that every use of a hardware context passes (`check_trezor`), over a scripted device
+    // -----------------------------------------------------------------------
+
+    /// Two extended public keys; each stands for the internal key of one device.
+    const DEVICE_A_XPUB: &str = "xpub6DEHSksajpRPM59RPw7Eg6PKdU7E2ehxJWtYdrfQ6JFmMGBsrR6jA78ANCLgzKYm4s5UqQ4ydLEYPbh3TRVvn5oAZVtWfi4qJLMntpZ8uGJ";
+    const DEVICE_B_XPUB: &str = "xpub6EuV33a2DXxAhoJTRTnr8qnysu81AA4YHpLY6o8NiGkEJ8KADJ35T64eJsStWsmRf1xXkEANVjXFXnaUKbRtFwuSPCLfDdZwYNZToh4LBCd";
+
+    /// The compressed public key of `xpub`, in the form the context keeps as its internal key.
+    fn internal_pubkey_of(xpub: &str) -> H264 {
+        H264::from(
+            Secp256k1ExtendedPublicKey::from_str(xpub)
+                .unwrap()
+                .public_key()
+                .serialize(),
+        )
+    }
+
+    /// A context initialised with the device whose internal key is `xpub`'s.
+    fn ctx_of_device(xpub: &str) -> HardwareWalletCtx {
+        HardwareWalletCtx {
+            hw_internal_pubkey: internal_pubkey_of(xpub),
+            hw_wallet_type: HwWalletType::Trezor,
+            hw_wallet: AsyncMutex::new(None),
+            device_info: None,
+        }
+    }
+
+    /// A processor of a scripted device: the device never asks for an interaction, so any request is a failure.
+    struct NoInteraction;
+
+    #[async_trait::async_trait]
+    impl TrezorRequestProcessor for NoInteraction {
+        type Error = String;
+
+        async fn on_button_request(&self) -> MmResult<(), trezor::TrezorProcessingError<Self::Error>> { Ok(()) }
+
+        async fn on_pin_request(
+            &self,
+        ) -> MmResult<trezor::TrezorPinMatrix3x3Response, trezor::TrezorProcessingError<Self::Error>> {
+            MmError::err(trezor::TrezorProcessingError::ProcessorError(
+                "the scripted device asked for a PIN".to_owned(),
+            ))
+        }
+
+        async fn on_passphrase_request(&self) -> MmResult<String, trezor::TrezorProcessingError<Self::Error>> {
+            MmError::err(trezor::TrezorProcessingError::ProcessorError(
+                "the scripted device asked for a passphrase".to_owned(),
+            ))
+        }
+
+        async fn on_ready(&self) -> MmResult<(), trezor::TrezorProcessingError<Self::Error>> { Ok(()) }
+    }
+
+    #[async_trait::async_trait]
+    impl TrezorConnectProcessor for NoInteraction {
+        async fn on_connect(&self) -> MmResult<std::time::Duration, HwProcessingError<Self::Error>> {
+            MmError::err(HwProcessingError::ProcessorError(
+                "the scripted device is already connected".to_owned(),
+            ))
+        }
+
+        async fn on_connected(&self) -> MmResult<(), HwProcessingError<Self::Error>> { Ok(()) }
+
+        async fn on_connection_failed(&self) -> MmResult<(), HwProcessingError<Self::Error>> { Ok(()) }
+    }
+
+    /// A connected device whose internal key is the context's passes the check.
+    #[test]
+    fn check_trezor_accepts_the_device_of_the_context() {
+        let ctx = ctx_of_device(DEVICE_A_XPUB);
+        let device = trezor::scripted_device::scripted_device_with_xpub(DEVICE_A_XPUB);
+
+        assert!(block_on(ctx.check_trezor(&device, &NoInteraction)).is_ok());
+    }
+
+    /// A connected device whose internal key is another one is refused with `FoundUnexpectedDevice`, naming the
+    /// device the context expects and the one found. This is the refusal the UTXO swap V2 signing relies on,
+    /// which signs through the coin's recorded context.
+    #[test]
+    fn check_trezor_refuses_another_device() {
+        let ctx = ctx_of_device(DEVICE_A_XPUB);
+        let other_device = trezor::scripted_device::scripted_device_with_xpub(DEVICE_B_XPUB);
+
+        match block_on(ctx.check_trezor(&other_device, &NoInteraction)) {
+            Err(e) => match e.into_inner() {
+                HwProcessingError::HwError(HwError::FoundUnexpectedDevice {
+                    actual_pubkey,
+                    expected_pubkey,
+                }) => {
+                    assert_eq!(actual_pubkey, internal_pubkey_of(DEVICE_B_XPUB));
+                    assert_eq!(expected_pubkey, internal_pubkey_of(DEVICE_A_XPUB));
+                },
+                _ => panic!("FoundUnexpectedDevice is expected"),
+            },
+            Ok(()) => panic!("another device must be refused"),
+        }
+    }
+
+    /// `trezor()` over a connected client of the context's device returns that client without reconnecting. (The
+    /// refusal of another device is run on `check_trezor` above: `trezor()` answers a failed check of a connected
+    /// client by reconnecting, which needs a real transport.)
+    #[test]
+    fn trezor_returns_the_connected_client_of_the_context_device() {
+        let ctx = ctx_of_device(DEVICE_A_XPUB);
+        *ctx.hw_wallet.try_lock().unwrap() = Some(HwClient::Trezor(
+            trezor::scripted_device::scripted_device_with_xpub(DEVICE_A_XPUB),
+        ));
+
+        assert!(block_on(ctx.trezor(&NoInteraction)).is_ok());
+    }
+
     #[test]
     fn disconnected_handle_is_unreachable() {
         let ctx = ctx_with_pubkey("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");

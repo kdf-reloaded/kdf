@@ -1168,19 +1168,34 @@ maintainer decision EC (a), 2026-11-08; batch 4 item B4-14).* When a coin
 is activated under the `Trezor` policy, the node records the device digest
 of R51 of the hardware context the activation used. Before every operation
 of that coin that would use the device or the device's storage namespace —
-reading an account's extended public key (`task::create_new_account`, the
-account an activation creates, a scan that derives), deriving a new
-address, and signing — the node compares the recorded digest with the
-digest of the current hardware context. On a mismatch the operation fails
-with `FoundUnexpectedDevice` before the device or the storage is touched;
-an empty slot still answers `HwContextNotInitialized` (R54). The coin keeps
-its recorded digest for the lifetime of its activation; using another
-device needs a deactivation and a fresh activation (R52). *Why:* the
-corpus-derived finding above. *Compatibility (informative):* no wire shape
-changes, and only this node's own coins are affected: where the reference
-would use the new device's keys against the old device's accounts, Reloaded
-refuses. Under `docs/COMPAT_SWITCHES.md`, "The default-side rule", arm 2:
-Reloaded's behavior by default, no switch.
+reading an account's extended public key (`task::create_new_account` and
+the account an activation creates), deriving a new address, and signing
+(except a running swap, R58a.1) — the node compares the recorded digest
+with the digest of the current hardware context. On a mismatch the
+operation fails with `FoundUnexpectedDevice` before the device or the
+storage is touched; an empty slot keeps the answer it had:
+`HwContextNotInitialized` for the account and address calls (R54),
+`NoTrezorDeviceAvailable` for a withdrawal. The coin keeps its recorded
+digest for the lifetime of its activation; using another device needs a
+deactivation and a fresh activation (R52). *Rationale:* the corpus-derived
+finding above. *Compatibility (informative):* no wire shape changes, and
+only this node's own coins are affected: where the reference would use the
+new device's keys against the old device's accounts, Reloaded refuses.
+Under `docs/COMPAT_SWITCHES.md`, "The default-side rule", arm 2: Reloaded's
+behavior by default, no switch.
+
+**R58a.1.** *A running swap keeps its device (Reloaded-original;
+2026-11-08, batch 4 item B4-14, review of PR #302).* The swap-v2 signing of
+a UTXO coin is excepted from R58a's comparison with the current hardware
+context. A swap that is already running keeps signing through the coin's
+recorded hardware context, whose connection check reads the identity of the
+connected device and refuses any other device with `FoundUnexpectedDevice`.
+The swap therefore signs with the coin's own device whenever that device is
+connected, also after a re-init put another device in the slot, and never
+with another device. *Rationale:* refusing a running swap would cost the
+trader a wait for the refund. *Safety:* as under R58a, no other device signs
+and nothing is written to another device's storage namespace; unlike R58a,
+the device is asked before the refusal.
 
 > **As built (2026-11-08, clean-side record; batch 4 item B4-14, PR #302).**
 > A coin activated under the `Trezor` policy keeps the hardware context its
@@ -1193,15 +1208,26 @@ Reloaded's behavior by default, no switch.
 > signing a withdrawal, the node compares the digest of that context with the
 > current one (`HardwareWalletCtx::ensure_same_device`); a different device
 > fails with `FoundUnexpectedDevice` through the path's existing hardware error
-> class, before the device or the storage is touched, and an empty slot keeps
-> answering `HwContextNotInitialized`. A scan and `account_balance` ask no
-> device. The swap-v2 signing of a UTXO coin already checks the connected
-> device against the coin's recorded context. Tests: the `r58a_*` tests in
-> `coins` (utxo_tests, eth_tests, hd_wallet_storage) and
-> `ensure_same_device_compares_the_digest` in `crypto`; the wiring of the two
-> withdraw signing paths is covered through their shared check only, and the
-> activation's single read by construction and the storage test, since the
-> lab has no Trezor.
+> class, before the device or the storage is touched. An empty slot keeps the
+> answer it had: `HwContextNotInitialized` for the account and address calls,
+> `NoTrezorDeviceAvailable` for a withdrawal. A scan and `account_balance` ask
+> no device; Reloaded's scans derive from stored keys. The swap-v2 signing of
+> a UTXO coin keeps its own check instead (R58a.1): it signs through the
+> coin's recorded context, whose connection check reads the identity of the
+> connected device and refuses another device with `FoundUnexpectedDevice`.
+> That check asks the device first and follows the connected device, not the
+> current hardware context. Tests: the `r58a_*` tests in `coins`
+> (utxo_tests, eth_tests, hd_wallet_storage); in `crypto`,
+> `ensure_same_device_compares_the_digest`, and over a scripted device
+> `check_trezor_refuses_another_device`,
+> `check_trezor_accepts_the_device_of_the_context` and
+> `trezor_returns_the_connected_client_of_the_context_device`. Covered
+> through their shared check only, since the lab has no Trezor: the wiring of
+> the two withdraw signing paths, EVM's new-address check, and the swap-v2
+> signing's use of the connection check. The reconnect that
+> `HardwareWalletCtx::trezor` makes after a failed check needs a real
+> transport and is not tested. The activation's single read is covered by
+> construction and the storage test.
 
 *Verification notes.*
 
@@ -1245,9 +1271,9 @@ software coin succeed (R54).
 
 **T36.** *Device replaced.* Re-run `task::init_trezor::init` with a second
 emulator seed while a `Trezor`-policy coin from the first is active; the
-test pins the behaviour chosen under the corpus-derived finding above
-(refusal with `FoundUnexpectedDevice` before any device or storage access,
-if adopted). *Adopted as R58a (decision EC (a)).* The lab has no Trezor, so
+test pins the behavior chosen under the corpus-derived finding above
+(refusal with `FoundUnexpectedDevice` before any device or storage
+access). *Adopted as R58a (decision EC (a)).* The lab has no Trezor, so
 the refusal is pinned by unit tests with two device contexts.
 
 **D7.** *Open decisions for the maintainer (2026-11-08).*
