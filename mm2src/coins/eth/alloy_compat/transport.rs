@@ -10,7 +10,10 @@
 //!    failures that advance the request to the next node.
 //! 2. The node that answers is rotated to the front of the order (sticky last-good node), the failed nodes
 //!    follow in their previous relative order.
-//! 3. Every node attempt is bounded by a wall-clock cutoff that covers the whole attempt.
+//! 3. Every node attempt is bounded by a wall-clock cutoff that covers the whole attempt: at the cutoff the
+//!    request moves on to the next node. *Reloaded divergence (CRD ch.35 D35.11):* the exchange of a node that
+//!    hit the cutoff is not abandoned. It keeps running until [`DIRECT_NODE_TIMEOUT_S`] after its own start and
+//!    the first answer from any node already asked ends the request; nothing is sent twice.
 //! 4. Every outbound request and inbound response fires the `RpcTransportEventHandler` callbacks so the
 //!    metrics layer keeps counting bytes per coin.
 //!
@@ -18,12 +21,15 @@
 //!
 //! - [`AlloyTransport`] — the cloneable, multi-URL, metrics-instrumented transport. Implements
 //!   `tower::Service<RequestPacket>` and therefore blanket-implements [`alloy::transports::Transport`].
-//! - [`NODE_CUTOFF_S`] / [`DIRECT_NODE_TIMEOUT_S`] — the two per-attempt bounds.
+//! - [`NODE_CUTOFF_S`] / [`DIRECT_NODE_TIMEOUT_S`] — the point at which the failover path moves on to the next
+//!   node, and the bound of one exchange.
 //!
 //! # Invariants
 //!
 //! - **JSON-RPC wire bytes are unchanged.** Outgoing requests are serialised by alloy's own
 //!   [`RequestPacket::Serialize`] impl. A successful response is handed on as the node sent it.
+//! - **Nothing is sent twice.** A request sends to each node at most once. An exchange that hit the cutoff stays
+//!   in the request's in-flight set (the future is kept, not re-created) until it ends or its own bound elapses.
 //! - **Concurrent requests.** The node order lives behind a short `std` lock that is never held across an
 //!   `.await`. A request works on a snapshot of the order and, when a node answers, writes the rotated order
 //!   back; with concurrent requests the last writer wins (CRD ch.35 D35.8 (iii)).
@@ -47,18 +53,20 @@ use alloy::transports::{TransportError, TransportErrorKind, TransportFut};
 use common::executor::Timer;
 use common::log::{debug, warn};
 use futures::future::{select, Either};
+use futures::stream::{FuturesUnordered, StreamExt};
 use tower::Service;
 
 use crate::node_url::{host_only, scrub_node_url, ListedNode, NodeSlot};
 use crate::{RpcTransportEventHandler, RpcTransportEventHandlerShared};
 
-/// Per-node bound of the failover path (CRD ch.35 R35.1.10): one attempt, from connecting to the decoded body,
-/// is abandoned after this many seconds and the request moves on to the next node.
+/// Per-node cutoff of the failover path (CRD ch.35 R35.1.10): after this many seconds without a decoded body the
+/// request moves on to the next node. The exchange itself is not abandoned there: it is kept until
+/// [`DIRECT_NODE_TIMEOUT_S`] after its start (D35.11).
 pub const NODE_CUTOFF_S: f64 = 10.;
 
 /// Per-request bound of a provider that talks to one node directly, outside the failover path (the signed
 /// transaction broadcast and the nonce reads of CRD ch.35 R35.1.12 use it): no 10 s cutoff, the lower-layer
-/// bound of the reference.
+/// bound of the reference. It is also the bound of an exchange the failover path keeps past its cutoff.
 pub const DIRECT_NODE_TIMEOUT_S: f64 = 30.;
 
 /// Transport backing alloy's JSON-RPC pipeline for the EVM coin family.
@@ -77,8 +85,11 @@ struct Inner {
     order: Mutex<Vec<usize>>,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
     sender: Arc<dyn NodeSender>,
-    /// Seconds one node attempt may take.
+    /// Seconds after which the request moves on to the next node.
     cutoff_s: f64,
+    /// Seconds one exchange may run from its own start, kept past its cutoff or not (CRD ch.35 D35.11). Equal to
+    /// `cutoff_s` for a transport with one node, which has no later node to move on to.
+    exchange_bound_s: f64,
 }
 
 #[derive(Clone)]
@@ -113,7 +124,7 @@ pub(crate) type NodeSendFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>,
 /// that the failover rules can be checked without a network.
 pub(crate) trait NodeSender: fmt::Debug + Send + Sync + 'static {
     /// POSTs `body` to `uri`. A non-2xx status is a failure, not a body. The returned text may carry the
-    /// URL: the caller scrubs it. `bound_s` is the attempt's own bound: everything the exchange starts must
+    /// URL: the caller scrubs it. `bound_s` is the exchange's own bound: everything the exchange starts must
     /// have ended by then (the caller's [`within_cutoff`] only stops waiting, it cannot stop spawned work).
     fn send<'a>(&'a self, uri: &'a http::Uri, body: &'a [u8], bound_s: f64) -> NodeSendFuture<'a>;
 }
@@ -164,6 +175,7 @@ impl AlloyTransport {
             })
             .collect::<Result<Vec<_>, String>>()?;
         let order = Mutex::new((0..nodes.len()).collect());
+        let exchange_bound_s = exchange_bound(cutoff_s, nodes.len());
         Ok(Self {
             inner: Arc::new(Inner {
                 nodes,
@@ -171,6 +183,7 @@ impl AlloyTransport {
                 event_handlers,
                 sender,
                 cutoff_s,
+                exchange_bound_s,
             }),
         })
     }
@@ -187,6 +200,7 @@ impl AlloyTransport {
                 event_handlers: self.inner.event_handlers.clone(),
                 sender: self.inner.sender.clone(),
                 cutoff_s: self.inner.cutoff_s,
+                exchange_bound_s: self.inner.exchange_bound_s,
             }),
         }
     }
@@ -232,7 +246,7 @@ impl Service<RequestPacket> for AlloyTransport {
 /// Why one node attempt did not produce an answer.
 #[derive(Debug)]
 enum NodeFailure {
-    /// The per-node cutoff elapsed.
+    /// The node gave no answer within the exchange bound.
     Cutoff,
     /// The connection, the status, the body or its framing was unusable. The text is already scrubbed.
     Transport(String),
@@ -272,9 +286,125 @@ fn attempt_failed_line(node: &Node, method: &str, failure: &NodeFailure, cutoff_
     )
 }
 
+/// How long one exchange may run from its own start. A failover transport keeps the exchange of a node that hit
+/// the cutoff until [`DIRECT_NODE_TIMEOUT_S`] (the same ratio to the cutoff for a scaled cutoff); a transport with
+/// one node has no later node to move on to and ends the exchange at the cutoff (CRD ch.35 D35.11).
+fn exchange_bound(cutoff_s: f64, node_count: usize) -> f64 {
+    if node_count > 1 {
+        cutoff_s * (DIRECT_NODE_TIMEOUT_S / NODE_CUTOFF_S)
+    } else {
+        cutoff_s
+    }
+}
+
+/// The debug line of a node that has not answered at the cutoff while its exchange is kept (CRD ch.35 R35.1.10,
+/// D35.11).
+fn still_listening_line(node: &Node, method: &str, cutoff_s: f64) -> String {
+    node.line(
+        "EVM RPC ",
+        &format!(" has no answer to {method} within {cutoff_s} s, still listening"),
+    )
+}
+
+/// The debug line of a node whose answer came after its cutoff and ended the request (CRD ch.35 D35.11).
+fn late_answer_line(node: &Node, method: &str) -> String {
+    node.line(
+        "EVM RPC ",
+        &format!(" answered {method} after its cutoff; the answer is used"),
+    )
+}
+
+/// The exchange of one node, ending with the position the node has in the request's order.
+type Exchange<'a> = Pin<Box<dyn Future<Output = (usize, Result<ResponsePacket, NodeFailure>)> + Send + 'a>>;
+
+/// Sends the request to the node at `position` of the order. The returned future is the only handle of the
+/// exchange: the request keeps it in its in-flight set for as long as it may still answer.
+fn start_exchange<'a>(
+    inner: &'a Inner,
+    node: &'a Node,
+    position: usize,
+    is_batch: bool,
+    body: &'a [u8],
+) -> Exchange<'a> {
+    Box::pin(async move { (position, attempt(inner, node, is_batch, body).await) })
+}
+
+/// What one request knows about the nodes it has asked.
+struct Walk<'a> {
+    inner: &'a Inner,
+    /// The order the request started with; a position below is an index into it.
+    order: &'a [usize],
+    method: &'a str,
+    /// `(position, failure)` of every exchange that ended without an answer, in the order the exchanges ended.
+    failures: Vec<(usize, NodeFailure)>,
+}
+
+impl<'a> Walk<'a> {
+    fn node(&self, position: usize) -> &'a Node {
+        let inner: &'a Inner = self.inner;
+        &inner.nodes[self.order[position]]
+    }
+
+    /// Takes the end of the exchange at `position`. An answer ends the request: the order is rotated to the
+    /// answering node (R35.1.9) and the answer is returned. A failure is logged and kept for the all-failed error.
+    /// `asking` is the position of the node the request is waiting for at this moment; an answer from any other
+    /// node came after that node's cutoff.
+    fn settle(
+        &mut self,
+        position: usize,
+        outcome: Result<ResponsePacket, NodeFailure>,
+        asking: Option<usize>,
+    ) -> Option<ResponsePacket> {
+        let node = self.node(position);
+        match outcome {
+            Ok(packet) => {
+                if asking != Some(position) {
+                    debug!("{}", late_answer_line(node, self.method));
+                }
+                // The answering node first, the nodes after it behind it, the nodes before it last in their
+                // previous relative order.
+                let order = self.order;
+                let mut rotated = Vec::with_capacity(order.len());
+                rotated.push(order[position]);
+                rotated.extend_from_slice(&order[position + 1..]);
+                rotated.extend_from_slice(&order[..position]);
+                self.inner.set_order(rotated);
+                Some(packet)
+            },
+            Err(failure) => {
+                if let NodeFailure::JsonRpc(payload) = &failure {
+                    warn!("{}", answered_with_error_line(node, self.method, payload));
+                } else {
+                    debug!(
+                        "{}",
+                        attempt_failed_line(node, self.method, &failure, self.inner.cutoff_s)
+                    );
+                }
+                self.failures.push((position, failure));
+                None
+            },
+        }
+    }
+
+    /// The failures as `(node index, failure)` in the order the nodes were asked, whatever order they ended in.
+    fn into_failures(mut self) -> Vec<(usize, NodeFailure)> {
+        let order = self.order;
+        self.failures.sort_by_key(|(position, _)| *position);
+        self.failures
+            .into_iter()
+            .map(|(position, failure)| (order[position], failure))
+            .collect()
+    }
+}
+
 /// Serialise the [`RequestPacket`], try the nodes in the current order (CRD ch.35 R35.1.8), fire metrics
 /// callbacks, rotate the answering node to the front (R35.1.9) and return its answer, or the all-failed error
 /// (R35.1.11).
+///
+/// A node that is still silent at the cutoff does not end its exchange (D35.11): the request moves on and keeps
+/// the exchange in `in_flight`, and the first answer of any node already asked ends the request. After the last
+/// node the request waits for the exchanges that are left; each ends by itself at its own bound. No node is
+/// asked twice.
 async fn send_packet(inner: Arc<Inner>, req: RequestPacket) -> Result<ResponsePacket, TransportError> {
     let method = method_label(&req);
     let is_batch = matches!(req, RequestPacket::Batch(_));
@@ -282,39 +412,58 @@ async fn send_packet(inner: Arc<Inner>, req: RequestPacket) -> Result<ResponsePa
     let body_bytes = body.get().as_bytes().to_vec();
 
     let order = inner.current_order();
-    let mut failures: Vec<(usize, NodeFailure)> = Vec::new();
+    let mut walk = Walk {
+        inner: &inner,
+        order: &order,
+        method: &method,
+        failures: Vec::new(),
+    };
+    let keeps_exchanges = inner.exchange_bound_s > inner.cutoff_s;
+    let mut in_flight = FuturesUnordered::new();
     for (position, &index) in order.iter().enumerate() {
-        let node = &inner.nodes[index];
         inner.event_handlers.on_outgoing_request(&body_bytes);
+        let exchange = start_exchange(&inner, &inner.nodes[index], position, is_batch, &body_bytes);
+        in_flight.push(exchange);
 
-        match attempt(&inner, node, is_batch, &body_bytes).await {
-            Ok(packet) => {
-                // The answering node first, the nodes after it behind it, the nodes that failed before it last
-                // in their previous relative order.
-                let mut rotated = Vec::with_capacity(order.len());
-                rotated.push(index);
-                rotated.extend_from_slice(&order[position + 1..]);
-                rotated.extend_from_slice(&order[..position]);
-                inner.set_order(rotated);
-                return Ok(packet);
-            },
-            Err(failure) => {
-                if let NodeFailure::JsonRpc(payload) = &failure {
-                    warn!("{}", answered_with_error_line(node, &method, payload));
-                } else {
-                    debug!("{}", attempt_failed_line(node, &method, &failure, inner.cutoff_s));
-                }
-                failures.push((index, failure));
-            },
+        let mut cutoff = Timer::sleep(inner.cutoff_s);
+        loop {
+            match select(in_flight.next(), &mut cutoff).await {
+                Either::Left((Some((ended, outcome)), _)) => {
+                    if let Some(packet) = walk.settle(ended, outcome, Some(position)) {
+                        return Ok(packet);
+                    }
+                    // Only the node being asked ends its turn; an earlier node that failed late is one more
+                    // outcome, the wait for this node goes on.
+                    if ended == position {
+                        break;
+                    }
+                },
+                // The node being asked is in the set until it ends, and its end leaves this loop.
+                Either::Left((None, _)) => break,
+                Either::Right(_) => {
+                    if keeps_exchanges {
+                        debug!("{}", still_listening_line(walk.node(position), &method, inner.cutoff_s));
+                    }
+                    break;
+                },
+            }
         }
     }
 
-    Err(all_failed(&inner, failures))
+    while let Some((ended, outcome)) = in_flight.next().await {
+        if let Some(packet) = walk.settle(ended, outcome, None) {
+            return Ok(packet);
+        }
+    }
+
+    Err(all_failed(&inner, walk.into_failures()))
 }
 
-/// One attempt on one node, bounded by the cutoff, classified per CRD ch.35 R35.1.8.
+/// One exchange with one node, bounded by the exchange bound, classified per CRD ch.35 R35.1.8. The request
+/// moves on at the cutoff without waiting for this to end (D35.11).
 async fn attempt(inner: &Inner, node: &Node, is_batch: bool, body: &[u8]) -> Result<ResponsePacket, NodeFailure> {
-    let sent = within_cutoff(inner.cutoff_s, inner.sender.send(&node.uri, body, inner.cutoff_s)).await;
+    let bound_s = inner.exchange_bound_s;
+    let sent = within_cutoff(bound_s, inner.sender.send(&node.uri, body, bound_s)).await;
     let response_bytes = match sent {
         None => return Err(NodeFailure::Cutoff),
         Some(Err(text)) => return Err(NodeFailure::Transport(node.scrub(&text))),
@@ -404,7 +553,7 @@ fn all_failed(inner: &Inner, failures: Vec<(usize, NodeFailure)>) -> TransportEr
     }
 }
 
-/// Runs `fut` for at most `seconds`; `None` means the cutoff elapsed first. The same select-with-timer on the
+/// Runs `fut` for at most `seconds`; `None` means the bound elapsed first. The same select-with-timer on the
 /// native and the WASM target.
 async fn within_cutoff<F: Future>(seconds: f64, fut: F) -> Option<F::Output> {
     let fut = Box::pin(fut);
@@ -414,9 +563,10 @@ async fn within_cutoff<F: Future>(seconds: f64, fut: F) -> Option<F::Output> {
     }
 }
 
-/// How long past the attempt's bound the spawned HTTP exchange may live. The caller's [`within_cutoff`] must win
+/// How long past the exchange's bound the spawned HTTP exchange may live. The caller's [`within_cutoff`] must win
 /// the race so that a timed-out node is reported as a cutoff; the exchange's own bound only has to end the spawned
-/// task soon after, so it is slightly later.
+/// task soon after, so it is slightly later. On wasm32 there is no spawned task: the fetch cannot be aborted here,
+/// and the caller's [`within_cutoff`] timer alone ends the wait at the exchange bound.
 #[cfg(not(target_arch = "wasm32"))]
 const SPAWNED_EXCHANGE_GRACE_S: f64 = 1.;
 

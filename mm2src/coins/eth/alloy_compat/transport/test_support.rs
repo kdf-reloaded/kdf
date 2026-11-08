@@ -14,8 +14,12 @@ pub(crate) enum Reply {
     Body(String),
     /// The exchange fails (connection refused, HTTP 502, ...); the text is the lower layer's message.
     Fail(String),
-    /// The node never answers; only the cutoff ends the attempt.
+    /// The node never answers; only the bound of the exchange ends the attempt.
     Hang,
+    /// HTTP 200 with this body, `seconds` after the request was sent.
+    BodyAfter(f64, String),
+    /// The exchange fails with this text, `seconds` after the request was sent.
+    FailAfter(f64, String),
 }
 
 /// One request as a stub node saw it.
@@ -34,6 +38,8 @@ type Handler = dyn Fn(&Call) -> Reply + Send + Sync;
 pub(crate) struct StubSender {
     handler: Arc<Handler>,
     calls: Arc<Mutex<Vec<(String, String)>>>,
+    /// The `bound_s` each request was sent with.
+    bounds: Arc<Mutex<Vec<f64>>>,
 }
 
 impl fmt::Debug for StubSender {
@@ -45,6 +51,7 @@ impl StubSender {
         StubSender {
             handler: Arc::new(handler),
             calls: Arc::default(),
+            bounds: Arc::default(),
         }
     }
 
@@ -62,11 +69,17 @@ impl StubSender {
             .collect()
     }
 
-    pub(crate) fn clear(&self) { self.calls.lock().unwrap().clear() }
+    /// The exchange bound every request was sent with, in arrival order.
+    pub(crate) fn bounds(&self) -> Vec<f64> { self.bounds.lock().unwrap().clone() }
+
+    pub(crate) fn clear(&self) {
+        self.calls.lock().unwrap().clear();
+        self.bounds.lock().unwrap().clear();
+    }
 }
 
 impl NodeSender for StubSender {
-    fn send<'a>(&'a self, uri: &'a http::Uri, body: &'a [u8], _bound_s: f64) -> NodeSendFuture<'a> {
+    fn send<'a>(&'a self, uri: &'a http::Uri, body: &'a [u8], bound_s: f64) -> NodeSendFuture<'a> {
         let request: Json = serde_json::from_slice(body).unwrap();
         let method = match &request {
             Json::Array(_) => "batch".to_owned(),
@@ -82,12 +95,21 @@ impl NodeSender for StubSender {
             .lock()
             .unwrap()
             .push((call.host.clone(), call.method.clone()));
+        self.bounds.lock().unwrap().push(bound_s);
         let reply = (self.handler)(&call);
         Box::pin(async move {
             match reply {
                 Reply::Body(body) => Ok(body.into_bytes()),
                 Reply::Fail(text) => Err(text),
                 Reply::Hang => futures::future::pending().await,
+                Reply::BodyAfter(seconds, body) => {
+                    Timer::sleep(seconds).await;
+                    Ok(body.into_bytes())
+                },
+                Reply::FailAfter(seconds, text) => {
+                    Timer::sleep(seconds).await;
+                    Err(text)
+                },
             }
         })
     }
