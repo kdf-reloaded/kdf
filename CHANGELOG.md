@@ -657,9 +657,11 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   KDF. Accounts that an earlier build stored under the seed's identity for a coin activated for the
   Trezor are removed from the seed's records at the next activation of that coin from the seed, with
   a warning that names the coin and the account numbers, so they are no longer listed under the
-  seed. The device re-creates its own: the next activation for the Trezor creates the account it
-  activates, and any other account appears again after `task::create_new_account` for its number.
-  Detail: PR #293; CRD ch.05 §5.10B R52–R55, R35a, R35c.
+  seed. The check removes any stored account whose key the seed does not derive under the coin's
+  current derivation path, so the same warning also appears for a coin whose derivation path has
+  changed since its accounts were stored. The device re-creates its own: the next activation for the
+  Trezor creates the account it activates, and any other account appears again after
+  `task::create_new_account` for its number. Detail: PR #293; CRD ch.05 §5.10B R52–R55, R35a, R35c.
 - **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
   trailer are read correctly for the median time.** Bitcoin Atom (BCA) serves 84-byte headers from block
   505888; Reloaded read them as 80 bytes, so the median time it needs before every HTLC spend and refund
