@@ -835,12 +835,14 @@ What does not work yet, or works only in part, in this release. Each item says w
 lives.
 
 - **Trezor accounts stored by an earlier release under a seed-phrase login can show up under the
-  seed.** Before this release, a coin activated for the Trezor next to a seed-phrase login stored its
-  accounts under the seed's identity. Those rows stay there, so a later activation of the same coin
-  from the seed (without `"priv_key_policy": "Trezor"`) lists them with the device's addresses as if
-  they were the seed's. Funds are not at risk, since only the device can sign for those addresses.
-  This affects only nodes that used a Trezor next to a seed-phrase login before this release.
-  Detail: PR #293; CRD ch.05 §5.10B R55.
+  seed.** Before this release, a coin activated for the Trezor next to a seed-phrase login stored
+  its accounts under the seed's identity. Those rows stay there, so a later activation of the same
+  coin from the seed (without `"priv_key_policy": "Trezor"`) lists them with the device's addresses
+  as if they were the seed's. Funds are not at risk, since only the device can sign for those
+  addresses. No method removes those rows, and activating the coin for the Trezor again does not
+  remove them either; until a later release checks the stored accounts, enable such a coin only for
+  the Trezor. This affects only nodes that used a Trezor next to a seed-phrase login before this
+  release. Detail: PR #293; CRD ch.05 §5.10B R55.
 - **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
   `get_enabled_coins` fails as a whole once such a coin is enabled.** Both report a single address,
   and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for
