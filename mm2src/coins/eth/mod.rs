@@ -99,6 +99,7 @@ mod eth_logs_window;
 mod eth_market_ops;
 mod eth_mm_coin;
 mod eth_swap_ops;
+mod secret_hash_value;
 // EVM Trezor hardware-wallet activation (device-sourced address/pubkey). Native,
 // non-iOS only — the Trezor signing policy exists only there (CRD §50).
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
@@ -117,6 +118,7 @@ pub use eth_impl::*;
 pub(crate) use eth_logs_window::{LogsWindow, PaymentKey, SPEND_WAIT_POLL_S};
 pub use eth_mm_coin::EthTxFeeDetails;
 pub use eth_types::*;
+pub(crate) use secret_hash_value::{check_payment_secret_hash_arg, contract_secret_hash};
 // EVM Trezor activation entrypoints (native, non-iOS).
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
 pub use eth_trezor_activation::{eth_coin_activate_with_trezor, eth_coin_activate_with_trezor_hd,
@@ -144,6 +146,7 @@ pub(crate) use abi::{AbiError, Contract, Function, Token};
 #[cfg(test)] mod abi_golden_tests;
 #[cfg(test)] mod eth_failover_tests;
 #[cfg(test)] mod eth_gas_limit_call_site_tests;
+#[cfg(test)] mod eth_secret_hash_tests;
 #[cfg(test)] mod eth_tests;
 #[cfg(test)] mod fee_service_url_tests;
 #[cfg(test)] mod typed_tx_vector_tests;

@@ -1077,3 +1077,141 @@ fn t10_qrc20_min_trading_vol_is_one_smallest_unit() {
         }
     }
 }
+
+// ─── CRD ch.51 R72A: the swap contract's `bytes20` slot carries the value derived from the shared secret hash ───
+//
+// The literals were computed outside the code under test: `R72A_SHARED_HASH_32` is SHA-256 of 32 bytes of 0x42,
+// `R72A_DERIVED_20` is RIPEMD-160 of those 32 hash bytes, and `R72A_SWAP_ID_32` is SHA-256 of the little-endian
+// `u32` time lock 1_800_000_000 followed by `R72A_SHARED_HASH_32`. `R72A_EXTRACT_HASH_32` is SHA-256 of 32 bytes
+// of 0x01, the secret of `test_extract_secret`, and its RIPEMD-160 is the `dhash160` of that secret.
+
+const R72A_SHARED_HASH_32: &str = "425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c";
+const R72A_DERIVED_20: &str = "8739f40ec4dbf569dcb38134c6e7310908566981";
+const R72A_SWAP_ID_32: &str = "7ab1069172a6ee74f38e0a0e76274430d5b34fa692a12db07ac75fe9003f1104";
+const R72A_EXTRACT_HASH_32: &str = "72cd6e8422c407fb6d098690f1130b7ded7ec2f7f5e1d30bd9d521f015363793";
+const R72A_TIME_LOCK: u32 = 1_800_000_000;
+
+fn r72a_qrc20_coin() -> Qrc20Coin {
+    // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
+    let priv_key = [
+        3, 98, 177, 3, 108, 39, 234, 144, 131, 178, 103, 103, 127, 80, 230, 166, 53, 68, 147, 215, 42, 216, 144, 72,
+        172, 110, 180, 13, 123, 179, 10, 49,
+    ];
+    qrc20_coin_for_test(&priv_key, None).1
+}
+
+/// The `erc20Payment` call bytes for `secret_hash`, and the arguments decoded from them.
+fn r72a_payment_call(coin: &Qrc20Coin, secret_hash: &[u8]) -> Qrc20AbiResult<(Vec<u8>, Vec<Token>)> {
+    let swap_id = qrc20_swap_id(R72A_TIME_LOCK, secret_hash);
+    let bytes = coin.erc20_payment_call_bytes(
+        swap_id,
+        U256::from(1000u64),
+        R72A_TIME_LOCK,
+        secret_hash,
+        H160::default(),
+    )?;
+    let function = eth::SWAP_CONTRACT.function("erc20Payment").unwrap();
+    let decoded = function.decode_input(&bytes[4..]).unwrap();
+    Ok((bytes, decoded))
+}
+
+#[test]
+fn r72a_qrc20_payment_embeds_the_derived_value_for_a_32_byte_secret_hash() {
+    let coin = r72a_qrc20_coin();
+    let shared = hex::decode(R72A_SHARED_HASH_32).unwrap();
+    let (_bytes, args) = r72a_payment_call(&coin, &shared).unwrap();
+    assert_eq!(args[4], Token::FixedBytes(hex::decode(R72A_DERIVED_20).unwrap()));
+}
+
+#[test]
+fn r72a_qrc20_payment_keeps_a_20_byte_secret_hash_unchanged() {
+    let coin = r72a_qrc20_coin();
+    let narrow = vec![0x5au8; 20];
+    let (bytes, args) = r72a_payment_call(&coin, &narrow).unwrap();
+    assert_eq!(args[4], Token::FixedBytes(narrow.clone()));
+    // Byte for byte what the call carried before the derivation existed: the raw value in the slot.
+    let swap_id = qrc20_swap_id(R72A_TIME_LOCK, &narrow);
+    let expected = eth::SWAP_CONTRACT
+        .function("erc20Payment")
+        .unwrap()
+        .encode_input(&[
+            Token::FixedBytes(swap_id),
+            Token::Uint(U256::from(1000u64)),
+            Token::Address(coin.contract_address),
+            Token::Address(H160::default()),
+            Token::FixedBytes(narrow),
+            Token::Uint(U256::from(R72A_TIME_LOCK)),
+        ])
+        .unwrap();
+    assert_eq!(bytes, expected);
+}
+
+#[test]
+fn r72a_qrc20_payment_with_a_wrongly_sized_secret_hash_is_not_built() {
+    let coin = r72a_qrc20_coin();
+    for len in [0usize, 19, 21, 33] {
+        let err = r72a_payment_call(&coin, &vec![0u8; len]).unwrap_err();
+        match err.get_inner() {
+            Qrc20AbiError::InvalidParams(text) => {
+                assert!(
+                    text.contains(&format!("got {}", len)),
+                    "unexpected error text: {}",
+                    text
+                )
+            },
+            _ => panic!("a wrongly sized secret hash must be refused as invalid params"),
+        }
+    }
+}
+
+#[test]
+fn r72a_qrc20_swap_id_is_computed_over_the_shared_value() {
+    let shared = hex::decode(R72A_SHARED_HASH_32).unwrap();
+    assert_eq!(hex::encode(qrc20_swap_id(R72A_TIME_LOCK, &shared)), R72A_SWAP_ID_32);
+}
+
+#[test]
+fn r72a_qrc20_validation_accepts_the_derived_value_for_a_32_byte_secret_hash() {
+    let shared = hex::decode(R72A_SHARED_HASH_32).unwrap();
+    let slot = Token::FixedBytes(hex::decode(R72A_DERIVED_20).unwrap());
+    eth::check_payment_secret_hash_arg(&slot, &shared).unwrap();
+}
+
+#[test]
+fn r72a_qrc20_validation_refuses_the_raw_leading_bytes_and_names_the_derived_value() {
+    let shared = hex::decode(R72A_SHARED_HASH_32).unwrap();
+    let slot = Token::FixedBytes(shared[..20].to_vec());
+    let err = eth::check_payment_secret_hash_arg(&slot, &shared).unwrap_err();
+    assert!(err.contains("secret_hash arg"), "unexpected error text: {}", err);
+    assert!(err.contains("is invalid"), "unexpected error text: {}", err);
+    let expected = format!(
+        "expected {:?}",
+        Token::FixedBytes(hex::decode(R72A_DERIVED_20).unwrap())
+    );
+    assert!(err.contains(&expected), "unexpected error text: {}", err);
+}
+
+#[test]
+fn r72a_qrc20_validation_of_a_20_byte_secret_hash_is_unchanged() {
+    let narrow = vec![0x5au8; 20];
+    eth::check_payment_secret_hash_arg(&Token::FixedBytes(narrow.clone()), &narrow).unwrap();
+    let err = eth::check_payment_secret_hash_arg(&Token::FixedBytes(vec![0x5bu8; 20]), &narrow).unwrap_err();
+    assert!(err.contains("is invalid"), "unexpected error text: {}", err);
+}
+
+#[test]
+fn r72a_qrc20_extract_secret_accepts_a_32_byte_secret_hash() {
+    let coin = r72a_qrc20_coin();
+    // The spend of `test_extract_secret`: its secret is 32 bytes of 0x01, whose SHA-256 is the 32-byte shared value.
+    let shared = hex::decode(R72A_EXTRACT_HASH_32).unwrap();
+    let tx_hex = hex::decode("01000000033f56ecafafc8602fde083ba868d1192d6649b8433e42e1a2d79ba007ea4f7abb010000006b48304502210093404e90e40d22730013035d31c404c875646dcf2fad9aa298348558b6d65ba60220297d045eac5617c1a3eddb71d4bca9772841afa3c4c9d6c68d8d2d42ee6de3950121022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1affffffff9cac7fe90d597922a1d92e05306c2215628e7ea6d5b855bfb4289c2944f4c73a030000006b483045022100b987da58c2c0c40ce5b6ef2a59e8124ed4ef7a8b3e60c7fb631139280019bc93022069649bcde6fe4dd5df9462a1fcae40598488d6af8c324cd083f5c08afd9568be0121022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1affffffff70b9870f2b0c65d220a839acecebf80f5b44c3ca4c982fa2fdc5552c037f5610010000006a473044022071b34dd3ebb72d29ca24f3fa0fc96571c815668d3b185dd45cc46a7222b6843f02206c39c030e618d411d4124f7b3e7ca1dd5436775bd8083a85712d123d933a51300121022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1affffffff020000000000000000c35403a0860101284ca402ed292b806a1835a1b514ad643f2acdb5c8db6b6a9714accff3275ea0d79a3f23be8fd00000000000000000000000000000000000000000000000000000000001312d000101010101010101010101010101010101010101010101010101010101010101000000000000000000000000d362e096e873eb7907e205fadc6175c6fec7bc440000000000000000000000009e032d4b0090a11dc40fe6c47601499a35d55fbb14ba8b71f3544b93e2f681f996da519a98ace0107ac2c02288d4010000001976a914783cf0be521101942da509846ea476e683aad83288ac0f047f5f").unwrap();
+    assert_eq!(coin.extract_secret(&shared, &tx_hex).unwrap(), vec![1u8; 32]);
+}
+
+#[test]
+fn r72a_qrc20_extract_secret_refuses_a_wrongly_sized_secret_hash() {
+    let coin = r72a_qrc20_coin();
+    let tx_hex = hex::decode("01000000033f56ecafafc8602fde083ba868d1192d6649b8433e42e1a2d79ba007ea4f7abb010000006b48304502210093404e90e40d22730013035d31c404c875646dcf2fad9aa298348558b6d65ba60220297d045eac5617c1a3eddb71d4bca9772841afa3c4c9d6c68d8d2d42ee6de3950121022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1affffffff9cac7fe90d597922a1d92e05306c2215628e7ea6d5b855bfb4289c2944f4c73a030000006b483045022100b987da58c2c0c40ce5b6ef2a59e8124ed4ef7a8b3e60c7fb631139280019bc93022069649bcde6fe4dd5df9462a1fcae40598488d6af8c324cd083f5c08afd9568be0121022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1affffffff70b9870f2b0c65d220a839acecebf80f5b44c3ca4c982fa2fdc5552c037f5610010000006a473044022071b34dd3ebb72d29ca24f3fa0fc96571c815668d3b185dd45cc46a7222b6843f02206c39c030e618d411d4124f7b3e7ca1dd5436775bd8083a85712d123d933a51300121022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1affffffff020000000000000000c35403a0860101284ca402ed292b806a1835a1b514ad643f2acdb5c8db6b6a9714accff3275ea0d79a3f23be8fd00000000000000000000000000000000000000000000000000000000001312d000101010101010101010101010101010101010101010101010101010101010101000000000000000000000000d362e096e873eb7907e205fadc6175c6fec7bc440000000000000000000000009e032d4b0090a11dc40fe6c47601499a35d55fbb14ba8b71f3544b93e2f681f996da519a98ace0107ac2c02288d4010000001976a914783cf0be521101942da509846ea476e683aad83288ac0f047f5f").unwrap();
+    let err = coin.extract_secret(&[0u8; 33], &tx_hex).unwrap_err();
+    assert!(err.contains("got 33"), "unexpected error text: {}", err);
+}

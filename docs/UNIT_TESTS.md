@@ -349,3 +349,46 @@ Run on 2026-11-07: `cargo test -p mm2_main --lib test_recover_funds` passed (42 
 | `test_recover_funds_sent_spend_spent_maker_payment_still_spends_the_unspent_taker_payment` | T32 item 9, R75 item 2 | The maker payment is spent and the taker payment is not: the spend of the taker payment is built (`SpentOtherPayment`), no refund |
 | `test_recover_funds_sent_spend_spent_maker_payment_and_spent_taker_payment_builds_nothing` | T32 item 10, R75 item 2 | Both payments spent: the call refuses ("Taker payment was already spent"); no spend and no refund is built |
 | `test_recover_funds_sent_spend_refunded_maker_payment_is_refused_as_already_refunded` | T32 item 11, R75 item 2 | The maker payment is refunded on the chain: the call refuses ("Maker payment was already refunded"), not with the sent-spend text; nothing is built |
+
+## EVM swap contract value derived from a 32-byte secret hash (14 tests)
+
+Location: `mm2src/coins/eth/eth_secret_hash_tests.rs` (coin fixtures from
+`eth_gas_limit_call_site_tests.rs`; payment building runs against a mock that captures the calldata, so no
+node is needed). CRD: chapter 51 R72A, R72B, §51.9.1. The vectors are literals computed outside the code:
+SHA-256 of 32 bytes of `0x42`, the RIPEMD-160 of that hash, and the swap id over the time lock and that hash.
+Run on 2026-11-08: `cargo test -p coins --lib -- eth::` passed (425 tests, these 14 included).
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `r72a_helper_keeps_a_20_byte_value_unchanged` | R72A | A 20-byte value comes back as it was |
+| `r72a_helper_derives_ripemd160_of_a_32_byte_value` | R72A | A 32-byte value gives the literal RIPEMD-160 value |
+| `r72a_helper_32_byte_derivation_equals_the_20_byte_default_of_the_same_secret` | R72A | For one secret, deriving from the 32-byte value equals the 20-byte default |
+| `r72a_helper_rejects_other_widths_with_the_shared_text` | R65, R72A | 0, 19, 21 and 33 bytes give the same error text as the UTXO comparator |
+| `r72a_eth_payment_embeds_the_derived_value_for_a_32_byte_secret_hash`, `r72a_erc20_payment_embeds_the_derived_value_for_a_32_byte_secret_hash` | R72A | The `ethPayment` and `erc20Payment` calldata carries exactly the derived 20 bytes in the `bytes20` slot |
+| `r72a_eth_payment_keeps_a_20_byte_secret_hash_unchanged`, `r72a_erc20_payment_keeps_a_20_byte_secret_hash_unchanged` | R72A | A 20-byte secret hash is embedded as before |
+| `r72a_payment_with_a_wrongly_sized_secret_hash_is_not_built` | R72A | A 33-byte value fails before any transaction is sent, for ETH and a token |
+| `r72a_swap_id_is_computed_over_the_shared_value` | R72A | The swap id is still SHA-256 over the time lock and the shared value (literal) |
+| `r72a_validation_accepts_the_derived_value_for_a_32_byte_secret_hash` | R72A | A slot holding the derived value is accepted |
+| `r72a_validation_refuses_the_raw_leading_bytes_and_names_the_derived_value` | R72A | A slot holding the leading 20 bytes of the shared value is refused; the error says "is invalid" and names the derived value as expected |
+| `r72a_validation_of_a_20_byte_secret_hash_is_unchanged` | R72A | The 20-byte comparison and error text are as before |
+| `r72a_validation_of_a_wrongly_sized_secret_hash_is_an_error` | R72A | A 21-byte shared value is an error naming its width |
+
+## QRC20 swap contract value derived from a 32-byte secret hash (9 tests)
+
+Location: the end of `mm2src/coins/qrc20/qrc20_tests.rs`, using the coin fixture of that file (no node is
+needed for these). CRD: chapter 51 R72A, R72B, §51.9.1. The vectors are the literals of the EVM tests above, plus
+the SHA-256 of the secret of `test_extract_secret`. QRC20 is covered by unit tests only. The slot comparison of
+`validate_payment` is tested through the helper it calls, because the validation itself needs a node. Run on
+2026-11-08: `cargo test -p coins --lib -- r72a_qrc20` passed (9 tests).
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `r72a_qrc20_payment_embeds_the_derived_value_for_a_32_byte_secret_hash` | R72A | The `erc20Payment` call bytes carry exactly the literal derived 20 bytes in the `bytes20` slot |
+| `r72a_qrc20_payment_keeps_a_20_byte_secret_hash_unchanged` | R72A | A 20-byte value gives call bytes identical to encoding the raw value |
+| `r72a_qrc20_payment_with_a_wrongly_sized_secret_hash_is_not_built` | R72A | 0, 19, 21 and 33 bytes give an invalid-params error naming the width, and no call bytes |
+| `r72a_qrc20_swap_id_is_computed_over_the_shared_value` | R72A | The swap id is still SHA-256 over the time lock and the shared value (literal) |
+| `r72a_qrc20_validation_accepts_the_derived_value_for_a_32_byte_secret_hash` | R72A | A slot holding the derived value is accepted |
+| `r72a_qrc20_validation_refuses_the_raw_leading_bytes_and_names_the_derived_value` | R72A | The leading 20 bytes of the shared value are refused; the error says "is invalid" and names the derived value as expected |
+| `r72a_qrc20_validation_of_a_20_byte_secret_hash_is_unchanged` | R72A | The 20-byte comparison is as before |
+| `r72a_qrc20_extract_secret_accepts_a_32_byte_secret_hash` | R72A | The secret of a real spend transaction is found when the shared value is the SHA-256 of the secret |
+| `r72a_qrc20_extract_secret_refuses_a_wrongly_sized_secret_hash` | R72A | A 33-byte value is an error naming its width |

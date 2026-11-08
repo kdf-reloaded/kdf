@@ -549,6 +549,11 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
     poll.
 
   Detail: PR #255; CRD ch.17 R17.8.3a.
+- **A swap between Siacoin (or another coin with a 32-byte hash lock) and an EVM coin or token can now
+  complete.** The EVM payment embeds the value the swap contract checks, derived from the 32-byte
+  secret hash, and the validation of a payment expects that value. Before, the counterparty refused the
+  payment. QRC20 payments now embed and validate the same derived value, and the secret of a spend is
+  checked against it; the QRC20 path is covered by unit tests only. Detail: PR #TBD; CRD ch.51 R72A.
 
 #### Node names in logs and errors
 
