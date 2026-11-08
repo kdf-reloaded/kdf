@@ -113,6 +113,14 @@ this group keep a plain `#[ignore]` because CI runs them on purpose in the
   40 s wait on the node's own timer) now mine a block first and wait up to 90 s; whether
   that removes the intermittent failures shows only in repeated CI runs.
 
+  Nine of those tests paid to the shared QRC20 swap contract with a fixed secret (or, for
+  three of them, a fixed secret hash) and a time lock of now minus 200 s: the three
+  `test_search_for_swap_tx_spend_*` tests, `test_taker_spends_maker_payment`,
+  `test_maker_spends_taker_payment`, `test_wait_for_tx_spend`, `test_maker_refunds_payment`,
+  `test_taker_refunds_payment` and `test_check_if_my_payment_sent`. The QRC20 swap id is
+  derived from the time lock and the secret hash. Each of the nine now draws its own random
+  secret (or secret hash) per run.
+
 The tQTUM tests (`coins/utxo/utxo_tests.rs`, `coins/qrc20/qrc20_tests.rs`,
 `mm2_main/src/mm2_tests.rs`) are not disabled. They need the one public Qtum testnet
 Electrum server, `s6.electrum.qtum.site:51001`, so like the live-infra tests of Group 3

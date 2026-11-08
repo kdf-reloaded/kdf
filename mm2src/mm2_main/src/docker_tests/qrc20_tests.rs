@@ -185,7 +185,7 @@ fn test_taker_spends_maker_payment() {
     let timelock = (now_ms() / 1000) as u32 - 200;
     let maker_pub = maker_coin.my_public_key().unwrap().to_vec();
     let taker_pub = taker_coin.my_public_key().unwrap().to_vec();
-    let secret = &[1; 32];
+    let secret = &rand::random::<[u8; 32]>();
     let secret_hash = dhash160(secret).to_vec();
     let amount = BigDecimal::try_from(0.2).unwrap();
 
@@ -267,7 +267,7 @@ fn test_maker_spends_taker_payment() {
     let timelock = (now_ms() / 1000) as u32 - 200;
     let maker_pub = maker_coin.my_public_key().unwrap().to_vec();
     let taker_pub = taker_coin.my_public_key().unwrap().to_vec();
-    let secret = &[1; 32];
+    let secret = &rand::random::<[u8; 32]>();
     let secret_hash = dhash160(secret).to_vec();
     let amount = BigDecimal::try_from(0.2).unwrap();
 
@@ -339,7 +339,7 @@ fn test_maker_refunds_payment() {
 
     let timelock = (now_ms() / 1000) as u32 - 200;
     let taker_pub = hex::decode("022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1a").unwrap();
-    let secret_hash = &[1; 20];
+    let secret_hash = &rand::random::<[u8; 20]>();
     let amount = BigDecimal::from_str("0.2").unwrap();
 
     let payment = coin
@@ -392,7 +392,7 @@ fn test_taker_refunds_payment() {
 
     let timelock = (now_ms() / 1000) as u32 - 200;
     let maker_pub = hex::decode("022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1a").unwrap();
-    let secret_hash = &[1; 20];
+    let secret_hash = &rand::random::<[u8; 20]>();
     let amount = BigDecimal::from_str("0.2").unwrap();
 
     let payment = coin
@@ -442,7 +442,7 @@ fn test_check_if_my_payment_sent() {
     let (_ctx, coin, _priv_key) = generate_qrc20_coin_with_random_privkey("QICK", 20.into(), 10.into());
     let timelock = (now_ms() / 1000) as u32 - 200;
     let taker_pub = hex::decode("022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1a").unwrap();
-    let secret_hash = &[1; 20];
+    let secret_hash = &rand::random::<[u8; 20]>();
     let amount = BigDecimal::from_str("0.2").unwrap();
 
     let payment = coin
@@ -487,7 +487,7 @@ fn test_search_for_swap_tx_spend_taker_spent() {
     let timelock = (now_ms() / 1000) as u32 - 200;
     let maker_pub = maker_coin.my_public_key().unwrap();
     let taker_pub = taker_coin.my_public_key().unwrap();
-    let secret = &[1; 32];
+    let secret = &rand::random::<[u8; 32]>();
     let secret_hash = &*dhash160(secret);
     let amount = BigDecimal::try_from(0.2).unwrap();
 
@@ -546,7 +546,7 @@ fn test_search_for_swap_tx_spend_maker_refunded() {
 
     let timelock = (now_ms() / 1000) as u32 - 200;
     let taker_pub = hex::decode("022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1a").unwrap();
-    let secret = &[1; 32];
+    let secret = &rand::random::<[u8; 32]>();
     let secret_hash = &*dhash160(secret);
     let amount = BigDecimal::try_from(0.2).unwrap();
 
@@ -605,7 +605,7 @@ fn test_search_for_swap_tx_spend_not_spent() {
 
     let timelock = (now_ms() / 1000) as u32 - 200;
     let taker_pub = hex::decode("022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1a").unwrap();
-    let secret = &[1; 32];
+    let secret = &rand::random::<[u8; 32]>();
     let secret_hash = &*dhash160(secret);
     let amount = BigDecimal::try_from(0.2).unwrap();
 
@@ -649,8 +649,8 @@ fn test_wait_for_tx_spend() {
     let timelock = (now_ms() / 1000) as u32 - 200;
     let maker_pub = maker_coin.my_public_key().unwrap();
     let taker_pub = taker_coin.my_public_key().unwrap();
-    let secret = &[1; 32];
-    let secret_hash = &*dhash160(secret);
+    let secret: [u8; 32] = rand::random();
+    let secret_hash = &*dhash160(&secret);
     let amount = BigDecimal::try_from(0.2).unwrap();
 
     let payment = maker_coin
@@ -701,7 +701,7 @@ fn test_wait_for_tx_spend() {
                 &payment_hex,
                 timelock,
                 &maker_pub_c,
-                secret,
+                &secret,
                 &[],
                 &taker_coin.swap_contract_address(),
             )
