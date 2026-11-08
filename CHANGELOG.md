@@ -553,7 +553,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   complete.** The EVM payment embeds the value the swap contract checks, derived from the 32-byte
   secret hash, and the validation of a payment expects that value. Before, the counterparty refused the
   payment. QRC20 payments now embed and validate the same derived value, and the secret of a spend is
-  checked against it; the QRC20 path is covered by unit tests only. Detail: PR #TBD; CRD ch.51 R72A.
+  checked against it; the QRC20 path is covered by unit tests only. Detail: PR #290; CRD ch.51 R72A.
 
 #### Node names in logs and errors
 

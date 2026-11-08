@@ -1543,7 +1543,7 @@ carry it.
 > WrongSecretHashLength`, `SiaValidatePaymentInputError::
 > WrongSecretHashLength`) rather than something recovery can act on.
 >
-> **EVM leg: closed in code as of 2026-11-08 (lab row pending).** The
+> **EVM leg: closed in code and verified in the lab as of 2026-11-08.** The
 > "plausible in other coin families" remark above held for the EVM legacy
 > swap contract. That contract takes the hash as a `bytes20` argument and
 > verifies a spend with `ripemd160(sha256(secret))`, which is exactly the
@@ -1569,9 +1569,19 @@ carry it.
 > byte-for-byte as before. Tests: `eth_secret_hash_tests.rs`, all prefixed
 > `r72a_` (helper, payment build for ETH and ERC20 against literal vectors,
 > swap id, validation). Run on 2026-11-08: `cargo test -p coins --lib -- eth::`
-> passed (425 tests, the new ones included) and the formatting check passed. The
-> lab row, a Siacoin-for-EVM-token swap end to end and a refund case, is pending;
-> until it passes this finding is closed in code and unit-tested only.
+> passed (425 tests, the new ones included) and the formatting check passed.
+> Lab (2026-11-08, build of PR #290, Siacoin against USDC-MON on Monad, 32-byte
+> secret hash H32, contract value D20 = RIPEMD-160(H32)): cell A (the maker sells
+> SC) and cell A2 (the maker sells USDC-MON) passed, payment and spend, and cell
+> B, the refund case (maker USDC-MON, taker Siacoin), passed. In cell B the
+> maker's real payment carried D20 left-aligned in the hash slot (payment word 4)
+> and the old 20-byte value appeared in no word; the maker's refund transaction
+> carried D20 in its payment-hash slot (refund word 2); the maker ended
+> MakerPaymentRefunded and Finished with no "secret_hash arg ... is invalid" line
+> in either log; the taker never sent its Siacoin and ended cleanly. The maker's
+> USDC-MON balance was exactly back to its starting amount after the refund (the
+> token is not reduced by gas; gas is paid in MON). The pre-fix baseline run (N1)
+> was not done.
 >
 > The QRC20 legacy swap uses the same contract and the same `bytes20` slot,
 > and has the same defect and the same fix, with the same helpers
