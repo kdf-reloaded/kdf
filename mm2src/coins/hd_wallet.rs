@@ -583,11 +583,29 @@ pub trait HDWalletRpcOps {
     ) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError>;
 }
 
+/// A coin of the Trezor key policy needs the hardware context at call time: the context slot is looked up when
+/// the call is made, and an empty slot answers `HwContextNotInitialized` (CRD ch.05 §5.10B R54, T35). A coin of any
+/// other policy never consults the slot, whether or not it is filled.
+pub(crate) fn require_hardware_context_for_trezor_policy_coin(
+    ctx: &MmArc,
+    coin: &MmCoinEnum,
+) -> MmResult<(), HDWalletRpcError> {
+    if !coin.uses_trezor_policy() {
+        return Ok(());
+    }
+    let crypto_ctx = crypto::CryptoCtx::from_ctx(ctx).mm_err(|e| HDWalletRpcError::Internal(e.to_string()))?;
+    crypto_ctx
+        .hw_ctx()
+        .or_mm_err(|| HDWalletRpcError::HwContextNotInitialized)?;
+    Ok(())
+}
+
 pub async fn get_new_address(
     ctx: MmArc,
     req: GetNewHDAddressRequest,
 ) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError> {
     let coin = lp_coinfind_or_err(&ctx, &req.coin).await.mm_err(Into::into)?;
+    require_hardware_context_for_trezor_policy_coin(&ctx, &coin)?;
     match coin {
         MmCoinEnum::UtxoCoin(utxo) => utxo.get_new_address_rpc(req.params).await,
         MmCoinEnum::QtumCoin(qtum) => qtum.get_new_address_rpc(req.params).await,

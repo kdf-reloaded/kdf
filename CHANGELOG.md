@@ -415,6 +415,13 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 
 #### Accounts and addresses under an HD login
 
+- **`get_mnemonic`, `change_mnemonic_password` and `get_private_keys` work while a Trezor is
+  initialized.** They refused whenever a Trezor context existed, even though the mnemonic and the
+  seed's keys they handle are the login's, not the device's. Now only a coin activated for the
+  Trezor is refused, as on GLEEC KDF: the activated-coins form of `get_private_keys` refuses it as
+  before, and the opt-in full export refuses a requested ticker that is activated for the Trezor
+  with `HardwareWalletNotSupported`. Detail: PR #293; CRD ch.05 §5.10B R56, ch.07 R-K6.
+
 - **Under an HD login, activation now lists the coin's own address from the start.** A UTXO coin
   such as RIN or QTUM activated through its task method, and an EVM coin activated with its tokens,
   list the address at `path_to_address` (by default account 0, External, address 0) with its balance
@@ -659,6 +666,28 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 
 #### UTXO coins and Electrum
 
+- **Under an HD login, a coin's account keys and its stored accounts follow the coin's own key
+  policy, also when a Trezor is initialized.** A node logged in with a seed phrase accepts
+  `task::init_trezor` afterwards, as GLEEC KDF does. Until now:
+  - a UTXO coin such as RIN, or QTUM, whose coins entry names a `trezor_coin` took the key of a new
+    account from the Trezor instead of the seed, in `task::create_new_account` and at activation, so
+    that account's addresses belonged to the device;
+  - a coin activated for the Trezor stored its accounts under the seed's wallet identity, where a
+    later activation of the same ticker from the seed would load them;
+  - Siacoin activation failed;
+  - `get_new_address` on a coin activated for the Trezor answered even when the Trezor context was
+    gone; it now answers `HwContextNotInitialized`.
+
+  Now a coin takes its keys from the seed under a seed-phrase login and from the device only when it
+  is activated for the Trezor, and each kind stores its accounts under its own identity, as on GLEEC
+  KDF. Accounts that an earlier build stored under the seed's identity for a coin activated for the
+  Trezor are removed from the seed's records at the next activation of that coin from the seed, with
+  a warning that names the coin and the account numbers, so they are no longer listed under the
+  seed. The check removes any stored account whose key the seed does not derive under the coin's
+  current derivation path, so the same warning also appears for a coin whose derivation path has
+  changed since its accounts were stored. The device re-creates its own: the next activation for the
+  Trezor creates the account it activates, and any other account appears again after
+  `task::create_new_account` for its number. Detail: PR #293; CRD ch.05 §5.10B R52–R55, R35a, R35c.
 - **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
   trailer are read correctly for the median time.** Bitcoin Atom (BCA) serves 84-byte headers from block
   505888; Reloaded read them as 80 bytes, so the median time it needs before every HTLC spend and refund
