@@ -25,7 +25,9 @@ passages of this note (§0, §A, §B, §C.2) passed the KDF Dirty Gate on
 > dates, head branch names, open/merged/draft state, review counts).
 > Chapter text written from the branch-tip rows describes the state at
 > that row and nothing later; none of these rows is a released
-> designation.
+> designation. References to chapter 21 §21.11B and chapter 18 §18.11
+> point to gated sections not yet on `dev`; they resolve when those
+> sections merge.
 
 ---
 
@@ -33,7 +35,7 @@ passages of this note (§0, §A, §B, §C.2) passed the KDF Dirty Gate on
 
 | Item | What the maintainer named | What the historical record holds | Row name |
 | --- | --- | --- | --- |
-| A | TRON swap support | A branch of that name whose single commit over `dev` adds **planning documents only** (seven plan/research notes and two review-reply notes; no source file). No pull request was ever opened from it, and no other branch or pull-request head of the record carries a TRON swap client (the index was searched by title and head name back to mid-2025: the only TRON pull requests are the two merged activation/withdraw ones of early 2026, a merged account-creation-fee fix, and item B). The remote tip is identical to the tabled row; there is **no later state**. | `feat/tron-swap-support (as of 2026-04-23)` (already tabled; analysed in [Chapter 21](../21-tron-integration.md) §21.11B F21.B4, batch 0.4.0-6) |
+| A | TRON swap support | A branch of that name whose single commit over `dev` adds **planning documents only** (seven plan/research notes and two review-reply notes; no source file). No pull request was ever opened from it, and no other branch or pull-request head of the record carries a TRON swap client (the index was searched by title and head name back to mid-2025: the only TRON pull requests are the two merged activation/withdraw ones of early 2026, a merged account-creation-fee fix, and item B). The remote tip is identical to the tabled row; there is **no later state**. | `feat/tron-swap-support (as of 2026-04-23)` (already tabled; analyzed in [Chapter 21](../21-tron-integration.md) §21.11B F21.B4, batch 0.4.0-6) |
 | B | TRON GasFree fee delegation | A branch of that name that is the head of an **open, unmerged draft pull request** against `dev` (opened 2026-03-23, last pushed 2026-05-04, in conflict with `dev` at archive time). Nine commits over its base, about 4.6 k lines added across 49 files. Review state: no review verdict was ever recorded; zero inline review comments; one comment from outside the maintainer team (a wording request, §B.3.6). | `feat/tron-gasfree (as of 2026-05-04)` (row added by this pass) |
 | C | Tendermint activation features (custom tokens, HD derivation path, WalletConnect / key-less signing, Trezor) | **No such unmerged pull request exists.** Every feature in that list was merged into the reference between 2024-05 and 2025-06 and is part of `v3.0.0-beta`; [Chapter 36](../36-tendermint-v2-activation-rpcs.md) (Dirty-Gate-passed) already binds them from that designation and `docs/plans/tendermint-activation-features.md` already tracks the implementation gap. The only **unmerged Tendermint** pull request in the record is a *priority transaction fee* draft (opened 2024-11-26, last pushed 2025-07-24, two inline review comments discussing the shape of a request field, in conflict with `dev`, never approved). It is enumerated in §C.2 as the nearest candidate, so the maintainer can decide whether it is the item meant. | `tendermint-priority-fee (as of 2025-07-24)` (row added by this pass) |
 
@@ -64,8 +66,8 @@ are `D21.B1`–`D21.B9`.
 | A.12 | Secret-hash algorithm chosen per coin pair for a TRON pairing | COVERED | R21.B6 with [Chapter 51](../51-legacy-v1-swap-state-machine.md) R71/R72 (pair-based). The documents also select on the coin pair; this repository's parked branch rewrite had used a per-coin shape, which `docs/plans/tron-swap-support.md` already rejects. |
 | A.13 | Watcher-reward contract variants for TRON | PARTLY (decision pending) | §21.11 D4 and plan question 5; the documents raise it as an open question and settle nothing. |
 | A.14 | Confirmation depth and solidified-block finality | COVERED (as a decision) | R21.B5, D21.B8. |
-| A.15 | Verification: a Nile proof of the hash lock before any client work, per-step tests, an end-to-end Nile swap before release | NOT COVERED on `dev` | Chapter 21 §21.11B binds no test rows for TRON swaps yet (the parked branch's T1–T6 exist only there). A lab/test row set is needed when swaps are scheduled (lane item). |
-| A.16 | Coins-file entries for native TRON coins carrying a swap contract | NOT COVERED | Configuration lane (coins repository), not CRD. |
+| A.15 | Verification: a Nile proof of the hash lock before any client work, per-step tests, an end-to-end Nile swap before release | NOT COVERED on `dev` | Chapter 21 §21.11B binds no test rows for TRON swaps yet (the parked branch's T1–T6 exist only there). A lab/test row set is needed when swaps are scheduled (work item). |
+| A.16 | Coins-file entries for native TRON coins carrying a swap contract | NOT COVERED | Coins-file configuration (coins repository), not CRD. |
 | A.17 | TRC20 tokens that return no boolean (mainnet USDT) tolerated by the contract's transfer wrapper and balance checks | COVERED | §21.11B.2 contract notes. |
 | A.18 | A pre-existing defect the documents assert in the EVM family's V1 **ERC20 payment validation** | finding, not a gap | See the code-quality finding below. |
 | A.19 | A refactor of the chain RPC client layer | not a behavior | Internal decomposition; nothing to cover. |
@@ -88,10 +90,10 @@ are `D21.B1`–`D21.B9`.
 
 **Item A recommendation.** Nothing in row A adds behavior beyond what
 §21.11B already covers or defers to D21.B1–D21.B9. Add to the TRON swap
-lane (steps P2–P5): (i) a test-row set for TRON swaps (A.15) once D21.B2
-is decided; (ii) the coins-file configuration item (A.16); (iii) the
-regression test of the finding above (optional). No new chapter section
-is needed.
+work (activation route, swap operations, lab rows): (i) a test-row set
+for TRON swaps (A.15) once D21.B2 is decided; (ii) the coins-file
+configuration item (A.16); (iii) the regression test of the finding
+above (optional). No new chapter section is needed.
 
 ---
 
@@ -128,7 +130,7 @@ done, while the tip carries it. All statements below are about the tip.
 | B.2.3 | Provider payload parsing: integers accepted as JSON numbers or decimal strings; negative or empty rejected; `version` must equal 1 everywhere; `requestId` must be a version-4 UUID; the transfer-fee estimate accepted under both of the provider's two spellings; signatures and transaction hashes rejected with a `0x` prefix or a wrong length; unknown lifecycle `state`/`txnState` values rejected. | COVERED | Branch ch.49 §49.4.4–§49.4.7, R5, R6, R12, T5, T6. |
 | B.2.4 | TIP-712 `PermitTransfer`: domain `GasFreeController` / `V1.0.0` / chain id (mainnet 728126428, Shasta 2494104990, Nile 3448148188) / controller; message field order `token, serviceProvider, user, receiver, value, maxFee, deadline, version, nonce`; signer must equal `user`; deadline must be in the future; 65-byte signature with `v` normalized to 27/28; raw signature redacted in debug output. Vectors: two domain separators (Nile, mainnet) and six permit hashes. | COVERED | Branch ch.49 §49.6, R3, R4, R6, R7, R9, T2. |
 | B.2.5 | Shared EIP-712 encoder changes made for GasFree: fixed-size `bytes32` encoded as the raw 32 bytes (previously hashed — a correctness fix), new dynamic `bytes` type (hashed), strict `0x`-prefixed even-length hex, 20-byte address and ≤32-byte uint checks. | not needed for GasFree / informative | `PermitTransfer` uses neither `bytes32` nor `bytes`. This repository's own encoder already enforces a 32-byte `bytes32` and does not hash it; it has no dynamic `bytes` type (relevant only to WalletConnect/MetaMask typed-data requests that carry one — [Chapter 22](../22-walletconnect-v2.md), [Chapter 47](../47-metamask-integration.md) owners' call). |
-| B.2.6 | Networking: a cross-platform "POST JSON with caller headers" transport where `Content-Type: application/json` cannot be overridden by the caller; the WASM transport now returns the browser-visible response headers instead of an empty map and lowercases header names. | COVERED (pointer) | Branch ch.49 §49.2 requires the capability and points to [Chapter 26](../26-cross-platform-and-wasm.md); chapter 26 §26.x's transport row does not yet list it (add when the rail is scheduled). |
+| B.2.6 | Networking: a cross-platform "POST JSON with caller headers" transport where `Content-Type: application/json` cannot be overridden by the caller; the WASM transport now returns the browser-visible response headers instead of an empty map and lowercases header names. | COVERED (pointer) | Branch ch.49 §49.2 requires the capability and points to [Chapter 26](../26-cross-platform-and-wasm.md); chapter 26's transport table does not yet list it (add when the rail is scheduled). |
 
 ### B.3 Withdraw behavior at the tip
 
@@ -218,22 +220,23 @@ the fee formula), plus the fee-policy RPC extension — no new chapter.
 ## D. Provenance footer (note-scoped)
 
 - *Inputs:* the reference states named in the preamble, read by the
-  dirty-side specification author (chapter 01 R37) on 2026-11-08:
-  the file lists, diffs and unit-test vectors of the two branch-tip
-  rows against their bases; the pull-request index of the historical
-  record (titles, head names, dates, state, review counts; the two
-  pull-request descriptions and their comments were read for behavior
-  facts and review state only, and nothing from them is quoted); one
+  dirty-side specification author (chapter 01 R37) on 2026-11-08: the
+  file lists, diffs and unit-test vectors of the two branch-tip rows
+  against their bases; the pull-request index of the historical record
+  (titles, head names, dates, state, review counts; the two pull-request
+  descriptions and their comments were read for behavior facts and
+  review state only, and nothing from them is quoted); one
   payment-validation path of `v3.0.0-beta` for §A.18; the planning
   documents of row A for their subject areas only. From this repository:
-  chapter 21 §21.11B (batch 0.4.0-6 worktree), chapter 36, chapter 18
-  §18.11 (batch 0.4.0-7 worktree), chapter 49 (both the `dev` chapter
-  and the GasFree chapter on branch `feat/tron-gasfree`), chapters 22,
-  26, 35, 47, 51, 55; `docs/plans/tron-swap-support.md`,
-  `tron-gasfree.md`, `tendermint-activation-features.md`,
-  `tron-support.md`; and this repository's tree (EIP-712 encoder,
-  withdraw request type, task-status enumeration, V1 payment
-  validation, Tendermint protocol parser) for the "our side" columns.
+  chapter 21 §21.11B (Spec Reader round 0.4.0-6, gated, not yet on
+  `dev`), chapter 36, chapter 18 §18.11 (round 0.4.0-7 draft), chapter
+  49 (both the `dev` chapter and the GasFree chapter on branch
+  `feat/tron-gasfree`), chapters 22, 26, 35, 47, 51, 55;
+  `docs/plans/tron-swap-support.md`, `tron-gasfree.md`,
+  `tendermint-activation-features.md`, `tron-support.md`; and this
+  repository's tree (EIP-712 encoder, withdraw request type, task-status
+  enumeration, V1 payment validation, Tendermint protocol parser) for
+  the "our side" columns.
 - *Permitted-input classes used:* public facts about a publicly
   reachable repository (chapter 01 R6: names, identifiers, dates, open/
   merged/draft state, comment counts); the public GasFree protocol,
@@ -243,23 +246,23 @@ the fee formula), plus the fee-policy RPC extension — no new chapter.
   chapters and tree.
 - *Sibling-allowlist consultations:* none beyond the chapter-21
   citations already recorded in §21.11B.6.
-- *Forbidden corpus:* **consulted**, for the behavior enumerations of
-  §A.18, §B and §C.2 and the identification facts of §0. Only functional
-  behavior, public RPC field names and wire-visible values, dictated
-  interop and review-state facts cross into this note; no private
-  identifier, helper decomposition, control-flow transcription, error or
-  log string literal, test body, or quoted pull-request or review text
-  does. Wire-visible discriminants (fee-method values, task-status
-  values, error discriminants, the fee-details tag, the relay type
-  value) are recorded as public interface of the reference's RPC
-  surface; whether Reloaded adopts them is a decision, not a
-  requirement. *Clearance record (chapter 01 R38–R40):* Cleared by the
-  KDF Dirty Gate on 2026-11-08: PASS, discretionary-similarity 0.05.
-  Extent: the complete change sets of the rows feat/tron-gasfree (as of
-  2026-05-04) over dev (as of 2026-03-16) (49 files) and
-  tendermint-priority-fee (as of 2025-07-24) over dev (as of 2025-07-18)
-  (9 files), the single-commit documentation change set of
-  feat/tron-swap-support (as of 2026-04-23) (9 files), one
+- *Forbidden corpus:* **consulted**, for the topic list of §A (subject
+  areas only), the behavior enumerations of §A.18, §B and §C.2 and the
+  identification facts of §0. Only functional behavior, public RPC field
+  names and wire-visible values, dictated interop and review-state facts
+  cross into this note; no private identifier, helper decomposition,
+  control-flow transcription, error or log string literal, test body, or
+  quoted pull-request or review text does. Wire-visible discriminants
+  (fee-method values, task-status values, error discriminants, the
+  fee-details tag, the relay type value) are recorded as public
+  interface of the reference's RPC surface; whether Reloaded adopts them
+  is a decision, not a requirement. *Clearance record (chapter 01
+  R38–R40):* Cleared by the KDF Dirty Gate on 2026-11-08: PASS,
+  discretionary-similarity 0.05. Extent: the complete change sets of the
+  rows feat/tron-gasfree (as of 2026-05-04) over dev (as of 2026-03-16)
+  (49 files) and tendermint-priority-fee (as of 2025-07-24) over dev (as
+  of 2025-07-18) (9 files), the single-commit documentation change set
+  of feat/tron-swap-support (as of 2026-04-23) (9 files), one
   payment-validation path of v3.0.0-beta, and the public descriptions
   and comment threads of the two draft pull requests whose heads are the
   two branch-tip rows; no later state of any of the three branches
