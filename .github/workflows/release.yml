@@ -18,14 +18,23 @@ name: Release
 # attached. Signing runs ONLY here. Unsigned `dev`/`staging` branch snapshots
 # are produced by dev-build.yml / staging-build.yml instead.
 #
-# Validate a change to this file end-to-end by pushing a throwaway pre-release
-# tag (e.g. `v0.0.0-rc.test`) on staging and deleting the drafted release + tag
-# afterwards.
+# Validate a change to this file with the manual dry run (workflow_dispatch from
+# the branch under test): it exercises every build, the asset naming, the
+# checksum manifest and the signing commands without publishing anything. The
+# publish job (real key, GitHub Release) runs only for tag pushes; its first full
+# test is a real tag, or a throwaway pre-release tag (e.g. `v0.0.0-rc.test`) on
+# staging whose drafted release + tag are deleted afterwards.
 
 on:
   push:
     tags:
       - 'v*'
+  # Dry run: builds everything and assembles the version-tagged assets and
+  # SHA256SUMS exactly as a release would, then signs the manifest with a
+  # throwaway key generated in the job. It never touches the `release`
+  # environment, the real signing key or a GitHub Release, so it can be run from
+  # any branch to test a change to this file.
+  workflow_dispatch:
 
 permissions:
   contents: write # create the GitHub Release and upload assets
@@ -47,6 +56,13 @@ jobs:
       - id: g
         run: |
           set -eu
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            # Dry run from any branch: build and assemble, publish nothing.
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "gate: dry run on ${GITHUB_REF}"
+            exit 0
+          fi
           git fetch --quiet --no-tags origin '+refs/heads/*:refs/remotes/origin/*' || true
           contains() { git branch -r --contains "$GITHUB_SHA" 2>/dev/null | grep -v ' -> ' | grep -qE "/$1$"; }
           ver="${GITHUB_REF_NAME#v}"
@@ -104,16 +120,17 @@ jobs:
     with:
       profile: release
 
-  # Collect every binary, checksum them, GPG-sign the manifest, and draft the
-  # GitHub Release. Runs in the protected `release` environment (the only place
-  # the signing key is exposed).
-  release:
+  # Collect every binary and library, name them with the version tag and write
+  # the SHA-256 manifest. No secrets and no environment: this part runs for tags
+  # and for the manual dry run alike. The assembled directory is handed to the
+  # signing job (tags) or the dry-run signing self-test (manual runs) as the
+  # `release-assets` artifact.
+  assemble:
     needs: [gate, linux, macos, windows, android, ios]
     if: ${{ needs.gate.outputs.proceed == 'true' }}
     runs-on: ubuntu-latest
-    environment: release
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v7
@@ -131,7 +148,8 @@ jobs:
         run: |
           set -eu
           mkdir -p release-assets
-          tag="${GITHUB_REF_NAME}"
+          # Tag runs use the tag name; a manual dry run has a branch ref instead.
+          if [ "$GITHUB_EVENT_NAME" = push ]; then tag="${GITHUB_REF_NAME}"; else tag="dry-run"; fi
           # Each artifact directory is named `kdf-<target>`; its payload is
           # `kdf` (unix) or `kdf.exe` (windows).
           for dir in artifacts/kdf-*; do
@@ -178,6 +196,30 @@ jobs:
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
 
+      - name: Hand the assets to the signing job
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: release-assets/*
+          if-no-files-found: error
+
+  # Sign the checksum manifest with the maintainer key and draft the GitHub
+  # Release. Tag pushes only. Runs in the protected `release` environment (the
+  # only place the signing key is exposed).
+  publish:
+    needs: [gate, assemble]
+    if: ${{ needs.gate.outputs.proceed == 'true' && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the assembled release assets
+        uses: actions/download-artifact@v7
+        with:
+          name: release-assets
+          path: release-assets
+
       - name: Import signing key and sign the checksum manifest
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
@@ -213,6 +255,36 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" release-assets/* \
             --repo "${GITHUB_REPOSITORY}" \
             "${flags[@]}"
+
+  # Dry run only: prove the signing commands work end to end with a throwaway
+  # key generated here (nothing from the `release` environment is used).
+  dry-run-sign:
+    needs: [gate, assemble]
+    if: ${{ needs.gate.outputs.proceed == 'true' && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Fetch the assembled release assets
+        uses: actions/download-artifact@v7
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Sign with a throwaway key and verify
+        run: |
+          set -eu
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          gpg --batch --pinentry-mode loopback --passphrase '' \
+            --quick-generate-key 'KDF dry run <dry-run@invalid>' ed25519 sign never
+          cd release-assets
+          gpg --batch --yes --pinentry-mode loopback --armor --detach-sign \
+            --output SHA256SUMS.asc SHA256SUMS
+          gpg --verify SHA256SUMS.asc SHA256SUMS
+          sha256sum -c SHA256SUMS
+          echo "Dry-run assets:"
+          ls -l
 
   # Optional: publish the runtime container image to a registry. Skipped unless
   # the `PUBLISH_DOCKERHUB` repository variable is set to `true` and the
