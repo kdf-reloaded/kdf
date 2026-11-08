@@ -263,7 +263,10 @@ the same seed phrase. Left unchanged by maintainer decision (2026-10-11).
 - [ ] Establish which key the reference binds on legacy EVM `enable` under an HD
   wallet (Spec Reader question) and bind it in ch. 55 §55.4.
 - [ ] Align the legacy path, with an upgrade note like the one for the mmrpc 2.0
-  path in `CHANGELOG.md`.
+  path in `CHANGELOG.md`. Decision CB of 2026-11-04 (plan
+  [`hd-key-unification`](../plans/hd-key-unification.md) item H7; ch. 55
+  §55.4 R55.4.10 note) chose the coin key and a successful answer behind a
+  switch. Decided, not implemented yet.
 
 ### Solana / SPL swap and history surface — **TODO**
 
@@ -898,8 +901,10 @@ R59.6.4, D2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta`
 (agree); the reference's later, unreleased change is recorded as the row
 `PR #2605 (merged 2025-09-10)`, which neither release carries.
 
-- [ ] *Decided 2026-11-01 (ch. 32 D12): no change before the beta; after it,
-  asking a different relay once (D12 item 1), then candidates (e) and (a).*
+- [x] *Decided 2026-11-01 (ch. 32 D12): no change before the beta; after it,
+  asking a different relay once (D12 item 1), then candidates (e) and (a).
+  Carried out by 2026-11-06 in PRs #208, #224, #251 and #259 (the boxes
+  below).*
   At both release rows and in Reloaded a receiver removes another maker's
   entry only on a cancel message, on a synchronization answer for the pair
   that drops it, on eviction of the whole pubkey record (90 s after the last

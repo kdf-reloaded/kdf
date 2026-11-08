@@ -234,7 +234,9 @@ pub fn allow_insecure_key_export(ctx: &MmArc) -> bool { ctx.conf["allow_insecure
 /// For Iguana wallets, each coin returns a single private key (the passphrase-derived key
 /// in the coin's native format — WIF for UTXO, hex for EVM, etc.).
 ///
-/// Hardware wallets are rejected — they never expose private keys to the host.
+/// A coin of the Trezor key policy never has its key exported: the reduced form refuses it through the coin's
+/// `display_priv_key`, the opt-in superset refuses an activated ticker of that policy with
+/// `HardwareWalletNotSupported`. A hardware context beside a software login does not refuse the call as such.
 pub async fn get_private_keys(
     ctx: MmArc,
     req: GetPrivateKeysRequest,
@@ -248,16 +250,14 @@ pub async fn get_private_keys(
         return MmError::err(GetPrivateKeysError::InsecureExportDisabled);
     }
 
-    // Refuse if this is a Trezor/HW session — hardware wallets never expose keys to the host.
     let crypto_ctx = CryptoCtx::from_ctx(&ctx).mm_err(GetPrivateKeysError::from)?;
-    if crypto_ctx.hw_ctx().is_some() {
-        return MmError::err(GetPrivateKeysError::HardwareWalletNotSupported);
-    }
 
     // Opt-in superset (R-K4): offline export of merely-configured coins, HD
     // per-derivation-path ranges, and protocol-specific formatting, returned
-    // via the untagged-union response shape.
+    // via the untagged-union response shape. The superset derives from the seed and never asks the coin, so a
+    // ticker that is activated as a coin of the Trezor policy is refused here: its key is never exported.
     if req.requests_superset() {
+        refuse_activated_trezor_policy_coins(&ctx, &req.coins).await?;
         return export_superset(&ctx, &crypto_ctx, &req);
     }
 
@@ -313,6 +313,30 @@ pub async fn get_private_keys(
 }
 
 // ── Opt-in superset (R-K4) ──────────────────────────────────────────────
+
+/// Refuses the superset call when a requested ticker is activated as a coin of the Trezor key policy (the key of a
+/// hardware-wallet coin is never exported). A ticker that is only configured, or activated under a software
+/// policy, is not refused: its keys are the seed's own keys.
+async fn refuse_activated_trezor_policy_coins(
+    ctx: &MmArc,
+    tickers: &[String],
+) -> Result<(), MmError<GetPrivateKeysError>> {
+    for ticker in tickers {
+        match lp_coinfind(ctx, ticker).await {
+            Ok(Some(coin)) if coin.uses_trezor_policy() => {
+                return MmError::err(GetPrivateKeysError::HardwareWalletNotSupported)
+            },
+            Ok(_) => {},
+            Err(e) => {
+                return MmError::err(GetPrivateKeysError::Internal(format!(
+                    "Error looking up {}: {}",
+                    ticker, e
+                )))
+            },
+        }
+    }
+    Ok(())
+}
 
 /// Export private keys for the opt-in superset (R-K4): any configured coin
 /// (regardless of activation), per-protocol formatting, and — in `hd` mode —
@@ -870,5 +894,137 @@ mod tests {
         // secret, identical to the other protocols' derivation of the same secret.
         let evm = unwrap_derived(derive_evm("ETH", &sample_secret()));
         assert_eq!(z.pubkey, evm.pubkey);
+    }
+
+    // ── Mixed mode: a software global-HD login with a hardware context (CRD ch.07 R-K3, R-K4) ──
+
+    #[cfg(not(target_arch = "wasm32"))]
+    const MIXED_MODE_MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    #[cfg(not(target_arch = "wasm32"))]
+    const MIXED_MODE_DEVICE_PUBKEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    /// A node under a software global-HD login that also holds a hardware context, with a software coin `SW` and
+    /// a coin `TRZ` of the Trezor key policy activated. `CFG` is configured only.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mixed_mode_ctx() -> MmArc {
+        use crate::utxo::utxo_tests::{software_coin_for_test, trezor_policy_coin_for_test};
+        use crate::{CoinsContext, MmCoinEnum};
+        use common::block_on;
+        use mm2_core::mm_ctx::MmCtxBuilder;
+        use primitives::hash::H264;
+        use std::str::FromStr;
+
+        let utxo_conf = |ticker: &str| {
+            serde_json::json!({
+                "coin": ticker,
+                "protocol": { "type": "UTXO" },
+                "pubtype": 0,
+                "p2shtype": 5,
+                "wiftype": 128,
+                "derivation_path": "m/44'/0'"
+            })
+        };
+        let ctx = MmCtxBuilder::new()
+            .with_conf(serde_json::json!({
+                "allow_insecure_key_export": true,
+                "coins": [utxo_conf("SW"), utxo_conf("TRZ"), utxo_conf("CFG")],
+            }))
+            .into_mm_arc();
+        let crypto_ctx = CryptoCtx::init_with_global_hd_account(ctx.clone(), MIXED_MODE_MNEMONIC).unwrap();
+        crypto_ctx.init_trezor_ctx_for_tests(H264::from_str(MIXED_MODE_DEVICE_PUBKEY).unwrap(), None);
+        assert!(
+            crypto_ctx.hw_ctx().is_some(),
+            "the hardware context exists beside the login"
+        );
+
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        block_on(async {
+            let mut coins = coins_ctx.coins.lock().await;
+            coins.insert("SW".to_owned(), MmCoinEnum::UtxoCoin(software_coin_for_test("SW")));
+            coins.insert(
+                "TRZ".to_owned(),
+                MmCoinEnum::UtxoCoin(trezor_policy_coin_for_test("TRZ")),
+            );
+        });
+        ctx
+    }
+
+    /// CRD ch.07 R-K3: the reduced form under a software login with a hardware context exports the software coin
+    /// and refuses the coin of the Trezor policy through its own `display_priv_key` (`KeyExportFailed`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn mixed_mode_reduced_form_exports_the_software_coin_and_refuses_the_trezor_policy_coin() {
+        use common::block_on;
+
+        let ctx = mixed_mode_ctx();
+
+        match block_on(get_private_keys(ctx.clone(), reduced_req(vec!["SW".into()]))) {
+            Ok(GetPrivateKeysResponse::Reduced { keys }) => {
+                assert_eq!(keys.len(), 1);
+                assert_eq!(keys[0].coin, "SW");
+                assert!(!keys[0].priv_key.is_empty());
+            },
+            Ok(_) => panic!("the reduced form is expected"),
+            Err(e) => panic!("the software coin must be exported: {}", e),
+        }
+
+        match block_on(get_private_keys(ctx, reduced_req(vec!["TRZ".into()]))) {
+            Ok(_) => panic!("the key of a coin of the Trezor policy must not be exported"),
+            Err(e) => assert!(
+                matches!(e.get_inner(), GetPrivateKeysError::KeyExportFailed { ticker, .. } if ticker == "TRZ"),
+                "{}",
+                e
+            ),
+        }
+    }
+
+    /// CRD ch.07 R-K4: the superset refuses a ticker activated as a coin of the Trezor policy with
+    /// `HardwareWalletNotSupported` (both modes, also beside a software ticker), and still exports a configured
+    /// ticker that is not activated, and an activated software ticker.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn mixed_mode_superset_refuses_an_activated_trezor_policy_ticker_and_exports_the_others() {
+        use common::block_on;
+
+        let ctx = mixed_mode_ctx();
+        let superset = |coins: &[&str], mode: GetPrivateKeysMode| GetPrivateKeysRequest {
+            offline: true,
+            mode,
+            ..reduced_req(coins.iter().map(|c| c.to_string()).collect())
+        };
+
+        for (coins, mode) in [
+            (vec!["TRZ"], GetPrivateKeysMode::Iguana),
+            (vec!["SW", "TRZ"], GetPrivateKeysMode::Iguana),
+            (vec!["TRZ"], GetPrivateKeysMode::Hd),
+        ] {
+            match block_on(get_private_keys(ctx.clone(), superset(&coins, mode))) {
+                Ok(_) => panic!("{:?} {:?}: the Trezor-policy ticker must be refused", coins, mode),
+                Err(e) => {
+                    assert_eq!(e.get_inner().status_code(), StatusCode::BAD_REQUEST);
+                    assert!(
+                        matches!(e.get_inner(), GetPrivateKeysError::HardwareWalletNotSupported),
+                        "{:?} {:?}: {}",
+                        coins,
+                        mode,
+                        e
+                    );
+                },
+            }
+        }
+
+        // A configured ticker that is not activated, and an activated software ticker, are exported.
+        match block_on(get_private_keys(
+            ctx,
+            superset(&["CFG", "SW"], GetPrivateKeysMode::Iguana),
+        )) {
+            Ok(GetPrivateKeysResponse::Iguana(entries)) => {
+                let tickers: Vec<_> = entries.iter().map(|entry| entry.coin.as_str()).collect();
+                assert_eq!(tickers, ["CFG", "SW"]);
+            },
+            Ok(_) => panic!("the iguana-mode superset is expected"),
+            Err(e) => panic!("the configured and the software tickers must be exported: {}", e),
+        }
     }
 }

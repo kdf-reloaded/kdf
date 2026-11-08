@@ -27,6 +27,17 @@ corrections). Mixed treatment -- see §42.0.
 > price providers (CoinGecko, CoinMarketCap, etc.) and their APIs are external
 > dictated interop. Private types and helper structure are informative.
 
+> **Price side moved to chapter 62 (added 2026-11-07; chapter 62 passed the
+> KDF Dirty Gate on 2026-11-07).** The endpoint lists, the request,
+> the fallback and rotation rules, the full response contract, the recognized
+> provider set, the pair-rate derivation, the staleness rule, the completion
+> snapshot's fetch moment and failure rule, and the watcher-reward price are
+> bound by [Chapter 62](62-price-service.md). Where this chapter's §42.4–§42.6
+> and chapter 62 differ, chapter 62 governs; in
+> particular the provider statements of §42.5 are superseded by chapter 62
+> R62.5.2 and D62.4 (see chapter 62 §62.9, finding F3). This note takes no
+> forbidden-class input itself; it only points.
+
 ---
 
 ## Part A -- As-built baseline (T-DOC)
@@ -93,12 +104,16 @@ aggregator API, not by this project.
 
 ## 42.5 Price-provider set & endpoint configurability
 
-> **Status update (reloaded).** The provider-set divergence is corrected:
-> deprecated provider variants are removed, replacement provider variants are
-> present, and unknown provider values remain tolerated for forward
-> compatibility.
+> **Status update (reloaded).** *Superseded by chapter 62 (2026-11-07).* The
+> statement of this paragraph that the provider-set divergence was corrected and
+> the set kept current was not accurate: the recognized `price_provider` names
+> are bound by [Chapter 62](62-price-service.md) R62.5.2 and Decision DR
+> (`binance`, `coingecko`, `coinpaprika`, `forex`, `livecoinwatch`; unknown
+> names, including the feed's literal `unknown`, stay unrecognized and are
+> tolerated by the parser; the set can be replaced by the `MM2.json` key
+> `price_providers`).
 >
-> **Port result (reloaded):** this recommendation is implemented.
+> **Port result (reloaded):** see chapter 62 §62.9 for what is implemented.
 
 > **Configurability requirement.** R42.5.1 The price endpoint shall remain fully
 > re-pointable via `price_url`; no hostname shall be hard-required in normative
@@ -108,6 +123,17 @@ aggregator API, not by this project.
 
 > **Status update (reloaded):** `price_url` accepts a comma-separated endpoint
 > list and the fetch logic falls back across endpoints on transport failures.
+
+> **Status update (reloaded, 2026-11-07).** *Reloaded-original; maintainer
+> Decisions DO to DU, 2026-11-07.* The former default host no longer exists (its
+> name does not resolve). The default price sources, their combination and
+> cross-check, the fallback inside a source, the `MM2.json` keys `price_urls`
+> and `price_providers`, the request keys `price_url` and `price_urls`, the
+> warn-once log rule, the 10 s cap per attempt (native builds) and the host-only naming of an
+> endpoint in log lines are bound by [Chapter 62](62-price-service.md)
+> (§62.10, the paragraphs "Decided 2026-11-07"); they are not repeated here. The
+> wire shape of §42.4, the bot's quoting and staleness checks, its refresh rate
+> and the stats-store schema are unchanged.
 
 ## 42.6 Fiat price at swap completion (T-PORT, implemented)
 
@@ -122,6 +148,16 @@ history may read the same values by swap `uuid`.
 > snapshots are fetched, stored in the GLEEC-compatible aggregate stats columns,
 > and exposed through per-wallet swap-history RPCs by `uuid`.
 
+> **Status update (reloaded, 2026-11-07).** *Reloaded-original; maintainer
+> Decisions DO to DU, 2026-11-07.* The snapshot uses the same price sources and
+> the same combination as the bot, fetches once at the terminal event of a
+> successful own swap (a failed own swap gets no prices) and prices a received
+> report at receive time; see [Chapter 62](62-price-service.md) R62.7 and
+> Decision DU. Before this update the snapshot fetched a single fixed address
+> that no longer resolves, so no swap completed since then has USD prices
+> stored. A failed fetch still stores the swap without prices; it never fails
+> the swap record. The snapshot is taken on native builds only.
+
 > **Cross-reference.** [Chapter 44](44-database-persistence-and-migrations.md)
 > §44.6 and R44.8.6 own the binding on-disk schema this requirement writes
 > through: the state `7 -> 8` `stats_swaps` migration adds the
@@ -135,12 +171,15 @@ history may read the same values by swap `uuid`.
 - `start_simple_market_maker_bot` starts the loop with a pair registry; the loop
   quotes per-pair using `spread`, volume settings, floors, and staleness checks;
   `stop_simple_market_maker_bot` stops it (Part A).
-- The price endpoint is overridable via `price_url` and defaults to the shipped
-  value (R42.5.1).
+- The price sources are overridable via the request keys `price_url` and
+  `price_urls` and the `MM2.json` key `price_urls`, and default to the shipped
+  sources of chapter 62 (R42.5.1).
 - Provider attribution stays current and deserialization remains tolerant to
   unknown future provider values.
-- Price fetch supports endpoint fallback via comma-separated `price_url`.
-- A completed swap records its moment-of-completion fiat price (R42.6.1).
+- Price fetch supports fallback inside a source and combines independent
+  sources with a cross-check (chapter 62 Decisions DO and DP).
+- A completed swap records its moment-of-completion fiat price (R42.6.1), from
+  the same price sources as the bot.
 
 ## 42.7 Provenance Footer
 
@@ -158,4 +197,7 @@ history may read the same values by swap `uuid`.
   price-aggregator response shape and upstream provider APIs);
   cross-chapter contracts (Chapter 44).
 - *Sibling-allowlist consultations:* [Chapter 44](44-database-persistence-and-migrations.md).
+- *2026-11-07 status updates (§42.5, §42.6):* Reloaded-original (maintainer
+  Decisions DO to DU); they only point to chapter 62. Inputs: this repository's
+  code and tests; no reference fact is stated.
 - *Forbidden corpus:* not consulted.

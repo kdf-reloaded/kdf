@@ -235,6 +235,76 @@ method still use your computer's resolver, whatever `dns_resolver` says.
 > `"system"` does. No single value reproduces that mix. See
 > [GLEEC compatibility](GLEEC_COMPATIBILITY.md).
 
+### Price Service
+
+On a native build, when a swap of the node ends successfully, the node stores the USD prices of its two coins
+with the swap record (the `maker_coin_usd_price` and `taker_coin_usd_price` columns of the statistics store). A
+swap that failed gets no prices. A swap report received from another node is priced when it arrives, whether
+or not that swap succeeded. The market-maker bot (`start_simple_market_maker_bot`) quotes from the same prices.
+
+A **source** is one address, or a list of addresses asked in order: the first that answers is the source's
+answer. The node asks all its sources at the same time and combines the answers.
+
+| `price_urls` | The sources |
+|---|---|
+| absent or `null` (the default) | source 1: `https://prices.gleec.com/api/v2/tickers?expire_at=259200`, then, if it fails, `https://defistats.gleec.com/api/v3/prices/tickers_v2?expire_at=259200`; source 2: `https://prices.cipig.net:1717/api/v2/tickers?expire_at=259200` |
+| an array | each item is a source: an address (a string), or a non-empty array of addresses |
+
+`price_urls` is a top-level key of `MM2.json`. When it is present and well-formed it **replaces** the default
+sources for every use of prices on the node (the bot and the swap prices); none of the default addresses is kept:
+
+```json
+{
+  "price_urls": [
+    ["https://prices.example.org/api/v2/tickers?expire_at=259200", "https://cache.example.org/tickers?expire_at=259200"],
+    "https://prices2.example.org/api/v2/tickers?expire_at=259200"
+  ],
+  ...
+}
+```
+
+A value that is not an array, an empty array, or an array with an item that is neither an address nor a
+non-empty array of addresses is ignored: the default sources apply and one warning names the key (never its
+value).
+
+- **Combining.** A record is dropped if its price provider is not recognized (see `price_providers`) or its
+  timestamp is zero. A coin that one source prices is priced from that source. A coin that several sources price
+  is priced from the source with the newest record when their prices differ by at most 5 % of the lowest. When
+  they differ by more, the sources disagree on that coin and it is **not priced at all**: the bot quotes no pair
+  with it and a swap with it is stored without USD prices. One warning names the coin, both prices, both
+  providers and both hosts when a disagreement starts, and one info line says when the sources agree again. The
+  5 % is fixed in the code. A source that does not answer is left out and the others are used alone; with no
+  source answering there are no prices.
+- **`price_providers`.** A top-level `MM2.json` key, an array of strings: the names of the price providers the
+  node recognizes. Absent (the default), the node recognizes `binance`, `coingecko`, `coinpaprika`, `forex` and
+  `livecoinwatch`. When present and well-formed (a non-empty array of strings) it **replaces** that set. The
+  name `unknown` is never recognized, even if listed (one warning). A value of another form is ignored with one
+  warning that names the key, and the default set applies. **A wrong list disables pricing:** a coin whose
+  price comes from a provider the list leaves out is dropped as above, so the bot quotes no pair with it.
+- **Bot request.** The `start_simple_market_maker_bot` request may carry `price_urls`, in the same form as the
+  key above (a flat array of addresses means independent sources, which are combined), or `price_url`, a string
+  of addresses separated by commas that is **one** source asked in order. A request with both keys, or with a
+  malformed value, is refused. The request's key is used for the bot instead of the `MM2.json` key or the
+  default; the swap prices always use the `MM2.json` key or the default.
+- **`expire_at`.** The default addresses accept `expire_at`, the greatest age in seconds of the prices they
+  serve (259200 is 72 hours). Keep it in an address of your own whose service supports it: without it the cipig
+  service serves prices many months old.
+- **Logs.** A price service that fails is reported with one warning when it starts failing, debug lines while
+  it keeps failing and one info line when it answers again; the state is shared by the bot and the swap prices.
+  The same holds for a coin the sources disagree on (kept per list of sources) and for the bot finding no source
+  at all (one error line when it starts, with the number of orders cancelled, then debug lines, then one info
+  line when a source answers again). On a native build each attempt on an address is cut off after 10 seconds. A
+  browser build also wraps the fetch in a timer for 10 seconds, but no test covers that yet, so the cap is not
+  claimed for it. A line names a price service by its scheme, host and port only, never its path or query,
+  because an address can carry a key; the text of an error, such as the body of a server's answer, is cleaned of
+  the address that was asked before it is logged.
+- **Order of the bot's orders.** A bot pair whose price is refused or lost (an unrecognized provider, a zero
+  price, a stale price, a coin the sources disagree on, or no source answering) has its order cancelled at
+  once, as in GLEEC KDF. This behavior is under observation in v0.4.0 and will be revisited in the next version.
+- **Browser build.** A WebAssembly build can read only a service that sends CORS headers; of the default
+  sources only the GLEEC addresses do, so a browser build gets its prices from them alone (the cipig source
+  counts as not answering). The swap prices are not taken in a browser build.
+
 ### Electrum Servers over TLS
 
 An Electrum server entry with `"protocol": "SSL"` is reached over TLS. The entry sits in the

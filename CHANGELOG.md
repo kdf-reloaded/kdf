@@ -27,7 +27,8 @@ reaches no coin server until you set one of these in `MM2.json`:
 - `"dns_resolver": ["192.0.2.53"]`: DNS servers of your choice.
 
 At start the node logs which resolver it uses. A name it cannot resolve is logged with a hint
-that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resolver).
+that names the key. See [Network configuration](docs/NETWORK_CONFIG.md#dns-resolver). Detail: PRs
+#216, #219; CRD ch.45 §45.6B.
 
 ### Upgrade note: a new node identity under an HD login
 
@@ -43,7 +44,7 @@ swaps with a hash of the passphrase text instead.
 - **A relay (seed node)** running with an HD login gets a new peer ID. Other nodes learn it again
   through the relay's address.
 
-A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R49.
+A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R45–R49.
 
 ### Added
 
@@ -54,10 +55,10 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   and `withdraw` pays them from the wallet's Sapling balance at Pirate Chain's fixed fee of 0.0001
   ARRR, keeping the change in Sapling. The withdrawal is recorded at once like any other, so its
   coins are not offered to the next send and its change shows as pending. The wallet itself stays
-  Sapling-only and has no Pirate1 receiving address, and ARRR swaps are unchanged. The first such
+  Sapling-only and has no Pirate1 receiving address, and this does not change ARRR swaps. The first such
   withdrawal after a start takes longer, because the node builds the key for the Ironwood proof once.
   To record these withdrawals the node now carries a patched copy of the `zcash_client_sqlite`
-  crate, with one change. Detail: PR #246; CRD ch.39 §39.6.5.
+  crate, with one change. Detail: PRs #229, #246; CRD ch.39 §39.6.5.
 
 #### EVM coins
 
@@ -79,21 +80,37 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
     `p2p.send_queue.drop_series.max` the longest current run of such minutes.
 
   Detail: PRs #204, #214; CRD ch.28 RQ1 items 6 and 8.
-- **A coin's protocol information can now carry a capability word that other nodes ignore.** The
+- **A coin's protocol information can now carry a capability word that older nodes and other
+  implementations ignore.** The
   protocol information a coin sends with its orders, requests and reservations may now end with a
   small extra map that names capabilities the node has, so that a later coin can require a
   capability of its counterparty before a swap starts. A node reads only the part before the word,
   so the order book, the address format it reports and every coin that asks for nothing behave
   exactly as before, and the word changes no order identity, no order book root and no
-  synchronization. A reader that cannot make sense of the word treats it as absent. No coin sends a
-  word yet, so nothing changes on the wire today. Detail: PR #235; CRD ch.59 R59.4A.1 to R59.4A.7.
+  synchronization. A reader that cannot make sense of the word treats it as absent. ARRR (PR #241)
+  and coins with a sighash suffix such as BC2 (PR #264) send a word; every other coin sends exactly
+  what it sent before. Detail: PRs #227, #235; CRD ch.59 R59.4A.1 to R59.4A.7.
 - **The log now says why a reservation or a request was turned down by a coin.** When a coin
   declines the protocol information of a counterparty's reservation (on the taker side) or request
   (on the maker side), the node logs one debug line naming both orders and the coin. When a taker's
   pass over the reservations it received ends without a connect and a coin declined at least one of
   them, one info line names the taker order and the number declined, so an operator whose order
   times out can see why. The protocol information itself is never logged. Nothing else changes in
-  how orders are matched. Detail: PR #235; CRD ch.59 R59.4A.6.
+  how orders are matched. Detail: PRs #227, #235; CRD ch.59 R59.4A.6.
+- **A new opt-in setting keeps your orders when a re-pricing fails.** Set the top-level
+  `MM2.json` boolean `setprice_replace_after_checks` to `true`, and `setprice` with
+  `cancel_previous` (which is also what the market-making bot uses) checks the new order first
+  and cancels your previous orders on the pair only when every check and the build of the new
+  order have passed. A failed check, such as a balance read that times out, then returns its
+  error and cancels nothing. **The cost is a stale price:** after a failed re-pricing your
+  previous orders stay live and matchable at their old price until your next successful
+  `setprice` or a cancel. An empty pair only misses trades, while a stale price can lose
+  funds, so turn it on only if you accept that. To bound how long an order can stand at an old
+  price, give each `setprice` a `timeout_in_minutes`: the order is then cancelled at the latest
+  that many minutes after it was placed (for an order restored at startup, after the restart).
+  The setting is off by default, which keeps today's behavior: a failed check cancels the
+  previous orders and creates none. Only the boolean `true` turns it on. Nothing on the wire
+  changes. Detail: PRs #265, #286; CRD ch.32 R-GH8a.
 
 #### UTXO coins and Electrum
 
@@ -110,7 +127,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   servers are used. The log names each pinned server once at activation. A browser build cannot pin
   and removes such a server. Komodo DeFi Framework and GLEEC KDF ignore the key, so an entry that
   carries it still works there, without the pin. How to get the value is described in
-  [Network configuration](docs/NETWORK_CONFIG.md#electrum-servers-over-tls). Detail: PR #273;
+  [Network configuration](docs/NETWORK_CONFIG.md#electrum-servers-over-tls). Detail: PRs #240, #273;
   CRD ch.38 R38.6.4n.
 - **A coin entry can now name a "sighash suffix", which Bitcoin II (BC2) needs.** Since block 57,750
   the BC2 network checks every signature against a digest that carries an extra 4-byte field after the
@@ -123,7 +140,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   refuses to sign for such a coin, and a BC2 entry without the key logs one warning that the network
   will refuse its transactions. The optional key `sighash_suffix_height` is checked but not used yet.
   The shared coins list still has to carry the key on the `BC2` and `BC2-segwit` entries (see Known
-  limitations). Detail: CRD ch.61.
+  limitations). Detail: PRs #261, #264; CRD ch.61.
 - **A swap of a coin with a sighash suffix now starts only with a counterparty that signs with it.**
   **BC2 trading in KDF Reloaded is incompatible with other Komodo DeFi Framework implementations:**
   they cannot spend BC2 since block 57,750, and KDF Reloaded declines a BC2 swap with them before it
@@ -135,7 +152,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   request that times out. Each decline is logged at debug level with its cause, and at most once an
   hour a warning gives the number declined. Setting `require_suffix_counterparty` to `false` in the
   coin entry turns the requirement off and restores the earlier behavior, in which a BC2 swap with such
-  a node can fail after a payment has been made. Detail: CRD ch.61 R61.5A; ch.59 §59.4A.
+  a node can fail after a payment has been made. Detail: PRs #261, #264; CRD ch.61 R61.5A; ch.59 §59.4A.
 
 #### Start-up and configuration
 
@@ -158,7 +175,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   their users upgrade to trade ARRR. GLEEC KDF keeps matching as before; a GLEEC taker sees a request
   that times out. Each decline is logged at debug level with its cause, and at most once an hour a
   warning gives the number declined. Setting `require_v6_counterparty` to `false` in the coin's
-  `consensus_params` turns the requirement off. Detail: PR #241; CRD ch.39 R39.6.4f.
+  `consensus_params` turns the requirement off. Detail: PRs #230, #241; CRD ch.39 R39.6.4f.
 - **An ARRR withdrawal that sets `fee` or `from` is now refused with the shared "unsupported" error.**
   The answer is `error_type: "UnsupportedError"` (HTTP 400), as for other withdrawals that ask for
   something a coin cannot do, and as GLEEC KDF answers. A custom `fee` used to give an internal
@@ -248,7 +265,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   the maker's other pairs stay. If the keep-alives return, the node asks for the pair as a new one
   and gets its orders back. Before, the order stayed until the maker posted on that pair again or
   went offline. Your own orders are never dropped. To restore the old behavior, set `pair_liveness`
-  to `false` in `MM2.json`. Detail: PR #251; CRD ch.32 R-GH14.
+  to `false` in `MM2.json`. Detail: PRs #243, #251; CRD ch.32 R-GH14.
 - **A relay holds a sync request that reaches it before it has started its own sync for that
   pair.** A relay passes a maker's keep-alive on before it handles it. When many makers start or
   re-post at once, the nodes behind it therefore asked for the maker's orders before the relay had
@@ -311,13 +328,13 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   server slows down, as under a per-session limit, all of them stay in the turn. The `MM2.json`
   numbers `electrum_spread_near_factor` (default `2`) and `electrum_spread_near_offset_ms` (default
   `20`) set the factor and the margin; a factor of `0` spreads over every connected server as
-  before. Detail: PR #215; CRD ch.38 R38.6.4a.
+  before. Detail: PRs #201, #215; CRD ch.38 R38.6.4a.
 - **Electrum reads always keep at least the two fastest connected servers taking turns.** A coin
   with two servers spreads its reads over both again, as before the round-trip rule above. A server
   that answers slowly once, for example one that limits each session to about one answer a second,
   could leave the turn for a while and send every read to the other server, which then reached its
   own limit sooner. With more servers, a distant one is left out only while two others stay near.
-  Detail: PR #262; CRD ch.38 R38.6.4a.
+  Detail: PRs #260, #262; CRD ch.38 R38.6.4a.
 - **A fixed withdraw fee on a UTXO coin is now charged in proportion to the transaction's size, as
   on Komodo and GLEEC KDF.** When `withdraw` or `task::withdraw::init` gives its fee as
   `{"type":"UtxoFixed","amount":…}`, the amount is now a rate per 1,000 bytes: a transaction of `s`
@@ -332,7 +349,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   each `SSL` Electrum server that has `disable_cert_verification` set and no `spki_sha256`, the node
   logs one warning at activation, naming the server by host and port: the connection is encrypted,
   but the server is not authenticated. Which certificates the node accepts and refuses is
-  unchanged. Detail: PR #273; CRD ch.38 R38.6.4m.
+  unchanged. Detail: PRs #240, #273; CRD ch.38 R38.6.4m.
 
 #### Start-up and configuration
 
@@ -368,7 +385,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   - **Swaps already in progress** keep the key they started with.
   - **An iguana login**, without `enable_hd`, does not change.
 
-  Detail: PR #250; CRD ch.05 R41–R44.
+  Detail: PRs #249, #250; CRD ch.05 R41–R44.
 - **Under an HD login, the node now trades under the key `get_public_key` reports.** That key
   signs the maker's orders and keep-alives, fills `sender_pubkey`, and is the persistent key of
   every new swap, as in GLEEC KDF.
@@ -379,27 +396,26 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
     seed, and for activating BCH with its tokens and Tendermint, until those activations move to
     the coin key.
 
-  See the upgrade note above. Detail: PR #254; CRD ch.05 R45–R49.
-- **Under an HD login, a swap that cannot complete is now refused before it starts.** An HD login is
-  one with `enable_hd` set to `true`, as the Komodo DeFi wallet uses in HD mode. Under it, the swap of
-  an EVM coin or token, of a UTXO coin enabled through legacy `enable` or `electrum` (or activated with
-  `priv_key_policy: IguanaPrivKey`), and of a UTXO coin activated at a `path_to_address` other than
-  account 0, External, address 0, announces another key than the one the coin pays from, so the other
-  side rejects the dex fee or the payment. `setprice`, `update_maker_order`, `buy`, `sell` and
-  `trade_preimage` now refuse such a pair before any balance check, with `<coin> cannot be swapped
-  under this login: <reason>`; the reason says what to do (trade the coin under a login without
-  `enable_hd`, enable it through its HD activation, or activate it at the first address), and for a
-  coin at another address it names both derivation paths. `trade_preimage` answers the error type
-  `SwapKeyMismatch` with the coin and the reason. An order of your own that already exists and fails
-  the check, for example one restored after an upgrade, is cancelled when a request matches it, with
-  one warning in the log; no reservation is sent, and no swap is started. A swap that has already
-  started is never stopped. A UTXO coin such as RIN activated through `task::enable_utxo` at its first
-  address, BCH activated together with its tokens, and every login without `enable_hd` are not
-  affected. Set the `MM2.json` boolean `swap_key_check` to `false` to restore the earlier behavior,
-  in which such a swap is negotiated and then fails. Since the entry above, no coin is refused any
-  more; the check stays as a guard. Detail: PRs #231, #233; CRD ch.05 R36–R40.
+  See the upgrade note above. Detail: PRs #253, #254; CRD ch.05 R45–R49.
+- **Under an HD login, a swap whose announced key would differ from the key its coin pays from is
+  refused before it starts.** An HD login is one with `enable_hd` set to `true`, as the Komodo DeFi
+  wallet uses in HD mode. `setprice`, `update_maker_order`, `buy`, `sell` and `trade_preimage` check
+  the pair before any balance check and answer `<coin> cannot be swapped under this login: <reason>`
+  (`trade_preimage`: error type `SwapKeyMismatch` with the coin and the reason). An order of your own
+  that fails the check is cancelled when a request matches it, with one warning in the log; no
+  reservation is sent, and a swap that has already started is never stopped. Now that each coin's
+  swap uses the coin's own key (PR #250, above), no coin fails the check; it stays as a guard. Set the
+  `MM2.json` boolean `swap_key_check` to `false` to turn it off. Detail: PRs #231, #233; CRD ch.05
+  R36–R40.
 
 #### Accounts and addresses under an HD login
+
+- **`get_mnemonic`, `change_mnemonic_password` and `get_private_keys` work while a Trezor is
+  initialized.** They refused whenever a Trezor context existed, even though the mnemonic and the
+  seed's keys they handle are the login's, not the device's. Now only a coin activated for the
+  Trezor is refused, as on GLEEC KDF: the activated-coins form of `get_private_keys` refuses it as
+  before, and the opt-in full export refuses a requested ticker that is activated for the Trezor
+  with `HardwareWalletNotSupported`. Detail: PR #293; CRD ch.05 §5.10B R56, ch.07 R-K6.
 
 - **Under an HD login, activation now lists the coin's own address from the start.** A UTXO coin
   such as RIN or QTUM activated through its task method, and an EVM coin activated with its tokens,
@@ -567,6 +583,23 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
     poll.
 
   Detail: PR #255; CRD ch.17 R17.8.3a.
+- **A swap between Siacoin (or another coin with a 32-byte hash lock) and an EVM coin or token can now
+  complete.** The EVM payment embeds the value the swap contract checks, derived from the 32-byte
+  secret hash, and the validation of a payment expects that value. Before, the counterparty refused the
+  payment. QRC20 payments now embed and validate the same derived value, and the secret of a spend is
+  checked against it; the QRC20 path is covered by unit tests only. Detail: PR #290; CRD ch.51 R72A.
+- **A nonce read that one EVM node fails while another answers is now logged as a warning naming
+  that node, and a single node's error no longer says "all EVM nodes failed".** Before a send, the
+  daemon asks every node of the coin for the pending nonce. A node that failed got an info line
+  starting with "Error" even when another node answered and the send went through, and a coin with
+  one node reported that node's failure as "all EVM nodes failed". Now the failing node's line is a
+  warning that says "Nonce request ... failed ... on node ...; another node answered". A round in
+  which no node answers is logged as a warning that says it is retrying, as "Nonce request ...
+  failed ... on node ...; no node answered, retrying (round 2 of 6)", and only a failure in the last
+  round, when the send fails, is logged at error level, as "Error ... when getting nonce ...". The
+  error of a single node names that node and its failure, for example
+  `https://rpc.example.org: HTTP 429 Too Many Requests`. With two or more nodes the text is
+  unchanged. Detail: PR #294; CRD ch.35 R35.1.12, R35.1.14.
 
 #### Node names in logs and errors
 
@@ -629,7 +662,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   payment was sent but not yet confirmed.** The maker payment belongs to the taker once that spend was
   sent. The call now refuses, whether or not the refund time has passed, and builds nothing. A swap with a
   confirmed spend was already refused. A swap whose maker payment is spent or refunded on the chain is
-  answered as before. Detail: PR #284; CRD ch.51 R75.
+  answered as before. Detail: PRs #276, #284; CRD ch.51 R75.
 - **A swap that waits to refund its payment now writes a warning when the coin's node has not advanced
   for an hour (and again at most hourly).** Before, a refund could wait for hours behind a stalled node
   and the log did not say so; in a test, a refund started four hours after the HTLC lock expired, while
@@ -642,6 +675,28 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 
 #### UTXO coins and Electrum
 
+- **Under an HD login, a coin's account keys and its stored accounts follow the coin's own key
+  policy, also when a Trezor is initialized.** A node logged in with a seed phrase accepts
+  `task::init_trezor` afterwards, as GLEEC KDF does. Until now:
+  - a UTXO coin such as RIN, or QTUM, whose coins entry names a `trezor_coin` took the key of a new
+    account from the Trezor instead of the seed, in `task::create_new_account` and at activation, so
+    that account's addresses belonged to the device;
+  - a coin activated for the Trezor stored its accounts under the seed's wallet identity, where a
+    later activation of the same ticker from the seed would load them;
+  - Siacoin activation failed;
+  - `get_new_address` on a coin activated for the Trezor answered even when the Trezor context was
+    gone; it now answers `HwContextNotInitialized`.
+
+  Now a coin takes its keys from the seed under a seed-phrase login and from the device only when it
+  is activated for the Trezor, and each kind stores its accounts under its own identity, as on GLEEC
+  KDF. Accounts that an earlier build stored under the seed's identity for a coin activated for the
+  Trezor are removed from the seed's records at the next activation of that coin from the seed, with
+  a warning that names the coin and the account numbers, so they are no longer listed under the
+  seed. The check removes any stored account whose key the seed does not derive under the coin's
+  current derivation path, so the same warning also appears for a coin whose derivation path has
+  changed since its accounts were stored. The device re-creates its own: the next activation for the
+  Trezor creates the account it activates, and any other account appears again after
+  `task::create_new_account` for its number. Detail: PR #293; CRD ch.05 §5.10B R52–R55, R35a, R35c.
 - **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
   trailer are read correctly for the median time.** Bitcoin Atom (BCA) serves 84-byte headers from block
   505888; Reloaded read them as 80 bytes, so the median time it needs before every HTLC spend and refund
@@ -667,8 +722,42 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   This covers a coin's dynamic fee and an explicit `UtxoFixed` or `UtxoPerKbyte` withdraw fee.
   Detail: PR #247; CRD ch.38 R38.6.6b, T38.6.6b.1.
 
+#### Price service and the maker bot
+
+- **The price service that no longer exists is replaced, prices now come from two sources that check each
+  other, and swaps record their USD prices again.** The address `prices.komodo.live`, which the
+  market-maker bot used for its default prices and which the node asks when a swap ends for the USD prices
+  it stores with the swap, no longer resolves. Since then the bot could not fetch prices unless you named
+  another service, and no swap completed stored USD prices. The default is now two sources asked at the
+  same time: the GLEEC price service (and, if it does not answer, its cache) and the cipig price service,
+  each with `?expire_at=259200` so that no price older than 72 hours is served. A coin that only one source
+  prices is priced from it. A coin both price must agree within 5 %; if they do not, the coin gets no
+  price from either, and the bot quotes no pair with it. A source that does not answer is skipped. The bot
+  and the swap prices use the same sources. Two new top-level keys in `MM2.json` change them: `price_urls`
+  (an array of sources, each one address or an array of addresses tried in order) replaces the default
+  sources, and `price_providers` (an array of names) replaces the price providers the node recognizes
+  (`binance`, `coingecko`, `coinpaprika`, `forex` and `livecoinwatch`); a wrong provider list stops
+  pricing of the coins it leaves out. The `start_simple_market_maker_bot` request accepts `price_urls`
+  beside `price_url`; a request with both, or with a malformed value, is refused. A price service that
+  fails is now reported once when it starts failing and once when it answers again, not every 30 seconds,
+  and so is the bot finding no source at all; on a native build each attempt takes at most 10 seconds (a
+  browser build also sets a timer, which no test covers yet); and log lines name a service by its host only,
+  with the text of an error, such as the body of a server's answer, cleaned of the address that was
+  asked. A swap you took part in is priced once, when it has ended successfully; a swap that failed gets no prices. Prices from
+  livecoinwatch are now accepted, so the bot can quote coins such as RIN that only that provider prices,
+  and the bot no longer divides by a price of zero. A bot pair whose price is refused or lost still has its
+  order cancelled at once, as in GLEEC KDF; this behavior is under observation in v0.4.0 and will be
+  revisited. See [Network configuration](docs/NETWORK_CONFIG.md#price-service).
+  Detail: PR #287; CRD ch.62.
+
 ### Tests
 
+- **A lab row checks what a short network outage does to a relay connection.** With every packet
+  between a relay and a peer dropped and no socket reset, a 10-second outage kept the connection and
+  traffic resumed within 6 seconds, three times out of three. After a 30-second outage the
+  connections were closed and the peer connected again; after a 60-second outage both connections
+  were closed and came back. Traffic was back 23 and 40 seconds after the restore. The node itself
+  is unchanged. Detail: PR #292; CRD ch.28 T14.
 - **The Qtum testnet tests now use the one public Qtum testnet server, and the QRC20 docker test
   set-up mines its own blocks and waits for new contracts.** The tests that activate the testnet
   Qtum coin pointed at servers that serve Qtum mainnet, so the test wallets looked empty and the
@@ -686,13 +775,14 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   checks that fee path instead. The node itself is unchanged. Detail: PR #285.
 - **The tests run before the next beta are listed in
   [`docs/release-tests/0.4.0-beta.1.md`](docs/release-tests/0.4.0-beta.1.md).** The lab rows of
-  the cycle's second batch are recorded there now; the release campaign follows.
+  the cycle's second and third batches are recorded there; the fourth batch and the release campaign
+  follow. Detail: PRs #266, #272, #275, #282, #289.
 - **ARRR is tested against real transactions from Pirate Chain's Ironwood wallets.** Two mainnet
   ARRR transactions that use the Ironwood pool, one paying into it and one paying out of it into a
   Sapling address, are read by every part of the node that reads whole transactions, and their
   Ironwood proofs and signatures verify with the node's own keys. A payment from an Ironwood wallet
   to the node's address is found, counted once, shown as pending while unconfirmed, and spent like
-  any other. Nothing changes in how the node behaves. Detail: PR #242; CRD ch.39 T39.6.5a, T39.8.0i.
+  any other. Nothing changes in how the node behaves. Detail: PRs #229, #242; CRD ch.39 T39.6.5a, T39.8.0i.
 - **A unit test of the maker's update queue no longer fails at random.** The test of the 10-second
   keep-alive wait counted the released and the pending orders while the queue kept releasing, so
   one release between the two counts made it fail now and then. It now stops the queue before
@@ -707,6 +797,20 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 
 ### Documentation
 
+- **The published signing key carries the release signing subkey.** The key file in
+  `docs/keys/takologi.asc` now includes the ed25519 subkey that signs tags and releases, and
+  `SECURITY.md` names that subkey, gives the keyserver explicitly, notes that the key file in tags up
+  to `v0.3.0-beta.1` lacks the subkey, and describes the `SHA256SUMS` check. The key's fingerprint
+  is unchanged. Detail: PR #196.
+- **The CRD records two more batches of reference answers.** The first covers how a cancelled order
+  can come back on the reference and how a relay answers while its order-book worker lags, when the
+  expiry drain runs, the arithmetic of an explicit `UtxoFixed` withdraw fee, and the gas of the
+  legacy taker-fee transaction (PR #222; CRD ch.12 R14, ch.32 R-GH11 to R-GH13, ch.38 R38.6.6l,
+  ch.57 R57.5.2a). The second covers the per-coin protocol information on orders, which key a
+  global-HD login uses on each surface, the watcher's payload and fee check, sender selection under
+  HD, the SLP withdraw fee, legacy `enable` under an HD login and the Ironwood address facts (PR
+  #232; CRD ch.05 §5.9B, ch.09, ch.49 R49.27, ch.51 R74, ch.55 R55.4.10, ch.59 R59.4.7). The node
+  itself is unchanged.
 - **The CRD now records more of how Komodo DeFi Framework and GLEEC KDF behave.** It covers HD
   activation and accounts (the address at `path_to_address`, `fetch_utxos`, `consolidate_utxos` and
   `task::create_new_account`), the answer to a shielded withdrawal, the Electrum
@@ -721,10 +825,18 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
-- [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md) — new, planning: the Bitcoin II
+- [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md) — new, in progress: the Bitcoin II
   network has required an extra field in every signature digest since block 57,750, so
   transactions signed the ordinary way are rejected. The rule is written (CRD chapter 61, PR
-  #261) and the signing change is implemented; the coins-file entries and the live check follow.
+  #261), and the signing change and the counterparty requirement are implemented (PR #264). On the
+  live chain a withdrawal and a swap between two KDF Reloaded nodes passed, and the decline of a
+  counterparty that does not sign with the suffix was checked (release tests, "BC2 confirmation" and
+  "BC2 swap check"). The coins-file entries and the P2PKH
+  live check are open.
+- [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md) — planning: its target now reads "after the 0.4.0 beta".
+- [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — in progress: the field tests of 2026-10-26 to
+  2026-10-29 are recorded, and the two open items of the earlier deadline are closed as history; a
+  live GUI round trip on Windows (its gate 8) is still open.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
   Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
   they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
@@ -739,21 +851,27 @@ file carries the detail. "New" means the plan was created in this cycle.
   written (CRD PR #227), and its generic part, the word's writer and fail-closed reader and the
   decline log lines, is implemented (PR #235); the ARRR rule that uses it is written (CRD PR #230)
   and implemented (PR #241).
-  The shielded history gained two items: the addresses of a swap's own transactions (PR #277) and
-  the fee of an own send (PR #288).
+  The shielded history gained three items: a withdrawal's Pirate1 recipient (PR #268), the addresses
+  of a swap's own transactions (PR #277) and the fee of an own send (PR #288).
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
+- [`electrum-measured-server-order`](docs/plans/electrum-measured-server-order.md) — parked: shipped in PR #144; the lab rows
+  of 2026-11-06 that ran `mixed` and `measured` on RIN are recorded as input; the default stays
+  `random` until the decision on `mixed`.
 - [`electrum-tls-server-authentication`](docs/plans/electrum-tls-server-authentication.md) — new,
-  in progress: what an `SSL` Electrum server must present, with and without `disable_cert_verification`,
+  parked: what an `SSL` Electrum server must present, with and without `disable_cert_verification`,
   is now written down (PR #240). So are a warning at activation when the flag is set and an optional
-  pin on the server's key, `spki_sha256`; both are now built (PR #273).
+  pin on the server's key, `spki_sha256`; both are now built (PR #273). The pass-through of the pin
+  by the coins file and the wallets, and two review follow-ups, are open.
+- [`evm-min-trading-volume`](docs/plans/evm-min-trading-volume.md) — parked: PR #66 is merged; only an end-to-end preview
+  test on a real 8-decimal coin is open.
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
   now names the gas limits each EVM coin and token will use and where they come from (PR #200);
   open point 3 is decided, and the fee to send an EVM taker fee is now quoted at the gas limit it
   is sent with (PR #213); options (a) and (b) still wait on the reference maintainers' outcome.
-- [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes
-  keep showing after a lost cancellation; five work packages after the beta, the first two being the
+- [`ghost-orders`](docs/plans/ghost-orders.md) — new, parked: cancelled orders that other nodes
+  keep showing after a lost cancellation; five work packages for this cycle, the first two being the
   higher sync limits on relays and the request to one other relay above (PRs #205, #207, #208). What
   two later packages waited for is now recorded: how a cancelled order can come back on Komodo and
   GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222). A received
@@ -764,35 +882,48 @@ file carries the detail. "New" means the plan was created in this cycle.
   maker's first orders (CRD PR #258, PR #259). The loaded-relay lab showed the request to one other
   relay clearing a cancelled order one keep-alive interval earlier in half of its cycles. A debug
   line now counts, per such request, which candidate rule would have skipped it (PR #269). A
-  fault-free run showed no extra requests at all, so the rule stays as it is (PR #274).
-- [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
+  fault-free run showed no extra requests at all, so the rule stays as it is (PR #274). The B2 cap
+  check from field logs and the repeated-cancel refresh are open.
+- [`gossip-send-queue-bound`](docs/plans/gossip-send-queue-bound.md) — done: its follow-ups now name the PRs they shipped in
+  (CRD PR #129; PRs #148, #159, #160, #166).
+- [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, in progress: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
   complete, which is now done (item H1: `swap_key_check`, PRs #231, #233), as is one swap key per
   coin (item H3, PRs #249, #250) and one trading identity for the node (item H4, PRs #253, #254),
-  whose design decisions the maintainer confirmed. Item H5 now starts with listing the address a
-  swap has used (see Known limitations). The maintainer's answers on
+  whose design decisions the maintainer confirmed. The maintainer's answers on
   withdraw, the legacy methods, legacy activation and Sia are recorded in it. `RELOADED_VS_GLEEC.md`
   now says what GLEEC KDF does under an HD login, and lists the planned change to legacy `enable` and
   `electrum` with its switch (PR #245). The direct `withdraw` under an HD login and the refusal of
   `from` under an iguana login are done (items H5.1 and H5.5, PR #270); the maintainer set the
-  default sender to the coin's activated address (decision CU). Activation lists the address at
+  default sender to the coin's activated address (2026-11-06). Activation lists the address at
   `path_to_address`, and `task::create_new_account` works without a hardware wallet (items H5.0 and
   H5.4, PR #279). `fetch_utxos`, `consolidate_utxos` and the automatic merge work under an HD login
-  (item H5.3, PR #281).
+  (item H5.3, PR #281). H6 and H7 are not started; the hardware-context work of this release is in
+  CRD ch.05 §5.10B.
+- [`lightning-activation-features`](docs/plans/lightning-activation-features.md) — parked: it records that PR #66 fixed the crash of
+  the trading-volume requests for Lightning coins.
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
-- [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — in progress: the 2-arena limit of 0.3.0-beta.1
+- [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — parked: the 2-arena limit of 0.3.0-beta.1
   was measured in two 6.5-hour runs and on start-up, activation, eight swaps and query latency; no cost
-  was resolved and the default stays (PR #225); executor sizing and an allocator comparison are left.
+  was resolved and the default stays (PR #225); executor sizing and an allocator comparison wait for
+  their triggers.
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
   with its two switches and their defaults (PR #201), and implemented (PR #215). The SwapLab timing
   rows ran on 2026-11-06: on RIN orders were posted in a quarter to a third of the time, and on DOGE
   about 11 % more slowly. The floor of two near servers, which brings DOGE back to the time of
   0.3.0-beta.1, is written (PR #260) and implemented (PR #262), and the SwapLab run on it passed
-  (release tests, rows 4–8).
+  (release tests, rows 4–8). The opt-in `setprice_replace_after_checks`, which replaces the previous
+  orders only after the new order passes its checks, is written (PR #265) and implemented (PR #286);
+  a lab row with a failing check passed on 2026-11-08, to be recorded on the release-tests page with
+  the third batch's close.
+- [`orderbook-queue-and-history-caps`](docs/plans/orderbook-queue-and-history-caps.md) — parked: PRs #131, #134, #137 and #164
+  are merged; the early-purge point waits for the maintainer.
+- [`orderbook-wipe-recovery`](docs/plans/orderbook-wipe-recovery.md) — parked: the CRD and both switches are merged (PRs #132,
+  #135); its SwapLab run is not scheduled.
 - [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new, in progress: the
   peer-to-peer items of 0.4.0. The redial guards are in (PRs #199, #206), and so are the peer-exchange
   logging, the address ranges and the idle-close log (PRs #203, #211), the send-queue window
@@ -800,18 +931,42 @@ file carries the detail. "New" means the plan was created in this cycle.
   #219); the remaining lookups (Sia, WalletConnect, Lightning, statistics) and encrypted DNS are
   new rows for later. A close that a non-reading peer would hold forever now ends after 30 seconds
   (item P6, PR #280).
+- [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — parked: it records that PRs #17 and #21 landed.
+- [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — parked: it records that PRs #54 and #65 landed,
+  with their compatibility bookkeeping; step 8 is open.
+- [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md) — parked: two-daemon detection and F3 are
+  postponed and not started.
 - [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — done: the plan now says
   that the fee estimate uses the transaction's signature-hash length, which is smaller than the
   transaction sent (PR #239; see Known limitations).
+- [`solana-support`](docs/plans/solana-support.md) — parked: Solana stays switched off; the release it returns in is not
+  set.
+- [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — parked: Tendermint swaps were added to the
+  0.4.0 scope on 2026-11-08; accepting both forms of the activation parameters is decided and not
+  started.
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
   recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226). On an SLP
   token withdrawal they charge it in proportion too; that is now recorded (PR #232), and KDF
-  Reloaded now charges it that way there as well (PR #234).
-- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — new step H6: the
+  Reloaded now charges it that way there as well (PR #234). The Sia floor was revised (PR #278), and
+  the UTXO change-fee rounding found in the release tests was fixed (PR #247). The default-side arm 3 is chosen
+  (2026-11-08): a raised advertised minimum, on by default, with a compatibility switch for the
+  reference value; its work is planned.
+- [`tron-gasfree`](docs/plans/tron-gasfree.md) — parked: TRON support was added to the 0.4.0 scope on 2026-11-08.
+- [`tron-support`](docs/plans/tron-support.md) — in progress: TRON support was added to the 0.4.0 scope on 2026-11-08; the
+  decisions a TRON swap needs were put to the maintainer that day.
+- [`tron-swap-support`](docs/plans/tron-swap-support.md) — parked: the chapter rewrite on its branch failed the KDF Dirty
+  Gate on 2026-11-08 and is not reused; the reference's TRON swap state is recorded by a gated Spec
+  Reader round that lands with the first TRON code PR.
+- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — parked; new step H6: the
   median time of a coin whose headers carry a fixed-length trailer (Bitcoin Atom) is read from each
   header's own bytes; the 1.6 list form of header requests and explicit `header_layout` entries for
-  RIC and MEWC in the coins repository are listed as later items (CRD PR #220, code PR #221).
+  RIC and MEWC in the coins repository are listed as later items (CRD PR #220, code PR #221). The
+  remaining H4 family rules and H5 are open.
+- [`v0.2.0-dependency-hygiene`](docs/plans/v0.2.0-dependency-hygiene.md) — in progress: the `idna` advisory row is
+  closed by PR #219.
+- [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md) — planning: it records that 0.3.0-beta.1 fixed
+  the earlier problem (PR #181); the two ideas left are not in 0.4.0.
 
 ### Known limitations
 
@@ -858,16 +1013,19 @@ lives.
   default because it has a cost: price changes reached other nodes about 20 to 25 seconds later, for
   5 minutes after the relay fell behind other nodes learned changes only through the keep-alive
   synchronization, and the relay logged 6 to 18 failed order-book synchronization requests a minute.
-  More in [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md). Detail: CRD ch.32
-  D9.
+  These costs were measured before this release changed when the slowdown ends (PRs #204, #214), and
+  were not measured again. More in
+  [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md). Detail: PRs #204, #214;
+  CRD ch.32 D9.
 - **Other nodes can keep showing a cancelled order for a while if its cancellation is lost on the
   way and the maker still advertises that pair.** Such an order cannot be matched or traded. A pair
-  the maker no longer advertises is dropped after 90 seconds, with the maker's other pairs kept. A
+  the maker no longer advertises is dropped after the liveness window (90 seconds, or
+  `maker_order_timeout`), with the maker's other pairs kept. A
   pair the maker still advertises heals at its next keep-alive, 30 seconds later, or through another
   relay: a node whose copy differs from the maker's asks one other relay, which removes the order if
   that relay received the cancellation. Until then the order stays visible. More in
-  [`ghost-orders`](docs/plans/ghost-orders.md). Detail: PRs #188, #208, #251; CRD ch.32 D12, R-Q5d,
-  R-GH14.
+  [`ghost-orders`](docs/plans/ghost-orders.md). Detail: PRs #188, #208, #224, #251; CRD ch.32 D12,
+  R-Q5d, R-GH14.
 - **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes of this release or later.**
   ARRR now uses a newer transaction format (v6, from the Ironwood upgrade) that no other KDF
   implementation can handle, so a swap with a Komodo or GLEEC counterparty cannot complete (observed
@@ -875,10 +1033,11 @@ lives.
   therefore declines such a counterparty before the swap starts, and KDF Reloaded 0.3.0-beta.1 nodes
   as well (see Changed). A swap between two KDF Reloaded nodes has completed on the live chain,
   including the spend of the locked ARRR (October 2026). The decline rests on a capability
-  statement in the order and match messages (coin setting `require_v6_counterparty`, on by
-  default). This check is temporary: it will be removed once version 6 is generally supported by
-  the other implementations. More in
-  [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
+  statement in the order and match messages (the setting `require_v6_counterparty` in the coin's
+  `consensus_params`, on by default). This check is temporary: it will be removed once version 6 is
+  generally supported by the other implementations. More in
+  [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md). Detail: PRs #230,
+  #241, #271; CRD ch.39 R39.6.4f.
 - **Shielded coins such as ARRR cannot be activated in a browser (WASM) build.** Activation ends with
   an error saying shielded activation is not available in the WebAssembly build: the browser build
   has no shielded wallet database, and building a shielded transaction would also need the Sapling
@@ -900,6 +1059,11 @@ lives.
   request has no `memo` field, so a memo sent with it is ignored and the shielded output carries
   none. Komodo DeFi Framework and GLEEC KDF echo the request's memo in the answer. Memo support is
   a separate, later item. Detail: PR #271; CRD ch.39 status note under R39.5A.3.
+- **ARRR has no Pirate1 receiving address.** The wallet can pay a Pirate1 address, but it receives,
+  keeps its change and swaps in Sapling only. Native mode and the rest of the Ironwood pool are
+  planned for a later release. More in
+  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PRs #229,
+  #246; CRD ch.39 §39.6.5.
 - **The Komodo DeFi Framework and GLEEC KDF builds available in November 2026 cannot spend BC2
   (Bitcoin II).** Since block 57,750 the BC2 network rejects every spend signed without the chain's
   sighash suffix, and those builds do not sign with it, so they can neither withdraw BC2 nor complete
@@ -909,24 +1073,38 @@ lives.
   `BC2-segwit` entries, a BC2 withdrawal or swap payment is refused at broadcast ("Signature must be
   zero for failed CHECK(MULTI)SIG operation"), and the node logs a warning when BC2 activates
   without the key. A hardware wallet cannot sign this digest, so BC2 cannot
-  be used with one. The global coins repository may not carry the key yet: add `sighash_suffix`
-  (`"0x01324342"` on `BC2` and `BC2-segwit`) to your coins file or use the KDF Reloaded coins file.
-  Detail: issue #252; CRD PR #261.
+  be used with one. The optional key `sighash_suffix_height` is checked but not used yet. The global
+  coins repository may not carry the key yet: add `sighash_suffix` (`"0x01324342"` on `BC2` and
+  `BC2-segwit`) to your coins file or use the KDF Reloaded coins file. Detail: PRs #261, #264; CRD
+  ch.61; issue #252.
+- **A browser (WASM) build cannot pin an Electrum server's key.** It removes a server entry that
+  carries `spki_sha256` and uses the coin's other servers. Wallets and the shared coins file may not
+  pass `spki_sha256` through to activation yet. Detail: PRs #240, #273; CRD ch.38 R38.6.4n,
+  D38.6.4n.1.
+- **Under a Trezor key, some UTXO operations are not available.** The direct `withdraw` answers an
+  internal error (use `task::withdraw`), `consolidate_utxos` answers `InvalidAddress`, and the
+  automatic merge (`utxo_merge_params`) stops; `fetch_utxos` works. Detail: PRs #270, #281; CRD
+  ch.49 R49.4, ch.05 R35b.
 - **The miner fee of a Siacoin withdrawal is estimated from a transaction length that is smaller than
   the transaction sent.** Sia nodes accepted these fees in tests. Detail: PR #239; CRD ch.20 D6.
 - **Orders that sell Siacoin (SC) are not shown to Komodo KDF and GLEEC KDF takers, and a GLEEC maker
   can fail to validate a Siacoin taker fee.** Takers on those two nodes do not see orders whose base
   coin is SC, so a KDF Reloaded maker that sells SC cannot be matched by them. A GLEEC maker can fail
   to validate a Siacoin taker fee when the transaction pool of its Sia node holds a transaction it
-  cannot read (a storage proof with an empty proof list); the fix exists in the sia-rust library but
-  not in the GLEEC release, so such swaps fail intermittently. A GLEEC node that sells SC as the order
-  base is not affected. Detail: PR #239.
+  cannot read (a storage proof whose proof field is null). KDF Reloaded reads past such a transaction
+  since this release (PR #291); the GLEEC release does not, so such swaps fail intermittently. A
+  GLEEC node that sells SC as the order base is not affected. Detail: PRs #239, #291; CRD ch.20
+  R-N4.
+- **Lightning cannot place orders or swap.** Orders and trade previews involving a Lightning coin
+  are refused with an error naming the coin; `trade_preimage` answers `TradingNotSupported`. More in
+  [`lightning-activation-features`](docs/plans/lightning-activation-features.md). Detail: PR #66; CRD
+  ch.60 R60.6.5.
 - **Radiant (RXD) is only partly usable.** RXD activates and signs, but swaps with it are not
   established. More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
 - **SLP tokens on BCH are untested on mainnet.** The shared coins file lists BCH and tBCH as plain
   UTXO coins and carries no SLP token entries, so SLP tokens cannot be enabled with it. The SLP
-  changes of this release are covered by unit tests only. Detail: PR #236.
+  changes of this release are covered by unit tests only. Detail: PRs #234, #236.
 - **TRON (TRX, TRC20) and Solana (SOL, SPL) cannot be activated in this beta.** Their support is not
   finished. TRON activation answers "TRON support is not available in this build";
   `enable_solana_with_tokens` and `enable_spl` answer "Solana support is not available in this
@@ -951,8 +1129,8 @@ lives.
   never confirms.** If the node's spend of the taker payment was broadcast but dropped from the chain,
   and the other side refunded its payment, `recover_funds_of_swap` refuses to refund the maker payment:
   the other side knows the secret from the broadcast and can still claim it. A refund in that case only,
-  when the other side's refund is shown on its own chain, is under consideration. Detail: PR #284; CRD
-  ch.51 R75, D8.
+  when the other side's refund is shown on its own chain, is under consideration. Detail: PRs #276,
+  #284; CRD ch.51 R75, D8.
 
 ## [0.3.0-beta.1] — 2026-11-01
 
@@ -2091,10 +2269,6 @@ file carries the detail. "New" means the plan was created in this cycle.
   #148), with defaults measured in the lab (PR #159) and the follow-ups done (PR #160). After a
   field run it became opt-in (PR #166); the plan lists what comes before it is the default again,
   and two deferred items await field data.
-- [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — new, in progress: a maker's memory growth
-  under heavy order updates was traced to the system allocator keeping freed memory, and on Linux the
-  daemon now limits the allocator to two arenas at start-up (PRs #189, #190); a longer run at a lower
-  update rate and the sizing of the executors are left (issue #191).
 - [`my-orders-speed`](docs/plans/my-orders-speed.md) — new and done: `my_orders` answers about 4 to
   12 times faster with 2,000 orders (PR #154).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — new, in progress: posting orders
@@ -2578,6 +2752,49 @@ Legacy `enable` for EVM coins under an HD wallet is not changed by this release.
 - **The `ws`/`wss` Electrum rejection message no longer implies missing work.** Native builds cannot use `ws`/`wss` servers, and WASM builds cannot use `TCP`/`SSL` ones — a deliberate platform split, not a pending feature. The native-side message said the protocols were "not supported yet", which read as a TODO and prompted repeated investigation; it now states the platform boundary directly. Message wording only, no behaviour change. Code: `mm2src/coins/utxo/rpc_clients/electrum_rpc_client.rs`.
 
 - **EVM swaps now explain a missing gas balance instead of leaking the provider error.** Attempting to trade an ERC-20/BEP-20/PLG-20 token with no platform coin (BNB/ETH/MATIC/…) to pay gas made `estimate_gas` revert, and the raw node error surfaced verbatim — e.g. BSC's `error code -32000: gas required exceeds allowance (0)` — with no indication that the actual problem was an empty gas balance. `get_fee_to_send_taker_fee` now checks the platform-coin balance when gas estimation fails and reports the shortfall against the *platform* ticker, which existing callers map onto `NotSufficientBaseCoinBalance` ("Not enough base coin BNB balance for swap: available …, required at least …"). Because that variant is classified as an insufficient-balance condition, `max_taker_vol` also degrades to a tradable volume of `0` instead of failing the whole RPC. The existing sent-coin check runs first and is unchanged, and a failure to read the platform balance never masks the original error. Code: `mm2src/coins/eth/eth_mm_coin.rs`, `mm2src/coins/eth/eth_types.rs`.
+- **Superseded (issue #11): KMD direct-burn DEX-fee split corrected; the
+  small-KMD dust exemption below is withdrawn.** The entry below ("Small KMD
+  direct-burn DEX fees retain the legacy wire shape") described a flat 75/25
+  split above dust plus a builder dust exemption for the resulting
+  under-dust fee output. Public-network observation of a `v2.6.0-beta` node
+  contradicts that: for a 0.01 KMD taker it emits 1,000 base units to the
+  fee address and 158 to `OP_RETURN`, not 868 + 289. The DEX-fee split is now
+  computed from three exact-rational ranges on the dust-floored total: at or
+  below dust, a single fee output for exactly dust; above dust with the 75%
+  share at or above dust, the 75/25 split; otherwise a fee output of exactly
+  dust and an OP_RETURN burn of the remainder. Because the fee-collection
+  leg is now never below dust, the generic UTXO builder needs no per-output
+  or per-descriptor dust exemption for this descriptor any more — the
+  under-dust exemption plumbing (builder option, taker-fee send variant, and
+  selector) has been removed entirely. Code: `mm2src/coins/lp_coins_types.rs`,
+  `mm2src/coins/utxo.rs`, `mm2src/coins/utxo/utxo_common/`.
+- **KMD taker no longer over-claims Active User Reward (interest) on
+  post-KIP-0001 UTXOs (issue #11).** The reward computation was missing the
+  KIP-0001 500x reduction that took effect at the dPoW Season-7 hard fork
+  (height 3,484,958). A KMD spend whose inputs include an eligible UTXO
+  confirmed at or after that height now claims the correct, reduced reward
+  instead of a figure 500x too large, which the network previously rejected
+  with `bad-txns-in-belowout`. Reported and validated on the same
+  transaction/history/`kmd_rewards_info` surfaces. Code: `mm2src/coins/utxo.rs`.
+- **No-fee waiver for the network burn/waiver-key taker (issue #11).** A
+  taker whose taker-coin swap public key equals the active network's
+  burn/waiver key now pays no DEX fee, on both netid 8762 and netid 6133 and
+  on the legacy swap protocol, independently of whether the network's burn
+  split is enabled. Previously the waiver only applied while an (inactive,
+  on both production networks) general burn-account path was active, so it
+  never took effect in production. Netid 8762's burn key
+  (`0369aa…3153`) is no longer empty. Code: `mm2src/coins/lp_coins_types.rs`,
+  `mm2src/mm2_net_config/`, `mm2src/mm2_main/src/lp_swap/maker_swap.rs`,
+  `mm2src/mm2_main/src/lp_swap/taker_swap.rs`.
+- **Background retry and diagnostic noise hardening.** Persistent QRC20 history
+  failures now back off from 10 seconds to a bounded five-minute retry interval
+  and reset after recovery. Native Electrum reconnect loops retain the first or
+  changed endpoint error at `ERROR` while identical retries move to `DEBUG`;
+  redundant rustls handshake/alert internals are omitted from the application
+  log while the endpoint-specific KDF error remains. Optional
+  `eth_feeHistory`, late request-response completions, routine peer exchange,
+  and duplicate peer-exchange dial diagnostics no longer appear as operator
+  errors. Code: `mm2src/coins/`, `mm2src/common/`, `mm2src/mm2_p2p/`.
 
 ### Added
 
@@ -2594,6 +2811,49 @@ Legacy `enable` for EVM coins under an HD wallet is not changed by this release.
 - **Transaction history also refreshes on Electrum notification.** The UTXO history loop re-reads balance every 30 s and reloads history only when it changed, so a confirmed transaction could sit unnoticed for most of an interval. It now waits for that interval *or* a script-hash notification, whichever comes first. The notification decides only *when* to look: the balance is still re-read authoritatively at the top of the loop, so nothing is inferred from the notification itself. Electrum-backed Iguana-derivation coins only; native-RPC coins are unchanged. Code: `mm2src/coins/utxo/utxo_common/utxo_common_history.rs`.
 - **Script-hash watchers no longer displace one another.** The registry stored a single watcher per script hash, so a second consumer of the same address — the history loop alongside the balance streamer — would have silently replaced the first, leaving that subsystem permanently unwoken. Watchers now accumulate per hash and every one is notified; departed consumers are pruned by receiver liveness, so one consumer leaving cannot silence the others. Code: `mm2src/coins/utxo/rpc_clients/electrum_rpc_client.rs`.
 - **Electrum-backed balances now update on notification instead of waiting for the next poll — CRD ch.38 R38.6.5.** The requirement — emit balance-change events with watched addresses registered at enable time and re-registered as needed — was only half met: events were emitted, but purely from a 30 s timer, and nothing was ever registered with a server. The client already received server-initiated notifications yet recognised exactly one method and discarded the rest as errors. It now routes `blockchain.scripthash.subscribe` notifications to a registry keyed by script hash, and the balance streamer subscribes its coin's address on start, races the notification against the poll deadline, and re-reads the balance as soon as a server reports a change. A deposit or incoming swap payment therefore appears in about the time the server takes to notice it, rather than up to a full poll interval later. Watched hashes are re-armed on every newly connected server, because a subscription belongs to one session and a reconnect or server swap drops it silently. **Polling is retained as the correctness floor**: a coin whose subscription fails, is unavailable, or dies silently keeps its existing timer, so the worst case is the latency we had before, never a stale balance. Applies to Electrum-backed UTXO, QTUM and BCH coins; native-RPC and non-UTXO families are unchanged. Unrecognised notification methods are now ignored rather than logged as errors, since a server may push subscriptions we never requested. Code: `mm2src/coins/utxo/rpc_clients/electrum_rpc_client.rs`, `mm2src/coins/utxo/utxo_builder/utxo_coin_builder.rs`, `mm2src/mm2_main/src/rpc/streaming_activations/balance.rs`.
+
+### Changed / dependencies
+
+- **Security and yanked dependency refresh.** Transitive `ruint` is upgraded
+  from 1.18.0 to the security-fixed 1.20.0 for RUSTSEC-2026-0220. Compatible
+  patch updates also replace the yanked `ahash 0.7.6`,
+  `crossbeam-channel 0.5.1`, and `rmp-serde 0.14.3` releases; MessagePack stays
+  on the wire-compatible 0.14 line. Obsolete `libsqlite3-sys` and `rand`
+  advisory exceptions are removed from the audit policy.
+- **Stable modern `librustzcash` stack with schema-safe shielded rescan.**
+  Z-coin now uses the coherent stable crates.io line
+  (`zcash_client_backend 0.23.0`, `zcash_client_sqlite 0.21.1`, and
+  `zcash_primitives`/`zcash_proofs 0.28.0`) instead of the legacy vendored 0.5
+  API. Reloaded stores the modern wallet and compact cache as
+  `<TICKER>_RELOADED_WALLET.db` and
+  `<TICKER>_RELOADED_COMPACT_BLOCKS.db`, leaving GLEEC/pre-upgrade files
+  untouched. Exact legacy schemas are preserved and rebuilt/rescanned rather
+  than migrated in place; unknown or corrupt schemas fail without mutation.
+  The selected-current migration/schema fingerprint is pinned, cached-chain
+  continuity is validated before scanning, and KDF P2SH transaction bytes are
+  protected by full serialization regressions. The broad old Zcash workspace
+  dependency is replaced by exact registry versions plus three narrow,
+  documented crate patches for the obsolete `time-core` pin and required KDF
+  transaction-builder compatibility. See CRD chapter 39 and
+  [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md). This port completes the
+  Light-mode modern store/scan path; the pre-existing Native full-node adapter
+  does not yet populate that modern compact cache and remains an explicit CRD
+  chapter-39 gap.
+- **Shared SQLite binding upgraded from `rusqlite 0.24.2` to `0.37.0`.** All
+  native SQLite consumers now share the version required by the stable Zcash
+  wallet store. Legacy `NO_PARAMS`/named-query APIs and dynamic parameter calls
+  were ported without changing their SQL contracts. The upgrade also exposed
+  and removed one deprecated Solana keypair accessor in tests; the independent
+  `nom 6.1.2` future-incompatibility remains owned by the pinned `sia-rust`
+  dependency rather than Zcash.
+- **`rand` 0.7 → 0.8** across all direct reloaded usages (RUSTSEC-2026-0097; upstream-blocked advisory). Code: multiple crates.
+- **`mm2_metrics` rewritten** with a hand-rolled Prometheus registry; drops the dead `metrics-runtime 0.13` / `metrics-util` stack, clearing RUSTSEC-2021-0113. Code: `mm2src/mm2_metrics/`.
+- **`anyhow` bumped to 1.0.103, `crossbeam-epoch` to 0.9.20** (advisory clears). Code: `Cargo.toml`.
+- **CI test failures now include Rust backtraces.** `tests.yml` sets `RUST_BACKTRACE=1` for test jobs so panics provide actionable stack traces in CI logs. Code: `.github/workflows/tests.yml`.
+
+## [0.2.0-beta.1] - 2026-08-05
+
+### Added
 
 - **Known beta limitation: shielded Zcash/ARRR is not supported in the web-wallet WASM bundle yet.** The WASM CI safety net now uses a direct `cargo check --target wasm32-unknown-unknown -p mm2_main` check because the packaging step hit a duplicate `secp256k1-sys` link collision from the Zcash/ARRR stack. Native and desktop builds remain the supported targets for shielded Zcoin activation and sync until the web bundle is normalized.
 
@@ -2680,42 +2940,7 @@ Legacy `enable` for EVM coins under an HD wallet is not changed by this release.
   `mm2src/coins_activation/src/z_coin_activation.rs`,
   `mm2src/coins/z_coin/z_coin_wallet_db.rs`.
 
-- **Superseded (issue #11): KMD direct-burn DEX-fee split corrected; the
-  small-KMD dust exemption below is withdrawn.** The entry below ("Small KMD
-  direct-burn DEX fees retain the legacy wire shape") described a flat 75/25
-  split above dust plus a builder dust exemption for the resulting
-  under-dust fee output. Public-network observation of a `v2.6.0-beta` node
-  contradicts that: for a 0.01 KMD taker it emits 1,000 base units to the
-  fee address and 158 to `OP_RETURN`, not 868 + 289. The DEX-fee split is now
-  computed from three exact-rational ranges on the dust-floored total: at or
-  below dust, a single fee output for exactly dust; above dust with the 75%
-  share at or above dust, the 75/25 split; otherwise a fee output of exactly
-  dust and an OP_RETURN burn of the remainder. Because the fee-collection
-  leg is now never below dust, the generic UTXO builder needs no per-output
-  or per-descriptor dust exemption for this descriptor any more — the
-  under-dust exemption plumbing (builder option, taker-fee send variant, and
-  selector) has been removed entirely. Code: `mm2src/coins/lp_coins_types.rs`,
-  `mm2src/coins/utxo.rs`, `mm2src/coins/utxo/utxo_common/`.
-- **KMD taker no longer over-claims Active User Reward (interest) on
-  post-KIP-0001 UTXOs (issue #11).** The reward computation was missing the
-  KIP-0001 500x reduction that took effect at the dPoW Season-7 hard fork
-  (height 3,484,958). A KMD spend whose inputs include an eligible UTXO
-  confirmed at or after that height now claims the correct, reduced reward
-  instead of a figure 500x too large, which the network previously rejected
-  with `bad-txns-in-belowout`. Reported and validated on the same
-  transaction/history/`kmd_rewards_info` surfaces. Code: `mm2src/coins/utxo.rs`.
-- **No-fee waiver for the network burn/waiver-key taker (issue #11).** A
-  taker whose taker-coin swap public key equals the active network's
-  burn/waiver key now pays no DEX fee, on both netid 8762 and netid 6133 and
-  on the legacy swap protocol, independently of whether the network's burn
-  split is enabled. Previously the waiver only applied while an (inactive,
-  on both production networks) general burn-account path was active, so it
-  never took effect in production. Netid 8762's burn key
-  (`0369aa…3153`) is no longer empty. Code: `mm2src/coins/lp_coins_types.rs`,
-  `mm2src/mm2_net_config/`, `mm2src/mm2_main/src/lp_swap/maker_swap.rs`,
-  `mm2src/mm2_main/src/lp_swap/taker_swap.rs`.
-- **Small KMD direct-burn DEX fees retain the legacy wire shape (superseded,
-  see above).** Netid 8762
+- **Small KMD direct-burn DEX fees retain the legacy wire shape.** Netid 8762
   KMD taker-fee construction now permits the positive 75% fee-collection
   output selected by the `v2.6.0-beta` policy even when that split component
   is below KMD's generic spendable-output dust threshold. The exception is
@@ -2729,9 +2954,8 @@ Legacy `enable` for EVM coins under an HD wallet is not changed by this release.
   ticker's zero-valued entry in `total_balance` instead of returning an untyped
   empty object. Code: `mm2src/coins/`, `mm2src/coins_activation/`.
 - **DEX-fee wire compatibility on both production netids.** Netid 8762 KMD
-  takers now use the `v2.6.0-beta`-compatible discounted fee and dust-aware
-  fee/OP_RETURN split (see the corrected three-range entry above for the
-  exact structure), while non-KMD takers remain single-output.
+  takers now use the `v2.6.0-beta`-compatible discounted fee and two-output
+  75/25 fee/OP_RETURN structure, while non-KMD takers remain single-output.
   Netid 6133 follows the v3/dev single-output fee structure. Both networks now
   use only the taker coin's minimum transaction amount as the fee floor,
   removing the erroneous additional `0.0001` floor. Fixes #1. Code:
@@ -2763,54 +2987,6 @@ Legacy `enable` for EVM coins under an HD wallet is not changed by this release.
 - **Ordermatch trie-delta removal test made deterministic.** The orderbook sync test no longer depends on nondeterministic ordering when asserting a delta after removed orders. Code: `mm2src/mm2_main/src/ordermatch_tests.rs`.
 - **Coin activation/runtime hardening for multi-asset wallets.** ERC20/BEP20 tokens with missing or zero config decimals now fall back to on-chain `decimals()`, NFT activation lazily opens the native async SQLite store instead of failing with `async_sqlite_connection is not initialized`, and Tendermint RPC node selection falls back from `/health` to `abci_info` before declaring all nodes unavailable. Code: `mm2src/coins/`, `mm2src/coins_activation/`.
 - **Runtime stubs converted to explicit no-op/errors where safe.** Unsupported TRON V1 swap paths now return structured errors, L2 SQL transaction-history queries return an unsupported-history error instead of panicking, wasm crash-report initialization is an intentional no-op, and public-key trait methods for enabled coin families no longer panic when called by production paths. Code: `mm2src/coins/`, `mm2src/common/`.
-- **Background retry and diagnostic noise hardening.** Persistent QRC20 history
-  failures now back off from 10 seconds to a bounded five-minute retry interval
-  and reset after recovery. Native Electrum reconnect loops retain the first or
-  changed endpoint error at `ERROR` while identical retries move to `DEBUG`;
-  redundant rustls handshake/alert internals are omitted from the application
-  log while the endpoint-specific KDF error remains. Optional
-  `eth_feeHistory`, late request-response completions, routine peer exchange,
-  and duplicate peer-exchange dial diagnostics no longer appear as operator
-  errors. Code: `mm2src/coins/`, `mm2src/common/`, `mm2src/mm2_p2p/`.
-
-### Changed / dependencies
-
-- **Security and yanked dependency refresh.** Transitive `ruint` is upgraded
-  from 1.18.0 to the security-fixed 1.20.0 for RUSTSEC-2026-0220. Compatible
-  patch updates also replace the yanked `ahash 0.7.6`,
-  `crossbeam-channel 0.5.1`, and `rmp-serde 0.14.3` releases; MessagePack stays
-  on the wire-compatible 0.14 line. Obsolete `libsqlite3-sys` and `rand`
-  advisory exceptions are removed from the audit policy.
-- **Stable modern `librustzcash` stack with schema-safe shielded rescan.**
-  Z-coin now uses the coherent stable crates.io line
-  (`zcash_client_backend 0.23.0`, `zcash_client_sqlite 0.21.1`, and
-  `zcash_primitives`/`zcash_proofs 0.28.0`) instead of the legacy vendored 0.5
-  API. Reloaded stores the modern wallet and compact cache as
-  `<TICKER>_RELOADED_WALLET.db` and
-  `<TICKER>_RELOADED_COMPACT_BLOCKS.db`, leaving GLEEC/pre-upgrade files
-  untouched. Exact legacy schemas are preserved and rebuilt/rescanned rather
-  than migrated in place; unknown or corrupt schemas fail without mutation.
-  The selected-current migration/schema fingerprint is pinned, cached-chain
-  continuity is validated before scanning, and KDF P2SH transaction bytes are
-  protected by full serialization regressions. The broad old Zcash workspace
-  dependency is replaced by exact registry versions plus three narrow,
-  documented crate patches for the obsolete `time-core` pin and required KDF
-  transaction-builder compatibility. See CRD chapter 39 and
-  [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md). This port completes the
-  Light-mode modern store/scan path; the pre-existing Native full-node adapter
-  does not yet populate that modern compact cache and remains an explicit CRD
-  chapter-39 gap.
-- **Shared SQLite binding upgraded from `rusqlite 0.24.2` to `0.37.0`.** All
-  native SQLite consumers now share the version required by the stable Zcash
-  wallet store. Legacy `NO_PARAMS`/named-query APIs and dynamic parameter calls
-  were ported without changing their SQL contracts. The upgrade also exposed
-  and removed one deprecated Solana keypair accessor in tests; the independent
-  `nom 6.1.2` future-incompatibility remains owned by the pinned `sia-rust`
-  dependency rather than Zcash.
-- **`rand` 0.7 → 0.8** across all direct reloaded usages (RUSTSEC-2026-0097; upstream-blocked advisory). Code: multiple crates.
-- **`mm2_metrics` rewritten** with a hand-rolled Prometheus registry; drops the dead `metrics-runtime 0.13` / `metrics-util` stack, clearing RUSTSEC-2021-0113. Code: `mm2src/mm2_metrics/`.
-- **`anyhow` bumped to 1.0.103, `crossbeam-epoch` to 0.9.20** (advisory clears). Code: `Cargo.toml`.
-- **CI test failures now include Rust backtraces.** `tests.yml` sets `RUST_BACKTRACE=1` for test jobs so panics provide actionable stack traces in CI logs. Code: `.github/workflows/tests.yml`.
 
 ## [0.1.0-beta.2] — 2026-07-07
 
@@ -2845,14 +3021,15 @@ Highlights:
 - Tag-driven, GPG-signed release pipeline: signed `SHA256SUMS` manifest and drafted GitHub Releases — pre-releases from `staging` (`-alpha/-beta/-rc` tags), finals from `main`. Linux binaries build inside a Debian 11 container (glibc 2.31) for broad backwards-compatibility; unsigned all-platform snapshots via manual `dev-build.yml` and automatic `staging-build.yml`.
 
 Tag `v0.2.0-beta.1` (2026-08-05) was cut on `staging` from the development line as of commit
-6dc1b63b1, part-way through 0.3.0-alpha.1. Everything it shipped is listed in the 0.3.0-alpha.1
-section above, which continues past that point. The tag itself is not on the development line, so
-it has no section of its own.
+6dc1b63b1, part-way through 0.3.0-alpha.1. Its section above is the tag's own text, restored on
+2026-11-08; until then its entries were listed under 0.3.0-alpha.1. The correction of its KMD fee
+entry is in the 0.3.0-alpha.1 section (the entry marked "Superseded (issue #11)").
 
 [Unreleased]: https://github.com/kdf-reloaded/kdf/compare/v0.3.0-beta.1...HEAD
 [0.3.0-beta.1]: https://github.com/kdf-reloaded/kdf/compare/ddb87a4849f91400b1b4aa120090f1acb12aa7bf...v0.3.0-beta.1
 [0.3.0-alpha.3]: https://github.com/kdf-reloaded/kdf/compare/49a46bc54fc16761796ed0bad53a472b8183ed9b...ddb87a4849f91400b1b4aa120090f1acb12aa7bf
 [0.3.0-alpha.2]: https://github.com/kdf-reloaded/kdf/compare/7a18f94b2f5de1ff7ba2ae69c4b445132d305a3f...49a46bc54fc16761796ed0bad53a472b8183ed9b
 [0.3.0-alpha.1]: https://github.com/kdf-reloaded/kdf/compare/v0.1.0-beta.2...7a18f94b2f5de1ff7ba2ae69c4b445132d305a3f
+[0.2.0-beta.1]: https://github.com/kdf-reloaded/kdf/releases/tag/v0.2.0-beta.1
 [0.1.0-beta.2]: https://github.com/kdf-reloaded/kdf/compare/v0.1.0-beta.1...v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/kdf-reloaded/kdf/releases/tag/v0.1.0-beta.1

@@ -1,6 +1,6 @@
 # Plan: ARRR swap questions from `lightwalletd` blocks, without an address index
 
-**Status:** planning (target: after the beta) — **Last reviewed:** 2026-10-28
+**Status:** planning (target: after the 0.4.0 beta) — **Last reviewed:** 2026-11-08
 
 > **Context.** The maintainer wants KDF Reloaded to answer every ARRR swap question
 > without Electrum. An ARRR swap asks three questions about its HTLC, a transparent
@@ -15,12 +15,13 @@
 > This plan describes a path that needs no address index: walk the swap's block range
 > with the compact blocks `lightwalletd` already serves, fetch each listed transaction
 > and match it against the HTLC. That plan's "detecting spends by reading blocks" was
-> rejected for the beta; this plan takes it up again for after the beta, with
+> rejected for 0.3.0-beta.1; this plan takes it up again for a later release, with
 > measurements.
 >
-> **Decided (maintainer, 2026-10-28):** the Electrum fallback stays for the beta, and
-> this plan's work comes after the beta. Its last step retires the fallback. Nothing
-> else here is decided.
+> **Decided (maintainer, 2026-10-28):** the Electrum fallback stays for the beta
+> (0.3.0-beta.1), and this plan's work comes after it. Its last step retires the
+> fallback. Nothing else here is decided. No part of it is implemented on `dev` as of
+> 2026-11-08.
 
 ## Summary
 
@@ -40,7 +41,7 @@
   Electrum on average: about 65 s at the nominal 60 s block time. This does not affect
   swap safety. An optional mempool step removes the delay.
 - **Effort:** about 8–13 working days of implementation, plus live-chain waiting,
-  after the beta. The last step retires the Electrum fallback.
+  after 0.3.0-beta.1. The last step retires the Electrum fallback.
 
 ## How the walk works
 
@@ -277,7 +278,7 @@ Each step is its own pull request and stays green on its own.
 
 ## Open questions
 
-All five are decisions for after the beta; none needs an answer before it.
+All five are decisions for after 0.3.0-beta.1; none needed an answer before it.
 
 1. **Order of sources for the spend questions.** Walk first, then the index, then
    Electrum (recommended)? Or keep the index first until the field check?

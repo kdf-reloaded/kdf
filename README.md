@@ -36,21 +36,21 @@ For the relationship to other downstream projects (notably the GLEEC fork), see 
 
 ## Beta disclaimer
 
-KDF Reloaded is currently in **public beta** (see [`ROADMAP.md`](ROADMAP.md)). APIs, on-disk formats, and the network protocol may still change between pre-1.0 releases. Use only with funds you can afford to lose.
+KDF Reloaded is currently in **public beta** (the early roadmap is in [`ROADMAP.md`](ROADMAP.md); current work is in [`docs/plans/`](docs/plans/)). APIs, on-disk formats, and the network protocol may still change between pre-1.0 releases. Use only with funds you can afford to lose.
 
 > **Release note:** This repository is published with a documented GPLv2 continuation posture and an explicit pre-release checklist; see [`SECURITY.md`](SECURITY.md) and [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) for release controls and operator guidance.
 
 - The `kdf` binary is provided for evaluation, testing, and review.
 - Some functionality is missing or limited in this release; see the *Known limitations* list in the [`CHANGELOG`](CHANGELOG.md#known-limitations).
 - Mainnet swaps function on netid `8762` (AtomicDEX network) and netid `6133` (GLEEC network), but you are running unaudited pre-release software.
-- **ARRR (Pirate) swaps work only between KDF Reloaded nodes of 0.4.0 or later.** Since Pirate Chain's Ironwood upgrade, ARRR needs a newer transaction format (version 6) that the other Komodo DeFi Framework implementations cannot build, so a swap with them would fail after the DEX fee was paid. KDF Reloaded therefore declines an ARRR swap, before anything is paid, with a node that does not state it builds version 6 (coin setting `require_v6_counterparty`, on by default). This check is temporary: it will be removed once version 6 is generally supported. More in the [`CHANGELOG`](CHANGELOG.md#known-limitations).
+- **ARRR (Pirate) swaps work only between KDF Reloaded nodes of 0.4.0 or later.** Since Pirate Chain's Ironwood upgrade, ARRR needs a newer transaction format (version 6) that the other Komodo DeFi Framework implementations cannot build, so a swap with them would fail after the DEX fee was paid. KDF Reloaded therefore declines an ARRR swap, before anything is paid, with a node that does not state it builds version 6 (the setting `require_v6_counterparty` in the coin's `consensus_params`, on by default). This check is temporary: it will be removed once version 6 is generally supported. More in the [`CHANGELOG`](CHANGELOG.md#known-limitations).
 - **BC2 (Bitcoin II) swaps work only with nodes that sign with the BC2 signature suffix, which today means KDF Reloaded.** Since block 57,750 the BC2 network rejects every spend that is not signed with its own suffix, and the other Komodo DeFi Framework implementations cannot sign it, so they cannot spend BC2 at all. KDF Reloaded therefore declines a BC2 swap, before anything is paid, with a node that does not state that it signs with the suffix (coin setting `require_suffix_counterparty`, on by default; switching it off restores the earlier behavior, in which a BC2 swap with such a node can fail after a payment has been made). This check is temporary: it will be removed once the other implementations support suffix signing. The global coins repository may not carry the coin key `sighash_suffix` (`"0x01324342"` on `BC2` and `BC2-segwit`) yet; until it does, add it to your coins file or use the KDF Reloaded coins file, otherwise the BC2 network rejects BC2 withdrawals and swaps. More in the [`CHANGELOG`](CHANGELOG.md#known-limitations).
-- Git commits and release tags are GPG-signed by the maintainer (`Takologi <takologi@proton.me>`, fingerprint `FEE1ACA52C65FF3EBF31818CB5595E1752BC2A82`); the public key is at [`docs/keys/takologi.asc`](docs/keys/takologi.asc). Release **binaries** ship with a GPG-signed `SHA256SUMS` manifest; see [`docs/RELEASE.md`](docs/RELEASE.md) and [`SECURITY.md`](SECURITY.md).
+- Git commits and release tags are GPG-signed by the maintainer (`Takologi <takologi@proton.me>`, fingerprint `FEE1ACA52C65FF3EBF31818CB5595E1752BC2A82`); the public key is at [`docs/keys/takologi.asc`](docs/keys/takologi.asc), and signatures are made with its signing subkey (see [`SECURITY.md`](SECURITY.md)). Release **binaries** ship with a GPG-signed `SHA256SUMS` manifest; see [`docs/RELEASE.md`](docs/RELEASE.md) and [`SECURITY.md`](SECURITY.md).
 
 ## What it does
 
 - **Atomic swaps** between supported chains via Hash Time Locked Contracts (HTLCs) — no custodian, no proxy tokens, you keep your keys.
-- **Multi-protocol coin support**: UTXO chains (Bitcoin family), EVM chains, Tendermint/Cosmos (wallet-only in this beta), Zcash (sapling), Lightning Network, and others — see [`mm2src/coins/`](mm2src/coins/).
+- **Multi-protocol coin support**: UTXO chains (Bitcoin family), EVM chains, Tendermint/Cosmos (wallet-only in this beta), Zcash (sapling), Lightning Network (no orders or swaps yet), and others — see [`mm2src/coins/`](mm2src/coins/).
 - **Distributed orderbook** propagated over [libp2p](https://libp2p.io/) gossipsub.
 - **JSON-RPC API** consumable from CLI, scripts, or third-party GUIs.
 
@@ -97,6 +97,11 @@ Minimal example:
 }
 ```
 
+> **Name lookups.** From 0.4.0 the node looks up every name through Google Public
+> DNS unless `dns_resolver` says otherwise. On a network that blocks Google Public
+> DNS, set `"dns_resolver": "system"` or your own DNS servers before you upgrade;
+> see [Network configuration](docs/NETWORK_CONFIG.md#dns-resolver).
+
 > **WalletConnect session storage.** The optional `wc_session_persistence`
 > setting controls whether and how WalletConnect v2 sessions are persisted.
 > It defaults to `open` (GLEEC-compatible plaintext, byte-interchangeable with
@@ -104,8 +109,9 @@ Minimal example:
 > [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) for details.
 
 > **Memory allocator arenas (Linux).** On Linux with glibc the daemon limits the
-> memory allocator to two arenas at start-up, which greatly reduces the memory
-> growth of a maker that updates many orders. Set the optional `malloc_arena_max`
+> memory allocator to two arenas at start-up, which removed the memory growth
+> measured for a maker that updated its orders about 80 times a second on a
+> 256-core host. Set the optional `malloc_arena_max`
 > setting in `MM2.json` to a whole number to choose another limit; `0` leaves
 > the allocator's own default. The environment variable `MALLOC_ARENA_MAX`, when
 > set, takes precedence and the daemon then leaves the allocator alone.
@@ -154,7 +160,7 @@ auditing, or redistributing the project:
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [PR review checklist](docs/PR_REVIEW_CHECKLIST.md). All contributors must agree to the [Developer Agreement](LEGAL/DEVELOPER-AGREEMENT) and abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-For the project roadmap beyond the current beta, see [`ROADMAP.md`](ROADMAP.md). For the change log, see [`CHANGELOG.md`](CHANGELOG.md).
+For the early roadmap, see [`ROADMAP.md`](ROADMAP.md); for current and planned work, see [`docs/plans/`](docs/plans/) and the tests run before a release in [`docs/release-tests/`](docs/release-tests/). For the change log, see [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

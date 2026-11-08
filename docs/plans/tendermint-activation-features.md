@@ -1,6 +1,6 @@
 # Plan: Tendermint activation features
 
-**Status:** parked (deferred by maintainer decision 2026-10-11; nothing started) — **Last reviewed:** 2026-10-29
+**Status:** parked (deferred by maintainer decision 2026-10-11; nothing started) — **Last reviewed:** 2026-11-08
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity`. That branch brings Tendermint activation to wire
@@ -11,7 +11,8 @@
 > branch.
 
 > **Beta availability (2026-10-26).** By maintainer decision Tendermint coins
-> and tokens are wallet-only in the coming beta: while
+> and tokens are wallet-only in 0.3.0-beta.1 and on `dev` as of 2026-11-08 (Tendermint
+> swaps were added to the 0.4.0 scope on 2026-11-08): while
 > `TENDERMINT_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`, activation,
 > balances and `withdraw` work, while `setprice`, `buy`, `sell` and
 > `start_swap` refuse the coin and an order with a Tendermint coin saved
@@ -48,7 +49,8 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    - *Public-docs WalletConnect form* `{"priv_key_policy": {"type":
      "WalletConnect", "data": <topic>}}`, treated exactly as the WalletConnect
      form. The public docs show this form; the reference rejects it. The
-     maintainer decided to accept both forms.
+     maintainer decided to accept both forms. The decision is taken; its
+     implementation has not started (no PR, no code).
    - Malformed input is the dispatcher's `InvalidRequest`, never a crash (the
      reference panics on some malformed keys; Reloaded must not).
    - When this lands, drop the interim rejection above.
@@ -60,7 +62,8 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    `enable_tendermint_token`, with `CustomTokenError`
    (`{"DuplicateTickerInConfig": {"ticker_in_config": ...}}`).
    A custom token must be wallet-only, as for EVM (ch. 35 R35.2.7); the EVM
-   implementation gap is tracked in kdf-reloaded/kdf#16.
+   side was fixed by `e18eca319` of 2026-10-12, merged with PR #21 on
+   2026-10-13 (issue #16, closed).
 4. **`tx_history: true`** starts background transaction-history fetching
    (Reloaded accepts the flag and does nothing).
 5. **Hardware `priv_key_policy`.** The reference ignores `priv_key_policy` for

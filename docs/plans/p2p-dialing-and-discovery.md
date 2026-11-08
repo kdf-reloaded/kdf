@@ -1,6 +1,6 @@
 # Plan: peer-to-peer dialing, discovery and send-queue follow-ups (0.4.0)
 
-**Status:** in progress — **Last reviewed:** 2026-11-02
+**Status:** in progress — **Last reviewed:** 2026-11-08
 
 > **Context.** These are the peer-to-peer items deferred from the 0.3.0 beta and the field
 > findings made around it. The maintainer approved batch 1 (P1 to P3, then P5) on 2026-11-02;
@@ -13,13 +13,13 @@
 
 | Id | What | CRD | State |
 |---|---|---|---|
-| P1 | **Redial guards.** No address is dialed again within 5 minutes, as GLEEC KDF does. No configured seed is dialed while its peer is connected, which ends a dial-and-close loop every 150 s. The short-of-relays warning appears at most once per 5 minutes. | ch.28 R27a, T12 | Spec PR #199; code PR #206; lab check L-SEED pending |
-| P2 | **Peer-exchange polish.** Skipped addresses are logged at DEBUG, with an hourly INFO summary. The idle close of a relay outside the relay mesh logs at INFO. The routability ranges are aligned with GLEEC KDF. Two wording fixes (R8c, R23 item 3). | ch.28 R8c items 4 and 7, R23 item 3, R24, R27b, T6a, T13, D9; ch.32 note under R-F3b | Spec PR #203; code PR #211; public probe pending |
+| P1 | **Redial guards.** No address is dialed again within 5 minutes, as GLEEC KDF does. No configured seed is dialed while its peer is connected, which ends a dial-and-close loop every 150 s. The short-of-relays warning appears at most once per 5 minutes. | ch.28 R27a, T12 | Spec PR #199; code PR #206; lab row L-SEED passed 2026-11-05 (release tests 0.4.0-beta.1, row 14) |
+| P2 | **Peer-exchange polish.** Skipped addresses are logged at DEBUG, with an hourly INFO summary. The idle close of a relay outside the relay mesh logs at INFO. The routability ranges are aligned with GLEEC KDF. Two wording fixes (R8c, R23 item 3). | ch.28 R8c items 4 and 7, R23 item 3, R24, R27b, T6a, T13, D9; ch.32 note under R-F3b | Spec PR #203; code PR #211; peer-exchange probe passed 2026-11-05 (release tests 0.4.0-beta.1, row 15; the hourly summary was not exercised) |
 | P3a | **Send-queue windows visible.** Each connection's dropped share per 60 s window, as a DEBUG line and a gauge. | ch.28 RQ1 items 6 and 8, T-RQ1.13; ch.32 R-MP5, T-MP10 | Spec PR #204; code PR #214 |
 | P3b | **Queue-signal clear rule.** The signal clears when nothing has waited 2 s or more, not only after a 5 s empty queue. It affects only makers with `maker_update_coalescing` on (see `maker-gossip-rate-control.md`). | ch.32 R-MP2 item 2, T-MP5, D9 | Spec PR #204; code PR #214 |
 | P4 | **Review of the repeated-drops threshold** (25 % in each of 3 minutes), from field data and a lab link that loses messages without breaking. | ch.28 RQ1 item 5 | Waits for P3a and field logs |
-| P5 | **One resolver for every hostname.** A `dns_resolver` setting chooses Google Public DNS (the default), the system resolver or fixed servers, for seeds, peer names, coin servers and HTTP(S) services alike. In-memory cache, last known answer for up to 24 hours when the resolver is unreachable, no fallback. The transport library's DNS layer and the old resolver library leave the build. Sia, WalletConnect, Lightning and the statistics method follow in batch 2. | ch.45 §45.6B, T45.16–T45.22, D45.6–D45.8; ch.28 R0b, R18, R8c item 7, D9, OQ2; pointers in ch.35, ch.38, ch.39 | Spec PR #216; code PR #219; lab row T45.22 pending |
-| P5b | **The remaining lookups** under the same resolver: Sia, the WalletConnect relay, Lightning peer addresses, the statistics method. | ch.45 D45.6 | Batch 2 |
+| P5 | **One resolver for every hostname.** A `dns_resolver` setting chooses Google Public DNS (the default), the system resolver or fixed servers, for seeds, peer names, coin servers and HTTP(S) services alike. In-memory cache, last known answer for up to 24 hours when the resolver is unreachable, no fallback. The transport library's DNS layer and the old resolver library leave the build. Sia, WalletConnect, Lightning and the statistics method follow in a later release (P5b). | ch.45 §45.6B, T45.16–T45.22, D45.6–D45.8; ch.28 R0b, R18, R8c item 7, D9, OQ2; pointers in ch.35, ch.38, ch.39 | Spec PR #216; code PR #219; lab row L-DNS (T45.22) passed 2026-11-05, cases 1 to 7 and 9 (release tests 0.4.0-beta.1, row 3; case 8 not exercised) |
+| P5b | **The remaining lookups** under the same resolver: Sia, the WalletConnect relay, Lightning peer addresses, the statistics method. | ch.45 D45.6 | Not in 0.4.0; follows in a later release (CHANGELOG, Known limitations) |
 | P5c | **Encrypted DNS** for the Google and fixed modes. | ch.45 D45.7 | Plan row only, no estimate |
 | P6 | **Bounded connection close:** a 30 s deadline on every close, in the vendored yamux wrapper. | ch.28 R27c, RQ1 item 5, D8 | Implemented in batch 3: PR #280; lab row L-CLOSE passed (2026-11-07); its memory criterion was restated after the run, from "back to baseline" to "flat after the close, where the control keeps growing" |
 | P8 | **Lab capture** confirming that GLEEC KDF relays send nothing on the peers topic. | ch.28, note after R8c | Lab only, any time |
@@ -40,6 +40,13 @@ lookups of R8c item 7 onto the shared resolver, and they become asynchronous wit
   30 seconds, where a build without the deadline kept it open 13 minutes. Its memory criterion was
   restated after the run, from "back to baseline" to "flat after the close, where the control keeps
   growing" (T14). In the 10-second link cuts of the same row the relay started no close.
+- **An outage without a reset (batch 4 item B4-8, 2026-11-08).** The drop-only arm of L-CLOSE
+  dropped every packet between a relay and a peer without resetting a socket. In three 10-second
+  drops both connections survived, and traffic resumed 2.5 to 5.5 seconds after the restore. After a
+  30-second drop the connections were closed and the peer connected again; after a 60-second drop
+  both connections were closed and came back. Traffic resumed 23 and 40 seconds after the restore.
+  This is input for P4 and for the maintainer's decision EA (an earlier redial of a connection that
+  a cut ended), which is pending.
 - **Resolver (P5), 2026-11-02.**
   - One setting, `dns_resolver`, for every hostname. Google Public DNS is the default for all
     names, `"google"` names it explicitly, and `"system"` is the way back to the operating
@@ -53,8 +60,8 @@ lookups of R8c item 7 onto the shared resolver, and they become asynchronous wit
     queries, cache and hosts-file reading on top. Its resolver crate needs a cache crate with
     Apache-2.0-only files, and its older 0.24 line has an unfixed advisory (CRD ch.45 D45.8).
     P5 in batch 1 is about 7–8 days of code.
-  - Batch 1 covers the peer-to-peer layer, HTTP(S), Electrum and lightwalletd; the rest follows
-    in batch 2.
+  - Batch 1 covers the peer-to-peer layer, HTTP(S), Electrum and lightwalletd; the rest was
+    planned for batch 2 and follows in a later release (P5b).
 
 ## Open points
 

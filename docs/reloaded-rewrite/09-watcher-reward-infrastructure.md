@@ -835,7 +835,9 @@ V3. The publish-subscribe overlay the substrate rides on is
   from a field run on the public network. No reference input was
   used, the amendment makes no parity claim, and it needs no
   Dirty Gate pass. Whether a reference node watches swaps of
-  these families is open and queued for a Spec Reader pass.
+  these families was open then and queued for a Spec Reader pass;
+  the scoped addition of 2026-11-04 below answers it (PR #232,
+  merged 2026-11-05).
 - *Scoped addition (2026-11-04) -- R6b, R10b, R22, R23, T4, T5 and the
   reference-position note under R17.* **KDF Dirty Gate: PASS on 2026-11-04, measure 0.05.** Prompted
   by the watcher questions of the 0.4.0 cycle, including the one the
