@@ -437,3 +437,27 @@ Run on 2026-11-07: `cargo test -p mm2_main --lib test_recover_funds` passed (42 
 | `test_recover_funds_sent_spend_spent_maker_payment_still_spends_the_unspent_taker_payment` | T32 item 9, R75 item 2 | The maker payment is spent and the taker payment is not: the spend of the taker payment is built (`SpentOtherPayment`), no refund |
 | `test_recover_funds_sent_spend_spent_maker_payment_and_spent_taker_payment_builds_nothing` | T32 item 10, R75 item 2 | Both payments spent: the call refuses ("Taker payment was already spent"); no spend and no refund is built |
 | `test_recover_funds_sent_spend_refunded_maker_payment_is_refused_as_already_refunded` | T32 item 11, R75 item 2 | The maker payment is refunded on the chain: the call refuses ("Maker payment was already refunded"), not with the sent-spend text; nothing is built |
+
+## Stale-tip warning during a refund wait (15 tests)
+
+Location: the module `tests` of `mm2src/mm2_main/src/lp_swap/stale_tip_watch.rs`. CRD: chapter 51, §51.6B, R79-R81, T33.
+Time is faked: the clock moves only when a fake sleep ends, a sleep takes a few polls, and a fake read answers at
+once, after one poll, or never, so no test waits. Run on 2026-11-08: all 15 passed.
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `t33_no_warning_at_59_minutes_one_at_60_naming_60` | T33 item 1, R80 | 59 minutes of the same height give no warning; at 60 minutes one, naming the height and 60 minutes |
+| `t33_no_second_warning_before_120_minutes_second_at_120` | T33 item 2, R80 | No second warning before 120 minutes; at 120 minutes a second one naming 120 minutes |
+| `t33_height_change_ends_the_stall_and_starts_a_new_clock` | T33 item 3, R80 | A change of height gives no warning; 59 minutes after it none, 60 minutes after it one |
+| `t33_height_change_before_the_first_warning_resets_the_clock` | T33 item 3, R80 | A change at 50 minutes means no warning at 109 minutes |
+| `t33_first_observation_only_records_the_height` | T33 item 5, R80 | The first observation is a baseline; the stall counts from it |
+| `t33_failed_reads_are_skipped_and_do_not_reset_the_clock` | T33 item 4, R79 | Failed reads give no warning and do not reset the clock; the warning still comes at 60 minutes |
+| `t33_a_wait_with_only_failed_reads_gives_no_warning` | T33 item 4, R79 | A wait whose reads all fail writes no warning |
+| `t33_a_read_that_does_not_finish_before_the_sleep_ends_is_skipped` | T33 item 4, R79 | Reads that never finish are dropped when their sleep ends: no warning from them, the clock is not reset (the warning still comes at 60 minutes), the sleeps add up to the wait |
+| `t33_pending_reads_do_not_extend_the_wait` | T33 item 7, R79 | With every read pending, no warning, slices of at most 300 s, and the slices add up to the wait exactly |
+| `t33_a_read_that_finishes_during_the_sleep_is_used` | T33 item 4, R79 | A read that answers before its sleep ends is observed (warning at 60 minutes) and the sleep is still awaited to its end |
+| `t33_warning_text_has_the_ticker_and_no_address` | T33 item 6, R80 | The text contains the ticker, the height and the minutes, and no `http` or `://` |
+| `t33_fixed_height_over_two_hours_warns_exactly_twice_in_slices_of_five_minutes` | T33 item 7, R79, R80 | A wait of 7500 s with a height that never changes: slices of at most 300 s that add up to 7500 s, exactly two warnings (60 and 120 minutes) |
+| `t33_a_height_that_moves_every_half_hour_never_warns` | T33 items 3 and 7 | A height that moves every 30 minutes never warns; the sleeps add up to 7200 s |
+| `t33_sleep_total_is_kept_for_waits_that_are_not_multiples_of_a_slice` | T33 item 7, R79 | Waits of 1000 s, 120 s and 0 s sleep exactly that long (a zero wait still sleeps once) |
+| `t33_short_steps_read_the_height_once_per_sample_period` | T33 item 7, R79 | A wait that the caller cuts into steps of 5 s reads the coin once per 5 minutes, not at each step |
