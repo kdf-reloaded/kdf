@@ -198,6 +198,15 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### Order book and peer-to-peer network
 
+- **A relay connection that a network cut ended can be dialed again before the 5-minute wait.** The
+  node does not dial an address again within 5 minutes of its last dial, as on GLEEC KDF, so a
+  connection the node had dialed and that a cut ended could stay down for up to 5 minutes. Now an
+  address whose connection was established, lasted at least 30 seconds and ended by a network error,
+  a close from the peer or a failed ping check may be dialed again at the next 30-second maintenance
+  check while the node is short of relays, at most twice in 5 minutes. A connection closed for being
+  idle or stuck, by the clock check or by the relay count, keeps the 5-minute wait. Detail: PR #NNN;
+  CRD ch.28 R27a item 1a.
+
 - **Messages from other nodes are checked for nesting depth and declared lengths before they are
   read.** Every value a peer sends is checked first: arrays and maps may nest at most 64 levels, and every
   declared length and count must fit in the bytes that follow. A value outside these bounds is
