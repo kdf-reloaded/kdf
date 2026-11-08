@@ -342,9 +342,9 @@ against the reference exactly as it fails against Reloaded.
 >    `cancel_order` or `my_orders` answers `NoSuchMethod`, HTTP 400, as
 >    R43.1A.3 binds. **Parity; no gap.** The field wallet's calls are
 >    malformed for both implementations.
-> 2. *Fallback.* Until PR #NNN, Reloaded answered a legacy request for an
+> 2. *Fallback.* Until PR #312, Reloaded answered a legacy request for an
 >    unknown method with the legacy error body (HTTP 500) and did not retry it
->    on the versioned table (R43.1A.1). Since PR #NNN (D43.1A.2 option (i),
+>    on the versioned table (R43.1A.1). Since PR #312 (D43.1A.2 option (i),
 >    the maintainer's decision of 2026-11-08), it retries such a request as
 >    R43.1A.1a–R43.1A.1e bind. **Parity.**
 > 3. *Envelope alias.* Reloaded's versioned envelope accepts `rpc_pass` as an
@@ -356,7 +356,7 @@ against the reference exactly as it fails against Reloaded.
 >    names a public method neither table serves, with `rpc_pass` and no
 >    `userpass`, decodes under the alias and answers `NoSuchMethod` where the
 >    reference answers `InvalidRequest`.
-> 4. *`orderbook` error token.* Until PR #NNN, Reloaded's versioned
+> 4. *`orderbook` error token.* Until PR #312, Reloaded's versioned
 >    `orderbook` named its internal-failure class `InternalError` where the
 >    reference names it `Internal` (R43.1A.6). It now names it `Internal`
 >    (D43.1A.3, the maintainer's decision of 2026-11-08). **Parity.**
@@ -391,13 +391,13 @@ name is retried on the versioned table and its answer rendered in the mmrpc
 `mmrpc`; (ii) keep the present behavior (legacy error body, HTTP 500) as a
 documented divergence. The wallet case of this section is not affected
 either way (its requests carry `mmrpc`). *Resolved 2026-11-08 by the
-maintainer's decision: option (i), PR #NNN.*
+maintainer's decision: option (i), PR #312.*
 
 **D43.1A.3** *Rename Reloaded's versioned `orderbook` internal-failure token
 to `Internal`?* A one-token change that restores the closed discriminant set
 of R43.1A.6; recommended, since no client contract depends on the Reloaded
 spelling. *Resolved 2026-11-08 by the maintainer's decision: renamed, PR
-#NNN.*
+#312.*
 
 ## 43.2 Public vs protected method classification
 

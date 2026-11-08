@@ -214,7 +214,7 @@ risk.
 > with activation: Reloaded HTML-escapes `<`, `>` and `&` inside response
 > bodies (so an error string containing a node URL with a query string is
 > altered), which the reference release does not do. A second one was closed
-> by PR #NNN: a legacy request whose method the legacy table does not know
+> by PR #312: a legacy request whose method the legacy table does not know
 > was answered as a legacy error, whereas the reference release retries such
 > a request on the mmrpc 2.0 dispatcher; Reloaded now retries it too
 > (Chapter 43 R43.1A.1a–R43.1A.1e). Neither affects a bound field of this

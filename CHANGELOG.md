@@ -520,7 +520,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   HTTP 500. A request without a valid `userpass` is still refused with the legacy error body before
   any retry. `setprice`, `buy`, `sell`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
   `my_orders`, `order_status` and `orderbook_depth` stay legacy-only, as on GLEEC KDF: called with
-  `mmrpc`, they answer `NoSuchMethod`. Detail: PR #NNN; CRD ch.43 §43.1A, R43.1A.1a–R43.1A.1e.
+  `mmrpc`, they answer `NoSuchMethod`. Detail: PR #312; CRD ch.43 §43.1A, R43.1A.1a–R43.1A.1e.
 
 ### Fixed
 
@@ -624,7 +624,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 - **The mmrpc 2.0 `orderbook` names its internal failure `Internal`, as on GLEEC KDF.** It answered
   `InternalError`; HTTP 500 and the message are unchanged. *Upgrade note:* a client that checks
-  `error_type` for `InternalError` on `orderbook` must check `Internal` instead. Detail: PR #NNN; CRD
+  `error_type` for `InternalError` on `orderbook` must check `Internal` instead. Detail: PR #312; CRD
   ch.43 R43.1A.6, D43.1A.3.
 - **A maker with `maker_update_coalescing` on is no longer held at its lowest rate by steady
   traffic.** The maker slows down when a relay falls behind.
