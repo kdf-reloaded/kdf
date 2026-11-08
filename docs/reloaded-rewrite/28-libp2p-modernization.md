@@ -960,7 +960,7 @@ relay-connection maintenance of RQ1a item 4 MUST follow these rules:
    default-side rule", it falls in arm 2: Reloaded's behavior by default,
    no switch.
 
-   > **As built (2026-11-08, clean-side record; batch 4 item B4-13, PR #NNN).**
+   > **As built (2026-11-08, clean-side record; batch 4 item B4-13, PR #303).**
    > A dial this node makes is recorded under its connection ID with the
    > address as written. When that connection closes after at least 30 s on a
    > transport error, a peer close or the ping safeguard, the address is

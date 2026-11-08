@@ -204,7 +204,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   address whose connection was established, lasted at least 30 seconds and ended by a network error,
   a close from the peer or a failed ping check may be dialed again at the next 30-second maintenance
   check while the node is short of relays, at most twice in 5 minutes. A connection closed for being
-  idle or stuck, by the clock check or by the relay count, keeps the 5-minute wait. Detail: PR #NNN;
+  idle or stuck, by the clock check or by the relay count, keeps the 5-minute wait. Detail: PR #303;
   CRD ch.28 R27a item 1a.
 
 - **Messages from other nodes are checked for nesting depth and declared lengths before they are
