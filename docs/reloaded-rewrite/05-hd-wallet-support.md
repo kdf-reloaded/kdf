@@ -1,6 +1,8 @@
 # Chapter 05 — Hierarchical-Deterministic Wallet Support
 
-**Status:** driving-spec.
+**Status:** driving-spec. §5.10B (R50–R58, T31–T36, D7) and the 2026-11-08
+amendments of R29, R31 and T12 **passed the KDF Dirty Gate on 2026-11-08,
+measure 0.02** (see §5.17 for the extent and method).
 
 A modernised cryptographic-key substrate that binds a complete
 BIP-39 / BIP-32 / SLIP-0010 / SLIP-0021 wallet stack on top of the
@@ -373,8 +375,11 @@ namespacing values. The value MUST be **stable across daemon
 restarts for the same mnemonic** so that stored HD accounts re-bind
 on re-login. When the policy is `Iguana`, no HD wallet-identity is
 available and HD storage MUST remain refused (HD is unsupported in
-Iguana mode); when a hardware-wallet context is active, the
-hardware device's own identity digest is used unchanged (R25).
+Iguana mode); a coin activated under the hardware (`Trezor`) key
+policy is namespaced by the hardware device's own identity digest
+(R25, §5.10B R51/R55), whichever software login holds the context,
+and the mere presence of a hardware context does not change the
+digest of a context-key coin (§5.10B R52).
 Acceptance: in software global-HD mode, an HD UTXO coin's HD
 storage initialises successfully (it MUST NOT be refused on the
 grounds that no hardware HD-wallet identity is present); in Iguana
@@ -420,16 +425,20 @@ and MUST NOT contact a hardware device.
 
 **R31.** *Extended-public-key source selection by key-pair policy.*
 The extended-public-key source consumed by per-coin account
-extraction MUST be chosen by the active key-pair policy, not by a
-fixed assumption of hardware:
+extraction MUST be chosen by the **coin's own key policy, fixed at
+its activation** (§5.10B R52), not by a fixed assumption of hardware
+and not by whether a hardware-wallet context happens to exist:
 
-  - when a hardware-wallet context is active, the source is the
-    hardware device (the device extractor of R25, which requires
-    the coin's `trezor_coin` config and performs the device
-    protocol);
-  - when the policy is `GlobalHDAccount` and no hardware context is
-    active, the source is the **in-context software derivation of
-    R30** (the in-memory master), requiring no `trezor_coin` field.
+  - when the coin was activated under the hardware (`Trezor`) key
+    policy, the source is the hardware device (the device extractor
+    of R25, which requires a hardware-wallet context and the coin's
+    `trezor_coin` config, and performs the device protocol);
+  - when the coin was activated under the context key policy of a
+    `GlobalHDAccount` login, the source is the **in-context software
+    derivation of R30** (the in-memory master), requiring no
+    `trezor_coin` field — whether or not a hardware-wallet context
+    exists at the time (§5.10B R52, T32). *(Amended 2026-11-08;
+    passed the KDF Dirty Gate with §5.10B on 2026-11-08.)*
 
   The per-coin extraction entry point MUST accept "no external
   (hardware) extractor" as a valid case and, in that case, resolve
@@ -709,9 +718,8 @@ coin not activated in HD mode, answers `CoinIsActivatedNotWithHDWallet`.
 > the parity target.
 
 > **As built (2026-11-07, clean-side record; plan item H5.4).**
-> `task::create_new_account` builds the hardware extractor only under a
-> hardware login; under a software global-HD login the account key is derived
-> in software for UTXO, QTUM, EVM and Siacoin. The request gained an optional
+> `task::create_new_account` derives the account key in software under a
+> software global-HD login, for UTXO, QTUM, EVM and Siacoin. The request gained an optional
 > `account_id`. `choose_new_account_id` picks the index once, before any
 > derivation: the requested index, or the lowest unused one; an index at or
 > beyond 2^31 answers `AccountLimitReached`; an index in use answers
@@ -732,6 +740,24 @@ coin not activated in HD mode, answers `CoinIsActivatedNotWithHDWallet`.
 > `Finishing`; the error set has no `UnexpectedUserAction` or `HwError`
 > discriminant, and `Timeout` answers HTTP 500. Tests: the `t14c_*` and
 > `r35c_item4_*` tests and `new_account_index_tests`.
+>
+> *Update (2026-11-08, batch 4 item B4-2).* The source of an account's
+> extended public key follows the coin's own key policy, not whether a
+> hardware context exists. `task::init_trezor` is accepted after a software
+> global-HD login and leaves a hardware context beside it; until this update
+> a UTXO or QTUM coin of the software policy that names a `trezor_coin` then
+> took the extended public key of a new account, in `create_new_account` and
+> in activation, from the device, and Siacoin activation failed with
+> `CoinDoesntSupportTrezor`. Now a coin of the software policy (UTXO, QTUM,
+> EVM, Siacoin) derives the key in software and never asks a device; a coin of
+> the Trezor policy asks the device, and without a hardware context it
+> reports `HwContextNotInitialized`. The choice is made in
+> `utxo_common::extract_extended_pubkey` and, for the UTXO activation, by
+> `reads_keys_from_device`; Siacoin ignores an offered device; EVM already
+> chose by its signer. Tests: the `r35c_*` and `r35a_*` tests with a device
+> offered in `coins/src/utxo/utxo_tests.rs` (module
+> `hd_accounts_at_index_tests`), and `r35a_*` in `coins_activation`'s
+> `utxo_activation/tests.rs`.
 
 ## 5.10 Bound Hardware-Wallet Path
 
@@ -827,6 +853,412 @@ MUST NOT request a user confirmation on the device. A failed
 reachability probe MAY update volatile connection-state bookkeeping
 so subsequent calls can report `"Unreachable"` without probing a
 handle already known to be unavailable.
+
+## 5.10B Hardware Context next to a Software Login (reference behavior)
+
+> **Clearance (chapter 01 R40) — passed on 2026-11-08.** This section, the 2026-11-08
+> amendments of R29, R31 and T12 that re-key three sentences on the coin's
+> own key policy, the matching sentence of chapter 38 R38.8.1 and the row
+> of chapter 30 §30.3 were added on 2026-11-08 by the KDF Spec Reader under
+> the two-team procedure of chapter 01 §1.4A, from forbidden-class input:
+> the reference lineage at the rows `v2.6.0-beta` and `v3.0.0-beta` of
+> chapter 02 §2.15A (identical for every fact taken), with the row
+> *baseline anchor (R1)* for the anchor comparison. They **passed the KDF
+> Dirty Gate on 2026-11-08**, measure 0.02; the attestation is in §5.17. The
+> clearances of §5.9B, §5.10A and the rest of this chapter are not
+> affected.
+
+*Vocabulary.* This chapter and §5.9B speak of a "hardware login" or a
+"hardware wallet" as a mode. The reference has no such login: a daemon
+always starts from a software login — the legacy passphrase (`Iguana`) or
+the mnemonic-derived global-HD account (`GlobalHDAccount`, R20), chosen by
+`enable_hd` (chapter 45 R45.4.8) — or in no-login mode, and a hardware
+(Trezor) context is an *optional slot* of the central cryptographic context
+that a running daemon fills afterwards (`task::init_trezor`, chapter 55
+§55.11). The device is then used **per coin**, by the coin's own key
+policy, never by the daemon as a whole. Where §5.9B says "under a hardware
+login" or "under a hardware wallet", read "for a coin activated under the
+`Trezor` key policy while a hardware context exists"; where it says "under
+a software login", read "for a coin activated under the context key
+policy", whether or not a hardware context exists. This section binds that
+reading. The hardware wire surfaces themselves — the init task, its
+statuses, errors and the device-identity assertion — stay bound by
+chapter 55 §55.11 and by R28–R28C above.
+
+**R50.** *A hardware context is accepted next to either software login,
+and only there.* `task::init_trezor::init` MUST be accepted while the
+daemon runs under a mnemonic (global-HD) login **and** while it runs under
+a legacy passphrase (`Iguana`) login. The initialisation MUST NOT consult
+the key-pair policy, MUST NOT refuse or warn on account of the login type,
+and MUST NOT switch the daemon's key-pair policy, its trading identity
+(R32) or its wallet identity (R29): after the task completes, every
+software surface behaves exactly as before, and coins already activated
+keep the key source they were activated with (R52). In no-login mode (no
+wallet name and no passphrase; chapter 45 §45.4) there is no
+central cryptographic context to hold the slot, so the task MUST fail at
+status level with `Internal` (string, HTTP 500); the reference offers no
+hardware-only login (D7.d). While a hardware context already exists, a new
+init task MUST replace it (the previous context is dropped once the new
+device has been read); the only concurrency refusal is
+`HwContextInitializingAlready` (HTTP 400) while another init task is still
+running (chapter 55 R55.11.6). A failed or cancelled init MUST leave the
+slot empty, including when it was filled before the attempt.
+*Rationale:* the device is a key source for individual coins, not an
+alternative identity for the node; refusing it under one login type would
+have no behavioural basis in the reference and would break the published
+procedure (connect the device, then activate the coins that need it).
+
+**R51.** *Device identity digest.* The hardware context's identity is the
+20-byte `RIPEMD160(SHA256(pubkey))` digest of the compressed secp256k1
+public key the device returns for the daemon's **internal derivation
+path** (R16, `m/44'/141'/2147483647/0/0`), requested with the device's
+Bitcoin-family public-key message and the secp256k1 curve. It is the value
+`task::init_trezor` reports as `device_pubkey` (chapter 55 R55.11.5), the
+value the optional `device_pubkey` assertion of R28A and R55.11.2 compares
+against, and the storage identity of every coin activated under the
+`Trezor` policy (R55). It is distinct from, and in general unequal to, the
+software identity of R29 (the digest of the login's internal key at the
+same path): the two coincide only when the device holds the same seed as
+the login, in which case every key the two sources derive coincides too.
+
+**R52.** *The key source of a coin is its own activation policy; hardware
+presence never decides.* For every coin family that accepts a key policy
+in its activation request (`priv_key_policy`), the source of the coin's
+keys and of its account extended public keys MUST be fixed **per coin, at
+activation, by that request**: `ContextPrivKey` (the default when the
+member is absent) binds the login's software key — the single key under
+`Iguana`, the seed-derived HD keys under `GlobalHDAccount` (§5.9A, §5.9B);
+`Trezor` binds the device; `WalletConnect` binds the session named in the
+request (chapter 22). The existence of a hardware context MUST NOT change
+the source of a `ContextPrivKey` activation, and a `Trezor` activation
+MUST NOT fall back to the seed when the context is missing. The coins-file
+`trezor_coin` member is a **precondition, not a selector**: it is read
+only when the `Trezor` policy was requested, and its absence refuses that
+activation (`CoinDoesntSupportTrezor` where the family exposes it; the
+EVM task maps it to `Internal`, chapter 35 R35.3.2); its presence on a
+`ContextPrivKey` activation has no effect. Two preconditions apply to a
+`Trezor` activation and to nothing else: a hardware context exists
+(otherwise `HwContextNotInitialized`, reported through the family's
+coin-creation failure class for UTXO coins and as `Internal` for EVM,
+chapter 55 / chapter 35) and the coin configuration carries a usable
+`derivation_path`. A `Trezor`-policy coin and a `ContextPrivKey` coin of
+another ticker MUST be able to coexist in one daemon; the mapping of a
+ticker to a source lasts for the lifetime of its activation, and changing
+it requires deactivation and a fresh activation (an activation of an
+already-active ticker is refused as such, whatever policy it names;
+chapter 55). *Rationale:* a wallet that mixes device-held and seed-held
+coins is the reference's normal shape; keying any decision on "a device is
+plugged in" would silently re-route seed-held coins to the device or the
+other way round.
+
+**R53.** *Per-family key-source rule under a software login with a
+hardware context present.* The following table binds where each family's
+key comes from when both a software login and a hardware context exist.
+"Software" means the login's key as §5.9B describes it.
+
+| Family and method | Source when the request says `Trezor` | Source when the request says nothing or `ContextPrivKey` | Notes |
+| --- | --- | --- | --- |
+| UTXO standard, BCH, QTUM — `task::enable_utxo`, `task::enable_bch`, `task::enable_qtum` | device; HD shape; requires the context, `trezor_coin` and `derivation_path` | software | the policy is honoured only by the task methods |
+| UTXO standard, BCH, QTUM — legacy `enable` / `electrum` | *(not reachable)* | software | the legacy methods have no policy member and never use the device, even with a context present |
+| SLP and Lightning on a `Trezor` BCH / platform | inherit the platform's device source | inherit the platform's software source | tokens take their platform's policy |
+| QRC20 on a `Trezor` QTUM platform | software | software | the token's own activation always binds the login key; a QRC20 token on a device-held QTUM platform therefore signs with the seed while its platform is on the device (a mixed state the reference permits; D7.e) |
+| EVM platform — `task::enable_eth_with_tokens` | device; HD shape; requires the context, `trezor_coin` and `derivation_path` (chapter 35 R35.3.2) | software | |
+| EVM platform — one-shot `enable_eth_with_tokens` | refused: `UnexpectedDeviceActivationPolicy` (chapter 35 R35.1.5) | software | |
+| ERC20 token (task and one-shot) | inherits the platform's source; the task form reads account keys from the device, the one-shot form refuses a device-held platform (chapter 35, the `enable_erc20` divergence note) | inherits the platform's software source | |
+| EVM `get_my_address` (no activation) | n/a — see R57 | device **if a hardware context exists**, else software | the one presence-keyed surface |
+| Tendermint and its tokens — `task::enable_tendermint_with_assets` | the member is accepted and ignored (chapter 36, request table); software | software | a device source is unreachable; a pubkey-only or WalletConnect activation is the family's alternative (chapter 36) |
+| Sia, Solana, ZHTLC (ARRR) | *(not reachable from the request)*; the families refuse a hardware policy with a typed hardware-not-supported error if it is ever presented (chapter 46 R46.1.3, chapter 40, chapter 39) | software | the hardware context is never consulted |
+
+**R54.** *Account creation, new address, scan and listing follow the
+coin's policy.* `task::create_new_account`, `get_new_address`,
+`scan_for_new_addresses` and `account_balance` MUST choose the device or
+the software derivation by the **coin's** key policy (`Trezor` or not),
+never by whether a hardware context exists at call time. For a
+`Trezor`-policy coin the account's extended public key is read from the
+device, a new address is confirmed on the device, and the current hardware
+context is looked up at call time: if the slot is empty the call fails with
+`HwContextNotInitialized` (HTTP 400; `task::create_new_account` and
+`get_new_address` carry the token; the activation tasks report the same
+condition through their failure classes, R52). For a `ContextPrivKey` coin
+the same calls derive in software (§5.9A R30, §5.9B R35c) and MUST NOT
+touch the device even while a context exists. `account_balance` and the
+address lists in activation results read the coin's own account set and
+contact no device under either policy. *Rationale:* the account set a coin
+exposes is the set its key source produced; mixing sources inside one
+coin's account set would store extended public keys that the coin's signer
+cannot spend from.
+
+**R55.** *Storage identity of a hardware-policy coin.* The per-coin HD
+account storage (the HD-account table of the wallet database) MUST namespace a `Trezor`-policy coin by the
+**device digest of R51** and a `ContextPrivKey` global-HD coin by the
+**software digest of R29**, the choice following the coin's policy (R52),
+not the login type and not the presence of a context. Consequences that
+MUST hold: (1) a `Trezor` activation and a later `ContextPrivKey`
+activation of the same ticker under the same login use **different**
+namespaces, so the later software activation MUST NOT load device-derived
+accounts, and a later `Trezor` activation MUST NOT load seed-derived ones;
+(2) two devices with different seeds have different namespaces for the
+same ticker and login; (3) a device holding the login's own seed shares
+the software namespace, which is harmless because its accounts are
+identical. *Dictated on-disk shape (interop):* the reference release rows
+store one account per row with the columns `coin`, `hd_wallet_rmd160`,
+`account_id`, `account_xpub`, `external_addresses_number` and
+`internal_addresses_number`; `hd_wallet_rmd160` is the policy-chosen
+digest above, and the key of a row is (`coin`, `hd_wallet_rmd160`,
+`account_id`). The *baseline anchor (R1)* keyed the same table additionally
+by the login's software digest (`mm2_rmd160`), and at the anchor only the
+device source existed, so the two columns always held different values;
+the reference dropped the software column before `v2.6.0-beta`. Reloaded
+keeps the anchor's three-part key (R29, chapter 38 R38.8.1); under this
+rule its `hd_wallet_rmd160` column MUST hold the policy-chosen digest, so
+that the three-part key separates the cases exactly as the reference's
+two-part key does (D7.b).
+
+**R56.** *Refusals are keyed on the coin's policy, not on hardware
+presence and not on the login type.* In the reference no wallet-level
+method consults the hardware slot: `get_mnemonic`,
+`change_mnemonic_password`, `get_wallet_names` and `delete_wallet` depend
+only on the named wallet and its password (chapter 07 §7.3A); they succeed
+under a mnemonic login while a device is connected, because the mnemonic
+they handle is the login's, which the device neither holds nor protects.
+`get_public_key`, `get_public_key_hash` and `get_shared_db_id` report the
+**software login's** identity (R32) with or without a device. Every
+hardware-related refusal is **per coin**, raised when *that coin* was
+activated under the `Trezor` policy: the legacy private-key display
+(`show_priv_key`) and the bound key-export paths of chapter 07 R-K6 refuse
+a `Trezor`-policy coin and MUST still serve the software coins of the same
+daemon; the single-address public-key accessor answers the `Trezor`
+variant of the unexpected-derivation-method class; swap signing and
+peer-to-script-hash signing on a `Trezor`-policy UTXO coin, swap signing
+and raw-transaction signing on a `Trezor`-policy EVM coin, fail with the
+family's typed error (hardware swaps are unsupported in the reference,
+chapter 35 / chapter 38); and the HD-account calls of R54 need the context
+at call time. *Rationale:* a refusal keyed on "a device is present" would
+deny the operator access to secrets the device has nothing to do with,
+and a refusal keyed on "login type" has no referent, since every login is
+a software login. Reloaded diverges on the two mnemonic methods; see the
+compatibility note and D7.c.
+
+**R57.** *The one presence-keyed surface: the own-address query.*
+`get_my_address` for an EVM-protocol coin that has not been activated
+(chapter 07 T7) MUST, in the reference, derive the reported address from
+the **device** whenever a hardware context exists — requiring the coin's
+`trezor_coin` and `derivation_path` and the device's HD account state —
+and from the login's software key at `path_to_address` otherwise. It is
+the only reference surface where the presence of a hardware context, and
+not a per-coin policy, selects the key. Reloaded's `get_my_address` derives
+from the login's key only (compatibility note below); whether to follow
+the reference here is D7.e.
+
+**R58.** *Reference states.* Everything in R50–R57 is identical at the
+rows `v2.6.0-beta` and `v3.0.0-beta`: the hardware context, the per-coin
+policy selection, the storage namespace and the refusal set did not change
+between them (the only differences in the files read are copyright lines
+and, in the EVM platform task, two refusals of NFT activation on TRON that
+do not touch key selection). Against the *baseline anchor (R1)* the
+reference differs in four points that this chapter already binds
+elsewhere or that R55 records: the task methods are `task::init_trezor::*`
+with `cancel` (the anchor had only the three flat methods, chapter 55
+R55.11.1); re-initialising an already-filled slot is accepted and replaces
+it (the anchor refused it as already initialised); the only software login
+at the anchor was `Iguana`, and the device was the only HD key source
+(§5.9A upstream-divergence note); and the storage key had three parts
+(R55).
+
+> **Compatibility (this repository, 2026-11-08; not corpus-sourced).**
+> Checked against the worktree at the `dev` tip of 2026-11-08:
+>
+> 1. *Selection keyed on presence.* The UTXO standard, BCH and QTUM
+>    activation tasks, the shared platform-with-tokens activation, the Sia
+>    activation and the EVM hardware activation path choose the device
+>    extended-public-key reader whenever the hardware slot is filled, and
+>    the software derivation only when it is empty. Under a mnemonic login
+>    with a connected device this sends a `ContextPrivKey` UTXO or EVM
+>    activation to the device for its account keys while its signer stays
+>    the seed — the mismatch R52 and R54 forbid. R31 and T12, as worded
+>    before this pass, prescribed that behaviour; they are amended with
+>    this section. See the code-quality finding below.
+> 2. *Storage namespace.* Reloaded's HD-account storage initialiser prefers
+>    the software digest of R29 whenever the login is global-HD and falls
+>    back to the device digest only under an `Iguana` login. Under a
+>    mnemonic login with a device, a `Trezor`-policy coin is therefore
+>    stored under the software namespace — the same rows a `ContextPrivKey`
+>    activation of that ticker uses — so the later activation of R55 (1)
+>    *does* load the other source's accounts, and a device swap leaves the
+>    namespace unchanged. See the code-quality finding below.
+> 3. *Mnemonic methods.* Reloaded's `get_mnemonic` and
+>    `change_mnemonic_password` refuse whenever a hardware context exists
+>    (chapter 07 R-K6, "a hardware-wallet session MUST be rejected"). The
+>    reference does not (R56). Under a mnemonic login this blocks the
+>    export or re-encryption of the login's own mnemonic because a device
+>    is connected. Chapter 07 R-K6's per-coin arm (refusing a `Trezor`-policy
+>    coin in key export) matches the reference; its wallet-level arm is a
+>    Reloaded hardening. D7.c decides whether to keep it.
+> 4. *Own-address query.* Reloaded's `get_my_address` derives from the
+>    login's key under both policies and never consults the hardware slot;
+>    the reference's presence keying of R57 is not implemented. D7.e.
+> 5. *Re-initialisation.* Reloaded already replaces a filled slot on a new
+>    init and refuses only a concurrent one, as R50 requires.
+> 6. *No-login mode.* Reloaded's init task reads the central context first
+>    and therefore fails as R50 requires when there is none.
+>
+> *Status (2026-11-08, batch 4 item B4-2, PR #293):* items 1 to 3 are
+> resolved as D7.a–c record (the source of a coin's keys and its storage
+> digest follow its policy; the wallet-level refusals are gone); item 4
+> stays, by D7.e. Every site of item 1 now leaves the choice to the coin's
+> policy: the UTXO and QTUM activation by the activation policy, the
+> account reader by the coin's key policy, Siacoin by ignoring an offered
+> device, EVM by its signer as before. `get_new_address` on a `Trezor`-policy
+> coin now looks the hardware slot up at call time and answers
+> `HwContextNotInitialized` when it is empty (R54, T35). Two points of R54
+> and R53 stay open: a new address of a `Trezor`-policy coin is derived from
+> the stored account key and not confirmed on the device (a follow-up), and
+> the BCH task refuses the `Trezor` policy (chapter 55 R55.9.2). When the
+> accounts of a coin of the software policy are loaded from storage, each
+> stored row's account extended public key is compared with the key the
+> seed derives for that account index below the coin's derivation path; a
+> row that differs (one an earlier build stored for a `Trezor`-policy coin
+> under the software digest) is deleted and not loaded, with one WARN that
+> names the ticker and the removed account ids and carries no key material.
+> A failure of the derivation or of the removal fails the load. R55 (1)
+> therefore holds also for rows written before this change. Tests:
+> `test_r55_*` in `coins/hd_wallet_storage/mod.rs`.
+
+> **Code-quality finding (informative; this repository, 2026-11-08).**
+> *Trigger:* a contradiction between two things read side by side — the
+> reference's per-coin policy keying (R52) and the presence keying at six
+> Reloaded sites (compatibility items 1 and 2). *Problem:* under a
+> mnemonic login with a connected Trezor, (a) every `ContextPrivKey` HD
+> activation of a UTXO, QTUM, BCH, EVM or Sia coin asks the device for its
+> account extended public keys and stores addresses the seed cannot spend
+> from, and (b) a `Trezor`-policy coin's accounts land in the software
+> namespace shared with the seed-held activation of the same ticker.
+> *Proposed fix:* (a) choose the extended-public-key reader from the coin's
+> own key policy (`Trezor` → device, otherwise software), as the reference
+> does, and drop the "is a device connected" test at those sites; a
+> `Trezor` request with an empty slot keeps failing as today; (b) have the
+> coin builders pass the policy-chosen digest (R55) into the storage
+> initialiser instead of letting the initialiser infer it from the login,
+> keeping the three-part key. Both changes are behaviour-neutral for a
+> daemon without a device and for an `Iguana` login with a device.
+
+> **Code-quality finding (informative; corpus-derived, stated as
+> behaviour).** *Trigger:* apparent with little extra effort while reading
+> R50 and R54 side by side. *Problem:* in the reference a coin activated
+> under the `Trezor` policy keeps no record of the device identity (R51) it
+> was activated with; it looks up whatever hardware context exists at each
+> device operation. Because R50 lets a new init replace the context with a
+> different device, such a coin then confirms addresses, reads new account
+> keys and signs with a device whose keys do not match its stored accounts,
+> and stores the new device's account keys under the old device's
+> namespace (R55). *Proposed fix (Reloaded):* record the device digest in
+> the coin at activation and, before any device operation, compare it with
+> the current context's digest; on mismatch answer the existing
+> `FoundUnexpectedDevice` hardware error class without touching the device
+> or the storage. Nothing in this is a wire change.
+
+*Verification notes.*
+
+**T31.** *Init under both logins.* With a Trezor emulator, start one
+daemon under a mnemonic (`enable_hd: true`) login and one under a legacy
+passphrase login; `task::init_trezor::init` → `status` reaches `Ok` on
+both, `get_public_key` and `get_public_key_hash` report the same values
+before and after, and a software coin activated before the init still
+signs a withdrawal from the seed afterwards (R50). In no-login mode the
+task's status is `Error` with `error_type` `Internal` (R50).
+
+**T32.** *Presence does not select.* Under a mnemonic login with the
+emulator initialised, `task::enable_utxo` of a UTXO coin **without**
+`priv_key_policy` completes without any device interaction (no
+`WaitingForTrezorToConnect` or `FollowHwDeviceInstructions` status, no
+device request recorded by the emulator), its `account_xpub` equals the
+software derivation of R30 for the login's mnemonic, and `get_new_address`
+on it contacts no device; the same request with `"priv_key_policy":
+"Trezor"` for another ticker reads its account key from the device and
+confirms a new address there (R52–R54).
+
+**T33.** *Namespaces.* Under one mnemonic login, activate ticker X with
+`Trezor` (emulator seed A), deactivate, activate X with `ContextPrivKey`;
+the second activation reports account `0` with the software `account_xpub`
+and not the device's; re-activating with `Trezor` reports the device's
+again; the stored rows for X exist twice with different `hd_wallet_rmd160`
+values, the device one equal to the `device_pubkey` of the init task (R51,
+R55).
+
+**T34.** *Refusals by coin policy.* With a device connected under a
+mnemonic login, `show_priv_key` of a software coin succeeds and of a
+`Trezor`-policy coin is refused; `get_mnemonic` behaves per the outcome of
+D7.c, and the test pins whichever is chosen; `get_public_key_hash` equals
+the software identity, not `device_pubkey` (R56).
+
+**T35.** *Context lost.* After `task::init_trezor::cancel` or a failed
+re-init emptied the slot, `get_new_address` and `task::create_new_account`
+on a `Trezor`-policy coin answer `HwContextNotInitialized` (HTTP 400 for
+the direct method; status-level for the task), while the same calls on a
+software coin succeed (R54).
+
+**T36.** *Device replaced.* Re-run `task::init_trezor::init` with a second
+emulator seed while a `Trezor`-policy coin from the first is active; the
+test pins the behaviour chosen under the corpus-derived finding above
+(refusal with `FoundUnexpectedDevice` before any device or storage access,
+if adopted).
+
+**D7.** *Open decisions for the maintainer (2026-11-08).*
+
+- **D7.a** *Refuse `task::init_trezor` under a software login?* The
+  reference accepts it under both logins (R50) and has no other way to
+  obtain a context. Options: (i) parity — accept under both, with the
+  per-coin keying of R52–R55 restored (recommended; the only option that
+  keeps the published connect-then-activate procedure); (ii) accept only
+  under a global-HD login (no reference basis; blocks a legacy-passphrase
+  user who wants a device-held coin); (iii) refuse unless a hardware-only
+  login exists — impossible until D7.d is decided in favour.
+- **D7.b** *Must the storage identifier carry the key source?* In the
+  reference the single digest *is* the source's identity (R55). Reloaded's
+  three-part key separates the cases once `hd_wallet_rmd160` holds the
+  policy-chosen digest; an explicit source column would be a schema change
+  (chapter 44) with no reference counterpart. Options: (i) policy-chosen
+  digest in the existing column (recommended; no migration); (ii) add a
+  source column (migration; clearer audits).
+- **D7.c** *What do refusals key on?* Reference: the coin's policy, nothing
+  at wallet level (R56). Reloaded: additionally hardware presence for
+  `get_mnemonic` / `change_mnemonic_password` (chapter 07 R-K6). Options:
+  (i) parity — drop the wallet-level presence check, keep the per-coin
+  arm; (ii) keep the Reloaded hardening and document it as a divergence in
+  chapter 07; (iii) key the two methods on whether the active wallet holds
+  a software mnemonic (always true today), which is (i) in effect.
+  Login-type keying is not an option: every login is a software login.
+- **D7.d** *A hardware-only login.* Not in the reference. If wanted, it is
+  a new mode with its own identity rules (trading identity, R32; storage,
+  R55) and is out of this section's scope.
+- **D7.e** *Follow the reference's two presence/mixed behaviours?*
+  `get_my_address` keyed on presence (R57), and QRC20 tokens on a
+  device-held QTUM platform signing with the seed (R53). Options: (i)
+  parity; (ii) key `get_my_address` on an explicit request member and
+  refuse the QRC20 mixed case; (iii) keep Reloaded's current software-only
+  `get_my_address` (an existing, documented divergence) and refuse the
+  mixed QRC20 case. Neither affects wire shapes.
+
+> **Resolutions (clean-side record, 2026-11-08; maintainer decision EB (b),
+> batch 4 item B4-2, PR #293).**
+> - *D7.a:* (i). `task::init_trezor` stays accepted under both software
+>   logins, and every coin takes its keys by its own policy (R52–R55).
+> - *D7.b:* (i). The policy-chosen digest goes into the existing
+>   `hd_wallet_rmd160` column; no schema change.
+> - *D7.c:* (i). The wallet-level presence checks of `get_mnemonic`,
+>   `change_mnemonic_password` and `get_private_keys` are dropped; the per-coin
+>   arm stays. In addition, Reloaded's opt-in export superset (chapter 07
+>   R-K4) refuses a requested ticker that is activated under the `Trezor`
+>   policy, so that no form of the export returns a key for a device-held
+>   coin. There is no hardware-only login in this codebase either: every
+>   context has an `Iguana` or `GlobalHDAccount` policy, and the hardware
+>   context sits beside it.
+> - *D7.d:* not pursued (out of scope).
+> - *D7.e:* `get_my_address` keeps Reloaded's software-only derivation, a
+>   divergence from R57; the mixed QRC20-on-`Trezor`-QTUM case of R53 keeps
+>   the reference behaviour for now and is an open follow-up.
+> - The corpus-derived code-quality finding above (no record of the
+>   activating device) is pending maintainer decision EC; T36 waits for it.
 
 ## 5.11 Bound WebAssembly-Only MetaMask Path
 
@@ -1406,9 +1838,12 @@ refused.
 **T12.** *Source selection by policy.* With a `GlobalHDAccount`
 policy and no hardware context, per-coin account extraction is
 invoked with no external extractor and the test asserts it resolves
-the account xpub via the software derivation of R30; with a
-hardware context active, the same extraction is asserted to route
-to the device source (R25).
+the account xpub via the software derivation of R30; for a coin
+activated under the hardware key policy, the same extraction is
+asserted to route to the device source (R25); for a context-key coin
+it is asserted to stay in software while a hardware-wallet context
+exists (§5.10B R52, T32). *(Amended 2026-11-08; passed the KDF Dirty
+Gate with §5.10B on 2026-11-08.)*
 
 **T13.** *HD trading identity (R32, R33).* Under a global-HD login, a
 posted maker order's public key, the keep-alive's public key, the
@@ -1601,6 +2036,14 @@ item H4). R45–R49 move the trading identity and the swap's persistent key to
 the internal key, and R46–R47 keep the passphrase-hash key for the swaps that
 recorded it.
 
+**D7.** *(Open, 2026-11-08; stated in §5.10B.)* Hardware context next to a
+software login: whether to refuse `task::init_trezor` under a software login
+(D7.a), whether the storage identifier must carry the key source (D7.b), what
+refusals key on (D7.c), a hardware-only login (D7.d), and the two
+presence-keyed or mixed reference behaviours (D7.e). *Resolved on 2026-11-08
+(maintainer decision EB (b)); see the resolutions after D7 in §5.10B. The
+device-identity finding there is pending decision EC.*
+
 ## 5.15 Baseline Verifications
 
 **V1.** The baseline tree MUST be confirmed to contain exactly
@@ -1791,3 +2234,39 @@ surface.
   never read the corpus, from that decision and this repository's own code.
   The reference facts of §5.9B are unchanged. It takes no forbidden-class
   input and needs no Dirty Gate pass.
+- *Scoped addition (2026-11-08) -- §5.10B (R50--R58, T31--T36, D7), the
+  re-keying amendments of R29, R31 and T12, and the D7 pointer in §5.14.*
+  **KDF Dirty Gate: PASS on 2026-11-08, measure 0.02, no leaks**; the
+  attestation follows this item. *Inputs:* the forbidden
+  corpus at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+  identical at both for every fact taken, with the row *baseline anchor (R1)*
+  for the anchor comparison, consulted **only** to establish: whether the
+  hardware-wallet init task consults the login type or the key-pair policy,
+  what it does in no-login mode, on re-initialisation and on failure; which
+  request member, configuration member or context state selects a coin's key
+  source per family, and which families cannot reach a device source; which
+  identity digest namespaces a hardware-policy coin's stored accounts, the
+  columns of that table, and how the anchor keyed it; which wallet-level and
+  coin-level methods refuse on a hardware condition and what the condition
+  is; and the behaviour of the own-address query when a hardware context
+  exists. What crosses is behaviour, public method names, dictated request,
+  response, error and schema members; no private identifier, function body,
+  helper decomposition, error, log or comment text was reproduced. The
+  compatibility note and the first code-quality finding rest on this
+  repository's own code; the second finding is corpus-derived and stated as
+  behaviour. T31--T36 are Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-08, measure
+  0.02, no leaks. The pass covered this addition together with the
+  re-keyed sentence of chapter 38 R38.8.1 and the chapter 05 row of
+  chapter 30 §30.3. *Extent:* the hardware-wallet context and its init
+  task, the per-coin key-policy selection for every coin family, the HD
+  storage identity and its schema, the HD account and address methods, the
+  wallet-level mnemonic and identity methods, the legacy key display and
+  the own-address query; compared at `v2.6.0-beta` (49 files read or
+  searched), at `v3.0.0-beta` (compared against `v2.6.0-beta`, the relevant
+  differences read) and at the *baseline anchor (R1)* (4 files, plus token
+  checks). *Method:* reading, with a mechanical comparison of every
+  backticked token of the candidate (64 tokens) against the corpus and
+  against this repository's tree, each match classified under the
+  forced-versus-free test; the gate script was not run because there are no
+  code blocks. *Measure:* 0.02 on the discretionary-expression basis.

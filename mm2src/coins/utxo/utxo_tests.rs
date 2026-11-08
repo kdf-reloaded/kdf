@@ -237,6 +237,23 @@ pub(crate) fn utxo_coin_from_fields(coin: UtxoCoinFields) -> UtxoStandardCoin {
     arc.into()
 }
 
+/// A single-key software coin (Iguana derivation, key-pair policy) of `ticker`, for tests outside this module.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn software_coin_for_test(ticker: &str) -> UtxoStandardCoin {
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+    fields.conf.ticker = ticker.to_owned();
+    utxo_coin_from_fields(fields)
+}
+
+/// A coin of `ticker` under the Trezor key policy, for tests outside this module.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn trezor_policy_coin_for_test(ticker: &str) -> UtxoStandardCoin {
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+    fields.conf.ticker = ticker.to_owned();
+    fields.priv_key_policy = PrivKeyPolicy::Trezor;
+    utxo_coin_from_fields(fields)
+}
+
 fn utxo_coin_for_test(
     rpc_client: UtxoRpcClientEnum,
     force_seed: Option<&str>,
@@ -12784,5 +12801,222 @@ pub(crate) mod hd_accounts_at_index_tests {
             error
         );
         assert!(items.lock().unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // R35c / R35a: the key source follows the coin's key policy, not the presence of a hardware context
+    // -----------------------------------------------------------------------
+
+    /// The extended public key the software global-HD login derives at `path`.
+    fn software_xpub(path: &str) -> String {
+        crypto::derive_secp256k1_extended_pubkey(
+            global_hd().root_priv_key().clone(),
+            &DerivationPath::from_str(path).unwrap(),
+        )
+        .unwrap()
+        .to_string(bip32::Prefix::XPUB)
+    }
+
+    /// A hardware device is offered (a hardware context exists beside the software login) to a software-keyed
+    /// coin: the account is created from the software key, and the device is asked 0 times.
+    fn r35c_software_coin_ignores_the_device_offered<Coin>(coin: &Coin, items: &StoredAccounts)
+    where
+        Coin: InitCreateHDAccountRpcOps + Sync,
+    {
+        let device = CountingDevice::new();
+        let params: CreateNewAccountParams = json::from_value(json!({ "scan": false, "account_id": 5 })).unwrap();
+        let account = block_on(coin.init_create_account_rpc(params, Some(&device), &CreatedAccount::default()))
+            .unwrap_or_else(|e| panic!("the account creation failed: {:?}", e));
+
+        assert_eq!(account.account_index, 5);
+        assert_eq!(device.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(stored(items, 5).account_xpub, software_xpub("m/44'/141'/5'"));
+    }
+
+    /// R35c: `task::create_new_account` for a software UTXO coin derives the account key in software although a
+    /// device is offered; the device is called 0 times and the account xpub equals the software one.
+    #[test]
+    fn r35c_a_software_utxo_coin_derives_its_account_key_in_software_with_a_device_offered() {
+        let items = mock_storage();
+        mock_chain();
+        r35c_software_coin_ignores_the_device_offered(&hd_coin_with_account_zero(), &items);
+    }
+
+    /// R35c: QTUM shares the account creation of the UTXO coins, and the rule with it.
+    #[test]
+    fn r35c_a_software_qtum_coin_derives_its_account_key_in_software_with_a_device_offered() {
+        let items = mock_storage();
+        mock_chain();
+        let arc: UtxoArc = hd_fields(HDAccountsMap::from([(0, account_zero())])).into();
+        r35c_software_coin_ignores_the_device_offered(&QtumCoin::from(arc), &items);
+    }
+
+    /// R35a: the activation of a software UTXO coin creates its first account from the software key although a
+    /// device is offered; the device is called 0 times and the account xpub equals the software one.
+    #[test]
+    fn r35a_activation_of_a_software_utxo_coin_derives_the_account_in_software_with_a_device_offered() {
+        let items = mock_storage();
+        mock_chain();
+        let coin = hd_coin(HDAccountsMap::new());
+        let device = CountingDevice::new();
+
+        let balance = match block_on(coin.enable_coin_balance(
+            Some(&device),
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )) {
+            Ok(EnableCoinBalance::HD(balance)) => balance,
+            Ok(other) => panic!("an HD balance is expected, got {:?}", other),
+            Err(e) => panic!("the activation failed: {}", e.into_inner()),
+        };
+
+        assert_eq!(paths(&balance.accounts[0]), ["m/44'/141'/0'/0/0"]);
+        assert_eq!(device.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(stored(&items, 0).account_xpub, software_xpub("m/44'/141'/0'"));
+    }
+
+    /// R35c: a coin of the Trezor policy still takes the account key from the device; without the device
+    /// offered it reports that the hardware context is missing, and asks nobody.
+    #[test]
+    fn r35c_a_trezor_policy_coin_still_asks_the_device() {
+        let items = mock_storage();
+        mock_chain();
+        let mut fields = hd_fields(HDAccountsMap::from([(0, account_zero())]));
+        fields.priv_key_policy = PrivKeyPolicy::Trezor;
+        fields.conf.trezor_coin = Some(TrezorUtxoCoin::Komodo);
+        let coin = utxo_coin_from_fields(fields);
+
+        // The device is offered: the request reaches it.
+        let device = CountingDevice::new();
+        let params: CreateNewAccountParams = json::from_value(json!({ "scan": false, "account_id": 5 })).unwrap();
+        let error = block_on(coin.init_create_account_rpc(params, Some(&device), &CreatedAccount::default()))
+            .unwrap_err()
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::HwContextNotInitialized),
+            "{:?}",
+            error
+        );
+        assert_eq!(device.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // The device is gone: the coin does not fall back to the software key.
+        let params: CreateNewAccountParams = json::from_value(json!({ "scan": false, "account_id": 5 })).unwrap();
+        let error = block_on(coin.init_create_account_rpc(params, None::<&CountingDevice>, &CreatedAccount::default()))
+            .unwrap_err()
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::HwContextNotInitialized),
+            "{:?}",
+            error
+        );
+        assert!(!items.lock().unwrap().contains_key(&5));
+    }
+
+    // -----------------------------------------------------------------------
+    // R54 / T35: the hardware context is looked up at call time, for a coin of the Trezor policy only
+    // -----------------------------------------------------------------------
+
+    const DEVICE_PUBKEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    /// A node under the software global-HD login, with `device` deciding whether the hardware slot is filled,
+    /// and with `coins` registered as activated. The wallet storage holds account `0` of each coin.
+    fn node_with_hd_coins(
+        device: bool,
+        coins: Vec<(&str, UtxoStandardCoin)>,
+        items: &StoredAccounts,
+    ) -> mm2_core::mm_ctx::MmArc {
+        use crate::{CoinsContext, MmCoinEnum};
+        use primitives::hash::H264;
+
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let crypto_ctx = CryptoCtx::init_with_global_hd_account(ctx.clone(), TEST_MNEMONIC).unwrap();
+        if device {
+            crypto_ctx.init_trezor_ctx_for_tests(H264::from_str(DEVICE_PUBKEY).unwrap(), None);
+        }
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        block_on(async {
+            let mut activated = coins_ctx.coins.lock().await;
+            for (ticker, coin) in coins {
+                activated.insert(ticker.to_owned(), MmCoinEnum::UtxoCoin(coin));
+            }
+        });
+        items.lock().unwrap().insert(0, HDAccountStorageItem {
+            account_id: 0,
+            account_xpub: account_zero().extended_pubkey.to_string(bip32::Prefix::XPUB),
+            external_addresses_number: 0,
+            internal_addresses_number: 0,
+        });
+        ctx
+    }
+
+    /// Mocks the node for a single address: its balance is zero.
+    fn mock_address_balance() {
+        NativeClient::display_balance
+            .mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::ok(BigDecimal::from(0)))));
+    }
+
+    fn trezor_policy_hd_coin() -> UtxoStandardCoin {
+        let mut fields = hd_fields(HDAccountsMap::from([(0, account_zero())]));
+        fields.priv_key_policy = PrivKeyPolicy::Trezor;
+        fields.conf.trezor_coin = Some(TrezorUtxoCoin::Komodo);
+        utxo_coin_from_fields(fields)
+    }
+
+    fn new_address_request(ticker: &str) -> crate::hd_wallet::GetNewHDAddressRequest {
+        json::from_value(json!({ "coin": ticker, "account_id": 0, "chain": "External" })).unwrap()
+    }
+
+    /// R54, T35: a coin of the Trezor policy whose hardware slot is empty answers `HwContextNotInitialized`
+    /// (HTTP 400) to `get_new_address`, and the software coin of the same daemon succeeds.
+    #[test]
+    fn r54_t35_a_trezor_policy_coin_with_an_empty_slot_answers_hw_context_not_initialized() {
+        let items = mock_storage();
+        mock_chain();
+        mock_address_balance();
+        let ctx = node_with_hd_coins(
+            false,
+            vec![("TRZ", trezor_policy_hd_coin()), ("DOC", hd_coin_with_account_zero())],
+            &items,
+        );
+
+        let error = block_on(crate::hd_wallet::get_new_address(
+            ctx.clone(),
+            new_address_request("TRZ"),
+        ))
+        .err()
+        .expect("the Trezor-policy coin needs the device")
+        .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::HwContextNotInitialized),
+            "{:?}",
+            error
+        );
+        assert_eq!(error.status_code(), common::StatusCode::BAD_REQUEST);
+
+        block_on(crate::hd_wallet::get_new_address(ctx, new_address_request("DOC")))
+            .unwrap_or_else(|e| panic!("the software coin must get its address: {:?}", e));
+    }
+
+    /// R54: with the slot filled, the Trezor-policy coin passes the check; a software coin does not consult the
+    /// slot, filled or not (T32).
+    #[test]
+    fn r54_presence_of_the_context_is_looked_up_for_the_trezor_policy_coin_only() {
+        let items = mock_storage();
+        mock_chain();
+        mock_address_balance();
+        let ctx = node_with_hd_coins(
+            true,
+            vec![("TRZ", trezor_policy_hd_coin()), ("DOC", hd_coin_with_account_zero())],
+            &items,
+        );
+
+        for ticker in ["TRZ", "DOC"] {
+            block_on(crate::hd_wallet::get_new_address(
+                ctx.clone(),
+                new_address_request(ticker),
+            ))
+            .unwrap_or_else(|e| panic!("{}: the new address must be given: {:?}", ticker, e));
+        }
     }
 }

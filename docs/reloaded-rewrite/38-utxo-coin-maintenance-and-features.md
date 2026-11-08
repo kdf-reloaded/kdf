@@ -3186,14 +3186,19 @@ the same for the Sia wallet daemon.
 
 R38.8.1 **Software-HD storage availability.** When a UTXO coin is activated in
 HD mode under a software global-HD account (key-pair policy `GlobalHDAccount`,
-selected by Chapter 45 R45.4.8 / Chapter 7 R28; no hardware device present), the
+selected by Chapter 45 R45.4.8 / Chapter 7 R28) with the coin's own key policy
+being the context key rather than `Trezor` — whether a hardware-wallet context
+happens to exist is immaterial (Chapter 5 §5.10B R52) — the
 coin's per-wallet HD-account storage MUST initialise successfully using the
 software wallet-identity digest of Chapter 5 R29 (the in-context
 `RIPEMD160(SHA256(pubkey))` identity, equal to the daemon-wide `mm2_rmd160`).
 It MUST NOT be refused on the grounds that no hardware device is connected. Iguana mode remains unsupported for HD (the request is
-refused); hardware mode is unchanged. The on-disk identity namespacing
-(`mm2_rmd160`, `hd_wallet_rmd160` columns) is unchanged; in software mode both
-take the same software-derived value.
+refused); a coin activated under the `Trezor` key policy is unchanged and is
+namespaced by the device digest (Chapter 5 §5.10B R55). The on-disk identity
+namespacing (`mm2_rmd160`, `hd_wallet_rmd160` columns) is unchanged; for a
+context-key coin both take the same software-derived value. *(Re-keyed
+2026-11-08 on the coin's policy; passed the KDF Dirty Gate with Chapter 5
+§5.10B on 2026-11-08.)*
 
 R38.8.2 **Account-0 bootstrap at activation.** Activating a software-HD UTXO
 coin MUST establish HD account `0` so the coin is usable immediately after

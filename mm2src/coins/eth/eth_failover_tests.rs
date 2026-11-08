@@ -121,7 +121,8 @@ fn t35_31_the_broadcast_does_not_wait_for_a_node_that_never_answers() {
 }
 
 /// T35.34: a node of the nonce gathering that fails is named with the coin's ticker and its position in the
-/// coin's list (R35.1.16), not "1 of 1".
+/// coin's list (R35.1.16), not "1 of 1". Another node answered in the round, so the line is a warning that says so
+/// and does not read as an error (R35.1.12).
 #[test]
 fn t35_34_a_failing_node_of_the_nonce_gathering_is_named_with_ticker_and_list_position() {
     let capturing = install_log_capture();
@@ -146,28 +147,103 @@ fn t35_34_a_failing_node_of_the_nonce_gathering_is_named_with_ticker_and_list_po
     if capturing {
         let lines: Vec<String> = captured_log_lines()
             .into_iter()
-            .filter(|l| l.contains("[T3534NONCE] Error"))
+            .filter(|l| l.contains("[T3534NONCE] "))
             .collect();
-        let wanted = format!(
-            " when getting nonce for addr {:?} from node http://n2.test (node 2 of 3)",
-            my_address()
+        let warned = format!("[T3534NONCE] Nonce request for addr {:?} failed (", my_address());
+        assert!(
+            lines.iter().any(|l| l.starts_with("WARN ")
+                && l.contains(&warned)
+                && l.ends_with(" on node http://n2.test (node 2 of 3); another node answered")),
+            "{lines:?}"
         );
+        assert!(lines.iter().all(|l| !l.starts_with("ERROR ")), "{lines:?}");
         assert!(
             lines
                 .iter()
-                .any(|l| l.contains("[T3534NONCE] Error ") && l.ends_with(&wanted)),
+                .filter(|l| l.starts_with("WARN "))
+                .all(|l| !l.contains("[T3534NONCE] Error ")),
             "{lines:?}"
         );
     }
 }
 
+/// R35.1.12: the level and the text of the line of a node that failed the nonce request depend on whether another
+/// node answered in the same round and, when none did, on whether the round will be repeated. Only a failure in the
+/// last round, when the request fails, reads as an error.
+#[test]
+fn t35_31_a_nonce_failure_is_an_error_only_when_no_node_answered_in_the_last_round() {
+    use common::log::log_crate::Level;
+    let addr = my_address();
+    let named = |before: &str, after: &str| Some(format!("[T3531] {before}http://n2.test (node 2 of 3){after}"));
+    let retrying = |round: u32| {
+        format!(
+            "[T3531] Nonce request for addr {addr:?} failed (HTTP 429) on node http://n2.test (node 2 of 3); no node \
+             answered, retrying (round {round} of 6)"
+        )
+    };
+
+    // Another node answered: a warning in any round.
+    for round in [1, 6] {
+        let (level, text) = nonce_failure_log("HTTP 429", addr, true, round, named);
+        assert_eq!(level, Level::Warn);
+        assert_eq!(
+            text,
+            format!(
+                "[T3531] Nonce request for addr {addr:?} failed (HTTP 429) on node http://n2.test (node 2 of 3); \
+                 another node answered"
+            )
+        );
+        assert!(!text.contains("Error "), "{text}");
+    }
+
+    // No node answered and the round will be repeated: a warning that says so.
+    for round in [1, 5] {
+        let (level, text) = nonce_failure_log("HTTP 429", addr, false, round, named);
+        assert_eq!(level, Level::Warn);
+        assert_eq!(text, retrying(round));
+        assert!(!text.contains("Error "), "{text}");
+    }
+
+    // No node answered in the last round, so the request fails: the error, in its original text.
+    let (level, text) = nonce_failure_log("HTTP 429", addr, false, 6, named);
+    assert_eq!(level, Level::Error);
+    assert_eq!(
+        text,
+        format!("[T3531] Error HTTP 429 when getting nonce for addr {addr:?} from node http://n2.test (node 2 of 3)")
+    );
+
+    // A node that cannot be named keeps all three forms without the node part.
+    let (level, text) = nonce_failure_log("HTTP 429", addr, true, 1, |_, _| None);
+    assert_eq!(level, Level::Warn);
+    assert_eq!(
+        text,
+        format!("Nonce request for addr {addr:?} failed (HTTP 429); another node answered")
+    );
+    let (level, text) = nonce_failure_log("HTTP 429", addr, false, 5, |_, _| None);
+    assert_eq!(level, Level::Warn);
+    assert_eq!(
+        text,
+        format!("Nonce request for addr {addr:?} failed (HTTP 429); no node answered, retrying (round 5 of 6)")
+    );
+    let (level, text) = nonce_failure_log("HTTP 429", addr, false, 6, |_, _| None);
+    assert_eq!(level, Level::Error);
+    assert_eq!(text, format!("Error HTTP 429 when getting nonce for addr {addr:?}"));
+}
+
 #[test]
 fn t35_31_no_node_answering_the_nonce_is_six_rounds_then_failure() {
+    let capturing = install_log_capture();
+    let listed = crate::node_url::listed_nodes("T3531ROUNDS", vec![NODE_1.into(), NODE_2.into()]);
     let mut senders = Vec::new();
     let mut nodes = Vec::new();
-    for url in [NODE_1, NODE_2] {
-        let (node, sender) = instance(url, |_| Reply::Fail("connection refused".to_owned()));
-        nodes.push(node);
+    for node in listed {
+        let (transport, sender) = stub_transport_of_nodes(vec![node], DIRECT_BOUND_S, vec![], |_| {
+            Reply::Fail("connection refused".to_owned())
+        });
+        nodes.push(Web3Instance {
+            web3: provider_from_transport(transport),
+            is_parity: false,
+        });
         senders.push(sender);
     }
     let started = std::time::Instant::now();
@@ -184,6 +260,33 @@ fn t35_31_no_node_answering_the_nonce_is_six_rounds_then_failure() {
     }
     // Five pauses between six rounds.
     assert!(started.elapsed().as_secs_f64() >= 5. * 0.02);
+
+    // Rounds 1 to 5 are warnings that say the round is repeated; only round 6, which ends the request, is an error.
+    if capturing {
+        let lines: Vec<String> = captured_log_lines()
+            .into_iter()
+            .filter(|l| l.contains("[T3531ROUNDS] ") && (l.contains("Nonce request") || l.contains("getting nonce")))
+            .collect();
+        assert_eq!(lines.len(), 12, "two nodes, six rounds: {lines:?}");
+        for (round, round_lines) in (1..=6).zip(lines.chunks(2)) {
+            for (i, line) in round_lines.iter().enumerate() {
+                let node = format!("http://n{0}.test (node {0} of 2)", i + 1);
+                if round < 6 {
+                    assert!(line.starts_with("WARN "), "{line}");
+                    assert!(!line.contains("[T3531ROUNDS] Error "), "{line}");
+                    assert!(
+                        line.contains(&format!(" on node {node}; no node answered, retrying (round ")),
+                        "{line}"
+                    );
+                    assert!(line.ends_with(&format!(" (round {round} of 6)")), "{line}");
+                } else {
+                    assert!(line.starts_with("ERROR "), "{line}");
+                    let ending = format!(" when getting nonce for addr {:?} from node {node}", my_address());
+                    assert!(line.ends_with(&ending), "{line}");
+                }
+            }
+        }
+    }
 }
 
 #[test]
