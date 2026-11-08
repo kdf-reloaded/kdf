@@ -31,9 +31,11 @@ the armv7 binary. musl-based systems (Alpine) are not covered either.
 The libraries are the daemon as a static archive for the host application to link, not a standalone program.
 Simulator targets (`aarch64-apple-ios-sim`, `x86_64-apple-ios`) and Android `x86_64` are not built.
 
-The library exports four C functions: `mm2_main` (start the daemon in a background thread from a JSON
+The host application calls four C functions: `mm2_main` (start the daemon in a background thread from a JSON
 configuration string and a log callback), `mm2_main_status` (0 not running, 1 starting, 2 context ready,
-3 RPC up), `mm2_stop` and `mm2_test`. No C header is shipped yet.
+3 RPC up), `mm2_stop` and `mm2_test`. The archive also exports two internal helper functions
+(`log_stacktrace`, `is_loopback_ip`) and the C symbols of the libraries built into it, among them SQLite
+(`sqlite3_*`) and libusb (`libusb_*`) under their usual names. No C header is shipped yet.
 
 ## Checksums and signature
 

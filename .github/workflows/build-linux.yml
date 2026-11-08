@@ -8,10 +8,9 @@ name: Build Linux
 #
 # The aarch64 and armv7 targets use the Debian 11 cross toolchains
 # (gcc-aarch64-linux-gnu, gcc-arm-linux-gnueabihf) on the same x86_64 container,
-# so they link against the same glibc 2.31 cross sysroot. The workspace compiles
-# C only for libsqlite3 (bundled), ring, secp256k1 and libusb (bundled source),
-# so no target-architecture system libraries are installed. protoc is a build-host
-# tool and stays the x86_64 one.
+# so they link against the same glibc 2.31 cross sysroot. The workspace's native
+# code builds from bundled sources, so no target-architecture system libraries
+# are installed. protoc is a build-host tool and stays the x86_64 one.
 #
 # Both pipelines reuse this workflow via `workflow_call`, so BOTH the signed
 # release builds (release.yml) AND the unsigned dev/staging snapshots
