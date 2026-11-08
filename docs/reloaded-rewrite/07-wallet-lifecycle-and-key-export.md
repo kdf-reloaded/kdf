@@ -132,9 +132,10 @@ superset of R-K4; it MUST NOT alter the behaviour bound in R-K2, R-K3 or R-K7.
 When the switch is `true`, the node logs one WARN at start-up that names the
 setting and says that `get_private_keys` can then export the private keys and
 viewing keys of every configured coin, activated or not; and it logs one WARN for
-every `get_private_keys` call that passes the switch gate, naming the mode and the
-number of tickers asked for. Neither line carries key material or a ticker list. A
-reduced call and a call refused at the gate log nothing extra.
+every `get_private_keys` call that passes the switch gate, naming the mode, the
+number of tickers asked for, and the offline and viewing-key flags. Neither line
+carries key material or a ticker list. A reduced call and a call refused at the gate
+log nothing extra.
 
 **R-K2.** *Single-coin activated reveal \u2014 always available.* The legacy
 v1-dispatcher method `show_priv_key` reveals the private key of exactly one
