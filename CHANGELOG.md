@@ -509,6 +509,19 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   a client that sends `from` under an iguana login stops sending it. Detail: PR #270; CRD ch.49
   R49.27b.
 
+#### RPC interface
+
+- **A request without `mmrpc` whose method only the mmrpc 2.0 interface knows is now answered
+  through that interface, as on GLEEC KDF.** When the legacy method table has no entry for the
+  request's method, the node retries the request once as an mmrpc 2.0 request and answers in the
+  mmrpc 2.0 envelope: the method's result, its typed error, `InvalidRequest` (HTTP 400) when the body
+  has members other than `userpass`, `method`, `params` and `id`, or `NoSuchMethod` (HTTP 400) when
+  neither interface knows the name. Until now such a request answered the legacy error body with
+  HTTP 500. A request without a valid `userpass` is still refused with the legacy error body before
+  any retry. `setprice`, `buy`, `sell`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
+  `my_orders`, `order_status` and `orderbook_depth` stay legacy-only, as on GLEEC KDF: called with
+  `mmrpc`, they answer `NoSuchMethod`. Detail: PR #NNN; CRD ch.43 §43.1A, R43.1A.1a–R43.1A.1e.
+
 ### Fixed
 
 #### ARRR and other shielded coins
@@ -609,6 +622,10 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### Order book and peer-to-peer network
 
+- **The mmrpc 2.0 `orderbook` names its internal failure `Internal`, as on GLEEC KDF.** It answered
+  `InternalError`; HTTP 500 and the message are unchanged. *Upgrade note:* a client that checks
+  `error_type` for `InternalError` on `orderbook` must check `Internal` instead. Detail: PR #NNN; CRD
+  ch.43 R43.1A.6, D43.1A.3.
 - **A maker with `maker_update_coalescing` on is no longer held at its lowest rate by steady
   traffic.** The maker slows down when a relay falls behind.
   - **The old signal.** It was raised once a relay's queue had stayed non-empty for 2 seconds,
