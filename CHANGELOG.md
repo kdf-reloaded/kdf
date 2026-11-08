@@ -101,13 +101,13 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   order have passed. A failed check, such as a balance read that times out, then returns its
   error and cancels nothing. **The cost is a stale price:** after a failed re-pricing your
   previous orders stay live and matchable at their old price until your next successful
-  `setprice` or a cancel, and an empty pair costs only trades where a stale price can cost
+  `setprice` or a cancel. An empty pair only misses trades, while a stale price can lose
   funds, so turn it on only if you accept that. To bound how long an order can stand at an old
   price, give each `setprice` a `timeout_in_minutes`: the order is then cancelled at the latest
   that many minutes after it was placed (for an order restored at startup, after the restart).
   The setting is off by default, which keeps today's behavior: a failed check cancels the
   previous orders and creates none. Only the boolean `true` turns it on. Nothing on the wire
-  changes. Detail: PR #TBD; CRD ch.32 R-GH8a.
+  changes. Detail: PR #286; CRD ch.32 R-GH8a.
 
 #### Start-up and configuration
 
@@ -625,7 +625,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   about 11 % more slowly. The floor of two near servers, which brings DOGE back to the time of
   0.3.0-beta.1, is written (PR #260) and implemented (PR #262), and the SwapLab run on it passed
   (release tests, rows 4–8). The opt-in `setprice_replace_after_checks`, which replaces the previous
-  orders only after the new order passes its checks, is written (PR #265) and implemented (PR #TBD);
+  orders only after the new order passes its checks, is written (PR #265) and implemented (PR #286);
   its SwapLab row follows.
 - [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new, in progress: the
   peer-to-peer items of 0.4.0. The redial guards are in (PRs #199, #206), and so are the peer-exchange

@@ -10739,9 +10739,21 @@ mod t60_7_maker_balance_watch_tests {
                 volume: i64,
                 min_volume: Option<i64>,
             ) -> Result<MakerOrder, String> {
+                self.set_price_with_history(cancel_previous, volume, min_volume, false)
+            }
+
+            /// As `set_price`, with the choice of `save_in_history`: the history write is the one that can fail
+            /// when the order is saved.
+            fn set_price_with_history(
+                &self,
+                cancel_previous: bool,
+                volume: i64,
+                min_volume: Option<i64>,
+                save_in_history: bool,
+            ) -> Result<MakerOrder, String> {
                 let req: SetPriceReq = json::from_value(json!({
                     "base": "BASE", "rel": "REL", "price": 1, "volume": volume, "min_volume": min_volume,
-                    "cancel_previous": cancel_previous, "save_in_history": false
+                    "cancel_previous": cancel_previous, "save_in_history": save_in_history
                 }))
                 .unwrap();
                 block_on(create_maker_order(&self.ctx, req))
@@ -10850,6 +10862,28 @@ mod t60_7_maker_balance_watch_tests {
             let err = refused(maker.set_price(true, 1, Some(2)));
 
             assert!(err.contains("below min base vol"), "{err}");
+            assert_eq!(maker.probe.count("read BASE"), 1, "the balance check ran first");
+            maker.assert_pair_unchanged(&previous, root);
+        }
+
+        /// T-GH8a, item 2 of R-GH8a: the save of the new order comes before the first cancel. The history database
+        /// of the node has no orders table, so the history write of the new order (`save_in_history`) fails: the
+        /// error is returned, both previous orders stay in the maker's set, in the book and under the held root,
+        /// no cancel and no created message is published, and no new order exists.
+        #[test]
+        fn t_gh8a_f_a_failed_save_leaves_the_previous_orders() {
+            let mut maker = Maker::new(json!({ "setprice_replace_after_checks": true }));
+            let previous = maker.two_previous_orders();
+            let root = maker.held_root();
+            let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().unwrap();
+            let _ = maker
+                .ctx
+                .sqlite_connection
+                .pin(Arc::new(std::sync::Mutex::new(connection)));
+
+            let err = refused(maker.set_price_with_history(true, 3, None, true));
+
+            assert!(err.contains("Error saving an order"), "{err}");
             assert_eq!(maker.probe.count("read BASE"), 1, "the balance check ran first");
             maker.assert_pair_unchanged(&previous, root);
         }

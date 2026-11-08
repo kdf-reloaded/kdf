@@ -2626,7 +2626,8 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
 
     // CRD ch.32 R-GH8a: with `setprice_replace_after_checks` on, every check above has passed and the order is
-    // built below before the previous orders are cancelled; off (the default), they are cancelled here (R-GH8).
+    // built and saved below before the previous orders are cancelled; off (the default), they are cancelled here
+    // (R-GH8).
     let replace_after_checks = req.cancel_previous && setprice_replace_after_checks(ctx);
     if req.cancel_previous && !replace_after_checks {
         cancel_previous_maker_orders(ctx, &ordermatch_ctx, &req.base, &req.rel).await;
@@ -2660,13 +2661,15 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
         )
         .await
     );
-    // The last step that can fail before the replacement: the previous orders go only now (R-GH8a item 2).
-    if replace_after_checks {
-        cancel_previous_maker_orders(ctx, &ordermatch_ctx, &req.base, &req.rel).await;
-    }
+    // With `setprice_replace_after_checks` on, the steps that can fail all precede the cancel below: the checks, the
+    // build, the subscription and this save (R-GH8a item 2). After the cancel only the local insert and the
+    // publication remain, and neither returns an error. At the default, the previous orders went before the build.
     save_my_new_maker_order(ctx.clone(), &new_order)
         .await
         .map_err(|e| ERRL!("{}", e))?;
+    if replace_after_checks {
+        cancel_previous_maker_orders(ctx, &ordermatch_ctx, &req.base, &req.rel).await;
+    }
     maker_order_created_p2p_notify(
         ctx.clone(),
         &new_order,

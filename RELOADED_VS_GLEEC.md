@@ -165,7 +165,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   orders only when all of them pass; a failed check returns its error and cancels
   nothing. The cost is a stale price: after a failed re-pricing the previous orders stay
   live and matchable at their old price until the next successful `setprice` or a cancel,
-  and an empty pair costs only trades where a stale price can cost funds. That is why the
+  and while an empty pair only misses trades, a stale price can lose funds. That is why the
   switch is off by default. With it on, a `timeout_in_minutes` on each `setprice` bounds
   that window: the order is cancelled at the latest that many minutes after it was placed
   (for an order restored at startup, after the restart). Nothing on the wire changes.
