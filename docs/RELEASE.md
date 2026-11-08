@@ -9,16 +9,19 @@ gate that must be fully ticked) — this file describes the *mechanics*.
 Releases are **tag-driven**. Pushing an annotated, GPG-signed `v*` tag triggers
 [`.github/workflows/release.yml`](../.github/workflows/release.yml), which:
 
-1. builds the Linux x86-64 binary inside a pinned **Debian 11** container
-   (glibc 2.31 floor → runs on Debian 11/12, Ubuntu 20.04+, RHEL 9, …);
-2. builds macOS (x86_64 / aarch64 / universal) and Windows binaries via the
+1. builds the Linux binaries (x86-64, aarch64 and armv7) inside a pinned **Debian 11**
+   container, the last two cross-compiled there (glibc 2.31 floor → runs on Debian 11/12,
+   Ubuntu 20.04+, RHEL 9, …);
+2. builds macOS (x86_64 / aarch64 / universal) and Windows binaries, and the
+   `libkdf.a` static libraries for Android (aarch64, armv7) and iOS (aarch64), via the
    existing per-platform workflows;
 3. writes a `SHA256SUMS` manifest over all binaries;
 4. **GPG-signs** `SHA256SUMS` with the maintainer key
    (`FEE1ACA52C65FF3EBF31818CB5595E1752BC2A82`) inside the protected `release`
    environment, producing `SHA256SUMS.asc`;
-5. drafts a **GitHub Release** with every binary + `SHA256SUMS` + `SHA256SUMS.asc`
-   attached.
+5. drafts a **GitHub Release** with every binary and library + `SHA256SUMS` +
+   `SHA256SUMS.asc` attached. The assets, target triples and system floors are listed in
+   [`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md).
 
 The `gate` job in `release.yml` decides how to treat the tag (GitHub tag
 triggers cannot be branch-scoped):

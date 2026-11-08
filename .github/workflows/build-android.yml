@@ -9,7 +9,10 @@ name: Build Android
 # Host runner is Linux (GitHub-hosted `ubuntu-latest` ships the NDK under
 # `$ANDROID_NDK_ROOT`).
 #
-# Manually dispatched until verified against a downstream Android project.
+# Called from release.yml (signed releases) and dev-build.yml / staging-build.yml
+# (unsigned snapshots); also runnable manually. The artifact is named after the Rust
+# target triple (`libkdf-<triple>`); the NDK ABI directory names are arm64-v8a
+# (aarch64-linux-android) and armeabi-v7a (armv7-linux-androideabi). NDK API 21.
 
 on:
   workflow_dispatch:
@@ -150,5 +153,5 @@ jobs:
       - name: Upload staticlib
         uses: actions/upload-artifact@v7
         with:
-          name: libkdf-${{ matrix.ndk-abi }}
+          name: libkdf-${{ matrix.target }}
           path: target/${{ matrix.target }}/${{ inputs.profile }}/libkdf.a
