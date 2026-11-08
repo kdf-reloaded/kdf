@@ -151,7 +151,7 @@ where
             sleeper.await;
         }
         remaining -= slice;
-        if !(remaining > 0.) {
+        if remaining.is_nan() || remaining <= 0. {
             break;
         }
     }
