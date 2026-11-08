@@ -303,6 +303,7 @@ fn local_start() -> LocalStart { wasm_start_impl }
 
 /// https://github.com/KomodoPlatform/atomicDEX-API/issues/886#issuecomment-812489844
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn orders_of_banned_pubkeys_should_not_be_displayed() {
     let coins = json!([
@@ -407,6 +408,7 @@ fn log_test_status() { common::log::tests::test_status() }
 fn log_test_printed_dashboard() { common::log::tests::test_printed_dashboard() }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_my_balance() {
     let coins = json!([
@@ -460,6 +462,7 @@ fn test_my_balance() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_p2wpkh_my_balance() {
     let seed = "valley embody about obey never adapt gesture trust screen tube glide bread";
@@ -586,6 +589,7 @@ fn check_sell_fails(mm: &MarketMakerIt, base: &str, rel: &str, vol: f64) {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_check_balance_on_order_post() {
     let coins = json!([
@@ -645,6 +649,7 @@ fn test_check_balance_on_order_post() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_rpc_password_from_json() {
     let coins = json!([
@@ -771,6 +776,7 @@ fn test_rpc_password_from_json() {
 
 /// Currently only `withdraw` RPC call supports V2.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_mmrpc_v2() {
     let coins = json!([
@@ -1181,6 +1187,7 @@ async fn trade_base_rel_electrum(
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn trade_test_electrum_and_eth_coins() { block_on(trade_base_rel_electrum(&[("ETH", "JST")], 1, 2, 0.1)); }
 
@@ -1509,6 +1516,7 @@ fn test_withdraw_and_send() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_tbtc_withdraw_to_cashaddresses_should_fail() {
     let seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";
@@ -1688,6 +1696,7 @@ fn test_withdraw_legacy() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_withdraw_segwit() {
     let seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";
@@ -1850,6 +1859,7 @@ fn test_swap_status() {
 /// Ensure that setprice/buy/sell calls deny base == rel
 /// https://github.com/artemii235/SuperNET/issues/363
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_order_errors_when_base_equal_rel() {
     let coins = json!([
@@ -1954,6 +1964,7 @@ fn startup_passphrase(passphrase: &str, expected_address: &str) {
 /// MM2 should detect if passphrase is WIF or 0x-prefixed hex encoded privkey and parse it properly.
 /// https://github.com/artemii235/SuperNET/issues/396
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_startup_passphrase() {
     // seed phrase
@@ -1982,6 +1993,7 @@ fn test_startup_passphrase() {
 
 /// https://github.com/artemii235/SuperNET/issues/398
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_cancel_order() {
     let coins = json!([
@@ -2125,6 +2137,7 @@ fn test_cancel_order() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_cancel_all_orders() {
     let coins = json!([
@@ -2275,6 +2288,7 @@ fn test_cancel_all_orders() {
 /// Electrum requests should success if at least 1 server successfully connected,
 /// all others might end up with DNS resolution errors, TCP connection errors, etc.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_electrum_enable_conn_errors() {
     let coins = json!([
@@ -2323,6 +2337,7 @@ fn test_electrum_enable_conn_errors() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_order_should_not_be_displayed_when_node_is_down() {
     let coins = json!([
@@ -2460,6 +2475,7 @@ fn test_order_should_not_be_displayed_when_node_is_down() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_own_orders_should_not_be_removed_from_orderbook() {
     let coins = json!([
@@ -2554,6 +2570,7 @@ fn check_priv_key(mm: &MarketMakerIt, coin: &str, expected_priv_key: &str) {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/519#issuecomment-589149811
 fn test_show_priv_key() {
@@ -2597,6 +2614,7 @@ fn test_show_priv_key() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/586
 fn test_electrum_and_enable_response() {
@@ -2749,6 +2767,7 @@ fn check_too_low_volume_order_creation_fails(mm: &MarketMakerIt, base: &str, rel
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/481
 fn setprice_buy_sell_too_low_volume() {
@@ -2794,6 +2813,7 @@ fn setprice_buy_sell_too_low_volume() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_fill_or_kill_taker_order_should_not_transform_to_maker() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -2865,6 +2885,7 @@ fn test_fill_or_kill_taker_order_should_not_transform_to_maker() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_gtc_taker_order_should_transform_to_maker() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -2942,6 +2963,7 @@ fn test_gtc_taker_order_should_transform_to_maker() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_set_price_must_save_order_to_db() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -2999,6 +3021,7 @@ fn test_set_price_must_save_order_to_db() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_set_price_response_format() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -3056,6 +3079,7 @@ fn test_set_price_response_format() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/635
 fn set_price_with_cancel_previous_should_broadcast_cancelled_message() {
@@ -3185,6 +3209,7 @@ fn set_price_with_cancel_previous_should_broadcast_cancelled_message() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_batch_requests() {
     let coins = json!([
@@ -3269,6 +3294,7 @@ fn request_metrics(mm: &MarketMakerIt) -> MetricsJson {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_metrics_method() {
     let coins = json!([
@@ -3419,6 +3445,7 @@ fn spin_n_nodes(seednodes: &[&str], coins: &Json, n: usize) -> Vec<(MarketMakerI
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_convert_utxo_address() {
     let coins = json!([
@@ -3541,6 +3568,7 @@ fn test_convert_utxo_address() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_convert_segwit_address() {
     let coins = json! ([
@@ -3671,6 +3699,7 @@ fn test_convert_segwit_address() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_convert_eth_address() {
     let coins = json!([
@@ -3769,6 +3798,7 @@ fn test_convert_eth_address() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_add_delegation_qtum() {
     let coins = json!([{
@@ -3854,6 +3884,7 @@ fn test_add_delegation_qtum() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_remove_delegation_qtum() {
     let coins = json!([{
@@ -3914,6 +3945,7 @@ fn test_remove_delegation_qtum() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_get_staking_infos_qtum() {
     let coins = json!([{
@@ -3974,6 +4006,7 @@ fn test_get_staking_infos_qtum() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_convert_qrc20_address() {
     let passphrase = "cV463HpebE2djP9ugJry5wZ9st5cc6AbkHXGryZVPXMH1XJK8cVU";
@@ -4115,6 +4148,7 @@ fn test_convert_qrc20_address() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_validateaddress() {
     let coins = json!([
@@ -4275,6 +4309,7 @@ fn test_validateaddress() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_validateaddress_segwit() {
     let seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";
@@ -4401,6 +4436,7 @@ fn test_validateaddress_segwit() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn qrc20_activate_electrum() {
     let passphrase = "cV463HpebE2djP9ugJry5wZ9st5cc6AbkHXGryZVPXMH1XJK8cVU";
@@ -4443,6 +4479,7 @@ fn qrc20_activate_electrum() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_qrc20_withdraw() {
     // corresponding private key: [3, 98, 177, 3, 108, 39, 234, 144, 131, 178, 103, 103, 127, 80, 230, 166, 53, 68, 147, 215, 42, 216, 144, 72, 172, 110, 180, 13, 123, 179, 10, 49]
@@ -4521,6 +4558,7 @@ fn test_qrc20_withdraw() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_qrc20_withdraw_error() {
     let passphrase = "album hollow help heart use bird response large lounge fat elbow coral";
@@ -4718,6 +4756,7 @@ async fn test_qrc20_history_impl() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_get_raw_transaction() {
     let coins = json! ([
@@ -4831,6 +4870,7 @@ fn test_get_raw_transaction() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_qrc20_tx_history() { block_on(test_qrc20_history_impl()); }
 
@@ -4839,6 +4879,7 @@ fn test_qrc20_tx_history() { block_on(test_qrc20_history_impl()); }
 async fn test_qrc20_tx_history() { test_qrc20_history_impl().await }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_tx_history_segwit() {
     let passphrase = "also shoot benefit prefer juice shell elder veteran woman mimic image kidney";
@@ -4965,6 +5006,7 @@ fn test_tx_history_segwit() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_tx_history_tbtc_non_segwit() {
     let passphrase = "also shoot benefit prefer juice shell elder veteran woman mimic image kidney";
@@ -5102,6 +5144,7 @@ fn test_tx_history_tbtc_non_segwit() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_buy_conf_settings() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -5178,6 +5221,7 @@ fn test_buy_conf_settings() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_buy_response_format() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -5232,6 +5276,7 @@ fn test_buy_response_format() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_sell_response_format() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -5286,6 +5331,7 @@ fn test_sell_response_format() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_my_orders_response_format() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -5365,6 +5411,7 @@ fn test_my_orders_response_format() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_my_orders_after_matched() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
@@ -5459,6 +5506,7 @@ fn test_my_orders_after_matched() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_sell_conf_settings() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -5535,6 +5583,7 @@ fn test_sell_conf_settings() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_set_price_conf_settings() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -5611,6 +5660,7 @@ fn test_set_price_conf_settings() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_update_maker_order() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -5751,6 +5801,7 @@ fn test_update_maker_order() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_update_maker_order_fail() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -5952,6 +6003,7 @@ fn test_update_maker_order_fail() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_update_maker_order_after_matched() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
@@ -6083,6 +6135,7 @@ fn test_update_maker_order_after_matched() {
 // trade fee should return numbers in all 3 available formats and
 // "amount" must be always in decimal representation for backwards compatibility
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_trade_fee_returns_numbers_in_various_formats() {
     let coins = json!([
@@ -6129,6 +6182,7 @@ fn test_trade_fee_returns_numbers_in_various_formats() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_orderbook_is_mine_orders() {
     let coins = json!([{"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
@@ -6293,6 +6347,7 @@ fn test_orderbook_is_mine_orders() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_sell_min_volume() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -6370,6 +6425,7 @@ fn test_sell_min_volume() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_sell_min_volume_dust() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -6421,6 +6477,7 @@ fn test_sell_min_volume_dust() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_setprice_min_volume_dust() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -6469,6 +6526,7 @@ fn test_setprice_min_volume_dust() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_buy_min_volume() {
     let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
@@ -6582,6 +6640,7 @@ fn request_and_check_orderbook_depth(mm_alice: &MarketMakerIt) {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_orderbook_depth() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
@@ -6860,6 +6919,7 @@ fn test_get_orderbook_with_same_orderbook_ticker() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_conf_settings_in_orderbook() {
     let coins = json!([
@@ -6965,6 +7025,7 @@ fn test_conf_settings_in_orderbook() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn alice_can_see_confs_in_orderbook_after_sync() {
     let bob_coins = json!([
@@ -7090,6 +7151,7 @@ fn alice_can_see_confs_in_orderbook_after_sync() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_sign_verify_message_utxo() {
     let seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";
@@ -7151,6 +7213,7 @@ fn test_sign_verify_message_utxo() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_sign_verify_message_utxo_segwit() {
     let seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";
@@ -7226,6 +7289,7 @@ fn test_sign_verify_message_utxo_segwit() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_sign_verify_message_eth() {
     let seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";

@@ -114,6 +114,7 @@ fn start_lightning_nodes() -> (MarketMakerIt, MarketMakerIt, String, String) {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_enable_lightning() {
     let seed = "valley embody about obey never adapt gesture trust screen tube glide bread";
@@ -200,6 +201,7 @@ fn test_enable_lightning() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_connect_to_lightning_node() {
     let (mm_node_1, mm_node_2, node_1_id, _) = start_lightning_nodes();
@@ -311,6 +313,7 @@ fn test_open_channel() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_sign_verify_message_lightning() {
     let seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";

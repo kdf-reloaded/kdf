@@ -4,6 +4,7 @@ use super::*;
 use mm2_test_helpers::for_tests::best_orders_v2;
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_best_orders() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
@@ -176,6 +177,7 @@ fn test_best_orders() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_best_orders_duplicates_after_update() {
     let eve_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
@@ -326,6 +328,7 @@ fn test_best_orders_duplicates_after_update() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_best_orders_filter_response() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
@@ -445,6 +448,7 @@ fn test_best_orders_filter_response() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_best_orders_address_and_confirmations() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();

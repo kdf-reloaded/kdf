@@ -18,6 +18,10 @@ wasm-opt = false
 [features]
 # Deprecated
 native = []
+# Runs the tests that need public servers (Electrum servers and the public ETH dev node). Off by default:
+# such a test fails whenever a server is down or has changed, so without this feature it is marked
+# `ignore`. See docs/UNIT_TESTS.md ("Tests that need public servers").
+live-network-tests = []
 track-ctx-pointer = ["common/track-ctx-pointer"]
 custom-swap-locktime = [] # only for testing purposes, should never be activated on release builds.
 ibc-routing-for-swaps = []
