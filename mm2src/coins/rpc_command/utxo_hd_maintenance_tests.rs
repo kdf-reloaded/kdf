@@ -646,8 +646,9 @@ fn r35b_merge_loop_merges_the_enabled_address_under_hd() {
     let arc = UtxoArc::new(fields);
     let weak = arc.downgrade();
 
-    // The coin is dropped as soon as the first transaction is sent. The pause between the rounds is far longer
-    // than the stopper's poll, so the loop wakes to a dropped coin and ends without a second round.
+    // The loop sleeps first, then merges: the first round runs after one pause, and the coin is dropped as soon as
+    // its transaction is sent. The pause is far longer than the stopper's poll, so the loop wakes to a dropped coin
+    // and ends without a second round. The test takes about two pauses.
     let seen = sent.clone();
     let stopper = async move {
         while seen.lock().unwrap().is_empty() {
@@ -655,7 +656,7 @@ fn r35b_merge_loop_merges_the_enabled_address_under_hd() {
         }
         drop(arc);
     };
-    let looped = merge_utxo_loop(weak, 3, 0.2, 10, UtxoStandardCoin::from);
+    let looped = merge_utxo_loop(weak, 3, 5.0, 10, UtxoStandardCoin::from);
     // Guarded like the other loop tests: a lingering strong reference must fail the test, not hang it.
     let both = futures::future::join(looped, stopper);
     match block_on(select(Box::pin(both), Box::pin(Timer::sleep(30.)))) {

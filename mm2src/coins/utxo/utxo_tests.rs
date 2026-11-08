@@ -12538,7 +12538,8 @@ pub(crate) mod hd_accounts_at_index_tests {
 
     /// T14a, R35a item 3, the corner below the limit: an `address_id` of 2^31 - 1 is a valid child index, yet the
     /// activation must hold addresses `0` to `2^31 - 1`, a count of 2^31, which is refused. The activation fails
-    /// with the same address-limit failure as the limit case, no address is derived or read, and nothing is stored.
+    /// with the same address-limit failure as the limit case and no address is derived or read. Only the empty
+    /// account row for the path is stored, with no address count.
     #[test]
     fn t14a_the_last_valid_address_id_needs_a_minimum_beyond_the_limit_and_fails_activation() {
         let items = mock_storage();
