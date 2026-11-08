@@ -218,7 +218,7 @@ pub enum OrderbookRpcError {
     BaseRelSameOrderbookTickersAndProtocols,
     CoinConfigNotFound(String),
     CoinIsWalletOnly(String),
-    InternalError(String),
+    Internal(String),
     P2PSubscribeError(String),
 }
 
@@ -229,7 +229,7 @@ impl HttpStatusCode for OrderbookRpcError {
             | OrderbookRpcError::BaseRelSameOrderbookTickersAndProtocols
             | OrderbookRpcError::CoinConfigNotFound(_)
             | OrderbookRpcError::CoinIsWalletOnly(_) => StatusCode::BAD_REQUEST,
-            OrderbookRpcError::InternalError(_) | OrderbookRpcError::P2PSubscribeError(_) => {
+            OrderbookRpcError::Internal(_) | OrderbookRpcError::P2PSubscribeError(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             },
         }
@@ -301,7 +301,7 @@ pub async fn orderbook_rpc_v2(
         .map_to_mm(OrderbookRpcError::P2PSubscribeError)?;
 
     let orderbook = ordermatch_ctx.orderbook.lock();
-    let my_pubsecp = mm2_internal_pubkey_hex(&ctx).map_to_mm(OrderbookRpcError::InternalError)?;
+    let my_pubsecp = mm2_internal_pubkey_hex(&ctx).map_to_mm(OrderbookRpcError::Internal)?;
 
     let mut asks = match orderbook.unordered.get(&(base_ticker.clone(), rel_ticker.clone())) {
         Some(uuids) => {
@@ -376,4 +376,63 @@ pub async fn orderbook_rpc_v2(
         total_bids_base_vol,
         total_bids_rel_vol,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CRD ch.43 R43.1A.6, D43.1A.3: the error tokens of the versioned `orderbook` are a closed set, and its
+    /// internal-failure class is `Internal` (string, HTTP 500). The failure itself needs a crypto context whose
+    /// state is broken, so the token and the status are pinned on the error type the dispatcher serializes.
+    #[test]
+    fn versioned_orderbook_error_tokens_and_statuses_follow_r43_1a_6() {
+        let cases = [
+            (
+                OrderbookRpcError::BaseRelSame,
+                "BaseRelSame",
+                None,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OrderbookRpcError::BaseRelSameOrderbookTickersAndProtocols,
+                "BaseRelSameOrderbookTickersAndProtocols",
+                None,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OrderbookRpcError::CoinConfigNotFound("RIN".to_owned()),
+                "CoinConfigNotFound",
+                Some("RIN"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OrderbookRpcError::CoinIsWalletOnly("RIN".to_owned()),
+                "CoinIsWalletOnly",
+                Some("RIN"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OrderbookRpcError::P2PSubscribeError("subscribe".to_owned()),
+                "P2PSubscribeError",
+                Some("subscribe"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                OrderbookRpcError::Internal("internal".to_owned()),
+                "Internal",
+                Some("internal"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (error, token, payload, status) in cases {
+            let encoded = json::to_value(&error).unwrap();
+            assert_eq!(encoded["error_type"], token, "{encoded}");
+            match payload {
+                Some(payload) => assert_eq!(encoded["error_data"], payload, "{encoded}"),
+                None => assert!(encoded.get("error_data").is_none(), "{encoded}"),
+            }
+            assert_eq!(error.status_code(), status, "{token}");
+        }
+    }
 }

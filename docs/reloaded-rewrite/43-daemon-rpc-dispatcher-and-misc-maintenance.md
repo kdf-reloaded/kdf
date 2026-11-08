@@ -334,7 +334,7 @@ under the versioned envelope, and a client that calls them that way fails
 against the reference exactly as it fails against Reloaded.
 
 > **Compatibility (this repository, 2026-11-08; not corpus-sourced).**
-> Checked against the worktree at the `dev` tip of 2026-11-08:
+> Checked against this repository's dev branch as of 2026-11-08:
 >
 > 1. *Method tables.* Reloaded's versioned table carries the same three order
 >    methods (`orderbook`, `best_orders`, `my_recent_swaps`) and its legacy
@@ -342,16 +342,24 @@ against the reference exactly as it fails against Reloaded.
 >    `cancel_order` or `my_orders` answers `NoSuchMethod`, HTTP 400, as
 >    R43.1A.3 binds. **Parity; no gap.** The field wallet's calls are
 >    malformed for both implementations.
-> 2. *Fallback.* Reloaded answers a legacy request for an unknown method with
->    the legacy error body (HTTP 500) and does not retry it on the versioned
->    table (R43.1A.1). Already recorded in chapter 55 §55.1; D43.1A.2.
+> 2. *Fallback.* Until PR #NNN, Reloaded answered a legacy request for an
+>    unknown method with the legacy error body (HTTP 500) and did not retry it
+>    on the versioned table (R43.1A.1). Since PR #NNN (D43.1A.2 option (i),
+>    the maintainer's decision of 2026-11-08), it retries such a request as
+>    R43.1A.1a–R43.1A.1e bind. **Parity.**
 > 3. *Envelope alias.* Reloaded's versioned envelope accepts `rpc_pass` as an
 >    alias of `userpass` (R43.1A.2). A Reloaded extension; harmless to
 >    reference clients, which never send it.
-> 4. *`orderbook` error token.* Reloaded's versioned `orderbook` names its
->    internal-failure class `InternalError` where the reference names it
->    `Internal` (R43.1A.6). A wire divergence in an `error_type` token;
->    D43.1A.3.
+>    Through the fallback (R43.1A.1e), Reloaded's legacy layer still tests
+>    `userpass` alone, so a protected name sent with `rpc_pass` only is
+>    refused before the fallback, as in the reference. A legacy body that
+>    names a public method neither table serves, with `rpc_pass` and no
+>    `userpass`, decodes under the alias and answers `NoSuchMethod` where the
+>    reference answers `InvalidRequest`.
+> 4. *`orderbook` error token.* Until PR #NNN, Reloaded's versioned
+>    `orderbook` named its internal-failure class `InternalError` where the
+>    reference names it `Internal` (R43.1A.6). It now names it `Internal`
+>    (D43.1A.3, the maintainer's decision of 2026-11-08). **Parity.**
 > 5. *`best_orders` error set.* Reloaded's versioned `best_orders` has no
 >    `CtxError` case (R43.1A.5); it never raises that class, so its observable
 >    token set is a subset of the reference's. Not a divergence.
@@ -372,6 +380,9 @@ documented deliberate divergence under that plan's §2.2; (iii) an inverse
 fallback that re-dispatches a versioned request for a legacy-only name on the
 legacy table — rejected on principle, because it would make the versioned
 envelope's strictness (R43.1A.2) and typed errors (R43.1A.3) unreliable.
+*Resolved 2026-11-08 by the maintainer's decision: option (i). The
+legacy-only order methods stay legacy-only, and no versioned aliases are
+added.*
 
 **D43.1A.2** *Implement the reference's legacy-to-versioned fallback
 (R43.1A.1)?* Options: (i) parity — a legacy request for an unknown legacy
@@ -379,12 +390,14 @@ name is retried on the versioned table and its answer rendered in the mmrpc
 2.0 envelope, so that a client can call every versioned method without
 `mmrpc`; (ii) keep the present behavior (legacy error body, HTTP 500) as a
 documented divergence. The wallet case of this section is not affected
-either way (its requests carry `mmrpc`).
+either way (its requests carry `mmrpc`). *Resolved 2026-11-08 by the
+maintainer's decision: option (i), PR #NNN.*
 
 **D43.1A.3** *Rename Reloaded's versioned `orderbook` internal-failure token
 to `Internal`?* A one-token change that restores the closed discriminant set
 of R43.1A.6; recommended, since no client contract depends on the Reloaded
-spelling.
+spelling. *Resolved 2026-11-08 by the maintainer's decision: renamed, PR
+#NNN.*
 
 ## 43.2 Public vs protected method classification
 
@@ -551,8 +564,8 @@ shall be wound down as part of shutdown rather than abandoned.
   What crosses is behavior, public wire method names and dictated request,
   response and error members; no private identifier, function body, helper
   decomposition, error, log or comment text was reproduced. The compatibility
-  note rests on this repository's own dispatcher, ordermatch and swap-RPC
-  code at the `dev` tip of 2026-11-08; D43.1A.1--D43.1A.3 are
+  note rests on the dispatcher, ordermatch and swap-RPC code of this
+  repository's dev branch as of 2026-11-08; D43.1A.1--D43.1A.3 are
   Reloaded-original. No row was added to chapter 02 §2.15A: every state read
   already had one, and each row's identifier and date were re-confirmed by
   read-only inspection of the historical record's reference metadata before

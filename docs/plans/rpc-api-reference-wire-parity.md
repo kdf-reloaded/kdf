@@ -159,7 +159,7 @@ fixed before W6 (HTTP status), which in turn comes before request leniency
 (`mmrpc: "2.0"`) form in the reference. `setprice`, `buy`, `sell`, `update_maker_order`, `cancel_order`,
 `cancel_all_orders`, `my_orders`, `order_status` and `orderbook_depth` are legacy-only there and in KDF
 Reloaded. "Legacy and v2" in row 3 therefore means the two generations of the dual methods, not a
-versioned form of every method. One `error_type` token deviation exists in batch 3 (D43.1A.3). In batch
+versioned form of every method. One `error_type` token deviation existed in batch 3 (D43.1A.3); PR #NNN renamed it. In batch
 4, `my_recent_swaps` has both forms, with matching members.
 
 Each batch is one branch, one PR, and is merged before the next starts. A batch
