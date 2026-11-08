@@ -2740,7 +2740,7 @@ Legacy `enable` for EVM coins under an HD wallet is not changed by this release.
 - **`anyhow` bumped to 1.0.103, `crossbeam-epoch` to 0.9.20** (advisory clears). Code: `Cargo.toml`.
 - **CI test failures now include Rust backtraces.** `tests.yml` sets `RUST_BACKTRACE=1` for test jobs so panics provide actionable stack traces in CI logs. Code: `.github/workflows/tests.yml`.
 
-## [0.2.0-beta.1] — 2026-08-05
+## [0.2.0-beta.1] - 2026-08-05
 
 ### Added
 
@@ -2829,8 +2829,7 @@ Legacy `enable` for EVM coins under an HD wallet is not changed by this release.
   `mm2src/coins_activation/src/z_coin_activation.rs`,
   `mm2src/coins/z_coin/z_coin_wallet_db.rs`.
 
-- **Small KMD direct-burn DEX fees retain the legacy wire shape (superseded,
-  see above).** Netid 8762
+- **Small KMD direct-burn DEX fees retain the legacy wire shape.** Netid 8762
   KMD taker-fee construction now permits the positive 75% fee-collection
   output selected by the `v2.6.0-beta` policy even when that split component
   is below KMD's generic spendable-output dust threshold. The exception is
@@ -2844,9 +2843,8 @@ Legacy `enable` for EVM coins under an HD wallet is not changed by this release.
   ticker's zero-valued entry in `total_balance` instead of returning an untyped
   empty object. Code: `mm2src/coins/`, `mm2src/coins_activation/`.
 - **DEX-fee wire compatibility on both production netids.** Netid 8762 KMD
-  takers now use the `v2.6.0-beta`-compatible discounted fee and dust-aware
-  fee/OP_RETURN split (see the corrected three-range entry above for the
-  exact structure), while non-KMD takers remain single-output.
+  takers now use the `v2.6.0-beta`-compatible discounted fee and two-output
+  75/25 fee/OP_RETURN structure, while non-KMD takers remain single-output.
   Netid 6133 follows the v3/dev single-output fee structure. Both networks now
   use only the taker coin's minimum transaction amount as the fee floor,
   removing the erroneous additional `0.0001` floor. Fixes #1. Code:
@@ -2912,14 +2910,15 @@ Highlights:
 - Tag-driven, GPG-signed release pipeline: signed `SHA256SUMS` manifest and drafted GitHub Releases — pre-releases from `staging` (`-alpha/-beta/-rc` tags), finals from `main`. Linux binaries build inside a Debian 11 container (glibc 2.31) for broad backwards-compatibility; unsigned all-platform snapshots via manual `dev-build.yml` and automatic `staging-build.yml`.
 
 Tag `v0.2.0-beta.1` (2026-08-05) was cut on `staging` from the development line as of commit
-6dc1b63b1, part-way through 0.3.0-alpha.1. Everything it shipped is listed in the 0.3.0-alpha.1
-section above, which continues past that point. The tag itself is not on the development line, so
-it has no section of its own.
+6dc1b63b1, part-way through 0.3.0-alpha.1. Its section above is the tag's own text, restored on
+2026-11-08; until then its entries were listed under 0.3.0-alpha.1. Three later corrections to its
+KMD fee entry are in the 0.3.0-alpha.1 section.
 
 [Unreleased]: https://github.com/kdf-reloaded/kdf/compare/v0.3.0-beta.1...HEAD
 [0.3.0-beta.1]: https://github.com/kdf-reloaded/kdf/compare/ddb87a4849f91400b1b4aa120090f1acb12aa7bf...v0.3.0-beta.1
 [0.3.0-alpha.3]: https://github.com/kdf-reloaded/kdf/compare/49a46bc54fc16761796ed0bad53a472b8183ed9b...ddb87a4849f91400b1b4aa120090f1acb12aa7bf
 [0.3.0-alpha.2]: https://github.com/kdf-reloaded/kdf/compare/7a18f94b2f5de1ff7ba2ae69c4b445132d305a3f...49a46bc54fc16761796ed0bad53a472b8183ed9b
 [0.3.0-alpha.1]: https://github.com/kdf-reloaded/kdf/compare/v0.1.0-beta.2...7a18f94b2f5de1ff7ba2ae69c4b445132d305a3f
+[0.2.0-beta.1]: https://github.com/kdf-reloaded/kdf/releases/tag/v0.2.0-beta.1
 [0.1.0-beta.2]: https://github.com/kdf-reloaded/kdf/compare/v0.1.0-beta.1...v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/kdf-reloaded/kdf/releases/tag/v0.1.0-beta.1
