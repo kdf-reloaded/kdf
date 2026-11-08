@@ -1182,7 +1182,7 @@ would use the new device's keys against the old device's accounts, Reloaded
 refuses. Under `docs/COMPAT_SWITCHES.md`, "The default-side rule", arm 2:
 Reloaded's behavior by default, no switch.
 
-> **As built (2026-11-08, clean-side record; batch 4 item B4-14, PR #NNN).**
+> **As built (2026-11-08, clean-side record; batch 4 item B4-14, PR #302).**
 > A coin activated under the `Trezor` policy keeps the hardware context its
 > activation read (`UtxoCoinFields.hw_ctx` for the UTXO family,
 > `EthTrezorSigner.hw_ctx` for EVM and its tokens). The activation reads the
@@ -1306,7 +1306,7 @@ the refusal is pinned by unit tests with two device contexts.
 >   the reference behaviour for now and is an open follow-up.
 > - The corpus-derived code-quality finding above (no record of the
 >   activating device) is resolved by maintainer decision EC (a): R58a
->   (batch 4 item B4-14, PR #NNN).
+>   (batch 4 item B4-14, PR #302).
 
 ## 5.11 Bound WebAssembly-Only MetaMask Path
 
