@@ -1382,3 +1382,211 @@ fn t35_36_the_debug_form_of_the_request_is_host_only() {
         assert!(!rendered.contains(secret), "a credential part is rendered");
     }
 }
+
+// ---------------------------------------------------------------------------
+// T14a, T14c: HD accounts at a given index (CRD ch.05 R35a, R35c)
+// ---------------------------------------------------------------------------
+
+mod hd_accounts_at_index {
+    use super::*;
+    use async_trait::async_trait;
+    use coins::hd_pubkey::{HDExtractPubkeyError, HDXPubExtractor};
+    use coins::hd_wallet::HDWalletRpcError;
+    use coins::rpc_command::init_create_account::{CreateNewAccountParams, CreatedAccount, InitCreateHDAccountRpcOps};
+    use crypto::trezor::utxo::TrezorUtxoCoin;
+    use crypto::{DerivationPath, XPub};
+
+    /// A software login has no device: asking one is a failure of the test.
+    struct NoDevice;
+
+    #[async_trait]
+    impl HDXPubExtractor for NoDevice {
+        async fn extract_utxo_xpub(
+            &self,
+            _trezor_utxo_coin: TrezorUtxoCoin,
+            _derivation_path: DerivationPath,
+        ) -> MmResult<XPub, HDExtractPubkeyError> {
+            panic!("a software login must not ask a hardware device")
+        }
+    }
+
+    fn quiet_node() -> MockEvmNode {
+        spawn_node(|method, params| match method {
+            "eth_getBalance" => Reply::Result(json!("0x0")),
+            _ => healthy_node_reply(method, params, 0, 0),
+        })
+    }
+
+    /// Activates the platform at `path_to_address` (absent when `null`), without a scan.
+    fn activate_at(ctx: &MmArc, node: &MockEvmNode, path_to_address: Json) -> Json {
+        let req = request(
+            std::slice::from_ref(&node.url),
+            json!({ "path_to_address": path_to_address, "scan_policy": "do_not_scan" }),
+        );
+        let result = activate(ctx, req).unwrap_or_else(|e| panic!("the HD activation failed: {}", e));
+        serde_json::to_value(&result).unwrap()
+    }
+
+    fn disable(ctx: &MmArc) { block_on(coins::disable_coin(ctx, PLATFORM)).expect("the platform is disabled"); }
+
+    fn accounts_of(result: &Json) -> &Vec<Json> { result["wallet_balance"]["accounts"].as_array().unwrap() }
+
+    fn paths_of(account: &Json) -> Vec<String> {
+        account["addresses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|address| address["derivation_path"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// T14a (R35a items 1 and 2): an EVM activation at the default path lists address `0` of account `0`; at
+    /// `account_id: 1, address_id: 3` it creates account `1`, reports it alone with addresses `0` to `3`; and a
+    /// later activation -- a restart: the wallet is rebuilt from the storage -- reports every stored account, the
+    /// activated addresses still listed.
+    #[test]
+    fn t14a_the_enabled_address_is_listed_from_activation_and_after_a_restart() {
+        let ctx = hd_ctx();
+        let node = quiet_node();
+
+        let first = activate_at(&ctx, &node, Json::Null);
+        assert_eq!(accounts_of(&first).len(), 1);
+        assert_eq!(accounts_of(&first)[0]["account_index"], 0);
+        assert_eq!(paths_of(&accounts_of(&first)[0]), ["m/44'/60'/0'/0/0"]);
+        disable(&ctx);
+
+        let second = activate_at(
+            &ctx,
+            &node,
+            json!({ "account_id": 1, "chain": "External", "address_id": 3 }),
+        );
+        assert_eq!(
+            accounts_of(&second).len(),
+            1,
+            "the result reports the path's account only, although the wallet holds account 0"
+        );
+        assert_eq!(accounts_of(&second)[0]["account_index"], 1);
+        assert_eq!(paths_of(&accounts_of(&second)[0]), [
+            "m/44'/60'/1'/0/0",
+            "m/44'/60'/1'/0/1",
+            "m/44'/60'/1'/0/2",
+            "m/44'/60'/1'/0/3"
+        ]);
+        disable(&ctx);
+
+        let restarted = activate_at(&ctx, &node, Json::Null);
+        let accounts = accounts_of(&restarted);
+        assert_eq!(
+            accounts.len(),
+            2,
+            "the path's account exists: every stored account is reported"
+        );
+        assert_eq!(paths_of(&accounts[0]), ["m/44'/60'/0'/0/0"]);
+        assert_eq!(accounts[1]["account_index"], 1);
+        assert_eq!(
+            paths_of(&accounts[1]).len(),
+            4,
+            "the addresses of account 1 are still listed"
+        );
+    }
+
+    /// T14a (R35a item 2): another account gets `min_addresses_number` alone, not the path's address count.
+    #[test]
+    fn t14a_other_evm_accounts_get_the_minimum_alone() {
+        let ctx = hd_ctx();
+        let node = quiet_node();
+        activate_at(&ctx, &node, Json::Null);
+        disable(&ctx);
+        activate_at(&ctx, &node, json!({ "account_id": 1 }));
+        disable(&ctx);
+
+        let req = request(
+            std::slice::from_ref(&node.url),
+            json!({
+                "path_to_address": { "account_id": 0, "chain": "External", "address_id": 4 },
+                "scan_policy": "do_not_scan",
+                "min_addresses_number": 2,
+            }),
+        );
+        let result = serde_json::to_value(activate(&ctx, req).unwrap_or_else(|e| panic!("{}", e))).unwrap();
+        let accounts = accounts_of(&result);
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(
+            paths_of(&accounts[0]).len(),
+            5,
+            "the path's account is raised to the activated address"
+        );
+        assert_eq!(
+            paths_of(&accounts[1]).len(),
+            2,
+            "the other account gets the minimum alone"
+        );
+    }
+
+    /// T14a (R35a item 2): an EVM coin has no internal chain, so a path on it raises nothing and the activation
+    /// still succeeds.
+    #[test]
+    fn t14a_an_internal_path_raises_nothing_on_an_evm_coin() {
+        let ctx = hd_ctx();
+        let node = quiet_node();
+        let result = activate_at(
+            &ctx,
+            &node,
+            json!({ "account_id": 0, "chain": "Internal", "address_id": 2 }),
+        );
+        assert_eq!(accounts_of(&result).len(), 1);
+        assert!(paths_of(&accounts_of(&result)[0]).is_empty());
+    }
+
+    /// T14c (R35c): under a software HD login an EVM coin creates accounts without a hardware device -- the first
+    /// call account `1`, `account_id: 3` account `3`, the next call account `2` -- `scan: false` returns no
+    /// addresses, `2^31` answers `AccountLimitReached` and a repeated index `AccountAlreadyExists`, both HTTP 400.
+    #[test]
+    fn t14c_an_evm_coin_creates_accounts_without_a_device() {
+        let ctx = hd_ctx();
+        let node = quiet_node();
+        activate_at(&ctx, &node, Json::Null);
+        let coin = match block_on(lp_coinfind(&ctx, PLATFORM)).unwrap().unwrap() {
+            coins::MmCoinEnum::EthCoin(coin) => coin,
+            other => panic!("not an EVM coin: {}", other.ticker()),
+        };
+
+        let created = CreatedAccount::default();
+        let create = |request: Json| -> MmResult<coins::coin_balance::HDAccountBalance, HDWalletRpcError> {
+            let params: CreateNewAccountParams = serde_json::from_value(request).unwrap();
+            block_on(coin.init_create_account_rpc(params, None::<&NoDevice>, &created))
+        };
+
+        let first = create(json!({ "scan": false })).unwrap();
+        assert_eq!(first.account_index, 1);
+        assert_eq!(first.derivation_path.0.to_string(), "m/44'/60'/1'");
+        assert!(first.addresses.is_empty(), "`scan: false` returns no addresses");
+        assert_eq!(
+            create(json!({ "scan": false, "account_id": 3 })).unwrap().account_index,
+            3
+        );
+        assert_eq!(create(json!({ "scan": false })).unwrap().account_index, 2);
+
+        let error = create(json!({ "scan": false, "account_id": 2_147_483_648u64 }))
+            .unwrap_err()
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::AccountLimitReached {
+                max_accounts_number: 2_147_483_648
+            }),
+            "{:?}",
+            error
+        );
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+
+        let error = create(json!({ "scan": false, "account_id": 3 }))
+            .unwrap_err()
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::AccountAlreadyExists { account_id: 3 }),
+            "{:?}",
+            error
+        );
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+    }
+}

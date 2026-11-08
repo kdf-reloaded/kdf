@@ -214,6 +214,11 @@ jobs:
           # `ordermatch` cell. `application` enables the request tests of `mm2_p2p`.
           - name: peer-decoding
             cmd: "cargo test -p common --lib msgpack_bounds:: && cargo test -p mm2_p2p --features application --lib t4a_ && cargo test -p coins --lib t4a_ && cargo test -p mm2_main --lib t4a_"
+          # The bounded close (CRD ch.28 R27c, T14): the vendored yamux crate's own tests,
+          # which include the deadline of the multiplexer's close. The crate is excluded
+          # from the workspace, so it is run by manifest path (its own Cargo.lock).
+          - name: bounded-close
+            cmd: "cargo test --manifest-path vendor-patches/libp2p-yamux-0.44.0/Cargo.toml"
 
     steps:
       - uses: actions/checkout@v7

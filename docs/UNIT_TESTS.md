@@ -279,7 +279,7 @@ database and the scripted lightwalletd transport of the note-lock harness). CI c
 (`cargo test -p coins --lib z_coin::`). CRD: chapter 39, §39.6.5 (R39.6.5a to R39.6.5h, T39.6.5b to
 T39.6.5e) and T39.5A.a.
 
-The tests of the second file make real Sapling spend proofs and a real Halo2 Ironwood proof; they need
+The tests of the second and third file make real Sapling proofs and a real Halo2 Ironwood proof; they need
 the Sapling parameter files and skip with a message where those are absent (the same arrangement as
 the other wallet-database tests). The first Ironwood build of a test binary derives the Ironwood
 proving key (once per binary, inside the builder) and takes about 100 seconds in a debug build when it
@@ -313,16 +313,19 @@ root of the empty tree and the bundle is output-only (spends disabled), which `t
 | `t39_6_5e_a_submitted_pirate1_withdrawal_is_recorded` | T39.6.5e, R39.6.5g | Through `send_raw_tx`: the fee read from the bytes (10,000), the note excluded from the next selection, the unmined history row with the final amounts that survives the scan, the change as non-spendable balance, then spendable after the scan. Needs the vendored `zcash_client_sqlite`, which skips the Orchard and Ironwood nullifier marking instead of panicking |
 | `t39_6_5a_the_recorder_stores_the_mainnet_withdrawal_with_its_derived_fee` | T39.6.5a, R39.6.5g | The recorded mainnet withdrawal (Sapling spend, two Ironwood actions) goes through the recorder into a real wallet database: stored with the derived fee 10,000; none of the wallet's notes are marked spent |
 
-## ARRR history rows: the wallet's own address in one form, and a withdrawal's recipient (9 tests)
+## ARRR history rows: the wallet's own address in one form, a withdrawal's recipient, and a swap's addresses (14 tests)
 
 Locations: `mm2src/coins/z_coin/z_coin_wallet_db.rs` (module `tests`, the snapshot fixtures of the
 history tests: a wallet database filled by hand, no proofs, no network) and
-`mm2src/coins/z_coin/z_note_lock_tests/withdraw_recipient.rs` (a real Light-mode coin over a wallet
-database and the scripted lightwalletd transport of the note-lock harness). CI cell: `shielded`
-(`cargo test -p coins --lib z_coin::`). CRD: chapter 39, R39.8.9d1, R39.8.9d2, T39.8.9d1, T39.8.9d2.
+`mm2src/coins/z_coin/z_note_lock_tests/withdraw_recipient.rs` and `.../swap_addresses.rs` (a real
+Light-mode coin over a wallet database and the scripted lightwalletd transport of the note-lock
+harness). CI cell: `shielded` (`cargo test -p coins --lib z_coin::`). CRD: chapter 39, R39.8.9d1,
+R39.8.9d2, R39.8.9d3, T39.8.9d1, T39.8.9d2, T39.8.9d3; the swap tests also cover the fee cases of
+R39.8.9e1 and T39.8.9e1.
 
-The recipient comes from a small file of the node's own, `<TICKER>_RELOADED_TX_ADDRESSES.db`, beside
-the wallet database. The tests of the second file make real Sapling spend proofs (the Pirate1 one also
+The recipient and a swap's addresses come from a small file of the node's own,
+`<TICKER>_RELOADED_TX_ADDRESSES.db`, beside the wallet database. The tests of the second and third
+file make real Sapling proofs (the Pirate1 one also
 a real Halo2 proof, with the one-time key derivation described under the Pirate1 withdrawals) and skip
 with a message where the Sapling parameter files are absent. The snapshot transaction used for the
 withdrawal gets a transaction id that is not the same read forwards and backwards, so a missing byte
@@ -333,12 +336,43 @@ reversal between the wallet database's order and the displayed one would fail th
 | `t39_8_9d1_the_own_address_is_listed_only_in_the_form_my_balance_reports` | T39.8.9d1, R39.8.9d1 | Deposit rows and a withdrawal row with change: every entry of `from` and `to` is the address the caller passes (the `my_balance` form), and none is a string from the wallet-database crate's `addresses` table, which is checked to be present |
 | `t39_8_9d2_the_recipient_is_listed_unmined_mined_and_after_a_restart` | T39.8.9d2 (a), (b) | A Sapling and a Pirate1 destination: the withdrawal's row lists it exactly as given, beside the own address for the change, unmined, after a restart, mined, and after another restart; no other row lists it; the row's hash is in display order |
 | `t39_8_9d2_an_entry_without_a_row_adds_none_and_a_row_without_an_entry_lists_no_recipient` | T39.8.9d2 (b), (d) | An entry for a transaction the wallet database does not hold adds no row and no address; with no store file, and with a store file that cannot be read, a row lists no recipient and raises no error |
-| `t39_8_9d2_an_expired_entry_is_removed_unless_its_transaction_is_mined` | T39.8.9d2 (c) | Expired and unmined: removed. Expired and mined, expiry not yet passed by the scan, and no expiry: kept. A second pass removes nothing |
+| `t39_8_9d2_an_expired_entry_is_removed_unless_its_transaction_is_mined` | T39.8.9d2 (c) | Expired and unmined: removed. Expired and mined, expiry not yet passed by the scan, and no expiry height (0): kept. A second pass removes nothing |
+| `t39_8_9d3_entries_on_both_sides_join_the_row_and_survive_a_reopen` | T39.8.9d3, R39.8.9d2 (b) | Snapshot rows: two `to` entries beside the own address on a row that spends and receives; a `from` entry on a row that spends no wallet note, with the wallet as receiver; an entry of another transaction does not leak; the same after the store is reopened. Needs no proofs |
 | `t39_8_9d2_a_completed_scan_pass_prunes_the_address_record` | T39.8.9d2 (c) | The prune point: after a completed scan pass the entry whose expiry the scanned height has passed is gone and the others stay |
 | `t39_8_9d2_the_address_record_survives_a_wallet_database_rebuild` | T39.8.9d2 (a) | The file is named `<TICKER>_RELOADED_TX_ADDRESSES.db` beside the wallet database, and a rebuild of the wallet database leaves its entries |
 | `t39_8_9d2_a_sapling_withdrawal_names_its_recipient_in_every_row` | T39.8.9d1, T39.8.9d2 | A real `withdraw` to a Sapling address, submitted through `send_raw_tx`, scanned into its block, and the coin rebuilt over the same directory: the recipient is in the unmined row, the mined row and after each restart; the deposit row lists the own address only; amounts unchanged |
 | `t39_8_9d2_a_pirate1_withdrawal_names_its_recipient_in_every_row` | T39.8.9d2 | The same for a Pirate1 destination, which the wallet's Sapling keys cannot open: the recipient is the request's string |
 | `t39_8_9d2_an_unsubmitted_withdrawal_adds_no_row_and_its_entry_goes_after_expiry` | T39.8.9d2 (b), (c) | A withdrawal that is built and never submitted adds no row and does not appear on the row of another withdrawal; once the scan passes the expiry height its entry is removed while the mined withdrawal's entry stays |
+| `t39_8_9d3_a_payment_lists_the_script_address_and_nothing_for_the_data_carrier` | T39.8.9d3 (a) | A real `z_send_htlc` payment (two transparent outputs: the script and the data carrier): the row lists the script's pay-to-script-hash address in `to`, which parses as such with the coin's prefix and the script's hash, beside the own address for the change, and nothing else; unmined, after a restart, mined, and after another restart. T39.8.9e1: the row also reports the fee the build paid (read from the transaction: the value leaving the Sapling pool less the transparent outputs), in all four states |
+| `t39_8_9d3_a_fee_payment_lists_the_fee_address_in_the_sapling_form` | T39.8.9d3 (b) | A real `z_send_dex_fee` payment: the row lists the fee address in `to`, encoded with the coin's Sapling prefix and different from the own address, beside the own address for the change; unmined, mined, and after each restart. T39.8.9e1: the row also reports the fee the build paid (read from the transaction), in all four states |
+| `t39_8_9d3_a_spend_and_a_refund_list_the_script_address_as_the_sender` | T39.8.9d3 (c) | A real spend (with the secret) and a real refund of the same payment built by `z_p2sh_spend`: neither has a row before it is mined (R39.8.9i); each mined row lists the script address in `from` and the own address in `to`; the same after a restart. T39.8.9e1 (b): both rows report a fee of `0`, because neither spends a wallet note and neither is recorded at broadcast |
+| `t39_8_9d3_a_failing_record_leaves_the_swap_step_whole_and_the_row_without_the_address` | T39.8.9d3, R39.8.9d2 (d) | The record file is replaced by a directory so every write fails: the payment and the spend are still built, broadcast and returned, and their rows list the own address only. T39.8.9e1: the payment row still reports its fee (held by the wallet database, not by the record) and the spend row reports `0` |
+
+## ARRR history rows: the fee of an own send (8 tests)
+
+Locations: `mm2src/coins/z_coin/z_coin_wallet_db.rs` (module `tests`, the snapshot fixtures of the
+history tests: a wallet database filled by hand, no proofs, no network) and
+`mm2src/coins/z_coin/z_note_lock_tests/history_fee.rs` (a real Light-mode coin over a wallet database
+and the scripted lightwalletd transport of the note-lock harness). CI cell: `shielded`
+(`cargo test -p coins --lib z_coin::`). CRD: chapter 39, R39.8.9e1, T39.8.9e1.
+
+In Light mode `transaction_fee` is the fee the wallet database holds for the transaction, `0` when it
+holds none. The tests of the second file make real Sapling spend proofs (the Pirate1 one also a real
+Halo2 proof, with the one-time key derivation described under the Pirate1 withdrawals) and skip with a
+message where the Sapling parameter files are absent. The swap payment, swap fee payment, swap spend
+and refund cases of T39.8.9e1 are checked by the swap-address tests (the section on the wallet's own
+address and a withdrawal's recipient), not here: there each of those tests also asserts the fee.
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `t39_8_9e1_a_row_with_no_recorded_fee_reports_zero` | T39.8.9e1 (b), (c) | Snapshot with no fee stored (checked to be NULL, not a stored zero): the four deposits and the unmined own send all report `0` |
+| `t39_8_9e1_a_recorded_fee_is_reported_unmined_mined_and_after_a_restart` | T39.8.9e1 (a) | A fee stored for the unmined own send is reported in the coin's decimals, after a restart, once the row is mined and after another restart; no other row reports a fee |
+| `t39_8_9e1_a_fee_belongs_to_its_own_row_only` | T39.8.9e1 (a), (b) | Fees stored for an own send and for another row are each reported by that row alone; the other three rows report `0` |
+| `t39_8_9e1_a_negative_stored_fee_refuses_the_page` | R39.8.9e1 | A negative stored fee is an unreadable row, like a negative amount: the page is refused, not served with a `0` |
+| `t39_8_9e1_an_own_send_reports_its_fee_unmined_mined_and_after_a_restart` | T39.8.9e1 (a), (b) | A real `send_outputs` (the swap-payment path) with fee `F`: the row reports `F` unmined, after a restart, after the block that mines it is scanned and after another restart; the receipt of the funding note, a deposit, reports `0` throughout |
+| `t39_8_9e1_a_sapling_withdrawal_reports_its_fee_in_every_state` | T39.8.9e1 (a) | A real `withdraw` to a Sapling address, submitted through `send_raw_tx`: the fee of the response is the fee of the row in all four states; before submission there is no row |
+| `t39_8_9e1_a_pirate1_withdrawal_reports_its_fee_in_every_state` | T39.8.9e1 (a) | The same for a Pirate1 destination, whose fee is the fixed 10,000 base units whatever the configured fee is |
+| `t39_8_9e1_a_rescanned_own_send_reports_zero_after_a_wallet_database_rebuild` | T39.8.9e1 (c) | After a real send is mined, the wallet database is rebuilt and the funding block and the mining block are scanned again: the own send is found (`spent_by_me` is the note) and reports `0`, the deposit too |
 
 ## ARRR withdraw response: `my_balance_change` is received minus spent (2 tests)
 

@@ -9592,7 +9592,14 @@ mod trie_store_memory_retention {
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
     fn install_legacy_worker(ctx: &MmArc) {
-        let trie_store = Arc::new(PaMutex::new(TrieStore::default()));
+        // The store is built first, so that `pair_liveness` is the one the store holds. The remaining fields come
+        // from the test-only `Default`, so that a field added later cannot break this feature build again. That
+        // `Default` also spawns a worker of its own on a channel of its own: the sender it made is dropped with the
+        // fields this struct update does not take, which ends that worker at its first poll, and it never gets a
+        // batch.
+        let trie_store = TrieStore::default();
+        let pair_liveness = trie_store.pair_liveness.clone();
+        let trie_store = Arc::new(PaMutex::new(trie_store));
         let (trie_ops_tx, mut rx) = mpsc::unbounded::<Vec<TrieOp>>();
         let worker_store = trie_store.clone();
         spawn(async move {
@@ -9601,18 +9608,10 @@ mod trie_store_memory_retention {
             }
         });
         let octx = OrdermatchContext {
-            maker_orders_ctx: Default::default(),
-            my_taker_orders: Default::default(),
-            orderbook: Default::default(),
             trie_store,
+            pair_liveness,
             trie_ops_tx,
-            orderbook_subscriptions: Default::default(),
-            sync_answer_deferral: Default::default(),
-            sync_log: Default::default(),
-            maker_outbox: Default::default(),
-            pending_maker_reserved: Default::default(),
-            orderbook_tickers: Default::default(),
-            original_tickers: Default::default(),
+            ..Default::default()
         };
         from_ctx(&ctx.ordermatch_ctx, move || Ok(octx)).unwrap();
     }
