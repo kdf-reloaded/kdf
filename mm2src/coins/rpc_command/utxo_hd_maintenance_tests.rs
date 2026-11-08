@@ -620,6 +620,66 @@ fn r35b_merge_loop_reads_the_enabled_address_under_hd() {
     assert!(read.iter().all(|address| *address == format!("{enabled}")));
 }
 
+/// R35b, the automatic merge loop, merge branch: under an HD login with a non-default `path_to_address` and
+/// `merge_at` outputs on the enabled address, one round sends exactly one transaction. It spends the enabled
+/// address's outputs only (two other known addresses hold outputs too, which stay untouched), pays one output back
+/// to the enabled address and is signed with the key at the enabled address's path. The loop is stopped after
+/// that first round, by dropping the coin.
+#[test]
+fn r35b_merge_loop_merges_the_enabled_address_under_hd() {
+    let fields = hd_fields(path_to_address(0, Bip44Chain::External, 1), &[(0, 3, 0)]);
+    let address_0 = address_at(&fields, 0, Bip44Chain::External, 0);
+    let enabled = address_at(&fields, 0, Bip44Chain::External, 1);
+    let address_2 = address_at(&fields, 0, Bip44Chain::External, 2);
+    let enabled_key = key_at(&fields, 0, Bip44Chain::External, 1);
+    let requested = mock_unspents(vec![
+        (address_0, vec![unspent(1, 0), unspent(1, 1), unspent(1, 2)]),
+        (enabled.clone(), vec![unspent(2, 0), unspent(2, 1), unspent(2, 2)]),
+        (address_2, vec![unspent(3, 0), unspent(3, 1), unspent(3, 2)]),
+    ]);
+    let sent: Arc<Mutex<Vec<chain::Transaction>>> = Arc::new(Mutex::new(Vec::new()));
+    let sent_txs = sent.clone();
+    UtxoStandardCoin::broadcast_tx.mock_safe(move |_coin, tx| {
+        sent_txs.lock().unwrap().push(tx.clone());
+        MockResult::Return(Box::pin(futures::future::ok(H256Json::default())))
+    });
+    let arc = UtxoArc::new(fields);
+    let weak = arc.downgrade();
+
+    // The loop sleeps first, then merges: the first round runs after one pause, and the coin is dropped as soon as
+    // its transaction is sent. The pause is far longer than the stopper's poll, so the loop wakes to a dropped coin
+    // and ends without a second round. The test takes about two pauses.
+    let seen = sent.clone();
+    let stopper = async move {
+        while seen.lock().unwrap().is_empty() {
+            Timer::sleep(0.01).await;
+        }
+        drop(arc);
+    };
+    let looped = merge_utxo_loop(weak, 3, 5.0, 10, UtxoStandardCoin::from);
+    // Guarded like the other loop tests: a lingering strong reference must fail the test, not hang it.
+    let both = futures::future::join(looped, stopper);
+    match block_on(select(Box::pin(both), Box::pin(Timer::sleep(30.)))) {
+        Either::Left(_) => (),
+        Either::Right(_) => panic!("the merge loop did not end after the coin was dropped"),
+    }
+
+    let sent = sent.lock().unwrap();
+    assert_eq!(sent.len(), 1, "one round sends exactly one merge transaction");
+    let expected: HashSet<OutPoint> = (0..3)
+        .map(|index| OutPoint {
+            hash: 2u8.into(),
+            index,
+        })
+        .collect();
+    assert_eq!(spent_outpoints(&sent[0]), expected);
+    assert_paid_to_and_signed_by(&sent[0], &enabled, &enabled_key);
+    // Only the enabled address was read.
+    let read = requested.lock().unwrap();
+    assert!(!read.is_empty());
+    assert!(read.iter().all(|address| *address == format!("{enabled}")));
+}
+
 /// R35b, the automatic merge loop, under the Trezor policy: the enabled address cannot be used, so the loop ends
 /// by itself with a logged error, reads nothing, and no merge or signing runs.
 #[test]

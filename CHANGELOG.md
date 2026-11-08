@@ -789,6 +789,21 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 - **The close deadline of the connection layer is tested in CI.** The tests of the vendored
   multiplexer crate, which carries the 30-second close deadline, now run as their own CI job.
   Detail: PR #280; CRD ch.28 T14.
+- **Two more tests for HD wallets.** One checks that the automatic UTXO merge under an HD login
+  really sends a merge: one transaction that spends only the outputs of the coin's activated
+  address, pays them back to it and is signed with that address's key. The other pins that an
+  `address_id` of 2^31 − 1 in `path_to_address` fails activation like 2^31 does, before anything is
+  derived, so the highest usable index is 2^31 − 2. The node itself is unchanged. Detail: PR #297;
+  CRD ch.05 R35a, R35b.
+- **CI runs the withdraw tests of `coins` and its QTUM, BCH and SLP tests.** A new CI job runs
+  `cargo test -p coins --lib -- withdraw qtum bch slp`, which until now ran only on developers'
+  machines. It runs without the `live-network-tests` feature, so it skips those of the selected
+  tests that need public servers and runs the offline ones. The node itself is unchanged. Detail:
+  PR #297.
+- **The BCH withdraw test retries when the testnet answers "Missing inputs".** The test broadcasts
+  to the public BCH testnet from a wallet that every CI run shares. It already retried a broadcast
+  rejected as a mempool conflict. A broadcast rejected with "Missing inputs" failed the test
+  instead; it is now retried the same way. The node itself is unchanged. Detail: PR #297.
 
 ### Documentation
 

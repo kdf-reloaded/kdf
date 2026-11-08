@@ -12553,6 +12553,43 @@ pub(crate) mod hd_accounts_at_index_tests {
         assert_eq!(stored(&items, 0).external_addresses_number, 0);
     }
 
+    /// T14a, R35a item 3, the corner below the limit: an `address_id` of 2^31 - 1 is a valid child index, yet the
+    /// activation must hold addresses `0` to `2^31 - 1`, a count of 2^31, which is refused. The activation fails
+    /// with the same address-limit failure as the limit case and no address is derived or read. Only the empty
+    /// account row for the path is stored, with no address count.
+    #[test]
+    fn t14a_the_last_valid_address_id_needs_a_minimum_beyond_the_limit_and_fails_activation() {
+        let items = mock_storage();
+        NativeClient::list_all_transactions
+            .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(Vec::new()))));
+        NativeClient::display_balances.mock_safe(|_, addresses: Vec<Address>, _| {
+            // The known addresses of the new account are none: only an empty request may reach the node.
+            assert!(
+                addresses.is_empty(),
+                "no balance is read for an address of a refused activation"
+            );
+            MockResult::Return(Box::new(futures01::future::ok(Vec::new())))
+        });
+        let coin = hd_coin(HDAccountsMap::new());
+
+        let error = enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(0, Bip44Chain::External, crypto::ChildNumber::HARDENED_FLAG - 1)),
+        )
+        .err()
+        .expect("the activation must fail");
+
+        assert!(
+            matches!(error, EnableCoinBalanceError::BalanceError(BalanceError::Internal(_))),
+            "the address-limit failure of the balance error set: {}",
+            error
+        );
+        assert_eq!(stored(&items, 0).external_addresses_number, 0);
+        assert_eq!(stored(&items, 0).internal_addresses_number, 0);
+    }
+
     /// T14a, R35a item 2: the account the path names alone is raised to the activated address; every other account
     /// gets `min_addresses_number` alone.
     #[test]
