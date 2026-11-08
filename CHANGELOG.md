@@ -2911,8 +2911,8 @@ Highlights:
 
 Tag `v0.2.0-beta.1` (2026-08-05) was cut on `staging` from the development line as of commit
 6dc1b63b1, part-way through 0.3.0-alpha.1. Its section above is the tag's own text, restored on
-2026-11-08; until then its entries were listed under 0.3.0-alpha.1. Three later corrections to its
-KMD fee entry are in the 0.3.0-alpha.1 section.
+2026-11-08; until then its entries were listed under 0.3.0-alpha.1. The correction of its KMD fee
+entry is in the 0.3.0-alpha.1 section (the entry marked "Superseded (issue #11)").
 
 [Unreleased]: https://github.com/kdf-reloaded/kdf/compare/v0.3.0-beta.1...HEAD
 [0.3.0-beta.1]: https://github.com/kdf-reloaded/kdf/compare/ddb87a4849f91400b1b4aa120090f1acb12aa7bf...v0.3.0-beta.1
