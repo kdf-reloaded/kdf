@@ -131,7 +131,7 @@ impl WcSessionPersistence {
     ///
     /// An absent (or `null`) value defaults to [`WcSessionPersistence::Open`].
     /// The reserved `encrypted` value, any non-string value, and any
-    /// unrecognised string each yield an explanatory error that names the
+    /// unrecognized string each yield an explanatory error that names the
     /// setting, the offending value, and the allowed values. The node stops
     /// its start-up on that error through [`validate_session_persistence`].
     ///
@@ -172,7 +172,7 @@ impl WcSessionPersistence {
 
 /// Checks the `wc_session_persistence` setting of the node configuration without using WalletConnect.
 ///
-/// The node calls this at start-up so that an invalid value (the reserved `encrypted`, an unrecognised string
+/// The node calls this at start-up so that an invalid value (the reserved `encrypted`, an unrecognized string
 /// or a non-string value) stops the launch, instead of failing the first WalletConnect RPC. It applies the same
 /// parsing as the first use of the subsystem; an absent or `null` value is valid.
 ///

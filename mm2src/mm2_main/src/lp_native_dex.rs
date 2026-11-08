@@ -276,7 +276,7 @@ fn validate_netid_range(conf: &json::Value) -> MmInitResult<()> {
 }
 
 /// Refuses the launch when `wc_session_persistence` holds a value the WalletConnect subsystem cannot use (CRD ch.22
-/// §22.5.1): the reserved `encrypted`, an unrecognised string or a non-string value.
+/// §22.5.1): the reserved `encrypted`, an unrecognized string or a non-string value.
 fn validate_wc_session_persistence(conf: &json::Value) -> MmInitResult<()> {
     kdf_walletconnect::validate_session_persistence(conf).map_to_mm(|e| MmInitError::ErrorDeserializingConfig {
         field: "wc_session_persistence".to_owned(),
