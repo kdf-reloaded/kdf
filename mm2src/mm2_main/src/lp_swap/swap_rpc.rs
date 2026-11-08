@@ -2,48 +2,76 @@ use super::*;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mm2::database::stats_swaps::FiatPriceSnapshot;
 #[cfg(not(target_arch = "wasm32"))]
-use mm2_net::transport::slurp_url;
+use crate::mm2::lp_ordermatch::price_service::{fetch_combined, pair_usd_prices, PriceServiceContext, PriceSource,
+                                               PriceTable};
 
+/// The tickers of the maker coin and the taker coin of `swap`.
 #[cfg(not(target_arch = "wasm32"))]
-const PRICE_SERVICE_ENDPOINT: &str = "https://prices.komodo.live:1313/api/v2/tickers";
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Deserialize)]
-struct FiatTickerInfo {
-    last_price: BigDecimal,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn strip_platform_suffix(ticker: &str) -> &str { ticker.split('-').next().unwrap_or(ticker) }
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn fetch_completion_fiat_snapshot(swap: &SavedSwap) -> Option<FiatPriceSnapshot> {
-    let (status, _, body) = slurp_url(PRICE_SERVICE_ENDPOINT).await.ok()?;
-    if status != StatusCode::OK {
-        return None;
-    }
-
-    let response = std::str::from_utf8(&body).ok()?;
-    fiat_snapshot_from_price_response(swap, response)
-}
-
-/// Picks the reference prices of the two coins of `swap` out of a price-service response body.
-#[cfg(not(target_arch = "wasm32"))]
-fn fiat_snapshot_from_price_response(swap: &SavedSwap, response: &str) -> Option<FiatPriceSnapshot> {
+fn coin_tickers(swap: &SavedSwap) -> Option<(String, String)> {
     let maker_coin = swap.maker_coin_ticker().ok()?;
     let taker_coin = swap.taker_coin_ticker().ok()?;
-    let maker_coin = strip_platform_suffix(&maker_coin);
-    let taker_coin = strip_platform_suffix(&taker_coin);
+    Some((maker_coin, taker_coin))
+}
 
-    let prices: HashMap<String, FiatTickerInfo> = serde_json::from_str(response.trim()).ok()?;
+/// Fetches the USD prices of the two coins of `swap` from the price sources of this node: the `price_urls` key of
+/// `MM2.json`, or the default sources, combined (CRD ch.62 R62.7, D62.7).
+#[cfg(not(target_arch = "wasm32"))]
+async fn fetch_completion_fiat_snapshot(ctx: &MmArc, swap: &SavedSwap) -> Option<FiatPriceSnapshot> {
+    let (maker_coin, taker_coin) = coin_tickers(swap)?;
+    let price_ctx = match PriceServiceContext::from_ctx(ctx) {
+        Ok(price_ctx) => price_ctx,
+        Err(err) => {
+            debug!("No fiat prices for the swap: {}", err);
+            return None;
+        },
+    };
+    fiat_snapshot_for_coins(&price_ctx, &price_ctx.sources, &maker_coin, &taker_coin).await
+}
 
-    let maker_coin_usd_price = prices.get(maker_coin)?.last_price.to_string();
-    let taker_coin_usd_price = prices.get(taker_coin)?.last_price.to_string();
+/// Fetches the sources, combines them and derives the USD prices of the two coins. No snapshot is returned when no
+/// source answers or the prices of the coins are refused (R62.5.1).
+#[cfg(not(target_arch = "wasm32"))]
+async fn fiat_snapshot_for_coins(
+    price_ctx: &PriceServiceContext,
+    sources: &[PriceSource],
+    maker_coin: &str,
+    taker_coin: &str,
+) -> Option<FiatPriceSnapshot> {
+    match fetch_combined(price_ctx, sources).await {
+        Ok(table) => fiat_snapshot_from_table(&table, maker_coin, taker_coin),
+        Err(err) => {
+            debug!("No fiat prices for the swap: {:?}", err);
+            None
+        },
+    }
+}
 
+/// Derives the snapshot of the maker coin against the taker coin from a combined table (CRD ch.62 R62.5.1): both
+/// tickers resolve and the taker coin's price is not zero. The table holds recognized providers and non-zero
+/// timestamps only. There is no age window (R62.7.4).
+#[cfg(not(target_arch = "wasm32"))]
+fn fiat_snapshot_from_table(table: &PriceTable, maker_coin: &str, taker_coin: &str) -> Option<FiatPriceSnapshot> {
+    let (maker_coin_usd_price, taker_coin_usd_price) = pair_usd_prices(table, maker_coin, taker_coin)?;
     Some(FiatPriceSnapshot {
-        maker_coin_usd_price,
-        taker_coin_usd_price,
+        maker_coin_usd_price: maker_coin_usd_price.to_string(),
+        taker_coin_usd_price: taker_coin_usd_price.to_string(),
     })
+}
+
+/// The snapshot of `swap` out of one price document, as if it were the only source and the providers were the
+/// default ones. A test seam for the tests that need no HTTP.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn fiat_snapshot_from_price_response(swap: &SavedSwap, response: &str) -> Option<FiatPriceSnapshot> {
+    use crate::mm2::lp_ordermatch::price_service::{combine_sources, parse_price_document, ProviderSet, SourceTable};
+
+    let (maker_coin, taker_coin) = coin_tickers(swap)?;
+    let records = parse_price_document(response.trim()).ok()?;
+    let source = SourceTable {
+        host: "test".to_string(),
+        records,
+    };
+    let combined = combine_sources(vec![source], &ProviderSet::default_set());
+    fiat_snapshot_from_table(&combined.table, &maker_coin, &taker_coin)
 }
 
 pub fn my_swaps_dir(ctx: &MmArc) -> PathBuf { ctx.dbdir().join("SWAPS").join("MY") }
@@ -75,9 +103,23 @@ pub async fn insert_new_swap_to_db_with_type(
         .map_err(|e| ERRL!("{}", e))
 }
 
+/// Stores a received swap report in the statistics store, priced at receive time whether the swap succeeded or not;
+/// the prices the report might carry are not used (CRD ch.62 R62.7.2).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn save_stats_swap(ctx: &MmArc, swap: &SavedSwap) -> Result<(), String> {
-    let fiat_snapshot = fetch_completion_fiat_snapshot(swap).await;
+    let fiat_snapshot = fetch_completion_fiat_snapshot(ctx, swap).await;
+    save_stats_swap_with_snapshot(ctx, swap, fiat_snapshot.as_ref()).await
+}
+
+/// Stores the report of the node's own finished swap in the statistics store. The prices are fetched here, once,
+/// and only for a successful swap: a failed swap is stored without prices (CRD ch.62 R62.7.1).
+#[cfg(not(target_arch = "wasm32"))]
+async fn save_own_stats_swap(ctx: &MmArc, swap: &SavedSwap) -> Result<(), String> {
+    let fiat_snapshot = if swap.is_finished_and_success() {
+        fetch_completion_fiat_snapshot(ctx, swap).await
+    } else {
+        None
+    };
     save_stats_swap_with_snapshot(ctx, swap, fiat_snapshot.as_ref()).await
 }
 
@@ -234,14 +276,16 @@ fn publish_swap_status(ctx: &MmArc, status: SavedSwap) {
 }
 
 /// Makes the terminal swap-status report of the node's own swap (CRD ch.51 R48, R50A): loads and redacts the
-/// record, stores it in the node's own statistics store on a native build, then publishes it to the P2P network.
+/// record, stores it (with the USD prices of a successful swap, fetched once) in the node's own statistics store on
+/// a native build, then publishes it to the P2P network.
 /// The caller makes the report for every legacy swap termination, whatever the coins or the outcome.
 pub(crate) async fn broadcast_my_swap_status(ctx: &MmArc, uuid: Uuid) -> Result<(), String> {
     let status = try_s!(load_redacted_my_swap(ctx, uuid).await);
 
     #[cfg(not(target_arch = "wasm32"))]
-    try_s!(save_stats_swap(ctx, &status).await);
+    try_s!(save_own_stats_swap(ctx, &status).await);
 
+    // The publication reuses the record as stored: it makes no price request of its own.
     publish_swap_status(ctx, status);
     Ok(())
 }
@@ -1207,3 +1251,153 @@ mod lp_swap_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "terminal_report_tests.rs"]
 mod terminal_report_tests;
+
+/// The reference prices recorded at swap completion (CRD ch.62 R62.5.1, R62.7): the saved answers of both default
+/// price services, the combination of the sources and the refusals. The services are loopback servers that answer
+/// canned texts.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod price_snapshot_tests {
+    use super::*;
+    use crate::mm2::lp_ordermatch::price_service::stub_server::{dead_url, price_document, serve, OK, SERVER_ERROR};
+    use crate::mm2::lp_ordermatch::price_service::{combine_sources, parse_price_document, ProviderSet, SourceTable};
+    use common::block_on;
+    use std::sync::atomic::Ordering;
+
+    /// Trimmed answers of the two default price services, saved on 2026-11-07.
+    const DEFISTATS_ANSWER: &str = include_str!("../for_tests/price_defistats_tickers_v2.json");
+    const CIPIG_ANSWER: &str = include_str!("../for_tests/price_cipig_tickers.json");
+
+    fn price(text: &str) -> BigDecimal { BigDecimal::from_str(text).unwrap() }
+
+    fn assert_prices(snapshot: &FiatPriceSnapshot, maker: &str, taker: &str) {
+        assert_eq!(price(&snapshot.maker_coin_usd_price), price(maker));
+        assert_eq!(price(&snapshot.taker_coin_usd_price), price(taker));
+    }
+
+    fn price_ctx(sources: Vec<PriceSource>) -> PriceServiceContext {
+        PriceServiceContext::new(sources, ProviderSet::default_set())
+    }
+
+    /// The combined table of one document, as if it were the only source.
+    fn table_of(document: &str) -> PriceTable {
+        let source = SourceTable {
+            host: "test".to_string(),
+            records: parse_price_document(document).unwrap(),
+        };
+        combine_sources(vec![source], &ProviderSet::default_set()).table
+    }
+
+    #[test]
+    fn the_snapshot_reads_the_prices_out_of_each_saved_answer() {
+        for (answer, rin, kmd) in [
+            (DEFISTATS_ANSWER, "0.0004366169", "0.00677448"),
+            (CIPIG_ANSWER, "0.0004324538", "0.0067748"),
+        ] {
+            let table = table_of(answer);
+            let snapshot = fiat_snapshot_from_table(&table, "RIN", "KMD").unwrap();
+            assert_prices(&snapshot, rin, kmd);
+            assert!(fiat_snapshot_from_table(&table, "RIN", "NOSUCH").is_none());
+        }
+    }
+
+    #[test]
+    fn a_token_ticker_is_priced_by_the_ticker_of_its_asset() {
+        let table = table_of(&price_document(&[
+            ("USDT", "1.0", "binance", 1_794_066_000),
+            ("RIN", "0.02", "livecoinwatch", 1_794_066_000),
+        ]));
+        let snapshot = fiat_snapshot_from_table(&table, "RIN", "USDT-PLG20").unwrap();
+        assert_prices(&snapshot, "0.02", "1.0");
+    }
+
+    /// R62.5.1 (b)-(d): an unrecognized provider, a zero timestamp and a zero taker price give no prices; a zero
+    /// maker price is stored.
+    #[test]
+    fn the_refusals_of_the_pair_rate_give_no_prices() {
+        let unrecognized = table_of(&price_document(&[
+            ("RIN", "0.02", "gleeccex", 1_794_066_000),
+            ("KMD", "0.25", "binance", 1_794_066_000),
+        ]));
+        assert!(fiat_snapshot_from_table(&unrecognized, "RIN", "KMD").is_none());
+        let unknown = table_of(&price_document(&[
+            ("RIN", "0.02", "unknown", 1_794_066_000),
+            ("KMD", "0.25", "binance", 1_794_066_000),
+        ]));
+        assert!(fiat_snapshot_from_table(&unknown, "RIN", "KMD").is_none());
+        let no_timestamp = table_of(&price_document(&[
+            ("RIN", "0.02", "binance", 0),
+            ("KMD", "0.25", "binance", 1_794_066_000),
+        ]));
+        assert!(fiat_snapshot_from_table(&no_timestamp, "RIN", "KMD").is_none());
+        let zero_taker = table_of(&price_document(&[
+            ("RIN", "0.02", "binance", 1_794_066_000),
+            ("KMD", "0", "binance", 1_794_066_000),
+        ]));
+        assert!(fiat_snapshot_from_table(&zero_taker, "RIN", "KMD").is_none());
+        let zero_maker = table_of(&price_document(&[
+            ("RIN", "0", "binance", 1_794_066_000),
+            ("KMD", "0.25", "binance", 1_794_066_000),
+        ]));
+        assert_prices(
+            &fiat_snapshot_from_table(&zero_maker, "RIN", "KMD").unwrap(),
+            "0",
+            "0.25",
+        );
+    }
+
+    #[test]
+    fn a_coin_whose_sources_disagree_is_not_priced() {
+        let (first, _) = serve(
+            OK,
+            price_document(&[
+                ("RIN", "0.02", "binance", 1_794_066_000),
+                ("KMD", "0.00678", "coingecko", 1_794_066_000),
+            ]),
+        );
+        let (second, _) = serve(
+            OK,
+            price_document(&[
+                ("RIN", "0.02", "binance", 1_794_066_100),
+                ("KMD", "0.00313", "coinpaprika", 1_794_066_100),
+            ]),
+        );
+        let sources = vec![vec![first], vec![second]];
+        let ctx = price_ctx(sources.clone());
+        assert!(block_on(fiat_snapshot_for_coins(&ctx, &sources, "RIN", "KMD")).is_none());
+        let snapshot = block_on(fiat_snapshot_for_coins(&ctx, &sources, "KMD", "RIN"));
+        assert!(snapshot.is_none(), "either coin in conflict gives no prices");
+        // RIN alone is priced.
+        let rin = block_on(fiat_snapshot_for_coins(&ctx, &sources, "RIN", "RIN")).unwrap();
+        assert_prices(&rin, "0.02", "0.02");
+    }
+
+    #[test]
+    fn the_snapshot_combines_two_sources() {
+        let (first, first_hits) = serve(OK, DEFISTATS_ANSWER);
+        let (second, second_hits) = serve(OK, CIPIG_ANSWER);
+        let sources = vec![vec![first], vec![second]];
+        let ctx = price_ctx(sources.clone());
+        // MON is served by the second source only; RIN by both, the newer record (the second) wins.
+        let snapshot = block_on(fiat_snapshot_for_coins(&ctx, &sources, "MON", "RIN")).unwrap();
+        assert_prices(&snapshot, "0.016405422", "0.0004324538");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn one_source_down_the_other_prices_the_swap() {
+        let (second, _) = serve(OK, CIPIG_ANSWER);
+        let sources = vec![vec![dead_url()], vec![second]];
+        let ctx = price_ctx(sources.clone());
+        let snapshot = block_on(fiat_snapshot_for_coins(&ctx, &sources, "RIN", "KMD")).unwrap();
+        assert_prices(&snapshot, "0.0004324538", "0.0067748");
+    }
+
+    #[test]
+    fn no_source_answering_gives_no_snapshot() {
+        let (first, _) = serve(SERVER_ERROR, "");
+        let sources = vec![vec![first], vec![dead_url()]];
+        let ctx = price_ctx(sources.clone());
+        assert!(block_on(fiat_snapshot_for_coins(&ctx, &sources, "RIN", "KMD")).is_none());
+    }
+}
