@@ -112,6 +112,12 @@ neither table knows the name — is rendered in the mmrpc 2.0 envelope
 not implement this fallback (compatibility note below; chapter 55 §55.1
 Reloaded-status note); D43.1A.2 decides whether it should.
 
+> *Reloaded status (clean side, 2026-11-08):* D43.1A.2 is resolved as
+> option (i). Since PR #312 Reloaded implements the fallback, and
+> R43.1A.1a–R43.1A.1e bind it. The last sentence of R43.1A.1 and the
+> conditional wording of the fallback-detail lead and of R43.1A.1e describe
+> the state before that change.
+
 > **Fallback detail (R43.1A.1a--R43.1A.1e; added 2026-11-08, round
 > 0.4.0-8b) -- passed the KDF Dirty Gate on 2026-11-08, measure 0.01
 > (attestation in §43.7).** The five sub-rules below refine the one-way
@@ -513,7 +519,7 @@ shall be wound down as part of shutdown rather than abandoned.
   failure class (R43.1A.6; D43.1A.3).
 - *(§43.1A fallback detail R43.1A.1a--R43.1A.1e; passed the KDF Dirty Gate on
   2026-11-08 -- reference behavior; binds Reloaded only if D43.1A.2 is decided
-  as option (i).)* A legacy request (no `mmrpc`) for a versioned-only method
+  as option (i).)* *(Decided: option (i), PR #312.)* A legacy request (no `mmrpc`) for a versioned-only method
   whose body has only `userpass`, `method`, `params` and `id` answers that
   method's result or typed error in the mmrpc 2.0 envelope with `mmrpc`
   `"2.0"`, the method's bound HTTP status and the request's `id` echoed

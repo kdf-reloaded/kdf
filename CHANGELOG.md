@@ -517,8 +517,8 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   mmrpc 2.0 envelope: the method's result, its typed error, `InvalidRequest` (HTTP 400) when the body
   has members other than `userpass`, `method`, `params` and `id`, or `NoSuchMethod` (HTTP 400) when
   neither interface knows the name. Until now such a request answered the legacy error body with
-  HTTP 500. A request without a valid `userpass` is still refused with the legacy error body before
-  any retry. `setprice`, `buy`, `sell`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
+  HTTP 500. A request that needs a password and lacks a valid `userpass` is still refused with the
+  legacy error body before any retry. `setprice`, `buy`, `sell`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
   `my_orders`, `order_status` and `orderbook_depth` stay legacy-only, as on GLEEC KDF: called with
   `mmrpc`, they answer `NoSuchMethod`. Detail: PR #312; CRD ch.43 §43.1A, R43.1A.1a–R43.1A.1e.
 
