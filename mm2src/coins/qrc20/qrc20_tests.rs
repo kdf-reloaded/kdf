@@ -1,5 +1,6 @@
 use super::*;
 use crate::utxo::rpc_clients::UnspentInfo;
+use crate::utxo::utxo_tests::tqtum_test_servers;
 use crate::TxFeeDetails;
 use bigdecimal::Zero;
 use chain::OutPoint;
@@ -19,6 +20,8 @@ fn test_dex_fee_addr_raw_pubkey() -> &'static [u8] {
     mm2_net_config::net_config_or_panic(8762).dex_fee_addr_raw_pubkey()
 }
 
+/// The coin's fixed fee rate: 1000 satoshi per kilobyte. The fee of a built transaction is this rate in proportion
+/// to the transaction's size, truncated (CRD ch.38 R38.6.6b), so the amounts below are exact byte counts.
 const EXPECTED_TX_FEE: i64 = 1000;
 const CONTRACT_CALL_GAS_FEE: i64 = (QRC20_GAS_LIMIT_DEFAULT * QRC20_GAS_PRICE_DEFAULT) as i64;
 const SWAP_PAYMENT_GAS_FEE: i64 = (QRC20_PAYMENT_GAS_LIMIT * QRC20_GAS_PRICE_DEFAULT) as i64;
@@ -42,7 +45,7 @@ fn qrc20_coin_for_test_with_decimals(priv_key: &[u8], fallback_swap: Option<&str
     });
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
         "swap_contract_address": "0xba8b71f3544b93e2f681f996da519a98ace0107a",
         "fallback_swap_contract": fallback_swap,
     });
@@ -69,6 +72,7 @@ fn check_tx_fee(coin: &Qrc20Coin, expected_tx_fee: ActualTxFee) {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_withdraw_impl_fee_details() {
     Qrc20Coin::get_unspent_ordered_list.mock_safe(|coin, _| {
         let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
@@ -105,10 +109,10 @@ fn test_withdraw_impl_fee_details() {
 
     let expected: Qrc20FeeDetails = json::from_value(json!({
         "coin": "QTUM",
-        // 1000 from satoshi,
-        // where decimals = 8,
-        //       1000 is fixed fee
-        "miner_fee": "0.00001",
+        // 299 satoshi, where decimals = 8:
+        // 1000 satoshi per kilobyte in proportion to the size of the built transaction,
+        // which is 299 bytes (CRD ch.38 R38.6.6b)
+        "miner_fee": "0.00000299",
         "gas_limit": 2_500_000,
         "gas_price": 40,
         // (gas_limit * gas_price) from satoshi in Qtum
@@ -119,6 +123,7 @@ fn test_withdraw_impl_fee_details() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_validate_maker_payment() {
     // this priv_key corresponds to "taker_passphrase" passphrase
     let priv_key = [
@@ -180,6 +185,7 @@ fn test_validate_maker_payment() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_wait_for_confirmations_excepted() {
     // this priv_key corresponds to "taker_passphrase" passphrase
     let priv_key = [
@@ -199,7 +205,9 @@ fn test_wait_for_confirmations_excepted() {
 
     let confirmations = 1;
     let requires_nota = false;
-    let wait_until = (now_ms() / 1000) + 1; // the transaction is mined already
+    // the transactions are mined already, so the call returns as soon as the server answers;
+    // the bound only has to cover the latency of a public testnet server
+    let wait_until = (now_ms() / 1000) + 60;
     let check_every = 1;
     coin.wait_for_confirmations(&payment_tx, confirmations, requires_nota, wait_until, check_every)
         .wait()
@@ -227,6 +235,7 @@ fn test_wait_for_confirmations_excepted() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_send_taker_fee() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -264,6 +273,7 @@ fn test_send_taker_fee() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_validate_fee() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -372,6 +382,7 @@ fn test_validate_fee() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_wait_for_tx_spend_malicious() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -404,6 +415,7 @@ fn test_wait_for_tx_spend_malicious() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_extract_secret() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -423,6 +435,7 @@ fn test_extract_secret() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_extract_secret_malicious() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -443,6 +456,7 @@ fn test_extract_secret_malicious() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_generate_token_transfer_script_pubkey() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -492,6 +506,7 @@ fn test_generate_token_transfer_script_pubkey() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_transfer_details_by_hash() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -646,6 +661,7 @@ fn test_transfer_details_by_hash() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_get_trade_fee() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -672,6 +688,7 @@ fn test_get_trade_fee() {
 /// `qKEDGuogDhtH9zBnc71QtqT1KDamaR1KJ3` address has `0` allowance,
 /// so only one `approve` and one `erc20Payment` contract calls should be included in the estimated trade fee.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_sender_trade_preimage_zero_allowance() {
     // priv_key of qKEDGuogDhtH9zBnc71QtqT1KDamaR1KJ3
     // please note this address should have an immutable balance
@@ -686,11 +703,14 @@ fn test_sender_trade_preimage_zero_allowance() {
     let allowance = block_on(coin.allowance(coin.swap_contract_address)).expect("!allowance");
     assert_eq!(allowance, 0.into());
 
-    let erc20_payment_fee_with_one_approve = big_decimal_from_sat(
-        CONTRACT_CALL_GAS_FEE + SWAP_PAYMENT_GAS_FEE + EXPECTED_TX_FEE,
-        coin.utxo.decimals,
-    );
-    let sender_refund_fee = big_decimal_from_sat(CONTRACT_CALL_GAS_FEE + EXPECTED_TX_FEE, coin.utxo.decimals);
+    // The miner fee is 1000 satoshi per kilobyte in proportion to the size of each built transaction
+    // (CRD ch.38 R38.6.6b). The `erc20Payment` transaction (with the `approve` output) and the refund transaction
+    // are 931 bytes in all, so their miner fees are 931 satoshi in all.
+    const TX_SIZES_TOTAL: i64 = 931;
+    let erc20_payment_fee_with_one_approve =
+        big_decimal_from_sat(CONTRACT_CALL_GAS_FEE + SWAP_PAYMENT_GAS_FEE, coin.utxo.decimals);
+    let sender_refund_fee = big_decimal_from_sat(CONTRACT_CALL_GAS_FEE, coin.utxo.decimals);
+    let tx_fees = big_decimal_from_sat(TX_SIZES_TOTAL * EXPECTED_TX_FEE / 1000, coin.utxo.decimals);
 
     let actual =
         block_on(coin.get_sender_trade_fee(TradePreimageValue::Exact(1.into()), FeeApproxStage::WithoutApprox))
@@ -698,7 +718,7 @@ fn test_sender_trade_preimage_zero_allowance() {
     // one `approve` contract call should be included into the expected trade fee
     let expected = TradeFee {
         coin: "QTUM".to_owned(),
-        amount: (erc20_payment_fee_with_one_approve + sender_refund_fee).into(),
+        amount: (erc20_payment_fee_with_one_approve + sender_refund_fee + tx_fees).into(),
         paid_from_trading_vol: false,
     };
     assert_eq!(actual, expected);
@@ -708,6 +728,7 @@ fn test_sender_trade_preimage_zero_allowance() {
 /// so if the value is `2.5`, then only one `erc20Payment` contract call should be included in the estimated trade fee,
 /// if the value is `3.5`, then two `approve` and one `erc20Payment` contract call should be included in the estimated trade fee.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_sender_trade_preimage_with_allowance() {
     // priv_key of qeUbAVgkPiF62syqd792VJeB9BaqMtLcZV
     // please note this address should have an immutable balance
@@ -722,13 +743,15 @@ fn test_sender_trade_preimage_with_allowance() {
     let allowance = block_on(coin.allowance(coin.swap_contract_address)).expect("!allowance");
     assert_eq!(allowance, 300_000_000.into());
 
-    let erc20_payment_fee_without_approve =
-        big_decimal_from_sat(SWAP_PAYMENT_GAS_FEE + EXPECTED_TX_FEE, coin.utxo.decimals);
-    let erc20_payment_fee_with_two_approves = big_decimal_from_sat(
-        2 * CONTRACT_CALL_GAS_FEE + SWAP_PAYMENT_GAS_FEE + EXPECTED_TX_FEE,
-        coin.utxo.decimals,
-    );
-    let sender_refund_fee = big_decimal_from_sat(CONTRACT_CALL_GAS_FEE + EXPECTED_TX_FEE, coin.utxo.decimals);
+    // The miner fee is 1000 satoshi per kilobyte in proportion to the size of each built transaction
+    // (CRD ch.38 R38.6.6b). Without an `approve` output, the `erc20Payment` transaction and the refund transaction
+    // are 1120 bytes in all, so their miner fees are 1120 satoshi in all.
+    const TX_SIZES_TOTAL: i64 = 1120;
+    let erc20_payment_fee_without_approve = big_decimal_from_sat(SWAP_PAYMENT_GAS_FEE, coin.utxo.decimals);
+    let erc20_payment_fee_with_two_approves =
+        big_decimal_from_sat(2 * CONTRACT_CALL_GAS_FEE + SWAP_PAYMENT_GAS_FEE, coin.utxo.decimals);
+    let sender_refund_fee = big_decimal_from_sat(CONTRACT_CALL_GAS_FEE, coin.utxo.decimals);
+    let tx_fees = big_decimal_from_sat(TX_SIZES_TOTAL * EXPECTED_TX_FEE / 1000, coin.utxo.decimals);
 
     let actual = block_on(coin.get_sender_trade_fee(
         TradePreimageValue::Exact(BigDecimal::try_from(2.5).unwrap()),
@@ -738,7 +761,7 @@ fn test_sender_trade_preimage_with_allowance() {
     // the expected fee should not include any `approve` contract call
     let expected = TradeFee {
         coin: "QTUM".to_owned(),
-        amount: (erc20_payment_fee_without_approve + sender_refund_fee.clone()).into(),
+        amount: (erc20_payment_fee_without_approve + sender_refund_fee.clone() + tx_fees.clone()).into(),
         paid_from_trading_vol: false,
     };
     assert_eq!(actual, expected);
@@ -748,17 +771,29 @@ fn test_sender_trade_preimage_with_allowance() {
         FeeApproxStage::WithoutApprox,
     ))
     .expect("!get_sender_trade_fee");
-    // two `approve` contract calls should be included into the expected trade fee
-    let expected = TradeFee {
-        coin: "QTUM".to_owned(),
-        amount: (erc20_payment_fee_with_two_approves + sender_refund_fee).into(),
-        paid_from_trading_vol: false,
-    };
-    assert_eq!(actual, expected);
+    // Two `approve` contract calls should be included into the expected trade fee. The two `approve` outputs make
+    // the `erc20Payment` transaction larger, so its miner fee grows by the size of the two outputs, which is
+    // below one kilobyte (1000 satoshi): the miner fees stay below `tx_fees` plus 1000 satoshi.
+    let expected_gas_fee = erc20_payment_fee_with_two_approves + sender_refund_fee;
+    assert_eq!(actual.coin, "QTUM");
+    assert!(!actual.paid_from_trading_vol);
+    let actual_amount = actual.amount.to_decimal();
+    assert!(
+        actual_amount >= &expected_gas_fee + &tx_fees,
+        "{} < {}",
+        actual_amount,
+        &expected_gas_fee + &tx_fees
+    );
+    assert!(
+        actual_amount < &expected_gas_fee + &tx_fees + big_decimal_from_sat(EXPECTED_TX_FEE, coin.utxo.decimals),
+        "{} is too large",
+        actual_amount
+    );
 }
 
 /// `receiverSpend` should be included in the estimated trade fee.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_receiver_trade_preimage() {
     // priv_key of qeUbAVgkPiF62syqd792VJeB9BaqMtLcZV
     // please note this address should have an immutable balance
@@ -775,7 +810,9 @@ fn test_receiver_trade_preimage() {
         .wait()
         .expect("!get_receiver_trade_fee");
     // only one contract call should be included into the expected trade fee
-    let expected_receiver_fee = big_decimal_from_sat(CONTRACT_CALL_GAS_FEE + EXPECTED_TX_FEE, coin.utxo.decimals);
+    // The miner fee is 1000 satoshi per kilobyte in proportion to the size of the built transaction
+    // (CRD ch.38 R38.6.6b). The `receiverSpend` transaction is 544 bytes, so its miner fee is 544 satoshi.
+    let expected_receiver_fee = big_decimal_from_sat(CONTRACT_CALL_GAS_FEE + 544, coin.utxo.decimals);
     let expected = TradeFee {
         coin: "QTUM".to_owned(),
         amount: expected_receiver_fee.into(),
@@ -786,6 +823,7 @@ fn test_receiver_trade_preimage() {
 
 /// `qeUbAVgkPiF62syqd792VJeB9BaqMtLcZV` address has `5` QRC20 tokens.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_taker_fee_tx_fee() {
     // priv_key of qeUbAVgkPiF62syqd792VJeB9BaqMtLcZV
     // please note this address should have an immutable balance
@@ -806,7 +844,9 @@ fn test_taker_fee_tx_fee() {
     let actual = block_on(coin.get_fee_to_send_taker_fee(dex_fee_amount, FeeApproxStage::WithoutApprox))
         .expect("!get_fee_to_send_taker_fee");
     // only one contract call should be included into the expected trade fee
-    let expected_receiver_fee = big_decimal_from_sat(CONTRACT_CALL_GAS_FEE + EXPECTED_TX_FEE, coin.utxo.decimals);
+    // The miner fee is 1000 satoshi per kilobyte in proportion to the size of the built transaction
+    // (CRD ch.38 R38.6.6b). The taker fee transaction is 447 bytes, so its miner fee is 447 satoshi.
+    let expected_receiver_fee = big_decimal_from_sat(CONTRACT_CALL_GAS_FEE + 447, coin.utxo.decimals);
     let expected = TradeFee {
         coin: "QTUM".to_owned(),
         amount: expected_receiver_fee.into(),
@@ -816,6 +856,7 @@ fn test_taker_fee_tx_fee() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_coin_from_conf_without_decimals() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -834,7 +875,7 @@ fn test_coin_from_conf_without_decimals() {
     });
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
+        "servers": tqtum_test_servers(),
         "swap_contract_address": "0xba8b71f3544b93e2f681f996da519a98ace0107a",
     });
     // 0459c999c3edf05e73c83f3fbae9f0f020919f91 has 12 decimals instead of standard 8
@@ -900,6 +941,7 @@ fn test_coin_from_conf_without_decimals() {
 /// Note maker initialized payment with the corresponding swap_id in
 /// b61ef2f9911d075e80a3623444cce8fd948932f66c9148283860d46e9af4f2c8 tx.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_validate_maker_payment_malicious() {
     // priv_key of qUX9FGHubczidVjWPCUWuwCUJWpkAtGCgf
     let priv_key = [
@@ -936,6 +978,7 @@ fn test_validate_maker_payment_malicious() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_negotiate_swap_contract_addr_no_fallback() {
     let (_, coin) = qrc20_coin_for_test(&[1; 32], None);
 
@@ -963,6 +1006,7 @@ fn test_negotiate_swap_contract_addr_no_fallback() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_negotiate_swap_contract_addr_has_fallback() {
     let fallback = "0x8500AFc0bc5214728082163326C2FF0C73f4a871";
     let fallback_addr = qtum::contract_addr_from_str(fallback).unwrap();
@@ -997,6 +1041,7 @@ fn test_negotiate_swap_contract_addr_has_fallback() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_send_contract_calls_recoverable_tx() {
     let priv_key = [
         3, 98, 177, 3, 108, 39, 234, 144, 131, 178, 103, 103, 127, 80, 230, 166, 53, 68, 147, 215, 42, 216, 144, 72,
@@ -1031,6 +1076,7 @@ fn test_send_contract_calls_recoverable_tx() {
 /// ch.57 T10 for the QRC20 layer (R57.7A.6): minimum trading volume is exactly 10^-decimals, minimum
 /// transaction amount exactly zero, including a decimals value (24) for which `10u64.pow` would overflow.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn t10_qrc20_min_trading_vol_is_one_smallest_unit() {
     let priv_key = [1u8; 32];
     for decimals in [18u8, 8, 6, 24] {

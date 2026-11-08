@@ -229,6 +229,7 @@ mod bchd_grpc_tests {
     use common::block_on;
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_validate_slp_utxos_valid() {
         let tx_hash = H256::from_reversed_str("0ba1b91abbfceaa0777424165edb2928dace87d59669c913989950da31968032");
 
@@ -263,6 +264,7 @@ mod bchd_grpc_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_validate_slp_utxos_non_slp_input() {
         let tx_hash = H256::from_reversed_str("0ba1b91abbfceaa0777424165edb2928dace87d59669c913989950da31968032");
 
@@ -312,6 +314,7 @@ mod bchd_grpc_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_validate_slp_utxos_invalid_amount() {
         let tx_hash = H256::from_reversed_str("0ba1b91abbfceaa0777424165edb2928dace87d59669c913989950da31968032");
         let invalid_utxo = SlpUnspent {
@@ -355,6 +358,7 @@ mod bchd_grpc_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_validate_slp_utxos_unexpected_token_id() {
         let tx_hash = H256::from_reversed_str("0ba1b91abbfceaa0777424165edb2928dace87d59669c913989950da31968032");
 
@@ -397,6 +401,7 @@ mod bchd_grpc_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_check_slp_transaction_valid() {
         let url = "https://bchd-testnet.electroncash.de:18335";
         // https://testnet.simpleledger.info/tx/c5f46ccc5431687154335d5b6526f1b9cfa961c44b97956b7bec77f884f56c73
@@ -405,6 +410,7 @@ mod bchd_grpc_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_check_slp_transaction_invalid() {
         let url = "https://bchd-testnet.electroncash.de:18335";
         // https://www.blockchain.com/bch-testnet/tx/d76723c092b64bc598d5d2ceafd6f0db37dce4032db569d6f26afb35491789a7

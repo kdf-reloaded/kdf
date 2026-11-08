@@ -66,15 +66,15 @@ use crate::coin_balance::{self, coin_balance_map_for_ticker, AddressBalanceStatu
                           EnableCoinScanPolicy, HDAccountBalance, HDAddressBalance, HDAddressBalanceScanner,
                           HDWalletBalance, HDWalletBalanceOps};
 use crate::hd_pubkey::HDXPubExtractor;
-use crate::hd_wallet::{self, AccountUpdatingError, AddressDerivingError, AsyncMutexGuard, GetNewHDAddressParams,
-                       GetNewHDAddressResponse, HDAccountMut, HDAccountOps, HDAccountsMap, HDAccountsMutex, HDAddress,
-                       HDWalletCoinOps, HDWalletOps, HDWalletRpcError, HDWalletRpcOps, InvalidBip44ChainError,
-                       NewAccountCreatingError};
+use crate::hd_wallet::{self, choose_new_account_id, AccountUpdatingError, AddressDerivingError, AsyncMutexGuard,
+                       GetNewHDAddressParams, GetNewHDAddressResponse, HDAccountMut, HDAccountOps, HDAccountsMap,
+                       HDAccountsMutex, HDAddress, HDAddressId, HDWalletCoinOps, HDWalletOps, HDWalletRpcError,
+                       HDWalletRpcOps, InvalidBip44ChainError, NewAccountCreatingError, NewAccountIndex};
 use crate::rpc_command::account_balance::{self, AccountBalanceParams, AccountBalanceRpcOps, HDAccountBalanceResponse};
 use crate::rpc_command::hd_account_balance_rpc_error::HDAccountBalanceRpcError;
 use crate::rpc_command::init_account_balance::{self as init_account_balance_mod, InitAccountBalanceParams,
                                                InitAccountBalanceRpcOps};
-use crate::rpc_command::init_create_account::{CreateNewAccountParams, InitCreateHDAccountRpcOps};
+use crate::rpc_command::init_create_account::{CreateNewAccountParams, CreatedAccount, InitCreateHDAccountRpcOps};
 use crate::BalanceResult;
 use crypto::{Bip44Chain, ChildNumber, DerivationPath as CryptoDerivationPath, GlobalHDAccountArc, RpcDerivationPath};
 use ed25519_dalek_bip32::{ChildIndex, ExtendedSigningKey};
@@ -235,26 +235,16 @@ pub fn derive_address(
 }
 
 /// Creates and registers a new HD account, deriving its `m/44'/1991'/{id}'`
-/// signing key from the wallet's root. Account ids are assigned sequentially
-/// (`utxo_common_hd`/`eth_hd_wallet`'s own convention).
+/// signing key from the wallet's root. The index is chosen as in
+/// `utxo_common_hd`/`eth_hd_wallet` (CRD ch.05 R35c item 1).
 pub async fn create_new_account(
     hd_wallet: &SiaHDWallet,
+    index: NewAccountIndex,
 ) -> MmResult<HDAccountMut<'_, SiaHDAccount>, NewAccountCreatingError> {
-    const INIT_ACCOUNT_ID: u32 = 0;
-    let new_account_id = hd_wallet
-        .accounts
-        .lock()
-        .await
-        .iter()
-        // The last element of the BTreeMap has the max account index.
-        .last()
-        .map(|(account_id, _account)| *account_id + 1)
-        .unwrap_or(INIT_ACCOUNT_ID);
-    if new_account_id >= ChildNumber::HARDENED_FLAG {
-        return MmError::err(NewAccountCreatingError::AccountLimitReached {
-            max_accounts_number: ChildNumber::HARDENED_FLAG,
-        });
-    }
+    let new_account_id = {
+        let accounts = hd_wallet.accounts.lock().await;
+        choose_new_account_id(&*accounts, index)?
+    };
 
     let account_signing_key = hd_wallet
         .root_signing_key
@@ -269,11 +259,10 @@ pub async fn create_new_account(
 
     let accounts = hd_wallet.accounts.lock().await;
     if accounts.contains_key(&new_account_id) {
-        let error = format!(
-            "Account '{}' has been activated while we proceed the 'create_new_account' function",
-            new_account_id
-        );
-        return MmError::err(NewAccountCreatingError::Internal(error));
+        // The index was free when it was chosen: the account was created while its key was being derived.
+        return MmError::err(NewAccountCreatingError::AccountAlreadyExists {
+            account_id: new_account_id,
+        });
     }
 
     Ok(AsyncMutexGuard::map(accounts, |accounts| {
@@ -282,6 +271,19 @@ pub async fn create_new_account(
             // the `entry` method should return [`Entry::Vacant`] due to the checks above
             .or_insert(new_account)
     }))
+}
+
+/// Removes the account `account_id` that a cancelled `task::create_new_account` created, when it is the wallet's
+/// last account (CRD ch.05 R35c item 4). No storage is wired for Siacoin accounts, so the wallet is all there is
+/// to update. Returns whether the account was removed.
+pub async fn remove_created_account(coin: &SiaCoin, account_id: u32) -> MmResult<bool, HDWalletRpcError> {
+    let hd_wallet = coin.derivation_method().hd_wallet_or_err().mm_err(Into::into)?;
+    let mut accounts = hd_wallet.get_accounts_mut().await;
+    if accounts.keys().next_back() != Some(&account_id) {
+        return Ok(false);
+    }
+    accounts.remove(&account_id);
+    Ok(true)
 }
 
 /// Updates `hd_account`'s known-addresses count in memory. No persistent
@@ -333,6 +335,7 @@ impl HDWalletCoinOps for SiaCoin {
         &self,
         hd_wallet: &'a Self::HDWallet,
         xpub_extractor: Option<&XPubExtractor>,
+        index: NewAccountIndex,
     ) -> MmResult<HDAccountMut<'a, Self::HDAccount>, NewAccountCreatingError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
@@ -344,7 +347,7 @@ impl HDWalletCoinOps for SiaCoin {
         if xpub_extractor.is_some() {
             return MmError::err(NewAccountCreatingError::CoinDoesntSupportTrezor);
         }
-        create_new_account(hd_wallet).await
+        create_new_account(hd_wallet, index).await
     }
 
     async fn set_known_addresses_number(
@@ -412,12 +415,20 @@ impl HDWalletBalanceOps for SiaCoin {
         xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
         min_addresses_number: u32,
+        path_to_address: Option<HDAddressId>,
     ) -> MmResult<HDWalletBalance, EnableCoinBalanceError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
     {
-        coin_balance::common_impl::enable_hd_wallet(self, hd_wallet, xpub_extractor, scan_policy, min_addresses_number)
-            .await
+        coin_balance::common_impl::enable_hd_wallet(
+            self,
+            hd_wallet,
+            xpub_extractor,
+            scan_policy,
+            min_addresses_number,
+            path_to_address,
+        )
+        .await
     }
 
     async fn scan_for_new_addresses(
@@ -535,25 +546,20 @@ impl InitAccountBalanceRpcOps for SiaCoin {
 /// is rejected long before an `HDWallet`-mode `SiaCoin` exists), so `xpub_extractor`
 /// is intentionally unused rather than threaded through as `Some(_)`.
 ///
-/// Separately, and not fixed here: `task::create_new_account`'s *dispatcher*
-/// (`coins_activation`/`coins::rpc_command::init_create_account`) unconditionally
-/// constructs its extractor via `RpcTaskXPubExtractor::new` (not `new_unchecked`),
-/// which itself fails immediately with `HwContextNotInitialized` whenever no
-/// hardware wallet is connected -- for *every* coin wired to it today, Sia
-/// included once wired. That is a pre-existing, coin-agnostic gap in the shared
-/// RPC-task plumbing, not something this pass introduces or can fix from within
-/// `coins::siacoin`; see the coder pass report.
+/// `task::create_new_account` builds a hardware-device extractor only under a hardware login (CRD ch.05 R35c), so
+/// under the software login a `SiaCoin` always runs under, this impl is reached without a device.
 #[async_trait]
 impl InitCreateHDAccountRpcOps for SiaCoin {
     async fn init_create_account_rpc<XPubExtractor>(
         &self,
         params: CreateNewAccountParams,
-        _xpub_extractor: &XPubExtractor,
+        _xpub_extractor: Option<&XPubExtractor>,
+        created_account: &CreatedAccount,
     ) -> MmResult<HDAccountBalance, HDWalletRpcError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
     {
-        init_create_new_account_software(self, params).await
+        init_create_new_account_software(self, params, created_account).await
     }
 }
 
@@ -563,10 +569,14 @@ impl InitCreateHDAccountRpcOps for SiaCoin {
 async fn init_create_new_account_software(
     coin: &SiaCoin,
     params: CreateNewAccountParams,
+    created_account: &CreatedAccount,
 ) -> MmResult<HDAccountBalance, HDWalletRpcError> {
     let hd_wallet = coin.derivation_method().hd_wallet_or_err().mm_err(Into::into)?;
 
-    let mut new_account = create_new_account(hd_wallet).await.mm_err(Into::into)?;
+    let mut new_account = create_new_account(hd_wallet, params.account_index())
+        .await
+        .mm_err(Into::into)?;
+    created_account.set(new_account.account_id());
     let address_scanner = coin.produce_hd_address_scanner().await.mm_err(Into::into)?;
     let account_index = new_account.account_id();
     let account_derivation_path = new_account.account_derivation_path();
@@ -712,7 +722,8 @@ mod tests {
         let expected_address = expected_keypair.public().address();
 
         let wallet = SiaHDWallet::new(&global_hd, 20).unwrap();
-        let account = block_on(create_new_account(&wallet)).expect("account 0 creation should succeed");
+        let account = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .expect("account 0 creation should succeed");
         let derived = derive_address(&account, Bip44Chain::External, 0).expect("address 0 derivation should succeed");
 
         assert_eq!(derived.address, expected_address);
@@ -721,17 +732,50 @@ mod tests {
     #[test]
     fn create_new_account_assigns_sequential_ids() {
         let wallet = test_wallet(20);
-        let account0_id = block_on(create_new_account(&wallet)).unwrap().account_id();
-        let account1_id = block_on(create_new_account(&wallet)).unwrap().account_id();
-        let account2_id = block_on(create_new_account(&wallet)).unwrap().account_id();
+        let account0_id = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .account_id();
+        let account1_id = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .account_id();
+        let account2_id = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .account_id();
         assert_eq!((account0_id, account1_id, account2_id), (0, 1, 2));
+    }
+
+    /// CRD ch.05 R35c item 1 (Reloaded extension for Siacoin): a requested index is honored, the next call without
+    /// one takes the lowest unused index, and a taken index is refused.
+    #[test]
+    fn create_new_account_honors_the_requested_index() {
+        let wallet = test_wallet(20);
+        let first = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .account_id();
+        let requested = block_on(create_new_account(&wallet, NewAccountIndex::Requested(3)))
+            .unwrap()
+            .account_id();
+        let next = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .account_id();
+        assert_eq!((first, requested, next), (0, 3, 1));
+
+        let taken = block_on(create_new_account(&wallet, NewAccountIndex::Requested(3)));
+        assert!(matches!(
+            taken.err().map(|e| e.into_inner()),
+            Some(NewAccountCreatingError::AccountAlreadyExists { account_id: 3 })
+        ));
     }
 
     #[test]
     fn different_accounts_derive_different_addresses() {
         let wallet = test_wallet(20);
-        let account0 = block_on(create_new_account(&wallet)).unwrap().clone();
-        let account1 = block_on(create_new_account(&wallet)).unwrap().clone();
+        let account0 = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .clone();
+        let account1 = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .clone();
 
         let addr0 = derive_address(&account0, Bip44Chain::External, 0).unwrap().address;
         let addr1 = derive_address(&account1, Bip44Chain::External, 0).unwrap().address;
@@ -741,7 +785,9 @@ mod tests {
     #[test]
     fn different_address_ids_within_an_account_derive_different_addresses() {
         let wallet = test_wallet(20);
-        let account = block_on(create_new_account(&wallet)).unwrap().clone();
+        let account = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .clone();
 
         let addr0 = derive_address(&account, Bip44Chain::External, 0).unwrap().address;
         let addr1 = derive_address(&account, Bip44Chain::External, 1).unwrap().address;
@@ -751,7 +797,9 @@ mod tests {
     #[test]
     fn derive_address_is_deterministic() {
         let wallet = test_wallet(20);
-        let account = block_on(create_new_account(&wallet)).unwrap().clone();
+        let account = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .clone();
 
         let first = derive_address(&account, Bip44Chain::External, 3).unwrap().address;
         let second = derive_address(&account, Bip44Chain::External, 3).unwrap().address;
@@ -761,14 +809,18 @@ mod tests {
     #[test]
     fn internal_chain_is_rejected_for_derive_address() {
         let wallet = test_wallet(20);
-        let account = block_on(create_new_account(&wallet)).unwrap().clone();
+        let account = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .clone();
         assert!(derive_address(&account, Bip44Chain::Internal, 0).is_err());
     }
 
     #[test]
     fn internal_chain_is_rejected_for_known_addresses_number() {
         let wallet = test_wallet(20);
-        let account = block_on(create_new_account(&wallet)).unwrap().clone();
+        let account = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .clone();
         assert!(account.known_addresses_number(Bip44Chain::Internal).is_err());
         assert_eq!(account.known_addresses_number(Bip44Chain::External).unwrap(), 0);
     }
@@ -776,7 +828,9 @@ mod tests {
     #[test]
     fn set_known_addresses_number_updates_external_count() {
         let wallet = test_wallet(20);
-        let mut account = block_on(create_new_account(&wallet)).unwrap().clone();
+        let mut account = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .clone();
         block_on(set_known_addresses_number(
             &wallet,
             &mut account,
@@ -790,7 +844,9 @@ mod tests {
     #[test]
     fn set_known_addresses_number_rejects_internal_chain() {
         let wallet = test_wallet(20);
-        let mut account = block_on(create_new_account(&wallet)).unwrap().clone();
+        let mut account = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .clone();
         assert!(block_on(set_known_addresses_number(
             &wallet,
             &mut account,
@@ -803,7 +859,9 @@ mod tests {
     #[test]
     fn account_derivation_path_reflects_account_id() {
         let wallet = test_wallet(20);
-        let account = block_on(create_new_account(&wallet)).unwrap().clone();
+        let account = block_on(create_new_account(&wallet, NewAccountIndex::LowestUnused))
+            .unwrap()
+            .clone();
         assert_eq!(account.account_derivation_path().to_string(), "m/44'/1991'/0'");
     }
 }

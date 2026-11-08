@@ -221,6 +221,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
 These are divergences from GLEEC KDF that are **not** operator-configurable in this release (no compat switch yet). They are logged here and in [`CHANGELOG.md`](CHANGELOG.md) per the convention; a per-feature switch may be added in a later release.
 
 - **Withdraw with an omitted HD `from`.** For an HD-mode UTXO wallet, `withdraw` and `task::withdraw` with no `from` sender spend from the coin's activated address, the address at `path_to_address` (by default account 0, external chain, index 0), instead of failing. GLEEC KDF rejects an omitted `from` with `FromAddressNotFound`. This makes the shipped Komodo DeFi wallet's withdraw-preview flow (which omits `from`) work against a reloaded node; the maintainer kept it deliberately on 2026-11-04, set the address on 2026-11-06, and no switch is planned. An explicit but invalid `from` is still rejected (`UnknownAccount` / `UnexpectedFromAddress`) on both methods. Until plan [`hd-key-unification`](docs/plans/hd-key-unification.md) item H5 (PR #270), the fallback was always account 0, external chain, index 0, and the direct `withdraw` method refused an HD UTXO wallet. Code: `coins/utxo/utxo_common/utxo_common_hd.rs` (`get_withdraw_hd_sender`), `utxo_withdraw.rs` (`resolve_withdraw_sender`), `utxo_common_helpers.rs` (`withdraw_with_hd_sender`, `validate_task_withdraw_sender`).
+- **An HD account number already in use.** `task::create_new_account` with an `account_id` that the wallet already holds ends the task with `AccountAlreadyExists` (with the `account_id`) before any key is derived; `task::create_new_account::status` reports it. GLEEC KDF derives the key first and then reports an internal error. Only a client that asks for an existing account sees the difference. The same task also serves Siacoin, which GLEEC KDF does not offer HD accounts for; that is a Reloaded extension (decision CC). Plan [`hd-key-unification`](docs/plans/hd-key-unification.md) item H5.4 (PR #279); CRD ch.05 R35c. Code: `coins/hd_wallet.rs` (`choose_new_account_id`), `coins/rpc_command/init_create_account.rs`.
 - **Legacy `my_balance` and `get_enabled_coins` answer for an EVM coin under an HD login.** They report the activated address. GLEEC KDF fails both under an HD login, for EVM coins as for UTXO coins; for a UTXO coin KDF Reloaded fails them too. Code: `coins/eth/eth_market_ops.rs` (`my_address`), `coins/lp_coins_ops.rs` (`get_enabled_coins`). See CRD ch.05 §5.9B R35 and plan [`hd-key-unification`](docs/plans/hd-key-unification.md).
 - **A Light-mode ZHTLC coin is served by `lightwalletd` alone; Electrum is
   removed, and there is no switch to restore it.** GLEEC KDF requires a
@@ -331,6 +332,14 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   noted under R39.5A.3. No compat switch: there is nothing to switch on yet.
   Code: `coins/lp_coins_types.rs` (`WithdrawRequest`), `coins/z_coin.rs`
   (`withdraw`).
+- **The ARRR history reports a fee only where the node recorded it.** GLEEC KDF
+  computes a row's `transaction_fee` from the full transaction (CRD ch.39
+  R39.8.9e). Reloaded's Light-mode wallet reads compact blocks, which carry no
+  fee data. A row reports the fee the node recorded when it broadcast its own
+  send, and `0` for a transaction another wallet built, for a swap spend or
+  refund, and for an own send found again after a rebuild of the wallet
+  database (R39.8.9e1). No compat switch: the data the reference computes from
+  is not there. Code: `coins/z_coin/z_coin_wallet_db.rs`.
 - **Siacoin withdraw populates `internal_id`.** GLEEC KDF leaves `internal_id`
   empty on its SC withdraw response — only its history path fills the field in.
   Reloaded sets it to the raw bytes of the signed transaction's id, the same
@@ -732,7 +741,7 @@ cache keeps its existing compatible name and format:
 | --- | --- | --- |
 | Shielded wallet | `<TICKER>_RELOADED_WALLET.db` | `<TICKER>_WALLET.db` |
 | Compact-block cache | `<TICKER>_RELOADED_COMPACT_BLOCKS.db` | `<TICKER>_COMPACT_BLOCKS.db` |
-| Recipients of the wallet's withdrawals, shown in the history | `<TICKER>_RELOADED_TX_ADDRESSES.db` | none |
+| Addresses of the transactions the node builds (a withdrawal's recipient, a swap's script and fee addresses), shown in the history | `<TICKER>_RELOADED_TX_ADDRESSES.db` | none |
 | Legacy native Sapling-state cache | `<TICKER>_CACHE.db` (shared) | `<TICKER>_CACHE.db` (shared) |
 
 On the first supported Light-mode activation after upgrading, Reloaded creates

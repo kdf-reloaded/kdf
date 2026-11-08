@@ -83,7 +83,11 @@ impl QtumDockerOps {
                     .create_contract(&bytecode.into(), gas_limit, gas_price, sender)
                     .wait()
                     .expect("!createcontract");
-                result.address.0.into()
+                let address: H160 = result.address.0.into();
+                // A call to the contract before its creation is mined fails with "contract address does
+                // not exist", so return only once the node shows the contract's code.
+                wait_for_contract_code(native, sender, &address);
+                address
             },
             _ => panic!("Native client expected"),
         }

@@ -1,3 +1,5 @@
+#[cfg(not(target_arch = "wasm32"))]
+use super::z_tx_addresses::AddressSide;
 use super::*;
 
 /// How long a send waits for an in-flight shielded spend to be scanned before it
@@ -675,10 +677,11 @@ impl ZCoin {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn send_outputs(
+    pub(crate) async fn send_outputs(
         &self,
         t_outputs: Vec<TxOut>,
         z_outputs: Vec<ZOutput>,
+        addresses: Vec<(AddressSide, String)>,
     ) -> Result<ZTransaction, MmError<SendOutputsErr>> {
         self.prepare_shielded_build().await.mm_err(SendOutputsErr::from)?;
 
@@ -704,6 +707,10 @@ impl ZCoin {
                             .await
                             .mm_err(SendOutputsErr::from)?;
 
+                        // The addresses of the history row (R39.8.9d3), before the wallet database
+                        // record below, so that the unmined row never shows without them. Only
+                        // after the backend accepted the transaction, as the record below.
+                        self.record_tx_addresses(&tx, &addresses);
                         // Only after the backend accepted it: a refused broadcast must
                         // leave every selected note immediately reusable (R39.8.0ap).
                         self.record_sent_shielded_tx(&tx, additional_data.fee_amount);
@@ -744,6 +751,31 @@ impl ZCoin {
             .await
             .map_to_mm(SendOutputsErr::TxNotMined)?;
         Ok(tx)
+    }
+
+    /// Keeps the addresses a swap transaction names, each on its side, for the history row of `tx`
+    /// (CRD ch.39 R39.8.9d3, in the record of R39.8.9d2 (a)). Nothing is recorded about notes.
+    ///
+    /// A failure only costs the row the address, so it is logged and the swap step goes on.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn record_tx_addresses(&self, tx: &ZTransaction, addresses: &[(AddressSide, String)]) {
+        for (side, address) in addresses {
+            if let Err(e) = self.z_fields.shielded_history.record_address(
+                tx.txid().as_ref(),
+                u32::from(tx.expiry_height()),
+                *side,
+                address,
+            ) {
+                log::warn!(
+                    "ZCoin {}: could not record the address {} of transaction {:?}: {}. \
+                     Its history row will not list the address.",
+                    self.ticker(),
+                    address,
+                    tx.txid(),
+                    e
+                );
+            }
+        }
     }
 
     /// Records a just-broadcast transaction in the shielded wallet database so the notes it

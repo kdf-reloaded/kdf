@@ -114,7 +114,7 @@ apart from a Reloaded one. The maintainer decided:
 | ARRR requirement | ARRR sends `tx_v6` always. Inside the Ironwood window it declines a counterparty without it, on the taker and the maker path, with the per-coin switch `require_v6_counterparty` (default on). One debug line per decline, and at most one warning per coin per hour with the count. | ch.39 R39.6.4f, T39.6.4f | CRD PR #230 |
 | ARRR predicate code | The shielded coin's protocol information and acceptance check, the switch, and the logs. Stacked on the capability-word code. | — | code PR #241 |
 
-### 5. Transparent addresses in the shielded history (scheduled)
+### 5. Transparent addresses in the shielded history (done for the node's own swap transactions)
 
 `z_coin_tx_history` lists no transparent address. That covers the transparent inputs of
 CRD ch.39 R39.8.9c and the transparent outputs of R39.8.9d: an ARRR swap's payment to its
@@ -139,6 +139,31 @@ What it needs:
 - one live swap in the lab, to see the payment, spend or refund rows.
 
 Rows from before the change keep their empty sets.
+
+**Done** (2026-11-07) for the transactions the node builds for a swap: ch.39 R39.8.9d3 and
+T39.8.9d3, PR #277. The transparent addresses of a transaction another wallet built (a payment
+from a transparent address, for example) stay unlisted, because nothing is fetched.
+
+Later, if it matters: each scan pass checks every kept entry of a mined transaction against the
+wallet database, and each history page reads the whole record. Both grow by one entry per
+transaction the node builds, which is cheap at today's sizes. Marking an entry once its
+transaction is mined, or joining the record into the wallet-database query, would make both
+cost only the new entries.
+
+### 6. Fee of a shielded history row (done for the node's own sends)
+
+`z_coin_tx_history` reported `transaction_fee` 0 on every row, although a withdrawal's answer
+names its fee. A live withdrawal in the release tests showed it on 2026-11-07. CRD ch.39 R39.8.9e
+computes the fee from the full transaction, which a Light-mode wallet does not have.
+
+**Done** (decided 2026-11-07) in PR #288, ch.39 R39.8.9e1: an own send (a withdrawal, a swap
+payment, a swap fee payment) reports the fee the node recorded at broadcast. A transaction
+another wallet built, a swap spend or refund, and an own send found again after a rebuild of the
+wallet database report 0.
+
+Later, if it matters: a swap spend or refund could record its fee when it is built, as item 5
+records its address. The fee of a transaction another wallet built would need the full
+transaction from the light endpoint.
 
 ## Open questions
 

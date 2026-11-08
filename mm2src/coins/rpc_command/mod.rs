@@ -14,3 +14,5 @@ pub mod init_withdraw;
 pub mod swap_gas_fee_policy;
 pub mod tendermint;
 pub mod token_allowance;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod utxo_hd_maintenance_tests;

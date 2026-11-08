@@ -17,6 +17,7 @@ use coins::utxo::utxo_standard::{utxo_standard_coin_with_priv_key, UtxoStandardC
 use coins::utxo::{coin_daemon_data_dir, sat_from_big_decimal, zcash_params_path, UtxoActivationParams,
                   UtxoAddressFormat, UtxoCoinFields};
 use coins::MarketCoinOps;
+use common::jsonrpc_client::{JsonRpcClient, JsonRpcRequest, RpcRes};
 use common::mm_number::BigDecimal;
 use ethereum_types::H160 as H160Eth;
 use futures01::Future;
@@ -82,6 +83,98 @@ pub fn set_qrc20_contract_addresses(qick: H160Eth, qorty: H160Eth, swap: H160Eth
 pub const UTXO_ASSET_DOCKER_IMAGE: &str = "docker.io/artempikulin/testblockchain:multiarch";
 
 pub const QTUM_ADDRESS_LABEL: &str = "MM2_ADDRESS_LABEL";
+
+/// The least time, in seconds, that the harness waits for a transaction on the QTUM regtest node to confirm or
+/// for its fee estimator to answer. The node mines its own blocks on a timer, so a 30 s wait is shorter than
+/// the node's worst gap between blocks on a busy CI runner; the bound stays finite, a node that never answers
+/// still fails the test.
+const QTUM_WAIT_SECS_MIN: u64 = 90;
+
+/// How long, in seconds, the harness waits for a freshly deployed contract to show its code on the node.
+const CONTRACT_CODE_WAIT_SECS: u64 = 60;
+
+/// RPC calls only the harness needs, on top of what the product client offers: mining blocks on demand and
+/// reading a contract's account info. They run against the regtest node only.
+trait QtumRegtestOps {
+    /// https://developer.bitcoin.org/reference/rpc/generatetoaddress.html
+    fn generate_to_address(&self, blocks: u32, address: &str) -> RpcRes<Vec<Json>>;
+
+    /// https://docs.qtum.site/en/Qtum-RPC-API/#getaccountinfo; `contract` is the hex address without `0x`.
+    fn get_account_info(&self, contract: &str) -> RpcRes<Json>;
+}
+
+impl QtumRegtestOps for NativeClient {
+    fn generate_to_address(&self, blocks: u32, address: &str) -> RpcRes<Vec<Json>> {
+        rpc_func!(self, "generatetoaddress", blocks, address)
+    }
+
+    fn get_account_info(&self, contract: &str) -> RpcRes<Json> { rpc_func!(self, "getaccountinfo", contract) }
+}
+
+/// Whether `ticker` is a coin of the QTUM regtest node (the platform coin or one of its two test tokens).
+fn is_qtum_regtest_ticker(ticker: &str) -> bool { matches!(ticker, "QTUM" | "QICK" | "QORTY") }
+
+/// The wait for a coin of the QTUM regtest node is at least [`QTUM_WAIT_SECS_MIN`]; other coins keep `timeout`.
+fn wait_secs_for(ticker: &str, timeout: u64) -> u64 {
+    if is_qtum_regtest_ticker(ticker) {
+        timeout.max(QTUM_WAIT_SECS_MIN)
+    } else {
+        timeout
+    }
+}
+
+/// Mines `blocks` blocks on the QTUM regtest node, paying the coinbase to `address`, so that a transaction does
+/// not wait for the node's own timer. Best effort: if the node refuses, the call is logged and the caller
+/// goes on waiting for the node's own blocks, as it did before.
+fn mine_qtum_blocks(client: &NativeClient, address: &str, blocks: u32) {
+    if let Err(e) = client.generate_to_address(blocks, address).wait() {
+        log!({ "mine_qtum_blocks: generatetoaddress failed, waiting for the node's own blocks: {:?}", e });
+    }
+}
+
+/// Mines one block on the QTUM regtest node if `coin` is one of its coins; any other coin is left alone.
+fn mine_qtum_block_for<T>(coin: &T)
+where
+    T: MarketCoinOps + AsRef<UtxoCoinFields>,
+{
+    if !is_qtum_regtest_ticker(coin.ticker()) {
+        return;
+    }
+    let client = match coin.as_ref().rpc_client {
+        UtxoRpcClientEnum::Native(ref client) => client,
+        _ => return,
+    };
+    match client.get_addresses_by_label(QTUM_ADDRESS_LABEL).wait() {
+        Ok(addresses) => {
+            if let Some((address, _purpose)) = addresses.into_iter().next() {
+                mine_qtum_blocks(client, &address, 1);
+            }
+        },
+        Err(e) => log!({ "mine_qtum_block_for: getaddressesbylabel failed: {:?}", e }),
+    }
+}
+
+/// Waits until the QTUM regtest node returns the code of the contract at `contract`, mining a block per second
+/// to `mining_address` meanwhile. A contract call sent before that fails with "contract address does not exist".
+pub fn wait_for_contract_code(client: &NativeClient, mining_address: &str, contract: &H160Eth) {
+    let contract_hex = hex::encode(contract.as_bytes());
+    let deadline = now_ms() / 1000 + CONTRACT_CODE_WAIT_SECS;
+    loop {
+        mine_qtum_blocks(client, mining_address, 1);
+        match client.get_account_info(&contract_hex).wait() {
+            Ok(info) if info["code"].as_str().is_some_and(|code| !code.is_empty()) => return,
+            Ok(info) => log!({ "contract {} has no code yet: {}", contract_hex, info }),
+            Err(e) => log!({ "contract {} is not known yet: {:?}", contract_hex, e }),
+        }
+        assert!(
+            now_ms() / 1000 < deadline,
+            "Contract {} has no code after {} s",
+            contract_hex,
+            CONTRACT_CODE_WAIT_SECS
+        );
+        thread::sleep(Duration::from_secs(1));
+    }
+}
 
 pub trait CoinDockerOps {
     fn rpc_client(&self) -> &UtxoRpcClientEnum;
@@ -296,7 +389,7 @@ pub fn fill_qrc20_address(coin: &Qrc20Coin, amount: BigDecimal, timeout: u64) {
     // RPC) must not cascade PoisonError into every subsequent test under
     // `--test-threads=1`; the lock only guards ordering, not invariants.
     let _lock = COINS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let timeout = now_ms() / 1000 + timeout;
+    let timeout = now_ms() / 1000 + wait_secs_for(coin.ticker(), timeout);
     let client = match coin.as_ref().rpc_client {
         UtxoRpcClientEnum::Native(ref client) => client,
         _ => panic!("Expected NativeClient"),
@@ -320,6 +413,8 @@ pub fn fill_qrc20_address(coin: &Qrc20Coin, amount: BigDecimal, timeout: u64) {
 
     let tx_bytes = client.get_transaction_bytes(&hash).wait().unwrap();
     log!({ "{:02x}", tx_bytes });
+    // Mine the block that confirms the transfer instead of waiting for the node's own timer.
+    mine_qtum_blocks(client, &from_addr, 1);
     coin.wait_for_confirmations(&tx_bytes, 1, false, timeout, 1)
         .wait()
         .unwrap();
@@ -472,12 +567,14 @@ where
     // RPC) must not cascade PoisonError into every subsequent test under
     // `--test-threads=1`; the lock only guards ordering, not invariants.
     let _lock = COINS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let timeout = now_ms() / 1000 + timeout;
+    let timeout = now_ms() / 1000 + wait_secs_for(coin.ticker(), timeout);
 
     if let UtxoRpcClientEnum::Native(client) = &coin.as_ref().rpc_client {
         client.import_address(address, address, false).wait().unwrap();
         let hash = client.send_to_address(address, &amount).wait().unwrap();
         let tx_bytes = client.get_transaction_bytes(&hash).wait().unwrap();
+        // On the QTUM regtest node, mine the confirming block instead of waiting for the node's own timer.
+        mine_qtum_block_for(coin);
         coin.wait_for_confirmations(&tx_bytes, 1, false, timeout, 1)
             .wait()
             .unwrap();
@@ -516,10 +613,24 @@ pub fn wait_for_estimate_smart_fee(timeout: u64) -> Result<(), String> {
 
     let priv_key = SecretKey::new(&mut rand::thread_rng());
     let (_ctx, coin) = qrc20_coin_from_privkey("QICK", priv_key.as_ref());
-    let timeout = now_ms() / 1000 + timeout;
+    let timeout = now_ms() / 1000 + wait_secs_for(coin.ticker(), timeout);
     let client = match coin.as_ref().rpc_client {
         UtxoRpcClientEnum::Native(ref client) => client,
         _ => panic!("Expected NativeClient"),
+    };
+    // The estimator answers once enough blocks have passed, so mine them on demand while waiting.
+    // Mining is best effort: if the address cannot be had, log once and rely on the node's own blocks.
+    // `get_address_by_label` panics, and a panic here would poison `LOCK` for later callers.
+    let mining_address = match client.get_addresses_by_label(QTUM_ADDRESS_LABEL).wait() {
+        Ok(addresses) if addresses.len() == 1 => addresses.into_iter().next().map(|(addr, _purpose)| addr),
+        Ok(addresses) => {
+            log!({ "wait_for_estimate_smart_fee: expected one address by {:?}, got {}; not mining", QTUM_ADDRESS_LABEL, addresses.len() });
+            None
+        },
+        Err(e) => {
+            log!({ "wait_for_estimate_smart_fee: getaddressesbylabel failed, not mining: {:?}", e });
+            None
+        },
     };
     while now_ms() / 1000 < timeout {
         if let Ok(res) = client.estimate_smart_fee(&None, 1).wait() {
@@ -527,6 +638,9 @@ pub fn wait_for_estimate_smart_fee(timeout: u64) -> Result<(), String> {
                 *state = EstimateSmartFeeState::Ok;
                 return Ok(());
             }
+        }
+        if let Some(ref mining_address) = mining_address {
+            mine_qtum_blocks(client, mining_address, 1);
         }
         thread::sleep(Duration::from_secs(1));
     }

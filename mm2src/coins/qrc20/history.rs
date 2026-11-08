@@ -900,6 +900,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_process_cached_tx_transfer_map_update_is_not_needed() {
         // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
         let priv_key = [
@@ -932,6 +933,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_process_cached_tx_transfer_map_updated() {
         // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
         let priv_key = [
@@ -974,6 +976,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_process_cached_tx_transfer_map_reload_is_required() {
         // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
         let priv_key = [
@@ -1016,6 +1019,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_process_tx_ids_updated() {
         // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
         let priv_key = [
@@ -1041,6 +1045,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_process_tx_ids_not_updated() {
         // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
         let priv_key = [
@@ -1066,6 +1071,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_process_tx_ids_error_on_details() {
         // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
         let priv_key = [

@@ -384,7 +384,8 @@ make a Sia-involved legacy swap complete.
 Dirty Gate with chapter 60 on 2026-10-25).** Sia's minimum trading volume and
 minimum transaction amount are both one hasting (10^-24 SC) in both
 reference designations (`v2.6.0-beta` and `v3.0.0-beta` agree) and in
-reloaded. Every Sia HTLC spend and refund deducts a fixed miner fee of
+reloaded (the minimum trading volume only until 2026-11-07; see the
+revision note). Every Sia HTLC spend and refund deducts a fixed miner fee of
 0.00002 SC from the HTLC value in both trees, so a Sia payment of 0.00002 SC or
 less, which every order builder accepts, can be neither spent nor
 refunded; the module MUST refuse such a spend or refund with an orderly
@@ -418,8 +419,16 @@ floor is a maintainer decision (chapter 60 D60.2).
 > watch item. The size the withdraw estimator multiplies by the rate is the
 > length of the transaction's signature-hash form, which is smaller than its
 > wire form (§20.10 D6); the network accepted the resulting fees. The trade
-> preimage shows 0.00001 SC as the miner fee of a Siacoin payment, half of the
-> fixed fee actually paid.
+> preimage showed 0.00001 SC as the miner fee of a Siacoin payment, half of the
+> fixed fee actually paid (fixed 2026-11-07).
+>
+> **Revision (2026-11-07, clean-room-original).** Reloaded raises its Sia
+> minimum trading volume to ten times the fixed miner fee (0.0002 SC). The
+> one-hasting floor let the default minimum volume of a Sia order fall under
+> the miner fee, which the pre-trade check of R60.6.7 then refused. The
+> minimum transaction amount stays one hasting. The receiver's trade fee is
+> reported as paid from the HTLC value, and all reported Sia miner-fee figures
+> are the fixed 0.00002 SC.
 
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method
@@ -443,6 +452,18 @@ activation request -- no URL is embedded in the module:
 | `GET /api/outputs/siacoin/:output_id/spent` | Locate a spending transaction |
 | `GET /api/txpool/transactions` | Mempool inspection |
 | `POST /api/txpool/broadcast` | Broadcast a signed transaction |
+
+**R-N4 (reading the transaction pool; Reloaded; clean-room original;
+decision 2026-11-07; no switch).** The transaction-pool reply
+(`GET /api/txpool/transactions`) shall be read one transaction at a time, in both
+its lists: a transaction that the Sia library cannot read is left out of the list,
+and the rest of the reply is used. A lookup of a transaction in the pool (the
+fee validation of a swap, the raw-transaction lookup, the wait for a spend) then
+does not fail because of someone else's unreadable transaction in the same
+pool. A left-out transaction is visible only in the debug log of the Sia library,
+with its position in the list and the kind of its error, never its content;
+the node's own log does not name it. A reply whose list is not a list at all is
+still an error. This is a behavior of the pinned Sia library, not of the coin layer.
 
 **R-N1 (host-only naming of the walletd server; Reloaded; clean-room
 original; maintainer decision 2026-10-26; no switch).** Every log line, error
@@ -908,7 +929,10 @@ rather than defects. None is a correctness claim.
   (UTXO/QTUM/ETH included) without a connected hardware wallet --
   Sia inherits this identically once wired. The existing
   single-address activation path is observably unaffected either
-  way. *(Still open on 2026-11-04; plan `hd-key-unification` item H5.)*
+  way. *(Open until 2026-11-07. Plan `hd-key-unification` item H5.4 fixed
+  it: the task builds the hardware-wallet extractor only under a hardware
+  login, so it serves Sia under a software login, as a documented Reloaded
+  extension (decision CC; chapter 05 R35c and its as-built note).)*
   Code: `mm2src/coins/siacoin/sia_hd_wallet.rs`,
   `siacoin_helpers.rs`, `mod.rs`,
   `mm2src/coins_activation/src/sia_activation.rs`.
