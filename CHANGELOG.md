@@ -760,7 +760,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   today. The Firo test that expected a fee the server no longer sends is ignored, and an offline test
   checks that fee path instead. The node itself is unchanged. Detail: PR #285.
 - **The QRC20 Docker tests now mine a block before their own confirmation waits and wait up to 90 s.**
-  The node itself is unchanged. Detail: PR #TBD.
+  The node itself is unchanged. Detail: PR #310.
 - **The tests run before the next beta are listed in
   [`docs/release-tests/0.4.0-beta.1.md`](docs/release-tests/0.4.0-beta.1.md).** The lab rows of
   the cycle's second and third batches are recorded there; the fourth batch and the release campaign
