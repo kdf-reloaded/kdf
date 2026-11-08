@@ -55,6 +55,11 @@ on:
         default: '["x86_64-unknown-linux-gnu"]'
         type: string
 
+# The build only reads the repository; caching and artifact upload use their own
+# runtime tokens, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: build (${{ matrix.target }})
