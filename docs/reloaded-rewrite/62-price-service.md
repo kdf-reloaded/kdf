@@ -480,7 +480,7 @@ the corpus, and carries no clean-room restriction.
   a Reloaded extension and unaffected by this chapter.
 
 > **Status update (reloaded, 2026-11-07).** Findings F1, F2 and F3 are fixed by
-> PR #TBD, with the decisions of §62.10 (DO to DU): F1 by the single fetch at the
+> PR #287, with the decisions of §62.10 (DO to DU): F1 by the single fetch at the
 > terminal report of a successful own swap, on the sources of D62.1 and the
 > derivation of R62.5.1; F2 by the request key `price_urls` (D62.6); F3 by the
 > reference provider set and the `price_providers` key (D62.4). The bot's

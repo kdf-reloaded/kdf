@@ -598,7 +598,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   and the bot no longer divides by a price of zero. A bot pair whose price is refused or lost still has its
   order cancelled at once, as in GLEEC KDF; this behavior is under observation in v0.4.0 and will be
   revisited. See [Network configuration](docs/NETWORK_CONFIG.md#price-service).
-  Detail: PR #TBD; CRD ch.62.
+  Detail: PR #287; CRD ch.62.
 
 ### Tests
 
