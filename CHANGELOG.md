@@ -610,7 +610,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   with the `live-network-tests` feature to run them; CI runs the same tests as before. The two tests
   that read one DOC and one MARTY transaction from the live chains use transactions that exist
   today. The Firo test that expected a fee the server no longer sends is ignored, and an offline test
-  checks that fee path instead. The node itself is unchanged. Detail: PR #TBD.
+  checks that fee path instead. The node itself is unchanged. Detail: PR #285.
 - **The tests run before the next beta are listed in
   [`docs/release-tests/0.4.0-beta.1.md`](docs/release-tests/0.4.0-beta.1.md).** The lab rows of
   the cycle's second batch are recorded there now; the release campaign follows.
