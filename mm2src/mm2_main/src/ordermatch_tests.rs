@@ -3803,7 +3803,8 @@ mod t32_k1b_final_cancel_tests {
 mod t12_7c_restore_guard_tests {
     use super::*;
     use crate::mm2::database::my_orders::CREATE_MY_ORDERS_TABLE;
-    use crate::mm2::lp_ordermatch::my_orders_storage::{delete_active_maker_order_attempt, MyOrdersError};
+    use crate::mm2::lp_ordermatch::my_orders_storage::{delete_active_maker_order_attempt,
+                                                       delete_active_taker_order_attempt, MyOrdersError};
     use common::log::log_crate::{set_logger, set_max_level, Level, LevelFilter, Log, Metadata, Record};
     use futures::compat::Future01CompatExt;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -4328,6 +4329,186 @@ mod t12_7c_restore_guard_tests {
         assert!(my_taker_order_file_path(&node.ctx, &taker_order.request.uuid).exists());
         assert_eq!(node.row(&maker_order.uuid).unwrap().0, "Created");
         assert_eq!(node.row(&taker_order.request.uuid).unwrap().0, "Created");
+    }
+
+    // B4-1b (CRD ch.12 R7c item 4, ch.32 R-GH8a): the taker record gets the retrying deletion too.
+
+    /// Mocks the taker attempt: it fails `failures` times and then runs the real attempt. Returns the call count.
+    fn mock_taker_attempts_then_real(failures: usize) -> Arc<AtomicUsize> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        delete_active_taker_order_attempt.mock_safe(move |ctx, uuid| {
+            if counted.fetch_add(1, AtomicOrdering::SeqCst) < failures {
+                let err = MmError::err(MyOrdersError::ErrorSaving("disk full".to_owned()));
+                MockResult::Return(Box::new(futures01::future::result(err)))
+            } else {
+                MockResult::Continue((ctx, uuid))
+            }
+        });
+        calls
+    }
+
+    /// The same for the maker attempt.
+    fn mock_maker_attempts_then_real(failures: usize) -> Arc<AtomicUsize> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        delete_active_maker_order_attempt.mock_safe(move |ctx, uuid| {
+            if counted.fetch_add(1, AtomicOrdering::SeqCst) < failures {
+                let err = MmError::err(MyOrdersError::ErrorSaving("disk full".to_owned()));
+                MockResult::Return(Box::new(futures01::future::result(err)))
+            } else {
+                MockResult::Continue((ctx, uuid))
+            }
+        });
+        calls
+    }
+
+    /// The first deletion attempt fails, a later one succeeds: no taker record remains, the history error is
+    /// returned, and the one failed attempt is logged once.
+    #[test]
+    fn t_b4_1b_a_taker_deletion_that_fails_once_and_then_succeeds_leaves_no_record() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = taker(true);
+        let calls = mock_taker_attempts_then_real(1);
+        let started = Instant::now();
+
+        let err = block_on(save_my_new_taker_order(node.ctx.clone(), &order)).unwrap_err();
+
+        assert!(matches!(err.get_inner(), MyOrdersError::ErrorSaving(_)), "{err}");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2, "one retry");
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "the attempts are spaced"
+        );
+        assert!(!my_taker_order_file_path(&node.ctx, &order.request.uuid).exists());
+        if logs {
+            let lines = lines_for(order.request.uuid);
+            assert_eq!(lines.len(), 1, "one warn line for the one failed attempt");
+            assert!(lines[0].starts_with("WARN") && lines[0].contains("taker order"));
+            assert!(lines[0].contains("attempt 1 of 3"));
+        }
+    }
+
+    /// A restart after the retried deletion restores no taker order.
+    #[test]
+    fn t_b4_1b_b_a_restart_after_the_retried_deletion_restores_no_taker_order() {
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = taker(true);
+        let _calls = mock_taker_attempts_then_real(2);
+
+        assert!(block_on(save_my_new_taker_order(node.ctx.clone(), &order)).is_err());
+        node.restore();
+
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
+        assert!(!taker_orders.contains_key(&order.request.uuid));
+    }
+
+    /// Every attempt fails: three attempts and no fourth, the same give-up line as the maker's, and the history
+    /// error is still returned.
+    #[test]
+    fn t_b4_1b_c_a_taker_deletion_that_fails_three_times_gives_up_and_names_the_order() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = taker(true);
+        let calls = mock_taker_attempts_then_real(usize::MAX);
+        let started = Instant::now();
+
+        let err = block_on(save_my_new_taker_order(node.ctx.clone(), &order)).unwrap_err();
+
+        assert!(matches!(err.get_inner(), MyOrdersError::ErrorSaving(_)), "{err}");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 3, "no fourth attempt");
+        assert!(started.elapsed() >= Duration::from_millis(400), "two pauses");
+        if logs {
+            let lines = lines_for(order.request.uuid);
+            assert_eq!(lines.len(), 4, "three failed attempts and the give-up line");
+            assert!(lines[..3]
+                .iter()
+                .all(|l| l.starts_with("WARN") && l.contains("taker order")));
+            assert!(lines[3].contains("Giving up") && lines[3].contains("taker order"));
+        }
+    }
+
+    /// A record that is already missing counts as deleted by the real attempt, so it adds no warn line.
+    #[test]
+    fn t_b4_1b_d_a_missing_taker_record_counts_as_deleted() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        let order = taker(false);
+        assert!(!my_taker_order_file_path(&node.ctx, &order.request.uuid).exists());
+
+        block_on(delete_active_taker_order_attempt(node.ctx.clone(), order.request.uuid).compat()).unwrap();
+
+        if logs {
+            assert!(lines_for(order.request.uuid).is_empty());
+        }
+    }
+
+    /// An existing record is deleted at the first attempt, with no pause and no warn line.
+    #[test]
+    fn t_b4_1b_e_an_existing_taker_record_is_deleted_at_the_first_attempt() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = taker(true);
+        let calls = mock_taker_attempts_then_real(0);
+
+        assert!(block_on(save_my_new_taker_order(node.ctx.clone(), &order)).is_err());
+
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "one attempt, no retry");
+        assert!(!my_taker_order_file_path(&node.ctx, &order.request.uuid).exists());
+        if logs {
+            assert!(lines_for(order.request.uuid).is_empty());
+        }
+    }
+
+    /// Regression: the maker save keeps its retrying deletion and its log lines, now through the shared loop.
+    #[test]
+    fn t_b4_1b_f_the_maker_retry_of_the_failed_save_is_unchanged() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = maker(true);
+        let calls = mock_maker_attempts_then_real(2);
+        let started = Instant::now();
+
+        let err = block_on(save_my_new_maker_order(node.ctx.clone(), &order)).unwrap_err();
+
+        assert!(matches!(err.get_inner(), MyOrdersError::ErrorSaving(_)), "{err}");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 3);
+        assert!(started.elapsed() >= Duration::from_millis(400), "two pauses");
+        assert!(!node.active_file(&order.uuid));
+        if logs {
+            let lines = lines_for(order.uuid);
+            assert_eq!(lines.len(), 2, "one warn line per failed attempt");
+            assert!(lines[0].contains("Deleting the active record of maker order"));
+            assert!(lines[0].contains("failed (attempt 1 of 3): "));
+            assert!(lines[1].contains("failed (attempt 2 of 3): "));
+            assert!(lines.iter().all(|line| line.contains("disk full")));
+        }
+    }
+
+    /// Regression: the maker give-up line keeps its text.
+    #[test]
+    fn t_b4_1b_g_the_maker_give_up_line_is_unchanged() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        let order = maker(false);
+        let calls = mock_attempts(3);
+
+        remove(&node, &order);
+
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 3);
+        if logs {
+            let lines = lines_for(order.uuid);
+            assert_eq!(lines.len(), 4);
+            assert!(lines[3].starts_with("WARN Giving up deleting the active record of maker order "));
+            assert!(lines[3].ends_with(" after 3 attempts"));
+        }
     }
 }
 
