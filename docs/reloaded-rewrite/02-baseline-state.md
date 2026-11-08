@@ -409,15 +409,22 @@ from other chapters when it was added; the pattern is chapter 01
 **R13.** *Bound reference-state table.* Every name the document set
 uses for a state of the historical record — the baseline anchor of
 R1, a release tag, a branch tip as of a date, a pull-request merge
-commit, or a specially named state — MUST have a row in the table
-below, and the row MUST give the name, the kind of state, the full
-commit identifier, and the date. The table is the single place in
+commit, or a specially named state — and every name it uses for a
+branch or tag state of a sibling public repository (chapter 01 R5/R14;
+amendment of 2026-11-08, passed the KDF Dirty Gate with chapter 21
+§21.11B on 2026-11-08) MUST have a row in the table below, and the row MUST give the
+name, the kind of state, the full commit identifier, and the date. A
+sibling-repository row names the repository in its kind column and
+does not make that repository part of the historical record. The table is the single place in
 the document set at which a post-anchor commit identifier or a
 branch state may appear (chapter 01 R11, carve-out class
 *reference-state table entry*; chapter 01 §1.7 as amended
 2026-10-25). Chapter prose, provenance footers, scoped records,
 clearance statements and scope attestations name a state by its
-row name only. The following discipline binds the table:
+row name only. *Note (2026-11-08):* a sibling-repository citation under
+chapter 01 R14 is the second admitted place for a commit identifier; it
+carries an identifier of that sibling repository only, never one of the
+historical record. The following discipline binds the table:
 
 - *Name discipline.* A release-tag name labels only that tag's
   commit and MUST NOT be reused for any other commit. A branch
@@ -505,6 +512,8 @@ live remote on 2026-10-24 (255 tags).
 | `PR #2580 (merged 2025-08-12)` | pull-request merge (squash) | `f5f0b18ccda65fbd363192a4d7631a75786f008a` | 2025-08-12 |
 | `PR #2605 (merged 2025-09-10)` | pull-request merge (squash) | `c6c3cc1b3053571ca785812634b077b8e114e415` | 2025-09-10 |
 | `PR #2631 (merged 2025-10-06)` | pull-request merge (reverts the changes of the rows `PR #2580` and `PR #2605`; both release rows from `v2.6.0-beta` on descend from it) | `4025b8cd4374439a963047f804d924031abefbb3` | 2025-10-06 |
+| `dev (as of 2026-03-09)` | branch tip (the base of the `feat/tron-swap-support (as of 2026-04-23)` row; the next first-parent commit of `dev` after the version-bump row `PR #2715 (merged 2026-03-06)`, four commits after it in total; row added 2026-11-08 by the specification author, passed the KDF Dirty Gate with chapter 21 §21.11B on 2026-11-08) | `5b12235d090abdc4ccab4909736768b6c1f8a036` | 2026-03-09 |
+| `etomic-swap feat/tron-v1-swap (as of 2026-09-01)` | branch tip of the **sibling public swap-contract repository** (`KomodoPlatform/etomic-swap`, mirrored commit-for-commit at `GLEECBTC/etomic-swap`), not of the historical record; MIT-licensed Tron-VM V1 swap contract and its Nile deployment record; same commit on both mirrors; row added 2026-11-08 by the specification author, passed the KDF Dirty Gate with chapter 21 §21.11B on 2026-11-08 | `9888569f1ab234b0965091909c8cb9fc3829d43e` | 2026-09-01 |
 
 The `v1.0.0-beta` to `v1.0.7-beta`, `v1.1.0` and `v1.0.1172` rows were
 added on 2026-10-25 under the author duty above. The other `v1.0.N`
