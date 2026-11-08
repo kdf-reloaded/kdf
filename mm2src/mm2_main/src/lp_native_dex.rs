@@ -275,6 +275,15 @@ fn validate_netid_range(conf: &json::Value) -> MmInitResult<()> {
     Ok(())
 }
 
+/// Refuses the launch when `wc_session_persistence` holds a value the WalletConnect subsystem cannot use (CRD ch.22
+/// §22.5.1): the reserved `encrypted`, an unrecognised string or a non-string value.
+fn validate_wc_session_persistence(conf: &json::Value) -> MmInitResult<()> {
+    kdf_walletconnect::validate_session_persistence(conf).map_to_mm(|e| MmInitError::ErrorDeserializingConfig {
+        field: "wc_session_persistence".to_owned(),
+        error: e.to_string(),
+    })
+}
+
 fn startup_net_config(netid: u16) -> MmInitResult<&'static dyn NetConfig> {
     match net_config_for(netid) {
         Some(cfg) => Ok(cfg),
@@ -494,6 +503,7 @@ pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
     install_dns_resolver(&ctx.conf)?;
 
     validate_netid_range(&ctx.conf)?;
+    validate_wc_session_persistence(&ctx.conf)?;
     coins::utxo::utxo_builder::header_layout_fallback_families(&ctx).mm_err(|e| {
         MmInitError::ErrorDeserializingConfig {
             field: "header_layout_fallback_families".to_owned(),
@@ -1005,7 +1015,8 @@ fn wss_certs(ctx: &MmArc) -> P2PResult<Option<WssCerts>> {
 #[cfg(test)]
 mod tests {
     use super::{default_seednodes, default_seednodes_from_strings, parse_passphrase_form, resolve_bootstrap_relays,
-                startup_net_config, validate_netid_range, MmInitError, P2PInitError, PassphraseForm};
+                startup_net_config, validate_netid_range, validate_wc_session_persistence, MmInitError, P2PInitError,
+                PassphraseForm};
     #[cfg(not(target_arch = "wasm32"))]
     use crate::mm2::lp_network::lp_network_ports;
     #[cfg(not(target_arch = "wasm32"))] use mm2_p2p::NetworkInfo;
@@ -1144,6 +1155,39 @@ mod tests {
             err.get_inner(),
             MmInitError::ErrorDeserializingConfig { field, .. } if field == "netid"
         ));
+    }
+
+    /// CRD ch.22 §22.5.1: an invalid `wc_session_persistence` refuses the launch with a configuration error that
+    /// names the setting; absent, `null`, `open` and `none` pass.
+    #[test]
+    fn invalid_wc_session_persistence_refuses_the_launch() {
+        for conf in [
+            json!({ "wc_session_persistence": "encrypted" }),
+            json!({ "wc_session_persistence": "bogus" }),
+            json!({ "wc_session_persistence": 7 }),
+        ] {
+            let err = validate_wc_session_persistence(&conf).unwrap_err();
+            assert!(
+                matches!(
+                    err.get_inner(),
+                    MmInitError::ErrorDeserializingConfig { field, error }
+                        if field == "wc_session_persistence" && error.contains("wc_session_persistence")
+                ),
+                "{conf}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_wc_session_persistence_passes() {
+        for conf in [
+            json!({}),
+            json!({ "wc_session_persistence": null }),
+            json!({ "wc_session_persistence": "open" }),
+            json!({ "wc_session_persistence": "none" }),
+        ] {
+            assert!(validate_wc_session_persistence(&conf).is_ok(), "{conf}");
+        }
     }
 
     #[test]

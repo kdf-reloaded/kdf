@@ -131,8 +131,9 @@ impl WcSessionPersistence {
     ///
     /// An absent (or `null`) value defaults to [`WcSessionPersistence::Open`].
     /// The reserved `encrypted` value, any non-string value, and any
-    /// unrecognised string each stop startup with an explanatory error that
-    /// names the setting, the offending value, and the allowed values.
+    /// unrecognised string each yield an explanatory error that names the
+    /// setting, the offending value, and the allowed values. The node stops
+    /// its start-up on that error through [`validate_session_persistence`].
     ///
     /// # Errors
     /// Returns [`WalletConnectError::Config`] for an invalid or not-yet-supported
@@ -167,6 +168,18 @@ impl WcSessionPersistence {
 
     /// Whether session rows may be written under this setting.
     fn should_write(self) -> bool { matches!(self, WcSessionPersistence::Open) }
+}
+
+/// Checks the `wc_session_persistence` setting of the node configuration without using WalletConnect.
+///
+/// The node calls this at start-up so that an invalid value (the reserved `encrypted`, an unrecognised string
+/// or a non-string value) stops the launch, instead of failing the first WalletConnect RPC. It applies the same
+/// parsing as the first use of the subsystem; an absent or `null` value is valid.
+///
+/// # Errors
+/// Returns [`WalletConnectError::Config`], naming the setting, for an invalid or not-yet-supported value.
+pub fn validate_session_persistence(conf: &serde_json::Value) -> Result<(), WalletConnectError> {
+    WcSessionPersistence::from_conf(conf).map(|_| ())
 }
 
 /// Writes `session` to `storage` only when `persistence` permits it.
@@ -1057,6 +1070,32 @@ mod persistence_tests {
         let non_string = WcSessionPersistence::from_conf(&json!({ "wc_session_persistence": 7 }))
             .expect_err("non-string must error");
         assert!(non_string.to_string().contains("must be a string"));
+    }
+
+    #[test]
+    fn wc_session_persistence_validation_applies_the_same_rules_as_first_use() {
+        use serde_json::json;
+
+        // Valid: absent, null, `open`, `none`.
+        for conf in [
+            json!({}),
+            json!({ "wc_session_persistence": null }),
+            json!({ "wc_session_persistence": "open" }),
+            json!({ "wc_session_persistence": "none" }),
+        ] {
+            assert!(validate_session_persistence(&conf).is_ok(), "{conf}");
+        }
+
+        // Invalid: the reserved value, an unknown string, a non-string. The error names the setting.
+        for conf in [
+            json!({ "wc_session_persistence": "encrypted" }),
+            json!({ "wc_session_persistence": "bogus" }),
+            json!({ "wc_session_persistence": 7 }),
+        ] {
+            let err = validate_session_persistence(&conf).expect_err("must be refused");
+            assert!(matches!(err, WalletConnectError::Config(_)), "{conf}");
+            assert!(err.to_string().contains("wc_session_persistence"), "{conf}: {err}");
+        }
     }
 
     #[test]
