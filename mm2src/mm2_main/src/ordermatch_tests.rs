@@ -10673,6 +10673,335 @@ mod t60_7_maker_balance_watch_tests {
         assert_eq!(publishes(&mut p2p_rx), 1);
         assert!(ordermatch_ctx.maker_orders_ctx.lock().contains_key(&kept.uuid));
     }
+
+    /// CRD ch.32 R-GH8a, T-GH8a: with `setprice_replace_after_checks` on, `setprice` with `cancel_previous`
+    /// replaces the previous orders of the pair only after every check and the build of the new order passed.
+    mod t_gh8a_replace_after_checks {
+        use super::super::maker_publication_tests::drain;
+        use super::*;
+        use crate::mm2::lp_ordermatch::new_protocol::OrdermatchMessage;
+
+        const PAIR: &str = "BASE:REL";
+
+        /// A message of the maker order flow that left the node.
+        #[derive(Debug, PartialEq)]
+        enum Sent {
+            Created(Uuid),
+            Cancelled(Uuid),
+        }
+
+        /// A node with the coins `BASE` and `REL`, the scripted balance of `Probe` and a channel that receives what
+        /// the node publishes.
+        struct Maker {
+            ctx: MmArc,
+            dbdir: std::path::PathBuf,
+            rx: mpsc::Receiver<AdexBehaviourCmd>,
+            probe: Probe,
+        }
+
+        impl Drop for Maker {
+            fn drop(&mut self) { std::fs::remove_dir_all(&self.dbdir).ok(); }
+        }
+
+        impl Maker {
+            /// `extra` is merged into the top-level configuration.
+            fn new(extra: Json) -> Maker {
+                let probe = Probe::install("42");
+                let dbdir = std::env::temp_dir().join(format!("kdf-gh8a-{}", Uuid::new_v4()));
+                let mut conf = json!({
+                    "coins": [{ "coin": "BASE" }, { "coin": "REL" }],
+                    "dbdir": dbdir.to_str().unwrap()
+                });
+                for (key, value) in extra.as_object().unwrap() {
+                    conf[key] = value.clone();
+                }
+                let ctx = MmCtxBuilder::new()
+                    .with_conf(conf)
+                    .with_secp256k1_key_pair(key_pair_from_seed("passphrase").unwrap())
+                    .into_mm_arc();
+                let (tx, rx) = mpsc::channel(1000);
+                P2PContext::new(tx).store_to_mm_arc(&ctx);
+                std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+                let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+                for ticker in ["BASE", "REL"] {
+                    block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+                }
+                Maker { ctx, dbdir, rx, probe }
+            }
+
+            fn ordermatch_ctx(&self) -> Arc<OrdermatchContext> { OrdermatchContext::from_ctx(&self.ctx).unwrap() }
+
+            /// `setprice` of `volume` BASE at price 1, with an optional minimum volume.
+            fn set_price(
+                &self,
+                cancel_previous: bool,
+                volume: i64,
+                min_volume: Option<i64>,
+            ) -> Result<MakerOrder, String> {
+                self.set_price_with_history(cancel_previous, volume, min_volume, false)
+            }
+
+            /// As `set_price`, with the choice of `save_in_history`: the history write is the one that can fail
+            /// when the order is saved.
+            fn set_price_with_history(
+                &self,
+                cancel_previous: bool,
+                volume: i64,
+                min_volume: Option<i64>,
+                save_in_history: bool,
+            ) -> Result<MakerOrder, String> {
+                let req: SetPriceReq = json::from_value(json!({
+                    "base": "BASE", "rel": "REL", "price": 1, "volume": volume, "min_volume": min_volume,
+                    "cancel_previous": cancel_previous, "save_in_history": save_in_history
+                }))
+                .unwrap();
+                block_on(create_maker_order(&self.ctx, req))
+            }
+
+            /// Two orders on (BASE, REL), created without `cancel_previous`; what was published meanwhile and the
+            /// reads of the balance are forgotten.
+            fn two_previous_orders(&mut self) -> HashSet<Uuid> {
+                let previous: HashSet<Uuid> = (0..2).map(|_| placed(self.set_price(false, 3, None)).uuid).collect();
+                flush_trie(&self.ctx);
+                assert_eq!(self.sent().len(), 2);
+                self.probe.log.lock().unwrap().clear();
+                previous
+            }
+
+            /// The created and cancelled messages published since the last call, in publication order.
+            fn sent(&mut self) -> Vec<Sent> {
+                drain(&mut self.rx)
+                    .into_iter()
+                    .filter_map(|published| match published.message {
+                        OrdermatchMessage::MakerOrderCreated(created) => Some(Sent::Created(created.uuid.into())),
+                        OrdermatchMessage::MakerOrderCancelled(cancelled) => {
+                            Some(Sent::Cancelled(cancelled.uuid.into()))
+                        },
+                        _ => None,
+                    })
+                    .collect()
+            }
+
+            /// The own orders of the maker.
+            fn own_orders(&self) -> HashSet<Uuid> {
+                self.ordermatch_ctx()
+                    .maker_orders_ctx
+                    .lock()
+                    .clone_orders()
+                    .keys()
+                    .copied()
+                    .collect()
+            }
+
+            fn in_book(&self, uuid: &Uuid) -> bool {
+                flush_trie(&self.ctx);
+                self.ordermatch_ctx()
+                    .orderbook
+                    .lock()
+                    .find_order_by_uuid(uuid)
+                    .is_some()
+            }
+
+            /// The root the trie holds for the pair of the maker's own orders.
+            fn held_root(&self) -> H64 {
+                flush_trie(&self.ctx);
+                let pubkey = hex::encode(self.ctx.secp256k1_key_pair().public_slice());
+                pair_trie_root_by_pub_ctx(&self.ordermatch_ctx(), &pubkey, PAIR)
+            }
+
+            /// Nothing happened to the pair: the same orders in the maker's set, in the book and under the held
+            /// root, and nothing published.
+            fn assert_pair_unchanged(&mut self, previous: &HashSet<Uuid>, root: H64) {
+                assert_eq!(&self.own_orders(), previous);
+                assert!(previous.iter().all(|uuid| self.in_book(uuid)));
+                assert_eq!(self.held_root(), root);
+                assert_eq!(self.sent(), Vec::<Sent>::new(), "no cancel and no created message");
+            }
+        }
+
+        fn placed(result: Result<MakerOrder, String>) -> MakerOrder {
+            match result {
+                Ok(order) => order,
+                Err(e) => panic!("the order must be placed: {e}"),
+            }
+        }
+
+        fn refused(result: Result<MakerOrder, String>) -> String {
+            match result {
+                Ok(order) => panic!("the order {} must be refused", order.uuid),
+                Err(e) => e,
+            }
+        }
+
+        /// A balance check that fails once, then passes: the first read of the balance fails.
+        fn fail_the_next_balance_check(maker: &Maker) { maker.probe.script(&[None]); }
+
+        /// T-GH8a bullet 1: the balance check fails, the error is returned, both previous orders are in the
+        /// maker's set and under the pair's held root, and no cancel message is published.
+        #[test]
+        fn t_gh8a_a_failed_balance_check_leaves_the_previous_orders() {
+            let mut maker = Maker::new(json!({ "setprice_replace_after_checks": true }));
+            let previous = maker.two_previous_orders();
+            let root = maker.held_root();
+            fail_the_next_balance_check(&maker);
+
+            assert!(maker.set_price(true, 3, None).is_err());
+
+            maker.assert_pair_unchanged(&previous, root);
+        }
+
+        /// T-GH8a bullet 2: the checks pass, the builder refuses the order (a volume below its minimum); the
+        /// pair is left as in bullet 1. The balance was read, so the checks ran before the build.
+        #[test]
+        fn t_gh8a_b_a_refused_build_leaves_the_previous_orders() {
+            let mut maker = Maker::new(json!({ "setprice_replace_after_checks": true }));
+            let previous = maker.two_previous_orders();
+            let root = maker.held_root();
+
+            let err = refused(maker.set_price(true, 1, Some(2)));
+
+            assert!(err.contains("below min base vol"), "{err}");
+            assert_eq!(maker.probe.count("read BASE"), 1, "the balance check ran first");
+            maker.assert_pair_unchanged(&previous, root);
+        }
+
+        /// T-GH8a, item 2 of R-GH8a: the save of the new order comes before the first cancel. The history database
+        /// of the node has no orders table, so the history write of the new order (`save_in_history`) fails: the
+        /// error is returned, both previous orders stay in the maker's set, in the book and under the held root,
+        /// no cancel and no created message is published, and no new order exists.
+        #[test]
+        fn t_gh8a_f_a_failed_save_leaves_the_previous_orders() {
+            let mut maker = Maker::new(json!({ "setprice_replace_after_checks": true }));
+            let previous = maker.two_previous_orders();
+            let root = maker.held_root();
+            let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().unwrap();
+            let _ = maker
+                .ctx
+                .sqlite_connection
+                .pin(Arc::new(std::sync::Mutex::new(connection)));
+
+            let err = refused(maker.set_price_with_history(true, 3, None, true));
+
+            assert!(err.contains("Error saving an order"), "{err}");
+            assert_eq!(maker.probe.count("read BASE"), 1, "the balance check ran first");
+            maker.assert_pair_unchanged(&previous, root);
+        }
+
+        /// T-GH8a bullet 3 with T-GH8 and T-GH9: after a failed re-pricing, the next one whose checks pass
+        /// replaces both orders: one cancel per old order, all before the created message of the new order.
+        #[test]
+        fn t_gh8a_c_the_next_passing_repricing_replaces_both_orders() {
+            let mut maker = Maker::new(json!({ "setprice_replace_after_checks": true }));
+            let previous = maker.two_previous_orders();
+            let root = maker.held_root();
+            fail_the_next_balance_check(&maker);
+            assert!(maker.set_price(true, 3, None).is_err());
+            maker.assert_pair_unchanged(&previous, root);
+
+            let new_order = placed(maker.set_price(true, 3, None));
+
+            assert_eq!(maker.own_orders(), HashSet::from([new_order.uuid]));
+            assert!(maker.in_book(&new_order.uuid));
+            assert!(previous.iter().all(|uuid| !maker.in_book(uuid)));
+            assert_ne!(maker.held_root(), root);
+            let sent = maker.sent();
+            assert_eq!(sent.len(), 3, "{sent:?}");
+            let cancelled: HashSet<Uuid> = sent[..2]
+                .iter()
+                .map(|message| match message {
+                    Sent::Cancelled(uuid) => *uuid,
+                    other => panic!("a cancel message must come first, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(cancelled, previous, "one cancel per old order");
+            assert_eq!(sent[2], Sent::Created(new_order.uuid));
+        }
+
+        /// T-GH8a bullet 4 (R-GH8): with the switch absent or `false`, the failed check cancels both previous
+        /// orders and creates none. A non-boolean value is taken as the default too (bullet 5).
+        #[test]
+        fn t_gh8a_d_at_the_default_a_failed_check_cancels_both_orders() {
+            for extra in [
+                json!({}),
+                json!({ "setprice_replace_after_checks": false }),
+                json!({ "setprice_replace_after_checks": "true" }),
+                json!({ "setprice_replace_after_checks": 1 }),
+                json!({ "setprice_replace_after_checks": null }),
+            ] {
+                let mut maker = Maker::new(extra.clone());
+                let previous = maker.two_previous_orders();
+                fail_the_next_balance_check(&maker);
+
+                assert!(maker.set_price(true, 3, None).is_err(), "{extra}");
+
+                assert_eq!(maker.own_orders(), HashSet::new(), "{extra}");
+                assert!(previous.iter().all(|uuid| !maker.in_book(uuid)), "{extra}");
+                let sent = maker.sent();
+                assert_eq!(sent.len(), 2, "{extra}: {sent:?}");
+                let cancelled: HashSet<Uuid> = sent
+                    .iter()
+                    .map(|message| match message {
+                        Sent::Cancelled(uuid) => *uuid,
+                        other => panic!("{extra}: no created message expected, got {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(cancelled, previous, "{extra}");
+            }
+        }
+
+        /// R-GH8 at the default: a build that fails after the cancel leaves the pair without an order.
+        #[test]
+        fn t_gh8a_d_at_the_default_a_refused_build_leaves_the_pair_empty() {
+            let mut maker = Maker::new(json!({}));
+            let previous = maker.two_previous_orders();
+
+            assert!(maker.set_price(true, 1, Some(2)).is_err());
+
+            assert_eq!(maker.own_orders(), HashSet::new());
+            let sent = maker.sent();
+            assert_eq!(sent.len(), 2, "{sent:?}");
+            assert!(sent.iter().all(|message| match message {
+                Sent::Cancelled(uuid) => previous.contains(uuid),
+                Sent::Created(_) => false,
+            }));
+        }
+
+        /// A request without `cancel_previous` never cancels, with the switch on or off.
+        #[test]
+        fn t_gh8a_without_cancel_previous_nothing_is_cancelled() {
+            for extra in [json!({}), json!({ "setprice_replace_after_checks": true })] {
+                let mut maker = Maker::new(extra.clone());
+                let previous = maker.two_previous_orders();
+                let root = maker.held_root();
+                fail_the_next_balance_check(&maker);
+
+                assert!(maker.set_price(false, 3, None).is_err(), "{extra}");
+
+                maker.assert_pair_unchanged(&previous, root);
+            }
+        }
+
+        /// T-GH8a bullet 5: only a JSON `true` turns the switch on.
+        #[test]
+        fn t_gh8a_e_only_a_json_true_turns_the_switch_on() {
+            let switch = |conf: Json| {
+                let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+                setprice_replace_after_checks(&ctx)
+            };
+            assert!(!switch(json!({})));
+            assert!(switch(json!({ "setprice_replace_after_checks": true })));
+            for other in [
+                json!(false),
+                json!("true"),
+                json!(1),
+                json!(0),
+                json!(null),
+                json!([true]),
+            ] {
+                assert!(!switch(json!({ "setprice_replace_after_checks": other })), "{other}");
+            }
+        }
+    }
 }
 
 /// CRD ch.12 R7a, R7b (maintainer Decision AM): a maker order's own lock is held for in-memory work only, and the
