@@ -211,8 +211,10 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   same value. Peers see it in `orderbook` and `best_orders`; a request below it gets no reservation.
   An order with its own `min_volume`, taker orders and `update_maker_order` keep their minimums. On a
   coin whose floor is below the safe spend amount, a `setprice` without `min_volume` that the
-  spend-safety check refused until now is accepted at the raised minimum. *Compatibility:* set
-  `spend_safe_min_volume` to `false` in `MM2.json` for the GLEEC KDF default. Detail: PR #315; CRD
+  spend-safety check refused until now is accepted at the raised minimum. When the fee estimate is
+  unavailable, the plain default is used if `pre_trade_spend_check` is off, with a warning in the
+  log; with the check on, the order is refused as before. *Compatibility:* set `spend_safe_min_volume` to `false` in `MM2.json`
+  for the GLEEC KDF default. Detail: PR #315; CRD
   ch.60 R60.6.8.
 - **Messages from other nodes are checked for nesting depth and declared lengths before they are
   read.** Every value a peer sends is checked first: arrays and maps may nest at most 64 levels, and every

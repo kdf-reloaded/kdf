@@ -377,7 +377,9 @@ pub(crate) async fn check_pre_trade_spend_safety(
 /// the minimum price (the order builder refuses it), and when neither leg contributes: a leg whose coin R60.6.7
 /// item 1 does not cover contributes no term, and neither does a Sia leg, whose floor is already ten times its
 /// fee. The safe amounts are read through the coin layer, so the request's single fee reading per coin (R60.6.7
-/// item 8) is the one this uses. An unavailable estimate is the typed refusal of R60.6.7 item 6.
+/// item 8) is the one this uses. An unavailable estimate (R60.6.8 item 4) is the typed refusal of R60.6.7 item 6
+/// while `pre_trade_spend_check` is on; with it off no term is formed (`Ok(None)`, the order keeps the plain
+/// default) and one WARN naming the pair is logged, so an operator who turned the check off sees no new refusal.
 pub(crate) async fn raised_default_min_volume_term(
     ctx: &MmArc,
     base_coin: &MmCoinEnum,
@@ -394,13 +396,25 @@ pub(crate) async fn raised_default_min_volume_term(
         if matches!(coin, MmCoinEnum::SiaCoin(_)) {
             continue;
         }
-        let safe_amount = coin
-            .spend_safe_amount()
-            .await
-            .map_err(|e| SpendSafetyError::EstimateUnavailable {
-                coin: coin.ticker().to_owned(),
-                error: e.to_string(),
-            })?;
+        let safe_amount = match coin.spend_safe_amount().await {
+            Ok(safe_amount) => safe_amount,
+            // R60.6.8 item 4: with the check off an unavailable estimate forms no term at all, and the request logs
+            // one WARN (it returns here, so once): the pair only, no fee figures and no error text.
+            Err(_) if !pre_trade_spend_check_enabled(ctx) => {
+                log::warn!(
+                    "The raised default minimum volume of {}/{} could not be computed, the plain default is used",
+                    base_coin.ticker(),
+                    rel_coin.ticker()
+                );
+                return Ok(None);
+            },
+            Err(e) => {
+                return Err(SpendSafetyError::EstimateUnavailable {
+                    coin: coin.ticker().to_owned(),
+                    error: e.to_string(),
+                })
+            },
+        };
         if let Some(safe_amount) = safe_amount {
             let leg_term = &(&factor * &safe_amount) / &divisor;
             term = Some(match term {

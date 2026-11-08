@@ -643,8 +643,8 @@ safe amounts of R60.6.7 item 2 of the base and the rel coin. A leg whose
 coin R60.6.7 item 1 does not cover contributes no term, and so does a Sia
 leg, whose floor is already ten times its fee (row S1).
 
-1. *When.* At `setprice`, and in the maker `trade_preimage`, which
-   previews it, so that the preview and the order agree. The fee rate
+1. *When.* At `setprice`, which the market-making bot also uses, and in
+   the maker `trade_preimage`, which previews it, so that the preview and the order agree. The fee rate
    comes from the reading of R60.6.7 item 8, so a request reads each
    coin's fee rate at most once and may use the short cache of chapter 38
    R38.6.6j and R38.6.6k. The value is fixed when it is computed; it does
@@ -663,8 +663,12 @@ leg, whose floor is already ten times its fee (row S1).
    never takes the default below `max(b, q ÷ p)`; an order too small for
    that is refused by R60.4.2 as before.
 4. *Estimate unavailable.* If the fee estimate of a dynamic-fee coin
-   cannot be obtained, the request is refused with the typed error of
-   R60.6.7 item 6; no placeholder estimate is substituted.
+   cannot be obtained, no raised term is formed and no placeholder
+   estimate is substituted. With `pre_trade_spend_check` on, the request is
+   refused with the typed error of R60.6.7 item 6, as before. With it
+   `false`, the order gets the default of R60.4.2 step 3 and the node logs
+   one WARN that names the pair and says the raised default could not be
+   computed; an operator who turned the check off sees no new refusal.
 5. *What peers see.* The raised value travels in the order record's
    `min_volume` (R60.5.1, W1) and is what peers see in `orderbook` and
    `best_orders`. A peer's handling is unchanged: a taker request below
@@ -691,14 +695,20 @@ because it would cost gossip.
 
 > **As built (2026-11-08, clean-side record; batch 4 item B4-15, PR #315).**
 > `setprice` and the maker `trade_preimage` compute the raised term once
-> per request from the coin layer's safe amount, so the R60.6.7 check and
-> the term share one fee reading per coin. The order builder applies the
+> per request from the coin layer's safe amount; the R60.6.7 check reads
+> the safe amount again, so the two share one fee reading per coin through
+> the short fee cache of chapter 38 R38.6.6j and R38.6.6k. The order builder applies the
 > term only when no `min_volume` was given, capped at the maximum volume
 > and never below `max(b, q ÷ p)`; R60.6.7 then checks the order at that
 > value. For a `max` order the volume is known only after the balance read,
 > so the capped default is checked again once the volume is computed. The
 > R60.4.2 refusals run first with unchanged inputs, so their error variants
-> do not change. An `update_maker_order` without `min_volume`, a
+> do not change. When the fee estimate is unavailable and
+> `pre_trade_spend_check` is off, the term is dropped, the order gets the
+> plain default and one WARN names the pair; with the check on, the request
+> is refused with the R60.6.7 item 6 error. The fallback is tested for
+> `setprice` and the maker preview; the WARN is covered by construction,
+> since these tests have no log capture. An `update_maker_order` without `min_volume`, a
 > good-till-cancelled taker order turning into a maker order, taker orders
 > and the taker previews keep their minimums. Tests: T60.8 (a)–(j) as
 > `t60_8_*` in `ordermatch_tests.rs`; the T60.6 setprice and preview tests
@@ -786,13 +796,14 @@ set; (g) a maximum volume of 0.0005 gives a default of 0.0005 (the cap),
 and the order trades only whole; (h) an `update_maker_order` without
 `min_volume` keeps the stored minimum, also after the fee estimate has
 risen; (i) when the fee estimate is unavailable, the `setprice` is refused
-with the typed error of R60.6.7 item 6; (j) the maker `trade_preimage` of
+with the typed error of R60.6.7 item 6, and with `pre_trade_spend_check`
+set to `false` it gets `max(b, q ÷ p)`; (j) the maker `trade_preimage` of
 the order of (a) is not refused, as `setprice` is not, and a maximum-volume
 preview is checked at the capped default as `setprice` is (the preview
-carries no minimum volume in its answer). *Lab row L-MINVOL:* a maker on a dynamic-fee coin posts a
-`setprice` without `min_volume`; a second node's `orderbook` shows the
-raised `min_volume`, and with the switch off the reference value; a taker
-request below it gets no reservation (W2).
+carries no minimum volume in its answer). *Lab row L-MINVOL:* a maker on
+a dynamic-fee coin posts a `setprice` without `min_volume`; a second
+node's `orderbook` shows the raised `min_volume`, and with the switch off
+the reference value; a taker request below it gets no reservation (W2).
 
 ## 60.8 Deferred Work
 

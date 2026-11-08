@@ -6894,21 +6894,52 @@ mod t60_6_pre_trade_spend_check_tests {
             assert!(err.contains("Cannot check the DYN coin spend safety"), "{err}");
         }
 
-        /// (i): when the fee estimate of a covered coin is unavailable the `setprice` is refused with the typed
-        /// error of R60.6.7 item 6, also when the pre-trade check is off, and with the raise off it is not
-        /// consulted at all.
+        /// (i), R60.6.8 item 4: when the fee estimate of a covered coin is unavailable, with `pre_trade_spend_check`
+        /// on the `setprice` is refused with the typed error of R60.6.7 item 6; with it off no raised term is formed
+        /// and the order gets the plain default, with no refusal. With the raise off the estimate is not consulted.
+        /// The single WARN of the fallback (the pair only) is covered by construction: the helper logs it on the one
+        /// path that returns `Ok(None)` for an unavailable estimate. No log-capture seam is shared with this module.
         #[test]
         fn t60_8_i_an_unavailable_estimate_is_a_typed_refusal() {
             mock_node_coins(true, "100");
             let body = json!({"base": "DYN", "rel": "PLAIN", "price": "1", "volume": "1"});
-            for conf in [json!({}), json!({ "pre_trade_spend_check": false })] {
-                let node = node(conf);
-                let err = setprice(&node, body.clone()).unwrap_err();
-                assert!(err.contains("Cannot check the DYN coin spend safety: "), "{err}");
-            }
-            let node = node(json!({ "spend_safe_min_volume": false, "pre_trade_spend_check": false }));
-            let order = setprice(&node, body).unwrap();
+
+            let node_check_on = node(json!({}));
+            let err = setprice(&node_check_on, body.clone()).unwrap_err();
+            assert!(err.contains("Cannot check the DYN coin spend safety: "), "{err}");
+
+            let node_check_off = node(json!({ "pre_trade_spend_check": false }));
+            let order = setprice(&node_check_off, body.clone()).unwrap();
             assert_eq!(min_volume_of(&order), units_8(10_000));
+
+            let node_raise_off = node(json!({ "spend_safe_min_volume": false, "pre_trade_spend_check": false }));
+            let order = setprice(&node_raise_off, body).unwrap();
+            assert_eq!(min_volume_of(&order), units_8(10_000));
+        }
+
+        /// (i) for the maker preview: the same rule as for `setprice`, so the preview and the order agree.
+        #[test]
+        fn t60_8_i_the_maker_preview_follows_the_same_rule_for_an_unavailable_estimate() {
+            use crate::mm2::lp_swap::trade_preimage_rpc;
+
+            mock_node_coins(true, "100");
+            let preview = |node: &Node| {
+                let req = json::from_value(json!({
+                    "base": "DYN", "rel": "PLAIN", "swap_method": "setprice", "price": "1", "volume": "1"
+                }))
+                .unwrap();
+                block_on(trade_preimage_rpc(node.ctx.clone(), req))
+            };
+
+            let node_check_on = node(json!({}));
+            let err = match preview(&node_check_on) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("the preview must be refused"),
+            };
+            assert!(err.contains("Cannot check the DYN coin spend safety"), "{err}");
+
+            let node_check_off = node(json!({ "pre_trade_spend_check": false }));
+            assert!(preview(&node_check_off).is_ok());
         }
     }
 
