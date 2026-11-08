@@ -1,5 +1,10 @@
 # Roadmap
 
+> **This is the roadmap of the alpha period and is not updated any more.** Work in progress and
+> planned work are tracked in [`docs/plans/`](docs/plans/), what each release contains in
+> [`CHANGELOG.md`](CHANGELOG.md), and the tests run before a release in
+> [`docs/release-tests/`](docs/release-tests/).
+
 This document captures the rough direction of KDF Reloaded beyond the v0.1.0-alpha.1 release. Specific dates are not committed; items may be reordered, deferred, or dropped as we learn from operating the alpha.
 
 ## Alpha (v0.1.0-alpha.x)
