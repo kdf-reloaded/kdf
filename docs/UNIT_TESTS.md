@@ -19,7 +19,7 @@ cargo test -p coins --lib -- eth::eth_tests::test_u256
 cargo test -p coins --lib -- eth::eth_tests::test_wei
 cargo test -p coins --lib -- rpc_response_tests coin_protocol_capability::
 
-# The withdraw family: UTXO, QTUM, BCH and SLP withdrawals, offline (the CI row `withdraw-family`)
+# The withdraw, QTUM, BCH and SLP tests of `coins`, offline (the CI row `withdraw-family`)
 cargo test -p coins --lib -- withdraw qtum bch slp
 
 # Bounds on a value received from a peer (CRD ch.28 R16a, T4a)

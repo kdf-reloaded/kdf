@@ -735,15 +735,15 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   `address_id` of 2^31 − 1 in `path_to_address` fails activation like 2^31 does, before anything is
   derived, so the highest usable index is 2^31 − 2. The node itself is unchanged. Detail: PR #297;
   CRD ch.05 R35a, R35b.
-- **CI runs the withdraw tests of UTXO coins, QTUM, BCH and SLP.** A new CI job runs
+- **CI runs the withdraw tests of `coins` and its QTUM, BCH and SLP tests.** A new CI job runs
   `cargo test -p coins --lib -- withdraw qtum bch slp`, which until now ran only on developers'
-  machines. It runs without the `live-network-tests` feature, so it skips the tests of the family that
-  need public servers and runs the offline ones. The node itself is unchanged. Detail: PR #297.
-- **The BCH and SLP withdraw tests retry when the testnet answers "Missing inputs".** These tests
-  broadcast to the public BCH testnet from a wallet that every CI run shares. They already retried a
-  broadcast rejected as a mempool conflict. A broadcast rejected with "Missing inputs" failed the
-  test instead; it is now retried the same way. The answer comes only when two CI runs overlap, so
-  the effect shows over repeated runs. The node itself is unchanged. Detail: PR #297.
+  machines. It runs without the `live-network-tests` feature, so it skips those of the selected
+  tests that need public servers and runs the offline ones. The node itself is unchanged. Detail:
+  PR #297.
+- **The BCH withdraw test retries when the testnet answers "Missing inputs".** The test broadcasts
+  to the public BCH testnet from a wallet that every CI run shares. It already retried a broadcast
+  rejected as a mempool conflict. A broadcast rejected with "Missing inputs" failed the test
+  instead; it is now retried the same way. The node itself is unchanged. Detail: PR #297.
 
 ### Documentation
 
