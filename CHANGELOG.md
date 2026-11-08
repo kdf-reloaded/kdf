@@ -406,7 +406,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   seed's keys they handle are the login's, not the device's. Now only a coin activated for the
   Trezor is refused, as on GLEEC KDF: the activated-coins form of `get_private_keys` refuses it as
   before, and the opt-in full export refuses a requested ticker that is activated for the Trezor
-  with `HardwareWalletNotSupported`. Detail: PR #NNN; CRD ch.05 §5.10B R56, ch.07 R-K6.
+  with `HardwareWalletNotSupported`. Detail: PR #293; CRD ch.05 §5.10B R56, ch.07 R-K6.
 
 - **Under an HD login, activation now lists the coin's own address from the start.** A UTXO coin
   such as RIN or QTUM activated through its task method, and an EVM coin activated with its tokens,
@@ -655,7 +655,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   Now a coin takes its keys from the seed under a seed-phrase login and from the device only when it
   is activated for the Trezor, and each kind stores its accounts under its own identity, as on GLEEC
   KDF. Accounts that a Trezor-activated coin stored under the seed's identity before this release
-  are no longer loaded; the next activation creates them again. Detail: PR #NNN; CRD ch.05 §5.10B
+  are no longer loaded; the next activation creates them again. Detail: PR #293; CRD ch.05 §5.10B
   R52–R55, R35a, R35c.
 - **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
   trailer are read correctly for the median time.** Bitcoin Atom (BCA) serves 84-byte headers from block

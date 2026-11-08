@@ -1102,7 +1102,7 @@ at the anchor was `Iguana`, and the device was the only HD key source
 > 6. *No-login mode.* Reloaded's init task reads the central context first
 >    and therefore fails as R50 requires when there is none.
 >
-> *Status (2026-11-08, batch 4 item B4-2, PR #NNN):* items 1 to 3 are
+> *Status (2026-11-08, batch 4 item B4-2, PR #293):* items 1 to 3 are
 > resolved as D7.a–c record (the source of a coin's keys and its storage
 > digest follow its policy; the wallet-level refusals are gone); item 4
 > stays, by D7.e. Every site of item 1 now leaves the choice to the coin's
@@ -1231,7 +1231,7 @@ if adopted).
   mixed QRC20 case. Neither affects wire shapes.
 
 > **Resolutions (clean-side record, 2026-11-08; maintainer decision EB (b),
-> batch 4 item B4-2, PR #NNN).**
+> batch 4 item B4-2, PR #293).**
 > - *D7.a:* (i). `task::init_trezor` stays accepted under both software
 >   logins, and every coin takes its keys by its own policy (R52–R55).
 > - *D7.b:* (i). The policy-chosen digest goes into the existing
