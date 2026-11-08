@@ -765,7 +765,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   transactions signed the ordinary way are rejected. The rule is written (CRD chapter 61, PR
   #261), and the signing change and the counterparty requirement are implemented (PR #264). On the
   live chain a withdrawal and a swap between two KDF Reloaded nodes passed, and the decline of a
-  counterparty that does not sign with the suffix was checked. The coins-file entries and the P2PKH
+  counterparty that does not sign with the suffix was checked (release tests, "BC2 confirmation" and
+  "BC2 swap check"). The coins-file entries and the P2PKH
   live check are open.
 - [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md) — planning: its target now reads "after the 0.4.0 beta".
 - [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — in progress: the field tests of 2026-10-26 to
@@ -852,7 +853,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   0.3.0-beta.1, is written (PR #260) and implemented (PR #262), and the SwapLab run on it passed
   (release tests, rows 4–8). The opt-in `setprice_replace_after_checks`, which replaces the previous
   orders only after the new order passes its checks, is written (PR #265) and implemented (PR #286);
-  its SwapLab row passed on 2026-11-08.
+  a lab row with a failing check passed on 2026-11-08, to be recorded on the release-tests page with
+  the third batch's close.
 - [`orderbook-queue-and-history-caps`](docs/plans/orderbook-queue-and-history-caps.md) — parked: PRs #131, #134, #137 and #164
   are merged; the early-purge point waits for the maintainer.
 - [`orderbook-wipe-recovery`](docs/plans/orderbook-wipe-recovery.md) — parked: the CRD and both switches are merged (PRs #132,
@@ -882,15 +884,15 @@ file carries the detail. "New" means the plan was created in this cycle.
   recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226). On an SLP
   token withdrawal they charge it in proportion too; that is now recorded (PR #232), and KDF
   Reloaded now charges it that way there as well (PR #234). The Sia floor was revised (PR #278), and
-  the EVM floor finding of the release tests was fixed (PR #247). The default-side arm 3 is chosen
+  the UTXO change-fee rounding found in the release tests was fixed (PR #247). The default-side arm 3 is chosen
   (2026-11-08): a raised advertised minimum, on by default, with a compatibility switch for the
   reference value; its work is planned.
 - [`tron-gasfree`](docs/plans/tron-gasfree.md) — parked: TRON support was added to the 0.4.0 scope on 2026-11-08.
-- [`tron-support`](docs/plans/tron-support.md) — parked: TRON support was added to the 0.4.0 scope on 2026-11-08; the
-  decisions a TRON swap needs are CRD ch.21 D21.B1 to D21.B9.
+- [`tron-support`](docs/plans/tron-support.md) — in progress: TRON support was added to the 0.4.0 scope on 2026-11-08; the
+  decisions a TRON swap needs were put to the maintainer that day.
 - [`tron-swap-support`](docs/plans/tron-swap-support.md) — parked: the chapter rewrite on its branch failed the KDF Dirty
-  Gate on 2026-11-08 and is not reused; the reference's TRON swap state is recorded in CRD ch.21
-  §21.11B.
+  Gate on 2026-11-08 and is not reused; the reference's TRON swap state is recorded by a gated Spec
+  Reader round that lands with the first TRON code PR.
 - [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — parked; new step H6: the
   median time of a coin whose headers carry a fixed-length trailer (Bitcoin Atom) is read from each
   header's own bytes; the 1.6 list form of header requests and explicit `header_layout` entries for

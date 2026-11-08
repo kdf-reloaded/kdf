@@ -1,6 +1,6 @@
 # Plan: make TRON work again
 
-**Status:** parked (TRON is switched off for this beta; work starts for the next beta) — **Last reviewed:** 2026-11-08
+**Status:** in progress (added to the 0.4.0 scope on 2026-11-08; activation and the wallet path first, swaps after) — **Last reviewed:** 2026-11-08
 
 > **Context:** created 2026-10-28 as the umbrella plan for bringing TRON (TRX,
 > TRC20) back. By maintainer decision TRON activation is switched off on `dev`
@@ -52,8 +52,9 @@ the next beta. Swap participation follows once its own blocker is cleared
    - [`tron-swap-support.md`](tron-swap-support.md): `feat/tron-swap-support`,
      TRON V1 atomic swaps. Blocker: its ch. 21 rewrite must pass the KDF
      Dirty Gate before any line of it is reused. That rewrite failed the gate
-     on 2026-11-08 and is not reused; the decisions a TRON swap needs are
-     ch. 21 D21.B1 to D21.B9, put to the maintainer on 2026-11-08.
+     on 2026-11-08 and is not reused; the decisions a TRON swap needs were put
+     to the maintainer on 2026-11-08 and are recorded in the new ch. 21 section
+     of Spec Reader round 0.4.0-6, which lands with the first TRON code PR.
    - [`tron-gasfree.md`](tron-gasfree.md): `feat/tron-gasfree`, the GasFree
      fee-delegated TRC20 withdraw. Blocker: the proxy creation bytecode must be
      pinned and checked against published address vectors.
