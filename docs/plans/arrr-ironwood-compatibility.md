@@ -1,6 +1,6 @@
 # Plan: Pirate Chain (ARRR) v6.0 / Ironwood compatibility for KDF Reloaded
 
-**Status:** in progress (steps A–E landed; field testing green-lit 2026-10-18) — **Last reviewed:** 2026-10-29
+**Status:** in progress (steps A–E landed; field tests passed 2026-10-26 to 10-29; §8 gate 8 open) — **Last reviewed:** 2026-11-08
 
 > **Context:** accepted 2026-09-17; implementation ran through 2026-10-12 (steps A–E) and
 > the reorg-recovery fix merged 2026-10-16. The §7 consultation with the Pirate Chain team
@@ -810,7 +810,9 @@ Decisions taken with the maintainer:
   regtest‑only acceptance path in §5 step 3.7, which could never show standardness rejection
   (`fRequireStandard = false`).
 
-**Open (to be decided with the wider team):**
+**Closed (kept as history):** both items below were open when they were written. The deadline
+passed; CRD ch.39 R39.6.4d gave the gate a built-in ARRR activation time, 3 Oct 2026 19:00 UTC
+(commit `58a8e0b4c`, 2026‑10‑08), and §5A is resolved by §10.
 
 - **REOPENED — arming the swap freeze before 2 Oct.** On 2026‑09‑21 we shipped R39.6.4b/c
   dormant, because `ironwood_activation_time` is absent from every published coin
@@ -1071,8 +1073,8 @@ then mainnet.
 
 ## 11. Field testing (green‑lit 2026‑10‑18)
 
-**This is the active work. Everything else in the project is parked until field testing and
-the beta are through.** Every statement in this section was checked against the tree on
+**Field testing started on 2026‑10‑18 and was the active work until the beta; 0.3.0-beta.1
+shipped on 2026‑11‑01.** The outcomes are recorded in §11.6. Every statement in this section was checked against the tree on
 2026‑10‑18; the one correction it produced is in §11.6.
 
 ### 11.1 Why now, and what is actually missing
@@ -1088,8 +1090,10 @@ is deeper than that window.
 the observed shape against the real backend, plus a negative proof (restoring the old
 in‑memory short‑circuit fails five of them, and restoring the 100‑block depth fails the
 later‑note variant). That is good evidence that the logic is right and no evidence at all that
-it survives contact with the network. Field testing is what closes that gap, and it is the
-only thing standing between the current tree and the beta.
+it survives contact with the network. Field testing was to close that gap, and it was the
+only thing standing between the tree and the beta. This plan records no field result for the
+rewind or the rebuild themselves; §11.6 records the outcomes for the swap, the broadcast and the
+spend detection.
 
 ### 11.2 The window the ARRR team handed us
 

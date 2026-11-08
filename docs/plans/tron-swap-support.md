@@ -1,6 +1,6 @@
 # Plan: Tron V1 atomic-swap participation
 
-**Status:** parked (branch-only; its ch.21 rewrite must pass the KDF Dirty Gate first) — **Last reviewed:** 2026-10-29
+**Status:** parked (branch-only; its ch.21 rewrite must pass the KDF Dirty Gate first) — **Last reviewed:** 2026-11-08
 
 > **Context:** written 2026-10-18, when a review of three stale June-2026
 > branches found a fully wired Tron V1 swap implementation and a 568-line
@@ -50,6 +50,23 @@
 > not patched.** Patching a failed chapter by hand is exactly the move the
 > clean-room wall exists to prevent, and a tainted orchestrator may not do it
 > at all.
+
+> ### Outcome (2026-11-08)
+>
+> - The ch.21 rewrite on this branch was put to the KDF Dirty Gate on 2026-11-08
+>   and **failed**; it is not reusable. The reference's TRON swap state is now
+>   recorded in CRD ch.21 §21.11B instead (Spec Reader round 0.4.0-6, which
+>   passed the KDF Dirty Gate on 2026-11-08).
+> - No released reference build and no historical-record branch carries a TRON
+>   swap client; the branch row holds planning documents only (ch.21 §21.11B.1).
+> - The `bytes32` / SHA-256 contract variant and one deployed Nile address now
+>   have a public derivation outside this repository: the sibling MIT-licensed
+>   swap-contract repository cited in ch.21 §21.11B.6, plus a public observation
+>   of the Nile chain. The premise above that no clean public derivation exists
+>   is therefore partly obsolete.
+> - The discovery surface, approving an allowance to zero first, the base58
+>   configuration form and all fee figures remain KDF Reloaded design choices
+>   (ch.21 D21.B5 to D21.B8).
 
 ### What *is* legitimately baseline-derived, so the gate has a narrower target
 

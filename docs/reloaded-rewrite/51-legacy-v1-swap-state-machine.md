@@ -1067,8 +1067,9 @@ itself. A message that does not decode or verify is discarded with a
 warning. A broadcast that the network refuses is the usual outcome, since
 the parties have normally broadcast the transaction already (it is in the
 mempool or in a block), and is logged at debug level only. Which nodes act
-on the topic, and what a reference receiver does with the message, are
-open (D6). *(Pointer added 2026-11-07.)* The reference's publishing side --
+on the topic is open (D6). What a reference receiver does with the message
+was open too; the note below records it (passed the KDF Dirty Gate on
+2026-11-04, PR #232, merged 2026-11-05). *(Pointer added 2026-11-07.)* The reference's publishing side --
 which steps of the maker, the taker, their recovery paths and the watcher
 publish, in which outcomes, for which coin kinds, and with which key -- is
 recorded in [Chapter 09](09-watcher-reward-infrastructure.md) R24, which

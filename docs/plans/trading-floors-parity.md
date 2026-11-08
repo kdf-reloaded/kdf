@@ -1,6 +1,6 @@
 # Plan: trading-floor parity for every coin family
 
-**Status:** in progress (beta blocker; all four PRs merged: #66, #69, #72, #73; the swaplab run of #72 left) — **Last reviewed:** 2026-10-29
+**Status:** in progress (all four PRs merged and live-tested; default-side arm 3 chosen 2026-11-08: a raised advertised minimum, on by default, with a compatibility switch for the reference value) — **Last reviewed:** 2026-11-08
 
 > **Context:** a field report of a refused WBTC-PLG20 buy led to the EVM fix of
 > PR #66 (plan `evm-min-trading-volume`). The maintainer then asked how the UTXO
@@ -36,7 +36,9 @@
    peers see (W1), so it needs a project-team decision.
 4. **Sia: parity floor, orderly spend and refund refusal (R60.6.4), plus the
    same pre-trade check.** *Rejected:* a raised local Sia floor (peers would
-   see a different advertised minimum).
+   see a different advertised minimum). *Revised 2026-11-07 (PR #278; ch. 20
+   R-S11, ch. 60 D60.2):* the Sia minimum trading volume is now 0.0002 SC, ten
+   times the fixed miner fee; the pre-trade check stays.
 5. **Lightning: the reference value now**, in the widened PR #66, with the
    order builders refusing Lightning pairs while Lightning trading is
    unsupported (R60.6.5). The parked plan `lightning-activation-features`
@@ -64,8 +66,9 @@
 > be activated, and Tendermint coins and tokens are wallet-only
 > (`TENDERMINT_SWAPS_AVAILABLE`), all three constants in
 > `coins/lp_coins_ops.rs` set to `false`. Items 6 and 7 and the Tendermint row
-> of ch. 60 (C1) stand unchanged for when the families return (Solana and TRON
-> planned for the next beta, Tendermint swaps for a later release); turning the
+> of ch. 60 (C1) stand unchanged for when the families return (all three are
+> off on `dev` as of 2026-11-08; TRON and Tendermint swaps were added to the
+> 0.4.0 scope on 2026-11-08, Solana's return is not set); turning the
 > families back on belongs to plans `solana-support`, `tron-swap-support` and
 > `tendermint-activation-features`, not to this one.
 
@@ -85,16 +88,19 @@
   with the untradable-pair refusal (R60.6.5) are implemented. Solana and SPL
   are refused the same way, because their fee functions are unimplemented.
   The vendored LDK fork gained one local patch (plan `lightning-ldk-upgrade`).
-- 2: UTXO fee policy merged in PR #72 (2026-10-25). An
-  explicit `UtxoFixed` withdraw fee keeps its per-started-kilobyte meaning,
-  since no chapter covers it. Swaplab live tests are pending a dedicated
-  swaplab session.
+- 2: UTXO fee policy merged in PR #72 (2026-10-25). The SwapLab live tests
+  ran in the 0.3.0-beta.1 release tests, row S7, PASS 2026-10-31: four floor
+  swaps finished, on KMD, LTC, DOGE and DINGO. The explicit `UtxoFixed`
+  withdraw fee kept its per-started-kilobyte meaning at first, since no
+  chapter covered it; it is proportional since PR #226 (see below). With a
+  change output, the fee is rounded once over the whole size since PR #247
+  (release tests 0.4.0-beta.1, row 19, finding F2).
   *Fact (KDF Spec Reader, 2026-11-03; CRD chapter 38 R38.6.6l, Dirty Gate
   PASS 2026-11-03):* a chapter now covers it. At both reference designations an
   explicit `UtxoFixed` withdraw fee is applied as a proportional, truncated
   rate per 1,000 bytes, exactly like `UtxoPerKbyte`; the per-started-kilobyte
-  meaning is the baseline anchor's. Whether this step adopts the reference
-  arithmetic is the maintainer's decision.
+  meaning is the baseline anchor's. The maintainer adopted the reference
+  arithmetic (decision 9, 2026-11-03).
   *Done for UTXO coins (PR #226, decision 9):* the explicit `UtxoFixed` fee is
   now proportional and truncated on every UTXO withdraw. *Done for the SLP
   token withdraw (PR #234, Decision BV, ch. 38 R38.6.6m):* it follows the same

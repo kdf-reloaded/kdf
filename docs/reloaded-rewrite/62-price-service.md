@@ -53,9 +53,9 @@ price side in full and leaves the bot's order logic to chapter 42.
   match and as reference facts where the maintainer has a decision to take.
 - **§62.9 (Reloaded state).** What this repository does today, from its own
   tree, and where it departs from the reference.
-- **§62.10 (D62.x).** The decisions the maintainer must take before a Coder
-  implements; every one is stated with the reference's answer and the
-  observed network state.
+- **§62.10 (D62.x).** The decisions the maintainer took on 2026-11-07
+  (Decisions DO to DU, implemented in PR #287); every one is stated with the
+  reference's answer and the observed network state.
 
 > **Binding scope (R62.0).** This chapter binds observable behavior: the URLs
 > requested and the order they are tried in, the HTTP request made, the JSON
@@ -137,6 +137,9 @@ reference meets that only for the bot.
 > that is not an array of strings) appears to fall back to the built-in list
 > rather than fail. Neither case is a documented contract of the reference;
 > D62.6 asks the maintainer to define Reloaded's behavior for both.
+> *(Decided 2026-11-07, Decision DT: Reloaded refuses a start request that
+> carries both keys, and one with a malformed value of either key; PR #287,
+> merged 2026-11-08.)*
 
 **R62.2.3** *The request.* Each attempt is a plain HTTP GET of the URL as
 given: no query parameter (no age or expiry filter, no ticker filter), no
@@ -289,12 +292,17 @@ one additional test-only name, which is not part of the contract. Only
 > reference node of either designation cannot price those tickers from that
 > endpoint, and R62.2.5 then moves the snapshot consumer on to the next
 > endpoint. `defistats.gleec.com` prices RIN from `livecoinwatch`, which the
-> reference recognizes and Reloaded today does not (§62.9 F3).
+> reference recognizes and Reloaded did not until PR #287, merged 2026-11-08
+> (§62.9 F3; D62.4, Decision DR of 2026-11-07: `livecoinwatch` is in
+> Reloaded's default set now).
 
 **R62.5.3** *No cross-source check.* A consumer takes the first document that
 satisfies it (R62.2.4, R62.2.5). No consumer fetches two endpoints to compare
 them, and no consumer remembers the previous cycle's price to detect a jump.
 *Rationale:* recorded because D62.2 asks whether Reloaded should.
+*(Decided 2026-11-07, Decision DP: Reloaded fetches its sources in parallel
+and drops a ticker whose prices differ by more than 5 %; PR #287, merged
+2026-11-08.)*
 
 > **Public-network observation (2026-11-07, informative).** Of the tickers both
 > `prices.cipig.net:1717` and `prices.gleec.com` listed, 17 differed by more
@@ -352,7 +360,8 @@ simply creates none. Consequently, a ticker that disappears from the feed, or
 whose provider changes to an unrecognized name, takes the pair's order off the
 book within one cycle. *Rationale:* an order left standing at a price nobody
 can refresh is the hazard the design trades against; D62.5 asks whether
-Reloaded keeps this.
+Reloaded keeps this. *(Decided 2026-11-07, Decision DS: kept, under
+observation in v0.4.0; recorded with PR #287, merged 2026-11-08.)*
 
 **R62.6.6** *Effect of a failed fetch.* When every endpoint fails in a cycle
 (R62.2.4), the bot cancels **every order of every configured pair** — by pair,
@@ -361,7 +370,8 @@ too — logs the failure and the number of cancelled orders at error level, and
 ends the cycle without creating anything. The bot stays running and tries
 again on the next cycle. *Rationale:* same hazard as R62.6.5; the by-pair
 cancellation is a side effect a Coder must reproduce or the maintainer must
-decide away (D62.5).
+decide away (D62.5). *(Decided 2026-11-07, Decision DS: kept; Reloaded's bot
+already cancels by pair, §62.9.)*
 
 **R62.6.7** *Logging frequency.* With a dead first endpoint in the list, the
 reference's first cycle logs one error line for it; thanks to R62.2.4's
@@ -404,7 +414,9 @@ aggregate statistics store, publish without storing, and never fetch the
 snapshot. The snapshot has no staleness test: a record with any non-zero
 timestamp is accepted however old.
 
-> **Code-quality finding F1 (informative; Reloaded's own tree).** Reloaded's
+> **Code-quality finding F1 (informative; Reloaded's own tree).** *(The tree
+> before PR #287, merged 2026-11-08; the line numbers are of that tree. The
+> status update of §62.9 records the fix.)* Reloaded's
 > snapshot path (`mm2src/mm2_main/src/lp_swap/swap_rpc.rs`, the constant at
 > line 8 and the fetch at lines 20–47) downloads from the single baseline
 > endpoint on the dead host `prices.komodo.live`, with no fallback, so every
@@ -417,6 +429,10 @@ timestamp is accepted however old.
 > R62.5.1 (b)–(d): it reads `last_price` of the two exact-or-prefix keys with
 > no provider or timestamp test. Proposed fix: route the snapshot through the
 > same endpoint list and R62.5.1 derivation as the bot, under D62.1–D62.4.
+> *(Done in PR #287, merged 2026-11-08, under Decisions DO to DU of
+> 2026-11-07: the snapshot uses the bot's sources and R62.5.1, fetches once
+> at the terminal report of a successful own swap, and no longer fetches on
+> publication.)*
 
 ## 62.8 Consumer (c): the watcher-reward conversion
 
@@ -448,7 +464,9 @@ failure mode.
 ## 62.9 Reloaded's present state and divergences (from this repository's tree)
 
 The following is from this repository's own code and release notes, not from
-the corpus, and carries no clean-room restriction.
+the corpus, and carries no clean-room restriction. The bullets describe the
+tree before PR #287 (merged 2026-11-08); the status update after them records
+what that PR changed.
 
 - **Endpoints.** Two consumers, two copies of one dead URL: the bot's default
   (`mm2src/mm2_main/src/lp_ordermatch/simple_market_maker.rs` line 30) and the
@@ -480,7 +498,9 @@ the corpus, and carries no clean-room restriction.
   a Reloaded extension and unaffected by this chapter.
 
 > **Status update (reloaded, 2026-11-07).** Findings F1, F2 and F3 are fixed by
-> PR #287, with the decisions of §62.10 (DO to DU): F1 by the single fetch at the
+> PR #287 (merged 2026-11-08), with the decisions of §62.10 (DO to DU). Both
+> consumers now use one list of sources: the default of D62.1 or the
+> `MM2.json` key `price_urls`; the dead baseline URL is gone. F1 by the single fetch at the
 > terminal report of a successful own swap, on the sources of D62.1 and the
 > derivation of R62.5.1; F2 by the request key `price_urls` (D62.6); F3 by the
 > reference provider set and the `price_providers` key (D62.4). The bot's
@@ -488,7 +508,7 @@ the corpus, and carries no clean-room restriction.
 > (parity). One latent defect of the bot is fixed with them: a zero `rel` price
 > now gives no rate (R62.5.1 d) instead of a division by zero.
 
-## 62.10 Decisions left to the maintainer
+## 62.10 Decisions of the maintainer (taken 2026-11-07)
 
 **D62.1** *Endpoint list and order.* Which endpoints Reloaded ships, and in
 which order, for (i) the bot's default and (ii) the snapshot. Options:
@@ -722,7 +742,9 @@ swap without prices and never fails the swap record.
   written from the receiver's own fetch (R62.7.2).
 - **T62.7** Send a start request with both `price_url` and `price_urls`, and
   one with `price_urls: "x"`: the behavior must be whatever D62.6 decides,
-  and tested, not left to the parser.
+  and tested, not left to the parser. *(D62.6 decided 2026-11-07, Decision
+  DT: both requests are refused, the error naming the key; unit tests in
+  `simple_market_maker_tests.rs`, PR #287, merged 2026-11-08.)*
 - **V62.1** Record the probe of §62.2 (DNS, status, time, size for each
   endpoint) in the SwapLab notes before each release; D62.1 depends on it.
 
@@ -770,7 +792,9 @@ swap without prices and never fails the swap record.
   transcription, message wording or module tree was found. The four
   reference states named exist as rows of chapter 02 §2.15A.
 - *Reloaded resolutions of 2026-11-07 (§62.9 status update, §62.10 "Decided"
-  paragraphs, §62.12 note):* Reloaded-original maintainer decisions DO to DU,
+  paragraphs, §62.12 note; and the clean-side decision-state pointers added
+  2026-11-08 under R62.2.2, R62.5.2, R62.5.3, R62.6.5, R62.6.6, F1, §62.9 and
+  T62.7, which cite those decisions and PR #287):* Reloaded-original maintainer decisions DO to DU,
   taken after the gated text above. They take no reference input and state no
   reference fact, so they need no Dirty Gate pass.
 - *Authorship:* KDF Spec Reader, round 0.4.0-4, 2026-11-07; cleared by the

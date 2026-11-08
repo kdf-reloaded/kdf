@@ -1296,7 +1296,9 @@ second, independent exchange).** *(Spec Reader 2026-11-07, rows
 > comparison at all, so the question does not arise there. Any Reloaded rule
 > that compares roots should compare against the **latest** root advertised
 > for the pair, or against none; whether to change R-Q5d is a maintainer
-> decision (§32.10 D12).
+> decision (§32.10 D12). *(Decided 2026-11-07, Decision DA: R-Q5d stays as
+> written after its cost was measured; the cost note under R-Q5d records it.
+> PR #269 and PR #274, merged 2026-11-07.)*
 
 **T-Q6b** *Concurrent keep-alives and the answer (R-Q6b).*
 *(Reloaded-original; passed the KDF Dirty Gate with R-Q6b on 2026-11-07.)* Two
@@ -2080,7 +2082,10 @@ guard of §32.3 R-C5 MUST retain a cancelled UUID for a fixed
 window of **120 seconds**. Within that window, a late-arriving
 create for the same UUID is suppressed. This value is fixed in
 the current binding; making it operator-configurable is deferred
-(§32.10 D2). *(Post-2022 component per §32.1.)*
+(§32.10 D2). *(Partly bound on 2026-11-03: R-K1b below makes the window
+a deployment-wide setting, `cancel_final_window_secs`, built in PR #224,
+merged 2026-11-04; per-coin windows stay deferred.)* *(Post-2022
+component per §32.1.)*
 
 **R-K1b (a cancel this node received is final; Reloaded-original,
 Decision BK item 2, bound 2026-11-03 as Decision 29).** *(Established
@@ -3238,10 +3243,10 @@ liveness on the receiver's clock, switch `pair_liveness`, default on.)*
 *(Since 2026-11-05, §32.7.3 R-Q5b item 6 parks a request that reaches a
 relay before the placeholder exists, and R-GH12a lets the order-book answer
 wait briefly for a lagging worker. Both change only the timing of an answer
-that would otherwise fail.)* *(Since 2026-11-07, R-GH8a: with
-`setprice_replace_after_checks` on, an opt-in, a re-pricing whose checks
-fail leaves the previous orders as they were; at the default R-GH8 holds as
-written.)*
+that would otherwise fail.)* *(Since 2026-11-08, R-GH8a (rule PR #265,
+code PR #286): with `setprice_replace_after_checks` on, an opt-in, a
+re-pricing whose checks fail leaves the previous orders as they were; at the
+default R-GH8 holds as written.)*
 
 **T-GH1** *Unnamed pairs are untouched (R-GH1).* A node holding entries of
 P on pairs X and Y receives a keep-alive from P naming only X with X's held
@@ -3934,9 +3939,10 @@ D11. **Second copy only for priority messages (Reloaded-original;
     at INFO (the note "Consequence for a relay's connections" under
     R-F3b).*
 
-D12. **Stale entries of a maker that keeps sending keep-alives (open
-    decision; added 2026-11-01; the reference facts it rests on are
-    §32.9C).** At the release rows and in Reloaded, an entry a node holds
+D12. **Stale entries of a maker that keeps sending keep-alives (decided
+    2026-11-01, Decision BK, below; items 1 to 4 built by 2026-11-06 in
+    PRs #208, #224, #251 and #259; added 2026-11-01; the reference facts it
+    rests on are §32.9C).** At the release rows and in Reloaded, an entry a node holds
     from a cancel it never received leaves only by the four paths of R-GH1;
     for a pair the maker no longer advertises it leaves only with the
     maker's whole record. The reference's later, unreleased change (R-GH6)

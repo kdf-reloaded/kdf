@@ -514,22 +514,24 @@ remedy is R33.
 
 > **Compatibility (this repository, 2026-11-04; not corpus-sourced; the
 > inventory is plan [`hd-key-unification`](../plans/hd-key-unification.md)).**
-> Reloaded departs from R32--R33 under a global-HD login in two ways that are
-> **not** parity, although an entry of `RELOADED_VS_GLEEC.md` described the
-> first as retained for parity (plan item H0 corrected it on 2026-11-04): (a) the v1 HTLC key falls back to a hash of the mnemonic string
-> for every coin that supplies no swap key -- every EVM swap, and every
+> Until 2026-11-05, Reloaded departed from R32--R33 under a global-HD login in
+> two ways that were **not** parity, although an entry of `RELOADED_VS_GLEEC.md` described the
+> first as retained for parity (plan item H0 corrected it on 2026-11-04): (a) the v1 HTLC key fell back to a hash of the mnemonic string
+> for every coin that supplied no swap key -- every EVM swap, and every
 > UTXO-family coin activated through the legacy route -- and the persistent
-> key is that same hash; (b) order signing and `sender_pubkey` use that hash
-> while keep-alive, `is_mine` and the stale sweep use the internal key, so
-> no keep-alive is ever sent for the key the orders carry. The reference does
-> neither. When `from` is absent, Reloaded's UTXO withdraw uses the coin's
+> key was that same hash; (b) order signing and `sender_pubkey` used that hash
+> while keep-alive, `is_mine` and the stale sweep used the internal key, so
+> no keep-alive was ever sent for the key the orders carried. The reference does
+> neither. Plan items H3 (§5.12C, PR #250) and H4 (§5.12D, PR #254), both
+> merged 2026-11-05, closed (a) and (b) (D6). When `from` is absent, Reloaded's UTXO withdraw uses the coin's
 > activated address, the address at `path_to_address`, on the task route and,
 > since plan item H5, on the direct method. The reference fails such a
 > withdrawal (chapter 49 R49.4 note). The maintainer kept that divergence on
 > 2026-11-04 (decision BY) and set the address on 2026-11-06 (decision CU).
 > Reloaded's legacy `enable` under HD binds the internal key where the
-> reference binds the coin key and then fails the response; plan item H7 binds
-> the coin key and keeps the successful answer behind a switch (decision CB).
+> reference binds the coin key and then fails the response; plan item H7 is to
+> bind the coin key and keep the successful answer behind a switch (decision
+> CB, 2026-11-04; decided, not implemented yet).
 > Plan `hd-key-unification` carries the fixes and records the maintainer's
 > decisions BY to CC on which surfaces stay documented divergences; R32--R35
 > record the reference target for the rest.
@@ -576,11 +578,13 @@ address `0`) as follows:
 
 > **Compatibility (this repository, 2026-11-07; not corpus-sourced; plan
 > [`hd-key-unification`](../plans/hd-key-unification.md) item H5.0).**
-> Reloaded raises the known-address count for `min_addresses_number` only
-> (chapter 38 R38.8.5) and lists only the addresses already handed out, so a
-> swap's funds at a never-requested `path_to_address` stay unlisted until
-> `get_new_address` reaches it (SwapLab row HD5, 2026-11-06). Item 2 is the
-> parity target; it is the option the plan's preparation note recommends.
+> Until PR #279 (merged 2026-11-07), Reloaded raised the known-address count
+> for `min_addresses_number` only (chapter 38 R38.8.5) and listed only the
+> addresses already handed out, so a swap's funds at a never-requested
+> `path_to_address` stayed unlisted until `get_new_address` reached it
+> (SwapLab row HD5, 2026-11-06). Item 2 is the parity target; it is the option
+> the plan's preparation note recommends. PR #279 built it; the as-built note
+> below records how, and its known gap.
 
 > **As built (2026-11-07, clean-side record; plan item H5.0).**
 > `enable_hd_wallet` takes the activated address beside
@@ -640,9 +644,10 @@ serve a UTXO coin of the standard family only; for every other coin type
   lifetime.
 
 > **Compatibility (this repository, 2026-11-07; not corpus-sourced).**
-> Reloaded refuses both commands and leaves the automatic merge off under HD
-> (plan `hd-key-unification` item H5.3). The behavior above is the parity
-> target.
+> Until PR #281 (merged 2026-11-08), Reloaded refused both commands and left
+> the automatic merge off under HD (plan `hd-key-unification` item H5.3). The
+> behavior above is the parity target; PR #281 built it (as-built note
+> below).
 
 > **As built (2026-11-07, clean-side record; plan item H5.3).** Reloaded
 > serves both commands and the automatic merge under a software global-HD
@@ -703,10 +708,11 @@ coin not activated in HD mode, answers `CoinIsActivatedNotWithHDWallet`.
 > a Reloaded choice, since the reference has none for the case.
 
 > **Compatibility (this repository, 2026-11-07; not corpus-sourced).**
-> Reloaded's task asks for a hardware device before anything else, so it fails
-> for every software-keyed coin (chapter 38 §38.8 status note; chapter 20
-> §20.10 D1 note; plan `hd-key-unification` item H5.4). The behavior above is
-> the parity target.
+> Until PR #279 (merged 2026-11-07), Reloaded's task asked for a hardware
+> device before anything else, so it failed for every software-keyed coin
+> (chapter 38 §38.8 status note; chapter 20 §20.10 D1 note; plan
+> `hd-key-unification` item H5.4). The behavior above is the parity target;
+> PR #279 built it, with the differences the as-built note below lists.
 
 > **As built (2026-11-07, clean-side record; plan item H5.4).**
 > `task::create_new_account` builds the hardware extractor only under a
@@ -963,8 +969,9 @@ itself and in `docs/GLEEC_COMPATIBILITY.md`.
 > pairs refused here trade normally there. Setting `swap_key_check` to
 > `false` does not reach that behavior; it restores the behavior of
 > earlier Reloaded builds, in which such a swap is negotiated and then
-> fails in the coin layer. Item H3 (§5.12C) removes the pairs that this
-> section refuses, and the divergence ends when item H4 lands (§5.12D).
+> fails in the coin layer. Item H3 (§5.12C; PR #250, merged 2026-11-05)
+> removed the pairs that this section refuses, and the divergence ended when
+> item H4 landed (§5.12D; PR #254, merged 2026-11-05).
 
 > **As built (2026-11-04, clean-side record; no requirement above changes).**
 > *Coin side.* `SwapOps::swap_key_disagreement` (`coins/lp_coins_traits.rs`) answers
@@ -1021,9 +1028,10 @@ itself and in `docs/GLEEC_COMPATIBILITY.md`.
 >   and refund on that key's address.
 >
 > The node's persistent key, the `persistent_pubkey` of chapter 51 R59, does
-> not change here. It moves to the internal key with item H4 (D6). Until then
-> it stays the passphrase hash, and a negotiation whose HTLC keys differ from
-> it emits shape 3 of chapter 51 R60.
+> not change here. It moved to the internal key with item H4 (D6; §5.12D,
+> PR #254, merged 2026-11-05). Until then it stayed the passphrase hash, and a
+> negotiation whose HTLC keys differed from it emitted shape 3 of chapter 51
+> R60.
 > Under an iguana login every key named in this section is the node's one
 > key, and nothing changes: not the wire, and not what a swap saves.
 
@@ -1100,9 +1108,10 @@ expected answer. The switch `swap_key_check` (R40) stays, with its default.
 
 > **Compatibility.** With this section Reloaded's V1 HTLC keys and its
 > UTXO-family funding address match the reference (§5.9B R33, R35; chapter 51
-> R74). Two differences to the reference remain, and both go with item H4:
-> the persistent key, which is still the passphrase hash under a global-HD
-> login, and the trading identity of §5.9B R32. A swap between a Reloaded
+> R74). Two differences to the reference remained after this section, and
+> both went with item H4 (§5.12D; PR #254, merged 2026-11-05; D6): the
+> persistent key, which until then was still the passphrase hash under a
+> global-HD login, and the trading identity of §5.9B R32. A swap between a Reloaded
 > node built with this section and an earlier Reloaded build negotiates as
 > any shape-3 swap does; the earlier build's own HD swaps still fail as they
 > did.
@@ -1205,7 +1214,8 @@ an explicitly named **legacy key** (Decision CR). It MUST be used only:
    identity (Lightning is not enabled in this release);
 3. by the shared platform-with-tokens activation, which passes it to the
    platform coin: BCH together with its tokens and Tendermint, until plan
-   item H7 moves them to the coin key (§5.9B R35), and Solana, which is not
+   item H7 moves them to the coin key (§5.9B R35; decision CB, decided, not
+   implemented yet), and Solana, which is not
    enabled in this release. The EVM platform ignores it *(amended
    2026-11-05: Solana named)*.
 
@@ -1247,7 +1257,8 @@ MUST carry an upgrade note for HD logins covering:
 > R33; chapter 28 R19). The legacy key of R46 has no counterpart there: the
 > reference never uses the passphrase hash under a global-HD login. Reloaded
 > keeps it only for its own earlier swap records, the Lightning seed, and the
-> two activations that item H7 moves.
+> two activations that item H7 is to move (decision CB; decided, not
+> implemented yet).
 
 > **As built (2026-11-xx, clean-side record; no requirement above changes).**
 > *R45, R46, mechanism.* `MmCtx` (`mm2_core/src/mm_ctx.rs`) keeps two key fields. `secp256k1_key_pair` is the

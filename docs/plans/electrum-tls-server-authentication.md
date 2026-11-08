@@ -1,9 +1,10 @@
 # Plan: Electrum TLS server authentication and the key pin
 
-**Status:** in progress (the rules are written; the warning and the pin are built, PR #273; the pass-through of step 4 is open) — **Last reviewed:** 2026-11-07
+**Status:** parked (rules, warning and pin shipped in PRs #240, #273; open: the pass-through by the coins file and the wallets, D38.6.4n.1, and two review follow-ups) — **Last reviewed:** 2026-11-08
 
-**CRD:** ch.38 R38.6.4m and R38.6.4n (Reloaded-original), with T38.6.4m, T38.6.4n and the open items
-D38.6.4m.1, D38.6.4n.1 and D38.6.4n.2; ch.55 R55.5.10 (the `mode.rpc_data.servers[]` row).
+**CRD:** ch.38 R38.6.4m and R38.6.4n (Reloaded-original), with T38.6.4m and T38.6.4n, the item
+D38.6.4m.1 (resolved 2026-11-05 by the lab run of step 2) and the open items D38.6.4n.1 and
+D38.6.4n.2; ch.55 R55.5.10 (the `mode.rpc_data.servers[]` row).
 
 > **Context.** A coin's Electrum server entry with `protocol` `SSL` is checked against the bundled
 > web roots. `disable_cert_verification` turns that check off. It was reported that a server with
@@ -18,7 +19,7 @@ D38.6.4m.1, D38.6.4n.1 and D38.6.4n.2; ch.55 R55.5.10 (the `mode.rpc_data.server
 
 ## Steps
 
-1. **Rules (this step).** R38.6.4m describes what the client offers and checks, with and without
+1. **Rules — done (PR #240, 2026-11-05).** R38.6.4m describes what the client offers and checks, with and without
    the flag. It names the refusals that stay, and specifies the activation warning. R38.6.4n
    specifies the pin: its value, the verification, the error classes, the browser build and the
    operator guidance. The ch.55 row points to both.

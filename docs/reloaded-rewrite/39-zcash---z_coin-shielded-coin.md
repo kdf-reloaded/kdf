@@ -179,7 +179,9 @@ field `rpc` and payload field `rpc_data`) selecting one of:
   the top level of the activation params.
   `light_wallet_d_servers` is **mandatory and non-empty** for Light mode and is
   the coin's only backend; `electrum_servers` is **accepted and ignored**, and
-  Electrum support for a ZHTLC coin is removed. See §39.11.2 for what activation
+  Electrum support for a ZHTLC coin is removed. *(Amended by Decision AK of
+  2026-10-28, PR #130: `electrum_servers` serves as a fallback for three swap
+  questions about an HTLC, R39.11.25.)* See §39.11.2 for what activation
   requires of the backend, and §39.11.1 for the functions it serves.
 
 > **Status update (reloaded, Step C).** Implemented. `light_wallet_d_servers` is
@@ -4154,6 +4156,9 @@ backends is:
 > builds any Electrum connection, so the "every Electrum server unreachable"
 > state cannot occur; an unreachable lightwalletd endpoint set and an
 > admission-excluded one end the task with distinct typed errors (R39.11.6).
+> *(Amended 2026-10-28, maintainer Decision AK, PR #130: `electrum_servers` is
+> accepted and optional, used only by the fallback of R39.11.25; activation
+> still never connects to it. See the amendment under R39.11.5.)*
 
 
 No Z-coin backend failure is reported as an HTTP 5xx on the `status` call
