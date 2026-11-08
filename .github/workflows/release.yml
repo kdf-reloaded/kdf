@@ -62,13 +62,31 @@ jobs:
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "gate: ref=$GITHUB_REF prerelease=$prerelease proceed=$proceed"
 
-  # Linux x86-64 reuses build-linux.yml, which builds inside a pinned Debian 11
-  # (glibc 2.31) container for broad portability. macOS and Windows reuse their
-  # per-platform build workflows (glibc is irrelevant there).
+  # Linux x86-64, aarch64 and armv7 reuse build-linux.yml, which builds inside a
+  # pinned Debian 11 (glibc 2.31) container for broad portability (aarch64 and
+  # armv7 are cross-compiled there). macOS and Windows reuse their per-platform
+  # build workflows (glibc is irrelevant there).
   linux:
     needs: gate
     if: ${{ needs.gate.outputs.proceed == 'true' }}
     uses: ./.github/workflows/build-linux.yml
+    with:
+      profile: release
+      targets: '["x86_64-unknown-linux-gnu","aarch64-unknown-linux-gnu","armv7-unknown-linux-gnueabihf"]'
+
+  # Static libraries `libkdf.a` for embedding in mobile apps: Android (aarch64,
+  # armv7; NDK API 21) and iOS (aarch64-apple-ios; deployment target 14.0).
+  android:
+    needs: gate
+    if: ${{ needs.gate.outputs.proceed == 'true' }}
+    uses: ./.github/workflows/build-android.yml
+    with:
+      profile: release
+
+  ios:
+    needs: gate
+    if: ${{ needs.gate.outputs.proceed == 'true' }}
+    uses: ./.github/workflows/build-ios.yml
     with:
       profile: release
 
@@ -90,7 +108,7 @@ jobs:
   # GitHub Release. Runs in the protected `release` environment (the only place
   # the signing key is exposed).
   release:
-    needs: [gate, linux, macos, windows]
+    needs: [gate, linux, macos, windows, android, ios]
     if: ${{ needs.gate.outputs.proceed == 'true' }}
     runs-on: ubuntu-latest
     environment: release
@@ -125,10 +143,30 @@ jobs:
               cp "$dir/kdf" "release-assets/kdf-${tag}-${target}"
             fi
           done
+          # Mobile static libraries: artifact directories `libkdf-<triple>`
+          # carry `libkdf.a`; shipped as `libkdf-<tag>-<triple>.a`.
+          for dir in artifacts/libkdf-*; do
+            [ -d "$dir" ] || continue
+            target="$(basename "$dir" | sed 's/^libkdf-//')"
+            if [ -f "$dir/libkdf.a" ]; then
+              cp "$dir/libkdf.a" "release-assets/libkdf-${tag}-${target}.a"
+            fi
+          done
           # Ship the license texts and third-party notices next to the
           # binaries; they are covered by the signed checksum manifest too.
           for f in COPYING LICENSE THIRDPARTY-LICENSES; do
             cp "src/LEGAL/$f" "release-assets/$f"
+          done
+          # Fail loudly if a Linux binary or a mobile library is missing, so a
+          # skipped matrix leg can never produce a release without it.
+          for want in \
+            "kdf-${tag}-x86_64-unknown-linux-gnu" \
+            "kdf-${tag}-aarch64-unknown-linux-gnu" \
+            "kdf-${tag}-armv7-unknown-linux-gnueabihf" \
+            "libkdf-${tag}-aarch64-linux-android.a" \
+            "libkdf-${tag}-armv7-linux-androideabi.a" \
+            "libkdf-${tag}-aarch64-apple-ios.a"; do
+            [ -s "release-assets/$want" ] || { echo "::error::missing release asset: $want"; exit 1; }
           done
           echo "Assembled:"
           ls -l release-assets
@@ -180,6 +218,9 @@ jobs:
   # the `PUBLISH_DOCKERHUB` repository variable is set to `true` and the
   # DOCKERHUB_USERNAME/DOCKERHUB_TOKEN secrets + DOCKERHUB_REPO variable exist.
   # Final releases only — we don't retag `:latest` from a pre-release.
+  # Note: `linux` now covers three targets; a failed aarch64 or armv7 leg fails
+  # the whole call and so skips this job. The release itself fails in that case,
+  # so there is nothing to publish an image for.
   docker:
     needs: [gate, linux]
     if: ${{ needs.gate.outputs.proceed == 'true' && needs.gate.outputs.prerelease != 'true' && vars.PUBLISH_DOCKERHUB == 'true' }}
