@@ -317,7 +317,9 @@ appears only as a failed swap.
 R60.4.2 step 3 travels in the order record's `min_volume` field
 ([Chapter 32](32-orderbook-p2p-and-trie.md) R-W1) and is what every peer
 sees in `orderbook` and `best_orders`. It embeds the maker's floors of
-**both** coins of the pair.
+**both** coins of the pair. *Reloaded (R60.6.8):* with
+`spend_safe_min_volume` on, a maker order's default carries the raised
+value instead.
 
 **R60.5.2 (W2) — silent non-reservation.** A taker request whose matched
 base volume is below the maker order's minimum base volume (R60.4.3)
@@ -572,7 +574,8 @@ coin layer (§60.5 R60.5.6 rows 3–5 and 8, findings F1 and F2).
    and carrying `S` as the threshold; `trade_preimage` reports the same
    refusal. An order with no operator-set minimum volume is refused, not
    silently raised: this rule never changes the default minimum volume a
-   maker advertises (R60.5.1, W1).
+   maker advertises (R60.5.1, W1). R60.6.8 raises that default when its
+   own switch is on.
 5. *Nothing a peer can observe.* The check never runs on a received
    order or request, never makes a maker withhold a reservation, and
    never aborts a started swap; W1–W5 are unchanged, and the floors of
@@ -628,6 +631,81 @@ coin layer (§60.5 R60.5.6 rows 3–5 and 8, findings F1 and F2).
 > which is conservative, because its transparent spend actually charges a
 > fixed 1,000 base units.
 
+**R60.6.8** *Raised default minimum volume (Reloaded-original; the
+maintainer's decision of 2026-11-08, option (A); batch 4 item B4-15).* With
+`spend_safe_min_volume` on, the default minimum volume that R60.4.2 step 3
+gives a maker order with no operator-set minimum volume is
+
+`max(b, q ÷ p, k · S_base, k · S_rel ÷ p)`, with `k` = 10,
+
+capped at the order's maximum base volume. `S_base` and `S_rel` are the
+safe amounts of R60.6.7 item 2 of the base and the rel coin. A leg whose
+coin R60.6.7 item 1 does not cover contributes no term, and so does a Sia
+leg, whose floor is already ten times its fee (row S1).
+
+1. *When.* At `setprice`, and in the maker `trade_preimage`, which
+   previews it, so that the preview and the order agree. The fee rate
+   comes from the reading of R60.6.7 item 8, so a request reads each
+   coin's fee rate at most once and may use the short cache of chapter 38
+   R38.6.6j and R38.6.6k. The value is fixed when it is computed; it does
+   not follow later fee moves. An `update_maker_order` without
+   `min_volume` keeps the stored minimum, and a good-till-cancelled taker
+   order that becomes a maker order keeps its taker default; neither
+   recomputes it.
+2. *Not raised.* An operator-set minimum volume is not changed; it stays
+   bound by R60.4.2 step 3 and, when its switch is on, by R60.6.7. A taker
+   order keeps the default of R60.4.2 step 3. R60.6.7 checks a maker order
+   at its raised default; since that default is never below the one of
+   R60.4.2 step 3, no order the check accepts without R60.6.8 is refused
+   with it.
+3. *Cap.* When the raised value exceeds the order's maximum base volume,
+   the default is that maximum, so the order trades only whole. The cap
+   never takes the default below `max(b, q ÷ p)`; an order too small for
+   that is refused by R60.4.2 as before.
+4. *Estimate unavailable.* If the fee estimate of a dynamic-fee coin
+   cannot be obtained, the request is refused with the typed error of
+   R60.6.7 item 6; no placeholder estimate is substituted.
+5. *What peers see.* The raised value travels in the order record's
+   `min_volume` (R60.5.1, W1) and is what peers see in `orderbook` and
+   `best_orders`. A peer's handling is unchanged: a taker request below
+   it receives no reservation (R60.5.2, W2), and no peer applies its own
+   floors to the record (R60.5.3, W3).
+6. *Switch.* The `MM2.json` boolean `spend_safe_min_volume`, default
+   `true`, enables the rule; only a JSON `false` turns it off, and the
+   default of R60.4.2 step 3 is then given unchanged. It is independent of
+   `pre_trade_spend_check`. The record's shape does not change, but its
+   value reaches peers, so under `docs/COMPAT_SWITCHES.md`, "The
+   default-side rule", this is an arm-3 project-team decision: the
+   maintainer chose Reloaded's value as the default on 2026-11-08.
+
+   > **Compatibility:** for order minimums matching GLEEC KDF, set
+   > `spend_safe_min_volume` to `false`.
+
+*Rationale:* a dynamic-fee coin's floor `b` can sit close to the HTLC
+spend fee, so the smallest trade a default order allows can lose most of
+its value to the fee or become unspendable when fees rise. Ten times the
+spend fee keeps the fee at a tenth of the smallest trade or less and
+absorbs a later rise of up to ten times. A swap that has started can still
+fail on a larger rise; re-advertising on fee changes is out of scope,
+because it would cost gossip.
+
+> **As built (2026-11-08, clean-side record; batch 4 item B4-15, PR #NNN).**
+> `setprice` and the maker `trade_preimage` compute the raised term once
+> per request from the coin layer's safe amount, so the R60.6.7 check and
+> the term share one fee reading per coin. The order builder applies the
+> term only when no `min_volume` was given, capped at the maximum volume
+> and never below `max(b, q ÷ p)`; R60.6.7 then checks the order at that
+> value. For a `max` order the volume is known only after the balance read,
+> so the capped default is checked again once the volume is computed. The
+> R60.4.2 refusals run first with unchanged inputs, so their error variants
+> do not change. An `update_maker_order` without `min_volume`, a
+> good-till-cancelled taker order turning into a maker order, taker orders
+> and the taker previews keep their minimums. Tests: T60.8 (a)–(j) as
+> `t60_8_*` in `ordermatch_tests.rs`; the T60.6 setprice and preview tests
+> now set `spend_safe_min_volume` to `false` where they test the plain
+> default. A Sia leg is excluded by its coin type; no unit test covers it,
+> because the test coins cannot be Sia coins.
+
 ## 60.7 Tests
 
 **T60.1** *UTXO values.* For coins configured as the public coins file
@@ -665,7 +743,9 @@ refused with threshold 0.0001092, and one at 0.00011 is accepted;
 (b) a Sia leg whose amount equals the fixed HTLC miner fee is refused
 with the miner fee plus one hasting as threshold; (c) a KMD order at its
 floor of 0.0001 is accepted (`S` = 496 + 1,000 base units);
-(d) `trade_preimage` reports the refusal of (a) with the same threshold;
+(d) `trade_preimage` reports the refusal of (a) with the same threshold
+(for an order without `min_volume`, with `spend_safe_min_volume` set to
+`false`; see T60.8 (j));
 (e) with `pre_trade_spend_check` set to `false`, the order of (a) is
 accepted; (f) an incoming order or taker request below `S` is handled
 exactly as without the rule; (g) an `update_maker_order` that changes only
@@ -690,6 +770,29 @@ amount is announced with its maximum volume lowered to the reserved
 amount plus the supported maximum; one whose supported maximum is below
 its minimum volume is canceled with the insufficient-balance reason and
 not announced.
+
+**T60.8** *R60.6.8.* With `spend_safe_min_volume` at its default and the
+dynamic-fee coin of T60.6 (a) (`S` = 10,920 base units) as base:
+(a) a `setprice` without `min_volume`, with a maximum volume of 1 and a
+rel coin that is not covered, advertises `min_volume` 0.001092, ten times
+`S`; (b) with the switch set to `false` and `pre_trade_spend_check` set
+to `false`, the same order advertises `max(b, q ÷ p)`, and with only the
+switch set to `false` it is refused by R60.6.7 as in T60.6 (a); (c) with KMD as base (`S` = 1,496 base units, T60.6
+(c)), the default is 0.0001496 instead of the floor 0.0001; (d) with an
+EVM coin as base and as rel, the default is `max(b, q ÷ p)`; (e) with a
+covered rel coin, the default is the largest of the four terms, the rel
+term divided by the price; (f) an operator-set `min_volume` is kept as
+set; (g) a maximum volume of 0.0005 gives a default of 0.0005 (the cap),
+and the order trades only whole; (h) an `update_maker_order` without
+`min_volume` keeps the stored minimum, also after the fee estimate has
+risen; (i) when the fee estimate is unavailable, the `setprice` is refused
+with the typed error of R60.6.7 item 6; (j) the maker `trade_preimage` of
+the order of (a) is not refused, as `setprice` is not, and a maximum-volume
+preview is checked at the capped default as `setprice` is (the preview
+carries no minimum volume in its answer). *Lab row L-MINVOL:* a maker on a dynamic-fee coin posts a
+`setprice` without `min_volume`; a second node's `orderbook` shows the
+raised `min_volume`, and with the switch off the reference value; a taker
+request below it gets no reservation (W2).
 
 ## 60.8 Deferred Work
 
@@ -1033,3 +1136,8 @@ the bound value satisfies.
   chapter 05 §5.12B carries no reference content of its own; it was
   written by a context that never read the forbidden corpus and needs
   no Dirty Gate pass.
+- *Reloaded-original addition (2026-11-08), clean side.* R60.6.8, T60.8,
+  the R60.6.7 item 4 sentence and the W1 note of R60.5.1 were written by a
+  session that never read the corpus, from the maintainer's decision of
+  2026-11-08 (option (A)) and this chapter's own rules. They take no
+  forbidden-class input and need no Dirty Gate pass.

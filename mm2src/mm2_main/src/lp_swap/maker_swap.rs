@@ -14,7 +14,8 @@ use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_
             TransactionIdentifier, WAIT_CONFIRM_INTERVAL};
 use crate::mm2::lp_dispatcher::{DispatcherContext, LpEvents};
 use crate::mm2::lp_network::subscribe_to_topic;
-use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, swap_key_mismatch, untradable_coin_ticker,
+use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, raised_default_for_check,
+                                raised_default_min_volume_term, swap_key_mismatch, untradable_coin_ticker,
                                 MakerOrderBuilder, OrderConfirmationsSettings};
 use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, retried_refund_rejection, tx_helper_topic, NON_FINAL_REFUND_RETRY_SECS};
 use crate::mm2::MM_VERSION;
@@ -2498,9 +2499,24 @@ pub async fn maker_swap_trade_preimage(
     if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
         return MmError::err(TradePreimageRpcError::from(mismatch));
     }
+    // CRD ch.60 R60.6.8 item 1: the preview describes a `setprice` without `min_volume`, so it takes the same raised
+    // default as the order would: the same term from the same fee reading, capped at the volume where it is known
+    // (`max` false), and checked at that value; a `max` preview is checked again once its volume is computed.
+    let raised_default_term = raised_default_min_volume_term(ctx, &base_coin, &rel_coin, &req.price)
+        .await
+        .map_to_mm(TradePreimageRpcError::from)?;
+    let min_volume_checked = raised_default_term.as_ref().and_then(|term| {
+        raised_default_for_check(
+            &base_coin,
+            &rel_coin,
+            &req.price,
+            term,
+            (!req.max).then_some(&req.volume),
+        )
+    });
     // CRD ch.60 R60.6.7 item 3: the preview applies the pre-trade spend-safety check of an order with the
     // default minimum volume, as the order the preview describes would carry.
-    check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, None, &req.price)
+    check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_checked, &req.price)
         .await
         .map_to_mm(TradePreimageRpcError::from)?;
     let base_coin_ticker = base_coin.ticker();
@@ -2522,6 +2538,12 @@ pub async fn maker_swap_trade_preimage(
         }
         req.volume
     };
+    if let (true, Some(term)) = (req.max, raised_default_term.as_ref()) {
+        let capped = raised_default_for_check(&base_coin, &rel_coin, &req.price, term, Some(&volume));
+        check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, capped, &req.price)
+            .await
+            .map_to_mm(TradePreimageRpcError::from)?;
+    }
 
     let preimage_value = TradePreimageValue::Exact(volume.to_decimal());
     let base_coin_fee = base_coin

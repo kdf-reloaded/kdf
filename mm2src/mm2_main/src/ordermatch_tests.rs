@@ -6213,11 +6213,13 @@ mod t60_6_pre_trade_spend_check_tests {
     }
 
     /// (a) through the `setprice` path: refused with the typed volume-too-low text, and the operator-set minimum
-    /// volume of an order is what is checked, whether or not one was given.
+    /// volume of an order is what is checked, whether or not one was given. An order with no operator-set minimum
+    /// volume is checked at the plain default of R60.4.2 step 3, so the raise of R60.6.8 is off here
+    /// (`spend_safe_min_volume` false; with it on, such an order carries a safe default instead, see T60.8).
     #[test]
     fn t60_6_setprice_is_refused_before_anything_else_happens() {
         mock_coins(false);
-        let ctx = ctx_with(json!({}), &["DYN", "KMD"]);
+        let ctx = ctx_with(json!({ "spend_safe_min_volume": false }), &["DYN", "KMD"]);
         for body in [
             json!({"base": "DYN", "rel": "KMD", "price": "1", "volume": "1", "min_volume": "0.0001"}),
             json!({"base": "DYN", "rel": "KMD", "price": "1", "volume": "1"}),
@@ -6506,6 +6508,407 @@ mod t60_6_pre_trade_spend_check_tests {
             let (refusals, fetches) = two_price_only_updates(json!({"fee_estimate_cache_secs": 0}));
             assert!(refusals.iter().all(|r| r.contains("is too low, required at least")));
             assert_eq!(fetches, 2);
+        }
+    }
+
+    /// CRD ch.60 T60.8: the raised default minimum volume of a maker order (R60.6.8). The coins are those of T60.6:
+    /// `DYN` (dynamic fee, `S` = 10,920 base units), `KMD` (`S` = 1,496), `PLAIN` and `PLAIN2` (not covered, which
+    /// is what an EVM coin is, R60.6.7 item 1); every floor is 0.0001. `setprice` runs end to end against a
+    /// temporary order directory, and the assertions read the `min_volume` the order record carries, which is
+    /// what peers see (R60.5.1, W1).
+    mod t60_8_raised_default_min_volume {
+        use super::*;
+        use coins::{CoinBalance, TradeFee};
+
+        /// A node with the four coins, a temporary order directory and a channel that receives what it publishes.
+        struct Node {
+            ctx: MmArc,
+            dbdir: std::path::PathBuf,
+            _p2p_rx: mpsc::Receiver<AdexBehaviourCmd>,
+        }
+
+        impl Drop for Node {
+            fn drop(&mut self) { std::fs::remove_dir_all(&self.dbdir).ok(); }
+        }
+
+        /// The coin mocks of T60.6 plus a balance of `balance` and zero trade fees, so that `setprice` and an
+        /// update run without a network.
+        fn mock_node_coins(estimate_fails: bool, balance: &'static str) {
+            mock_coins(estimate_fails);
+            TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from(0)));
+            TestCoin::my_balance.mock_safe(move |_| {
+                MockResult::Return(Box::new(futures01::future::ok(CoinBalance::new(
+                    balance.parse::<BigDecimal>().unwrap(),
+                ))))
+            });
+            TestCoin::get_sender_trade_fee.mock_safe(|coin, _value, _stage| {
+                let fee = TradeFee {
+                    coin: coin.ticker().to_owned(),
+                    amount: MmNumber::from(0),
+                    paid_from_trading_vol: false,
+                };
+                MockResult::Return(Box::pin(async move { Ok(fee) }))
+            });
+            TestCoin::get_receiver_trade_fee.mock_safe(|coin, _stage| {
+                let fee = TradeFee {
+                    coin: coin.ticker().to_owned(),
+                    amount: MmNumber::from(0),
+                    paid_from_trading_vol: false,
+                };
+                MockResult::Return(Box::new(futures01::future::ok(fee)))
+            });
+        }
+
+        /// `extra` is merged into the top-level configuration.
+        fn node(extra: Json) -> Node {
+            let dbdir = std::env::temp_dir().join(format!("kdf-t60-8-{}", Uuid::new_v4()));
+            let mut conf = json!({
+                "coins": [{ "coin": "DYN" }, { "coin": "KMD" }, { "coin": "PLAIN" }, { "coin": "PLAIN2" }],
+                "dbdir": dbdir.to_str().unwrap()
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                conf[key] = value.clone();
+            }
+            let ctx = MmCtxBuilder::new()
+                .with_conf(conf)
+                .with_secp256k1_key_pair(key_pair_from_seed("passphrase").unwrap())
+                .into_mm_arc();
+            let (tx, p2p_rx) = mpsc::channel(100);
+            P2PContext::new(tx).store_to_mm_arc(&ctx);
+            std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+            let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+            for ticker in ["DYN", "KMD", "PLAIN", "PLAIN2"] {
+                block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+            }
+            Node {
+                ctx,
+                dbdir,
+                _p2p_rx: p2p_rx,
+            }
+        }
+
+        fn setprice(node: &Node, mut body: Json) -> Result<MakerOrder, String> {
+            body["save_in_history"] = json!(false);
+            let req: SetPriceReq = json::from_value(body).unwrap();
+            block_on(create_maker_order(&node.ctx, req))
+        }
+
+        /// The `min_volume` the order record carries, as a number of base units of 10^-8.
+        fn min_volume_of(order: &MakerOrder) -> MmNumber { order.min_base_vol.clone() }
+
+        /// (a): a `setprice` without `min_volume`, a maximum volume of 1 and a rel coin that is not covered
+        /// advertises ten times `S` of the base coin: 0.001092.
+        #[test]
+        fn t60_8_a_the_default_is_ten_times_the_safe_amount() {
+            mock_node_coins(false, "100");
+            let node = node(json!({}));
+            let order = setprice(
+                &node,
+                json!({"base": "DYN", "rel": "PLAIN", "price": "1", "volume": "1"}),
+            )
+            .unwrap();
+            assert_eq!(min_volume_of(&order), units_8(109_200));
+            assert_eq!(order.max_base_vol, MmNumber::from(1));
+        }
+
+        /// (b): with the switch off the same order advertises `max(b, q / p)`. The pre-trade check of R60.6.7 is
+        /// independent: with it on, that default is refused on `DYN` as before (its floor is below `S`), and with
+        /// it off the order is accepted at the floor. Only an explicit JSON `false` turns the raise off.
+        #[test]
+        fn t60_8_b_switch_off_gives_the_plain_default() {
+            mock_node_coins(false, "100");
+            let body = json!({"base": "DYN", "rel": "PLAIN", "price": "1", "volume": "1"});
+
+            let node_off = node(json!({ "spend_safe_min_volume": false, "pre_trade_spend_check": false }));
+            let order = setprice(&node_off, body.clone()).unwrap();
+            assert_eq!(min_volume_of(&order), units_8(10_000));
+
+            let node_check_on = node(json!({ "spend_safe_min_volume": false }));
+            let err = setprice(&node_check_on, body.clone()).unwrap_err();
+            assert!(
+                err.contains("The volume 0.0001 of the DYN coin is too low, required at least 0.0001092"),
+                "{err}"
+            );
+
+            // The raise is independent of the check: with the check off and the raise on it still applies.
+            let node_raise_only = node(json!({ "pre_trade_spend_check": false }));
+            let order = setprice(&node_raise_only, body).unwrap();
+            assert_eq!(min_volume_of(&order), units_8(109_200));
+
+            for (conf, enabled) in [
+                (json!({}), true),
+                (json!({ "spend_safe_min_volume": true }), true),
+                (json!({ "spend_safe_min_volume": null }), true),
+                (json!({ "spend_safe_min_volume": "false" }), true),
+                (json!({ "spend_safe_min_volume": 0 }), true),
+                (json!({ "spend_safe_min_volume": false }), false),
+            ] {
+                let ctx = ctx_with(conf.clone(), &[]);
+                assert_eq!(spend_safe_min_volume_enabled(&ctx), enabled, "{conf}");
+            }
+        }
+
+        /// (c): with KMD as base (`S` = 1,496 base units) the default is 0.0001496 instead of the floor 0.0001.
+        #[test]
+        fn t60_8_c_kmd_default_is_above_the_floor() {
+            mock_node_coins(false, "100");
+            let node = node(json!({}));
+            let order = setprice(
+                &node,
+                json!({"base": "KMD", "rel": "PLAIN", "price": "1", "volume": "1"}),
+            )
+            .unwrap();
+            assert_eq!(min_volume_of(&order), units_8(14_960));
+        }
+
+        /// (d): with coins that R60.6.7 item 1 does not cover on both legs (an EVM coin is one) the default is
+        /// `max(b, q / p)`, with the rel floor decided by the price.
+        #[test]
+        fn t60_8_d_uncovered_coins_keep_the_plain_default() {
+            mock_node_coins(false, "100");
+            let node = node(json!({}));
+            let order = setprice(
+                &node,
+                json!({"base": "PLAIN", "rel": "PLAIN2", "price": "1", "volume": "1"}),
+            )
+            .unwrap();
+            assert_eq!(min_volume_of(&order), units_8(10_000));
+            // q / p = 0.0001 / 0.25 = 0.0004 is above the base floor.
+            let order = setprice(
+                &node,
+                json!({"base": "PLAIN", "rel": "PLAIN2", "price": "0.25", "volume": "1"}),
+            )
+            .unwrap();
+            assert_eq!(min_volume_of(&order), units_8(40_000));
+        }
+
+        /// (e): with a covered rel coin the default is the largest of the four terms, the rel term divided by the
+        /// price: `10 * S_rel / p` against `10 * S_base` (and the floors).
+        #[test]
+        fn t60_8_e_the_largest_term_of_both_legs_wins() {
+            mock_node_coins(false, "100");
+            let node = node(json!({}));
+            // Price 0.5: 10 * 10,920 / 0.5 = 218,400 base units beats 10 * 1,496 = 14,960 and 0.0002.
+            let order = setprice(
+                &node,
+                json!({"base": "KMD", "rel": "DYN", "price": "0.5", "volume": "1"}),
+            )
+            .unwrap();
+            assert_eq!(min_volume_of(&order), units_8(218_400));
+            // Price 10: 10 * 10,920 / 10 = 10,920 is below 10 * 1,496 = 14,960, so the base term wins.
+            let order = setprice(
+                &node,
+                json!({"base": "KMD", "rel": "DYN", "price": "10", "volume": "1"}),
+            )
+            .unwrap();
+            assert_eq!(min_volume_of(&order), units_8(14_960));
+            // Both legs covered by the same kind of coin, base `DYN`: its own term, 10 * 10,920.
+            let order = setprice(&node, json!({"base": "DYN", "rel": "KMD", "price": "1", "volume": "1"})).unwrap();
+            assert_eq!(min_volume_of(&order), units_8(109_200));
+        }
+
+        /// (f): an operator-set `min_volume` is kept as set, however it compares with the raised value.
+        #[test]
+        fn t60_8_f_an_operator_set_minimum_is_kept() {
+            mock_node_coins(false, "100");
+            let node = node(json!({}));
+            for minimum in ["0.0002", "0.01"] {
+                let body = json!({
+                    "base": "DYN", "rel": "PLAIN", "price": "1", "volume": "1", "min_volume": minimum
+                });
+                let order = setprice(&node, body).unwrap();
+                assert_eq!(min_volume_of(&order), MmNumber::from(minimum));
+            }
+        }
+
+        /// (g): a maximum volume of 0.0005 gives a default of 0.0005 (the cap), and the order trades only whole.
+        /// The cap never takes the default below `max(b, q / p)`: a maximum volume under that is refused by
+        /// R60.4.2 as before. A maximum volume under `S` is refused by R60.6.7 at the capped default.
+        #[test]
+        fn t60_8_g_the_default_is_capped_at_the_maximum_volume() {
+            mock_node_coins(false, "100");
+            let node = node(json!({}));
+            let order = setprice(
+                &node,
+                json!({"base": "DYN", "rel": "PLAIN", "price": "1", "volume": "0.0005"}),
+            )
+            .unwrap();
+            assert_eq!(min_volume_of(&order), units_8(50_000));
+            assert_eq!(order.max_base_vol, MmNumber::from("0.0005"));
+            assert_eq!(order.min_base_vol, order.max_base_vol);
+
+            // KMD: the raised value 0.0001496 is above the maximum volume 0.00012, which is above the floor.
+            let order = setprice(
+                &node,
+                json!({"base": "KMD", "rel": "PLAIN", "price": "1", "volume": "0.00012"}),
+            )
+            .unwrap();
+            assert_eq!(min_volume_of(&order), units_8(12_000));
+
+            // Below the floor the order is refused by the floors, as without the raise.
+            let err = setprice(
+                &node,
+                json!({"base": "KMD", "rel": "PLAIN", "price": "1", "volume": "0.00005"}),
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("Max base vol 0.00005 is too low, required: 0.0001"),
+                "{err}"
+            );
+
+            // At the floor of `DYN` the capped default 0.0001 is below `S`: refused by R60.6.7.
+            let err = setprice(
+                &node,
+                json!({"base": "DYN", "rel": "PLAIN", "price": "1", "volume": "0.0001"}),
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("The volume 0.0001 of the DYN coin is too low, required at least 0.0001092"),
+                "{err}"
+            );
+        }
+
+        /// (g), `max` order: the volume is known only after the balance read, so the capped default is checked
+        /// then. A balance of 0.0001 gives a maximum volume under `S` of `DYN`.
+        #[test]
+        fn t60_8_g_a_max_order_is_checked_at_its_capped_default() {
+            mock_node_coins(false, "0.0001");
+            let node = node(json!({}));
+            let err = setprice(&node, json!({"base": "DYN", "rel": "PLAIN", "price": "1", "max": true})).unwrap_err();
+            assert!(
+                err.contains("of the DYN coin is too low, required at least 0.0001092"),
+                "{err}"
+            );
+        }
+
+        /// The cap in isolation: it never takes the default below the plain one.
+        #[test]
+        fn t60_8_g_the_cap_never_goes_below_the_plain_default() {
+            let plain = units_8(10_000);
+            let term = units_8(109_200);
+            assert_eq!(raised_default_capped(plain.clone(), &term, &MmNumber::from(1)), term);
+            assert_eq!(
+                raised_default_capped(plain.clone(), &term, &units_8(50_000)),
+                units_8(50_000)
+            );
+            assert_eq!(raised_default_capped(plain.clone(), &term, &units_8(5_000)), plain);
+        }
+
+        /// (h): today an `update_maker_order` without `min_volume` does not recompute the default; the order
+        /// keeps the value it carries, even after the fee estimate moved, and the update re-checks it as before.
+        #[test]
+        fn t60_8_h_an_update_keeps_the_stored_default() {
+            mock_node_coins(false, "100");
+            let node = node(json!({}));
+            let order = setprice(
+                &node,
+                json!({"base": "DYN", "rel": "PLAIN", "price": "1", "volume": "1"}),
+            )
+            .unwrap();
+            assert_eq!(min_volume_of(&order), units_8(109_200));
+
+            // The estimate doubles after the order was placed; a recomputed default would follow it.
+            TestCoin::spend_safe_amount.mock_safe(|coin| {
+                let safe_amount = match coin.ticker() {
+                    "DYN" => Some(units_8(21_840)),
+                    _ => None,
+                };
+                MockResult::Return(Box::pin(async move { Ok(safe_amount) }))
+            });
+            let updated = block_on(update_maker_order(&node.ctx, MakerOrderUpdateReq {
+                uuid: order.uuid,
+                new_price: Some(MmNumber::from("2")),
+                max: None,
+                volume_delta: None,
+                min_volume: None,
+                base_confs: None,
+                base_nota: None,
+                rel_confs: None,
+                rel_nota: None,
+            }))
+            .unwrap();
+            assert_eq!(updated.price, MmNumber::from("2"));
+            assert_eq!(min_volume_of(&updated), units_8(109_200));
+        }
+
+        /// (j): the maker `trade_preimage` of the order of (a) is not refused: it previews the order with the same
+        /// raised default as `setprice`, so the preview and the order agree. With the raise off the preview is
+        /// refused as in T60.6 (d), with the estimate unavailable it is refused with the typed error, and the
+        /// taker previews, which keep their default, are refused either way.
+        #[test]
+        fn t60_8_j_the_maker_preview_takes_the_raised_default() {
+            use crate::mm2::lp_swap::trade_preimage_rpc;
+
+            let preview = |node: &Node, method: &str, extra: Json| {
+                let mut body =
+                    json!({"base": "DYN", "rel": "PLAIN", "swap_method": method, "price": "1", "volume": "1"});
+                for (key, value) in extra.as_object().unwrap() {
+                    body[key] = value.clone();
+                }
+                let req = json::from_value(body).unwrap();
+                block_on(trade_preimage_rpc(node.ctx.clone(), req))
+            };
+
+            mock_node_coins(false, "100");
+            let node_on = node(json!({}));
+            assert!(preview(&node_on, "setprice", json!({})).is_ok());
+            // The order of (a) is accepted at the same value.
+            assert!(setprice(
+                &node_on,
+                json!({"base": "DYN", "rel": "PLAIN", "price": "1", "volume": "1"})
+            )
+            .is_ok());
+
+            // A `max` preview is checked at its capped default once the volume is known: a balance of 0.0001 gives
+            // a maximum volume under `S`.
+            mock_node_coins(false, "0.0001");
+            let err = match preview(&node_on, "setprice", json!({ "max": true })) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("the preview must be refused"),
+            };
+            assert!(err.contains("0.0001092"), "{err}");
+
+            mock_node_coins(false, "100");
+            let node_off = node(json!({ "spend_safe_min_volume": false }));
+            let err = match preview(&node_off, "setprice", json!({})) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("the preview must be refused with the raise off"),
+            };
+            assert!(err.contains("0.0001092"), "{err}");
+
+            // The taker previews keep the plain default and are refused as in T60.6 (d).
+            for method in ["sell", "buy"] {
+                let err = match preview(&node_on, method, json!({})) {
+                    Err(e) => e.to_string(),
+                    Ok(_) => panic!("the {method} preview must be refused"),
+                };
+                assert!(err.contains("0.0001092"), "{method}: {err}");
+            }
+
+            mock_node_coins(true, "100");
+            let node_failing = node(json!({}));
+            let err = match preview(&node_failing, "setprice", json!({})) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("the preview must be refused"),
+            };
+            assert!(err.contains("Cannot check the DYN coin spend safety"), "{err}");
+        }
+
+        /// (i): when the fee estimate of a covered coin is unavailable the `setprice` is refused with the typed
+        /// error of R60.6.7 item 6, also when the pre-trade check is off, and with the raise off it is not
+        /// consulted at all.
+        #[test]
+        fn t60_8_i_an_unavailable_estimate_is_a_typed_refusal() {
+            mock_node_coins(true, "100");
+            let body = json!({"base": "DYN", "rel": "PLAIN", "price": "1", "volume": "1"});
+            for conf in [json!({}), json!({ "pre_trade_spend_check": false })] {
+                let node = node(conf);
+                let err = setprice(&node, body.clone()).unwrap_err();
+                assert!(err.contains("Cannot check the DYN coin spend safety: "), "{err}");
+            }
+            let node = node(json!({ "spend_safe_min_volume": false, "pre_trade_spend_check": false }));
+            let order = setprice(&node, body).unwrap();
+            assert_eq!(min_volume_of(&order), units_8(10_000));
         }
     }
 

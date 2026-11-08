@@ -2586,8 +2586,27 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     if rel_coin.wallet_only(ctx) {
         return ERR!("Rel coin {} is wallet only", req.rel);
     }
+    // CRD ch.60 R60.6.8: an order with no operator-set minimum volume gets the raised default. The pre-trade check
+    // below then sees that default, capped at the maximum volume where it is already known (`max` false), and a
+    // `max` order is checked again once its volume is computed.
+    let raised_default_term = if req.min_volume.is_none() {
+        try_s!(raised_default_min_volume_term(ctx, &base_coin, &rel_coin, &req.price).await)
+    } else {
+        None
+    };
+    let min_volume_checked = req.min_volume.clone().or_else(|| {
+        raised_default_term.as_ref().and_then(|term| {
+            raised_default_for_check(
+                &base_coin,
+                &rel_coin,
+                &req.price,
+                term,
+                (!req.max).then_some(&req.volume),
+            )
+        })
+    });
     // CRD ch.60 R60.6.7 item 3: the smallest trade the order can produce must be spendable on both legs.
-    try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, req.min_volume.clone(), &req.price).await);
+    try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_checked, &req.price).await);
 
     #[cfg(feature = "ibc-routing-for-swaps")]
     {
@@ -2623,6 +2642,14 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
         (req.volume.clone(), base_balance)
     };
 
+    // CRD ch.60 R60.6.8 item 3 with R60.6.7: a `max` order's volume is known only now; the default it carries is
+    // the raised one capped at that volume, and that is what must be spendable. Never stricter than the check
+    // above for a plain default, which the capped default is not below.
+    if let (true, Some(term)) = (req.max, raised_default_term.as_ref()) {
+        let capped = raised_default_for_check(&base_coin, &rel_coin, &req.price, term, Some(&volume));
+        try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, capped, &req.price).await);
+    }
+
     let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
 
     // CRD ch.32 R-GH8a: with `setprice_replace_after_checks` on, every check above has passed and the order is
@@ -2642,6 +2669,7 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     let builder = MakerOrderBuilder::new(&base_coin, &rel_coin)
         .with_max_base_vol(volume)
         .with_min_base_vol(req.min_volume)
+        .with_raised_default_term(raised_default_term)
         .with_price(req.price)
         .with_conf_settings(conf_settings)
         .with_save_in_history(req.save_in_history)

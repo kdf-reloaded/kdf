@@ -5289,7 +5289,8 @@ mod ch57_min_trading_vol_tests {
 
 /// CRD ch.60 T60.6 (d): both `trade_preimage` previews report the pre-trade spend-safety refusal with the same
 /// threshold as the order paths. `TestCoin` reports the safe amount, so no network is needed; the check runs
-/// before any balance or fee lookup.
+/// before any balance or fee lookup. The maker preview describes an order without `min_volume`, which R60.6.8
+/// raises past the refusal, so `spend_safe_min_volume` is `false` here (T60.8 (j) covers the raised preview).
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod t60_6_trade_preimage_tests {
     use super::*;
@@ -5319,7 +5320,9 @@ mod t60_6_trade_preimage_tests {
     #[test]
     fn t60_6_d_both_previews_report_the_same_refusal() {
         mock_coins();
-        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({ "spend_safe_min_volume": false }))
+            .into_mm_arc();
         for method in ["setprice", "sell", "buy"] {
             let base = MmCoinEnum::Test(TestCoin::new("DYN"));
             let rel = MmCoinEnum::Test(TestCoin::new("KMD"));

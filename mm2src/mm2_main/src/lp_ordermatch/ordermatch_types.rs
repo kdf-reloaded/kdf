@@ -258,6 +258,16 @@ pub(crate) fn pre_trade_spend_check_enabled(ctx: &MmArc) -> bool {
     ctx.conf["pre_trade_spend_check"].as_bool() != Some(false)
 }
 
+/// CRD ch.60 R60.6.8 item 6: the MM2.json boolean `spend_safe_min_volume`, default `true`. Only an explicit JSON
+/// `false` gives a maker order the default minimum volume of R60.4.2 step 3 unchanged, which is the reference
+/// behaviour; independent of `pre_trade_spend_check`.
+pub(crate) fn spend_safe_min_volume_enabled(ctx: &MmArc) -> bool {
+    ctx.conf["spend_safe_min_volume"].as_bool() != Some(false)
+}
+
+/// CRD ch.60 R60.6.8: the multiple of a leg's safe amount that the raised default minimum volume keeps.
+const RAISED_DEFAULT_MIN_VOLUME_FACTOR: u64 = 10;
+
 /// CRD ch.59 R59.4.6: the MM2.json boolean `suppress_unchanged_order_updates`, default `true`. Only an
 /// explicit JSON `false` makes `update_maker_order` broadcast an update that changes nothing.
 pub(crate) fn suppress_unchanged_order_updates(ctx: &MmArc) -> bool {
@@ -359,6 +369,78 @@ pub(crate) async fn check_pre_trade_spend_safety(
         }
     }
     Ok(())
+}
+
+/// CRD ch.60 R60.6.8: the raised term of the default minimum volume of a maker order, that is
+/// `max(k * S_base, k * S_rel / p)` with `k` = 10 and `S` the safe amount of R60.6.7 item 2, before the cap at the
+/// order's maximum base volume. `Ok(None)` when the switch `spend_safe_min_volume` is off, when `price` is below
+/// the minimum price (the order builder refuses it), and when neither leg contributes: a leg whose coin R60.6.7
+/// item 1 does not cover contributes no term, and neither does a Sia leg, whose floor is already ten times its
+/// fee. The safe amounts are read through the coin layer, so the request's single fee reading per coin (R60.6.7
+/// item 8) is the one this uses. An unavailable estimate is the typed refusal of R60.6.7 item 6.
+pub(crate) async fn raised_default_min_volume_term(
+    ctx: &MmArc,
+    base_coin: &MmCoinEnum,
+    rel_coin: &MmCoinEnum,
+    price: &MmNumber,
+) -> Result<Option<MmNumber>, SpendSafetyError> {
+    if !spend_safe_min_volume_enabled(ctx) || validate_price(price.clone()).is_err() {
+        return Ok(None);
+    }
+    let factor = MmNumber::from(RAISED_DEFAULT_MIN_VOLUME_FACTOR);
+    let mut term: Option<MmNumber> = None;
+    // The base leg is the amount itself, the rel leg is divided by the price to be a base volume.
+    for (coin, divisor) in [(base_coin, MmNumber::from(1)), (rel_coin, price.clone())] {
+        if matches!(coin, MmCoinEnum::SiaCoin(_)) {
+            continue;
+        }
+        let safe_amount = coin
+            .spend_safe_amount()
+            .await
+            .map_err(|e| SpendSafetyError::EstimateUnavailable {
+                coin: coin.ticker().to_owned(),
+                error: e.to_string(),
+            })?;
+        if let Some(safe_amount) = safe_amount {
+            let leg_term = &(&factor * &safe_amount) / &divisor;
+            term = Some(match term {
+                Some(current) => current.max(leg_term),
+                None => leg_term,
+            });
+        }
+    }
+    Ok(term)
+}
+
+/// CRD ch.60 R60.6.8 item 3: the raised default of an order with no operator-set minimum volume. `plain` is the
+/// default of R60.4.2 step 3, `term` the raised term, `max_base_vol` the order's maximum base volume. The raised
+/// term is capped at the maximum volume, and the cap never takes the default below `plain`.
+pub(crate) fn raised_default_capped(plain: MmNumber, term: &MmNumber, max_base_vol: &MmNumber) -> MmNumber {
+    plain.max(term.clone().min(max_base_vol.clone()))
+}
+
+/// The minimum volume that the pre-trade check of a new maker order sees when no operator-set minimum volume was
+/// given and R60.6.8 raises the default: the default of R60.4.2 step 3 raised by `term`, capped at
+/// `max_base_vol` where that is known (`None` when the maximum volume is computed later, from the balance).
+/// `None` when the plain default cannot be formed (the order builder refuses such an order).
+pub(crate) fn raised_default_for_check(
+    base_coin: &MmCoinEnum,
+    rel_coin: &MmCoinEnum,
+    price: &MmNumber,
+    term: &MmNumber,
+    max_base_vol: Option<&MmNumber>,
+) -> Option<MmNumber> {
+    let plain = validate_and_get_min_vol(
+        base_coin.min_trading_vol(),
+        rel_coin.min_trading_vol(),
+        None,
+        price.clone(),
+    )
+    .ok()?;
+    Some(match max_base_vol {
+        Some(max_base_vol) => raised_default_capped(plain, term, max_base_vol),
+        None => plain.max(term.clone()),
+    })
 }
 
 pub enum TakerOrderBuildError {
@@ -804,6 +886,8 @@ pub struct MakerOrder {
 pub struct MakerOrderBuilder<'a> {
     pub(crate) max_base_vol: MmNumber,
     pub(crate) min_base_vol: Option<MmNumber>,
+    /// CRD ch.60 R60.6.8: the raised term of the default minimum volume, used only when `min_base_vol` is `None`.
+    pub(crate) raised_default_term: Option<MmNumber>,
     pub(crate) price: MmNumber,
     pub(crate) base_coin: &'a MmCoinEnum,
     pub(crate) rel_coin: &'a MmCoinEnum,
@@ -963,6 +1047,7 @@ impl<'a> MakerOrderBuilder<'a> {
             rel_orderbook_ticker: None,
             max_base_vol: 0.into(),
             min_base_vol: None,
+            raised_default_term: None,
             price: 0.into(),
             conf_settings: None,
             save_in_history: true,
@@ -983,6 +1068,14 @@ impl<'a> MakerOrderBuilder<'a> {
 
     pub fn with_price(mut self, price: MmNumber) -> Self {
         self.price = price;
+        self
+    }
+
+    /// CRD ch.60 R60.6.8: raises the default minimum volume of an order that has no operator-set one by `term`
+    /// (see [`raised_default_min_volume_term`]), capped at the order's maximum base volume. Ignored when an
+    /// operator-set minimum volume is given.
+    pub(crate) fn with_raised_default_term(mut self, term: Option<MmNumber>) -> Self {
+        self.raised_default_term = term;
         self
     }
 
@@ -1049,6 +1142,13 @@ impl<'a> MakerOrderBuilder<'a> {
             self.min_base_vol.clone(),
             self.price.clone(),
         )?;
+
+        // CRD ch.60 R60.6.8: the refusals above are those of R60.4.2; the raise only changes the default that an
+        // order with no operator-set minimum volume carries.
+        let actual_min_base_vol = match (&self.min_base_vol, &self.raised_default_term) {
+            (None, Some(term)) => raised_default_capped(actual_min_base_vol, term, &self.max_base_vol),
+            _ => actual_min_base_vol,
+        };
 
         let created_at = now_ms();
 

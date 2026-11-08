@@ -717,6 +717,8 @@ behavior, except for `swap_key_check`; the row of each switch in
 [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the full detail:
 
 - `pre_trade_spend_check: false` — no pre-trade spend check.
+- `spend_safe_min_volume: false` — a maker order without `min_volume` advertises the default of the
+  coin floors, as GLEEC KDF does, instead of at least ten times the HTLC spend fee.
 - `erc20_hd_activation: false` — `enable_erc20` refuses a token whose platform coin is activated
   on an HD wallet, as GLEEC KDF does. By default KDF Reloaded activates the token on the platform's
   enabled address.
