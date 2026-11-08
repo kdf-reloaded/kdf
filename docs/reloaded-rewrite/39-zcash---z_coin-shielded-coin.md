@@ -3202,7 +3202,7 @@ object whose shape differs from the generic v2 history entry. Its fields are:
 | `block_height` | integer | Block height the transaction was mined at. |
 | `confirmations` | integer | Confirmation count derived from `current_block` versus `block_height`. |
 | `timestamp` | integer | Transaction timestamp (Unix seconds). |
-| `transaction_fee` | decimal | Fee paid by the transaction. |
+| `transaction_fee` | decimal | Fee paid by the transaction. In Light mode the fee recorded for an own send, otherwise `0` (R39.8.9e1). |
 | `coin` | string | Ticker the transaction belongs to. |
 | `internal_id` | integer (signed 64-bit) | Stable internal identifier used for `FromId` paging (R39.8.4). |
 
@@ -3646,6 +3646,50 @@ tip; otherwise it is `current_block + 1 - block_height`. The `current_block`
 used here is the single lightwalletd tip (R39.11.8(f), R39.11.9), which is also the
 source of the scanned blocks, so an entry cannot be ahead of the height used to
 count its confirmations.
+
+R39.8.9e1 *Fee of a row in Light mode.* A Light-mode wallet scans compact
+blocks, which carry neither the transparent values nor the Sapling value balance
+that R39.8.9e computes the fee from. In Light mode `transaction_fee` shall
+therefore be the fee the wallet database holds for the transaction, and `0` when
+it holds none:
+
+- (a) *Own send.* A transaction that spends the wallet's notes is recorded with
+  its fee when the backend accepts its broadcast (§39.8.0.7; R39.6.5g for a
+  transaction submitted through `send_raw_transaction`): a withdrawal, a swap
+  payment, a swap fee payment. Its row shall report that fee while unmined, once
+  mined and after a restart. The scan that mines the transaction shall not change
+  it.
+- (b) *No recorded fee.* A transaction another wallet built, such as a deposit,
+  has no fee in the wallet database. Neither has a swap spend or refund: it
+  spends no wallet note, so it is not recorded at broadcast. Their rows report
+  `0`, which here means that the fee is not known, not that none was paid.
+- (c) *Rebuild.* A rebuilt wallet database (§39.8.0.4) holds no broadcast
+  records, so an own send that the rebuilt database finds by scanning reports
+  `0`.
+- (d) Nothing is fetched from the light endpoint to fill in the fee.
+- (e) A stored fee that is not a valid amount, such as a negative one, is a
+  defect of the wallet database. The history page is refused, as for an invalid
+  stored amount, and is not served with a fee of `0`, which would read as "not
+  known".
+
+> **Provenance (reloaded, 2026-11-07; this repository, not corpus-sourced).**
+> R39.8.9e1 and T39.8.9e1 were written from this repository's code and the
+> vendored wallet-database crate. A live withdrawal in the release tests showed
+> `transaction_fee` `0` on its row, unmined and mined, where the withdraw answer
+> named the fee; the code reported `0` on every row. R39.8.9e stays the rule of
+> the reference; R39.8.9e1 states what a Light-mode wallet reports.
+
+T39.8.9e1 *Fee of a row (R39.8.9e1).* Tests shall show:
+
+- an own send with fee `F`, made through the wallet's send path, reports
+  `transaction_fee` `F` unmined, after the block that mines it is scanned, and
+  after the wallet database is reopened, as at a restart;
+- the same for a withdrawal submitted through `send_raw_transaction`;
+- a swap payment and a swap fee payment report their fee, and a swap spend and
+  a refund report `0`;
+- a deposit from another wallet reports `0`;
+- after a rebuild of the wallet database, the rescanned own send reports `0`;
+- a negative stored fee refuses the page.
 
 > **Status update (reloaded, 2026-11-07; this repository, not corpus-sourced).**
 > R39.8.9c and R39.8.9d were only partly implemented. Found in the release tests

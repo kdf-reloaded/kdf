@@ -332,6 +332,14 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   noted under R39.5A.3. No compat switch: there is nothing to switch on yet.
   Code: `coins/lp_coins_types.rs` (`WithdrawRequest`), `coins/z_coin.rs`
   (`withdraw`).
+- **The ARRR history reports a fee only where the node recorded it.** GLEEC KDF
+  computes a row's `transaction_fee` from the full transaction (CRD ch.39
+  R39.8.9e). Reloaded's Light-mode wallet reads compact blocks, which carry no
+  fee data. A row reports the fee the node recorded when it broadcast its own
+  send, and `0` for a transaction another wallet built, for a swap spend or
+  refund, and for an own send found again after a rebuild of the wallet
+  database (R39.8.9e1). No compat switch: the data the reference computes from
+  is not there. Code: `coins/z_coin/z_coin_wallet_db.rs`.
 - **Siacoin withdraw populates `internal_id`.** GLEEC KDF leaves `internal_id`
   empty on its SC withdraw response — only its history path fills the field in.
   Reloaded sets it to the raw bytes of the signed transaction's id, the same
