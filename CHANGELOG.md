@@ -739,6 +739,11 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   `cargo test -p coins --lib -- withdraw qtum bch slp`, which until now ran only on developers'
   machines. It runs without the `live-network-tests` feature, so it skips the tests of the family that
   need public servers and runs the offline ones. The node itself is unchanged. Detail: PR #NNN.
+- **The BCH and SLP withdraw tests retry when the testnet answers "Missing inputs".** These tests
+  broadcast to the public BCH testnet from a wallet that every CI run shares. They already retried a
+  broadcast rejected as a mempool conflict. A broadcast rejected with "Missing inputs" failed the
+  test instead; it is now retried the same way. The answer comes only when two CI runs overlap, so
+  the effect shows over repeated runs. The node itself is unchanged. Detail: PR #NNN.
 
 ### Documentation
 
