@@ -4,7 +4,7 @@ use libp2p::swarm::{CloseConnection, ConnectionDenied, ConnectionId, FromSwarm, 
                     THandler, THandlerInEvent, THandlerOutEvent, ToSwarm};
 use libp2p::PeerId;
 use log::error;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::task::{Context, Poll};
 use void::Void;
 
@@ -23,6 +23,11 @@ pub struct AdexPing {
     ping: ping::Behaviour,
     /// Consecutive ping failures per peer. Reset to zero on a successful ping.
     failed_counts: HashMap<PeerId, u32>,
+    /// The established connections of each peer, so that the connections a safeguard close ends are known.
+    connections: HashMap<PeerId, Vec<ConnectionId>>,
+    /// The connections that the safeguard has started to close and that the swarm has not yet reported closed (CRD
+    /// ch.28 R27a item 1a). [`AdexPing::take_ping_close`] removes an entry when the swarm reports the close.
+    closing: HashSet<ConnectionId>,
 }
 
 #[allow(clippy::new_without_default)]
@@ -31,7 +36,15 @@ impl AdexPing {
         AdexPing {
             ping: ping::Behaviour::new(ping::Config::new()),
             failed_counts: HashMap::new(),
+            connections: HashMap::new(),
+            closing: HashSet::new(),
         }
+    }
+
+    /// Whether the connection `connection_id`, which the swarm has just reported closed, was closed by the safeguard.
+    /// Forgets the connection. The caller asks it for every closed connection, so no entry outlives its connection.
+    pub(crate) fn take_ping_close(&mut self, connection_id: ConnectionId) -> bool {
+        self.closing.remove(&connection_id)
     }
 }
 
@@ -82,7 +95,29 @@ impl NetworkBehaviour for AdexPing {
             .handle_pending_outbound_connection(connection_id, maybe_peer, addresses, effective_role)
     }
 
-    fn on_swarm_event(&mut self, event: FromSwarm<Self::ConnectionHandler>) { self.ping.on_swarm_event(event) }
+    fn on_swarm_event(&mut self, event: FromSwarm<Self::ConnectionHandler>) {
+        match &event {
+            FromSwarm::ConnectionEstablished(established) => self
+                .connections
+                .entry(established.peer_id)
+                .or_default()
+                .push(established.connection_id),
+            FromSwarm::ConnectionClosed(closed) => {
+                let none_left = match self.connections.get_mut(&closed.peer_id) {
+                    Some(connections) => {
+                        connections.retain(|connection_id| *connection_id != closed.connection_id);
+                        connections.is_empty()
+                    },
+                    None => false,
+                };
+                if none_left {
+                    self.connections.remove(&closed.peer_id);
+                }
+            },
+            _ => {},
+        }
+        self.ping.on_swarm_event(event)
+    }
 
     fn on_connection_handler_event(
         &mut self,
@@ -116,6 +151,10 @@ impl NetworkBehaviour for AdexPing {
                                 e, event.peer, count
                             );
                             self.failed_counts.remove(&event.peer);
+                            // Record the connections this close ends (CRD ch.28 R27a item 1a).
+                            if let Some(connections) = self.connections.get(&event.peer) {
+                                self.closing.extend(connections.iter().copied());
+                            }
                             return Poll::Ready(ToSwarm::CloseConnection {
                                 peer_id: event.peer,
                                 connection: CloseConnection::All,

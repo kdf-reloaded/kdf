@@ -7,14 +7,17 @@
 //! 2. [`SeedPeers`] (R27a item 2) remembers which peer the last outbound connection to each configured bootstrap
 //!    address reached, so that the address is not dialed while that peer is connected through any connection.
 //! 3. [`ShortOfRelaysLog`] (R27a item 3) limits the "below low watermark" WARN line.
+//! 4. [`EarlyRedials`] (R27a item 1a) lets an address that this node dialed be dialed again before the interval of
+//!    item 1 has passed, when the connection that the dial made lasted a while and was then cut.
 //!
 //! Every method takes the current time as an argument and never reads the clock itself, so that the tests drive it.
 //! The time must not go backwards: the monotonic clock of the WebAssembly timer asserts on it.
 
 use crate::atomicdex_behaviour::CONNECTED_RELAYS_CHECK_INTERVAL;
-use libp2p::{swarm::ConnectionId, Multiaddr, PeerId};
+use libp2p::{swarm::{ConnectionError, ConnectionId},
+             Multiaddr, PeerId};
 use log::Level;
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, io, time::Duration};
 use wasm_timer::Instant;
 
 /// How long a dialed address is not dialed again (R27a item 1) and how long the short-of-relays WARN line is held
@@ -22,6 +25,12 @@ use wasm_timer::Instant;
 pub(crate) const REDIAL_GUARD_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// How many dialed addresses are remembered (R27a item 1). When the record is full, the oldest entry is dropped.
 pub(crate) const MAX_DIALED_ADDRESSES: usize = 1024;
+/// How long a dialed connection must have lasted for its address to be dialed again early (R27a item 1a).
+pub(crate) const EARLY_REDIAL_MIN_LIFETIME: Duration = Duration::from_secs(30);
+/// How many early redials of one address are allowed within the guard interval (R27a item 1a).
+pub(crate) const MAX_EARLY_REDIALS: usize = 2;
+/// The text of the error that the bounded close of the multiplexer ends with (R27c).
+const CLOSE_TIMED_OUT_TEXT: &str = "close timed out";
 
 /// The timings of the maintenance and of its guards. The default is the production setting; a test shortens both.
 #[derive(Clone, Copy, Debug)]
@@ -30,6 +39,8 @@ pub(crate) struct RedialGuardConfig {
     pub(crate) interval: Duration,
     /// The period of the relay-connection maintenance tick (RQ1a item 4).
     pub(crate) tick: Duration,
+    /// How long a dialed connection must have lasted for an early redial of its address (R27a item 1a).
+    pub(crate) early_redial_min_lifetime: Duration,
 }
 
 impl Default for RedialGuardConfig {
@@ -37,6 +48,7 @@ impl Default for RedialGuardConfig {
         RedialGuardConfig {
             interval: REDIAL_GUARD_INTERVAL,
             tick: CONNECTED_RELAYS_CHECK_INTERVAL,
+            early_redial_min_lifetime: EARLY_REDIAL_MIN_LIFETIME,
         }
     }
 }
@@ -139,6 +151,260 @@ impl SeedPeers {
     fn peer_of(&self, address: &Multiaddr) -> Option<&PeerId> { self.peers.get(address) }
 }
 
+/// A close that this node started on purpose and recorded where it started it (R27a item 1a).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalClose {
+    /// The ping safeguard (R9). The only local close that allows an early redial.
+    PingSafeguard,
+    /// Any other close of this node that a call site recorded: the peer-clock admission check (RP2) and the
+    /// relay-count maintenance (R27).
+    Other,
+}
+
+/// How a dialed connection ended, as far as R27a item 1a tells the causes apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseCause {
+    /// A transport error or a close from the peer: the swarm reports both as an I/O error of the connection, and
+    /// nothing on this node's side started the close. Allows an early redial.
+    Transport,
+    /// The ping safeguard (R9) closed it. Allows an early redial.
+    PingSafeguard,
+    /// The idle timeout (keep-alive). No early redial.
+    IdleTimeout,
+    /// The bounded close of R27c was abandoned at its deadline. No early redial.
+    CloseTimedOut,
+    /// A connection handler failed. R27a item 1a does not list it, so no early redial.
+    HandlerError,
+    /// A close that this node started and that no call site recorded as the ping safeguard: the stuck-peer close
+    /// (RQ1 item 5), the admission close (RP2), the relay-count close (R27), or a close with another purpose. No
+    /// early redial.
+    LocalClose,
+}
+
+impl CloseCause {
+    /// Whether a connection that ended this way and lasted long enough allows an early redial of its address.
+    pub(crate) fn allows_early_redial(self) -> bool {
+        matches!(self, CloseCause::Transport | CloseCause::PingSafeguard)
+    }
+}
+
+/// Whether `error` is the error of a close that was abandoned at its deadline (R27c). The multiplexer reports it as an
+/// I/O error of kind `TimedOut` with this text, which the boxed multiplexer wraps into another I/O error.
+fn is_close_timed_out(error: &io::Error) -> bool { error.to_string().contains(CLOSE_TIMED_OUT_TEXT) }
+
+/// Tells the cause of a `SwarmEvent::ConnectionClosed` (R27a item 1a).
+///
+/// `cause` is the cause of the event. The swarm reports `None` when the close was started on this node's side and
+/// finished without an error, whatever started it, so `None` alone does not name the reason: `local` is what the call
+/// site that started the close recorded. A close that ended with an error is a transport error or a close from the
+/// peer, unless `local` says that this node had started it. The idle timeout, the handler error and the R27c timeout
+/// are told by their error.
+pub(crate) fn classify_close<E>(cause: Option<&ConnectionError<E>>, local: Option<LocalClose>) -> CloseCause {
+    match cause {
+        Some(ConnectionError::IO(error)) if is_close_timed_out(error) => CloseCause::CloseTimedOut,
+        Some(ConnectionError::KeepAliveTimeout) => CloseCause::IdleTimeout,
+        Some(ConnectionError::Handler(_)) => CloseCause::HandlerError,
+        Some(ConnectionError::IO(_)) | None => match (local, cause.is_some()) {
+            (Some(LocalClose::PingSafeguard), _) => CloseCause::PingSafeguard,
+            (Some(LocalClose::Other), _) => CloseCause::LocalClose,
+            (None, true) => CloseCause::Transport,
+            (None, false) => CloseCause::LocalClose,
+        },
+    }
+}
+
+/// A connection this node dialed and that was established.
+struct DialedConnection {
+    peer: PeerId,
+    /// The address that was dialed, as written.
+    address: Multiaddr,
+    established_at: Instant,
+    /// A close of this node's that a call site recorded, other than the ping safeguard.
+    local_close: Option<LocalClose>,
+}
+
+/// What a close of a dialed connection means for the early redial of its address (for the log).
+pub(crate) struct DialedClose {
+    /// The address that was dialed, as written.
+    pub(crate) address: Multiaddr,
+    pub(crate) cause: CloseCause,
+    /// How long the connection lasted.
+    pub(crate) lifetime: Duration,
+    /// Whether the address may now be dialed before the interval of item 1 has passed.
+    pub(crate) early_redial_allowed: bool,
+}
+
+/// The early-redial state of one address.
+#[derive(Default)]
+struct EarlyAddress {
+    /// When the connection that allows an early redial ended; `None` once the address is not allowed.
+    allowed_at: Option<Instant>,
+    /// When the early redials of the address within the interval were made, oldest first.
+    redialed_at: Vec<Instant>,
+}
+
+/// Early redial after a cut (R27a item 1a).
+///
+/// Every dial that this node makes is registered with the identifier of its connection (the dial options carry it
+/// before the dial starts), so that the address as written is known when the connection is established and when it
+/// closes. A connection that lasted at least the minimum lifetime and ended on a cause that [`CloseCause`] allows
+/// marks its address as allowed. The marked address is not guarded by the dial record at a maintenance tick below the
+/// low watermark, until it is dialed or the cap of [`MAX_EARLY_REDIALS`] within the interval is reached.
+pub(crate) struct EarlyRedials {
+    min_lifetime: Duration,
+    interval: Duration,
+    /// The dials in flight, by connection identifier. An entry ends with the connection or the failure of its dial.
+    pending: HashMap<ConnectionId, Multiaddr>,
+    /// The established connections that this node dialed. An entry ends with the close of the connection.
+    established: HashMap<ConnectionId, DialedConnection>,
+    /// The addresses that are allowed, or that were redialed early within the interval. Bounded by
+    /// [`MAX_DIALED_ADDRESSES`].
+    addresses: HashMap<Multiaddr, EarlyAddress>,
+}
+
+impl EarlyRedials {
+    pub(crate) fn new(min_lifetime: Duration, interval: Duration) -> Self {
+        EarlyRedials {
+            min_lifetime,
+            interval,
+            pending: HashMap::new(),
+            established: HashMap::new(),
+            addresses: HashMap::new(),
+        }
+    }
+
+    /// A dial of `address`, as written, with the identifier `connection_id` has been started.
+    pub(crate) fn dial_started(&mut self, address: Multiaddr, connection_id: ConnectionId) {
+        self.pending.insert(connection_id, address);
+    }
+
+    /// The dial with `connection_id` has failed, or the swarm refused to schedule it, so no connection follows.
+    pub(crate) fn dial_ended(&mut self, connection_id: ConnectionId) { self.pending.remove(&connection_id); }
+
+    /// The outbound connection with `connection_id` was established at `now` and reached `peer`. A connection that no
+    /// dial of ours started is ignored.
+    pub(crate) fn connection_established(&mut self, connection_id: ConnectionId, peer: PeerId, now: Instant) {
+        if let Some(address) = self.pending.remove(&connection_id) {
+            self.established.insert(connection_id, DialedConnection {
+                peer,
+                address,
+                established_at: now,
+                local_close: None,
+            });
+        }
+    }
+
+    /// This node has started to close the connections to `peer` for the reason `close`. It marks the connections to
+    /// `peer` that it dialed, so that their close is not taken for a transport error. The ping safeguard is not
+    /// recorded here: [`AdexPing`](crate::adex_ping::AdexPing) records it.
+    pub(crate) fn mark_local_close(&mut self, peer: PeerId, close: LocalClose) {
+        for connection in self
+            .established
+            .values_mut()
+            .filter(|connection| connection.peer == peer)
+        {
+            connection.local_close = Some(close);
+        }
+    }
+
+    /// The connection with `connection_id` closed at `now` with `cause`. `closed_by_ping` is whether the ping
+    /// safeguard had started the close. Returns what the close means for its address, or `None` when this node did
+    /// not dial the connection.
+    pub(crate) fn connection_closed<E>(
+        &mut self,
+        connection_id: ConnectionId,
+        cause: Option<&ConnectionError<E>>,
+        closed_by_ping: bool,
+        now: Instant,
+    ) -> Option<DialedClose> {
+        let connection = self.established.remove(&connection_id)?;
+        // When both recorded a close, the one that does not allow an early redial wins.
+        let local = match (connection.local_close, closed_by_ping) {
+            (Some(LocalClose::Other), _) => Some(LocalClose::Other),
+            (_, true) => Some(LocalClose::PingSafeguard),
+            (recorded, false) => recorded,
+        };
+        let cause = classify_close(cause, local);
+        let lifetime = now.duration_since(connection.established_at);
+        let early_redial_allowed = cause.allows_early_redial() && lifetime >= self.min_lifetime;
+        if early_redial_allowed {
+            self.allow(connection.address.clone(), now);
+        }
+        Some(DialedClose {
+            address: connection.address,
+            cause,
+            lifetime,
+            early_redial_allowed,
+        })
+    }
+
+    /// Marks `address` as allowed to be dialed early.
+    fn allow(&mut self, address: Multiaddr, now: Instant) {
+        self.prune(now);
+        if self.addresses.len() >= MAX_DIALED_ADDRESSES && !self.addresses.contains_key(&address) {
+            let oldest = self
+                .addresses
+                .iter()
+                .min_by_key(|(_, state)| state.last_activity())
+                .map(|(address, _)| address.clone());
+            if let Some(oldest) = oldest {
+                self.addresses.remove(&oldest);
+            }
+        }
+        self.addresses.entry(address).or_default().allowed_at = Some(now);
+    }
+
+    /// Forgets what is older than the interval. An allowance older than the interval is of no use: the dial that the
+    /// connection came from was made before the connection ended, so its guard has lapsed.
+    fn prune(&mut self, now: Instant) {
+        let interval = self.interval;
+        self.addresses.retain(|_, state| {
+            state.redialed_at.retain(|at| now.duration_since(*at) < interval);
+            state.allowed_at = state.allowed_at.filter(|at| now.duration_since(*at) < interval);
+            state.allowed_at.is_some() || !state.redialed_at.is_empty()
+        });
+    }
+
+    /// Whether `address` may be dialed at `now` despite the dial record: it is allowed, and it has had fewer than
+    /// [`MAX_EARLY_REDIALS`] early redials within the interval.
+    pub(crate) fn allows(&self, address: &Multiaddr, now: Instant) -> bool {
+        self.addresses.get(address).is_some_and(|state| {
+            let recent = state
+                .redialed_at
+                .iter()
+                .filter(|at| now.duration_since(**at) < self.interval)
+                .count();
+            state.allowed_at.is_some() && recent < MAX_EARLY_REDIALS
+        })
+    }
+
+    /// `address` is being dialed at `now`. When `early` is set, the dial is an early redial and counts against the
+    /// cap. Either way the allowance is used up: the address is guarded by the dial record again, and is allowed
+    /// again only by a new connection that lasted long enough.
+    fn dial_recorded(&mut self, address: &Multiaddr, now: Instant, early: bool) {
+        self.prune(now);
+        if let Some(state) = self.addresses.get_mut(address) {
+            state.allowed_at = None;
+            if early {
+                state.redialed_at.push(now);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize { self.addresses.len() }
+}
+
+impl EarlyAddress {
+    /// The latest time at which something was recorded for the address.
+    fn last_activity(&self) -> Option<Instant> {
+        self.allowed_at
+            .into_iter()
+            .chain(self.redialed_at.last().copied())
+            .max()
+    }
+}
+
 /// Limits the short-of-relays WARN line (R27a item 3): at most once per interval while the number of connected
 /// relays is unchanged. A changed number is reported at once.
 pub(crate) struct ShortOfRelaysLog {
@@ -172,6 +438,7 @@ impl ShortOfRelaysLog {
 pub(crate) struct RedialGuards {
     pub(crate) dialed: DialRecord,
     pub(crate) seeds: SeedPeers,
+    pub(crate) early: EarlyRedials,
     pub(crate) short_of_relays: ShortOfRelaysLog,
 }
 
@@ -180,12 +447,27 @@ impl RedialGuards {
         RedialGuards {
             dialed: DialRecord::new(config.interval),
             seeds: SeedPeers::default(),
+            early: EarlyRedials::new(config.early_redial_min_lifetime, config.interval),
             short_of_relays: ShortOfRelaysLog::new(config.interval),
         }
     }
 
+    /// Whether `address` is guarded at `now`: it was dialed less than the interval before (item 1) and no early
+    /// redial is allowed for it (item 1a).
+    pub(crate) fn is_guarded(&self, address: &Multiaddr, now: Instant) -> bool {
+        self.dialed.is_guarded(address, now) && !self.early.allows(address, now)
+    }
+
+    /// Records a dial of `address` at `now` for item 1. A dial that item 1a allowed counts against the cap of early
+    /// redials of the address, and uses up the allowance.
+    pub(crate) fn record_dial(&mut self, address: &Multiaddr, now: Instant) {
+        let early = self.dialed.is_guarded(address, now) && self.early.allows(address, now);
+        self.early.dial_recorded(address, now, early);
+        self.dialed.record(address.clone(), now);
+    }
+
     /// The addresses of a known peer that maintenance may dial at `now`: those that are not guarded by the dial
-    /// record (item 1) and are not the remote address of an open connection (RQ1a item 6).
+    /// record (item 1, unless item 1a allows an early redial) and are not the remote address of an open connection (RQ1a item 6).
     pub(crate) fn dialable_peer_addresses(
         &self,
         addresses: impl IntoIterator<Item = Multiaddr>,
@@ -194,12 +476,12 @@ impl RedialGuards {
     ) -> Vec<Multiaddr> {
         addresses
             .into_iter()
-            .filter(|address| !self.dialed.is_guarded(address, now) && !is_connected_to_addr(address))
+            .filter(|address| !self.is_guarded(address, now) && !is_connected_to_addr(address))
             .collect()
     }
 
     /// The bootstrap addresses that maintenance may dial at `now`: those that are not guarded by the dial record
-    /// (item 1), are not the remote address of an open connection (RQ1a item 6) and do not belong to a connected
+    /// (item 1, unless item 1a allows an early redial), are not the remote address of an open connection (RQ1a item 6) and do not belong to a connected
     /// peer (item 2).
     pub(crate) fn dialable_bootstrap<'a>(
         &self,
@@ -211,7 +493,7 @@ impl RedialGuards {
         bootstrap
             .iter()
             .filter(|address| {
-                !self.dialed.is_guarded(address, now)
+                !self.is_guarded(address, now)
                     && !is_connected_to_addr(address)
                     && !self.seeds.peer_of(address).is_some_and(&is_peer_connected)
             })
@@ -224,6 +506,8 @@ mod tests {
     use super::*;
 
     const INTERVAL: Duration = Duration::from_secs(10);
+    /// The shortened minimum lifetime of a dialed connection for an early redial (R27a item 1a).
+    const MIN_LIFETIME: Duration = Duration::from_secs(3);
 
     fn addr(n: usize) -> Multiaddr { format!("/ip4/203.0.113.{}/tcp/42845", n % 250).parse().unwrap() }
 
@@ -233,6 +517,7 @@ mod tests {
         RedialGuards::new(RedialGuardConfig {
             interval: INTERVAL,
             tick: Duration::from_secs(1),
+            early_redial_min_lifetime: MIN_LIFETIME,
         })
     }
 
@@ -468,6 +753,392 @@ mod tests {
         let config = RedialGuardConfig::default();
         assert_eq!(config.interval, Duration::from_secs(300));
         assert_eq!(config.tick, Duration::from_secs(30));
+        assert_eq!(config.early_redial_min_lifetime, Duration::from_secs(30));
+        assert_eq!(MAX_EARLY_REDIALS, 2);
         assert_eq!(MAX_DIALED_ADDRESSES, 1024);
+    }
+
+    // ---- CRD ch.28 T15 (R27a item 1a): early redial after a cut ----
+
+    /// A fresh set of guards. Tests that shadow `guards` with a local variable use this instead of `guards()`.
+    fn new_guards() -> RedialGuards { guards() }
+
+    fn io_error(kind: io::ErrorKind, text: &str) -> ConnectionError<()> {
+        ConnectionError::IO(io::Error::new(kind, text.to_owned()))
+    }
+
+    /// The cause of a connection that a transport error ended, or that the peer closed: the swarm reports an I/O
+    /// error.
+    fn transport_error() -> ConnectionError<()> { io_error(io::ErrorKind::ConnectionReset, "reset") }
+
+    /// Dials `address` at `at` (a bootstrap or maintenance dial, as the dial functions do) and establishes the
+    /// connection with the identifier `id` to `peer` at the same time.
+    fn dial_and_establish(guards: &mut RedialGuards, address: &Multiaddr, id: u64, peer: PeerId, at: Instant) {
+        let connection = ConnectionId::new_unchecked(id as usize);
+        guards.record_dial(address, at);
+        guards.early.dial_started(address.clone(), connection);
+        guards.early.connection_established(connection, peer, at);
+    }
+
+    /// Closes the connection with the identifier `id` at `at`.
+    fn close(
+        guards: &mut RedialGuards,
+        id: u64,
+        cause: Option<&ConnectionError<()>>,
+        closed_by_ping: bool,
+        at: Instant,
+    ) -> DialedClose {
+        guards
+            .early
+            .connection_closed(ConnectionId::new_unchecked(id as usize), cause, closed_by_ping, at)
+            .expect("the connection was dialed by this node")
+    }
+
+    /// Whether maintenance at a tick below the low watermark may dial `address` at `now`.
+    fn dialable(guards: &RedialGuards, address: &Multiaddr, now: Instant) -> bool {
+        guards
+            .dialable_bootstrap(std::slice::from_ref(address), now, |_| false, |_| false)
+            .len()
+            == 1
+    }
+
+    /// T15: the causes are told apart as R27a item 1a lists them.
+    #[test]
+    fn close_causes_are_classified() {
+        let timed_out = || io::Error::new(io::ErrorKind::TimedOut, CLOSE_TIMED_OUT_TEXT);
+        // The multiplexer's error reaches the swarm wrapped into another I/O error.
+        let wrapped_timed_out = ConnectionError::<()>::IO(io::Error::other(timed_out()));
+        let bare_timed_out = ConnectionError::<()>::IO(timed_out());
+        // A transport timeout that is not the bounded close is a transport error.
+        let transport_timeout = io_error(io::ErrorKind::TimedOut, "connection timed out");
+
+        for (cause, local, want) in [
+            (Some(&transport_error()), None, CloseCause::Transport),
+            (Some(&transport_timeout), None, CloseCause::Transport),
+            (
+                Some(&ConnectionError::<()>::KeepAliveTimeout),
+                None,
+                CloseCause::IdleTimeout,
+            ),
+            (
+                Some(&ConnectionError::<()>::Handler(())),
+                None,
+                CloseCause::HandlerError,
+            ),
+            (Some(&bare_timed_out), None, CloseCause::CloseTimedOut),
+            (Some(&wrapped_timed_out), None, CloseCause::CloseTimedOut),
+            // A close that this node started and that ended without an error.
+            (None, None, CloseCause::LocalClose),
+            (None, Some(LocalClose::Other), CloseCause::LocalClose),
+            (None, Some(LocalClose::PingSafeguard), CloseCause::PingSafeguard),
+            // A close that this node started and that the transport cut short with an error.
+            (
+                Some(&transport_error()),
+                Some(LocalClose::Other),
+                CloseCause::LocalClose,
+            ),
+            (
+                Some(&transport_error()),
+                Some(LocalClose::PingSafeguard),
+                CloseCause::PingSafeguard,
+            ),
+            // The error decides when the connection had ended on its own before the recorded close took effect.
+            (
+                Some(&ConnectionError::<()>::KeepAliveTimeout),
+                Some(LocalClose::PingSafeguard),
+                CloseCause::IdleTimeout,
+            ),
+            // The bounded close of R27c is never an early redial, whoever started the close.
+            (
+                Some(&wrapped_timed_out),
+                Some(LocalClose::PingSafeguard),
+                CloseCause::CloseTimedOut,
+            ),
+        ] {
+            assert_eq!(classify_close(cause, local), want, "{:?} / {:?}", cause, local);
+        }
+
+        assert!(CloseCause::Transport.allows_early_redial());
+        assert!(CloseCause::PingSafeguard.allows_early_redial());
+        for cause in [
+            CloseCause::IdleTimeout,
+            CloseCause::CloseTimedOut,
+            CloseCause::HandlerError,
+            CloseCause::LocalClose,
+        ] {
+            assert!(!cause.allows_early_redial(), "{:?}", cause);
+        }
+    }
+
+    /// T15: a dialed connection that lasted at least the minimum lifetime and ended on a transport error or a close
+    /// from the peer (the swarm reports both as an I/O error), or on the ping safeguard, makes its address dialable at
+    /// the next tick below the low watermark, well before the interval of item 1 has passed.
+    #[test]
+    fn exempt_cause_after_the_minimum_lifetime_allows_an_early_redial() {
+        let start = Instant::now();
+        let address = addr(1);
+
+        for (id, cause, by_ping, want_cause) in [
+            (1, Some(transport_error()), false, CloseCause::Transport),
+            (2, None, true, CloseCause::PingSafeguard),
+            (3, Some(transport_error()), true, CloseCause::PingSafeguard),
+        ] {
+            let mut guards = new_guards();
+            dial_and_establish(&mut guards, &address, id, PeerId::random(), start);
+            // While the connection is open the address is guarded, as before.
+            assert!(!dialable(&guards, &address, secs(start, 2)));
+
+            let closed = close(&mut guards, id, cause.as_ref(), by_ping, secs(start, 4));
+            assert_eq!(closed.cause, want_cause);
+            assert_eq!(closed.address, address);
+            assert_eq!(closed.lifetime, Duration::from_secs(4));
+            assert!(closed.early_redial_allowed);
+
+            // The next tick, long before the interval has passed.
+            assert!(guards.dialed.is_guarded(&address, secs(start, 5)));
+            assert!(!guards.is_guarded(&address, secs(start, 5)));
+            assert!(dialable(&guards, &address, secs(start, 5)));
+            // The address of a known peer is dialable in the same way.
+            assert_eq!(
+                guards.dialable_peer_addresses(vec![address.clone()], secs(start, 5), |_| false),
+                vec![address.clone()]
+            );
+        }
+    }
+
+    /// T15: "at least" the minimum lifetime: a connection that lasted exactly as long qualifies; one that lasted less
+    /// does not, however it ended, and its address stays guarded until the interval of item 1 has passed.
+    #[test]
+    fn connection_shorter_than_the_minimum_lifetime_stays_guarded() {
+        let start = Instant::now();
+        let address = addr(1);
+
+        let mut guards = new_guards();
+        dial_and_establish(&mut guards, &address, 1, PeerId::random(), start);
+        let closed = close(&mut guards, 1, Some(&transport_error()), false, secs(start, 3));
+        assert!(closed.early_redial_allowed, "exactly the minimum lifetime qualifies");
+
+        for (cause, by_ping) in [(Some(transport_error()), false), (None, true)] {
+            let mut guards = new_guards();
+            dial_and_establish(&mut guards, &address, 1, PeerId::random(), start);
+            let closed = close(
+                &mut guards,
+                1,
+                cause.as_ref(),
+                by_ping,
+                start + Duration::from_millis(2_999),
+            );
+            assert!(!closed.early_redial_allowed);
+            for tick in 3..10 {
+                assert!(!dialable(&guards, &address, secs(start, tick)), "tick {}", tick);
+            }
+            // The interval of item 1 ends the guard, as before.
+            assert!(dialable(&guards, &address, secs(start, 10)));
+        }
+    }
+
+    /// T15: the idle timeout, the R27c close timeout (bare and wrapped), a handler error, and every close that this
+    /// node started for another reason (the stuck-peer close, the admission close of RP2, the relay-count close of
+    /// R27) leave the address guarded, however long the connection lasted.
+    #[test]
+    fn non_exempt_causes_stay_guarded() {
+        let start = Instant::now();
+        let address = addr(1);
+        let peer = PeerId::random();
+        let timed_out = || io::Error::new(io::ErrorKind::TimedOut, CLOSE_TIMED_OUT_TEXT);
+
+        // (cause of the event, whether a call site recorded a close of this node's other than the ping safeguard)
+        let cases: Vec<(&str, Option<ConnectionError<()>>, bool)> = vec![
+            ("idle timeout", Some(ConnectionError::KeepAliveTimeout), false),
+            ("close timed out", Some(ConnectionError::IO(timed_out())), false),
+            (
+                "close timed out, wrapped",
+                Some(ConnectionError::IO(io::Error::other(timed_out()))),
+                false,
+            ),
+            ("handler error", Some(ConnectionError::Handler(())), false),
+            // The stuck-peer close ends without an error and no call site names it.
+            ("stuck-peer close", None, false),
+            // The admission close and the relay-count close are recorded where the node calls the close.
+            ("recorded close, clean", None, true),
+            ("recorded close, cut short by an error", Some(transport_error()), true),
+        ];
+        for (name, cause, recorded) in cases {
+            let mut guards = new_guards();
+            dial_and_establish(&mut guards, &address, 1, peer, start);
+            if recorded {
+                guards.early.mark_local_close(peer, LocalClose::Other);
+            }
+            let closed = close(&mut guards, 1, cause.as_ref(), false, secs(start, 6));
+            assert!(!closed.early_redial_allowed, "{}", name);
+            assert!(!closed.cause.allows_early_redial(), "{}", name);
+            for tick in 6..10 {
+                assert!(
+                    !dialable(&guards, &address, secs(start, tick)),
+                    "{}, tick {}",
+                    name,
+                    tick
+                );
+            }
+            assert!(dialable(&guards, &address, secs(start, 10)), "{}", name);
+        }
+
+        // A recorded close of another purpose wins over the ping safeguard.
+        let mut guards = new_guards();
+        dial_and_establish(&mut guards, &address, 1, peer, start);
+        guards.early.mark_local_close(peer, LocalClose::Other);
+        let closed = close(&mut guards, 1, None, true, secs(start, 6));
+        assert_eq!(closed.cause, CloseCause::LocalClose);
+        assert!(!dialable(&guards, &address, secs(start, 7)));
+    }
+
+    /// The close of a connection that this node did not dial changes nothing, and a record of a close of this node's
+    /// marks only the connections to that peer.
+    #[test]
+    fn only_dialed_connections_of_the_marked_peer_are_affected() {
+        let start = Instant::now();
+        let (first, second) = (addr(1), addr(2));
+        let (peer_a, peer_b) = (PeerId::random(), PeerId::random());
+        let mut guards = new_guards();
+
+        // An inbound connection, or one that a peer-exchange dial of another node made: no dial of ours started it.
+        guards
+            .early
+            .connection_established(ConnectionId::new_unchecked(50), peer_a, start);
+        assert!(guards
+            .early
+            .connection_closed(
+                ConnectionId::new_unchecked(50),
+                Some(&transport_error()),
+                false,
+                secs(start, 5)
+            )
+            .is_none());
+
+        dial_and_establish(&mut guards, &first, 1, peer_a, start);
+        dial_and_establish(&mut guards, &second, 2, peer_b, start);
+        guards.early.mark_local_close(peer_a, LocalClose::Other);
+        let closed_a = close(&mut guards, 1, Some(&transport_error()), false, secs(start, 5));
+        let closed_b = close(&mut guards, 2, Some(&transport_error()), false, secs(start, 5));
+        assert_eq!(closed_a.cause, CloseCause::LocalClose);
+        assert_eq!(closed_b.cause, CloseCause::Transport);
+        assert!(!dialable(&guards, &first, secs(start, 6)));
+        assert!(dialable(&guards, &second, secs(start, 6)));
+
+        // A dial that failed or was refused leaves no connection behind.
+        let connection = ConnectionId::new_unchecked(9);
+        guards.early.dial_started(first.clone(), connection);
+        guards.early.dial_ended(connection);
+        assert!(guards.early.pending.is_empty());
+        guards.early.connection_established(connection, peer_a, secs(start, 6));
+        assert!(guards.early.established.is_empty());
+    }
+
+    /// T15, the cap: after two early redials within the interval the third is guarded, and the address is dialable
+    /// again once the interval has passed (the sliding window of the last two early redials, and at the latest the
+    /// guard of item 1).
+    #[test]
+    fn third_early_redial_within_the_interval_is_guarded() {
+        let start = Instant::now();
+        let address = addr(1);
+        let peer = PeerId::random();
+        let mut guards = new_guards();
+
+        // The start-up dial at 0; its connection is cut at 3 s.
+        dial_and_establish(&mut guards, &address, 1, peer, start);
+        assert!(close(&mut guards, 1, Some(&transport_error()), false, secs(start, 3)).early_redial_allowed);
+
+        // First early redial at the 3 s tick; that connection is cut at 6 s.
+        assert!(dialable(&guards, &address, secs(start, 3)));
+        dial_and_establish(&mut guards, &address, 2, peer, secs(start, 3));
+        assert!(
+            !dialable(&guards, &address, secs(start, 4)),
+            "an early redial is a dial for item 1"
+        );
+        assert!(close(&mut guards, 2, Some(&transport_error()), false, secs(start, 6)).early_redial_allowed);
+
+        // Second early redial at the 6 s tick; that connection is cut at 9 s.
+        assert!(dialable(&guards, &address, secs(start, 6)));
+        dial_and_establish(&mut guards, &address, 3, peer, secs(start, 6));
+        assert!(close(&mut guards, 3, Some(&transport_error()), false, secs(start, 9)).early_redial_allowed);
+
+        // A third one at 9 s would be the third within the interval: guarded, until the first early redial (at 3 s)
+        // is an interval old.
+        for tick in 9..13 {
+            assert!(!dialable(&guards, &address, secs(start, tick)), "tick {}", tick);
+        }
+        assert!(dialable(&guards, &address, secs(start, 13)));
+    }
+
+    /// T15: an early dial is recorded as a dial for item 1, and a failed early dial falls back to item 1: the address
+    /// is guarded for the interval from the early dial, and allowed again only by a new connection that lasted long
+    /// enough.
+    #[test]
+    fn failed_early_dial_falls_back_to_the_guard() {
+        let start = Instant::now();
+        let address = addr(1);
+        let mut guards = new_guards();
+
+        dial_and_establish(&mut guards, &address, 1, PeerId::random(), start);
+        close(&mut guards, 1, Some(&transport_error()), false, secs(start, 4));
+        assert!(dialable(&guards, &address, secs(start, 5)));
+
+        // The early dial at the 5 s tick fails: no connection follows.
+        guards.record_dial(&address, secs(start, 5));
+        let connection = ConnectionId::new_unchecked(2);
+        guards.early.dial_started(address.clone(), connection);
+        guards.early.dial_ended(connection);
+
+        assert!(guards.dialed.is_guarded(&address, secs(start, 14)));
+        for tick in 5..15 {
+            assert!(!dialable(&guards, &address, secs(start, tick)), "tick {}", tick);
+        }
+        assert!(dialable(&guards, &address, secs(start, 15)));
+    }
+
+    /// T15: an allowed address waits for a tick at which the node is below its low watermark: maintenance consults
+    /// the candidates only then, and the allowance is neither used up nor lost by the ticks that skip it.
+    #[test]
+    fn allowance_waits_for_a_tick_below_the_low_watermark() {
+        let start = Instant::now();
+        let address = addr(1);
+        let mut guards = new_guards();
+
+        dial_and_establish(&mut guards, &address, 1, PeerId::random(), start);
+        close(&mut guards, 1, Some(&transport_error()), false, secs(start, 4));
+
+        // Ticks at which the node is not below its low watermark dial nothing, so nothing is recorded.
+        // The first tick below it can dial the address.
+        assert!(dialable(&guards, &address, secs(start, 8)));
+        // An allowed address is still not dialed while a connection to its address is open (RQ1a item 6) or while its
+        // peer is connected (item 2).
+        assert!(guards
+            .dialable_bootstrap(std::slice::from_ref(&address), secs(start, 8), |_| true, |_| false)
+            .is_empty());
+        assert!(guards
+            .dialable_peer_addresses(vec![address.clone()], secs(start, 8), |_| true)
+            .is_empty());
+    }
+
+    /// An allowance expires with the interval, and the early-redial state stays within the bound of the dial record.
+    #[test]
+    fn early_state_expires_and_is_bounded() {
+        let start = Instant::now();
+        let mut early = EarlyRedials::new(MIN_LIFETIME, INTERVAL);
+        let total = MAX_DIALED_ADDRESSES + 50;
+        for n in 0..total {
+            let at = start + Duration::from_millis(n as u64);
+            early.allow(addr_port(n), at);
+            assert!(early.len() <= MAX_DIALED_ADDRESSES);
+        }
+        assert_eq!(early.len(), MAX_DIALED_ADDRESSES);
+        let now = start + Duration::from_secs(5);
+        // The oldest were dropped, the newest remain.
+        assert!(!early.allows(&addr_port(0), now));
+        assert!(early.allows(&addr_port(total - 1), now));
+
+        // Everything is forgotten once the interval has passed and the next entry is made.
+        early.allow(addr_port(9_999), secs(start, 60));
+        assert_eq!(early.len(), 1);
     }
 }

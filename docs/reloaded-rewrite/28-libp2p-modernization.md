@@ -926,7 +926,58 @@ relay-connection maintenance of RQ1a item 4 MUST follow these rules:
    addresses forgets an entry after 5 minutes. It holds at most 1,024
    entries, and when it is full the oldest entry is dropped. As at the
    reference, a connection that lasted less than 5 minutes delays the
-   redial of its address to the 5-minute mark.
+   redial of its address to the 5-minute mark, except as item 1a allows.
+1a. **Early redial after a cut** *(added 2026-11-08, batch 4 item B4-13;
+   Reloaded-original; maintainer decision EA (a)).* An address MAY be
+   dialed again before the 5-minute mark of item 1 when all of these hold:
+   - this node dialed the address, and the connection that dial made was
+     established and lasted at least **30 seconds**;
+   - that connection ended by a transport error, by a close from the peer,
+     or by this node's ping safeguard (R9);
+   - the node is below its low watermark at a maintenance tick (RQ1a
+     item 4); the earliest early redial is the first such tick after the
+     connection ended;
+   - the address has had fewer than **2** early redials within the last
+     5 minutes.
+
+   An early redial counts as a dial for item 1. Once the cap is reached,
+   or when an early redial fails, item 1 applies unchanged. No early
+   redial follows a connection that ended on the idle timeout, a stuck-peer
+   close (RQ1 item 5), a bounded-close timeout (R27c), the clock admission
+   check (RP2) or the relay-count maintenance of R27. A stuck-peer close is
+   recognized when it ends cleanly or with the close timeout of R27c; one
+   that ends with another transport error counts as a transport error,
+   because the vendored gossipsub closes such a connection without
+   reporting why. The bans of RP3 are keyed by the gossip-signing key and
+   never close or refuse a connection, so they need no rule here. *Why:*
+   the guard of item 1 exists to stop dial loops toward
+   addresses that fail or flap; a connection that was established and
+   worked for a while and was then cut does not belong to them. In lab
+   row L-CLOSE variant B, a link cut with a socket reset left a relay
+   connection down for 4 min 9 s, held only by this guard. *Compatibility
+   (informative):* no wire shape changes; the peer sees a dial earlier than
+   the reference would make it. Under `docs/COMPAT_SWITCHES.md`, "The
+   default-side rule", it falls in arm 2: Reloaded's behavior by default,
+   no switch.
+
+   > **As built (2026-11-08, clean-side record; batch 4 item B4-13, PR #NNN).**
+   > A dial this node makes is recorded under its connection ID with the
+   > address as written. When that connection closes after at least 30 s on a
+   > transport error, a peer close or the ping safeguard, the address is
+   > marked for an early redial. The cause comes from the close event, plus a
+   > mark that this node records where it starts a close itself (idle
+   > timeout, stuck peer, admission, relay count); a handler error and the
+   > close timeout of R27c are not exempt. The next maintenance tick below the
+   > low watermark may dial a marked address despite item 1, at most twice
+   > within the guard interval, counted over a sliding window, and that dial
+   > counts as a dial for item 1. Tests: the T15 unit tests in
+   > `redial_guard.rs`. There is no behavior test: the in-memory transport of
+   > the test setup does not release a port when its listener is dropped, so
+   > a cut seed cannot listen on its address again. The end-to-end check is
+   > lab row L-RELINK. The case "not below the low watermark" is covered by
+   > construction: the early-redial check runs only in the below-watermark
+   > branch.
+
 2. **Connected seed.** The node MUST NOT dial a configured bootstrap
    address while the peer that the address belongs to is connected,
    inbound or outbound. An address belongs to the peer that the last
@@ -1929,6 +1980,25 @@ shortened by test configuration.
   closed 44 s to 51 s in, both came back after the restore, and traffic
   resumed after 40 s. No "close timed out" line was logged.
 
+**T15.** *Early redial after a cut (R27a item 1a; added 2026-11-08).* The
+guard interval and the tick are shortened by test configuration.
+- An address whose dialed connection was established, lasted at least the
+  threshold and ended by a transport error, a peer close or the ping
+  safeguard is dialable at the next tick while the node is below its low
+  watermark; after two early redials within the interval, item 1 holds it
+  until the interval has passed.
+- No early redial after an idle-timeout close, a stuck-peer close, a
+  bounded-close timeout, an admission close, a relay-count close, or a
+  connection that lasted less than the threshold; nor when the node is not
+  below its low watermark.
+- *Lab row L-RELINK (black-box).* The topology of L-CLOSE variant B. (a) A
+  10 s cut of the link between R and its relay peer P with a socket reset,
+  where R dialed the connection: R dials P again at the first maintenance
+  tick after the restore, and the connection is back within about 30 s,
+  where the build without item 1a waits until the 5-minute mark. (b)
+  *Flapping control:* a peer that accepts R's connection and drops it in
+  less than 30 s: R does not dial it again before the 5-minute mark.
+
 ## 28.11 Deferred Work
 
 > **Note.** The §28.9A items (peer health-check RPC, time-sync
@@ -2491,3 +2561,10 @@ per-peer IHAVE and IWANT caps of R13a) MUST be confirmed to add no rule that rea
   lab run; and, for the parity note, the gated facts of RQ1b items 3 to 5
   as already recorded in this chapter. Written by a context that never
   read the forbidden corpus. It needs no Dirty Gate pass of its own.
+- *Scoped addition (2026-11-08) -- R27a item 1a and T15.* Reloaded-original,
+  batch 4 item B4-13, maintainer decision EA (a). *Inputs:* this
+  repository's redial guard (`mm2_p2p/src/redial_guard.rs`), lab rows
+  L-CLOSE B and its drop-only arm, and, for the reference statement, the
+  gated facts of RQ1a items 3 and 4 as already recorded in this chapter.
+  Written by a context that never read the forbidden corpus. It needs no
+  Dirty Gate pass of its own.
