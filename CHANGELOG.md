@@ -671,7 +671,9 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   are unchanged. The node is asked for its height about every five minutes, alongside the wait, so the
   wait is never longer for it. The warning is not written while a swap waits for a payment to be
   confirmed, for swaps of the second protocol version or for the watcher. The warning is verified by
-  unit tests only; nobody has yet watched it on a stalled node in real time. Detail: PR #306; CRD ch.51 R79-R81.
+  unit tests only; nobody has yet watched it on a stalled node in real time. More in the release tests,
+  [finding F4](docs/release-tests/0.4.0-beta.1.md#findings-and-dispositions). Detail: PR #306; CRD
+  ch.51 R79-R81.
 
 #### UTXO coins and Electrum
 
