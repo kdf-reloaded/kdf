@@ -315,8 +315,9 @@ In both states a hardware-wallet session is always rejected (keys are never
 exported off the device), secret material is never logged or persisted in
 plaintext, and the surface is intended for localhost / trusted-channel use.
 This is a **fund-controlling secret**: enabling the switch is a deliberate,
-acknowledged operator act. The node does not log a warning when it is active
-yet; a start-up warning is planned. The bounded exposure and rationale are described in CRD chapter 07
+acknowledged operator act. When it is active, the node logs a warning at
+start-up and another for each call that uses the full export; neither carries
+key material. The bounded exposure and rationale are described in CRD chapter 07
 §7.3A. See [`COMPAT_SWITCHES.md`](COMPAT_SWITCHES.md) and
 [`CODING_STANDARDS.md`](CODING_STANDARDS.md) §5.1 for why this is the sole
 fund-controlling-secret carve-out.
