@@ -202,6 +202,18 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### Order book and peer-to-peer network
 
+- **A maker order without `min_volume` now advertises a minimum of at least ten times the HTLC spend
+  fee** when a coin of the pair pays that fee out of the HTLC: a UTXO coin such as RIN, the BCH and
+  Qtum platform coins, and the transparent side of a shielded coin. Sia keeps its own floor. Until now
+  the default was the coins' floors only, so on a coin with a changing fee the smallest trade could
+  lose most of its value to the fee. The raised minimum is capped at the order's volume, so a small
+  order trades only whole. It is computed at `setprice`, and the maker `trade_preimage` checks the
+  same value. Peers see it in `orderbook` and `best_orders`; a request below it gets no reservation.
+  An order with its own `min_volume`, taker orders and `update_maker_order` keep their minimums. On a
+  coin whose floor is below the safe spend amount, a `setprice` without `min_volume` that the
+  spend-safety check refused until now is accepted at the raised minimum. *Compatibility:* set
+  `spend_safe_min_volume` to `false` in `MM2.json` for the GLEEC KDF default. Detail: PR #NNN; CRD
+  ch.60 R60.6.8.
 - **Messages from other nodes are checked for nesting depth and declared lengths before they are
   read.** Every value a peer sends is checked first: arrays and maps may nest at most 64 levels, and every
   declared length and count must fit in the bytes that follow. A value outside these bounds is
