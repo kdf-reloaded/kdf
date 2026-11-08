@@ -8,6 +8,7 @@
 //! - Private keys are sensitive material; call only over localhost / trusted channels.
 //! - Keys are serialized once for the response and not persisted or logged.
 
+use common::log::warn;
 use common::HttpStatusCode;
 use crypto::{Bip32DerPathOps, ChildNumber, CryptoCtx, CryptoCtxError, DerivationPath, GlobalHDAccountArc,
              HDPathToCoin, KeyPairPolicy, Secp256k1Secret};
@@ -227,6 +228,36 @@ impl From<CryptoCtxError> for GetPrivateKeysError {
 /// convention but is a **separate** switch governing a different threat model.
 pub fn allow_insecure_key_export(ctx: &MmArc) -> bool { ctx.conf["allow_insecure_key_export"].as_bool() == Some(true) }
 
+/// The start-up line that tells the operator the opt-in key export is on. It names the setting and what it
+/// allows, and carries no key material.
+fn insecure_key_export_startup_warning() -> &'static str {
+    "`allow_insecure_key_export` is true: get_private_keys can export the private keys and viewing keys of every \
+     coin in the coins configuration, including coins that are not activated"
+}
+
+/// Logs one WARN at start-up when `allow_insecure_key_export` is on, and nothing when it is off or missing.
+pub fn warn_if_insecure_key_export(ctx: &MmArc) {
+    if allow_insecure_key_export(ctx) {
+        warn!("{}", insecure_key_export_startup_warning());
+    }
+}
+
+/// The per-call line for a request that takes the opt-in superset path. It names the method, the requested
+/// form and the number of tickers, never a ticker list, a key or any other secret.
+fn superset_call_warning(req: &GetPrivateKeysRequest) -> String {
+    let mode = match req.mode {
+        GetPrivateKeysMode::Iguana => "iguana",
+        GetPrivateKeysMode::Hd => "hd",
+    };
+    format!(
+        "get_private_keys: opt-in full key export requested (mode {}, {} coin tickers, offline {}, viewing keys {})",
+        mode,
+        req.coins.len(),
+        req.offline,
+        req.include_shielded
+    )
+}
+
 // ── Handler ─────────────────────────────────────────────────────────────
 
 /// Export private keys for the requested activated coins.
@@ -246,8 +277,12 @@ pub async fn get_private_keys(
     // refused unless the operator has opted in via `allow_insecure_key_export`.
     // The reduced activated-coins path below is unaffected when no superset
     // field is set, regardless of the switch (R-K3).
-    if req.requests_superset() && !allow_insecure_key_export(&ctx) {
-        return MmError::err(GetPrivateKeysError::InsecureExportDisabled);
+    if req.requests_superset() {
+        if !allow_insecure_key_export(&ctx) {
+            return MmError::err(GetPrivateKeysError::InsecureExportDisabled);
+        }
+        // One WARN per call that passed the gate; the reduced path logs nothing extra.
+        warn!("{}", superset_call_warning(&req));
     }
 
     let crypto_ctx = CryptoCtx::from_ctx(&ctx).mm_err(GetPrivateKeysError::from)?;
@@ -809,6 +844,116 @@ mod tests {
                 assert_eq!(e.get_inner().status_code(), StatusCode::FORBIDDEN);
                 assert!(matches!(e.into_inner(), GetPrivateKeysError::InsecureExportDisabled));
             },
+        }
+    }
+
+    #[test]
+    fn test_warning_texts_name_the_setting_and_carry_no_secret() {
+        let startup = insecure_key_export_startup_warning();
+        assert!(startup.contains("allow_insecure_key_export"));
+        assert!(startup.contains("private keys and viewing keys"));
+        assert!(startup.contains("not activated"));
+
+        let req = GetPrivateKeysRequest {
+            mode: GetPrivateKeysMode::Hd,
+            include_shielded: true,
+            ..reduced_req(vec!["DOC".into(), "MARTY".into()])
+        };
+        let call = superset_call_warning(&req);
+        assert!(call.starts_with("get_private_keys:"));
+        assert!(call.contains("mode hd"));
+        assert!(call.contains("2 coin tickers"));
+        assert!(call.contains("viewing keys true"));
+        // The number of tickers is named, the tickers themselves are not.
+        assert!(!call.contains("DOC") && !call.contains("MARTY"));
+        // The two lines share no marker, so the tests that count them cannot disturb each other.
+        assert!(!startup.contains("opt-in full key export requested"));
+    }
+
+    fn lines_containing(text: &str) -> Vec<String> {
+        use crate::eth::alloy_compat::transport::test_support::captured_log_lines;
+        captured_log_lines().into_iter().filter(|l| l.contains(text)).collect()
+    }
+
+    #[test]
+    fn test_startup_warning_follows_the_switch() {
+        use crate::eth::alloy_compat::transport::test_support::install_log_capture;
+        use mm2_core::mm_ctx::MmCtxBuilder;
+        use serde_json::json;
+
+        let capturing = install_log_capture();
+        let text = insecure_key_export_startup_warning();
+        // The capture is process-wide; only this test writes this line, so the counts below are its own.
+        let before = lines_containing(text).len();
+
+        // Missing, false and a non-boolean value log nothing.
+        for conf in [
+            json!({}),
+            json!({ "allow_insecure_key_export": false }),
+            json!({ "allow_insecure_key_export": "true" }),
+        ] {
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            warn_if_insecure_key_export(&ctx);
+        }
+        if capturing {
+            assert_eq!(lines_containing(text).len(), before, "no line when the switch is off");
+        }
+
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({ "allow_insecure_key_export": true }))
+            .into_mm_arc();
+        warn_if_insecure_key_export(&ctx);
+        if capturing {
+            let lines = lines_containing(text);
+            assert_eq!(lines.len(), before + 1, "exactly one line when the switch is on");
+            assert!(lines[before].starts_with("WARN"), "the line is a warning");
+        }
+    }
+
+    #[test]
+    fn test_per_call_warning_only_on_the_superset_path() {
+        use crate::eth::alloy_compat::transport::test_support::install_log_capture;
+        use common::block_on;
+        use mm2_core::mm_ctx::MmCtxBuilder;
+        use serde_json::json;
+
+        let capturing = install_log_capture();
+        let marker = "get_private_keys: opt-in full key export requested";
+        // One test function runs the three calls in order, so the counts are this test's own.
+        let before = lines_containing(marker).len();
+        let superset = || GetPrivateKeysRequest {
+            offline: true,
+            ..reduced_req(vec!["DOC".into()])
+        };
+        let on = || {
+            MmCtxBuilder::new()
+                .with_conf(json!({ "allow_insecure_key_export": true }))
+                .into_mm_arc()
+        };
+        let off = || MmCtxBuilder::new().with_conf(json!({})).into_mm_arc();
+
+        // A superset call refused by the closed gate logs no per-call line.
+        let refused = block_on(get_private_keys(off(), superset()));
+        assert!(matches!(
+            refused.map_err(|e| e.into_inner()),
+            Err(GetPrivateKeysError::InsecureExportDisabled)
+        ));
+        if capturing {
+            assert_eq!(lines_containing(marker).len(), before);
+        }
+
+        // A reduced call logs none, even with the switch on.
+        let _ = block_on(get_private_keys(on(), reduced_req(vec!["DOC".into()])));
+        if capturing {
+            assert_eq!(lines_containing(marker).len(), before);
+        }
+
+        // A superset call that passes the gate logs one WARN. It stops later (no wallet in this context).
+        let _ = block_on(get_private_keys(on(), superset()));
+        if capturing {
+            let lines = lines_containing(marker);
+            assert_eq!(lines.len(), before + 1);
+            assert!(lines[before].starts_with("WARN"), "the line is a warning");
         }
     }
 
