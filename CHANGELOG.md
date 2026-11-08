@@ -110,7 +110,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   that many minutes after it was placed (for an order restored at startup, after the restart).
   The setting is off by default, which keeps today's behavior: a failed check cancels the
   previous orders and creates none. Only the boolean `true` turns it on. Nothing on the wire
-  changes. Detail: PR #286; CRD ch.32 R-GH8a.
+  changes. Detail: PRs #265, #286; CRD ch.32 R-GH8a.
 
 #### UTXO coins and Electrum
 
@@ -756,10 +756,6 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   HD, the SLP withdraw fee, legacy `enable` under an HD login and the Ironwood address facts (PR
   #232; CRD ch.05 §5.9B, ch.09, ch.49 R49.27, ch.51 R74, ch.55 R55.4.10, ch.59 R59.4.7). The node
   itself is unchanged.
-- **The CRD records the rule for replacing a pair's orders on `setprice`.** With
-  `setprice_replace_after_checks` on, the previous orders are cancelled only after the new order has
-  passed its checks. The rule is adopted; its implementation is in PR #286, not merged yet. Detail:
-  PR #265; CRD ch.32 R-GH8a.
 - **The CRD now records more of how Komodo DeFi Framework and GLEEC KDF behave.** It covers HD
   activation and accounts (the address at `path_to_address`, `fetch_utxos`, `consolidate_utxos` and
   `task::create_new_account`), the answer to a shielded withdrawal, the Electrum
