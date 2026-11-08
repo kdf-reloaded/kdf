@@ -58,7 +58,7 @@ sha256sum --ignore-missing -c SHA256SUMS
 (all three Linux targets), [`build-android.yml`](../.github/workflows/build-android.yml),
 [`build-ios.yml`](../.github/workflows/build-ios.yml), [`build-macos.yml`](../.github/workflows/build-macos.yml)
 and [`build-windows.yml`](../.github/workflows/build-windows.yml), then collects the results, writes
-`SHA256SUMS` and signs it. The release fails if a Linux binary or a mobile library is missing.
+`SHA256SUMS` and signs it. The release fails if a Linux binary, the macOS universal binary or a mobile library is missing.
 
 The unsigned snapshots from `dev-build.yml` (manual) and `staging-build.yml` (every push to `staging`)
 use the same build workflows, so they carry the same targets and the same floors.
