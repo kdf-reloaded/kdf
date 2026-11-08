@@ -656,7 +656,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 - **An invalid `wc_session_persistence` now stops the start, as documented.** The value `encrypted`,
   an unknown word or a value that is not a string is refused at start-up with a configuration error
   that names the setting. Before, the node started and only the first WalletConnect call failed.
-  Detail: PR #NNN; CRD ch.22 §22.5.1.
+  Detail: PR #308; CRD ch.22 §22.5.1.
 
 #### Swap recovery
 
