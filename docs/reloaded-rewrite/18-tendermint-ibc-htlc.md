@@ -679,6 +679,11 @@ zero the hash lock is the plain SHA-256 of the secret. The module accepts
   whole seconds, required for activation), then clamped into the module's
   interval [50, 34560]. The same formula applies to the maker payment and
   the taker payment: both reference sides pass the *base* lock duration.
+
+> **As-built note (2026-11-08, clean side, PR #NNN).** `TendermintConf`
+> refuses an `avg_blocktime` of 0 at activation with the existing
+> `TendermintInitError` shape, naming the key; the block-count division
+> keeps a divisor of at least 1 regardless.
 - **R18.11.2.** *Timestamp.* The `timestamp` field MUST be zero, so that
   the hash lock is the plain 32-byte SHA-256 of the swap secret
   ([Chapter 51 R72](51-legacy-v1-swap-state-machine.md): a Tendermint
@@ -797,6 +802,14 @@ zero the hash lock is the plain SHA-256 of the secret. The module accepts
 > says it must be. Proposed fix: label all three with the platform ticker
 > and convert with the platform decimals.
 
+> **As-built note (2026-11-08, clean side, PR #NNN).** The proposed fix is
+> applied: for a token, the sender-side trade fee and the
+> fee-to-send-the-dex-fee are labeled with the platform ticker and
+> converted with the platform decimals. The two `_for_denom` helpers take
+> the payment denom and its decimals for the amount only; the fee label
+> and decimals are the platform coin's own. The receiver-side fee is
+> unchanged.
+
 ### 18.11.3 HTLC id, hash lock and the claim
 
 - **R18.11.12.** *HTLC id.* The id under which the module stores an HTLC
@@ -817,6 +830,10 @@ zero the hash lock is the plain SHA-256 of the secret. The module accepts
 - **R18.11.14.** *Secret extraction.* The secret is recovered from a
   claim transaction by decoding its first message as the dialect's claim
   message and hex-decoding its `secret` field to exactly 32 bytes.
+
+> **As-built note (2026-11-08, clean side, PR #NNN).** `extract_secret`
+> (coin and token) refuses a secret whose hex decodes to any length other
+> than 32 bytes, with an error naming the length.
 
 ### 18.11.4 Refund: what the reference does and what it reports
 
@@ -904,6 +921,14 @@ The module refunds an expired HTLC itself; there is no refund message
   fetch the transaction by hash from a node and require byte equality
   with the supplied transaction. A no-fee descriptor is rejected on both
   the sending and the validating side (see the §18.5.1 finding).
+
+> **As-built note (2026-11-08, clean side, PR #NNN).** The validation
+> also requires the message type URL of the form (`MsgSend` or
+> `MsgMultiSend`). The node's copy is fetched with the tx-service
+> `GetTx` query that the confirmation wait uses; its decoded transaction
+> is re-encoded to the raw form for the byte comparison. The maker's fee
+> validation repeats on any error, up to three more times 10 seconds
+> apart, so a transaction the node has not indexed yet is retried.
 - **R18.11.22.** *My-payment-sent check.* To find its own payment after a
   restart the sender MUST compute the HTLC id from its own account, the
   counterparty account derived from the counterparty pubkey, the single
@@ -914,6 +939,14 @@ The module refunds an expired HTLC itself; there is no refund message
   accept it when its hash lock equals the module's recorded hash lock
   case-insensitively. Amount and counterparty therefore participate
   through the id.
+
+> **As-built note (2026-11-08, clean side, PR #NNN).** The swap machine
+> asks the new provided trait method `check_if_my_payment_sent_for_amount`
+> (same arguments plus the payment amount, default: the old method), at
+> its four call sites with the amount the payment send uses. The
+> Tendermint coin and token override it with the id-first lookup (the
+> token with its own denom and decimals, the platform's account and node)
+> and answer an error from the old method, which carries no amount.
 
 ### 18.11.7 Dialects, IBC denominations and chains without an HTLC module
 
@@ -929,6 +962,13 @@ The module refunds an expired HTLC itself; there is no refund message
   is the coins-file `wallet_only` flag. Reloaded SHOULD refuse such
   coins at order time (Chapter 60 refusal contract) rather than at
   payment time.
+
+> **As-built note (2026-11-08, clean side, PR #NNN).** A coin or token
+> whose account prefix selects no dialect (a token uses its platform
+> coin's prefix) reports `wallet_only` true in addition to the build
+> switch and the coins-file flag, so the existing order refusal applies.
+> Chapter 60 R60.2.3 asks for an orderly error for a coin that cannot
+> trade, which that refusal is; it needs no other shape.
 - **R18.11.24.** *IBC denominations.* A token whose denom is an IBC
   voucher (`ibc/<HASH>`) or a CW20 denom is swapped exactly like a native
   token: the denom appears in the HTLC amount coin; the fee is paid in
@@ -941,6 +981,14 @@ The module refunds an expired HTLC itself; there is no refund message
   channel stop unconditionally. The only live pieces are the order-time
   minimum-balance check and the channel id carried in order metadata.
   Reloaded MUST NOT advertise or accept an IBC-routed swap.
+
+> **As-built note (2026-11-08, clean side, PR #NNN).** With the feature
+> `ibc-routing-for-swaps` on, its only hook is the order-time
+> minimum-balance check, which neither advertises a route nor accepts a
+> request. The coin and token advertise empty protocol information, and
+> their acceptance check now also declines a counterparty's non-empty
+> protocol information (where a routing channel would travel), with or
+> without the feature.
 
 ### 18.11.8 Watchers
 
@@ -996,17 +1044,19 @@ swaps return:
 - payment validation checks hash lock, sender, receiver and amount but
   neither `time_lock`, `timestamp`, node byte-equality nor the `Open`
   state (R18.11.5);
-- burn-form fee validation checks only the sender and the first output's
+- burn-form fee validation checked only the sender and the first output's
   address, not the amounts, the burn output or the message/output counts
-  (R18.11.21);
-- the my-payment-sent check searches the sender's recent create
-  transactions and matches the hash lock only (R18.11.22);
+  (R18.11.21): closed (PR #NNN);
+- the my-payment-sent check searched the sender's recent create
+  transactions and matched the hash lock only (R18.11.22): closed
+  (PR #NNN);
 - the refund methods answer an error and the machine records a
   refund-failed event — the same outcome as the reference, R18.11.15,
   which R18.11.17 replaces;
 - the broadcast helper ignores the deadline it is given (no five-second
   overflow, but also no bounded wait);
-- tokens' trade-fee labels follow the reference (finding in §18.11.2).
+- tokens' trade-fee labels followed the reference (finding in §18.11.2):
+  closed (PR #NNN).
 
 ### 18.11.11 Verification notes
 
