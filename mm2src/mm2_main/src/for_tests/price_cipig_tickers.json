@@ -1,0 +1,80 @@
+{
+ "RIN": {
+  "ticker": "RIN",
+  "last_price": "0.0004324538",
+  "last_updated": "2026-11-07T15:46:53Z",
+  "last_updated_timestamp": 1794066413,
+  "volume24h": "16.0000000000",
+  "price_provider": "livecoinwatch",
+  "volume_provider": "livecoinwatch",
+  "sparkline_7d": null,
+  "sparkline_provider": "unknown",
+  "change_24h": "0.9935000000",
+  "change_24h_provider": "livecoinwatch"
+ },
+ "KMD": {
+  "ticker": "KMD",
+  "last_price": "0.0067748000",
+  "last_updated": "2026-11-07T15:44:49.000Z",
+  "last_updated_timestamp": 1794066289,
+  "volume24h": "309.2200000000",
+  "price_provider": "coingecko",
+  "volume_provider": "coingecko",
+  "sparkline_7d": null,
+  "sparkline_provider": "coingecko",
+  "change_24h": "1.0146000000",
+  "change_24h_provider": "livecoinwatch"
+ },
+ "BTC": {
+  "ticker": "BTC",
+  "last_price": "75712.89000000",
+  "last_updated": "2026-11-07T15:46:53Z",
+  "last_updated_timestamp": 1794066413,
+  "volume24h": "9641736693.5561847687",
+  "price_provider": "binance",
+  "volume_provider": "coinpaprika",
+  "sparkline_7d": null,
+  "sparkline_provider": "coingecko",
+  "change_24h": "-0.019",
+  "change_24h_provider": "binance"
+ },
+ "MON": {
+  "ticker": "MON",
+  "last_price": "0.0164054220",
+  "last_updated": "2026-11-07T15:42:12Z",
+  "last_updated_timestamp": 1794066132,
+  "volume24h": "2654352.6703822073",
+  "price_provider": "coinpaprika",
+  "volume_provider": "coinpaprika",
+  "sparkline_7d": null,
+  "sparkline_provider": "coingecko",
+  "change_24h": "-4.790000",
+  "change_24h_provider": "coinpaprika"
+ },
+ "POL": {
+  "ticker": "POL",
+  "last_price": "0.09061000",
+  "last_updated": "2026-11-07T15:46:52Z",
+  "last_updated_timestamp": 1794066412,
+  "volume24h": "14881447.6585486755",
+  "price_provider": "binance",
+  "volume_provider": "coinpaprika",
+  "sparkline_7d": null,
+  "sparkline_provider": "coingecko",
+  "change_24h": "-2.789",
+  "change_24h_provider": "binance"
+ },
+ "1INCH": {
+  "ticker": "1INCH",
+  "last_price": "0.07970000",
+  "last_updated": "2026-11-07T15:46:50Z",
+  "last_updated_timestamp": 1794066410,
+  "volume24h": "5024892.8717140649",
+  "price_provider": "binance",
+  "volume_provider": "coinpaprika",
+  "sparkline_7d": null,
+  "sparkline_provider": "coingecko",
+  "change_24h": "1.014",
+  "change_24h_provider": "binance"
+ }
+}

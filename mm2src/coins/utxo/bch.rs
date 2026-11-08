@@ -951,6 +951,7 @@ mod bch_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_get_slp_genesis_params() {
         let coin = tbch_coin_for_test();
         let token_id = "bb309e48930671582bea508f9a1d9b491e49b69be3d6f372dc08da2ac6e90eb7".into();
@@ -962,6 +963,7 @@ mod bch_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_plain_bch_tx_details() {
         let coin = tbch_coin_for_test();
         let storage = init_storage_for(coin.ticker());
@@ -1004,6 +1006,7 @@ mod bch_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_slp_tx_details() {
         let coin = tbch_coin_for_test();
         let storage = init_storage_for(coin.ticker());
@@ -1166,6 +1169,7 @@ mod bch_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_sign_message() {
         let coin = tbch_coin_for_test();
         let signature = coin.sign_message("test").unwrap();
@@ -1176,6 +1180,7 @@ mod bch_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     #[cfg(not(target_arch = "wasm32"))]
     fn test_verify_message() {
         let coin = tbch_coin_for_test();

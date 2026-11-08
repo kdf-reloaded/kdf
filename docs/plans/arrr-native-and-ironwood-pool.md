@@ -1,13 +1,14 @@
 # Plan: ARRR native mode and the Ironwood pool
 
-**Status:** planning — **Last reviewed:** 2026-11-04
+**Status:** planning (the v0.4.0 items shipped in PRs #227 to #288; native mode and the rest of the Ironwood pool are not designed yet) — **Last reviewed:** 2026-11-08
 
 > **Context:** decided by the maintainer on 2026-10-28 (Decision X). Release 0.3.0-beta stays
 > Sapling-only. It builds version-6 transactions that carry a Sapling bundle and an empty Ironwood
 > bundle (CRD ch.39 R39.6.4), and it refuses native-mode activation of a shielded coin
 > (ch.39 R39.11.1a). This plan collects what has to exist before native mode and the Ironwood pool
-> can ship, targeted at v0.4.0. Nothing here is settled design yet. Each item needs its own analysis
-> pass, and the CRD rules come first.
+> can ship. The v0.4.0 part (the next section, and the capability word of §4) is merged; the rest
+> targets a later release and is not settled design yet. Each item needs its own analysis pass, and
+> the CRD rules come first.
 >
 > **Scope decided on 2026-11-04.** The ARRR wallet and ARRR swaps stay Sapling-only. v0.4.0 takes
 > two items from the Ironwood pool: receiving payments that come from Ironwood wallets, and paying
@@ -110,9 +111,9 @@ apart from a Reloaded one. The maintainer decided:
 
 | Part | What | CRD | State |
 |---|---|---|---|
-| Capability word | A generic word after a coin's first value in its protocol information, sent only by coins that opt in. The reader fails closed. The order-match layer carries the bytes unchanged and logs declines. | ch.59 §59.4A (R59.4A.1–R59.4A.7, T14) | CRD PR #227, code PR #235 (generic part) |
-| ARRR requirement | ARRR sends `tx_v6` always. Inside the Ironwood window it declines a counterparty without it, on the taker and the maker path, with the per-coin switch `require_v6_counterparty` (default on). One debug line per decline, and at most one warning per coin per hour with the count. | ch.39 R39.6.4f, T39.6.4f | CRD PR #230 |
-| ARRR predicate code | The shielded coin's protocol information and acceptance check, the switch, and the logs. Stacked on the capability-word code. | — | code PR #241 |
+| Capability word | A generic word after a coin's first value in its protocol information, sent only by coins that opt in. The reader fails closed. The order-match layer carries the bytes unchanged and logs declines. | ch.59 §59.4A (R59.4A.1–R59.4A.7, T14) | CRD PR #227, code PR #235 (generic part), both merged 2026-11-05 |
+| ARRR requirement | ARRR sends `tx_v6` always. Inside the Ironwood window it declines a counterparty without it, on the taker and the maker path, with the per-coin switch `require_v6_counterparty` (default on). One debug line per decline, and at most one warning per coin per hour with the count. | ch.39 R39.6.4f, T39.6.4f | CRD PR #230, merged 2026-11-05 |
+| ARRR predicate code | The shielded coin's protocol information and acceptance check, the switch, and the logs. Stacked on the capability-word code. | — | code PR #241, merged 2026-11-05 |
 
 ### 5. Transparent addresses in the shielded history (done for the node's own swap transactions)
 
@@ -121,12 +122,13 @@ CRD ch.39 R39.8.9c and the transparent outputs of R39.8.9d: an ARRR swap's payme
 script address, the spend or refund from it, and fee outputs. The shielded fee address that
 a swap's fee payment pays is not listed either. Those rows show an empty or wallet-only `from`
 and `to`, so a user reconciling a swap sees funds leave or arrive with no counterpart address.
-The status note under ch.39 R39.8.9e records the gap, which was found by reading the code; no
-live row has shown it yet.
+The status note under ch.39 R39.8.9e records the gap, which was found by reading the code. For the
+node's own swap transactions, the lab row "ARRR swap history", Part B, passed on 2026-11-07 with the
+change of PR #277 (release tests 0.4.0-beta.1).
 
-**Scheduled** (decided 2026-11-07) as a separate change, after the fix that lists the wallet's
-own address in one form and names a withdrawal's recipient (ch.39 R39.8.9d1, R39.8.9d2).
-Size: S–M.
+**Decided** on 2026-11-07 as a separate change, after the fix that lists the wallet's own address
+in one form and names a withdrawal's recipient (ch.39 R39.8.9d1, R39.8.9d2; PR #268). Done in
+PR #277 (see below). Size: S–M.
 
 What it needs:
 
@@ -136,7 +138,8 @@ What it needs:
   store of ch.39 R39.8.9d2, with several addresses per transaction, each on its `from` or `to`
   side. Nothing is fetched from the light endpoint;
 - an as-built note and tests in ch.39 (the rules exist);
-- one live swap in the lab, to see the payment, spend or refund rows.
+- one live swap in the lab, to see the payment, spend or refund rows: done 2026-11-07 (release
+  tests 0.4.0-beta.1, row "ARRR swap history", Part B).
 
 Rows from before the change keep their empty sets.
 
@@ -149,6 +152,21 @@ wallet database, and each history page reads the whole record. Both grow by one 
 transaction the node builds, which is cheap at today's sizes. Marking an entry once its
 transaction is mined, or joining the record into the wallet-database query, would make both
 cost only the new entries.
+
+### 6. Fee of a shielded history row (done for the node's own sends)
+
+`z_coin_tx_history` reported `transaction_fee` 0 on every row, although a withdrawal's answer
+names its fee. A live withdrawal in the release tests showed it on 2026-11-07. CRD ch.39 R39.8.9e
+computes the fee from the full transaction, which a Light-mode wallet does not have.
+
+**Done** (decided 2026-11-07) in PR #288, ch.39 R39.8.9e1: an own send (a withdrawal, a swap
+payment, a swap fee payment) reports the fee the node recorded at broadcast. A transaction
+another wallet built, a swap spend or refund, and an own send found again after a rebuild of the
+wallet database report 0.
+
+Later, if it matters: a swap spend or refund could record its fee when it is built, as item 5
+records its address. The fee of a transaction another wallet built would need the full
+transaction from the light endpoint.
 
 ## Open questions
 

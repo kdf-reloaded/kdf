@@ -4018,6 +4018,41 @@ pub(crate) struct PendingNonce {
     pub(crate) nodes: Vec<Web3Instance>,
 }
 
+/// How many rounds `pending_nonce_from_nodes` makes before the request fails: the first one and five repeats.
+const NONCE_ROUNDS: u32 = 6;
+
+/// The level and the text of the log line of a node that failed the pending-nonce request `e` for `addr` in round
+/// `round` (1-based, of `NONCE_ROUNDS`) (CRD ch.35 R35.1.12). `node_line(before, after)` builds the node's R35.1.16
+/// line around the two texts, or gives `None` when the node cannot be named. A failure that costs the send nothing
+/// is a warning: either another node answered in the round, or no node did and the round will be repeated. Only a
+/// failure in the last round, when no node answered and the request fails, is an error.
+pub(crate) fn nonce_failure_log(
+    e: &str,
+    addr: Address,
+    round_answered: bool,
+    round: u32,
+    node_line: impl Fn(&str, &str) -> Option<String>,
+) -> (common::log::log_crate::Level, String) {
+    use common::log::log_crate::Level;
+    let warn_with = |suffix: String| {
+        let before = format!("Nonce request for addr {addr:?} failed ({e}) on node ");
+        let line = node_line(&before, &suffix)
+            .unwrap_or_else(|| format!("Nonce request for addr {addr:?} failed ({e}){suffix}"));
+        (Level::Warn, line)
+    };
+    if round_answered {
+        warn_with("; another node answered".to_owned())
+    } else if round < NONCE_ROUNDS {
+        warn_with(format!(
+            "; no node answered, retrying (round {round} of {NONCE_ROUNDS})"
+        ))
+    } else {
+        let before = format!("Error {e} when getting nonce for addr {addr:?} from node ");
+        let line = node_line(&before, "").unwrap_or_else(|| format!("Error {e} when getting nonce for addr {addr:?}"));
+        (Level::Error, line)
+    }
+}
+
 /// Requests the pending nonce of `addr` from every node concurrently and returns the highest one together with
 /// the nodes that reported it (CRD ch.35 R35.1.12 step 1). A node that fails is logged and ignored. When no
 /// node answers, the round is repeated after `round_interval_s`, up to five more times, before the request
@@ -4027,6 +4062,7 @@ pub(crate) async fn pending_nonce_from_nodes(
     web3s: &[Web3Instance],
     round_interval_s: f64,
 ) -> Result<PendingNonce, String> {
+    // The rounds in which no node answered so far; the round being made is the next one.
     let mut errors: u32 = 0;
     loop {
         let futures: Vec<_> = web3s
@@ -4055,6 +4091,8 @@ pub(crate) async fn pending_nonce_from_nodes(
             .collect();
 
         let mut best: Option<PendingNonce> = None;
+        // The failing nodes are logged after the round, when it is known whether another node answered.
+        let mut failed: Vec<(&Web3Instance, String)> = Vec::new();
         for (web3, answer) in web3s.iter().zip(join_all(futures).await) {
             match answer {
                 Ok(n) => match best.as_mut() {
@@ -4067,18 +4105,17 @@ pub(crate) async fn pending_nonce_from_nodes(
                         })
                     },
                 },
-                Err(e) => {
-                    // R35.1.16: the failing node is named, with the coin's ticker and the node's list position.
-                    let node_line = crate::eth::alloy_compat::provider::direct_node_line(
-                        &web3.web3,
-                        &format!("Error {e} when getting nonce for addr {addr:?} from node "),
-                        "",
-                    );
-                    match node_line {
-                        Some(line) => log!((line)),
-                        None => log!("Error " (e) " when getting nonce for addr " [addr]),
-                    }
-                },
+                Err(e) => failed.push((web3, e)),
+            }
+        }
+        for (web3, e) in failed {
+            // R35.1.16: the failing node is named, with the coin's ticker and the node's list position.
+            let (level, text) = nonce_failure_log(&e, addr, best.is_some(), errors + 1, |before, after| {
+                crate::eth::alloy_compat::provider::direct_node_line(&web3.web3, before, after)
+            });
+            match level {
+                common::log::log_crate::Level::Warn => common::log::warn!("{text}"),
+                _ => error!("{text}"),
             }
         }
         if let Some(best) = best {
@@ -4086,7 +4123,7 @@ pub(crate) async fn pending_nonce_from_nodes(
         }
         // all requests errored
         errors += 1;
-        if errors > 5 {
+        if errors >= NONCE_ROUNDS {
             return ERR!("Couldn't get nonce after 5 errored attempts, aborting");
         }
         Timer::sleep(round_interval_s).await

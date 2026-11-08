@@ -237,6 +237,23 @@ pub(crate) fn utxo_coin_from_fields(coin: UtxoCoinFields) -> UtxoStandardCoin {
     arc.into()
 }
 
+/// A single-key software coin (Iguana derivation, key-pair policy) of `ticker`, for tests outside this module.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn software_coin_for_test(ticker: &str) -> UtxoStandardCoin {
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+    fields.conf.ticker = ticker.to_owned();
+    utxo_coin_from_fields(fields)
+}
+
+/// A coin of `ticker` under the Trezor key policy, for tests outside this module.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn trezor_policy_coin_for_test(ticker: &str) -> UtxoStandardCoin {
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+    fields.conf.ticker = ticker.to_owned();
+    fields.priv_key_policy = PrivKeyPolicy::Trezor;
+    utxo_coin_from_fields(fields)
+}
+
 fn utxo_coin_for_test(
     rpc_client: UtxoRpcClientEnum,
     force_seed: Option<&str>,
@@ -575,6 +592,7 @@ fn test_v2_trezor_htlc_keypair_reports_unsupported_script_mode() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_extract_secret() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
@@ -587,6 +605,7 @@ fn test_extract_secret() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_send_maker_spends_taker_payment_recoverable_tx() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
@@ -616,6 +635,7 @@ fn test_send_maker_spends_taker_payment_recoverable_tx() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_generate_transaction() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
@@ -826,6 +846,7 @@ fn test_generate_transaction_change_equal_to_dust_is_an_output_r38_6_6n() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_addresses_from_script() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
@@ -1012,6 +1033,7 @@ fn test_wait_for_payment_spend_timeout_electrum() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_search_for_swap_tx_spend_electrum_was_spent() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
@@ -1046,6 +1068,7 @@ fn test_search_for_swap_tx_spend_electrum_was_spent() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_search_for_swap_tx_spend_electrum_was_refunded() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
@@ -1914,6 +1937,7 @@ fn test_withdraw_doc_rewards_none() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_utxo_lock() {
     // send several transactions concurrently to check that they are not using same inputs
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
@@ -1933,6 +1957,7 @@ fn test_utxo_lock() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_spv_proof() {
     // RICK, the chain this test used before, is retired. DOC is its successor
     // test chain in the same family (Komodo asset chain, Equihash headers,
@@ -1961,6 +1986,7 @@ fn list_since_block_btc_serde() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/587
 fn get_tx_details_coinbase_transaction() {
     let client = electrum_client_for_test(&[
@@ -1975,8 +2001,9 @@ fn get_tx_details_coinbase_transaction() {
     );
 
     let fut = async move {
-        // hash of coinbase transaction https://morty.explorer.dexstats.info/tx/b59b093ed97c1798f2a88ee3375a0c11d0822b6e4468478777f899891abd34a5
-        let hash = hex::decode("b59b093ed97c1798f2a88ee3375a0c11d0822b6e4468478777f899891abd34a5").unwrap();
+        // hash of a MARTY coinbase transaction (height 1389279). The coinbase the test used before is no longer
+        // served by the MARTY servers; any coinbase transaction that they serve does as well.
+        let hash = hex::decode("2338196dcc82061707803c6ec9f78d27aafd09fd1a6ad08907939897d93a949c").unwrap();
 
         let mut input_transactions = HistoryUtxoTxMap::new();
         let tx_details = coin.tx_details_by_hash(&hash, &mut input_transactions).await.unwrap();
@@ -1987,6 +2014,7 @@ fn get_tx_details_coinbase_transaction() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_electrum_rpc_client_error() {
     let client = electrum_client_for_test(&["electrum1.cipig.net:10060"]);
 
@@ -2263,6 +2291,7 @@ fn test_generate_tx_fee_is_correct_when_dynamic_fee_is_larger_than_relay() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_get_median_time_past_from_electrum_kmd() {
     let client = electrum_client_for_test(&[
         "electrum1.cipig.net:10001",
@@ -2279,6 +2308,7 @@ fn test_get_median_time_past_from_electrum_kmd() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_get_median_time_past_from_electrum_btc() {
     let client = electrum_client_for_test(&[
         "electrum1.cipig.net:10000",
@@ -2367,6 +2397,7 @@ fn test_get_median_time_past_from_native_does_not_have_median_in_get_block() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_cashaddresses_in_tx_details_by_hash() {
     let conf = json!({
         "coin": "BCH",
@@ -2414,6 +2445,7 @@ fn test_cashaddresses_in_tx_details_by_hash() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_address_from_str_with_cashaddress_activated() {
     let conf = json!({
         "coin": "BCH",
@@ -2450,6 +2482,7 @@ fn test_address_from_str_with_cashaddress_activated() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_address_from_str_with_legacy_address_activated() {
     let conf = json!({
         "coin": "BCH",
@@ -2621,6 +2654,7 @@ fn test_one_unavailable_electrum_proto_version() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_generate_pod() {
     let priv_key = [
         3, 98, 177, 3, 108, 39, 234, 144, 131, 178, 103, 103, 127, 80, 230, 166, 53, 68, 147, 215, 42, 216, 144, 72,
@@ -2643,6 +2677,7 @@ fn test_qtum_generate_pod() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_add_delegation() {
     let keypair = key_pair_from_seed("asthma turtle lizard tone genuine tube hunt valley soap cloth urge alpha amazing frost faculty cycle mammal leaf normal bright topple avoid pulse buffalo").unwrap();
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
@@ -2682,6 +2717,7 @@ fn test_qtum_add_delegation() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_add_delegation_on_already_delegating() {
     let keypair = key_pair_from_seed("federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron").unwrap();
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
@@ -2711,6 +2747,7 @@ fn test_qtum_add_delegation_on_already_delegating() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_get_delegation_infos() {
     let keypair =
         key_pair_from_seed("federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron").unwrap();
@@ -2743,6 +2780,7 @@ fn test_qtum_get_delegation_infos() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_remove_delegation() {
     let keypair = key_pair_from_seed("federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron").unwrap();
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
@@ -2766,6 +2804,7 @@ fn test_qtum_remove_delegation() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_my_balance() {
     QtumCoin::get_mature_unspent_ordered_list.mock_safe(move |coin, _address| {
         let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
@@ -2827,6 +2866,7 @@ fn test_qtum_my_balance() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_my_balance_with_check_utxo_maturity_false() {
     const DISPLAY_BALANCE: u64 = 68;
     // The qtum address is legacy and belongs to the activated key, so its P2PKH balance and P2PK lookup are one
@@ -2875,7 +2915,11 @@ fn test_get_mature_unspent_ordered_map_from_cache_impl(
     expected_height: Option<u64>,
     expected_confs: u32,
 ) {
-    const TX_HASH: &str = "0a0fda88364b960000f445351fe7678317a1e0c80584de0413377ede00ba696f";
+    // A DOC coinbase transaction (height 1405347, one output). The transaction the test used before is no
+    // longer served by the DOC servers. The unspent list, the block count, the cached verbose transaction and
+    // the maturity check are mocked below, so the live server is asked only for `get_verbose_transaction`
+    // of this hash, and any transaction the servers serve as verbose does.
+    const TX_HASH: &str = "ee6afde5fb0e4898f3ad9991d3ffb98561201b32ef4fd2453364fedd66bf479e";
     let tx_hash: H256Json = hex::decode(TX_HASH).unwrap().as_slice().into();
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let mut verbose = client.get_verbose_transaction(&tx_hash).wait().unwrap();
@@ -2883,7 +2927,9 @@ fn test_get_mature_unspent_ordered_map_from_cache_impl(
     verbose.height = cached_height;
 
     // prepare mocks
-    ElectrumClient::list_unspent.mock_safe(move |_, _, _| {
+    // The address is the coin's own legacy address, so `get_all_unspent_ordered_list` reads the unspents through
+    // `ElectrumClient::list_unspent_with_p2pk` and never calls `UtxoRpcClientOps::list_unspent`.
+    ElectrumClient::list_unspent_with_p2pk.mock_safe(move |_, _, _| {
         let unspents = vec![UnspentInfo {
             outpoint: OutPoint {
                 hash: H256::from_reversed_str(TX_HASH),
@@ -2922,6 +2968,7 @@ fn test_get_mature_unspent_ordered_map_from_cache_impl(
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_get_mature_unspents_ordered_map_from_cache() {
     let unspent_height = None;
     let cached_height = None;
@@ -3803,6 +3850,7 @@ fn test_htlc_spend_fee_r38_6_6c() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_validate_fee_wrong_sender() {
     let rpc_client = electrum_client_for_test(&[
         "marty.electrum1.cipig.net:10021",
@@ -3829,6 +3877,7 @@ fn test_validate_fee_wrong_sender() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_validate_fee_min_block() {
     let rpc_client = electrum_client_for_test(&[
         "marty.electrum1.cipig.net:10021",
@@ -3856,6 +3905,7 @@ fn test_validate_fee_min_block() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/857
 fn test_validate_fee_bch_70_bytes_signature() {
     let rpc_client = electrum_client_for_test(&[
@@ -3925,6 +3975,7 @@ fn firo_verbose_block_deserialize() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn firo_lelantus_tx() {
     // https://explorer.firo.org/tx/06ed4b75010edcf404a315be70903473f44050c978bc37fbcee90e0b49114ba8
     let tx_hash = "06ed4b75010edcf404a315be70903473f44050c978bc37fbcee90e0b49114ba8".into();
@@ -3937,6 +3988,8 @@ fn firo_lelantus_tx() {
 }
 
 #[test]
+#[ignore = "stale: the live Firo answer no longer carries nFees; see docs/DISABLED_TESTS.md. \
+            The offline test firo_lelantus_tx_details_offline covers the fee path."]
 fn firo_lelantus_tx_details() {
     // https://explorer.firo.org/tx/06ed4b75010edcf404a315be70903473f44050c978bc37fbcee90e0b49114ba8
     let electrum = electrum_client_for_test(&[
@@ -3966,7 +4019,90 @@ fn firo_lelantus_tx_details() {
     assert_eq!(Some(expected_fee), tx_details.fee_details);
 }
 
+/// The fee of a FIRO Lelantus spend, without a server.
+///
+/// A Lelantus spend has no previous output to read an amount from: its input is a null previous output, so the
+/// input amount of the transaction is zero, and its verbose form carries the fee of each such input in `nFees`.
+/// `tx_details_by_hash` takes the fee as the sum of the `nFees` of the Lelantus inputs in that case. This runs
+/// that real function over a verbose answer of the shape Firo gave, with the node call mocked.
+///
+/// `firo_lelantus_tx_details` made the same check against a live Firo server, whose answer no longer carries
+/// `nFees` (see docs/DISABLED_TESTS.md).
 #[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn firo_lelantus_tx_details_offline() {
+    const P2PKH: &str = "76a91405aab5342166f8594baf17a7d9bef5d56744332788ac";
+    // A null previous output, a one-byte scriptSig (the Lelantus spend opcode) and the final sequence.
+    let null_input = format!("{}ffffffff01c9ffffffff", "00".repeat(32));
+    // Version 1, two such inputs, one output of 100000 satoshi to a P2PKH script, lock time 0.
+    let tx_hex = format!("0100000002{null_input}{null_input}01a08601000000000019{P2PKH}00000000");
+
+    let lelantus_input = |n_fees: f64, serial: &str| {
+        json!({
+            "scriptSig": { "asm": "OP_LELANTUSJOINSPLIT", "hex": "c9" },
+            "nFees": n_fees,
+            "serials": [serial],
+            "sequence": 4294967295u32,
+        })
+    };
+    let verbose: RpcTransaction = json::from_value(json!({
+        "hex": tx_hex,
+        "txid": "4242424242424242424242424242424242424242424242424242424242424242",
+        "version": 1,
+        "locktime": 0,
+        "vin": [
+            lelantus_input(0.00003793, "0a0b0c0d"),
+            lelantus_input(0.00045778, "0e0f1011"),
+        ],
+        "vout": [{
+            "value": 0.001,
+            "n": 0,
+            "scriptPubKey": {
+                "asm": "OP_DUP OP_HASH160 05aab5342166f8594baf17a7d9bef5d567443327 OP_EQUALVERIFY OP_CHECKSIG",
+                "hex": P2PKH,
+                "reqSigs": 1,
+                "type": "pubkeyhash",
+                "addresses": ["R9o9xTocqr6CeEDGDH6mEYpwLoMz6jNjMW"],
+            },
+        }],
+        "blockhash": "4343434343434343434343434343434343434343434343434343434343434343",
+        "confirmations": 10,
+        "time": 1700000000,
+        "blocktime": 1700000000,
+        "height": 1000,
+    }))
+    .unwrap();
+    // Both inputs parse as the Lelantus variant, not as a signed, coinbase or Sigma input.
+    assert_eq!(verbose.vin.len(), 2);
+    assert!(verbose
+        .vin
+        .iter()
+        .all(|input| matches!(input, rpc::v1::types::TransactionInputEnum::Lelantus(_))));
+
+    let tx_hash = [0x42u8; 32];
+    NativeClient::get_verbose_transaction.mock_safe(move |_client, txid| {
+        assert_eq!(*txid, H256Json::from(&tx_hash[..]));
+        MockResult::Return(Box::new(futures01::future::ok(verbose.clone())))
+    });
+
+    let client = NativeClient(Arc::new(NativeClientImpl::default()));
+    let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
+    let mut map = HashMap::new();
+    let tx_details = block_on(coin.tx_details_by_hash(&tx_hash, &mut map)).unwrap();
+
+    // No input has an amount to read, so the fee is the sum of the `nFees` of the two inputs.
+    let expected_fee = TxFeeDetails::Utxo(UtxoFeeDetails {
+        coin: Some(TEST_COIN_NAME.into()),
+        amount: "0.00049571".parse().unwrap(),
+    });
+    assert_eq!(Some(expected_fee), tx_details.fee_details);
+    assert_eq!(tx_details.total_amount, BigDecimal::from(0));
+    assert_eq!(tx_details.spent_by_me, BigDecimal::from(0));
+    assert!(tx_details.from.is_empty());
+}
+
+#[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_generate_tx_doge_fee() {
     // DOGE is plain fixed 1,000,000 per kB with a forced minimum relay fee; both are proportional (R38.6.6b).
     let config = json!({
@@ -4031,6 +4167,7 @@ fn test_generate_tx_doge_fee() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn doge_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrum1.cipig.net:10060",
@@ -4045,6 +4182,7 @@ fn doge_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn firo_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrumx01.firo.org:50001",
@@ -4059,6 +4197,7 @@ fn firo_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn verus_mtp() {
     let electrum = electrum_client_for_test(&["el0.verus.io:17485", "el1.verus.io:17485", "el2.verus.io:17485"]);
     let mtp = electrum
@@ -4069,6 +4208,7 @@ fn verus_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn sys_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrum1.cipig.net:10064",
@@ -4083,6 +4223,7 @@ fn sys_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn btc_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrum1.cipig.net:10000",
@@ -4097,6 +4238,7 @@ fn btc_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn rvn_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrum1.cipig.net:10051",
@@ -4111,6 +4253,7 @@ fn rvn_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn qtum_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrum1.cipig.net:10050",
@@ -4125,6 +4268,7 @@ fn qtum_mtp() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn zer_mtp() {
     let electrum = electrum_client_for_test(&[
         "electrum1.cipig.net:10065",
@@ -4203,6 +4347,7 @@ fn test_tx_details_kmd_rewards_claimed_by_other() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_tx_details_bch_no_rewards() {
     let electrum = electrum_client_for_test(&[
         "bitcoin-cash.devmole.eu:5001",
@@ -4226,6 +4371,7 @@ fn test_tx_details_bch_no_rewards() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_update_kmd_rewards() {
     // 535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024
     const OUTDATED_TX_DETAILS: &str = r#"{"tx_hex":"0400008085202f8901afcadb73880bc1c9e7ce96b8274c2e2a4547415e649f425f98791685be009b73020000006b483045022100b8fbb77efea482b656ad16fc53c5a01d289054c2e429bf1d7bab16c3e822a83602200b87368a95c046b2ce6d0d092185138a3f234a7eb0d7f8227b196ef32358b93f012103b1e544ce2d860219bc91314b5483421a553a7b33044659eff0be9214ed58adddffffffff01dd15c293000000001976a91483762a373935ca241d557dfce89171d582b486de88ac99fe9960000000000000000000000000000000","tx_hash":"535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024","from":["RMGJ9tRST45RnwEKHPGgBLuY3moSYP7Mhk"],"to":["RMGJ9tRST45RnwEKHPGgBLuY3moSYP7Mhk"],"total_amount":"24.68539379","spent_by_me":"24.68539379","received_by_me":"24.78970333","my_balance_change":"0.10430954","block_height":2387532,"timestamp":1620705483,"fee_details":{"type":"Utxo","amount":"-0.10430954"},"coin":"KMD","internal_id":"535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024"}"#;
@@ -4258,6 +4404,7 @@ fn test_update_kmd_rewards() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_update_kmd_rewards_claimed_not_by_me() {
     // The custom 535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024 transaction with the additional 'from' address.
     const OUTDATED_TX_DETAILS: &str = r#"{"tx_hex":"0400008085202f8901afcadb73880bc1c9e7ce96b8274c2e2a4547415e649f425f98791685be009b73020000006b483045022100b8fbb77efea482b656ad16fc53c5a01d289054c2e429bf1d7bab16c3e822a83602200b87368a95c046b2ce6d0d092185138a3f234a7eb0d7f8227b196ef32358b93f012103b1e544ce2d860219bc91314b5483421a553a7b33044659eff0be9214ed58adddffffffff01dd15c293000000001976a91483762a373935ca241d557dfce89171d582b486de88ac99fe9960000000000000000000000000000000","tx_hash":"535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024","from":["RMGJ9tRST45RnwEKHPGgBLuY3moSYP7Mhk", "RMDc4fvQeekJwrXxuaw1R2b7CTPEuVguMP"],"to":["RMGJ9tRST45RnwEKHPGgBLuY3moSYP7Mhk"],"total_amount":"24.68539379","spent_by_me":"24.68539379","received_by_me":"24.78970333","my_balance_change":"0.10430954","block_height":2387532,"timestamp":1620705483,"fee_details":{"type":"Utxo","amount":"-0.10430954"},"coin":"KMD","internal_id":"535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024"}"#;
@@ -4453,6 +4600,7 @@ fn test_withdraw_to_p2wpkh() {
 /// `UtxoStandardCoin` has to check UTXO maturity if `check_utxo_maturity` is `true`.
 /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_utxo_standard_with_check_utxo_maturity_true() {
     /// Whether [`UtxoStandardCoin::get_mature_unspent_ordered_list`] is called or not.
     static mut GET_MATURE_UNSPENT_ORDERED_LIST_CALLED: bool = false;
@@ -4491,6 +4639,7 @@ fn test_utxo_standard_with_check_utxo_maturity_true() {
 /// `UtxoStandardCoin` hasn't to check UTXO maturity if `check_utxo_maturity` is not set.
 /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_utxo_standard_without_check_utxo_maturity() {
     /// Whether [`UtxoStandardCoin::get_all_unspent_ordered_list`] is called or not.
     static mut GET_ALL_UNSPENT_ORDERED_LIST_CALLED: bool = false;
@@ -4533,6 +4682,7 @@ fn test_utxo_standard_without_check_utxo_maturity() {
 /// `QtumCoin` has to check UTXO maturity if `check_utxo_maturity` is not set.
 /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_without_check_utxo_maturity() {
     /// Whether [`QtumCoin::get_mature_unspent_ordered_list`] is called or not.
     static mut GET_MATURE_UNSPENT_ORDERED_LIST_CALLED: bool = false;
@@ -4563,6 +4713,7 @@ fn test_qtum_without_check_utxo_maturity() {
 /// `QtumCoin` hasn't to check UTXO maturity if `check_utxo_maturity` is `false`.
 /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_qtum_with_check_utxo_maturity_false() {
     /// Whether [`QtumCoin::get_all_unspent_ordered_list`] is called or not.
     static mut GET_ALL_UNSPENT_ORDERED_LIST_CALLED: bool = false;
@@ -5280,6 +5431,7 @@ fn test_electrum_balance_deserializing() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_electrum_display_balances() {
     let rpc_client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     block_on(utxo_common_tests::test_electrum_display_balances(&rpc_client));
@@ -5345,6 +5497,7 @@ fn test_native_display_balances() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_message_hash() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
@@ -5359,6 +5512,7 @@ fn test_message_hash() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_sign_verify_message() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
@@ -5380,6 +5534,7 @@ fn test_sign_verify_message() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_sign_verify_message_segwit() {
     let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
@@ -12646,5 +12801,222 @@ pub(crate) mod hd_accounts_at_index_tests {
             error
         );
         assert!(items.lock().unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // R35c / R35a: the key source follows the coin's key policy, not the presence of a hardware context
+    // -----------------------------------------------------------------------
+
+    /// The extended public key the software global-HD login derives at `path`.
+    fn software_xpub(path: &str) -> String {
+        crypto::derive_secp256k1_extended_pubkey(
+            global_hd().root_priv_key().clone(),
+            &DerivationPath::from_str(path).unwrap(),
+        )
+        .unwrap()
+        .to_string(bip32::Prefix::XPUB)
+    }
+
+    /// A hardware device is offered (a hardware context exists beside the software login) to a software-keyed
+    /// coin: the account is created from the software key, and the device is asked 0 times.
+    fn r35c_software_coin_ignores_the_device_offered<Coin>(coin: &Coin, items: &StoredAccounts)
+    where
+        Coin: InitCreateHDAccountRpcOps + Sync,
+    {
+        let device = CountingDevice::new();
+        let params: CreateNewAccountParams = json::from_value(json!({ "scan": false, "account_id": 5 })).unwrap();
+        let account = block_on(coin.init_create_account_rpc(params, Some(&device), &CreatedAccount::default()))
+            .unwrap_or_else(|e| panic!("the account creation failed: {:?}", e));
+
+        assert_eq!(account.account_index, 5);
+        assert_eq!(device.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(stored(items, 5).account_xpub, software_xpub("m/44'/141'/5'"));
+    }
+
+    /// R35c: `task::create_new_account` for a software UTXO coin derives the account key in software although a
+    /// device is offered; the device is called 0 times and the account xpub equals the software one.
+    #[test]
+    fn r35c_a_software_utxo_coin_derives_its_account_key_in_software_with_a_device_offered() {
+        let items = mock_storage();
+        mock_chain();
+        r35c_software_coin_ignores_the_device_offered(&hd_coin_with_account_zero(), &items);
+    }
+
+    /// R35c: QTUM shares the account creation of the UTXO coins, and the rule with it.
+    #[test]
+    fn r35c_a_software_qtum_coin_derives_its_account_key_in_software_with_a_device_offered() {
+        let items = mock_storage();
+        mock_chain();
+        let arc: UtxoArc = hd_fields(HDAccountsMap::from([(0, account_zero())])).into();
+        r35c_software_coin_ignores_the_device_offered(&QtumCoin::from(arc), &items);
+    }
+
+    /// R35a: the activation of a software UTXO coin creates its first account from the software key although a
+    /// device is offered; the device is called 0 times and the account xpub equals the software one.
+    #[test]
+    fn r35a_activation_of_a_software_utxo_coin_derives_the_account_in_software_with_a_device_offered() {
+        let items = mock_storage();
+        mock_chain();
+        let coin = hd_coin(HDAccountsMap::new());
+        let device = CountingDevice::new();
+
+        let balance = match block_on(coin.enable_coin_balance(
+            Some(&device),
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )) {
+            Ok(EnableCoinBalance::HD(balance)) => balance,
+            Ok(other) => panic!("an HD balance is expected, got {:?}", other),
+            Err(e) => panic!("the activation failed: {}", e.into_inner()),
+        };
+
+        assert_eq!(paths(&balance.accounts[0]), ["m/44'/141'/0'/0/0"]);
+        assert_eq!(device.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(stored(&items, 0).account_xpub, software_xpub("m/44'/141'/0'"));
+    }
+
+    /// R35c: a coin of the Trezor policy still takes the account key from the device; without the device
+    /// offered it reports that the hardware context is missing, and asks nobody.
+    #[test]
+    fn r35c_a_trezor_policy_coin_still_asks_the_device() {
+        let items = mock_storage();
+        mock_chain();
+        let mut fields = hd_fields(HDAccountsMap::from([(0, account_zero())]));
+        fields.priv_key_policy = PrivKeyPolicy::Trezor;
+        fields.conf.trezor_coin = Some(TrezorUtxoCoin::Komodo);
+        let coin = utxo_coin_from_fields(fields);
+
+        // The device is offered: the request reaches it.
+        let device = CountingDevice::new();
+        let params: CreateNewAccountParams = json::from_value(json!({ "scan": false, "account_id": 5 })).unwrap();
+        let error = block_on(coin.init_create_account_rpc(params, Some(&device), &CreatedAccount::default()))
+            .unwrap_err()
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::HwContextNotInitialized),
+            "{:?}",
+            error
+        );
+        assert_eq!(device.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // The device is gone: the coin does not fall back to the software key.
+        let params: CreateNewAccountParams = json::from_value(json!({ "scan": false, "account_id": 5 })).unwrap();
+        let error = block_on(coin.init_create_account_rpc(params, None::<&CountingDevice>, &CreatedAccount::default()))
+            .unwrap_err()
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::HwContextNotInitialized),
+            "{:?}",
+            error
+        );
+        assert!(!items.lock().unwrap().contains_key(&5));
+    }
+
+    // -----------------------------------------------------------------------
+    // R54 / T35: the hardware context is looked up at call time, for a coin of the Trezor policy only
+    // -----------------------------------------------------------------------
+
+    const DEVICE_PUBKEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    /// A node under the software global-HD login, with `device` deciding whether the hardware slot is filled,
+    /// and with `coins` registered as activated. The wallet storage holds account `0` of each coin.
+    fn node_with_hd_coins(
+        device: bool,
+        coins: Vec<(&str, UtxoStandardCoin)>,
+        items: &StoredAccounts,
+    ) -> mm2_core::mm_ctx::MmArc {
+        use crate::{CoinsContext, MmCoinEnum};
+        use primitives::hash::H264;
+
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let crypto_ctx = CryptoCtx::init_with_global_hd_account(ctx.clone(), TEST_MNEMONIC).unwrap();
+        if device {
+            crypto_ctx.init_trezor_ctx_for_tests(H264::from_str(DEVICE_PUBKEY).unwrap(), None);
+        }
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        block_on(async {
+            let mut activated = coins_ctx.coins.lock().await;
+            for (ticker, coin) in coins {
+                activated.insert(ticker.to_owned(), MmCoinEnum::UtxoCoin(coin));
+            }
+        });
+        items.lock().unwrap().insert(0, HDAccountStorageItem {
+            account_id: 0,
+            account_xpub: account_zero().extended_pubkey.to_string(bip32::Prefix::XPUB),
+            external_addresses_number: 0,
+            internal_addresses_number: 0,
+        });
+        ctx
+    }
+
+    /// Mocks the node for a single address: its balance is zero.
+    fn mock_address_balance() {
+        NativeClient::display_balance
+            .mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::ok(BigDecimal::from(0)))));
+    }
+
+    fn trezor_policy_hd_coin() -> UtxoStandardCoin {
+        let mut fields = hd_fields(HDAccountsMap::from([(0, account_zero())]));
+        fields.priv_key_policy = PrivKeyPolicy::Trezor;
+        fields.conf.trezor_coin = Some(TrezorUtxoCoin::Komodo);
+        utxo_coin_from_fields(fields)
+    }
+
+    fn new_address_request(ticker: &str) -> crate::hd_wallet::GetNewHDAddressRequest {
+        json::from_value(json!({ "coin": ticker, "account_id": 0, "chain": "External" })).unwrap()
+    }
+
+    /// R54, T35: a coin of the Trezor policy whose hardware slot is empty answers `HwContextNotInitialized`
+    /// (HTTP 400) to `get_new_address`, and the software coin of the same daemon succeeds.
+    #[test]
+    fn r54_t35_a_trezor_policy_coin_with_an_empty_slot_answers_hw_context_not_initialized() {
+        let items = mock_storage();
+        mock_chain();
+        mock_address_balance();
+        let ctx = node_with_hd_coins(
+            false,
+            vec![("TRZ", trezor_policy_hd_coin()), ("DOC", hd_coin_with_account_zero())],
+            &items,
+        );
+
+        let error = block_on(crate::hd_wallet::get_new_address(
+            ctx.clone(),
+            new_address_request("TRZ"),
+        ))
+        .err()
+        .expect("the Trezor-policy coin needs the device")
+        .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::HwContextNotInitialized),
+            "{:?}",
+            error
+        );
+        assert_eq!(error.status_code(), common::StatusCode::BAD_REQUEST);
+
+        block_on(crate::hd_wallet::get_new_address(ctx, new_address_request("DOC")))
+            .unwrap_or_else(|e| panic!("the software coin must get its address: {:?}", e));
+    }
+
+    /// R54: with the slot filled, the Trezor-policy coin passes the check; a software coin does not consult the
+    /// slot, filled or not (T32).
+    #[test]
+    fn r54_presence_of_the_context_is_looked_up_for_the_trezor_policy_coin_only() {
+        let items = mock_storage();
+        mock_chain();
+        mock_address_balance();
+        let ctx = node_with_hd_coins(
+            true,
+            vec![("TRZ", trezor_policy_hd_coin()), ("DOC", hd_coin_with_account_zero())],
+            &items,
+        );
+
+        for ticker in ["TRZ", "DOC"] {
+            block_on(crate::hd_wallet::get_new_address(
+                ctx.clone(),
+                new_address_request(ticker),
+            ))
+            .unwrap_or_else(|e| panic!("{}: the new address must be given: {:?}", ticker, e));
+        }
     }
 }

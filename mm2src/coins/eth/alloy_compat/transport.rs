@@ -354,7 +354,9 @@ fn decode_answer(bytes: &[u8], is_batch: bool) -> Result<ResponsePacket, NodeFai
     }
 }
 
-/// The error of a request that every node failed (CRD ch.35 R35.1.11).
+/// The error of a request that every node failed (CRD ch.35 R35.1.11). A transport with exactly one node names
+/// that node's transport-class failure as `<host>: <failure>`, without the "all EVM nodes failed:" prefix
+/// (R35.1.14).
 fn all_failed(inner: &Inner, failures: Vec<(usize, NodeFailure)>) -> TransportError {
     let last_non_cutoff = failures
         .iter()
@@ -387,7 +389,12 @@ fn all_failed(inner: &Inner, failures: Vec<(usize, NodeFailure)>) -> TransportEr
                 .map(|(label, text)| format!("{label}: {text}"))
                 .collect::<Vec<_>>()
                 .join("; ");
-            TransportErrorKind::custom_str(&format!("all EVM nodes failed: {listing}"))
+            if inner.nodes.len() == 1 {
+                // One node has nothing to be "all" of: the error names that node's failure alone.
+                TransportErrorKind::custom_str(&listing)
+            } else {
+                TransportErrorKind::custom_str(&format!("all EVM nodes failed: {listing}"))
+            }
         },
         // Every node hit the cutoff, or there is no node: a generic error that names no node.
         None => TransportErrorKind::custom_str(&format!(

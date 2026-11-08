@@ -682,11 +682,13 @@ covers only a failed balance read, not this failure. Chapter 05 §5.9B
 tabulates the keys. *Compatibility (this repository; not corpus-sourced):*
 Reloaded's legacy methods under HD bind the internal key and succeed. The
 maintainer decided on 2026-11-04 (decision CB in plan
-[`hd-key-unification`](../plans/hd-key-unification.md)): item H7 binds the
-coin key as the reference does and answers successfully with that key's
+[`hd-key-unification`](../plans/hd-key-unification.md)): item H7 is to bind the
+coin key as the reference does and answer successfully with that key's
 address, behind a compatibility switch whose default keeps that answer and
 whose off position gives the reference's failed response (chapter 05 R35
-note). The H7 CRD names the switch.
+note). The H7 CRD names the switch. H7 is decided, not implemented yet:
+until it lands, Reloaded keeps the behavior stated at the start of this
+note.
 
 ## 55.5 Standalone-coin task family: shared contract
 

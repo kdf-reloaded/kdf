@@ -1,6 +1,6 @@
 # Plan: wire parity of every RPC with the public KDF API reference
 
-**Status:** parked (coin activation shipped in PR #17; the rest not started) — **Last reviewed:** 2026-10-29
+**Status:** parked (coin activation shipped in PR #17; the rest not started) — **Last reviewed:** 2026-11-08
 
 > **Context:** written 2026-10-08 and updated 2026-10-11
 > on `fix/activation-api-parity`, after coin activation was brought to parity on
@@ -298,14 +298,15 @@ Two related, non-divergence notes are also recorded in the governing chapter:
 
 ## Order of execution
 
-1. Land `fix/activation-api-parity` (activation parity, ch.55, and the
-   activation rows that seed the register). Activation work that the branch
+1. Done: `fix/activation-api-parity` landed as PR #17 on 2026-10-11
+   (activation parity, ch.55, and the activation rows that seed the register). Activation work that the branch
    deliberately deferred is tracked in its own plans and is not part of this
    plan's batches: `docs/plans/solana-support.md`,
    `docs/plans/tendermint-activation-features.md`,
    `docs/plans/lightning-activation-features.md`, legacy EVM `enable` under an
    HD wallet (`UPSTREAM-PARITY-GAPS.md`), custom tokens not being wallet-only
-   (kdf-reloaded/kdf#16), the held Z-coin Light-mode Electrum policy (ch.39),
+   (issue #16, closed; fixed by `e18eca319` of 2026-10-12, merged with PR #21 on
+   2026-10-13), the held Z-coin Light-mode Electrum policy (ch.39),
    the per-ticker serialization of concurrent activations (ch.55 R55.1.12,
    implemented in PR #156), and the GLEEC behavior for a Z-coin sync date in
    the future (ch.39 §39.10, Reloaded status item 2, implemented in PR #22).

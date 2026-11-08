@@ -1,6 +1,6 @@
 # Plan: configuration-selected UTXO header families
 
-**Status:** in progress (beta blocker H4a and the fallback H4b landed in PRs #62, #67 and #74; H4 in part in PR #82, its remaining family rules open; H5 open) — **Last reviewed:** 2026-11-04
+**Status:** parked (H4a and H4b landed in PRs #62, #67, #74; H4 in part in PR #82; H6 in PRs #220, #221; the remaining H4 family rules and H5 open) — **Last reviewed:** 2026-11-08
 
 > **Context:** this plan closes the open work left by the fix for standard headers whose
 > version collides with a header family (commit `47ede628c`, CRD ch.37
@@ -555,7 +555,7 @@ threading extends it to the other read paths exactly as it extends the key.
 
 ### H6 — Time-only read of the median-time-past window (ch.37 R37.5.10; **0.4.0 batch 1 fix**)
 
-**Status:** CRD merged (PR #220); code in PR #221.
+*State:* CRD merged (PR #220); code merged (PR #221), both 2026-11-04.
 
 Why: a coin whose Electrum servers serve the standard 80-byte header plus a fixed-length trailer — the
 first one met is Bitcoin Atom (`BCA`, 84 bytes from height 505888) — has a median-time-past list that no
@@ -581,7 +581,10 @@ no switch to turn the fix on.
   guard that the number of strings equals `n`); moving the `RIC` and `MEWC` registry entries onto an explicit
   coins-file `header_layout` (a coins-repository change).
 - **Acceptance in the lab:** `get_current_mtp` of the live `BCA` coin equals the median computed independently
-  from the same eleven served headers; later a live `BCA` swap.
+  from the same eleven served headers; later a live `BCA` swap. *Lab rows (release tests 0.4.0-beta.1):* the
+  offline spends and refunds passed on 2026-11-04 (row 16, 12 of 12 cases). Live (row 17), a first small swap
+  finished on 2026-11-05 and the network accepted its BCA HTLC spend; the BCA chain stood still from 2026-11-05,
+  and the rest of the row is pending until it moves.
 - **Not in scope:** header sync, stores and hash validation for such a coin (H5 and R37.5.7 need the chain's exact
   bytes and hashes).
 
@@ -606,7 +609,7 @@ no switch to turn the fix on.
 | H4b structural fallback and its switch (D3, registry-free leg) | H4a — the layout readers; not H2/H3 (every coin is the `"BTC"` family until H2) | small–medium (switch parse at startup, fallback in the list and single-header entry points, info line, COMPAT docs, key rename) | PRs #67 and #74 |
 | H4 family rules | H3 | medium | PR #82 (LBRY and PIVX readers); the rest open |
 | H5 identity, storage, linkage | H4, H4a, H4b | medium, touches persisted data | open |
-| H6 time-only median read (R37.5.10) | H4b — the cascade it follows | small–medium (one function, one call, a log line, tests with a stub server for the individual requests) | CRD **PR #220** (merged); code **PR #221** |
+| H6 time-only median read (R37.5.10) | H4b — the cascade it follows | small–medium (one function, one call, a log line, tests with a stub server for the individual requests) | CRD **PR #220**, code **PR #221**, both merged 2026-11-04 |
 
 H1+H2 can start immediately; H0 gates nothing any more. Each PR updates ch.37
 §37.5.8 and §37.9 in the same commit as its code, and closes the

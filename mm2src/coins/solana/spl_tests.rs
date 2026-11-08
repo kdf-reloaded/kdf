@@ -64,6 +64,7 @@ fn test_verify_message() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn spl_my_balance() {
     let passphrase = "federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron".to_string();
@@ -90,6 +91,7 @@ fn spl_my_balance() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_spl_transactions() {
     let passphrase = "federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron".to_string();

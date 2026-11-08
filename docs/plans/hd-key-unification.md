@@ -1,6 +1,6 @@
 # Plan: one key per coin and one trading identity under an HD login
 
-**Status:** planning — **Last reviewed:** 2026-11-04
+**Status:** in progress (H0 to H5 shipped in PRs #228 to #281; the hardware-context work of this release is tracked in CRD ch.05 §5.10B; H6 and H7 not started) — **Last reviewed:** 2026-11-08
 
 > **Context.** Under an HD login (`enable_hd: true`) the node holds three different secp256k1
 > keys, where an iguana login holds one:
@@ -20,29 +20,36 @@
 > funds, signs and receives. Where a step leaves that target, the maintainer decided on
 > 2026-11-04 (decisions BY to CC under open points).
 
-## What a user sees today (HD login only)
+## What a user saw before 0.4.0 (HD login only)
 
 1. **ETH and ERC20 swaps cannot succeed.** The swap puts the passphrase-hash key on the wire but
    pays from the coin's HD signer. The other side's sender check fails. The dex fee is lost, and
    a payment already sent waits for its refund time. Nothing refuses these swaps up front.
+   *Fixed by H3 (PR #250).*
 2. **Swap proceeds on an address no view shows.** A UTXO coin enabled through legacy `enable`
    under an HD login receives its spend or refund on the passphrase-hash address. The funds are
-   recoverable by logging in with the same passphrase without `enable_hd`.
+   recoverable by logging in with the same passphrase without `enable_hd`. *Fixed by H3
+   (PR #250); the address a swap pays is listed from activation since H5.0 (PR #279).*
 3. **A maker does not see its orders as its own.** Orders are signed with the passphrase-hash key,
    but `orderbook` marks own orders by the internal key, so `is_mine` is false for them. No
    keep-alive goes out for them either: the maker drops each order from its own orderbook after
    the maker-order timeout and sends it again in full, about every 90 s. That keeps the order
    visible on other nodes, apart from short gaps when a node drops it just before the next copy
    arrives (row HD1, 2026-11-04: three gaps in 60 minutes, none in the iguana control).
+   *Fixed by H4 (PR #254).*
 4. **A UTXO coin activated at another `path_to_address`** puts that address's key on the wire
-   but funds the swap from account 0, external chain, index 0.
+   but funds the swap from account 0, external chain, index 0. *Fixed by H3 (PR #250).*
 5. **Funds shown but not spendable:** Sia (`withdraw` ignores `from`) and ERC20 (`from`
-   refused) show balances on HD addresses they cannot spend from.
+   refused) show balances on HD addresses they cannot spend from. *Open: H6.*
 6. **Single-address views:** balance events and history cover only the activated address
    (UTXO, EVM, Sia). The direct UTXO `withdraw` (legacy and mmrpc 2.0) is refused. Legacy
    `my_balance` fails for a UTXO coin, and legacy `get_enabled_coins` fails as a whole once one
-   such coin is enabled; for an EVM coin both answer with the activated address.
+   such coin is enabled; for an EVM coin both answer with the activated address. *The direct
+   UTXO `withdraw` is served since H5.1 (PR #270). Balance events and history: open, H6. Legacy
+   `my_balance` and `get_enabled_coins` keep failing for a UTXO coin, as at the reference
+   (decision CA).*
 7. **Tendermint and BCH-with-tokens** run on the passphrase-hash key, not on an HD derivation.
+   *Open: H7.*
 
 Who logs in with HD: the Flutter Komodo DeFi wallet (supported since 0.1.x) and API users who
 set `enable_hd`.
@@ -51,14 +58,14 @@ set `enable_hd`.
 
 | Id | What | CRD | State |
 |---|---|---|---|
-| H0 | **Docs agree with each other and with the code.** Six contradictions: the HD withdraw without `from` (ch.49 against RELOADED_VS_GLEEC and the CHANGELOG), the Trezor EVM activation status (ch.50 against ch.35), the §38.8 status lines, the Sia result shape (ch.20 against ch.46), the HD swap fix credited to ch.51, and the unverified parity claim for the swap fallback. | ch.49, ch.50/ch.35, ch.38, ch.20, ch.51, RELOADED_VS_GLEEC | Docs PR #228 |
-| H1 | **Refuse what cannot work, before negotiation.** A V1 swap leg is refused when the key it would put on the wire is not the key the coin pays from. Under an HD login that covers ETH/ERC20, coins enabled with a single key (legacy `enable`/`electrum`, `priv_key_policy: IguanaPrivKey`), and UTXO coins at a `path_to_address` other than 0/0/0. Checked at order posting, `trade_preimage` and matching; one fixed error text names the coin, the reason and the way out; an own order that fails is cancelled. The `MM2.json` switch `swap_key_check` (default `true`) turns it off. An iguana login never meets it. | ch.05 §5.12B (R36–R40, T15–T18); the reference has no such check (ch.05 §5.9B R34) | Spec PR #231; code PR #233 |
+| H0 | **Docs agree with each other and with the code.** Six contradictions: the HD withdraw without `from` (ch.49 against RELOADED_VS_GLEEC and the CHANGELOG), the Trezor EVM activation status (ch.50 against ch.35), the §38.8 status lines, the Sia result shape (ch.20 against ch.46), the HD swap fix credited to ch.51, and the unverified parity claim for the swap fallback. | ch.49, ch.50/ch.35, ch.38, ch.20, ch.51, RELOADED_VS_GLEEC | Merged 2026-11-05 (PR #228) |
+| H1 | **Refuse what cannot work, before negotiation.** A V1 swap leg is refused when the key it would put on the wire is not the key the coin pays from. Under an HD login that covers ETH/ERC20, coins enabled with a single key (legacy `enable`/`electrum`, `priv_key_policy: IguanaPrivKey`), and UTXO coins at a `path_to_address` other than 0/0/0. Checked at order posting, `trade_preimage` and matching; one fixed error text names the coin, the reason and the way out; an own order that fails is cancelled. The `MM2.json` switch `swap_key_check` (default `true`) turns it off. An iguana login never meets it. | ch.05 §5.12B (R36–R40, T15–T18); the reference has no such check (ch.05 §5.9B R34) | Merged 2026-11-05 (spec PR #231, code PR #233) |
 | H2 | **Lab confirmation of the ordermatch effect** (row HD1). | — | Done 2026-11-04: `is_mine` false confirmed; the orders stay visible on other nodes through the full re-send about every 90 s |
-| H3 | **One swap key per coin.** The V1 HTLC key is the coin's own key at `path_to_address` for every family: the EVM signer's key; for a UTXO coin the same key funds the payment, receives the change, and is paid the spend and refund, so funding moves from account 0 / External / 0 to `path_to_address`; a shielded coin keeps its per-swap key and Sia its padded ed25519 key. Lifts the H1 refusals one by one. | ch.05 §5.12C (R41–R44, T19–T24) to the target of ch.05 §5.9B R33 and ch.51 R74; ch.15 R36 (V2 follows the same address) | Spec PR #249 (merged); code PR #250 |
-| H4 | **One trading identity under HD: the internal key.** Order signing, `sender_pubkey` and the V1 persistent pubkey (start event, swap statistics) move from the passphrase hash to the internal key, which keep-alive, `is_mine` and the stale-order sweep already use; the relay's own libp2p identity is checked against the same target. An HD maker then sends one keep-alive per pair every 30 s instead of re-sending each order about every 90 s. The swap's transaction-helper messages are signed with the key that signs the swap's messages, so they move with it. Then every HD negotiation is shape 3 (ch.51 R59). Wire-visible at upgrade (see below). | ch.05 §5.12D (R45–R49, T25–T30) to the target of ch.05 §5.9B R32–R33, ch.51 R74 (persistent key) and R50B (helper messages); ch.28 R19 (relay identity); decisions CR, CS, CT | Spec PR #253 (merged); code PR #254 |
-| H5 | **UTXO operations outside swaps.** First, the address at `path_to_address` is listed once a swap has used it: today a swap uses it even when the HD account has not listed it, and nothing lists it later, so its funds show only after `get_new_address` (SwapLab row HD5, 2026-11-06). The direct `withdraw` under HD, refused until now, is served with `from` as at the reference (decision BZ). A withdraw without `from` uses the coin's activated address, the address at `path_to_address`, on both routes, a documented divergence: the reference fails it (decisions BY, CU). Under a single-key login an explicit `from` is refused on the direct method too, as at the reference (item H5.5). Legacy `my_balance` and `get_enabled_coins` keep failing for an HD UTXO coin, as at the reference; a CHANGELOG note names what to use instead, and no code changes (decision CA). For an EVM coin both keep answering with the activated address, where the reference fails. Also `fetch_utxos` and `consolidate_utxos` under HD, and `task::create_new_account` under a software HD login (today it asks for a hardware device first and fails, for UTXO, QTUM and EVM alike). Items: H5.0 activation lists the address at `path_to_address`, as the reference does (ch.05 R35a); H5.1 the direct `withdraw`; H5.3 `fetch_utxos`, `consolidate_utxos` and the automatic merge (R35b); H5.4 `task::create_new_account` (R35c); H5.5 the single-key `from` refusal (ch.49 R49.27b item 1). | ch.49 R49.4 as amended (divergence, BY, CU), R49.27, R49.27b; ch.05 §5.9B R35, R35a–R35c; ch.38 §38.8, ch.20 §20.10 D1 note | H5.1 and H5.5: PR #270. H5.0 and H5.4: PR #279. H5.3: next |
-| H6 | **Every HD address covered.** History v2 under HD takes an account or address `target`, an account covering every known external and internal address (the reference target; EVM history is legacy only there); balance events for every known HD address; ERC20 `withdraw` with `from`. Sia keeps its HD account and address RPCs, and its `withdraw` honors `from`, so every balance it shows can be spent; the reference offers no such RPCs and ignores `from`, so this is a documented divergence (decision CC). The history cache is rebuilt, not migrated. | target ch.05 §5.9B R35; ch.38, ch.35, ch.53 D53.5, ch.49 R49.27; ch.20 R-W1 and ch.46 (divergence, CC) | Independent |
-| H7 | **Family activations.** `enable_tendermint_with_assets` and `enable_bch_with_tokens` on the coin key at `path_to_address` under the coin's `derivation_path` (the reference target; a Tendermint configuration without `derivation_path` fails there; Tendermint activation plan items 2 and 5); legacy `enable`/`electrum` under HD binds the coin key at `path_to_address` (default account 0, External, 0) under the coin's `derivation_path`, as the reference builds the coin, and answers successfully with that key's address, where the reference registers the coin and then fails the response at `address`. A compatibility switch, on by default, keeps Reloaded's successful answer; off gives the reference's failed response. The H7 CRD names the switch in the ch.05 and ch.55 rules and in the compatibility docs (decision CB). Today Reloaded binds the internal key, so the address such a coin shows changes at upgrade (see below). | target ch.05 §5.9B R35, ch.55 R55.4.10 (answer: divergence with a switch, CB); ch.36, UPSTREAM-PARITY-GAPS (legacy EVM `enable`) | Independent |
+| H3 | **One swap key per coin.** The V1 HTLC key is the coin's own key at `path_to_address` for every family: the EVM signer's key; for a UTXO coin the same key funds the payment, receives the change, and is paid the spend and refund, so funding moves from account 0 / External / 0 to `path_to_address`; a shielded coin keeps its per-swap key and Sia its padded ed25519 key. Lifts the H1 refusals one by one. | ch.05 §5.12C (R41–R44, T19–T24) to the target of ch.05 §5.9B R33 and ch.51 R74; ch.15 R36 (V2 follows the same address) | Merged 2026-11-05 (spec PR #249, code PR #250); SwapLab rows HD3 and HD4 passed 2026-11-05 |
+| H4 | **One trading identity under HD: the internal key.** Order signing, `sender_pubkey` and the V1 persistent pubkey (start event, swap statistics) move from the passphrase hash to the internal key, which keep-alive, `is_mine` and the stale-order sweep already use; the relay's own libp2p identity is checked against the same target. An HD maker then sends one keep-alive per pair every 30 s instead of re-sending each order about every 90 s. The swap's transaction-helper messages are signed with the key that signs the swap's messages, so they move with it. Then every HD negotiation is shape 3 (ch.51 R59). Wire-visible at upgrade (see below). | ch.05 §5.12D (R45–R49, T25–T30) to the target of ch.05 §5.9B R32–R33, ch.51 R74 (persistent key) and R50B (helper messages); ch.28 R19 (relay identity); decisions CR, CS, CT | Merged 2026-11-05 (spec PR #253, code PR #254); SwapLab row HD5 passed 2026-11-06 |
+| H5 | **UTXO operations outside swaps.** First, the address at `path_to_address` is listed once a swap has used it: before PR #279 a swap used it even when the HD account had not listed it, and nothing listed it later, so its funds showed only after `get_new_address` (SwapLab row HD5, 2026-11-06; fixed by H5.0). The direct `withdraw` under HD, refused before PR #270, is served with `from` as at the reference (decision BZ). A withdraw without `from` uses the coin's activated address, the address at `path_to_address`, on both routes, a documented divergence: the reference fails it (decisions BY, CU). Under a single-key login an explicit `from` is refused on the direct method too, as at the reference (item H5.5). Legacy `my_balance` and `get_enabled_coins` keep failing for an HD UTXO coin, as at the reference; a CHANGELOG note names what to use instead, and no code changes (decision CA). For an EVM coin both keep answering with the activated address, where the reference fails. Also `fetch_utxos` and `consolidate_utxos` under HD, and `task::create_new_account` under a software HD login (before PR #279 it asked for a hardware device first and failed, for UTXO, QTUM and EVM alike). Items: H5.0 activation lists the address at `path_to_address`, as the reference does (ch.05 R35a); H5.1 the direct `withdraw`; H5.3 `fetch_utxos`, `consolidate_utxos` and the automatic merge (R35b); H5.4 `task::create_new_account` (R35c); H5.5 the single-key `from` refusal (ch.49 R49.27b item 1). | ch.49 R49.4 as amended (divergence, BY, CU), R49.27, R49.27b; ch.05 §5.9B R35, R35a–R35c; ch.38 §38.8, ch.20 §20.10 D1 note | Merged: H5.1 and H5.5 in PR #270 (2026-11-07), H5.0 and H5.4 in PR #279 (2026-11-08), H5.3 in PR #281 (2026-11-08); SwapLab rows HD6.1 to HD6.5 passed in a run from 2026-11-07 to 2026-11-08 |
+| H6 | **Every HD address covered.** History v2 under HD takes an account or address `target`, an account covering every known external and internal address (the reference target; EVM history is legacy only there); balance events for every known HD address; ERC20 `withdraw` with `from`. Sia keeps its HD account and address RPCs, and its `withdraw` honors `from`, so every balance it shows can be spent; the reference offers no such RPCs and ignores `from`, so this is a documented divergence (decision CC). The history cache is rebuilt, not migrated. | target ch.05 §5.9B R35; ch.38, ch.35, ch.53 D53.5, ch.49 R49.27; ch.20 R-W1 and ch.46 (divergence, CC) | Not started (no PR); independent of the other items |
+| H7 | **Family activations.** `enable_tendermint_with_assets` and `enable_bch_with_tokens` on the coin key at `path_to_address` under the coin's `derivation_path` (the reference target; a Tendermint configuration without `derivation_path` fails there; Tendermint activation plan items 2 and 5); legacy `enable`/`electrum` under HD binds the coin key at `path_to_address` (default account 0, External, 0) under the coin's `derivation_path`, as the reference builds the coin, and answers successfully with that key's address, where the reference registers the coin and then fails the response at `address`. A compatibility switch, on by default, keeps Reloaded's successful answer; off gives the reference's failed response. The H7 CRD names the switch in the ch.05 and ch.55 rules and in the compatibility docs (decision CB). Today Reloaded binds the internal key, so the address such a coin shows changes at upgrade (see below). | target ch.05 §5.9B R35, ch.55 R55.4.10 (answer: divergence with a switch, CB); ch.36, UPSTREAM-PARITY-GAPS (legacy EVM `enable`) | Not started (no PR); independent of the other items |
 
 ## Rules that hold across the steps
 
@@ -85,7 +92,8 @@ operator does:
 - an HD relay gets a new peer identifier, which peers learn again through its address (decision
   CS).
 
-The CHANGELOG carries this note for the release that ships H4 (ch.05 R49).
+The CHANGELOG carries this note, "Upgrade note: a new node identity under an HD login", for the
+release that ships H4, 0.4.0-beta.1 (ch.05 R49).
 
 ## The address change at upgrade (H7)
 
@@ -105,6 +113,11 @@ reference; the H7 CRD settles Reloaded's answer for it.
 | HD3 | H3 | HD-login swaps RIN/ETH both directions against an iguana peer; spend and refund outputs on HD addresses the wallet shows. | ~2 h |
 | HD4 | H3/H4 | A swap started by the previous build under an HD login, resumed by the new build, completes on its recorded keys. | ~1 h |
 | HD5 | H4 | HD maker with open orders across the upgrade: orders re-posted under the new identity, `is_mine` true, the old orders gone from a peer within the maker-order timeout. | ~1 h |
+
+Results: HD1 ran on 2026-11-04 (H2 above). HD3, HD4 and HD5 passed on 2026-11-05 and 2026-11-06,
+and a further row, HD6 (H5.0, H5.3 and H5.4, with the withdrawals of H5.1), passed in a run from
+2026-11-07 to 2026-11-08; the release-tests page of 0.4.0-beta.1 has the results. HD2 is not on
+that page.
 
 ## Open points
 
@@ -139,9 +152,10 @@ reference; the H7 CRD settles Reloaded's answer for it.
   switch.
 - **CB (a).** Legacy `enable`/`electrum` under HD binds the coin key and answers successfully with
   its address, behind a compatibility switch whose default is this answer (H7). Not chosen:
-  matching the reference exactly, or refusing.
+  matching the reference exactly, or refusing. Not implemented yet: H7 has no PR.
 - **CC (a).** Sia keeps its HD account and address RPCs, and `withdraw` honors `from` (H6). Not
-  chosen: hiding balances on addresses other than the first, or a known-limitation note only.
+  chosen: hiding balances on addresses other than the first, or a known-limitation note only. Not
+  implemented yet: H6 has no PR, and Sia `withdraw` still ignores `from`.
 
 **H4 design decisions** (2026-11-05, confirmed by the maintainer the same day):
 

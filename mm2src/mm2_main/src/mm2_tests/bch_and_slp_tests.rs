@@ -92,6 +92,7 @@ fn withdraw_and_send_bch(mm: &MarketMakerIt, to: &str, expected_from: &str) {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_withdraw_cashaddresses() {
     let coins = json!([
@@ -194,6 +195,7 @@ fn test_withdraw_cashaddresses() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_withdraw_to_different_cashaddress_network_should_fail() {
     let coins = json!([
@@ -255,6 +257,7 @@ fn test_withdraw_to_different_cashaddress_network_should_fail() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_common_cashaddresses() {
     let coins = json!([
@@ -357,6 +360,7 @@ async fn wait_till_history_has_records(
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_bch_and_slp_testnet_history() {
     let coins = json!([
@@ -438,6 +442,7 @@ fn test_bch_and_slp_testnet_history() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_sign_verify_message_bch() {
     let seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";
@@ -506,6 +511,7 @@ fn test_sign_verify_message_bch() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_sign_verify_message_slp() {
     let seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";

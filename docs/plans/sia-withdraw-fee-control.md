@@ -1,6 +1,6 @@
 # Plan: operator-selectable Siacoin withdraw fee
 
-**Status:** done (shipped in PR #77; below-estimate fee verified live 2026-10-26 on an uncongested txpool) — **Last reviewed:** 2026-10-26
+**Status:** done (shipped in PR #77; below-estimate fee verified live 2026-10-26 on an uncongested txpool) — **Last reviewed:** 2026-11-08
 
 > **Context:** parked deliberately on 2026-09-20 during the
 > beta triage of the Siacoin work. Nothing here is a defect fix: the gap is a
@@ -28,9 +28,11 @@
 `WithdrawRequest` carries a `fee` object whose variants are all UTXO-, EVM-,
 QRC20- or Cosmos-shaped (`UtxoFixed`, `UtxoPerKbyte`, `EthGas`,
 `EthGasEip1559`, `Qrc20Gas`, `CosmosGas`). None of them can express a Sia fee.
-The field deserialises for an SC request and is then ignored: CRD ch.20 §20.9
-R-W3 states outright that "the request does not carry a fee-override value for
-this path". There is no way to set an SC withdraw fee over RPC.
+Before PR #77 the field deserialized for an SC request and was then ignored:
+CRD ch.20 §20.9 R-W3 stated outright that "the request does not carry a
+fee-override value for this path", and there was no way to set an SC withdraw
+fee over RPC. Since PR #77, `UtxoPerKbyte` is applied as SC per kilobyte
+(Decision F above).
 
 The fee itself is not the problem. Reloaded estimates it from the transaction's
 serialized length (its signature-hash form, which is smaller than the wire form;
@@ -44,9 +46,9 @@ override.
 The shipped Komodo DeFi wallet shows its "Enable Custom Fees" switch for every
 non-ZHTLC coin, Siacoin included (`SendModal.qml`, `visible:
 !General.isZhtlc(...)`). A user can therefore enable it for SC, enter a fee,
-and send. The wallet puts a `UtxoPerKbyte` object in the request, KDF ignores
-it, and the withdrawal goes out at the estimated fee. No error is raised on
-either side.
+and send. The wallet puts a `UtxoPerKbyte` object in the request. Before PR #77
+KDF ignored it, and the withdrawal went out at the estimated fee, with no error
+on either side; since PR #77 KDF Reloaded applies it as SC per kilobyte.
 
 That is a silent no-op, which is the part worth fixing eventually: the user
 believes they set something and did not. It is *not* a funds-safety problem --

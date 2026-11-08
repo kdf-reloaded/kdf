@@ -72,6 +72,7 @@ fn check_tx_fee(coin: &Qrc20Coin, expected_tx_fee: ActualTxFee) {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_withdraw_impl_fee_details() {
     Qrc20Coin::get_unspent_ordered_list.mock_safe(|coin, _| {
         let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
@@ -122,6 +123,7 @@ fn test_withdraw_impl_fee_details() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_validate_maker_payment() {
     // this priv_key corresponds to "taker_passphrase" passphrase
     let priv_key = [
@@ -183,6 +185,7 @@ fn test_validate_maker_payment() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_wait_for_confirmations_excepted() {
     // this priv_key corresponds to "taker_passphrase" passphrase
     let priv_key = [
@@ -232,6 +235,7 @@ fn test_wait_for_confirmations_excepted() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_send_taker_fee() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -269,6 +273,7 @@ fn test_send_taker_fee() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_validate_fee() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -377,6 +382,7 @@ fn test_validate_fee() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_wait_for_tx_spend_malicious() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -409,6 +415,7 @@ fn test_wait_for_tx_spend_malicious() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_extract_secret() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -428,6 +435,7 @@ fn test_extract_secret() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_extract_secret_malicious() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -448,6 +456,7 @@ fn test_extract_secret_malicious() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_generate_token_transfer_script_pubkey() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -497,6 +506,7 @@ fn test_generate_token_transfer_script_pubkey() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_transfer_details_by_hash() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -651,6 +661,7 @@ fn test_transfer_details_by_hash() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_get_trade_fee() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -677,6 +688,7 @@ fn test_get_trade_fee() {
 /// `qKEDGuogDhtH9zBnc71QtqT1KDamaR1KJ3` address has `0` allowance,
 /// so only one `approve` and one `erc20Payment` contract calls should be included in the estimated trade fee.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_sender_trade_preimage_zero_allowance() {
     // priv_key of qKEDGuogDhtH9zBnc71QtqT1KDamaR1KJ3
     // please note this address should have an immutable balance
@@ -716,6 +728,7 @@ fn test_sender_trade_preimage_zero_allowance() {
 /// so if the value is `2.5`, then only one `erc20Payment` contract call should be included in the estimated trade fee,
 /// if the value is `3.5`, then two `approve` and one `erc20Payment` contract call should be included in the estimated trade fee.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_sender_trade_preimage_with_allowance() {
     // priv_key of qeUbAVgkPiF62syqd792VJeB9BaqMtLcZV
     // please note this address should have an immutable balance
@@ -780,6 +793,7 @@ fn test_sender_trade_preimage_with_allowance() {
 
 /// `receiverSpend` should be included in the estimated trade fee.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_receiver_trade_preimage() {
     // priv_key of qeUbAVgkPiF62syqd792VJeB9BaqMtLcZV
     // please note this address should have an immutable balance
@@ -809,6 +823,7 @@ fn test_receiver_trade_preimage() {
 
 /// `qeUbAVgkPiF62syqd792VJeB9BaqMtLcZV` address has `5` QRC20 tokens.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_taker_fee_tx_fee() {
     // priv_key of qeUbAVgkPiF62syqd792VJeB9BaqMtLcZV
     // please note this address should have an immutable balance
@@ -841,6 +856,7 @@ fn test_taker_fee_tx_fee() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_coin_from_conf_without_decimals() {
     // priv_key of qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG
     let priv_key = [
@@ -925,6 +941,7 @@ fn test_coin_from_conf_without_decimals() {
 /// Note maker initialized payment with the corresponding swap_id in
 /// b61ef2f9911d075e80a3623444cce8fd948932f66c9148283860d46e9af4f2c8 tx.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_validate_maker_payment_malicious() {
     // priv_key of qUX9FGHubczidVjWPCUWuwCUJWpkAtGCgf
     let priv_key = [
@@ -961,6 +978,7 @@ fn test_validate_maker_payment_malicious() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_negotiate_swap_contract_addr_no_fallback() {
     let (_, coin) = qrc20_coin_for_test(&[1; 32], None);
 
@@ -988,6 +1006,7 @@ fn test_negotiate_swap_contract_addr_no_fallback() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_negotiate_swap_contract_addr_has_fallback() {
     let fallback = "0x8500AFc0bc5214728082163326C2FF0C73f4a871";
     let fallback_addr = qtum::contract_addr_from_str(fallback).unwrap();
@@ -1022,6 +1041,7 @@ fn test_negotiate_swap_contract_addr_has_fallback() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_send_contract_calls_recoverable_tx() {
     let priv_key = [
         3, 98, 177, 3, 108, 39, 234, 144, 131, 178, 103, 103, 127, 80, 230, 166, 53, 68, 147, 215, 42, 216, 144, 72,
@@ -1056,6 +1076,7 @@ fn test_send_contract_calls_recoverable_tx() {
 /// ch.57 T10 for the QRC20 layer (R57.7A.6): minimum trading volume is exactly 10^-decimals, minimum
 /// transaction amount exactly zero, including a decimals value (24) for which `10u64.pow` would overflow.
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn t10_qrc20_min_trading_vol_is_one_smallest_unit() {
     let priv_key = [1u8; 32];
     for decimals in [18u8, 8, 6, 24] {

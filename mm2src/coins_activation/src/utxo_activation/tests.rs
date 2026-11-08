@@ -1,6 +1,6 @@
 //! Wire-shape tests of the UTXO-family members (CRD ch. 55 §55.5-§55.8, T55.4, T55.5, T55.10-T55.15).
 
-use super::common_impl::validate_electrum_connection_settings;
+use super::common_impl::{reads_keys_from_device, validate_electrum_connection_settings};
 use super::init_utxo_standard_activation_error::InitUtxoStandardError;
 use super::init_utxo_standard_statuses::UtxoStandardInProgressStatus;
 use super::utxo_standard_activation_result::{UtxoStandardActivationResult, UtxoWalletBalance};
@@ -422,4 +422,55 @@ fn bch_member_accepts_only_the_bch_protocol() {
     });
     assert_eq!(bch.expect("BCH is accepted").slp_prefix(), "simpleledger");
     assert!(BchProtocolInfo::try_from_coin_protocol(CoinProtocol::UTXO).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// R35a / R35c: the extended-key source follows the coin's key policy
+// ---------------------------------------------------------------------------
+
+/// CRD ch.05 R35a, R35c: a coin of a software policy never reads its extended keys from the device, whether or not
+/// a hardware context exists beside the software login.
+#[test]
+fn r35a_a_software_policy_coin_never_reads_its_keys_from_the_device() {
+    for policy in [
+        PrivKeyActivationPolicy::ContextPrivKey,
+        PrivKeyActivationPolicy::IguanaPrivKey,
+    ] {
+        for hw_context_present in [false, true] {
+            match reads_keys_from_device(&policy, hw_context_present) {
+                Ok(from_device) => {
+                    assert!(
+                        !from_device,
+                        "{:?} with a hardware context {}",
+                        policy, hw_context_present
+                    )
+                },
+                Err(e) => panic!(
+                    "{:?} with a hardware context {}: {}",
+                    policy,
+                    hw_context_present,
+                    e.into_inner()
+                ),
+            }
+        }
+    }
+}
+
+/// CRD ch.05 R35a: a coin of the Trezor policy reads them from the device, and reports a missing hardware context.
+#[test]
+fn r35a_a_trezor_policy_coin_reads_its_keys_from_the_device() {
+    match reads_keys_from_device(&PrivKeyActivationPolicy::Trezor, true) {
+        Ok(from_device) => assert!(from_device),
+        Err(e) => panic!("{}", e.into_inner()),
+    }
+    match reads_keys_from_device(&PrivKeyActivationPolicy::Trezor, false) {
+        Ok(_) => panic!("a missing hardware context must be reported"),
+        Err(e) => assert!(
+            matches!(
+                e.into_inner(),
+                InitUtxoStandardError::HwError(HwRpcError::NotInitialized)
+            ),
+            "the error names the missing hardware context"
+        ),
+    }
 }

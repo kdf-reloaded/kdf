@@ -1,6 +1,6 @@
 # Plan: expire a withdraw's recorded spend by the chain's real block time
 
-**Status:** planning (post-beta; nothing is implemented) — **Last reviewed:** 2026-10-30
+**Status:** planning (post-beta; nothing is implemented) — **Last reviewed:** 2026-11-08
 
 > **Context.** Field test of 2026-10-30: two `withdraw` + `send_raw_transaction`
 > pairs for DOGE, three seconds apart, from one address. The second withdraw
@@ -9,9 +9,10 @@
 > a UTXO coin remembers the outputs it spent only for its own swap sends, not for
 > withdraws, so the next withdraw relies on the Electrum server having indexed the
 > broadcast (CRD ch.38 §38.5B R38.5B.2, R38.5B.3). Maintainer Decision BE
-> (2026-10-30) fixes this before the beta: a withdraw's spend is recorded when its
-> broadcast is accepted (R38.5B.9), with no expiry of recorded entries, as in the
-> reference (D38.5B.2). This plan holds the two ideas left for after the beta.
+> (2026-10-30) fixed this in 0.3.0-beta.1 (PR #181): a withdraw's spend is recorded
+> when its broadcast is accepted (R38.5B.9), with no expiry of recorded entries, as
+> in the reference (D38.5B.2). This plan holds the two ideas left for after
+> 0.3.0-beta.1; neither is in 0.4.0 (CHANGELOG, Known limitations).
 
 ## 1. Expire a recorded withdraw entry after a multiple of the real block time
 

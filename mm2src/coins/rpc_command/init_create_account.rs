@@ -83,9 +83,10 @@ pub enum CreateAccountInProgressStatus {
 
 #[async_trait]
 pub trait InitCreateHDAccountRpcOps {
-    /// Creates the account and scans it. `xpub_extractor` is the hardware device that provides the account's
-    /// extended public key under a hardware login; under a software login it is `None` and the key is derived in
-    /// software (CRD ch.05 R35c). The index of the account is recorded in `created_account` once it exists.
+    /// Creates the account and scans it. `xpub_extractor` is the hardware device the caller can offer, which exists
+    /// whenever a hardware context does; a coin of the Trezor policy takes the account's extended public key from
+    /// it, a software-keyed coin derives the key in software and never asks it (CRD ch.05 R35c). The index of the
+    /// account is recorded in `created_account` once it exists.
     async fn init_create_account_rpc<XPubExtractor>(
         &self,
         params: CreateNewAccountParams,
@@ -158,8 +159,10 @@ impl RpcTask for InitCreateAccountTask {
         where
             Coin: InitCreateHDAccountRpcOps + Send + Sync,
         {
-            // Under a hardware login the device provides the account's extended public key. Under a software
-            // login no device is sought and the key is derived in software (CRD ch.05 R35c).
+            // The device is offered whenever a hardware context exists. Whether it provides the account's extended
+            // public key is the coin's own key policy to say: a coin of the Trezor policy asks it, a software-keyed
+            // coin derives the key in software and never does, also when the context exists beside a software
+            // login (CRD ch.05 R35c). Without a hardware context no device is sought.
             let xpub_extractor = if uses_hardware_wallet(ctx)? {
                 let hw_statuses = HwConnectStatuses {
                     on_connect: CreateAccountInProgressStatus::WaitingForTrezorToConnect,
@@ -196,8 +199,9 @@ impl RpcTask for InitCreateAccountTask {
     }
 }
 
-/// Whether the account's extended public key comes from a hardware device: the node runs under a hardware login
-/// (CRD ch.05 R35c). Under a software login no hardware context exists, and none is needed.
+/// Whether a hardware device can be offered for the account's extended public key: a hardware context exists
+/// (CRD ch.05 R35c). The coin's own key policy decides whether it asks the device (see `extract_extended_pubkey`);
+/// without a hardware context no device is sought, and none is needed under a software login.
 pub(crate) fn uses_hardware_wallet(ctx: &MmArc) -> MmResult<bool, HDWalletRpcError> {
     let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| HDWalletRpcError::Internal(e.to_string()))?;
     Ok(crypto_ctx.hw_ctx().is_some())

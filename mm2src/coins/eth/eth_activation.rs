@@ -10,7 +10,7 @@
 use super::*;
 use crate::eth::eth_hd_wallet::{EthHDAccount, EthHDWallet};
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
-use crate::hd_wallet_storage::HDWalletCoinStorage;
+use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageKeyPolicy};
 use crate::is_wallet_only_conf;
 use crate::node_url::{host_only, listed_nodes, scrub_node_url, ListedNode};
 use crate::rpc_command::get_my_address::PathToAddress;
@@ -410,21 +410,44 @@ pub fn eth_full_derivation_path(
     Ok(path)
 }
 
-/// Builds the HD wallet of an EVM coin: the stored accounts of the wallet namespace the daemon runs in.
+/// Builds the HD wallet of an EVM coin: the stored accounts of the wallet namespace of the coin's key policy
+/// (CRD ch.05 R29): the software identity for a software coin, the device identity for a Trezor-policy coin.
 pub async fn build_eth_hd_wallet(
     ctx: &MmArc,
     ticker: &str,
     conf: &Json,
     gap_limit: u32,
+    key_policy: HDWalletStorageKeyPolicy,
 ) -> Result<EthHDWallet, MmError<EthCoinBuildError>> {
     let derivation_path = eth_path_to_coin(conf)?;
-    let hd_wallet_storage = HDWalletCoinStorage::init(ctx, ticker.to_owned())
+    let hd_wallet_storage = HDWalletCoinStorage::init(ctx, ticker.to_owned(), key_policy)
         .await
         .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
-    let stored = hd_wallet_storage
-        .load_all_accounts()
-        .await
-        .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
+    // A coin of the software policy loads only the accounts its seed derived; the rows it did not derive are
+    // removed (CRD ch.05 R55 (1)). A coin of the Trezor policy loads its rows as stored: its keys need the device.
+    let stored = match key_policy {
+        HDWalletStorageKeyPolicy::Software => {
+            use crypto::Bip32DerPathOps;
+
+            let crypto_ctx = crypto::CryptoCtx::from_ctx(ctx).mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
+            let global_hd = match crypto_ctx.key_pair_policy() {
+                crypto::KeyPairPolicy::GlobalHDAccount(global_hd) => global_hd,
+                crypto::KeyPairPolicy::Iguana => {
+                    return MmError::err(EthCoinBuildError::Internal(
+                        "An HD wallet needs a global-HD login".to_owned(),
+                    ))
+                },
+            };
+            hd_wallet_storage
+                .load_accounts_derived_from_seed(global_hd.root_priv_key(), &derivation_path.to_derivation_path())
+                .await
+                .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?
+        },
+        HDWalletStorageKeyPolicy::Hardware => hd_wallet_storage
+            .load_all_accounts()
+            .await
+            .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?,
+    };
     let loaded: Result<HDAccountsMap<EthHDAccount>, _> = stored
         .iter()
         .map(|item| {
@@ -490,7 +513,7 @@ pub async fn eth_coin_from_params_with_global_hd(
     protocol: CoinProtocol,
 ) -> Result<EthCoin, MmError<EthCoinBuildError>> {
     let key_pair = derive_eth_hd_activation_key(global_hd, conf, path_to_address)?;
-    let hd_wallet = build_eth_hd_wallet(ctx, ticker, conf, gap_limit).await?;
+    let hd_wallet = build_eth_hd_wallet(ctx, ticker, conf, gap_limit, HDWalletStorageKeyPolicy::Software).await?;
     build_eth_coin(
         ctx,
         ticker,

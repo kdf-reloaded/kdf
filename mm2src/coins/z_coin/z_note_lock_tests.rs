@@ -2242,6 +2242,7 @@ async fn t39_8_0g1_a_mempool_output_with_the_tip_unchanged_reaches_the_unspendab
     );
 }
 
+mod history_fee;
 mod pirate1_withdraw;
 mod swap_addresses;
 mod withdraw_balance_change;

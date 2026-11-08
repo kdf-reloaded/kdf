@@ -1,6 +1,6 @@
 # Plan: measured Electrum server order
 
-**Status:** in progress (shipped in PR #144; the RIN field run and the `mixed`-default decision left) — **Last reviewed:** 2026-10-29
+**Status:** parked (shipped in PR #144; the default stays random until the decision on making `mixed` the default) — **Last reviewed:** 2026-11-08
 
 **CRD:** ch.38 R38.6.4l (Reloaded-original), with T38.6.4l.1–T38.6.4l.15 and
 the decision items D38.6.4l.1–D38.6.4l.9, all resolved by 2026-10-29.
@@ -177,6 +177,11 @@ A maintained connection is **poor** when one of these holds:
 - **Block interval per coin.** Check what the UTXO coin configurations carry;
   a coin without one uses the 10-minute fallback for P1.
 - **When `mixed` becomes the default.** Decided 2026-10-28: after a field run
-  on RIN with `mixed`, as a separate change (CRD D38.6.4l.1).
+  on RIN with `mixed`, as a separate change (CRD D38.6.4l.1). The default is
+  still `random`. *Lab input, 2026-11-06 (release tests 0.4.0-beta.1, rows 7
+  and 8, N4 and N5):* RIN loops of 200 rounds with `mixed` and with `measured`
+  took 20.1 s and 20.4 s, the same time as the default order; the rows are
+  informative, without a pass rule. Whether they stand for the field run is
+  not recorded.
 - **The CRD's reading of the plan.** Decided 2026-10-29: the rules behind
   D38.6.4l.2, .3 and .5 to .9 are kept as written.

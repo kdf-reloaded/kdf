@@ -296,7 +296,9 @@ passed the KDF Dirty Gate with its target on 2026-11-07.)* Under a global-HD log
 reference serves this RPC, `fetch_utxos` and the automatic merge as
 [Chapter 5](05-hd-wallet-support.md) §5.9B R35b records: consolidation and
 the automatic merge on the enabled address only, `fetch_utxos` over every
-known address.
+known address. *As built (2026-11-07, clean-side record; plan item H5.3).*
+Reloaded serves this RPC, `fetch_utxos` and the automatic merge under a
+software global-HD login; the as-built note under Chapter 5 R35b records how.
 
 R38.5.3 The coin's header/byte handling shall use the configuration-selected
 chain-variant model defined in
@@ -2395,7 +2397,11 @@ six servers. It found the rule helpful where a coin's servers differ and
 neutral where they do not, and the maintainer kept the rule and both defaults.
 The decision is under monitoring, not closed. The maintainer confirms or
 changes it on the behavior seen in the field and on users' reports. That is
-also why both values are switches.
+also why both values are switches. Decision 22 also chose a check of the
+chain tip, so that a near server two or more blocks behind the best tip stops
+being near (plan [`order-posting-latency`](../plans/order-posting-latency.md),
+work package 5). That check is decided, not implemented yet: no rule for it
+is written in this chapter, and no PR carries it.
 
 D38.6.4a.2 *(Decided 2026-11-02, maintainer Decision 15: kept as written; under
 monitoring.)* *The form of the limit.* Item 6 bounds a
@@ -2670,8 +2676,9 @@ tests of [Chapter 60](60-trading-floors-and-refusal-contract.md) T60.1–T60.2.
 > existing per-started-kilobyte meaning. R38.6.6i is now fully as-built.
 > *Amended 2026-11-03:* the explicit `UtxoFixed` descriptor on a UTXO
 > withdraw now follows R38.6.6l item 2 (maintainer Decision 27, PR #226); the
-> SLP token withdraw keeps the per-started-kilobyte meaning (compatibility row
-> under R38.6.6l).
+> SLP token withdraw kept the per-started-kilobyte meaning (compatibility row
+> under R38.6.6l) until PR #234, merged 2026-11-05, applied R38.6.6m there
+> (Decision BV, 2026-11-04).
 
 R38.6.6j *Fee-estimate reuse and short cache (Reloaded-original, maintainer
 Decision R of 2026-10-27; passed the KDF Dirty Gate on 2026-10-27).*
@@ -3156,9 +3163,9 @@ the same for the Sia wallet daemon.
 > addresses. The software source of Chapter 5 §5.9A, the account-`0`
 > bootstrap, `get_new_address`, the scan and gap-limit rules and
 > `min_addresses_number` are now built. Remaining: `task::create_new_account`
-> for an account other than `0` still fails under a software global-HD login,
-> because it asks for a hardware device first (the Chapter 20 §20.10 D1 note
-> records it); and `path_to_address` is honored for a software global-HD
+> for an account other than `0` failed under a software global-HD login until
+> PR #279 (merged 2026-11-07; update below), because it asked for a hardware
+> device first (the Chapter 20 §20.10 D1 note records it); and `path_to_address` is honored for a software global-HD
 > account only, not under the Trezor policy (Chapter 55 §55.5). Both are items
 > of plan [`hd-key-unification`](../plans/hd-key-unification.md). *(Pointer
 > added 2026-11-07; passed the KDF Dirty Gate with its target on 2026-11-07.)* The
@@ -3184,14 +3191,19 @@ the same for the Sia wallet daemon.
 
 R38.8.1 **Software-HD storage availability.** When a UTXO coin is activated in
 HD mode under a software global-HD account (key-pair policy `GlobalHDAccount`,
-selected by Chapter 45 R45.4.8 / Chapter 7 R28; no hardware device present), the
+selected by Chapter 45 R45.4.8 / Chapter 7 R28) with the coin's own key policy
+being the context key rather than `Trezor` — whether a hardware-wallet context
+happens to exist is immaterial (Chapter 5 §5.10B R52) — the
 coin's per-wallet HD-account storage MUST initialise successfully using the
 software wallet-identity digest of Chapter 5 R29 (the in-context
 `RIPEMD160(SHA256(pubkey))` identity, equal to the daemon-wide `mm2_rmd160`).
 It MUST NOT be refused on the grounds that no hardware device is connected. Iguana mode remains unsupported for HD (the request is
-refused); hardware mode is unchanged. The on-disk identity namespacing
-(`mm2_rmd160`, `hd_wallet_rmd160` columns) is unchanged; in software mode both
-take the same software-derived value.
+refused); a coin activated under the `Trezor` key policy is unchanged and is
+namespaced by the device digest (Chapter 5 §5.10B R55). The on-disk identity
+namespacing (`mm2_rmd160`, `hd_wallet_rmd160` columns) is unchanged; for a
+context-key coin both take the same software-derived value. *(Re-keyed
+2026-11-08 on the coin's policy; passed the KDF Dirty Gate with Chapter 5
+§5.10B on 2026-11-08.)*
 
 R38.8.2 **Account-0 bootstrap at activation.** Activating a software-HD UTXO
 coin MUST establish HD account `0` so the coin is usable immediately after

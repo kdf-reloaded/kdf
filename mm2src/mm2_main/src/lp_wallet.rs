@@ -428,24 +428,16 @@ pub async fn delete_wallet_rpc(
 /// `encrypted` format returns the stored envelope unchanged (no password
 /// required, no decryption). `plaintext` format decrypts the stored mnemonic
 /// under the supplied wallet password; a wrong password yields `InvalidPassword`
-/// and never a usable-but-corrupt plaintext. Host-side seed export is refused
-/// for hardware-wallet (Trezor) sessions. The recovered secret is serialized
-/// exactly once, for the response only, and is never logged or persisted.
+/// and never a usable-but-corrupt plaintext. A hardware context beside the
+/// software login does not change the answer: the mnemonic is the software
+/// wallet's own; a node with no mnemonic wallet answers "No active wallet".
+/// The recovered secret is serialized exactly once, for the response only, and
+/// is never logged or persisted.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn get_mnemonic_rpc(
     ctx: MmArc,
     req: GetMnemonicRequest,
 ) -> Result<GetMnemonicResponse, MmError<WalletError>> {
-    // Reject hardware-wallet (Trezor) sessions: host-side seed export is never
-    // performed for hardware wallets.
-    let crypto_ctx =
-        crypto::CryptoCtx::from_ctx(&ctx).map_err(|e| MmError::new(WalletError::Internal(e.to_string())))?;
-    if crypto_ctx.hw_ctx().is_some() {
-        return MmError::err(WalletError::InvalidRequest(
-            "Mnemonic export is not supported for hardware-wallet sessions".to_string(),
-        ));
-    }
-
     // Resolve the active wallet name.
     let wallet_name = match ctx.wallet_name.as_option() {
         Some(Some(name)) => name.clone(),
@@ -475,24 +467,16 @@ pub async fn get_mnemonic_rpc(
 ///
 /// `current_password` is verified by decrypting the stored envelope; a wrong
 /// password yields `InvalidPassword`. On success the mnemonic is re-wrapped
-/// under `new_password` and the wallet record is overwritten in place. Refused
-/// for hardware-wallet (Trezor) sessions, which hold no host-side mnemonic. The
-/// recovered secret lives only for the duration of the re-encryption and is
-/// never logged or persisted in plaintext.
+/// under `new_password` and the wallet record is overwritten in place. A
+/// hardware context beside the software login does not change this; a node with
+/// no mnemonic wallet answers "No active wallet". The recovered secret lives
+/// only for the duration of the re-encryption and is never logged or persisted
+/// in plaintext.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn change_mnemonic_password_rpc(
     ctx: MmArc,
     req: ChangeMnemonicPasswordRequest,
 ) -> Result<(), MmError<WalletError>> {
-    // Reject hardware-wallet (Trezor) sessions: there is no host-side mnemonic to re-encrypt.
-    let crypto_ctx =
-        crypto::CryptoCtx::from_ctx(&ctx).map_err(|e| MmError::new(WalletError::Internal(e.to_string())))?;
-    if crypto_ctx.hw_ctx().is_some() {
-        return MmError::err(WalletError::InvalidRequest(
-            "Changing the mnemonic password is not supported for hardware-wallet sessions".to_string(),
-        ));
-    }
-
     if req.new_password.is_empty() {
         return MmError::err(WalletError::InvalidRequest("new_password cannot be empty".to_string()));
     }
@@ -1197,5 +1181,100 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err.get_inner(), WalletError::InvalidPassword));
         assert!(path.exists(), "a failed password check must leave the record intact");
+    }
+
+    const DEVICE_PUBKEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    /// A node under a software global-HD login on `TEST_MNEMONIC` that also holds a hardware context, with the
+    /// wallet record `mixed-wallet` stored under `password` and active.
+    fn mixed_mode_ctx(password: &str) -> MmArc {
+        use primitives::hash::H264;
+        use std::str::FromStr;
+
+        let ctx = test_ctx();
+        block_on(create_wallet_rpc(ctx.clone(), CreateWalletRequest {
+            wallet_name: "mixed-wallet".to_string(),
+            password: password.to_string(),
+            mnemonic: TEST_MNEMONIC.to_string(),
+        }))
+        .unwrap();
+        let _ = ctx.wallet_name.pin(Some("mixed-wallet".to_string()));
+        let crypto_ctx = crypto::CryptoCtx::init_with_global_hd_account(ctx.clone(), TEST_MNEMONIC).unwrap();
+        crypto_ctx.init_trezor_ctx_for_tests(H264::from_str(DEVICE_PUBKEY).unwrap(), None);
+        assert!(
+            crypto_ctx.hw_ctx().is_some(),
+            "the hardware context exists beside the login"
+        );
+        ctx
+    }
+
+    fn plaintext_mnemonic(ctx: &MmArc, password: &str) -> Result<String, MmError<WalletError>> {
+        let request = GetMnemonicRequest::Plaintext {
+            password: password.to_string(),
+        };
+        match block_on(get_mnemonic_rpc(ctx.clone(), request))? {
+            GetMnemonicResponse::Plaintext { mnemonic } => Ok(mnemonic),
+            GetMnemonicResponse::Encrypted { .. } => panic!("the plaintext form is expected"),
+        }
+    }
+
+    /// A software global-HD login with a hardware context: `get_mnemonic` returns the wallet's own mnemonic.
+    #[test]
+    fn test_get_mnemonic_under_a_software_login_with_a_hardware_context() {
+        let ctx = mixed_mode_ctx("mixed_pw");
+        assert_eq!(plaintext_mnemonic(&ctx, "mixed_pw").unwrap(), TEST_MNEMONIC);
+        let err = plaintext_mnemonic(&ctx, "wrong_pw").unwrap_err();
+        assert!(matches!(err.get_inner(), WalletError::InvalidPassword));
+    }
+
+    /// The same state: `change_mnemonic_password` re-encrypts the stored mnemonic under the new password.
+    #[test]
+    fn test_change_mnemonic_password_under_a_software_login_with_a_hardware_context() {
+        let ctx = mixed_mode_ctx("mixed_pw");
+        block_on(change_mnemonic_password_rpc(
+            ctx.clone(),
+            ChangeMnemonicPasswordRequest {
+                current_password: "mixed_pw".to_string(),
+                new_password: "mixed_pw_2".to_string(),
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(plaintext_mnemonic(&ctx, "mixed_pw_2").unwrap(), TEST_MNEMONIC);
+        let err = plaintext_mnemonic(&ctx, "mixed_pw").unwrap_err();
+        assert!(matches!(err.get_inner(), WalletError::InvalidPassword));
+    }
+
+    /// A hardware context with no mnemonic wallet (no active wallet name): both commands fail cleanly with the
+    /// "No active wallet" request error, not with a hardware-wallet refusal.
+    #[test]
+    fn test_mnemonic_commands_fail_with_no_active_wallet_under_a_hardware_context() {
+        use primitives::hash::H264;
+        use std::str::FromStr;
+
+        let ctx = test_ctx();
+        let crypto_ctx = crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "no wallet passphrase").unwrap();
+        crypto_ctx.init_trezor_ctx_for_tests(H264::from_str(DEVICE_PUBKEY).unwrap(), None);
+        assert!(crypto_ctx.hw_ctx().is_some());
+
+        let err = block_on(get_mnemonic_rpc(ctx.clone(), GetMnemonicRequest::Encrypted))
+            .err()
+            .expect("there is no mnemonic wallet");
+        assert!(
+            matches!(err.get_inner(), WalletError::InvalidRequest(m) if m == "No active wallet"),
+            "{:?}",
+            err
+        );
+
+        let err = block_on(change_mnemonic_password_rpc(ctx, ChangeMnemonicPasswordRequest {
+            current_password: "a".to_string(),
+            new_password: "b".to_string(),
+        }))
+        .expect_err("there is no mnemonic wallet");
+        assert!(
+            matches!(err.get_inner(), WalletError::InvalidRequest(m) if m == "No active wallet"),
+            "{:?}",
+            err
+        );
     }
 }
