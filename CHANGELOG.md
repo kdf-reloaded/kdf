@@ -811,10 +811,18 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
-- [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md) — new, planning: the Bitcoin II
+- [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md) — new, in progress: the Bitcoin II
   network has required an extra field in every signature digest since block 57,750, so
   transactions signed the ordinary way are rejected. The rule is written (CRD chapter 61, PR
-  #261) and the signing change is implemented; the coins-file entries and the live check follow.
+  #261), and the signing change and the counterparty requirement are implemented (PR #264). On the
+  live chain a withdrawal and a swap between two KDF Reloaded nodes passed, and the decline of a
+  counterparty that does not sign with the suffix was checked (release tests, "BC2 confirmation" and
+  "BC2 swap check"). The coins-file entries and the P2PKH
+  live check are open.
+- [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md) — planning: its target now reads "after the 0.4.0 beta".
+- [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — in progress: the field tests of 2026-10-26 to
+  2026-10-29 are recorded, and the two open items of the earlier deadline are closed as history; a
+  live GUI round trip on Windows (its gate 8) is still open.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
   Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
   they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
@@ -829,21 +837,27 @@ file carries the detail. "New" means the plan was created in this cycle.
   written (CRD PR #227), and its generic part, the word's writer and fail-closed reader and the
   decline log lines, is implemented (PR #235); the ARRR rule that uses it is written (CRD PR #230)
   and implemented (PR #241).
-  The shielded history gained two items: the addresses of a swap's own transactions (PR #277) and
-  the fee of an own send (PR #288).
+  The shielded history gained three items: a withdrawal's Pirate1 recipient (PR #268), the addresses
+  of a swap's own transactions (PR #277) and the fee of an own send (PR #288).
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
+- [`electrum-measured-server-order`](docs/plans/electrum-measured-server-order.md) — parked: shipped in PR #144; the lab rows
+  of 2026-11-06 that ran `mixed` and `measured` on RIN are recorded as input; the default stays
+  `random` until the decision on `mixed`.
 - [`electrum-tls-server-authentication`](docs/plans/electrum-tls-server-authentication.md) — new,
-  in progress: what an `SSL` Electrum server must present, with and without `disable_cert_verification`,
+  parked: what an `SSL` Electrum server must present, with and without `disable_cert_verification`,
   is now written down (PR #240). So are a warning at activation when the flag is set and an optional
-  pin on the server's key, `spki_sha256`; both are now built (PR #273).
+  pin on the server's key, `spki_sha256`; both are now built (PR #273). The pass-through of the pin
+  by the coins file and the wallets, and two review follow-ups, are open.
+- [`evm-min-trading-volume`](docs/plans/evm-min-trading-volume.md) — parked: PR #66 is merged; only an end-to-end preview
+  test on a real 8-decimal coin is open.
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
   now names the gas limits each EVM coin and token will use and where they come from (PR #200);
   open point 3 is decided, and the fee to send an EVM taker fee is now quoted at the gas limit it
   is sent with (PR #213); options (a) and (b) still wait on the reference maintainers' outcome.
-- [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes
-  keep showing after a lost cancellation; five work packages after the beta, the first two being the
+- [`ghost-orders`](docs/plans/ghost-orders.md) — new, parked: cancelled orders that other nodes
+  keep showing after a lost cancellation; five work packages for this cycle, the first two being the
   higher sync limits on relays and the request to one other relay above (PRs #205, #207, #208). What
   two later packages waited for is now recorded: how a cancelled order can come back on Komodo and
   GLEEC KDF, and that their makers advertise every non-empty pair at every tick (PR #222). A received
@@ -854,28 +868,34 @@ file carries the detail. "New" means the plan was created in this cycle.
   maker's first orders (CRD PR #258, PR #259). The loaded-relay lab showed the request to one other
   relay clearing a cancelled order one keep-alive interval earlier in half of its cycles. A debug
   line now counts, per such request, which candidate rule would have skipped it (PR #269). A
-  fault-free run showed no extra requests at all, so the rule stays as it is (PR #274).
-- [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, planning: under an HD login, one
+  fault-free run showed no extra requests at all, so the rule stays as it is (PR #274). The B2 cap
+  check from field logs and the repeated-cancel refresh are open.
+- [`gossip-send-queue-bound`](docs/plans/gossip-send-queue-bound.md) — done: its follow-ups now name the PRs they shipped in
+  (CRD PR #129; PRs #148, #159, #160, #166).
+- [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, in progress: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
   complete, which is now done (item H1: `swap_key_check`, PRs #231, #233), as is one swap key per
   coin (item H3, PRs #249, #250) and one trading identity for the node (item H4, PRs #253, #254),
-  whose design decisions the maintainer confirmed. Item H5 now starts with listing the address a
-  swap has used (see Known limitations). The maintainer's answers on
+  whose design decisions the maintainer confirmed. The maintainer's answers on
   withdraw, the legacy methods, legacy activation and Sia are recorded in it. `RELOADED_VS_GLEEC.md`
   now says what GLEEC KDF does under an HD login, and lists the planned change to legacy `enable` and
   `electrum` with its switch (PR #245). The direct `withdraw` under an HD login and the refusal of
   `from` under an iguana login are done (items H5.1 and H5.5, PR #270); the maintainer set the
-  default sender to the coin's activated address (decision CU). Activation lists the address at
+  default sender to the coin's activated address (2026-11-06). Activation lists the address at
   `path_to_address`, and `task::create_new_account` works without a hardware wallet (items H5.0 and
   H5.4, PR #279). `fetch_utxos`, `consolidate_utxos` and the automatic merge work under an HD login
-  (item H5.3, PR #281).
+  (item H5.3, PR #281). H6 and H7 are not started; the hardware-context work of this release is in
+  CRD ch.05 §5.10B.
+- [`lightning-activation-features`](docs/plans/lightning-activation-features.md) — parked: it records that PR #66 fixed the crash of
+  the trading-volume requests for Lightning coins.
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
-- [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — in progress: the 2-arena limit of 0.3.0-beta.1
+- [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md) — parked: the 2-arena limit of 0.3.0-beta.1
   was measured in two 6.5-hour runs and on start-up, activation, eight swaps and query latency; no cost
-  was resolved and the default stays (PR #225); executor sizing and an allocator comparison are left.
+  was resolved and the default stays (PR #225); executor sizing and an allocator comparison wait for
+  their triggers.
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
   with its two switches and their defaults (PR #201), and implemented (PR #215). The SwapLab timing
@@ -884,7 +904,12 @@ file carries the detail. "New" means the plan was created in this cycle.
   0.3.0-beta.1, is written (PR #260) and implemented (PR #262), and the SwapLab run on it passed
   (release tests, rows 4–8). The opt-in `setprice_replace_after_checks`, which replaces the previous
   orders only after the new order passes its checks, is written (PR #265) and implemented (PR #286);
-  its SwapLab row follows.
+  a lab row with a failing check passed on 2026-11-08, to be recorded on the release-tests page with
+  the third batch's close.
+- [`orderbook-queue-and-history-caps`](docs/plans/orderbook-queue-and-history-caps.md) — parked: PRs #131, #134, #137 and #164
+  are merged; the early-purge point waits for the maintainer.
+- [`orderbook-wipe-recovery`](docs/plans/orderbook-wipe-recovery.md) — parked: the CRD and both switches are merged (PRs #132,
+  #135); its SwapLab run is not scheduled.
 - [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new, in progress: the
   peer-to-peer items of 0.4.0. The redial guards are in (PRs #199, #206), and so are the peer-exchange
   logging, the address ranges and the idle-close log (PRs #203, #211), the send-queue window
@@ -892,18 +917,42 @@ file carries the detail. "New" means the plan was created in this cycle.
   #219); the remaining lookups (Sia, WalletConnect, Lightning, statistics) and encrypted DNS are
   new rows for later. A close that a non-reading peer would hold forever now ends after 30 seconds
   (item P6, PR #280).
+- [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — parked: it records that PRs #17 and #21 landed.
+- [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — parked: it records that PRs #54 and #65 landed,
+  with their compatibility bookkeeping; step 8 is open.
+- [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md) — parked: two-daemon detection and F3 are
+  postponed and not started.
 - [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — done: the plan now says
   that the fee estimate uses the transaction's signature-hash length, which is smaller than the
   transaction sent (PR #239; see Known limitations).
+- [`solana-support`](docs/plans/solana-support.md) — parked: Solana stays switched off; the release it returns in is not
+  set.
+- [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — parked: Tendermint swaps were added to the
+  0.4.0 scope on 2026-11-08; accepting both forms of the activation parameters is decided and not
+  started.
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
   recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226). On an SLP
   token withdrawal they charge it in proportion too; that is now recorded (PR #232), and KDF
-  Reloaded now charges it that way there as well (PR #234).
-- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — new step H6: the
+  Reloaded now charges it that way there as well (PR #234). The Sia floor was revised (PR #278), and
+  the UTXO change-fee rounding found in the release tests was fixed (PR #247). The default-side arm 3 is chosen
+  (2026-11-08): a raised advertised minimum, on by default, with a compatibility switch for the
+  reference value; its work is planned.
+- [`tron-gasfree`](docs/plans/tron-gasfree.md) — parked: TRON support was added to the 0.4.0 scope on 2026-11-08.
+- [`tron-support`](docs/plans/tron-support.md) — in progress: TRON support was added to the 0.4.0 scope on 2026-11-08; the
+  decisions a TRON swap needs were put to the maintainer that day.
+- [`tron-swap-support`](docs/plans/tron-swap-support.md) — parked: the chapter rewrite on its branch failed the KDF Dirty
+  Gate on 2026-11-08 and is not reused; the reference's TRON swap state is recorded by a gated Spec
+  Reader round that lands with the first TRON code PR.
+- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — parked; new step H6: the
   median time of a coin whose headers carry a fixed-length trailer (Bitcoin Atom) is read from each
   header's own bytes; the 1.6 list form of header requests and explicit `header_layout` entries for
-  RIC and MEWC in the coins repository are listed as later items (CRD PR #220, code PR #221).
+  RIC and MEWC in the coins repository are listed as later items (CRD PR #220, code PR #221). The
+  remaining H4 family rules and H5 are open.
+- [`v0.2.0-dependency-hygiene`](docs/plans/v0.2.0-dependency-hygiene.md) — in progress: the `idna` advisory row is
+  closed by PR #219.
+- [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md) — planning: it records that 0.3.0-beta.1 fixed
+  the earlier problem (PR #181); the two ideas left are not in 0.4.0.
 
 ### Known limitations
 

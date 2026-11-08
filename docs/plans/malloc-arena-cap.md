@@ -1,6 +1,6 @@
 # Plan: limit the memory allocator's arenas at startup
 
-**Status:** in progress (CRD PR, then code PR) — **Last reviewed:** 2026-11-03
+**Status:** parked (the arena limit shipped in PRs #189, #190; measured in PR #225; executor sizing and an allocator comparison wait for their triggers) — **Last reviewed:** 2026-11-08
 
 > **Context.** A maker that updates hundreds of orders many times a second holds more and more memory, although the data
 > it holds stays the same. The lab traced this to the system allocator (glibc): each thread that allocates can get an
@@ -33,7 +33,7 @@ load, the same binary each time, `RUST_LOG=debug`.
 
 ## The change (before the first beta)
 
-Spec: CRD ch.45 §45.6A. Code, after the CRD PR is merged, by `kdf-coder`:
+Spec: CRD ch.45 §45.6A. Shipped: CRD PR #189 and code PR #190, both merged 2026-11-01:
 
 1. One allocator call, `mallopt(M_ARENA_MAX, n)`, in the start-up path of `mm2src/mm2_main/src/mm2.rs` after the
    configuration is read and before the daemon starts its runtimes (the new module `malloc_arena.rs` holds the
@@ -47,6 +47,11 @@ Spec: CRD ch.45 §45.6A. Code, after the CRD PR is merged, by `kdf-coder`:
 5. CHANGELOG entry in plain words (references the finding's issue, does not close it), one README sentence for the key.
 
 ## Verification on the new head (minimal, Decision BJ)
+
+*Run on 2026-11-01 on `9f0ec1c83` (`dev` after PR #190), all PASS (release tests 0.3.0-beta.1, rows
+"Arena cap"): the configuration checks; the default soak, +0.26 MB/min over minutes 10–40 with 2
+arenas, a plateau not yet measured; the smoke row. The plateau runs are in the next section
+(PR #225, merged 2026-11-04).*
 
 - 40-minute soak with 480 orders and about 80 updates per second, default limit: memory growth below 0.3 MB/min from
   minute 10, at most 3 arenas in the allocator statistics, update rate and processor use as in the run with the

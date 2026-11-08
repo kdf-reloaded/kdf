@@ -1,14 +1,15 @@
 # Plan: Radiant signature-hash support
 
-**Status:** parked (signing shipped in PRs #54, #65; step 6 compatibility bookkeeping and step 8 open) — **Last reviewed:** 2026-10-29
+**Status:** parked (signing shipped in PRs #54, #65, with its compatibility bookkeeping; step 8 open) — **Last reviewed:** 2026-11-08
 
 > **Context:** Radiant (`RXD`) is the one coin in the shipped registry whose
 > `signature_version` names a signing dialect this build did not implement.
 > The unsafe half of that was closed first — the coin no longer signs
 > something invalid (PR #54) — and the feature itself is now **implemented and
 > merged** (PR #65, 2026-10-25): the dialect CRD ch.58 binds, with two
-> mainnet vectors behind it. What is left is the compatibility bookkeeping
-> of step 6 and one follow-up the implementation surfaced (ch.58 D5, not a beta item).
+> mainnet vectors behind it. The compatibility bookkeeping of step 6 was done
+> in PR #65 as well. What is left is one follow-up the implementation surfaced
+> (ch.58 D5, not a beta item).
 
 ## Where it stands (2026-10-29)
 
@@ -17,7 +18,7 @@
 | PR #54 (guard + switch) | merged 2026-10-25 |
 | Steps 2–4 (vectors, implementation, tests T1–T8) | **done** — merged in PR #65, 2026-10-25 |
 | Step 5 (close the records) | ch.58: R58.5.1 closed, R58.5.2 implemented, D1 and D4 closed, D3 partly corroborated — done 2026-10-25 |
-| Step 6 (compatibility bookkeeping) | **open** — to be done in the implementation PR (see step 6) |
+| Step 6 (compatibility bookkeeping) | **done** in PR #65 (commit `1c0dc2a4a`, 2026-10-25): the switch's wording in `docs/GLEEC_COMPATIBILITY.md` and `RELOADED_VS_GLEEC.md` lists `fork_id_rxd` as recognized (see step 6) |
 | R58.3.3 correction against Radiant-Core | **done** in ch.58 on 2026-10-25 (see "The R58.3.3 correction" below) |
 | Fail-early follow-up (ch.58 D5) | **open**, owner ch.58 §58.3, not a beta item |
 
@@ -36,7 +37,7 @@ non-zero — so the coin activated and signed with the Bitcoin-Cash BIP-143
 preimage: field 8 of R58.3.1 missing, the digest wrong for every input, and
 every Radiant withdrawal and swap rejected at broadcast. Silently.
 
-**What changed.** Branch `fix/signature-version-guard` (**PR #54**, open)
+**What changed.** Branch `fix/signature-version-guard` (**PR #54**, merged 2026-10-25)
 replaced that silent fallback with an explicit activation failure. A present
 but unrecognised `signature_version` now fails the conf build with
 `UtxoConfError::InvalidSignatureVersion`, naming the value, the accepted set
@@ -184,18 +185,19 @@ the reference's behaviour — RXD activates, shows its balance, and signs in a
 way Radiant rejects. That trade-off stands as recorded; this plan does not
 reopen it, it removes the need for it.
 
-**This belongs in the beta release notes**: an operator upgrading with RXD in
-their coins file sees a coin stop activating, and needs to be told why, that
-the switch exists, and that support is planned rather than withdrawn.
+**Release notes.** This was to go into the beta release notes while RXD
+refused to activate. PRs #54 and #65 both landed before 0.3.0-beta.1, and its
+CHANGELOG says that RXD now activates and signs with Radiant's own signature
+hash, with no switch.
 
 ## Steps
 
-*State as of 2026-10-29: steps 1–4 done and merged (PRs #54, #65, 2026-10-25);
-step 5 done in ch.58; step 6 open; steps 7–8 added 2026-10-25.*
+*State as of 2026-11-08: steps 1–4 done and merged (PRs #54, #65, 2026-10-25);
+step 5 done in ch.58; step 6 done in PR #65; step 7 done in ch.58; step 8 open.*
 
 1. **Land PR #54** (or confirm it landed). Everything below assumes the guard
    and the switch are in place; without them the coin signs invalid
-   transactions instead of refusing. *Open — #54 waits on #57.*
+   transactions instead of refusing. *Done — #57 and #54 merged 2026-10-25.*
 2. **Source the T3 vector.** *Done 2026-10-25 — two vectors, see above.* A Radiant mainnet transaction with a
    pay-to-public-key-hash input, plus that input's previous script code and
    previous output value, recorded with its source. Verify by hand, once, that
@@ -242,10 +244,13 @@ step 5 done in ch.58; step 6 open; steps 7–8 added 2026-10-25.*
    compatibility switch and no `docs/COMPAT_SWITCHES.md` entry of its own.
    PR #54's switch keeps its entry in `docs/GLEEC_COMPATIBILITY.md` and
    `RELOADED_VS_GLEEC.md`; check whether its wording needs amending once RXD
-   is no longer the coin it refuses. *Open — belongs in the implementation
-   PR.* Also stale once it lands: `docs/reloaded-rewrite/UPSTREAM-PARITY-GAPS.md`
+   is no longer the coin it refuses. Also stale once it lands: `docs/reloaded-rewrite/UPSTREAM-PARITY-GAPS.md`
    #9 (marked OPEN) and ch.38 R38.5.4's clause "the one coin whose dialect
-   reloaded does not yet support".
+   reloaded does not yet support". *Done in the implementation PR (PR #65,
+   commit `1c0dc2a4a`): both documents list `fork_id_rxd` as recognized.
+   Since then, UPSTREAM-PARITY-GAPS #9 names PR #65 as merged and stays open
+   for RXD's trading fitness (ch.58 D2), and ch.38 carries an as-built note
+   under that clause.*
 7. **R58.3.3 correction.** *Done 2026-10-25 in ch.58* — see "The R58.3.3
    correction" above. Nothing in the implementation changes for it; the
    chapter now records the as-built tolerance as a divergence.
@@ -294,7 +299,8 @@ counterparty, or to verify rather than report what the lineage says about
 - Ch.58 R58.5.1 is closed and D1 is answered in the chapter. *Done
   2026-10-25.*
 - The beta release notes explain the activation refusal, the switch, and that
-  it is now gone for RXD. *Open — with step 6.*
+  it is now gone for RXD. *Done for what shipped: the 0.3.0-beta.1 CHANGELOG
+  says RXD activates and needs no switch.*
 
 ## Out of scope
 

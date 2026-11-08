@@ -647,9 +647,11 @@ and R59.4.4. The window is per public key only: no pair and no order of
 another maker expires on its own at the reference's release rows
 ([Chapter 32](32-orderbook-p2p-and-trie.md) §32.9C R-GH3); the per-pair
 variant of the reference's later, unreleased change is recorded there as
-R-GH6 item 7, and whether Reloaded adopts a form of it is ch. 32 §32.10
-D12. Reloaded binds per-pair liveness on the receiver's clock as ch. 32
-§32.9C.2 R-GH14 (switch `pair_liveness`, default on), with this window.
+R-GH6 item 7, and whether Reloaded adopts a form of it was ch. 32 §32.10
+D12, decided 2026-11-01 (Decision BK, item (a)). Reloaded binds per-pair
+liveness on the receiver's clock as ch. 32 §32.9C.2 R-GH14 (switch
+`pair_liveness`, default on), with this window; PR #251 built it, merged
+2026-11-05.
 
 **R59.6.5** *Own public keys are exempt.* The eviction of R59.6.4 shall
 never apply to the node's own persistent public key or to any

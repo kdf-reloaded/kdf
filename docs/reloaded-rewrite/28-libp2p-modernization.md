@@ -552,6 +552,10 @@ tells that peer more.
 > to a random connected relay. Both rows and this repository pick a
 > random known peer instead (item 6). Proposal: amend the wording of
 > R23 item 3.
+> *Status (clean-side note, added 2026-11-08):* proposals (b) to (d)
+> were adopted (D9, status of 2026-11-02): R24's ranges, R8c's wording
+> and R23 item 3 were amended in PR #203, and the R24 change was built
+> in PR #211, both merged 2026-11-04. (c) and (d) needed no code.
 >
 > *Open question.* The statement that a reference node sends no
 > peers-topic traffic rests on reading at both rows, not on

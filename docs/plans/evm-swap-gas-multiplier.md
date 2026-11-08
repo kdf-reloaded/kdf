@@ -1,6 +1,6 @@
 # Plan: where the EVM gas multiplier and the gas limits reach the swap transactions
 
-**Status:** blocked ((c) and (d) decided and written in PR #123; (a) and (b) wait on the reference maintainers' outcome) — **Last reviewed:** 2026-11-03
+**Status:** blocked ((c) and (d) decided and written in PR #123; (a) and (b) wait on the reference maintainers' outcome) — **Last reviewed:** 2026-11-08
 
 > **Context:** an operator running a maker on USDC-MON (Monad) and USDC-BASE set
 > `estimate_gas_mult` and still saw the fixed 210,000 / 150,000 limits on the
@@ -229,7 +229,7 @@ note because the reference does not do it.
   Reloaded-original divergence note with its own tests. Added 2026-11-02:
   R57.5.5, a log line at activation that shows each EVM coin's gas limits in
   effect and where they come from, so a coins file without the block a chain
-  needs shows at once.
+  needs shows at once; shipped in PR #200 (merged 2026-11-03).
 - **Coins file (separate repository):** the Monad block above, after the direct
   measurement; nothing else.
 - **Documentation:** a short section in the operator-facing docs describing which
@@ -248,3 +248,4 @@ note because the reference does not do it.
    KDF sends the taker fee with the same fixed limit and quotes it by
    `eth_estimateGas`, so quoting at the limit diverges in the quote only, under
    the second arm of the default-side rule; `false` gives GLEEC KDF's quote.
+   Shipped in PR #213 (merged 2026-11-04).

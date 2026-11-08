@@ -2397,7 +2397,11 @@ six servers. It found the rule helpful where a coin's servers differ and
 neutral where they do not, and the maintainer kept the rule and both defaults.
 The decision is under monitoring, not closed. The maintainer confirms or
 changes it on the behavior seen in the field and on users' reports. That is
-also why both values are switches.
+also why both values are switches. Decision 22 also chose a check of the
+chain tip, so that a near server two or more blocks behind the best tip stops
+being near (plan [`order-posting-latency`](../plans/order-posting-latency.md),
+work package 5). That check is decided, not implemented yet: no rule for it
+is written in this chapter, and no PR carries it.
 
 D38.6.4a.2 *(Decided 2026-11-02, maintainer Decision 15: kept as written; under
 monitoring.)* *The form of the limit.* Item 6 bounds a
@@ -2672,8 +2676,9 @@ tests of [Chapter 60](60-trading-floors-and-refusal-contract.md) T60.1–T60.2.
 > existing per-started-kilobyte meaning. R38.6.6i is now fully as-built.
 > *Amended 2026-11-03:* the explicit `UtxoFixed` descriptor on a UTXO
 > withdraw now follows R38.6.6l item 2 (maintainer Decision 27, PR #226); the
-> SLP token withdraw keeps the per-started-kilobyte meaning (compatibility row
-> under R38.6.6l).
+> SLP token withdraw kept the per-started-kilobyte meaning (compatibility row
+> under R38.6.6l) until PR #234, merged 2026-11-05, applied R38.6.6m there
+> (Decision BV, 2026-11-04).
 
 R38.6.6j *Fee-estimate reuse and short cache (Reloaded-original, maintainer
 Decision R of 2026-10-27; passed the KDF Dirty Gate on 2026-10-27).*
@@ -3158,9 +3163,9 @@ the same for the Sia wallet daemon.
 > addresses. The software source of Chapter 5 §5.9A, the account-`0`
 > bootstrap, `get_new_address`, the scan and gap-limit rules and
 > `min_addresses_number` are now built. Remaining: `task::create_new_account`
-> for an account other than `0` still fails under a software global-HD login,
-> because it asks for a hardware device first (the Chapter 20 §20.10 D1 note
-> records it); and `path_to_address` is honored for a software global-HD
+> for an account other than `0` failed under a software global-HD login until
+> PR #279 (merged 2026-11-07; update below), because it asked for a hardware
+> device first (the Chapter 20 §20.10 D1 note records it); and `path_to_address` is honored for a software global-HD
 > account only, not under the Trezor policy (Chapter 55 §55.5). Both are items
 > of plan [`hd-key-unification`](../plans/hd-key-unification.md). *(Pointer
 > added 2026-11-07; passed the KDF Dirty Gate with its target on 2026-11-07.)* The

@@ -436,7 +436,10 @@ dynamic-fee coin it guarantees nothing (finding F1).
 > value does not exceed the fee, and treat a parity-preserving local
 > pre-trade check as in F1(a). Raising reloaded's Sia floor would be a
 > one-sided local divergence (W3), not a wire break, but it is a
-> maintainer's decision. *(Trigger: explicit request.)*
+> maintainer's decision. *(Trigger: explicit request.)* *(Decided under
+> D60.2: resolved 2026-10-25, the refusal and pre-trade check built in
+> PR #73; revised 2026-11-07, the Sia minimum trading volume raised in
+> PR #278.)*
 
 > **Code-quality finding F3 (informative; this repository's code).**
 > Reloaded's legacy HTLC spend and refund builders, and its version-two

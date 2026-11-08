@@ -485,7 +485,10 @@ most once an hour with the count since the previous one (the clock is injected).
   applies the height gate or only parses and validates the key. Both supported
   networks are far above the activation height, so the gate has no effect on
   any transaction signed today; the recommendation is to parse and validate
-  now and implement the gate with the first coin that needs it.
+  now and implement the gate with the first coin that needs it. *(Built as
+  recommended in PR #264, merged 2026-11-07: the key is parsed, validated and
+  carried, and no signing site reads it (§61.9A). Honoring the height gate
+  waits for the first coin that needs it.)*
 - **D2** *Refusal for reference counterparties.* *(Decided 2026-11-07 in favour
   of the refusal.)* An order or swap with a counterparty that does not declare
   suffix signing is declined before it starts: R61.5A.

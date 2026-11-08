@@ -1,6 +1,6 @@
 # Plan: Tron GasFree fee-delegated TRC20 withdraw rail
 
-**Status:** parked (branch-only; gated on pinning the GasFree proxy creation bytecode) — **Last reviewed:** 2026-10-29
+**Status:** parked (branch-only; gated on pinning the GasFree proxy creation bytecode) — **Last reviewed:** 2026-11-08
 
 > **Context:** written 2026-10-18, when a review of three stale June-2026
 > branches found a complete, test-covered GasFree implementation and an
@@ -11,10 +11,11 @@
 > ref, is what keeps the work findable.
 
 > **Beta availability (2026-10-26).** By maintainer decision TRON (TRX, TRC20)
-> activation is switched off on `dev` for the coming beta: while
+> activation is switched off in 0.3.0-beta.1 and on `dev` as of 2026-11-08: while
 > `TRON_ACTIVATION_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`, every TRON
 > activation route answers "TRON support is not available in this build" (CRD
-> ch.21 availability note). TRON is planned to return in the next beta; turning
+> ch.21 availability note). TRON support was added to the 0.4.0 scope on
+> 2026-11-08 (plan `tron-support`); turning
 > activation back on (ch.21 D6) precedes the activation-time steps below and is
 > part of any revival of this plan.
 

@@ -1219,6 +1219,7 @@ V3. The unit ratio, ed25519 scheme, address encoding, walletd
 - *Clean-context correction (2026-11-04, forbidden corpus not consulted):*
   the D1 note now calls the HD activation result the deliberate divergence
   of chapter 46 R46.2.4 instead of a wire deviation, and records that the
-  account-creation bug is still open. Written from this repository's own
+  account-creation bug was still open then (plan item H5.4 fixed it in
+  PR #279, merged 2026-11-07; see the D1 note). Written from this repository's own
   code and chapter 46; it takes no forbidden-class input and needs no gate
   pass.
