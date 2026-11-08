@@ -1576,13 +1576,14 @@ carry it.
 > SC) and cell A2 (the maker sells USDC-MON) passed, payment and spend, and cell
 > B, the refund case (maker USDC-MON, taker Siacoin), passed. In cell B the
 > maker's real payment carried D20 left-aligned in the hash slot (payment word 4)
-> and the old 20-byte value appeared in no word; the maker's refund transaction
-> carried D20 in its payment-hash slot (refund word 2); the maker ended
+> and the leading 20 bytes of H32 (the value before the fix) appeared in no
+> word; the maker's refund transaction carried D20 in its payment-hash slot
+> (refund word 2); the maker ended
 > MakerPaymentRefunded and Finished with no "secret_hash arg ... is invalid" line
 > in either log; the taker never sent its Siacoin and ended cleanly. The maker's
 > USDC-MON balance was exactly back to its starting amount after the refund (the
-> token is not reduced by gas; gas is paid in MON). The pre-fix baseline run (N1)
-> was not done.
+> token is not reduced by gas; gas is paid in MON). A run of the build before
+> the fix, for comparison, was not done.
 >
 > The QRC20 legacy swap uses the same contract and the same `bytes20` slot,
 > and has the same defect and the same fix, with the same helpers
