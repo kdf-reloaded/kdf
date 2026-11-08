@@ -735,6 +735,10 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   `address_id` of 2^31 − 1 in `path_to_address` fails activation like 2^31 does, before anything is
   derived, so the highest usable index is 2^31 − 2. The node itself is unchanged. Detail: PR #NNN;
   CRD ch.05 R35a, R35b.
+- **CI runs the withdraw tests of UTXO coins, QTUM, BCH and SLP.** A new CI job runs
+  `cargo test -p coins --lib -- withdraw qtum bch slp`, which until now ran only on developers'
+  machines. It runs without the `live-network-tests` feature, so it skips the tests of the family that
+  need public servers and runs the offline ones. The node itself is unchanged. Detail: PR #NNN.
 
 ### Documentation
 

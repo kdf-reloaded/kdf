@@ -19,6 +19,9 @@ cargo test -p coins --lib -- eth::eth_tests::test_u256
 cargo test -p coins --lib -- eth::eth_tests::test_wei
 cargo test -p coins --lib -- rpc_response_tests coin_protocol_capability::
 
+# The withdraw family: UTXO, QTUM, BCH and SLP withdrawals, offline (the CI row `withdraw-family`)
+cargo test -p coins --lib -- withdraw qtum bch slp
+
 # Bounds on a value received from a peer (CRD ch.28 R16a, T4a)
 cargo test -p common --lib msgpack_bounds::
 cargo test -p mm2_p2p --features application --lib t4a_
@@ -80,8 +83,10 @@ What does not, and why:
   `--include-ignored`; see [DISABLED_TESTS.md](DISABLED_TESTS.md).
 - `polygon_check_if_my_payment_sent`, which skips itself when `POLYGON_RPC_URL` is not set.
 
-CI runs the same tests as before the feature existed. The jobs that run unit tests select their tests by
-name, and none of the gated tests is among them. The `docker-tests` job selects three gated tests by name
+No CI job runs a gated test unless it passes the feature on purpose. The jobs that run unit tests select
+their tests by name. Only the filter of the `withdraw-family` row (`withdraw qtum bch slp`, added in batch 4)
+also matches gated tests; that row runs without the feature, so it skips them and runs the offline tests of
+the family. The `docker-tests` job selects three gated tests by name
 (`test_withdraw_segwit`, `test_withdraw_cashaddresses` and
 `test_withdraw_to_different_cashaddress_network_should_fail`), so it passes the feature. A new test that needs
 a public server should carry the attribute, and it joins a CI job only if someone adds the feature to that

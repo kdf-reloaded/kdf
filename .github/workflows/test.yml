@@ -219,6 +219,13 @@ jobs:
           # from the workspace, so it is run by manifest path (its own Cargo.lock).
           - name: bounded-close
             cmd: "cargo test --manifest-path vendor-patches/libp2p-yamux-0.44.0/Cargo.toml"
+          # The withdraw, Qtum, Bitcoin Cash and SLP tests of `coins`, selected by a substring of
+          # the test path. The tests of these paths that need a public server carry
+          # `#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]`
+          # (docs/UNIT_TESTS.md, "Tests that need public servers"), so without that feature this
+          # cell runs only the offline ones.
+          - name: withdraw-family
+            cmd: "cargo test -p coins --lib -- withdraw qtum bch slp"
 
     steps:
       - uses: actions/checkout@v7
