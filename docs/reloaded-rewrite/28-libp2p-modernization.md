@@ -1909,6 +1909,21 @@ shortened by test configuration.
   and ended after P was resumed. R's memory was flat after
   the close on the R27c build (57 MB, from a 33.5 MB baseline) and grew
   to 80 MB on the control, still growing when the run ended.
+- *Lab row L-CLOSE, drop-only arm (added 2026-11-08, batch 4 item B4-8;
+  informative for R27a and the repeated-drops review).* The same relay R
+  and peer P, with normal TCP buffers and order traffic; every packet
+  between R and P is dropped for a while, and no socket is reset. *Pass
+  (fixed before the run):* in each of three 10 s drops the connection
+  survives, with no close on either side until 60 s after the restore, and
+  traffic toward P resumes within 30 s. A 30 s and a 60 s drop are recorded
+  only. *Result (2026-11-08, on the R27c build):* the three 10 s drops kept
+  both connections, with the same ports and no close, and traffic resumed
+  2.5 s to 5.5 s after the restore (pass). In the 30 s drop a ping timed out
+  22 s in; after the restore R logged one connection closed cleanly and the
+  other closed with a broken pipe, P dialed again 16 s after the restore,
+  and traffic resumed after 23 s. In the 60 s drop R logged its connections
+  closed 44 s to 51 s in, both came back after the restore, and traffic
+  resumed after 40 s. No "close timed out" line was logged.
 
 ## 28.11 Deferred Work
 

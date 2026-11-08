@@ -687,8 +687,42 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   This covers a coin's dynamic fee and an explicit `UtxoFixed` or `UtxoPerKbyte` withdraw fee.
   Detail: PR #247; CRD ch.38 R38.6.6b, T38.6.6b.1.
 
+#### Price service and the maker bot
+
+- **The price service that no longer exists is replaced, prices now come from two sources that check each
+  other, and swaps record their USD prices again.** The address `prices.komodo.live`, which the
+  market-maker bot used for its default prices and which the node asks when a swap ends for the USD prices
+  it stores with the swap, no longer resolves. Since then the bot could not fetch prices unless you named
+  another service, and no swap completed stored USD prices. The default is now two sources asked at the
+  same time: the GLEEC price service (and, if it does not answer, its cache) and the cipig price service,
+  each with `?expire_at=259200` so that no price older than 72 hours is served. A coin that only one source
+  prices is priced from it. A coin both price must agree within 5 %; if they do not, the coin gets no
+  price from either, and the bot quotes no pair with it. A source that does not answer is skipped. The bot
+  and the swap prices use the same sources. Two new top-level keys in `MM2.json` change them: `price_urls`
+  (an array of sources, each one address or an array of addresses tried in order) replaces the default
+  sources, and `price_providers` (an array of names) replaces the price providers the node recognizes
+  (`binance`, `coingecko`, `coinpaprika`, `forex` and `livecoinwatch`); a wrong provider list stops
+  pricing of the coins it leaves out. The `start_simple_market_maker_bot` request accepts `price_urls`
+  beside `price_url`; a request with both, or with a malformed value, is refused. A price service that
+  fails is now reported once when it starts failing and once when it answers again, not every 30 seconds,
+  and so is the bot finding no source at all; on a native build each attempt takes at most 10 seconds (a
+  browser build also sets a timer, which no test covers yet); and log lines name a service by its host only,
+  with the text of an error, such as the body of a server's answer, cleaned of the address that was
+  asked. A swap you took part in is priced once, when it has ended successfully; a swap that failed gets no prices. Prices from
+  livecoinwatch are now accepted, so the bot can quote coins such as RIN that only that provider prices,
+  and the bot no longer divides by a price of zero. A bot pair whose price is refused or lost still has its
+  order cancelled at once, as in GLEEC KDF; this behavior is under observation in v0.4.0 and will be
+  revisited. See [Network configuration](docs/NETWORK_CONFIG.md#price-service).
+  Detail: PR #287; CRD ch.62.
+
 ### Tests
 
+- **A lab row checks what a short network outage does to a relay connection.** With every packet
+  between a relay and a peer dropped and no socket reset, a 10-second outage kept the connection and
+  traffic resumed within 6 seconds, three times out of three. After a 30-second outage the
+  connections were closed and the peer connected again; after a 60-second outage both connections
+  were closed and came back. Traffic was back 23 and 40 seconds after the restore. The node itself
+  is unchanged. Detail: PR #292; CRD ch.28 T14.
 - **The Qtum testnet tests now use the one public Qtum testnet server, and the QRC20 docker test
   set-up mines its own blocks and waits for new contracts.** The tests that activate the testnet
   Qtum coin pointed at servers that serve Qtum mainnet, so the test wallets looked empty and the

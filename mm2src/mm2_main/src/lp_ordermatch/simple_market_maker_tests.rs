@@ -285,3 +285,152 @@ mod tests {
         assert_eq!(usdt_infos.unwrap().last_price, MmNumber::from(1));
     }
 }
+
+/// The price sources of a bot start (CRD ch.62 D62.6) and the bot's view of the combined prices.
+#[cfg(not(target_arch = "wasm32"))]
+mod price_source_tests {
+    use super::*;
+    use crate::mm2::lp_ordermatch::lp_bot::price_service::stub_server::price_document;
+    use crate::mm2::lp_ordermatch::lp_bot::price_service::{combine_sources, default_price_sources,
+                                                           parse_price_document, read_price_providers_conf,
+                                                           registry_from_table, PriceProvidersConf, ProviderSet,
+                                                           SourceTable};
+    use crate::mm2::lp_ordermatch::lp_bot::simple_market_maker_bot::{resolve_bot_price_sources,
+                                                                     StartSimpleMakerBotError};
+    use serde_json::Value as Json;
+
+    fn node_sources() -> Vec<Vec<String>> { vec![vec!["https://node.example/tickers".to_string()]] }
+
+    fn refused(price_url: Option<&str>, price_urls: Option<Json>) -> StartSimpleMakerBotError {
+        resolve_bot_price_sources(price_url.map(str::to_string), price_urls, &node_sources())
+            .unwrap_err()
+            .into_inner()
+    }
+
+    #[test]
+    fn without_request_keys_the_node_sources_are_used() {
+        assert_eq!(
+            resolve_bot_price_sources(None, None, &node_sources()).unwrap(),
+            node_sources()
+        );
+        assert_eq!(
+            resolve_bot_price_sources(None, None, &default_price_sources()).unwrap(),
+            default_price_sources()
+        );
+    }
+
+    #[test]
+    fn a_request_price_url_is_one_source_tried_in_order() {
+        let sources = resolve_bot_price_sources(
+            Some("https://one.example/t, https://two.example/t".to_string()),
+            None,
+            &node_sources(),
+        )
+        .unwrap();
+        assert_eq!(sources, vec![vec![
+            "https://one.example/t".to_string(),
+            "https://two.example/t".to_string()
+        ]]);
+    }
+
+    #[test]
+    fn a_request_price_urls_array_is_independent_sources() {
+        let sources = resolve_bot_price_sources(
+            None,
+            Some(json!(["https://one.example/t", [
+                "https://two.example/t",
+                "https://three.example/t"
+            ]])),
+            &node_sources(),
+        )
+        .unwrap();
+        assert_eq!(sources, vec![vec!["https://one.example/t".to_string()], vec![
+            "https://two.example/t".to_string(),
+            "https://three.example/t".to_string()
+        ],]);
+    }
+
+    #[test]
+    fn a_request_with_both_keys_is_refused() {
+        assert!(matches!(
+            refused(Some("https://one.example/t"), Some(json!(["https://two.example/t"]))),
+            StartSimpleMakerBotError::BothPriceUrlKeys
+        ));
+    }
+
+    #[test]
+    fn a_malformed_request_value_is_refused_not_defaulted() {
+        let malformed_values = [
+            json!("https://one.example/t"),
+            json!([]),
+            json!([5]),
+            json!([[]]),
+            json!([["a", 5]]),
+            json!({}),
+        ];
+        for malformed in malformed_values {
+            match refused(None, Some(malformed.clone())) {
+                StartSimpleMakerBotError::InvalidPriceUrl(key) => assert_eq!(key, "price_urls", "{malformed}"),
+                other => panic!("{malformed}: unexpected {other:?}"),
+            }
+        }
+        for malformed in ["", " , "] {
+            match refused(Some(malformed), None) {
+                StartSimpleMakerBotError::InvalidPriceUrl(key) => assert_eq!(key, "price_url", "{malformed:?}"),
+                other => panic!("{malformed:?}: unexpected {other:?}"),
+            }
+        }
+    }
+
+    /// RIN is priced only by livecoinwatch: with that provider recognized the bot gets a rate for it (CRD ch.62
+    /// R62.5.2), and the bot's enum names it.
+    #[test]
+    fn livecoinwatch_prices_are_accepted_and_the_bot_gets_a_rate() {
+        let document = include_str!("../for_tests/price_defistats_tickers_v2.json");
+        let source = SourceTable {
+            host: "test".to_string(),
+            records: parse_price_document(document).unwrap(),
+        };
+        let table = combine_sources(vec![source], &ProviderSet::default_set()).table;
+        let registry = registry_from_table(table);
+        let rin = registry.get_infos("RIN").unwrap();
+        assert_eq!(rin.price_provider, Provider::Livecoinwatch);
+        let rates = registry
+            .get_cex_rates("RIN".to_string(), "KMD".to_string())
+            .expect("a rate for RIN against KMD");
+        assert_eq!(rates.base_provider, Provider::Livecoinwatch);
+        assert_eq!(rates.rel_provider, Provider::Coingecko);
+        let rates = registry
+            .get_cex_rates("RIN".to_string(), "MATIC".to_string())
+            .expect("a rate for RIN against MATIC");
+        assert_eq!(rates.rel_provider, Provider::Livecoinwatch);
+    }
+
+    /// A provider the operator lists in `price_providers` that the bot's enum does not name is still accepted by the
+    /// bot; a record from a provider that is not listed never reaches it.
+    #[test]
+    fn a_listed_provider_without_an_enum_name_is_quoted() {
+        let document = price_document(&[
+            ("RIN", "0.02", "gleeccex", 1_794_066_000),
+            ("KMD", "0.25", "coingecko", 1_794_066_000),
+        ]);
+        let source = || SourceTable {
+            host: "test".to_string(),
+            records: parse_price_document(&document).unwrap(),
+        };
+        let default_set = combine_sources(vec![source()], &ProviderSet::default_set()).table;
+        assert!(registry_from_table(default_set)
+            .get_cex_rates("RIN".to_string(), "KMD".to_string())
+            .is_none());
+
+        let conf = json!({"price_providers": ["gleeccex", "coingecko"]});
+        let PriceProvidersConf::Valid { providers, .. } = read_price_providers_conf(&conf) else {
+            panic!("the list is well-formed");
+        };
+        let table = combine_sources(vec![source()], &providers).table;
+        let rates = registry_from_table(table)
+            .get_cex_rates("RIN".to_string(), "KMD".to_string())
+            .expect("gleeccex is listed");
+        assert_eq!(rates.base_provider, Provider::Configured);
+    }
+}
