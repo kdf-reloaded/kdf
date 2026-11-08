@@ -505,6 +505,10 @@ live remote on 2026-10-24 (255 tags).
 | `PR #2580 (merged 2025-08-12)` | pull-request merge (squash) | `f5f0b18ccda65fbd363192a4d7631a75786f008a` | 2025-08-12 |
 | `PR #2605 (merged 2025-09-10)` | pull-request merge (squash) | `c6c3cc1b3053571ca785812634b077b8e114e415` | 2025-09-10 |
 | `PR #2631 (merged 2025-10-06)` | pull-request merge (reverts the changes of the rows `PR #2580` and `PR #2605`; both release rows from `v2.6.0-beta` on descend from it) | `4025b8cd4374439a963047f804d924031abefbb3` | 2025-10-06 |
+| `feat/tron-gasfree (as of 2026-05-04)` | branch tip (the head of an open, unmerged draft pull request against `dev`, opened 2026-03-23; the branch carries nine commits over its base `dev (as of 2026-03-16)`) | `7f8d735d3f5715a15d260f5c98a4e6fddc3e2d16` | 2026-05-04 |
+| `dev (as of 2026-03-16)` | branch tip (the base of the `feat/tron-gasfree (as of 2026-05-04)` row; a first-parent commit of `dev` between the rows `PR #2715 (merged 2026-03-06)` and `dev (as of 2026-03-27)`) | `5d1c6979f312dbe45b947a168d5a4c788550657a` | 2026-03-16 |
+| `tendermint-priority-fee (as of 2025-07-24)` | branch tip (the head of an open, unmerged draft pull request against `dev`, opened 2024-11-26; three commits over its base `dev (as of 2025-07-18)`) | `0de3f962c5f5bcb56b119cc77c847244e8cdf1b1` | 2025-07-24 |
+| `dev (as of 2025-07-18)` | branch tip (the base of the `tendermint-priority-fee (as of 2025-07-24)` row) | `b59860b32cebad69eeb7dc56fac2bd1fe0addd7c` | 2025-07-18 |
 
 The `v1.0.0-beta` to `v1.0.7-beta`, `v1.1.0` and `v1.0.1172` rows were
 added on 2026-10-25 under the author duty above. The other `v1.0.N`
