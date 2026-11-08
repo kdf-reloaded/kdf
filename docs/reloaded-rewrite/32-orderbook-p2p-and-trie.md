@@ -3210,7 +3210,7 @@ opposite default without weighing the stale price.)
 > the save writes the order's active record before its history row; when only
 > the history write fails, the new order is not placed but its active record
 > stayed, so a restart restored it as well. The second held at the default
-> too; it is fixed by PR #TBD: a failed history write deletes the active
+> too; it is fixed by PR #309: a failed history write deletes the active
 > record again, for a maker order (with the retrying deletion of ch. 12 R7c
 > item 4) and for a taker order, and the history error is still returned. The
 > maker path uses the retrying deletion whatever `maker_restore_skips_cancelled`
@@ -3345,7 +3345,7 @@ bullet); `t_gh8a_f_a_failed_save_leaves_the_previous_orders` (sixth bullet:
 the node's history database has no orders table, so the history write of the
 new order fails; the error is returned and nothing was cancelled);
 `t_gh8a_without_cancel_previous_nothing_is_cancelled` (item 4).
-*Coverage of the orphan fix (PR #TBD).* `t_gh8a_g_a_failed_history_write_leaves_no_active_record_of_the_new_order`
+*Coverage of the orphan fix (PR #309).* `t_gh8a_g_a_failed_history_write_leaves_no_active_record_of_the_new_order`
 (a `setprice` whose history write fails, at the default and with the switch on: the error is returned, no
 active record of the new order is stored, and a restart restores nothing), and in module
 `t12_7c_restore_guard_tests` the `t_b4_1_*` tests for the maker and the taker save (the active record is gone

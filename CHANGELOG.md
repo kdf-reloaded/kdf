@@ -632,7 +632,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   resumed. Detail: PR #280; CRD ch.28 R27c.
 - **An order whose save to the order history failed is reported as failed and no longer comes back
   as a live order after a restart, and a buy or sell whose save failed no longer sends its request.**
-  Detail: PR #TBD; CRD ch.32 R-GH8a.
+  Detail: PR #309; CRD ch.32 R-GH8a.
 
 #### Siacoin
 
