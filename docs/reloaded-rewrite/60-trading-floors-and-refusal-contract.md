@@ -689,7 +689,7 @@ absorbs a later rise of up to ten times. A swap that has started can still
 fail on a larger rise; re-advertising on fee changes is out of scope,
 because it would cost gossip.
 
-> **As built (2026-11-08, clean-side record; batch 4 item B4-15, PR #NNN).**
+> **As built (2026-11-08, clean-side record; batch 4 item B4-15, PR #315).**
 > `setprice` and the maker `trade_preimage` compute the raised term once
 > per request from the coin layer's safe amount, so the R60.6.7 check and
 > the term share one fee reading per coin. The order builder applies the
