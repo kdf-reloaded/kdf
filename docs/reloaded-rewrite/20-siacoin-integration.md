@@ -453,6 +453,18 @@ activation request -- no URL is embedded in the module:
 | `GET /api/txpool/transactions` | Mempool inspection |
 | `POST /api/txpool/broadcast` | Broadcast a signed transaction |
 
+**R-N4 (reading the transaction pool; Reloaded; clean-room original;
+decision 2026-11-07; no switch).** The transaction-pool reply
+(`GET /api/txpool/transactions`) shall be read one transaction at a time, in both
+its lists: a transaction that the Sia library cannot read is left out of the list,
+and the rest of the reply is used. A lookup of a transaction in the pool (the
+fee validation of a swap, the raw-transaction lookup, the wait for a spend) then
+does not fail because of someone else's unreadable transaction in the same
+pool. A left-out transaction is visible only in the debug log of the Sia library,
+with its position in the list and the kind of its error, never its content;
+the node's own log does not name it. A reply whose list is not a list at all is
+still an error. This is a behavior of the pinned Sia library, not of the coin layer.
+
 **R-N1 (host-only naming of the walletd server; Reloaded; clean-room
 original; maintainer decision 2026-10-26; no switch).** Every log line, error
 text and status message the Sia coin layer emits that names the walletd
