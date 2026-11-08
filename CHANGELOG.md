@@ -655,8 +655,9 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   Now a coin takes its keys from the seed under a seed-phrase login and from the device only when it
   is activated for the Trezor, and each kind stores its accounts under its own identity, as on GLEEC
   KDF. Accounts that a Trezor-activated coin stored under the seed's identity before this release
-  are no longer loaded; the next activation creates them again. Detail: PR #293; CRD ch.05 §5.10B
-  R52–R55, R35a, R35c.
+  are no longer loaded. The next activation creates the account it activates; any other account
+  appears again after `task::create_new_account` for its number. Funds are not affected: the
+  addresses are the device's, as before. Detail: PR #293; CRD ch.05 §5.10B R52–R55, R35a, R35c.
 - **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
   trailer are read correctly for the median time.** Bitcoin Atom (BCA) serves 84-byte headers from block
   505888; Reloaded read them as 80 bytes, so the median time it needs before every HTLC spend and refund
