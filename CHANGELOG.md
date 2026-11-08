@@ -578,7 +578,7 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   round, when the send fails, is logged at error level, as "Error ... when getting nonce ...". The
   error of a single node names that node and its failure, for example
   `https://rpc.example.org: HTTP 429 Too Many Requests`. With two or more nodes the text is
-  unchanged. Detail: PR #TBD; CRD ch.35 R35.1.12, R35.1.14.
+  unchanged. Detail: PR #294; CRD ch.35 R35.1.12, R35.1.14.
 
 #### Node names in logs and errors
 
