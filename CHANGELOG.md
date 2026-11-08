@@ -549,7 +549,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
     declined.
 
   One change applies today: a coin entry with `avg_blocktime` 0 now fails activation with an error
-  naming the key. Detail: PR #NNN; CRD ch.18 §18.11.
+  naming the key. Detail: PR #299; CRD ch.18 §18.11.
 
 ### Fixed
 
@@ -878,7 +878,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   and searches, the spend search, the refund answers, the check of the DEX fee, the secret
   extraction, the confirmation wait and the activation check. Three of them still record behavior
   that a later change replaces: the payment check does not compare the time lock, and a refund that
-  the chain makes by itself is reported as a failed refund. Detail: PR #NNN; CRD ch.18 §18.3, §18.5, §18.11.
+  the chain makes by itself is reported as a failed refund. Detail: PR #299; CRD ch.18 §18.3, §18.5, §18.11.
 
 ### Documentation
 

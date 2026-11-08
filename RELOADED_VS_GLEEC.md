@@ -583,7 +583,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   module is refused when an order is placed, where GLEEC KDF fails at the first
   payment unless the coins file marks the coin wallet-only; and a counterparty
   whose Tendermint order carries protocol information, where an IBC route would
-  travel, is declined, where GLEEC KDF accepts any. PR #NNN.
+  travel, is declined, where GLEEC KDF accepts any. PR #299.
 - **A node does not watch swaps of UTXO, BCH and QTUM coins.** The checks a
   watcher runs are not implemented for these coins yet, so a node with
   `is_watcher` set does not subscribe to their watcher topics. GLEEC KDF
