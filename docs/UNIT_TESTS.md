@@ -509,3 +509,79 @@ once, after one poll, or never, so no test waits. Run on 2026-11-08: all 15 pass
 | `t33_a_height_that_moves_every_half_hour_never_warns` | T33 items 3 and 7 | A height that moves every 30 minutes never warns; the sleeps add up to 7200 s |
 | `t33_sleep_total_is_kept_for_waits_that_are_not_multiples_of_a_slice` | T33 item 7, R79 | Waits of 1000 s, 120 s and 0 s sleep exactly that long (a zero wait still sleeps once) |
 | `t33_short_steps_read_the_height_once_per_sample_period` | T33 item 7, R79 | A wait that the caller cuts into steps of 5 s reads the coin once per 5 minutes, not at each step |
+
+## Tendermint swap flow (50 tests)
+
+Location: the module `tendermint_swap_flow_tests` of `mm2src/coins/tendermint/tendermint_swap_flow_tests.rs`
+(native builds only). CRD: chapter 18, §18.3, §18.5 and §18.11. Run with
+`cargo test -p coins --lib tendermint::tendermint_swap_flow_tests`.
+
+Run on 2026-11-08: `cargo test -p coins --lib tendermint::` passed (67 tests, the 50 of this module included);
+the swap-machine tests `cargo test -p mm2_main --lib -- lp_swap::maker_swap lp_swap::taker_swap` passed (138 tests).
+
+The tests drive a `TendermintCoin` (an Iris coin with the `iaa` prefix, and a Nucleus coin with the `nuc`
+prefix where the dialect matters) against a throwaway server on a loopback port. The server answers the
+JSON-RPC requests the code under test makes (`health`, `abci_info`, `abci_query`, `tx_search`) and records them,
+so the tests also assert what was asked. The keys are fixed throwaway keys.
+
+Tendermint swaps stay off (`TENDERMINT_SWAPS_AVAILABLE` is `false`); the corrections tested here make the code
+correct for when they are turned on (CRD ch.18 §18.11).
+
+A test named `*_today_*` records a behavior that differs from the chapter and waits for a maintainer decision.
+It carries a comment `// CRD ch.18: ... (gap G<n>)`, and the later fix flips that one assertion. The open gaps:
+
+| Gap | What differs from the chapter today |
+|-----|-------------------------------------|
+| G1 | The payment check does not compare the time lock of the HTLC with the negotiated one (R18.11.5, D18.11.1 and D18.11.2 open) |
+| G3 | A refunded HTLC is reported with an empty transaction, and the two refund methods answer a plain error, instead of an outcome the swap state machine recognizes as "the chain refunds by itself" (R18.11.17, D18.11.3 open) |
+
+Two gaps of the first version of this table are closed. G5 (`check_if_my_payment_sent` matched by hash lock
+only) was fixed by R18.11.22: the lookup is by the HTLC id, which covers the receiver and the amount. G6
+(`wait_for_confirmations` ignores the confirmation count) was never a gap: R18.11.18 says a Tendermint coin
+requires zero confirmations and ignores the count.
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `tm_flow_coin_account_is_the_hash160_of_the_public_key` | §18.2.2 | The account of the test coin is the bech32 of the hash160 of the public key, with the dialect's prefix (checks the fixture) |
+| `tm_flow_create_htlc_message_fields_iris`, `tm_flow_create_htlc_message_fields_nucleus` | §18.3.2 | The create message carries the sender, the receiver, one coin of the amount, the hash lock as the lower-case hex of the 32-byte secret hash, timestamp 0 and the time lock given; the Iris extras are empty and `transfer` is false; the type URL is the dialect's; the id returned with it is the HTLC id |
+| `tm_flow_time_lock_blocks_follow_the_duration_within_the_chain_bounds` | §18.3.2 | The time lock in blocks is the duration divided by the block time, clamped to 50 .. 34560 |
+| `tm_flow_claim_htlc_message_fields_iris`, `tm_flow_claim_htlc_message_fields_nucleus` | §18.3.2 | The claim message carries the HTLC id, the claimer and the secret as hex; the type URL is the dialect's |
+| `tm_flow_htlc_id_is_the_upper_case_sha256_of_hash_from_to_and_amount` | §18.3.1 | The id is the upper-case SHA-256 of the secret hash, the sender, the receiver and `<amount><denom>`, computed independently in the test; another amount or receiver gives another id |
+| `tm_flow_validate_payment_accepts_a_matching_payment` | §18.5 | A matching payment is accepted as a maker payment and as a taker payment, on both dialects, whatever the letter case of the hash lock |
+| `tm_flow_validate_payment_rejects_a_wrong_hash_lock`, `..._a_wrong_sender`, `..._a_wrong_receiver`, `..._a_wrong_amount_or_denom` | §18.5 | A payment with another hash lock, sender, receiver, amount or denom is refused, with the matching reason |
+| `tm_flow_validate_payment_today_accepts_any_time_lock` | §18.5, gap G1 | A payment with a time lock of 1 block, of the chain maximum or beyond it is accepted |
+| `tm_flow_check_if_my_payment_sent_finds_the_payment_by_its_id` | R18.11.22 | Open, completed and refunded HTLCs, on both dialects: the module is asked for the id, then `create_htlc.id='<id>'` is searched (newest first, one result) and the create transaction is returned |
+| `tm_flow_check_if_my_payment_sent_is_none_when_the_module_has_no_htlc` | R18.11.22 | No HTLC under the id gives `None` and no transaction search |
+| `tm_flow_check_if_my_payment_sent_does_not_match_another_receiver_or_amount` | R18.11.22 | A payment with the same hash lock to another receiver, or of another amount, is not found (its id differs); the payment sent is found by its receiver and amount |
+| `tm_flow_check_if_my_payment_sent_fails_on_a_non_zero_result_code` | R18.11.22 | A create transaction with a non-zero result code is an error naming the id |
+| `tm_flow_check_if_my_payment_sent_fails_when_the_module_has_the_htlc_and_the_search_finds_nothing` | R18.11.22 | The module has the HTLC and the search finds nothing: an error naming the id |
+| `tm_flow_check_if_my_payment_sent_compares_the_hash_lock_without_regard_to_the_letter_case` | R18.11.3, R18.11.22 | The recorded and the message hash locks are compared case-insensitively, in either direction |
+| `tm_flow_check_if_my_payment_sent_refuses_a_create_transaction_with_another_hash_lock` | R18.11.22 | A create transaction whose hash lock differs from the recorded one is an error |
+| `tm_flow_check_if_my_payment_sent_of_a_token_uses_the_token_denom_and_decimals` | R18.11.22, R18.11.11 | A token's payment is looked up with the token's denom and decimals, the platform's account and node |
+| `tm_flow_check_if_my_payment_sent_without_the_amount_is_an_error` | R18.11.22 | The old method (no amount) answers an error on the coin and the token and asks the node nothing |
+| `tm_flow_search_for_swap_tx_spend_of_an_open_htlc_is_none` | §18.3.3, §18.5 | An open HTLC gives `None` for both the "my" and the "other" search; the chain is asked for the HTLC under its id on the Iris query path |
+| `tm_flow_search_for_swap_tx_spend_of_a_completed_htlc_is_the_claim` | §18.3.3, §18.5 | A completed HTLC gives `Spent` with the claim transaction, found by `claim_htlc.id='<id>'` (oldest first); the secret read from it is the one claimed |
+| `tm_flow_search_for_swap_tx_spend_today_gives_an_empty_tx_for_a_refunded_htlc` | §18.3.1, gap G3 | A refunded HTLC gives `Refunded` with an empty transaction |
+| `tm_flow_search_for_swap_tx_spend_of_a_nucleus_htlc_uses_the_nucleus_query` | §18.3.3 | A Nucleus coin asks the Nucleus query path and reports the open, completed and refunded states the same way |
+| `tm_flow_refund_methods_today_answer_the_auto_refund_error` | §18.3.1, gap G3 | Both refund methods answer the plain error "Tendermint HTLCs auto-refund on chain; no broadcast required." and ask the node nothing |
+| `tm_flow_extract_secret_returns_the_secret_of_a_claim_message` | §18.5 | The secret is read from the claim message of both dialects; bytes that are not a transaction give an error |
+| `tm_flow_extract_secret_requires_exactly_32_bytes` | R18.11.14 | A secret of 1, 31, 33 or 64 bytes is an error naming the length, for the coin and the token; 32 bytes give the secret |
+| `tm_flow_wait_for_confirmations_passes_on_an_ok_status_whatever_the_count` | R18.11.18 | A transaction with an OK status passes at once with 100 confirmations asked for (zero are required); the node is asked for it by the upper-case SHA-256 hex of its bytes |
+| `tm_flow_wait_for_confirmations_fails_on_an_error_status` | R18.11.18 | A transaction with an error status fails the wait, naming the code |
+| `tm_flow_validate_fee_accepts_the_standard_fee` | R18.11.21 | One `MsgSend` from the taker to the fee address with exactly the fee coin, the uuid memo and an equal node copy is accepted on both dialects; the node is asked by the upper-case SHA-256 hex of the bytes |
+| `tm_flow_validate_fee_refuses_a_wrong_recipient`, `..._a_wrong_sender`, `..._two_coins_a_wrong_amount_and_a_wrong_denom`, `..._two_messages`, `..._a_wrong_memo` | R18.11.21 | Each wrong standard fee is refused with its reason, before the node is asked for a copy |
+| `tm_flow_validate_fee_refuses_a_message_of_the_other_form` | R18.11.21 | A `MsgMultiSend` for a standard descriptor, and a `MsgSend` for a burn descriptor, are refused |
+| `tm_flow_validate_fee_refuses_no_fee_descriptor` | R18.11.21 | `DexFee::NoFee` is refused on the validating side |
+| `tm_flow_validate_fee_accepts_the_burn_fee` | R18.11.21 | One `MsgMultiSend` with one input of the taker and the fee output then the burn output, each with exactly its coin, is accepted on both dialects |
+| `tm_flow_validate_fee_refuses_a_wrong_burn_fee` | R18.11.21 | A wrong burn amount, burn address, number of outputs or inputs, fee output (amount, coins, address, order) or sender is refused with its reason |
+| `tm_flow_validate_fee_refuses_a_node_copy_that_differs`, `..._a_transaction_the_node_does_not_have` | R18.11.21 | A node copy that differs from the supplied bytes, and a missing copy, are validation errors naming the hash |
+| `tm_flow_token_validate_fee_uses_the_token_denom` | R18.11.21, R18.11.11 | A token's fee is checked in the token's denom (standard and burn form) |
+| `tm_flow_activation_refuses_an_avg_blocktime_of_zero`, `tm_flow_conf_refuses_an_avg_blocktime_of_zero_and_names_the_key` | R18.11.1 | `avg_blocktime` 0 is refused at activation with an error naming the key; positive values are accepted, the earlier refusals stay |
+| `tm_flow_token_trade_fees_carry_the_platform_ticker_and_decimals` | R18.11.10, R18.11.11 | A token's sender-side trade fee and fee to send the dex fee carry the platform ticker and the platform-decimals amount; the receiver-side fee and the platform coin's own fee are the same |
+| `tm_flow_a_chain_without_an_htlc_module_is_wallet_only` | R18.11.23 | A prefix other than `iaa` and `nuc` is wallet-only with the build switch on, whatever the coins file says; `iaa` and `nuc` follow the flag |
+| `tm_flow_the_wallet_only_answer_of_the_coin_and_token_follows_the_prefix` | R18.11.23 | The coin and the token answer through the predicate (wallet-only while the build switch is off) |
+| `tm_flow_ibc_routing_is_never_advertised_or_accepted` | R18.11.25 | The coin and the token advertise no protocol information and decline a match whose counterparty information is not empty |
+
+Not covered, because they need the node to answer the account, simulation and broadcast requests: the
+broadcast of the create, claim and fee transactions (`send_maker_payment`, `send_taker_payment`, the two
+spend methods, `send_taker_fee`), and `wait_for_tx_spend`.

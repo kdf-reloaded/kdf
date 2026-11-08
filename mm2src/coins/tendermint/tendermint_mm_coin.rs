@@ -53,10 +53,13 @@ impl TendermintCoin {
         }
     }
 
-    /// Estimate the sender (maker/taker) trade fee for a given denom.
+    /// Estimate the sender (maker/taker) trade fee for the payment of `amount` in the given denom.
+    ///
+    /// `decimals` are those of the payment denom and convert `amount`. The fee is paid in the platform denom
+    /// whatever the payment denom is (CRD ch.18 R18.11.11), so it is labeled with this (platform) coin's ticker
+    /// and converted with this coin's decimals.
     pub(super) async fn get_sender_trade_fee_for_denom(
         &self,
-        ticker: String,
         denom: cosmrs::Denom,
         decimals: u8,
         amount: BigDecimal,
@@ -101,19 +104,22 @@ impl TendermintCoin {
             .map_err(|e| MmError::new(TradePreimageError::Transport(e.to_string())))?;
 
         let fee_amount_u64 = fee.amount.first().map(|c| c.amount as u64).unwrap_or(0);
-        let fee_amount_dec = big_decimal_from_sat_unsigned(fee_amount_u64, decimals);
+        let fee_amount_dec = big_decimal_from_sat_unsigned(fee_amount_u64, self.protocol_info.decimals);
 
         Ok(TradeFee {
-            coin: ticker,
+            coin: self.ticker.clone(),
             amount: fee_amount_dec.into(),
             paid_from_trading_vol: false,
         })
     }
 
-    /// Estimate the fee for sending a taker DEX fee transaction.
+    /// Estimate the fee for sending a taker DEX fee transaction of `dex_fee_amount` in the given denom.
+    ///
+    /// `decimals` are those of the fee denom and convert `dex_fee_amount`. The network fee is paid in the platform
+    /// denom (CRD ch.18 R18.11.11), so it is labeled with this (platform) coin's ticker and converted with this
+    /// coin's decimals.
     pub(super) async fn get_fee_to_send_taker_fee_for_denom(
         &self,
-        ticker: String,
         denom: cosmrs::Denom,
         decimals: u8,
         dex_fee_amount: BigDecimal,
@@ -150,10 +156,10 @@ impl TendermintCoin {
             .map_err(|e| MmError::new(TradePreimageError::Transport(e.to_string())))?;
 
         let fee_amount_u64 = fee.amount.first().map(|c| c.amount as u64).unwrap_or(0);
-        let fee_amount_dec = big_decimal_from_sat_unsigned(fee_amount_u64, decimals);
+        let fee_amount_dec = big_decimal_from_sat_unsigned(fee_amount_u64, self.protocol_info.decimals);
 
         Ok(TradeFee {
-            coin: ticker,
+            coin: self.ticker.clone(),
             amount: fee_amount_dec.into(),
             paid_from_trading_vol: false,
         })
@@ -170,10 +176,15 @@ impl MmCoin for TendermintCoin {
     fn is_asset_chain(&self) -> bool { false }
 
     /// Wallet-only while [`TENDERMINT_SWAPS_AVAILABLE`] is `false` (swaps for the family are postponed for the
-    /// current beta), whatever the coins-config entry says; otherwise the entry decides. Only order placement
+    /// current beta), whatever the coins-config entry says; otherwise the entry decides. A chain whose account
+    /// prefix selects no HTLC dialect is wallet-only in either case (CRD ch.18 R18.11.23). Only order placement
     /// asks this: a swap that has already started never does.
     fn wallet_only(&self, ctx: &MmArc) -> bool {
-        !TENDERMINT_SWAPS_AVAILABLE || crate::is_wallet_only_ticker(ctx, self.ticker())
+        tendermint_wallet_only(
+            TENDERMINT_SWAPS_AVAILABLE,
+            &self.protocol_info.account_prefix,
+            crate::is_wallet_only_ticker(ctx, self.ticker()),
+        )
     }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
@@ -387,7 +398,6 @@ impl MmCoin for TendermintCoin {
         let fut = async move {
             let fee = try_s!(
                 coin.get_sender_trade_fee_for_denom(
-                    coin.ticker.to_owned(),
                     coin.protocol_info.denom.clone(),
                     coin.protocol_info.decimals,
                     coin.min_tx_amount(),
@@ -411,25 +421,15 @@ impl MmCoin for TendermintCoin {
         let amount = match value {
             TradePreimageValue::Exact(decimal) | TradePreimageValue::UpperBound(decimal) => decimal,
         };
-        self.get_sender_trade_fee_for_denom(
-            self.ticker.clone(),
-            self.protocol_info.denom.clone(),
-            self.protocol_info.decimals,
-            amount,
-        )
-        .await
+        self.get_sender_trade_fee_for_denom(self.protocol_info.denom.clone(), self.protocol_info.decimals, amount)
+            .await
     }
 
     fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {
         let coin = self.clone();
         let fut = async move {
-            coin.get_sender_trade_fee_for_denom(
-                coin.ticker.clone(),
-                coin.protocol_info.denom.clone(),
-                coin.decimals(),
-                coin.min_tx_amount(),
-            )
-            .await
+            coin.get_sender_trade_fee_for_denom(coin.protocol_info.denom.clone(), coin.decimals(), coin.min_tx_amount())
+                .await
         };
         Box::new(fut.boxed().compat())
     }
@@ -440,7 +440,6 @@ impl MmCoin for TendermintCoin {
         _stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
         self.get_fee_to_send_taker_fee_for_denom(
-            self.ticker.clone(),
             self.protocol_info.denom.clone(),
             self.protocol_info.decimals,
             dex_fee_amount,
@@ -467,9 +466,13 @@ impl MmCoin for TendermintCoin {
     fn coin_protocol_info(&self) -> Vec<u8> { Vec::new() }
 
     /// Declines every new match while [`TENDERMINT_SWAPS_AVAILABLE`] is `false`, so an order saved before the
-    /// switch was turned off, or a peer's request against one, cannot start a new swap. This is asked only when
-    /// an order is matched, never by a swap that is running, being kick-started or recovered.
-    fn is_coin_protocol_supported(&self, _info: &Option<Vec<u8>>) -> bool { TENDERMINT_SWAPS_AVAILABLE }
+    /// switch was turned off, or a peer's request against one, cannot start a new swap. It also declines a match
+    /// whose counterparty information is not empty, which is where an IBC routing channel would travel
+    /// (CRD ch.18 R18.11.25). This is asked only when an order is matched, never by a swap that is running,
+    /// being kick-started or recovered.
+    fn is_coin_protocol_supported(&self, info: &Option<Vec<u8>>) -> bool {
+        tendermint_protocol_info_supported(TENDERMINT_SWAPS_AVAILABLE, info)
+    }
 }
 
 // ————————————————————————————————————————————————————————————————

@@ -1,3 +1,4 @@
+use super::htlc::HtlcType;
 use super::rpc::*;
 use crate::node_url::host_only;
 use crate::{HistorySyncState, PrivKeyNotAllowed, PrivKeyPolicy, TransactionEnum};
@@ -21,6 +22,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::ops::Deref;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use bigdecimal::BigDecimal;
@@ -173,6 +175,14 @@ impl TendermintConf {
             ticker: ticker.to_string(),
             kind: TendermintInitErrorKind::AvgBlockTimeInvalid,
         })?;
+
+        // CRD ch.18 R18.11.1: the block count of a lock is the lock duration divided by `avg_blocktime`.
+        if avg_blocktime == 0 {
+            return MmError::err(TendermintInitError {
+                ticker: ticker.to_string(),
+                kind: TendermintInitErrorKind::AvgBlockTimeZero,
+            });
+        }
 
         let derivation_path =
             serde_json::from_value(conf["derivation_path"].clone()).map_to_mm(|e| TendermintInitError {
@@ -363,6 +373,8 @@ pub enum TendermintInitErrorKind {
     RpcClientInitError(String),
     AvgBlockTimeMissing,
     AvgBlockTimeInvalid,
+    #[display(fmt = "Tendermint `avg_blocktime` must be at least 1 second, got 0")]
+    AvgBlockTimeZero,
     ErrorDeserializingDerivationPath(String),
 }
 
@@ -469,6 +481,24 @@ pub(super) enum HtlcMsgError {
 // ————————————————————————————————————————————————————————————————
 // Free functions
 // ————————————————————————————————————————————————————————————————
+
+/// Whether a Tendermint coin or token is wallet-only (CRD ch.18 R18.11.23).
+///
+/// It is while swaps are switched off in this build, while the coins-file entry says so, and always when the
+/// chain's account prefix selects no HTLC dialect (only `iaa` and `nuc` have one): such a coin is refused at
+/// order time and not at payment time. A token passes its platform coin's prefix.
+pub(super) fn tendermint_wallet_only(swaps_available: bool, account_prefix: &str, config_wallet_only: bool) -> bool {
+    !swaps_available || HtlcType::from_str(account_prefix).is_err() || config_wallet_only
+}
+
+/// Whether a Tendermint coin accepts the protocol information of a counterparty's order (CRD ch.18 R18.11.25).
+///
+/// Reloaded advertises no protocol information for the family and accepts no IBC-routed swap, so any
+/// non-empty information (where a routing channel would travel) is declined, as is every match while swaps are
+/// switched off in this build.
+pub(super) fn tendermint_protocol_info_supported(swaps_available: bool, info: &Option<Vec<u8>>) -> bool {
+    swaps_available && info.as_ref().is_none_or(|info| info.is_empty())
+}
 
 pub(crate) fn account_id_from_privkey(priv_key: &[u8], prefix: &str) -> MmResult<AccountId, TendermintInitErrorKind> {
     let signing_key = cosmrs::crypto::secp256k1::SigningKey::from_slice(priv_key)

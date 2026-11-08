@@ -91,6 +91,33 @@ pub trait SwapOps {
         swap_contract_address: &Option<BytesJson>,
     ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send>;
 
+    /// [`SwapOps::check_if_my_payment_sent`] for a coin whose lookup needs the amount the payment was sent with
+    /// (CRD ch.18 R18.11.22: the Tendermint HTLC id covers the amount). The swap machine calls this method,
+    /// passing the exact amount of its payment send.
+    ///
+    /// The default ignores `amount` and answers the question of [`SwapOps::check_if_my_payment_sent`], so a coin
+    /// that does not need the amount is not changed.
+    #[allow(clippy::too_many_arguments)]
+    fn check_if_my_payment_sent_for_amount(
+        &self,
+        time_lock: u32,
+        my_pub: &[u8],
+        other_pub: &[u8],
+        secret_hash: &[u8],
+        search_from_block: u64,
+        swap_contract_address: &Option<BytesJson>,
+        _amount: &BigDecimal,
+    ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send> {
+        self.check_if_my_payment_sent(
+            time_lock,
+            my_pub,
+            other_pub,
+            secret_hash,
+            search_from_block,
+            swap_contract_address,
+        )
+    }
+
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,
