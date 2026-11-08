@@ -326,6 +326,8 @@ where
         // Trezor policy whose device is not offered (the hardware context is gone) reports that.
         PrivKeyPolicy::Trezor => {
             let extractor = xpub_extractor.or_mm_err(|| HDExtractPubkeyError::HwContextNotInitialized)?;
+            // CRD ch.05 R58a: the device that would answer is the one the coin was activated with.
+            crate::hd_pubkey::require_extractor_device(coin.as_ref().hw_ctx.as_ref(), extractor)?;
             let trezor_coin = coin
                 .as_ref()
                 .conf

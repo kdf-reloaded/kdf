@@ -530,6 +530,14 @@ fn ctx_with_hw(material_client: TrezorClient, internal_pubkey: H264) -> MmArc {
 // EthCoin fixtures under the Trezor signing policy
 // ---------------------------------------------------------------------------
 
+/// The hardware context the fixture's coin is activated with: the one `ctx_with_hw` installed (CRD ch.05 R58a).
+fn activation_hw_ctx(ctx: &MmArc) -> crypto::HardwareWalletArc {
+    CryptoCtx::from_ctx(ctx)
+        .expect("a CryptoCtx")
+        .hw_ctx()
+        .expect("a hardware context")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_trezor_coin(
     ctx: &MmArc,
@@ -598,6 +606,7 @@ fn device_trezor_iguana_coin(
         derivation_path: DerivationPath::from_str(EVM_PATH).unwrap(),
         address,
         public,
+        hw_ctx: activation_hw_ctx(ctx),
     });
     build_trezor_coin(
         ctx,
@@ -642,6 +651,7 @@ fn device_trezor_hd_coin(
         derivation_path: DerivationPath::from_str(EVM_PATH).unwrap(),
         address: leaf_address,
         public: leaf_public,
+        hw_ctx: activation_hw_ctx(ctx),
     });
     let derivation_method = DerivationMethod::HDWallet(EthHDWallet {
         hd_wallet_storage: HDWalletCoinStorage::default(),

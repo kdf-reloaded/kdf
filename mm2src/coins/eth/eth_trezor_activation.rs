@@ -11,10 +11,9 @@
 //! surfaced through the supplied [`TrezorConnectProcessor`], which the caller
 //! wires to the activation task's status / user-action vocabulary.
 
-use super::eth_activation::{build_eth_hd_wallet, eth_coin_from_params_with_trezor, eth_full_derivation_path,
-                            EthCoinActivationParams, EthCoinBuildError};
+use super::eth_activation::{build_eth_hd_wallet_for_device, eth_coin_from_params_with_trezor,
+                            eth_full_derivation_path, EthCoinActivationParams, EthCoinBuildError};
 use super::*;
-use crate::hd_wallet_storage::HDWalletStorageKeyPolicy;
 use crate::rpc_command::get_my_address::PathToAddress;
 use crate::CryptoCtx;
 use crypto::trezor::{ProcessTrezorResponse, TrezorProcessingError};
@@ -43,7 +42,9 @@ fn trezor_processing_error_to_string<E: std::fmt::Display>(e: TrezorProcessingEr
 /// Build an [`EthCoin`] under the Trezor signing policy from an already
 /// device-derived address / account public key / derivation path (R50.1 — no
 /// local secret is used or stored). This is the pure construction step; the
-/// device read is performed by [`eth_coin_activate_with_trezor`].
+/// device read is performed by [`eth_coin_activate_with_trezor`]. `hw_ctx` is
+/// the hardware context that read used: the coin keeps it as the identity of its
+/// device (CRD ch.05 R58a).
 pub async fn eth_coin_from_conf_and_request_with_trezor(
     ctx: &MmArc,
     ticker: &str,
@@ -53,12 +54,14 @@ pub async fn eth_coin_from_conf_and_request_with_trezor(
     derivation_path: DerivationPath,
     address: Address,
     public: Public,
+    hw_ctx: crypto::HardwareWalletArc,
 ) -> Result<EthCoin, String> {
     let params = try_s!(EthCoinActivationParams::from_legacy_request(req, conf));
     let signer = EthTrezorSigner {
         derivation_path,
         address,
         public,
+        hw_ctx,
     };
     eth_coin_from_params_with_trezor(
         ctx,
@@ -73,11 +76,20 @@ pub async fn eth_coin_from_conf_and_request_with_trezor(
     .map_err(|e| e.to_string())
 }
 
-/// Connect to the device (surfacing connect / PIN / passphrase through `processor`) and read the
+/// The current hardware context. An activation takes it once and uses that one context for the device read, the
+/// coin's record of its device and the storage namespace (CRD ch.05 R58a).
+fn current_hardware_context(ctx: &MmArc) -> Result<crypto::HardwareWalletArc, String> {
+    let crypto_ctx = CryptoCtx::from_ctx(ctx).map_err(|e| e.to_string())?;
+    crypto_ctx
+        .hw_ctx()
+        .ok_or_else(|| "Trezor device is not initialized".to_owned())
+}
+
+/// Connect to the device of `hw_ctx` (surfacing connect / PIN / passphrase through `processor`) and read the
 /// address and the account public key at `derivation_path`. The device-reported public key must map
 /// to the reported address before it is bound into a coin's signer.
 async fn read_device_address<Processor>(
-    ctx: &MmArc,
+    hw_ctx: &crypto::HardwareWalletArc,
     derivation_path: &DerivationPath,
     processor: &Processor,
 ) -> Result<(Address, Public), String>
@@ -85,11 +97,6 @@ where
     Processor: TrezorConnectProcessor + Sync,
     Processor::Error: std::fmt::Display,
 {
-    let crypto_ctx = CryptoCtx::from_ctx(ctx).map_err(|e| e.to_string())?;
-    let hw_ctx = crypto_ctx
-        .hw_ctx()
-        .ok_or_else(|| "Trezor device is not initialized".to_owned())?;
-
     // R50.13: connect to the device. The processor surfaces connect / PIN /
     // passphrase requests through the caller's task status / user-action
     // vocabulary and is reused for the subsequent read exchange.
@@ -156,8 +163,20 @@ where
 {
     let derivation_path =
         DerivationPath::from_str(EVM_TREZOR_DEFAULT_PATH).map_err(|e| format!("Invalid EVM derivation path: {}", e))?;
-    let (address, public) = read_device_address(ctx, &derivation_path, processor).await?;
-    eth_coin_from_conf_and_request_with_trezor(ctx, ticker, conf, req, protocol, derivation_path, address, public).await
+    let hw_ctx = current_hardware_context(ctx)?;
+    let (address, public) = read_device_address(&hw_ctx, &derivation_path, processor).await?;
+    eth_coin_from_conf_and_request_with_trezor(
+        ctx,
+        ticker,
+        conf,
+        req,
+        protocol,
+        derivation_path,
+        address,
+        public,
+        hw_ctx,
+    )
+    .await
 }
 
 /// Activate an EVM platform coin under the Trezor signing policy as an HD wallet whose root identity is
@@ -185,12 +204,14 @@ where
     Processor: TrezorConnectProcessor + Sync,
     Processor::Error: std::fmt::Display,
 {
+    // The hardware context is taken once: the storage, the device read and the coin's record of its device all
+    // use it (CRD ch.05 R58a).
     let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
-    if crypto_ctx.hw_ctx().is_none() {
-        return MmError::err(EthCoinBuildError::Internal(
+    let hw_ctx = crypto_ctx.hw_ctx().or_mm_err(|| {
+        EthCoinBuildError::Internal(
             "Trezor device is not initialized; connect a Trezor (task::init_trezor) first".to_owned(),
-        ));
-    }
+        )
+    })?;
     if conf["trezor_coin"].as_str().is_none() {
         return MmError::err(EthCoinBuildError::Internal(format!(
             "Coin {} does not support the Trezor hardware wallet",
@@ -198,15 +219,16 @@ where
         )));
     }
     let full_path = eth_full_derivation_path(conf, path_to_address)?;
-    let hd_wallet = build_eth_hd_wallet(ctx, ticker, conf, gap_limit, HDWalletStorageKeyPolicy::Hardware).await?;
+    let hd_wallet = build_eth_hd_wallet_for_device(ctx, ticker, conf, gap_limit, &hw_ctx).await?;
 
-    let (address, public) = read_device_address(ctx, &full_path, processor)
+    let (address, public) = read_device_address(&hw_ctx, &full_path, processor)
         .await
         .map_to_mm(EthCoinBuildError::Internal)?;
     let signer = EthTrezorSigner {
         derivation_path: full_path,
         address,
         public,
+        hw_ctx,
     };
     eth_coin_from_params_with_trezor(
         ctx,

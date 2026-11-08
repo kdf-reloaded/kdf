@@ -1408,6 +1408,8 @@ mod hd_accounts_at_index {
         ) -> MmResult<XPub, HDExtractPubkeyError> {
             panic!("a software login must not ask a hardware device")
         }
+
+        fn hardware_context(&self) -> Option<crypto::HardwareWalletArc> { None }
     }
 
     fn quiet_node() -> MockEvmNode {

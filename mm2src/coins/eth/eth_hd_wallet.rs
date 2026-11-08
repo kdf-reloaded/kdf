@@ -298,8 +298,10 @@ impl ExtractExtendedPubkey for EthCoin {
         // A hardware-wallet coin takes the account key from the device; deriving it from the software seed
         // would bind the account to a key the device does not control.
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
-        if matches!(self.signer, super::EthSigner::Trezor(_)) {
+        if let super::EthSigner::Trezor(signer) = &self.signer {
             let xpub_extractor = xpub_extractor.or_mm_err(|| HDExtractPubkeyError::HwContextNotInitialized)?;
+            // CRD ch.05 R58a: the device that would answer is the one the coin was activated with.
+            crate::hd_pubkey::require_extractor_device(Some(&signer.hw_ctx), xpub_extractor)?;
             let xpub = xpub_extractor.extract_eth_xpub(derivation_path).await?;
             return Secp256k1ExtendedPublicKey::from_str(&xpub)
                 .map_to_mm(|e| HDExtractPubkeyError::Internal(format!("Invalid device EVM xpub: {}", e)));

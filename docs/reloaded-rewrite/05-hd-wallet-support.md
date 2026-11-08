@@ -1163,6 +1163,46 @@ at the anchor was `Iguana`, and the device was the only HD key source
 > `FoundUnexpectedDevice` hardware error class without touching the device
 > or the storage. Nothing in this is a wire change.
 
+**R58a.** *Device identity of a `Trezor`-policy coin (Reloaded-original;
+maintainer decision EC (a), 2026-11-08; batch 4 item B4-14).* When a coin
+is activated under the `Trezor` policy, the node records the device digest
+of R51 of the hardware context the activation used. Before every operation
+of that coin that would use the device or the device's storage namespace —
+reading an account's extended public key (`task::create_new_account`, the
+account an activation creates, a scan that derives), deriving a new
+address, and signing — the node compares the recorded digest with the
+digest of the current hardware context. On a mismatch the operation fails
+with `FoundUnexpectedDevice` before the device or the storage is touched;
+an empty slot still answers `HwContextNotInitialized` (R54). The coin keeps
+its recorded digest for the lifetime of its activation; using another
+device needs a deactivation and a fresh activation (R52). *Why:* the
+corpus-derived finding above. *Compatibility (informative):* no wire shape
+changes, and only this node's own coins are affected: where the reference
+would use the new device's keys against the old device's accounts, Reloaded
+refuses. Under `docs/COMPAT_SWITCHES.md`, "The default-side rule", arm 2:
+Reloaded's behavior by default, no switch.
+
+> **As built (2026-11-08, clean-side record; batch 4 item B4-14, PR #NNN).**
+> A coin activated under the `Trezor` policy keeps the hardware context its
+> activation read (`UtxoCoinFields.hw_ctx` for the UTXO family,
+> `EthTrezorSigner.hw_ctx` for EVM and its tokens). The activation reads the
+> context once and uses that one context for the device read, the coin's
+> record and its storage namespace (`HDWalletCoinStorage::init_for_device`).
+> Before reading an account's extended public key (`task::create_new_account`
+> and the account an activation creates), before `get_new_address`, and before
+> signing a withdrawal, the node compares the digest of that context with the
+> current one (`HardwareWalletCtx::ensure_same_device`); a different device
+> fails with `FoundUnexpectedDevice` through the path's existing hardware error
+> class, before the device or the storage is touched, and an empty slot keeps
+> answering `HwContextNotInitialized`. A scan and `account_balance` ask no
+> device. The swap-v2 signing of a UTXO coin already checks the connected
+> device against the coin's recorded context. Tests: the `r58a_*` tests in
+> `coins` (utxo_tests, eth_tests, hd_wallet_storage) and
+> `ensure_same_device_compares_the_digest` in `crypto`; the wiring of the two
+> withdraw signing paths is covered through their shared check only, and the
+> activation's single read by construction and the storage test, since the
+> lab has no Trezor.
+
 *Verification notes.*
 
 **T31.** *Init under both logins.* With a Trezor emulator, start one
@@ -1207,7 +1247,8 @@ software coin succeed (R54).
 emulator seed while a `Trezor`-policy coin from the first is active; the
 test pins the behaviour chosen under the corpus-derived finding above
 (refusal with `FoundUnexpectedDevice` before any device or storage access,
-if adopted).
+if adopted). *Adopted as R58a (decision EC (a)).* The lab has no Trezor, so
+the refusal is pinned by unit tests with two device contexts.
 
 **D7.** *Open decisions for the maintainer (2026-11-08).*
 
@@ -1264,7 +1305,8 @@ if adopted).
 >   divergence from R57; the mixed QRC20-on-`Trezor`-QTUM case of R53 keeps
 >   the reference behaviour for now and is an open follow-up.
 > - The corpus-derived code-quality finding above (no record of the
->   activating device) is pending maintainer decision EC; T36 waits for it.
+>   activating device) is resolved by maintainer decision EC (a): R58a
+>   (batch 4 item B4-14, PR #NNN).
 
 ## 5.11 Bound WebAssembly-Only MetaMask Path
 
@@ -2053,7 +2095,7 @@ software login: whether to refuse `task::init_trezor` under a software login
 refusals key on (D7.c), a hardware-only login (D7.d), and the two
 presence-keyed or mixed reference behaviours (D7.e). *Resolved on 2026-11-08
 (maintainer decision EB (b)); see the resolutions after D7 in §5.10B. The
-device-identity finding there is pending decision EC.*
+device-identity finding there is resolved by decision EC (a), as R58a.*
 
 ## 5.15 Baseline Verifications
 

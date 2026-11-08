@@ -113,6 +113,20 @@ impl HardwareWalletCtx {
 
     pub fn rmd160(&self) -> H160 { dhash160(self.hw_internal_pubkey.as_slice()) }
 
+    /// Checks that `current` identifies the same device as this context, by the device digest of CRD ch.05 R51
+    /// ([`HardwareWalletCtx::rmd160`]). This context is the one a coin was activated with (CRD ch.05 R58a); a
+    /// different digest is answered with [`HwError::FoundUnexpectedDevice`] (this context's device is the expected
+    /// one). The check reads two values the contexts already hold and touches no device.
+    pub fn ensure_same_device(&self, current: &HardwareWalletCtx) -> Result<(), HwError> {
+        if self.rmd160() == current.rmd160() {
+            return Ok(());
+        }
+        Err(HwError::FoundUnexpectedDevice {
+            actual_pubkey: current.hw_internal_pubkey,
+            expected_pubkey: self.hw_internal_pubkey,
+        })
+    }
+
     /// Probe the current connection state of the device handle without
     /// contending for the session or enqueuing a user-interaction task.
     ///
@@ -198,6 +212,29 @@ mod tests {
         assert_eq!(a.rmd160().as_slice().len(), 20);
         assert_eq!(a.rmd160(), b.rmd160());
         assert_ne!(a.rmd160(), c.rmd160());
+    }
+
+    /// CRD ch.05 R58a: the same digest passes, another one answers `FoundUnexpectedDevice` naming both devices.
+    #[test]
+    fn ensure_same_device_compares_the_digest() {
+        let a = ctx_with_pubkey("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+        let a_again = ctx_with_pubkey("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+        let b = ctx_with_pubkey("03774ae7f858a9411e5ef4246b70c65aac5649980be5c17891bbec17895da008cb");
+
+        assert!(a.ensure_same_device(&a_again).is_ok());
+        match a.ensure_same_device(&b) {
+            Err(HwError::FoundUnexpectedDevice {
+                actual_pubkey,
+                expected_pubkey,
+            }) => {
+                assert_eq!(actual_pubkey, b.hw_internal_pubkey);
+                assert_eq!(expected_pubkey, a.hw_internal_pubkey);
+            },
+            other => panic!(
+                "another device must be refused, got {:?}",
+                other.map_err(|e| e.to_string())
+            ),
+        }
     }
 
     #[test]

@@ -281,6 +281,25 @@ impl HDWalletCoinStorage {
         .await
     }
 
+    /// Opens the storage of a coin of the Trezor policy for the device that `hw_ctx` identifies: the wallet is the
+    /// device digest of `hw_ctx` (CRD ch.05 R51, R55), whatever the hardware slot holds now. A Trezor activation
+    /// takes its hardware context once and opens its storage, records its device and reads its keys with that one
+    /// context (CRD ch.05 R58a).
+    pub async fn init_for_device(
+        ctx: &MmArc,
+        coin: String,
+        hw_ctx: &crypto::HardwareWalletArc,
+    ) -> HDWalletStorageResult<HDWalletCoinStorage> {
+        Self::init_with_identities(
+            ctx,
+            coin,
+            HDWalletStorageKeyPolicy::Hardware,
+            None,
+            Some(hw_ctx.rmd160()),
+        )
+        .await
+    }
+
     /// [`HDWalletCoinStorage::init`] over the two digests the node holds.
     async fn init_with_identities(
         ctx: &MmArc,
@@ -890,6 +909,35 @@ mod tests {
     #[test]
     fn test_wallet_identity_follows_the_coin_key_policy() {
         block_on(test_wallet_identity_follows_the_coin_key_policy_impl())
+    }
+
+    /// CRD ch.05 R58a: the storage of a Trezor activation is the device digest of the one context the activation
+    /// took, not of whatever the hardware slot holds when the storage is opened.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn r58a_the_storage_follows_the_context_given_not_the_slot() {
+        use primitives::hash::H264;
+
+        block_on(async {
+            let ctx = mm_ctx_with_custom_db();
+            let crypto_ctx = CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "r58a passphrase").unwrap();
+            let device_a = crypto_ctx.init_trezor_ctx_for_tests(
+                H264::from_str("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap(),
+                None,
+            );
+            // The slot is replaced by another device after the activation took its context.
+            let device_b = crypto_ctx.init_trezor_ctx_for_tests(
+                H264::from_str("03774ae7f858a9411e5ef4246b70c65aac5649980be5c17891bbec17895da008cb").unwrap(),
+                None,
+            );
+            assert_ne!(device_a.rmd160(), device_b.rmd160());
+
+            let storage = HDWalletCoinStorage::init_for_device(&ctx, "DOC".to_owned(), &device_a)
+                .await
+                .expect("!init_for_device");
+            assert_eq!(storage.hd_wallet_rmd160, device_a.rmd160());
+            assert_ne!(Some(storage.hd_wallet_rmd160), crypto_ctx.hw_wallet_rmd160());
+        })
     }
 
     #[cfg(target_arch = "wasm32")]
