@@ -1543,6 +1543,68 @@ carry it.
 > instead of a raw parse failure (`SiaCheckIfMyPaymentSentArgsError::
 > WrongSecretHashLength`, `SiaValidatePaymentInputError::
 > WrongSecretHashLength`) rather than something recovery can act on.
+>
+> **EVM leg: closed in code and verified in the lab as of 2026-11-08.** The
+> "plausible in other coin families" remark above held for the EVM legacy
+> swap contract. That contract takes the hash as a `bytes20` argument and
+> verifies a spend with `ripemd160(sha256(secret))`, which is exactly the
+> second case of R72A. Before this change the EVM coin layer put the shared
+> `secret_hash` into that slot unchanged: with the 32-byte alternate the
+> ABI encoder accepted the value, the counterparty decoded only its leading
+> 20 bytes and refused the payment ("secret_hash arg ... is invalid"), and
+> such a payment could not have been spent. Now the EVM layer derives the
+> slot value with one helper, `contract_secret_hash`
+> (`mm2src/coins/eth/secret_hash_value.rs`): 20 bytes unchanged, 32 bytes
+> `RIPEMD160` applied once, any other width an error with the text of the
+> UTXO comparator. The payment build (`send_hash_time_locked_payment`, ETH
+> and ERC20 arms, `eth_impl.rs`) embeds the derived value and fails before
+> building when the width is wrong; the payment validation
+> (`validate_payment`, both arms) compares the decoded slot with the derived
+> value through `check_payment_secret_hash_arg`, and its error names the
+> derived value as the expected one. The swap id (`etomic_swap_id`) is still
+> computed over the shared value on both sides, unchanged. Spend and refund
+> read the payment's own arguments from the payment transaction, which hold
+> the derived value already, and secret extraction reads the revealed secret
+> from the spend call, so they needed no change (R72B holds: the maker and
+> taker stage graphs pass the shared value unchanged). The 20-byte path is
+> byte-for-byte as before. Tests: `eth_secret_hash_tests.rs`, all prefixed
+> `r72a_` (helper, payment build for ETH and ERC20 against literal vectors,
+> swap id, validation). Run on 2026-11-08: `cargo test -p coins --lib -- eth::`
+> passed (425 tests, the new ones included) and the formatting check passed.
+> Lab (2026-11-08, build of PR #290, Siacoin against USDC-MON on Monad, 32-byte
+> secret hash H32, contract value D20 = RIPEMD-160(H32)): cell A (the maker sells
+> SC) and cell A2 (the maker sells USDC-MON) passed, payment and spend, and cell
+> B, the refund case (maker USDC-MON, taker Siacoin), passed. In cell B the
+> maker's real payment carried D20 left-aligned in the hash slot (payment word 4)
+> and the leading 20 bytes of H32 (the value before the fix) appeared in no
+> word; the maker's refund transaction carried D20 in its payment-hash slot
+> (refund word 2); the maker ended
+> MakerPaymentRefunded and Finished with no "secret_hash arg ... is invalid" line
+> in either log; the taker never sent its Siacoin and ended cleanly. The maker's
+> USDC-MON balance was exactly back to its starting amount after the refund (the
+> token is not reduced by gas; gas is paid in MON). A run of the build before
+> the fix, for comparison, was not done.
+>
+> The QRC20 legacy swap uses the same contract and the same `bytes20` slot,
+> and has the same defect and the same fix, with the same helpers
+> (`mm2src/coins/qrc20/swap.rs`). `erc20_payment_call_bytes` derives the slot
+> value (a wrong width is an `InvalidParams` error, so no payment is built);
+> both the payment build and the validation's expected call bytes come from
+> it. `validate_payment` also compares the decoded slot with the derived
+> value through `check_payment_secret_hash_arg`, before the call-bytes
+> comparison, so the error names the derived value as expected.
+> `extract_secret_impl` and `search_for_swap_tx_spend` compare the
+> `dhash160` of a revealed secret with the derived value instead of the
+> shared one, which for a 32-byte shared value could never match.
+> Unchanged, with reasons: the swap id (`qrc20_swap_id`, over the shared
+> value on both sides); the refund (`refund_hash_time_locked_payment`,
+> `sender_refund_output`) and `wait_for_tx_spend_impl`, which read the
+> `secret_hash` of the payment transaction, already the derived value; the
+> trade-fee estimate, which uses a 20-byte dummy. The QRC20 path is covered
+> by unit tests only (`r72a_qrc20_*` in `qrc20_tests.rs`; run on 2026-11-08:
+> 9 passed); the live lab row is Siacoin against an EVM token. The v2 EVM
+> swap contracts take 32-byte hashes (`bytes32`) and the TRON V1 path has no
+> secret hash; neither is affected.
 
 **R74.** *Which key each side puts on the wire under a global-HD login.*
 *(Passed the KDF Dirty Gate on 2026-11-04, measure 0.04. Reference fact, Spec Reader 2026-11-04, rows

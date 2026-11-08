@@ -374,11 +374,15 @@ parsing is not the place that width is enforced or relaxed: it is
 entitled to assume chapter 51's negotiation layer already
 delivered a 32-byte value, and MUST continue to reject a
 `secret_hash` of any other length as a parse failure rather than
-attempt to pad or reinterpret it. Chapter 51 §51.9.1 records, as a
-code-quality finding, that this repository's negotiation layer
-does not yet perform the R72 selection for Sia; until it does,
-this module's own correct 32-byte-only parsing cannot by itself
-make a Sia-involved legacy swap complete.
+attempt to pad or reinterpret it. *(Updated 2026-11-07.)* The
+selection is performed: the legacy maker swap calls
+`select_secret_hash_algo` (`lp_swap.rs`) once per swap and the taker
+adopts the negotiated value, so a Sia-involved legacy swap negotiates
+the 32-byte value. The other leg's coin layer derives what its own
+construction needs from that shared value (chapter 51 R72A): the UTXO
+layer and, as of this change, the EVM coin layer do. This module's own
+parsing stays 32-byte-only, as above. Chapter 51 §51.9.1 records the
+detail.
 
 **R-S11 (trading floors; Spec Reader 2026-10-25, cleared by the
 Dirty Gate with chapter 60 on 2026-10-25).** Sia's minimum trading volume and
