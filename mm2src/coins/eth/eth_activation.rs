@@ -423,10 +423,31 @@ pub async fn build_eth_hd_wallet(
     let hd_wallet_storage = HDWalletCoinStorage::init(ctx, ticker.to_owned(), key_policy)
         .await
         .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
-    let stored = hd_wallet_storage
-        .load_all_accounts()
-        .await
-        .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
+    // A coin of the software policy loads only the accounts its seed derived; the rows it did not derive are
+    // removed (CRD ch.05 R55 (1)). A coin of the Trezor policy loads its rows as stored: its keys need the device.
+    let stored = match key_policy {
+        HDWalletStorageKeyPolicy::Software => {
+            use crypto::Bip32DerPathOps;
+
+            let crypto_ctx = crypto::CryptoCtx::from_ctx(ctx).mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
+            let global_hd = match crypto_ctx.key_pair_policy() {
+                crypto::KeyPairPolicy::GlobalHDAccount(global_hd) => global_hd,
+                crypto::KeyPairPolicy::Iguana => {
+                    return MmError::err(EthCoinBuildError::Internal(
+                        "An HD wallet needs a global-HD login".to_owned(),
+                    ))
+                },
+            };
+            hd_wallet_storage
+                .load_accounts_derived_from_seed(global_hd.root_priv_key(), &derivation_path.to_derivation_path())
+                .await
+                .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?
+        },
+        HDWalletStorageKeyPolicy::Hardware => hd_wallet_storage
+            .load_all_accounts()
+            .await
+            .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?,
+    };
     let loaded: Result<HDAccountsMap<EthHDAccount>, _> = stored
         .iter()
         .map(|item| {

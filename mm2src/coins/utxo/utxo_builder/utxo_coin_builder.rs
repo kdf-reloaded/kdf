@@ -328,7 +328,11 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
             .await
             .mm_err(Into::into)?;
         let accounts = self
-            .load_hd_wallet_accounts(&hd_wallet_storage, &derivation_path)
+            .load_hd_wallet_accounts(
+                &hd_wallet_storage,
+                &derivation_path,
+                Some(global_hd_ctx.root_priv_key()),
+            )
             .await?;
         let gap_limit = self.gap_limit();
         let hd_wallet = UtxoHDWallet {
@@ -402,7 +406,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
             .mm_err(Into::into)?;
 
         let accounts = self
-            .load_hd_wallet_accounts(&hd_wallet_storage, &derivation_path)
+            .load_hd_wallet_accounts(&hd_wallet_storage, &derivation_path, None)
             .await?;
         let gap_limit = self.gap_limit();
         let hd_wallet = UtxoHDWallet {
@@ -447,8 +451,9 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         &self,
         hd_wallet_storage: &HDWalletCoinStorage,
         derivation_path: &HDPathToCoin,
+        software_master: Option<&bip32::ExtendedPrivateKey<secp256k1::SecretKey>>,
     ) -> UtxoCoinBuildResult<HDAccountsMap<UtxoHDAccount>> {
-        utxo_common::load_hd_accounts_from_storage(hd_wallet_storage, derivation_path)
+        utxo_common::load_hd_accounts_from_storage(hd_wallet_storage, derivation_path, software_master)
             .await
             .mm_err(UtxoCoinBuildError::from)
     }

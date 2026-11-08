@@ -267,11 +267,22 @@ where
     Ok(balances)
 }
 
+/// Loads the stored HD accounts of a coin. `software_master` is the seed's BIP-32 master for a coin of the
+/// software policy: the rows that the seed did not derive are removed and not loaded (CRD ch.05 R55 (1)).
+/// A coin of the Trezor policy passes `None`: its rows are loaded as stored, since its keys need the device.
 pub async fn load_hd_accounts_from_storage(
     hd_wallet_storage: &HDWalletCoinStorage,
     derivation_path: &HDPathToCoin,
+    software_master: Option<&bip32::ExtendedPrivateKey<secp256k1::SecretKey>>,
 ) -> HDWalletStorageResult<HDAccountsMap<UtxoHDAccount>> {
-    let accounts = hd_wallet_storage.load_all_accounts().await?;
+    let accounts = match software_master {
+        Some(master) => {
+            hd_wallet_storage
+                .load_accounts_derived_from_seed(master, &derivation_path.to_derivation_path())
+                .await?
+        },
+        None => hd_wallet_storage.load_all_accounts().await?,
+    };
     let res: HDWalletStorageResult<HDAccountsMap<UtxoHDAccount>> = accounts
         .iter()
         .map(|account_info| {

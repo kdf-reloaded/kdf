@@ -1113,7 +1113,16 @@ at the anchor was `Iguana`, and the device was the only HD key source
 > `HwContextNotInitialized` when it is empty (R54, T35). Two points of R54
 > and R53 stay open: a new address of a `Trezor`-policy coin is derived from
 > the stored account key and not confirmed on the device (a follow-up), and
-> the BCH task refuses the `Trezor` policy (chapter 55 R55.9.2).
+> the BCH task refuses the `Trezor` policy (chapter 55 R55.9.2). When the
+> accounts of a coin of the software policy are loaded from storage, each
+> stored row's account extended public key is compared with the key the
+> seed derives for that account index below the coin's derivation path; a
+> row that differs (one an earlier build stored for a `Trezor`-policy coin
+> under the software digest) is deleted and not loaded, with one WARN that
+> names the ticker and the removed account ids and carries no key material.
+> A failure of the derivation or of the removal fails the load. R55 (1)
+> therefore holds also for rows written before this change. Tests:
+> `test_r55_*` in `coins/hd_wallet_storage/mod.rs`.
 
 > **Code-quality finding (informative; this repository, 2026-11-08).**
 > *Trigger:* a contradiction between two things read side by side — the

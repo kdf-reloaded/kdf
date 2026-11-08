@@ -1,6 +1,7 @@
 use crate::hd_wallet::HDWalletCoinOps;
 use async_trait::async_trait;
-use crypto::{CryptoCtx, CryptoCtxError, CryptoInitError, XPub};
+use common::log::warn;
+use crypto::{ChildNumber, CryptoCtx, CryptoCtxError, CryptoInitError, DerivationPath, Secp256k1ExtendedPublicKey, XPub};
 use derive_more::Display;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
@@ -10,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::Formatter;
 use std::ops::Deref;
+use std::str::FromStr;
 
 #[cfg(not(target_arch = "wasm32"))] mod sqlite_storage;
 #[cfg(target_arch = "wasm32")] mod wasm_storage;
@@ -315,6 +317,47 @@ impl HDWalletCoinStorage {
         })
     }
 
+    /// Loads the stored accounts of a coin of the software policy, and removes the rows that the wallet's seed
+    /// did not derive (CRD ch.05 R55 (1)): a row whose `account_xpub` differs from the extended public key the
+    /// seed derives for that `account_id` below `coin_path` (an older build stored the accounts of a Trezor-policy
+    /// coin under the seed's identity). Such a row is deleted, so that the account created for its index later is
+    /// not a second row, and is not loaded. One WARN per load names the ticker and the removed account ids; it
+    /// carries no key, address or host. A row whose `account_xpub` cannot be read is left to the loader.
+    ///
+    /// A coin of the Trezor policy does not come here: its keys need the device.
+    ///
+    /// # Errors
+    ///
+    /// Any storage failure, a failed derivation or a failed removal fails the load; no unchecked row is returned.
+    pub async fn load_accounts_derived_from_seed(
+        &self,
+        master: &bip32::ExtendedPrivateKey<secp256k1::SecretKey>,
+        coin_path: &DerivationPath,
+    ) -> HDWalletStorageResult<Vec<HDAccountStorageItem>> {
+        let stored = self.load_all_accounts().await?;
+        let mut accounts = Vec::with_capacity(stored.len());
+        let mut foreign_account_ids = Vec::new();
+        for item in stored {
+            if is_account_of_the_seed(master, coin_path, &item)? {
+                accounts.push(item);
+            } else {
+                foreign_account_ids.push(item.account_id);
+            }
+        }
+        for account_id in &foreign_account_ids {
+            self.remove_account(*account_id).await?;
+        }
+        if !foreign_account_ids.is_empty() {
+            warn!(
+                "{}: removed {} stored HD account(s) that the wallet's seed did not derive, account ids {:?}",
+                self.coin,
+                foreign_account_ids.len(),
+                foreign_account_ids
+            );
+        }
+        Ok(accounts)
+    }
+
     pub fn wallet_id(&self) -> HDWalletId {
         HDWalletId::new(self.coin.clone(), &self.mm2_rmd160, &self.hd_wallet_rmd160)
     }
@@ -365,6 +408,28 @@ impl HDWalletCoinStorage {
         let wallet_id = self.wallet_id();
         self.inner.clear_accounts(wallet_id).await
     }
+}
+
+/// Whether the stored row holds the extended public key the seed derives for its account index (CRD ch.05 R55).
+/// The expected key is the one the software derivation of R30 gives: the coin's derivation path plus the hardened
+/// account index.
+fn is_account_of_the_seed(
+    master: &bip32::ExtendedPrivateKey<secp256k1::SecretKey>,
+    coin_path: &DerivationPath,
+    item: &HDAccountStorageItem,
+) -> HDWalletStorageResult<bool> {
+    let stored = match Secp256k1ExtendedPublicKey::from_str(&item.account_xpub) {
+        Ok(stored) => stored,
+        // An unreadable row is the loader's own case (it clears the accounts), not a foreign key.
+        Err(_) => return Ok(true),
+    };
+    let account_child = ChildNumber::new(item.account_id, true)
+        .map_to_mm(|e| HDWalletStorageError::Internal(format!("Invalid stored account index: {}", e)))?;
+    let mut account_path = coin_path.clone();
+    account_path.push(account_child);
+    let derived = crypto::derive_secp256k1_extended_pubkey(master.clone(), &account_path)
+        .mm_err(|e| HDWalletStorageError::Internal(format!("BIP32 derivation error: {}", e)))?;
+    Ok(derived.to_string(bip32::Prefix::XPUB) == stored.to_string(bip32::Prefix::XPUB))
 }
 
 fn display_rmd160(rmd160: &H160) -> String { hex::encode(rmd160.deref()) }
@@ -834,4 +899,187 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_wallet_identity_has_no_fallback() { block_on(test_wallet_identity_has_no_fallback_impl()) }
+
+    const FOREIGN_MNEMONIC: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+    const SEED_MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    fn master_of(mnemonic: &str) -> bip32::ExtendedPrivateKey<secp256k1::SecretKey> {
+        use crypto::KeyPairPolicy;
+
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        let crypto_ctx = CryptoCtx::init_with_global_hd_account(ctx, mnemonic).unwrap();
+        match crypto_ctx.key_pair_policy() {
+            KeyPairPolicy::GlobalHDAccount(global_hd) => global_hd.root_priv_key().clone(),
+            KeyPairPolicy::Iguana => panic!("expected a global-HD login"),
+        }
+    }
+
+    /// The extended public key the software derivation gives at `path`, as it is stored.
+    fn xpub_at(master: &bip32::ExtendedPrivateKey<secp256k1::SecretKey>, path: &str) -> String {
+        crypto::derive_secp256k1_extended_pubkey(master.clone(), &DerivationPath::from_str(path).unwrap())
+            .unwrap()
+            .to_string(bip32::Prefix::XPUB)
+    }
+
+    fn row(account_id: u32, xpub: String, external_addresses_number: u32) -> HDAccountStorageItem {
+        HDAccountStorageItem {
+            account_id,
+            account_xpub: xpub,
+            external_addresses_number,
+            internal_addresses_number: 0,
+        }
+    }
+
+    async fn stored_rows(db: &HDWalletCoinStorage) -> Vec<HDAccountStorageItem> {
+        let mut rows = db.load_all_accounts().await.expect("!load_all_accounts");
+        rows.sort_by_key(|row| row.account_id);
+        rows
+    }
+
+    async fn software_db(ctx: &MmArc) -> HDWalletCoinStorage {
+        HDWalletCoinStorage::init_with_identities(
+            ctx,
+            "DOC".to_owned(),
+            HDWalletStorageKeyPolicy::Software,
+            Some(H160::from("0000000000000000000000000000000000000001")),
+            None,
+        )
+        .await
+        .expect("!init")
+    }
+
+    /// CRD ch.05 R55 (1): a software activation does not load a row the seed did not derive. The row is removed,
+    /// the account created for its index later is the only row of that index, and a second load changes nothing.
+    async fn test_r55_a_foreign_row_is_removed_and_not_loaded_impl() {
+        let master = master_of(SEED_MNEMONIC);
+        let foreign_master = master_of(FOREIGN_MNEMONIC);
+        let coin_path = DerivationPath::from_str("m/44'/141'").unwrap();
+        let own_account_1 = row(1, xpub_at(&master, "m/44'/141'/1'"), 2);
+        let foreign_account_0 = row(0, xpub_at(&foreign_master, "m/44'/141'/0'"), 3);
+
+        let ctx = mm_ctx_with_custom_db();
+        let db = software_db(&ctx).await;
+        db.upload_new_account(foreign_account_0).await.expect("!upload");
+        db.upload_new_account(own_account_1.clone()).await.expect("!upload");
+
+        // Only the seed's account is loaded; the foreign row is removed.
+        let loaded = db
+            .load_accounts_derived_from_seed(&master, &coin_path)
+            .await
+            .expect("!load_accounts_derived_from_seed");
+        assert_eq!(loaded, vec![own_account_1.clone()]);
+        assert_eq!(stored_rows(&db).await, vec![own_account_1.clone()]);
+
+        // The activation creates account 0 from the seed: exactly one row with account_id 0 remains.
+        let seed_account_0 = row(0, xpub_at(&master, "m/44'/141'/0'"), 0);
+        db.upload_new_account(seed_account_0.clone()).await.expect("!upload");
+        let rows = stored_rows(&db).await;
+        assert_eq!(rows, vec![seed_account_0.clone(), own_account_1.clone()]);
+        assert_eq!(rows.iter().filter(|row| row.account_id == 0).count(), 1);
+
+        // A second activation loads both, and removes nothing.
+        let mut loaded = db
+            .load_accounts_derived_from_seed(&master, &coin_path)
+            .await
+            .expect("!load_accounts_derived_from_seed");
+        loaded.sort_by_key(|row| row.account_id);
+        assert_eq!(loaded, vec![seed_account_0.clone(), own_account_1.clone()]);
+        assert_eq!(stored_rows(&db).await, vec![seed_account_0, own_account_1]);
+    }
+
+    /// CRD ch.05 R55 (1): where every stored row is the seed's, nothing is removed.
+    async fn test_r55_matching_rows_are_all_loaded_impl() {
+        let master = master_of(SEED_MNEMONIC);
+        let coin_path = DerivationPath::from_str("m/44'/141'").unwrap();
+        let rows: Vec<_> = (0..3)
+            .map(|id| row(id, xpub_at(&master, &format!("m/44'/141'/{}'", id)), id + 1))
+            .collect();
+
+        let ctx = mm_ctx_with_custom_db();
+        let db = software_db(&ctx).await;
+        for item in &rows {
+            db.upload_new_account(item.clone()).await.expect("!upload");
+        }
+
+        let mut loaded = db
+            .load_accounts_derived_from_seed(&master, &coin_path)
+            .await
+            .expect("!load_accounts_derived_from_seed");
+        loaded.sort_by_key(|row| row.account_id);
+        assert_eq!(loaded, rows);
+        assert_eq!(stored_rows(&db).await, rows);
+    }
+
+    /// CRD ch.05 R55 (1) through the UTXO loader: a coin of the software policy (the seed's master given) drops
+    /// the foreign row; a coin of the Trezor policy (no master) loads its rows as stored, unchecked.
+    async fn test_r55_the_utxo_loader_checks_software_coins_only_impl() {
+        use crate::utxo::utxo_common::load_hd_accounts_from_storage;
+
+        let master = master_of(SEED_MNEMONIC);
+        let foreign_master = master_of(FOREIGN_MNEMONIC);
+        let coin_path = crypto::HDPathToCoin::from_str("m/44'/141'").unwrap();
+
+        let ctx = mm_ctx_with_custom_db();
+        let db = software_db(&ctx).await;
+        db.upload_new_account(row(0, xpub_at(&foreign_master, "m/44'/141'/0'"), 3))
+            .await
+            .expect("!upload");
+        db.upload_new_account(row(1, xpub_at(&master, "m/44'/141'/1'"), 2))
+            .await
+            .expect("!upload");
+
+        // The Trezor-policy coin: unchecked, both rows are loaded and kept.
+        let unchecked = load_hd_accounts_from_storage(&db, &coin_path, None)
+            .await
+            .expect("!load: Trezor policy");
+        assert_eq!(unchecked.keys().cloned().collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(stored_rows(&db).await.len(), 2);
+
+        // The software coin: the foreign account 0 is not loaded and is removed.
+        let checked = load_hd_accounts_from_storage(&db, &coin_path, Some(&master))
+            .await
+            .expect("!load: software policy");
+        assert_eq!(checked.keys().cloned().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            stored_rows(&db)
+                .await
+                .iter()
+                .map(|row| row.account_id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test]
+    async fn test_r55_a_foreign_row_is_removed_and_not_loaded() {
+        test_r55_a_foreign_row_is_removed_and_not_loaded_impl().await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_r55_a_foreign_row_is_removed_and_not_loaded() {
+        block_on(test_r55_a_foreign_row_is_removed_and_not_loaded_impl())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test]
+    async fn test_r55_matching_rows_are_all_loaded() { test_r55_matching_rows_are_all_loaded_impl().await }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_r55_matching_rows_are_all_loaded() { block_on(test_r55_matching_rows_are_all_loaded_impl()) }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test]
+    async fn test_r55_the_utxo_loader_checks_software_coins_only() {
+        test_r55_the_utxo_loader_checks_software_coins_only_impl().await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_r55_the_utxo_loader_checks_software_coins_only() {
+        block_on(test_r55_the_utxo_loader_checks_software_coins_only_impl())
+    }
 }
