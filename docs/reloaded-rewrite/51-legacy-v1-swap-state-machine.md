@@ -1580,8 +1580,8 @@ carry it.
 > word; the maker's refund transaction carried D20 in its payment-hash slot
 > (refund word 2); the maker ended
 > MakerPaymentRefunded and Finished with no "secret_hash arg ... is invalid" line
-> in either log; the taker never sent its Siacoin and ended cleanly. The maker's
-> USDC-MON balance was exactly back to its starting amount after the refund (the
+> in either log; the taker never sent its Siacoin payment and ended cleanly. The
+> maker's USDC-MON balance was exactly back to its starting amount after the refund (the
 > token is not reduced by gas; gas is paid in MON). A run of the build before
 > the fix, for comparison, was not done.
 >
