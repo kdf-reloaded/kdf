@@ -583,6 +583,11 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
     poll.
 
   Detail: PR #255; CRD ch.17 R17.8.3a.
+- **A swap between Siacoin (or another coin with a 32-byte hash lock) and an EVM coin or token can now
+  complete.** The EVM payment embeds the value the swap contract checks, derived from the 32-byte
+  secret hash, and the validation of a payment expects that value. Before, the counterparty refused the
+  payment. QRC20 payments now embed and validate the same derived value, and the secret of a spend is
+  checked against it; the QRC20 path is covered by unit tests only. Detail: PR #290; CRD ch.51 R72A.
 - **A nonce read that one EVM node fails while another answers is now logged as a warning naming
   that node, and a single node's error no longer says "all EVM nodes failed".** Before a send, the
   daemon asks every node of the coin for the pending nonce. A node that failed got an info line
