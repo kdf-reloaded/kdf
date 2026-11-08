@@ -689,8 +689,8 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   belong to the first, and stored the second device's accounts under the first one's identity. Now such
   a coin remembers the device it was activated with and answers `FoundUnexpectedDevice`,
   `get_new_address` included, before it asks the device or writes anything; it works again with its own
-  device, or after it is activated anew with the other one. A swap that is already running keeps signing
-  with the coin's own device and refuses any other. Detail: PR #302; CRD ch.05 §5.10B R58a and R58a.1.
+  device, or after it is activated anew with the other one. A swap keeps signing with the coin's own
+  device and refuses any other. Detail: PR #302; CRD ch.05 §5.10B R58a and R58a.1.
 - **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
   trailer are read correctly for the median time.** Bitcoin Atom (BCA) serves 84-byte headers from block
   505888; Reloaded read them as 80 bytes, so the median time it needs before every HTLC spend and refund

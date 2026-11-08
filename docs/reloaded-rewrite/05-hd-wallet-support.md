@@ -1170,7 +1170,7 @@ of R51 of the hardware context the activation used. Before every operation
 of that coin that would use the device or the device's storage namespace —
 reading an account's extended public key (`task::create_new_account` and
 the account an activation creates), deriving a new address, and signing
-(except a running swap, R58a.1) — the node compares the recorded digest
+(except a swap's signing, R58a.1) — the node compares the recorded digest
 with the digest of the current hardware context. On a mismatch the
 operation fails with `FoundUnexpectedDevice` before the device or the
 storage is touched; an empty slot keeps the answer it had:
@@ -1184,18 +1184,19 @@ new device's keys against the old device's accounts, Reloaded refuses.
 Under `docs/COMPAT_SWITCHES.md`, "The default-side rule", arm 2: Reloaded's
 behavior by default, no switch.
 
-**R58a.1.** *A running swap keeps its device (Reloaded-original;
+**R58a.1.** *A swap keeps the coin's device (Reloaded-original;
 2026-11-08, batch 4 item B4-14, review of PR #302).* The swap-v2 signing of
 a UTXO coin is excepted from R58a's comparison with the current hardware
-context. A swap that is already running keeps signing through the coin's
-recorded hardware context, whose connection check reads the identity of the
-connected device and refuses any other device with `FoundUnexpectedDevice`.
-The swap therefore signs with the coin's own device whenever that device is
-connected, also after a re-init put another device in the slot, and never
-with another device. *Rationale:* refusing a running swap would cost the
-trader a wait for the refund. *Safety:* as under R58a, no other device signs
-and nothing is written to another device's storage namespace; unlike R58a,
-the device is asked before the refusal.
+context. A swap, whether it was already running or starts later, signs
+through the coin's recorded hardware context, whose connection check reads
+the identity of the connected device and refuses any other device with
+`FoundUnexpectedDevice`. The swap therefore signs with the coin's own
+device whenever that device is connected, also after a re-init put another
+device in the slot, and never with another device. *Rationale:* refusing a
+swap's signing would cost the trader a wait for the refund. *Safety:* as
+under R58a, no other device signs and nothing is written to another
+device's storage namespace; unlike R58a, the device is asked before the
+refusal.
 
 > **As built (2026-11-08, clean-side record; batch 4 item B4-14, PR #302).**
 > A coin activated under the `Trezor` policy keeps the hardware context its
