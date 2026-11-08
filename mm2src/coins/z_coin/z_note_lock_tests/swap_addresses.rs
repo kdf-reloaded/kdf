@@ -1,5 +1,6 @@
 //! The history rows of the transactions the node builds for a swap list their addresses (CRD ch.39
-//! R39.8.9d3, T39.8.9d3).
+//! R39.8.9d3, T39.8.9d3) and report their fee (R39.8.9e1, T39.8.9e1): the payment and the fee payment the
+//! fee they paid, the spend and the refund `0`.
 //!
 //! The harness is the one of the parent module: a real `ZCoin` over a real `zcash_client_sqlite` wallet
 //! database and the scripted lightwalletd transport. The transactions are the ones the swap code builds:
@@ -8,6 +9,7 @@
 //! a compact block made of it; a "restart" is a new coin over the same database directory. The tests make
 //! real Sapling proofs, so they need the Sapling parameter files and say so where those are absent.
 
+use super::history_fee::paid_fee;
 use super::withdraw_recipient::{own_address, page, row_of, sorted};
 use super::*;
 use crate::utxo::utxo_common::payment_script;
@@ -85,6 +87,9 @@ async fn t39_8_9d3_a_payment_lists_the_script_address_and_nothing_for_the_data_c
     let script_address = p2sh_address(&fixture.coin, &redeem).to_string();
     assert_is_script_address(&fixture, &script_address, &redeem);
     let expected_to = sorted(vec![script_address, own.clone()]);
+    // The fee the build paid, read from the transaction (R39.8.9e1 (a)).
+    let fee = paid_fee(&tx);
+    assert!(fee > 0, "the payment pays a fee");
 
     let check = |fixture: &LightCoinFixture, mined: bool| {
         let page = page(fixture);
@@ -93,6 +98,7 @@ async fn t39_8_9d3_a_payment_lists_the_script_address_and_nothing_for_the_data_c
         assert_eq!(row.to, expected_to, "mined: {mined}");
         assert_eq!(row.from, vec![own.clone()], "mined: {mined}");
         assert_eq!(row.block_height != 0, mined);
+        assert_eq!(row.transaction_fee, sat(fee), "mined: {mined}");
     };
 
     // The unmined row, and after a restart.
@@ -126,6 +132,9 @@ async fn t39_8_9d3_a_fee_payment_lists_the_fee_address_in_the_sapling_form() {
     assert!(fee_address.starts_with(&hrp), "the coin's prefix: {fee_address}");
     assert_ne!(fee_address, own, "the fee address is not the wallet's own");
     let expected_to = sorted(vec![fee_address, own.clone()]);
+    // The fee the build paid, read from the transaction (R39.8.9e1 (a)).
+    let fee = paid_fee(&tx);
+    assert!(fee > 0, "the fee payment pays a fee");
 
     let check = |fixture: &LightCoinFixture, mined: bool| {
         let page = page(fixture);
@@ -134,6 +143,7 @@ async fn t39_8_9d3_a_fee_payment_lists_the_fee_address_in_the_sapling_form() {
         assert_eq!(row.to, expected_to, "mined: {mined}");
         assert_eq!(row.from, vec![own.clone()], "mined: {mined}");
         assert_eq!(row.block_height != 0, mined);
+        assert_eq!(row.transaction_fee, sat(fee), "mined: {mined}");
     };
 
     check(&fixture, false);
@@ -149,6 +159,7 @@ async fn t39_8_9d3_a_fee_payment_lists_the_fee_address_in_the_sapling_form() {
 /// T39.8.9d3 (c): the rows of a spend of the counterparty's payment and of a refund of the node's own list
 /// the script's address in `from` and the wallet's own address in `to`. Neither spends a wallet note, so
 /// neither has an unmined row (R39.8.9i): each shows up when it is mined, and the same after a restart.
+/// Both report a fee of `0` (R39.8.9e1 (b)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t39_8_9d3_a_spend_and_a_refund_list_the_script_address_as_the_sender() {
     let Some(mut fixture) = LightCoinFixture::new() else {
@@ -203,6 +214,9 @@ async fn t39_8_9d3_a_spend_and_a_refund_list_the_script_address_as_the_sender() 
             assert_eq!(row.from, vec![script_address.clone()], "{name}");
             assert_eq!(row.to, vec![own.clone()], "{name}");
             assert_ne!(row.block_height, 0, "{name} is mined");
+            // The transaction pays a fee, but it spends no wallet note and is not recorded at broadcast,
+            // so the wallet database holds none (R39.8.9e1 (b)).
+            assert_eq!(row.transaction_fee, BigDecimal::from(0), "{name}");
         }
     };
     check(&fixture);
@@ -241,7 +255,11 @@ async fn t39_8_9d3_a_failing_record_leaves_the_swap_step_whole_and_the_row_witho
     let page = page(&fixture);
     let payment_row = row_of(&page, &payment);
     assert_eq!(payment_row.to, vec![own.clone()], "no script address");
+    // The fee is held by the wallet database, not by the address record: the payment keeps it, the
+    // spend reports `0`.
+    assert_eq!(payment_row.transaction_fee, sat(paid_fee(&payment)));
     let spend_row = row_of(&page, &spend);
     assert!(spend_row.from.is_empty(), "no script address");
+    assert_eq!(spend_row.transaction_fee, BigDecimal::from(0));
     assert_eq!(spend_row.to, vec![own]);
 }

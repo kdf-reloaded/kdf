@@ -266,7 +266,7 @@ impl InitStandaloneCoinActivationOps for SiaCoin {
                 .mm_err(|error| SiaInitError::CouldNotGetBalance(error.to_string()))?;
             single_address_wallet_balance(address, balance)
         } else {
-            self.enable_coin_balance(xpub_extractor, EnableCoinScanPolicy::default(), 0)
+            self.enable_coin_balance(xpub_extractor, EnableCoinScanPolicy::default(), 0, None)
                 .await
                 .mm_err(|error| SiaInitError::CouldNotGetBalance(error.to_string()))?
         };

@@ -150,6 +150,21 @@ transaction the node builds, which is cheap at today's sizes. Marking an entry o
 transaction is mined, or joining the record into the wallet-database query, would make both
 cost only the new entries.
 
+### 6. Fee of a shielded history row (done for the node's own sends)
+
+`z_coin_tx_history` reported `transaction_fee` 0 on every row, although a withdrawal's answer
+names its fee. A live withdrawal in the release tests showed it on 2026-11-07. CRD ch.39 R39.8.9e
+computes the fee from the full transaction, which a Light-mode wallet does not have.
+
+**Done** (decided 2026-11-07) in PR #288, ch.39 R39.8.9e1: an own send (a withdrawal, a swap
+payment, a swap fee payment) reports the fee the node recorded at broadcast. A transaction
+another wallet built, a swap spend or refund, and an own send found again after a rebuild of the
+wallet database report 0.
+
+Later, if it matters: a swap spend or refund could record its fee when it is built, as item 5
+records its address. The fee of a transaction another wallet built would need the full
+transaction from the light endpoint.
+
 ## Open questions
 
 - Which reference behavior, if any, applies? The reference builds no version-6 transactions.

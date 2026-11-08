@@ -287,6 +287,19 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 
 #### UTXO coins and Electrum
 
+- **`fetch_utxos`, `consolidate_utxos` and the automatic merge (`utxo_merge_params`) now work
+  under an HD login**, as they do in GLEEC KDF. Until now the two commands were refused and the
+  automatic merge stayed off.
+  - `fetch_utxos` lists the unspent outputs of every address the wallet knows, in every account. It
+    makes no new address known.
+  - `consolidate_utxos` merges only the outputs of the coin's own address, the one at
+    `path_to_address`, into one output paid back to it. No other address is touched. With
+    `broadcast: false` it returns the transaction without sending it.
+  - The automatic merge works on the same address, for a UTXO coin such as RIN and for QTUM.
+  - Under a Trezor key, `consolidate_utxos` answers `InvalidAddress` and the automatic merge stops,
+    so the device is never asked to sign; `fetch_utxos` works.
+
+  Detail: PR #281; CRD ch.05 R35b.
 - **Electrum reads now go only to the servers with the shortest round trip.** Since 0.3.0-beta.1
   a coin's read-only Electrum queries took turns over every connected server, so a distant server
   in the list answered one read in N. Now they take turns only among the connected servers whose
@@ -385,6 +398,30 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   affected. Set the `MM2.json` boolean `swap_key_check` to `false` to restore the earlier behavior,
   in which such a swap is negotiated and then fails. Since the entry above, no coin is refused any
   more; the check stays as a guard. Detail: PRs #231, #233; CRD ch.05 R36–R40.
+
+#### Accounts and addresses under an HD login
+
+- **Under an HD login, activation now lists the coin's own address from the start.** A UTXO coin
+  such as RIN or QTUM activated through its task method, and an EVM coin activated with its tokens,
+  list the address at `path_to_address` (by default account 0, External, address 0) with its balance
+  in the activation result, in `account_balance` and in `my_tx_history`, without `get_new_address`.
+  If that address's account does not exist yet, activation creates it and reports only that account.
+  This is what GLEEC KDF does. Until now the coins that a swap paid to that address could stay
+  unlisted until `get_new_address` reached it. An `address_id` of 2^31 or more fails activation with
+  an internal error. Detail: PR #279; CRD ch.05 R35a.
+- **`task::create_new_account` now works under an HD login without a hardware wallet.** It serves a
+  UTXO coin such as RIN, QTUM, EVM coins and Siacoin; until now it asked for a hardware wallet first
+  and failed.
+  - The request takes an optional `account_id`. Without it, the lowest unused account number is
+    taken.
+  - With an `account_id` that is already in use, the task ends with `AccountAlreadyExists` (with the
+    `account_id`) before anything is derived; `task::create_new_account::status` reports it. GLEEC
+    KDF reports an internal error there.
+  - `task::create_new_account::cancel` is now served. Cancelling removes the account the task
+    created if it is the wallet's highest-numbered account.
+  - Under a software login the task reports `Preparing` and then its result.
+
+  Detail: PR #279; CRD ch.05 R35c.
 
 #### Name lookups
 
@@ -489,6 +526,11 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   the script address it spends from. Their rows used to list only the wallet's own address. The
   node records these addresses when it builds the transaction, in the same file as a withdrawal's
   recipient, and fetches nothing. Detail: PR #277; CRD ch.39 R39.8.9d3.
+
+- **The ARRR history now reports the fee of the wallet's own sends.** A withdrawal, a swap payment
+  and a swap fee payment show the fee they paid in `transaction_fee`, before and after mining. Every
+  row used to report 0. The fee comes from the record the node writes when the backend accepts the
+  broadcast. Found in a live test. Detail: PR #288; CRD ch.39 R39.8.9e1.
 
 #### EVM coins
 
@@ -681,6 +723,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   written (CRD PR #227), and its generic part, the word's writer and fail-closed reader and the
   decline log lines, is implemented (PR #235); the ARRR rule that uses it is written (CRD PR #230)
   and implemented (PR #241).
+  The shielded history gained two items: the addresses of a swap's own transactions (PR #277) and
+  the fee of an own send (PR #288).
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
@@ -716,7 +760,10 @@ file carries the detail. "New" means the plan was created in this cycle.
   now says what GLEEC KDF does under an HD login, and lists the planned change to legacy `enable` and
   `electrum` with its switch (PR #245). The direct `withdraw` under an HD login and the refusal of
   `from` under an iguana login are done (items H5.1 and H5.5, PR #270); the maintainer set the
-  default sender to the coin's activated address (decision CU).
+  default sender to the coin's activated address (decision CU). Activation lists the address at
+  `path_to_address`, and `task::create_new_account` works without a hardware wallet (items H5.0 and
+  H5.4, PR #279). `fetch_utxos`, `consolidate_utxos` and the automatic merge work under an HD login
+  (item H5.3, PR #281).
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
@@ -755,13 +802,6 @@ file carries the detail. "New" means the plan was created in this cycle.
 What does not work yet, or works only in part, in this release. Each item says where more detail
 lives.
 
-- **Under an HD login, a UTXO coin such as RIN can show no address and no balance although its swap
-  address holds funds.** An HD account lists only the addresses it has handed out. A swap uses the
-  coin's address at `path_to_address` (by default account 0, External, address 0) even when the
-  account has not listed it yet, so the coins a swap pays you can arrive there unlisted. Restarting
-  the node does not change this. Requesting an address with `get_new_address` lists it together with
-  its balance. The funds are not affected. More in
-  [`hd-key-unification`](docs/plans/hd-key-unification.md), item H5.
 - **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
   `get_enabled_coins` fails as a whole once such a coin is enabled.** Both report a single address,
   and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for
@@ -836,6 +876,10 @@ lives.
   fetches nothing more. Swap rows from before this release keep the sets they had. More in
   [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PRs #268,
   #277; CRD ch.39 R39.8.9d2 (d), R39.8.9d3 (d).
+- **The ARRR history reports a fee of 0 where the node does not know the fee.** That is the case
+  for a transaction another wallet built, such as a deposit, for a swap's spend or refund, and for
+  an own send that a rebuilt wallet database found by scanning. The node reads compact blocks,
+  which carry no fee data, and fetches nothing more. Detail: PR #288; CRD ch.39 R39.8.9e1 (b), (c).
 - **An ARRR withdrawal takes no memo, and its answer has no `memo` member.** The `withdraw`
   request has no `memo` field, so a memo sent with it is ignored and the shielded output carries
   none. Komodo DeFi Framework and GLEEC KDF echo the request's memo in the answer. Memo support is

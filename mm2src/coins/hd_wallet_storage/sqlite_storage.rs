@@ -27,6 +27,9 @@ const INSERT_ACCOUNT: &str = "INSERT INTO hd_account
 const DELETE_ACCOUNTS_BY_WALLET_ID: &str =
     "DELETE FROM hd_account WHERE coin=?1 AND mm2_rmd160=?2 AND hd_wallet_rmd160=?3;";
 
+const DELETE_ACCOUNT: &str =
+    "DELETE FROM hd_account WHERE coin=?1 AND mm2_rmd160=?2 AND hd_wallet_rmd160=?3 AND account_id=?4;";
+
 const SELECT_ACCOUNT: &str = "SELECT account_id, account_xpub, external_addresses_number, internal_addresses_number
     FROM hd_account
     WHERE coin=?1 AND mm2_rmd160=?2 AND hd_wallet_rmd160=?3 AND account_id=?4;";
@@ -201,6 +204,21 @@ impl HDWalletStorageInternalOps for HDWalletSqliteStorage {
 
             let params = account.to_sql_params_with_wallet_id(wallet_id);
             conn.execute(INSERT_ACCOUNT, params_from_iter(params.iter()))
+                .map(|_| ())
+                .map_to_mm(HDWalletStorageError::from)
+        })
+        .await
+    }
+
+    async fn remove_account(&self, wallet_id: HDWalletId, account_id: u32) -> HDWalletStorageResult<()> {
+        let selfi = self.clone();
+        async_blocking(move || {
+            let conn_shared = selfi.get_shared_conn()?;
+            let conn = Self::lock_conn(&conn_shared)?;
+
+            let mut params = wallet_id.to_sql_params();
+            params.push(account_id.to_string());
+            conn.execute(DELETE_ACCOUNT, params_from_iter(params.iter()))
                 .map(|_| ())
                 .map_to_mm(HDWalletStorageError::from)
         })
