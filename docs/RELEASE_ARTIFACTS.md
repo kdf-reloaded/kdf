@@ -10,7 +10,10 @@ version tag, so `<tag>` is for example `v0.4.0`.
 | `kdf-<tag>-x86_64-unknown-linux-gnu` | `x86_64-unknown-linux-gnu` | 64-bit Intel/AMD Linux, glibc 2.31 or newer |
 | `kdf-<tag>-aarch64-unknown-linux-gnu` | `aarch64-unknown-linux-gnu` | 64-bit ARM Linux (Raspberry Pi 3/4/5 with a 64-bit OS, ARM servers), glibc 2.31 or newer |
 | `kdf-<tag>-armv7-unknown-linux-gnueabihf` | `armv7-unknown-linux-gnueabihf` | 32-bit ARM Linux, ARMv7-A with hard-float (VFPv3-D16); Raspberry Pi 2 and newer with a 32-bit OS |
-| macOS and Windows binaries | see the release page | |
+| `kdf-<tag>-x86_64-apple-darwin` | `x86_64-apple-darwin` | Intel Macs |
+| `kdf-<tag>-aarch64-apple-darwin` | `aarch64-apple-darwin` | Apple silicon Macs |
+| `kdf-<tag>-universal-apple-darwin` | both of the above | One macOS binary for Intel and Apple silicon |
+| `kdf-<tag>-x86_64-pc-windows-msvc.exe` | `x86_64-pc-windows-msvc` | 64-bit Windows |
 
 **glibc floor.** The three Linux binaries are built inside a pinned Debian 11 container and cross-compiled
 there with the Debian 11 cross toolchains (`gcc-aarch64-linux-gnu`, `gcc-arm-linux-gnueabihf`), so each

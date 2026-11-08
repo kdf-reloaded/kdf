@@ -159,6 +159,9 @@ jobs:
               cp "$dir/kdf.exe" "release-assets/kdf-${tag}-${target}.exe"
             elif [ -f "$dir/kdf" ]; then
               cp "$dir/kdf" "release-assets/kdf-${tag}-${target}"
+            elif [ -f "$dir/kdf-universal" ]; then
+              # The macOS universal binary (lipo of x86_64 and aarch64).
+              cp "$dir/kdf-universal" "release-assets/kdf-${tag}-${target}"
             fi
           done
           # Mobile static libraries: artifact directories `libkdf-<triple>`
@@ -175,12 +178,13 @@ jobs:
           for f in COPYING LICENSE THIRDPARTY-LICENSES; do
             cp "src/LEGAL/$f" "release-assets/$f"
           done
-          # Fail loudly if a Linux binary or a mobile library is missing, so a
+          # Fail loudly if a Linux binary, the macOS universal binary or a mobile library is missing, so a
           # skipped matrix leg can never produce a release without it.
           for want in \
             "kdf-${tag}-x86_64-unknown-linux-gnu" \
             "kdf-${tag}-aarch64-unknown-linux-gnu" \
             "kdf-${tag}-armv7-unknown-linux-gnueabihf" \
+            "kdf-${tag}-universal-apple-darwin" \
             "libkdf-${tag}-aarch64-linux-android.a" \
             "libkdf-${tag}-armv7-linux-androideabi.a" \
             "libkdf-${tag}-aarch64-apple-ios.a"; do
