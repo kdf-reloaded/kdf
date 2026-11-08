@@ -3135,18 +3135,19 @@ path.* An opt-in. With `setprice_replace_after_checks` on, `setprice` with
    previous orders: every check that cancels the previous orders on error
    under R-GH8 (the balance and volume checks, for `max` the maximum volume,
    and, in a build with IBC routing for swaps, its minimum-balance check) and
-   the build of the order itself (its volume, minimum volume and price).
+   the build of the order itself (its volume, minimum volume and price), its
+   subscription to the pair's topic and its save.
 2. *Then the replacement.* Only when all of them pass does it replace the
    previous orders of the directed pair as R-GH8 and R-GH9 say: the same
    orders, the same local removal from the maker's own set, read index and
    trie, and one cancel per replaced order. R-GH9's order holds, except that
-   the new order is built before the first cancel; it is saved, inserted
+   the new order is built and saved before the first cancel; it is inserted
    locally and published only after the last cancel.
-3. *A failed check leaves the pair as it was.* When any check fails, the
-   request returns that check's error and the previous orders stay: no cancel
-   message is published, and neither the maker's set nor the advertised root
-   changes. The previous orders keep their price: after a failed re-pricing
-   they stay live and matchable at the old price until the next successful
+3. *A failed check leaves the pair as it was.* When any check, the build, the
+   subscription or the save fails, the request returns that error and the
+   previous orders stay: no cancel message is published, and neither the
+   maker's set nor the advertised root changes. The previous orders keep
+   their price: after a failed re-pricing they stay live and matchable at the old price until the next successful
    re-pricing or a cancel; the balance watch named in the rationale below
    corrects their volume, not their price. A maker that prefers an empty pair
    to a stale price leaves the switch off, its default.
@@ -3181,6 +3182,33 @@ matchable at its previous price until it re-prices successfully or cancels
 maker that prefers keeping its orders through a failed check turns the switch
 on. (Decision DG of 2026-11-07 supersedes Decision DE, which had chosen the
 opposite default without weighing the stale price.)
+
+> *As built (2026-11-07).* `setprice_replace_after_checks` is read by one
+> function next to the failed-check path of the maker-order creation in
+> `ordermatch_trading.rs`; it is `true` only for a JSON `true`, and the
+> node's configuration is fixed after start, so every read gives the same
+> answer. Two places change, and only when the request carries
+> `cancel_previous`: (a) the helper that cancels the previous orders when
+> a check fails (the IBC-routing minimum balance in a build with that
+> feature, the maximum volume for `max`, the balance check otherwise) no
+> longer cancels, and returns the check's error (item 3); (b) the cancel
+> that came after the checks and before the build of the order moves to
+> after the build, after the order's subscription to its pair's topic and
+> after the save of the new order, so the order is built and saved before the
+> first cancel (item 2). The steps that can fail (the checks, the build, the
+> subscription, the save) all precede the cancel; the local insert and the
+> publication follow it, and neither returns an error. A failed save returns
+> its error with nothing cancelled. Two residuals remain. A crash between the
+> save and the cancel leaves both the previous orders and the saved new
+> order, and a restart restores both until the next re-pricing or cancel. And
+> the save writes the order's active record before its history row; when only
+> the history write fails, the new order is not placed but its active record
+> stays, so a restart restores it as well. The second holds at the default
+> too and is listed as a follow-up in the order-posting plan.
+> The refusals before the balance checks (item 4) are untouched. The same
+> function serves the market-making bot and `start_swap` with the
+> `SetPrice` method, which both pass `cancel_previous`, so both follow the
+> switch. With the switch at its default, both places keep today's order.
 
 **R-GH10 (Reloaded today).** *Established 2026-11-01 against this
 repository's own keep-alive receiver, synchronization applier, order-
@@ -3281,7 +3309,26 @@ on (base, rel), `setprice_replace_after_checks: true`:
   T-GH9 say;
 - with the switch absent or `false`, the first case cancels both previous
   orders and creates none (R-GH8);
-- a value that is not a boolean is taken as the default (`false`).
+- a value that is not a boolean is taken as the default (`false`);
+- a re-pricing whose new order cannot be saved (its history write fails)
+  returns that error and behaves as in the first bullet.
+
+*Coverage (2026-11-07).* The unit tests in `ordermatch_tests.rs`, module
+`t60_7_maker_balance_watch_tests::t_gh8a_replace_after_checks`, with a node
+whose balance read fails once: `t_gh8a_a_failed_balance_check_leaves_the_previous_orders`
+(first bullet: error returned, both orders in the maker's set, in the book and
+under the same held root, nothing published);
+`t_gh8a_b_a_refused_build_leaves_the_previous_orders` (second bullet, the
+checks having run first); `t_gh8a_c_the_next_passing_repricing_replaces_both_orders`
+(third bullet, with T-GH9's order: one cancel per old order, then the created
+message); `t_gh8a_d_at_the_default_a_failed_check_cancels_both_orders` (fourth
+bullet, with the switch absent, `false`, `"true"`, `1` and `null`) and
+`t_gh8a_d_at_the_default_a_refused_build_leaves_the_pair_empty` (R-GH8's build
+case at the default); `t_gh8a_e_only_a_json_true_turns_the_switch_on` (fifth
+bullet); `t_gh8a_f_a_failed_save_leaves_the_previous_orders` (sixth bullet:
+the node's history database has no orders table, so the history write of the
+new order fails; the error is returned and nothing was cancelled);
+`t_gh8a_without_cancel_previous_nothing_is_cancelled` (item 4).
 
 **T-GH9** *One cancel per replaced order, in order (R-GH9).* The same
 re-pricing publishes exactly two cancel messages, one per old order

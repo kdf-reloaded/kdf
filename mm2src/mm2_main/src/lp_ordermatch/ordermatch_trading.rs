@@ -2507,10 +2507,20 @@ impl<'a> From<&'a MakerOrder> for MakerOrderForRpc<'a> {
     }
 }
 
+/// The top-level MM2.json boolean `setprice_replace_after_checks` (CRD ch.32 R-GH8a item 5), default `false`;
+/// only a JSON `true` turns it on, any other value is the default. On, `setprice` with `cancel_previous` replaces
+/// the previous orders of the pair only after every check and the build of the new order have passed.
+pub(crate) fn setprice_replace_after_checks(ctx: &MmArc) -> bool {
+    ctx.conf["setprice_replace_after_checks"].as_bool() == Some(true)
+}
+
 /// Cancels the orders in case of error on different checks
 /// https://github.com/KomodoPlatform/atomicDEX-API/issues/794
+///
+/// With `setprice_replace_after_checks` on (CRD ch.32 R-GH8a item 3) a failed check cancels nothing: the previous
+/// orders stay and the error is returned.
 pub(crate) async fn cancel_orders_on_error<T, E>(ctx: &MmArc, req: &SetPriceReq, error: E) -> Result<T, E> {
-    if req.cancel_previous {
+    if req.cancel_previous && !setprice_replace_after_checks(ctx) {
         let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
         cancel_previous_maker_orders(ctx, &ordermatch_ctx, &req.base, &req.rel).await;
     }
@@ -2615,7 +2625,11 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
 
     let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
 
-    if req.cancel_previous {
+    // CRD ch.32 R-GH8a: with `setprice_replace_after_checks` on, every check above has passed and the order is
+    // built and saved below before the previous orders are cancelled; off (the default), they are cancelled here
+    // (R-GH8).
+    let replace_after_checks = req.cancel_previous && setprice_replace_after_checks(ctx);
+    if req.cancel_previous && !replace_after_checks {
         cancel_previous_maker_orders(ctx, &ordermatch_ctx, &req.base, &req.rel).await;
     }
 
@@ -2647,9 +2661,15 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
         )
         .await
     );
+    // With `setprice_replace_after_checks` on, the steps that can fail all precede the cancel below: the checks, the
+    // build, the subscription and this save (R-GH8a item 2). After the cancel only the local insert and the
+    // publication remain, and neither returns an error. At the default, the previous orders went before the build.
     save_my_new_maker_order(ctx.clone(), &new_order)
         .await
         .map_err(|e| ERRL!("{}", e))?;
+    if replace_after_checks {
+        cancel_previous_maker_orders(ctx, &ordermatch_ctx, &req.base, &req.rel).await;
+    }
     maker_order_created_p2p_notify(
         ctx.clone(),
         &new_order,

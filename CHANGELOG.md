@@ -97,6 +97,20 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   them, one info line names the taker order and the number declined, so an operator whose order
   times out can see why. The protocol information itself is never logged. Nothing else changes in
   how orders are matched. Detail: PRs #227, #235; CRD ch.59 R59.4A.6.
+- **A new opt-in setting keeps your orders when a re-pricing fails.** Set the top-level
+  `MM2.json` boolean `setprice_replace_after_checks` to `true`, and `setprice` with
+  `cancel_previous` (which is also what the market-making bot uses) checks the new order first
+  and cancels your previous orders on the pair only when every check and the build of the new
+  order have passed. A failed check, such as a balance read that times out, then returns its
+  error and cancels nothing. **The cost is a stale price:** after a failed re-pricing your
+  previous orders stay live and matchable at their old price until your next successful
+  `setprice` or a cancel. An empty pair only misses trades, while a stale price can lose
+  funds, so turn it on only if you accept that. To bound how long an order can stand at an old
+  price, give each `setprice` a `timeout_in_minutes`: the order is then cancelled at the latest
+  that many minutes after it was placed (for an order restored at startup, after the restart).
+  The setting is off by default, which keeps today's behavior: a failed check cancels the
+  previous orders and creates none. Only the boolean `true` turns it on. Nothing on the wire
+  changes. Detail: PR #286; CRD ch.32 R-GH8a.
 
 #### UTXO coins and Electrum
 
@@ -831,7 +845,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   rows ran on 2026-11-06: on RIN orders were posted in a quarter to a third of the time, and on DOGE
   about 11 % more slowly. The floor of two near servers, which brings DOGE back to the time of
   0.3.0-beta.1, is written (PR #260) and implemented (PR #262), and the SwapLab run on it passed
-  (release tests, rows 4–8).
+  (release tests, rows 4–8). The opt-in `setprice_replace_after_checks`, which replaces the previous
+  orders only after the new order passes its checks, is written (PR #265) and implemented (PR #286);
+  its SwapLab row follows.
 - [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new, in progress: the
   peer-to-peer items of 0.4.0. The redial guards are in (PRs #199, #206), and so are the peer-exchange
   logging, the address ranges and the idle-close log (PRs #203, #211), the send-queue window
