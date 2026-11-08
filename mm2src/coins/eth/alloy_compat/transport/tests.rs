@@ -308,6 +308,48 @@ fn t35_30_the_all_failed_text_lists_each_host_once_and_nothing_more() {
 }
 
 #[test]
+fn t35_30_a_single_node_that_fails_is_named_without_all_nodes_having_failed() {
+    let (provider, _) = stub_provider(&[A], CUTOFF, |_| Reply::Fail("HTTP 429 Too Many Requests".to_owned()));
+    let err = eth_call(&provider).unwrap_err();
+    assert!(err.is_transport_error(), "the failure is not a transport error");
+    let text = err.to_string();
+    assert!(
+        text.ends_with("http://a.test: HTTP 429 Too Many Requests"),
+        "the node and its failure do not close the text: {text}"
+    );
+    assert!(
+        !text.contains("all EVM nodes failed"),
+        "one node is called all nodes: {text}"
+    );
+
+    // The same with a credential in the node's URL: the host alone is named, once.
+    let url = "https://user:secret@rpc.example.org:8545/v3/APIKEY?token=X";
+    let (provider, _) = stub_provider(&[url], CUTOFF, |call| {
+        Reply::Fail(format!("Transport '{}' error: HTTP 429 Too Many Requests", call.uri))
+    });
+    let text = eth_call(&provider).unwrap_err().to_string();
+    assert!(!text.contains("all EVM nodes failed"), "one node is called all nodes");
+    assert_eq!(
+        text.matches("https://rpc.example.org:8545").count(),
+        1,
+        "the host is not named exactly once"
+    );
+    for secret in ["user", "secret", "/v3/", "APIKEY", "token="] {
+        assert!(!text.contains(secret), "a credential part is rendered");
+    }
+}
+
+#[test]
+fn t35_30_two_failing_nodes_keep_the_all_failed_listing() {
+    let (provider, _) = stub_provider(&[A, B], CUTOFF, |_| Reply::Fail("HTTP 429".to_owned()));
+    let text = eth_call(&provider).unwrap_err().to_string();
+    assert!(
+        text.contains("all EVM nodes failed: http://a.test: HTTP 429; http://b.test: HTTP 429"),
+        "the listing changed: {text}"
+    );
+}
+
+#[test]
 fn t35_28_nothing_secret_reaches_a_returned_text_or_a_log_line() {
     let capturing = install_log_capture();
     let url = "https://user:secret@rpc.example.org:8545/v3/APIKEY?token=X";

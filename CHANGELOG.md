@@ -567,6 +567,18 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
     poll.
 
   Detail: PR #255; CRD ch.17 R17.8.3a.
+- **A nonce read that one EVM node fails while another answers is now logged as a warning naming
+  that node, and a single node's error no longer says "all EVM nodes failed".** Before a send, the
+  daemon asks every node of the coin for the pending nonce. A node that failed got an info line
+  starting with "Error" even when another node answered and the send went through, and a coin with
+  one node reported that node's failure as "all EVM nodes failed". Now the failing node's line is a
+  warning that says "Nonce request ... failed ... on node ...; another node answered". A round in
+  which no node answers is logged as a warning that says it is retrying, as "Nonce request ...
+  failed ... on node ...; no node answered, retrying (round 2 of 6)", and only a failure in the last
+  round, when the send fails, is logged at error level, as "Error ... when getting nonce ...". The
+  error of a single node names that node and its failure, for example
+  `https://rpc.example.org: HTTP 429 Too Many Requests`. With two or more nodes the text is
+  unchanged. Detail: PR #TBD; CRD ch.35 R35.1.12, R35.1.14.
 
 #### Node names in logs and errors
 
