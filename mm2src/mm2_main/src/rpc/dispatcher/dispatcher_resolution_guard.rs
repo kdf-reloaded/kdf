@@ -71,6 +71,7 @@ fn task_namespace_methods_are_routed() {
         "create_new_account::init",
         "create_new_account::status",
         "create_new_account::user_action",
+        "create_new_account::cancel",
         "scan_for_new_addresses::init",
         "scan_for_new_addresses::status",
         "withdraw::init",

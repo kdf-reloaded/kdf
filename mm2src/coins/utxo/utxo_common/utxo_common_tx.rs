@@ -500,6 +500,7 @@ pub async fn p2sh_spending_tx<T: UtxoCommonOps>(
         zcash: coin.as_ref().conf.zcash,
         str_d_zeel,
         hash_algo,
+        sighash_suffix: coin.as_ref().conf.sighash_suffix,
     };
     let signed_input = try_s!(p2sh_spend(
         &unsigned,
@@ -1141,12 +1142,90 @@ impl Default for MergeConditions {
 
 pub enum UtxoMergeError {
     BadMergeConditions(String),
+    /// The enabled address of an HD coin cannot be used as the address to merge (CRD ch.05 R35b).
+    InvalidAddress(String),
     InternalError(String),
+}
+
+/// The address an HD coin merges (CRD ch.05 R35b): the coin's enabled address, the address at the activation's
+/// `path_to_address`, with the derivation path of its key. Only a software HD key policy is served: the key at that
+/// path signs. A coin under the Trezor policy is refused, so that no merge asks the device to sign.
+async fn hd_merge_sender(coin: &UtxoCoinFields, hd_wallet: &UtxoHDWallet) -> Result<ActiveUtxoAddress, String> {
+    if !matches!(coin.priv_key_policy, PrivKeyPolicy::HDWallet { .. }) {
+        return Err(format!(
+            "UTXO merge needs the software HD key policy, coin={}",
+            coin.conf.ticker
+        ));
+    }
+    let info = crate::utxo::utxo_standard_swap_v2::enabled_hd_address_info(
+        coin,
+        hd_wallet,
+        "UTXO merge enabled address selection",
+    )
+    .await?;
+    Ok(ActiveUtxoAddress {
+        address: info.address,
+        pubkey: Some(info.pubkey),
+        derivation_path: Some(info.derivation_path),
+    })
+}
+
+/// Merges the unspent outputs of the coin's own address into one output paid to that same address: the single
+/// address of an iguana coin, the enabled address of an HD coin (CRD ch.05 R35b). Returns the transaction, the
+/// merged outputs and the address.
+pub async fn merge_utxos_at_enabled_address<Coin>(
+    coin: &Coin,
+    merge_conditions: &MergeConditions,
+    broadcast: bool,
+) -> MmResult<(UtxoTx, Vec<UnspentInfo>, Address), UtxoMergeError>
+where
+    Coin: UtxoCommonOps + GetUtxoListOps + UtxoTxGenerationOps + UtxoTxBroadcastOps,
+{
+    match &coin.as_ref().derivation_method {
+        DerivationMethod::Iguana(my_address) => {
+            let to_script_pubkey = output_script(my_address, ScriptType::P2PKH);
+            let (tx, spent) = merge_utxos(coin, my_address, &to_script_pubkey, merge_conditions, broadcast).await?;
+            Ok((tx, spent, my_address.clone()))
+        },
+        DerivationMethod::HDWallet(hd_wallet) => {
+            let sender = hd_merge_sender(coin.as_ref(), hd_wallet)
+                .await
+                .map_to_mm(UtxoMergeError::InvalidAddress)?;
+            let address = sender.address.clone();
+            let to_script_pubkey = output_script(&address, ScriptType::P2PKH);
+            let (tx, spent) = merge_utxos_from(
+                coin,
+                &address,
+                Some(sender),
+                &to_script_pubkey,
+                merge_conditions,
+                broadcast,
+            )
+            .await?;
+            Ok((tx, spent, address))
+        },
+    }
 }
 
 pub async fn merge_utxos<Coin>(
     coin: &Coin,
     from_address: &Address,
+    to_script_pubkey: &Script,
+    merge_conditions: &MergeConditions,
+    broadcast: bool,
+) -> MmResult<(UtxoTx, Vec<UnspentInfo>), UtxoMergeError>
+where
+    Coin: UtxoCommonOps + GetUtxoListOps + UtxoTxGenerationOps + UtxoTxBroadcastOps,
+{
+    merge_utxos_from(coin, from_address, None, to_script_pubkey, merge_conditions, broadcast).await
+}
+
+/// [`merge_utxos`] for an address of the coin's own: with `hd_sender` `None` it is the iguana address, signed with
+/// the coin's single key; with an HD sender it is that address, signed with the key at the sender's derivation path.
+async fn merge_utxos_from<Coin>(
+    coin: &Coin,
+    from_address: &Address,
+    hd_sender: Option<ActiveUtxoAddress>,
     to_script_pubkey: &Script,
     merge_conditions: &MergeConditions,
     broadcast: bool,
@@ -1182,37 +1261,69 @@ where
     };
 
     if broadcast {
-        let tx = generate_and_send_tx(
-            coin,
-            unspents.clone(),
-            None,
-            FeePolicy::DeductFromOutput(0),
-            recently_spent,
-            vec![output],
-        )
-        .await
-        .map_to_mm(|e| {
+        let sent = match hd_sender {
+            None => {
+                generate_and_send_tx(
+                    coin,
+                    unspents.clone(),
+                    None,
+                    FeePolicy::DeductFromOutput(0),
+                    recently_spent,
+                    vec![output],
+                )
+                .await
+            },
+            Some(sender) => {
+                generate_and_send_tx_from_sender(
+                    coin,
+                    sender,
+                    unspents.clone(),
+                    None,
+                    FeePolicy::DeductFromOutput(0),
+                    recently_spent,
+                    vec![output],
+                )
+                .await
+            },
+        };
+        let tx = sent.map_to_mm(|e| {
             UtxoMergeError::InternalError(format!("Error in generate_and_send_tx for coin={ticker}: {e:?}"))
         })?;
         Ok((tx, unspents))
     } else {
         drop(recently_spent);
 
-        let my_address = coin
-            .as_ref()
-            .derivation_method
-            .iguana_or_err()
-            .mm_err(|e| UtxoMergeError::InternalError(format!("No iguana address for coin={ticker}: {e}")))?;
-        let key_pair = coin
-            .as_ref()
-            .priv_key_policy
-            .key_pair_or_err()
-            .mm_err(|e| UtxoMergeError::InternalError(format!("No key pair for coin={ticker}: {e}")))?;
+        // An HD sender is signed for with the key at its derivation path, and its address takes the place of
+        // the iguana address below.
+        let hd_signing = match &hd_sender {
+            Some(sender) => {
+                let key_pair = active_sender_key_pair(coin.as_ref(), sender)
+                    .map_to_mm(|e| UtxoMergeError::InternalError(format!("No key pair for coin={ticker}: {e}")))?;
+                Some((sender.address.clone(), key_pair))
+            },
+            None => None,
+        };
+        let (my_address, key_pair) = match &hd_signing {
+            Some((address, key_pair)) => (address, key_pair),
+            None => (
+                coin.as_ref()
+                    .derivation_method
+                    .iguana_or_err()
+                    .mm_err(|e| UtxoMergeError::InternalError(format!("No iguana address for coin={ticker}: {e}")))?,
+                coin.as_ref()
+                    .priv_key_policy
+                    .key_pair_or_err()
+                    .mm_err(|e| UtxoMergeError::InternalError(format!("No key pair for coin={ticker}: {e}")))?,
+            ),
+        };
 
-        let builder = UtxoTxBuilder::new(coin)
+        let mut builder = UtxoTxBuilder::new(coin)
             .add_available_inputs(unspents.clone())
             .add_outputs(vec![output])
             .with_fee_policy(FeePolicy::DeductFromOutput(0));
+        if hd_signing.is_some() {
+            builder = builder.with_from_address(my_address.clone());
+        }
         let (unsigned, _) = builder
             .build()
             .await
@@ -1351,7 +1462,7 @@ async fn sign_raw_utxo_tx<T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps>(
         .mm_err(|e| RawTransactionError::InternalError(e.to_string()))?;
 
     // Build TransactionInputSigner from the decoded tx
-    let mut input_signer = TransactionInputSigner::from(tx);
+    let mut input_signer = TransactionInputSigner::from_transaction(tx, coin.as_ref().conf.sighash_suffix);
     input_signer.consensus_branch_id = coin.as_ref().conf.consensus_branch_id;
 
     // Set amounts on each input
@@ -1408,16 +1519,26 @@ pub async fn merge_utxo_loop<T>(
             None => break,
         };
 
-        let my_address = match coin.as_ref().derivation_method {
-            DerivationMethod::Iguana(ref my_address) => my_address,
-            DerivationMethod::HDWallet(_) => {
-                warn!("'merge_utxo_loop' is currently not used for HD wallets");
-                return;
+        // CRD ch.05 R35b: under HD the loop merges the enabled address only, into that same address. When that
+        // address cannot be used (a hardware policy, or an address that does not resolve) the loop ends here, with
+        // a logged error, and no merge runs for the coin's lifetime.
+        let (my_address, hd_sender) = match &coin.as_ref().derivation_method {
+            DerivationMethod::Iguana(my_address) => (my_address.clone(), None),
+            DerivationMethod::HDWallet(hd_wallet) => match hd_merge_sender(coin.as_ref(), hd_wallet).await {
+                Ok(sender) => (sender.address.clone(), Some(sender)),
+                Err(e) => {
+                    error!(
+                        "'merge_utxo_loop' ends for coin {}: the enabled HD address cannot be merged: {}",
+                        coin.as_ref().conf.ticker,
+                        e
+                    );
+                    return;
+                },
             },
         };
 
         let ticker = &coin.as_ref().conf.ticker;
-        let (unspents, recently_spent) = match coin.get_unspent_ordered_list(my_address).await {
+        let (unspents, recently_spent) = match coin.get_unspent_ordered_list(&my_address).await {
             Ok((unspents, recently_spent)) => (unspents, recently_spent),
             Err(e) => {
                 error!("Error {} on get_unspent_ordered_list of coin {}", e, ticker);
@@ -1428,17 +1549,37 @@ pub async fn merge_utxo_loop<T>(
             let unspents: Vec<_> = unspents.into_iter().take(max_merge_at_once).collect();
             info!("Trying to merge {} UTXOs of coin {}", unspents.len(), ticker);
             let value = unspents.iter().fold(0, |sum, unspent| sum + unspent.value);
-            let script_pubkey = Builder::build_p2pkh(&my_address.hash).to_bytes();
+            let script_pubkey = match &hd_sender {
+                Some(sender) => output_script(&sender.address, ScriptType::P2PKH).to_bytes(),
+                None => Builder::build_p2pkh(&my_address.hash).to_bytes(),
+            };
             let output = TransactionOutput { value, script_pubkey };
-            let merge_tx_fut = generate_and_send_tx(
-                &coin,
-                unspents,
-                None,
-                FeePolicy::DeductFromOutput(0),
-                recently_spent,
-                vec![output],
-            );
-            match merge_tx_fut.await {
+            let merge_tx_res = match hd_sender {
+                None => {
+                    generate_and_send_tx(
+                        &coin,
+                        unspents,
+                        None,
+                        FeePolicy::DeductFromOutput(0),
+                        recently_spent,
+                        vec![output],
+                    )
+                    .await
+                },
+                Some(sender) => {
+                    generate_and_send_tx_from_sender(
+                        &coin,
+                        sender,
+                        unspents,
+                        None,
+                        FeePolicy::DeductFromOutput(0),
+                        recently_spent,
+                        vec![output],
+                    )
+                    .await
+                },
+            };
+            match merge_tx_res {
                 Ok(tx) => info!(
                     "UTXO merge successful for coin {}, tx_hash {:?}",
                     ticker,

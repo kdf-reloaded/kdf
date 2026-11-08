@@ -176,12 +176,66 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   from the defaults, with the gas-estimate multiplier when one is set; a DEBUG
   line lists every member. It is logging only: no request, response or
   transaction changes, so no switch exists. See CRD ch.57 R57.5.5.
+- **Electrum servers can be pinned by their key, and a server that skips its
+  certificate checks is flagged at activation.** A server entry with `protocol`
+  `SSL` may carry `spki_sha256`: the SHA-256 digest of the server's public key
+  (`SubjectPublicKeyInfo`), or an array of 1 to 4 of them. With a pin the node
+  accepts the server only if it proves that it holds a pinned key; the chain,
+  the dates and the name of its certificate are not checked, so a self-signed
+  certificate can be used and still be authenticated. A mismatch is a handshake
+  failure that suspends the server and is logged at WARN; a malformed pin or a
+  pin on a `TCP` server removes that server. GLEEC KDF and Komodo DeFi
+  Framework ignore the key (measured 2026-11-07), so an entry that carries it
+  works there, unpinned. The key is opt-in and changes nothing unless set, so no
+  switch exists. Separately, at activation Reloaded logs one WARN line for each
+  `SSL` server that has `disable_cert_verification` set and no pin: the
+  connection is encrypted, but the server is not authenticated. The reference
+  logs no such line. What `disable_cert_verification` accepts and refuses is
+  the same on both. See CRD ch.38 R38.6.4m and R38.6.4n and
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+- **Bitcoin II (BC2) transactions are signed the way the BC2 network requires.**
+  Since block 57,750 the BC2 network checks every signature against a digest
+  that carries an extra 4-byte field after the signature-hash type, and refuses
+  a transaction signed the ordinary way ("Signature must be zero for failed
+  CHECK(MULTI)SIG operation"). A coin entry may now carry the top-level key
+  `sighash_suffix`, a `0x`-prefixed hexadecimal value of at most 32 bits; when
+  it is present, every input the node signs for that coin (withdrawals, the
+  DEX-fee transaction, HTLC payments, spends and refunds, the taker's
+  pre-signature of a version-two swap, and `sign_raw_transaction`) is signed
+  over the digest with those four bytes appended. BC2's value is `0x01324342`.
+  The key `sighash_suffix_height` is read and checked but not used yet: the
+  suffix applies at every height. A malformed value fails the activation of
+  the coin with an error naming the key, and so does the combination with
+  Radiant's signature version or with the Zcash-family overwintered signature
+  hash. Hardware wallets cannot add the field, so a coin
+  with a suffix refuses a hardware signing request before the device is
+  contacted. A BC2 entry without the key still activates and logs one warning
+  that the network will refuse its transactions. A coin without the key signs
+  exactly as before. The shared coins list must carry the key on the `BC2` and
+  `BC2-segwit` entries. **No switch returns the ordinary signature:** the
+  Komodo DeFi Framework 2.6.0-beta and the GLEEC KDF development build
+  `a12695e` (the two builds measured) cannot sign BC2 transactions after block
+  57,750 at all, so there is no reference behavior to return to. **BC2 swaps
+  require a counterparty that signs with the suffix.** A coin with a suffix
+  adds a capability word to its order and match messages and declines a
+  counterparty without it before any swap starts (CRD ch.61 R61.5A, ch.59
+  §59.4A); nodes that predate the word, and the reference builds, are declined.
+  Set `require_suffix_counterparty` to `false` in the coin entry to admit them;
+  a swap with them still cannot complete when they have to spend BC2. This
+  check is temporary and will be removed as soon as the other implementations
+  support suffix signing. The global coins repository may not carry the
+  `sighash_suffix` key on the `BC2` and `BC2-segwit` entries yet: until it
+  does, add it to your coins file or use the KDF Reloaded coins file, because
+  without it the BC2 network rejects BC2 withdrawals and swaps. See
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
+  [`docs/plans/bc2-replay-protection.md`](docs/plans/bc2-replay-protection.md).
 
 ### Behavioural divergences without a compatibility switch
 
 These are divergences from GLEEC KDF that are **not** operator-configurable in this release (no compat switch yet). They are logged here and in [`CHANGELOG.md`](CHANGELOG.md) per the convention; a per-feature switch may be added in a later release.
 
 - **Withdraw with an omitted HD `from`.** For an HD-mode UTXO wallet, `withdraw` and `task::withdraw` with no `from` sender spend from the coin's activated address, the address at `path_to_address` (by default account 0, external chain, index 0), instead of failing. GLEEC KDF rejects an omitted `from` with `FromAddressNotFound`. This makes the shipped Komodo DeFi wallet's withdraw-preview flow (which omits `from`) work against a reloaded node; the maintainer kept it deliberately on 2026-11-04, set the address on 2026-11-06, and no switch is planned. An explicit but invalid `from` is still rejected (`UnknownAccount` / `UnexpectedFromAddress`) on both methods. Until plan [`hd-key-unification`](docs/plans/hd-key-unification.md) item H5 (PR #270), the fallback was always account 0, external chain, index 0, and the direct `withdraw` method refused an HD UTXO wallet. Code: `coins/utxo/utxo_common/utxo_common_hd.rs` (`get_withdraw_hd_sender`), `utxo_withdraw.rs` (`resolve_withdraw_sender`), `utxo_common_helpers.rs` (`withdraw_with_hd_sender`, `validate_task_withdraw_sender`).
+- **An HD account number already in use.** `task::create_new_account` with an `account_id` that the wallet already holds ends the task with `AccountAlreadyExists` (with the `account_id`) before any key is derived; `task::create_new_account::status` reports it. GLEEC KDF derives the key first and then reports an internal error. Only a client that asks for an existing account sees the difference. The same task also serves Siacoin, which GLEEC KDF does not offer HD accounts for; that is a Reloaded extension (decision CC). Plan [`hd-key-unification`](docs/plans/hd-key-unification.md) item H5.4 (PR #279); CRD ch.05 R35c. Code: `coins/hd_wallet.rs` (`choose_new_account_id`), `coins/rpc_command/init_create_account.rs`.
 - **Legacy `my_balance` and `get_enabled_coins` answer for an EVM coin under an HD login.** They report the activated address. GLEEC KDF fails both under an HD login, for EVM coins as for UTXO coins; for a UTXO coin KDF Reloaded fails them too. Code: `coins/eth/eth_market_ops.rs` (`my_address`), `coins/lp_coins_ops.rs` (`get_enabled_coins`). See CRD ch.05 §5.9B R35 and plan [`hd-key-unification`](docs/plans/hd-key-unification.md).
 - **A Light-mode ZHTLC coin is served by `lightwalletd` alone; Electrum is
   removed, and there is no switch to restore it.** GLEEC KDF requires a
@@ -285,6 +339,21 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   GLEEC KDF, on the legacy stack, is affected by the same underlying divergence.
   No compat switch: the alternative is invisible incoming payments. Code:
   `coins/z_coin.rs`, `coins/z_coin/z_coin_wallet_db.rs`.
+- **An ARRR withdrawal takes no memo.** Reloaded's `withdraw` request has no
+  `memo` member, so a memo sent with it is ignored, the shielded output carries
+  none, and the answer has no `memo` member. GLEEC KDF echoes the request's memo
+  in the answer (CRD ch.39 R39.5A.3). Memo support is a separate, later item,
+  noted under R39.5A.3. No compat switch: there is nothing to switch on yet.
+  Code: `coins/lp_coins_types.rs` (`WithdrawRequest`), `coins/z_coin.rs`
+  (`withdraw`).
+- **The ARRR history reports a fee only where the node recorded it.** GLEEC KDF
+  computes a row's `transaction_fee` from the full transaction (CRD ch.39
+  R39.8.9e). Reloaded's Light-mode wallet reads compact blocks, which carry no
+  fee data. A row reports the fee the node recorded when it broadcast its own
+  send, and `0` for a transaction another wallet built, for a swap spend or
+  refund, and for an own send found again after a rebuild of the wallet
+  database (R39.8.9e1). No compat switch: the data the reference computes from
+  is not there. Code: `coins/z_coin/z_coin_wallet_db.rs`.
 - **Siacoin withdraw populates `internal_id`.** GLEEC KDF leaves `internal_id`
   empty on its SC withdraw response — only its history path fills the field in.
   Reloaded sets it to the raw bytes of the signed transaction's id, the same
@@ -408,6 +477,14 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   full-layout fallback of RIC and MEWC, not this read. Nothing a counterparty
   observes changes. See CRD ch.37 R37.5.10 and
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+- **EVM V1 payment-spend wait.** Both scan the swap contract's logs in windows of
+  `logs_block_range` blocks (default 1,000). GLEEC KDF rescans from the swap's
+  start block on every poll and retries a refused window query. KDF Reloaded
+  checks the deadline on every iteration, including after a failed query, keeps a
+  cursor past the windows already scanned, and shrinks the window when a node
+  reports a range limit. KDF Reloaded's search for an existing spend, refund or
+  own payment uses exact windows where GLEEC KDF's are one block wider; there is
+  no observable difference beyond one duplicate block per window.
 
 ### Removed / disabled in KDF Reloaded
 
@@ -524,7 +601,8 @@ with a node that cannot build version 6 used to start, and failed at that node's
 ARRR transaction, after the DEX fee was paid. GLEEC KDF nodes and KDF Reloaded
 0.3.0-beta.1 nodes send no word and are declined. Set `require_v6_counterparty` to
 `false` in the coin's `consensus_params` to admit them again; an ARRR swap with GLEEC KDF
-still cannot complete.
+still cannot complete. The capability check is temporary: it will be removed once
+version 6 is generally supported.
 
 Two coin-activation behaviours differ from GLEEC KDF by default (CRD ch.46
 R46.2.4, ch.55 R55.4.6):
@@ -662,7 +740,7 @@ cache keeps its existing compatible name and format:
 | --- | --- | --- |
 | Shielded wallet | `<TICKER>_RELOADED_WALLET.db` | `<TICKER>_WALLET.db` |
 | Compact-block cache | `<TICKER>_RELOADED_COMPACT_BLOCKS.db` | `<TICKER>_COMPACT_BLOCKS.db` |
-| Recipients of the wallet's withdrawals, shown in the history | `<TICKER>_RELOADED_TX_ADDRESSES.db` | none |
+| Addresses of the transactions the node builds (a withdrawal's recipient, a swap's script and fee addresses), shown in the history | `<TICKER>_RELOADED_TX_ADDRESSES.db` | none |
 | Legacy native Sapling-state cache | `<TICKER>_CACHE.db` (shared) | `<TICKER>_CACHE.db` (shared) |
 
 On the first supported Light-mode activation after upgrading, Reloaded creates

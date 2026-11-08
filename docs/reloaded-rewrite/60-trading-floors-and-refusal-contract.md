@@ -122,7 +122,7 @@ them.
 | E1 | EVM platform coins and ERC-20 tokens | 10^-decimals | 0 | ch. 57 R57.7A.1, R57.7A.3 | No: as Q1 — PR #66 pending |
 | T1 | TRON (TRX) and TRC20 | 10^-decimals (the E1 rule; TRON coins are cases of the EVM coin family in both trees) | 0 | ch. 21 §21.11A | No: as Q1 (TRX 10^-2 against 10^-6); swap participation itself is deferred (ch. 21) |
 | C1 | Tendermint platform coins and their tokens | one base unit, 10^-decimals of the coin or token | one base unit | ch. 18 §18.5.2 | Matches |
-| S1 | Sia | one hasting, 10^-24 SC | one hasting | ch. 20 R-S11 | Matches (finding F2 applies to both trees) |
+| S1 | Sia | one hasting, 10^-24 SC | one hasting | ch. 20 R-S11 | Raised in reloaded (D60.2 revision): minimum trading volume 0.0002 SC (ten times the fixed miner fee, since 2026-11-07), minimum transaction amount unchanged; finding F2 applies to both trees |
 | L1 | Lightning | equal to the minimum transaction amount | the largest, over the node's open channels, of the counterparty's minimum outbound HTLC amount (one millisatoshi where a channel does not state one, and one millisatoshi with no channels), in the coin's own decimals | ch. 41 §41.11A | No: both accessors terminate abnormally (finding F5) |
 | P1 | Solana and SPL tokens | none: both designations terminate the request abnormally (finding F6) | one lamport, 10^-9, for SOL **and** for every SPL token regardless of the token's decimals | ch. 40 §40.6A | Differs, with no parity target: 0.00777 and 0 |
 
@@ -428,7 +428,8 @@ dynamic-fee coin it guarantees nothing (finding F1).
 > **Code-quality finding F2 (informative; explicit look requested).** In
 > both reference designations and in reloaded, every Sia HTLC spend and
 > refund deducts a fixed 0.00002 SC miner fee from the HTLC value, while the
-> Sia floors (row S1) are one hasting. A Sia payment of 0.00002 SC or less —
+> Sia floors (row S1) are one hasting (in reloaded until 2026-11-07; see
+> the revision note in chapter 20 R-S11). A Sia payment of 0.00002 SC or less —
 > accepted by every order builder — can be neither spent nor refunded,
 > and the arithmetic does not refuse cleanly beforehand. *Proposed
 > remedy:* refuse the spend or refund with an orderly error when the
@@ -697,6 +698,9 @@ parity (R60.6.1).
 floor stays at parity; the orderly spend and refund refusal of R60.6.4
 and the pre-trade check of R60.6.7 together keep a Sia payment at or
 below the miner fee from being created.
+Revised 2026-11-07: the Sia minimum trading volume is raised to ten
+times the fixed miner fee (chapter 20 R-S11 revision); the pre-trade
+check stays.
 
 **D60.3** *Order-validation home.* Chapter 57 D7's maker price floor is
 coin-agnostic and is now bound here as R60.4.2 step 4; the one-line fix

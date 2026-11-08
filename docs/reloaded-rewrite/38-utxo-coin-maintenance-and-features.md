@@ -296,7 +296,9 @@ passed the KDF Dirty Gate with its target on 2026-11-07.)* Under a global-HD log
 reference serves this RPC, `fetch_utxos` and the automatic merge as
 [Chapter 5](05-hd-wallet-support.md) §5.9B R35b records: consolidation and
 the automatic merge on the enabled address only, `fetch_utxos` over every
-known address.
+known address. *As built (2026-11-07, clean-side record; plan item H5.3).*
+Reloaded serves this RPC, `fetch_utxos` and the automatic merge under a
+software global-HD login; the as-built note under Chapter 5 R35b records how.
 
 R38.5.3 The coin's header/byte handling shall use the configuration-selected
 chain-variant model defined in
@@ -1799,10 +1801,13 @@ public servers where it was.
 R38.6.4m **TLS server authentication for Electrum servers (Reloaded-original;
 maintainer decision 2026-11-04).**
 
-> **As-built status (2026-11-05).** Items 1–5 and 7–9 describe the code at
-> this chapter's revision. Item 6, the warning, is planned and not yet built;
-> its implementation waits for the maintainer's approval, together with
-> R38.6.4n.
+> **As-built status (2026-11-07).** All items describe the code. Items 1–5 and
+> 7–9 were built before; item 6, the warning, is built together with R38.6.4n.
+> The warning is logged where a server joins the coin's pool at activation
+> (`PoolShared::add_server_at` in `electrum_pool.rs`), from what the server's
+> parsed settings (`ServerSpec::tls_notice` in `electrum_rpc_client.rs`) say, so
+> it is logged once per server per activation, never for a server that was
+> removed, and never on a browser build, where `tls_notice` has nothing to report.
 
 1. *Scope.* This rule governs an Electrum server with `protocol` `SSL` on a
    native build. `TCP` carries no TLS. On a browser build the TLS of `WSS`
@@ -1849,7 +1854,7 @@ maintainer decision 2026-11-04).**
      presented, but the server is not authenticated. A self-signed version 3
      certificate with an accepted key is accepted. A version 1 certificate, or
      a key outside item 3, is refused even so.
-6. *Warning (planned).* At activation, a server to which item 5 applies logs
+6. *Warning.* At activation, a server to which item 5 applies logs
    one WARN line, once per activation of the coin:
 
    `<TICKER>: Electrum server <host:port> has disable_cert_verification set: the connection is encrypted, but the server is not authenticated`
@@ -1914,10 +1919,33 @@ maintainer decision 2026-11-04).**
 > the behaviors above are what both versions do, not a statement that the
 > two libraries are identical in every rejection text.
 
-R38.6.4n **Electrum server key pin `spki_sha256` (Reloaded-original; planned;
-maintainer decision 2026-11-04).** Opt-in: a server entry without the key
-behaves exactly as R38.6.4m. The implementation waits for the maintainer's
-approval.
+R38.6.4n **Electrum server key pin `spki_sha256` (Reloaded-original;
+maintainer decision 2026-11-04; built).** Opt-in: a server entry without the key
+behaves exactly as R38.6.4m.
+
+> **As-built note (2026-11-07).** The key is carried on the server entry
+> (`ElectrumRpcRequest::spki_sha256` in `electrum_types.rs`) as the JSON value
+> it was configured with, so that a malformed value removes only its own server
+> (item 5) and never fails the whole activation request. It is read when the
+> server joins the pool (`server_spec` in `electrum_rpc_client.rs`), which turns
+> it into 1 to 4 digests next to `skip_validation` in the server's settings. The
+> verifier is `PinnedKeyVerification` in `rpc_clients.rs`, a sibling of the
+> verifier of R38.6.4m item 5: it parses the end-entity certificate with the TLS
+> library's own parser, hashes the DER `SubjectPublicKeyInfo` that parser
+> returns, and compares it with the pins; the handshake signature is verified as
+> in item 5. A connection to a pinned server builds its own TLS configuration,
+> so that the verifier can tell the session that the key matched no pin. A
+> pinned server therefore never resumes a TLS session: every connection makes a
+> full handshake, and the key is checked each time. The configuration is not to
+> be shared between connections, because it carries that signal. On that
+> signal the session reports exactly the text of item 5, and `establish` in
+> `electrum_pool.rs` logs the WARN of item 5 once for every refusal. The INFO line
+> of item 4 is logged next to the warning of R38.6.4m item 6, where the server
+> joins the pool. A browser build removes a server entry that carries the key
+> (`server_spec`, item 6). The Z-coin Electrum fallback builds its entries
+> without a pin. Malformed pins are checked before the protocol, so a malformed
+> pin on a `TCP` server is reported as malformed. The operator description of
+> item 7 is the section "Electrum Servers over TLS" of `docs/NETWORK_CONFIG.md`.
 
 1. *Key and value.* Each Electrum server entry may carry `spki_sha256`, next to
    `url`, `protocol`, `disable_cert_verification` and `timeout_sec`, in the
@@ -2274,7 +2302,11 @@ T38.6.4m *TLS server authentication (R38.6.4m).*
 - (e) The WARN line of item 6 appears exactly once per activation, names only
   `host:port`, and does not appear for `TCP` or for a pinned server.
 
-Items (a), (b) and (d) are covered by existing tests; (c) and (e) are new.
+All five are covered. (a), (b) and (d) by `tls_tests` and the pool tests that
+existed before; (c) by `t38_6_4m_c_a_version_1_certificate_and_an_rsa_1024_certificate_are_refused_under_the_flag`
+(static DER fixtures in `mm2src/coins/utxo/test-fixtures/electrum-tls/`, checked at the
+verifier because a `rustls` server cannot sign with a 1024-bit RSA key); (e) by
+`t38_6_4m_e_the_warning_is_logged_once_per_activation_for_host_and_port_only`.
 
 T38.6.4n *Electrum server key pin (R38.6.4n).* With test certificates on a
 loopback server:
@@ -2290,6 +2322,15 @@ loopback server:
 - the flag together with a pin behaves as the pin alone, with no WARN of
   R38.6.4m item 6;
 - one INFO line of item 4 per activation.
+
+Covered by the `t38_6_4n_*` tests of `tls_tests` in `electrum_rpc_client.rs`: the
+matching pin on both versions and in every accepted form, the mismatch text, the
+three certificate defects with the pinned key, another key under the same subject,
+the flag together with a pin, a pin on a version 1 and on an RSA-1024 certificate,
+the pin forms and their malformed counterparts, the classification of an entry when
+it is read, the removal without any connection, the suspension and the WARN of a
+mismatch, and the INFO line (in the test of T38.6.4m (e)); the request test in
+`coins_activation` reads the key from an activation request.
 
 D38.6.4l.1 *(Resolved 2026-10-28, maintainer decision.)* *When `mixed`
 becomes the default.* The plan intends `mixed` as the default and left the
@@ -3136,6 +3177,12 @@ the same for the Sia wallet daemon.
 > BIP-84 coins. It cross-references Chapter 5 R15–R20, R29–R31; Chapter 7 R28;
 > §38.3.3 (HD purpose generality); and Chapter 45 R45.4.8 (HD-mode identity
 > selection).
+>
+> *Update (2026-11-07, plan items H5.0 and H5.4).* The first remaining item is
+> built: `task::create_new_account` serves a software global-HD login (Chapter
+> 5 R35c and its as-built note). Activation lists the address at
+> `path_to_address` from the first activation on (Chapter 5 R35a). Under the
+> Trezor policy, `path_to_address` is still not honored for a UTXO coin.
 
 R38.8.1 **Software-HD storage availability.** When a UTXO coin is activated in
 HD mode under a software global-HD account (key-pair policy `GlobalHDAccount`,

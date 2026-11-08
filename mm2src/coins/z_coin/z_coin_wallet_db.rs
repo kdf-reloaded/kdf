@@ -211,6 +211,9 @@ struct ZCoinStoredHistoryRow {
     timestamp: u64,
     received_by_me: u64,
     spent_by_me: u64,
+    /// The fee the wallet database holds for the transaction, in the coin's smallest unit; `0` when it
+    /// holds none (R39.8.9e1).
+    fee: u64,
     /// What the node's address store holds for this transaction (R39.8.9d2); empty when it holds
     /// nothing. The wallet-database crate's own address lists are not used (R39.8.9d1).
     recorded: TxAddresses,
@@ -417,8 +420,20 @@ impl ZCoinShieldedHistory {
         expiry_height: u32,
         destination: &str,
     ) -> Result<(), String> {
-        self.tx_addresses
-            .record(txid, expiry_height, AddressSide::To, destination)
+        self.record_address(txid, expiry_height, AddressSide::To, destination)
+    }
+
+    /// Keeps `address` on `side` of the transaction `txid` for its history row (R39.8.9d2 (a),
+    /// R39.8.9d3). `txid` is in the internal byte order of the wallet database. Nothing is recorded
+    /// about notes.
+    pub(crate) fn record_address(
+        &self,
+        txid: &[u8; 32],
+        expiry_height: u32,
+        side: AddressSide,
+        address: &str,
+    ) -> Result<(), String> {
+        self.tx_addresses.record(txid, expiry_height, side, address)
     }
 
     /// Removes the address entries of transactions that expired without being mined (R39.8.9d2 (c)).
@@ -1840,7 +1855,8 @@ impl ZCoinShieldedHistory {
                     COALESCE(vt.mined_height, 0) AS block_height,
                     COALESCE(vt.block_time, 0) AS timestamp,
                     COALESCE(SUM(vt.total_received), 0) AS received_by_me,
-                    COALESCE(SUM(vt.total_spent), 0) AS spent_by_me
+                    COALESCE(SUM(vt.total_spent), 0) AS spent_by_me,
+                    COALESCE(MAX(vt.fee_paid), 0) AS fee_paid
                 FROM v_transactions vt
                 INNER JOIN transactions t ON t.txid = vt.txid
                 WHERE vt.mined_height IS NOT NULL
@@ -1855,6 +1871,7 @@ impl ZCoinShieldedHistory {
                 let txid: Vec<u8> = row.get(1)?;
                 let received: i64 = row.get(4)?;
                 let spent: i64 = row.get(5)?;
+                let fee: i64 = row.get(6)?;
                 let row_recorded = recorded.get(&txid).cloned().unwrap_or_default();
                 Ok(ZCoinStoredHistoryRow {
                     internal_id: row.get(0)?,
@@ -1863,6 +1880,7 @@ impl ZCoinShieldedHistory {
                     timestamp: row.get::<_, u32>(3)? as u64,
                     received_by_me: non_negative_amount(received, 4)?,
                     spent_by_me: non_negative_amount(spent, 5)?,
+                    fee: non_negative_amount(fee, 6)?,
                     recorded: row_recorded,
                 })
             })
@@ -1921,7 +1939,7 @@ impl ZCoinStoredHistoryRow {
             block_height: self.block_height,
             confirmations: confirmations(current_block, self.block_height),
             timestamp: self.timestamp,
-            transaction_fee: BigDecimal::from(0),
+            transaction_fee: big_decimal_from_sat_unsigned(self.fee, decimals),
             coin: ticker.to_owned(),
             internal_id: self.internal_id,
         }
@@ -4503,7 +4521,8 @@ pub(crate) mod tests {
     }
 
     /// T39.8.9d2: an entry whose transaction expired and is not mined is removed; the entry of a mined
-    /// transaction is kept however old, and so is one whose expiry has not been passed by the scan.
+    /// transaction is kept however old, and so is one whose expiry has not been passed by the scan and
+    /// one with no expiry height (0).
     #[test]
     fn t39_8_9d2_an_expired_entry_is_removed_unless_its_transaction_is_mined() {
         let history = open_snapshot_history(&test_db_dir("snapshot-prune"));
@@ -4519,7 +4538,7 @@ pub(crate) mod tests {
             ([9; 32], scanned - 1), // expired, never mined: removed
             ([8; 32], scanned),     // the scan has not passed it yet: kept
             ([7; 32], scanned + 1), // kept
-            ([6; 32], 0),           // never expires: kept
+            ([6; 32], 0),           // no expiry height (0), never expires: kept
         ];
         for (txid, expiry) in entries {
             history.record_withdraw_recipient(&txid, expiry, &destination).unwrap();
@@ -4537,6 +4556,63 @@ pub(crate) mod tests {
         assert!(row_of(&page, 1).to.contains(&destination));
         // A second pass has nothing left to remove.
         assert_eq!(history.prune_tx_addresses().unwrap(), 0);
+    }
+
+    /// T39.8.9d3: entries on both sides join the row of their transaction: a `to` entry beside the wallet's
+    /// own address for the change (a payment, a fee payment), and a `from` entry on a row that spends no
+    /// wallet note (a spend or refund, which lists the script address and the wallet as receiver). The sets
+    /// are the same after the store is reopened, and an entry of another transaction does not leak in.
+    #[test]
+    fn t39_8_9d3_entries_on_both_sides_join_the_row_and_survive_a_reopen() {
+        let db_dir = test_db_dir("snapshot-swap-addresses");
+        let history = open_snapshot_history(&db_dir);
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+        let payment = FIXTURE_SPEND_TXID_INTERNAL;
+        let spend = FIXTURE_RECEIVE_TXID_INTERNAL;
+        give_snapshot_row_a_txid(&history, 5, payment);
+        give_snapshot_row_a_txid(&history, 1, spend);
+        history
+            .record_address(&payment, SNAPSHOT_EXPIRY, AddressSide::To, "script-address")
+            .unwrap();
+        history
+            .record_address(&payment, SNAPSHOT_EXPIRY, AddressSide::To, "fee-address")
+            .unwrap();
+        history
+            .record_address(&spend, SNAPSHOT_EXPIRY, AddressSide::From, "script-address")
+            .unwrap();
+        history
+            .record_address(&[0xcd; 32], SNAPSHOT_EXPIRY, AddressSide::From, "unrelated")
+            .unwrap();
+
+        let check = |history: &ZCoinShieldedHistory| {
+            let page = snapshot_page(history, page_number(1), 10, true);
+            assert_eq!(page.total, 5);
+            // The payment row: spends and receives, so the wallet is on both sides, and both recorded
+            // `to` entries are listed.
+            let payment_row = row_of(&page, 5);
+            assert_eq!(payment_row.from, vec!["zs-wallet".to_owned()]);
+            assert_eq!(
+                payment_row.to,
+                sorted(vec![
+                    "fee-address".to_owned(),
+                    "script-address".to_owned(),
+                    "zs-wallet".to_owned()
+                ])
+            );
+            // The spend row spends no wallet note: the script address is the only sender.
+            let spend_row = row_of(&page, 1);
+            assert_eq!(spend_row.from, vec!["script-address".to_owned()]);
+            assert_eq!(spend_row.to, vec!["zs-wallet".to_owned()]);
+            // Nothing leaks onto the other rows.
+            for id in 2..=4 {
+                let other = row_of(&page, id);
+                assert!(other.from.is_empty(), "row {id}");
+                assert_eq!(other.to, vec!["zs-wallet".to_owned()], "row {id}");
+            }
+        };
+        check(&history);
+        drop(history);
+        check(&reopen_snapshot_history(&db_dir));
     }
 
     /// T39.8.9d2: the scan pass is the prune point: after a completed pass the entries whose expiry the
@@ -7512,6 +7588,142 @@ pub(crate) mod tests {
             .map_err(|e| e.to_string())
             .expect("the note is free once the transaction has expired");
         assert_eq!(sapling_nullifiers(&first), sapling_nullifiers(&retry));
+    }
+
+    // ---- the fee of a history row (CRD ch.39 R39.8.9e1, T39.8.9e1) ----
+
+    /// Sets (or clears) the fee the wallet database holds for the transaction `id_tx`.
+    fn set_snapshot_fee(history: &ZCoinShieldedHistory, id_tx: i64, fee: Option<i64>) {
+        let (conn, _, _) = snapshot_connection(history);
+        conn.execute("UPDATE transactions SET fee = ?1 WHERE id_tx = ?2", params![fee, id_tx])
+            .unwrap();
+    }
+
+    /// The `transaction_fee` of every row of a page, by internal id.
+    fn fees_by_id(page: &ZCoinTxHistoryPage) -> Vec<(i64, BigDecimal)> {
+        let mut fees: Vec<_> = page
+            .transactions
+            .iter()
+            .map(|tx| (tx.internal_id, tx.transaction_fee.clone()))
+            .collect();
+        fees.sort_by_key(|(id, _)| *id);
+        fees
+    }
+
+    /// T39.8.9e1 (b), (c): a row for which the wallet database holds no fee reports `0`: the four
+    /// deposits of the snapshot and, as after a rebuild of the wallet database, the own send.
+    #[test]
+    fn t39_8_9e1_a_row_with_no_recorded_fee_reports_zero() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-fee-none"));
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+
+        // The test has teeth only if the column is NULL, not a stored zero.
+        let (conn, _, _) = snapshot_connection(&history);
+        let recorded: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transactions WHERE fee IS NOT NULL", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(recorded, 0);
+
+        let page = snapshot_page(&history, page_number(1), 10, true);
+        assert_eq!(page.total, 5);
+        for (id, fee) in fees_by_id(&page) {
+            assert_eq!(fee, BigDecimal::from(0), "row {id}");
+        }
+        // Row 5 is the own send: it spends wallet notes and still reports 0, because no fee is held.
+        assert!(row_of(&page, 5).spent_by_me > BigDecimal::from(0));
+    }
+
+    /// T39.8.9e1 (a): the fee the wallet database holds for an own send is reported, in the coin's
+    /// decimals, by the unmined row, by the mined row and after a restart of each; no other row
+    /// reports a fee.
+    #[test]
+    fn t39_8_9e1_a_recorded_fee_is_reported_unmined_mined_and_after_a_restart() {
+        let db_dir = test_db_dir("snapshot-fee-recorded");
+        let history = open_snapshot_history(&db_dir);
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+        let fee_sat = 10_000;
+        set_snapshot_fee(&history, 5, Some(fee_sat));
+
+        let check = |history: &ZCoinShieldedHistory, tip: u64| {
+            let page = history
+                .load_page("ARRR", "zs-wallet", 8, tip, &page_number(1), 10, true)
+                .unwrap();
+            assert_eq!(page.total, 5);
+            let own_send = row_of(&page, 5);
+            assert_eq!(own_send.transaction_fee, sat_amount(fee_sat));
+            for (id, fee) in fees_by_id(&page).into_iter().filter(|(id, _)| *id != 5) {
+                assert_eq!(fee, BigDecimal::from(0), "row {id}");
+            }
+        };
+
+        // The unmined row, and after a restart.
+        check(&history, 4_184_456);
+        drop(history);
+        let history = reopen_snapshot_history(&db_dir);
+        check(&history, 4_184_456);
+
+        // The mined row, and after a restart. The block fields are the ones a scan sets; it does not
+        // touch the fee column.
+        let (conn, _, _) = snapshot_connection(&history);
+        let mined_at = SNAPSHOT_HEIGHTS[3] + 1;
+        insert_snapshot_block(&conn, mined_at);
+        conn.execute(
+            "UPDATE transactions SET block = ?1, mined_height = ?1, tx_index = 0 WHERE id_tx = 5",
+            params![mined_at],
+        )
+        .unwrap();
+        drop(conn);
+        check(&history, u64::from(mined_at));
+        drop(history);
+        let history = reopen_snapshot_history(&db_dir);
+        check(&history, u64::from(mined_at));
+    }
+
+    /// T39.8.9e1 (b): a deposit reports `0` even when the wallet database holds a fee for another
+    /// transaction; the fee of one row is never carried to another.
+    #[test]
+    fn t39_8_9e1_a_fee_belongs_to_its_own_row_only() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-fee-own-row"));
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+        set_snapshot_fee(&history, 5, Some(10_000));
+        set_snapshot_fee(&history, 2, Some(25_000));
+
+        let page = snapshot_page(&history, page_number(1), 10, true);
+        assert_eq!(fees_by_id(&page), vec![
+            (1, BigDecimal::from(0)),
+            (2, sat_amount(25_000)),
+            (3, BigDecimal::from(0)),
+            (4, BigDecimal::from(0)),
+            (5, sat_amount(10_000)),
+        ]);
+    }
+
+    /// A fee the wallet database holds as a negative number is an unreadable row, like a negative
+    /// amount: the page is refused, not served with a `0` that would look like "no fee".
+    #[test]
+    fn t39_8_9e1_a_negative_stored_fee_refuses_the_page() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-fee-negative"));
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+        set_snapshot_fee(&history, 5, Some(-1));
+
+        assert!(history
+            .load_page("ARRR", "zs-wallet", 8, 4_184_456, &page_number(1), 10, true)
+            .is_err());
+    }
+
+    impl ZCoinShieldedHistory {
+        /// Test access to the rebuild of the wallet database at an anchor (R39.8.0ad), which is private
+        /// to this module: the wallet database is replaced by a fresh one holding the account, anchored
+        /// at the empty chain state of `height` and `hash`, and the compact-block cache is emptied.
+        pub(crate) fn rebuild_wallet_at_empty_anchor_for_test(
+            &self,
+            height: u32,
+            hash: [u8; 32],
+        ) -> Result<(), String> {
+            self.rebuild_wallet_at_anchor(ChainState::empty(BlockHeight::from_u32(height), BlockHash(hash)))
+        }
     }
 }
 

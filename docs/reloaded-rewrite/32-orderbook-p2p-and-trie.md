@@ -1198,6 +1198,34 @@ requester MUST ask one other relay once:
 > whose request failed or left a pair diverged. A divergence can also come
 > from an order message that arrived while the answer was being applied;
 > the extra request is then redundant, not harmful.
+>
+> *Cost (measured 2026-11-06 and 2026-11-07; Decision DA).* Lab runs of this
+> project's own nodes, with a maker that repriced its 32 pairs every 10 s,
+> measured the requests that trigger (b) adds. On a healthy network, with
+> 50 ms on every link and no loss, no node sent a synchronization request in
+> 30 minutes, so none followed under either trigger. Behind a heavily loaded
+> forwarding relay that ran the reference, a request to another relay
+> followed 86 % of the first requests with the other relay 3 s away, and 42 %
+> with it 6 s away.
+>
+> A cause test on 2026-11-07 used the loaded setup with the other relay 3 s
+> away and a second repricing maker added, and compared three schedules of
+> the first maker:
+> - with repricing every 10 s, 188 of 443 first requests were followed by such
+>   a request, each after an order message of the maker for the pair that the
+>   node handled after the keep-alive, so that the root the node reached
+>   included that change;
+> - with the repricing finished before the keep-alive, 35 of 273 were
+>   followed, none after a later change of the maker and none in the cycles
+>   in which the relay 3 s away answered first;
+> - without repricing, none of 103 first requests was followed.
+>
+> The 35 came in two cycles of the lab's link cuts, after a relay had
+> re-established its link; their cause is not established. In the cause test,
+> unlike the loaded-relay run, the relay 3 s away answered most first
+> requests, so it does not trace that run's own counts. The maintainer kept
+> trigger (b) as written. The debug line of each such request counts which
+> candidate rule would have skipped it.
 
 **R-Q6 (transport properties of the request, bound as facts the mesh
 relies on).** The request is a single one-shot request-response
@@ -4767,3 +4795,9 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   requester and parked-request table, and a lab run of this project's own
   nodes with reference binaries as black boxes, reported as counts. It states
   no reference fact and needs no Dirty Gate pass.
+- *Reloaded-original addition (2026-11-07, Decision DA) -- the cost
+  paragraph of R-Q5d's divergence note.* Written by a context that never read
+  the forbidden corpus. Its sources are the maintainer's Decision DA and three
+  lab runs of this project's own nodes with reference binaries as black boxes,
+  reported as counts. It states no reference fact and needs no Dirty Gate
+  pass.

@@ -5,6 +5,7 @@ use crate::utxo_activation::init_utxo_standard_statuses::{UtxoStandardAwaitingSt
 use crate::utxo_activation::utxo_standard_activation_result::{UtxoStandardActivationResult, UtxoWalletBalance};
 use coins::coin_balance::EnableCoinBalanceOps;
 use coins::hd_pubkey::RpcTaskXPubExtractor;
+use coins::hd_wallet::HDAddressId;
 use coins::utxo::UtxoActivationParams;
 use coins::{MarketCoinOps, PrivKeyActivationPolicy, PrivKeyBuildPolicy};
 use crypto::hw_rpc_task::HwConnectStatuses;
@@ -68,11 +69,22 @@ where
     task_handle
         .update_in_progress_status(UtxoStandardInProgressStatus::RequestingWalletBalance)
         .mm_err(Into::into)?;
+    // The activation lists the address at `path_to_address`, and creates its account when the wallet holds none
+    // (CRD ch.05 R35a). The Trezor policy does not honor `path_to_address` (CRD ch.55 §55.5), so its activation
+    // handles the first account as before.
+    let path_to_address = if matches!(activation_params.priv_key_policy, PrivKeyActivationPolicy::Trezor) {
+        None
+    } else {
+        Some(HDAddressId::from(
+            &activation_params.path_to_address.clone().unwrap_or_default(),
+        ))
+    };
     let wallet_balance = coin
         .enable_coin_balance(
             xpub_extractor,
             activation_params.scan_policy,
             activation_params.min_addresses_number.unwrap_or_default(),
+            path_to_address,
         )
         .await
         .mm_err(|error| InitUtxoStandardError::from_enable_balance_err(error, ticker.clone()))?;

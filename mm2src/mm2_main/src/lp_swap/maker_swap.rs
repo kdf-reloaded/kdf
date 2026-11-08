@@ -1633,6 +1633,13 @@ impl MakerSwap {
             ),
             Err(e) => ERR!("Error {} when trying to find maker payment spend", e),
             Ok(None) => {
+                // CRD ch.51 R75 item 2: the record holds the sent spend of the taker payment (a confirmed one
+                // was refused above), so the unspent maker payment is not refunded, whatever its refund time.
+                if self.r().taker_payment_spend.is_some() {
+                    return ERR!(
+                        "Taker payment spend transaction has been sent, the maker payment belongs to the taker and is not refunded"
+                    );
+                }
                 // our payment is not spent, try to refund
                 log!("Trying to refund MakerPayment");
                 if now_ms() / 1000 < self.r().data.maker_payment_lock + 3700 {
@@ -3849,6 +3856,181 @@ mod maker_swap_tests {
         assert!(unsafe { !SEARCH_FOR_SWAP_TX_SPEND_MY_CALLED });
         assert!(unsafe { !SEARCH_FOR_SWAP_TX_SPEND_OTHER_CALLED });
         assert!(unsafe { !SEND_MAKER_REFUNDS_PAYMENT_CALLED });
+    }
+
+    /// A finished maker swap whose record holds the spend of the taker payment (`TakerPaymentSpent`) and not
+    /// its confirmation (CRD ch.51 §51.6A, a swap with a sent spend).
+    const SAVED_WITH_SENT_TAKER_PAYMENT_SPEND: &str = r#"{"error_events":["StartFailed","NegotiateFailed","TakerFeeValidateFailed","MakerPaymentTransactionFailed","MakerPaymentDataSendFailed","TakerPaymentValidateFailed","TakerPaymentSpendFailed","TakerPaymentSpendConfirmFailed","MakerPaymentRefunded","MakerPaymentRefundFailed"],"events":[{"event":{"data":{"lock_duration":7800,"maker_amount":"1","maker_coin":"BEER","maker_coin_start_block":154892,"maker_payment_confirmations":1,"maker_payment_lock":1563444026,"my_persistent_pub":"02631dcf1d4b1b693aa8c2751afc68e4794b1e5996566cfc701a663f8b7bbbe640","secret":"e1c9bd12a83f810813dc078ac398069b63d56bf1e94657def995c43cd1975302","started_at":1563428426,"taker":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3","taker_amount":"1","taker_coin":"ETOMIC","taker_coin_start_block":150282,"taker_payment_confirmations":1,"uuid":"983ce732-62a8-4a44-b4ac-7e4271adc977"},"type":"Started"},"timestamp":1563428426510},{"event":{"data":{"taker_payment_locktime":1563436226,"taker_pubkey":"02031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3"},"type":"Negotiated"},"timestamp":1563428466880},{"event":{"data":{"tx_hash":"32f5bec2106dd3778dc32e3d856398ed0fa10b71c688672906a4fa0345cc4135","tx_hex":"0400008085202f89015ba9c8f0aec5b409bc824bcddc1a5a40148d4bd065c10169249e44ec44d62db2010000006a473044022050a213db7486e34871b9e7ef850845d55e0d53431350c16fa14fb60b81b1858302204f1042761f84e5f8d22948358b3c4103861adf5293d1d9e7f58f3b7491470b19012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff02bcf60100000000001976a914ca1e04745e8ca0c60d8c5881531d51bec470743f88ac764d12ac010000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac8806305d000000000000000000000000000000"},"type":"TakerFeeValidated"},"timestamp":1563428507723},{"event":{"data":{"tx_hash":"1619d10a51925d2f3d0ef92d81cb6449b77d5dbe1f3ef5e7ae6c8bc19080cb5a","tx_hex":"0400008085202f890176ead03820bc0c4e92dba39b5d7e7a1e176b165f6cfc7a5e2c000ed62e8a8134010000006b48304502210086ca9a6ea5e787f4c3001c4ddb7b2f4732d8bb2642e9e43d0f39df4b736a4aa402206dbd17753f728d70c9631b6c2d1bba125745a5bc9be6112febf0e0c8ada786b1012102631dcf1d4b1b693aa8c2751afc68e4794b1e5996566cfc701a663f8b7bbbe640ffffffff0200e1f5050000000017a91410503cfea67f03f025c5e1eeb18524464adf77ee877f360c18c00000001976a91464ae8510aac9546d5e7704e31ce177451386455588ac9b06305d000000000000000000000000000000"},"type":"MakerPaymentSent"},"timestamp":1563428512925},{"event":{"data":{"tx_hash":"ee8b904efdee0d3bf0215d14a236489cde0b0efa92f7fa49faaa5fd97ed38ac0","tx_hex":"0400008085202f89013541cc4503faa406296788c6710ba10fed9863853d2ec38d77d36d10c2bef532010000006b483045022100a32e290d3a047ad75a512f9fd581c561c5153aa1b6be2b36915a9dd452cd0d4102204d1838b3cd15698ab424d15651d50983f0196e59b0b34abaad9cb792c97b527a012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff0200e1f5050000000017a91424fc6f967eaa2751adbeb42a97c3497fbd9ddcce878e681ca6010000001976a91405aab5342166f8594baf17a7d9bef5d56744332788acbf06305d000000000000000000000000000000"},"type":"TakerPaymentReceived"},"timestamp":1563428664418},{"event":{"type":"TakerPaymentWaitConfirmStarted"},"timestamp":1563428664420},{"event":{"type":"TakerPaymentValidatedAndConfirmed"},"timestamp":1563428664824},{"event":{"data":{"tx_hash":"8b48d7452a2a1c6b1128aa83ab946e5a624037c5327b527b18c3dcadb404f139","tx_hex":"0400008085202f8901c08ad37ed95faafa49faf792fa0e0bde9c4836a2145d21f03b0deefd4e908bee00000000d747304402206ac1f2b5b856b86585b4d2147309e3a7ef9dd4c35ffd85a49c409a4acd11602902204be03e2114888fae460eaf99675bae0c834ff80be8531a5bd30ee14baf0a52e30120e1c9bd12a83f810813dc078ac398069b63d56bf1e94657def995c43cd1975302004c6b6304c224305db1752102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ac6782012088a9143501575fb9a12a689bb94adad33cc78c13b0688c882102631dcf1d4b1b693aa8c2751afc68e4794b1e5996566cfc701a663f8b7bbbe640ac68ffffffff0118ddf505000000001976a91464ae8510aac9546d5e7704e31ce177451386455588ac28f92f5d000000000000000000000000000000"},"type":"TakerPaymentSpent"},"timestamp":1563428666150},{"event":{"type":"Finished"},"timestamp":1563428666152}],"my_info":{"my_amount":"1","my_coin":"BEER","other_amount":"1","other_coin":"ETOMIC","started_at":1563428426},"success_events":["Started","Negotiated","TakerFeeValidated","MakerPaymentSent","TakerPaymentReceived","TakerPaymentWaitConfirmStarted","TakerPaymentValidatedAndConfirmed","TakerPaymentSpent","TakerPaymentSpendConfirmStarted","TakerPaymentSpendConfirmed","Finished"],"type":"Maker","uuid":"983ce732-62a8-4a44-b4ac-7e4271adc977"}"#;
+
+    fn maker_swap_with_sent_taker_payment_spend() -> MakerSwap {
+        let maker_saved_swap: MakerSavedSwap = json::from_str(SAVED_WITH_SENT_TAKER_PAYMENT_SPEND).unwrap();
+        let key_pair =
+            key_pair_from_seed("spice describe gravity federal blast come thank unfair canal monkey style afraid")
+                .unwrap();
+        let ctx = test_ctx_with_netid(key_pair);
+
+        TestCoin::ticker.mock_safe(|_| MockResult::Return("ticker"));
+        TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
+
+        let maker_coin = MmCoinEnum::Test(TestCoin::default());
+        let taker_coin = MmCoinEnum::Test(TestCoin::default());
+        let (maker_swap, _) = MakerSwap::load_from_saved(
+            ctx.clone(),
+            maker_coin,
+            taker_coin,
+            crate::mm2::lp_swap::recorded_by_maker(maker_saved_swap, &ctx),
+        )
+        .unwrap();
+        assert!(maker_swap.r().taker_payment_spend.is_some());
+        assert!(!maker_swap.r().taker_payment_spend_confirmed);
+        maker_swap
+    }
+
+    /// The maker payment is unspent on the chain. A refund transaction and the refund gate are recorded when
+    /// they are reached.
+    fn mock_unspent_maker_payment(refund_built: &'static AtomicBool, gate_asked: &'static AtomicBool) {
+        TestCoin::search_for_swap_tx_spend_my
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+        TestCoin::refund_gate_closed_note.mock_safe(move |_, _| {
+            gate_asked.store(true, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(None)))
+        });
+        TestCoin::send_maker_refunds_payment.mock_safe(move |_, _, _, _, _, _, _| {
+            refund_built.store(true, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+    }
+
+    const SENT_SPEND_REFUSAL: &str =
+        "Taker payment spend transaction has been sent, the maker payment belongs to the taker and is not refunded";
+
+    /// T32 item 7: the maker payment is unspent and the refund time has passed.
+    #[test]
+    fn test_recover_funds_sent_spend_unspent_maker_payment_after_the_lock_is_not_refunded() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        static GATE_ASKED: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        assert!(maker_swap.r().data.maker_payment_lock + 3700 < now_ms() / 1000);
+        mock_unspent_maker_payment(&REFUND_BUILT, &GATE_ASKED);
+        let lock_before = maker_swap.r().data.maker_payment_lock;
+
+        let err = block_on(maker_swap.recover_funds()).expect_err("Expected an error");
+        assert!(err.contains(SENT_SPEND_REFUSAL), "{err}");
+        assert!(!err.contains("Too early to refund"), "{err}");
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+        assert!(!GATE_ASKED.load(Ordering::SeqCst));
+        // R76: the record is as it was.
+        assert_eq!(maker_swap.r().data.maker_payment_lock, lock_before);
+        assert!(maker_swap.r().taker_payment_spend.is_some());
+        assert!(!maker_swap.r().taker_payment_spend_confirmed);
+        assert!(maker_swap.r().maker_payment_refund.is_none());
+    }
+
+    /// T32 item 8: the maker payment is unspent and the refund time has not passed; the answer is the same
+    /// refusal, not the refund-time one.
+    #[test]
+    fn test_recover_funds_sent_spend_unspent_maker_payment_before_the_lock_gets_the_same_refusal() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        static GATE_ASKED: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        maker_swap.w().data.maker_payment_lock = now_ms() / 1000 + 100_000;
+        mock_unspent_maker_payment(&REFUND_BUILT, &GATE_ASKED);
+
+        let err = block_on(maker_swap.recover_funds()).expect_err("Expected an error");
+        assert!(err.contains(SENT_SPEND_REFUSAL), "{err}");
+        assert!(!err.contains("Too early to refund"), "{err}");
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+        assert!(!GATE_ASKED.load(Ordering::SeqCst));
+    }
+
+    /// T32 item 9: the maker payment is spent and the taker payment is not; the call spends the taker payment.
+    #[test]
+    fn test_recover_funds_sent_spend_spent_maker_payment_still_spends_the_unspent_taker_payment() {
+        static SPEND_BUILT: AtomicBool = AtomicBool::new(false);
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
+            MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Spent(
+                eth_tx_for_test().into(),
+            ))))))
+        });
+        TestCoin::search_for_swap_tx_spend_other
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+        TestCoin::send_maker_spends_taker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SPEND_BUILT.store(true, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+        TestCoin::send_maker_refunds_payment.mock_safe(|_, _, _, _, _, _, _| {
+            REFUND_BUILT.store(true, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let expected = Ok(RecoveredSwap {
+            coin: "ticker".into(),
+            action: RecoveredSwapAction::SpentOtherPayment,
+            transaction: eth_tx_for_test().into(),
+        });
+        assert_eq!(block_on(maker_swap.recover_funds()), expected);
+        assert!(SPEND_BUILT.load(Ordering::SeqCst));
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+    }
+
+    /// T32 item 10: the maker payment is spent and the taker payment is already spent; nothing is built.
+    #[test]
+    fn test_recover_funds_sent_spend_spent_maker_payment_and_spent_taker_payment_builds_nothing() {
+        static SPEND_BUILT: AtomicBool = AtomicBool::new(false);
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
+            MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Spent(
+                eth_tx_for_test().into(),
+            ))))))
+        });
+        TestCoin::search_for_swap_tx_spend_other.mock_safe(|_, _, _, _, _, _, _, _| {
+            MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Spent(
+                eth_tx_for_test().into(),
+            ))))))
+        });
+        TestCoin::send_maker_spends_taker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SPEND_BUILT.store(true, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+        TestCoin::send_maker_refunds_payment.mock_safe(|_, _, _, _, _, _, _| {
+            REFUND_BUILT.store(true, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let err = block_on(maker_swap.recover_funds()).expect_err("Expected an error");
+        assert!(err.contains("Taker payment was already spent"), "{err}");
+        assert!(!SPEND_BUILT.load(Ordering::SeqCst));
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+    }
+
+    /// T32 item 11: the maker payment is refunded on the chain; the answer is that of a swap without a spend.
+    #[test]
+    fn test_recover_funds_sent_spend_refunded_maker_payment_is_refused_as_already_refunded() {
+        static SPEND_BUILT: AtomicBool = AtomicBool::new(false);
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
+            MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Refunded(
+                eth_tx_for_test().into(),
+            ))))))
+        });
+        TestCoin::send_maker_spends_taker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SPEND_BUILT.store(true, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+        TestCoin::send_maker_refunds_payment.mock_safe(|_, _, _, _, _, _, _| {
+            REFUND_BUILT.store(true, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let err = block_on(maker_swap.recover_funds()).expect_err("Expected an error");
+        assert!(err.contains("Maker payment was already refunded"), "{err}");
+        assert!(!err.contains(SENT_SPEND_REFUSAL), "{err}");
+        assert!(!SPEND_BUILT.load(Ordering::SeqCst));
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
     }
 
     #[test]

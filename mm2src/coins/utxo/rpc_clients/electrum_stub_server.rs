@@ -134,6 +134,7 @@ impl StubServer {
             url: self.addr(),
             protocol: Default::default(),
             disable_cert_verification: false,
+            spki_sha256: None,
             timeout_sec: None,
         }
     }

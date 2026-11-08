@@ -972,6 +972,92 @@ connection to such a relay open, so its idle close is the normal end of
 a connection nothing uses. The lab rows and the public probes of
 2026-10-31 logged it as a warning on every run.
 
+**R27c.** *Bounded close (added 2026-11-07, batch 0.4.0 item P6;
+Reloaded-original; maintainer decisions of 2026-11-02).* Every close of a
+connection that this node starts MUST end within **30 seconds** of its
+start. This covers the close of a stuck peer under RQ1 item 5, the ping
+safeguard of R9, the relay-count maintenance of R27 and RQ1a item 4, the
+peer-clock admission check of RP2, and every other disconnect the node
+requests.
+
+1. **Deadline.** If the multiplexer has not finished closing the
+   connection 30 seconds after the close started, the node abandons the
+   close: it drops the connection and its transport stream, and the
+   connection counts as closed from that moment. Data still queued for
+   the peer is lost, as it is at any close.
+2. **Cause and log.** Such a close is reported with an I/O error as its
+   cause, and that error carries a timeout with the message "close timed
+   out". The node logs it at WARN under the classification of R27b,
+   naming the peer ID and the cause.
+3. **Afterwards.** The peer counts as disconnected. Relay state is updated
+   under R27, and the redial guards of R27a decide when the peer may be
+   dialed again. The operating system may go on retrying the unsent data
+   of the abandoned socket for a while; the node holds no state for it.
+4. **Unchanged.** A connection that fails, or that closes on the idle
+   timeout, is dropped without waiting for the multiplexer's close, as
+   before. A close that the multiplexer finishes in time behaves as
+   before.
+5. **Where it lives.** The deadline is part of the multiplexer's close in
+   the vendored `libp2p-yamux` crate of this repository
+   (`vendor-patches/libp2p-yamux-0.44.0`, recorded in its patch notes).
+   Every transport a native node builds runs that multiplexer (R0b,
+   §28.8), so the deadline holds on native nodes; the browser build
+   SHOULD carry it too.
+6. **Setting.** The 30 seconds are a fixed value of the vendored crate,
+   which tests MAY shorten. They are not an `MM2.json` setting.
+
+*Why.* A close sends the multiplexer's GoAway frame and flushes the
+socket, and the connection counts as open until that has finished.
+Toward a peer that reads nothing, for example a hung process whose
+kernel keeps the TCP session open with a zero receive window, the flush
+cannot complete while the window stays closed, so the close can last as
+long as the peer's kernel keeps the session. For that time the
+connection, its gossip queue up to the cap of RQ1 item 2 and the
+multiplexer's buffers stay held, the peer counts as connected, and the
+maintenance of R27 does not redial it. In the lab row of T14, a build
+without this rule kept such a close open for 13 minutes, and it ended
+after the peer was resumed; with the rule, the close ended after 30
+seconds. A healthy close
+takes milliseconds, and
+flushing a full multiplexer window of 256 KiB at 100 kbit/s takes about
+20 seconds, so 30 seconds leave a slow peer that still reads time to
+finish.
+
+> **Compatibility (informative).** Reloaded-original. No wire shape
+> changes. The peer sees the transport connection end up to 30 seconds
+> after the GoAway frame instead of whenever it reads again. The rule
+> affects only this node's own connections, so under
+> `docs/COMPAT_SWITCHES.md`, "The default-side rule", it falls in arm 2:
+> Reloaded's behavior by default and no switch. It needs no row in the
+> operator-facing compatibility documents. *Parity note:* by RQ1b items 3
+> to 5, the reference's gossip layer detects no slow peer and never
+> closes a connection itself; every close there is application-initiated
+> (R9, R27, RP2). The pinned fork's public swarm crate (MIT), which both
+> reference rows bind (RQ1b), awaits the multiplexer's close without a
+> deadline.
+>
+> **As built (2026-11-07, clean-side record; plan item P6).** The deadline
+> is in `Muxer::poll_close` of `vendor-patches/libp2p-yamux-0.44.0/src/lib.rs`,
+> the second patch in its `PATCH-NOTES.md`. The constant `CLOSE_TIMEOUT` is
+> 30 s. The first `poll_close` of a connection starts a
+> `futures_timer::Delay`; the inner close is polled first, and if it is
+> still pending when the delay fires, `poll_close` returns an `io::Error` of
+> kind `TimedOut` with the message "close timed out" and never polls the
+> inner connection again. The boxed muxer wraps that error in an I/O error
+> of kind `Other`, so the swarm's cause carries both; its debug text, which
+> the WARN line of R27b prints with the peer ID, contains "close timed
+> out". The deadline holds on every target: on `wasm32`, `futures-timer`
+> runs on the browser timer, through a feature that the shared dependency
+> graph enables, not this crate. Only the crate's own tests shorten the
+> deadline, through a private field. Tests:
+> `close_toward_a_peer_that_reads_nothing_times_out_at_the_deadline`,
+> `close_toward_a_peer_that_reads_ends_at_once` and
+> `close_deadline_is_thirty_seconds` in the yamux crate (CI row
+> `bounded-close`); `close_timed_out_is_a_warn_that_carries_the_cause` and
+> the extended
+> `connection_closed_is_classified_by_cause_type_and_remaining_connections`
+> in `mm2_p2p`.
+
 ## 28.9A Required Port — Peer Health-check, Time-sync Admission, Expirable Bans (driving-spec)
 
 **STATUS.** The three behaviours in this section are post-baseline
@@ -1174,7 +1260,9 @@ queue per connection of the RPCs waiting to be written to that peer.
    of Chapter 32. RQ1a states what a reference peer does after the close:
    when it redials, what it sends, and that it holds nothing against the
    closer. The ping safeguard of R9 closes every connection to a peer in
-   the same way.
+   the same way. *(Added 2026-11-07, item P6.)* Each of these closes
+   ends within the deadline of R27c, also toward a peer that reads
+   nothing.
 
    **Guard for relays** *(amended 2026-10-30, maintainer decision AY).*
    A shared cause can make several relay connections stuck at once, for
@@ -1795,6 +1883,33 @@ classification is tested on its inputs:
 - every other cause logs at WARN, and a close without a cause logs at
   INFO as a clean close.
 
+**T14.** *Bounded close (R27c; added 2026-11-07).* The deadline is
+shortened by test configuration.
+- In the vendored multiplexer crate, a close toward a peer that reads
+  nothing ends with the timed-out cause once the deadline has passed,
+  and not before. A close toward a peer that reads ends at once, without
+  an error.
+- A close with the timed-out cause logs at WARN with the peer ID.
+- *Lab row L-CLOSE (black-box).* A relay R and a peer P. P's data queue
+  at R is filled to the cap, then P's process is stopped (`SIGSTOP` or a
+  container freeze), so that P's kernel keeps the socket with a zero
+  receive window, with the TCP path to P full: R's unsent bytes toward P
+  stay constant. Small TCP buffers on R and P make the path fill. R logs
+  the stuck close (or the ping close), then the closed connection with
+  the timed-out cause within 30 s of it. If R is below its low
+  watermark, it redials P at the first tick R27a allows. After the
+  close, R's memory stops growing, where the control's keeps growing.
+  *Control:* a build without R27c, run the same way, records how long
+  the close lasts without the deadline. *Clarified after the run
+  (2026-11-07):* the memory line first read "R's memory returns to its
+  baseline"; it was written for a quiet peer, and in this run, which
+  flooded R with orders, R's memory rose by about 25 MB in both builds
+  before the close. *Result (2026-11-07):* the close ended 30.0 s after
+  it started on the R27c build; on the control it stayed open 13 min 4 s
+  and ended after P was resumed. R's memory was flat after
+  the close on the R27c build (57 MB, from a 33.5 MB baseline) and grew
+  to 80 MB on the control, still growing when the run ended.
+
 ## 28.11 Deferred Work
 
 > **Note.** The §28.9A items (peer health-check RPC, time-sync
@@ -1870,6 +1985,9 @@ AY), pre-beta: adopted, together with the repeated-drops criterion of
 RQ1 item 5. A swaplab run gates the merge.* *Amended 2026-10-30 (decision
 AY): a guard holds back the close of a relay when another relay was
 closed within 30 s or fewer than 2 would remain (RQ1 item 5, T-RQ1.12).*
+*Amended 2026-11-07 (batch 0.4.0 item P6): a close that the multiplexer
+cannot finish because the peer reads nothing is abandoned after 30 s
+(R27c).*
 
 **D9.** *Peer-address follow-ups (deferred to after the beta; added
 2026-10-31, maintainer decision BH).*
@@ -2347,3 +2465,10 @@ per-peer IHAVE and IWANT caps of R13a) MUST be confirmed to add no rule that rea
   against the standard that any discretionary finding fails a file;
   dictated-interop tokens, public library defaults and constants, and
   Reloaded-original text were excluded from the measured set.
+- *Scoped addition (2026-11-07) -- R27c, T14, the sentence added to RQ1
+  item 5 and the amendment of D8.* Reloaded-original, batch 0.4.0 item
+  P6. *Inputs:* this repository's vendored `libp2p-yamux` crate and the
+  pinned fork's public `libp2p-swarm` crate (MIT) for the close path; a
+  lab run; and, for the parity note, the gated facts of RQ1b items 3 to 5
+  as already recorded in this chapter. Written by a context that never
+  read the forbidden corpus. It needs no Dirty Gate pass of its own.

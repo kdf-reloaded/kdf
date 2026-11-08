@@ -98,7 +98,8 @@ use utxo_common::{big_decimal_from_sat, UtxoTxBuilder};
 use utxo_signer::sign_params::{SendingOutputInfo, SpendingInputInfo, UtxoSignTxParamsBuilder};
 use utxo_signer::with_key_pair::sign_tx_with_p2pk;
 use utxo_signer::with_trezor::TrezorTxSigner;
-use utxo_signer::{TxProvider, TxProviderError, UtxoSignTxError, UtxoSignTxResult};
+use utxo_signer::{refuse_sighash_suffix_for_hardware_wallet, TxProvider, TxProviderError, UtxoSignTxError,
+                  UtxoSignTxResult};
 
 use self::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumRpcRequest, EstimateFeeMethod, EstimateFeeMode,
                         NativeClient, UnspentInfo, UnspentMap, UtxoRpcClientEnum, UtxoRpcError, UtxoRpcFut,
@@ -654,6 +655,15 @@ pub struct UtxoCoinConf {
     pub fork_id: u32,
     /// Signature version
     pub signature_version: SignatureVersion,
+    /// The sighash suffix (CRD ch.61): four little-endian bytes appended to every legacy and BIP-143
+    /// signature-hash preimage of this coin. Zero (the key is absent) appends nothing.
+    pub sighash_suffix: u32,
+    /// The optional `sighash_suffix_height` key, validated at activation. No signing site gates on it yet
+    /// (CRD ch.61 decision D1): the suffix applies at every height.
+    pub sighash_suffix_height: Option<u64>,
+    /// The `require_suffix_counterparty` key (CRD ch.61 R61.5A.4, default `true`): whether a coin with a
+    /// non-zero `sighash_suffix` declines a counterparty that does not declare suffix signing.
+    pub require_suffix_counterparty: bool,
     pub required_confirmations: AtomicU64,
     /// if set to true MM2 will check whether calculated fee is lower than relay fee and use
     /// relay fee amount instead of calculated
@@ -838,6 +848,7 @@ impl UtxoCoinFields {
             zcash: self.conf.zcash,
             str_d_zeel,
             hash_algo: self.tx_hash_algo.into(),
+            sighash_suffix: self.conf.sighash_suffix,
         }
     }
 }
@@ -2111,6 +2122,9 @@ fn map_utxo_sign_error(ticker: &str, error: UtxoSignTxError) -> String {
         UtxoSignTxError::TrezorDoesntSupportP2WPKH => {
             "hardware_wallet:unsupported_script_signing_mode: Trezor UTXO signer does not support this address/script mode".to_owned()
         },
+        sign_error @ UtxoSignTxError::SighashSuffixNotSupportedByHardwareWallet { .. } => {
+            format!("hardware_wallet:unsupported_sighash_suffix: {}", sign_error)
+        },
         UtxoSignTxError::TrezorError(trezor) => map_trezor_error(trezor),
         UtxoSignTxError::InvalidSignParam { param, description } => format!(
             "hardware_wallet:missing_derivation_metadata: invalid Trezor signing parameter '{}': {}",
@@ -2207,6 +2221,9 @@ where
             "UTXO Swap V2 Trezor input signing",
         ))
     })?;
+    // CRD ch.61 R61.4.4: refuse before the device is contacted.
+    refuse_sighash_suffix_for_hardware_wallet(unsigned.sighash_suffix)
+        .map_err(|e| TransactionErr::Plain(map_utxo_sign_error(&fields.conf.ticker, e.into_inner())))?;
     let hw_ctx = fields.hw_ctx.as_ref().ok_or_else(|| {
         TransactionErr::Plain(
             "hardware_wallet:transport_failure: initialized hardware wallet context is unavailable".to_owned(),
