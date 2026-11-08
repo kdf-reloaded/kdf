@@ -26,6 +26,67 @@ cargo test -p coins --lib t4a_
 cargo test -p mm2_main --lib t4a_
 ```
 
+## Tests that need public servers (`live-network-tests`)
+
+Some tests connect to public servers: the DOC and MARTY Electrum servers of cipig, the Bitcoin, Bitcoin
+Cash, Firo, Verus, Dogecoin and other Electrum servers, the Qtum testnet server (see below), the public
+Ethereum dev node, a BCHD node, the Solana test networks, the public price service and `httpbin.org`. Such a test fails whenever a
+server is down, slow or has changed, and that says nothing about the code. So these tests are off by
+default. Each one carries this attribute right after `#[test]`:
+
+```rust
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
+```
+
+A plain `cargo test` lists them as ignored. To run them, build with the cargo feature of the crate that
+holds the test. The feature exists in `coins`, `mm2_main` and `mm2_net`, and does nothing else:
+
+```bash
+# Unit tests of the coins crate (UTXO, QRC20, BCH and SLP, Solana)
+cargo test -p coins --lib --features live-network-tests utxo::utxo_tests::
+cargo test -p coins --lib --features live-network-tests qrc20::
+
+# The integration tests of mm2_main, which start a node and use public servers
+cargo test -p mm2_main --lib --features regtest-netid,live-network-tests -- mm2::mm2_tests::test_my_balance
+
+# The one test of mm2_net
+cargo test -p mm2_net --lib --features live-network-tests test_slurp_req
+```
+
+The integration tests in `mm2_tests` need the `regtest-netid` feature (they start nodes on the test netid) and run
+as library tests of `mm2_main`, with no Docker. The `docker_tests` binary is only for the tests that need the
+local Docker chains: it pulls images and starts containers unless `_MM2_TEST_CONF` is set.
+
+What carries the attribute:
+
+- `coins`: the tests of `utxo/utxo_tests.rs` that build an Electrum client or activate a coin on a public
+  server (`electrum_client_for_test` waits for a first connection, so even a test that only checks a
+  signature needs the server), the tests of `qrc20/qrc20_tests.rs`, `qrc20/history.rs`, `utxo/bch.rs` and
+  `utxo/slp.rs` (all through the testnet coin helpers), the BCHD tests of `utxo/bchd_grpc.rs`, and the
+  Solana tests that read a balance or send a transaction.
+- `mm2_main`: the tests of `mm2_tests.rs` and its `mm2_tests/` modules that enable a coin on a public
+  server, `test_process_price_request` (it fetches the public price service), and three tests of `docker_tests.rs` that need a public server besides the Docker nodes
+  (`test_get_max_taker_vol_with_kmd`, `test_match_utxo_with_eth_taker_sell`,
+  `test_match_utxo_with_eth_taker_buy`).
+- `mm2_net`: `test_slurp_req`.
+
+What does not, and why:
+
+- Tests that use a local stub, a mock or the Docker nodes only.
+- The `wasm32` tests, which run in a browser.
+- The tests behind `zhtlc-native-tests`, which has its own feature and set-up.
+- `test_withdraw_and_send`, `test_withdraw_legacy` and the few other tests with a plain `#[ignore]`: they
+  stay ignored with or without the feature. The first two run in the `external-network-tests` CI job with
+  `--include-ignored`; see [DISABLED_TESTS.md](DISABLED_TESTS.md).
+- `polygon_check_if_my_payment_sent`, which skips itself when `POLYGON_RPC_URL` is not set.
+
+CI runs the same tests as before the feature existed. The jobs that run unit tests select their tests by
+name, and none of the gated tests is among them. The `docker-tests` job selects three gated tests by name
+(`test_withdraw_segwit`, `test_withdraw_cashaddresses` and
+`test_withdraw_to_different_cashaddress_network_should_fail`), so it passes the feature. A new test that needs
+a public server should carry the attribute, and it joins a CI job only if someone adds the feature to that
+job on purpose. If a gated test fails, look at the server before you look at the code.
+
 ## tQTUM tests and their Electrum server
 
 Most of the tests that activate the Qtum testnet coin (`tQTUM`, and `QRC20` on it) read the

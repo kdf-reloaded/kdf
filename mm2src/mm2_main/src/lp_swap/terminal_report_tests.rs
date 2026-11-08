@@ -4,11 +4,13 @@
 //!
 //! The tests run the real load/redact, store and publish steps of [`broadcast_my_swap_status`] (the price
 //! fetch of the live path is replaced by a canned price-service response) and read the published payload from
-//! the P2P command channel.
+//! the P2P command channel. The price tests of CRD ch.62 R62.7.1 run the real `broadcast_my_swap_status` against
+//! loopback price services.
 
 use super::*;
 use crate::mm2::database::init_and_migrate_db;
 use crate::mm2::lp_network::P2PContext;
+use crate::mm2::lp_ordermatch::price_service::stub_server::{dead_url, price_document, serve, OK};
 use crate::mm2::lp_swap::maker_swap::{MakerSavedEvent, MakerSwapData, MakerSwapEvent, TakerNegotiationData};
 use crate::mm2::lp_swap::taker_swap::{MakerNegotiationData, TakerSavedEvent, TakerSwapData, TakerSwapEvent};
 use common::block_on;
@@ -19,6 +21,7 @@ use mm2_core::mm_ctx::MmCtxBuilder;
 use mm2_p2p::atomicdex_behaviour::AdexBehaviourCmd;
 use rpc::v1::types::{Bytes as BytesJson, H256 as H256Json, H264 as H264Json};
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 fn maker_persistent_key() -> String { format!("02{}", "11".repeat(32)) }
@@ -27,7 +30,15 @@ fn maker_wire_key() -> String { "11".repeat(32) }
 fn taker_wire_key() -> String { "22".repeat(32) }
 fn zero_32() -> String { "00".repeat(32) }
 fn zero_33() -> String { "00".repeat(33) }
-const PRICE_RESPONSE: &str = r#"{"ARRR":{"last_price":"1.5"},"RIN":{"last_price":"0.02"},"KMD":{"last_price":"0.25"}}"#;
+
+/// The canned price-service response: the three coins of the tests, from a recognized provider.
+fn price_response() -> String {
+    price_document(&[
+        ("ARRR", "1.5", "binance", 1_794_066_000),
+        ("RIN", "0.02", "livecoinwatch", 1_794_066_000),
+        ("KMD", "0.25", "coingecko", 1_794_066_000),
+    ])
+}
 
 fn key33(hex: &str) -> H264Json { hex.parse().unwrap() }
 
@@ -254,11 +265,18 @@ struct TestNode {
 }
 
 impl TestNode {
-    fn new() -> TestNode {
+    fn new() -> TestNode { TestNode::with_conf(json!({})) }
+
+    /// A node whose `MM2.json` sets the key `price_urls` to `price_urls`.
+    fn with_price_urls(price_urls: Value) -> TestNode { TestNode::with_conf(json!({ "price_urls": price_urls })) }
+
+    fn with_conf(extra: Value) -> TestNode {
         let dir = std::env::temp_dir().join(format!("kdf-terminal-report-{}", Uuid::new_v4()));
-        let ctx = MmCtxBuilder::default()
-            .with_conf(json!({"netid": 8762, "dbdir": dir.to_str().unwrap()}))
-            .into_mm_arc();
+        let mut conf = json!({"netid": 8762, "dbdir": dir.to_str().unwrap()});
+        if let (Some(conf), Some(extra)) = (conf.as_object_mut(), extra.as_object()) {
+            conf.extend(extra.clone());
+        }
+        let ctx = MmCtxBuilder::default().with_conf(conf).into_mm_arc();
         let _ = ctx
             .sqlite_connection
             .pin(Arc::new(Mutex::new(Connection::open_in_memory().unwrap())));
@@ -283,13 +301,16 @@ impl TestNode {
     fn report(&self, uuid: Uuid) {
         block_on(async {
             let status = load_redacted_my_swap(&self.ctx, uuid).await.unwrap();
-            let fiat = fiat_snapshot_from_price_response(&status, PRICE_RESPONSE);
+            let fiat = fiat_snapshot_from_price_response(&status, &price_response());
             save_stats_swap_with_snapshot(&self.ctx, &status, fiat.as_ref())
                 .await
                 .unwrap();
             publish_swap_status(&self.ctx, status);
         });
     }
+
+    /// Makes the terminal report with the real [`broadcast_my_swap_status`], which prices a successful swap once.
+    fn report_for_real(&self, uuid: Uuid) { block_on(broadcast_my_swap_status(&self.ctx, uuid)).unwrap(); }
 
     /// Everything published since the last call, as `(topics, payload)`.
     fn published(&mut self) -> Vec<(Vec<String>, Vec<u8>)> {
@@ -328,7 +349,7 @@ impl TestNode {
     /// prices of the canned price-service response.
     fn receive(&self, payload: &[u8]) {
         let status: SwapStatus = json::from_slice(payload).unwrap();
-        let fiat = fiat_snapshot_from_price_response(&status.data, PRICE_RESPONSE);
+        let fiat = fiat_snapshot_from_price_response(&status.data, &price_response());
         block_on(save_stats_swap_with_snapshot(&self.ctx, &status.data, fiat.as_ref())).unwrap();
     }
 }
@@ -559,6 +580,105 @@ fn t27_own_stored_record_is_not_redacted_by_the_report() {
         assert_eq!(start["taker_coin_htlc_privkey"], Value::Null);
         assert_eq!(start["my_persistent_pub"], zero_33());
         assert_ne!(own_json["events"][0]["event"]["data"]["p2p_privkey"], Value::Null);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Prices (CRD ch.62 R62.7.1, R62.7.2)
+// ---------------------------------------------------------------------------------------------------------
+
+/// R62.7.1: the report of a successful own swap fetches the prices once, from each price source once, stores them,
+/// and the publication makes no second fetch.
+#[test]
+fn a_successful_own_swap_is_priced_once_and_publication_fetches_nothing() {
+    for role in ROLES {
+        let (first, first_hits) = serve(OK, price_response());
+        let (second, second_hits) = serve(OK, price_response());
+        let mut node = TestNode::with_price_urls(json!([first, [second]]));
+        let uuid = Uuid::new_v4();
+        node.store_own_record(&record(uuid, role, "RIN", "KMD", Outcome::Success, false));
+
+        node.report_for_real(uuid);
+
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1, "{:?}: one fetch per source", role);
+        assert_eq!(
+            second_hits.load(Ordering::SeqCst),
+            1,
+            "{:?}: one fetch per source",
+            role
+        );
+        only_publication(node.published(), uuid);
+        let (_, _, maker_price, taker_price) = node.stats_row(uuid);
+        assert_eq!(maker_price.as_deref(), Some("0.02"), "{:?}", role);
+        assert_eq!(taker_price.as_deref(), Some("0.25"), "{:?}", role);
+    }
+}
+
+/// R62.7.1: a failed own swap is stored and published without prices, and no price request is made for it.
+#[test]
+fn a_failed_own_swap_gets_no_prices_and_no_fetch() {
+    for outcome in [Outcome::NegotiationRefusal, Outcome::PaymentStageFailure] {
+        let (source, hits) = serve(OK, price_response());
+        let mut node = TestNode::with_price_urls(json!([source]));
+        let uuid = Uuid::new_v4();
+        node.store_own_record(&record(uuid, Role::Maker, "RIN", "KMD", outcome, false));
+
+        node.report_for_real(uuid);
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "{:?}: no fetch for a failed swap",
+            outcome
+        );
+        only_publication(node.published(), uuid);
+        assert_eq!(node.stats_rows(), 1, "{:?}: the failed swap is still stored", outcome);
+        let (_, _, maker_price, taker_price) = node.stats_row(uuid);
+        assert_eq!(maker_price.as_deref(), Some(""), "{:?}", outcome);
+        assert_eq!(taker_price.as_deref(), Some(""), "{:?}", outcome);
+    }
+}
+
+/// R62.7.3: with no price source answering, the successful swap is still stored and published, without prices.
+#[test]
+fn a_successful_own_swap_without_a_price_source_is_stored_and_published_unpriced() {
+    let mut node = TestNode::with_price_urls(json!([dead_url()]));
+    let uuid = Uuid::new_v4();
+    node.store_own_record(&record(uuid, Role::Taker, "RIN", "KMD", Outcome::Success, false));
+
+    node.report_for_real(uuid);
+
+    only_publication(node.published(), uuid);
+    assert_eq!(node.stats_rows(), 1);
+    let (_, _, maker_price, taker_price) = node.stats_row(uuid);
+    assert_eq!(maker_price.as_deref(), Some(""));
+    assert_eq!(taker_price.as_deref(), Some(""));
+}
+
+/// R62.7.2: a received report is priced at receive time, whether the swap succeeded or not, with one fetch each.
+#[test]
+fn a_received_report_is_priced_at_receive_time_whatever_the_outcome() {
+    for outcome in OUTCOMES {
+        let mut author = TestNode::new();
+        let uuid = Uuid::new_v4();
+        author.store_own_record(&record(uuid, Role::Maker, "RIN", "KMD", outcome, false));
+        author.report(uuid);
+        let report = only_publication(author.published(), uuid);
+
+        let (source, hits) = serve(OK, price_response());
+        let receiver = TestNode::with_price_urls(json!([source]));
+        let status: SwapStatus = json::from_slice(&report).unwrap();
+        block_on(save_stats_swap(&receiver.ctx, &status.data)).unwrap();
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "{:?}: one fetch at receive time",
+            outcome
+        );
+        let (_, _, maker_price, taker_price) = receiver.stats_row(uuid);
+        assert_eq!(maker_price.as_deref(), Some("0.02"), "{:?}", outcome);
+        assert_eq!(taker_price.as_deref(), Some("0.25"), "{:?}", outcome);
     }
 }
 

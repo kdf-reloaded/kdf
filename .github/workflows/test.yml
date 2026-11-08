@@ -385,7 +385,13 @@ jobs:
         # private regtest chain, so no fixed seed is needed and none is
         # committed. See scripts/with-test-passphrases.sh and
         # docs/TEST_ENV_VARS.md.
-        run: scripts/with-test-passphrases.sh cargo test --bin docker_tests --features regtest-netid -- --test-threads=1 test_search_for_swap_tx_spend test_one_hundred_maker_payments test_withdraw test_utxo_merge test_send_and_validate test_validate_maker_payment_wrong_amount test_list_unspent test_multiple_sequential
+        #
+        # `live-network-tests` keeps this step running what it ran before the feature existed. Three tests
+        # that the name filters below select reach public servers (`test_withdraw_segwit`,
+        # `test_withdraw_cashaddresses`, `test_withdraw_to_different_cashaddress_network_should_fail`), and
+        # without the feature they would be ignored. The filters select the same tests as before, so the
+        # feature does not add a live test to this job. See docs/UNIT_TESTS.md.
+        run: scripts/with-test-passphrases.sh cargo test --bin docker_tests --features regtest-netid,live-network-tests -- --test-threads=1 test_search_for_swap_tx_spend test_one_hundred_maker_payments test_withdraw test_utxo_merge test_send_and_validate test_validate_maker_payment_wrong_amount test_list_unspent test_multiple_sequential
         env:
           RUST_LOG: debug
           

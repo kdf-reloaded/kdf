@@ -223,6 +223,7 @@ mod tests {
     use mm2_err_handle::prelude::*;
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_slurp_req() {
         let (status, _headers, _body) = block_on(slurp_url("https://httpbin.org/get")).unwrap();
         assert!(status.is_success(), "the request did not succeed");

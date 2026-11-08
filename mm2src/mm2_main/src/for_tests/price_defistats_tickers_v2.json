@@ -1,0 +1,67 @@
+{
+ "RIN": {
+  "ticker": "RIN",
+  "last_price": "0.0004366169",
+  "last_updated": "2026-11-07T15:43:01Z",
+  "last_updated_timestamp": 1794066181,
+  "volume24h": "16.0000000000",
+  "price_provider": "livecoinwatch",
+  "volume_provider": "livecoinwatch",
+  "sparkline_7d": null,
+  "sparkline_provider": "unknown",
+  "change_24h": "1.0094000000",
+  "change_24h_provider": "livecoinwatch"
+ },
+ "KMD": {
+  "ticker": "KMD",
+  "last_price": "0.0067744800",
+  "last_updated": "2026-11-07T15:40:49.000Z",
+  "last_updated_timestamp": 1794066049,
+  "volume24h": "500.7900000000",
+  "price_provider": "coingecko",
+  "volume_provider": "coingecko",
+  "sparkline_7d": null,
+  "sparkline_provider": "coingecko",
+  "change_24h": "0.650000",
+  "change_24h_provider": "coinpaprika"
+ },
+ "BTC": {
+  "ticker": "BTC",
+  "last_price": "75711.38000000",
+  "last_updated": "2026-11-07T15:42:07Z",
+  "last_updated_timestamp": 1794066127,
+  "volume24h": "15910298982.0000000000",
+  "price_provider": "binance",
+  "volume_provider": "coingecko",
+  "sparkline_7d": null,
+  "sparkline_provider": "coingecko",
+  "change_24h": "0.059",
+  "change_24h_provider": "binance"
+ },
+ "MATIC": {
+  "ticker": "MATIC",
+  "last_price": "0.0909358654",
+  "last_updated": "2026-11-07T15:43:01Z",
+  "last_updated_timestamp": 1794066181,
+  "volume24h": "0.0000000000",
+  "price_provider": "livecoinwatch",
+  "volume_provider": "coingecko",
+  "sparkline_7d": null,
+  "sparkline_provider": "coingecko",
+  "change_24h": "0.9778000000",
+  "change_24h_provider": "livecoinwatch"
+ },
+ "1INCH": {
+  "ticker": "1INCH",
+  "last_price": "0.07980000",
+  "last_updated": "2026-11-07T15:42:59Z",
+  "last_updated_timestamp": 1794066179,
+  "volume24h": "21785391.0000000000",
+  "price_provider": "binance",
+  "volume_provider": "coingecko",
+  "sparkline_7d": null,
+  "sparkline_provider": "coingecko",
+  "change_24h": "1.141",
+  "change_24h_provider": "binance"
+ }
+}

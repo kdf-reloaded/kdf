@@ -9,12 +9,17 @@ use serde_json::Value as Json;
 
 mod tests {
     use super::*;
-    use crate::mm2::lp_ordermatch::KMD_PRICE_ENDPOINT;
+    use crate::mm2::lp_ordermatch::price_service::DEFAULT_PRICE_SOURCES;
     use http::HeaderMap;
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     #[cfg(not(target_arch = "wasm32"))]
-    fn test_process_price_request() { let _resp = block_on(process_price_request(KMD_PRICE_ENDPOINT)).unwrap(); }
+    fn test_process_price_request() {
+        for endpoint in DEFAULT_PRICE_SOURCES.iter().flat_map(|source| source.iter()) {
+            let _resp = block_on(process_price_request(endpoint)).unwrap();
+        }
+    }
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
