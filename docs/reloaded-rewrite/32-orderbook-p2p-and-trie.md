@@ -3211,14 +3211,16 @@ opposite default without weighing the stale price.)
 > the history write fails, the new order is not placed but its active record
 > stayed, so a restart restored it as well. The second held at the default
 > too; it is fixed by PR #309 and, for the taker's retry, the follow-up PR
-> #TBD: a failed history write deletes the active record again, for a maker
+> #314: a failed history write deletes the active record again, for a maker
 > order and for a taker order, both with the retrying deletion of ch. 12 R7c
 > item 4, and the history error is still returned. Both paths use the
 > retrying deletion whatever `maker_restore_skips_cancelled` is set to: the
-> switch of R7c item 3 governs
-> the deletion of a removed order's record, while this deletion undoes the
-> record of an order that was never placed. A failed attempt is logged at warn
-> level naming the order, and so is the give-up after the last one. With PR
+> switch of R7c item 3 governs the deletion of a removed order's record,
+> while this deletion undoes the record of an order that was never placed. A failed attempt is logged at warn
+> level naming the order, and so is the give-up after the last one. On the
+> taker path the retry runs while `buy` or `sell` holds the taker-order lock,
+> so a failing disk delays the node's other taker requests by the retry's
+> two 200 ms pauses and its attempts. With PR
 > #309 alone the taker path made a single deletion attempt, which left the
 > record to be restored at the next start when that attempt also failed. In
 > the same change the taker path (`buy` and `sell`) saves its order first: a failed
@@ -3364,7 +3366,7 @@ and the row); and `t_gh8a_h_a_failed_taker_save_sends_no_request` (a `buy`
 whose history write fails returns the error and subscribes to no topic,
 publishes no taker request, stores no taker record and restores nothing),
 with `t_gh8a_h_a_taker_save_that_works_sends_one_request` as its regression.
-*Coverage of the taker retry (PR #TBD).* In module `t12_7c_restore_guard_tests`
+*Coverage of the taker retry (PR #314).* In module `t12_7c_restore_guard_tests`
 the `t_b4_1b_*` tests: a taker whose history write fails while the first
 deletion attempt also fails leaves no record, returns the history error and
 logs one warn line; a restart then restores no taker order; with every
