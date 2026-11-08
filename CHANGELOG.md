@@ -655,9 +655,9 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
   Now a coin takes its keys from the seed under a seed-phrase login and from the device only when it
   is activated for the Trezor, and each kind stores its accounts under its own identity, as on GLEEC
   KDF. Accounts that a Trezor-activated coin stored under the seed's identity before this release
-  are no longer loaded. The next activation creates the account it activates; any other account
-  appears again after `task::create_new_account` for its number. Funds are not affected: the
-  addresses are the device's, as before. Detail: PR #293; CRD ch.05 §5.10B R52–R55, R35a, R35c.
+  stay there (see Known limitations): the coin activated for the Trezor no longer loads them, its
+  next activation creates the account it activates, and any other account appears again after
+  `task::create_new_account` for its number. Detail: PR #293; CRD ch.05 §5.10B R52–R55, R35a, R35c.
 - **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
   trailer are read correctly for the median time.** Bitcoin Atom (BCA) serves 84-byte headers from block
   505888; Reloaded read them as 80 bytes, so the median time it needs before every HTLC spend and refund
@@ -834,6 +834,13 @@ file carries the detail. "New" means the plan was created in this cycle.
 What does not work yet, or works only in part, in this release. Each item says where more detail
 lives.
 
+- **Trezor accounts stored by an earlier release under a seed-phrase login can show up under the
+  seed.** Before this release, a coin activated for the Trezor next to a seed-phrase login stored its
+  accounts under the seed's identity. Those rows stay there, so a later activation of the same coin
+  from the seed (without `"priv_key_policy": "Trezor"`) lists them with the device's addresses as if
+  they were the seed's. Funds are not at risk, since only the device can sign for those addresses.
+  This affects only nodes that used a Trezor next to a seed-phrase login before this release.
+  Detail: PR #293; CRD ch.05 §5.10B R55.
 - **Under an HD login, legacy `my_balance` fails for a UTXO coin such as RIN, and legacy
   `get_enabled_coins` fails as a whole once such a coin is enabled.** Both report a single address,
   and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for
