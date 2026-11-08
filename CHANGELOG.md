@@ -193,7 +193,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   seconds from the moment it was asked, uses the first good answer from any node it has already
   asked, and sends nothing twice. When every node fails, the error reads as before. A request in
   which every node stays silent can now take about 20 seconds longer than before (two nodes: 40
-  seconds instead of 20). A coin with one node is not affected. Detail: PR #TBD; CRD ch.35 D35.11.
+  seconds instead of 20). A coin with one node is not affected. Detail: PR #313; CRD ch.35 D35.11.
 - **The quoted fee for sending an EVM taker fee is now the fee at the gas limit the node sends it
   with.** `trade_preimage`, the taker's balance check before a swap and the maximum taker volume
   used to price the taker-fee transfer at the node's gas estimate, while the transfer is sent with

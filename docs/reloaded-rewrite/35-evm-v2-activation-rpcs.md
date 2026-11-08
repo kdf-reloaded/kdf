@@ -2471,8 +2471,9 @@ holds kept exchanges (an earlier node answered, or the caller dropped the
 request) drops them; the native HTTP task of such an exchange ends at its own
 bound, 1 s past the 30 s, so a node that never answers holds a connection for
 up to 31 s per request instead of 11 s. On the WASM target the browser fetch
-cannot be aborted here, and the timer alone ends the wait at the bound. T35.37
-tests the rule.
+cannot be aborted here, and the timer alone ends the wait at the bound (not
+tested in a browser build: the WASM target is compile-checked only, and T35.37
+runs on the native target). T35.37 tests the rule.
 
 ## 35.9 Provenance Footer
 
