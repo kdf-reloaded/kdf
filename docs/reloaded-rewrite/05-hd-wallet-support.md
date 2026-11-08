@@ -598,7 +598,14 @@ address `0`) as follows:
 > `my_tx_history`. Known gap against item 3: an `address_id` at the hardened
 > limit fails activation with the `Internal` arm, because Reloaded's balance
 > error set has no address-limit arm yet (a follow-up); the account created
-> for the path stays stored after such a failure. An EVM coin has no internal
+> for the path stays stored after such a failure. An `address_id` of
+> 2^31 − 1 fails the same way, although it is below the limit: the
+> activation must then hold addresses 0 to 2^31 − 1, a count of 2^31, which
+> `ensure_minimum_addresses` refuses before anything is derived or read; so
+> the highest usable index is 2^31 − 2 (*added 2026-11-08, batch 4 item
+> B4-7; test
+> `t14a_the_last_valid_address_id_needs_a_minimum_beyond_the_limit_and_fails_activation`*).
+> An EVM coin has no internal
 > chain, so an Internal-chain path raises nothing there. Tests: the `t14a_*`
 > tests in `coins/src/utxo/utxo_tests.rs` (module
 > `hd_accounts_at_index_tests`) and in `coins_activation`'s

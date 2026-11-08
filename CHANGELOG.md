@@ -729,6 +729,12 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 - **The close deadline of the connection layer is tested in CI.** The tests of the vendored
   multiplexer crate, which carries the 30-second close deadline, now run as their own CI job.
   Detail: PR #280; CRD ch.28 T14.
+- **Two more tests for HD wallets.** One checks that the automatic UTXO merge under an HD login
+  really sends a merge: one transaction that spends only the outputs of the coin's activated
+  address, pays them back to it and is signed with that address's key. The other pins that an
+  `address_id` of 2^31 − 1 in `path_to_address` fails activation like 2^31 does, before anything is
+  derived, so the highest usable index is 2^31 − 2. The node itself is unchanged. Detail: PR #NNN;
+  CRD ch.05 R35a, R35b.
 
 ### Documentation
 
