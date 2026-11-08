@@ -118,9 +118,9 @@ fn eth_coin_with_ctx(eth_extra: Json) -> (MmArc, EthCoin) {
     coin_over_entries(EthCoinType::Eth, eth_extra, json!({})).unwrap()
 }
 
-fn eth_coin(eth_extra: Json) -> EthCoin { eth_coin_with_ctx(eth_extra).1 }
+pub(super) fn eth_coin(eth_extra: Json) -> EthCoin { eth_coin_with_ctx(eth_extra).1 }
 
-fn token_coin(eth_extra: Json, jst_extra: Json) -> EthCoin {
+pub(super) fn token_coin(eth_extra: Json, jst_extra: Json) -> EthCoin {
     coin_over_entries(
         EthCoinType::Erc20 {
             platform: "ETH".to_owned(),

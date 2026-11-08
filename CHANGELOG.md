@@ -156,11 +156,20 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### Start-up and configuration
 
+- **A warning when the full key export is switched on.** With `allow_insecure_key_export: true`
+  in `MM2.json`, the node now logs a warning at start-up that says `get_private_keys` can export the
+  keys of every configured coin, and another warning for each call that uses the full export, with
+  the mode and the number of coins asked for. Neither warning contains a key. Detail: PR #305; CRD
+  ch.07 R-K1.
 - **The start-up log now lists the files the node uses.** At start the node logs, at INFO and as
   absolute paths, where its configuration came from (the command line, the default file or the file
   named by `MM_CONF_PATH`), where its coins list came from, the log file, the database folders and the
   wallet file it reads, so a node started from the wrong folder shows it at once. It never logs file
   contents or configuration values, and no WSS certificate or key path. Detail: PR #209; CRD ch.45 R45.6.6.
+
+#### Releases and downloads
+
+- **Releases now include Linux builds for 64-bit and 32-bit ARM, and the mobile libraries.** Besides the x86_64 binary, each signed release carries `kdf` for aarch64 and armv7 Linux (glibc 2.31 or newer, like the x86_64 one), and `libkdf.a` static libraries for Android (aarch64 and armv7) and iOS (aarch64) apps. The macOS binary that runs on both Intel and Apple silicon is attached as well; earlier releases did not include it. Every file is in the signed checksum list. The names, target triples and minimum system versions are in `docs/RELEASE_ARTIFACTS.md`. Detail: PR #300.
 
 ### Changed
 
@@ -583,6 +592,11 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
     poll.
 
   Detail: PR #255; CRD ch.17 R17.8.3a.
+- **A swap between Siacoin (or another coin with a 32-byte hash lock) and an EVM coin or token can now
+  complete.** The EVM payment embeds the value the swap contract checks, derived from the 32-byte
+  secret hash, and the validation of a payment expects that value. Before, the counterparty refused the
+  payment. QRC20 payments now embed and validate the same derived value, and the secret of a spend is
+  checked against it; the QRC20 path is covered by unit tests only. Detail: PR #290; CRD ch.51 R72A.
 - **A nonce read that one EVM node fails while another answers is now logged as a warning naming
   that node, and a single node's error no longer says "all EVM nodes failed".** Before a send, the
   daemon asks every node of the coin for the pending nonce. A node that failed got an info line
@@ -690,6 +704,14 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   changed since its accounts were stored. The device re-creates its own: the next activation for the
   Trezor creates the account it activates, and any other account appears again after
   `task::create_new_account` for its number. Detail: PR #293; CRD ch.05 §5.10B R52–R55, R35a, R35c.
+- **A coin activated for a Trezor refuses to work with a different Trezor.** A node accepts
+  `task::init_trezor` again while it runs, and a new init can replace the device. Until now such a coin
+  read new account keys from the second device and signed withdrawals with it, against accounts that
+  belong to the first, and stored the second device's accounts under the first one's identity. Now such
+  a coin remembers the device it was activated with and answers `FoundUnexpectedDevice`,
+  `get_new_address` included, before it asks the device or writes anything; it works again with its own
+  device, or after it is activated anew with the other one. A swap keeps signing with the coin's own
+  device and refuses any other. Detail: PR #302; CRD ch.05 §5.10B R58a and R58a.1.
 - **BCA HTLC spends and refunds can now be built, and coins whose block headers carry a fixed-length
   trailer are read correctly for the median time.** Bitcoin Atom (BCA) serves 84-byte headers from block
   505888; Reloaded read them as 80 bytes, so the median time it needs before every HTLC spend and refund
@@ -787,6 +809,21 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 - **The close deadline of the connection layer is tested in CI.** The tests of the vendored
   multiplexer crate, which carries the 30-second close deadline, now run as their own CI job.
   Detail: PR #280; CRD ch.28 T14.
+- **Two more tests for HD wallets.** One checks that the automatic UTXO merge under an HD login
+  really sends a merge: one transaction that spends only the outputs of the coin's activated
+  address, pays them back to it and is signed with that address's key. The other pins that an
+  `address_id` of 2^31 − 1 in `path_to_address` fails activation like 2^31 does, before anything is
+  derived, so the highest usable index is 2^31 − 2. The node itself is unchanged. Detail: PR #297;
+  CRD ch.05 R35a, R35b.
+- **CI runs the withdraw tests of `coins` and its QTUM, BCH and SLP tests.** A new CI job runs
+  `cargo test -p coins --lib -- withdraw qtum bch slp`, which until now ran only on developers'
+  machines. It runs without the `live-network-tests` feature, so it skips those of the selected
+  tests that need public servers and runs the offline ones. The node itself is unchanged. Detail:
+  PR #297.
+- **The BCH withdraw test retries when the testnet answers "Missing inputs".** The test broadcasts
+  to the public BCH testnet from a wallet that every CI run shares. It already retried a broadcast
+  rejected as a mempool conflict. A broadcast rejected with "Missing inputs" failed the test
+  instead; it is now retried the same way. The node itself is unchanged. Detail: PR #297.
 
 ### Documentation
 

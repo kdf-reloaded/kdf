@@ -18,14 +18,23 @@ name: Release
 # attached. Signing runs ONLY here. Unsigned `dev`/`staging` branch snapshots
 # are produced by dev-build.yml / staging-build.yml instead.
 #
-# Validate a change to this file end-to-end by pushing a throwaway pre-release
-# tag (e.g. `v0.0.0-rc.test`) on staging and deleting the drafted release + tag
-# afterwards.
+# Validate a change to this file with the manual dry run (workflow_dispatch from
+# the branch under test): it exercises every build, the asset naming, the
+# checksum manifest and the signing commands without publishing anything. The
+# publish job (real key, GitHub Release) runs only for tag pushes; its first full
+# test is a real tag, or a throwaway pre-release tag (e.g. `v0.0.0-rc.test`) on
+# staging whose drafted release + tag are deleted afterwards.
 
 on:
   push:
     tags:
       - 'v*'
+  # Dry run: builds everything and assembles the version-tagged assets and
+  # SHA256SUMS exactly as a release would, then signs the manifest with a
+  # throwaway key generated in the job. It never touches the `release`
+  # environment, the real signing key or a GitHub Release, so it can be run from
+  # any branch to test a change to this file.
+  workflow_dispatch:
 
 permissions:
   contents: write # create the GitHub Release and upload assets
@@ -47,6 +56,13 @@ jobs:
       - id: g
         run: |
           set -eu
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            # Dry run from any branch: build and assemble, publish nothing.
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "gate: dry run on ${GITHUB_REF}"
+            exit 0
+          fi
           git fetch --quiet --no-tags origin '+refs/heads/*:refs/remotes/origin/*' || true
           contains() { git branch -r --contains "$GITHUB_SHA" 2>/dev/null | grep -v ' -> ' | grep -qE "/$1$"; }
           ver="${GITHUB_REF_NAME#v}"
@@ -62,13 +78,31 @@ jobs:
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "gate: ref=$GITHUB_REF prerelease=$prerelease proceed=$proceed"
 
-  # Linux x86-64 reuses build-linux.yml, which builds inside a pinned Debian 11
-  # (glibc 2.31) container for broad portability. macOS and Windows reuse their
-  # per-platform build workflows (glibc is irrelevant there).
+  # Linux x86-64, aarch64 and armv7 reuse build-linux.yml, which builds inside a
+  # pinned Debian 11 (glibc 2.31) container for broad portability (aarch64 and
+  # armv7 are cross-compiled there). macOS and Windows reuse their per-platform
+  # build workflows (glibc is irrelevant there).
   linux:
     needs: gate
     if: ${{ needs.gate.outputs.proceed == 'true' }}
     uses: ./.github/workflows/build-linux.yml
+    with:
+      profile: release
+      targets: '["x86_64-unknown-linux-gnu","aarch64-unknown-linux-gnu","armv7-unknown-linux-gnueabihf"]'
+
+  # Static libraries `libkdf.a` for embedding in mobile apps: Android (aarch64,
+  # armv7; NDK API 21) and iOS (aarch64-apple-ios; deployment target 14.0).
+  android:
+    needs: gate
+    if: ${{ needs.gate.outputs.proceed == 'true' }}
+    uses: ./.github/workflows/build-android.yml
+    with:
+      profile: release
+
+  ios:
+    needs: gate
+    if: ${{ needs.gate.outputs.proceed == 'true' }}
+    uses: ./.github/workflows/build-ios.yml
     with:
       profile: release
 
@@ -86,16 +120,17 @@ jobs:
     with:
       profile: release
 
-  # Collect every binary, checksum them, GPG-sign the manifest, and draft the
-  # GitHub Release. Runs in the protected `release` environment (the only place
-  # the signing key is exposed).
-  release:
-    needs: [gate, linux, macos, windows]
+  # Collect every binary and library, name them with the version tag and write
+  # the SHA-256 manifest. No secrets and no environment: this part runs for tags
+  # and for the manual dry run alike. The assembled directory is handed to the
+  # signing job (tags) or the dry-run signing self-test (manual runs) as the
+  # `release-assets` artifact.
+  assemble:
+    needs: [gate, linux, macos, windows, android, ios]
     if: ${{ needs.gate.outputs.proceed == 'true' }}
     runs-on: ubuntu-latest
-    environment: release
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v7
@@ -113,7 +148,8 @@ jobs:
         run: |
           set -eu
           mkdir -p release-assets
-          tag="${GITHUB_REF_NAME}"
+          # Tag runs use the tag name; a manual dry run has a branch ref instead.
+          if [ "$GITHUB_EVENT_NAME" = push ]; then tag="${GITHUB_REF_NAME}"; else tag="dry-run"; fi
           # Each artifact directory is named `kdf-<target>`; its payload is
           # `kdf` (unix) or `kdf.exe` (windows).
           for dir in artifacts/kdf-*; do
@@ -123,12 +159,36 @@ jobs:
               cp "$dir/kdf.exe" "release-assets/kdf-${tag}-${target}.exe"
             elif [ -f "$dir/kdf" ]; then
               cp "$dir/kdf" "release-assets/kdf-${tag}-${target}"
+            elif [ -f "$dir/kdf-universal" ]; then
+              # The macOS universal binary (lipo of x86_64 and aarch64).
+              cp "$dir/kdf-universal" "release-assets/kdf-${tag}-${target}"
+            fi
+          done
+          # Mobile static libraries: artifact directories `libkdf-<triple>`
+          # carry `libkdf.a`; shipped as `libkdf-<tag>-<triple>.a`.
+          for dir in artifacts/libkdf-*; do
+            [ -d "$dir" ] || continue
+            target="$(basename "$dir" | sed 's/^libkdf-//')"
+            if [ -f "$dir/libkdf.a" ]; then
+              cp "$dir/libkdf.a" "release-assets/libkdf-${tag}-${target}.a"
             fi
           done
           # Ship the license texts and third-party notices next to the
           # binaries; they are covered by the signed checksum manifest too.
           for f in COPYING LICENSE THIRDPARTY-LICENSES; do
             cp "src/LEGAL/$f" "release-assets/$f"
+          done
+          # Fail loudly if a Linux binary, the macOS universal binary or a mobile library is missing, so a
+          # skipped matrix leg can never produce a release without it.
+          for want in \
+            "kdf-${tag}-x86_64-unknown-linux-gnu" \
+            "kdf-${tag}-aarch64-unknown-linux-gnu" \
+            "kdf-${tag}-armv7-unknown-linux-gnueabihf" \
+            "kdf-${tag}-universal-apple-darwin" \
+            "libkdf-${tag}-aarch64-linux-android.a" \
+            "libkdf-${tag}-armv7-linux-androideabi.a" \
+            "libkdf-${tag}-aarch64-apple-ios.a"; do
+            [ -s "release-assets/$want" ] || { echo "::error::missing release asset: $want"; exit 1; }
           done
           echo "Assembled:"
           ls -l release-assets
@@ -139,6 +199,30 @@ jobs:
           cd release-assets
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Hand the assets to the signing job
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: release-assets/*
+          if-no-files-found: error
+
+  # Sign the checksum manifest with the maintainer key and draft the GitHub
+  # Release. Tag pushes only. Runs in the protected `release` environment (the
+  # only place the signing key is exposed).
+  publish:
+    needs: [gate, assemble]
+    if: ${{ needs.gate.outputs.proceed == 'true' && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the assembled release assets
+        uses: actions/download-artifact@v7
+        with:
+          name: release-assets
+          path: release-assets
 
       - name: Import signing key and sign the checksum manifest
         env:
@@ -176,10 +260,43 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             "${flags[@]}"
 
+  # Dry run only: prove the signing commands work end to end with a throwaway
+  # key generated here (nothing from the `release` environment is used).
+  dry-run-sign:
+    needs: [gate, assemble]
+    if: ${{ needs.gate.outputs.proceed == 'true' && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Fetch the assembled release assets
+        uses: actions/download-artifact@v7
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Sign with a throwaway key and verify
+        run: |
+          set -eu
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          gpg --batch --pinentry-mode loopback --passphrase '' \
+            --quick-generate-key 'KDF dry run <dry-run@invalid>' ed25519 sign never
+          cd release-assets
+          gpg --batch --yes --pinentry-mode loopback --armor --detach-sign \
+            --output SHA256SUMS.asc SHA256SUMS
+          gpg --verify SHA256SUMS.asc SHA256SUMS
+          sha256sum -c SHA256SUMS
+          echo "Dry-run assets:"
+          ls -l
+
   # Optional: publish the runtime container image to a registry. Skipped unless
   # the `PUBLISH_DOCKERHUB` repository variable is set to `true` and the
   # DOCKERHUB_USERNAME/DOCKERHUB_TOKEN secrets + DOCKERHUB_REPO variable exist.
   # Final releases only — we don't retag `:latest` from a pre-release.
+  # Note: `linux` now covers three targets; a failed aarch64 or armv7 leg fails
+  # the whole call and so skips this job. The release itself fails in that case,
+  # so there is nothing to publish an image for.
   docker:
     needs: [gate, linux]
     if: ${{ needs.gate.outputs.proceed == 'true' && needs.gate.outputs.prerelease != 'true' && vars.PUBLISH_DOCKERHUB == 'true' }}

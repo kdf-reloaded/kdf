@@ -504,6 +504,8 @@ pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
 
     validate_netid_range(&ctx.conf)?;
     validate_wc_session_persistence(&ctx.conf)?;
+    // The opt-in full key export is a deliberate security trade-off: say so in the log when it is on (CRD ch.07 R-K1).
+    coins::rpc_command::get_private_keys::warn_if_insecure_key_export(&ctx);
     coins::utxo::utxo_builder::header_layout_fallback_families(&ctx).mm_err(|e| {
         MmInitError::ErrorDeserializingConfig {
             field: "header_layout_fallback_families".to_owned(),

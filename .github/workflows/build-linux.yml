@@ -1,17 +1,26 @@
 name: Build Linux
 
-# Linux x86_64 build, produced inside a pinned Debian 11 (glibc 2.31) container
-# so the resulting binary runs on any host with glibc >= 2.31 (Debian 11/12,
-# Ubuntu 20.04+, RHEL/Rocky 9, ...). Building on a newer base (e.g. the
-# ubuntu-latest image, glibc 2.39) would raise the glibc floor and make the
-# binary refuse to start on those still-common hosts.
+# Linux build (x86_64 native, aarch64 and armv7 cross-compiled), produced inside
+# a pinned Debian 11 (glibc 2.31) container so the resulting binaries run on any
+# host with glibc >= 2.31 (Debian 11/12, Ubuntu 20.04+, RHEL/Rocky 9, ...).
+# Building on a newer base (e.g. the ubuntu-latest image, glibc 2.39) would raise
+# the glibc floor and make the binary refuse to start on those still-common hosts.
+#
+# The aarch64 and armv7 targets use the Debian 11 cross toolchains
+# (gcc-aarch64-linux-gnu, gcc-arm-linux-gnueabihf) on the same x86_64 container,
+# so they link against the same glibc 2.31 cross sysroot. The workspace's native
+# code builds from bundled sources, so no target-architecture system libraries
+# are installed. protoc is a build-host tool and stays the x86_64 one.
 #
 # Both pipelines reuse this workflow via `workflow_call`, so BOTH the signed
 # release builds (release.yml) AND the unsigned dev/staging snapshots
 # (dev-build.yml) inherit the same low glibc floor and stay backwards-compatible.
 #
 # Also callable manually via workflow_dispatch. `profile` selects the cargo
-# profile (release / dev).
+# profile (release / dev). `targets` is a JSON array of Rust target triples;
+# the default keeps the x86_64-only behavior for callers that do not pass it.
+# Supported: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu,
+# armv7-unknown-linux-gnueabihf (ARMv7-A, hard-float).
 
 on:
   workflow_dispatch:
@@ -24,6 +33,10 @@ on:
         description: "comma-separated cargo features"
         required: false
         default: ""
+      targets:
+        description: "JSON array of Rust target triples"
+        required: false
+        default: '["x86_64-unknown-linux-gnu"]'
   workflow_call:
     inputs:
       profile:
@@ -36,13 +49,28 @@ on:
         required: false
         default: ""
         type: string
+      targets:
+        description: "JSON array of Rust target triples"
+        required: false
+        default: '["x86_64-unknown-linux-gnu"]'
+        type: string
+
+# The build only reads the repository; caching and artifact upload use their own
+# runtime tokens, not GITHUB_TOKEN.
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: build (${{ matrix.target }})
     runs-on: ubuntu-latest
     container:
       image: debian:11
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(inputs.targets) }}
 
     steps:
       # The debian:11 image is minimal: install everything the build needs.
@@ -91,6 +119,27 @@ jobs:
             clang libclang-dev git curl ca-certificates unzip
           rm -rf /var/lib/apt/lists/*
 
+      # Cross targets only: the Debian 11 cross C toolchain plus its glibc 2.31
+      # sysroot (libc6-dev-*-cross is a dependency of the gcc package), from the
+      # same pinned snapshot as above. qemu-user runs the smoke test after the
+      # build. No libusb/libudev packages on purpose: libusb1-sys probes
+      # pkg-config, which refuses to answer for a cross build, so it falls back to
+      # its bundled libusb source (udev off) -- the same as the Android build.
+      - name: Install cross toolchain
+        if: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
+        run: |
+          set -eu
+          case "${{ matrix.target }}" in
+            aarch64-unknown-linux-gnu)
+              pkgs="gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user" ;;
+            armv7-unknown-linux-gnueabihf)
+              pkgs="gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user" ;;
+            *) echo "unsupported target: ${{ matrix.target }}"; exit 1 ;;
+          esac
+          apt-get update
+          apt-get install -y --no-install-recommends $pkgs
+          rm -rf /var/lib/apt/lists/*
+
       # Debian 11 ships protoc 3.12, which rejects the proto3 `optional` fields
       # in swap_v2.proto (needs >= 3.15). Install a modern protoc from the
       # official release instead of the apt package.
@@ -122,16 +171,79 @@ jobs:
       - name: Check Rust toolchain
         run: rustc --version && cargo --version
 
-      - name: Cache cargo registry
+      # Per-target compiler wiring, written to the environment of the later
+      # steps only (no .cargo/config.toml change, so local builds are untouched).
+      # TOOL_PREFIX names the binutils used by the glibc check; QEMU/SYSROOT run
+      # the smoke test.
+      - name: Configure target
+        run: |
+          set -eu
+          # cargo writes the `dev` profile to target/<triple>/debug/.
+          case "${{ inputs.profile }}" in
+            dev) echo "PROFILE_DIR=debug" >> "$GITHUB_ENV" ;;
+            *)   echo "PROFILE_DIR=${{ inputs.profile }}" >> "$GITHUB_ENV" ;;
+          esac
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu)
+              echo "TOOL_PREFIX=" >> "$GITHUB_ENV"
+              ;;
+            aarch64-unknown-linux-gnu)
+              {
+                echo "TOOL_PREFIX=aarch64-linux-gnu-"
+                echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
+                echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
+                echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++"
+                echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar"
+                echo "QEMU=qemu-aarch64"
+                echo "SYSROOT=/usr/aarch64-linux-gnu"
+              } >> "$GITHUB_ENV"
+              ;;
+            armv7-unknown-linux-gnueabihf)
+              {
+                echo "TOOL_PREFIX=arm-linux-gnueabihf-"
+                echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc"
+                echo "CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc"
+                echo "CXX_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++"
+                echo "AR_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-ar"
+                echo "QEMU=qemu-arm"
+                echo "SYSROOT=/usr/arm-linux-gnueabihf"
+              } >> "$GITHUB_ENV"
+              ;;
+          esac
+
+      # Runs in the checkout, so it applies to the toolchain pinned by
+      # rust-toolchain.toml (the one the build uses).
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      # x86_64 keeps caching target/ as before. The cross legs cache only the
+      # registry and git checkouts: their release-profile target dirs are several
+      # GB each and would push the unit-test caches out of the repository's cache
+      # budget, and release-profile builds run only on staging pushes, tags and
+      # manual dispatch. Keys carry the target so legs never restore each other's
+      # build directory.
+      - name: Cache cargo registry and target
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
         uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: linux-debian11-${{ inputs.profile }}-${{ hashFiles('**/Cargo.lock') }}
+          key: linux-debian11-${{ matrix.target }}-${{ inputs.profile }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            linux-debian11-${{ inputs.profile }}-
+            linux-debian11-${{ matrix.target }}-${{ inputs.profile }}-
+
+      - name: Cache cargo registry (cross)
+        if: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: linux-debian11-cross-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            linux-debian11-cross-registry-
 
       - name: Build kdf
         run: |
@@ -140,10 +252,35 @@ jobs:
             FEATURES_FLAG="--features ${{ inputs.features }}"
           fi
           cd mm2src
-          cargo build --bin kdf --target x86_64-unknown-linux-gnu --profile ${{ inputs.profile }} $FEATURES_FLAG
+          cargo build --bin kdf --target ${{ matrix.target }} --profile ${{ inputs.profile }} $FEATURES_FLAG
+
+      # The glibc 2.31 floor is a checked fact, not only a comment: the newest
+      # GLIBC_x.y symbol version the binary needs must not exceed 2.31.
+      - name: Check glibc floor
+        run: |
+          set -eu
+          bin="target/${{ matrix.target }}/${PROFILE_DIR}/kdf"
+          "${TOOL_PREFIX}objdump" -T "$bin" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -u -V > /tmp/glibc-versions
+          cat /tmp/glibc-versions
+          newest="$(tail -n 1 /tmp/glibc-versions)"
+          echo "newest glibc symbol version: ${newest}"
+          highest="$(printf '%s\nGLIBC_2.31\n' "$newest" | sort -V | tail -n 1)"
+          if [ "$highest" != "GLIBC_2.31" ]; then
+            echo "::error::${{ matrix.target }} needs ${newest}, above the GLIBC_2.31 floor"
+            exit 1
+          fi
+          file "$bin" 2>/dev/null || "${TOOL_PREFIX}readelf" -h "$bin" | grep -E 'Class|Machine'
+
+      # Cross targets: run the binary under qemu-user against the cross glibc
+      # sysroot, to catch a binary that links but cannot start.
+      - name: Smoke test (qemu-user)
+        if: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
+        run: |
+          set -eu
+          "$QEMU" -L "$SYSROOT" "target/${{ matrix.target }}/${PROFILE_DIR}/kdf" --version
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: kdf-x86_64-unknown-linux-gnu
-          path: target/x86_64-unknown-linux-gnu/${{ inputs.profile }}/kdf
+          name: kdf-${{ matrix.target }}
+          path: target/${{ matrix.target }}/${{ inputs.profile == 'dev' && 'debug' || inputs.profile }}/kdf

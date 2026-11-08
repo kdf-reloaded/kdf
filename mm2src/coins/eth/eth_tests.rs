@@ -2898,6 +2898,9 @@ fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
             derivation_path,
             address,
             public,
+            hw_ctx: crate::utxo::utxo_tests::hd_accounts_at_index_tests::device_context(
+                crate::utxo::utxo_tests::hd_accounts_at_index_tests::DEVICE_PUBKEY,
+            ),
         }),
         swap_contract_address: Address::from_slice(&hex::decode("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap()),
         fallback_swap_contract: None,
@@ -2947,6 +2950,9 @@ fn a_trezor_signed_hd_coin_is_not_a_software_hd_wallet() {
         derivation_path: DerivationPath::from_str("m/44'/60'/0'/0/0").unwrap(),
         address,
         public: *key_pair.public(),
+        hw_ctx: crate::utxo::utxo_tests::hd_accounts_at_index_tests::device_context(
+            crate::utxo::utxo_tests::hd_accounts_at_index_tests::DEVICE_PUBKEY,
+        ),
     });
     let hardware = EthCoin(Arc::new(inner));
 
@@ -2954,6 +2960,39 @@ fn a_trezor_signed_hd_coin_is_not_a_software_hd_wallet() {
     assert!(hardware.uses_hardware_signer());
     assert!(hardware.hardware_derivation_path().is_some());
     assert!(!hardware.uses_software_hd_wallet());
+}
+
+/// CRD ch.05 R58a, T36: the account extended public key of an EVM coin of the Trezor policy is read from the
+/// device it was activated with. A hardware context of another device is refused with `FoundUnexpectedDevice`
+/// before the extractor is asked; the device of the activation is asked.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+#[test]
+fn r58a_t36_evm_xpub_read_refuses_a_replaced_device() {
+    use crate::hd_pubkey::{ExtractExtendedPubkey, HDExtractPubkeyError};
+    use crate::utxo::utxo_tests::hd_accounts_at_index_tests::{device_context, CountingDevice, DEVICE_PUBKEY,
+                                                              DEVICE_PUBKEY_B};
+
+    let (_ctx, coin) = trezor_eth_coin_for_test(EthCoinType::Eth);
+    let path = || DerivationPath::from_str("m/44'/60'/0'").unwrap();
+
+    let device_b = CountingDevice::with_context(device_context(DEVICE_PUBKEY_B));
+    let error = block_on(coin.extract_extended_pubkey(Some(&device_b), path()))
+        .err()
+        .expect("the replaced device must be refused")
+        .into_inner();
+    assert!(matches!(
+        error,
+        HDExtractPubkeyError::HardwareWalletError(crypto::HwError::FoundUnexpectedDevice { .. })
+    ));
+    assert_eq!(device_b.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // The device of the activation passes the check and reaches the extractor, which has no EVM device here.
+    let device_a = CountingDevice::with_context(device_context(DEVICE_PUBKEY));
+    let error = block_on(coin.extract_extended_pubkey(Some(&device_a), path()))
+        .err()
+        .expect("the test extractor answers no key")
+        .into_inner();
+    assert!(matches!(error, HDExtractPubkeyError::CoinDoesntSupportTrezor));
 }
 
 /// R50.24 / R49.6: the direct legacy `withdraw` method rejects a Trezor-policy

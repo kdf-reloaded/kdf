@@ -7,7 +7,9 @@ name: Build iOS
 # host Swift/Obj-C app links against. Requires a macOS runner and the iOS
 # target toolchain.
 #
-# Manually dispatched until a runner is provisioned.
+# Called from release.yml (signed releases) and dev-build.yml / staging-build.yml
+# (unsigned snapshots); also runnable manually. Deployment target iOS 14.0;
+# simulator targets stay off unless asked for.
 
 on:
   workflow_dispatch:

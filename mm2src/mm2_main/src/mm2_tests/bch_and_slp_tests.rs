@@ -12,7 +12,7 @@ const T_BCH_ELECTRUMS: &[&str] = &[
 
 fn t_bch_electrums_legacy_json() -> Vec<Json> { T_BCH_ELECTRUMS.iter().map(|url| json!({ "url": url })).collect() }
 
-/// How many times [`withdraw_and_send_bch`] rebuilds and rebroadcasts after a mempool conflict.
+/// How many times [`withdraw_and_send_bch`] rebuilds and rebroadcasts after a conflict with an earlier spend.
 #[cfg(not(target_arch = "wasm32"))]
 const BCH_CONFLICT_RETRIES: usize = 12;
 /// How long [`withdraw_and_send_bch`] waits before each retry.
@@ -24,10 +24,10 @@ const BCH_CONFLICT_RETRY_DELAY: Duration = Duration::from_secs(10);
 ///
 /// The test wallet is a shared testnet wallet, and the Electrum servers can lag behind the wallet's
 /// own spends: a withdrawal built a few seconds after the previous broadcast can pick the coin that
-/// broadcast already spent, and the network then rejects it as a mempool conflict. Another CI run
-/// spending the same wallet at the same time ends the same way. Both clear once the servers have
-/// caught up, so a conflict rebuilds the withdrawal after a pause instead of failing the test; any
-/// other broadcast error still fails at once.
+/// broadcast already spent, and the network then rejects it as a mempool conflict or with "Missing
+/// inputs". Another CI run spending the same wallet at the same time ends the same way. Both clear
+/// once the servers have caught up, so such a rejection rebuilds the withdrawal after a pause instead
+/// of failing the test; any other broadcast error still fails at once.
 #[cfg(not(target_arch = "wasm32"))]
 fn withdraw_and_send_bch(mm: &MarketMakerIt, to: &str, expected_from: &str) {
     for attempt in 1..=BCH_CONFLICT_RETRIES + 1 {
@@ -75,7 +75,9 @@ fn withdraw_and_send_bch(mm: &MarketMakerIt, to: &str, expected_from: &str) {
             return;
         }
 
-        let conflict = send_tx.1.contains("txn-mempool-conflict") || send_tx.1.contains("missingorspent");
+        let conflict = send_tx.1.contains("txn-mempool-conflict")
+            || send_tx.1.contains("missingorspent")
+            || send_tx.1.contains("Missing inputs");
         assert!(
             conflict && attempt <= BCH_CONFLICT_RETRIES,
             "BCH send_raw_transaction (attempt {}): {}",

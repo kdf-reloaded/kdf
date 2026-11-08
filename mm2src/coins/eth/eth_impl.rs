@@ -103,6 +103,16 @@ impl EthCoinImpl {
             && self.hardware_derivation_path().is_none()
     }
 
+    /// The hardware context a hardware-wallet coin was activated with (CRD ch.05 R58a); `None` for a coin that
+    /// does not sign with a hardware wallet.
+    pub fn activation_hardware_context(&self) -> Option<crypto::HardwareWalletArc> {
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+        if let EthSigner::Trezor(signer) = &self.signer {
+            return Some(signer.hw_ctx.clone());
+        }
+        None
+    }
+
     /// The derivation path of the enabled address of a hardware-wallet coin.
     pub fn hardware_derivation_path(&self) -> Option<crypto::DerivationPath> {
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
@@ -2563,13 +2573,21 @@ impl EthCoin {
         receiver_addr: Address,
         swap_contract_address: Address,
     ) -> EthTxFut {
+        // CRD ch.51 R72A: the contract's `bytes20` slot carries the value derived from the shared `secret_hash`.
+        // `id` is the swap id, computed by the caller over the shared value itself and left as it is.
+        let contract_hash = match contract_secret_hash(secret_hash) {
+            Ok(hash) => hash,
+            Err(e) => {
+                return Box::new(futures01::future::err(TransactionErr::Plain(ERRL!("{}", e))));
+            },
+        };
         match &self.coin_type {
             EthCoinType::Eth => {
                 let function = try_tx_fus!(SWAP_CONTRACT.function("ethPayment"));
                 let data = try_tx_fus!(function.encode_input(&[
                     Token::FixedBytes(id),
                     Token::Address(receiver_addr),
-                    Token::FixedBytes(secret_hash.to_vec()),
+                    Token::FixedBytes(contract_hash.to_vec()),
                     Token::Uint(U256::from(time_lock))
                 ]));
                 self.sign_and_send_transaction(
@@ -2593,7 +2611,7 @@ impl EthCoin {
                     Token::Uint(value),
                     Token::Address(*token_addr),
                     Token::Address(receiver_addr),
-                    Token::FixedBytes(secret_hash.to_vec()),
+                    Token::FixedBytes(contract_hash.to_vec()),
                     Token::Uint(U256::from(time_lock))
                 ]));
 
@@ -3124,6 +3142,7 @@ impl EthCoin {
         let selfi = self.clone();
         let secret_hash = secret_hash.to_vec();
         let fut = async move {
+            // The swap id is computed over the shared value, as the sender computed it (ch.51 R72A).
             let swap_id = selfi.etomic_swap_id(time_lock, &secret_hash);
             let status = try_s!(
                 selfi
@@ -3203,13 +3222,8 @@ impl EthCoin {
                         );
                     }
 
-                    if decoded[2] != Token::FixedBytes(secret_hash.to_vec()) {
-                        return ERR!(
-                            "Payment tx secret_hash arg {:?} is invalid, expected {:?}",
-                            decoded[2],
-                            Token::FixedBytes(secret_hash.to_vec())
-                        );
-                    }
+                    // CRD ch.51 R72A: compared against the value derived from the shared `secret_hash`.
+                    check_payment_secret_hash_arg(&decoded[2], &secret_hash)?;
 
                     if decoded[3] != Token::Uint(U256::from(time_lock)) {
                         return ERR!(
@@ -3261,13 +3275,8 @@ impl EthCoin {
                         );
                     }
 
-                    if decoded[4] != Token::FixedBytes(secret_hash.to_vec()) {
-                        return ERR!(
-                            "Payment tx secret_hash arg {:?} is invalid, expected {:?}",
-                            decoded[4],
-                            Token::FixedBytes(secret_hash.to_vec())
-                        );
-                    }
+                    // CRD ch.51 R72A: compared against the value derived from the shared `secret_hash`.
+                    check_payment_secret_hash_arg(&decoded[4], &secret_hash)?;
 
                     if decoded[5] != Token::Uint(U256::from(time_lock)) {
                         return ERR!(
