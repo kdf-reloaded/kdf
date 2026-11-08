@@ -943,18 +943,21 @@ relay-connection maintenance of RQ1a item 4 MUST follow these rules:
    An early redial counts as a dial for item 1. Once the cap is reached,
    or when an early redial fails, item 1 applies unchanged. No early
    redial follows a connection that ended on the idle timeout, a stuck-peer
-   close (RQ1 item 5), a bounded-close timeout (R27c), the clock admission
-   check (RP2) or the relay-count maintenance of R27. A stuck-peer close is
-   recognized when it ends cleanly or with the close timeout of R27c; one
-   that ends with another transport error counts as a transport error,
-   because the vendored gossipsub closes such a connection without
-   reporting why. The bans of RP3 are keyed by the gossip-signing key and
-   never close or refuse a connection, so they need no rule here. *Why:*
-   the guard of item 1 exists to stop dial loops toward
-   addresses that fail or flap; a connection that was established and
-   worked for a while and was then cut does not belong to them. In lab
-   row L-CLOSE variant B, a link cut with a socket reset left a relay
-   connection down for 4 min 9 s, held only by this guard. *Compatibility
+   close (RQ1 item 5), a bounded-close timeout (R27c), a handler error, the
+   clock admission check (RP2) or the relay-count maintenance of R27. A
+   close by the ping safeguard that ends with the close timeout of R27c
+   counts as that timeout. A stuck-peer close is recognized when it ends
+   cleanly or with the close timeout of R27c; one that ends with another
+   transport error counts as a transport error, because the vendored
+   gossipsub closes such a connection without reporting why. The bans of
+   RP3 are keyed by the gossip-signing key and never close or refuse a
+   connection, so they need no rule here. *Why:* the guard of item 1
+   exists to stop dial loops toward addresses that fail or flap; a
+   connection that was established and worked for a while and was then
+   cut does not belong to them. In lab row L-CLOSE variant B, after one of
+   three link cuts with a socket reset, a relay connection came back only
+   after 4 min 9 s, inside the 5-minute guard of item 1 (recorded only;
+   lab row L-RELINK checks whether the guard held it). *Compatibility
    (informative):* no wire shape changes; the peer sees a dial earlier than
    the reference would make it. Under `docs/COMPAT_SWITCHES.md`, "The
    default-side rule", it falls in arm 2: Reloaded's behavior by default,
@@ -965,18 +968,19 @@ relay-connection maintenance of RQ1a item 4 MUST follow these rules:
    > address as written. When that connection closes after at least 30 s on a
    > transport error, a peer close or the ping safeguard, the address is
    > marked for an early redial. The cause comes from the close event, plus a
-   > mark that this node records where it starts a close itself (idle
-   > timeout, stuck peer, admission, relay count); a handler error and the
-   > close timeout of R27c are not exempt. The next maintenance tick below the
-   > low watermark may dial a marked address despite item 1, at most twice
-   > within the guard interval, counted over a sliding window, and that dial
-   > counts as a dial for item 1. Tests: the T15 unit tests in
-   > `redial_guard.rs`. There is no behavior test: the in-memory transport of
-   > the test setup does not release a port when its listener is dropped, so
-   > a cut seed cannot listen on its address again. The end-to-end check is
-   > lab row L-RELINK. The case "not below the low watermark" is covered by
-   > construction: the early-redial check runs only in the below-watermark
-   > branch.
+   > mark that this node records where it starts a close itself (the ping
+   > safeguard, in `adex_ping`; the admission check; the relay count).
+   > The idle timeout and the close timeout of R27c are told by their errors;
+   > a stuck-peer close, which gossipsub starts, by its clean end. A handler
+   > error is not exempt. The next maintenance tick below the low watermark
+   > may dial a marked address despite item 1, at most twice within the guard
+   > interval, counted over a sliding window, and that dial counts as a dial
+   > for item 1. Tests: the T15 unit tests in `redial_guard.rs`. There is no
+   > behavior test: the in-memory transport of the test setup does not
+   > release a port when its listener is dropped, so a cut seed cannot listen
+   > on its address again. The end-to-end check is lab row L-RELINK. The case
+   > "not below the low watermark" is covered by construction: the
+   > early-redial check runs only in the below-watermark branch.
 
 2. **Connected seed.** The node MUST NOT dial a configured bootstrap
    address while the peer that the address belongs to is connected,
