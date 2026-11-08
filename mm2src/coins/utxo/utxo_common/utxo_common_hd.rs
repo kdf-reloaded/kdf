@@ -290,6 +290,11 @@ pub async fn load_hd_accounts_from_storage(
     }
 }
 
+/// Provides the extended public key at `derivation_path`, from the source the coin's own key policy names (CRD
+/// ch.05 R35c, R35a): the device for a coin of the Trezor policy, the in-memory BIP-32 master for a coin of the
+/// software global-HD policy. `xpub_extractor` is the device the caller can offer (it exists whenever a hardware
+/// context does); a software-keyed coin never asks it, so a hardware context beside a software login cannot
+/// bind a software coin's account to the device's key.
 pub async fn extract_extended_pubkey<T, XPubExtractor>(
     coin: &T,
     xpub_extractor: Option<&XPubExtractor>,
@@ -299,9 +304,17 @@ where
     T: AsRef<UtxoCoinFields>,
     XPubExtractor: HDXPubExtractor,
 {
-    match xpub_extractor {
-        // Hardware source: require the coin's `trezor_coin` config and run the device protocol.
-        Some(extractor) => {
+    match &coin.as_ref().priv_key_policy {
+        // Software global-HD source: derive the account extended pubkey from the in-memory
+        // BIP-32 master held by the coin's HD priv-key policy. No `trezor_coin` and no device.
+        PrivKeyPolicy::HDWallet {
+            bip39_secp_priv_key, ..
+        } => crypto::derive_secp256k1_extended_pubkey(bip39_secp_priv_key.clone(), &derivation_path)
+            .mm_err(|e| HDExtractPubkeyError::Internal(format!("BIP32 derivation error: {}", e))),
+        // Hardware source: require the coin's `trezor_coin` config and run the device protocol. A coin of the
+        // Trezor policy whose device is not offered (the hardware context is gone) reports that.
+        PrivKeyPolicy::Trezor => {
+            let extractor = xpub_extractor.or_mm_err(|| HDExtractPubkeyError::HwContextNotInitialized)?;
             let trezor_coin = coin
                 .as_ref()
                 .conf
@@ -310,18 +323,8 @@ where
             let xpub = extractor.extract_utxo_xpub(trezor_coin, derivation_path).await?;
             Secp256k1ExtendedPublicKey::from_str(&xpub).map_to_mm(HDExtractPubkeyError::InvalidXpub)
         },
-        // Software global-HD source: derive the account extended pubkey from the in-memory
-        // BIP-32 master held by the coin's HD priv-key policy. No `trezor_coin` and no device.
-        None => {
-            let bip39_secp_priv_key = match &coin.as_ref().priv_key_policy {
-                PrivKeyPolicy::HDWallet {
-                    bip39_secp_priv_key, ..
-                } => bip39_secp_priv_key.clone(),
-                _ => return MmError::err(HDExtractPubkeyError::HwContextNotInitialized),
-            };
-            crypto::derive_secp256k1_extended_pubkey(bip39_secp_priv_key, &derivation_path)
-                .mm_err(|e| HDExtractPubkeyError::Internal(format!("BIP32 derivation error: {}", e)))
-        },
+        // A single-key coin has no HD wallet to take an account key for.
+        PrivKeyPolicy::KeyPair(_) => MmError::err(HDExtractPubkeyError::HwContextNotInitialized),
     }
 }
 

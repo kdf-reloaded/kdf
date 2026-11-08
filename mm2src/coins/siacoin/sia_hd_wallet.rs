@@ -334,7 +334,7 @@ impl HDWalletCoinOps for SiaCoin {
     async fn create_new_account<'a, XPubExtractor>(
         &self,
         hd_wallet: &'a Self::HDWallet,
-        xpub_extractor: Option<&XPubExtractor>,
+        _xpub_extractor: Option<&XPubExtractor>,
         index: NewAccountIndex,
     ) -> MmResult<HDAccountMut<'a, Self::HDAccount>, NewAccountCreatingError>
     where
@@ -342,11 +342,10 @@ impl HDWalletCoinOps for SiaCoin {
     {
         // Sia has no hardware-wallet signing support (R-T3: only the single-key
         // and single-address HD-account priv-key policies reach an activated
-        // coin); a caller that supplied an xpub extractor is asking for a
-        // derivation this coin cannot service in software.
-        if xpub_extractor.is_some() {
-            return MmError::err(NewAccountCreatingError::CoinDoesntSupportTrezor);
-        }
+        // coin), so its key policy is always the software one and the account is
+        // always derived in software (CRD ch.05 R35c). A device the caller can
+        // offer -- it exists whenever a hardware context does, also beside a
+        // software login -- is never asked, and does not make the creation fail.
         create_new_account(hd_wallet, index).await
     }
 
@@ -529,16 +528,12 @@ impl InitAccountBalanceRpcOps for SiaCoin {
 
 /// Unlike `HDWalletRpcOps`/`AccountBalanceRpcOps`/`InitAccountBalanceRpcOps` above,
 /// this does **not** delegate to `init_create_account::common_impl`. That shared
-/// helper is what `EthCoin`/`UtxoStandardCoin` use, but it always forwards
-/// `Some(xpub_extractor)` into `HDWalletCoinOps::create_new_account` (mirroring the
-/// hardware-wallet-capable account-creation flow those coins support). Sia's own
-/// `create_new_account` (above) rejects *any* `Some(_)` extractor outright --
-/// SLIP-10 ed25519 has no public-key-only child derivation, so there is no
+/// helper is what `EthCoin`/`UtxoStandardCoin` use, and it forwards the device
+/// extractor the caller can offer into `HDWalletCoinOps::create_new_account`
+/// (mirroring the hardware-wallet-capable account-creation flow those coins
+/// support). SLIP-10 ed25519 has no public-key-only child derivation, so there is no
 /// software-or-hardware "extract an xpub for a not-yet-existing account" operation
 /// to perform (module doc comment; the chapter's own D1 architectural-risk note).
-/// Delegating verbatim would therefore make `task::create_new_account` permanently
-/// fail for every Sia HD wallet with `CoinDoesntSupportTrezor`, not merely for a
-/// hardware-backed one.
 ///
 /// This impl instead calls the crate's `create_new_account` free function
 /// directly (this module, above) -- always the software path, which is the only
@@ -546,8 +541,8 @@ impl InitAccountBalanceRpcOps for SiaCoin {
 /// is rejected long before an `HDWallet`-mode `SiaCoin` exists), so `xpub_extractor`
 /// is intentionally unused rather than threaded through as `Some(_)`.
 ///
-/// `task::create_new_account` builds a hardware-device extractor only under a hardware login (CRD ch.05 R35c), so
-/// under the software login a `SiaCoin` always runs under, this impl is reached without a device.
+/// `task::create_new_account` offers a hardware-device extractor whenever a hardware context exists (CRD ch.05
+/// R35c); a `SiaCoin` ignores it, as it ignores it in `HDWalletCoinOps::create_new_account` above.
 #[async_trait]
 impl InitCreateHDAccountRpcOps for SiaCoin {
     async fn init_create_account_rpc<XPubExtractor>(

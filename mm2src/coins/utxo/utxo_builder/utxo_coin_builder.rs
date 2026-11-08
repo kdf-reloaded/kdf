@@ -1,5 +1,5 @@
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
-use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError};
+use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError, HDWalletStorageKeyPolicy};
 use crate::rpc_command::get_my_address::PathToAddress;
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::rpc_clients::electrum_pool::{electrum_block_interval, electrum_server_order,
@@ -323,7 +323,10 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
         };
 
         // Build the HD wallet structure for multi-account support.
-        let hd_wallet_storage = HDWalletCoinStorage::init(self.ctx(), ticker).await.mm_err(Into::into)?;
+        // The software global-HD coin: its accounts belong to the software wallet identity (CRD ch.05 R29).
+        let hd_wallet_storage = HDWalletCoinStorage::init(self.ctx(), ticker, HDWalletStorageKeyPolicy::Software)
+            .await
+            .mm_err(Into::into)?;
         let accounts = self
             .load_hd_wallet_accounts(&hd_wallet_storage, &derivation_path)
             .await?;
@@ -392,7 +395,11 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         let address_format = self.address_format()?;
         let derivation_path = self.derivation_path().mm_err(Into::into)?;
 
-        let hd_wallet_storage = HDWalletCoinStorage::init(self.ctx(), ticker).await.mm_err(Into::into)?;
+        // The Trezor-policy coin: its accounts belong to the device identity, also when a software global-HD
+        // login runs beside the hardware context (CRD ch.05 R29).
+        let hd_wallet_storage = HDWalletCoinStorage::init(self.ctx(), ticker, HDWalletStorageKeyPolicy::Hardware)
+            .await
+            .mm_err(Into::into)?;
 
         let accounts = self
             .load_hd_wallet_accounts(&hd_wallet_storage, &derivation_path)

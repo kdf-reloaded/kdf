@@ -148,6 +148,8 @@ zcash_transparent = { version = "=0.10.0", features = ["transparent-inputs"] }
 zip32 = "=0.2.1"
 
 [dev-dependencies]
+# The get_private_keys tests install a hardware context beside a software login (`init_trezor_ctx_for_tests`).
+crypto = { path = "../crypto", features = ["test-helpers"] }
 # Used only by z_coin/z_v6_construction_tests.rs, to implement Sapling provers that must never be called
 # (a transparent-only transaction has no Sapling bundle); versions are those already locked.
 bls12_381 = "0.8"

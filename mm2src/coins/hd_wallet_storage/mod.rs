@@ -232,16 +232,65 @@ impl Default for HDWalletCoinStorage {
     }
 }
 
+/// The key policy of the coin whose accounts the storage holds. It names the digest that identifies the wallet in
+/// the storage: a node may hold a software global-HD login and a hardware context together, and a coin's accounts
+/// belong to the key source of that coin alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HDWalletStorageKeyPolicy {
+    /// A coin of the software (context-key, global-HD) policy: the wallet is the software identity.
+    Software,
+    /// A coin of the Trezor policy: the wallet is the device identity.
+    Hardware,
+}
+
+impl HDWalletStorageKeyPolicy {
+    /// The digest that identifies the wallet of a coin of this policy, chosen from the two the node may hold.
+    /// A missing digest is not replaced by the other one.
+    fn select_wallet_rmd160(self, software: Option<H160>, hardware: Option<H160>) -> Option<H160> {
+        match self {
+            HDWalletStorageKeyPolicy::Software => software,
+            HDWalletStorageKeyPolicy::Hardware => hardware,
+        }
+    }
+}
+
 impl HDWalletCoinStorage {
-    pub async fn init(ctx: &MmArc, coin: String) -> HDWalletStorageResult<HDWalletCoinStorage> {
-        let inner = Box::new(HDWalletStorageInstance::init(ctx).await?);
+    /// Opens the storage of `coin`. The wallet is identified by the digest of the coin's own key policy: the
+    /// software global-HD identity for [`HDWalletStorageKeyPolicy::Software`], the device identity for
+    /// [`HDWalletStorageKeyPolicy::Hardware`] (CRD ch.05 R29). There is no fallback to the other digest.
+    ///
+    /// # Errors
+    ///
+    /// [`HDWalletStorageError::HDWalletUnavailable`] if the digest of the policy does not exist: no software
+    /// global-HD login (Iguana mode), or no hardware context.
+    pub async fn init(
+        ctx: &MmArc,
+        coin: String,
+        key_policy: HDWalletStorageKeyPolicy,
+    ) -> HDWalletStorageResult<HDWalletCoinStorage> {
         let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(Into::into)?;
-        // Software global-HD wallets are namespaced by the in-context software identity (R29);
-        // hardware wallets by the device identity; Iguana mode has no HD identity (refused).
-        let hd_wallet_rmd160 = crypto_ctx
-            .global_hd_wallet_rmd160()
-            .or_else(|| crypto_ctx.hw_wallet_rmd160())
+        Self::init_with_identities(
+            ctx,
+            coin,
+            key_policy,
+            crypto_ctx.global_hd_wallet_rmd160(),
+            crypto_ctx.hw_wallet_rmd160(),
+        )
+        .await
+    }
+
+    /// [`HDWalletCoinStorage::init`] over the two digests the node holds.
+    async fn init_with_identities(
+        ctx: &MmArc,
+        coin: String,
+        key_policy: HDWalletStorageKeyPolicy,
+        software_rmd160: Option<H160>,
+        hardware_rmd160: Option<H160>,
+    ) -> HDWalletStorageResult<HDWalletCoinStorage> {
+        let hd_wallet_rmd160 = key_policy
+            .select_wallet_rmd160(software_rmd160, hardware_rmd160)
             .or_mm_err(|| HDWalletStorageError::HDWalletUnavailable)?;
+        let inner = Box::new(HDWalletStorageInstance::init(ctx).await?);
         Ok(HDWalletCoinStorage {
             coin,
             mm2_rmd160: *ctx.rmd160(),
@@ -671,4 +720,118 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_remove_account() { block_on(test_remove_account_impl()) }
+
+    const SOFTWARE_XPUB: &str = "xpub6DEHSksajpRPM59RPw7Eg6PKdU7E2ehxJWtYdrfQ6JFmMGBsrR6jA78ANCLgzKYm4s5UqQ4ydLEYPbh3TRVvn5oAZVtWfi4qJLMntpZ8uGJ";
+    const DEVICE_XPUB: &str = "xpub6EuV33a2DXxAhoJTRTnr8qnysu81AA4YHpLY6o8NiGkEJ8KADJ35T64eJsStWsmRf1xXkEANVjXFXnaUKbRtFwuSPCLfDdZwYNZToh4LBCd";
+
+    fn account_with_xpub(xpub: &str) -> HDAccountStorageItem {
+        HDAccountStorageItem {
+            account_id: 0,
+            account_xpub: xpub.to_owned(),
+            external_addresses_number: 1,
+            internal_addresses_number: 0,
+        }
+    }
+
+    /// CRD ch.05 R29, mixed mode: a node holds a software global-HD login and a hardware context together. The
+    /// accounts of a Trezor-policy coin are stored under the DEVICE digest, those of a software coin under the
+    /// software digest, and neither policy loads the other's accounts.
+    async fn test_wallet_identity_follows_the_coin_key_policy_impl() {
+        let ctx = mm_ctx_with_custom_db();
+        let software_rmd160 = H160::from("0000000000000000000000000000000000000001");
+        let device_rmd160 = H160::from("0000000000000000000000000000000000000002");
+        let open = |policy: HDWalletStorageKeyPolicy| {
+            HDWalletCoinStorage::init_with_identities(
+                &ctx,
+                "DOC".to_owned(),
+                policy,
+                Some(software_rmd160),
+                Some(device_rmd160),
+            )
+        };
+
+        // A Trezor-policy activation stores its account under the device digest.
+        let trezor_db = open(HDWalletStorageKeyPolicy::Hardware)
+            .await
+            .expect("!init: Trezor policy");
+        assert_eq!(trezor_db.hd_wallet_rmd160, device_rmd160);
+        trezor_db
+            .upload_new_account(account_with_xpub(DEVICE_XPUB))
+            .await
+            .expect("!upload_new_account: Trezor policy");
+
+        // A later software activation of the same ticker loads none of those accounts.
+        let software_db = open(HDWalletStorageKeyPolicy::Software)
+            .await
+            .expect("!init: software policy");
+        assert_eq!(software_db.hd_wallet_rmd160, software_rmd160);
+        assert!(software_db
+            .load_all_accounts()
+            .await
+            .expect("!load_all_accounts")
+            .is_empty());
+        assert!(software_db.load_account(0).await.expect("!load_account").is_none());
+
+        // The reverse: a software coin's accounts are not loaded by a Trezor-policy activation.
+        software_db
+            .upload_new_account(account_with_xpub(SOFTWARE_XPUB))
+            .await
+            .expect("!upload_new_account: software policy");
+        let actual = open(HDWalletStorageKeyPolicy::Hardware)
+            .await
+            .expect("!init: Trezor policy")
+            .load_all_accounts()
+            .await
+            .expect("!load_all_accounts");
+        assert_eq!(actual, vec![account_with_xpub(DEVICE_XPUB)]);
+        let actual = open(HDWalletStorageKeyPolicy::Software)
+            .await
+            .expect("!init: software policy")
+            .load_all_accounts()
+            .await
+            .expect("!load_all_accounts");
+        assert_eq!(actual, vec![account_with_xpub(SOFTWARE_XPUB)]);
+    }
+
+    /// CRD ch.05 R29: the digest of the coin's policy is the only one used. A missing digest is not replaced by the
+    /// other one: the storage is unavailable.
+    async fn test_wallet_identity_has_no_fallback_impl() {
+        let ctx = mm_ctx_with_custom_db();
+        let some_rmd160 = H160::from("0000000000000000000000000000000000000003");
+        let open = |policy: HDWalletStorageKeyPolicy, software: Option<H160>, hardware: Option<H160>| {
+            HDWalletCoinStorage::init_with_identities(&ctx, "DOC".to_owned(), policy, software, hardware)
+        };
+
+        // A Trezor-policy coin without a hardware context, under a software login.
+        let error = open(HDWalletStorageKeyPolicy::Hardware, Some(some_rmd160), None)
+            .await
+            .expect_err("a Trezor-policy coin needs the device digest");
+        assert!(matches!(error.into_inner(), HDWalletStorageError::HDWalletUnavailable));
+
+        // A software coin without a software global-HD login (Iguana), beside a hardware context.
+        let error = open(HDWalletStorageKeyPolicy::Software, None, Some(some_rmd160))
+            .await
+            .expect_err("a software coin needs the software digest");
+        assert!(matches!(error.into_inner(), HDWalletStorageError::HDWalletUnavailable));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test]
+    async fn test_wallet_identity_follows_the_coin_key_policy() {
+        test_wallet_identity_follows_the_coin_key_policy_impl().await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_wallet_identity_follows_the_coin_key_policy() {
+        block_on(test_wallet_identity_follows_the_coin_key_policy_impl())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test]
+    async fn test_wallet_identity_has_no_fallback() { test_wallet_identity_has_no_fallback_impl().await }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_wallet_identity_has_no_fallback() { block_on(test_wallet_identity_has_no_fallback_impl()) }
 }

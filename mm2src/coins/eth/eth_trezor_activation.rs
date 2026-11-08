@@ -14,6 +14,7 @@
 use super::eth_activation::{build_eth_hd_wallet, eth_coin_from_params_with_trezor, eth_full_derivation_path,
                             EthCoinActivationParams, EthCoinBuildError};
 use super::*;
+use crate::hd_wallet_storage::HDWalletStorageKeyPolicy;
 use crate::rpc_command::get_my_address::PathToAddress;
 use crate::CryptoCtx;
 use crypto::trezor::{ProcessTrezorResponse, TrezorProcessingError};
@@ -197,7 +198,7 @@ where
         )));
     }
     let full_path = eth_full_derivation_path(conf, path_to_address)?;
-    let hd_wallet = build_eth_hd_wallet(ctx, ticker, conf, gap_limit).await?;
+    let hd_wallet = build_eth_hd_wallet(ctx, ticker, conf, gap_limit, HDWalletStorageKeyPolicy::Hardware).await?;
 
     let (address, public) = read_device_address(ctx, &full_path, processor)
         .await
