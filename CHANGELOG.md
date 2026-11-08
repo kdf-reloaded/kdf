@@ -688,6 +688,12 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 
 ### Tests
 
+- **A lab row checks what a short network outage does to a relay connection.** With every packet
+  between a relay and a peer dropped and no socket reset, a 10-second outage kept the connection and
+  traffic resumed within 6 seconds, three times out of three. After a 30-second outage the
+  connections were closed and the peer connected again; after a 60-second outage both connections
+  were closed and came back. Traffic was back 23 and 40 seconds after the restore. The node itself
+  is unchanged. Detail: PR #292; CRD ch.28 T14.
 - **The Qtum testnet tests now use the one public Qtum testnet server, and the QRC20 docker test
   set-up mines its own blocks and waits for new contracts.** The tests that activate the testnet
   Qtum coin pointed at servers that serve Qtum mainnet, so the test wallets looked empty and the

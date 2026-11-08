@@ -40,6 +40,13 @@ lookups of R8c item 7 onto the shared resolver, and they become asynchronous wit
   30 seconds, where a build without the deadline kept it open 13 minutes. Its memory criterion was
   restated after the run, from "back to baseline" to "flat after the close, where the control keeps
   growing" (T14). In the 10-second link cuts of the same row the relay started no close.
+- **An outage without a reset (batch 4 item B4-8, 2026-11-08).** The drop-only arm of L-CLOSE
+  dropped every packet between a relay and a peer without resetting a socket. In three 10-second
+  drops both connections survived, and traffic resumed 2.5 to 5.5 seconds after the restore. After a
+  30-second drop the connections were closed and the peer connected again; after a 60-second drop
+  both connections were closed and came back. Traffic resumed 23 and 40 seconds after the restore.
+  This is input for P4 and for the maintainer's decision EA (an earlier redial of a connection that
+  a cut ended), which is pending.
 - **Resolver (P5), 2026-11-02.**
   - One setting, `dns_resolver`, for every hostname. Google Public DNS is the default for all
     names, `"google"` names it explicitly, and `"system"` is the way back to the operating
