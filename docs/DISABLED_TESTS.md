@@ -109,6 +109,10 @@ this group keep a plain `#[ignore]` because CI runs them on purpose in the
   "contract address does not exist" for the QICK token. Whether they cure those failures
   shows only in CI runs. The tests stay ignored until a CI run shows them green.
 
+  The tests' own confirmation waits in `docker_tests/qrc20_tests.rs` (they used a fixed
+  40 s wait on the node's own timer) now mine a block first and wait up to 90 s; whether
+  that removes the intermittent failures shows only in repeated CI runs.
+
 The tQTUM tests (`coins/utxo/utxo_tests.rs`, `coins/qrc20/qrc20_tests.rs`,
 `mm2_main/src/mm2_tests.rs`) are not disabled. They need the one public Qtum testnet
 Electrum server, `s6.electrum.qtum.site:51001`, so like the live-infra tests of Group 3
