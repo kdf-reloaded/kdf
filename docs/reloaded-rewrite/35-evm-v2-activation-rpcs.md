@@ -623,6 +623,30 @@ coin signs itself (swap payments, spends, refunds, approvals, `withdraw`) is
    reported pending nonce exceeds the one it used; this wait has no bound in
    the reference (a `Code-quality finding` is recorded below).
 
+> **As built (Reloaded; 2026-11-07; updated 2026-11-08).** The log level and the
+> wording of a failing node's line in step 1 are decided after the round, from
+> whether a node answered and, if none did, from the number of the round. The
+> failures of a round are collected during the round and logged after it. There
+> are three forms, each in the R35.1.16 form (ticker, host, "(node *i* of *n*)")
+> and each, for a node that cannot be named, without the node part:
+>
+> - another node answered in the round: a **warn** line, `[<ticker>] Nonce
+>   request for addr <address> failed (<failure>) on node <host> (node <i> of
+>   <n>); another node answered`, which does not read as an error, whatever the
+>   round;
+> - no node answered and the round will be repeated (it is one of the first
+>   five of the six rounds): a **warn** line, `[<ticker>] Nonce request for addr
+>   <address> failed (<failure>) on node <host> (node <i> of <n>); no node
+>   answered, retrying (round <k> of 6)`, because a later round can still
+>   succeed and the send then goes through;
+> - no node answered in the last round, so the request fails: an **error**
+>   line, `[<ticker>] Error <failure> when getting nonce for addr <address> from
+>   node <host> (node <i> of <n>)`.
+>
+> The retries, the number of rounds, the pause between them and the choice of
+> the nonce do not change. A log line is not peer-visible, so nothing here is
+> bound against the reference.
+
 A caller-supplied raw transaction submitted through the `send_raw_transaction`
 RPC is **not** a signed-by-the-coin send: it is broadcast through R35.1.8, so a
 JSON-RPC rejection from the first node leads to a submission to the next node,
@@ -691,6 +715,16 @@ URL carries a provider API key just as a node URL does (Reloaded;
 clean-room original; maintainer decision 2026-10-26; no switch, for the same
 reason). This sentence binds only Reloaded's own texts and states nothing
 about the reference's.
+
+> **As built (Reloaded; 2026-11-07): one node.** The all-failed error of
+> R35.1.11 for a transport with exactly one node -- a node reached on its own
+> (R35.1.12) or a failover transport configured with a single node -- names
+> that node's transport-class failure as `<host>: <failure>`, for example
+> `https://rpc.example.org: HTTP 429 Too Many Requests`, without the "all EVM
+> nodes failed:" prefix, because one node is not "all". With two or more nodes
+> the text is unchanged. The JSON-RPC error form of R35.1.15 and the text of a
+> request on which every node hit the cutoff keep their wording. The host-only
+> naming and the scrubbing of this rule apply as before.
 
 > **Pointer (2026-10-28).** The maintainer decision of 2026-10-26 extends
 > host-only naming to every node family. The host-only form defined above is
