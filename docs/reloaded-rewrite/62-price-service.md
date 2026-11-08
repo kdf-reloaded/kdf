@@ -529,9 +529,10 @@ source by its cache `https://defistats.gleec.com/api/v3/prices/tickers_v2?expire
 (asked only if the first fails); source 2 is
 `https://prices.cipig.net:1717/api/v2/tickers?expire_at=259200`. The query
 parameter `expire_at` is the greatest age, in seconds (259200 = 72 hours), of
-the tickers the service serves; without it the cipig service serves tickers
-many months old. The dead `komodian.info`, `komodo.earth` and `komodo.live`
-hosts are dropped. One list serves every consumer (the bot and the snapshot).
+the tickers the service serves; without it the prices.cipig.net price service
+serves tickers many months old. The dead `komodian.info`, `komodo.earth` and
+`komodo.live` hosts are dropped. One list serves every consumer (the bot and
+the snapshot).
 A top-level `MM2.json` key `price_urls` replaces the default list for every
 consumer when present: an array whose items are each a URL string (one source)
 or a non-empty array of URL strings (one source with in-order fallback). A

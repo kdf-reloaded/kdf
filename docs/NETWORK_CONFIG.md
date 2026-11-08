@@ -287,8 +287,8 @@ value).
   malformed value, is refused. The request's key is used for the bot instead of the `MM2.json` key or the
   default; the swap prices always use the `MM2.json` key or the default.
 - **`expire_at`.** The default addresses accept `expire_at`, the greatest age in seconds of the prices they
-  serve (259200 is 72 hours). Keep it in an address of your own whose service supports it: without it the cipig
-  service serves prices many months old.
+  serve (259200 is 72 hours). Keep it in an address of your own whose service supports it: without it the
+  prices.cipig.net price service serves prices many months old.
 - **Logs.** A price service that fails is reported with one warning when it starts failing, debug lines while
   it keeps failing and one info line when it answers again; the state is shared by the bot and the swap prices.
   The same holds for a coin the sources disagree on (kept per list of sources) and for the bot finding no source
@@ -302,8 +302,8 @@ value).
   price, a stale price, a coin the sources disagree on, or no source answering) has its order cancelled at
   once, as in GLEEC KDF. This behavior is under observation in v0.4.0 and will be revisited in the next version.
 - **Browser build.** A WebAssembly build can read only a service that sends CORS headers; of the default
-  sources only the GLEEC addresses do, so a browser build gets its prices from them alone (the cipig source
-  counts as not answering). The swap prices are not taken in a browser build.
+  sources only the GLEEC addresses do, so a browser build gets its prices from them alone (the
+  prices.cipig.net price service counts as not answering). The swap prices are not taken in a browser build.
 
 ### Electrum Servers over TLS
 

@@ -737,9 +737,9 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   market-maker bot used for its default prices and which the node asks when a swap ends for the USD prices
   it stores with the swap, no longer resolves. Since then the bot could not fetch prices unless you named
   another service, and no swap completed stored USD prices. The default is now two sources asked at the
-  same time: the GLEEC price service (and, if it does not answer, its cache) and the cipig price service,
-  each with `?expire_at=259200` so that no price older than 72 hours is served. A coin that only one source
-  prices is priced from it. A coin both price must agree within 5 %; if they do not, the coin gets no
+  same time: the GLEEC price service (and, if it does not answer, its cache) and the prices.cipig.net price
+  service, each with `?expire_at=259200` so that no price older than 72 hours is served. A coin that only one
+  source prices is priced from it. A coin both price must agree within 5 %; if they do not, the coin gets no
   price from either, and the bot quotes no pair with it. A source that does not answer is skipped. The bot
   and the swap prices use the same sources. Two new top-level keys in `MM2.json` change them: `price_urls`
   (an array of sources, each one address or an array of addresses tried in order) replaces the default
