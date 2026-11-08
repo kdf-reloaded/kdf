@@ -37,7 +37,16 @@ pub enum MyOrdersError {
     InternalError(String),
 }
 
+/// Saves a new maker order: its active record, then, when the order is kept in the history, its filtering-history
+/// row. A failed write of the active record is only logged. When the history write fails, the active record just
+/// written is deleted again and the history error is returned: the callers report the order as not placed, and a
+/// record left behind would bring it back as a live order at the next start (CRD ch.32 R-GH8a).
+///
+/// # Errors
+///
+/// The error of the filtering-history write.
 pub async fn save_my_new_maker_order(ctx: MmArc, order: &MakerOrder) -> MyOrdersResult<()> {
+    let deletion_ctx = ctx.clone();
     let storage = MyOrdersStorage::new(ctx);
     storage
         .save_new_active_maker_order(order)
@@ -45,11 +54,22 @@ pub async fn save_my_new_maker_order(ctx: MmArc, order: &MakerOrder) -> MyOrders
         .error_log_with_msg("!save_new_active_maker_order");
 
     if order.save_in_history {
-        storage.save_maker_order_in_filtering_history(order).await?;
+        if let Err(e) = storage.save_maker_order_in_filtering_history(order).await {
+            // A record that is already missing counts as deleted, so a failed active write adds no noise.
+            delete_active_maker_order_with_retry(&deletion_ctx, order.uuid).await;
+            return Err(e);
+        }
     }
     Ok(())
 }
 
+/// Saves a new taker order: its active record, then, when the order is kept in the history, its filtering-history
+/// row. A failed write of the active record is only logged. When the history write fails, the active record just
+/// written is deleted again and the history error is returned (CRD ch.32 R-GH8a).
+///
+/// # Errors
+///
+/// The error of the filtering-history write.
 pub async fn save_my_new_taker_order(ctx: MmArc, order: &TakerOrder) -> MyOrdersResult<()> {
     let storage = MyOrdersStorage::new(ctx);
     storage
@@ -58,7 +78,16 @@ pub async fn save_my_new_taker_order(ctx: MmArc, order: &TakerOrder) -> MyOrders
         .error_log_with_msg("!save_new_active_taker_order");
 
     if order.save_in_history {
-        storage.save_taker_order_in_filtering_history(order).await?;
+        if let Err(e) = storage.save_taker_order_in_filtering_history(order).await {
+            if let Err(delete_err) = storage.delete_active_taker_order(order.request.uuid).await {
+                common::log::warn!(
+                    "Deleting the active record of taker order {} after a failed history write failed: {}",
+                    order.request.uuid,
+                    delete_err
+                );
+            }
+            return Err(e);
+        }
     }
     Ok(())
 }
