@@ -287,6 +287,19 @@ A login without `enable_hd` is not affected. Detail: PR #254; CRD ch.05 R45–R4
 
 #### UTXO coins and Electrum
 
+- **`fetch_utxos`, `consolidate_utxos` and the automatic merge (`utxo_merge_params`) now work
+  under an HD login**, as they do in GLEEC KDF. Until now the two commands were refused and the
+  automatic merge stayed off.
+  - `fetch_utxos` lists the unspent outputs of every address the wallet knows, in every account. It
+    makes no new address known.
+  - `consolidate_utxos` merges only the outputs of the coin's own address, the one at
+    `path_to_address`, into one output paid back to it. No other address is touched. With
+    `broadcast: false` it returns the transaction without sending it.
+  - The automatic merge works on the same address, for a UTXO coin such as RIN and for QTUM.
+  - Under a Trezor key, `consolidate_utxos` answers `InvalidAddress` and the automatic merge stops,
+    so the device is never asked to sign; `fetch_utxos` works.
+
+  Detail: PR #281; CRD ch.05 R35b.
 - **Electrum reads now go only to the servers with the shortest round trip.** Since 0.3.0-beta.1
   a coin's read-only Electrum queries took turns over every connected server, so a distant server
   in the list answered one read in N. Now they take turns only among the connected servers whose
@@ -743,7 +756,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   `from` under an iguana login are done (items H5.1 and H5.5, PR #270); the maintainer set the
   default sender to the coin's activated address (decision CU). Activation lists the address at
   `path_to_address`, and `task::create_new_account` works without a hardware wallet (items H5.0 and
-  H5.4, PR #279).
+  H5.4, PR #279). `fetch_utxos`, `consolidate_utxos` and the automatic merge work under an HD login
+  (item H5.3, PR #281).
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
   queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
   remain.
