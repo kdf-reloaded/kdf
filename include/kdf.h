@@ -61,9 +61,10 @@ int8_t mm2_stop(void);
  * and restarted with the same configuration after a successful run. Returns
  * `torch` on success and -1 on any failure: a test failed, a run is already
  * in progress, or stopping or restarting the daemon failed. After a failure
- * mm2_test does not restore the daemon's state: it may be stopped, or still
- * running if stopping it failed; further calls return -1. A -1 that only
- * reports a run in progress changes nothing.
+ * mm2_test does not restore the daemon's state: it may be stopped, or
+ * running (stopping it failed, or the failure came during the restart);
+ * mm2_main_status tells which. Further calls return -1. A -1 that only
+ * reports a run in progress changes nothing in the daemon's state.
  */
 int32_t mm2_test(int32_t torch, kdf_log_callback log_cb);
 
