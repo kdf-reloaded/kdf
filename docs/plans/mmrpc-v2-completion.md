@@ -18,7 +18,7 @@ applies.
 
 For v0.4.0 the maintainer decided on 2026-11-08 to keep the reference's surfaces: the legacy-only
 order methods stay legacy-only, and no versioned aliases are added (CRD ch.43 D43.1A.1, option (i)).
-The same review implemented the reference's one-way fallback: a legacy request whose method the
+PR #312 also implemented the reference's one-way fallback: a legacy request whose method the
 legacy table does not know is retried on the versioned table (R43.1A.1a–R43.1A.1e, PR #312). That
 lets a legacy-only client reach versioned-only methods. Nothing yet helps a versioned-only client
 reach the legacy-only methods. This plan closes that gap for the next version, as a documented
@@ -46,9 +46,11 @@ extension.
    envelope strictness, the dispatcher errors, and the versioned shapes of `orderbook`, `best_orders`
    and `my_recent_swaps`. It passed the KDF Dirty Gate on 2026-11-08 and is on dev. No further
    reference input is needed for the extension itself.
-2. **`docs/reloaded-rewrite/rpc-method-census.md`** lists every method name per surface. 52 names are
-   on the legacy surface, 9 of them on both surfaces, which leaves 43 legacy-only names. It is the
-   inventory source.
+2. **`docs/reloaded-rewrite/rpc-method-census.md`** lists every method name per surface; it is the
+   inventory source, reconciled with Reloaded's dispatchers. On dev as of 2026-11-09 the legacy table
+   routes 54 names, 10 of them on both surfaces, which leaves 44 legacy-only names. The census counts
+   52 and 9. It does not list `peer_connection_healthcheck` on the legacy surface, where Reloaded
+   also routes it, nor the test helper `sim_panic`.
 3. **`docs/plans/rpc-api-reference-wire-parity.md`** supplies:
    - the seven wire dimensions W1–W7 that each versioned form binds;
    - the divergence record of §2.2;
@@ -57,7 +59,7 @@ extension.
    method's legacy handler give the request members and the success shape that a versioned form
    wraps.
 5. **Client request shapes.** The shapes a wallet such as the Stashi wallet actually sends are read
-   from its public source, after a licence check, for request shapes only. They decide D2 below and
+   from its public source, after a license check, for request shapes only. They decide D2 below and
    are recorded in the governing chapter.
 
 Steps 1–4 use no forbidden-class input. Step 5 reads a third-party client, not the KDF corpus.
@@ -75,7 +77,7 @@ The legacy-only names, grouped as in the parity plan's batches:
 | C. Swaps | `all_swaps_uuids_by_filter`, `import_swaps`, `recover_funds_of_swap`, `stats_swap_status` |
 | D. Wallet and coins | `my_balance`, `disable_coin`, `send_raw_transaction`, `validateaddress`, `convertaddress`, `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`, `set_required_confirmations`, `set_requires_notarization` |
 | E. Daemon and network | `version`, `stop`, `metrics`, `get_my_peer_id`, `get_directly_connected_peers`, `get_gossip_mesh`, `get_gossip_peer_topics`, `get_gossip_topic_peers`, `get_relay_mesh`, `ban_pubkey`, `list_banned_pubkeys`, `unban_pubkeys` |
-| Legacy-only for good (§1.4) | `electrum`, `enable`, `help`, `show_priv_key` |
+| Legacy-only for good (§1.4) | `electrum`, `enable`, `help`, `show_priv_key`, `sim_panic` |
 
 The phase that takes a group first reconciles its list with Reloaded's dispatchers of that day.
 
@@ -127,6 +129,8 @@ default-side rule", it is the second arm, Reloaded's behavior by default.
   the versioned one.
 - **`show_priv_key`.** Key export on the versioned surface goes through `get_private_keys` and its
   refusals (CRD ch.07). A second versioned export path would widen the surface that exposes keys.
+- **`sim_panic`.** A test helper that makes the process panic; it is not part of any client's
+  surface, and no versioned form is wanted.
 
 Each of these is recorded in the governing chapter as "legacy-only by decision", so a later phase
 does not reopen it by accident.
@@ -139,7 +143,7 @@ One phase per group, one PR per phase, ordered by client impact:
 | --- | --- | --- |
 | 1 | A. Order management | 43, 11, 12, 59 |
 | 2 | B. Trading | 43, 08, 11, 57, 60 |
-| 3 | D. Wallet and coins | 43, 38, 49, 20, 53 |
+| 3 | D. Wallet and coins | 43, 38, 49 and the chapters of the coin families each method serves |
 | 4 | C. Swaps | 43, 13, 51, 52 |
 | 5 | E. Daemon and network | 43, 28 |
 
@@ -167,7 +171,7 @@ change to a shared piece (the alias registration, the success wrapper, the error
      tables.
    - Ch.43: the R43.1A.4 surface table gains a Reloaded column. D43.1A.1 gets a pointer to this plan
      for the next version.
-   - `RELOADED_VS_GLEEC.md`: one catalogue entry per phase.
+   - `RELOADED_VS_GLEEC.md`: one catalog entry per phase.
    - `docs/GLEEC_COMPATIBILITY.md`: one row per phase, with "none — no switch exists" or the switch.
      `docs/COMPAT_SWITCHES.md` changes only if D1 chooses a switch.
    - `docs/API_REFERENCE_DEVIATIONS.md`: one table per group.
