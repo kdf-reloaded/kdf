@@ -76,6 +76,7 @@ The chapter is structured as:
 | §18.5   | V1 atomic-swap surface — payment, validation, secret extraction |
 | §18.6   | Multi-denom and CW20-style token support |
 | §18.6A  | Cosmos staking / delegation RPC surface (implemented) |
+| §18.6B  | Priority gas price in the Cosmos fee formula (gated text; passed the KDF Dirty Gate on 2026-11-08) |
 | §18.7   | Deferred + required-not-yet sub-features (activation RPC, IBC RPC, balance events, tx history, IBC swap-routing precondition) |
 | §18.8   | External references |
 | §18.9   | Baseline Verifications |
@@ -285,7 +286,9 @@ Defaults:
 
 - `timeout_timestamp = block-time + 15 minutes` (configurable via
   the deferred RPC handler in §18.7.2).
-- Gas limit: 150,000 gas units (a withdrawal figure; swap transactions use 125,000, §18.11.2 R18.11.7).
+- Gas limit: 150,000 gas units (the IBC transfer's default; swap transactions
+  use 125,000, §18.11.2 R18.11.7; a request fee descriptor may override it,
+  §18.6B R18.6B.3).
 
 The transfer wire surface is fully defined here; the stand-alone
 RPC handler that exposes it to GUI callers is one of the deferred
@@ -434,6 +437,157 @@ Binding requirements:
 - **R-S3.** The query methods MUST read validator, delegation,
   reward, and unbonding state from the chain's query endpoints and
   return decoded amounts in the coin's display precision.
+
+---
+
+## 18.6B Priority gas price in the Cosmos fee formula (gated text; passed the KDF Dirty Gate on 2026-11-08)
+
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-08, measure
+> 0.03** (chapter 01 R40; attestation in the Provenance Footer). This
+> section was written by the dirty-side specification author on
+> 2026-11-08 (Spec Reader round 0.4.0-11) from the reference state
+> `tendermint-priority-fee (as of 2025-07-24)` compared against its base
+> `dev (as of 2025-07-18)` (both rows of chapter 02 §2.15A) and from
+> this repository's own tree. The reference state is an unmerged,
+> never-approved draft that no released designation carries; the
+> maintainer decided on 2026-11-08 (decision FN (a)) to include the
+> feature. The fee formula itself is **not** new: it is the formula of
+> §18.11.2 (R18.11.6–R18.11.11, Spec Reader round 0.4.0-7, gated, not
+> yet on `dev` at the time of writing), which both released designations
+> and this repository already apply with the default gas price. This
+> section binds only *which* gas price enters it. Rules are numbered
+> R18.6B.x in the style of §18.11; the maintainer decision is D18.6B.1.
+
+The Cosmos fee of a transaction the project signs is an amount in the
+**platform denom** derived from a gas simulation and a gas price (the
+simulate query of R18.11.6). Today that price is one figure per coin:
+the `gas_price` member of the coin's `protocol_data` or the built-in
+default 0.25 (chapter 36 R36.3.1). The reference draft makes the price
+a *selected* figure.
+
+- **R18.6B.1.** *The selected gas price.* Every Cosmos transaction the
+  project builds — a withdraw bank send, an IBC transfer (§18.4), a
+  delegation, undelegation or reward claim (§18.6A), a create-HTLC,
+  claim-HTLC or dex-fee send (§18.5, §18.11), and every trade-fee
+  simulation (R18.11.10) — MUST be priced with exactly one *selected
+  gas price*, determined in this order:
+  1. a request fee descriptor of the **explicit** Cosmos form (chapter
+     49 R49.28) supplies the price directly;
+  2. a request fee descriptor of the **priority** Cosmos form (chapter
+     49 R49.29) names a level — low, average or high — and the selected
+     price is the figure at that level's position in the coin's
+     `priority_gas_prices` (chapter 36 R36.3.5); the level *default*,
+     and any level when the coin has no `priority_gas_prices`, select
+     the coin's default gas price;
+  3. a swap transaction or trade-fee simulation carries no request
+     descriptor; its level is the coin's current swap fee policy
+     mapped by chapter 35 R35.6.8 (low → low, medium → average, high →
+     high, every other policy value → default), resolved as in item 2;
+  4. otherwise — no descriptor, or a descriptor that names no price —
+     the selected price is the coin's default gas price.
+  A token's transactions select from its **platform coin's**
+  `priority_gas_prices`, policy and default (chapter 36 R36.3.6,
+  R18.11.11).
+- **R18.6B.2.** *Where the price enters, and the rounding.* The selected
+  price replaces the default gas price in the formula of R18.11.6 and
+  R18.11.9 and nowhere else: the fee amount in base units of the
+  platform denom is `ceil(gas_used × 1.5 × selected_price)`, where
+  `gas_used` is the simulation's reported gas usage, or the fixed 50,000
+  when the coin has no local private key (R18.11.9). The product is
+  computed in IEEE-754 double precision in the order written, rounded
+  **up** to the next integer, and that integer is the amount; no other
+  rounding, truncation or minimum applies, and the level selection
+  itself involves no arithmetic (the configured figure is used as
+  written). The explicit form's price (item 1 of R18.6B.1) enters the
+  same formula: the amount is still simulation-derived, not
+  `gas_limit × gas_price`.
+- **R18.6B.3.** *The gas limit is independent of the selected price.*
+  Selecting a level changes the price only. The transaction's gas limit
+  stays the explicit `gas_limit` of the request descriptor when one is
+  given (both Cosmos forms carry one), else the operation's default:
+  125,000 for a bank send, a create-HTLC, a claim-HTLC and a dex-fee
+  send (R18.11.7); 150,000 for an IBC transfer (R18.11.7); for the
+  staking transactions of §18.6A the default is higher than the swap
+  default — one and a half times it (187,500) for a delegation and for
+  a reward claim, twice it (250,000) for an undelegation. The explicit
+  gas limit does **not** enter the fee amount (R18.6B.2).
+- **R18.6B.4.** *Scope of the swap-policy branch.* Item 3 of R18.6B.1
+  applies to the create-HTLC of both payments, the claim of both
+  payments, the dex-fee send (standard and burn forms, R18.11.20), and
+  the three trade-fee preimage simulations of R18.11.10, for the
+  platform coin and for its tokens alike; it applies in the external-
+  signer branch of R18.11.9 as well. Withdraw, IBC and staking
+  transactions never consult the swap fee policy (items 1, 2 and 4).
+
+> **Reference behavior at the draft row (informative; a behavior fact,
+> not a requirement).** With no `priority_gas_prices` configured, the
+> draft prices every transaction exactly as its base does, whatever
+> level or policy is named; with the array configured and no level or
+> policy named, likewise. The draft adds no validation of the configured
+> figures (chapter 36 §36.3.1A, divergence note) and no new error: a
+> named level that cannot be honored is not an error, it is the default
+> price.
+
+> **Our side (informative; this repository's tree, 2026-11-08).**
+> Reloaded applies the formula of R18.6B.2 with the default gas price for
+> every transaction: its fee computation reads one price per coin and
+> its withdraw-fee descriptor has no Cosmos form at all (chapter 57
+> §57.7 finding; chapter 49 §49.2A), so items 1–3 of R18.6B.1 have no
+> input today and a Cosmos fee descriptor fails request parsing. The
+> staking requests already carry an optional `fee` member that the fee
+> computation receives but, for want of a Cosmos form, cannot honor. The
+> default gas limits of R18.6B.3 for swaps and bank sends match; the
+> staking and IBC defaults are for the clean side to confirm against
+> this repository's staking and withdraw paths when §49.2A is
+> implemented.
+
+- **D18.6B.1 (maintainer decision; resolved).** *Resolved: the
+  maintainer's decision of 2026-11-09, option (a), refuse at activation
+  (T36.17).* Whether a configured level
+  figure of zero or less is refused at activation (chapter 36 §36.3.1A
+  divergence note; T36.17), which R18.6B.2 otherwise turns into a zero
+  fee that the chain rejects at broadcast. Recommended: refuse.
+
+T18.6B.1 *Selected price in the amount (R18.6B.1, R18.6B.2).* Against a
+mocked simulate query reporting `gas_used` 61,234 and a platform coin
+with `priority_gas_prices: [0.015, 0.025, 0.04]`, `gas_price` 0.03 and 6
+decimals: a withdraw with the priority descriptor at level high reports
+`fee_details.amount` 0.003675 (ceil(61,234 × 1.5 × 0.04) = ceil(3,674.04)
+= 3,675 base units); at level low 0.001378 (ceil(1,377.765)); at level
+default 0.002756 (ceil(2,755.53)); the same withdraw on a coin without
+the array at level high also 0.002756; the explicit descriptor with
+`gas_price` 0.05 reports 0.004593 (ceil(4,592.55)) whatever its
+`gas_limit`; a withdraw without a descriptor reports 0.002756. With the
+coin's swap fee policy set to high (chapter 35 R35.6.8) the simulated
+dex-fee send and create-HTLC fees use 0.04, and a withdraw in the same
+state still uses 0.03 (R18.6B.4). *(Figures computed from the formula;
+Reloaded-original test.)*
+
+T18.6B.2 *Gas limit independence (R18.6B.3).* With the array of
+T18.6B.1, a withdraw with the priority descriptor `gas_limit` 150,000 at
+level high signs a transaction whose gas limit is 150,000 and whose fee
+amount equals the level-high amount of T18.6B.1; the same at `gas_limit`
+125,000 has the same fee amount; a delegation without a descriptor signs
+with gas limit 187,500, an undelegation with 250,000, an IBC transfer
+with 150,000.
+
+> **As built (2026-11-09; written by the clean-room Coder, R18.6B.1 -- R18.6B.4, T18.6B.1, T18.6B.2).**
+> One function of the platform coin returns `(selected price, gas limit)` for a fee-intent value that is either a
+> request (the request's optional fee descriptor and the operation's default gas limit) or a swap. A request
+> takes the explicit price of `CosmosGas`, the level of `CosmosGasPriority` (positions 0, 1, 2 of
+> `priority_gas_prices`; `Default`, or no array, the default price) and otherwise the default price; any
+> descriptor of another family is ignored (ch.49 R49.30). A swap takes the level of the coin's swap fee policy
+> (`Low`, `Medium`, `High` to positions 0, 1, 2; `Legacy` the default price) and the default gas limit
+> 125,000. The amount stays `ceil((gas_used x 1.5) x price)` in `f64`, with the fixed 50,000 gas units of the
+> external-signer branch. The explicit gas limit never enters the amount. A token passes its platform coin, so it
+> uses that coin's array, policy and default. Wired to: withdraw (coin and token; the task route reaches the
+> same `withdraw`), the three staking requests, the create-HTLC, claim-HTLC and DEX-fee sends, and the three
+> trade-fee simulations. **Defaults found:** before this change every staking request used the 125,000 of a
+> bank send; R18.6B.3's 187,500 (delegation, reward claim) and 250,000 (undelegation) are now the defaults the
+> staking requests pass. **IBC transfer:** the transfer message exists but no request or withdraw route sends
+> it yet (§18.7.2), so nothing is wired; the 150,000 default constant is the value the caller that will be
+> added passes. **Open:** an explicit `CosmosGas` price of zero or less is not refused (the rules name no
+> check); the amount would be zero, which the chain rejects at broadcast.
 
 ---
 
@@ -637,6 +791,48 @@ The chapter relies on one baseline-state claim:
   mechanical difference and token scan; the gate script was not run
   because there are no code blocks. *Measure:* 0.05 on the
   discretionary-expression basis.
+
+- *Scoped addition (2026-11-08) -- §18.6B (R18.6B.1 -- R18.6B.4, the two
+  informative notes, D18.6B.1, T18.6B.1, T18.6B.2) and the §18.0 table
+  row.* **KDF Dirty Gate: PASS on 2026-11-08, measure 0.03, no findings**
+  (chapter 01 R40; the attestation at the end of this item closes it).
+  *Inputs:* the forbidden corpus at the rows `tendermint-priority-fee (as
+  of 2025-07-24)` and `dev (as of 2025-07-18)` of chapter 02 §2.15A,
+  consulted **only** to establish which gas price each class of Cosmos
+  transaction is priced with when a level is named by a request descriptor
+  or by the swap fee policy, that the level selection leaves the formula,
+  its rounding and the gas limits unchanged, the default gas limits of the
+  staking transactions, and that an unhonorable level falls back to the
+  default price without an error; the released designations `v2.6.0-beta`
+  and `v3.0.0-beta` were checked only for the staking gas-limit defaults
+  and for the absence of any level selection. Behavior and arithmetic
+  only; no private identifier, function body, helper decomposition, error,
+  log, comment or test text was reproduced. The *Our side* note rests on
+  this repository's own tree; the test figures of T18.6B.1 are computed
+  from the formula, not taken from any test. *Dirty Gate clearance
+  (chapter 01 T1, R40):* PASS, 2026-11-08. Extent: the Tendermint
+  fee-computation and fee-descriptor surface — the Cosmos withdraw,
+  staking and IBC fee descriptors, the swap fee-policy RPC pair and its
+  policy enum, and the Tendermint protocol descriptor's gas-price members
+  — compared at the row tendermint-priority-fee (as of 2025-07-24) against
+  its base row dev (as of 2025-07-18) over the complete difference between
+  those two states (nine source files, two of them test files), together
+  with the public description, two review comments and three discussion
+  comments of the draft pull request those rows record; and at the rows
+  v2.6.0-beta and v3.0.0-beta for the released fee-policy method strings,
+  request member and enum values, the explicit Cosmos fee descriptor, the
+  handling of a foreign fee form on a Cosmos request, and the staking and
+  IBC gas-limit defaults. Method: reading of the full inter-state
+  difference and of the release-state passages, combined with mechanical
+  text search of the candidate's added lines against identifier,
+  numeric-constant, string-literal, name and number lists drawn from the
+  compared states; no code-block tool run was needed (the candidate embeds
+  only two one-line JSON wire examples). Measure: discretionary-similarity
+  0.03, read against the per-token forced-vs-free standard of chapter 01
+  R35/R39 (dictated wire, config, error-discriminant and contract-constant
+  tokens excluded; FAIL on any private identifier, body or control-flow
+  transcription, error/log wording, internal module tree or internal test
+  name) — below threshold, PASS.
 
 ---
 

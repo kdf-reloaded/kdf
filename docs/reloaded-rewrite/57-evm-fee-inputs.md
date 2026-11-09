@@ -1030,9 +1030,13 @@ expected-`EthGas` error where the reference would honour it.
 > Cosmos-family gas form carrying an integer gas limit and a
 > floating-point gas price. The Tendermint withdraw path therefore cannot
 > be driven by an explicit fee at all. This is outside this chapter's
-> subject and is recorded for
-> [Chapter 18](18-tendermint-ibc-htlc.md) / ch. 36 to pick up.
-> *(Trigger: apparent while enumerating the fee-form tags for R57.7.1.)*
+> subject and is recorded for [Chapter 18](18-tendermint-ibc-htlc.md) /
+> ch. 36 to pick up. *(Trigger: apparent while enumerating the fee-form
+> tags for R57.7.1.)* *Picked up on 2026-11-08:* the two Cosmos-family
+> forms are bound in [Chapter 49](49-withdrawal-task-path.md) §49.2A and
+> their arithmetic in [Chapter 18](18-tendermint-ibc-htlc.md) §18.6B
+> (gated text; passed the KDF Dirty Gate on 2026-11-08); this pointer
+> carries no reference content.
 
 ---
 

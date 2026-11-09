@@ -1394,7 +1394,8 @@ The same enum is accepted as the optional `swap_gas_fee_policy` field of
 
 R35.6.4 These RPCs apply only to EVM-family coins (coins whose swaps price gas via
 the EIP-1559 / legacy gas model). A request for a coin that does not support the
-policy shall be rejected.
+policy shall be rejected. *(Extended to Tendermint platform coins by R35.6.8, gated
+text, passed the KDF Dirty Gate on 2026-11-08.)*
 
 R35.6.5 `error_type` discriminants and HTTP status shall include at least:
 
@@ -1477,6 +1478,103 @@ parameter exists on the legacy route too; its wire placement there is
 > establishing §35.6A -- a stored policy with no reader in the path the rule
 > says it governs. Finding is in this repository's own code, not in any
 > reference material.)*
+
+### 35.6.1 Tendermint extension of the fee-policy RPCs (gated text; passed the KDF Dirty Gate on 2026-11-08)
+
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-08, measure 0.03**
+> (chapter 01 R40; attestation in the Provenance Footer). This subsection was
+> written by the dirty-side specification author on 2026-11-08 (Spec Reader
+> round 0.4.0-11) from the reference state `tendermint-priority-fee (as of
+> 2025-07-24)` compared against its base `dev (as of 2025-07-18)`, with the
+> released rows `v2.6.0-beta` and `v3.0.0-beta` read for the method names and
+> the accepted coin families only (all rows of chapter 02 §2.15A), and from
+> this repository's own tree. The reference state is an unmerged,
+> never-approved draft that no released designation carries; the maintainer
+> decided on 2026-11-08 (decision FN (a)) to include the feature.
+
+> **Name history (behavior fact, for the parity decision).** At the draft
+> row and its base the reference exposed this RPC pair under the method
+> strings `get_swap_transaction_fee_policy` and
+> `set_swap_transaction_fee_policy`, with the set-request member
+> `swap_tx_fee_policy` and a **five**-value policy enum — `Unsupported`,
+> `Internal`, `Low`, `Medium`, `High` — of which the draft maps `Low`,
+> `Medium` and `High` to the low, average and high levels of a Tendermint
+> coin and both `Unsupported` and `Internal` to its default price, with
+> `Internal` as a Tendermint coin's initial value. At both released rows the
+> pair carries the names and the four-value enum this section already binds
+> (R35.6.1–R35.6.3) and accepts EVM platform coins **only**. No released
+> reference therefore ever exposed a Tendermint arm under either naming, so
+> Reloaded keeps the naming of R35.6.1–R35.6.3 and the only parity question
+> is the mapping of R35.6.8 (D35.12).
+
+R35.6.8 *Tendermint platform coins are accepted.* `get_swap_gas_fee_policy`
+and `set_swap_gas_fee_policy` shall also accept a **Tendermint platform
+coin** (`TENDERMINT` protocol, [Chapter 36](36-tendermint-v2-activation-rpcs.md)).
+The policy value is the enum of R35.6.3, held per activated platform coin
+in the same way as for an EVM coin, echoed by `set` and returned by `get`.
+For a Tendermint coin the values mean, in the terms of chapter 36 R36.3.5
+and [Chapter 18](18-tendermint-ibc-htlc.md) R18.6B.1 item 3:
+
+| Policy value | Selected gas price for swap transactions |
+| --- | --- |
+| `Legacy` | the coin's default gas price (`gas_price` of `protocol_data`, else the built-in default) — the initial policy of every Tendermint coin |
+| `Low` | position 0 (low) of `priority_gas_prices` |
+| `Medium` | position 1 (average) of `priority_gas_prices` |
+| `High` | position 2 (high) of `priority_gas_prices` |
+
+A coin without `priority_gas_prices` selects its default gas price under
+every value (chapter 36 R36.3.5 item 3) — see R35.6.9 item 2 for what the
+RPCs then do. The initial policy is `Legacy`: no activation parameter and no
+coin-configuration key sets a Tendermint coin's initial policy at the draft
+row (unlike the EVM precedence of R35.6.7), and this section binds none
+(D35.12 item (iii)). The policy governs the swap transactions and trade-fee
+simulations listed in chapter 18 R18.6B.4 and **never** a withdraw, IBC or
+staking transaction (chapter 18 R18.6B.1 items 1, 2 and 4). A Tendermint
+**token** has no policy of its own: its swap transactions are priced by its
+platform coin's policy (chapter 18 R18.6B.1, last sentence).
+
+R35.6.9 *Error cases and non-cases.* Beyond R35.6.5:
+
+1. a Tendermint **token** ticker on either RPC is `NotSupported` (HTTP 400),
+   as at the draft row; the caller addresses the platform coin;
+2. a Tendermint platform coin **without** `priority_gas_prices`: at the
+   draft row both RPCs succeed and the stored policy has no observable
+   effect. Reloaded (D35.12 item (i), option (c)) accepts `set` of any
+   value, stores it and returns it from `get`, logs one warning that the
+   coin has no `priority_gas_prices` and cannot honor the level, and prices
+   at the default;
+3. an unknown coin is `NoSuchCoin` (400) and a policy string outside the
+   four values is the request-parse failure of R35.1.1 (`InvalidRequest`),
+   both as for an EVM coin;
+4. every other coin family remains `NotSupported` (R35.6.4).
+
+> **Reloaded status (informative; this repository's tree, 2026-11-08).**
+> Reloaded's two RPCs resolve the ticker to an EVM coin and answer
+> `NotSupported` for everything else, including a Tendermint platform coin;
+> the Tendermint coin holds no policy and its swap transactions are priced
+> at the default gas price (chapter 18 §18.6B, *Our side*). Implementing
+> R35.6.8 adds a Tendermint arm to both RPCs and a per-coin policy slot;
+> chapter 18 R18.6B.1 item 3 is the consumer.
+
+T35.38 *Tendermint fee-policy round trip (R35.6.8, R35.6.9).* On an
+activated Tendermint platform coin with `priority_gas_prices`:
+`get_swap_gas_fee_policy` returns `Legacy`; `set_swap_gas_fee_policy` with
+`High` returns `High` and `get` then returns `High`; a simulated dex-fee send
+and create-HTLC in that state are priced at position 2 of the array
+(chapter 18 T18.6B.1); a withdraw in the same state is priced at the default
+price. On a Tendermint token ticker both RPCs answer HTTP 400
+`NotSupported`. On a Tendermint platform coin without the array, `set` with
+`Medium` returns `Medium`, `get` then returns `Medium`, one warning is
+logged, and a simulated dex-fee send is priced at the default price
+(R35.6.9 item 2). *(Reloaded-original test
+written to the gated rules.)*
+
+> **As built (2026-11-09; written by the clean-room Coder, R35.6.8, R35.6.9, T35.38).** A Tendermint platform coin
+> holds a policy slot (`Legacy` at construction; no activation parameter or coins-file key sets it). Both RPCs
+> resolve an EVM coin or a Tendermint platform coin; a Tendermint token ticker is `NotSupported`. The setter
+> stores any of the four values; on a coin without `priority_gas_prices` it logs one warning for every value,
+> `Legacy` included, and the coin prices at the default. The
+> policy feeds only the swap branch of chapter 18 R18.6B.1 item 3.
 
 ---
 
@@ -2482,6 +2580,24 @@ cannot be aborted here, and the timer alone ends the wait at the bound (not
 tested in a browser build: the WASM target is compile-checked only, and T35.37
 runs on the native target). T35.37 tests the rule.
 
+**D35.12** *(Resolved: the maintainer's decision of 2026-11-09 — item (i),
+option (c), accept and log a warning; items (ii) and (iii) as written (`Legacy`
+kept, no initial-policy key); to be reassessed after field use. Gated text of
+§35.6.1, passed the KDF Dirty Gate on 2026-11-08.)* *Tendermint fee policy: three choices.* (i) A
+Tendermint platform coin **without** `priority_gas_prices`: (a) accept `set`
+of any value and price at the default, as the reference draft does; (b) refuse
+`set` of a non-`Legacy` value with `NotSupported` (R35.6.9 item 2, the interim
+rule; recommended, in line with the maintainer's preference on the EVM fee
+path to fail rather than substitute silently); (c) accept and log a warning.
+(ii) Whether `Legacy` is the right name for "the coin's default gas price" on
+a Tendermint coin, or the enum gains a fifth value for that meaning — the
+four-value enum is kept here because R35.6.3's values are a published surface
+and a Tendermint coin needs no fifth meaning. (iii) Whether a Tendermint
+coin's initial policy may be set by a coin- configuration key or an activation
+parameter as an EVM coin's is (R35.6.7); the draft has neither, and R35.6.8
+binds `Legacy` as the initial value. Chapter 36 D36.4 (field and level names)
+is decided together with this item.
+
 ## 35.9 Provenance Footer
 
 - *Inputs:* the published Komodo DeFi Framework API reference (the
@@ -2641,3 +2757,44 @@ runs on the native target). T35.37 tests the rule.
   *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
   0.00, no findings; the pointer was judged with its target, whose clearance
   is recorded in chapter 21's provenance footer of the same date.
+- *Scoped addition (2026-11-08) -- §35.6.1 (the name-history note, R35.6.8,
+  R35.6.9, the Reloaded status note, T35.38), the parenthetical added to
+  R35.6.4, and D35.12.* **KDF Dirty Gate: PASS on 2026-11-08, measure 0.03, no
+  findings** (chapter 01 R40; the attestation at the end of this item closes
+  it). *Inputs:* the forbidden corpus at the rows `tendermint-priority-fee (as
+  of 2025-07-24)` and `dev (as of 2025-07-18)` of chapter 02 §2.15A, consulted
+  **only** to establish that the fee-policy RPC pair accepts a Tendermint
+  platform coin and not a token at the draft row, how each policy value maps
+  to a level or to the default price, the initial value, that a coin without
+  the level array is accepted with no effect, and the method strings, request
+  member and policy values the pair carried at that row and its base; the rows
+  `v2.6.0-beta` and `v3.0.0-beta` were consulted **only** to confirm the
+  method strings, request member and policy values this section already binds
+  and that the pair accepts EVM platform coins only at both. Behavior and
+  dictated method strings, request members and policy values only; no private
+  identifier, function body, helper decomposition, error, log, comment or test
+  text was reproduced. The Reloaded status note, the interim rule of R35.6.9
+  item 2, T35.38 and D35.12 rest on this repository's own tree and documents
+  and are Reloaded-original. *Dirty Gate clearance (chapter 01 T1, R40):*
+  PASS, 2026-11-08. Extent: the Tendermint fee-computation and fee-descriptor
+  surface — the Cosmos withdraw, staking and IBC fee descriptors, the swap
+  fee-policy RPC pair and its policy enum, and the Tendermint protocol
+  descriptor's gas-price members — compared at the row tendermint-priority-fee
+  (as of 2025-07-24) against its base row dev (as of 2025-07-18) over the
+  complete difference between those two states (nine source files, two of them
+  test files), together with the public description, two review comments and
+  three discussion comments of the draft pull request those rows record; and
+  at the rows v2.6.0-beta and v3.0.0-beta for the released fee-policy method
+  strings, request member and enum values, the explicit Cosmos fee descriptor,
+  the handling of a foreign fee form on a Cosmos request, and the staking and
+  IBC gas-limit defaults. Method: reading of the full inter-state difference
+  and of the release-state passages, combined with mechanical text search of
+  the candidate's added lines against identifier, numeric-constant,
+  string-literal, name and number lists drawn from the compared states; no
+  code-block tool run was needed (the candidate embeds only two one-line JSON
+  wire examples). Measure: discretionary-similarity 0.03, read against the
+  per-token forced-vs-free standard of chapter 01 R35/R39 (dictated wire,
+  config, error-discriminant and contract-constant tokens excluded; FAIL on
+  any private identifier, body or control-flow transcription, error/log
+  wording, internal module tree or internal test name) — below threshold,
+  PASS.
