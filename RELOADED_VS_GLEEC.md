@@ -595,6 +595,16 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   payment unless the coins file marks the coin wallet-only; and a counterparty
   whose Tendermint order carries protocol information, where an IBC route would
   travel, is declined, where GLEEC KDF accepts any. PR #299.
+  Two more cases are wallet-only whatever the switch says, and are refused when
+  an order is placed. A custom Tendermint token, activated from an inline
+  `protocol` in `tokens_params` or in `enable_tendermint_token` and absent from
+  the coins file, is wallet-only, as a custom EVM token is. A Tendermint coin
+  or token whose activation policy holds no local private key is wallet-only,
+  so this node's own key can never stand in as the coin's HTLC public key on
+  the legacy swap path; a token takes the policy of its platform coin. No
+  activation can produce such a policy yet, so the second refusal only guards
+  the policies that come later. No switch exists. CRD ch.36 R36.1.2, ch.35
+  R35.2.7. PR #319.
 - **A node does not watch swaps of UTXO, BCH and QTUM coins.** The checks a
   watcher runs are not implemented for these coins yet, so a node with
   `is_watcher` set does not subscribe to their watcher topics. GLEEC KDF
@@ -617,7 +627,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   address's event log and tells a spend from a refund (ch.20 D3, closed).
   Still open: the V2 swap protocol is not implemented for SC (ch.20 D5,
   V1 only).
-- The hash of the passphrase text under an HD login. Each coin swaps with its own key, and the node trades under the internal key, the key `get_public_key` reports, as in GLEEC KDF (CRD ch.05 §5.12C and §5.12D; PRs #250, #254). KDF Reloaded still keeps the passphrase hash for three things: the swaps an earlier build started with it, a Lightning node's seed, and the activation of BCH with its tokens and of Tendermint, until plan item H7 moves those to the coin key. GLEEC KDF never uses that hash under an HD login. Plan [`hd-key-unification`](docs/plans/hd-key-unification.md); CRD ch.05 R46.
+- The hash of the passphrase text under an HD login. Each coin swaps with its own key, and the node trades under the internal key, the key `get_public_key` reports, as in GLEEC KDF (CRD ch.05 §5.12C and §5.12D; PRs #250, #254). KDF Reloaded still keeps the passphrase hash for three things: the swaps an earlier build started with it, a Lightning node's seed, and the activation of BCH with its tokens, until plan item H7 moves that to the coin key. GLEEC KDF never uses that hash under an HD login. Tendermint is no longer on the list: under an HD login `enable_tendermint_with_assets` and `task::enable_tendermint` derive the coin's key from the seed at the coin's `derivation_path` extended by `path_to_address` (default account 0, `External`, address 0), as GLEEC KDF does and as other wallets derive a Cosmos address (`m/44'/118'/0'/0/0` for ATOM), and the coin's public key is derived from that key. A coin configuration without `derivation_path`, or a `path_to_address` that cannot be derived, fails the activation with `PlatformCoinCreationError`. An iguana login does not change. There is no switch. The address of a Tendermint coin under an HD login changes at the upgrade, so funds on the old address are moved first (see the changelog's upgrade note). Plan [`hd-key-unification`](docs/plans/hd-key-unification.md) and [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md); CRD ch.05 R46, ch.36 R36.1.2 and R36.1.4 step 3. PR #319.
 - **Legacy `enable` and `electrum` under an HD login.** Today KDF Reloaded binds such a coin to the internal key and answers with that key's address. GLEEC KDF builds the coin with the coin's own HD key at `path_to_address` under its `derivation_path`, registers it, and then fails the response; the coin stays enabled. Planned: KDF Reloaded binds the coin's own HD key in the same way and answers successfully with its address. A compatibility switch, on by default, keeps that answer; switched off, the node fails the response as GLEEC KDF does. The switch is named when the work lands. In both positions the address such a coin shows changes at that upgrade, so funds on the old address are moved to an HD address first. A coin configuration without `derivation_path` fails this activation at GLEEC KDF; KDF Reloaded's answer for it is settled with the work. Plan [`hd-key-unification`](docs/plans/hd-key-unification.md), item H7; CRD ch.55 R55.4.10.
 
 ### Settings to set for GLEEC-compatible operation

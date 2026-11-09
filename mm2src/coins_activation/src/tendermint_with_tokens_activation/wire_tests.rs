@@ -6,17 +6,22 @@
 //! listens on (or, for the in-progress test, a port that never answers).
 
 use super::*;
-use crate::evm_test_support::{coins_conf, refusing_url};
+use crate::evm_test_support::{coins_conf, refusing_url, spawn_node, Reply};
 use crate::init_platform_coin_with_tokens::{cancel_init_platform_coin_with_tokens, init_platform_coin_with_tokens,
                                             init_platform_coin_with_tokens_status};
-use crate::token::{enable_token, EnableTokenError, EnableTokenRequest};
-use coins::{lp_coinfind, CoinsContext, MmCoinEnum};
+use crate::tendermint_token_activation::{enable_tendermint_token, EnableTendermintTokenRequest};
+use crate::token::EnableTokenError;
+use coins::{lp_coinfind, CoinsContext, MmCoin, MmCoinEnum};
 use common::{block_on, HttpStatusCode, StatusCode};
 use mm2_core::mm_ctx::MmCtxBuilder;
 use rpc_task::rpc_common::RpcTaskStatusRequest;
 use serde_json::json;
 use std::net::TcpListener;
+use std::str::FromStr;
 use std::time::Duration;
+
+const HD_MNEMONIC: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
 type Req = EnablePlatformCoinWithTokensReq<TendermintActivationParams>;
 
@@ -49,6 +54,21 @@ fn tendermint_coins() -> Vec<Json> {
             "coin": "NOAVG",
             "protocol": { "type": "TENDERMINT", "protocol_data": {
                 "denom": "uno", "decimals": 6, "account_prefix": "no", "chain_id": "no-1" } },
+            "mm2": 1
+        }),
+        json!({
+            "coin": "ATOM",
+            "avg_blocktime": 6,
+            "derivation_path": "m/44'/118'",
+            "protocol": { "type": "TENDERMINT", "protocol_data": {
+                "denom": "uatom", "decimals": 6, "account_prefix": "cosmos", "chain_id": "cosmoshub-4" } },
+            "mm2": 1
+        }),
+        json!({
+            "coin": "ATOM-NODERIV",
+            "avg_blocktime": 6,
+            "protocol": { "type": "TENDERMINT", "protocol_data": {
+                "denom": "uatom", "decimals": 6, "account_prefix": "cosmos", "chain_id": "cosmoshub-4" } },
             "mm2": 1
         }),
         json!({
@@ -152,14 +172,17 @@ fn assert_nothing_registered(ctx: &MmArc, tickers: &[&str]) {
 }
 
 /// Registers the platform without contacting a node: building the coin needs none.
-fn register_platform(ctx: &MmArc) -> TendermintCoin {
+fn register_platform(ctx: &MmArc) -> TendermintCoin { register_platform_on(ctx, &refusing_url()) }
+
+/// [`register_platform`] with the node URL given.
+fn register_platform_on(ctx: &MmArc, node_url: &str) -> TendermintCoin {
     let conf = coins::coin_conf(ctx, PLATFORM);
     let priv_key = *ctx.legacy_passphrase_key_pair().private().secret;
     let coin = block_on(coins::tendermint::tendermint_coin_from_conf_and_request(
         ctx,
         PLATFORM.to_owned(),
         &conf,
-        vec![serde_json::from_value(json!({ "url": refusing_url() })).unwrap()],
+        vec![serde_json::from_value(json!({ "url": node_url })).unwrap()],
         &priv_key,
         true,
     ))
@@ -335,19 +358,27 @@ fn unexpected_token_protocol_carries_the_canonical_protocol_form() {
 // T36.10, T36.11: enable_tendermint_token
 // ---------------------------------------------------------------------------
 
-fn token_request(ticker: &str) -> EnableTokenRequest<TendermintTokenActivationParams> {
+fn token_request(ticker: &str) -> EnableTendermintTokenRequest {
     serde_json::from_value(json!({ "ticker": ticker, "activation_params": {} })).unwrap()
 }
 
-fn token_failure(ctx: &MmArc, ticker: &str) -> (Json, StatusCode) {
-    match block_on(enable_token::<TendermintToken>(ctx.clone(), token_request(ticker))) {
+fn token_request_with(ticker: &str, protocol: Json) -> EnableTendermintTokenRequest {
+    serde_json::from_value(json!({ "ticker": ticker, "activation_params": {}, "protocol": protocol })).unwrap()
+}
+
+fn token_wire(error: &MmError<EnableTokenError>) -> (Json, StatusCode) {
+    let e: &EnableTokenError = error.get_inner();
+    (serde_json::to_value(e).expect("a serializable error"), e.status_code())
+}
+
+fn token_failure_of(ctx: &MmArc, req: EnableTendermintTokenRequest) -> (Json, StatusCode) {
+    match block_on(enable_tendermint_token(ctx.clone(), req)) {
         Ok(_) => panic!("expected a failure"),
-        Err(e) => {
-            let e: &EnableTokenError = e.get_inner();
-            (serde_json::to_value(e).expect("a serializable error"), e.status_code())
-        },
+        Err(e) => token_wire(&e),
     }
 }
+
+fn token_failure(ctx: &MmArc, ticker: &str) -> (Json, StatusCode) { token_failure_of(ctx, token_request(ticker)) }
 
 #[test]
 fn a_token_balance_failure_is_could_not_fetch_balance_and_leaves_the_token_set_unchanged() {
@@ -398,8 +429,6 @@ fn a_token_registered_after_a_successful_activation_is_recorded_on_the_platform(
 /// token report `wallet_only` true and decline every match, whatever their coins-config entries say.
 #[test]
 fn a_tendermint_platform_and_token_are_wallet_only_whatever_the_config_says() {
-    use coins::MmCoin;
-
     for flag in [None, Some(false), Some(true)] {
         let mut confs = tendermint_coins();
         for conf in confs.iter_mut() {
@@ -494,4 +523,400 @@ fn a_running_task_reports_activating_coin_only() {
     ))
     .unwrap_or_else(|e| panic!("cancel failed: {}", e));
     drop(silent_node);
+}
+
+// ---------------------------------------------------------------------------
+// Custom tokens (R36.1.2 `tokens_params[].protocol`, R36.1.4 step 4, R36.1.6, R36.2.1, R36.2.4)
+// ---------------------------------------------------------------------------
+
+fn custom_protocol(platform: &str) -> Json {
+    json!({ "type": "TENDERMINTTOKEN", "protocol_data": { "platform": platform, "decimals": 6, "denom": "ucustom" } })
+}
+
+/// A `tokens_params` entry that carries an inline protocol.
+fn inline_token(ticker: &str, platform: &str) -> Json {
+    json!({ "ticker": ticker, "protocol": custom_protocol(platform) })
+}
+
+/// The standard base64 of `bytes`.
+fn base64_standard(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::new();
+    for chunk in bytes.chunks(3) {
+        let group = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        encoded.push(ALPHABET[(group >> 18) as usize & 63] as char);
+        encoded.push(ALPHABET[(group >> 12) as usize & 63] as char);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[(group >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[group as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    encoded
+}
+
+/// The protobuf of a bank `QueryBalanceResponse` holding `amount` of `denom` (both short enough for one-byte
+/// lengths).
+fn balance_response(denom: &str, amount: u64) -> Vec<u8> {
+    let amount = amount.to_string();
+    let mut coin = vec![0x0a, denom.len() as u8];
+    coin.extend_from_slice(denom.as_bytes());
+    coin.push(0x12);
+    coin.push(amount.len() as u8);
+    coin.extend_from_slice(amount.as_bytes());
+    let mut response = vec![0x0a, coin.len() as u8];
+    response.extend_from_slice(&coin);
+    response
+}
+
+/// A node that answers the health check and every balance query with `amount` of `denom`.
+fn balance_node(denom: &str, amount: u64) -> crate::evm_test_support::MockEvmNode {
+    let value = base64_standard(&balance_response(denom, amount));
+    spawn_node(move |method, _params| match method {
+        "health" => Reply::Result(json!({})),
+        "abci_query" => Reply::Result(json!({ "response": { "code": 0, "value": value } })),
+        _ => Reply::RpcError,
+    })
+}
+
+fn token_of(ctx: &MmArc, ticker: &str) -> TendermintToken {
+    match block_on(lp_coinfind(ctx, ticker)) {
+        Ok(Some(MmCoinEnum::TendermintToken(token))) => token,
+        _ => panic!("{} is not an active Tendermint token", ticker),
+    }
+}
+
+#[test]
+fn an_inline_token_is_enabled_beside_the_platform_and_is_wallet_only() {
+    // R36.1.2, R36.1.4 step 4: a token entry with a `protocol` is built from it; the entry of a configured token
+    // is built from the coins configuration and is not marked custom (R-b: a custom token is wallet-only).
+    let ctx = ctx();
+    let platform = register_platform(&ctx);
+    let initializer = TendermintTokenInitializer {
+        platform_coin: platform.clone(),
+    };
+    let req = request(json!({ "tokens_params": [{ "ticker": "IRIS-NYAN" }, inline_token("CUSTOM-TOKEN", PLATFORM)] }));
+
+    let coins = match block_on(initializer.enable_tokens_as_mm_coins(ctx.clone(), &req.request)) {
+        Ok(coins) => coins,
+        Err(_) => panic!("the tokens must be enabled"),
+    };
+    assert_eq!(coins.len(), 2);
+    let tokens: Vec<TendermintToken> = coins
+        .into_iter()
+        .map(|coin| match coin {
+            MmCoinEnum::TendermintToken(token) => token,
+            _ => panic!("a Tendermint token"),
+        })
+        .collect();
+    let custom = tokens
+        .iter()
+        .find(|token| token.ticker == "CUSTOM-TOKEN")
+        .expect("the custom token");
+    let configured = tokens
+        .iter()
+        .find(|token| token.ticker == "IRIS-NYAN")
+        .expect("the configured token");
+
+    assert!(custom.custom_token);
+    assert_eq!(custom.decimals, 6);
+    assert_eq!(custom.denom.to_string(), "ucustom");
+    assert!(custom.wallet_only(&ctx));
+    assert!(!configured.custom_token);
+    assert_eq!(configured.denom.to_string(), "unyan");
+
+    let recorded = platform.activated_token_tickers();
+    assert!(recorded.contains("CUSTOM-TOKEN") && recorded.contains("IRIS-NYAN"));
+}
+
+#[test]
+fn an_inline_protocol_for_a_configured_ticker_is_a_custom_token_error() {
+    // T36.6, R36.1.6: a `protocol` for a ticker of the coins configuration is rejected, HTTP 500.
+    let ctx = ctx();
+    let wire = failure(
+        &ctx,
+        request(json!({ "tokens_params": [inline_token("IRIS-NYAN", PLATFORM)] })),
+    );
+    assert_eq!(wire.0["error_type"], "CustomTokenError", "{:?}", wire.0);
+    assert_eq!(
+        wire.0["error_data"],
+        json!({ "DuplicateTickerInConfig": { "ticker_in_config": "IRIS-NYAN" } })
+    );
+    assert_eq!(wire.1, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_nothing_registered(&ctx, &[PLATFORM, "IRIS-NYAN"]);
+}
+
+#[test]
+fn an_inline_token_of_another_platform_is_platform_coin_mismatch() {
+    // R36.1.4 step 4: a custom token names the platform being activated like a configured one.
+    let ctx = ctx();
+    let wire = failure(
+        &ctx,
+        request(json!({ "tokens_params": [inline_token("CUSTOM-TOKEN", "OSMO")] })),
+    );
+    assert_unit_error(&wire, "PlatformCoinMismatch", StatusCode::BAD_REQUEST);
+    assert_nothing_registered(&ctx, &[PLATFORM, "CUSTOM-TOKEN"]);
+}
+
+#[test]
+fn an_inline_protocol_of_another_type_is_unexpected_token_protocol() {
+    // R36.1.6: the inline protocol must be `TENDERMINTTOKEN`; the answer carries the canonical protocol form.
+    let ctx = ctx();
+    let protocol = json!({ "type": "TENDERMINT", "protocol_data": {
+        "denom": "uatom", "decimals": 6, "account_prefix": "cosmos", "chain_id": "cosmoshub-4" } });
+    let wire = failure(
+        &ctx,
+        request(json!({ "tokens_params": [{ "ticker": "CUSTOM-TOKEN", "protocol": protocol }] })),
+    );
+    assert_eq!(wire.0["error_type"], "UnexpectedTokenProtocol", "{:?}", wire.0);
+    assert_eq!(wire.0["error_data"]["ticker"], "CUSTOM-TOKEN");
+    assert_eq!(wire.0["error_data"]["protocol"]["type"], "TENDERMINT");
+    assert_eq!(wire.1, StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn a_custom_token_is_activated_on_its_own_and_is_wallet_only() {
+    // R36.2.1: `enable_tendermint_token` with a `protocol` activates the token from it; R-b: it is wallet-only.
+    let ctx = ctx();
+    let node = balance_node("ucustom", 12_345_678);
+    let platform = register_platform_on(&ctx, &node.url);
+
+    let result = match block_on(enable_tendermint_token(
+        ctx.clone(),
+        token_request_with("CUSTOM-TOKEN", custom_protocol(PLATFORM)),
+    )) {
+        Ok(result) => serde_json::to_value(&result).expect("a serializable result"),
+        Err(e) => panic!("the custom token must activate: {:?}", token_wire(&e).0),
+    };
+    assert_eq!(result["platform_coin"], PLATFORM);
+    let balances = result["balances"].as_object().expect("a balances map");
+    assert_eq!(balances.len(), 1, "{:?}", result);
+    assert_eq!(balances.values().next().unwrap()["spendable"], "12.345678");
+
+    let token = token_of(&ctx, "CUSTOM-TOKEN");
+    assert!(token.custom_token);
+    assert!(token.wallet_only(&ctx));
+    assert!(platform.activated_token_tickers().contains("CUSTOM-TOKEN"));
+
+    // A second activation of the same ticker is refused.
+    let wire = token_failure_of(&ctx, token_request_with("CUSTOM-TOKEN", custom_protocol(PLATFORM)));
+    assert_eq!(wire.0["error_type"], "TokenIsAlreadyActivated");
+    assert_eq!(wire.1, StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn a_configured_token_is_activated_as_before_and_is_not_custom() {
+    let ctx = ctx();
+    let node = balance_node("unyan", 5_000_000);
+    let platform = register_platform_on(&ctx, &node.url);
+
+    match block_on(enable_tendermint_token(ctx.clone(), token_request("IRIS-NYAN"))) {
+        Ok(_) => {},
+        Err(e) => panic!("the configured token must activate: {:?}", token_wire(&e).0),
+    }
+    assert!(!token_of(&ctx, "IRIS-NYAN").custom_token);
+    assert!(platform.activated_token_tickers().contains("IRIS-NYAN"));
+}
+
+#[test]
+fn a_custom_token_for_a_configured_ticker_on_its_own_is_a_custom_token_error() {
+    // T36.6, R36.2.4: the same on `enable_tendermint_token` is HTTP 400.
+    let ctx = ctx();
+    let wire = token_failure_of(&ctx, token_request_with("IRIS-NYAN", custom_protocol(PLATFORM)));
+    assert_eq!(wire.0["error_type"], "CustomTokenError", "{:?}", wire.0);
+    assert_eq!(
+        wire.0["error_data"],
+        json!({ "DuplicateTickerInConfig": { "ticker_in_config": "IRIS-NYAN" } })
+    );
+    assert_eq!(wire.1, StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn a_custom_token_on_its_own_follows_the_platform_and_balance_errors() {
+    let ctx = ctx();
+    // The platform is not active.
+    let wire = token_failure_of(&ctx, token_request_with("CUSTOM-TOKEN", custom_protocol(PLATFORM)));
+    assert_eq!(wire.0["error_type"], "PlatformCoinIsNotActivated");
+    assert_eq!(wire.0["error_data"], json!(PLATFORM));
+    assert_eq!(wire.1, StatusCode::BAD_REQUEST);
+
+    // The platform is active and its nodes refuse: the protocol was accepted, the balance read failed, and the
+    // platform's token set is unchanged.
+    let platform = register_platform(&ctx);
+    let wire = token_failure_of(&ctx, token_request_with("CUSTOM-TOKEN", custom_protocol(PLATFORM)));
+    assert_eq!(wire.0["error_type"], "CouldNotFetchBalance", "{:?}", wire.0);
+    assert_eq!(wire.1, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(platform.activated_token_tickers().is_empty());
+    assert_nothing_registered(&ctx, &["CUSTOM-TOKEN"]);
+
+    // A protocol of another type is refused with the canonical protocol form.
+    let other = json!({ "type": "TENDERMINT", "protocol_data": {
+        "denom": "uatom", "decimals": 6, "account_prefix": "cosmos", "chain_id": "cosmoshub-4" } });
+    let wire = token_failure_of(&ctx, token_request_with("CUSTOM-TOKEN", other));
+    assert_eq!(wire.0["error_type"], "UnexpectedTokenProtocol");
+    assert_eq!(wire.0["error_data"]["protocol"]["type"], "TENDERMINT");
+}
+
+// ---------------------------------------------------------------------------
+// The key of the platform coin (R36.1.2 `path_to_address`, R36.1.4 step 3)
+// ---------------------------------------------------------------------------
+
+fn hd_ctx() -> MmArc {
+    let mut coins = coins_conf().as_array().cloned().unwrap_or_default();
+    coins.extend(tendermint_coins());
+    let ctx = MmCtxBuilder::new().with_conf(json!({ "coins": coins })).into_mm_arc();
+    crypto::CryptoCtx::init_with_global_hd_account(ctx.clone(), HD_MNEMONIC).expect("initialize the HD crypto context");
+    ctx
+}
+
+/// Builds the platform coin the way the activation does, without contacting a node.
+fn built_platform(
+    ctx: &MmArc,
+    ticker: &str,
+    extra: Json,
+) -> Result<TendermintCoin, MmError<TendermintActivationError>> {
+    let (conf, protocol) = match coin_conf_with_protocol::<TendermintPlatformProtocolInfo>(ctx, ticker) {
+        Ok(found) => found,
+        Err(_) => panic!("the configuration of {}", ticker),
+    };
+    let mut extra = extra;
+    extra["ticker"] = json!(ticker);
+    let priv_key = *ctx.legacy_passphrase_key_pair().private().secret;
+    block_on(
+        <TendermintCoin as PlatformWithTokensActivationOps>::enable_platform_coin(
+            ctx.clone(),
+            ticker.to_owned(),
+            conf,
+            request(extra).request,
+            protocol,
+            &priv_key,
+        ),
+    )
+}
+
+fn address_of_secret(secret: &[u8]) -> String {
+    let key_pair = crypto::privkey::key_pair_from_secret(secret).unwrap();
+    coins::tendermint::account_id_from_pubkey_hex("cosmos", &hex::encode(key_pair.public_slice()))
+        .unwrap()
+        .to_string()
+}
+
+/// The address of the key at `path` of the wallet of an HD login.
+fn hd_address_at(ctx: &MmArc, path: &str) -> String {
+    let global_hd = match crypto::CryptoCtx::from_ctx(ctx).unwrap().key_pair_policy() {
+        crypto::KeyPairPolicy::GlobalHDAccount(global_hd) => global_hd.clone(),
+        crypto::KeyPairPolicy::Iguana => panic!("expected an HD login"),
+    };
+    let secret = global_hd
+        .derive_secp256k1_secret(&crypto::DerivationPath::from_str(path).unwrap())
+        .unwrap();
+    address_of_secret(secret.as_slice())
+}
+
+fn built_address(ctx: &MmArc, ticker: &str, extra: Json) -> String {
+    match built_platform(ctx, ticker, extra) {
+        Ok(coin) => coin.account_id.to_string(),
+        Err(e) => panic!("the platform must be built: {:?}", e.get_inner()),
+    }
+}
+
+#[test]
+fn an_iguana_login_activates_the_address_of_the_passphrase_key_whatever_path_to_address_holds() {
+    // R36.1.2: without HD mode `path_to_address` has no effect, whatever it holds.
+    let ctx = ctx();
+    let expected = address_of_secret(&*ctx.legacy_passphrase_key_pair().private().secret);
+    assert_eq!(built_address(&ctx, "ATOM", json!({})), expected);
+    for path_to_address in [
+        json!({ "account_id": 3, "chain": "Internal", "address_id": 9 }),
+        json!("nonsense"),
+        json!({ "chain": "Sideways" }),
+        Json::Null,
+    ] {
+        let extra = json!({ "path_to_address": path_to_address });
+        assert_eq!(built_address(&ctx, "ATOM", extra), expected);
+    }
+    // Also a coin without a `derivation_path`.
+    assert_eq!(built_address(&ctx, "ATOM-NODERIV", json!({})), expected);
+}
+
+#[test]
+fn an_hd_login_activates_the_address_at_the_default_path() {
+    // R36.1.4 step 3: the address at account 0, External, address 0 under the coin's `derivation_path`.
+    let ctx = hd_ctx();
+    let expected = hd_address_at(&ctx, "m/44'/118'/0'/0/0");
+    assert_eq!(built_address(&ctx, "ATOM", json!({})), expected);
+    assert_eq!(
+        built_address(&ctx, "ATOM", json!({ "path_to_address": null })),
+        expected
+    );
+    // It is not the address of the passphrase key that an iguana login (and earlier builds) used.
+    let passphrase_key = address_of_secret(&*ctx.legacy_passphrase_key_pair().private().secret);
+    assert_ne!(expected, passphrase_key);
+}
+
+#[test]
+fn an_hd_login_honors_path_to_address() {
+    let ctx = hd_ctx();
+    let cases = [
+        (
+            json!({ "account_id": 2, "chain": "Internal", "address_id": 5 }),
+            "m/44'/118'/2'/1/5",
+        ),
+        (json!({ "address_id": 3 }), "m/44'/118'/0'/0/3"),
+        (json!({ "account_id": 1, "chain": "External" }), "m/44'/118'/1'/0/0"),
+    ];
+    for (path_to_address, path) in cases {
+        let extra = json!({ "path_to_address": path_to_address });
+        assert_eq!(built_address(&ctx, "ATOM", extra), hd_address_at(&ctx, path), "{path}");
+    }
+}
+
+#[test]
+fn an_hd_login_without_a_derivation_path_is_a_platform_coin_creation_error() {
+    // R36.1.4 step 3: missing derivation config is `PlatformCoinCreationError`.
+    let ctx = hd_ctx();
+    match built_platform(&ctx, "ATOM-NODERIV", json!({})) {
+        Ok(_) => panic!("the activation needs a derivation path"),
+        Err(e) => match e.get_inner() {
+            TendermintActivationError::PlatformCoinCreationError { ticker, error } => {
+                assert_eq!(ticker, "ATOM-NODERIV");
+                assert!(error.contains("derivation_path"), "{}", error);
+            },
+            other => panic!("unexpected error {:?}", other),
+        },
+    }
+}
+
+#[test]
+fn an_hd_login_with_an_invalid_path_to_address_is_a_platform_coin_creation_error() {
+    // R36.1.4 step 3: an invalid path is `PlatformCoinCreationError`.
+    let ctx = hd_ctx();
+    for path_to_address in [
+        json!("nonsense"),
+        json!({ "account_id": "zero" }),
+        json!({ "chain": "Sideways" }),
+        // A hardened child number must be below 2^31.
+        json!({ "account_id": 2_147_483_648u32 }),
+    ] {
+        let extra = json!({ "path_to_address": path_to_address.clone() });
+        match built_platform(&ctx, "ATOM", extra) {
+            Ok(_) => panic!("{} must be refused", path_to_address),
+            Err(e) => assert!(
+                matches!(
+                    e.get_inner(),
+                    TendermintActivationError::PlatformCoinCreationError { ticker, .. } if ticker == "ATOM"
+                ),
+                "{}: {:?}",
+                path_to_address,
+                e.get_inner()
+            ),
+        }
+    }
 }

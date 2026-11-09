@@ -46,6 +46,22 @@ swaps with a hash of the passphrase text instead.
 
 A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R45–R49.
 
+### Upgrade note: Tendermint coins under an HD login move to the seed's standard address
+
+**If you log in with `enable_hd: true` and use a Tendermint coin (ATOM, IRIS and others), move
+its funds off the old address before you upgrade.** Under an HD login a Tendermint coin now uses
+the seed's standard address at `path_to_address`, as other wallets do; before upgrading, move
+funds from the old address with the previous release, v0.3.0-beta.1.
+- **The new address** is the BIP-44 address at the coin's `derivation_path` and `path_to_address`
+  (by default account 0, `External`, address 0), for example `m/44'/118'/0'/0/0` for ATOM.
+- **The old address** came from a hash of the passphrase text, which no other wallet uses. A node
+  that is upgraded without moving the funds first shows an empty balance on the new address.
+  Start the previous release and withdraw from the old address to the new one.
+- **A coin configuration without `derivation_path`** cannot be activated under an HD login and
+  fails with `PlatformCoinCreationError`.
+
+A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2, R36.1.4 step 3.
+
 ### Added
 
 #### ARRR and other shielded coins
@@ -125,6 +141,16 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   knows and sends nothing to any server. A coin that is not active answers `NoSuchCoin`; a coin that
   does not use an Electrum client (a coin with a local daemon, a shielded coin, a token of another
   family) answers `CoinIsNotElectrum`. Detail: PR #324; CRD ch.38 R38.6.4o.
+- **Radiant (RXD) swaps between two KDF Reloaded nodes are tested on the mainnet.** On 2026-11-09, RXD against
+  RIN completed in both directions (RXD as the maker's coin and as the taker's coin), and a refund of an RXD
+  payment went out for the maker and for the taker after the lock time. The first swap took 930 seconds, of which
+  842 seconds were the maker's payment waiting for its two confirmations. The two
+  refunds were broadcast 27 and 18 minutes after the lock time recorded in the payment transaction, and neither
+  was rejected. A plain RXD withdrawal was accepted and confirmed within about 90 seconds. RXD swaps between
+  a KDF Reloaded node and GLEEC KDF 3.0.0-beta (build d56a7bc50) also completed in both directions on a private
+  test mesh (871 and 1531 seconds). Swaps with Komodo DeFi Framework are not part of this. Detail: PR #322;
+  CRD ch.58 D2; plan
+  [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
 - **An Electrum server can now be pinned by its key.** A server entry with `protocol` `SSL` may
   carry `spki_sha256`: the SHA-256 digest of the server's public key in hexadecimal (64 digits,
   colons between byte pairs allowed), or a list of up to four, so the next key can be pinned before
@@ -178,8 +204,23 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   wallet file it reads, so a node started from the wrong folder shows it at once. It never logs file
   contents or configuration values, and no WSS certificate or key path. Detail: PR #209; CRD ch.45 R45.6.6.
 
+#### Tendermint (Cosmos) coins
+
+- **Tendermint custom tokens can be activated.** `tokens_params` of `enable_tendermint_with_assets`
+  and `enable_tendermint_token` accept a `protocol` member, the `TENDERMINTTOKEN` protocol of a
+  token that is not in the coins file. A `protocol` for a ticker that the coins file already lists
+  fails with `CustomTokenError` (`DuplicateTickerInConfig`). A custom token is wallet-only: orders
+  and swaps with it are refused, as with a custom EVM token. Detail: PR #319; CRD ch.36 R36.1.2,
+  R36.2.1, R36.2.4.
+- **Under an HD login, a Tendermint coin honors `path_to_address`.** The activated address is the
+  one at `path_to_address` under the coin's `derivation_path` (default account 0, `External`,
+  address 0), and the coin's public key is derived from that address's key. See the upgrade note
+  above. Detail: PR #319; CRD ch.36 R36.1.2, R36.1.4 step 3.
+
 #### Releases and downloads
 
+- **The mobile libraries now also cover the Android x86_64 ABI and the iOS simulator.** Each signed release carries `libkdf.a` for Android x86_64 (emulators and Chromebooks), and for the iOS simulator on Apple silicon (`aarch64-apple-ios-sim`) and Intel (`x86_64-apple-ios`) Macs, as separate libraries next to the device one. The dev and staging builds carry them too. Detail: `docs/RELEASE_ARTIFACTS.md`.
+- **Releases now include a C header for the mobile libraries.** `kdf-<tag>.h` declares the functions of `libkdf.a` with their exact prototypes and the log callback type, so an Android or iOS app can call the library without writing the declarations itself. CI builds the library, compiles and runs a test program against the header, and checks that the header and the library agree. Detail: the Release workflow and `docs/RELEASE_ARTIFACTS.md`.
 - **Releases now include Linux builds for 64-bit and 32-bit ARM, and the mobile libraries.** Besides the x86_64 binary, each signed release carries `kdf` for aarch64 and armv7 Linux (glibc 2.31 or newer, like the x86_64 one), and `libkdf.a` static libraries for Android (aarch64 and armv7) and iOS (aarch64) apps. The macOS binary that runs on both Intel and Apple silicon is attached as well; earlier releases did not include it. Every file is in the signed checksum list. The names, target triples and minimum system versions are in `docs/RELEASE_ARTIFACTS.md`. Detail: PR #300.
 
 ### Changed
@@ -474,8 +515,8 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   - The maker sends one keep-alive per pair every 30 s instead of re-sending each order.
   - A relay's peer ID comes from the same key.
   - The hash of the passphrase text is kept only for swaps that recorded it, for a Lightning node's
-    seed, and for activating BCH with its tokens and Tendermint, until those activations move to
-    the coin key.
+    seed, and for activating BCH with its tokens, until that activation moves to the coin key
+    (Tendermint moved to the coin key; see the upgrade note above).
 
   See the upgrade note above. Detail: PRs #253, #254; CRD ch.05 R45–R49.
 - **Under an HD login, a swap whose announced key would differ from the key its coin pays from is
@@ -605,6 +646,15 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### Tendermint (Cosmos) coins
 
+- **Under an HD login, a Tendermint coin now uses the seed's standard address, not the address of
+  the passphrase hash.** **Before you upgrade, move funds from the old address with the previous
+  release, v0.3.0-beta.1.** Under an HD login a Tendermint coin (ATOM, IRIS and others) now uses the
+  seed's standard address at `path_to_address`, as other wallets do. A login without `enable_hd`
+  does not change. See the upgrade note above. Detail: PR #319; CRD ch.36 R36.1.2, R36.1.4 step 3.
+- **A Tendermint coin or token that holds no local private key is wallet-only.** It is refused when
+  an order is placed, so this node's own key cannot stand in for the coin's key on the swap path. A
+  token follows its platform coin. No activation produces such a coin yet. Detail: PR #319; CRD
+  ch.36 R36.1.2.
 - **The Tendermint swap code follows the CRD's swap rules more closely; Tendermint swaps stay off.**
   Swaps of Tendermint coins remain switched off in this release, and their code was brought closer to
   the rules they will follow when they return:
@@ -1122,7 +1172,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   (item P6, PR #280).
 - [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — parked: it records that PRs #17 and #21 landed.
 - [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — parked: it records that PRs #54 and #65 landed,
-  with their compatibility bookkeeping; step 8 is open.
+  with their compatibility bookkeeping, and the 2026-11-09 mainnet swap tests; step 8 (a stricter signing of malformed
+  caller-supplied scripts) is a separate post-beta change.
 - [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md) — parked: two-daemon detection and F3 are
   postponed and not started.
 - [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — done: the plan now says
@@ -1132,7 +1183,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   set.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — parked: Tendermint swaps were added to the
   0.4.0 scope on 2026-11-08; accepting both forms of the activation parameters is decided and not
-  started.
+  started. Two of its features are implemented: custom tokens (wallet-only) and the HD
+  `path_to_address` (PR #319).
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
   recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226). On an SLP
@@ -1288,8 +1340,9 @@ lives.
   are refused with an error naming the coin; `trade_preimage` answers `TradingNotSupported`. More in
   [`lightning-activation-features`](docs/plans/lightning-activation-features.md). Detail: PR #66; CRD
   ch.60 R60.6.5.
-- **Radiant (RXD) is only partly usable.** RXD activates and signs, but swaps with it are not
-  established. More in
+- **Radiant (RXD) swaps are tested between KDF Reloaded nodes and with GLEEC KDF 3.0.0-beta.** An
+  RXD swap with Komodo DeFi Framework 2.6.0-beta, a build without the Radiant signature dialect,
+  did not complete in the 0.3.0 tests. More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
 - **SLP tokens on BCH are untested on mainnet.** The shared coins file lists BCH and tBCH as plain
   UTXO coins and carries no SLP token entries, so SLP tokens cannot be enabled with it. The SLP

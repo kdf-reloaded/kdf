@@ -69,6 +69,9 @@ pub struct TendermintTokenImpl {
     pub platform_coin: TendermintCoin,
     pub decimals: u8,
     pub denom: Denom,
+    /// The token was activated from an inline `protocol` and has no coins-file entry. Such a token is always
+    /// wallet-only (CRD ch.36 R36.1.2 `tokens_params[].protocol`, as for a custom EVM token, ch.35 R35.2.7).
+    pub custom_token: bool,
 }
 
 #[derive(Clone)]
@@ -84,12 +87,25 @@ impl std::fmt::Debug for TendermintToken {
 }
 
 impl TendermintToken {
+    /// A token of the coins file (`custom_token` is `false`).
     pub fn new(ticker: String, platform_coin: TendermintCoin, decimals: u8, denom: Denom) -> Self {
+        Self::new_with_custom_flag(ticker, platform_coin, decimals, denom, false)
+    }
+
+    /// A token with the `custom_token` flag given: `true` for a token activated from an inline `protocol`.
+    pub fn new_with_custom_flag(
+        ticker: String,
+        platform_coin: TendermintCoin,
+        decimals: u8,
+        denom: Denom,
+        custom_token: bool,
+    ) -> Self {
         TendermintToken(Arc::new(TendermintTokenImpl {
             ticker,
             platform_coin,
             decimals,
             denom,
+            custom_token,
         }))
     }
 
@@ -108,9 +124,38 @@ impl TendermintToken {
         decimals: u8,
         denom: &str,
     ) -> MmResult<Self, TendermintTokenInitError> {
+        Self::from_protocol_with_custom_flag(ticker, platform_coin, decimals, denom, false)
+    }
+
+    /// [`TendermintToken::from_protocol`] with the `custom_token` flag given (`true` for a token activated from
+    /// an inline `protocol`).
+    pub fn from_protocol_with_custom_flag(
+        ticker: String,
+        platform_coin: TendermintCoin,
+        decimals: u8,
+        denom: &str,
+        custom_token: bool,
+    ) -> MmResult<Self, TendermintTokenInitError> {
         let denom = Denom::from_str(denom)
             .map_to_mm(|e| TendermintTokenInitError::InternalError(format!("Invalid denom '{denom}': {e}")))?;
-        Ok(TendermintToken::new(ticker, platform_coin, decimals, denom))
+        Ok(TendermintToken::new_with_custom_flag(
+            ticker,
+            platform_coin,
+            decimals,
+            denom,
+            custom_token,
+        ))
+    }
+
+    /// [`MmCoin::wallet_only`] with the build switch given, so a test can evaluate the answer with swaps on.
+    pub(super) fn wallet_only_with_switch(&self, ctx: &MmArc, swaps_available: bool) -> bool {
+        tendermint_wallet_only(
+            swaps_available,
+            &self.platform_coin.protocol_info.account_prefix,
+            crate::is_wallet_only_ticker(ctx, self.ticker()),
+            self.platform_coin.activation_policy.has_local_key(),
+            self.custom_token,
+        )
     }
 }
 
@@ -469,15 +514,10 @@ impl MmCoin for TendermintToken {
 
     /// Wallet-only while [`TENDERMINT_SWAPS_AVAILABLE`] is `false` (swaps for the family are postponed for the
     /// current beta), whatever the coins-config entry says; otherwise the entry decides. A token of a chain whose
-    /// account prefix selects no HTLC dialect is wallet-only in either case (CRD ch.18 R18.11.23). Only order
-    /// placement asks this: a swap that has already started never does.
-    fn wallet_only(&self, ctx: &MmArc) -> bool {
-        tendermint_wallet_only(
-            TENDERMINT_SWAPS_AVAILABLE,
-            &self.platform_coin.protocol_info.account_prefix,
-            crate::is_wallet_only_ticker(ctx, self.ticker()),
-        )
-    }
+    /// account prefix selects no HTLC dialect is wallet-only in either case (CRD ch.18 R18.11.23), and so is a
+    /// custom token (CRD ch.36 R36.1.2) and a token whose platform coin holds no local private key (CRD ch.18
+    /// R18.11.23a). Only order placement asks this: a swap that has already started never does.
+    fn wallet_only(&self, ctx: &MmArc) -> bool { self.wallet_only_with_switch(ctx, TENDERMINT_SWAPS_AVAILABLE) }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         // Token withdraw: constructs a MsgSend in the token's denom,

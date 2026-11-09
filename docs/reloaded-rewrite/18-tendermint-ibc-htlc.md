@@ -983,6 +983,40 @@ The module refunds an expired HTLC itself; there is no refund message
 > switch and the coins-file flag, so the existing order refusal applies.
 > Chapter 60 R60.2.3 asks for an orderly error for a coin that cannot
 > trade, which that refusal is; it needs no other shape.
+
+- **R18.11.23a.** *A coin without a local key is refused at order time
+  (Reloaded-original).* A Tendermint coin whose activation policy holds no
+  private key that this node signs with, and every token on such a coin (a
+  token uses its platform coin's policy), SHALL be refused at order
+  placement with the same refusal as R18.11.23: the coin reports
+  `wallet_only` true. The refusal is unconditional; no switch turns it off.
+  A swap that has already started never asks. The reference has no such
+  rule. The legacy swap path takes the HTLC public key from the key the coin
+  signs with, and for a coin that has none it falls back to this node's own
+  persistent public key without an error, so a counterparty would lock its
+  payment to an account derived from that key, which the coin cannot sign
+  for, and this node's own payment would fail later at broadcast. Refusing
+  at order time keeps that public key from ever being announced. No such
+  policy can be built at runtime today (the activation builds a software-key
+  policy under an iguana login and under an HD login, both with a local
+  key); the rule is in place so that a later activation mode that holds no
+  local key (a public-key, hardware or external-signer policy) cannot enable
+  Tendermint swaps by accident. It extends R18.11.23's refusal contract
+  (Chapter 60 R60.2.3) and is independent of the account-prefix test of
+  R18.11.23.
+
+> **As-built note (PR #319).** `tendermint_wallet_only`
+> (`mm2src/coins/tendermint/tendermint_types.rs`) takes `has_local_key`,
+> which is `true` when the activation policy yields a private key
+> (`TendermintActivationPolicy::has_local_key`); `wallet_only()` of the coin
+> and of the token passes it (the token passes its platform coin's policy).
+> The test `tm_act_the_predicate_is_true_for_each_reason_alone` checks that
+> the lack of a local key alone makes the answer wallet-only. The test
+> `tm_act_a_coin_and_token_without_a_local_key_are_wallet_only` builds the
+> one policy without a local key that exists (the hardware-wallet policy)
+> for a coin and a token and checks that both are wallet-only, and that a
+> coin and a token with a key are not made wallet-only by this term.
+
 - **R18.11.24.** *IBC denominations.* A token whose denom is an IBC
   voucher (`ibc/<HASH>`) or a CW20 denom is swapped exactly like a native
   token: the denom appears in the HTLC amount coin; the fee is paid in

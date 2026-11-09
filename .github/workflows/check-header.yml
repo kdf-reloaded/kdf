@@ -1,0 +1,130 @@
+name: Check C header
+
+# Checks include/kdf.h against the library it describes.
+#
+# Builds the x86_64 Linux static library (libkdf.a, not shipped: the release
+# ships the Android and iOS libraries) in the same pinned Debian 11 container as
+# build-linux.yml, compiles tests/c/kdf_header_check.c against the header with
+# strict warnings, links it with the library and runs it. It then compares the
+# KDF symbols the header declares with the ones the archive exports; the two
+# sets must be equal. A prototype that does not match shows up as a compile or
+# link error, or as a wrong result in the test program.
+#
+# Runs when the header, its test or the exporting sources change, and is called
+# by release.yml so a release cannot ship a header that does not match.
+
+on:
+  pull_request:
+    paths:
+      - 'include/kdf.h'
+      - 'tests/c/**'
+      - 'mm2src/mm2_main/src/mm2_lib/**'
+      - 'mm2src/common/for_c.rs'
+      - '.github/workflows/check-header.yml'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:11
+    timeout-minutes: 120
+
+    steps:
+      # Same pinned snapshot as build-linux.yml (see the comments there).
+      - name: Install build dependencies
+        run: |
+          set -eu
+          SNAPSHOT=20260901T000000Z
+          {
+            echo "deb http://snapshot.debian.org/archive/debian/${SNAPSHOT}/ bullseye main"
+            echo "deb http://snapshot.debian.org/archive/debian/${SNAPSHOT}/ bullseye-updates main"
+            echo "deb http://snapshot.debian.org/archive/debian-security/${SNAPSHOT}/ bullseye-security main"
+          } > /etc/apt/sources.list
+          echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10-no-check-valid-until
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev cmake \
+            clang libclang-dev git curl ca-certificates unzip
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Install protoc
+        run: |
+          set -eu
+          PROTOC_VERSION=27.3
+          curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          unzip -o /tmp/protoc.zip -d /usr/local
+          rm -f /tmp/protoc.zip
+          chmod +x /usr/local/bin/protoc
+          echo "PROTOC=/usr/local/bin/protoc" >> "$GITHUB_ENV"
+          protoc --version
+
+      - name: Trust workspace for git
+        run: git config --global --add safe.directory '*'
+
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Check Rust toolchain
+        run: rustc --version && cargo --version
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: linux-debian11-header-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            linux-debian11-header-registry-
+
+      # `cargo rustc --crate-type=staticlib` overrides the manifest's crate
+      # types, as the Android and iOS builds do. native-static-libs prints the
+      # system libraries the archive needs at link time.
+      - name: Build libkdf.a
+        run: |
+          set -eu
+          cargo rustc -p mm2_bin_lib --lib --release \
+            --target x86_64-unknown-linux-gnu --crate-type=staticlib \
+            -- --print native-static-libs 2>&1 | tee /tmp/build.log
+          cp target/x86_64-unknown-linux-gnu/release/libmm2_bin_lib.a /tmp/libkdf.a
+          grep -o 'native-static-libs: .*' /tmp/build.log | sed 's/^native-static-libs: //' > /tmp/native-libs
+          echo "system libraries: $(cat /tmp/native-libs)"
+
+      - name: Compile, link and run the header check
+        run: |
+          set -eu
+          # The native library list is meant to split into separate arguments.
+          # shellcheck disable=SC2046
+          gcc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+            tests/c/kdf_header_check.c /tmp/libkdf.a $(cat /tmp/native-libs) \
+            -o /tmp/kdf_header_check
+          /tmp/kdf_header_check
+          # The header must also be valid C++.
+          printf '#include "kdf.h"\nint main() { return 0; }\n' > /tmp/hdr.cpp
+          g++ -std=c++11 -Wall -Werror -fsyntax-only -Iinclude /tmp/hdr.cpp
+
+      # The symbols the header declares must be exactly the KDF symbols the
+      # archive exports (the archive also contains the symbols of the bundled C
+      # libraries, which the header does not describe).
+      - name: Compare header and exported symbols
+        run: |
+          set -eu
+          grep -oE '\b(mm2_[a-z_]+|log_stacktrace|is_loopback_ip)\(' include/kdf.h \
+            | tr -d '(' | sort -u > /tmp/header-symbols
+          nm -g --defined-only /tmp/libkdf.a 2>/dev/null \
+            | awk '$2 == "T" || $2 == "t" {print $3}' \
+            | grep -E '^(mm2_[a-z_]+|log_stacktrace|is_loopback_ip)$' | sort -u > /tmp/archive-symbols
+          echo "header:";  cat /tmp/header-symbols
+          echo "archive:"; cat /tmp/archive-symbols
+          diff /tmp/header-symbols /tmp/archive-symbols

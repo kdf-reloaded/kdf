@@ -7,22 +7,26 @@
 //! a Tendermint platform coin plus an inline batch of Tendermint (IBC / native
 //! bank) tokens in one call.
 //!
-//! This module covers the single-address ("Iguana") activation path: the
-//! generic activator passes a secp256k1 private key, so HD / Ledger / external
-//! signer policies (R36.1.3) -- which require the task variant of §36.6 -- are
-//! out of scope here.
+//! This module covers the software-key activation paths: the single-address
+//! ("Iguana") path, where the generic activator passes a secp256k1 private
+//! key, and the HD path, where the key is derived from the seed at the coin's
+//! `derivation_path` and `path_to_address` (R36.1.2). Ledger / external signer
+//! policies (R36.1.3) are out of scope here.
 
 use crate::platform_coin_with_tokens::*;
 use crate::prelude::*;
-use crate::tendermint_token_activation::TendermintTokenProtocol;
+use crate::tendermint_token_activation::{resolve_tendermint_token_protocol, TendermintTokenProtocol,
+                                         TendermintTokenRequest};
 use async_trait::async_trait;
 use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
-use coins::tendermint::{tendermint_coin_from_conf_and_request, RpcNode, TendermintCoin, TendermintInitError,
-                        TendermintToken, TendermintTokenActivationParams, TendermintTokenInitError};
-use coins::{CoinBalance, MarketCoinOps};
+use coins::rpc_command::get_my_address::PathToAddress;
+use coins::tendermint::{tendermint_coin_from_conf_and_request, tendermint_coin_from_conf_and_request_with_global_hd,
+                        RpcNode, TendermintCoin, TendermintInitError, TendermintToken, TendermintTokenInitError};
+use coins::{CoinBalance, MarketCoinOps, MmCoinEnum};
 use common::mm_number::BigDecimal;
 use common::Future01CompatExt;
+use crypto::{CryptoCtx, KeyPairPolicy};
 use futures::future::{abortable, AbortHandle};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
@@ -38,9 +42,9 @@ impl TokenOf for TendermintToken {
 fn default_get_balances() -> bool { true }
 
 /// `enable_tendermint_with_assets` request parameters (R36.1.2). The
-/// single-address activation subset; `path_to_address` is accepted for
-/// wire-compatibility but is not consumed on the private-key activation path.
-/// A non-null `activation_params` (R36.1.3) is rejected, see
+/// software-key subset: `path_to_address` selects the activated address under
+/// an HD login and has no effect under an iguana login. A non-null
+/// `activation_params` (R36.1.3) is rejected, see
 /// [`reject_unsupported_activation_params`].
 ///
 /// The public docs list `required_confirmations` (default 3), `requires_notarization` and `priv_key_policy` for
@@ -50,13 +54,14 @@ fn default_get_balances() -> bool { true }
 pub struct TendermintActivationParams {
     nodes: Vec<RpcNode>,
     // CRD R36.1.2: required, the array itself may be empty.
-    tokens_params: Vec<TokenActivationRequest<TendermintTokenActivationParams>>,
+    tokens_params: Vec<TokenActivationRequest<TendermintTokenRequest>>,
     #[serde(default)]
     tx_history: bool,
     #[serde(default = "default_get_balances")]
     get_balances: bool,
+    // Kept raw: it matters under an HD login only, where a value that does not parse is a platform-coin creation
+    // error (CRD ch.36 R36.1.4 step 3); under an iguana login it is ignored whatever it holds.
     #[serde(default)]
-    #[allow(dead_code)]
     path_to_address: Option<Json>,
     #[serde(default)]
     activation_params: Option<Json>,
@@ -79,6 +84,24 @@ fn reject_unsupported_activation_params(
             error: "The `activation_params` signing policies are not supported yet".to_owned(),
         }),
         _ => Ok(()),
+    }
+}
+
+/// The `path_to_address` of a request under an HD login: the default (account 0, `External`, address 0) when the
+/// request has none or has `null`, else the parsed object. A value that does not parse is a platform-coin creation
+/// error (CRD ch.36 R36.1.4 step 3).
+fn path_to_address_of(
+    ticker: &str,
+    path_to_address: &Option<Json>,
+) -> Result<PathToAddress, MmError<TendermintActivationError>> {
+    match path_to_address {
+        Some(path) if !path.is_null() => {
+            serde_json::from_value(path.clone()).map_to_mm(|e| TendermintActivationError::PlatformCoinCreationError {
+                ticker: ticker.to_owned(),
+                error: format!("Invalid `path_to_address`: {e}"),
+            })
+        },
+        _ => Ok(PathToAddress::default()),
     }
 }
 
@@ -131,47 +154,61 @@ pub struct TendermintTokenInitializer {
     platform_coin: TendermintCoin,
 }
 
+/// Whether every token's protocol names the platform being activated (CRD R36.1.4 step 4).
+fn all_on_platform(protocols: &[TendermintTokenProtocol], platform_ticker: &str) -> bool {
+    protocols
+        .iter()
+        .all(|protocol| protocol.platform_coin_ticker == platform_ticker)
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl TokenInitializer for TendermintTokenInitializer {
-    type Token = TendermintToken;
-    type TokenActivationRequest = TendermintTokenActivationParams;
-    type TokenProtocol = TendermintTokenProtocol;
-    type InitTokensError = TendermintTokenInitError;
+impl TokenAsMmCoinInitializer for TendermintTokenInitializer {
+    type PlatformCoin = TendermintCoin;
+    type ActivationRequest = TendermintActivationParams;
 
-    fn tokens_requests_from_platform_request(
-        platform_params: &TendermintActivationParams,
-    ) -> Vec<TokenActivationRequest<Self::TokenActivationRequest>> {
-        platform_params.tokens_params.clone()
-    }
-
-    async fn enable_tokens(
+    /// Enables the requested tokens in passes, each covering every token in request order before the next
+    /// starts, so the error reported is that of the earliest failing pass: the resolution of every token's
+    /// protocol (from the coins configuration, or the inline `protocol` of a custom token), then the platform
+    /// consistency of every token (`PlatformCoinMismatch`), then the construction. All tokens are checked before
+    /// any is built, so a failure leaves nothing behind (CRD R36.1.4 step 4, R36.1.6).
+    async fn enable_tokens_as_mm_coins(
         &self,
-        activation_params: Vec<TokenActivationParams<TendermintTokenActivationParams, TendermintTokenProtocol>>,
-    ) -> Result<Vec<TendermintToken>, MmError<TendermintTokenInitError>> {
-        // CRD R36.1.4 step 4 / R36.1.6: every token must ride on the platform being activated. All tokens are
-        // checked before any is built, so a mismatch leaves nothing behind.
-        if activation_params
-            .iter()
-            .any(|params| params.protocol.platform_coin_ticker != self.platform_coin.ticker())
-        {
-            return MmError::err(TendermintTokenInitError::PlatformCoinMismatch);
+        ctx: MmArc,
+        request: &Self::ActivationRequest,
+    ) -> Result<Vec<MmCoinEnum>, MmError<InitTokensAsMmCoinsError>> {
+        let requests = &request.tokens_params;
+
+        let mut protocols = Vec::with_capacity(requests.len());
+        for token_request in requests {
+            let protocol =
+                resolve_tendermint_token_protocol(&ctx, &token_request.ticker, token_request.request.protocol.as_ref())
+                    .map_to_mm(InitTokensAsMmCoinsError::from)?;
+            protocols.push(protocol);
         }
 
-        let mut tokens = Vec::with_capacity(activation_params.len());
-        for params in activation_params {
-            let token = TendermintToken::from_protocol(
-                params.ticker,
+        if !all_on_platform(&protocols, self.platform_coin.ticker()) {
+            return MmError::err(InitTokensAsMmCoinsError::PlatformCoinMismatch);
+        }
+
+        let mut tokens = Vec::with_capacity(requests.len());
+        for (token_request, protocol) in requests.iter().zip(protocols) {
+            let token = TendermintToken::from_protocol_with_custom_flag(
+                token_request.ticker.clone(),
                 self.platform_coin.clone(),
-                params.protocol.decimals,
-                &params.protocol.denom,
-            )?;
+                protocol.decimals,
+                &protocol.denom,
+                protocol.custom,
+            )
+            .mm_err(InitTokensAsMmCoinsError::from)?;
             tokens.push(token);
         }
-        Ok(tokens)
-    }
 
-    fn platform_coin(&self) -> &TendermintCoin { &self.platform_coin }
+        for token in tokens.iter() {
+            self.platform_coin.register_token_info(token);
+        }
+        Ok(tokens.into_iter().map(Into::into).collect())
+    }
 }
 
 impl From<TendermintTokenInitError> for InitTokensAsMmCoinsError {
@@ -272,15 +309,36 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
     ) -> Result<Self, MmError<Self::ActivationError>> {
         reject_unsupported_activation_params(&ticker, &activation_request.activation_params)?;
 
-        let coin = tendermint_coin_from_conf_and_request(
-            &ctx,
-            ticker,
-            &platform_conf,
-            activation_request.nodes,
-            priv_key,
-            activation_request.get_balances,
-        )
-        .await
+        let crypto_ctx = CryptoCtx::from_ctx(&ctx).mm_err(|e| TendermintActivationError::Internal(e.to_string()))?;
+        let coin = match crypto_ctx.key_pair_policy() {
+            // An iguana login signs with the single key the generic activator passes.
+            KeyPairPolicy::Iguana => {
+                tendermint_coin_from_conf_and_request(
+                    &ctx,
+                    ticker,
+                    &platform_conf,
+                    activation_request.nodes,
+                    priv_key,
+                    activation_request.get_balances,
+                )
+                .await
+            },
+            // An HD login signs with the key of the address at `path_to_address` under the coin's
+            // `derivation_path` (CRD ch.36 R36.1.2, R36.1.4 step 3).
+            KeyPairPolicy::GlobalHDAccount(global_hd) => {
+                let path_to_address = path_to_address_of(&ticker, &activation_request.path_to_address)?;
+                tendermint_coin_from_conf_and_request_with_global_hd(
+                    &ctx,
+                    ticker,
+                    &platform_conf,
+                    activation_request.nodes,
+                    global_hd,
+                    &path_to_address,
+                    activation_request.get_balances,
+                )
+                .await
+            },
+        }
         .mm_err(TendermintActivationError::from)?;
         Ok(coin)
     }

@@ -49,7 +49,7 @@ use coins::rpc_command::init_withdraw::{init_withdraw, withdraw_cancel, withdraw
 use coins::rpc_command::swap_gas_fee_policy::{get_swap_gas_fee_policy, set_swap_gas_fee_policy};
 use coins::rpc_command::token_allowance::{approve_token, get_token_allowance};
 use coins::siacoin::SiaCoin;
-use coins::tendermint::{TendermintCoin, TendermintToken};
+use coins::tendermint::TendermintCoin;
 use coins::utxo::bch::BchCoin;
 use coins::utxo::qtum::QtumCoin;
 use coins::utxo::slp::SlpToken;
@@ -63,8 +63,8 @@ use coins_activation::{cancel_init_platform_coin_with_tokens, cancel_init_token,
                        init_platform_coin_with_tokens_user_action, init_token, init_token_status,
                        init_token_user_action};
 use coins_activation::{cancel_init_standalone_coin, cancel_l2_activation, enable_l2, enable_platform_coin_with_tokens,
-                       enable_token, init_l2, init_l2_status, init_l2_user_action, init_standalone_coin,
-                       init_standalone_coin_status, init_standalone_coin_user_action};
+                       enable_tendermint_token, enable_token, init_l2, init_l2_status, init_l2_user_action,
+                       init_standalone_coin, init_standalone_coin_status, init_standalone_coin_user_action};
 use common::log::{debug, error, warn};
 use common::HttpStatusCode;
 use futures::Future as Future03;
@@ -238,7 +238,7 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "enable_nft" => handle_mmrpc(ctx, request, enable_evm_token).await,
         "enable_sia" => handle_mmrpc(ctx, request, init_standalone_coin::<SiaCoin>).await,
         "enable_slp" => handle_mmrpc(ctx, request, enable_token::<SlpToken>).await,
-        "enable_tendermint_token" => handle_mmrpc(ctx, request, enable_token::<TendermintToken>).await,
+        "enable_tendermint_token" => handle_mmrpc(ctx, request, enable_tendermint_token).await,
         "enable_tendermint_with_assets" => {
             handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<TendermintCoin>).await
         },
