@@ -427,7 +427,7 @@ non-fungible flavours.
 
 ---
 
-## #9 — UTXO: `signature_version` value `fork_id_rxd` unsupported (Radiant) — **signing CLOSED (PR #65, merged); trading tested between two KDF Reloaded nodes 2026-11-09 (ch. 58 D2); interop with Komodo DeFi Framework and GLEEC KDF OPEN**
+## #9 — UTXO: `signature_version` value `fork_id_rxd` unsupported (Radiant) — **signing CLOSED (PR #65, merged); trading tested between KDF Reloaded nodes and with GLEEC KDF 3.0.0-beta 2026-11-09 (ch. 58 D2); interop with Komodo DeFi Framework OPEN**
 
 CRD reference:
 [`58-utxo-signature-version-and-radiant-sighash.md`](./58-utxo-signature-version-and-radiant-sighash.md).
@@ -438,10 +438,10 @@ PR #65** (`feat/rxd-signature-version`, stacked on PR #54, both merged)
 from the cleared chapter and public Radiant-Core alone; ch. 58 §58.5
 carries the as-built statement. The third item — trading fitness (ch. 58
 D2) — was tested on 2026-11-09 between two KDF Reloaded nodes (mainnet,
-RXD against RIN: both directions, a maker refund and a taker refund); the
-evidence is recorded in ch. 58 D2. It is **still open** for swaps with
-Komodo DeFi Framework 2.6.0-beta (no Radiant dialect) and with GLEEC KDF,
-which are not tested.
+RXD against RIN: both directions, a maker refund and a taker refund) and
+with GLEEC KDF 3.0.0-beta (both directions); the evidence is recorded in
+ch. 58 D2. It is **still open** for swaps with Komodo DeFi Framework
+2.6.0-beta (no Radiant dialect), which did not complete in the 0.3.0 tests.
 
 - [x] The shipped coins configuration gives the Radiant entry
   `"signature_version": "fork_id_rxd"` with `"fork_id": "0x40"`. Reloaded's
@@ -459,9 +459,9 @@ which are not tested.
   correct and the authoritative route (ch. 58 R58.4.3). Add the mainnet
   signature vector of ch. 58 T3 as the parity guard.
 - [ ] Separately: enabling Radiant for **trading** is not covered by the
-  signing work (ch. 58 D2). Established between two KDF Reloaded nodes on
-  2026-11-09 (see the status above); open for swaps with Komodo DeFi
-  Framework 2.6.0-beta and with GLEEC KDF.
+  signing work (ch. 58 D2). Established between KDF Reloaded nodes and with
+  GLEEC KDF 3.0.0-beta on 2026-11-09 (see the status above); open for swaps
+  with Komodo DeFi Framework 2.6.0-beta.
 
 ---
 

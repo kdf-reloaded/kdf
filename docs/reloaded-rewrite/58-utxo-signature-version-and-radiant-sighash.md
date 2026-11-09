@@ -858,10 +858,16 @@ above, one by one:
   servers and the header handling of the coins entry, and no header or
   server error appeared in any of them. They were not tested separately.
 
+*GLEEC KDF.* RXD swaps between a KDF Reloaded node and GLEEC KDF 3.0.0-beta
+(build d56a7bc50, a release binary run as a black box) completed in both
+directions on a private test mesh, RXD against RIN, with no failure event
+(871 and 1531 seconds); the GLEEC node activated RXD from the same coins
+entry and no refusal text appeared in either direction.
+
 Not covered: an RXD swap with Komodo DeFi Framework 2.6.0-beta (that build
-has no Radiant dialect, R58.4A) and with GLEEC KDF. This item is
-**closed for swaps between two KDF Reloaded nodes** and stays open for
-those two.
+has no Radiant dialect, R58.4A; it did not complete in the 0.3.0 tests). This
+item is **closed for swaps between two KDF Reloaded nodes and with GLEEC
+KDF 3.0.0-beta** and stays open for Komodo DeFi Framework.
 
 **D3.** *Reference-bearing outputs.* **Partly corroborated on chain,
 2026-10-25; open for two details.** R58.4.2 left the non-zero-reference
