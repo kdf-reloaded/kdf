@@ -130,6 +130,16 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 #### UTXO coins and Electrum
 
+- **Radiant (RXD) swaps between two KDF Reloaded nodes are tested on the mainnet.** On 2026-11-09, RXD against
+  RIN completed in both directions (RXD as the maker's coin and as the taker's coin), and a refund of an RXD
+  payment went out for the maker and for the taker after the lock time. The first swap took 930 seconds, of which
+  842 seconds were the maker's payment waiting for its two confirmations. The two
+  refunds were broadcast 27 and 18 minutes after the lock time recorded in the payment transaction, and neither
+  was rejected. A plain RXD withdrawal was accepted and confirmed within about 90 seconds. RXD swaps between
+  a KDF Reloaded node and GLEEC KDF 3.0.0-beta (build d56a7bc50) also completed in both directions on a private
+  test mesh (871 and 1531 seconds). Swaps with Komodo DeFi Framework are not part of this. Detail: PR #322;
+  CRD ch.58 D2; plan
+  [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
 - **An Electrum server can now be pinned by its key.** A server entry with `protocol` `SSL` may
   carry `spki_sha256`: the SHA-256 digest of the server's public key in hexadecimal (64 digits,
   colons between byte pairs allowed), or a list of up to four, so the next key can be pinned before
@@ -1100,7 +1110,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   (item P6, PR #280).
 - [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — parked: it records that PRs #17 and #21 landed.
 - [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — parked: it records that PRs #54 and #65 landed,
-  with their compatibility bookkeeping; step 8 is open.
+  with their compatibility bookkeeping, and the 2026-11-09 mainnet swap tests; step 8 (a stricter signing of malformed
+  caller-supplied scripts) is a separate post-beta change.
 - [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md) — parked: two-daemon detection and F3 are
   postponed and not started.
 - [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — done: the plan now says
@@ -1267,8 +1278,9 @@ lives.
   are refused with an error naming the coin; `trade_preimage` answers `TradingNotSupported`. More in
   [`lightning-activation-features`](docs/plans/lightning-activation-features.md). Detail: PR #66; CRD
   ch.60 R60.6.5.
-- **Radiant (RXD) is only partly usable.** RXD activates and signs, but swaps with it are not
-  established. More in
+- **Radiant (RXD) swaps are tested between KDF Reloaded nodes and with GLEEC KDF 3.0.0-beta.** An
+  RXD swap with Komodo DeFi Framework 2.6.0-beta, a build without the Radiant signature dialect,
+  did not complete in the 0.3.0 tests. More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
 - **SLP tokens on BCH are untested on mainnet.** The shared coins file lists BCH and tBCH as plain
   UTXO coins and carries no SLP token entries, so SLP tokens cannot be enabled with it. The SLP
