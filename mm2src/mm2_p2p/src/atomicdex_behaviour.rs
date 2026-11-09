@@ -1,6 +1,6 @@
 use crate::{adex_ping::AdexPing,
             peers_exchange::{strip_p2p_suffix, PeerAddresses, PeersExchange},
-            redial_guard::{RedialGuardConfig, RedialGuards},
+            redial_guard::{LocalClose, RedialGuardConfig, RedialGuards},
             request_response::{build_request_response_behaviour, LocalFailure, PeerRequest, PeerResponse,
                                RequestResponseBehaviour, RequestResponseBehaviourEvent, RequestResponseSender},
             runtime::{SwarmRuntimeOps, SWARM_RUNTIME},
@@ -454,6 +454,7 @@ impl AtomicDexBehaviour {
     fn process_pending_clock_checks(
         swarm: &mut AtomicDexSwarm,
         pending_clock_checks: &mut HashMap<PeerId, oneshot::Receiver<PeerResponse>>,
+        guards: &mut RedialGuards,
         cx: &mut Context,
     ) {
         let pending_checks = std::mem::take(pending_clock_checks);
@@ -466,6 +467,9 @@ impl AtomicDexBehaviour {
                     PeerClockCheck::Failed => {
                         if Swarm::disconnect_peer_id(swarm, peer_id).is_err() {
                             error!("Peer {} disconnect error after failed clock check", peer_id);
+                        } else {
+                            // The admission close allows no early redial (CRD ch.28 R27a item 1a).
+                            guards.early.mark_local_close(peer_id, LocalClose::Other);
                         }
                     },
                     PeerClockCheck::Inconclusive => {
@@ -874,7 +878,7 @@ fn maintain_connection_to_relays(
         for (peer, addresses) in to_connect {
             for addr in addresses {
                 // A bootstrap dial of this tick may have dialed the address already.
-                if swarm.behaviour().gossipsub.is_connected_to_addr(&addr) || guards.dialed.is_guarded(&addr, now) {
+                if swarm.behaviour().gossipsub.is_connected_to_addr(&addr) || guards.is_guarded(&addr, now) {
                     continue;
                 }
                 dial_peer_addr(swarm, guards, peer, addr, "peer exchange relay maintenance", now);
@@ -894,6 +898,9 @@ fn maintain_connection_to_relays(
                 info!("Disconnecting peer {}", peer);
                 if Swarm::disconnect_peer_id(swarm, **peer).is_err() {
                     error!("Peer {} disconnect error", peer);
+                } else {
+                    // The relay-count close allows no early redial (CRD ch.28 R27a item 1a).
+                    guards.early.mark_local_close(**peer, LocalClose::Other);
                 }
             }
         }
@@ -956,7 +963,7 @@ fn listen_on_addr(swarm: &mut AtomicDexSwarm, addr: Multiaddr) -> Result<(), Ade
 
 /// Dials a configured bootstrap address. The dial is recorded for the dial guard (CRD ch.28 R27a item 1) whether or
 /// not it succeeds, and its connection ID is remembered so that the peer it reaches is recorded as the peer of the
-/// address (item 2).
+/// address (item 2) and the address is known when the connection closes (item 1a).
 fn dial_bootstrap_addr(
     swarm: &mut AtomicDexSwarm,
     guards: &mut RedialGuards,
@@ -964,20 +971,23 @@ fn dial_bootstrap_addr(
     reason: &str,
     now: Instant,
 ) {
-    guards.dialed.record(addr.clone(), now);
+    guards.record_dial(&addr, now);
     let opts = DialOpts::unknown_peer_id().address(addr.clone()).build();
     let connection_id = opts.connection_id();
     guards.seeds.dial_started(addr.clone(), connection_id);
+    guards.early.dial_started(addr.clone(), connection_id);
     match Swarm::dial(swarm, opts) {
         Ok(_) => info!("Dialed {} ({})", addr, reason),
         Err(e) => {
             guards.seeds.dial_not_scheduled(&addr, connection_id);
+            guards.early.dial_ended(connection_id);
             error!("P2P bootstrap dial scheduling failed for {} ({}): {}", addr, reason, e)
         },
     }
 }
 
-/// Dials an address of a known peer. The dial is recorded for the dial guard (CRD ch.28 R27a item 1).
+/// Dials an address of a known peer. The dial is recorded for the dial guard (CRD ch.28 R27a item 1), and its
+/// connection ID is remembered so that the address is known when the connection closes (item 1a).
 fn dial_peer_addr(
     swarm: &mut AtomicDexSwarm,
     guards: &mut RedialGuards,
@@ -986,13 +996,20 @@ fn dial_peer_addr(
     reason: &str,
     now: Instant,
 ) {
-    guards.dialed.record(addr.clone(), now);
-    match Swarm::dial(swarm, addr.clone()) {
+    guards.record_dial(&addr, now);
+    // The same options as `Swarm::dial` builds from an address; they carry the identifier of the connection.
+    let opts = DialOpts::unknown_peer_id().address(addr.clone()).build();
+    let connection_id = opts.connection_id();
+    guards.early.dial_started(addr.clone(), connection_id);
+    match Swarm::dial(swarm, opts) {
         Ok(_) => info!("Dialed peer {} at {} ({})", peer, addr, reason),
-        Err(e) => error!(
-            "P2P peer dial scheduling failed for peer {} at {} ({}): {}",
-            peer, addr, reason, e
-        ),
+        Err(e) => {
+            guards.early.dial_ended(connection_id);
+            error!(
+                "P2P peer dial scheduling failed for peer {} at {} ({}): {}",
+                peer, addr, reason, e
+            )
+        },
     }
 }
 
@@ -1540,9 +1557,41 @@ fn start_gossipsub(
                             connection_id,
                             endpoint,
                             ..
-                        } if endpoint.is_dialer() => guards.seeds.connection_established(*connection_id, *peer_id),
+                        } if endpoint.is_dialer() => {
+                            guards.seeds.connection_established(*connection_id, *peer_id);
+                            guards
+                                .early
+                                .connection_established(*connection_id, *peer_id, Instant::now());
+                        },
+                        // How a dialed connection ended decides whether its address may be dialed again early (CRD
+                        // ch.28 R27a item 1a). The ping safeguard recorded its close in the ping behaviour; the other
+                        // closes of this node were recorded by their call sites.
+                        SwarmEvent::ConnectionClosed {
+                            connection_id, cause, ..
+                        } => {
+                            let closed_by_ping = swarm.behaviour_mut().ping.take_ping_close(*connection_id);
+                            if let Some(closed) = guards.early.connection_closed(
+                                *connection_id,
+                                cause.as_ref(),
+                                closed_by_ping,
+                                Instant::now(),
+                            ) {
+                                debug!(
+                                    "P2P connection dialed at {} lasted {:?} and ended on {:?}; early redial {}",
+                                    closed.address,
+                                    closed.lifetime,
+                                    closed.cause,
+                                    if closed.early_redial_allowed {
+                                        "allowed"
+                                    } else {
+                                        "not allowed"
+                                    }
+                                );
+                            }
+                        },
                         SwarmEvent::OutgoingConnectionError { connection_id, .. } => {
-                            guards.seeds.dial_failed(*connection_id)
+                            guards.seeds.dial_failed(*connection_id);
+                            guards.early.dial_ended(*connection_id);
                         },
                         _ => {},
                     }
@@ -1584,7 +1633,7 @@ fn start_gossipsub(
         }
 
         #[cfg(feature = "application")]
-        AtomicDexBehaviour::process_pending_clock_checks(&mut swarm, &mut pending_clock_checks, cx);
+        AtomicDexBehaviour::process_pending_clock_checks(&mut swarm, &mut pending_clock_checks, &mut guards, cx);
 
         if swarm.behaviour().gossipsub.is_relay() {
             while let Poll::Ready(Some(())) = announce_interval.poll_next_unpin(cx) {
