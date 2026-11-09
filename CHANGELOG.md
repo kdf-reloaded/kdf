@@ -644,7 +644,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   host used. The bot and the swap prices both follow it. **With this default a wrong figure from the first source
   can be used, with a warning.** `"price_conflict": "refuse"` in `MM2.json` restores the old behavior: such a
   coin is not priced. A value of another form is ignored with one warning that names the key. See
-  [Network configuration](docs/NETWORK_CONFIG.md#price-service). Detail: PR #TBD; CRD ch.62 D62.2.
+  [Network configuration](docs/NETWORK_CONFIG.md#price-service). Detail: PR #326; CRD ch.62 D62.2.
 
 ### Fixed
 
@@ -895,8 +895,8 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   another service, and no swap completed stored USD prices. The default is now two sources asked at the
   same time: the GLEEC price service (and, if it does not answer, its cache) and the prices.cipig.net price
   service, each with `?expire_at=259200` so that no price older than 72 hours is served. A coin that only one
-  source prices is priced from it. A coin both price should agree within 5 %; for one that does not, see the
-  `price_conflict` entry under Changed. A source that does not answer is skipped. The bot
+  source prices is priced from it. The prices of a coin both services price should agree within 5 %; for one
+  that does not, see the `price_conflict` entry under Changed. A source that does not answer is skipped. The bot
   and the swap prices use the same sources. Two new top-level keys in `MM2.json` change them: `price_urls`
   (an array of sources, each one address or an array of addresses tried in order) replaces the default
   sources, and `price_providers` (an array of names) replaces the price providers the node recognizes
