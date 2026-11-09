@@ -2486,7 +2486,7 @@ watched address produces a streamed balance event.
 > 7. **The 10-second poll floor stays** (chapter 10 R25). Lowering it would be a
 >    separate decision, because of the load it puts on public Electrum servers.
 >
-> **Addition (2026-11-09; Reloaded-original, clean side; PR #NNN).**
+> **Addition (2026-11-09; Reloaded-original, clean side; PR #327).**
 >
 > 8. **A repeating failure is logged once and backs off.**
 >    - **Logging:** when the history loop's balance read or history request fails
