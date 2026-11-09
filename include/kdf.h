@@ -58,10 +58,11 @@ int8_t mm2_stop(void);
 
 /*
  * Runs the built-in self tests. If the daemon is running, it is stopped first
- * and restarted with the same configuration after the tests. Returns `torch`
- * on success and -1 on any failure: a test failed, a run is already in
- * progress, or stopping or restarting the daemon failed. After a failure,
- * further calls return -1.
+ * and restarted with the same configuration after a successful run. Returns
+ * `torch` on success and -1 on any failure: a test failed, a run is already
+ * in progress, or stopping or restarting the daemon failed. After a failure
+ * the daemon stays stopped and further calls return -1; a -1 that only
+ * reports a run in progress changes nothing.
  */
 int32_t mm2_test(int32_t torch, kdf_log_callback log_cb);
 
