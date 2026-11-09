@@ -250,6 +250,11 @@ impl TendermintActivationPolicy {
             Self::PrivateKey(private_key) => Some(*private_key.key_pair()?.private_key_secret.as_ref()),
         }
     }
+
+    /// Whether the policy holds a private key this node signs with. A policy without one (the hardware-wallet
+    /// policy) cannot sign the HTLC transactions of a swap, so the coin is wallet-only (see
+    /// [`tendermint_wallet_only`]).
+    pub(crate) fn has_local_key(&self) -> bool { self.activated_key_or_err().is_ok() }
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -376,6 +381,11 @@ pub enum TendermintInitErrorKind {
     #[display(fmt = "Tendermint `avg_blocktime` must be at least 1 second, got 0")]
     AvgBlockTimeZero,
     ErrorDeserializingDerivationPath(String),
+    /// The activation under an HD login needs the coin's `derivation_path` (CRD ch.36 R36.1.4 step 3).
+    #[display(fmt = "The coin configuration has no `derivation_path`, which an HD activation needs")]
+    DerivationPathMissing,
+    #[display(fmt = "Could not derive the key of the activated address: {}", _0)]
+    HdDerivationFailed(String),
 }
 
 impl std::fmt::Display for TendermintInitError {
@@ -482,13 +492,28 @@ pub(super) enum HtlcMsgError {
 // Free functions
 // ————————————————————————————————————————————————————————————————
 
-/// Whether a Tendermint coin or token is wallet-only (CRD ch.18 R18.11.23).
+/// Whether a Tendermint coin or token is wallet-only (CRD ch.18 R18.11.23, ch.36 R36.1.2).
 ///
-/// It is while swaps are switched off in this build, while the coins-file entry says so, and always when the
-/// chain's account prefix selects no HTLC dialect (only `iaa` and `nuc` have one): such a coin is refused at
-/// order time and not at payment time. A token passes its platform coin's prefix.
-pub(super) fn tendermint_wallet_only(swaps_available: bool, account_prefix: &str, config_wallet_only: bool) -> bool {
-    !swaps_available || HtlcType::from_str(account_prefix).is_err() || config_wallet_only
+/// It is while swaps are switched off in this build, while the coins-file entry says so, and always when:
+/// - the chain's account prefix selects no HTLC dialect (only `iaa` and `nuc` have one): such a coin is refused at
+///   order time and not at payment time. A token passes its platform coin's prefix;
+/// - the activation policy holds no local private key (`has_local_key` is `false`). Such a coin cannot sign an
+///   HTLC transaction, and the legacy swap path would otherwise announce this node's own key as the coin's HTLC
+///   public key. A token passes its platform coin's policy;
+/// - the token is a custom one, activated from an inline `protocol` and absent from the coins file, as a custom
+///   EVM token is (`custom_token`; a platform coin passes `false`).
+pub(super) fn tendermint_wallet_only(
+    swaps_available: bool,
+    account_prefix: &str,
+    config_wallet_only: bool,
+    has_local_key: bool,
+    custom_token: bool,
+) -> bool {
+    !swaps_available
+        || HtlcType::from_str(account_prefix).is_err()
+        || config_wallet_only
+        || !has_local_key
+        || custom_token
 }
 
 /// Whether a Tendermint coin accepts the protocol information of a counterparty's order (CRD ch.18 R18.11.25).

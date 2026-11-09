@@ -13,21 +13,26 @@
 
 use super::htlc::{ClaimHtlcMsg, ClaimHtlcProto, CreateHtlcMsg, CreateHtlcProto, HtlcType, QueryHtlcRequestProto};
 use super::tendermint_types::{tendermint_protocol_info_supported, tendermint_wallet_only};
-use super::{tendermint_coin_from_conf_and_request, CosmosTransaction, RpcNode, TendermintCoin, TendermintConf,
-            TendermintToken};
-use crate::{DexFee, DexFeeBurnDestination, FeeApproxStage, FoundSwapTxSpend, MarketCoinOps, MmCoin, SwapOps,
-            TradePreimageValue, TransactionEnum, TransactionErr, ValidateFeeArgs, ValidatePaymentInput};
+use super::{tendermint_coin_from_conf_and_request, tendermint_coin_from_conf_and_request_with_global_hd,
+            CosmosTransaction, RpcNode, TendermintActivationPolicy, TendermintCoin, TendermintCoinImpl,
+            TendermintConf, TendermintInitErrorKind, TendermintProtocolInfo, TendermintToken};
+use crate::rpc_command::get_my_address::PathToAddress;
+use crate::{DexFee, DexFeeBurnDestination, FeeApproxStage, FoundSwapTxSpend, MarketCoinOps, MmCoin, PrivKeyPolicy,
+            SwapOps, TradePreimageValue, TransactionEnum, TransactionErr, ValidateFeeArgs, ValidatePaymentInput,
+            WithdrawRequest};
 use bigdecimal::BigDecimal;
 use common::mm_number::MmNumber;
 use cosmrs::crypto::secp256k1::SigningKey;
 use cosmrs::proto::cosmos::auth::v1beta1::{BaseAccount, QueryAccountResponse};
-use cosmrs::proto::cosmos::bank::v1beta1::{Input, MsgMultiSend, MsgSend, Output};
+use cosmrs::proto::cosmos::bank::v1beta1::{Input, MsgMultiSend, MsgSend, Output, QueryBalanceResponse};
 use cosmrs::proto::cosmos::base::abci::v1beta1::{GasInfo, TxResponse};
 use cosmrs::proto::cosmos::base::v1beta1::Coin as CoinProto;
-use cosmrs::proto::cosmos::tx::v1beta1::{GetTxRequest, GetTxResponse, SimulateResponse, Tx, TxRaw};
+use cosmrs::proto::cosmos::tx::v1beta1::{GetTxRequest, GetTxResponse, SignDoc as SignDocProto, SimulateResponse, Tx,
+                                         TxRaw};
 use cosmrs::tx::{self, Fee, SignDoc, SignerInfo};
 use cosmrs::{AccountId, Any, Coin};
 use crypto::privkey::key_pair_from_secret;
+use crypto::{Bip44Chain, CryptoCtx, GlobalHDAccountArc, KeyPairPolicy};
 use futures::compat::Future01CompatExt;
 use kdf_crypto::dhash160;
 use mm2_core::mm_ctx::{MmArc, MmCtxBuilder};
@@ -2077,15 +2082,30 @@ fn tm_flow_a_chain_without_an_htlc_module_is_wallet_only() {
     // wallet-only, whatever the coins file says, so it is refused at order time and not at payment time. The
     // build switch is off in this build, so the predicate is tested with the switch on.
     for prefix in ["cosmos", "osmo", "atom", ""] {
-        assert!(tendermint_wallet_only(true, prefix, false), "prefix '{prefix}'");
-        assert!(tendermint_wallet_only(true, prefix, true), "prefix '{prefix}'");
+        assert!(
+            tendermint_wallet_only(true, prefix, false, true, false),
+            "prefix '{prefix}'"
+        );
+        assert!(
+            tendermint_wallet_only(true, prefix, true, true, false),
+            "prefix '{prefix}'"
+        );
     }
     for prefix in ["iaa", "nuc"] {
-        assert!(!tendermint_wallet_only(true, prefix, false), "prefix '{prefix}'");
+        assert!(
+            !tendermint_wallet_only(true, prefix, false, true, false),
+            "prefix '{prefix}'"
+        );
         // The coins-file flag still decides for the chains that have a module.
-        assert!(tendermint_wallet_only(true, prefix, true), "prefix '{prefix}'");
+        assert!(
+            tendermint_wallet_only(true, prefix, true, true, false),
+            "prefix '{prefix}'"
+        );
         // The build switch off makes every Tendermint coin wallet-only.
-        assert!(tendermint_wallet_only(false, prefix, false), "prefix '{prefix}'");
+        assert!(
+            tendermint_wallet_only(false, prefix, false, true, false),
+            "prefix '{prefix}'"
+        );
     }
 }
 
@@ -2134,5 +2154,429 @@ fn tm_flow_ibc_routing_is_never_advertised_or_accepted() {
     for info in [None, Some(Vec::new()), Some(vec![1u8])] {
         assert!(!fx.coin.is_coin_protocol_supported(&info));
         assert!(!token.is_coin_protocol_supported(&info));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Activation features (CRD ch.36): a key-less policy, a custom token and the HD key
+// ---------------------------------------------------------------------------
+
+const HD_MNEMONIC: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+/// The account number the scripted node reports for every account.
+const ACCOUNT_NUMBER: u64 = 7;
+
+/// A coin on the chain and account of `fx.coin` whose activation policy is the key-less hardware policy, the one
+/// policy of `PrivKeyPolicy` that holds no private key.
+fn keyless_coin(fx: &Fixture) -> TendermintCoin {
+    let conf = Chain::Iris.conf();
+    let tendermint_conf =
+        TendermintConf::try_from_json("IRIS", &conf).unwrap_or_else(|e| panic!("the test configuration: {}", e));
+    let protocol_info: TendermintProtocolInfo =
+        serde_json::from_value(conf["protocol"]["protocol_data"].clone()).expect("the protocol data");
+    TendermintCoin::from(TendermintCoinImpl::new(
+        "IRIS".to_owned(),
+        tendermint_conf,
+        protocol_info,
+        fx.coin.account_id.clone(),
+        TendermintActivationPolicy::with_private_key_policy(PrivKeyPolicy::Trezor),
+        Vec::new(),
+        fx.ctx.weak(),
+        false,
+    ))
+}
+
+fn nyan_token(platform: &TendermintCoin, custom_token: bool) -> TendermintToken {
+    TendermintToken::new_with_custom_flag(
+        "IRIS-NYAN".to_owned(),
+        platform.clone(),
+        6,
+        "unyan".parse().expect("a denom"),
+        custom_token,
+    )
+}
+
+#[test]
+fn tm_act_the_predicate_is_true_for_each_reason_alone() {
+    // CRD ch.18 R18.11.23, ch.36 R36.1.2: with swaps on, a chain with an HTLC module, no coins-file flag, a local
+    // key and no custom token is the one case that can trade; each other input alone makes the coin wallet-only.
+    assert!(!tendermint_wallet_only(true, "iaa", false, true, false));
+    assert!(tendermint_wallet_only(false, "iaa", false, true, false), "swaps off");
+    assert!(
+        tendermint_wallet_only(true, "cosmos", false, true, false),
+        "no HTLC dialect"
+    );
+    assert!(
+        tendermint_wallet_only(true, "iaa", true, true, false),
+        "coins-file flag"
+    );
+    assert!(tendermint_wallet_only(true, "iaa", false, false, false), "no local key");
+    assert!(tendermint_wallet_only(true, "iaa", false, true, true), "custom token");
+}
+
+#[test]
+fn tm_act_a_coin_and_token_without_a_local_key_are_wallet_only() {
+    // CRD ch.36 R36.1.2 (Reloaded rule): a coin whose activation policy holds no local key, and a token of such a
+    // coin, are wallet-only, so order placement refuses them before the legacy swap path could announce this
+    // node's own key as the coin's HTLC public key. The build switch is off, so the coin and the token are
+    // evaluated with the switch on.
+    let fx = fixture(Chain::Iris);
+    let keyless = keyless_coin(&fx);
+
+    assert!(fx.coin.activation_policy.has_local_key());
+    assert!(!keyless.activation_policy.has_local_key());
+    // The key-less coin has no HTLC key pair: the case the refusal exists for.
+    assert!(fx.coin.get_htlc_key_pair().is_some());
+    assert!(keyless.get_htlc_key_pair().is_none());
+
+    // `iaa` has an HTLC module and nothing else refuses the coin, so the key alone decides.
+    assert!(
+        !fx.coin.wallet_only_with_switch(&fx.ctx, true),
+        "a coin with a key is unaffected"
+    );
+    assert!(keyless.wallet_only_with_switch(&fx.ctx, true), "a coin without a key");
+    assert!(
+        !nyan_token(&fx.coin, false).wallet_only_with_switch(&fx.ctx, true),
+        "a token with a key"
+    );
+    assert!(
+        nyan_token(&keyless, false).wallet_only_with_switch(&fx.ctx, true),
+        "a token uses the policy of its platform coin"
+    );
+
+    // With the build switch off, as in this build, the answer is wallet-only either way.
+    assert!(keyless.wallet_only(&fx.ctx));
+    assert!(nyan_token(&keyless, false).wallet_only(&fx.ctx));
+}
+
+#[test]
+fn tm_act_a_custom_token_is_wallet_only_and_a_configured_token_is_not() {
+    // CRD ch.36 R36.1.2 (Reloaded rule): a custom token, activated from an inline protocol, is wallet-only as a
+    // custom EVM token is (ch.35 R35.2.7). A token of the coins file is unchanged.
+    let fx = fixture(Chain::Iris);
+    let custom = nyan_token(&fx.coin, true);
+    let configured = nyan_token(&fx.coin, false);
+    assert!(custom.custom_token);
+    assert!(!configured.custom_token);
+    assert!(custom.wallet_only_with_switch(&fx.ctx, true));
+    assert!(!configured.wallet_only_with_switch(&fx.ctx, true));
+    assert!(custom.wallet_only(&fx.ctx));
+
+    // The constructors that take no flag build a configured token.
+    let from_protocol = TendermintToken::from_protocol("IRIS-NYAN".to_owned(), fx.coin.clone(), 6, "unyan")
+        .unwrap_or_else(|e| panic!("the token: {}", e));
+    assert!(!from_protocol.custom_token);
+    let custom_from_protocol =
+        TendermintToken::from_protocol_with_custom_flag("IRIS-NYAN".to_owned(), fx.coin.clone(), 6, "unyan", true)
+            .unwrap_or_else(|e| panic!("the token: {}", e));
+    assert!(custom_from_protocol.custom_token);
+}
+
+/// The secret key at `path` of the test mnemonic, derived with the BIP-39 and BIP-32 crates directly, not through
+/// the wallet code under test.
+fn independent_secret(path: &str) -> [u8; 32] {
+    let mnemonic = bip39::Mnemonic::from_phrase(HD_MNEMONIC, bip39::Language::English).expect("a valid mnemonic");
+    let seed = bip39::Seed::new(&mnemonic, "");
+    let mut key: bip32::ExtendedPrivateKey<secp256k1::SecretKey> =
+        bip32::ExtendedPrivateKey::new(seed.as_bytes()).expect("a master key");
+    let path: bip32::DerivationPath = path.parse().expect("a derivation path");
+    for child in path {
+        key = key.derive_child(child).expect("a child key");
+    }
+    *key.private_key().as_ref()
+}
+
+/// The bech32 account address of the key with the given secret.
+fn address_of_secret(secret: &[u8; 32], prefix: &str) -> String {
+    SigningKey::from_slice(secret)
+        .expect("a signing key")
+        .public_key()
+        .account_id(prefix)
+        .expect("an account id")
+        .to_string()
+}
+
+/// A Cosmos Hub style coin with the derivation path `m/44'/118'`.
+fn atom_conf() -> Json {
+    json!({
+        "coin": "ATOM",
+        "avg_blocktime": 6,
+        "derivation_path": "m/44'/118'",
+        "protocol": { "type": "TENDERMINT", "protocol_data": {
+            "denom": "uatom",
+            "decimals": 6,
+            "account_prefix": "cosmos",
+            "chain_id": "cosmoshub-4",
+        } },
+        "mm2": 1
+    })
+}
+
+fn hd_login_ctx() -> MmArc {
+    let ctx = MmCtxBuilder::new()
+        .with_conf(json!({ "netid": mm2_net_config::SUPPORTED_NETIDS[0] }))
+        .into_mm_arc();
+    CryptoCtx::init_with_global_hd_account(ctx.clone(), HD_MNEMONIC).unwrap();
+    ctx
+}
+
+fn global_hd_of(ctx: &MmArc) -> GlobalHDAccountArc {
+    match CryptoCtx::from_ctx(ctx).unwrap().key_pair_policy() {
+        KeyPairPolicy::GlobalHDAccount(global_hd) => global_hd.clone(),
+        KeyPairPolicy::Iguana => panic!("expected an HD login"),
+    }
+}
+
+fn hd_coin_of(ctx: &MmArc, conf: &Json, node: &FakeNode, path_to_address: &PathToAddress) -> TendermintCoin {
+    common::block_on(tendermint_coin_from_conf_and_request_with_global_hd(
+        ctx,
+        "ATOM".to_owned(),
+        conf,
+        vec![RpcNode::for_test(&node.url())],
+        &global_hd_of(ctx),
+        path_to_address,
+        false,
+    ))
+    .unwrap_or_else(|e| panic!("cannot build the HD test coin: {}", e))
+}
+
+fn hd_coin(ctx: &MmArc, node: &FakeNode, path_to_address: &PathToAddress) -> TendermintCoin {
+    hd_coin_of(ctx, &atom_conf(), node, path_to_address)
+}
+
+/// The secret of the coin's activation policy.
+fn activated_secret(coin: &TendermintCoin) -> Vec<u8> {
+    coin.activation_policy
+        .activated_key_or_err()
+        .map_err(|e| e.to_string())
+        .expect("the activated key")
+        .as_slice()
+        .to_vec()
+}
+
+/// What the coin reports as its address, its public key and its HTLC key must be those of the key with `secret`.
+fn assert_coin_is_the_key(coin: &TendermintCoin, secret: &[u8; 32], context: &str) {
+    assert_eq!(
+        coin.my_address(),
+        Ok(address_of_secret(secret, "cosmos")),
+        "address, {context}"
+    );
+    assert_eq!(activated_secret(coin), secret.to_vec(), "activated key, {context}");
+    // The public key of the activation policy is the one of the activated private key, not the wallet's root
+    // public key (CRD ch.36 §36.7 code-quality finding).
+    assert_eq!(
+        coin.activation_policy.public_key().expect("a public key"),
+        cosmrs::tendermint::PublicKey::from_raw_secp256k1(&pubkey(secret)).expect("a valid public key"),
+        "public key of the policy, {context}"
+    );
+    assert_eq!(
+        coin.get_htlc_key_pair().expect("an HTLC key pair").public_slice(),
+        &pubkey(secret)[..],
+        "HTLC public key, {context}"
+    );
+    assert_eq!(
+        coin.get_public_key().ok(),
+        Some(
+            SigningKey::from_slice(secret)
+                .expect("a signing key")
+                .public_key()
+                .to_string()
+        ),
+        "reported public key, {context}"
+    );
+}
+
+#[test]
+fn tm_act_iguana_login_address_is_unchanged() {
+    // CRD ch.36 R36.1.2: without HD mode the activated address is the one of the single key, as before.
+    let fx = fixture(Chain::Iris);
+    assert_eq!(fx.coin.my_address(), Ok(address_of_secret(&OWN_KEY, "iaa")));
+    assert_eq!(activated_secret(&fx.coin), OWN_KEY.to_vec());
+}
+
+#[test]
+fn tm_act_hd_login_activates_the_standard_address_at_the_default_path() {
+    // CRD ch.36 R36.1.2, R36.1.4 step 3: under an HD login the coin is the address at account 0, External, address
+    // 0 under the coin's `derivation_path`: `m/44'/118'/0'/0/0`, as any BIP-44 wallet derives it.
+    let ctx = hd_login_ctx();
+    let node = FakeNode::start();
+    let coin = hd_coin(&ctx, &node, &PathToAddress::default());
+    let expected = independent_secret("m/44'/118'/0'/0/0");
+    assert_coin_is_the_key(&coin, &expected, "default path");
+    assert!(coin.activation_policy.has_local_key());
+}
+
+#[test]
+fn tm_act_hd_login_activates_the_address_at_the_given_path_to_address() {
+    // CRD ch.36 R36.1.2: another `path_to_address` selects the address at that path.
+    let ctx = hd_login_ctx();
+    let node = FakeNode::start();
+    let default_address = hd_coin(&ctx, &node, &PathToAddress::default()).my_address();
+    let cases = [
+        (
+            PathToAddress {
+                account_id: 1,
+                chain: Bip44Chain::External,
+                address_id: 0,
+            },
+            "m/44'/118'/1'/0/0",
+        ),
+        (
+            PathToAddress {
+                account_id: 0,
+                chain: Bip44Chain::Internal,
+                address_id: 0,
+            },
+            "m/44'/118'/0'/1/0",
+        ),
+        (
+            PathToAddress {
+                account_id: 2,
+                chain: Bip44Chain::Internal,
+                address_id: 7,
+            },
+            "m/44'/118'/2'/1/7",
+        ),
+    ];
+    for (path_to_address, path) in cases {
+        let coin = hd_coin(&ctx, &node, &path_to_address);
+        assert_coin_is_the_key(&coin, &independent_secret(path), path);
+        assert_ne!(coin.my_address(), default_address, "{path}");
+    }
+}
+
+#[test]
+fn tm_act_hd_login_without_a_derivation_path_fails_activation() {
+    // CRD ch.36 R36.1.4 step 3: a coin configuration without `derivation_path` cannot be activated under an HD login.
+    let ctx = hd_login_ctx();
+    let node = FakeNode::start();
+    let mut conf = atom_conf();
+    conf.as_object_mut().expect("an object").remove("derivation_path");
+    let err = common::block_on(tendermint_coin_from_conf_and_request_with_global_hd(
+        &ctx,
+        "ATOM".to_owned(),
+        &conf,
+        vec![RpcNode::for_test(&node.url())],
+        &global_hd_of(&ctx),
+        &PathToAddress::default(),
+        false,
+    ))
+    .err()
+    .expect("the activation needs a derivation path");
+    assert_eq!(err.get_inner().ticker, "ATOM");
+    assert!(
+        matches!(err.get_inner().kind, TendermintInitErrorKind::DerivationPathMissing),
+        "{err}"
+    );
+    assert!(err.to_string().contains("derivation_path"), "{err}");
+}
+
+/// A node that serves the block height, the account, the simulation and the balance a withdrawal asks for.
+fn script_withdraw_node(node: &FakeNode, balance_sat: u64) {
+    let account = QueryAccountResponse {
+        account: Some(Any {
+            type_url: "/cosmos.auth.v1beta1.BaseAccount".to_owned(),
+            value: BaseAccount {
+                account_number: ACCOUNT_NUMBER,
+                sequence: 1,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        }),
+    }
+    .encode_to_vec();
+    let simulation = SimulateResponse {
+        gas_info: Some(GasInfo {
+            gas_wanted: 125_000,
+            gas_used: 80_000,
+        }),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let balance = QueryBalanceResponse {
+        balance: Some(CoinProto {
+            denom: "uatom".to_owned(),
+            amount: balance_sat.to_string(),
+        }),
+    }
+    .encode_to_vec();
+    node.answer(move |method, params| match method {
+        "abci_info" => Some(json!({
+            "response": {
+                "data": "test",
+                "version": "0",
+                "app_version": "1",
+                "last_block_height": "100",
+                "last_block_app_hash": ""
+            }
+        })),
+        "abci_query" if params["path"] == "/cosmos.auth.v1beta1.Query/Account" => Some(abci_value(&account)),
+        "abci_query" if params["path"] == "/cosmos.tx.v1beta1.Service/Simulate" => Some(abci_value(&simulation)),
+        "abci_query" if params["path"] == "/cosmos.bank.v1beta1.Query/Balance" => Some(abci_value(&balance)),
+        _ => None,
+    });
+}
+
+/// Whether the first signature of the encoded transaction verifies, over the sign document of the chain and
+/// account number, against the public key.
+fn tx_signature_verifies(tx_bytes: &[u8], chain_id: &str, account_number: u64, public_key: &[u8]) -> bool {
+    let raw = TxRaw::decode(tx_bytes).expect("a transaction");
+    let sign_doc = SignDocProto {
+        body_bytes: raw.body_bytes.clone(),
+        auth_info_bytes: raw.auth_info_bytes.clone(),
+        chain_id: chain_id.to_owned(),
+        account_number,
+    };
+    let digest = Sha256::digest(&sign_doc.encode_to_vec());
+    let message = secp256k1::Message::from_digest_slice(digest.as_slice()).expect("a 32-byte digest");
+    let signature = secp256k1::ecdsa::Signature::from_compact(&raw.signatures[0]).expect("a compact signature");
+    let public_key = secp256k1::PublicKey::from_slice(public_key).expect("a public key");
+    secp256k1::Secp256k1::verification_only()
+        .verify_ecdsa(&message, &signature, &public_key)
+        .is_ok()
+}
+
+#[test]
+fn tm_act_hd_withdrawal_is_signed_with_the_key_at_the_path() {
+    // CRD ch.36 §36.7 code-quality finding: a withdrawal of a coin activated at a non-default path is signed with
+    // the key of that path and verifies against that path's public key, not against the wallet's root public key
+    // nor against the key of the default path.
+    let ctx = hd_login_ctx();
+    let node = FakeNode::start();
+    script_withdraw_node(&node, 10_000_000);
+    let path_to_address = PathToAddress {
+        account_id: 1,
+        chain: Bip44Chain::External,
+        address_id: 4,
+    };
+    let coin = hd_coin(&ctx, &node, &path_to_address);
+
+    let to = AccountId::new("cosmos", dhash160(&pubkey(&PEER_KEY)).as_slice())
+        .expect("a valid account id")
+        .to_string();
+    let request: WithdrawRequest =
+        serde_json::from_value(json!({ "coin": "ATOM", "to": to, "amount": "1" })).expect("a withdraw request");
+    let details =
+        common::block_on(coin.withdraw(request).compat()).unwrap_or_else(|e| panic!("the withdrawal failed: {}", e));
+
+    let own_address = address_of_secret(&independent_secret("m/44'/118'/1'/0/4"), "cosmos");
+    assert_eq!(details.from, vec![own_address]);
+    assert_eq!(details.coin, "ATOM");
+
+    let chain_id = "cosmoshub-4";
+    let tx_bytes = details.tx_hex.0.clone();
+    let path_key = pubkey(&independent_secret("m/44'/118'/1'/0/4"));
+    assert!(
+        tx_signature_verifies(&tx_bytes, chain_id, ACCOUNT_NUMBER, &path_key),
+        "the transaction is signed with the key of the path"
+    );
+    for (other, path) in [
+        (pubkey(&independent_secret("m/44'/118'/0'/0/0")), "the default path"),
+        (pubkey(&independent_secret("m")), "the wallet root"),
+    ] {
+        assert!(
+            !tx_signature_verifies(&tx_bytes, chain_id, ACCOUNT_NUMBER, &other),
+            "the signature must not verify against {path}"
+        );
     }
 }

@@ -38,6 +38,7 @@ pub use solana_with_tokens_activation::enable_solana_with_tokens;
 pub use spl_token_activation::enable_spl;
 pub use standalone_coin::{cancel_init_standalone_coin, init_standalone_coin, init_standalone_coin_status,
                           init_standalone_coin_user_action};
+pub use tendermint_token_activation::enable_tendermint_token;
 pub use token::enable_token;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
