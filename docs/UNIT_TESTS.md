@@ -585,3 +585,49 @@ requires zero confirmations and ignores the count.
 Not covered, because they need the node to answer the account, simulation and broadcast requests: the
 broadcast of the create, claim and fee transactions (`send_maker_payment`, `send_taker_payment`, the two
 spend methods, `send_taker_fee`), and `wait_for_tx_spend`.
+
+## Tendermint activation: custom tokens, HD key, key-less policy (21 tests)
+
+Location: eight tests in the module `tendermint_swap_flow_tests` of
+`mm2src/coins/tendermint/tendermint_swap_flow_tests.rs` (names start with `tm_act_`; native builds only), and
+thirteen in `mm2src/coins_activation/src/tendermint_with_tokens_activation/wire_tests.rs`. CRD: chapter 36,
+R36.1.2, R36.1.4 steps 3 and 4, R36.1.6, R36.2.1, R36.2.4 and T36.16, T36.17. Run with
+`cargo test -p coins --lib tendermint::tendermint_swap_flow_tests::tm_act_` and
+`cargo test -p coins_activation --lib tendermint_with_tokens_activation::wire_tests`.
+
+Not run yet: the tests were written in a session that did not build, and they run at the first build window.
+This line is replaced by the result of that run.
+
+The `coins` tests drive a `TendermintCoin` against the throwaway loopback server of the swap-flow tests. The HD
+tests log in with the standard test mnemonic (`abandon ... about`) and compute the expected key with the BIP-39 and
+BIP-32 crates directly, not through the wallet code. The `coins_activation` tests build the coin through the real
+activation routine (`enable_platform_coin`, which contacts no node) and activate tokens against a loopback node
+that answers the health check and a balance query. The build switch `TENDERMINT_SWAPS_AVAILABLE` is `false`, so the
+wallet-only tests evaluate the coin and the token with the switch on through `wallet_only_with_switch`.
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `tm_act_the_predicate_is_true_for_each_reason_alone` | R36.1.2, R18.11.23 | `tendermint_wallet_only` is false only for swaps on, an HTLC dialect, no coins-file flag, a local key and no custom token; each of the five other inputs alone makes it true |
+| `tm_act_a_coin_and_token_without_a_local_key_are_wallet_only` | R36.1.2 | A coin whose policy is `PrivKeyPolicy::Trezor` (built in the test) has no local key and no HTLC key pair and is wallet-only, and so is a token of it; a coin with a key and its token are not; with the build switch off all answer wallet-only |
+| `tm_act_a_custom_token_is_wallet_only_and_a_configured_token_is_not` | R36.1.2 | A token built with the custom flag is wallet-only; a configured token is not; the constructors without the flag build a configured token |
+| `tm_act_iguana_login_address_is_unchanged` | R36.1.2 | The single-key coin keeps the address of its key |
+| `tm_act_hd_login_activates_the_standard_address_at_the_default_path` | R36.1.2, R36.1.4 step 3 | Under an HD login the address, the activated key, the public key of the policy, the HTLC key and `get_public_key` are those of `m/44'/118'/0'/0/0` of the test mnemonic |
+| `tm_act_hd_login_activates_the_address_at_the_given_path_to_address` | R36.1.2 | Three other `path_to_address` values (account 1, the internal chain, account 2 internal address 7) give the matching path's key and a different address from the default |
+| `tm_act_hd_login_without_a_derivation_path_fails_activation` | R36.1.4 step 3 | A configuration without `derivation_path` fails with the missing-derivation-path error |
+| `tm_act_hd_withdrawal_is_signed_with_the_key_at_the_path` | §36.7 finding, T36.17 | A withdrawal of a coin activated at `m/44'/118'/1'/0/4` is signed with that key: the signature verifies against its public key and against neither the default path's key nor the wallet root key |
+| `an_inline_token_is_enabled_beside_the_platform_and_is_wallet_only` | R36.1.2, R36.1.4 step 4 | An inline-protocol token and a configured token are enabled in one call; the first is custom and wallet-only, the second is not; both are recorded on the platform |
+| `an_inline_protocol_for_a_configured_ticker_is_a_custom_token_error` | R36.1.6, T36.6 | `CustomTokenError` with `{"DuplicateTickerInConfig": {"ticker_in_config": ...}}`, HTTP 500; nothing registered |
+| `an_inline_token_of_another_platform_is_platform_coin_mismatch` | R36.1.4 step 4 | A custom token that names another platform is the unit `PlatformCoinMismatch`, HTTP 400 |
+| `an_inline_protocol_of_another_type_is_unexpected_token_protocol` | R36.1.6 | An inline `TENDERMINT` protocol is `UnexpectedTokenProtocol` with the canonical protocol form |
+| `a_custom_token_is_activated_on_its_own_and_is_wallet_only` | R36.2.1 | `enable_tendermint_token` with a `protocol` activates the token, reports the balance map and the platform, marks it custom and wallet-only, and refuses a second activation |
+| `a_configured_token_is_activated_as_before_and_is_not_custom` | R36.2.2 | The configured token activates as before and is not custom |
+| `a_custom_token_for_a_configured_ticker_on_its_own_is_a_custom_token_error` | R36.2.4, T36.6 | The same duplicate on the single-token method is HTTP 400 |
+| `a_custom_token_on_its_own_follows_the_platform_and_balance_errors` | R36.2.4 | A custom token before its platform is active is `PlatformCoinIsNotActivated`; with refusing nodes it is `CouldNotFetchBalance` and leaves the platform's token set unchanged; an inline protocol of another type is `UnexpectedTokenProtocol` |
+| `an_iguana_login_activates_the_address_of_the_passphrase_key_whatever_path_to_address_holds` | R36.1.2 | Under an iguana login every `path_to_address` value, valid or not, and a configuration without `derivation_path`, give the address of the passphrase key |
+| `an_hd_login_activates_the_address_at_the_default_path` | R36.1.4 step 3 | The platform activation under an HD login builds the address at `m/44'/118'/0'/0/0`, which is not the address of the passphrase key |
+| `an_hd_login_honors_path_to_address` | R36.1.2 | A full object, a partial object (defaults fill the rest) and an object with the account only select the matching path |
+| `an_hd_login_without_a_derivation_path_is_a_platform_coin_creation_error` | R36.1.4 step 3, R36.1.6 | A configuration without `derivation_path` fails with `PlatformCoinCreationError` naming the key |
+| `an_hd_login_with_an_invalid_path_to_address_is_a_platform_coin_creation_error` | R36.1.4 step 3, R36.1.6 | A string, a wrong-typed member, an unknown chain and a hardened index at 2^31 each fail with `PlatformCoinCreationError` |
+
+One existing test changed: `tm_flow_a_chain_without_an_htlc_module_is_wallet_only` passes the two new arguments of the
+predicate. The token helpers of the wire tests (`token_failure`) now call `enable_tendermint_token`.

@@ -170,6 +170,19 @@ impl TendermintCoin {
 // MmCoin trait implementation
 // ————————————————————————————————————————————————————————————————
 
+impl TendermintCoin {
+    /// [`MmCoin::wallet_only`] with the build switch given, so a test can evaluate the answer with swaps on.
+    pub(super) fn wallet_only_with_switch(&self, ctx: &MmArc, swaps_available: bool) -> bool {
+        tendermint_wallet_only(
+            swaps_available,
+            &self.protocol_info.account_prefix,
+            crate::is_wallet_only_ticker(ctx, self.ticker()),
+            self.activation_policy.has_local_key(),
+            false,
+        )
+    }
+}
+
 #[async_trait::async_trait]
 #[allow(unused_variables)]
 impl MmCoin for TendermintCoin {
@@ -177,15 +190,10 @@ impl MmCoin for TendermintCoin {
 
     /// Wallet-only while [`TENDERMINT_SWAPS_AVAILABLE`] is `false` (swaps for the family are postponed for the
     /// current beta), whatever the coins-config entry says; otherwise the entry decides. A chain whose account
-    /// prefix selects no HTLC dialect is wallet-only in either case (CRD ch.18 R18.11.23). Only order placement
-    /// asks this: a swap that has already started never does.
-    fn wallet_only(&self, ctx: &MmArc) -> bool {
-        tendermint_wallet_only(
-            TENDERMINT_SWAPS_AVAILABLE,
-            &self.protocol_info.account_prefix,
-            crate::is_wallet_only_ticker(ctx, self.ticker()),
-        )
-    }
+    /// prefix selects no HTLC dialect is wallet-only in either case (CRD ch.18 R18.11.23), and so is a coin whose
+    /// activation policy holds no local private key (CRD ch.18 R18.11.23a). Only order placement asks this: a swap
+    /// that has already started never does.
+    fn wallet_only(&self, ctx: &MmArc) -> bool { self.wallet_only_with_switch(ctx, TENDERMINT_SWAPS_AVAILABLE) }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         let coin = self.clone();

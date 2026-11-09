@@ -46,6 +46,22 @@ swaps with a hash of the passphrase text instead.
 
 A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R45–R49.
 
+### Upgrade note: Tendermint coins under an HD login move to the seed's standard address
+
+**If you log in with `enable_hd: true` and use a Tendermint coin (ATOM, IRIS and others), move
+its funds off the old address before you upgrade.** Under an HD login a Tendermint coin now uses
+the seed's standard address at `path_to_address`, as other wallets do; before upgrading, move
+funds from the old address with the previous release, v0.3.0-beta.1.
+- **The new address** is the BIP-44 address at the coin's `derivation_path` and `path_to_address`
+  (by default account 0, `External`, address 0), for example `m/44'/118'/0'/0/0` for ATOM.
+- **The old address** came from a hash of the passphrase text, which no other wallet uses. A node
+  that is upgraded without moving the funds first shows an empty balance on the new address.
+  Start the previous release and withdraw from the old address to the new one.
+- **A coin configuration without `derivation_path`** cannot be activated under an HD login and
+  fails with `PlatformCoinCreationError`.
+
+A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2, R36.1.4 step 3.
+
 ### Added
 
 #### ARRR and other shielded coins
@@ -166,6 +182,19 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   named by `MM_CONF_PATH`), where its coins list came from, the log file, the database folders and the
   wallet file it reads, so a node started from the wrong folder shows it at once. It never logs file
   contents or configuration values, and no WSS certificate or key path. Detail: PR #209; CRD ch.45 R45.6.6.
+
+#### Tendermint (Cosmos) coins
+
+- **Tendermint custom tokens can be activated.** `tokens_params` of `enable_tendermint_with_assets`
+  and `enable_tendermint_token` accept a `protocol` member, the `TENDERMINTTOKEN` protocol of a
+  token that is not in the coins file. A `protocol` for a ticker that the coins file already lists
+  fails with `CustomTokenError` (`DuplicateTickerInConfig`). A custom token is wallet-only: orders
+  and swaps with it are refused, as with a custom EVM token. Detail: PR #319; CRD ch.36 R36.1.2,
+  R36.2.1, R36.2.4.
+- **Under an HD login, a Tendermint coin honors `path_to_address`.** The activated address is the
+  one at `path_to_address` under the coin's `derivation_path` (default account 0, `External`,
+  address 0), and the coin's public key is derived from that address's key. See the upgrade note
+  above. Detail: PR #319; CRD ch.36 R36.1.2, R36.1.4 step 3.
 
 #### Releases and downloads
 
@@ -435,8 +464,8 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   - The maker sends one keep-alive per pair every 30 s instead of re-sending each order.
   - A relay's peer ID comes from the same key.
   - The hash of the passphrase text is kept only for swaps that recorded it, for a Lightning node's
-    seed, and for activating BCH with its tokens and Tendermint, until those activations move to
-    the coin key.
+    seed, and for activating BCH with its tokens, until that activation moves to the coin key
+    (Tendermint moved to the coin key; see the upgrade note above).
 
   See the upgrade note above. Detail: PRs #253, #254; CRD ch.05 R45–R49.
 - **Under an HD login, a swap whose announced key would differ from the key its coin pays from is
@@ -566,6 +595,15 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### Tendermint (Cosmos) coins
 
+- **Under an HD login, a Tendermint coin now uses the seed's standard address, not the address of
+  the passphrase hash.** **Before you upgrade, move funds from the old address with the previous
+  release, v0.3.0-beta.1.** Under an HD login a Tendermint coin (ATOM, IRIS and others) now uses the
+  seed's standard address at `path_to_address`, as other wallets do. A login without `enable_hd`
+  does not change. See the upgrade note above. Detail: PR #319; CRD ch.36 R36.1.2, R36.1.4 step 3.
+- **A Tendermint coin or token that holds no local private key is wallet-only.** It is refused when
+  an order is placed, so this node's own key cannot stand in for the coin's key on the swap path. A
+  token follows its platform coin. No activation produces such a coin yet. Detail: PR #319; CRD
+  ch.36 R36.1.2.
 - **The Tendermint swap code follows the CRD's swap rules more closely; Tendermint swaps stay off.**
   Swaps of Tendermint coins remain switched off in this release, and their code was brought closer to
   the rules they will follow when they return:
@@ -1070,7 +1108,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   set.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — parked: Tendermint swaps were added to the
   0.4.0 scope on 2026-11-08; accepting both forms of the activation parameters is decided and not
-  started.
+  started. Two of its features are implemented: custom tokens (wallet-only) and the HD
+  `path_to_address` (PR #319).
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
   recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226). On an SLP
