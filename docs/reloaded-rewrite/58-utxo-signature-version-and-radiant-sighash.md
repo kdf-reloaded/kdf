@@ -842,11 +842,16 @@ above, one by one:
   transactions of a maker and of a taker were accepted by Radiant and
   mined. Both swaps finished with no failure event.
 - *Relay-fee floor against the configured fee:* a plain withdrawal paid
-  0.0374 RXD for 374 bytes, the configured 0.1 RXD per kilobyte, which is
-  about 100,000 times the relay floor the Electrum server reports
-  (0.000001 RXD per kilobyte). No transaction was rejected for its fee.
-  The configured fee is more than the network requires; whether to lower
-  it is a separate question.
+  0.0374 RXD for 374 bytes, the configured 0.1 RXD per kilobyte, and no
+  transaction of these tests was rejected for its fee. The configured fee
+  is the network's minimum, not a margin above it. A withdrawal of 226
+  bytes that paid 0.00000226 RXD (0.00001 RXD per kilobyte) was refused at
+  broadcast with "min relay fee not met", although the Electrum servers
+  answer `blockchain.relayfee` with 0.000001 RXD per kilobyte, which is
+  not what the node enforces. The public source of Radiant Core sets its
+  minimum relay fee to 0.1 RXD per kilobyte since release 2.0 (0.01 RXD
+  per kilobyte before). The `txfee` of the coins entry therefore stays at
+  10000000 satoshis per kilobyte.
 - *Lock time against 300-second blocks:* the maker's refund was broadcast
   27 minutes after the lock time recorded in the payment transaction (that
   lock time was 4 h 25 min after the payment), the taker's 18 minutes after
