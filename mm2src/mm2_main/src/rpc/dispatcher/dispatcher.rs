@@ -34,6 +34,7 @@ use coins::nft::rpc::{clear_nft_db, get_nft_list, get_nft_metadata, get_nft_tran
 // native-only.
 use coins::rpc_command::account_balance::account_balance;
 use coins::rpc_command::consolidate_utxos::consolidate_utxos_rpc;
+use coins::rpc_command::electrum_servers::electrum_servers_rpc;
 use coins::rpc_command::fetch_utxos::fetch_utxos_rpc;
 use coins::rpc_command::get_current_mtp::get_current_mtp_rpc;
 use coins::rpc_command::get_enabled_coins::get_enabled_coins_rpc;
@@ -229,6 +230,7 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "approve_token" => handle_mmrpc(ctx, request, approve_token).await,
         "best_orders" => handle_mmrpc(ctx, request, best_orders_rpc_v2).await,
         "consolidate_utxos" => handle_mmrpc(ctx, request, consolidate_utxos_rpc).await,
+        "electrum_servers" => handle_mmrpc(ctx, request, electrum_servers_rpc).await,
         "enable_bch_with_tokens" => handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<BchCoin>).await,
         // `enable_erc20` and its alias `enable_nft` share one single-token handler (CRD ch. 35 R35.2.4).
         "enable_erc20" => handle_mmrpc(ctx, request, enable_evm_token).await,

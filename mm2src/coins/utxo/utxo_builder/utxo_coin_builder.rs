@@ -4,7 +4,7 @@ use crate::rpc_command::get_my_address::PathToAddress;
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::rpc_clients::electrum_pool::{electrum_block_interval, electrum_server_order,
                                               electrum_spread_near_factor, electrum_spread_near_offset_ms,
-                                              electrum_spread_reads};
+                                              electrum_spread_reads, electrum_tip_checks};
 use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumPoolOptions, ElectrumPoolTimings,
                                ElectrumRpcRequest, EstimateFeeMethod, UtxoRpcClientEnum};
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
@@ -530,6 +530,7 @@ pub(crate) async fn build_electrum_client(
         near_factor: electrum_spread_near_factor(ctx),
         near_offset_ms: electrum_spread_near_offset_ms(ctx),
         block_interval: electrum_block_interval(coin_conf),
+        tip_checks: electrum_tip_checks(ctx),
     });
     for (server, e) in client.add_servers(&servers) {
         // A server is named as `host:port` or by a placeholder, never by its configured string (CRD ch.38

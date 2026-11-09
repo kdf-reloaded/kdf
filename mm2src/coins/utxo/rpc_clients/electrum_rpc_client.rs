@@ -1,5 +1,5 @@
 #[cfg(test)] use super::electrum_pool::ServerStateSnapshot;
-use super::electrum_pool::{ElectrumPoolOptions, PoolShared};
+use super::electrum_pool::{ElectrumPoolOptions, ElectrumServersView, PoolShared};
 use super::*;
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::header_time_only::read_window_times;
@@ -243,13 +243,20 @@ pub(crate) type HeaderNotified = Arc<dyn Fn(u64) + Send + Sync>;
 
 /// No tip is known yet.
 const NO_TIP: u64 = u64::MAX;
+/// No moment is known yet.
+const NO_TIME_MS: u64 = u64::MAX;
 
 /// What a connection has learned about the chain tip: the height of the last header it carried, and whether
 /// a header request was answered over it, which makes the server push a notification for each new tip
-/// (CRD ch.38 R38.6.4l items 2 and 6, D38.6.4l.4).
+/// (CRD ch.38 R38.6.4l items 2 and 6, D38.6.4l.4), and when the first answer and the last notification came
+/// (R38.6.4o item 4).
 pub(crate) struct HeaderTrack {
     notifying: AtomicBool,
     tip: AtomicU64,
+    /// When the first header answer came, in milliseconds since the epoch.
+    answered_at_ms: AtomicU64,
+    /// When the last header notification came, in milliseconds since the epoch.
+    notified_at_ms: AtomicU64,
     on_notification: HeaderNotified,
 }
 
@@ -258,21 +265,37 @@ impl HeaderTrack {
         HeaderTrack {
             notifying: AtomicBool::new(false),
             tip: AtomicU64::new(NO_TIP),
+            answered_at_ms: AtomicU64::new(NO_TIME_MS),
+            notified_at_ms: AtomicU64::new(NO_TIME_MS),
             on_notification,
         }
     }
 
-    /// The answer to a header request: the server now pushes the tips that follow.
+    /// The answer to a header request: the server now pushes the tips that follow. The first answer starts the
+    /// silence a stuck connection is counted from; a later one (a block-count read over the connection) only moves
+    /// the height.
     fn note_answer(&self, height: u64) {
-        self.tip.store(height, AtomicOrdering::Relaxed);
+        let first = self.tip.swap(height, AtomicOrdering::Relaxed) == NO_TIP;
+        if first {
+            self.answered_at_ms.store(now_ms(), AtomicOrdering::Relaxed);
+        }
         self.notifying.store(true, AtomicOrdering::Relaxed);
     }
 
     /// A header notification: the connection's height moves, and the pool is told.
     fn note_notification(&self, height: u64) {
         self.note_answer(height);
+        self.notified_at_ms.store(now_ms(), AtomicOrdering::Relaxed);
         (self.on_notification)(height);
     }
+
+    /// When the first header answer came (seconds since the epoch).
+    pub(crate) fn answered_at(&self) -> Option<f64> { Self::seconds(self.answered_at_ms.load(AtomicOrdering::Relaxed)) }
+
+    /// When the last header notification came (seconds since the epoch).
+    pub(crate) fn notified_at(&self) -> Option<f64> { Self::seconds(self.notified_at_ms.load(AtomicOrdering::Relaxed)) }
+
+    fn seconds(ms: u64) -> Option<f64> { (ms != NO_TIME_MS).then(|| ms as f64 / 1000.) }
 
     /// The height of the last header the connection carried.
     pub(crate) fn tip(&self) -> Option<u64> {
@@ -547,6 +570,10 @@ impl ElectrumClientImpl {
     /// Get available protocol versions.
     pub fn protocol_version(&self) -> &OrdRange<f32> { &self.protocol_version }
 
+    /// The pool as the `electrum_servers` request reports it (CRD ch.38 R38.6.4o item 10). It sends nothing to any
+    /// server and changes nothing.
+    pub fn servers_view(&self) -> ElectrumServersView { self.pool.servers_view() }
+
     /// What a test sees of each server of the pool.
     #[cfg(test)]
     pub(crate) fn pool_snapshot(&self) -> Vec<ServerStateSnapshot> { self.pool.snapshot() }
@@ -711,6 +738,105 @@ impl ElectrumClient {
     pub fn transaction_get_from(&self, server: &str, txid: &H256Json) -> RpcRes<BytesJson> {
         let verbose = false;
         rpc_func_from!(self, server, "blockchain.transaction.get", txid, verbose)
+    }
+
+    /// `blockchain.transaction.get` of `server` with the verbose flag: the transaction with its confirmations.
+    pub fn transaction_get_verbose_from(&self, server: &str, txid: &H256Json) -> RpcRes<RpcTransaction> {
+        let verbose = true;
+        rpc_func_from!(self, server, "blockchain.transaction.get", txid, verbose)
+    }
+
+    /// The wait for the confirmations of a transaction (CRD ch.38 R38.6.4o item 6). It chooses one server when it
+    /// starts (see [`PoolShared::choose_wait_server`]) and sends every transaction request and block-count request
+    /// to it as a directed request (R38.6.4g), so that the answer that ends the wait always comes from the server
+    /// being polled and never from whichever server a spread read reached. When a request to the server fails in
+    /// transport, the wait chooses again, leaving out the servers that failed during this wait while another choice
+    /// exists, and goes on with the new server. An error answer of the server is an answer, not a failure of the
+    /// server. No request is added: the wait asks as often as it did.
+    pub(crate) async fn wait_for_confirmations_on_one_server(
+        &self,
+        tx_hash: H256Json,
+        expiry_height: u32,
+        confirmations: u32,
+        requires_notarization: bool,
+        wait_until: u64,
+        check_every: u64,
+    ) -> Result<(), String> {
+        let mut failed: Vec<String> = Vec::new();
+        let mut server = self.pool.choose_wait_server(&failed);
+        loop {
+            if now_ms() / 1000 > wait_until {
+                return ERR!(
+                    "Waited too long until {} for transaction {:?} to be confirmed {} times",
+                    wait_until,
+                    tx_hash,
+                    confirmations
+                );
+            }
+            let Some(addr) = server.clone() else {
+                error!("No Electrum server to poll for the transaction {:?}, retrying", tx_hash);
+                Timer::sleep(check_every as f64).await;
+                server = self.pool.choose_wait_server(&failed);
+                continue;
+            };
+
+            match self.transaction_get_verbose_from(&addr, &tx_hash).compat().await {
+                Ok(t) => {
+                    let tx_confirmations = if requires_notarization {
+                        t.confirmations
+                    } else {
+                        t.rawconfirmations.unwrap_or(t.confirmations)
+                    };
+                    if tx_confirmations >= confirmations {
+                        return Ok(());
+                    } else {
+                        info!(
+                            "Waiting for tx {:?} confirmations, now {}, required {}, requires_notarization {}",
+                            tx_hash, tx_confirmations, confirmations, requires_notarization
+                        )
+                    }
+                },
+                Err(e) => {
+                    if e.error.is_transport() {
+                        failed.push(addr);
+                        server = self.pool.choose_wait_server(&failed);
+                        // Another server is asked at once; with none left to choose, the wait goes on as before.
+                        if server.as_ref().map_or(false, |next| !failed.contains(next)) {
+                            continue;
+                        }
+                    }
+                    if expiry_height > 0 {
+                        let Some(addr) = server.clone() else {
+                            Timer::sleep(check_every as f64).await;
+                            continue;
+                        };
+                        match self.blockchain_headers_subscribe_from(&addr).compat().await {
+                            Ok(header) => {
+                                let block = header.block_height();
+                                if block > expiry_height as u64 {
+                                    return ERR!("The transaction {:?} has expired, current block {}", tx_hash, block);
+                                }
+                            },
+                            Err(e) => {
+                                error!("Error {} getting block number, retrying in 10 seconds", e);
+                                if e.error.is_transport() {
+                                    failed.push(addr);
+                                    server = self.pool.choose_wait_server(&failed);
+                                }
+                                Timer::sleep(check_every as f64).await;
+                                continue;
+                            },
+                        }
+                    }
+                    error!(
+                        "Error {:?} getting the transaction {:?}, retrying in 10 seconds",
+                        e, tx_hash
+                    )
+                },
+            }
+
+            Timer::sleep(check_every as f64).await;
+        }
     }
 }
 
@@ -2925,6 +3051,18 @@ mod tls_tests {
     }
 }
 
+/// A client with the default pool settings but the tip checks off (CRD ch.38 R38.6.4o item 11): with them on, a
+/// connection sends a header request when it joins, which the tests that count request messages do not want to see.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn client_without_tip_checks() -> ElectrumClientImpl {
+    let mut client = ElectrumClientImpl::new("MOCK".to_owned(), vec![]);
+    client.configure_pool(ElectrumPoolOptions {
+        tip_checks: false,
+        ..Default::default()
+    });
+    client
+}
+
 /// An Electrum client connected to a loopback stub server (see `electrum_stub_server`), for tests that count request
 /// messages. `script` sets the stub's canned answers before the client connects; the stub records every message
 /// the client writes, and `StubServer::request_messages` returns those that are not the connection's own traffic.
@@ -2937,7 +3075,7 @@ pub(crate) fn electrum_client_over_stub(
     common::block_on(async {
         let server = StubServer::start(StubBehavior::Answer).await;
         script(&server);
-        let client = ElectrumClientImpl::new("MOCK".to_owned(), vec![]);
+        let client = client_without_tip_checks();
         client
             .add_server(&server.request())
             .expect("the stub is a usable server");
@@ -2954,7 +3092,7 @@ pub(crate) fn electrum_client_over_stub(
 /// (read spreading on). Returns once every server is in the maintained set.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) async fn electrum_client_over_stubs(servers: &[&super::electrum_stub_server::StubServer]) -> ElectrumClient {
-    let client = ElectrumClientImpl::new("MOCK".to_owned(), vec![]);
+    let client = client_without_tip_checks();
     for server in servers {
         client.add_server(&server.request()).expect("a stub is a usable server");
     }

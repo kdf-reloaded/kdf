@@ -15,10 +15,12 @@
 //! Every duration is held in [`ElectrumPoolTimings`]; production uses [`ElectrumPoolTimings::default`],
 //! tests build the pool with millisecond values.
 
-use super::electrum_measure::{block_interval_from_conf, eligible_servers, is_slow, lags_behind, near_sessions,
-                              next_round_at, pick_replacement, rank_after_round, rank_with_replacement, shuffle,
-                              stale_limit, Draw, Measurement, Measuring, RoundServer, ServerQuality,
-                              NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
+use super::electrum_measure::{agreed_tip, block_interval_from_conf, eligible_servers, is_beyond_tolerance, is_slow,
+                              lag, lead, near_sessions, next_round_at, out_of_date_states, pick_replacement,
+                              rank_after_round, rank_with_replacement, remeasure_gap, round_agreed_tip, shuffle,
+                              signed_lag, stale_limit, tolerance_blocks, Draw, Measurement, Measuring, OutOfDate,
+                              PoorReason, RoundServer, ServerQuality, TipFigure, NEAR_FACTOR_DEFAULT,
+                              NEAR_OFFSET_DEFAULT_MS};
 use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, ServerSpec, Session, SessionEnded,
                                  TlsNotice};
 use super::*;
@@ -62,6 +64,9 @@ pub struct ElectrumPoolTimings {
     pub round_floor: Duration,
     /// The shortest time between the starts of two re-measure rounds of a coin (R38.6.4l items 3 and 7).
     pub remeasure_limit: Duration,
+    /// The longest the least time between two re-measure rounds grows to after rounds without a replacement
+    /// (R38.6.4o item 8).
+    pub remeasure_cap: Duration,
     /// How long a poor connection stays poor-demoted after its last trigger (R38.6.4l item 7).
     pub poor_demotion: Duration,
     /// The least time without a header notification that makes a lone connection stale (R38.6.4l item 6).
@@ -87,6 +92,7 @@ impl Default for ElectrumPoolTimings {
             budget_reserve: Duration::from_secs(5),
             round_floor: Duration::from_secs(5),
             remeasure_limit: Duration::from_secs(5 * 60),
+            remeasure_cap: Duration::from_secs(60 * 60),
             poor_demotion: Duration::from_secs(15 * 60),
             stale_floor: Duration::from_secs(10 * 60),
             latency_floor: Duration::from_millis(300),
@@ -120,6 +126,18 @@ impl ServerOrder {
     pub(super) fn shuffle_with<T, R: rand::Rng>(mut items: Vec<T>, rng: &mut R) -> Vec<T> {
         items.shuffle(rng);
         items
+    }
+
+    /// The value of `electrum_server_order` this order is (R38.6.4o item 10).
+    pub(super) fn name(&self) -> &'static str {
+        match self {
+            ServerOrder::Listed => "listed",
+            ServerOrder::Random => "random",
+            ServerOrder::Mixed => "mixed",
+            ServerOrder::Measured => "measured",
+            #[cfg(test)]
+            ServerOrder::Fixed(_) => "fixed",
+        }
     }
 
     /// Which measured order this is, if it is one.
@@ -216,6 +234,36 @@ pub(crate) fn electrum_spread_reads(ctx: &MmArc) -> bool {
     spread
 }
 
+/// Whether `conf` asks for the tip checks, and the warning to log when its `electrum_tip_checks` is not a boolean. An
+/// absent key and a JSON `null` mean `true`, without a warning (CRD ch.38 R38.6.4o item 11, D38.6.4o.5).
+pub(super) fn parse_tip_checks(conf: &Json) -> (bool, Option<String>) {
+    match &conf["electrum_tip_checks"] {
+        Json::Null => (true, None),
+        Json::Bool(checks) => (*checks, None),
+        other => (
+            true,
+            Some(format!(
+                "electrum_tip_checks {other} is not a boolean; using true (the tip checks are on)"
+            )),
+        ),
+    }
+}
+
+/// CRD ch.38 R38.6.4o item 11: the `MM2.json` boolean `electrum_tip_checks`, read at coin activation, default
+/// `true`. With `false`, the header request on joining is sent only under `mixed` and `measured`, no connection is
+/// ever out of date (so reads, broadcasts and confirmation waits ignore the chain tips) and the warnings about
+/// out-of-date servers are not logged. A value that is not a boolean is taken as `true` and one warning is logged.
+///
+/// **Compatibility:** for behaviour matching GLEEC KDF, set `electrum_tip_checks` to `false`, together with
+/// `electrum_server_order` `listed` and `electrum_spread_reads` `false`.
+pub(crate) fn electrum_tip_checks(ctx: &MmArc) -> bool {
+    let (checks, warning) = parse_tip_checks(&ctx.conf);
+    if let Some(warning) = warning {
+        warn!("{warning}");
+    }
+    checks
+}
+
 /// The non-negative number `conf` holds under `key`, and the warning to log when the key holds anything else. An
 /// absent key means `default`, without a warning.
 fn parse_non_negative_number(conf: &Json, key: &str, default: f64) -> (f64, Option<String>) {
@@ -303,6 +351,14 @@ pub(super) fn is_read_only(request: &JsonRpcRequestEnum) -> bool {
     }
 }
 
+/// The Electrum method of a transaction broadcast (R38.6.4a item 2, R38.6.4o item 5).
+const BROADCAST_METHOD: &str = "blockchain.transaction.broadcast";
+
+/// Whether `request` is a transaction broadcast.
+fn is_broadcast(request: &JsonRpcRequestEnum) -> bool {
+    matches!(request, JsonRpcRequestEnum::Single(single) if single.method == BROADCAST_METHOD)
+}
+
 /// How a coin's pool is set up (CRD ch.38 R38.6.4b).
 #[derive(Clone, Debug)]
 pub struct ElectrumPoolOptions {
@@ -322,8 +378,12 @@ pub struct ElectrumPoolOptions {
     pub near_factor: f64,
     /// The near offset *A* of R38.6.4a item 6, in milliseconds.
     pub near_offset_ms: f64,
-    /// The coin's block interval, from its `avg_blocktime` (R38.6.4l item 6); `None` when it has none.
+    /// The coin's block interval, from its `avg_blocktime` (R38.6.4l item 6); `None` when it has none. The coin's
+    /// tolerance (R38.6.4o item 1) is derived from it once, when the pool is built.
     pub block_interval: Option<Duration>,
+    /// Whether the chain tips of the maintained connections are checked (R38.6.4o item 11): the header request on
+    /// joining under every order, the out-of-date state of a connection and what follows from it.
+    pub tip_checks: bool,
 }
 
 impl Default for ElectrumPoolOptions {
@@ -338,6 +398,7 @@ impl Default for ElectrumPoolOptions {
             near_factor: NEAR_FACTOR_DEFAULT,
             near_offset_ms: NEAR_OFFSET_DEFAULT_MS,
             block_interval: None,
+            tip_checks: true,
         }
     }
 }
@@ -493,6 +554,45 @@ impl Failures {
     }
 }
 
+/// One server of a coin's pool as the `electrum_servers` request reports it (CRD ch.38 R38.6.4o item 10).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ElectrumServerView {
+    /// The host-only label of the server (R38.6.9a).
+    pub server: String,
+    /// The position in the coin's current rank, from 0.
+    pub rank: usize,
+    pub maintained: bool,
+    /// The near decision of R38.6.4a item 6 with R38.6.4o item 5, judged at the moment of the request; `false` for a
+    /// server that is not maintained.
+    pub near: bool,
+    /// The height the server's open connection reports; `None` for a server without one.
+    pub height: Option<u64>,
+    /// The agreed tip minus the height; negative for a server above the agreed tip, its lead negated; `None` without a
+    /// height or an agreed tip.
+    pub lag: Option<i64>,
+    /// `"behind"`, `"ahead"` or `"stuck"` for a maintained connection that is out of date, otherwise `None`.
+    pub out_of_date: Option<&'static str>,
+    /// The smoothed latency of a maintained connection (R38.6.4l item 2).
+    pub latency_ms: Option<f64>,
+    pub suspended: bool,
+    pub poor_demoted: bool,
+    pub removed: bool,
+}
+
+/// A coin's pool as the `electrum_servers` request reports it (CRD ch.38 R38.6.4o item 10).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ElectrumServersView {
+    pub coin: String,
+    /// The value of `electrum_server_order` in force.
+    pub server_order: &'static str,
+    /// The coin's tolerance *T* in blocks (R38.6.4o item 1).
+    pub tolerance_blocks: u64,
+    /// The running agreed tip of the maintained connections (R38.6.4o item 4); `None` when there is none.
+    pub agreed_tip: Option<u64>,
+    /// Every server of the pool, in the coin's current rank.
+    pub servers: Vec<ElectrumServerView>,
+}
+
 /// What a test sees of one server of the pool.
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
@@ -520,6 +620,17 @@ pub struct ServerStateSnapshot {
     pub poor_until: f64,
 }
 
+/// What the answer to a header request tells (R38.6.4l item 2, R38.6.4o item 7).
+struct HeaderAnswer {
+    latency_ms: f64,
+    height: u64,
+    /// The header bytes the answer carried, when it carried a readable header.
+    header: Option<Vec<u8>>,
+}
+
+/// The most connections a re-measure round has in flight at a time (R38.6.4o item 8).
+const REMEASURE_IN_FLIGHT: usize = 4;
+
 /// The pool's figures of the measured order that are not a server's (R38.6.4l items 2 and 7).
 #[derive(Default)]
 struct MeasureState {
@@ -527,6 +638,11 @@ struct MeasureState {
     activation_best_ms: Option<f64>,
     /// When the last re-measure round started (seconds since the epoch).
     last_round_started: Option<f64>,
+    /// How many re-measure rounds in a row ended without a replacement (R38.6.4o item 8); the least time before the
+    /// round after the next one doubles with each.
+    backoff_level: u32,
+    /// The backoff level that applied when the last round started: the least time before the next round.
+    gap_level: u32,
     /// Tests: the start of every re-measure round.
     #[cfg(test)]
     rounds: Vec<f64>,
@@ -558,6 +674,10 @@ pub(super) struct PoolShared {
     read_cursor: AtomicUsize,
     /// The coin's block interval (R38.6.4l item 6).
     block_interval: Option<Duration>,
+    /// The coin's tolerance *T* in blocks, computed once from the block interval (R38.6.4o item 1).
+    tolerance: u64,
+    /// R38.6.4o item 11.
+    tip_checks: bool,
     measure: StdMutex<MeasureState>,
     /// Where the random choices of the measured order come from; tests inject their own.
     draw: StdMutex<DrawSource>,
@@ -596,6 +716,8 @@ impl PoolShared {
             near_offset_ms: options.near_offset_ms,
             read_cursor: AtomicUsize::new(0),
             block_interval: options.block_interval,
+            tolerance: tolerance_blocks(options.block_interval),
+            tip_checks: options.tip_checks,
             measure: StdMutex::new(MeasureState::default()),
             draw: StdMutex::new(random_draw()),
             measure_tx,
@@ -1052,8 +1174,9 @@ impl PoolShared {
     // ---- maintenance (R38.6.4c) ---------------------------------------------------------------
 
     /// Adds the connection of `slot` to the maintained set, demoting the lowest-ranked member if the set
-    /// then exceeds the ceiling (R38.6.4c item 2). Under a measured order, a connection that joins with no
-    /// header request sent over it sends one right after joining (R38.6.4l item 6, D38.6.4l.4).
+    /// then exceeds the ceiling (R38.6.4c item 2). A connection that joins with no header request sent over it
+    /// sends one right after joining, under every order unless the tip checks are off (R38.6.4o item 3,
+    /// D38.6.4o.4); under a measured order always (R38.6.4l item 6, D38.6.4l.4).
     fn join_maintained(self: &Arc<Self>, slot: &Arc<ServerSlot>, session: &Arc<Session>) {
         if session.is_closed() {
             return;
@@ -1087,16 +1210,15 @@ impl PoolShared {
                 }
             }
         }
-        // Under `random` and `listed` there is no header request on joining (R38.6.4a item 7).
-        if joined && self.measuring().is_some() && !session.headers().is_notifying() {
+        if joined && (self.tip_checks || self.measuring().is_some()) && !session.headers().is_notifying() {
             self.request_header_on_join(slot, session);
         }
     }
 
     /// The header request a connection sends right after it joins the maintained set without one (R38.6.4l
-    /// item 6, D38.6.4l.4). Its answer is the connection's height and the server then pushes a notification for
-    /// each new tip. It is a one-off per join: it is neither a sample of the smoothed latency nor a
-    /// measurement round, so the limit on re-measure rounds does not count it.
+    /// item 6, D38.6.4l.4; R38.6.4o item 3). Its answer is the connection's height and the server then pushes a
+    /// notification for each new tip. It is a one-off per join: it is neither a sample of the smoothed latency nor
+    /// a measurement round, so the limit on re-measure rounds does not count it.
     fn request_header_on_join(self: &Arc<Self>, slot: &Arc<ServerSlot>, session: &Arc<Session>) {
         if session.is_closed() || !slot.is_maintained() {
             return;
@@ -1204,10 +1326,11 @@ impl PoolShared {
                                     .await
                                     .ok()
                                     .flatten()
-                                    .map(|(latency_ms, height)| Measurement {
+                                    .map(|answer| Measurement {
                                         id: slot.id,
-                                        latency_ms,
-                                        height,
+                                        latency_ms: answer.latency_ms,
+                                        height: answer.height,
+                                        header: answer.header,
                                         suspended: was_suspended,
                                     });
                                 ProbeStep::Measured(slot, session, measured)
@@ -1258,7 +1381,9 @@ impl PoolShared {
             }
         }
         let round = self.round_servers(&measurements);
-        let eligible = eligible_servers(&round, self.reported_tip(), self.latency_floor_ms());
+        let reported = self.reported_heights();
+        self.warn_measured_behind(&round, &reported);
+        let eligible = eligible_servers(&round, &reported, self.tolerance, self.latency_floor_ms());
         let all: Vec<usize> = self.slots().iter().map(|slot| slot.id).collect();
         let order = self.with_draw(|draw| rank_after_round(mode, &eligible, &all, draw));
         self.apply_rank(&order);
@@ -1305,17 +1430,43 @@ impl PoolShared {
 
     fn latency_floor_ms(&self) -> f64 { self.timings.latency_floor.as_secs_f64() * 1000. }
 
-    /// The highest height a maintained connection currently reports (D38.6.4l.3).
-    fn reported_tip(&self) -> Option<u64> {
+    /// The height each maintained connection currently reports, by server id (D38.6.4l.3, R38.6.4o item 2): one
+    /// height per server, for the agreed tip of a measurement round.
+    fn reported_heights(&self) -> Vec<(usize, u64)> {
         self.maintained_slots()
             .iter()
             .filter_map(|slot| {
-                slot.state()
-                    .session
-                    .as_ref()
-                    .and_then(|session| session.headers().tip())
+                let height = slot.state().session.as_ref()?.headers().tip()?;
+                Some((slot.id, height))
             })
-            .max()
+            .collect()
+    }
+
+    /// For each measured server of a round whose lag or lead to the round's agreed tip is more than the tolerance,
+    /// one WARN line, the *behind* or the *ahead* one (R38.6.4o item 9).
+    fn warn_measured_behind(&self, round: &[RoundServer], reported: &[(usize, u64)]) {
+        let Some(tip) = round_agreed_tip(round, reported) else {
+            return;
+        };
+        for server in round {
+            let Some(m) = &server.measurement else { continue };
+            let behind = lag(tip, m.height);
+            let ahead = lead(tip, m.height);
+            let Some(slot) = self.slot_by_id(server.id) else {
+                continue;
+            };
+            if behind > self.tolerance {
+                warn!(
+                    "{}: Electrum server {} is {} blocks behind the other servers (tip {})",
+                    self.ticker, slot.label, behind, tip
+                );
+            } else if ahead > self.tolerance {
+                warn!(
+                    "{}: Electrum server {} is {} blocks ahead of the other servers (tip {})",
+                    self.ticker, slot.label, ahead, tip
+                );
+            }
+        }
     }
 
     /// Every server of the pool as a measurement round sees it.
@@ -1329,7 +1480,7 @@ impl PoolShared {
                     id: slot.id,
                     removed: state.removed.is_some(),
                     poor_demoted: state.quality.is_poor_demoted(now),
-                    measurement: measurements.iter().find(|m| m.id == slot.id).copied(),
+                    measurement: measurements.iter().find(|m| m.id == slot.id).cloned(),
                 }
             })
             .collect()
@@ -1346,17 +1497,18 @@ impl PoolShared {
         }
     }
 
-    /// The header request of a measurement or of a joining connection (R38.6.4l items 2 and 6) over `session`,
-    /// answered within `timeout`: the round trip in milliseconds and the height of the answered tip. `None` when
-    /// the server did not answer or the answer has no height. A request that fails closes a connection the slot
-    /// holds (`stored`), as any failed request does (R38.6.4f item 1); the caller releases a connection of its own.
+    /// The header request of a measurement or of a joining connection (R38.6.4l items 2 and 6, R38.6.4o item 3) over
+    /// `session`, answered within `timeout`: the round trip in milliseconds, the height of the answered tip and the
+    /// header bytes the answer carried. `None` when the server did not answer or the answer has no height. A request
+    /// that fails closes a connection the slot holds (`stored`), as any failed request does (R38.6.4f item 1); the
+    /// caller releases a connection of its own.
     async fn header_measurement(
         &self,
         slot: &ServerSlot,
         session: &Session,
         stored: bool,
         timeout: Duration,
-    ) -> Option<(f64, u64)> {
+    ) -> Option<HeaderAnswer> {
         let request = JsonRpcRequestEnum::Single(JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: self.fresh_request_id(),
@@ -1375,12 +1527,22 @@ impl PoolShared {
             },
         };
         let latency_ms = (now_float() - started) * 1000.;
-        match response {
+        let answer = match response {
             JsonRpcResponseEnum::Single(single) if single.error.is_null() => {
-                single.result["height"].as_u64().map(|height| (latency_ms, height))
+                single.result["height"].as_u64().map(|height| HeaderAnswer {
+                    latency_ms,
+                    height,
+                    header: single.result["hex"]
+                        .as_str()
+                        .and_then(|hex| hex::decode(hex).ok())
+                        .filter(|bytes| !bytes.is_empty()),
+                })
             },
             _ => None,
-        }
+        };
+        // The answer is the connection's height; the connections are judged again (R38.6.4o item 4).
+        self.refresh_out_of_date();
+        answer
     }
 
     /// A request over the maintained connection `session_id` of `slot` took `sample_ms`: a sample of its
@@ -1413,53 +1575,117 @@ impl PoolShared {
     }
 
     /// A header notification of the height `height` arrived over the connection `session_id` of server `id`
-    /// (R38.6.4l items 2 and 6): the count of P1 with several maintained connections moves.
+    /// (R38.6.4l items 2 and 6, R38.6.4o item 4): under a measured order the count of P1 with several maintained
+    /// connections moves, and the maintained connections are judged again for being out of date.
     fn header_notified(&self, id: usize, session_id: u64, height: u64) {
-        if self.measuring().is_none() {
-            return;
-        }
         let Some(slot) = self.slot_by_id(id) else { return };
-        // The connections that receive notifications, and the highest height any of them reported.
-        let notifying: Vec<u64> = self
-            .maintained_slots()
-            .iter()
-            .filter_map(|slot| {
-                let state = slot.state();
-                let session = state.session.as_ref()?;
-                session
-                    .headers()
-                    .is_notifying()
-                    .then(|| session.headers().tip())
-                    .flatten()
-            })
-            .collect();
-        let best = notifying.iter().copied().max().unwrap_or(height).max(height);
-        let lagging = notifying.len() >= 2 && lags_behind(best, height);
-        let stale = {
-            let mut state = slot.state();
-            if !state.maintained || state.session.as_ref().map(|session| session.id()) != Some(session_id) {
-                return;
-            }
-            state.quality.notified_at = now_float();
-            state.quality.lag_strikes = if lagging { state.quality.lag_strikes + 1 } else { 0 };
-            state.quality.lag_strikes >= 2
-        };
-        if stale {
+        let mut wake = false;
+        if self.measuring().is_some() {
+            // The heights the maintained connections report, the notifier's own included (the connection took the
+            // height before this call), and the agreed tip over them.
+            let heights: Vec<u64> = self
+                .maintained_slots()
+                .iter()
+                .filter_map(|slot| slot.state().session.as_ref()?.headers().tip())
+                .collect();
+            let lagging = is_beyond_tolerance(agreed_tip(&heights), height, self.tolerance);
+            let stale = {
+                let mut state = slot.state();
+                if state.maintained && state.session.as_ref().map(|session| session.id()) == Some(session_id) {
+                    state.quality.notified_at = now_float();
+                    state.quality.lag_strikes = if lagging { state.quality.lag_strikes + 1 } else { 0 };
+                    state.quality.lag_strikes >= 2
+                } else {
+                    false
+                }
+            };
+            // A notification can end the silence of a connection or make another one stuck (R38.6.4o item 4).
+            wake = stale || self.tip_checks;
+        }
+        self.refresh_out_of_date();
+        if wake {
             self.signal_measure();
         }
     }
 
-    /// The time without a header notification that makes a lone connection stale (R38.6.4l item 6).
+    /// The time without a header notification that makes a lone connection stale (R38.6.4l item 6), and the stuck
+    /// period of a connection among several (R38.6.4o item 4, D38.6.4o.7): the larger of 3 block intervals and 10
+    /// minutes.
     fn stale_limit(&self) -> Duration { stale_limit(self.block_interval, self.timings.stale_floor) }
+
+    /// What the out-of-date judgment needs to know of the connection of `slot`: its height and the times of its
+    /// header answer and last notification. `None` for a connection without a height.
+    fn tip_figure(slot: &ServerSlot) -> Option<TipFigure> {
+        let state = slot.state();
+        let headers = state.session.as_ref()?.headers();
+        let height = headers.tip()?;
+        let answered_at = headers.answered_at()?;
+        let notified_at = headers.notified_at();
+        Some(TipFigure {
+            height,
+            since: notified_at.map_or(answered_at, |at| at.max(answered_at)),
+            notified_at,
+        })
+    }
+
+    /// The out-of-date state of each of `maintained` at `now` (R38.6.4o item 4), from the figures at that moment.
+    /// With the tip checks off no connection is ever out of date (item 11). Nothing is logged or changed.
+    fn judge_out_of_date(&self, maintained: &[Arc<ServerSlot>], now: f64) -> Vec<Option<OutOfDate>> {
+        if !self.tip_checks {
+            return vec![None; maintained.len()];
+        }
+        let figures: Vec<Option<TipFigure>> = maintained.iter().map(|slot| Self::tip_figure(slot)).collect();
+        out_of_date_states(&figures, self.tolerance, self.stale_limit(), now)
+    }
+
+    /// Judges the maintained connections anew and logs each change of state once (R38.6.4o items 4 and 9): on
+    /// becoming out of date as behind or as stuck, and on becoming up to date again. Returns the maintained
+    /// connections in priority order with their states.
+    fn refresh_out_of_date(&self) -> Vec<(Arc<ServerSlot>, Option<OutOfDate>)> {
+        let maintained = self.maintained_slots();
+        let states = self.judge_out_of_date(&maintained, now_float());
+        for (slot, state) in maintained.iter().zip(&states) {
+            let kind = state.as_ref().map(OutOfDate::kind);
+            let changed = {
+                let mut slot_state = slot.state();
+                let changed = slot_state.quality.reported_state != kind;
+                slot_state.quality.reported_state = kind;
+                changed
+            };
+            if !changed {
+                continue;
+            }
+            match state {
+                Some(OutOfDate::Behind { lag, tip }) => warn!(
+                    "{}: Electrum server {} is {} blocks behind the other servers (tip {})",
+                    self.ticker, slot.label, lag, tip
+                ),
+                Some(OutOfDate::Ahead { lead, tip }) => warn!(
+                    "{}: Electrum server {} is {} blocks ahead of the other servers (tip {})",
+                    self.ticker, slot.label, lead, tip
+                ),
+                Some(OutOfDate::Stuck { silent_secs }) => warn!(
+                    "{}: Electrum server {} has sent no new block for {} s while another server did",
+                    self.ticker,
+                    slot.label,
+                    silent_secs.round() as u64
+                ),
+                None => warn!("{}: Electrum server {} is up to date again", self.ticker, slot.label),
+            }
+        }
+        maintained.into_iter().zip(states).collect()
+    }
 
     /// Judges the maintained connections (R38.6.4l item 6) and marks each poor one poor-demoted for the
     /// demotion time from `now`; a connection that is still poor restarts its mark (item 7 step 1). Returns
-    /// whether any connection is poor.
+    /// whether any connection is poor. P1 covers a connection that is behind on two consecutive notifications, one
+    /// that is stuck (R38.6.4o item 4) and a lone connection that has gone silent; P2 a slow one.
     pub(super) fn mark_poor_connections(&self, now: f64) -> bool {
         let best_activation = self.measure_state().activation_best_ms;
         let slow_floor_ms = self.timings.slow_floor.as_secs_f64() * 1000.;
         let limit = self.stale_limit().as_secs_f64();
         let maintained = self.maintained_slots();
+        let states = self.judge_out_of_date(&maintained, now);
         let notifying = maintained
             .iter()
             .filter(|slot| {
@@ -1470,7 +1696,7 @@ impl PoolShared {
             })
             .count();
         let mut any = false;
-        for slot in &maintained {
+        for (slot, out_of_date) in maintained.iter().zip(states) {
             let mut state = slot.state();
             let receives = state.session.as_ref().map_or(false, |s| s.headers().is_notifying());
             let slow = is_slow(
@@ -1480,18 +1706,33 @@ impl PoolShared {
                 slow_floor_ms,
             );
             let behind = receives && notifying >= 2 && state.quality.lag_strikes >= 2;
+            let stuck = matches!(out_of_date, Some(OutOfDate::Stuck { .. }));
             let silent = receives && notifying == 1 && now - state.quality.notified_at > limit;
-            if slow || behind || silent {
+            if slow || behind || stuck || silent {
                 state.quality.poor_until = now + self.timings.poor_demotion.as_secs_f64();
                 any = true;
-                let reason = if slow { "slow" } else { "behind the chain" };
-                debug!("{}: Electrum server {} is poor ({})", self.ticker, slot.label, reason);
+                let reason = if behind {
+                    PoorReason::Behind
+                } else if stuck || silent {
+                    PoorReason::Stuck
+                } else {
+                    PoorReason::Slow
+                };
+                state.quality.poor_reason = Some(reason);
+                debug!(
+                    "{}: Electrum server {} is poor ({})",
+                    self.ticker,
+                    slot.label,
+                    reason.as_str()
+                );
             }
         }
         any
     }
 
-    /// When the next lone connection turns stale, if one will (R38.6.4l item 6): the moment to look again.
+    /// When the next connection may turn stale, if one will (R38.6.4l item 6, R38.6.4o item 4): the moment to look
+    /// again. That is when a lone connection's silence passes the limit, and when the silence of a connection passes
+    /// the stuck period.
     fn next_stale_check(&self, now: f64) -> Option<f64> {
         let limit = self.stale_limit().as_secs_f64();
         let maintained = self.maintained_slots();
@@ -1504,9 +1745,23 @@ impl PoolShared {
                     .map_or(false, |s| s.headers().is_notifying())
             })
             .collect();
-        match notifying.as_slice() {
+        let lone = match notifying.as_slice() {
             [only] => Some(only.state().quality.notified_at + limit).filter(|at| *at > now),
             _ => None,
+        };
+        let stuck = if self.tip_checks {
+            maintained
+                .iter()
+                .filter_map(|slot| Self::tip_figure(slot))
+                .map(|figure| figure.since + limit)
+                .filter(|at| *at > now)
+                .reduce(f64::min)
+        } else {
+            None
+        };
+        match (lone, stuck) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
     }
 
@@ -1543,14 +1798,18 @@ impl PoolShared {
     }
 
     /// A re-measure round (R38.6.4l items 2 and 7): every server that is not maintained, not suspended and not
-    /// removed is connected and sent one header request. The connections are released, but for the one that
-    /// replaces the poor connection, which joins the maintained set over the connection it was measured on.
+    /// removed is connected and sent one header request, at most [`REMEASURE_IN_FLIGHT`] connection attempts at a
+    /// time (R38.6.4o item 8). The connections are released, but for the one that replaces the poor connection,
+    /// which joins the maintained set over the connection it was measured on.
     pub(super) async fn run_remeasure_round(self: &Arc<Self>) {
         let Some(mode) = self.measuring() else { return };
         let started = now_float();
         {
             let mut state = self.measure_state();
             state.last_round_started = Some(started);
+            // The least time before the next round is the one that applies now; a round without a replacement
+            // doubles the one after it (R38.6.4o item 8).
+            state.gap_level = state.backoff_level;
             #[cfg(test)]
             state.rounds.push(started);
         }
@@ -1559,8 +1818,7 @@ impl PoolShared {
             .into_iter()
             .filter(|slot| !slot.is_maintained() && !slot.is_suspended(started))
             .collect();
-        let mut attempts: FuturesUnordered<_> = candidates
-            .into_iter()
+        let mut attempts = futures::stream::iter(candidates)
             .map(|slot| {
                 let pool = self.clone();
                 async move {
@@ -1578,16 +1836,17 @@ impl PoolShared {
                     let measured = pool
                         .header_measurement(&slot, &session, !owned, pool.timings.request)
                         .await
-                        .map(|(latency_ms, height)| Measurement {
+                        .map(|answer| Measurement {
                             id: slot.id,
-                            latency_ms,
-                            height,
+                            latency_ms: answer.latency_ms,
+                            height: answer.height,
+                            header: answer.header,
                             suspended: false,
                         });
                     (slot, measured, Some((session, owned)))
                 }
             })
-            .collect();
+            .buffer_unordered(REMEASURE_IN_FLIGHT);
         let mut measured = Vec::new();
         let mut connections = Vec::new();
         while let Some((slot, measurement, connection)) = attempts.next().await {
@@ -1598,7 +1857,9 @@ impl PoolShared {
 
         let now = now_float();
         let round = self.round_servers(&measured);
-        let eligible = eligible_servers(&round, self.reported_tip(), self.latency_floor_ms());
+        let reported = self.reported_heights();
+        self.warn_measured_behind(&round, &reported);
+        let eligible = eligible_servers(&round, &reported, self.tolerance, self.latency_floor_ms());
         // The poor connection the round is for: the highest-ranked one that is marked (a further one waits for
         // the next round).
         let poor = self
@@ -1608,6 +1869,16 @@ impl PoolShared {
         let replacement = poor
             .as_ref()
             .and_then(|_| self.with_draw(|draw| pick_replacement(mode, &eligible, draw)));
+        if poor.is_some() {
+            // A round without a replacement doubles the least time before the next one; a replacement returns it
+            // to the base (R38.6.4o item 8).
+            let mut state = self.measure_state();
+            state.backoff_level = if replacement.is_some() {
+                0
+            } else {
+                state.backoff_level.saturating_add(1)
+            };
+        }
         debug!(
             "{}: Electrum re-measure round: {} measured, {} eligible, replacement {}",
             self.ticker,
@@ -1655,11 +1926,21 @@ impl PoolShared {
             if let Some(session) = session {
                 self.join_maintained(&slot, &session);
             }
+            let reason = poor.state().quality.poor_reason;
             self.demote(&poor);
-            debug!(
-                "{}: Electrum server {} replaces {} in the maintained set",
-                self.ticker, slot.label, poor.label
-            );
+            match reason {
+                Some(reason) => warn!(
+                    "{}: Electrum server {} was replaced by {} ({})",
+                    self.ticker,
+                    poor.label,
+                    slot.label,
+                    reason.as_str()
+                ),
+                None => warn!(
+                    "{}: Electrum server {} was replaced by {}",
+                    self.ticker, poor.label, slot.label
+                ),
+            }
         }
     }
 
@@ -1757,6 +2038,102 @@ impl PoolShared {
         }
     }
 
+    // ---- confirmation waits and the `electrum_servers` view (R38.6.4o items 6 and 10) -----------
+
+    /// The server a wait for a transaction's confirmations polls (CRD ch.38 R38.6.4o item 6): the first
+    /// maintained connection in priority order that is up to date; if none is, the first maintained connection; if
+    /// the set is empty, the first server of the rank that is not removed. The servers in `failed` (those that
+    /// failed during this wait) are left out while another choice exists. The server is named by its configured
+    /// address, which a directed request (R38.6.4g) takes. `None` when the pool has no usable server.
+    pub(super) fn choose_wait_server(&self, failed: &[String]) -> Option<String> {
+        self.wait_choice(failed).or_else(|| self.wait_choice(&[]))
+    }
+
+    fn wait_choice(&self, excluded: &[String]) -> Option<String> {
+        let allowed = |slot: &Arc<ServerSlot>| !excluded.contains(&slot.addr);
+        let maintained: Vec<(Arc<ServerSlot>, Option<OutOfDate>)> = self
+            .refresh_out_of_date()
+            .into_iter()
+            .filter(|(slot, _)| allowed(slot))
+            .collect();
+        let chosen = maintained
+            .iter()
+            .find(|(_, state)| state.is_none())
+            .or_else(|| maintained.first())
+            .map(|(slot, _)| slot.clone());
+        chosen
+            .or_else(|| self.usable_slots().into_iter().find(allowed))
+            .map(|slot| slot.addr.clone())
+    }
+
+    /// A snapshot of the pool for the `electrum_servers` request (CRD ch.38 R38.6.4o item 10): every server in the
+    /// coin's current rank with its figures at this moment. It sends nothing to any server and changes nothing
+    /// (it logs no change of state either).
+    pub(super) fn servers_view(&self) -> ElectrumServersView {
+        let now = now_float();
+        let maintained = self.maintained_slots();
+        let states = self.judge_out_of_date(&maintained, now);
+        let heights: Vec<u64> = maintained
+            .iter()
+            .filter_map(|slot| Self::tip_figure(slot).map(|figure| figure.height))
+            .collect();
+        let agreed = agreed_tip(&heights);
+        // The near decision runs over the up-to-date connections; when none is up to date, over all of them
+        // (R38.6.4o item 5).
+        let mut candidates: Vec<Arc<ServerSlot>> = maintained
+            .iter()
+            .zip(&states)
+            .filter(|(_, state)| state.is_none())
+            .map(|(slot, _)| slot.clone())
+            .collect();
+        if candidates.is_empty() {
+            candidates = maintained.clone();
+        }
+        let near_ids: Vec<usize> = candidates
+            .iter()
+            .zip(self.near_flags(&candidates))
+            .filter(|(_, near)| *near)
+            .map(|(slot, _)| slot.id)
+            .collect();
+        let servers = self
+            .slots()
+            .iter()
+            .enumerate()
+            .map(|(rank, slot)| {
+                let position = maintained.iter().position(|member| member.id == slot.id);
+                let state = slot.state();
+                let height = state
+                    .session
+                    .as_ref()
+                    .filter(|session| !session.is_closed())
+                    .and_then(|session| session.headers().tip());
+                ElectrumServerView {
+                    server: slot.label.clone(),
+                    rank,
+                    maintained: position.is_some(),
+                    near: near_ids.contains(&slot.id),
+                    height,
+                    lag: agreed.zip(height).and_then(|(tip, height)| signed_lag(tip, height)),
+                    out_of_date: position
+                        .and_then(|position| states.get(position))
+                        .and_then(|state| state.as_ref())
+                        .map(|state| state.kind().as_str()),
+                    latency_ms: position.and_then(|_| state.quality.smoothed.value_ms()),
+                    suspended: state.suspension.is_suspended(now),
+                    poor_demoted: state.quality.is_poor_demoted(now),
+                    removed: state.removed.is_some(),
+                }
+            })
+            .collect();
+        ElectrumServersView {
+            coin: self.ticker.clone(),
+            server_order: self.order.name(),
+            tolerance_blocks: self.tolerance,
+            agreed_tip: agreed,
+            servers,
+        }
+    }
+
     // ---- routing (R38.6.4f, R38.6.4g, R38.6.4j) -----------------------------------------------
 
     /// Sends `request` over `session`; a failure closes the connection (R38.6.4f item 1).
@@ -1834,21 +2211,24 @@ impl PoolShared {
         }
     }
 
-    /// The maintained connections in the order `request` tries them: the priority order, except that a
-    /// read-only query with `electrum_spread_reads` on tries the near connections first (R38.6.4a item 6),
-    /// starting at the one whose turn it is and going round them, and then the others in priority order
-    /// (items 1, 3 and 5). Everything else, and a set of one, keeps the priority order.
+    /// The maintained connections in the order `request` tries them. A read-only query or a transaction broadcast
+    /// tries the up-to-date connections first and the out-of-date ones after them, in priority order among
+    /// themselves (R38.6.4o item 5; when none is up to date, all count as up to date). Among the up-to-date
+    /// connections, a read-only query with `electrum_spread_reads` on tries the near ones first (R38.6.4a item 6),
+    /// starting at the one whose turn it is and going round them, and then the others in priority order (items 1,
+    /// 3 and 5). Everything else, and a set of one, keeps the priority order.
     fn in_turn_for(&self, request: &JsonRpcRequestEnum, maintained: Vec<Arc<ServerSlot>>) -> Vec<Arc<ServerSlot>> {
-        if !(self.spread_reads && is_read_only(request)) {
+        let read = is_read_only(request);
+        if !(read || is_broadcast(request)) {
             return maintained;
         }
+        let (up_to_date, out_of_date) = self.split_by_state(maintained);
+        if !(self.spread_reads && read) {
+            return up_to_date.into_iter().chain(out_of_date).collect();
+        }
         let turn = self.read_cursor.fetch_add(1, AtomicOrdering::Relaxed);
-        let figures: Vec<Option<f64>> = maintained
-            .iter()
-            .map(|slot| slot.state().quality.smoothed.value_ms())
-            .collect();
-        let near = near_sessions(&figures, self.near_factor, self.near_offset_ms);
-        let (mut turns, others): (Vec<_>, Vec<_>) = maintained
+        let near = self.near_flags(&up_to_date);
+        let (mut turns, others): (Vec<_>, Vec<_>) = up_to_date
             .into_iter()
             .zip(near)
             .partition::<Vec<_>, _>(|(_, near)| *near);
@@ -1856,7 +2236,38 @@ impl PoolShared {
         if size > 1 {
             turns.rotate_left(turn % size);
         }
-        turns.into_iter().chain(others).map(|(slot, _)| slot).collect()
+        turns
+            .into_iter()
+            .chain(others)
+            .map(|(slot, _)| slot)
+            .chain(out_of_date)
+            .collect()
+    }
+
+    /// Splits `maintained`, given in priority order, into the up-to-date and the out-of-date connections, each in
+    /// priority order (R38.6.4o item 5). The connections are judged anew first. When none is up to date, every one
+    /// of them is taken as up to date.
+    fn split_by_state(&self, maintained: Vec<Arc<ServerSlot>>) -> (Vec<Arc<ServerSlot>>, Vec<Arc<ServerSlot>>) {
+        let states = self.refresh_out_of_date();
+        let (out_of_date, up_to_date): (Vec<_>, Vec<_>) = maintained.into_iter().partition::<Vec<_>, _>(|slot| {
+            states
+                .iter()
+                .any(|(other, state)| other.id == slot.id && state.is_some())
+        });
+        if up_to_date.is_empty() {
+            (out_of_date, Vec::new())
+        } else {
+            (up_to_date, out_of_date)
+        }
+    }
+
+    /// Which of `slots` are near (R38.6.4a item 6), from their smoothed latencies at this moment.
+    fn near_flags(&self, slots: &[Arc<ServerSlot>]) -> Vec<bool> {
+        let figures: Vec<Option<f64>> = slots
+            .iter()
+            .map(|slot| slot.state().quality.smoothed.value_ms())
+            .collect();
+        near_sessions(&figures, self.near_factor, self.near_offset_ms)
     }
 
     async fn route_inner(
@@ -2065,20 +2476,28 @@ async fn maintenance_loop(client: Weak<ElectrumClientImpl>, mut trigger_rx: futu
 /// (R38.6.4l items 6 and 7). A round waits until 5 minutes have passed since the last one started; while a
 /// connection stays poor and no replacement is found, the next round follows under the same limit.
 async fn measure_loop(pool: Weak<PoolShared>, mut wake_rx: futures_mpsc::UnboundedReceiver<()>) {
-    let mut round_due = false;
     loop {
         let Some(strong) = pool.upgrade() else { return };
         let now = now_float();
-        if strong.mark_poor_connections(now) {
-            round_due = true;
+        // A round is called for while a maintained connection is poor.
+        let round_due = strong.mark_poor_connections(now);
+        if !round_due {
+            // No maintained connection is poor any more: no round is called for, and the least time between rounds
+            // returns to the base (R38.6.4o item 8).
+            let mut state = strong.measure_state();
+            state.backoff_level = 0;
+            state.gap_level = 0;
         }
         let wait = if round_due {
+            let (last_started, gap_level) = {
+                let state = strong.measure_state();
+                (state.last_round_started, state.gap_level)
+            };
             let at = next_round_at(
-                strong.measure_state().last_round_started,
-                strong.timings.remeasure_limit,
+                last_started,
+                remeasure_gap(strong.timings.remeasure_limit, strong.timings.remeasure_cap, gap_level),
             );
             if now >= at {
-                round_due = false;
                 strong.run_remeasure_round().await;
                 // Look at the connections again at once: a connection that is still poor waits for the limit.
                 continue;
@@ -2178,6 +2597,8 @@ mod budget_tests {
         // R38.6.4l: the 5-minute round limit, the 15-minute mark, the 10-minute stale floor, the 300 ms
         // eligibility floor and the 1 s floor of P2.
         assert_eq!(t.remeasure_limit, secs(300));
+        // R38.6.4o item 8: the least time between rounds grows from 5 to at most 60 minutes.
+        assert_eq!(t.remeasure_cap, secs(3600));
         assert_eq!(t.poor_demotion, secs(900));
         assert_eq!(t.stale_floor, secs(600));
         assert_eq!(t.latency_floor, Duration::from_millis(300));

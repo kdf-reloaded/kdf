@@ -62,6 +62,8 @@ struct StubState {
     accepted: AtomicUsize,
     /// The tip `blockchain.headers.subscribe` answers; without one it answers its canned result.
     tip: Mutex<Option<u64>>,
+    /// The header bytes (hex) the tip's header carries in `blockchain.headers.subscribe` answers and notifications.
+    header_hex: Mutex<String>,
     /// How long the stub waits before it answers a method (CRD ch.38 R38.6.4l tests).
     reply_delays: Mutex<HashMap<String, Duration>>,
     /// The open connections, with whether each has been answered a `blockchain.headers.subscribe`.
@@ -110,6 +112,7 @@ impl StubServer {
             last_requests: Mutex::new(HashMap::new()),
             accepted: AtomicUsize::new(0),
             tip: Mutex::new(None),
+            header_hex: Mutex::new("00".to_owned()),
             reply_delays: Mutex::new(HashMap::new()),
             live: Mutex::new(Vec::new()),
             listener_stop: Mutex::new(None),
@@ -255,13 +258,17 @@ impl StubServer {
         self.push_header(height);
     }
 
+    /// Sets the header bytes (hex) every header the stub answers or pushes carries, so that two stubs at one height can
+    /// answer the same header or different ones (CRD ch.38 R38.6.4o item 7). The default is `00`.
+    pub fn set_header_hex(&self, hex: &str) { *self.state.header_hex.lock().unwrap() = hex.to_owned(); }
+
     /// Pushes a header notification with `height` over every connection that has asked for headers, without
     /// changing the tip the stub answers.
     pub fn push_header(&self, height: u64) {
         let line = json!({
             "jsonrpc": "2.0",
             "method": "blockchain.headers.subscribe",
-            "params": [header_json(height)],
+            "params": [header_json(height, &self.state.header_hex.lock().unwrap())],
         })
         .to_string();
         for (control, subscribed) in self.state.live.lock().unwrap().iter() {
@@ -336,8 +343,8 @@ impl StubServer {
     }
 }
 
-/// The header of a tip at `height`, as `blockchain.headers.subscribe` answers and notifies it.
-fn header_json(height: u64) -> Json { json!({"height": height, "hex": "00"}) }
+/// The header of a tip at `height` with the bytes `hex`, as `blockchain.headers.subscribe` answers and notifies it.
+fn header_json(height: u64, hex: &str) -> Json { json!({"height": height, "hex": hex}) }
 
 /// Answers one request; `None` stays unanswered. `subscribed` is set when the connection is answered a header
 /// subscription.
@@ -369,7 +376,8 @@ fn answer(state: &StubState, behavior: StubBehavior, request: &Json, subscribed:
         (_, "blockchain.headers.subscribe") if state.tip.lock().unwrap().is_some() => {
             subscribed.store(true, Ordering::SeqCst);
             let height = state.tip.lock().unwrap().unwrap_or_default();
-            result(header_json(height))
+            let hex = state.header_hex.lock().unwrap().clone();
+            result(header_json(height, &hex))
         },
         _ => {
             let scripthash = request["params"][0].as_str().unwrap_or_default().to_owned();

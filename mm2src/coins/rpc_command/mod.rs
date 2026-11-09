@@ -1,5 +1,6 @@
 pub mod account_balance;
 pub mod consolidate_utxos;
+pub mod electrum_servers;
 pub mod fetch_utxos;
 pub mod get_current_mtp;
 pub mod get_enabled_coins;
