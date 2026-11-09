@@ -62,6 +62,8 @@ Work order inside the one PR: (1 + 3 + 4) first, as the fix for E1; then 5; 2; 7
 
 ### 1. Agreed tip, stuck-server rule, no single-server veto (security)
 
+*Implemented in b554d2593 (R38.6.4o items 2 and 4; a server far above the agreed tip is also out of date as *ahead*, D38.6.4o.9).*
+
 Today the reference tip is the plain maximum of every reported height (E4).
 
 - *Agreed tip*: with 3 or more reported heights, the highest height that at least two
@@ -88,6 +90,8 @@ exclusion).
 
 ### 2. Swap confirmation polls stick to one server (security)
 
+*Implemented in b554d2593 (R38.6.4o item 6).*
+
 `wait_for_confirmations` trusts the `confirmations` field of whichever server answers;
 under spreading each poll may reach another server, and the first "confirmed" answer ends
 the wait, so the weakest of N servers decides. The wait picks one session at its start (the
@@ -99,6 +103,8 @@ Tests: stub A answers 3 confirmations, stub B answers 0; the wait does not end o
 answer while B is the chosen session; failover sticks.
 
 ### 3. Tolerance T from `avg_blocktime` (stability)
+
+*Implemented in b554d2593 (R38.6.4o item 1).*
 
 Observed failures are hundreds of blocks (E1); natural spread between healthy servers is a
 few blocks on fast chains (E2). A tolerance generous in time therefore catches every real
@@ -130,6 +136,8 @@ Tests: the table; absent, zero, negative and string values → 1; the cap.
 
 ### 4. Stale connections leave the read rotation at once (stability)
 
+*Implemented in b554d2593 (R38.6.4o items 3 and 5).*
+
 "Near" is latency-only today; a fast but stale server keeps its share of reads until it is
 replaced, and with 2 listed servers it is never replaced (E1).
 
@@ -149,6 +157,8 @@ catches up); E1 with stubs (all reads on the good server).
 
 ### 5. Observability (stability; prerequisite for the field run)
 
+*Implemented in b554d2593 (R38.6.4o items 9 and 10).*
+
 Poor marks are `debug!` only today, and nothing shows a server's height.
 - WARN once per server per state change, host-only label: `<ticker>: Electrum <host> is
   <N> blocks behind (tip <h>), not used for reads` / `... up to date again` /
@@ -161,6 +171,8 @@ wrong balance; an operator sees which server to fix or to drop from the coins fi
 
 ### 6. `mixed` becomes the default (stability)
 
+*Not implemented: the default changes in a separate change after the field run (D38.6.4o.6).*
+
 Lab rows N4/N5 (2026-11-06) were informative only. Pass rule: 72 h with steps 1, 3, 4 and 5
 in, on RIN, on DGB (natural spread, 4 or more servers) and on one 600 s chain, plus an E1
 regression row (2 servers, one stale): (a) every replacement has a logged reason; (b) no
@@ -171,6 +183,8 @@ the run passes (CHANGELOG line, `GLEEC_COMPATIBILITY.md` row).
 
 ### 7. Re-measure backoff (stability, server load)
 
+*Implemented in b554d2593 (R38.6.4o item 8).*
+
 A chain halt, or a lone connection on a halted chain, starts a round every re-measure
 limit (5 min) on every node. After a round with no eligible replacement, the next round
 waits twice as long (5 → 10 → 20 → … cap 60 min); the wait returns to 5 minutes when a
@@ -180,6 +194,8 @@ Rounds connect at most 4 servers at a time.
 
 ### 8. Header agreement at equal height (security and stability, no extra requests)
 
+*Implemented in b554d2593 (R38.6.4o item 7).*
+
 Two servers at the same height with different header bytes are on different chains (E5:
 fork, wrong network, misconfigured server). At the agreed tip height, a server whose header
 differs from the one at least two others report is non-eligible that round. Not a
@@ -187,6 +203,8 @@ suspension; a natural tip reorg resolves itself in the next round. Fewer than tw
 servers → nothing happens.
 
 ### 9. Broadcast avoids stale connections (speed and stability)
+
+*Implemented in b554d2593 (R38.6.4o item 5).*
 
 Broadcasts follow the priority order. A stale server rejects a transaction ("missing
 inputs"), which costs a retry, or accepts it and never relays it, which is silent. A

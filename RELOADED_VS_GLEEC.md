@@ -546,6 +546,16 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   listed server at once and succeeds as soon as one connects; GLEEC KDF's per-attempt bounds do not
   depend on how many servers remain, and it does not wait at activation. Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.38
   R38.6.4j.
+- **A coin's Electrum servers that are behind the chain or stuck are asked last, and a swap's
+  confirmation wait polls one server.** Reloaded asks each connected Electrum server for its newest
+  block when it joins and compares the heights: a server more than the coin's tolerance (180 seconds
+  of blocks, at least 1 and at most 20) behind or ahead of the height two or more servers have reached, or one
+  that sends no new block for three block times or ten minutes while another does, is tried after
+  the others for reads and broadcasts, and logged once per change of state; a confirmation wait
+  polls one up-to-date server for the whole wait and moves on only when it fails. The read-only
+  request `electrum_servers` shows the servers' state. GLEEC KDF ranks by the list position and has
+  none of this, so a lagging server keeps answering there. No peer observes it. Row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.38 R38.6.4o.
 - **A shielded coin's `lightwalletd` endpoints are named and suspended on failure.** The endpoint that
   rejected a broadcast is named (host-only) in the error and the log; an endpoint that fails at
   transport level is suspended for 20 s, doubling up to 12 hours, and endpoints that are not
@@ -745,6 +755,11 @@ behavior, except for `swap_key_check`; the row of each switch in
   servers when two or more are connected), then have no effect.
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
   listed instead of by a random draw.
+- `electrum_tip_checks: false` — the node does not compare the block heights of a coin's Electrum
+  servers: a server that is behind the chain or stopped following it keeps its place in reads,
+  broadcasts and a swap's confirmation wait, which polls the first connected server in priority
+  order. Together with the two switches above this gives GLEEC KDF's routing. The
+  `electrum_servers` request has no GLEEC KDF equivalent.
 - `orderbook_sync_names_held_root: false` — a sync request names the root the maker advertised
   instead of the one this node holds.
 - `order_messages_refresh_liveness: false` — only keep-alives keep a maker's order book alive.

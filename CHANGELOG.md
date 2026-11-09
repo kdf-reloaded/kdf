@@ -114,6 +114,17 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### UTXO coins and Electrum
 
+- **A new request, `electrum_servers`, shows which Electrum server a coin uses and how far behind
+  each one is.** Send `{"mmrpc": "2.0", "method": "electrum_servers", "params": {"coin": "RIN"}}`
+  for an active coin that uses Electrum servers. The answer lists every server of the coin in the
+  order the node ranks them, by host and port: whether it is connected, whether reads are being
+  sent to it, its latest block height, how many blocks it is behind the other servers, whether it
+  is out of date (`behind`, `ahead` or `stuck`), its smoothed round trip, whether it is suspended or marked
+  as poor, and whether it was removed from the coin's list. It also gives the coin's tolerance in
+  blocks and the block height most servers agree on. The request only reads what the node already
+  knows and sends nothing to any server. A coin that is not active answers `NoSuchCoin`; a coin
+  that does not use an Electrum client (a coin with a local daemon, a shielded coin, a token of
+  another family) answers `CoinIsNotElectrum`. Detail: PR #TBD; CRD ch.38 R38.6.4o.
 - **An Electrum server can now be pinned by its key.** A server entry with `protocol` `SSL` may
   carry `spki_sha256`: the SHA-256 digest of the server's public key in hexadecimal (64 digits,
   colons between byte pairs allowed), or a list of up to four, so the next key can be pinned before
@@ -346,6 +357,35 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### UTXO coins and Electrum
 
+- **A coin's Electrum servers that are behind the chain, or stopped following it, are no longer
+  asked.** A server that is 1,000 blocks behind used to keep its share of balance and history
+  reads, and a swap's wait for a confirmation could be answered by any server in turn. Now the
+  node asks every connected server for its newest block when it joins the coin's set, under every
+  `electrum_server_order`, and compares them. A server is *behind* when it is more than the coin's
+  tolerance below the height two or more servers have reached (with two servers, below the
+  higher one). The tolerance is three minutes of blocks, at least 1 and at most 20: 1 for BTC, 2
+  for LTC, 3 for RIN and KMD, 12 for DGB. A server more than the tolerance *above* that height is
+  *ahead*, which is just as wrong: it is on another chain or reports a height that does not exist.
+  A server is *stuck* when it sends no new block for
+  longer than three block times or ten minutes while another server does. Such a server stays in
+  the set and keeps answering when the others fail, but reads, transaction broadcasts and
+  confirmation waits go to the others first, and it is asked again as soon as it has caught up.
+  The node logs one warning, naming the server by host and port, when a server falls behind, is
+  ahead or is stuck, and when it is up to date again. A swap's confirmation wait now asks one server
+  for the whole wait (the first connected one that is up to date) and moves to another only when
+  that one fails, so the weakest of several servers can no longer end it early. A single server
+  that claims a height far above the others, or a server of another network in the list, no
+  longer makes the honest servers look behind. With `electrum_server_order` set to `mixed` or
+  `measured`, the same tolerance decides which measured servers count as fresh, a server that
+  answers a different block at the same height than two others is not ranked among the fresh ones,
+  and repeated searches for a replacement wait 5, 10, 20, 40 and then 60 minutes, so a halted chain
+  does not make every node probe the public servers every five minutes, and at most four servers
+  are connected at a time. For the old behavior, set the `MM2.json` boolean
+  `electrum_tip_checks` to `false` (and `electrum_server_order` to `listed` and
+  `electrum_spread_reads` to `false` to match GLEEC KDF). **`mixed` does not become the default
+  yet.** The change is in two stages: this release brings the checks; the default order changes
+  from `random` to `mixed` in a later release, after a field run on RIN, DGB and a coin with
+  600-second blocks has shown no false marks. Detail: PR #TBD; CRD ch.38 R38.6.4o.
 - **`fetch_utxos`, `consolidate_utxos` and the automatic merge (`utxo_merge_params`) now work
   under an HD login**, as they do in GLEEC KDF. Until now the two commands were refused and the
   automatic merge stayed off.

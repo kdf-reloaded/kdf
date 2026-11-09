@@ -1305,13 +1305,16 @@ every maintained session.
 >   two are near, the session with the next-lowest figure after the fastest is set near as
 >   well, the earlier one in priority order between equal figures. `in_turn_for` is
 >   unchanged, since it consumes the flags.
-> - *The turn.* When a read-only query starts, `in_turn_for` in the pool reads each
->   maintained slot's smoothed latency and asks for the near ones. It rotates them by
->   the read counter modulo their number, then appends the other maintained slots in
->   priority order. The budget arithmetic of R38.6.4j is unchanged, since it counts
+> - *The turn.* When a read-only query starts, `in_turn_for` in the pool first sets
+>   the out-of-date connections aside (R38.6.4o item 5), then reads each remaining
+>   slot's smoothed latency and asks for the near ones. It rotates them by
+>   the read counter modulo their number, then appends the other up-to-date slots in
+>   priority order and the out-of-date ones after them. The budget arithmetic of R38.6.4j is unchanged, since it counts
 >   over that list.
 > - *Samples.* The pool records the smoothed latency of every answered request and
->   ping under every order. P2 is judged only under `mixed` and `measured`.
+>   ping under every order. P2 is judged only under `mixed` and `measured`. The header
+>   request on joining is sent under every order unless `electrum_tip_checks` is
+>   `false` (R38.6.4o item 3) and is not a sample.
 > - *The switches.* `electrum_spread_near_factor` and `electrum_spread_near_offset_ms`
 >   are read once per coin activation, in the UTXO coin builder next to
 >   `electrum_spread_reads`. The Z-coin Electrum fallback goes through the same builder.
@@ -1704,8 +1707,9 @@ item 3).**
      measurement, and the release of R38.6.4k-R item 3, suspend the server
      under R38.6.4d item 1 but do not make it ineligible in that round
      (D38.6.4l.8);
-   - its height is at most *T* blocks below the best tip, *T* being the coin's
-     tolerance (R38.6.4o item 1, D38.6.4o.1);
+   - its height is at most *T* blocks below and at most *T* blocks above the
+     best tip, *T* being the coin's tolerance (R38.6.4o items 1 and 2,
+     D38.6.4o.1, D38.6.4o.9);
    - its header agrees with the round's (R38.6.4o item 7);
    - its latency is at most the larger of 4 × the best latency and 300 ms.
 
@@ -2056,7 +2060,11 @@ holds under every value of `electrum_server_order` unless it says otherwise.
      height.
 
    A server's *lag* is the agreed tip minus its height, or 0 when its height is
-   at or above the agreed tip (D38.6.4o.2).
+   at or above the agreed tip. Its *lead* is its height minus the agreed tip,
+   or 0 when its height is at or below the agreed tip. A lead of more than *T*
+   is as wrong as a lag of more than *T*: no healthy server is many blocks
+   ahead of every other one, so such a server is on another chain or network,
+   or reports a height that does not exist (D38.6.4o.2, D38.6.4o.9).
 3. *Heights of maintained connections.* Each connection that joins the
    maintained set sends one header request (`blockchain.headers.subscribe`)
    right after it joins, unless a header request was already sent over it (an
@@ -2072,6 +2080,7 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    heights of the maintained connections that have one. A maintained
    connection is *out of date* while either holds:
    - *behind:* its lag to the running agreed tip is more than *T*;
+   - *ahead:* its lead over the running agreed tip is more than *T*;
    - *stuck:* there are two or more maintained connections with a height, it
      has received no header notification for longer than *P* = the larger of
      3 × `avg_blocktime` and 10 minutes (10 minutes for a coin without a valid
@@ -2129,6 +2138,8 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    and is logged at WARN once per change of state, not on every notification:
    - on becoming out of date as *behind*:
      `<ticker>: Electrum server <host:port> is <lag> blocks behind the other servers (tip <height>)`;
+   - on becoming out of date as *ahead*:
+     `<ticker>: Electrum server <host:port> is <lead> blocks ahead of the other servers (tip <height>)`;
    - on becoming out of date as *stuck*:
      `<ticker>: Electrum server <host:port> has sent no new block for <seconds> s while another server did`;
    - on becoming up to date again:
@@ -2136,9 +2147,9 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    - on a replacement under R38.6.4l item 7:
      `<ticker>: Electrum server <host:port> was replaced by <host:port> (<reason>)`,
      with the reason `behind`, `stuck` or `slow`;
-   - in a measurement round, for each measured server whose lag to the round's
-     agreed tip is more than *T*, once per round:
-     `<ticker>: Electrum server <host:port> is <lag> blocks behind the other servers (tip <height>)`.
+   - in a measurement round, for each measured server whose lag or lead to the
+     round's agreed tip is more than *T*, once per round, the *behind* or
+     *ahead* line above.
 10. *The `electrum_servers` request (Reloaded-only RPC).* An mmrpc 2.0 method
     `electrum_servers` with the parameter `coin` (a ticker) answers, for an
     active coin served by the Electrum client, a snapshot of its pool:
@@ -2172,9 +2183,10 @@ holds under every value of `electrum_server_order` unless it says otherwise.
       `rank` is the position in it, from 0. `server` is the host-only label of
       R38.6.9a.
     - `height` is `null` for a server without a height; `lag` is `null` when
-      `height` or `agreed_tip` is.
+      `height` or `agreed_tip` is, and is negative for a server above the
+      agreed tip (its lead, negated).
     - `out_of_date` is `null` when the server is up to date or not maintained,
-      otherwise `"behind"` or `"stuck"`.
+      otherwise `"behind"`, `"ahead"` or `"stuck"`.
     - `latency_ms` is the smoothed latency of R38.6.4l item 2, `null` without
       one.
     - `near` is the near decision of R38.6.4a item 6 with item 5 here, judged
@@ -2227,9 +2239,110 @@ from turning every node into a periodic prober of the public servers.
 > the first maintained connection in priority order, as the reference's
 > priority routing does. GLEEC KDF has no equivalent of `electrum_servers`.
 
-> **Status (2026-11-09).** The rule is written; the code is not implemented
-> yet. Until it is, R38.6.4l items 4 and 6 behave as before this amendment
-> (the plain maximum as best tip, 1 block eligible, 2 blocks behind).
+> **As-built note (2026-11-09).** Items 1 to 11 are implemented, with the bound
+> above the agreed tip of D38.6.4o.9. The default flip of D38.6.4o.6 is not part
+> of it: `electrum_server_order` stays `random`.
+>
+> *Pure decisions*, in `electrum_measure.rs`, so that the tests are
+> deterministic: `tolerance_blocks` (item 1), `agreed_tip`, `lag`, `lead`,
+> `signed_lag` and `is_beyond_tolerance` / `is_outside_tolerance` (item 2),
+> `out_of_date_states` with `TipFigure` and `OutOfDate` (item 4; *behind* and
+> *ahead* win over *stuck*),
+> `eligible_servers` with the two-sided height bound and its header agreement
+> (R38.6.4l item 4 and item 7 here; `consensus_header` finds the bytes that two or more measured servers
+> share at the agreed tip height) and `remeasure_gap` (item 8).
+>
+> *Heights and times.* `HeaderTrack` in `electrum_rpc_client.rs` keeps, for each
+> connection, its height, the time of its first header answer and the time of
+> its last header notification. A later answer to a header request (a
+> block-count read over the connection) moves the height only and is not a
+> notification, so it neither starts nor ends a silence. An answer or a
+> notification whose height cannot be read leaves all of it as it was.
+>
+> *The pool*, in `electrum_pool.rs`. `join_maintained` sends the header request
+> on joining when the tip checks are on or the order is measured (item 3).
+> `refresh_out_of_date` judges the maintained connections anew, logs each
+> change of state once and returns the states (item 9, first three lines); it
+> runs when a header request is answered, when a notification arrives and when
+> a read-only query, a broadcast or a confirmation wait starts. `in_turn_for`
+> and `split_by_state` apply item 5: up-to-date connections first, then the
+> out-of-date ones, in priority order among themselves, and every connection
+> counts as up to date when none is. The turn, the near decision (`near_flags`)
+> and the floor of two run over the up-to-date connections only. A broadcast
+> and, with `electrum_spread_reads` `false`, a read take the same order, so the
+> first of the up-to-date connections in priority order goes first.
+> `choose_wait_server` is item 6. `run_remeasure_round` connects at most
+> `REMEASURE_IN_FLIGHT` (4) candidates at a time, logs the replacement line and
+> the lines for measured servers that are behind, and moves `backoff_level`;
+> `remeasure_gap` turns it into the least time before the next round, which the
+> measure loop uses. `servers_view` is item 10. `parse_tip_checks` and
+> `electrum_tip_checks` are item 11; the switch is read once per coin activation
+> in the UTXO coin builder, next to `electrum_spread_reads`, and the Z-coin
+> Electrum fallback goes through the same builder.
+>
+> *The confirmation wait.* `UtxoRpcClientEnum::wait_for_confirmations` sends an
+> Electrum client to `wait_for_confirmations_on_one_server`, which asks the
+> chosen server with `transaction_get_verbose_from` and
+> `blockchain_headers_subscribe_from`. Native and lightwalletd paths are
+> unchanged. A failure in transport makes the wait choose again; an error
+> answer of the server (for example a transaction it does not know yet) is an
+> answer, as in R38.6.4f item 1, and the wait stays on that server. Where the
+> wait has no other choice it goes on with the server it has, after the usual
+> pause.
+>
+> *The request.* `electrum_servers` is `rpc_command/electrum_servers.rs`, routed
+> in the v2 dispatcher; a ZHTLC coin, a native coin and any other coin answer
+> `CoinIsNotElectrum`. `near` is the near decision even with
+> `electrum_spread_reads` `false`; `latency_ms` is `null` for a server that is
+> not maintained, which has lost its smoothed latency (R38.6.4a item 7).
+>
+> *Points the chapter leaves open, as implemented.* (1) A server both measured
+> in a round and reported by its maintained connection counts once, with its
+> measured height. (2) For header agreement, two different bytes that are each
+> shared by as many servers as any other bytes leave no consensus, so nobody
+> is excluded; a server whose answer carried no readable header bytes is not
+> compared. (3) The reason of a replacement is `behind`, else `stuck`, else
+> `slow`; a lone connection that went silent (R38.6.4l item 6) is `stuck`.
+> (4) The least times of item 8 are those between the starts of two rounds: 5,
+> 10, 20, 40, 60, 60. The measure loop also stops calling for a round once no
+> connection is poor any more. (5) A header notification wakes the measure
+> loop when the tip checks are on, so that a connection that turns stuck or
+> recovers is noticed at once.
+>
+> *The bound above the agreed tip (D38.6.4o.9).* A measured server is eligible
+> only within *T* of the agreed tip on both sides, and a maintained connection
+> more than *T* above the running agreed tip is out of date as *ahead*: it takes
+> no read and no broadcast before the others, and the node logs the *ahead* line
+> once. A measurement round logs the *behind* or the *ahead* line for each
+> measured server outside the tolerance. Being ahead is not a trigger of
+> R38.6.4l item 6 and gives no reason for a replacement; with exactly two
+> servers the agreed tip is the higher one, so nobody is ahead. The `lag` of the
+> `electrum_servers` answer is signed, through `signed_lag`: negative above the
+> agreed tip, `null` where the distance does not fit in 64 bits.
+>
+> *Tests.* Pure: `t38_6_4o_1_the_tolerance_from_avg_blocktime`,
+> `t38_6_4o_2_the_agreed_tip_is_the_second_highest_height`,
+> `a_connection_is_behind_only_beyond_the_tolerance`,
+> `a_connection_is_stuck_when_another_one_hears_news_and_it_does_not`,
+> `a_liar_above_the_others_is_ahead_and_does_not_make_them_look_behind`,
+> `t38_6_4o_8_a_header_that_differs_from_two_agreeing_ones_is_not_eligible` and
+> `the_remeasure_gap_doubles_up_to_the_cap` in `electrum_measure.rs`. Against the
+> stub server, in `electrum_pool_tests.rs`:
+> `t38_6_4o_3_a_connection_behind_is_out_of_date_at_once_and_reversibly`,
+> `t38_6_4o_4_two_servers_one_far_behind`,
+> `t38_6_4o_5_a_silent_connection_is_stuck_while_another_one_hears_news`,
+> `t38_6_4o_6_a_liar_does_not_steer`,
+> `t38_6_4o_7_the_confirmation_wait_sticks_to_one_server`,
+> `t38_6_4o_8_a_header_that_differs_makes_a_server_not_eligible`,
+> `t38_6_4o_9_rounds_without_a_replacement_back_off_and_the_poor_condition_resets_them`,
+> `t38_6_4o_9_a_round_connects_at_most_four_servers_at_a_time`,
+> `t38_6_4o_10_the_view_lists_the_pool_and_sends_nothing` and
+> `t38_6_4o_11_the_switch_turns_the_checks_off` with
+> `t38_6_4o_11_with_the_checks_off_the_wait_polls_the_first_connection`; the
+> request itself in `rpc_command/electrum_servers.rs`. The stub server has
+> `set_header_hex` for the header bytes of each tip. The tests of R38.6.4a and
+> R38.6.4l that are not about R38.6.4o build their pool with the tip checks off,
+> so that they stay about those rules.
 
 T38.6.4.1 *Bounds and validation.* A test shall activate against an in-process
 Electrum test server set with `min_connected` 0, with `min_connected` above
@@ -2368,8 +2481,9 @@ answers one.
 
 T38.6.4a.5 *Samples under `random` and `listed`.* Under `listed` and under
 `random`, ordinary requests and pings shall produce a smoothed latency for each
-maintained session, and no header request shall be sent on joining (compare
-T38.6.4l.15).
+maintained session. With `electrum_tip_checks` `false`, no header request shall
+be sent on joining; with the default `true`, exactly one is (R38.6.4o item 3;
+compare T38.6.4l.15).
 
 T38.6.4a.6 *Near factor and offset values.* An absent
 `electrum_spread_near_factor` means 2, without a warning. `0` makes every
@@ -2497,8 +2611,10 @@ T38.6.4l.15 *Header request on joining.* Under `mixed`, a server that joins
 the maintained set through an ordinary maintenance pass, with no measuring
 connection, shall receive exactly one header request right after joining. A
 later notification 2 or more blocks below the other maintained connections, on
-two consecutive notifications, shall trigger P1 for it. Under `random`, the
-same join shall send no header request (R38.6.4l items 1 and 6).
+two consecutive notifications, shall trigger P1 for it. Under `random` with
+`electrum_tip_checks` `false`, the same join shall send no header request;
+with the default `true` it sends one, but no trigger runs (R38.6.4l items 1
+and 6, R38.6.4o items 3 and 11).
 
 T38.6.4m *TLS server authentication (R38.6.4m).*
 - (a) The default configuration refuses a self-signed certificate, in both the
@@ -2551,7 +2667,8 @@ give *T* = 1, 2, 3, 12, 18 and 20; 0.5 shall give 20 (the cap); an absent key,
 T38.6.4o.2 *Agreed tip.* Heights {*H*} shall give no agreed tip; {*H*,
 *H* − 1000} shall give *H*; {*H*, *H*, *H* − 1} shall give *H*; {*H* +
 1,000,000, *H*, *H* − 1} shall give *H*; {*H* + 5, *H* + 3, *H*} shall give
-*H* + 3. A server above the agreed tip shall have lag 0 (item 2).
+*H* + 3. A server above the agreed tip shall have lag 0 and a lead of its
+distance above it (item 2).
 
 T38.6.4o.3 *Behind, at once and reversibly.* Under `random`, with three
 maintained stubs and a coin with `avg_blocktime` 60 (*T* = 3), each stub shall
@@ -2577,8 +2694,10 @@ of R38.6.4l item 6 is unchanged (item 4).
 
 T38.6.4o.6 *A liar does not steer.* Under `mixed`, with three stubs at *H* +
 1,000,000, *H* and *H*, the two at *H* shall be eligible and the liar shall
-not, and no maintained connection at *H* shall be out of date (items 2, 4;
-R38.6.4l item 4).
+not, and no maintained connection at *H* shall be out of date. With the three
+maintained under `random`, the liar shall be out of date as *ahead* and take
+no reads, and one WARN *ahead* line shall name it. A server at *H* + *T* shall
+stay eligible and up to date (items 2, 4, 5, 9; R38.6.4l item 4).
 
 T38.6.4o.7 *Confirmation wait sticks.* With two maintained stubs, *A* first in
 priority order and *B* second, *A* answering the transaction with 0
@@ -2777,6 +2896,14 @@ measurement rounds only, at the agreed tip height only, and only with two
 agreeing servers. A natural reorganization at the tip resolves itself in the
 next round, because nothing is suspended.
 
+D38.6.4o.9 *(Decided 2026-11-09, maintainer intent of the plan's example of a
+testnet server in a mainnet list.)* *A bound above the agreed tip.* With the
+lag alone, a server far above the agreed tip has lag 0: it would stay eligible
+and keep its share of reads, which is the failure the agreed tip exists to
+prevent. Eligibility and the out-of-date state therefore bound the distance
+both ways by *T*. With exactly two servers the agreed tip is the higher one,
+so no server is ever *ahead*; with three or more, a single server far ahead is.
+
 > **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
 > T38.6.4.12 against an in-process stub server set, with two exceptions:
 > - The first two cases of T38.6.4.1 (a floor of 0, a floor above the
@@ -2787,6 +2914,15 @@ next round, because nothing is suspended.
 >
 > An end-to-end run of both through the task RPC needs the Docker test
 > environment.
+>
+> **Coverage note (2026-11-09).** The deterministic tests cover T38.6.4o.1 –
+> T38.6.4o.11 against the in-process stub server and as pure functions, as the
+> as-built note after R38.6.4o lists them. The tests of T38.6.4a.5 and T38.6.4l.15
+> keep their variants with `electrum_tip_checks` `false` and add the default
+> one. The request
+> `electrum_servers` is tested at the handler, with a native coin for
+> `CoinIsNotElectrum` and an inactive ticker for `NoSuchCoin`; its routing in the
+> dispatcher has no test of its own.
 
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change
@@ -4117,10 +4253,10 @@ R38.8.6 **Tests (two-direction, observable).**
   finding fails a chapter; dictated-interop and public-surface tokens were
   excluded from the measured set.
 - *Reloaded-original addition (2026-11-09, maintainer decisions D38.6.4o.1 –
-  D38.6.4o.8), clean side -- R38.6.4o, T38.6.4o.1 – T38.6.4o.11, D38.6.4o.1 –
-  D38.6.4o.8, and the amendments they name in R38.6.4a items 6 and 7, R38.6.4f
+  D38.6.4o.9), clean side -- R38.6.4o, T38.6.4o.1 – T38.6.4o.11, D38.6.4o.1 –
+  D38.6.4o.9, and the amendments they name in R38.6.4a items 6 and 7, R38.6.4f
   item 4, R38.6.4l items 1, 4, 6 and 7, the test preamble of R38.6.4l,
-  T38.6.4l.1, T38.6.4l.3 and D38.6.4a.1.* Written by a session that never read
+  T38.6.4a.5, T38.6.4l.1, T38.6.4l.3, T38.6.4l.15 and D38.6.4a.1.* Written by a session that never read
   the forbidden corpus. The inputs are this repository's own code and chapter
   text, the coins file's `avg_blocktime` values, field reports of stale
   Electrum servers, the public Electrum protocol, and the maintainer's
