@@ -553,6 +553,20 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   transport level is suspended for 20 s, doubling up to 12 hours, and endpoints that are not
   suspended are tried first. Only the order in which the operator's own endpoints are asked, and
   error texts, change. Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.39 R39.11.30, R39.11.31.
+- **A Tendermint coin can carry priority gas prices, and a request or a swap fee policy can pick one.**
+  Reloaded reads the optional `priority_gas_prices` member (three numbers, the chain's low, average and high gas
+  prices) of a `TENDERMINT` entry's `protocol_data`, accepts the `CosmosGasPriority` fee form beside the
+  `CosmosGas` one on withdraw and staking requests, and lets `get_swap_gas_fee_policy` and
+  `set_swap_gas_fee_policy` take a Tendermint platform coin; GLEEC KDF `v3.0.0-beta` has none of the three beyond
+  `CosmosGas`, and answers `NotSupported` for a Tendermint coin on the two methods. Two points are Reloaded's own:
+  an array with a figure of zero or less fails the coin's activation, where a zero price would make every fee zero;
+  and `set_swap_gas_fee_policy` on a Tendermint coin without `priority_gas_prices` accepts and stores any value
+  with one warning in the log that the coin cannot honor the level, and prices at the default. A Tendermint request
+  that carries a fee form of another family ignores it, as GLEEC KDF does. No switch is needed: a coins file
+  without the member and a request without the new forms are priced as before; only the staking default gas
+  limits change (CHANGELOG, Changed). Rows in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.36 R36.3.5, ch.18 R18.6B, ch.49 R49.28 to
+  R49.30, ch.35 R35.6.8, R35.6.9. PR #323.
 
 ### Removed / disabled in KDF Reloaded
 

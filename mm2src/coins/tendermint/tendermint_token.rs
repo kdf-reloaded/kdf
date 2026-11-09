@@ -589,7 +589,9 @@ impl MmCoin for TendermintToken {
                 .map_to_mm(WithdrawError::Transport)?;
             let timeout_height = current_block + TIMEOUT_HEIGHT_DELTA;
 
-            let (_, gas_limit) = token.platform_coin.gas_info_for_withdraw(&req.fee, GAS_LIMIT_DEFAULT);
+            // A token is priced with its platform coin's prices (CRD ch.36 R36.3.6, CRD ch.18 R18.6B.1).
+            let fee_intent = FeeIntent::request(req.fee, GAS_LIMIT_DEFAULT);
+            let (_, gas_limit) = token.platform_coin.selected_gas_price_and_limit(&fee_intent);
 
             let fee_amount_u64 = token
                 .platform_coin
@@ -599,7 +601,7 @@ impl MmCoin for TendermintToken {
                     msg_payload.clone(),
                     timeout_height,
                     &memo,
-                    req.fee,
+                    &fee_intent,
                 )
                 .await
                 .map_mm_err()?;

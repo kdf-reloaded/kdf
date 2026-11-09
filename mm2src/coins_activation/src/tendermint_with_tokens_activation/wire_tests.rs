@@ -282,6 +282,85 @@ fn an_absent_or_null_activation_params_is_not_refused() {
 }
 
 // ---------------------------------------------------------------------------
+// T36.16, T36.17: `priority_gas_prices` in the platform's protocol data (R36.3.5)
+// ---------------------------------------------------------------------------
+
+/// A `TENDERMINT` entry whose `protocol_data` carries `priority_gas_prices: priority`.
+fn priority_coin(ticker: &str, priority: Json) -> Json {
+    json!({
+        "coin": ticker,
+        "avg_blocktime": 5,
+        "protocol": { "type": "TENDERMINT", "protocol_data": {
+            "denom": "uiris", "decimals": 6, "account_prefix": "iaa", "chain_id": "irishub-1",
+            "priority_gas_prices": priority } },
+        "mm2": 1
+    })
+}
+
+#[test]
+fn priority_gas_prices_of_another_shape_is_a_coin_protocol_parse_error() {
+    // T36.16: two elements, four elements, a string element and an object each fail parsing of the protocol
+    // descriptor, and no coin is registered.
+    for shape in [
+        json!([0.015, 0.025]),
+        json!([0.015, 0.025, 0.04, 0.05]),
+        json!([0.015, "0.025", 0.04]),
+        json!({ "low": 0.015, "average": 0.025, "high": 0.04 }),
+    ] {
+        let ctx = ctx_with(vec![priority_coin("PRIOBAD", shape.clone())]);
+        let wire = failure(&ctx, request(json!({ "ticker": "PRIOBAD" })));
+        assert_eq!(wire.0["error_type"], "CoinProtocolParseError", "{shape}: {:?}", wire.0);
+        assert_eq!(wire.0["error_data"]["ticker"], "PRIOBAD", "{shape}");
+        assert!(wire.0["error_data"]["error"].is_string(), "{shape}");
+        assert_eq!(wire.1, StatusCode::INTERNAL_SERVER_ERROR, "{shape}");
+        assert_nothing_registered(&ctx, &["PRIOBAD"]);
+    }
+}
+
+#[test]
+fn a_non_positive_priority_gas_price_is_a_platform_coin_creation_error() {
+    // T36.17: a figure of zero or less fails the activation as a platform-coin creation error that names the
+    // member, and registers no coin.
+    for figures in [
+        json!([0, 0.025, 0.04]),
+        json!([0.015, 0.025, 0]),
+        json!([0.015, -0.025, 0.04]),
+    ] {
+        let ctx = ctx_with(vec![priority_coin("PRIOZERO", figures.clone())]);
+        let wire = failure(&ctx, request(json!({ "ticker": "PRIOZERO" })));
+        assert_creation_error(&wire, "PRIOZERO");
+        assert!(
+            wire.0["error_data"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("priority_gas_prices"),
+            "{figures}: {:?}",
+            wire.0
+        );
+        assert_nothing_registered(&ctx, &["PRIOZERO"]);
+    }
+}
+
+#[test]
+fn a_valid_or_null_priority_gas_prices_is_not_refused() {
+    // T36.16: the array in any order and `null` pass the protocol checks, so the request proceeds to the nodes
+    // and the error is the node failure, not a refusal of the member.
+    for figures in [json!([0.015, 0.025, 0.04]), json!([0.04, 0.025, 0.015]), Json::Null] {
+        let ctx = ctx_with(vec![priority_coin("PRIOOK", figures.clone())]);
+        let wire = failure(&ctx, request(json!({ "ticker": "PRIOOK" })));
+        assert_creation_error(&wire, "PRIOOK");
+        assert!(
+            !wire.0["error_data"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("priority_gas_prices"),
+            "{figures}: {:?}",
+            wire.0
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // T36.4: tokens_params is required
 // ---------------------------------------------------------------------------
 

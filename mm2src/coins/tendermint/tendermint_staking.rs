@@ -364,7 +364,12 @@ impl TendermintCoin {
             + TIMEOUT_HEIGHT_DELTA;
 
         let fee = self
-            .calculate_fee(sim_msg, timeout_height, &req.memo, req.fee)
+            .calculate_fee(
+                sim_msg,
+                timeout_height,
+                &req.memo,
+                &FeeIntent::request(req.fee, STAKING_GAS_LIMIT_DEFAULT),
+            )
             .await
             .map_mm_err()?;
 
@@ -494,7 +499,12 @@ impl TendermintCoin {
             + TIMEOUT_HEIGHT_DELTA;
 
         let fee = self
-            .calculate_fee(msg.clone(), timeout_height, &req.memo, req.fee)
+            .calculate_fee(
+                msg.clone(),
+                timeout_height,
+                &req.memo,
+                &FeeIntent::request(req.fee, UNDELEGATE_GAS_LIMIT_DEFAULT),
+            )
             .await
             .map_mm_err()?;
 
@@ -583,7 +593,12 @@ impl TendermintCoin {
             + TIMEOUT_HEIGHT_DELTA;
 
         let fee = self
-            .calculate_fee(msg.clone(), timeout_height, &req.memo, req.fee)
+            .calculate_fee(
+                msg.clone(),
+                timeout_height,
+                &req.memo,
+                &FeeIntent::request(req.fee, STAKING_GAS_LIMIT_DEFAULT),
+            )
             .await
             .map_mm_err()?;
 

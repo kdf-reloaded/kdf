@@ -1383,6 +1383,29 @@ mod slp_tests {
         assert!(matches!(err.into_inner(), WithdrawError::InvalidFeePolicy(_)));
     }
 
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_slp_withdraw_cosmos_fee_descriptors_are_invalid_fee_policy() {
+        // CRD ch.49 R49.28, R49.29: the two Cosmos fee forms are a fee type a UTXO-family coin does not take, so
+        // they are the invalid-fee-policy error, not ignored.
+        for fee in [
+            WithdrawFee::CosmosGas {
+                gas_limit: 125_000,
+                gas_price: 0.03,
+            },
+            WithdrawFee::CosmosGasPriority {
+                gas_limit: 125_000,
+                gas_price_option: crate::CosmosGasPriceOption::High,
+            },
+        ] {
+            let err = match slp_withdraw_with_fee(fee, &[100_000_000]) {
+                Ok(_) => panic!("a Cosmos fee descriptor must be refused"),
+                Err(err) => err,
+            };
+            assert!(matches!(err.into_inner(), WithdrawError::InvalidFeePolicy(_)));
+        }
+    }
+
     /// The reference arithmetic of R38.6.6l item 2 and R38.6.6b, `floor(a x s / 1000)` once, for a transaction
     /// of worst-case size `size` that carries a change output (the size includes the change output).
     fn fee_test_fee_with_change(size: u64) -> u64 { FEE_TEST_RATE_SAT * size / 1000 }
