@@ -169,6 +169,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### Releases and downloads
 
+- **Every pull request now builds the node for 64-bit ARM Linux.** The check cross-builds `kdf` for aarch64, tests the glibc floor and starts the binary under an emulator, so a change that breaks the ARM build is found before it merges. It is not a required check at first; it becomes one after about ten green runs on `dev` (roughly two weeks). Detail: the Tests workflow.
 - **Releases now include Linux builds for 64-bit and 32-bit ARM, and the mobile libraries.** Besides the x86_64 binary, each signed release carries `kdf` for aarch64 and armv7 Linux (glibc 2.31 or newer, like the x86_64 one), and `libkdf.a` static libraries for Android (aarch64 and armv7) and iOS (aarch64) apps. The macOS binary that runs on both Intel and Apple silicon is attached as well; earlier releases did not include it. Every file is in the signed checksum list. The names, target triples and minimum system versions are in `docs/RELEASE_ARTIFACTS.md`. Detail: PR #300.
 
 ### Changed
