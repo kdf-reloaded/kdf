@@ -292,6 +292,15 @@ expose a dual transport substrate organised as:
 | `transport` | A unified slurp accessor surface (`slurp_url`, `slurp_url_with_headers`, `slurp_post_json`) re-exported with identical signatures on both targets; the body picks the right module behind a point-of-use attribute (R3). |
 | `grpc_web` | A gRPC-WEB client that consumes both R2 macros at the top of the file and a single shared decode/encode body below. |
 
+> **Header-bearing JSON POST (pointer, 2026-11-08).**
+> [Chapter 63](63-tron-gasfree-fee-delegation.md) R23 requires a
+> fourth accessor on the `transport` row -- a POST-JSON accessor that
+> carries caller-supplied request headers on both targets -- for the
+> GasFree provider's authenticated API. The accessor is not yet in
+> the table above; the row is to be extended when that rail is
+> scheduled. The requirement passed the KDF Dirty Gate with chapter 63
+> on 2026-11-08.
+
 Consumers above the transport layer write one
 code path. The native WebSocket
 client MUST be routed through a sibling-allowlist

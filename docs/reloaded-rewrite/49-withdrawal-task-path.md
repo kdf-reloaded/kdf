@@ -31,6 +31,14 @@ withdrawal request, such as memo, broadcast, protocol-channel, or expiry
 controls. The task endpoint shall not add a second withdrawal-specific request
 shape.
 
+> **Fee-rail selector (pointer, 2026-11-08).** The optional `fee_method`
+> (`native` | `gasless` | `auto`) and `gasless` fields of the shared request,
+> the gasless fee-details shape, the gasless task progress phases and the
+> nested gasless error family under the shared withdraw error are bound by
+> [Chapter 63](63-tron-gasfree-fee-delegation.md) §63.3.4–§63.3.6 and §63.9.
+> They are inert for every non-Tron coin. Chapter 63 passed the KDF Dirty Gate
+> on 2026-11-08.
+
 > **The `fee` descriptor's EVM forms (cross-reference).** The descriptor is a
 > single enumeration shared by every coin family, tagged by a `type` member.
 > Its EVM forms, the rule for an absent descriptor, the gas-limit estimation

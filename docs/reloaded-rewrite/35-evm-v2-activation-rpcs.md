@@ -184,6 +184,13 @@ reference version at all. A malformed value in any of these five fields shall
 > methods, behind the availability constant
 > ([Chapter 55](55-coin-activation-wire-contract.md) D55.5).
 
+> **GasFree provider binding (pointer, 2026-11-08).** The optional
+> `tron_gasless_provider` object on this request and its task form,
+> and the optional `gasless` object on the TRC20 token-activation
+> requests -- valid for TRON platforms only and rejected elsewhere --
+> are bound by [Chapter 63](63-tron-gasfree-fee-delegation.md)
+> §63.3.1–§63.3.2 (passed the KDF Dirty Gate on 2026-11-08).
+
 ### 35.1.B Activation flow and failure precedence
 
 R35.1.2 Activation shall proceed through the following phases, and when a
