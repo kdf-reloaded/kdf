@@ -185,7 +185,7 @@ fn test_taker_spends_maker_payment() {
     let timelock = (now_ms() / 1000) as u32 - 200;
     let maker_pub = maker_coin.my_public_key().unwrap().to_vec();
     let taker_pub = taker_coin.my_public_key().unwrap().to_vec();
-    let secret = &[1; 32];
+    let secret = &rand::random::<[u8; 32]>();
     let secret_hash = dhash160(secret).to_vec();
     let amount = BigDecimal::try_from(0.2).unwrap();
 
@@ -205,13 +205,7 @@ fn test_taker_spends_maker_payment() {
     log!("Maker payment: "[payment_tx_hash]);
 
     let confirmations = 1;
-    let requires_nota = false;
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    let check_every = 1;
-    taker_coin
-        .wait_for_confirmations(&payment_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&taker_coin, &payment_tx_hex, confirmations);
 
     let input = ValidatePaymentInput {
         payment_tx: payment_tx_hex.clone(),
@@ -221,7 +215,7 @@ fn test_taker_spends_maker_payment() {
         secret_hash,
         amount: amount.clone(),
         swap_contract_address: taker_coin.swap_contract_address(),
-        try_spv_proof_until: wait_until + 30,
+        try_spv_proof_until: (now_ms() / 1000) + 70,
         confirmations,
     };
     taker_coin.validate_maker_payment(input).wait().unwrap();
@@ -241,11 +235,7 @@ fn test_taker_spends_maker_payment() {
     let spend_tx_hex = spend.tx_hex();
     log!("Taker spends tx: "[spend_tx_hash]);
 
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    taker_coin
-        .wait_for_confirmations(&spend_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&taker_coin, &spend_tx_hex, confirmations);
 
     let maker_balance = maker_coin
         .my_spendable_balance()
@@ -277,7 +267,7 @@ fn test_maker_spends_taker_payment() {
     let timelock = (now_ms() / 1000) as u32 - 200;
     let maker_pub = maker_coin.my_public_key().unwrap().to_vec();
     let taker_pub = taker_coin.my_public_key().unwrap().to_vec();
-    let secret = &[1; 32];
+    let secret = &rand::random::<[u8; 32]>();
     let secret_hash = dhash160(secret).to_vec();
     let amount = BigDecimal::try_from(0.2).unwrap();
 
@@ -297,13 +287,7 @@ fn test_maker_spends_taker_payment() {
     log!("Taker payment: "[payment_tx_hash]);
 
     let confirmations = 1;
-    let requires_nota = false;
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    let check_every = 1;
-    maker_coin
-        .wait_for_confirmations(&payment_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&maker_coin, &payment_tx_hex, confirmations);
 
     let input = ValidatePaymentInput {
         payment_tx: payment_tx_hex.clone(),
@@ -313,7 +297,7 @@ fn test_maker_spends_taker_payment() {
         secret_hash: secret_hash.clone(),
         amount: amount.clone(),
         swap_contract_address: maker_coin.swap_contract_address(),
-        try_spv_proof_until: wait_until + 30,
+        try_spv_proof_until: (now_ms() / 1000) + 70,
         confirmations,
     };
     maker_coin.validate_taker_payment(input).wait().unwrap();
@@ -333,11 +317,7 @@ fn test_maker_spends_taker_payment() {
     let spend_tx_hex = spend.tx_hex();
     log!("Maker spends tx: "[spend_tx_hash]);
 
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    maker_coin
-        .wait_for_confirmations(&spend_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&maker_coin, &spend_tx_hex, confirmations);
 
     let maker_balance = maker_coin
         .my_spendable_balance()
@@ -359,7 +339,7 @@ fn test_maker_refunds_payment() {
 
     let timelock = (now_ms() / 1000) as u32 - 200;
     let taker_pub = hex::decode("022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1a").unwrap();
-    let secret_hash = &[1; 20];
+    let secret_hash = &rand::random::<[u8; 20]>();
     let amount = BigDecimal::from_str("0.2").unwrap();
 
     let payment = coin
@@ -378,12 +358,7 @@ fn test_maker_refunds_payment() {
     log!("Maker payment: "[payment_tx_hash]);
 
     let confirmations = 1;
-    let requires_nota = false;
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    let check_every = 1;
-    coin.wait_for_confirmations(&payment_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&coin, &payment_tx_hex, confirmations);
 
     let balance_after_payment = coin.my_spendable_balance().wait().unwrap();
     assert_eq!(expected_balance.clone() - amount, balance_after_payment);
@@ -403,10 +378,7 @@ fn test_maker_refunds_payment() {
     let refund_tx_hex = refund.tx_hex();
     log!("Maker refunds payment: "[refund_tx_hash]);
 
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    coin.wait_for_confirmations(&refund_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&coin, &refund_tx_hex, confirmations);
 
     let balance_after_refund = coin.my_spendable_balance().wait().unwrap();
     assert_eq!(expected_balance, balance_after_refund);
@@ -420,7 +392,7 @@ fn test_taker_refunds_payment() {
 
     let timelock = (now_ms() / 1000) as u32 - 200;
     let maker_pub = hex::decode("022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1a").unwrap();
-    let secret_hash = &[1; 20];
+    let secret_hash = &rand::random::<[u8; 20]>();
     let amount = BigDecimal::from_str("0.2").unwrap();
 
     let payment = coin
@@ -439,12 +411,7 @@ fn test_taker_refunds_payment() {
     log!("Taker payment: "[payment_tx_hash]);
 
     let confirmations = 1;
-    let requires_nota = false;
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    let check_every = 1;
-    coin.wait_for_confirmations(&payment_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&coin, &payment_tx_hex, confirmations);
 
     let balance_after_payment = coin.my_spendable_balance().wait().unwrap();
     assert_eq!(expected_balance.clone() - amount, balance_after_payment);
@@ -464,10 +431,7 @@ fn test_taker_refunds_payment() {
     let refund_tx_hex = refund.tx_hex();
     log!("Taker refunds payment: "[refund_tx_hash]);
 
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    coin.wait_for_confirmations(&refund_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&coin, &refund_tx_hex, confirmations);
 
     let balance_after_refund = coin.my_spendable_balance().wait().unwrap();
     assert_eq!(expected_balance, balance_after_refund);
@@ -478,7 +442,7 @@ fn test_check_if_my_payment_sent() {
     let (_ctx, coin, _priv_key) = generate_qrc20_coin_with_random_privkey("QICK", 20.into(), 10.into());
     let timelock = (now_ms() / 1000) as u32 - 200;
     let taker_pub = hex::decode("022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1a").unwrap();
-    let secret_hash = &[1; 20];
+    let secret_hash = &rand::random::<[u8; 20]>();
     let amount = BigDecimal::from_str("0.2").unwrap();
 
     let payment = coin
@@ -497,12 +461,7 @@ fn test_check_if_my_payment_sent() {
     log!("Maker payment: "[payment_tx_hash]);
 
     let confirmations = 2;
-    let requires_nota = false;
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    let check_every = 1;
-    coin.wait_for_confirmations(&payment_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&coin, &payment_tx_hex, confirmations);
 
     let search_from_block = coin.current_block().wait().expect("!current_block") - 10;
     let found = coin
@@ -528,7 +487,7 @@ fn test_search_for_swap_tx_spend_taker_spent() {
     let timelock = (now_ms() / 1000) as u32 - 200;
     let maker_pub = maker_coin.my_public_key().unwrap();
     let taker_pub = taker_coin.my_public_key().unwrap();
-    let secret = &[1; 32];
+    let secret = &rand::random::<[u8; 32]>();
     let secret_hash = &*dhash160(secret);
     let amount = BigDecimal::try_from(0.2).unwrap();
 
@@ -548,13 +507,7 @@ fn test_search_for_swap_tx_spend_taker_spent() {
     log!("Maker payment: "[payment_tx_hash]);
 
     let confirmations = 1;
-    let requires_nota = false;
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    let check_every = 1;
-    taker_coin
-        .wait_for_confirmations(&payment_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&taker_coin, &payment_tx_hex, confirmations);
 
     let spend = taker_coin
         .send_taker_spends_maker_payment(
@@ -571,11 +524,7 @@ fn test_search_for_swap_tx_spend_taker_spent() {
     let spend_tx_hex = spend.tx_hex();
     log!("Taker spends tx: "[spend_tx_hash]);
 
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    taker_coin
-        .wait_for_confirmations(&spend_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&taker_coin, &spend_tx_hex, confirmations);
 
     let actual = block_on(maker_coin.search_for_swap_tx_spend_my(
         timelock,
@@ -597,7 +546,7 @@ fn test_search_for_swap_tx_spend_maker_refunded() {
 
     let timelock = (now_ms() / 1000) as u32 - 200;
     let taker_pub = hex::decode("022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1a").unwrap();
-    let secret = &[1; 32];
+    let secret = &rand::random::<[u8; 32]>();
     let secret_hash = &*dhash160(secret);
     let amount = BigDecimal::try_from(0.2).unwrap();
 
@@ -617,13 +566,7 @@ fn test_search_for_swap_tx_spend_maker_refunded() {
     log!("Maker payment: "[payment_tx_hash]);
 
     let confirmations = 1;
-    let requires_nota = false;
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    let check_every = 1;
-    maker_coin
-        .wait_for_confirmations(&payment_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&maker_coin, &payment_tx_hex, confirmations);
 
     let refund = maker_coin
         .send_maker_refunds_payment(
@@ -640,11 +583,7 @@ fn test_search_for_swap_tx_spend_maker_refunded() {
     let refund_tx_hex = refund.tx_hex();
     log!("Maker refunds tx: "[refund_tx_hash]);
 
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    maker_coin
-        .wait_for_confirmations(&refund_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&maker_coin, &refund_tx_hex, confirmations);
 
     let actual = block_on(maker_coin.search_for_swap_tx_spend_my(
         timelock,
@@ -666,7 +605,7 @@ fn test_search_for_swap_tx_spend_not_spent() {
 
     let timelock = (now_ms() / 1000) as u32 - 200;
     let taker_pub = hex::decode("022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1a").unwrap();
-    let secret = &[1; 32];
+    let secret = &rand::random::<[u8; 32]>();
     let secret_hash = &*dhash160(secret);
     let amount = BigDecimal::try_from(0.2).unwrap();
 
@@ -686,13 +625,7 @@ fn test_search_for_swap_tx_spend_not_spent() {
     log!("Maker payment: "[payment_tx_hash]);
 
     let confirmations = 1;
-    let requires_nota = false;
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    let check_every = 1;
-    maker_coin
-        .wait_for_confirmations(&payment_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&maker_coin, &payment_tx_hex, confirmations);
 
     let actual = block_on(maker_coin.search_for_swap_tx_spend_my(
         timelock,
@@ -716,8 +649,8 @@ fn test_wait_for_tx_spend() {
     let timelock = (now_ms() / 1000) as u32 - 200;
     let maker_pub = maker_coin.my_public_key().unwrap();
     let taker_pub = taker_coin.my_public_key().unwrap();
-    let secret = &[1; 32];
-    let secret_hash = &*dhash160(secret);
+    let secret: [u8; 32] = rand::random();
+    let secret_hash = &*dhash160(&secret);
     let amount = BigDecimal::try_from(0.2).unwrap();
 
     let payment = maker_coin
@@ -736,13 +669,7 @@ fn test_wait_for_tx_spend() {
     log!("Maker payment: "[payment_tx_hash]);
 
     let confirmations = 1;
-    let requires_nota = false;
-    let wait_until = (now_ms() / 1000) + 40; // timeout if test takes more than 40 seconds to run
-    let check_every = 1;
-    taker_coin
-        .wait_for_confirmations(&payment_tx_hex, confirmations, requires_nota, wait_until, check_every)
-        .wait()
-        .unwrap();
+    confirm_on_qtum_regtest(&taker_coin, &payment_tx_hex, confirmations);
 
     // first try to check if the wait_for_tx_spend() returns an error correctly
     let wait_until = (now_ms() / 1000) + 5;
@@ -774,7 +701,7 @@ fn test_wait_for_tx_spend() {
                 &payment_hex,
                 timelock,
                 &maker_pub_c,
-                secret,
+                &secret,
                 &[],
                 &taker_coin.swap_contract_address(),
             )
@@ -1386,6 +1313,7 @@ fn test_search_for_segwit_swap_tx_spend_native_was_refunded_maker() {
         .wait()
         .unwrap();
 
+    mine_qtum_block_for(&coin);
     coin.wait_for_confirmations(&tx.tx_hex(), 1, false, timeout, 1)
         .wait()
         .unwrap();
@@ -1395,6 +1323,7 @@ fn test_search_for_segwit_swap_tx_spend_native_was_refunded_maker() {
         .wait()
         .unwrap();
 
+    mine_qtum_block_for(&coin);
     coin.wait_for_confirmations(&refund_tx.tx_hex(), 1, false, timeout, 1)
         .wait()
         .unwrap();
@@ -1426,6 +1355,7 @@ fn test_search_for_segwit_swap_tx_spend_native_was_refunded_taker() {
         .wait()
         .unwrap();
 
+    mine_qtum_block_for(&coin);
     coin.wait_for_confirmations(&tx.tx_hex(), 1, false, timeout, 1)
         .wait()
         .unwrap();
@@ -1435,6 +1365,7 @@ fn test_search_for_segwit_swap_tx_spend_native_was_refunded_taker() {
         .wait()
         .unwrap();
 
+    mine_qtum_block_for(&coin);
     coin.wait_for_confirmations(&refund_tx.tx_hex(), 1, false, timeout, 1)
         .wait()
         .unwrap();
