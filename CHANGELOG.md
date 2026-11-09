@@ -634,6 +634,18 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   One change applies today: a coin entry with `avg_blocktime` 0 now fails activation with an error
   naming the key. Detail: PR #299; CRD ch.18 §18.11.
 
+#### Price service and the maker bot
+
+- **A coin on which the price sources disagree is now priced from the first source, with a warning, instead of
+  being left unpriced.** The 5 % check between the two sources no longer leaves a coin unpriced just because the
+  two services take its price from different providers and the figures differ. If one price provider's figures
+  from two sources agree, the newest of them is used. Otherwise the coin is priced from the first source, in the
+  order of `price_urls`, and the log carries one warning that names the coin, both figures, both providers and the
+  host used. The bot and the swap prices both follow it. **With this default a wrong figure from the first source
+  can be used, with a warning.** `"price_conflict": "refuse"` in `MM2.json` restores the old behavior: such a
+  coin is not priced. A value of another form is ignored with one warning that names the key. See
+  [Network configuration](docs/NETWORK_CONFIG.md#price-service). Detail: PR #TBD; CRD ch.62 D62.2.
+
 ### Fixed
 
 #### ARRR and other shielded coins
@@ -883,8 +895,8 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   another service, and no swap completed stored USD prices. The default is now two sources asked at the
   same time: the GLEEC price service (and, if it does not answer, its cache) and the prices.cipig.net price
   service, each with `?expire_at=259200` so that no price older than 72 hours is served. A coin that only one
-  source prices is priced from it. A coin both price must agree within 5 %; if they do not, the coin gets no
-  price from either, and the bot quotes no pair with it. A source that does not answer is skipped. The bot
+  source prices is priced from it. A coin both price should agree within 5 %; for one that does not, see the
+  `price_conflict` entry under Changed. A source that does not answer is skipped. The bot
   and the swap prices use the same sources. Two new top-level keys in `MM2.json` change them: `price_urls`
   (an array of sources, each one address or an array of addresses tried in order) replaces the default
   sources, and `price_providers` (an array of names) replaces the price providers the node recognizes

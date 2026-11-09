@@ -18,7 +18,12 @@ fn source_table(host: &str, entries: &[(&str, &str, &str, u64)]) -> SourceTable 
     }
 }
 
-fn combine(tables: Vec<SourceTable>) -> Combined { combine_sources(tables, &ProviderSet::default_set()) }
+/// The sources combined under the default `price_conflict` policy.
+fn combine(tables: Vec<SourceTable>) -> Combined { combine_with(tables, ConflictPolicy::default()) }
+
+fn combine_with(tables: Vec<SourceTable>, policy: ConflictPolicy) -> Combined {
+    combine_sources(tables, &ProviderSet::default_set(), policy)
+}
 
 fn price_in(combined: &Combined, ticker: &str) -> MmNumber { combined.table[ticker].infos.last_price.clone() }
 
@@ -126,10 +131,13 @@ fn exactly_five_percent_agrees_and_beyond_it_is_a_conflict() {
     assert!(combined.conflicts.is_empty());
     assert_eq!(price_in(&combined, "BTC"), MmNumber::from("105"));
 
-    let combined = combine(vec![
-        source_table("a", &[("BTC", "100", "binance", 10)]),
-        source_table("b", &[("BTC", "105.01", "binance", 20)]),
-    ]);
+    let combined = combine_with(
+        vec![
+            source_table("a", &[("BTC", "100", "binance", 10)]),
+            source_table("b", &[("BTC", "105.01", "binance", 20)]),
+        ],
+        ConflictPolicy::Refuse,
+    );
     assert!(!combined.table.contains_key("BTC"));
     assert_eq!(combined.conflicts.len(), 1);
     let conflict = &combined.conflicts[0];
@@ -192,10 +200,13 @@ fn unrecognized_and_zero_timestamp_records_are_dropped_before_combining() {
 /// The KMD case of 2026-11-07: one source priced it from coingecko, the other from coinpaprika at half the value.
 #[test]
 fn two_providers_a_factor_two_apart_are_a_conflict() {
-    let combined = combine(vec![
-        source_table("gleec", &[("KMD", "0.00678", "coingecko", 10)]),
-        source_table("cipig", &[("KMD", "0.00313", "coinpaprika", 20)]),
-    ]);
+    let combined = combine_with(
+        vec![
+            source_table("gleec", &[("KMD", "0.00678", "coingecko", 10)]),
+            source_table("cipig", &[("KMD", "0.00313", "coinpaprika", 20)]),
+        ],
+        ConflictPolicy::Refuse,
+    );
     assert!(!combined.table.contains_key("KMD"));
     assert_eq!(combined.conflicts.len(), 1);
     assert_eq!(combined.conflicts[0].low.provider, "coinpaprika");
@@ -210,13 +221,181 @@ fn with_three_sources_the_widest_pair_decides() {
         source_table("c", &[("BTC", "104", "binance", 20)]),
     ]);
     assert_eq!(price_in(&agree, "BTC"), MmNumber::from("102"));
-    let disagree = combine(vec![
-        source_table("a", &[("BTC", "100", "binance", 10)]),
-        source_table("b", &[("BTC", "102", "binance", 30)]),
-        source_table("c", &[("BTC", "110", "binance", 20)]),
-    ]);
+    let disagree = combine_with(
+        vec![
+            source_table("a", &[("BTC", "100", "binance", 10)]),
+            source_table("b", &[("BTC", "102", "binance", 30)]),
+            source_table("c", &[("BTC", "110", "binance", 20)]),
+        ],
+        ConflictPolicy::Refuse,
+    );
     assert!(!disagree.table.contains_key("BTC"));
     assert_eq!(disagree.conflicts.len(), 1);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Like with like and the `price_conflict` switch (CRD ch.62 D62.2)
+// ---------------------------------------------------------------------------------------------------------------
+
+#[test]
+fn same_provider_figures_that_agree_keep_the_newest_without_a_conflict() {
+    for policy in [ConflictPolicy::FirstSource, ConflictPolicy::Refuse] {
+        let combined = combine_with(
+            vec![
+                source_table("a", &[("BTC", "100", "binance", 10)]),
+                source_table("b", &[("BTC", "103", "binance", 20)]),
+            ],
+            policy,
+        );
+        assert!(
+            combined.conflicts.is_empty() && combined.outvoted.is_empty(),
+            "{policy:?}"
+        );
+        assert_eq!(price_in(&combined, "BTC"), MmNumber::from("103"), "{policy:?}");
+    }
+}
+
+#[test]
+fn same_provider_figures_that_disagree_go_to_the_first_source_by_default() {
+    // The first source's record is the older one, so the result is not the newest-wins of an agreement.
+    let combined = combine(vec![
+        source_table("a", &[("BTC", "100", "binance", 10)]),
+        source_table("b", &[("BTC", "120", "binance", 20)]),
+    ]);
+    assert_eq!(price_in(&combined, "BTC"), MmNumber::from("100"));
+    assert_eq!(combined.table["BTC"].provider, "binance");
+    assert!(combined.outvoted.is_empty());
+    assert_eq!(combined.conflicts.len(), 1);
+    let conflict = &combined.conflicts[0];
+    assert_eq!(conflict.ticker, "BTC");
+    assert_eq!(conflict.resolved_to.as_deref(), Some("a"));
+    let line = conflict.describe();
+    assert!(
+        line.starts_with("The price sources disagree on BTC by more than 5 %: "),
+        "{line}"
+    );
+    assert!(
+        line.contains("(binance, from a)") && line.contains("(binance, from b)"),
+        "{line}"
+    );
+    assert!(line.ends_with("; the price from a is used"), "{line}");
+}
+
+#[test]
+fn same_provider_figures_that_disagree_are_unpriced_under_refuse() {
+    let combined = combine_with(
+        vec![
+            source_table("a", &[("BTC", "100", "binance", 10)]),
+            source_table("b", &[("BTC", "120", "binance", 20)]),
+        ],
+        ConflictPolicy::Refuse,
+    );
+    assert!(!combined.table.contains_key("BTC"));
+    assert_eq!(combined.conflicts.len(), 1);
+    let conflict = &combined.conflicts[0];
+    assert_eq!(conflict.resolved_to, None);
+    let line = conflict.describe();
+    assert!(
+        line.starts_with("The price sources disagree on BTC by more than 5 %: "),
+        "{line}"
+    );
+    assert!(line.ends_with("; the ticker is not priced"), "{line}");
+}
+
+#[test]
+fn different_providers_that_agree_keep_the_newest_without_a_conflict() {
+    for policy in [ConflictPolicy::FirstSource, ConflictPolicy::Refuse] {
+        let combined = combine_with(
+            vec![
+                source_table("a", &[("BTC", "100", "binance", 10)]),
+                source_table("b", &[("BTC", "104", "coingecko", 20)]),
+            ],
+            policy,
+        );
+        assert!(
+            combined.conflicts.is_empty() && combined.outvoted.is_empty(),
+            "{policy:?}"
+        );
+        assert_eq!(price_in(&combined, "BTC"), MmNumber::from("104"), "{policy:?}");
+        assert_eq!(combined.table["BTC"].provider, "coingecko", "{policy:?}");
+    }
+}
+
+/// The KMD case: source 1 names coingecko, source 2 coinpaprika, and the figures are about 7 % apart.
+#[test]
+fn the_kmd_case_is_priced_from_the_first_source_by_default_and_unpriced_under_refuse() {
+    let sources = || {
+        vec![
+            source_table("gleec", &[("KMD", "0.00678", "coingecko", 20)]),
+            source_table("cipig", &[("KMD", "0.00727", "coinpaprika", 10)]),
+        ]
+    };
+    let combined = combine_with(sources(), ConflictPolicy::FirstSource);
+    assert_eq!(price_in(&combined, "KMD"), MmNumber::from("0.00678"));
+    assert_eq!(combined.table["KMD"].provider, "coingecko");
+    assert_eq!(combined.conflicts.len(), 1);
+    assert_eq!(combined.conflicts[0].resolved_to.as_deref(), Some("gleec"));
+
+    // The first source is the one that is used, whichever figure it holds.
+    let mut reversed = sources();
+    reversed.reverse();
+    let combined = combine_with(reversed, ConflictPolicy::FirstSource);
+    assert_eq!(price_in(&combined, "KMD"), MmNumber::from("0.00727"));
+    assert_eq!(combined.conflicts[0].resolved_to.as_deref(), Some("cipig"));
+
+    let combined = combine_with(sources(), ConflictPolicy::Refuse);
+    assert!(!combined.table.contains_key("KMD"));
+    assert_eq!(combined.conflicts.len(), 1);
+    assert_eq!(combined.conflicts[0].resolved_to, None);
+}
+
+#[test]
+fn a_ticker_of_the_second_source_only_is_kept_under_both_policies() {
+    for policy in [ConflictPolicy::FirstSource, ConflictPolicy::Refuse] {
+        let combined = combine_with(
+            vec![
+                source_table("a", &[("BTC", "100", "binance", 10)]),
+                source_table("b", &[
+                    ("BTC", "100", "binance", 10),
+                    ("MON", "0.016", "coinpaprika", 20),
+                ]),
+            ],
+            policy,
+        );
+        assert_eq!(price_in(&combined, "MON"), MmNumber::from("0.016"), "{policy:?}");
+        assert!(
+            combined.conflicts.is_empty() && combined.outvoted.is_empty(),
+            "{policy:?}"
+        );
+    }
+}
+
+/// With three sources, two that share a provider and agree settle the ticker; the third provider's outlier is not
+/// compared with them and is no conflict, whatever the policy.
+#[test]
+fn two_sources_of_one_provider_that_agree_settle_a_ticker_that_a_third_provider_disputes() {
+    let sources = |first_timestamp: u64| {
+        vec![
+            source_table("a", &[("BTC", "100", "binance", first_timestamp)]),
+            source_table("b", &[("BTC", "130", "coingecko", 30)]),
+            source_table("c", &[("BTC", "102", "binance", 20)]),
+        ]
+    };
+    for policy in [ConflictPolicy::FirstSource, ConflictPolicy::Refuse] {
+        // The newest of the same-provider records is kept ...
+        let combined = combine_with(sources(10), policy);
+        assert_eq!(price_in(&combined, "BTC"), MmNumber::from("102"), "{policy:?}");
+        assert_eq!(combined.table["BTC"].provider, "binance", "{policy:?}");
+        // ... on a tie, the earlier source's.
+        let combined = combine_with(sources(20), policy);
+        assert_eq!(price_in(&combined, "BTC"), MmNumber::from("100"), "{policy:?}");
+        // The ticker is listed as settled by one provider, and there is no conflict.
+        assert!(combined.conflicts.is_empty(), "{policy:?}");
+        assert_eq!(combined.outvoted, vec!["BTC".to_string()], "{policy:?}");
+    }
+    // It raises no WARN and no INFO: the health state sees nothing.
+    let ctx = context(vec![]);
+    assert_eq!(ctx.note_conflicts(&[], &combine(sources(10))), vec![]);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -407,6 +586,71 @@ fn unknown_stays_unrecognized_even_when_listed() {
     assert!(!ctx.providers.recognizes("unknown"));
 }
 
+#[test]
+fn without_the_price_conflict_key_the_first_source_is_used() {
+    for conf in [json!({}), json!({"netid": 8762}), json!({"price_conflict": null})] {
+        assert_eq!(read_price_conflict_conf(&conf), PriceConflictConf::Absent, "{conf}");
+        assert_eq!(
+            PriceServiceContext::from_conf(&conf).conflict_policy,
+            ConflictPolicy::FirstSource,
+            "{conf}"
+        );
+    }
+    // The context of a test or of a consumer without a conf has the default too.
+    assert_eq!(context(vec![]).conflict_policy, ConflictPolicy::FirstSource);
+}
+
+#[test]
+fn the_price_conflict_key_selects_the_policy() {
+    let conf = json!({"price_conflict": "refuse"});
+    assert_eq!(
+        read_price_conflict_conf(&conf),
+        PriceConflictConf::Valid(ConflictPolicy::Refuse)
+    );
+    assert_eq!(
+        PriceServiceContext::from_conf(&conf).conflict_policy,
+        ConflictPolicy::Refuse
+    );
+    let conf = json!({"price_conflict": "first_source"});
+    assert_eq!(
+        read_price_conflict_conf(&conf),
+        PriceConflictConf::Valid(ConflictPolicy::FirstSource)
+    );
+    assert_eq!(
+        PriceServiceContext::from_conf(&conf).conflict_policy,
+        ConflictPolicy::FirstSource
+    );
+    // The key is independent of the other two.
+    let conf = json!({"price_conflict": "refuse", "price_urls": ["https://a.example/t"]});
+    let ctx = PriceServiceContext::from_conf(&conf);
+    assert_eq!(ctx.conflict_policy, ConflictPolicy::Refuse);
+    assert_eq!(ctx.sources, vec![vec!["https://a.example/t".to_string()]]);
+}
+
+/// A value of another form is ignored: the default applies (one WARN names the key, never the value).
+#[test]
+fn a_malformed_price_conflict_key_gives_the_default() {
+    for malformed in [
+        json!(true),
+        json!("x"),
+        json!([]),
+        json!({}),
+        json!(5),
+        json!(""),
+        json!("Refuse"),
+        json!("first-source"),
+        json!(["refuse"]),
+    ] {
+        let conf = json!({ "price_conflict": malformed });
+        assert_eq!(read_price_conflict_conf(&conf), PriceConflictConf::Invalid, "{conf}");
+        assert_eq!(
+            PriceServiceContext::from_conf(&conf).conflict_policy,
+            ConflictPolicy::FirstSource,
+            "{conf}"
+        );
+    }
+}
+
 /// A wrong list disables pricing for the tickers whose providers it leaves out.
 #[test]
 fn a_wrong_provider_list_disables_pricing() {
@@ -417,6 +661,7 @@ fn a_wrong_provider_list_disables_pricing() {
             ("KMD", "0.25", "coingecko", 10),
         ])],
         &providers,
+        ConflictPolicy::default(),
     );
     assert!(combined.table.is_empty());
 }
@@ -487,6 +732,42 @@ fn a_ticker_conflict_warns_once_and_says_when_the_prices_agree_again() {
     // A ticker that vanished from both sources has not "agreed again".
     assert_eq!(ctx.note_conflicts(&[], &combine(vec![])), vec![]);
     assert_eq!(ctx.note_conflicts(&[], &conflicting()), kmd(Notice::Warn));
+}
+
+/// A conflict resolved to the first source follows the same rule: the ticker is priced all along, one WARN names the
+/// host used, DEBUG repeats while it lasts and one INFO says when the figures agree again.
+#[test]
+fn a_resolved_conflict_warns_once_logs_debug_while_it_lasts_and_an_info_when_the_figures_agree_again() {
+    let ctx = context(vec![]);
+    let conflicting = || {
+        combine(vec![
+            source_table("a", &[("KMD", "0.00678", "coingecko", 10)]),
+            source_table("b", &[("KMD", "0.00727", "coinpaprika", 20)]),
+        ])
+    };
+    let agreeing = || {
+        combine(vec![
+            source_table("a", &[("KMD", "0.00678", "coingecko", 10)]),
+            source_table("b", &[("KMD", "0.00679", "coingecko", 20)]),
+        ])
+    };
+    let kmd = |notice| vec![("KMD".to_string(), notice)];
+
+    let combined = conflicting();
+    assert_eq!(price_in(&combined, "KMD"), MmNumber::from("0.00678"));
+    assert!(combined.conflicts[0].describe().ends_with("; the price from a is used"));
+    assert_eq!(ctx.note_conflicts(&[], &combined), kmd(Notice::Warn));
+    // The ticker stays in the table while the conflict lasts.
+    let combined = conflicting();
+    assert!(combined.table.contains_key("KMD"));
+    assert_eq!(ctx.note_conflicts(&[], &combined), kmd(Notice::Debug));
+    assert_eq!(ctx.note_conflicts(&[], &conflicting()), kmd(Notice::Debug));
+    assert_eq!(ctx.note_conflicts(&[], &agreeing()), kmd(Notice::Info));
+    assert_eq!(ctx.note_conflicts(&[], &agreeing()), vec![]);
+    // A new episode warns again.
+    assert_eq!(ctx.note_conflicts(&[], &conflicting()), kmd(Notice::Warn));
+    // A ticker that vanished from every source has not "agreed again".
+    assert_eq!(ctx.note_conflicts(&[], &combine(vec![])), vec![]);
 }
 
 /// The bot's "no source answers" episode: an ERROR when it starts (the bot's), DEBUG while it lasts and an INFO when
@@ -605,21 +886,35 @@ fn two_sources_are_both_fetched_and_combined() {
     assert!(table.contains_key("KMD") && table.contains_key("MON"));
 }
 
-#[test]
-fn a_conflicting_ticker_is_absent_from_the_fetched_table() {
+/// Two sources that disagree on KMD: the first names coingecko, the second coinpaprika.
+fn kmd_disagreement_sources() -> Vec<PriceSource> {
     let (first, _) = serve(
         OK,
         document_of(&[("BTC", "100", "binance", 10), ("KMD", "0.00678", "coingecko", 10)]),
     );
     let (second, _) = serve(
         OK,
-        document_of(&[("BTC", "100", "binance", 20), ("KMD", "0.00313", "coinpaprika", 20)]),
+        document_of(&[("BTC", "100", "binance", 20), ("KMD", "0.00727", "coinpaprika", 20)]),
     );
-    let sources = vec![vec![first], vec![second]];
-    let ctx = context(sources.clone());
+    vec![vec![first], vec![second]]
+}
+
+#[test]
+fn a_conflicting_ticker_is_absent_from_the_fetched_table_under_refuse() {
+    let sources = kmd_disagreement_sources();
+    let ctx = context(sources.clone()).with_conflict_policy(ConflictPolicy::Refuse);
     let table = block_on(fetch_combined(&ctx, &sources)).unwrap();
     assert!(table.contains_key("BTC"));
     assert!(!table.contains_key("KMD"));
+}
+
+#[test]
+fn a_conflicting_ticker_is_priced_from_the_first_source_in_the_fetched_table_by_default() {
+    let sources = kmd_disagreement_sources();
+    let ctx = context(sources.clone());
+    let table = block_on(fetch_combined(&ctx, &sources)).unwrap();
+    assert!(table.contains_key("BTC"));
+    assert_eq!(table["KMD"].infos.last_price, MmNumber::from("0.00678"));
 }
 
 #[test]

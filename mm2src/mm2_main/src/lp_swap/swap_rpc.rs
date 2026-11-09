@@ -62,7 +62,8 @@ fn fiat_snapshot_from_table(table: &PriceTable, maker_coin: &str, taker_coin: &s
 /// default ones. A test seam for the tests that need no HTTP.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 fn fiat_snapshot_from_price_response(swap: &SavedSwap, response: &str) -> Option<FiatPriceSnapshot> {
-    use crate::mm2::lp_ordermatch::price_service::{combine_sources, parse_price_document, ProviderSet, SourceTable};
+    use crate::mm2::lp_ordermatch::price_service::{combine_sources, parse_price_document, ConflictPolicy, ProviderSet,
+                                                   SourceTable};
 
     let (maker_coin, taker_coin) = coin_tickers(swap)?;
     let records = parse_price_document(response.trim()).ok()?;
@@ -70,7 +71,7 @@ fn fiat_snapshot_from_price_response(swap: &SavedSwap, response: &str) -> Option
         host: "test".to_string(),
         records,
     };
-    let combined = combine_sources(vec![source], &ProviderSet::default_set());
+    let combined = combine_sources(vec![source], &ProviderSet::default_set(), ConflictPolicy::default());
     fiat_snapshot_from_table(&combined.table, &maker_coin, &taker_coin)
 }
 
@@ -1259,7 +1260,8 @@ mod terminal_report_tests;
 mod price_snapshot_tests {
     use super::*;
     use crate::mm2::lp_ordermatch::price_service::stub_server::{dead_url, price_document, serve, OK, SERVER_ERROR};
-    use crate::mm2::lp_ordermatch::price_service::{combine_sources, parse_price_document, ProviderSet, SourceTable};
+    use crate::mm2::lp_ordermatch::price_service::{combine_sources, parse_price_document, ConflictPolicy, ProviderSet,
+                                                   SourceTable};
     use common::block_on;
     use std::sync::atomic::Ordering;
 
@@ -1284,7 +1286,7 @@ mod price_snapshot_tests {
             host: "test".to_string(),
             records: parse_price_document(document).unwrap(),
         };
-        combine_sources(vec![source], &ProviderSet::default_set()).table
+        combine_sources(vec![source], &ProviderSet::default_set(), ConflictPolicy::default()).table
     }
 
     #[test]
@@ -1345,8 +1347,8 @@ mod price_snapshot_tests {
         );
     }
 
-    #[test]
-    fn a_coin_whose_sources_disagree_is_not_priced() {
+    /// The sources of the KMD case: both name different providers and the prices differ by more than 5 %.
+    fn disagreeing_sources() -> Vec<PriceSource> {
         let (first, _) = serve(
             OK,
             price_document(&[
@@ -1361,14 +1363,31 @@ mod price_snapshot_tests {
                 ("KMD", "0.00313", "coinpaprika", 1_794_066_100),
             ]),
         );
-        let sources = vec![vec![first], vec![second]];
-        let ctx = price_ctx(sources.clone());
+        vec![vec![first], vec![second]]
+    }
+
+    #[test]
+    fn a_coin_whose_sources_disagree_is_not_priced_under_refuse() {
+        let sources = disagreeing_sources();
+        let ctx = price_ctx(sources.clone()).with_conflict_policy(ConflictPolicy::Refuse);
         assert!(block_on(fiat_snapshot_for_coins(&ctx, &sources, "RIN", "KMD")).is_none());
         let snapshot = block_on(fiat_snapshot_for_coins(&ctx, &sources, "KMD", "RIN"));
         assert!(snapshot.is_none(), "either coin in conflict gives no prices");
         // RIN alone is priced.
         let rin = block_on(fiat_snapshot_for_coins(&ctx, &sources, "RIN", "RIN")).unwrap();
         assert_prices(&rin, "0.02", "0.02");
+    }
+
+    /// By default a coin the sources disagree on is priced from the first source, in either position of the pair.
+    #[test]
+    fn a_coin_whose_sources_disagree_is_priced_from_the_first_source_by_default() {
+        let sources = disagreeing_sources();
+        let ctx = price_ctx(sources.clone());
+        assert_eq!(ctx.conflict_policy, ConflictPolicy::FirstSource);
+        let snapshot = block_on(fiat_snapshot_for_coins(&ctx, &sources, "RIN", "KMD")).unwrap();
+        assert_prices(&snapshot, "0.02", "0.00678");
+        let snapshot = block_on(fiat_snapshot_for_coins(&ctx, &sources, "KMD", "RIN")).unwrap();
+        assert_prices(&snapshot, "0.00678", "0.02");
     }
 
     #[test]

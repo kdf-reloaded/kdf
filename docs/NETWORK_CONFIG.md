@@ -269,12 +269,27 @@ value).
 
 - **Combining.** A record is dropped if its price provider is not recognized (see `price_providers`) or its
   timestamp is zero. A coin that one source prices is priced from that source. A coin that several sources price
-  is priced from the source with the newest record when their prices differ by at most 5 % of the lowest. When
-  they differ by more, the sources disagree on that coin and it is **not priced at all**: the bot quotes no pair
-  with it and a swap with it is stored without USD prices. One warning names the coin, both prices, both
-  providers and both hosts when a disagreement starts, and one info line says when the sources agree again. The
-  5 % is fixed in the code. A source that does not answer is left out and the others are used alone; with no
-  source answering there are no prices.
+  is priced from the source with the newest record when their prices differ by at most 5 % of the lowest,
+  whichever price providers the records name. When they differ by more, the sources disagree on that coin. If
+  one price provider's records from at least two sources agree within 5 % of the lowest, the newest of those is
+  used and the other providers' figures are not compared with it (no warning, one debug line naming the coin).
+  Otherwise `price_conflict` decides (next item). One warning names the coin, both prices, both providers and
+  both hosts when a disagreement starts, and one info line says when the sources agree again. The 5 % is fixed
+  in the code. A source that does not answer is left out and the others are used alone; with no source
+  answering there are no prices.
+- **`price_conflict`.** A top-level `MM2.json` key, a string: what the node does with a coin on which the sources
+  disagree as described above. It applies to the bot and to the swap prices.
+
+  | `price_conflict` | The coin |
+  |---|---|
+  | absent, `null` or `"first_source"` (the default) | is priced from the first source, in the order of `price_urls`, that prices it; the warning ends "the price from <host> is used" |
+  | `"refuse"` | is **not priced at all**: the bot quotes no pair with it and a swap with it is stored without USD prices; the warning ends "the ticker is not priced" |
+
+  **Risk of the default:** a wrong figure from the first source can be used, with a warning, where the strict
+  check would have left the coin unpriced.
+  `"price_conflict": "refuse"` restores the strict check. A value of another form is ignored with one warning
+  that names the key (never the value), and the default applies. The `start_simple_market_maker_bot` request has
+  no such field.
 - **`price_providers`.** A top-level `MM2.json` key, an array of strings: the names of the price providers the
   node recognizes. Absent (the default), the node recognizes `binance`, `coingecko`, `coinpaprika`, `forex` and
   `livecoinwatch`. When present and well-formed (a non-empty array of strings) it **replaces** that set. The
@@ -299,7 +314,8 @@ value).
   because an address can carry a key; the text of an error, such as the body of a server's answer, is cleaned of
   the address that was asked before it is logged.
 - **Order of the bot's orders.** A bot pair whose price is refused or lost (an unrecognized provider, a zero
-  price, a stale price, a coin the sources disagree on, or no source answering) has its order cancelled at
+  price, a stale price, a coin the sources disagree on under `"price_conflict": "refuse"`, or no source
+  answering) has its order cancelled at
   once, as in GLEEC KDF. This behavior is under observation in v0.4.0 and will be revisited in the next version.
 - **Browser build.** A WebAssembly build can read only a service that sends CORS headers; of the default
   sources only the GLEEC addresses do, so a browser build gets its prices from them alone (the
