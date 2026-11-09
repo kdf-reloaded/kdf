@@ -57,8 +57,35 @@ different header bytes. Reads from the fork server show a different chain's bala
 
 ## Steps
 
-Work order inside the one PR: (1 + 3 + 4) first, as the fix for E1; then 5; 2; 7; 8; 9;
-6 last. The CRD amendment comes before the code of each step.
+Work order inside the one PR: 0 (the field fix) first, then (1 + 3 + 4); 5; 2; 7; 8; 9; 6 last.
+The CRD amendment comes before the code of each step.
+
+### 0. Activation stall with a silent and a refusing server (field fix, first in the PR)
+
+**E6 — field report, 2026-11: UNO, legacy `electrum`, `mixed`, `max_connected` 2.** One server never
+accepts a TCP connection, one is refused (expired certificate), one is good. The lab reproduced it on dev:
+`mixed` failed in 3 of 16 runs with "The balance was not received within 20 seconds", and `random`
+failed in 0 of 16. In a failing run no balance request reached any server.
+
+Code reading:
+1. Under a measured order the probe released the build before any connection had joined the set,
+   because a connection was offered only after its header answer.
+2. The balance read then took the all-servers retry in fixed groups.
+3. A group of the silent and the refusing server waited for the silent one's whole attempt, and the
+   good server was not reached within the caller's 20 s.
+
+Four changes, decided 2026-11-09:
+- **F1:** the probe offers each connection to the set as it connects, under every order (code brought
+  to R38.6.4k-R item 3 and D38.6.4l.2).
+- **F2:** a session that has answered nothing takes no reads while another session has a figure
+  (R38.6.4a items 6–7, D38.6.4a.4).
+- **F3:** the activation balance read passes its 20 s bound to the pool as the call budget (R38.6.4j
+  item 1).
+- **F4:** the retry runs as a sliding window instead of fixed groups (R38.6.4f item 2, R38.6.4j,
+  D38.6.4j.1).
+
+Tests: T38.6.4.14 (E6 under `mixed` and `random`), T38.6.4j.1, T38.6.4a.9. Lab row: E6 on the PR build,
+`mixed`, 8 runs, 0 failures expected, with the promotion head as control.
 
 ### 1. Agreed tip, stuck-server rule, no single-server veto (security)
 

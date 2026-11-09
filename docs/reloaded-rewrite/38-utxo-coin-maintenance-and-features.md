@@ -1172,10 +1172,12 @@ Decision CX, with no forbidden-class input.)*
    R38.6.4.
 6. *Near sessions.* Among the maintained sessions that have a smoothed
    latency (item 7), let *f* be the lowest. A maintained session is *near*
-   when it has no smoothed latency yet, or when its smoothed latency is at
-   most the larger of *F* × *f* and *f* + *A*, where *F* is the near factor
-   and *A* the near offset of item 8. When no maintained session has a smoothed latency, every
-   maintained session is near. *At least two are near:* when two or more
+   when its smoothed latency is at most the larger of *F* × *f* and *f* + *A*,
+   where *F* is the near factor and *A* the near offset of item 8. A session
+   without a smoothed latency is not near while any maintained session has
+   one: a session that has answered nothing yet takes no read before it has
+   answered once (D38.6.4a.4). When no maintained session has a smoothed
+   latency, every maintained session is near. *At least two are near:* when two or more
    sessions are maintained and the limit leaves only one of them near, the
    maintained session with the next-lowest smoothed latency is near as well;
    between equal figures, the one earlier in priority order is. A coin with
@@ -1194,7 +1196,10 @@ Decision CX, with no forbidden-class input.)*
    `server.ping` (R38.6.4e item 4) answered over the session is a sample; the
    first sample after the session joins the maintained set starts the
    average. A broadcast or a subscription answered over the session is a
-   sample too. Nothing is sent for it. Under `random` and `listed` there is still
+   sample too, and so is the answer to the header request the session sends
+   on joining (R38.6.4o item 3) or to the header request of the measurement
+   it joined from (R38.6.4l item 2), so a joining session that answers has a
+   figure at once. Nothing else is sent for it. Under `random` and `listed` there is still
    no activation round, no re-measure round and no trigger (R38.6.4l items 1, 6
    and 7); the header request on joining is sent under every order
    (R38.6.4o item 3). A session that leaves the
@@ -1471,7 +1476,10 @@ R38.6.4f **Routing of ordinary requests.**
 2. A request that fails over every maintained connection, or finds the set
    empty, is retried over *all* servers still in the pool, connecting them as
    needed, with up to `max_connected` servers in flight at a time; the first
-   answer ends the request. Connections this retry opened to servers outside
+   answer ends the request. The servers in flight form a sliding window: as
+   soon as one attempt ends without an answer, the next server in the
+   visiting order starts, so one attempt that is slow to fail never holds
+   back servers that could answer (Reloaded, D38.6.4j.1). Connections this retry opened to servers outside
    the maintained set are released afterwards (closed, hence suspended under
    R38.6.4d item 1); a losing parallel attempt may be released at once or
    left to lapse under the idle cutoff of R38.6.4e item 3. The order in which
@@ -1525,18 +1533,20 @@ R38.6.4j **Per-attempt budget derived from the call budget (Reloaded-original,
    budget *B*. *B* defaults to 60 s -- the figure Reloaded's request path
    already uses as its budget -- and a caller with a tighter deadline may pass
    a smaller one.
-2. Before each round of attempts, the round's budget is the smaller of (a) the
+2. Before each attempt starts, the attempt's budget is the smaller of (a) the
    establishment bound of R38.6.4e item 1 plus the per-request bound of item 2
    and (b) (*B* − 5 s) / *N*, where *N* is the number of rounds the call may
    still make: the maintained connections still to be tried one at a time
-   (R38.6.4f item 1) plus the retry rounds of R38.6.4f item 2, each of up to
-   `max_connected` servers in parallel. The round's budget is never below 5 s
-   and bounds everything the round does, connecting included.
+   (R38.6.4f item 1) plus the retry rounds of R38.6.4f item 2, counted as the
+   retry's servers not yet started, this one included, divided by
+   `max_connected` and rounded up. The attempt's budget is never below 5 s and
+   bounds everything the attempt does, connecting included (D38.6.4j.1).
 3. When *B* is exhausted the call ends with the failure of R38.6.4i even if
    servers remain untried.
-4. Item 2 counts the retry rounds as the number of servers in the pool
-   divided by `max_connected`, rounded up, and takes the call's *remaining*
-   budget as *B*. The 5 s reserve is not spent, so a call whose servers all
+4. Before the retry has started, item 2 counts its rounds as the number of
+   servers in the pool divided by `max_connected`, rounded up; during the
+   retry, as item 2 states. It always takes the call's *remaining* budget as
+   *B*. The 5 s reserve is not spent, so a call whose servers all
    fail ends no later than *B*.
 
 *Rationale.* Under R38.6.4e as the reference applies it, every attempt gets the
@@ -2443,6 +2453,22 @@ Each of these settings shall parse as stated:
 - any other value, including a different letter case or a non-string, means
   `random` with one warning.
 
+T38.6.4.14 *A dead and a refusing server at activation.* With three stubs,
+one that never accepts a connection, one that refuses every connection at
+once and one good one, `max_connected` 2 and an injected draw that ranks the
+good stub last, under `mixed` and under `random`: when the build returns, the
+maintained set shall hold the good stub (R38.6.4k-R item 3, D38.6.4l.2), and a
+balance read with the caller's budget of 20 s (shortened timings scale alike)
+shall be answered by the good stub well within that budget, in every one of
+20 runs (R38.6.4f item 2, R38.6.4j item 1).
+
+T38.6.4j.1 *Sliding retry window.* With an empty maintained set, `max_connected`
+2 and three servers in the visiting order dead (never accepts), refusing (fails
+at once) and good, the good server shall be asked as soon as the refusing one
+has failed, not after the dead one's attempt ends, and shall answer the
+request. Each attempt's budget shall follow R38.6.4j item 2 with the servers
+not yet started (R38.6.4f item 2, R38.6.4j).
+
 Two activations shall draw independently of each other. Over many draws with
 the real random source, each server shall come first roughly equally often,
 within generous bounds (R38.6.4b-R).
@@ -2503,6 +2529,13 @@ T38.6.4a.8 *Two sessions keep both in turn.* With two maintained stubs, one
 answering in about 5 ms and one in about 200 ms, and each with at least one
 sample, 30 read-only queries in a row shall be answered by both stubs in
 turn, each answering 15 within one.
+
+T38.6.4a.9 *A session that has answered nothing.* With two maintained stubs,
+one with a smoothed latency and one joined whose header request on joining is
+not answered, every read-only query shall go to the first; once the second
+answers its header request it shall have a figure and be judged by the limit
+and the floor of two as usual. With no maintained session having a figure,
+both shall be near (item 6, item 7, D38.6.4a.4).
 
 The tests of R38.6.4l run in-process against the stub Electrum server of
 `mm2src/coins/utxo/rpc_clients/electrum_stub_server.rs`, with the per-method
@@ -2825,6 +2858,23 @@ item 6 was the cause. The maintainer chose a floor of two near sessions, over
 keeping item 6 as it was, over a hysteresis on leaving the near set, and over
 the factor 0 as the default. The defaults of D38.6.4a.1 stay, under
 monitoring.
+
+D38.6.4a.4 *(Decided 2026-11-09, maintainer.)* *No reads for a session that has
+answered nothing.* A field case with one server that never answered and two
+that did showed that "no figure, so near" lets a joined but silent connection
+take its turn of the reads, and every such read waits for its attempt bound
+before the failover. A session without a figure is therefore not near while
+another maintained session has one, and the answer to the header request on
+joining counts as a sample, so an answering session gets a figure at once.
+
+D38.6.4j.1 *(Decided 2026-11-09, maintainer.)* *A sliding retry window.* With
+fixed groups of `max_connected`, a group whose members are one server that
+never accepts and one that refuses at once waits for the first server's whole
+attempt, and the group that holds a good server is not reached in time; a
+field activation failed that way under a 20 s caller deadline. The retry now
+starts the next server as soon as an attempt ends without an answer, and each
+attempt's budget is derived from the servers not yet started. With
+`max_connected` servers in flight the bound of the whole retry is unchanged.
 
 D38.6.4m.1 *(Resolved 2026-11-05 by a lab run.)* *A refusal under the flag in the
 field.* The item was raised because a server with `disable_cert_verification` was
@@ -4262,3 +4312,11 @@ R38.8.6 **Tests (two-direction, observable).**
   Electrum servers, the public Electrum protocol, and the maintainer's
   decisions of 2026-11-09. They take no forbidden-class input, so chapter 01
   R38 is not engaged and no gate pass is required.
+- *Reloaded-original amendment (2026-11-09, maintainer decisions D38.6.4a.4 and
+  D38.6.4j.1), clean side -- R38.6.4a items 6 and 7, R38.6.4f item 2, R38.6.4j
+  items 2 and 4, T38.6.4.14, T38.6.4j.1, T38.6.4a.9, D38.6.4a.4 and D38.6.4j.1.*
+  Written by a session that never read the forbidden corpus. The inputs are
+  this repository's code, a field report of a failed activation, this
+  project's own lab reproduction of it, and the maintainer's decisions of
+  2026-11-09. They take no forbidden-class input, so chapter 01 R38 is not
+  engaged and no gate pass is required.
