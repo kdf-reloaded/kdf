@@ -673,6 +673,9 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 - **An order whose save to the order history failed is reported as failed and no longer comes back
   as a live order after a restart, and a buy or sell whose save failed no longer sends its request.**
   Detail: PR #309; CRD ch.32 R-GH8a.
+- **A buy or sell whose save failed no longer comes back after a restart, even when the first
+  attempt to remove its record fails.** The removal is now tried up to three times, as it already
+  was for a maker order. Detail: PR #314; CRD ch.12 R7c.
 
 #### Siacoin
 
