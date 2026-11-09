@@ -1319,7 +1319,14 @@ every maintained session.
 > - *Samples.* The pool records the smoothed latency of every answered request and
 >   ping under every order. P2 is judged only under `mixed` and `measured`. The header
 >   request on joining is sent under every order unless `electrum_tip_checks` is
->   `false` (R38.6.4o item 3) and is not a sample.
+>   `false` (R38.6.4o item 3). Its answer, and the answer to the activation or
+>   re-measure header request of the connection a session joined from, is a sample
+>   (2026-11-09, D38.6.4a.4): `header_measurement` records it for a maintained
+>   connection, and the probe's and the round's joins record it through
+>   `record_first_sample`, which does nothing when the session has a sample already.
+>   P2's count of 5 samples includes it. `near_sessions` makes a session without a
+>   figure not near while any session has one (the floor of two picks only among
+>   sessions with figures), and every session near when none has.
 > - *The switches.* `electrum_spread_near_factor` and `electrum_spread_near_offset_ms`
 >   are read once per coin activation, in the UTXO coin builder next to
 >   `electrum_spread_reads`. The Z-coin Electrum fallback goes through the same builder.
@@ -1651,6 +1658,38 @@ failure, naming each server, from the activation itself.
 >   R38.6.4k that chapter 55 R55.5.14's status note already records (the
 >   observable discriminant is `Transport` either way). Implementing R38.6.4f
 >   item 2 removes the need for it: the block-height query connects the pool.
+
+> **As-built note (2026-11-09), the activation stall (plan step 0).**
+> - *R38.6.4k-R item 3 and R38.6.4l item 2.* Before, `run_probe` offered a connection to the maintained set
+>   only when its activation header request had been answered or had failed, so under `mixed` and `measured` the
+>   set was empty when the build returned. Now, at the establishment, a connection that the rule of R38.6.4c
+>   item 2 lets in (`would_join`) joins at once, the activation header request runs over it afterwards and its
+>   measurement feeds the rank as before; one that does not join is held until its answer and released then,
+>   so every server is still measured. `ServerSlot` state `probing` marks a connection whose probe request is in
+>   flight: it sends no header request of its own on joining, and when a higher-ranked server displaces it, it
+>   stays open until its measurement has ended. The release at the end of the probe leaves a maintained
+>   connection alone. The test is `t38_6_4l_2_the_set_is_not_empty_when_the_build_returns_under_a_measured_order`.
+> - *R38.6.4f item 2 and R38.6.4j items 2 and 4.* The retry in `route_inner` keeps `max_connected` attempts in
+>   flight and starts the next server in the visiting order as soon as one ends without an answer. The budget of
+>   an attempt is `round_budget` over the call's remaining budget, `rounds_of(servers not yet started, width)`
+>   rounds and the attempt's own establishment-plus-request cap. The maintained connections tried one at a time
+>   before the retry count the retry as before, `rounds_of(servers in the pool, width)`. A call that has no time
+>   left starts no further attempt, and the ones in flight end within the budget they started with. The
+>   re-measure round of R38.6.4o item 8 has its own window and is unchanged.
+> - *R38.6.4j item 1.* `with_call_budget` in `electrum_pool.rs` runs a future with a caller's budget in force
+>   for the Electrum calls it starts while it is polled (a thread-local set around each poll; the smaller of it
+>   and `timings.call_budget` is the budget of the call). The legacy `electrum` and `enable` activation read,
+>   `legacy_activation_response` in `lp_commands_legacy.rs`, wraps `my_balance()` in it with its bound of 20 s.
+>   The budget applies to calls the future makes inline; a call made from a task spawned by the read does not
+>   see it. The v2 activation tasks have no fixed outer bound on their balance read, so none is passed there.
+> - *Tests.* `t38_6_4_14_a_dead_and_a_refusing_server_at_activation` (20 runs each under `mixed` and `random`; the
+>   silent server is a stub that accepts the connection and never answers, since a listener that never accepts
+>   cannot be told from it in-process; the refusing one is a stub that refuses the connection),
+>   `t38_6_4j_1_the_retry_is_a_sliding_window`, `the_rounds_of_a_sliding_retry_count_the_servers_not_yet_started`,
+>   `t38_6_4a_9_a_session_that_has_answered_nothing_takes_no_read` and the changed T38.6.4a.1 test in
+>   `electrum_measure.rs`. The tests of T38.6.4a.2 and T38.6.4a.5 warm the sessions with a ping, since a read no
+>   longer gives a second session a first figure. The P2 test counts the header answer as the first of the five
+>   samples.
 
 R38.6.4l **Measured server order (Reloaded-original, maintainer design
 approval 2026-10-28; binds the `mixed` and `measured` values of R38.6.4b-R
@@ -2480,14 +2519,15 @@ alone (R38.6.4a item 6), with smoothed latencies given in milliseconds:
 - 25, 27 and 32 with *F* = 0.5, taken as 1: all three are near, through the
   offset term (20 ms by default);
 - one session without a smoothed latency among the six of the first case: it
-  is near as well;
+  is not near (D38.6.4a.4);
 - no session with a smoothed latency: all are near;
 - 38 and 230 with *F* = 2: both are near (the floor of two);
 - 25, 230 and 266 with *F* = 2: the first two are near, the third is not;
 - 230, 25 and 230 with *F* = 2: the first two are near (the lowest figure,
   then the earlier of the two equal ones), the third is not;
-- 25, 230 and no smoothed latency with *F* = 2: the first and the third are
-  near, the second is not;
+- 25, 230 and no smoothed latency with *F* = 2: the first two are near (the
+  floor of two picks among sessions with a figure), the third is not
+  (D38.6.4a.4);
 - a single session with 230: it is near.
 
 T38.6.4a.2 *Reads avoid a far session.* With three maintained stubs, two
@@ -2609,7 +2649,9 @@ activation latency of 40 ms:
 - the same three samples shall not trigger for a server whose activation
   latency was 400 ms;
 - a connection with no reference latency shall never trigger P2
-(R38.6.4l item 6).
+(R38.6.4l item 6). At pool level the answer to the header request on joining
+is the first of a connection's samples (R38.6.4a item 7), so a pool test
+reaches the five samples with four further answers.
 
 T38.6.4l.10 *Poor-demotion.* A triggered server shall stay maintained and keep
 answering. A re-measure round 14 minutes after the trigger shall not choose

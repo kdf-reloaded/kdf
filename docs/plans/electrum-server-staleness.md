@@ -87,6 +87,8 @@ Four changes, decided 2026-11-09:
 Tests: T38.6.4.14 (E6 under `mixed` and `random`), T38.6.4j.1, T38.6.4a.9. Lab row: E6 on the PR build,
 `mixed`, 8 runs, 0 failures expected, with the promotion head as control.
 
+*Implemented (PR #324): F1 to F4 in 5c6703b42.*
+
 ### 1. Agreed tip, stuck-server rule, no single-server veto (security)
 
 *Implemented in b554d2593 (R38.6.4o items 2 and 4; a server far above the agreed tip is also out of date as *ahead*, D38.6.4o.9).*

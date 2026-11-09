@@ -124,7 +124,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   blocks and the block height most servers agree on. The request only reads what the node already
   knows and sends nothing to any server. A coin that is not active answers `NoSuchCoin`; a coin
   that does not use an Electrum client (a coin with a local daemon, a shielded coin, a token of
-  another family) answers `CoinIsNotElectrum`. Detail: PR #TBD; CRD ch.38 R38.6.4o.
+  another family) answers `CoinIsNotElectrum`. Detail: PR #324; CRD ch.38 R38.6.4o.
 - **An Electrum server can now be pinned by its key.** A server entry with `protocol` `SSL` may
   carry `spki_sha256`: the SHA-256 digest of the server's public key in hexadecimal (64 digits,
   colons between byte pairs allowed), or a list of up to four, so the next key can be pinned before
@@ -385,7 +385,7 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   `electrum_spread_reads` to `false` to match GLEEC KDF). **`mixed` does not become the default
   yet.** The change is in two stages: this release brings the checks; the default order changes
   from `random` to `mixed` in a later release, after a field run on RIN, DGB and a coin with
-  600-second blocks has shown no false marks. Detail: PR #TBD; CRD ch.38 R38.6.4o.
+  600-second blocks has shown no false marks. Detail: PR #324; CRD ch.38 R38.6.4o.
 - **`fetch_utxos`, `consolidate_utxos` and the automatic merge (`utxo_merge_params`) now work
   under an HD login**, as they do in GLEEC KDF. Until now the two commands were refused and the
   automatic merge stayed off.
@@ -809,6 +809,29 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### UTXO coins and Electrum
 
+- **A coin with several Electrum servers no longer fails to activate when one server never answers
+  and another is refused.** A field report: the legacy `electrum` call for UNO, with
+  `electrum_server_order` set to `mixed`, three servers and `max_connected` 2, answered "The balance
+  was not received within 20 seconds" in 3 of 16 lab runs, and 0 of 16 with `random`. One server
+  never accepted a connection, one was refused at once (its certificate had expired) and one was good.
+  Three things went wrong together, and each is fixed:
+  - Under `mixed` and `measured` the node offered a connection to the coin's set of connected
+    servers only after its first block-height answer, so the activation returned with an empty set
+    and the balance read had to try every server. Now every connection is offered as it is made, as
+    under `random`, and the block-height answer still ranks the servers afterwards.
+  - When the set is empty or every connected server fails, the node tried the remaining servers in
+    fixed pairs (`max_connected` at a time), and a pair of the silent and the refused server waited
+    for the silent one, so the pair with the good server was not reached in time. Now the next server
+    starts as soon as one attempt fails, and each attempt's time is worked out from the servers still
+    to try.
+  - The 20 seconds of the `electrum` and `enable` balance read were not known to the Electrum
+    client, which budgeted its attempts against 60 seconds. Now the read passes its 20 seconds on, so
+    the client moves to the next server inside it.
+  A server that has answered nothing yet no longer takes its turn of the reads while another has
+  answered: before, a server that was connected but silent took its share of the reads and each of
+  them waited for the failover. The answer to the block-height request a server gets when it joins
+  now counts as its first measured round trip. Detail: PR #324; CRD ch.38 R38.6.4a, R38.6.4f,
+  R38.6.4j, R38.6.4k-R.
 - **Under an HD login, a coin's account keys and its stored accounts follow the coin's own key
   policy, also when a Trezor is initialized.** A node logged in with a seed phrase accepts
   `task::init_trezor` afterwards, as GLEEC KDF does. Until now:
