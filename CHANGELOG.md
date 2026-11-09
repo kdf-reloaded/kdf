@@ -823,6 +823,15 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 #### UTXO coins and Electrum
 
+- **A coin whose Electrum servers keep failing no longer fills the log with two errors every 10
+  seconds.** With `tx_history` on, the history loop logged the failed balance read and the failed
+  history request on every attempt, for as long as the server failed, for example on an expired
+  certificate (a field report). It now logs each error once, also when its text carries a changing
+  number such as a time, then one summary line per 10 minutes with the count, and one line when the
+  server answers again. While the history request keeps failing, the next attempt waits 60 s and
+  then longer, up to 5 minutes, instead of 10 s, so after the server recovers, the history can
+  resume up to 5 minutes later. A healthy coin is unaffected. Detail: PR #NNN; CRD ch.38 §38.6.5
+  item 8.
 - **Under an HD login, a coin's account keys and its stored accounts follow the coin's own key
   policy, also when a Trezor is initialized.** A node logged in with a seed phrase accepts
   `task::init_trezor` afterwards, as GLEEC KDF does. Until now:
