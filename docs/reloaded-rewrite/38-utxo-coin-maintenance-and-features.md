@@ -2129,9 +2129,11 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    A server's *lag* is the agreed tip minus its height, or 0 when its height is
    at or above the agreed tip. Its *lead* is its height minus the agreed tip,
    or 0 when its height is at or below the agreed tip. A lead of more than *T*
-   is as wrong as a lag of more than *T*: no healthy server is many blocks
-   ahead of every other one, so such a server is on another chain or network,
-   or reports a height that does not exist (D38.6.4o.2, D38.6.4o.9).
+   cannot be judged from heights alone: such a server may report a height
+   that does not exist, or follow another network, or be the one server that
+   followed a network upgrade while the others stopped. Item 12 therefore
+   treats it as a disagreement about the chain, not as a server to hide
+   (D38.6.4o.2, D38.6.4o.9).
 3. *Heights of maintained connections.* Each connection that joins the
    maintained set sends one header request (`blockchain.headers.subscribe`)
    right after it joins, unless a header request was already sent over it (an
@@ -2147,7 +2149,8 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    heights of the maintained connections that have one. A maintained
    connection is *out of date* while either holds:
    - *behind:* its lag to the running agreed tip is more than *T*;
-   - *ahead:* its lead over the running agreed tip is more than *T*;
+   - *ahead:* its lead over the running agreed tip is more than *T*; this also
+     puts the coin into the disagreement state of item 12;
    - *stuck:* there are two or more maintained connections with a height, it
      has received no header notification for longer than *P* = the larger of
      3 × `avg_blocktime` and 10 minutes (10 minutes for a coin without a valid
@@ -2188,13 +2191,13 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    ends the wait therefore always comes from the server the wait is polling,
    never from whichever server a spread read reached. No request is added
    (D38.6.4o.3).
-7. *Header agreement in a measurement round (amends R38.6.4l item 4).* In a
-   measurement round under `mixed` or `measured`, each measured server's
-   answer carries the header at its height. When at least two servers
-   measured at the round's agreed tip height answer the same header bytes, a
-   server measured at that height whose header bytes differ is not eligible
-   in that round. Nothing else follows from it: no suspension, no removal, and
-   servers at other heights are not compared (D38.6.4o.8).
+7. *Headers at the same height (amends R38.6.4l item 4).* Two servers that
+   answer different header bytes for the same height, in a measurement round
+   or in their header notifications, are not judged by the majority: the
+   difference starts the comparison of item 12 for those two servers, and
+   until it has ended neither is excluded for it. A difference at the tip
+   alone is an ordinary race between two new blocks and resolves itself
+   (D38.6.4o.8, D38.6.4o.12).
 8. *Re-measure backoff (amends R38.6.4l item 7 step 2).* A re-measure round
    that finds no eligible replacement doubles the least time before the coin's
    next re-measure round: 5, 10, 20, 40, then 60 minutes, and 60 minutes from
@@ -2216,7 +2219,10 @@ holds under every value of `electrum_server_order` unless it says otherwise.
      with the reason `behind`, `stuck` or `slow`;
    - in a measurement round, for each measured server whose lag or lead to the
      round's agreed tip is more than *T*, once per round, the *behind* or
-     *ahead* line above.
+     *ahead* line above;
+   - on entering the disagreement state of item 12, at ERROR, the text of the
+     activation error of item 12; on leaving it, at WARN:
+     `<ticker>: the Electrum servers agree about the chain again`.
 10. *The `electrum_servers` request (Reloaded-only RPC).* An mmrpc 2.0 method
     `electrum_servers` with the parameter `coin` (a ticker) answers, for an
     active coin served by the Electrum client, a snapshot of its pool:
@@ -2226,6 +2232,7 @@ holds under every value of `electrum_server_order` unless it says otherwise.
       "server_order": "random",
       "tolerance_blocks": 3,
       "agreed_tip": 1234567,
+      "chain_disagreement": null,
       "servers": [
         {
           "server": "electrum1.example.org:50002",
@@ -2246,6 +2253,8 @@ holds under every value of `electrum_server_order` unless it says otherwise.
     - `server_order` is the value in force (R38.6.4b-R, R38.6.4l).
     - `agreed_tip` is the running agreed tip of item 4, `null` when there is
       none.
+    - `chain_disagreement` is `null` outside the disagreement state of item
+      12, and otherwise the text of its error.
     - `servers` lists every server of the pool, in the coin's current rank;
       `rank` is the position in it, from 0. `server` is the host-only label of
       R38.6.9a.
@@ -2269,11 +2278,67 @@ holds under every value of `electrum_server_order` unless it says otherwise.
     coin activation, default `true`. With `false`: under `random` and `listed`
     no header request is sent on joining (item 3; under `mixed` and `measured`
     D38.6.4l.4 still applies), no connection is ever out of date for items 5
-    and 6, and the first three warnings of item 9 are not logged. Items 1, 2,
+    and 6, the first three warnings of item 9 are not logged, and item 12 does
+    not apply: activation does not wait for heights, never fails for a
+    disagreement, and the disagreement state is never entered. Items 1, 2,
     7 and 8 still shape the measured order of R38.6.4l, which is not the
     default and has its own compatibility value. A value that is not a boolean
     is taken as `true`, with one warning naming the key and the value; an
     absent key or a JSON `null` logs nothing (D38.6.4o.5).
+12. *Disagreement about the chain (D38.6.4o.9 – D38.6.4o.13).* The servers of
+    a coin *disagree about the chain* when either holds:
+    - *far ahead:* with three or more heights, a server's lead over the agreed
+      tip is more than *T*;
+    - *diverged:* a comparison finds that two servers answer different header
+      bytes for the same height.
+
+    A *comparison* of two servers asks each of them, with one directed request
+    (R38.6.4g) `blockchain.block.header`, for the header at a *common height*
+    and compares the bytes. The common height is the lower of the two servers'
+    heights minus *T*, but not below 0, so that a race between two new blocks
+    at the tip never counts; for a difference found at one height (item 7) it
+    is that height, once both servers report heights at least *T* above it. A
+    comparison runs:
+    - when exactly two heights are known and they are more than *T* apart.
+      If the headers agree, the two are on the same chain and the lower server
+      is only behind: item 4 applies, and the higher one is used. If they
+      differ, the servers have diverged. With two servers a stale one cannot
+      be told from one that followed a network upgrade by heights alone, and
+      the comparison tells them apart;
+    - at activation, between the server at the agreed tip and each other
+      server whose height is within *T* of it;
+    - when item 7 finds different headers at the same height.
+
+    Two servers are compared at most once per 5 minutes, unless one of their
+    heights has changed by more than *T* since the last comparison. A server
+    that does not answer a comparison within the per-request bound of
+    R38.6.4e item 2 is not judged by it.
+    - *At activation.* When the build has its first connection, it waits
+      until every other server has a height and every comparison has ended,
+      or until 5 s have passed since that first connection, whichever comes
+      first, and judges on what arrived. A server that has not answered by
+      then is not judged (D38.6.4o.10). When the servers disagree, the
+      activation fails with the error
+      `<ticker>: the Electrum servers disagree about the chain (<host:port> at <height>, <host:port> at <height>, ...; tolerance <T> blocks). The node cannot tell which one is right; check the servers or remove the wrong ones from the coin's list`,
+      naming every server with a height, by host and port (R38.6.9a). A task
+      activation reports it as an activation error of the coin; the legacy
+      `electrum` and `enable` methods return it as their error text. The coin
+      is not registered.
+    - *After activation.* When the servers come to disagree later, the coin
+      enters the *disagreement state* (D38.6.4o.11). While in it, the coin
+      refuses to place a new order with it as the base or the rel coin, to
+      start a new swap with it, and to build a withdrawal, each with the error
+      `<ticker>: the Electrum servers disagree about the chain (<host:port> at <height>, <host:port> at <height>, ...; tolerance <T> blocks). New orders, swaps and withdrawals are refused until they agree again; remove the servers that follow the other chain from the coin's list, or activate the coin again with servers that agree`,
+      which is also the text of the ERROR line of item 9. A disagreement can
+      last for weeks when a network splits, so the text names the servers and
+      the remedy. Balance,
+      history and other reads keep working, and a swap that has already
+      started goes on. Item 4 still keeps a far-ahead server out of the
+      reads. The state ends as soon as neither condition holds.
+13. *Fewer than three servers.* When a coin is activated with fewer than three
+    servers in its pool that are not removed, the activation logs one WARN:
+    `<ticker>: only <n> Electrum servers are listed; with fewer than three the node cannot always tell a stale server from one on another chain`
+    (D38.6.4o.13). It is logged whatever the value of `electrum_tip_checks`.
 
 *Rationale.* Field reports show stale servers hundreds of blocks behind,
 while healthy servers on fast chains are routinely a few blocks apart because
@@ -2801,12 +2866,11 @@ the read turn. With every stub silent for longer than *P*, none shall be stuck.
 With a single maintained stub, item 4 shall not apply; the lone-connection rule
 of R38.6.4l item 6 is unchanged (item 4).
 
-T38.6.4o.6 *A liar does not steer.* Under `mixed`, with three stubs at *H* +
-1,000,000, *H* and *H*, the two at *H* shall be eligible and the liar shall
-not, and no maintained connection at *H* shall be out of date. With the three
-maintained under `random`, the liar shall be out of date as *ahead* and take
-no reads, and one WARN *ahead* line shall name it. A server at *H* + *T* shall
-stay eligible and up to date (items 2, 4, 5, 9; R38.6.4l item 4).
+T38.6.4o.6 *A far-ahead server fails the activation.* With three stubs at *H*
++ 1,000,000, *H* and *H*, the activation shall fail with the error of item 12
+naming all three servers, and the coin shall not be registered. A stub at *H*
++ *T* instead shall not fail it. With `electrum_tip_checks` `false`, the first
+case shall activate (items 2, 11, 12; D38.6.4o.9).
 
 T38.6.4o.7 *Confirmation wait sticks.* With two maintained stubs, *A* first in
 priority order and *B* second, *A* answering the transaction with 0
@@ -2816,11 +2880,12 @@ of the wait shall reach *A*. When *A* starts to fail, the wait shall continue
 on *B* and end on its answer. With *A* out of date, the wait shall choose *B*
 from the start (item 6).
 
-T38.6.4o.8 *Header agreement.* In a measurement round under `mixed` with three
-stubs at the same height, two answering the same header bytes and one other
-bytes, the third shall not be eligible and shall not be suspended or removed.
-With two stubs at the same height answering different bytes and no third at
-that height, both shall stay eligible (item 7).
+T38.6.4o.8 *Different headers.* With three stubs at the same height *H*,
+two answering the same header bytes at *H* − *T* and one other bytes there,
+the activation shall fail with the error of item 12. With three stubs that
+differ only in the header at *H* and agree at *H* − *T*, the activation shall
+succeed (a race at the tip), and no stub shall be excluded for it (items 7,
+12; D38.6.4o.12).
 
 T38.6.4o.9 *Backoff.* With `max_connected` 1, two listed stubs and every
 candidate ineligible, successive re-measure rounds shall start 5, 10, 20, 40,
@@ -2841,6 +2906,34 @@ stub shall receive a header request after joining, a stub 1000 blocks behind
 shall stay in the read turn, and a confirmation wait shall poll the first
 maintained connection in priority order. A non-boolean value shall be taken as
 `true` with one warning; an absent key and `null` shall log nothing (item 11).
+
+T38.6.4o.12 *Two servers, stale or diverged.* With two stubs at *H* and *H* −
+1000 that answer the same header at *H* − 1000 − *T*, the activation shall
+succeed, every read shall go to the stub at *H*, and the other shall be out of
+date as *behind*. With different headers there, the activation shall fail with
+the error of item 12 (items 4, 12; D38.6.4o.13).
+
+T38.6.4o.13 *The activation window.* With three stubs, one of them silent, the
+activation shall judge the other two and return within 5 s (shortened timings
+scale alike) of its first connection, and the silent stub shall not be named
+in any error (item 12; D38.6.4o.10).
+
+T38.6.4o.14 *Disagreement after activation.* With three maintained stubs at
+*H*, when one moves to *H* + *T* + 1 while the others stay, the coin shall
+enter the disagreement state with one ERROR line. A new order with the coin as
+base or rel, the start of a new swap and a withdrawal shall be refused with
+the error of item 12, while a balance read succeeds. When the others reach
+the same height, the state shall end with one WARN line and the refusals
+shall stop. `electrum_servers` shall show `chain_disagreement` during the
+state and `null` after it (items 9, 10, 12; D38.6.4o.11).
+
+T38.6.4o.15 *Fewer than three servers.* Activating a coin with two servers,
+and with one, shall log the WARN of item 13 once; with three it shall not
+(item 13).
+
+T38.6.4o.16 *Comparison limit.* Two servers compared once shall not be
+compared again within 5 minutes unless one of their heights has moved by more
+than *T* (item 12).
 
 D38.6.4l.1 *(Resolved 2026-10-28, maintainer decision.)* *When `mixed`
 becomes the default.* The plan intends `mixed` as the default and left the
@@ -3022,14 +3115,37 @@ measurement rounds only, at the agreed tip height only, and only with two
 agreeing servers. A natural reorganization at the tip resolves itself in the
 next round, because nothing is suspended.
 
-D38.6.4o.9 *(Reloaded rule derived on 2026-11-09 from D38.6.4o.1 and D38.6.4o.2
-and the plan's example of a testnet server in a mainnet list; open for the
-maintainer's confirmation.)* *A bound above the agreed tip.* With the
-lag alone, a server far above the agreed tip has lag 0: it would stay eligible
-and keep its share of reads, which is the failure the agreed tip exists to
-prevent. Eligibility and the out-of-date state therefore bound the distance
-both ways by *T*. With exactly two servers the agreed tip is the higher one,
-so no server is ever *ahead*; with three or more, a single server far ahead is.
+D38.6.4o.9 *(Decided 2026-11-09, maintainer; replaces the derived rule that
+first stood here, under which a far-ahead server was excluded from the reads
+and warned about.)* *A server far ahead fails the activation.* A server more
+than the tolerance above the height the others agree on is not hidden: it may
+be the one server that followed a network upgrade while the others stopped, so
+the node cannot know which side is right. The activation fails with a clear
+error instead (item 12).
+
+D38.6.4o.10 *(Decided 2026-11-09, maintainer.)* *When activation judges.* After
+the first connection, the activation waits up to 5 s for the other servers'
+heights and comparisons, then judges on what arrived. Waiting for every server
+would let a server that never answers delay the activation by its whole
+establishment bound again; judging only on what is known when the build
+returns would almost never see more than one height.
+
+D38.6.4o.11 *(Decided 2026-11-09, maintainer.)* *A disagreement after
+activation.* The coin refuses new orders, new swaps and withdrawals until the
+servers agree again, logged at ERROR; reads and running swaps go on. Logging
+only, or following the higher server, were not chosen.
+
+D38.6.4o.12 *(Decided 2026-11-09, maintainer.)* *Different headers at the
+same height.* A fork whose sides both go on is treated like a far-ahead server:
+it fails the activation, and later it puts the coin into the disagreement
+state. The majority is not followed silently. The comparison is made below the
+tip, so a race between two new blocks does not count.
+
+D38.6.4o.13 *(Decided 2026-11-09, maintainer.)* *Two servers.* With two
+servers far apart, a header comparison at a common height tells a stale server
+on the same chain (the higher one is used) from two servers on different
+chains (the activation fails). Lists of fewer than three servers get a warning
+at activation, because with them the node cannot always tell the cases apart.
 
 > **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
 > T38.6.4.12 against an in-process stub server set, with two exceptions:
@@ -4380,7 +4496,7 @@ R38.8.6 **Tests (two-direction, observable).**
   finding fails a chapter; dictated-interop and public-surface tokens were
   excluded from the measured set.
 - *Reloaded-original addition (2026-11-09, maintainer decisions D38.6.4o.1 –
-  D38.6.4o.8 and the rule D38.6.4o.9), clean side -- R38.6.4o, T38.6.4o.1 –
+  D38.6.4o.8; D38.6.4o.9 as amended below), clean side -- R38.6.4o, T38.6.4o.1 –
   T38.6.4o.11, D38.6.4o.1 – D38.6.4o.9, and the amendments they name in R38.6.4a items 6 and 7, R38.6.4f
   item 4, R38.6.4l items 1, 4, 6 and 7, the test preamble of R38.6.4l,
   T38.6.4a.5, T38.6.4l.1, T38.6.4l.3, T38.6.4l.15 and D38.6.4a.1.* Written by a session that never read
@@ -4397,3 +4513,12 @@ R38.8.6 **Tests (two-direction, observable).**
   project's own lab reproduction of it, and the maintainer's decisions of
   2026-11-09. They take no forbidden-class input, so chapter 01 R38 is not
   engaged and no gate pass is required.
+- *Reloaded-original amendment (2026-11-09, maintainer decisions D38.6.4o.9 –
+  D38.6.4o.13), clean side -- R38.6.4o items 2, 4, 7, 9, 10, 11, 12 and 13,
+  T38.6.4o.6, T38.6.4o.8, T38.6.4o.12 – T38.6.4o.16 and D38.6.4o.9 – D38.6.4o.13.*
+  Written by a session that never read the forbidden corpus. D38.6.4o.9
+  replaces a rule this chapter recorded earlier the same day and the
+  maintainer did not confirm. The inputs are this repository's code, the
+  public Electrum protocol and the maintainer's decisions of 2026-11-09. They
+  take no forbidden-class input, so chapter 01 R38 is not engaged and no gate
+  pass is required.
