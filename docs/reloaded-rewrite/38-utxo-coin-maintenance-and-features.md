@@ -1672,6 +1672,45 @@ failure, naming each server, from the activation itself.
 >   observable discriminant is `Transport` either way). Implementing R38.6.4f
 >   item 2 removes the need for it: the block-height query connects the pool.
 
+> **As-built note (2026-11-09), items 12 and 13 (disagreement about the chain).** This note supersedes the
+> *bound above the agreed tip* paragraph and the names of the tests of T38.6.4o.6 and T38.6.4o.8 above; item 4's
+> *ahead* is still an out-of-date state.
+> - *Pure.* `electrum_measure.rs`: `common_height`, `is_far_ahead` and `header_differences` (the pairs measured at
+>   one height with different header bytes). `eligible_servers` no longer excludes a header that differs; the
+>   two-sided height bound is unchanged.
+> - *The pool.* `electrum_pool.rs`: `due_comparisons` (the three triggers of item 12, the 5-minute limit unless
+>   a height moved by more than *T*), `compare_pair` (one directed `blockchain.block.header` per server, bytes
+>   compared; a server that does not answer is not judged), `run_comparisons`, `disagreement_servers` and
+>   `disagreement_text` (the two error texts), `update_disagreement` (ERROR on entering, WARN on leaving; run from
+>   `refresh_out_of_date`) and `chain_disagreement`. Comparisons that fall due after the activation run on the
+>   maintenance loop (`Wake::Compare`). A pair found different at one height in a measurement round is kept in
+>   `pending` and compared once both heights are at least *T* above it. Different headers seen only in header
+>   notifications are not tracked: a connection keeps the height of a notification, not its header bytes, so
+>   item 7's notification case is not implemented (the measurement-round case is).
+> - *Activation.* `activation_probe` logs the WARN of item 13 (whatever the switch says) and records the time of
+>   the first connection; `judge_activation` waits until the probe has ended, every connected server's header
+>   request has ended (`header_resolved`) and no comparison is running, or until `activation_window` (5 s) after the
+>   first connection, running the due comparisons meanwhile, then fails with the text of the activation. The
+>   builder calls it after the probe and maps the text to the new `UtxoCoinBuildError::ElectrumServersDisagree`,
+>   which the task activation reports as a coin creation error and the legacy `electrum` and `enable` return as
+>   their text. A silent server therefore costs the window, 5 s, not its establishment bound; the lab case of a
+>   server that never answers builds in about 5 s longer than before.
+> - *After activation.* `MmCoin::chain_disagreement` (default `None`) is answered for the UTXO coin types through
+>   `electrum_chain_disagreement`. It refuses a withdrawal (`WithdrawError::ChainDisagreement`, in `withdraw` and
+>   `init_withdraw`), a new order (`create_maker_order_impl` and `lp_auto_buy`) and a new swap (the maker and the
+>   taker start in `lp_connect_start_bob` and `lp_connected_alice`, before anything moves; v1 and v2 both pass
+>   there). `electrum_servers` has the field `chain_disagreement`. With `electrum_tip_checks` `false` nothing of this
+>   runs.
+> - *Tests.* `t38_6_4o_6_a_far_ahead_server_fails_the_activation`,
+>   `t38_6_4o_8_different_headers_fail_the_activation_only_below_the_tip`, `t38_6_4o_12_two_servers_stale_or_diverged`,
+>   `t38_6_4o_13_the_activation_window_does_not_wait_for_a_silent_server`,
+>   `t38_6_4o_14_the_disagreement_state_after_activation`, `t38_6_4o_15_fewer_than_three_servers_are_flagged` and
+>   `t38_6_4o_16_a_pair_is_compared_at_most_once_per_limit`, with `set_block_header` and `set_default_block_header`
+>   on the stub. The old far-ahead test is now `t38_6_4o_6_a_far_ahead_server_is_kept_out_of_the_reads` (item 4).
+>   T38.6.4o.14 is tested at the pool (the state, the two log lines, `electrum_servers`, `chain_disagreement`); the
+>   refusals themselves (order, swap start, withdrawal) are one `if let Some(error) = ...chain_disagreement()` each and
+>   have no test of their own at the order, swap or withdrawal level.
+
 > **As-built note (2026-11-09), the activation stall (plan step 0).**
 > - *R38.6.4k-R item 3 and R38.6.4l item 2.* Before, `run_probe` offered a connection to the maintained set
 >   only when its activation header request had been answered or had failed, so under `mixed` and `measured` the
