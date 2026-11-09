@@ -4556,7 +4556,7 @@ R38.8.6 **Tests (two-direction, observable).**
   engaged and no gate pass is required.
 - *Reloaded-original amendment (2026-11-09, maintainer decisions D38.6.4o.9 –
   D38.6.4o.13), clean side -- R38.6.4o items 2, 4, 7, 9, 10, 11, 12 and 13,
-  T38.6.4o.6, T38.6.4o.8, T38.6.4o.12 – T38.6.4o.16 and D38.6.4o.9 – D38.6.4o.13.*
+  T38.6.4o.6 – T38.6.4o.8, T38.6.4o.12 – T38.6.4o.16 and D38.6.4o.9 – D38.6.4o.13.*
   Written by a session that never read the forbidden corpus. D38.6.4o.9
   replaces a rule this chapter recorded earlier the same day and the
   maintainer did not confirm. The inputs are this repository's code, the

@@ -770,10 +770,11 @@ behavior, except for `swap_key_check`; the row of each switch in
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
   listed instead of by a random draw.
 - `electrum_tip_checks: false` — the node does not compare the block heights of a coin's Electrum
-  servers, does not fail an activation or refuse trades when they disagree about the chain: a server that is behind the chain or stopped following it keeps its place in reads,
-  broadcasts and a swap's confirmation wait, which polls the first connected server in priority
-  order. Together with the two switches above this gives GLEEC KDF's routing. The
-  `electrum_servers` request has no GLEEC KDF equivalent.
+  servers, does not fail an activation or refuse trades when they disagree about the chain: a server
+  that is behind the chain or stopped following it keeps its place in reads, broadcasts and a swap's
+  confirmation wait, which polls the first connected server in priority order. Together with the two
+  switches above this gives GLEEC KDF's routing. The `electrum_servers` request has no GLEEC KDF
+  equivalent.
 - `orderbook_sync_names_held_root: false` — a sync request names the root the maker advertised
   instead of the one this node holds.
 - `order_messages_refresh_liveness: false` — only keep-alives keep a maker's order book alive.

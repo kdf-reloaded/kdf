@@ -424,23 +424,22 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   `electrum_server_order`, and compares them. A server is *behind* when it is more than the coin's
   tolerance below the height two or more servers have reached (with two servers, below the higher
   one). The tolerance is three minutes of blocks, at least 1 and at most 20: 1 for BTC, 2 for LTC, 3
-  for RIN and KMD, 12 for DGB. A server far above that height is not
-  hidden: see the entry on disagreement about the chain. A server is *stuck* when it sends no new block for longer than three block times or ten minutes while
-  another server does. Such a server stays in the set and keeps answering when the others fail, but
-  reads, transaction broadcasts and confirmation waits go to the others first, and it is asked again
-  as soon as it has caught up. The node logs one warning, naming the server by host and port, when a
-  server falls behind or is stuck, and when it is up to date again. A swap's confirmation
-  wait now asks one server for the whole wait (the first connected one that is up to date) and moves
-  to another only when that one fails, so the weakest of several servers can no longer end it early.
-  A single server that claims a height far above the others, or a server of another network in the
-  list, no longer makes the honest servers look behind. With `electrum_server_order` set to `mixed`
-  or `measured`, the same tolerance decides which measured servers count as fresh, a server that
-  answers a different block at the same height than two others is not ranked among the fresh ones,
-  and repeated searches for a replacement wait 5, 10, 20, 40 and then 60 minutes, so a halted chain
-  does not make every node probe the public servers every five minutes, and a search for a
-  replacement connects at most four servers at a time. For the old behavior, set the `MM2.json`
-  boolean `electrum_tip_checks` to `false` (and `electrum_server_order` to `listed` and
-  `electrum_spread_reads` to `false` to match GLEEC KDF). **`mixed` does not become the default
+  for RIN and KMD, 12 for DGB. A server far above that height is not hidden: see the entry on
+  disagreement about the chain. A server is *stuck* when it sends no new block for longer than three
+  block times or ten minutes while another server does. Such a server stays in the set and keeps
+  answering when the others fail, but reads, transaction broadcasts and confirmation waits go to the
+  others first, and it is asked again as soon as it has caught up. The node logs one warning, naming
+  the server by host and port, when a server falls behind or is stuck, and when it is up to date
+  again. A swap's confirmation wait now asks one server for the whole wait (the first connected one
+  that is up to date) and moves to another only when that one fails, so the weakest of several
+  servers can no longer end it early. A single server that claims a height far above the others, or
+  a server of another network in the list, no longer makes the honest servers look behind. With
+  `electrum_server_order` set to `mixed` or `measured`, the same tolerance decides which measured
+  servers count as fresh, and repeated searches for a replacement wait 5, 10, 20, 40 and then 60
+  minutes, so a halted chain does not make every node probe the public servers every five minutes,
+  and a search for a replacement connects at most four servers at a time. For the old behavior, set
+  the `MM2.json` boolean `electrum_tip_checks` to `false` (and `electrum_server_order` to `listed`
+  and `electrum_spread_reads` to `false` to match GLEEC KDF). **`mixed` does not become the default
   yet.** The change is in two stages: this release brings the checks; the default order changes from
   `random` to `mixed` in a later release, after a field run on RIN, DGB and a coin with 600-second
   blocks has shown no false marks. Detail: PR #324; CRD ch.38 R38.6.4o.
