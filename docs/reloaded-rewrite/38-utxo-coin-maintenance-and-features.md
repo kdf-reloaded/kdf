@@ -1683,10 +1683,10 @@ failure, naming each server, from the activation itself.
 >   compared; a server that does not answer is not judged), `run_comparisons`, `disagreement_servers` and
 >   `disagreement_text` (the two error texts), `update_disagreement` (ERROR on entering, WARN on leaving; run from
 >   `refresh_out_of_date`) and `chain_disagreement`. Comparisons that fall due after the activation run on the
->   maintenance loop (`Wake::Compare`). A pair found different at one height in a measurement round is kept in
->   `pending` and compared once both heights are at least *T* above it. Different headers seen only in header
->   notifications are not tracked: a connection keeps the height of a notification, not its header bytes, so
->   item 7's notification case is not implemented (the measurement-round case is).
+>   maintenance loop (`Wake::Compare`). A pair found different at one height, in a measurement round or between
+>   two maintained connections, is kept in `pending` and compared once both heights are at least *T* above it. A
+>   connection keeps the last header bytes it carried with their height (`HeaderTrack::last_header`, from the answer
+>   to the header request and from every notification); `note_same_height_differences` runs when either arrives.
 > - *Activation.* `activation_probe` logs the WARN of item 13 (whatever the switch says) and records the time of
 >   the first connection; `judge_activation` waits until the probe has ended, every connected server's header
 >   request has ended (`header_resolved`) and no comparison is running, or until `activation_window` (5 s) after the
@@ -1707,9 +1707,11 @@ failure, naming each server, from the activation itself.
 >   `t38_6_4o_14_the_disagreement_state_after_activation`, `t38_6_4o_15_fewer_than_three_servers_are_flagged` and
 >   `t38_6_4o_16_a_pair_is_compared_at_most_once_per_limit`, with `set_block_header` and `set_default_block_header`
 >   on the stub. The old far-ahead test is now `t38_6_4o_6_a_far_ahead_server_is_kept_out_of_the_reads` (item 4).
->   T38.6.4o.14 is tested at the pool (the state, the two log lines, `electrum_servers`, `chain_disagreement`); the
->   refusals themselves (order, swap start, withdrawal) are one `if let Some(error) = ...chain_disagreement()` each and
->   have no test of their own at the order, swap or withdrawal level.
+>   `t38_6_4o_7_different_headers_in_notifications_start_a_comparison` covers item 7 for notifications.
+>   T38.6.4o.14 is tested at the pool (the state, the two log lines, `electrum_servers`, `chain_disagreement`) and at
+>   the withdrawal (`a_withdrawal_is_refused_while_the_servers_disagree` in `rpc_command/electrum_servers.rs`). The
+>   refusals of a new order and of a swap start are one `if let Some(error) = ...chain_disagreement()` each and have
+>   no test of their own.
 
 > **As-built note (2026-11-09), the activation stall (plan step 0).**
 > - *R38.6.4k-R item 3 and R38.6.4l item 2.* Before, `run_probe` offered a connection to the maintained set
