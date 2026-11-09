@@ -2,9 +2,10 @@
 
 **Status:** in progress (decisions D1–D7 taken 2026-11-09; one PR for all items) — **Last reviewed:** 2026-11-09
 
-**CRD:** ch.38 R38.6.4a item 6 and R38.6.4l items 4, 6 and 7 (amended), new rules for the
-confirmation wait, the broadcast route, header agreement and the server-state report
-(Reloaded-original). Builds on [the measured server order](electrum-measured-server-order.md).
+**CRD:** ch.38 R38.6.4o with T38.6.4o.1–T38.6.4o.11 and D38.6.4o.1–D38.6.4o.8 (new), amending
+R38.6.4a items 6 and 7, R38.6.4f item 4 and R38.6.4l items 1, 4, 6 and 7 (Reloaded-original).
+Builds on [the measured server order](electrum-measured-server-order.md) and carries work package 5
+(the tip check of the near sessions) of [order-posting latency](order-posting-latency.md).
 
 > **Context.** A coin's Electrum servers can fall behind the chain, stop following it, or follow
 > another chain. Today a lagging server keeps its share of reads, a stuck server among two or
@@ -172,8 +173,10 @@ the run passes (CHANGELOG line, `GLEEC_COMPATIBILITY.md` row).
 
 A chain halt, or a lone connection on a halted chain, starts a round every re-measure
 limit (5 min) on every node. After a round with no eligible replacement, the next round
-waits twice as long (5 → 10 → 20 → … cap 60 min); the wait resets when the agreed tip
-advances. Rounds connect at most 4 servers at a time.
+waits twice as long (5 → 10 → 20 → … cap 60 min); the wait returns to 5 minutes when a
+round finds a replacement or no maintained connection is poor any more. (A reset on every
+advance of the tip would undo the backoff whenever the healthy servers keep notifying.)
+Rounds connect at most 4 servers at a time.
 
 ### 8. Header agreement at equal height (security and stability, no extra requests)
 
@@ -211,7 +214,10 @@ available; the retry over every server stays.
   the higher of the two when 2 report.
 - D3 confirmation polls: sticky only; no corroboration now.
 - D4 header request on join under every order: yes.
-- D5 observability: WARN lines and the `electrum_servers` RPC.
+- D5 observability: WARN lines and the `electrum_servers` RPC. The opt-back switch that
+  `docs/COMPAT_SWITCHES.md` requires is `electrum_tip_checks` (default `true`; `false`, with
+  `electrum_server_order` `listed` and `electrum_spread_reads` `false`, gives the GLEEC KDF
+  behavior).
 - D6 field-run pass rule for the `mixed` default: as step 6, including the DGB and E1 rows.
 - D7 stuck period P: max(3 × `avg_blocktime`, 10 min).
 - Delivery: one PR for every step, in the work order above.
