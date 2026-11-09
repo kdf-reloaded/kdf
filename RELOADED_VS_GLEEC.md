@@ -500,16 +500,18 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   §62.7). KDF Reloaded asks two sources at the same time (`prices.gleec.com` with its cache
   `defistats.gleec.com`, and `prices.cipig.net:1717`, with `?expire_at=259200`) and combines them: a coin
   priced by one source is kept, a coin both price within 5 % takes the newer record, and a coin they
-  disagree on by more than that is not priced at all -- the bot quotes no pair with it and a swap with it is
-  stored without USD prices (on 2026-11-07 the two services priced KMD at 0.00313 and 0.00680 USD). There is
+  disagree on by more than that is, by default, priced from the first source with a warning (on 2026-11-07 the
+  two services priced KMD at 0.00313 and 0.00680 USD, and a wrong figure from the first source can be used this
+  way). The `MM2.json` key `price_conflict` set to `"refuse"` leaves such a coin unpriced instead: the bot quotes
+  no pair with it and a swap with it is stored without USD prices. There is
   no rotation, since the first address of a source is asked first every time. A failing price address is
   reported by one warning when it starts failing and one info line when it answers again (the bot finding
   no source at all, by one error line), each attempt on a native build is cut off after 10 s (a browser build
   also sets a timer, which no test covers yet), and the USD prices of an own swap are fetched once, only for a successful swap (as in GLEEC
   KDF; earlier KDF Reloaded builds fetched them for every swap, from an address that no longer resolves). The bot's
   per-pair refusal and immediate cancellation of orders are the reference's; they are under observation in
-  v0.4.0 and will be revisited. The `MM2.json` keys `price_urls` and `price_providers` are new; GLEEC KDF
-  has neither key nor a configurable provider set. The start request now accepts the reference's `price_urls`
+  v0.4.0 and will be revisited. The `MM2.json` keys `price_urls`, `price_providers` and `price_conflict` are new; GLEEC KDF
+  has none of them and no configurable provider set. The start request now accepts the reference's `price_urls`
   too. See CRD ch.62,
   [`docs/NETWORK_CONFIG.md`](docs/NETWORK_CONFIG.md#price-service) and
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).

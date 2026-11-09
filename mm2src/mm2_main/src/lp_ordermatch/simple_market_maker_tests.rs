@@ -293,8 +293,8 @@ mod price_source_tests {
     use crate::mm2::lp_ordermatch::lp_bot::price_service::stub_server::price_document;
     use crate::mm2::lp_ordermatch::lp_bot::price_service::{combine_sources, default_price_sources,
                                                            parse_price_document, read_price_providers_conf,
-                                                           registry_from_table, PriceProvidersConf, ProviderSet,
-                                                           SourceTable};
+                                                           registry_from_table, ConflictPolicy, PriceProvidersConf,
+                                                           ProviderSet, SourceTable};
     use crate::mm2::lp_ordermatch::lp_bot::simple_market_maker_bot::{resolve_bot_price_sources,
                                                                      StartSimpleMakerBotError};
     use serde_json::Value as Json;
@@ -391,7 +391,7 @@ mod price_source_tests {
             host: "test".to_string(),
             records: parse_price_document(document).unwrap(),
         };
-        let table = combine_sources(vec![source], &ProviderSet::default_set()).table;
+        let table = combine_sources(vec![source], &ProviderSet::default_set(), ConflictPolicy::default()).table;
         let registry = registry_from_table(table);
         let rin = registry.get_infos("RIN").unwrap();
         assert_eq!(rin.price_provider, Provider::Livecoinwatch);
@@ -418,7 +418,7 @@ mod price_source_tests {
             host: "test".to_string(),
             records: parse_price_document(&document).unwrap(),
         };
-        let default_set = combine_sources(vec![source()], &ProviderSet::default_set()).table;
+        let default_set = combine_sources(vec![source()], &ProviderSet::default_set(), ConflictPolicy::default()).table;
         assert!(registry_from_table(default_set)
             .get_cex_rates("RIN".to_string(), "KMD".to_string())
             .is_none());
@@ -427,7 +427,7 @@ mod price_source_tests {
         let PriceProvidersConf::Valid { providers, .. } = read_price_providers_conf(&conf) else {
             panic!("the list is well-formed");
         };
-        let table = combine_sources(vec![source()], &providers).table;
+        let table = combine_sources(vec![source()], &providers, ConflictPolicy::default()).table;
         let rates = registry_from_table(table)
             .get_cex_rates("RIN".to_string(), "KMD".to_string())
             .expect("gleeccex is listed");
