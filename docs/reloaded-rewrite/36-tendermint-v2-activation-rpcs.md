@@ -130,7 +130,7 @@ R36.1.2 **Request fields.**
 | `nodes[].api_url`, `nodes[].grpc_url`, `nodes[].ws_url` | string | optional | Accepted (they appear in the public-docs examples) and **ignored**. |
 | `tokens_params` | array of token requests | **required** (may be empty) | Tendermint tokens to activate alongside the platform. |
 | `tokens_params[].ticker` | string | **required** | Token ticker. |
-| `tokens_params[].protocol` | object (coin-protocol form) | optional | Custom-token activation: when present, the token is activated from this protocol object instead of the coins configuration (R36.1.4 step 4). Any other member of a token request (e.g. `required_confirmations`) is accepted and ignored. |
+| `tokens_params[].protocol` | object (coin-protocol form) | optional | Custom-token activation: when present, the token is activated from this protocol object instead of the coins configuration (R36.1.4 step 4). A custom token is wallet-only (Reloaded; as a custom EVM token is, ch. 35 R35.2.7). Any other member of a token request (e.g. `required_confirmations`) is accepted and ignored. |
 | `tx_history` | boolean | optional, default `false` | When `true`, background transaction-history fetching is started for the platform coin after successful activation. |
 | `get_balances` | boolean | optional, default `true` | Selects the balance view or the ticker view of the result (R36.1.5). |
 | `path_to_address` | object `{account_id: integer, chain: "External"\|"Internal", address_id: integer}` | optional, default `{0, "External", 0}` | In HD-wallet mode selects which derived address is activated (under the coin's configured derivation path); without HD mode it has no effect. |
@@ -144,6 +144,31 @@ R36.1.2 **Request fields.**
 > three for Tendermint. Because the docs do not state what observable effect the
 > fields have, the reference behaviour is bound. The docs mark `nodes`,
 > `ticker` and `tokens_params` required, which the reference also enforces.
+
+> **As built (Reloaded; PR #NNN; informative).** `path_to_address` and
+> `tokens_params[].protocol` are implemented as follows.
+>
+> - **`path_to_address`.** The activation reads the login's key policy. Under an
+>   HD login the coin's key is derived from the seed at the coin's
+>   `derivation_path` extended by `path_to_address` (account hardened, then the
+>   chain, then the address index), with the same derivation the UTXO coins use
+>   for their activated address; the account id is derived from that key and the
+>   coin's public key is derived from the same private key, never taken from the
+>   wallet's root key. A coin configuration without `derivation_path`, a
+>   `path_to_address` that does not parse, and a path that cannot be derived
+>   each fail with `PlatformCoinCreationError`; the request member is parsed
+>   under an HD login only, and under an iguana login it is ignored whatever it
+>   holds, as before. The task variant (§36.6) uses the same build.
+> - **`tokens_params[].protocol`.** An entry with a `protocol` is built from it;
+>   an entry without one is built from the coins configuration. A `protocol`
+>   for a ticker that has a coins-configuration entry fails with
+>   `CustomTokenError`; the check precedes the one on the protocol's type. All
+>   entries are resolved, then checked against the platform
+>   (`PlatformCoinMismatch`), then built, so a failure leaves nothing registered.
+>   A malformed `protocol` object is a request-parse failure (ch. 55 §55.1).
+> - **A custom token is wallet-only,** as a custom EVM token is (ch.35 R35.2.7):
+>   it is refused when an order is placed, whatever the coins file and the build
+>   switch say.
 
 R36.1.3 **`activation_params` forms.** When present, `activation_params` shall
 be accepted in each of the following forms:
@@ -276,7 +301,7 @@ R36.2.1 **Request fields.**
 | --- | --- | --- | --- |
 | `ticker` | string | **required** | Token ticker. |
 | `activation_params` | object | **required** (may be `{}`) | Present for forward compatibility; its members (e.g. the docs' `required_confirmations`) are accepted and ignored. A request without it is a request-parse failure (`InvalidRequest`, ch. 55 §55.1). |
-| `protocol` | object (coin-protocol form) | optional | Custom-token activation from the supplied `TENDERMINTTOKEN` protocol instead of the coins configuration. |
+| `protocol` | object (coin-protocol form) | optional | Custom-token activation from the supplied `TENDERMINTTOKEN` protocol instead of the coins configuration. The token is wallet-only (Reloaded; ch. 35 R35.2.7). |
 
 R36.2.2 The token's platform binding, decimals, and on-chain denomination are
 taken from its `TENDERMINTTOKEN` `protocol_data` (§36.3.2). Activation shall,
@@ -317,6 +342,16 @@ produce them.
 **Unresponsive nodes.** When the platform's nodes are all unreachable or
 failing, `enable_tendermint_token` shall return `CouldNotFetchBalance` (string)
 with HTTP **500**.
+
+> **As built (Reloaded; PR #NNN; informative).** `enable_tendermint_token` has its
+> own handler with a request type that carries the optional `protocol` beside
+> `ticker` and `activation_params`. The steps are those of the generic
+> single-token activation, with the protocol resolved as in the as-built note
+> under R36.1.2: the inline `protocol` when present (a `CustomTokenError`,
+> HTTP 400, when the ticker is in the coins configuration; an
+> `UnexpectedTokenProtocol` when it is not `TENDERMINTTOKEN`), else the coins
+> configuration. The token built from an inline `protocol` is marked custom and
+> is wallet-only.
 
 ---
 
@@ -579,10 +614,14 @@ a hardware-policy request (Tendermint has none), so
 ## 36.7 Reloaded status (informative)
 
 > **Maintainer decision (binding, 2026-10-11).** This branch implements the
-> wire contract of this chapter: items 1-4, 7 and 10-15 below. Items 5, 6, 8 and
-> 9 are features (signing policies via `activation_params` in all three forms of
-> R36.1.3, HD `path_to_address`, custom tokens, transaction history) and are
-> deferred to `docs/plans/tendermint-activation-features.md`.
+> wire contract of this chapter: items 1-4, 7 and 10-15 below. Items 5 and 9
+> are features (signing policies via `activation_params` in all three forms of
+> R36.1.3, transaction history) and are deferred to
+> `docs/plans/tendermint-activation-features.md`. Two further features, HD
+> `path_to_address` and custom tokens, were deferred the same way and have been
+> delivered since (PR #NNN); their items are removed from the list and the
+> as-built notes under R36.1.2 and R36.2.4 describe them. The source numbers of
+> the other items are unchanged.
 >
 > **Deliberate divergence (binding, interim).** Until R36.1.3 is implemented, a
 > request that carries a non-null `activation_params` shall be rejected with
@@ -595,8 +634,8 @@ a hardware-policy request (Tendermint has none), so
 > `activation_params` only, and is removed when the plan's item 1 lands.
 
 > **Implemented on `fix/activation-api-parity`:** items 1-4, 7 and 10-15 below
-> and the interim rejection of `activation_params`. Remaining: items 5, 6, 8 and
-> 9 (deferred to the Tendermint plan). The list is kept as the record of what
+> and the interim rejection of `activation_params`. Remaining: items 5 and 9
+> (deferred to the Tendermint plan). The list is kept as the record of what
 > changed.
 
 Current reloaded behaviour that deviates from the bound contract (behavioural
@@ -616,18 +655,9 @@ terms; the clean implementer works from this list):
    public-key or WalletConnect request silently activates with the local
    context key. Bound: the three forms of R36.1.3 with their effects; malformed
    input is `InvalidRequest`.
-6. **`path_to_address` / HD mode.** Reloaded ignores `path_to_address` and
-   always activates the context key's address. Bound: in HD-wallet mode the
-   address at `path_to_address` under the coin's derivation path; missing
-   derivation config or an invalid path is `PlatformCoinCreationError`.
 7. **Token platform check.** Reloaded does not check that an inline token's
    `platform` equals the activated platform. Bound: `PlatformCoinMismatch`
    (unit, HTTP 400).
-8. **Custom tokens.** Reloaded accepts no `protocol` member on
-   `tokens_params[]` or on `enable_tendermint_token`. Bound: custom-token
-   activation and `CustomTokenError` (R36.1.6, R36.2.4). When custom Tendermint
-   tokens are implemented, each shall be wallet-only, as a custom EVM token is
-   (ch. 35 R35.2.7); see `docs/plans/tendermint-activation-features.md` item 3.
 9. **`tx_history`.** Reloaded accepts `true` but starts no history fetching.
    Bound: background history fetching starts after activation.
 10. **`protocol` member of `UnexpectedPlatformProtocol` /
@@ -679,6 +709,12 @@ terms; the clean implementer works from this list):
 > queries) is then inconsistent with the activated address. Proposed fix for
 > Reloaded: derive the public key from the activated private key; verify with an
 > HD-mode signing test before relying on HD Tendermint swaps.
+>
+> **As built (Reloaded; PR #NNN).** Done. Reloaded derives the public key of an
+> HD-activated coin from the activated private key, and a test signs a
+> withdrawal at a non-default path and verifies the signature against that
+> path's public key and against neither the default path's key nor the wallet's
+> root key.
 
 ---
 
@@ -754,6 +790,24 @@ T36.15 *No response bodies in logs (R36.5A.3).* With log capture at the most
 verbose level, a request whose answer carries a marker string succeeds, and
 no captured line contains the marker. A line that reports the answer may
 carry its size.
+
+T36.16 *Custom tokens.* An inline `TENDERMINTTOKEN` `protocol` in `tokens_params`
+activates beside the platform and on `enable_tendermint_token`; the token is
+marked custom and is wallet-only; a configured token activated in the same call
+is unchanged. A `protocol` for a configured ticker is the `CustomTokenError` of
+T36.6, a `protocol` that names another platform is `PlatformCoinMismatch`, and a
+`protocol` of another type is `UnexpectedTokenProtocol`.
+
+T36.17 *HD key.* Under an HD login the address of the activated coin equals the
+BIP-44 address at the coin's `derivation_path` and `path_to_address`, computed
+independently of the wallet code from the test mnemonic (`m/44'/118'/0'/0/0` by
+default, another path for another `path_to_address`); the coin's public key is
+that of the activated private key; a withdrawal signed at a non-default path
+verifies against that path's public key and against neither the default path's
+key nor the wallet's root key. Under an iguana login the address is that of the
+single key, whatever `path_to_address` holds. A coin configuration without
+`derivation_path`, and an unparseable or underivable `path_to_address`, fail
+under an HD login with `PlatformCoinCreationError`.
 
 ## 36.9 Deferred Work
 
@@ -849,3 +903,10 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required. The resolution of D36.3's second question (2026-10-29, decision
   AU) was added on the same terms.
+- *Clean-context addition (2026-11-09, forbidden corpus not consulted):* the
+  as-built notes under R36.1.2 and R36.2.4, the as-built note under the HD
+  code-quality finding of §36.7, the wallet-only sentences of the
+  `tokens_params[].protocol` and `protocol` rows, and the removal of the former
+  items 6 and 8 of §36.7 describe this repository's code. They take no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.
