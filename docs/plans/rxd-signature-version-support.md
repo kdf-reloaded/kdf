@@ -306,9 +306,12 @@ counterparty, or to verify rather than report what the lineage says about
 ## Out of scope
 
 - **D2 — Radiant beyond signing.** HTLC script acceptance, the relay-fee floor
-  against the configured transaction fee, its block-header family, its Electrum
-  server behavior, and whether its roughly 300-second block time interacts
-  badly with the swap lock-time rules are all unestablished. The cleared
+  against the configured transaction fee, and the interplay of its roughly
+  300-second block time with the swap lock-time rules were tested on
+  2026-11-09 for swaps between KDF Reloaded nodes and with GLEEC KDF
+  3.0.0-beta, with no failure (the configured fee is the network minimum);
+  its block-header family and its Electrum server behavior were not tested
+  separately. The cleared
   R58.4A.3 records that the reference lineage *reports* a completed legacy
   (version-one) RXD/KMD swap under the dialect; that is reported, not verified
   by this project, bears on the legacy swap path only, and says nothing about

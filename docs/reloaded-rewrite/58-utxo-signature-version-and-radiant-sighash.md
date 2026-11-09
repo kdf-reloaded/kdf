@@ -848,7 +848,8 @@ above, one by one:
   bytes that paid 0.00000226 RXD (0.00001 RXD per kilobyte) was refused at
   broadcast with "min relay fee not met", although the Electrum servers
   answer `blockchain.relayfee` with 0.000001 RXD per kilobyte, which is
-  not what the node enforces. The public source of Radiant Core sets its
+  not what the node enforces. The public source of Radiant Core
+  (`src/policy/policy.h`; §58.9) sets its
   minimum relay fee to 0.1 RXD per kilobyte since release 2.0 (0.01 RXD
   per kilobyte before). The `txfee` of the coins entry therefore stays at
   10000000 satoshis per kilobyte.
@@ -1013,7 +1014,8 @@ post-beta change (size M); this item stays open until then.
   Radiant project documentation (`https://radiantblockchain.org`): the
   authority for §58.3 — the inserted output-summaries field, the summary
   layout, the reference opcodes and their 36-byte operands, and the
-  reference-set de-duplication and ordering. The file classes read for
+  reference-set de-duplication and ordering; for D2, the minimum relay fee
+  of its policy header. The file classes read for
   the 2026-10-25 correction of R58.3.3: the script library (the
   reference-collecting walk and the opcode table), the transaction
   primitive header (the per-output summary writer and the
