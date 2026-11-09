@@ -199,6 +199,9 @@ jobs:
             "libkdf-${tag}-aarch64-linux-android.a" \
             "libkdf-${tag}-armv7-linux-androideabi.a" \
             "libkdf-${tag}-aarch64-apple-ios.a" \
+            "libkdf-${tag}-aarch64-apple-ios-sim.a" \
+            "libkdf-${tag}-x86_64-apple-ios.a" \
+            "libkdf-${tag}-x86_64-linux-android.a" \
             "kdf-${tag}.h"; do
             [ -s "release-assets/$want" ] || { echo "::error::missing release asset: $want"; exit 1; }
           done

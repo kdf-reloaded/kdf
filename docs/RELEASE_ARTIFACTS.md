@@ -29,10 +29,13 @@ the armv7 binary. musl-based systems (Alpine) are not covered either.
 |------|---------------|-------|
 | `libkdf-<tag>-aarch64-linux-android.a` | `aarch64-linux-android` | Android ABI `arm64-v8a`, NDK API level 21 |
 | `libkdf-<tag>-armv7-linux-androideabi.a` | `armv7-linux-androideabi` | Android ABI `armeabi-v7a`, NDK API level 21 |
+| `libkdf-<tag>-x86_64-linux-android.a` | `x86_64-linux-android` | Android ABI `x86_64` (emulators, Chromebooks), NDK API level 21 |
 | `libkdf-<tag>-aarch64-apple-ios.a` | `aarch64-apple-ios` | iOS devices, deployment target iOS 14.0 |
+| `libkdf-<tag>-aarch64-apple-ios-sim.a` | `aarch64-apple-ios-sim` | iOS simulator on Apple silicon Macs, deployment target iOS 14.0 |
+| `libkdf-<tag>-x86_64-apple-ios.a` | `x86_64-apple-ios` | iOS simulator on Intel Macs, deployment target iOS 14.0 |
 
 The libraries are the daemon as a static archive for the host application to link, not a standalone program.
-Simulator targets (`aarch64-apple-ios-sim`, `x86_64-apple-ios`) and Android `x86_64` are not built.
+Each iOS slice is a separate static library (no XCFramework); Android 32-bit x86 (`i686`) is not built.
 
 ## C header (`kdf-<tag>.h`)
 

@@ -116,7 +116,7 @@ Minimal example:
 > the allocator's own default. The environment variable `MALLOC_ARENA_MAX`, when
 > set, takes precedence and the daemon then leaves the allocator alone.
 
-Each signed release ships `kdf` binaries for Linux (x86_64, aarch64 and armv7; glibc 2.31 or newer), macOS and Windows, and static libraries `libkdf.a` for Android (aarch64, armv7) and iOS (aarch64) apps, with a matching C header `kdf-<tag>.h`. The file names, target triples and minimum system versions are listed in [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md).
+Each signed release ships `kdf` binaries for Linux (x86_64, aarch64 and armv7; glibc 2.31 or newer), macOS and Windows, and static libraries `libkdf.a` for Android (aarch64, armv7, x86_64) and iOS (device and simulator) apps, with a matching C header `kdf-<tag>.h`. The file names, target triples and minimum system versions are listed in [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md).
 
 ## Usage
 
