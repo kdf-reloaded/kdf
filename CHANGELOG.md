@@ -94,7 +94,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   that names `Low`, `Average` or `High` is priced with the matching figure; `Default`, and any name on a
   coin without the array, keep the coin's usual `gas_price`. The array is optional, the figures may be in
   any order, and a token is priced with its platform coin's array. A coin without the member behaves
-  exactly as before. Detail: PR #NNN; CRD ch.36 R36.3.5, ch.18 R18.6B.1.
+  exactly as before. Detail: PR #323; CRD ch.36 R36.3.5, ch.18 R18.6B.1.
 - **A Tendermint request can set the gas limit and the gas price, or the price level.** The `fee`
   member of `withdraw`, `task::withdraw::init` and the staking requests now takes two more forms for a
   Tendermint coin or token: `{"type": "CosmosGas", "gas_limit": 125000, "gas_price": 0.03}` and
@@ -103,7 +103,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   fee amount is still derived from the node's gas simulation, `ceil(gas used x 1.5 x price)`, not from
   the limit times the price. Every other coin family refuses the two forms with `InvalidFeePolicy`,
   and a Tendermint request that carries a form of another family ignores it and uses the default price
-  and gas limit. Detail: PR #NNN; CRD ch.49 R49.28 to R49.30, ch.18 R18.6B.2.
+  and gas limit. Detail: PR #323; CRD ch.49 R49.28 to R49.30, ch.18 R18.6B.2.
 - **`get_swap_gas_fee_policy` and `set_swap_gas_fee_policy` now accept a Tendermint platform
   coin.** The policy (`Legacy`, `Low`, `Medium`, `High`, starting at `Legacy`) selects the gas price of
   the coin's swap transactions and of its trade-fee estimates: `Low`, `Medium` and `High` pick the low,
@@ -111,7 +111,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   withdraw, a delegation or a transfer between chains. A Tendermint token has no policy of its own and
   the two methods answer `NotSupported` for its ticker. On a coin without `priority_gas_prices` the
   methods still accept and store any value, with one warning in the log that the coin cannot honor the
-  level, and prices stay at the default. Detail: PR #NNN; CRD ch.35 R35.6.8, R35.6.9.
+  level, and prices stay at the default. Detail: PR #323; CRD ch.35 R35.6.8, R35.6.9.
 
 #### Order book and peer-to-peer network
 
@@ -665,13 +665,13 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   activation.** A `priority_gas_prices` array with a figure that is zero, negative or not a finite
   number makes the coin's fee zero or undefined, so activation is refused with a
   `PlatformCoinCreationError` that names the member, and nothing is registered. A malformed array (not
-  exactly three numbers) fails with `CoinProtocolParseError`. Detail: PR #NNN; CRD ch.36 R36.3.5 (note),
+  exactly three numbers) fails with `CoinProtocolParseError`. Detail: PR #323; CRD ch.36 R36.3.5 (note),
   T36.17.
 - **Delegations, undelegations and reward claims on a Tendermint coin are signed with a larger default
   gas limit.** They used the 125,000 of a plain transfer. The defaults are now 187,500 for a delegation
   and a reward claim and 250,000 for an undelegation; a request can still set its own limit with the
   new `fee` forms. The fee amount comes from the node's gas simulation and does not change. Detail: PR
-  #NNN; CRD ch.18 R18.6B.3.
+  #323; CRD ch.18 R18.6B.3.
 
 ### Fixed
 

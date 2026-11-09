@@ -563,7 +563,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   that carries a fee form of another family ignores it, as GLEEC KDF does. No switch is needed: a coins file
   without the member and a request without the new forms behave as before. Rows in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.36 R36.3.5, ch.18 R18.6B, ch.49 R49.28 to
-  R49.30, ch.35 R35.6.8, R35.6.9. PR #NNN.
+  R49.30, ch.35 R35.6.8, R35.6.9. PR #323.
 
 ### Removed / disabled in KDF Reloaded
 
