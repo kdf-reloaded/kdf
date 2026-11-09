@@ -492,7 +492,7 @@ pub(super) enum HtlcMsgError {
 // Free functions
 // ————————————————————————————————————————————————————————————————
 
-/// Whether a Tendermint coin or token is wallet-only (CRD ch.18 R18.11.23, ch.36 R36.1.2).
+/// Whether a Tendermint coin or token is wallet-only (CRD ch.18 R18.11.23 and R18.11.23a, ch.36 R36.1.2).
 ///
 /// It is while swaps are switched off in this build, while the coins-file entry says so, and always when:
 /// - the chain's account prefix selects no HTLC dialect (only `iaa` and `nuc` have one): such a coin is refused at
