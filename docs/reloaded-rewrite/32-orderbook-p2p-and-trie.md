@@ -3203,13 +3203,30 @@ opposite default without weighing the stale price.)
 > first cancel (item 2). The steps that can fail (the checks, the build, the
 > subscription, the save) all precede the cancel; the local insert and the
 > publication follow it, and neither returns an error. A failed save returns
-> its error with nothing cancelled. Two residuals remain. A crash between the
-> save and the cancel leaves both the previous orders and the saved new
-> order, and a restart restores both until the next re-pricing or cancel. And
+> its error with nothing cancelled. Two residuals were found. The first
+> remains: a crash between the save and the cancel leaves both the previous
+> orders and the saved new order, and a restart restores both until the next
+> re-pricing or cancel. The second:
 > the save writes the order's active record before its history row; when only
 > the history write fails, the new order is not placed but its active record
-> stays, so a restart restores it as well. The second holds at the default
-> too and is listed as a follow-up in the order-posting plan.
+> stayed, so a restart restored it as well. The second held at the default
+> too; it is fixed by PR #309: a failed history write deletes the active
+> record again, for a maker order (with the retrying deletion of ch. 12 R7c
+> item 4) and for a taker order, and the history error is still returned. The
+> maker path uses the retrying deletion whatever `maker_restore_skips_cancelled`
+> is set to: the switch of R7c item 3 governs the deletion of a removed order's
+> record, while this deletion undoes the record of an order that was never
+> placed. A failed deletion is logged at warn level naming the order. The
+> taker path makes a single deletion attempt: chapter 12 binds the retrying
+> deletion (R7c item 4) for maker records only, so if that one attempt also
+> fails, the taker record stays and the warn line names it. In the same
+> change the taker path (`buy` and `sell`) saves its order first: a failed
+> save returns its error before the order's subscription to its pair's topic
+> and before the taker request is published, so no request leaves the node
+> for an order that was reported as failed. The subscription that now
+> follows a good save adds no orphan path: it does not request the
+> orderbook, so its only error is the ordermatch context lookup, which the
+> request has already passed.
 > The refusals before the balance checks (item 4) are untouched. The same
 > function serves the market-making bot and `start_swap` with the
 > `SetPrice` method, which both pass `cancel_previous`, so both follow the
@@ -3334,6 +3351,18 @@ bullet); `t_gh8a_f_a_failed_save_leaves_the_previous_orders` (sixth bullet:
 the node's history database has no orders table, so the history write of the
 new order fails; the error is returned and nothing was cancelled);
 `t_gh8a_without_cancel_previous_nothing_is_cancelled` (item 4).
+*Coverage of the orphan fix (PR #309).*
+`t_gh8a_g_a_failed_history_write_leaves_no_active_record_of_the_new_order`
+(a `setprice` whose history write fails, at the default and with the switch
+on: the error is returned, no active record of the new order is stored, and
+a restart restores nothing), and in module `t12_7c_restore_guard_tests` the
+`t_b4_1_*` tests for the maker and the taker save (the active record is gone
+after the failed history write, the records of other orders stay, an order
+outside the history keeps its record, a successful save keeps the record
+and the row); and `t_gh8a_h_a_failed_taker_save_sends_no_request` (a `buy`
+whose history write fails returns the error and subscribes to no topic,
+publishes no taker request, stores no taker record and restores nothing),
+with `t_gh8a_h_a_taker_save_that_works_sends_one_request` as its regression.
 
 **T-GH9** *One cancel per replaced order, in order (R-GH9).* The same
 re-pricing publishes exactly two cancel messages, one per old order

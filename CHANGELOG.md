@@ -661,6 +661,9 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   usual redial rules apply. In a lab test toward a frozen peer, such a close ended after 30 seconds
   with the deadline; without it, the close stayed open 13 minutes and ended after the peer was
   resumed. Detail: PR #280; CRD ch.28 R27c.
+- **An order whose save to the order history failed is reported as failed and no longer comes back
+  as a live order after a restart, and a buy or sell whose save failed no longer sends its request.**
+  Detail: PR #309; CRD ch.32 R-GH8a.
 
 #### Siacoin
 

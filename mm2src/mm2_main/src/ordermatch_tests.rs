@@ -4234,6 +4234,101 @@ mod t12_7c_restore_guard_tests {
         let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
         assert!(taker_orders.contains_key(&order.request.uuid));
     }
+
+    // B4-1 (CRD ch.32 R-GH8a, as built): a failed history write deletes the active record just written.
+
+    /// The history database loses its orders table, so the history write of a new order fails.
+    fn break_history_database(node: &Node) {
+        node.ctx
+            .sqlite_connection()
+            .execute("DROP TABLE my_orders", [])
+            .unwrap();
+    }
+
+    #[test]
+    fn t_b4_1_a_maker_failed_history_write_leaves_no_active_record() {
+        let mut node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = maker(true);
+
+        let err = block_on(save_my_new_maker_order(node.ctx.clone(), &order)).unwrap_err();
+
+        assert!(matches!(err.get_inner(), MyOrdersError::ErrorSaving(_)), "{err}");
+        assert!(!node.active_file(&order.uuid));
+        let stored = block_on(node.storage().load_active_maker_orders()).unwrap();
+        assert!(stored.iter().all(|stored| stored.uuid != order.uuid));
+        // A restart does not bring the order back.
+        node.restore();
+        assert!(!node.restored_makers().contains(&order.uuid));
+        node.assert_nothing_published();
+    }
+
+    #[test]
+    fn t_b4_1_b_taker_failed_history_write_leaves_no_active_record() {
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = taker(true);
+
+        let err = block_on(save_my_new_taker_order(node.ctx.clone(), &order)).unwrap_err();
+
+        assert!(matches!(err.get_inner(), MyOrdersError::ErrorSaving(_)), "{err}");
+        assert!(!my_taker_order_file_path(&node.ctx, &order.request.uuid).exists());
+        let stored = block_on(node.storage().load_active_taker_orders()).unwrap();
+        assert!(stored.iter().all(|stored| stored.request.uuid != order.request.uuid));
+        // A restart does not bring the order back.
+        node.restore();
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
+        assert!(!taker_orders.contains_key(&order.request.uuid));
+    }
+
+    /// The other orders that are stored stay: only the record of the failed order goes.
+    #[test]
+    fn t_b4_1_c_a_failed_history_write_deletes_only_its_own_record() {
+        let node = Node::new(json!({}));
+        let kept_maker = maker(false);
+        let kept_taker = taker(false);
+        block_on(save_my_new_maker_order(node.ctx.clone(), &kept_maker)).unwrap();
+        block_on(save_my_new_taker_order(node.ctx.clone(), &kept_taker)).unwrap();
+        break_history_database(&node);
+
+        assert!(block_on(save_my_new_maker_order(node.ctx.clone(), &maker(true))).is_err());
+        assert!(block_on(save_my_new_taker_order(node.ctx.clone(), &taker(true))).is_err());
+
+        assert!(node.active_file(&kept_maker.uuid));
+        assert!(my_taker_order_file_path(&node.ctx, &kept_taker.request.uuid).exists());
+    }
+
+    /// An order that is not kept in the history has no history write to fail: its record stays.
+    #[test]
+    fn t_b4_1_d_an_order_outside_the_history_keeps_its_record() {
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let maker_order = maker(false);
+        let taker_order = taker(false);
+
+        block_on(save_my_new_maker_order(node.ctx.clone(), &maker_order)).unwrap();
+        block_on(save_my_new_taker_order(node.ctx.clone(), &taker_order)).unwrap();
+
+        assert!(node.active_file(&maker_order.uuid));
+        assert!(my_taker_order_file_path(&node.ctx, &taker_order.request.uuid).exists());
+    }
+
+    /// Regression: a successful save leaves the active record and the history row.
+    #[test]
+    fn t_b4_1_e_a_successful_save_keeps_the_record_and_the_history_row() {
+        let node = Node::new(json!({}));
+        let maker_order = maker(true);
+        let taker_order = taker(true);
+
+        block_on(save_my_new_maker_order(node.ctx.clone(), &maker_order)).unwrap();
+        block_on(save_my_new_taker_order(node.ctx.clone(), &taker_order)).unwrap();
+
+        assert!(node.active_file(&maker_order.uuid));
+        assert!(my_taker_order_file_path(&node.ctx, &taker_order.request.uuid).exists());
+        assert_eq!(node.row(&maker_order.uuid).unwrap().0, "Created");
+        assert_eq!(node.row(&taker_order.request.uuid).unwrap().0, "Created");
+    }
 }
 
 fn pair_trie_root_by_pub(ctx: &MmArc, pubkey: &str, pair: &str) -> H64 {
@@ -10885,6 +10980,100 @@ mod t60_7_maker_balance_watch_tests {
             assert!(err.contains("Error saving an order"), "{err}");
             assert_eq!(maker.probe.count("read BASE"), 1, "the balance check ran first");
             maker.assert_pair_unchanged(&previous, root);
+        }
+
+        /// R-GH8a, the orphan residual: a `setprice` whose history write fails returns the error and leaves no
+        /// active record of the new order, so a restart cannot restore it. It holds at the default and with the
+        /// switch on.
+        #[test]
+        fn t_gh8a_g_a_failed_history_write_leaves_no_active_record_of_the_new_order() {
+            for extra in [json!({}), json!({ "setprice_replace_after_checks": true })] {
+                let maker = Maker::new(extra.clone());
+                let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().unwrap();
+                let _ = maker
+                    .ctx
+                    .sqlite_connection
+                    .pin(Arc::new(std::sync::Mutex::new(connection)));
+
+                let err = refused(maker.set_price_with_history(false, 3, None, true));
+
+                assert!(err.contains("Error saving an order"), "{extra}: {err}");
+                let stored = block_on(MyOrdersStorage::new(maker.ctx.clone()).load_active_maker_orders()).unwrap();
+                assert!(stored.is_empty(), "{extra}: {stored:?}");
+                assert_eq!(maker.own_orders(), HashSet::new(), "{extra}");
+                std::fs::create_dir_all(my_taker_orders_dir(&maker.ctx)).unwrap();
+                block_on(orders_kick_start(&maker.ctx)).unwrap();
+                assert_eq!(
+                    maker.own_orders(),
+                    HashSet::new(),
+                    "{extra}: restored at the next start"
+                );
+            }
+        }
+
+        /// `buy` of 3 BASE at price 1 on the node, through `lp_auto_buy`, with the choice of `save_in_history`.
+        fn buy(maker: &Maker, save_in_history: bool) -> Result<String, String> {
+            let base = block_on(lp_coinfind(&maker.ctx, "BASE")).unwrap().unwrap();
+            let rel = block_on(lp_coinfind(&maker.ctx, "REL")).unwrap().unwrap();
+            let input: AutoBuyInput = json::from_value(json!({
+                "base": "BASE", "rel": "REL", "price": 1, "volume": 3, "method": "buy",
+                "save_in_history": save_in_history
+            }))
+            .unwrap();
+            block_on(lp_auto_buy(&maker.ctx, &base, &rel, input))
+        }
+
+        /// The taker requests that left the node.
+        fn taker_requests(maker: &mut Maker) -> usize {
+            drain(&mut maker.rx)
+                .into_iter()
+                .filter(|published| matches!(published.message, OrdermatchMessage::TakerRequest(_)))
+                .count()
+        }
+
+        /// R-GH8a, the taker path: a `buy` whose history write fails returns the error, subscribes to no topic,
+        /// publishes no taker request, keeps no active taker record and inserts no taker order, so a restart
+        /// restores nothing.
+        #[test]
+        fn t_gh8a_h_a_failed_taker_save_sends_no_request() {
+            let mut maker = Maker::new(json!({}));
+            std::fs::create_dir_all(my_taker_orders_dir(&maker.ctx)).unwrap();
+            let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().unwrap();
+            let _ = maker
+                .ctx
+                .sqlite_connection
+                .pin(Arc::new(std::sync::Mutex::new(connection)));
+
+            let err = match buy(&maker, true) {
+                Ok(result) => panic!("the buy must fail, got {result}"),
+                Err(e) => e,
+            };
+
+            assert!(err.contains("Error saving an order"), "{err}");
+            assert_eq!(taker_requests(&mut maker), 0, "no taker request is published");
+            assert!(maker.ordermatch_ctx().orderbook_subscriptions.read().is_empty());
+            let stored = block_on(MyOrdersStorage::new(maker.ctx.clone()).load_active_taker_orders()).unwrap();
+            assert!(stored.is_empty(), "{stored:?}");
+            assert!(block_on(maker.ordermatch_ctx().my_taker_orders.lock()).is_empty());
+            block_on(orders_kick_start(&maker.ctx)).unwrap();
+            assert!(block_on(maker.ordermatch_ctx().my_taker_orders.lock()).is_empty());
+        }
+
+        /// Regression: with a save that works (an order kept outside the history; the history row of a successful
+        /// save is covered by `t_b4_1_e_a_successful_save_keeps_the_record_and_the_history_row`), the same `buy`
+        /// subscribes, publishes one taker request and keeps its order and its active record.
+        #[test]
+        fn t_gh8a_h_a_taker_save_that_works_sends_one_request() {
+            let mut maker = Maker::new(json!({}));
+            std::fs::create_dir_all(my_taker_orders_dir(&maker.ctx)).unwrap();
+
+            buy(&maker, false).unwrap();
+
+            assert_eq!(taker_requests(&mut maker), 1);
+            assert_eq!(maker.ordermatch_ctx().orderbook_subscriptions.read().len(), 1);
+            let stored = block_on(MyOrdersStorage::new(maker.ctx.clone()).load_active_taker_orders()).unwrap();
+            assert_eq!(stored.len(), 1);
+            assert_eq!(block_on(maker.ordermatch_ctx().my_taker_orders.lock()).len(), 1);
         }
 
         /// T-GH8a bullet 3 with T-GH8 and T-GH9: after a failed re-pricing, the next one whose checks pass
