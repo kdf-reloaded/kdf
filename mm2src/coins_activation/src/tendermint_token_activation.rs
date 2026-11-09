@@ -264,6 +264,7 @@ mod tests {
             denom: "uatom".to_owned(),
             decimals: 6,
             ibc_channels: std::collections::HashMap::new(),
+            priority_gas_prices: None,
         };
         assert!(TendermintTokenProtocol::try_from_coin_protocol(proto).is_err());
     }

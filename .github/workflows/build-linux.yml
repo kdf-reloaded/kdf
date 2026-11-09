@@ -37,6 +37,11 @@ on:
         description: "JSON array of Rust target triples"
         required: false
         default: '["x86_64-unknown-linux-gnu"]'
+      upload:
+        description: "upload the binary as an artifact"
+        required: false
+        type: boolean
+        default: true
   workflow_call:
     inputs:
       profile:
@@ -54,6 +59,11 @@ on:
         required: false
         default: '["x86_64-unknown-linux-gnu"]'
         type: string
+      upload:
+        description: "upload the binary as an artifact"
+        required: false
+        default: true
+        type: boolean
 
 # The build only reads the repository; caching and artifact upload use their own
 # runtime tokens, not GITHUB_TOKEN.
@@ -280,6 +290,7 @@ jobs:
           "$QEMU" -L "$SYSROOT" "target/${{ matrix.target }}/${PROFILE_DIR}/kdf" --version
 
       - name: Upload artifact
+        if: ${{ inputs.upload }}
         uses: actions/upload-artifact@v7
         with:
           name: kdf-${{ matrix.target }}

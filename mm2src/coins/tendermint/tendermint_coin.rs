@@ -151,6 +151,15 @@ async fn build_tendermint_coin(
         )));
     }
 
+    // CRD ch.36 R36.3.5 (divergence note) and T36.17: a figure of zero or less, or one that is not finite, would
+    // make the fee of CRD ch.18 §18.6B zero or undefined, so it fails the activation as a platform-coin creation
+    // error. The order of the three figures is not checked (D36.4).
+    if let Some(prices) = protocol_info.priority_gas_prices {
+        if prices.iter().any(|price| !price.is_finite() || *price <= 0.0) {
+            return MmError::err(init_err(TendermintInitErrorKind::PriorityGasPriceNotPositive(prices)));
+        }
+    }
+
     // The pair of a secret and the public key derived from that same secret.
     let key_pair_of = |secret: &[u8]| -> MmResult<TendermintKeyPair, TendermintInitError> {
         let key_pair = key_pair_from_secret(secret)

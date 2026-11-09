@@ -3,15 +3,16 @@ use super::htlc::{ClaimHtlcMsg, CreateHtlcMsg, HtlcType, QueryHtlcRequestProto, 
 use super::rpc::*;
 use super::tendermint_types::*;
 use super::IRIS_PREFIX;
+use crate::eth::SwapGasFeePolicy;
 use crate::node_url::{host_only, scrub_urls_in_text};
 use crate::utxo::sat_from_big_decimal;
 use crate::utxo::utxo_common::{big_decimal_from_sat, big_decimal_from_sat_unsigned};
-use crate::{CoinBalance, HistorySyncState, MarketCoinOps, TransactionDetails, TransactionEnum, TransactionErr,
-            WithdrawFee};
+use crate::{CoinBalance, CosmosGasPriceOption, HistorySyncState, MarketCoinOps, TransactionDetails, TransactionEnum,
+            TransactionErr, WithdrawFee};
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use common::executor::Timer;
-use common::log::debug;
+use common::log::{debug, warn};
 use common::now_ms;
 use cosmrs::crypto::secp256k1::SigningKey;
 use cosmrs::proto::cosmos::auth::v1beta1::{BaseAccount, QueryAccountRequest, QueryAccountResponse};
@@ -127,14 +128,76 @@ impl TendermintCoin {
         estimated.clamp(MIN_TIME_LOCK, MAX_TIME_LOCK)
     }
 
-    pub(super) fn gas_info_for_withdraw(
-        &self,
-        withdraw_fee: &Option<WithdrawFee>,
-        fallback_gas_limit: u64,
-    ) -> (f64, u64) {
-        // Fork's WithdrawFee has no CosmosGas variant yet, so always use defaults.
-        let _ = withdraw_fee;
-        (self.gas_price(), fallback_gas_limit)
+    /// The gas price a named level selects (CRD ch.18 R18.6B.1 item 2): `Low`, `Average` and `High` are positions 0,
+    /// 1 and 2 of the coin's `priority_gas_prices` (CRD ch.36 R36.3.5), the configured figure used as written.
+    /// `Default`, and any level when the coin has no array, select the default gas price. A named level that cannot
+    /// be honored is never an error.
+    fn gas_price_for_option(&self, option: CosmosGasPriceOption) -> f64 {
+        let position = match option {
+            CosmosGasPriceOption::Low => 0,
+            CosmosGasPriceOption::Average => 1,
+            CosmosGasPriceOption::High => 2,
+            CosmosGasPriceOption::Default => return self.gas_price(),
+        };
+        match self.protocol_info.priority_gas_prices {
+            Some(prices) => prices[position],
+            None => self.gas_price(),
+        }
+    }
+
+    /// The level the coin's swap fee policy maps to (CRD ch.35 R35.6.8): `Low` to low, `Medium` to average, `High`
+    /// to high, `Legacy` to the default price.
+    fn gas_price_option_for_policy(policy: SwapGasFeePolicy) -> CosmosGasPriceOption {
+        match policy {
+            SwapGasFeePolicy::Legacy => CosmosGasPriceOption::Default,
+            SwapGasFeePolicy::Low => CosmosGasPriceOption::Low,
+            SwapGasFeePolicy::Medium => CosmosGasPriceOption::Average,
+            SwapGasFeePolicy::High => CosmosGasPriceOption::High,
+        }
+    }
+
+    /// Reads the per-coin swap fee policy (CRD ch.35 R35.6.8); `Legacy` until set.
+    pub fn swap_gas_fee_policy(&self) -> SwapGasFeePolicy { *self.swap_gas_fee_policy.lock().unwrap() }
+
+    /// Sets the per-coin swap fee policy (CRD ch.35 R35.6.8, R35.6.9 item 2). Any value is accepted and stored. A
+    /// coin without `priority_gas_prices` cannot honor a level other than the default, so every value, `Legacy`
+    /// included, is stored with one warning and the coin keeps pricing at the default gas price.
+    pub fn set_swap_gas_fee_policy(&self, policy: SwapGasFeePolicy) {
+        if self.protocol_info.priority_gas_prices.is_none() {
+            warn!(
+                "{}: the swap fee policy {:?} is stored; this coin has no `priority_gas_prices`, so swap transactions \
+                 are priced at the default gas price",
+                self.ticker, policy
+            );
+        }
+        *self.swap_gas_fee_policy.lock().unwrap() = policy;
+    }
+
+    /// The gas price and the gas limit a fee computation uses (CRD ch.18 R18.6B.1 -- R18.6B.4).
+    ///
+    /// The price, in order: the explicit price of a `CosmosGas` descriptor; the level a `CosmosGasPriority` descriptor
+    /// names; for a swap transaction or a trade-fee simulation the level of the coin's swap fee policy; otherwise the
+    /// default gas price. A descriptor of any other family on a Cosmos request is ignored without error (CRD ch.49
+    /// R49.30): the default price and the operation's default gas limit apply. The gas limit is the descriptor's
+    /// `gas_limit` when it has one, else the operation's default (CRD ch.18 R18.6B.3), and is independent of the price.
+    ///
+    /// A token passes its platform coin as `self`, so it uses that coin's array, policy and default (CRD ch.36
+    /// R36.3.6).
+    pub(super) fn selected_gas_price_and_limit(&self, intent: &FeeIntent) -> (f64, u64) {
+        match intent {
+            FeeIntent::Swap => {
+                let option = Self::gas_price_option_for_policy(self.swap_gas_fee_policy());
+                (self.gas_price_for_option(option), GAS_LIMIT_DEFAULT)
+            },
+            FeeIntent::Request { fee, default_gas_limit } => match fee {
+                Some(WithdrawFee::CosmosGas { gas_limit, gas_price }) => (*gas_price, *gas_limit),
+                Some(WithdrawFee::CosmosGasPriority {
+                    gas_limit,
+                    gas_price_option,
+                }) => (self.gas_price_for_option(*gas_price_option), *gas_limit),
+                _ => (self.gas_price(), *default_gas_limit),
+            },
+        }
     }
 
     pub(crate) fn is_tx_amount_enough(&self, decimals: u8, amount: &BigDecimal) -> bool {
@@ -364,12 +427,12 @@ impl TendermintCoin {
         msg: Any,
         timeout_height: u64,
         memo: &str,
-        withdraw_fee: Option<WithdrawFee>,
+        intent: &FeeIntent,
     ) -> MmResult<Fee, TendermintCoinRpcError> {
         let activated_priv_key = if let Ok(key) = self.activation_policy.activated_key_or_err() {
             key
         } else {
-            let (gas_price, gas_limit) = self.gas_info_for_withdraw(&withdraw_fee, GAS_LIMIT_DEFAULT);
+            let (gas_price, gas_limit) = self.selected_gas_price_and_limit(intent);
             let amount = ((GAS_WANTED_BASE_VALUE * 1.5) * gas_price).ceil();
             let fee_amount = Coin {
                 denom: self.platform_denom().clone(),
@@ -425,7 +488,7 @@ impl TendermintCoin {
             TendermintCoinRpcError::InvalidResponse(format!("Could not read gas_info. Response: {raw_response:?}"))
         })?;
 
-        let (gas_price, gas_limit) = self.gas_info_for_withdraw(&withdraw_fee, GAS_LIMIT_DEFAULT);
+        let (gas_price, gas_limit) = self.selected_gas_price_and_limit(intent);
         let amount = ((gas.gas_used as f64 * 1.5) * gas_price).ceil();
         let fee_amount = Coin {
             denom: self.platform_denom().clone(),
@@ -442,12 +505,12 @@ impl TendermintCoin {
         msg: Any,
         timeout_height: u64,
         memo: &str,
-        withdraw_fee: Option<WithdrawFee>,
+        intent: &FeeIntent,
     ) -> MmResult<u64, TendermintCoinRpcError> {
         let priv_key = if let Some(pk) = priv_key {
             pk
         } else {
-            let (gas_price, _) = self.gas_info_for_withdraw(&withdraw_fee, 0);
+            let (gas_price, _) = self.selected_gas_price_and_limit(intent);
             return Ok(((GAS_WANTED_BASE_VALUE * 1.5) * gas_price).ceil() as u64);
         };
 
@@ -498,7 +561,7 @@ impl TendermintCoin {
             TendermintCoinRpcError::InvalidResponse(format!("Could not read gas_info. Response: {raw_response:?}"))
         })?;
 
-        let (gas_price, _) = self.gas_info_for_withdraw(&withdraw_fee, 0);
+        let (gas_price, _) = self.selected_gas_price_and_limit(intent);
         Ok(((gas.gas_used as f64 * 1.5) * gas_price).ceil() as u64)
     }
 

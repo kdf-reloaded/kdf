@@ -46,7 +46,13 @@ shape.
 > [Chapter 57](57-evm-fee-inputs.md) §57.7, which also records that reloaded
 > accepts only the legacy EVM form today and that the enumeration is missing
 > the Cosmos-family form entirely. This chapter binds the request's shape and
-> the task lifecycle around it, not the per-family fee semantics.
+> the task lifecycle around it, not the per-family fee semantics. The two
+> Cosmos-family forms -- the explicit one of the released reference and the
+> priority one of an unmerged reference draft -- are bound in §49.2A (gated
+> text; passed the KDF Dirty Gate on 2026-11-08), with their arithmetic in
+> [Chapter 18](18-tendermint-ibc-htlc.md) §18.6B.
+>
+> *As built 2026-11-09 (clean-side note): implemented; see the As-built note of §49.2A.*
 
 R49.2. When `from` is present, it shall be an HD-address selector in exactly one
 of these public JSON wire forms:
@@ -277,6 +283,167 @@ T49.11. Start a TRON-family native or TRC20-like token withdrawal task under a
 Trezor/hardware-wallet signing policy. The task shall reach a terminal
 structured unsupported withdrawal error and shall not require a Trezor PIN or
 passphrase user action.
+
+### 49.2A Cosmos-family fee descriptors (gated text; passed the KDF Dirty Gate on 2026-11-08)
+
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-08, measure 0.03**
+> (chapter 01 R40; attestation in the Provenance Footer). This subsection was
+> written by the dirty-side specification author on 2026-11-08 (Spec Reader
+> round 0.4.0-11) from the reference state `tendermint-priority-fee (as of
+> 2025-07-24)` compared against its base `dev (as of 2025-07-18)`, with the
+> released rows `v2.6.0-beta` and `v3.0.0-beta` read for the explicit form
+> only (all rows of chapter 02 §2.15A), and from this repository's own tree.
+> R49.28 and R49.30 describe behavior **both released designations** have;
+> R49.29 describes the unmerged, never-approved draft only. The maintainer
+> decided on 2026-11-08 (decision FN (a)) to include the feature; the names
+> are open under chapter 36 D36.4. Rules continue this chapter's sequence
+> (R49.28 onward) although they sit before §49.3.
+
+R49.28. *Explicit Cosmos form.* For a Tendermint platform coin and a
+Tendermint token, the direct `withdraw` method, `task::withdraw::init`, the
+staking requests of [Chapter 18](18-tendermint-ibc-htlc.md) §18.6A
+(`add_delegation`, `remove_delegation`, `claim_staking_rewards` and their
+namespaced aliases, through their optional `fee` member) and a withdraw that
+is routed as an IBC transfer (chapter 18 §18.4) shall accept the fee
+descriptor
+
+```json
+{"type": "CosmosGas", "gas_limit": 125000, "gas_price": 0.03}
+```
+
+where `gas_limit` is an unsigned integer that becomes the signed
+transaction's gas limit (chapter 18 R18.6B.3) and `gas_price` is a number in
+the platform's base denom per gas unit that becomes the selected gas price
+(chapter 18 R18.6B.1 item 1). The fee **amount** is still simulation-derived
+(chapter 18 R18.6B.2): `gas_limit × gas_price` is **not** the amount, unlike
+the EVM `EthGas` form of [Chapter 57](57-evm-fee-inputs.md) R57.7.1. A token
+withdraw pays this fee in the platform denom (chapter 18 R18.11.11). Both
+members are required; a descriptor missing one fails request parsing like
+any malformed `fee` object (the request-parse failure of
+[Chapter 55](55-coin-activation-wire-contract.md) §55.1). The tag spelling is
+`CosmosGas` exactly (the same serialization rule as chapter 57 R57.7.1's
+note). This form exists at both released designations.
+
+R49.29. *Priority Cosmos form (draft row only).* The same requests shall
+accept the descriptor
+
+```json
+{"type": "CosmosGasPriority", "gas_limit": 125000, "gas_price_option": "High"}
+```
+
+where `gas_limit` is as in R49.28 and `gas_price_option` is one of exactly
+four case-sensitive strings — `Low`, `Average`, `High`, `Default` — naming
+a level of the coin's `priority_gas_prices` ([Chapter 36](36-tendermint-v2-activation-rpcs.md)
+R36.3.5): the first three select positions 0, 1 and 2 of the array;
+`Default`, and every level on a coin whose `protocol_data` has no array,
+selects the coin's default gas price (chapter 18 R18.6B.1 item 2). A token
+withdraw selects from its platform coin's array (chapter 36 R36.3.6). Any
+other `gas_price_option` string, or a missing member, fails request parsing
+as in R49.28. No level is ever an error: an unhonorable level is the
+default price. The tag and member spellings are those of the reference
+draft, kept under chapter 36 D36.4 option (a) and to be renamed
+consistently with chapter 18 §18.6B and chapter 35 R35.6.8 if (b) or (c) is
+chosen.
+
+R49.30. *A foreign fee form on a Cosmos request.* At both released
+designations and at the draft row, a `fee` descriptor of a **non-Cosmos**
+type that parses (`UtxoFixed`, `UtxoPerKbyte`, `EthGas`, `EthGasEip1559`,
+`Qrc20Gas`) on a Tendermint withdraw, staking or IBC request is **ignored
+without error**: the default gas price and the operation's default gas
+limit are used as if no descriptor had been sent. Reloaded shall **not**
+copy this: such a descriptor shall be refused with the structured
+withdrawal error of R49.20, discriminant `InvalidFeePolicy`, HTTP 400 (the
+arm R49.27a already lists for a fee descriptor of a type the coin does not
+take, [Chapter 38](38-utxo-coin-maintenance-and-features.md)
+R38.6.6l/R38.6.6m), on the direct method and in `details` on the task
+route, and the staking requests shall answer their own structured error
+with the same meaning. *(Reloaded divergence; D49.1.)*
+
+*Reloaded status (2026-11-09):* by the maintainer's decision of 2026-11-09
+(D49.1, option (b)) such a descriptor is ignored without error, for parity,
+on the direct method, on the task route and on the staking requests: the
+default gas price and the operation's default gas limit apply. The refusal
+above records the state before that decision.
+
+R49.31. *What the completed payload shows.* For a Tendermint withdraw the
+`fee_details` member of the transaction-details object (R49.25) carries the
+fee `amount` as a decimal string in the platform coin's display precision —
+the integer of chapter 18 R18.6B.2 scaled by the platform's `decimals` —
+the platform `coin` ticker, and the `gas_limit` the transaction was signed
+with. T18.6B.1 of chapter 18 asserts the amount through this member.
+
+> **Reloaded status (informative; this repository's tree, 2026-11-08).** The
+> shared fee descriptor has neither Cosmos form (chapter 57 §57.7 finding),
+> so a Tendermint withdraw, staking or IBC request carrying either fails
+> **request parsing** today, and the Tendermint fee computation ignores the
+> descriptor it is handed (a code comment in this repository's Tendermint
+> helpers records the missing form). Adding both forms, the refusal of
+> R49.30 and the level selection of chapter 18 §18.6B closes the gap. The
+> `fee_details` shape of R49.31 already matches.
+>
+> *As built 2026-11-09 (clean-side note): implemented; the status note after R49.30 records the decided
+> behavior (ignore, D49.1 option (b)); see the As-built note of §49.2A.*
+
+**D49.1 (maintainer decision; resolved).** *Resolved: the maintainer's decision of 2026-11-09, option (b), ignore for parity (R49.30); to be reassessed after field use.* *Foreign fee form on a Cosmos
+request.* R49.30 binds a refusal where every reference state silently
+ignores the descriptor. Options: (a) refuse with `InvalidFeePolicy` as
+written (recommended: the UTXO and EVM families already refuse, R49.27a,
+and a caller who sent an EVM descriptor to a Cosmos coin has made a
+mistake worth reporting); (b) ignore as the reference does, for parity.
+No peer observes the outcome, so no compatibility switch is engaged
+either way (`docs/COMPAT_SWITCHES.md`, default-side rule arm 1).
+
+T49.28. *Explicit Cosmos form (R49.28, R49.31).* Against a mocked backend
+whose simulate query reports a fixed `gas_used`: a Tendermint platform-coin
+withdraw with the `CosmosGas` descriptor, on the direct method and on
+`task::withdraw::init`, signs a transaction whose gas limit equals the
+descriptor's `gas_limit` and whose `fee_details.amount` equals the chapter
+18 R18.6B.2 figure for the descriptor's `gas_price`; the same descriptor
+with a different `gas_limit` yields the same `amount`; a Tendermint token
+withdraw with the descriptor pays the fee in the platform denom; a
+descriptor missing `gas_price` or `gas_limit` fails request parsing on both
+routes; `add_delegation` with the descriptor signs with the descriptor's
+gas limit.
+
+T49.29. *Priority Cosmos form (R49.29).* On a platform coin with
+`priority_gas_prices` the four `gas_price_option` values select the three
+configured figures and the default price respectively (amounts as in
+chapter 18 T18.6B.1); on a platform coin without the array every value
+selects the default price and no error is raised; on a token the platform's
+array is used; `gas_price_option: "high"` (lower case) and
+`gas_price_option: "Medium"` each fail request parsing on both routes.
+
+T49.30. *Foreign form refused (R49.30; Reloaded-original).* A Tendermint
+withdraw carrying `{"type": "EthGas", "gas_price": 1, "gas": 21000}` answers
+HTTP 400 with `error_type: "InvalidFeePolicy"` on the direct method and
+`details.error_type == "InvalidFeePolicy"` on the task route, and no
+transaction is simulated or broadcast; the same with a `UtxoFixed`
+descriptor; `add_delegation` with an `EthGas` descriptor answers its
+structured error and broadcasts nothing.
+
+*Reloaded status (2026-11-09):* by the maintainer's decision of 2026-11-09
+(D49.1, option (b)) the test is built as: the same withdraw with an `EthGas`
+descriptor succeeds on the direct method and on the task route, signed with
+the coin's default gas price and the operation's default gas limit, exactly
+as the same withdraw without a descriptor; the same with a `UtxoFixed`
+descriptor; a delegation fee computed with an `EthGas` descriptor uses the
+delegation's default gas limit. The sentence above records the state before
+that decision.
+
+> **As built (2026-11-09; R49.28 -- R49.31, T49.28 -- T49.30).** The shared fee
+> descriptor has two more variants: `CosmosGas {gas_limit: u64, gas_price: f64}` and
+> `CosmosGasPriority {gas_limit: u64, gas_price_option}`, with the tags spelled exactly so and the four
+> case-sensitive level strings `Low`, `Average`, `High`, `Default`; a missing member or another string fails
+> request parsing. The Tendermint withdraw (coin and token), the staking requests and the task route (which calls
+> the same `withdraw`) read them through the fee-intent function of chapter 18 §18.6B; any other descriptor on a
+> Tendermint request is ignored without error (R49.30, D49.1 option (b)). The UTXO, SLP, EVM, QRC20 and Siacoin
+> withdraw paths refuse both forms through their existing wrong-fee-type arm (`InvalidFeePolicy`; the NFT
+> withdraw's `InvalidRequest`); the shielded coin refuses any `fee` as before. **Not changed:** the TRON
+> and Solana (SOL, SPL) withdraws never inspect `fee`. **Note:** `EthGasEip1559`, named in R49.30, is not a variant of this
+> repository's descriptor, so such a request fails parsing before it reaches any coin. `gas_price` is read as a
+> JSON number (`f64`), so a numeric string fails parsing.
+> Test coverage: the staking requests, the task route and the swap sends are covered through the fee computation
+> they share, not end to end (`docs/UNIT_TESTS.md`).
 
 ## 49.3 Status request and retention
 
@@ -764,3 +931,52 @@ addresses.
   from those decisions and this repository's own code. The reference facts
   of the note under R49.4 are unchanged. It takes no forbidden-class input
   and needs no Dirty Gate pass.
+- *Scoped addition (2026-11-08) -- §49.2A (R49.28 -- R49.31, the Reloaded
+  status note, D49.1, T49.28 -- T49.30) and the pointer sentences added to the
+  cross-reference note under R49.1.* **KDF Dirty Gate: PASS on 2026-11-08,
+  measure 0.03, no findings** (chapter 01 R40; the attestation at the end of
+  this item closes it). *Inputs:* the forbidden corpus at the rows
+  `tendermint-priority-fee (as of 2025-07-24)` and `dev (as of 2025-07-18)` of
+  chapter 02 §2.15A, consulted **only** to establish the wire shape of the
+  priority Cosmos fee descriptor (tag, members, the four level strings), which
+  requests accept it, how a level resolves to a price and what an unhonorable
+  level does; and the rows `v2.6.0-beta` and `v3.0.0-beta`, consulted **only**
+  to confirm the explicit Cosmos descriptor's tag and members, that it is
+  accepted by the same requests, that its amount is simulation-derived, that a
+  foreign fee form is ignored without error, and that neither released row
+  carries the priority form. The draft's review state is recorded as a fact
+  only. Behavior and dictated request members, tag values and error
+  discriminants only; no private identifier, function body, helper
+  decomposition, error, log, comment, test body or review text was reproduced.
+  The Reloaded status note, D49.1 and T49.30 rest on this repository's own
+  tree and documents and are Reloaded-original. *Dirty Gate clearance (chapter
+  01 T1, R40):* PASS, 2026-11-08. Extent: the Tendermint fee-computation and
+  fee-descriptor surface — the Cosmos withdraw, staking and IBC fee
+  descriptors, the swap fee-policy RPC pair and its policy enum, and the
+  Tendermint protocol descriptor's gas-price members — compared at the row
+  tendermint-priority-fee (as of 2025-07-24) against its base row dev (as of
+  2025-07-18) over the complete difference between those two states (nine
+  source files, two of them test files), together with the public description,
+  two review comments and three discussion comments of the draft pull request
+  those rows record; and at the rows v2.6.0-beta and v3.0.0-beta for the
+  released fee-policy method strings, request member and enum values, the
+  explicit Cosmos fee descriptor, the handling of a foreign fee form on a
+  Cosmos request, and the staking and IBC gas-limit defaults. Method: reading
+  of the full inter-state difference and of the release-state passages,
+  combined with mechanical text search of the candidate's added lines against
+  identifier, numeric-constant, string-literal, name and number lists drawn
+  from the compared states; no code-block tool run was needed (the candidate
+  embeds only two one-line JSON wire examples). Measure:
+  discretionary-similarity 0.03, read against the per-token forced-vs-free
+  standard of chapter 01 R35/R39 (dictated wire, config, error-discriminant
+  and contract-constant tokens excluded; FAIL on any private identifier, body
+  or control-flow transcription, error/log wording, internal module tree or
+  internal test name) — below threshold, PASS.
+- *Clean-context addition (2026-11-09, forbidden corpus not consulted):* the
+  recorded resolution of D49.1, the dated status notes after R49.30 and
+  T49.30 (the decided behavior; the cleared text above them is unchanged), the
+  as-built note of §49.2A with its test-coverage sentence, and the two
+  clean-side notes after the cross-reference under R49.1 and the Reloaded
+  status note describe the maintainer's decision of 2026-11-09 and this repository's code.
+  They take no forbidden-class input, so chapter 01 R38 is not engaged and no
+  gate pass is required.

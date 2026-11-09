@@ -685,6 +685,23 @@ jobs:
             echo "::error::a geth test reported skipping"; exit 1
           fi
 
+  # Cross-builds the `kdf` binary for aarch64 Linux on every PR, so a change that
+  # breaks the 64-bit ARM build is caught before it merges instead of at release
+  # time. It reuses build-linux.yml: the pinned Debian 11 container, the Debian 11
+  # aarch64 cross toolchain, the glibc 2.31 floor check and a qemu `kdf --version`
+  # smoke test. Debug profile for speed; no tests (running them would need
+  # qemu-user and be slow); no artifact upload.
+  #
+  # Not in `tests-passed`' `needs:` yet, for the reason given there: it depends on
+  # third-party availability (snapshot.debian.org, the protoc download). Adding
+  # `aarch64-linux` to that list makes it required.
+  aarch64-linux:
+    uses: ./.github/workflows/build-linux.yml
+    with:
+      profile: dev
+      targets: '["aarch64-unknown-linux-gnu"]'
+      upload: false
+
   tests-passed:
     # The single required status check for dev, staging and main. Branch
     # protection pins this one stable context name instead of the individual

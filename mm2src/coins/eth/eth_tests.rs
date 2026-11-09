@@ -2049,6 +2049,41 @@ fn test_withdraw_impl_fee_details() {
 }
 
 #[test]
+fn test_withdraw_impl_refuses_the_cosmos_fee_forms() {
+    // CRD ch.49 R49.28, R49.29: the two Cosmos fee forms are a fee type an EVM coin does not take, so they are the
+    // invalid-fee-policy error, not ignored and not read as an `EthGas` descriptor.
+    let (ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
+
+    evm_withdraw_balance.mock_safe(|_, _| {
+        let balance = wei_from_big_decimal(&1000000000.into(), 18).unwrap();
+        MockResult::Return(Box::new(futures01::future::ok(balance)))
+    });
+    get_addr_nonce.mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(0.into()))));
+
+    for fee in [
+        WithdrawFee::CosmosGas {
+            gas_limit: 125_000,
+            gas_price: 0.03,
+        },
+        WithdrawFee::CosmosGasPriority {
+            gas_limit: 125_000,
+            gas_price_option: crate::CosmosGasPriceOption::High,
+        },
+    ] {
+        let withdraw_req = WithdrawRequest {
+            amount: 1.into(),
+            from: None,
+            to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
+            coin: "ETH".to_string(),
+            max: false,
+            fee: Some(fee),
+        };
+        let err = block_on(withdraw_impl(ctx.clone(), coin.clone(), withdraw_req)).unwrap_err();
+        assert!(matches!(err.into_inner(), WithdrawError::InvalidFeePolicy(_)));
+    }
+}
+
+#[test]
 fn task_withdraw_evm_native_accepts_omitted_from_sender() {
     let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
     let withdraw_req = WithdrawRequest {

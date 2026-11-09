@@ -595,8 +595,7 @@ R36.1.2, R36.1.4 steps 3 and 4, R36.1.6, R36.2.1, R36.2.4 and T36.16, T36.17. Ru
 `cargo test -p coins --lib tendermint::tendermint_swap_flow_tests::tm_act_` and
 `cargo test -p coins_activation --lib tendermint_with_tokens_activation::wire_tests`.
 
-Not run yet: the tests were written in a session that did not build, and they run at the first build window.
-This line is replaced by the result of that run.
+Result on 2026-11-09: all pass (`coins` `tendermint::` 75 of 75, `coins_activation` `tendermint` 45 of 45).
 
 The `coins` tests drive a `TendermintCoin` against the throwaway loopback server of the swap-flow tests. The HD
 tests log in with the standard test mnemonic (`abandon ... about`) and compute the expected key with the BIP-39 and
@@ -631,3 +630,62 @@ wallet-only tests evaluate the coin and the token with the switch on through `wa
 
 One existing test changed: `tm_flow_a_chain_without_an_htlc_module_is_wallet_only` passes the two new arguments of the
 predicate. The token helpers of the wire tests (`token_failure`) now call `enable_tendermint_token`.
+
+## Tendermint priority gas prices (23 tests, plus two cases in an existing test)
+
+Locations: the module `priority_fee_tests` of `mm2src/coins/tendermint/tendermint_swap_flow_tests/priority_fee_tests.rs`
+(native builds only, a child of the swap-flow module above; 13 tests), `coins/lp_coins_context.rs` (5 tests of the
+protocol descriptor), `coins_activation/src/tendermint_with_tokens_activation/wire_tests.rs` (3 tests) and one
+cross-family test each in `coins/eth/eth_tests.rs` and `coins/utxo/slp.rs`; the Siacoin test
+`other_fee_variants_are_rejected_naming_the_accepted_type` gained two cases. CRD: chapter 36 §36.3.1A, chapter 18
+§18.6B, chapter 49 §49.2A and chapter 35 §35.6.1. Run with
+`cargo test -p coins --lib tendermint::tendermint_swap_flow_tests::priority_fee_tests`,
+`cargo test -p coins --lib tendermint_priority_gas_prices` (four of the five descriptor tests),
+`cargo test -p coins --lib tendermint_token_protocol_ignores_a_priority_gas_prices_member`,
+`cargo test -p coins --lib other_fee_variants_are_rejected_naming_the_accepted_type` (Siacoin),
+`cargo test -p coins_activation --lib priority_gas_price` and
+`cargo test -p coins --lib -- cosmos_fee`.
+
+Last run (2026-11-09, on dev with the activation features): `tendermint::` 88 passed, 0 failed;
+`tendermint_priority_gas_prices` 4 passed; `cosmos_fee` 3 passed; `swap_gas_fee_policy` 16 passed;
+the three cross-family tests 3 passed; `cargo test -p coins_activation --lib tendermint` 48 passed (its
+`priority_gas_price` subset 3 passed). `cargo check -p mm2_main --tests`, `cargo clippy ... -D warnings` and the
+`wasm32-unknown-unknown` check of `coins`, `coins_activation` and `mm2_main` are clean.
+
+The coin tests use the scripted node of the swap-flow module (`script_fee_estimation`, which now also answers the
+balance query): every transaction simulates 61,234 gas units, the test chain has 6 decimals, and the coin has
+`priority_gas_prices: [0.015, 0.025, 0.04]` and `gas_price` 0.03. The fee is `ceil(61,234 x 1.5 x price)` base
+units: 3,675 at the high price, 2,297 at the average, 1,378 at the low and 2,756 at the default price.
+
+| Test | CRD | What is tested |
+|------|-----|----------------|
+| `tendermint_priority_gas_prices_parses_three_numbers_in_any_order` | T36.16, R36.3.5 | Three numbers (integers included, any order, a zero) parse |
+| `tendermint_priority_gas_prices_null_and_absent_are_the_same` | T36.16 | `null` and an absent member are no array |
+| `tendermint_priority_gas_prices_of_another_shape_fails_parsing` | T36.16 | Two or four elements, none, a string or `null` element, an object and a scalar fail parsing |
+| `tendermint_priority_gas_prices_is_not_serialized_when_absent` | R36.3.5 | The protocol shown in an error carries the member only when the entry has it |
+| `tendermint_token_protocol_ignores_a_priority_gas_prices_member` | T36.16, R36.3.6 | A token entry with the member parses, the member ignored |
+| `priority_gas_prices_of_another_shape_is_a_coin_protocol_parse_error` | T36.16 | End to end: `CoinProtocolParseError`, HTTP 500, no coin registered |
+| `a_non_positive_priority_gas_price_is_a_platform_coin_creation_error` | T36.17 | `[0, ...]`, `[..., 0]` and a negative figure: `PlatformCoinCreationError` naming the member, no coin |
+| `a_valid_or_null_priority_gas_prices_is_not_refused` | T36.16 | The array in any order and `null` pass; the error is the node failure |
+| `activation_accepts_the_priority_gas_prices_shapes_and_any_order` | T36.16 | The coin builder accepts absent, `null`, the array in either order, integers and equal figures |
+| `activation_refuses_a_non_positive_priority_gas_price` | T36.17 | Zero and negative figures are refused, the text names the member and the coin |
+| `activation_refuses_a_malformed_priority_gas_prices_value_too` | T36.16 | A wrong shape never builds a coin even if it reached the builder |
+| `the_cosmos_fee_forms_parse_with_exact_spellings` | R49.28, R49.29, T49.29 | Both forms and the four level strings parse; a missing member, `"high"`, `"HIGH"`, `"Medium"` and an empty string fail, on a withdraw and on a staking request |
+| `a_withdraw_is_priced_with_the_selected_gas_price` | T18.6B.1, T49.28, T49.29 | Levels High, Average, Low and Default, the explicit 0.05 and no descriptor give 0.003675, 0.002297, 0.001378, 0.002756, 0.004593 and 0.002756, in `fee_details` and in the signed transaction |
+| `every_level_selects_the_default_price_without_the_array` | T18.6B.1, T49.29 | Without the array every level gives 0.002756 and nothing fails; the explicit form still applies |
+| `the_swap_policy_prices_swap_simulations_and_never_a_withdraw` | T18.6B.1, R18.6B.4 | Policy High, Medium, Low and Legacy price the dex-fee send and create-HTLC simulations at the matching figure; a withdraw keeps its own price |
+| `a_token_is_priced_with_its_platform_coin_in_the_platform_denom` | T49.28, R36.3.6 | A token withdraw selects from the platform's array and pays in the platform denom; its simulations follow the platform's policy |
+| `the_gas_limit_is_independent_of_the_price` | T18.6B.2 | The signed gas limit is the descriptor's, the amount does not depend on it |
+| `the_operations_default_gas_limits` | T18.6B.2 | Defaults 125,000, 187,500, 250,000 and 150,000; a descriptor's limit replaces them; the swap policy never prices a request |
+| `a_foreign_fee_form_is_ignored_on_every_cosmos_request` | T49.30 | `EthGas`, `UtxoFixed`, `UtxoPerKbyte` and `Qrc20Gas` on a withdraw, a token withdraw and a staking fee computation give the default price and limit, no error |
+| `the_tendermint_swap_fee_policy_round_trip` | T35.38 | Starts at `Legacy`, `set` echoes, `get` returns; a token ticker is `NotSupported`, an unknown coin `NoSuchCoin`, an outside value fails parsing |
+| `a_policy_without_the_array_is_stored_with_one_warning_and_priced_at_the_default` | T35.38, R35.6.9 | `Medium` without the array: stored, returned, one warning, default price; `Legacy` logs its own warning too |
+| `test_withdraw_impl_refuses_the_cosmos_fee_forms` (EVM), `test_slp_withdraw_cosmos_fee_descriptors_are_invalid_fee_policy` (SLP) | R49.28, R49.29 | The two forms are `InvalidFeePolicy` for another family |
+
+Not covered: the staking requests themselves (the delegation, undelegation and reward-claim flows need a node that
+also answers the broadcast), so their default gas limits are tested at the fee computation they call; the
+task-route withdraw (it calls the same `withdraw`); an IBC transfer (the request is not implemented yet, so only
+its default limit is tested); the swap sends themselves (create-HTLC, claim, DEX-fee send) under a policy other
+than `Legacy`, and the receiver trade-fee estimate: covered through the fee computation they share; and the fixed
+50,000 gas units of a coin with no local key (the activated coin always has one). The warning-count assertions run
+only when the test owns the process logger.

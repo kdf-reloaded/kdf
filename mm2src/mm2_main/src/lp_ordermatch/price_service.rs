@@ -11,8 +11,11 @@
 //! - A *source* is a list of URLs tried in order; the first URL that answers is the source's answer, with no
 //!   rotation. The sources of a node are fetched in parallel and combined (see [`combine_sources`]).
 //! - A record enters the combined table only if its `price_provider` is recognized (see [`ProviderSet`]) and its
-//!   `last_updated_timestamp` is not zero. A ticker served by several sources is kept only if their prices agree
-//!   within [`PRICE_CONFLICT_TOLERANCE_PERCENT`]; otherwise it is a *conflict* and is absent from the table.
+//!   `last_updated_timestamp` is not zero. A ticker served by several sources is kept if their prices agree
+//!   within [`PRICE_CONFLICT_TOLERANCE_PERCENT`]. Otherwise the figures of one provider that two sources report are
+//!   compared with each other alone; if there are none, or they disagree too, the ticker is a *conflict* and the
+//!   `price_conflict` key decides whether it is priced from the first source or is absent from the table (see
+//!   [`ConflictPolicy`]).
 //! - On a native build each attempt is capped at [`PRICE_ATTEMPT_TIMEOUT_SECS`] seconds by the transport's bounded
 //!   request, which has its own tests.
 //! - A log line that names an endpoint names its host label ([`host_only`]) only, never the path or the query: a
@@ -60,6 +63,8 @@ pub const DEFAULT_PRICE_PROVIDERS: [&str; 5] = ["binance", "coingecko", "coinpap
 pub const PRICE_URLS_CONF_KEY: &str = "price_urls";
 /// The name of the top-level `MM2.json` key that replaces the default set of recognized price providers.
 pub const PRICE_PROVIDERS_CONF_KEY: &str = "price_providers";
+/// The name of the top-level `MM2.json` key that selects what is done with a ticker the sources disagree on.
+pub const PRICE_CONFLICT_CONF_KEY: &str = "price_conflict";
 /// The provider name the feeds use for a price that could not be sourced; never recognized, even if listed.
 const UNKNOWN_PROVIDER: &str = "unknown";
 /// Two prices of one ticker agree if the higher exceeds the lower by at most this many percent (CRD ch.62 D62.2).
@@ -222,6 +227,37 @@ pub fn read_price_providers_conf(conf: &Json) -> PriceProvidersConf {
     }
 }
 
+/// What is done with a ticker on which the sources disagree and no provider's own figures settle it (CRD ch.62
+/// D62.2). It applies to every consumer of the combined table.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ConflictPolicy {
+    /// The ticker is priced from the earliest source, in the configured order, that has it; a warning says so.
+    #[default]
+    FirstSource,
+    /// The ticker is not priced.
+    Refuse,
+}
+
+/// What the top-level `MM2.json` key `price_conflict` holds.
+#[derive(Debug, PartialEq)]
+pub enum PriceConflictConf {
+    /// The key is absent or `null`.
+    Absent,
+    /// The string `"first_source"` or `"refuse"`.
+    Valid(ConflictPolicy),
+    /// Anything else.
+    Invalid,
+}
+
+pub fn read_price_conflict_conf(conf: &Json) -> PriceConflictConf {
+    match conf.get(PRICE_CONFLICT_CONF_KEY) {
+        None | Some(Json::Null) => PriceConflictConf::Absent,
+        Some(Json::String(value)) if value == "first_source" => PriceConflictConf::Valid(ConflictPolicy::FirstSource),
+        Some(Json::String(value)) if value == "refuse" => PriceConflictConf::Valid(ConflictPolicy::Refuse),
+        Some(_) => PriceConflictConf::Invalid,
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Warn-once transitions
 // ---------------------------------------------------------------------------------------------------------------
@@ -294,6 +330,8 @@ pub struct PriceServiceContext {
     pub sources: Vec<PriceSource>,
     /// The recognized price providers.
     pub providers: ProviderSet,
+    /// What is done with a ticker the sources disagree on, for every consumer of the node.
+    pub conflict_policy: ConflictPolicy,
     endpoints: Mutex<HashMap<String, Health>>,
     /// The tickers in conflict, per list of sources (see [`sources_key`]): a consumer with sources of its own and
     /// one on the sources of the node must not overwrite each other's episodes.
@@ -307,14 +345,22 @@ impl PriceServiceContext {
         PriceServiceContext {
             sources,
             providers,
+            conflict_policy: ConflictPolicy::default(),
             endpoints: Mutex::new(HashMap::new()),
             conflicts: Mutex::new(HashMap::new()),
             no_source: Mutex::new(Health::Unknown),
         }
     }
 
+    /// The context with `conflict_policy` in place of the default one.
+    pub fn with_conflict_policy(mut self, conflict_policy: ConflictPolicy) -> PriceServiceContext {
+        self.conflict_policy = conflict_policy;
+        self
+    }
+
     /// Obtains the price service context of the node, creating it from `MM2.json` on first use. A malformed
-    /// `price_urls` or `price_providers` is reported once, here, by the name of the key, never its value.
+    /// `price_urls`, `price_providers` or `price_conflict` is reported once, here, by the name of the key, never its
+    /// value.
     pub fn from_ctx(ctx: &MmArc) -> Result<Arc<PriceServiceContext>, String> {
         from_ctx(&ctx.price_service_ctx, || Ok(PriceServiceContext::from_conf(&ctx.conf)))
     }
@@ -354,7 +400,18 @@ impl PriceServiceContext {
                 ProviderSet::default_set()
             },
         };
-        PriceServiceContext::new(sources, providers)
+        let conflict_policy = match read_price_conflict_conf(conf) {
+            PriceConflictConf::Valid(policy) => policy,
+            PriceConflictConf::Absent => ConflictPolicy::default(),
+            PriceConflictConf::Invalid => {
+                warn!(
+                    "The MM2.json key '{}' is not \"first_source\" or \"refuse\"; using \"first_source\"",
+                    PRICE_CONFLICT_CONF_KEY
+                );
+                ConflictPolicy::default()
+            },
+        };
+        PriceServiceContext::new(sources, providers).with_conflict_policy(conflict_policy)
     }
 
     /// Records the outcome of an attempt on the endpoint with the host label `host` (`failure` is `None` if it
@@ -394,8 +451,17 @@ impl PriceServiceContext {
     }
 
     /// Records which tickers are in conflict in `combined`, a combination of the `sources`, logs the lines
-    /// [`health_step`] asks for and returns, per ticker, what was asked.
+    /// [`health_step`] asks for and returns, per ticker, what was asked. A ticker that a conflict resolved to the
+    /// first source is in the table, so when its sources agree again it is told as for any other ticker. The tickers
+    /// settled by one provider's own figures get one DEBUG line per call and are not part of the return value.
     fn note_conflicts(&self, sources: &[PriceSource], combined: &Combined) -> Vec<(String, Notice)> {
+        for ticker in &combined.outvoted {
+            debug!(
+                "The price of {} is taken from the sources of one provider that agree; the figures of the other \
+                 providers are not used",
+                ticker
+            );
+        }
         let mut notices: Vec<(String, Notice, String)> = Vec::new();
         {
             let mut all_previous = self.conflicts.lock().unwrap_or_else(PoisonError::into_inner);
@@ -464,13 +530,19 @@ pub struct Conflict {
     pub ticker: String,
     pub low: ConflictSide,
     pub high: ConflictSide,
+    /// The host whose price the table holds for the ticker (see [`ConflictPolicy::FirstSource`]); `None` if the ticker
+    /// is not priced.
+    pub resolved_to: Option<String>,
 }
 
 impl Conflict {
     fn describe(&self) -> String {
+        let outcome = match &self.resolved_to {
+            Some(host) => format!("the price from {} is used", host),
+            None => "the ticker is not priced".to_string(),
+        };
         format!(
-            "The price sources disagree on {} by more than {} %: {} ({}, from {}) against {} ({}, from {}); the \
-             ticker is not priced",
+            "The price sources disagree on {} by more than {} %: {} ({}, from {}) against {} ({}, from {}); {}",
             self.ticker,
             PRICE_CONFLICT_TOLERANCE_PERCENT,
             self.low.price,
@@ -479,6 +551,7 @@ impl Conflict {
             self.high.price,
             self.high.provider,
             self.high.host,
+            outcome,
         )
     }
 }
@@ -488,6 +561,9 @@ impl Conflict {
 pub struct Combined {
     pub table: PriceTable,
     pub conflicts: Vec<Conflict>,
+    /// The tickers whose sources disagree but that are priced from one provider's figures from several sources that
+    /// agree; they are not conflicts.
+    pub outvoted: Vec<String>,
 }
 
 fn price_at(records: &[(String, PricedTicker)], index: usize) -> &MmNumber { &records[index].1.infos.last_price }
@@ -497,14 +573,72 @@ fn within_tolerance(low: &MmNumber, high: &MmNumber) -> bool {
     spread <= low.clone() * MmNumber::from(PRICE_CONFLICT_TOLERANCE_PERCENT)
 }
 
+/// The indices of the lowest and the highest price among the records at `indices`.
+fn price_bounds(records: &[(String, PricedTicker)], indices: &[usize]) -> Option<(usize, usize)> {
+    let low = indices
+        .iter()
+        .copied()
+        .min_by(|a, b| price_at(records, *a).cmp(price_at(records, *b)))?;
+    let high = indices
+        .iter()
+        .copied()
+        .max_by(|a, b| price_at(records, *a).cmp(price_at(records, *b)))?;
+    Some((low, high))
+}
+
+/// The index, among `indices` (in source order), of the record with the newest timestamp; on a tie, the earlier.
+fn newest_of(records: &[(String, PricedTicker)], indices: &[usize]) -> Option<usize> {
+    let timestamp = |index: usize| records[index].1.infos.last_updated_timestamp;
+    let mut winner: Option<usize> = None;
+    for &index in indices {
+        match winner {
+            Some(current) if timestamp(index) <= timestamp(current) => (),
+            _ => winner = Some(index),
+        }
+    }
+    winner
+}
+
+/// The index of the record to keep when the records disagree but one provider's records from at least two sources
+/// agree within [`PRICE_CONFLICT_TOLERANCE_PERCENT`]: the newest of them. Providers are tried in the order of their
+/// first record, so the earlier source's provider goes first. The figures of the other providers are not compared.
+fn same_provider_winner(records: &[(String, PricedTicker)]) -> Option<usize> {
+    let mut tried: Vec<&str> = Vec::new();
+    for (_, record) in records {
+        let provider = record.provider.as_str();
+        if tried.contains(&provider) {
+            continue;
+        }
+        tried.push(provider);
+        let group: Vec<usize> = (0..records.len())
+            .filter(|index| records[*index].1.provider == provider)
+            .collect();
+        if group.len() < 2 {
+            continue;
+        }
+        let Some((low, high)) = price_bounds(records, &group) else {
+            continue;
+        };
+        if within_tolerance(price_at(records, low), price_at(records, high)) {
+            return newest_of(records, &group);
+        }
+    }
+    None
+}
+
 /// Combines the answers of the sources (given in source order) into one table (CRD ch.62 D62.2).
 ///
 /// 1. A record is dropped if its provider is not recognized under `providers` or its timestamp is zero.
 /// 2. A ticker in one source is kept.
 /// 3. A ticker in several sources whose prices differ by at most [`PRICE_CONFLICT_TOLERANCE_PERCENT`] of the lowest
 ///    is kept from the source with the newest timestamp; on a tie, from the earlier source.
-/// 4. Any other ticker is a conflict and is absent from the table.
-pub fn combine_sources(sources: Vec<SourceTable>, providers: &ProviderSet) -> Combined {
+/// 4. In any other ticker the sources disagree. If some provider's records from at least two sources agree within
+///    the tolerance, the newest of those is kept, the figures of the other providers are not compared with it, and
+///    the ticker is listed in [`Combined::outvoted`].
+/// 5. Any other ticker is a conflict, listed in [`Combined::conflicts`]. Under [`ConflictPolicy::FirstSource`] the
+///    record of the earliest source that has it is kept; under [`ConflictPolicy::Refuse`] the ticker is absent from
+///    the table.
+pub fn combine_sources(sources: Vec<SourceTable>, providers: &ProviderSet, policy: ConflictPolicy) -> Combined {
     let mut candidates: BTreeMap<String, Vec<(String, PricedTicker)>> = BTreeMap::new();
     for source in sources {
         for (ticker, record) in source.records {
@@ -526,32 +660,43 @@ pub fn combine_sources(sources: Vec<SourceTable>, providers: &ProviderSet) -> Co
             }
             continue;
         }
-        let low = (0..records.len()).min_by(|a, b| price_at(&records, *a).cmp(price_at(&records, *b)));
-        let high = (0..records.len()).max_by(|a, b| price_at(&records, *a).cmp(price_at(&records, *b)));
-        let (Some(low), Some(high)) = (low, high) else {
+        let all: Vec<usize> = (0..records.len()).collect();
+        let Some((low, high)) = price_bounds(&records, &all) else {
             continue;
         };
         if within_tolerance(price_at(&records, low), price_at(&records, high)) {
-            let mut winner = 0;
-            for (index, (_, record)) in records.iter().enumerate() {
-                if record.infos.last_updated_timestamp > records[winner].1.infos.last_updated_timestamp {
-                    winner = index;
-                }
+            if let Some(winner) = newest_of(&records, &all) {
+                let (_, record) = records.swap_remove(winner);
+                combined.table.insert(ticker, record);
             }
+            continue;
+        }
+        if let Some(winner) = same_provider_winner(&records) {
             let (_, record) = records.swap_remove(winner);
+            combined.outvoted.push(ticker.clone());
             combined.table.insert(ticker, record);
-        } else {
-            let side = |index: usize| ConflictSide {
-                host: records[index].0.clone(),
-                price: records[index].1.infos.last_price.clone(),
-                provider: records[index].1.provider.clone(),
-            };
-            let conflict = Conflict {
-                low: side(low),
-                high: side(high),
-                ticker,
-            };
-            combined.conflicts.push(conflict);
+            continue;
+        }
+        let side = |index: usize| ConflictSide {
+            host: records[index].0.clone(),
+            price: records[index].1.infos.last_price.clone(),
+            provider: records[index].1.provider.clone(),
+        };
+        let (low, high) = (side(low), side(high));
+        // The records are in source order, so the first is the earliest source's.
+        let resolved_to = match policy {
+            ConflictPolicy::FirstSource => Some(records[0].0.clone()),
+            ConflictPolicy::Refuse => None,
+        };
+        combined.conflicts.push(Conflict {
+            ticker: ticker.clone(),
+            low,
+            high,
+            resolved_to: resolved_to.clone(),
+        });
+        if resolved_to.is_some() {
+            let (_, record) = records.swap_remove(0);
+            combined.table.insert(ticker, record);
         }
     }
     combined
@@ -710,7 +855,7 @@ pub async fn fetch_combined(
         };
     }
 
-    let combined = combine_sources(tables, &ctx.providers);
+    let combined = combine_sources(tables, &ctx.providers, ctx.conflict_policy);
     ctx.note_conflicts(sources, &combined);
     debug!("price registry size: {}", combined.table.len());
     Ok(combined.table)

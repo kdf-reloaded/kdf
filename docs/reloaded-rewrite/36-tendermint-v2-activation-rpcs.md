@@ -404,6 +404,103 @@ fail activation with `CoinProtocolParseError`; one whose `decimals` exceeds 18
 shall fail with `PlatformCoinCreationError` (R36.1.6). Neither partially
 activates the coin.
 
+### 36.3.1A Priority gas prices in the `TENDERMINT` `protocol_data` (gated text; passed the KDF Dirty Gate on 2026-11-08)
+
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-08, measure
+> 0.03** (chapter 01 R40; attestation in the Provenance Footer). This
+> subsection was written by the dirty-side specification author on
+> 2026-11-08 (Spec Reader round 0.4.0-11) from the reference state
+> `tendermint-priority-fee (as of 2025-07-24)` compared against its base
+> `dev (as of 2025-07-18)` (both rows of chapter 02 §2.15A), from the public
+> Cosmos chain-registry schema, and from this repository's own tree. The
+> reference state is an **unmerged draft**: neither `v2.6.0-beta` nor
+> `v3.0.0-beta` carries any of it (§36.0.1 is unaffected), it was never
+> approved, it was in conflict with the reference's development branch when
+> the record was archived, and no later state of it exists. The maintainer
+> decided on 2026-11-08 (decision FN (a)) to include the feature in
+> Reloaded; whether the *field names* below are kept for parity with that
+> draft is open (D36.4).
+
+A Cosmos chain publishes three gas-price levels for each fee token in the
+public Cosmos chain registry (`fees.fee_tokens[].low_gas_price`,
+`average_gas_price`, `high_gas_price`, in base denom per gas unit). The
+reference draft lets a coins-file entry carry those three figures so that a
+caller may pick a level by name instead of a number.
+
+R36.3.5 *The `priority_gas_prices` member.* The `TENDERMINT` `protocol_data`
+object MAY carry one further optional member:
+
+| `protocol_data` key | JSON type | Required? | Functional role |
+| --- | --- | --- | --- |
+| `priority_gas_prices` | array of exactly three numbers | optional | The chain's published gas prices in base denom per gas unit, in the fixed order **low, average, high** (positions 0, 1, 2). A named level in a withdraw, staking or IBC fee descriptor (chapter 49 R49.29) or a swap fee policy (chapter 35 R35.6.8) selects the figure at the matching position; the selected figure then enters the fee formula of chapter 18 §18.6B in place of the default gas price. |
+
+Shape and validation at the reference state:
+
+1. the value is an array of **exactly three** JSON numbers (integers are
+   accepted as numbers); an array of any other length, a non-array value or
+   a non-numeric element fails parsing of the coin's protocol descriptor,
+   which is the same failure class as a missing required field of R36.3.1
+   (`CoinProtocolParseError`, R36.3.2); a JSON `null` is treated as absent;
+2. the figures are **not** otherwise validated: no positivity check, no
+   ordering check (low ≤ average ≤ high is not enforced), no relation to
+   `gas_price` is checked;
+3. when the member is absent, every named level resolves to the coin's
+   default gas price (the `gas_price` member of R36.3.1, or the built-in
+   default 0.25 when that is absent too); activation and every operation
+   succeed exactly as before, so absence is **benign**;
+4. the member is read at platform activation and held for the coin's
+   lifetime; it is not re-read, and no RPC changes it.
+
+R36.3.6 *Tokens have no priority prices of their own.* The `TENDERMINTTOKEN`
+`protocol_data` carries no such member. A token's transactions are priced
+with its platform coin's `priority_gas_prices`, as they are priced with the
+platform coin's `gas_price` today (R36.3.3, `gas_price` row). A
+`priority_gas_prices` member on a token entry, if present, is an unknown
+member and is ignored under the extra-config-keys note of §36.3.1.
+
+> **Reloaded status (informative; this repository's tree, 2026-11-08).**
+> Reloaded's Tendermint protocol descriptor has no `priority_gas_prices`
+> member; because the descriptor tolerates unknown members (§36.3.3), a
+> coins file that already carries the array activates today with the array
+> silently dropped, and every level resolves to the default price. The
+> coins file this repository ships carries the member on no entry as of
+> this writing.
+
+> **Upstream divergence (informative).** The draft validates neither the
+> count semantics beyond the fixed length nor the sign of the figures. A
+> Reloaded implementation SHOULD refuse, at platform-coin construction
+> (`PlatformCoinCreationError`, the class R36.3.2 uses for `decimals`),
+> an array containing a non-positive or non-finite figure, because such a
+> figure makes the fee of chapter 18 §18.6B zero or undefined; whether to
+> also require the non-decreasing order is left to D36.4.
+
+T36.16 *`priority_gas_prices` shape (R36.3.5).* A `TENDERMINT` entry with
+`priority_gas_prices: [0.015, 0.025, 0.04]` activates and the three levels
+resolve to 0.015, 0.025 and 0.04 (observable through the fee amount of a withdraw
+carrying the priority fee descriptor of chapter 49 R49.29); an entry with a
+two-element array, with a four-element array, with a string element and with
+an object in place of the array each fails activation with
+`CoinProtocolParseError` and registers no coin; an entry without the member,
+and one with `priority_gas_prices: null`, activate and every level resolves
+to the default price. A `TENDERMINTTOKEN` entry carrying the member
+activates with the member ignored (R36.3.6).
+
+T36.17 *Non-positive figure (divergence note).* An entry with
+`priority_gas_prices: [0, 0.025, 0.04]` fails activation with
+`PlatformCoinCreationError` and registers no coin. *(Reloaded-original; the
+reference draft accepts it.)*
+
+> **As built (2026-11-09; R36.3.5, R36.3.6, T36.16, T36.17).**
+> The `TENDERMINT` arm of the coin protocol carries `priority_gas_prices` as an optional array of exactly
+> three `f64` (`null` and absent are `None`; it is not serialized when absent), so every shape of R36.3.5 item 1
+> fails `CoinProtocolParseError` through the existing protocol parse. The platform builder reads the same
+> member into its protocol info once and refuses a figure that is zero, negative or not finite with
+> `PlatformCoinCreationError` (the init-error kind `PriorityGasPriceNotPositive`) before the account is
+> derived; the order of the figures is not checked (D36.4). A `TENDERMINTTOKEN` entry is parsed without the
+> member, which is ignored as an unknown key (R36.3.6). Tests: T36.16 and T36.17 in
+> `lp_coins_context.rs`, `tendermint_with_tokens_activation/wire_tests.rs` and
+> `tendermint_swap_flow_tests/priority_fee_tests.rs`.
+
 ### 36.3.2 `TENDERMINTTOKEN` token `protocol_data`
 
 R36.3.3 The `TENDERMINTTOKEN` `protocol_data` object shall carry the following
@@ -429,7 +526,11 @@ from anywhere other than its own `protocol_data`.
 > `account_prefix` and `chain_id`; the `TENDERMINTTOKEN` arm captures
 > `platform`, `decimals`, and `denom`. Benign fields (`gas_price`,
 > `chain_registry_name`) are silently dropped; the enum tolerates unknown
-> `protocol_data` keys so surplus config does not fail activation.
+> `protocol_data` keys so surplus config does not fail activation. The
+> `priority_gas_prices` member of §36.3.1A (gated text) is not yet parsed
+> and is dropped the same way.
+>
+> *As built 2026-11-09 (clean-side note): implemented; see the As-built note of §36.3.1A.*
 
 > **Reloaded status (informative).** Reloaded enforces the `decimals <= 18`
 > bound while *parsing* the coin protocol, so a value above 18 currently fails
@@ -830,6 +931,25 @@ native UTXO daemon's errors carry the daemon's error code and message and the
 body's size only (chapter 38 R38.6.9b item 4), and so do the Sia wallet
 daemon's (chapter 20 R-N3).
 
+D36.4 *(Resolved: the maintainer's decision of 2026-11-09, option (a), the
+draft's names and shapes, with the three figures accepted in any order (no
+non-decreasing requirement); to be reassessed after field use. Previously open -- maintainer decision; gated text of §36.3.1A, passed the KDF
+Dirty Gate on 2026-11-08.)* *Field-name parity for the priority gas prices.*
+The member name `priority_gas_prices`, its fixed three-element array shape and
+the level names used by the fee descriptor of chapter 49 R49.29 (`Low`,
+`Average`, `High`, `Default`) are those of the unmerged reference draft named
+in §36.3.1A. No released designation carries them, so there is no deployed
+coins file or client to be compatible with. Options: (a) keep the draft's
+names and shapes so that a coins file written for the draft works unchanged;
+(b) choose Reloaded's own names (for example an object `{"low": …, "average":
+…, "high": …}` mirroring the chain-registry keys, and `Medium` in place of
+`Average` to match the swap fee policy of chapter 35 R35.6.3), documented in
+`docs/COMPAT_SWITCHES.md` as a Reloaded-only surface; (c) accept both. The
+rules of §36.3.1A, chapter 49 §49.2A and chapter 35 R35.6.8 are written in the
+draft's names under option (a) and are to be renamed consistently if (b) or
+(c) is chosen. The same decision settles whether the non-decreasing order of
+the three figures is required (the divergence note of §36.3.1A).
+
 ## 36.10 Baseline Verifications
 
 V36.1 The dispatcher routes `enable_tendermint_with_assets`,
@@ -910,3 +1030,49 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   items 6 and 8 of §36.7 describe this repository's code. They take no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required.
+- *Scoped addition (2026-11-08) -- §36.3.1A (R36.3.5, R36.3.6, the two
+  informative notes, T36.16), the sentence added to the §36.3.3 status note,
+  and D36.4.* **KDF Dirty Gate: PASS on 2026-11-08, measure 0.03, no
+  findings** (chapter 01 R40; the attestation at the end of this item closes
+  it). *Inputs:* the forbidden corpus at the rows `tendermint-priority-fee
+  (as of 2025-07-24)` and `dev (as of 2025-07-18)` of chapter 02 §2.15A,
+  consulted **only** to establish the name, JSON shape, validation and
+  absent-value behavior of the optional priority-gas-price member of the
+  `TENDERMINT` protocol descriptor, that a token descriptor has no such
+  member, and the draft's review state as a fact (unmerged, never approved,
+  in conflict at archive time, no later state); the released designations
+  `v2.6.0-beta` and `v3.0.0-beta` were checked only for the absence of the
+  member. The three-level model and the level names rest on the public
+  Cosmos chain-registry schema (chapter 01 R3/R6). Behavior and dictated
+  coins-file member names only; no private identifier, function body, helper
+  decomposition, error, log, comment, test body or review text was
+  reproduced. The Reloaded status note and T36.17 rest on this repository's
+  own tree and are Reloaded-original. *Dirty Gate clearance (chapter 01 T1,
+  R40):* PASS, 2026-11-08. Extent: the Tendermint fee-computation and
+  fee-descriptor surface — the Cosmos withdraw, staking and IBC fee
+  descriptors, the swap fee-policy RPC pair and its policy enum, and the
+  Tendermint protocol descriptor's gas-price members — compared at the row
+  tendermint-priority-fee (as of 2025-07-24) against its base row dev (as of
+  2025-07-18) over the complete difference between those two states (nine
+  source files, two of them test files), together with the public
+  description, two review comments and three discussion comments of the
+  draft pull request those rows record; and at the rows v2.6.0-beta and
+  v3.0.0-beta for the released fee-policy method strings, request member and
+  enum values, the explicit Cosmos fee descriptor, the handling of a foreign
+  fee form on a Cosmos request, and the staking and IBC gas-limit defaults.
+  Method: reading of the full inter-state difference and of the
+  release-state passages, combined with mechanical text search of the
+  candidate's added lines against identifier, numeric-constant,
+  string-literal, name and number lists drawn from the compared states; no
+  code-block tool run was needed (the candidate embeds only two one-line
+  JSON wire examples). Measure: discretionary-similarity 0.03, read against
+  the per-token forced-vs-free standard of chapter 01 R35/R39 (dictated
+  wire, config, error-discriminant and contract-constant tokens excluded;
+  FAIL on any private identifier, body or control-flow transcription,
+  error/log wording, internal module tree or internal test name) — below
+  threshold, PASS.
+- *Clean-context addition (2026-11-09, forbidden corpus not consulted):* the
+  recorded resolution of D36.4, the as-built note under §36.3.1A and the
+  clean-side note closing the §36.3.3 status note describe the maintainer's
+  decision of 2026-11-09 and this repository's code. They take no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is required.

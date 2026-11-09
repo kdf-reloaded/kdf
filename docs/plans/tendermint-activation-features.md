@@ -90,6 +90,17 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
 1 (it removes the interim rejection), then 2, 3, 4. Items 5 and 6 need a
 maintainer decision first.
 
+## Lab rows owed before swaps are switched on
+
+These rows run on a chain with the HTLC module before `TENDERMINT_SWAPS_AVAILABLE`
+becomes `true`, in the change that switches swaps on:
+
+- **Trade-fee estimate under the swap fee policy (PR #323).** With a funded account
+  and a lab-only `priority_gas_prices` array on the coin, `get_trade_fee` under each
+  policy value (`Legacy`, `Low`, `Medium`, `High`) gives fees in the ratio of the
+  selected gas prices (CRD ch.18 T18.6B.1, ch.35 T35.38). PR #323 covers this with
+  unit tests only.
+
 ## Latent hazard: a key-less policy on the legacy HTLC path
 
 Found 2026-10-18 while designing the WalletConnect availability switches of CRD

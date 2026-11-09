@@ -136,6 +136,8 @@ impl TryFromCoinProtocol for TendermintPlatformProtocolInfo {
                 denom,
                 decimals,
                 ibc_channels,
+                // Read by the coin builder from the same `protocol_data` block, like the gas price.
+                priority_gas_prices: _,
             } => Ok(TendermintPlatformProtocolInfo {
                 account_prefix,
                 chain_id,
@@ -530,6 +532,7 @@ mod tests {
             denom: "uatom".to_owned(),
             decimals: 6,
             ibc_channels,
+            priority_gas_prices: None,
         })
         .unwrap();
         assert_eq!(parsed.account_prefix, "cosmos");

@@ -304,6 +304,10 @@ them, and no consumer remembers the previous cycle's price to detect a jump.
 and drops a ticker whose prices differ by more than 5 %; PR #287, merged
 2026-11-08.)*
 
+*Amended 2026-11-09 (clean-side, by D62.2):* the figures of one provider are
+compared with each other, and a ticker that still disagrees is priced from the
+first source unless `price_conflict` is `"refuse"`.
+
 > **Public-network observation (2026-11-07, informative).** Of the tickers both
 > `prices.cipig.net:1717` and `prices.gleec.com` listed, 17 differed by more
 > than 2 %, most with a different `price_provider` on each side; KMD was
@@ -508,6 +512,12 @@ what that PR changed.
 > (parity). One latent defect of the bot is fixed with them: a zero `rel` price
 > now gives no rate (R62.5.1 d) instead of a division by zero.
 
+> **Status update (Reloaded, 2026-11-09).** The price service compares like with
+> like and has the `price_conflict` switch of D62.2 (amended 2026-11-09): a ticker
+> on which the sources disagree is priced from one provider's agreeing records or,
+> by default, from the first source, with a WARN; the value `"refuse"` leaves it
+> unpriced as before.
+
 ## 62.10 Decisions of the maintainer (taken 2026-11-07)
 
 **D62.1** *Endpoint list and order.* Which endpoints Reloaded ships, and in
@@ -571,6 +581,58 @@ fails only if no source answered. The figure rests on live data of 2026-11-07:
 same-provider differences stayed below 3.6 % (timing), and the differences above
 5 % that were seen were a factor of two or more with different providers on the
 two sides (for example KMD at 0.00313 against 0.00680 USD).
+
+**Amended 2026-11-09.** The 5 % cross-check compares like with like, and a
+switch decides what a disagreement leads to. Reloaded-original: the reference
+takes the first document that answers and has no cross-source check (R62.5.3),
+so the amendment rests on no reference behavior. It replaces the clause "above
+5 %, the ticker is a *conflict* and is absent from the combined table" of the
+paragraph above; the rest of that paragraph stands. Each record carries one
+`price_provider`, the upstream provider that set its `last_price`; two sources
+can be compared on a ticker with the same upstream only when both records name
+the same provider. For a ticker in more than one source:
+
+1. *Agreement.* All its records are within 5 % of the lowest: the record with
+   the newest timestamp is used, on a tie the earlier source's, whatever
+   providers the records name. Two agreeing figures are never refused.
+2. *Disagreement.* Some pair of records is more than 5 % apart.
+   - (a) *Like with like.* If some provider has records from at least two
+     sources and all of its records agree within 5 % of its lowest, the newest
+     of them is used, on a tie the earlier source's (a provider is tried in the
+     order of its first source; when two providers each qualify, the one
+     whose first record comes from the earlier source is used). The figures
+     of other providers are not
+     compared with it, are no conflict, and produce no WARN; one DEBUG line per
+     fetch names the ticker. With two sources this case cannot occur, since two
+     records of one provider that agree are an agreement under 1.
+   - (b) *Otherwise* (no provider has records from two sources, or the
+     same-provider records disagree too), the `MM2.json` key `price_conflict`
+     decides, for every consumer of the combined table. Its value is the
+     string `"first_source"` (the default) or `"refuse"`. Absent or `null`
+     gives the default; any other value or type is ignored with one WARN that
+     names the key, not the value, and the default applies. The key is read
+     once, at the start of the price service of the node. The bot's start
+     request has no override.
+     - `first_source`: the record of the earliest source, in the configured
+       order, that has the ticker is used. The ticker is a *conflict* that is
+       resolved: the WARN of D62.3 names the ticker, both prices, both
+       providers and hosts, and ends with the host whose price is used.
+     - `refuse`: the ticker is a conflict that is not resolved. It is absent
+       from the combined table and the WARN ends with "the ticker is not
+       priced"; the consumers treat it as a missing ticker, as before this
+       amendment.
+
+   A resolved conflict follows D62.3 like any other: one WARN when it starts,
+   DEBUG while it lasts, one INFO when the sources agree again.
+   *As built:* with three or more sources, a conflict that a later fetch
+   settles under (a) also ends the episode and logs the INFO line, although
+   a third provider's figure may still differ; the DEBUG line of (a) names
+   the ticker meanwhile.
+
+**Risk, recorded.** Gaps above 5 % seen earlier included figures that were a
+factor of two or more apart (KMD at 0.00313 against 0.00680 USD). Under
+`first_source` a wrong figure of the first source is used, with a WARN;
+`refuse` is the operator's way back to the strict check.
 
 **D62.3** *Warn-once and back-off.* The reference logs one error per failed
 endpoint per attempt forever (R62.6.7). Reloaded already logs at warn level.
@@ -645,6 +707,11 @@ cancelled too, and that one failed cycle takes every order of every configured
 pair off the book; a grace period and a restriction to the bot's own orders are
 the options kept for that revisit.
 
+*Amended 2026-11-09 (clean-side, by D62.2):* "a conflict" in this paragraph is
+a conflict that D62.2 leaves unpriced (the `refuse` value of `price_conflict`);
+under the default value the ticker is priced from the first source and the pair
+is quoted.
+
 **D62.6** *Config override key and request strictness.* (i) Whether the bot
 accepts the reference's `price_urls` array in addition to Reloaded's
 comma-separated `price_url` string, and which wins when both are present
@@ -686,6 +753,11 @@ report makes no price request of its own. A received report is priced at receive
 time, whether or not the reported swap succeeded, and whatever the report
 carried is not used. A conflict, a missing ticker or a failed fetch stores the
 swap without prices and never fails the swap record.
+
+*Amended 2026-11-09 (clean-side, by D62.2):* "a conflict" in this paragraph is a
+conflict that D62.2 leaves unpriced (the `refuse` value of `price_conflict`);
+under the default value the ticker is priced from the first source and the swap
+is stored with prices.
 
 ## 62.11 Cross-chapter consequences
 
@@ -798,5 +870,11 @@ swap without prices and never fails the swap record.
   T62.7, which cite those decisions and PR #287):* Reloaded-original maintainer decisions DO to DU,
   taken after the gated text above. They take no reference input and state no
   reference fact, so they need no Dirty Gate pass.
+- *Amendment of 2026-11-09 (D62.2 "Amended 2026-11-09", the §62.9 status update
+  of that date, and the pointers added under R62.5.3, D62.5 and D62.7):*
+  Reloaded-original maintainer decision, taken after the gated text above. It
+  takes no reference input and states no reference fact beyond the
+  already-gated absence of a cross-source check (R62.5.3), so it needs no Dirty
+  Gate pass.
 - *Authorship:* KDF Spec Reader, round 0.4.0-4, 2026-11-07; cleared by the
   KDF Dirty Gate on 2026-11-07.

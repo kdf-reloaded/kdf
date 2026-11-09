@@ -142,7 +142,7 @@ impl TendermintCoin {
             let timeout_height = current_block + TIMEOUT_HEIGHT_DELTA;
 
             let fee = try_tx_s!(
-                coin.calculate_fee(tx_payload.clone(), timeout_height, TX_DEFAULT_MEMO, None)
+                coin.calculate_fee(tx_payload.clone(), timeout_height, TX_DEFAULT_MEMO, &FeeIntent::Swap)
                     .await
             );
 
@@ -194,7 +194,7 @@ impl TendermintCoin {
                     create_htlc_tx.msg_payload.clone(),
                     timeout_height,
                     TX_DEFAULT_MEMO,
-                    None,
+                    &FeeIntent::Swap,
                 )
                 .await
             );
@@ -240,8 +240,13 @@ impl TendermintCoin {
             let timeout_height = current_block + TIMEOUT_HEIGHT_DELTA;
 
             let fee = try_tx_s!(
-                coin.calculate_fee(claim_htlc_tx.msg_payload.clone(), timeout_height, TX_DEFAULT_MEMO, None,)
-                    .await
+                coin.calculate_fee(
+                    claim_htlc_tx.msg_payload.clone(),
+                    timeout_height,
+                    TX_DEFAULT_MEMO,
+                    &FeeIntent::Swap,
+                )
+                .await
             );
 
             let (_tx_id, tx_raw) = try_tx_s!(

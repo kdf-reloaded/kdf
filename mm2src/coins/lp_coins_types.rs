@@ -505,6 +505,31 @@ pub enum WithdrawFee {
         gas_limit: u64,
         gas_price: u64,
     },
+    /// Cosmos explicit fee (CRD ch.49 R49.28): the signed transaction's gas limit and the gas price that enters
+    /// the simulation-derived fee amount (CRD ch.18 R18.6B.1 item 1, R18.6B.2); the amount is **not**
+    /// `gas_limit * gas_price`. `gas_price` is in the platform's base denom per gas unit. Only a Tendermint coin
+    /// takes this form; every other family refuses it as a fee type it does not take.
+    CosmosGas {
+        gas_limit: u64,
+        gas_price: f64,
+    },
+    /// Cosmos priority fee (CRD ch.49 R49.29): the signed transaction's gas limit and a named level of the
+    /// platform coin's `priority_gas_prices` (CRD ch.36 R36.3.5; CRD ch.18 R18.6B.1 item 2). Only a Tendermint
+    /// coin takes this form; every other family refuses it as a fee type it does not take.
+    CosmosGasPriority {
+        gas_limit: u64,
+        gas_price_option: CosmosGasPriceOption,
+    },
+}
+/// The level named by a [`WithdrawFee::CosmosGasPriority`] descriptor (CRD ch.49 R49.29): the spellings are
+/// exactly these four, case-sensitive. `Low`, `Average` and `High` select position 0, 1 and 2 of the platform
+/// coin's `priority_gas_prices`; `Default` selects the coin's default gas price.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+pub enum CosmosGasPriceOption {
+    Low,
+    Average,
+    High,
+    Default,
 }
 pub struct WithdrawSenderAddress<Address, Pubkey> {
     pub(crate) address: Address,

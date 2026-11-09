@@ -85,6 +85,34 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   limits a chain needs is now visible at once, as it was not when Monad token swaps ran out of gas
   with a coins file older than October 28, 2026. Detail: PR #200; CRD ch.57 R57.5.5.
 
+#### Tendermint (Cosmos) coins
+
+- **A Tendermint coin can carry the chain's three published gas prices, and a request can pick one by
+  name.** The coin's `protocol_data` in the coins file may now hold `priority_gas_prices`, an array of
+  exactly three numbers: the low, average and high gas prices of the chain, in the base denom per gas
+  unit (the chain registry publishes them). A withdraw, a delegation, an undelegation or a reward claim
+  that names `Low`, `Average` or `High` is priced with the matching figure; `Default`, and any name on a
+  coin without the array, keep the coin's usual `gas_price`. The array is optional, the figures may be in
+  any order, and a token is priced with its platform coin's array. A coin without the member is priced
+  exactly as before. Detail: PR #323; CRD ch.36 R36.3.5, ch.18 R18.6B.1.
+- **A Tendermint request can set the gas limit and the gas price, or the price level.** The `fee`
+  member of `withdraw`, `task::withdraw::init` and the staking requests now takes two more forms for a
+  Tendermint coin or token: `{"type": "CosmosGas", "gas_limit": 125000, "gas_price": 0.03}` and
+  `{"type": "CosmosGasPriority", "gas_limit": 125000, "gas_price_option": "High"}` (`Low`, `Average`,
+  `High` or `Default`, spelled exactly so). The gas limit is the one the transaction is signed with. The
+  fee amount is still derived from the node's gas simulation, `ceil(gas used x 1.5 x price)`, not from
+  the limit times the price. UTXO, EVM, QRC20 and Siacoin coins refuse the two forms with
+  `InvalidFeePolicy` (a shielded coin refuses any `fee`, as before), and a Tendermint request that
+  carries a form of another family ignores it and uses the default price and gas limit. Detail: PR #323; CRD ch.49 R49.28 to R49.30, ch.18 R18.6B.2.
+- **`get_swap_gas_fee_policy` and `set_swap_gas_fee_policy` now accept a Tendermint platform
+  coin.** The policy (`Legacy`, `Low`, `Medium`, `High`, starting at `Legacy`) selects the gas price of
+  the coin's swap transactions and of its trade-fee estimates: `Low`, `Medium` and `High` pick the low,
+  average and high figure of `priority_gas_prices`, `Legacy` the default price. It never changes a
+  withdraw or a staking transaction. A Tendermint token has no policy of its own and
+  the two methods answer `NotSupported` for its ticker. On a coin without `priority_gas_prices` the
+  methods still accept and store any value, with one warning in the log that the coin cannot honor the
+  level, and prices stay at the default. Detail: PR #323; CRD ch.35 R35.6.8, R35.6.9.
+
 #### Order book and peer-to-peer network
 
 - **How close a connection comes to being closed as stuck can now be watched.** A node closes a
@@ -219,6 +247,10 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 #### Releases and downloads
 
+- **Every pull request now builds the node for 64-bit ARM Linux.** The check cross-builds `kdf` for
+  aarch64, tests the glibc floor and starts the binary under an emulator, so a change that breaks
+  the ARM build is found before it merges. It is not a required check at first; it becomes one after
+  about ten green runs on `dev` (roughly two weeks). Detail: the Tests workflow.
 - **The mobile libraries now also cover the Android x86_64 ABI and the iOS simulator.** Each signed release carries `libkdf.a` for Android x86_64 (emulators and Chromebooks), and for the iOS simulator on Apple silicon (`aarch64-apple-ios-sim`) and Intel (`x86_64-apple-ios`) Macs, as separate libraries next to the device one. The dev and staging builds carry them too. Detail: `docs/RELEASE_ARTIFACTS.md`.
 - **Releases now include a C header for the mobile libraries.** `kdf-<tag>.h` declares the functions of `libkdf.a` with their exact prototypes and the log callback type, so an Android or iOS app can call the library without writing the declarations itself. CI builds the library, compiles and runs a test program against the header, and checks that the header and the library agree. Detail: the Release workflow and `docs/RELEASE_ARTIFACTS.md`.
 - **Releases now include Linux builds for 64-bit and 32-bit ARM, and the mobile libraries.** Besides the x86_64 binary, each signed release carries `kdf` for aarch64 and armv7 Linux (glibc 2.31 or newer, like the x86_64 one), and `libkdf.a` static libraries for Android (aarch64 and armv7) and iOS (aarch64) apps. The macOS binary that runs on both Intel and Apple silicon is attached as well; earlier releases did not include it. Every file is in the signed checksum list. The names, target triples and minimum system versions are in `docs/RELEASE_ARTIFACTS.md`. Detail: PR #300.
@@ -690,6 +722,29 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
   One change applies today: a coin entry with `avg_blocktime` 0 now fails activation with an error
   naming the key. Detail: PR #299; CRD ch.18 §18.11.
+- **A Tendermint coin whose configured gas prices include a figure of zero or less now fails
+  activation.** A `priority_gas_prices` array with a figure that is zero, negative or not a finite
+  number makes the coin's fee zero or undefined, so activation is refused with a
+  `PlatformCoinCreationError` that names the member, and nothing is registered. A malformed array (not
+  exactly three numbers) fails with `CoinProtocolParseError`. Detail: PR #323; CRD ch.36 R36.3.5 (note),
+  T36.17.
+- **Delegations, undelegations and reward claims on a Tendermint coin are signed with a larger default
+  gas limit.** They used the 125,000 of a plain transfer. The defaults are now 187,500 for a delegation
+  and a reward claim and 250,000 for an undelegation; a request can still set its own limit with the
+  new `fee` forms. The fee amount comes from the node's gas simulation and does not change. Detail: PR
+  #323; CRD ch.18 R18.6B.3.
+
+#### Price service and the maker bot
+
+- **A coin on which the price sources disagree is now priced from the first source, with a warning, instead of
+  being left unpriced.** The 5 % check between the two sources no longer leaves a coin unpriced just because the
+  two services take its price from different providers and the figures differ. If one price provider's figures
+  from two sources agree, the newest of them is used. Otherwise the coin is priced from the first source, in the
+  order of `price_urls`, and the log carries one warning that names the coin, both figures, both providers and the
+  host used. The bot and the swap prices both follow it. **With this default a wrong figure from the first source
+  can be used, with a warning.** `"price_conflict": "refuse"` in `MM2.json` restores the old behavior: such a
+  coin is not priced. A value of another form is ignored with one warning that names the key. See
+  [Network configuration](docs/NETWORK_CONFIG.md#price-service). Detail: PR #326; CRD ch.62 D62.2.
 
 ### Fixed
 
@@ -899,6 +954,15 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   them waited for the failover. The answer to the block-height request a server gets when it joins
   now counts as its first measured round trip. Detail: PR #324; CRD ch.38 R38.6.4a, R38.6.4f,
   R38.6.4j, R38.6.4k-R.
+- **A coin whose Electrum servers keep failing no longer fills the log with two errors every 10
+  seconds.** With `tx_history` on, the history loop logged the failed balance read and the failed
+  history request on every attempt, for as long as the server failed, for example on an expired
+  certificate (a field report). It now logs each error once, also when its text carries a changing
+  number such as a time, then one summary line per 10 minutes with the count, and one line when the
+  server answers again. While the history request keeps failing, the attempts after the first retry
+  wait 60 s and then longer, up to 5 minutes, instead of 10 s each, so after the server recovers,
+  the history can resume up to 5 minutes later. A healthy coin is unaffected. Detail: PR #327; CRD ch.38 §38.6.5
+  item 8.
 - **Under an HD login, a coin's account keys and its stored accounts follow the coin's own key
   policy, also when a Trezor is initialized.** A node logged in with a seed phrase accepts
   `task::init_trezor` afterwards, as GLEEC KDF does. Until now:
@@ -963,8 +1027,8 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   another service, and no swap completed stored USD prices. The default is now two sources asked at the
   same time: the GLEEC price service (and, if it does not answer, its cache) and the prices.cipig.net price
   service, each with `?expire_at=259200` so that no price older than 72 hours is served. A coin that only one
-  source prices is priced from it. A coin both price must agree within 5 %; if they do not, the coin gets no
-  price from either, and the bot quotes no pair with it. A source that does not answer is skipped. The bot
+  source prices is priced from it. The prices of a coin both services price should agree within 5 %; for one
+  that does not, see the `price_conflict` entry under Changed. A source that does not answer is skipped. The bot
   and the swap prices use the same sources. Two new top-level keys in `MM2.json` change them: `price_urls`
   (an array of sources, each one address or an array of addresses tried in order) replaces the default
   sources, and `price_providers` (an array of names) replaces the price providers the node recognizes
