@@ -136,7 +136,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   842 seconds were the maker's payment waiting for its two confirmations. The two
   refunds were broadcast 27 and 18 minutes after the lock time recorded in the payment transaction, and neither
   was rejected. A plain RXD withdrawal was accepted and confirmed within about 90 seconds. Swaps with Komodo
-  DeFi Framework or GLEEC KDF are not part of this. Detail: CRD ch.58 D2; plan
+  DeFi Framework or GLEEC KDF are not part of this. Detail: PR #322; CRD ch.58 D2; plan
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
 - **An Electrum server can now be pinned by its key.** A server entry with `protocol` `SSL` may
   carry `spki_sha256`: the SHA-256 digest of the server's public key in hexadecimal (64 digits,
