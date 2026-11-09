@@ -1559,7 +1559,7 @@ the key that coin signs its swap transactions with (its **signing key**):
 3. an EVM coin or token with a software signer: the signer's key, in
    compressed form;
 4. a Tendermint coin or token: its activated key, which under a global-HD
-   login is the coin key at `path_to_address` since PR #NNN *(amended
+   login is the coin key at `path_to_address` since PR #319 *(amended
    2026-11-09)*;
 5. a shielded coin: the per-swap key of chapter 39 R39.5.6 (unchanged). Sia:
    chapter 51 R64 (unchanged).
@@ -1727,7 +1727,7 @@ an explicitly named **legacy key** (Decision CR). It MUST be used only:
    and Solana, which is not
    enabled in this release. The EVM platform ignores it *(amended
    2026-11-05: Solana named; amended 2026-11-09: under a global-HD login
-   Tendermint takes the coin key at `path_to_address`, PR #NNN)*.
+   Tendermint takes the coin key at `path_to_address`, PR #319)*.
 
 No other part of the node may use it.
 

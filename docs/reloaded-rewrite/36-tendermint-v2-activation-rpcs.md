@@ -145,7 +145,7 @@ R36.1.2 **Request fields.**
 > fields have, the reference behaviour is bound. The docs mark `nodes`,
 > `ticker` and `tokens_params` required, which the reference also enforces.
 
-> **As built (Reloaded; PR #NNN; informative).** `path_to_address` and
+> **As built (Reloaded; PR #319; informative).** `path_to_address` and
 > `tokens_params[].protocol` are implemented as follows.
 >
 > - **`path_to_address`.** The activation reads the login's key policy. Under an
@@ -343,7 +343,7 @@ produce them.
 failing, `enable_tendermint_token` shall return `CouldNotFetchBalance` (string)
 with HTTP **500**.
 
-> **As built (Reloaded; PR #NNN; informative).** `enable_tendermint_token` has its
+> **As built (Reloaded; PR #319; informative).** `enable_tendermint_token` has its
 > own handler with a request type that carries the optional `protocol` beside
 > `ticker` and `activation_params`. The steps are those of the generic
 > single-token activation, with the protocol resolved as in the as-built note
@@ -619,7 +619,7 @@ a hardware-policy request (Tendermint has none), so
 > R36.1.3, transaction history) and are deferred to
 > `docs/plans/tendermint-activation-features.md`. Two further features, HD
 > `path_to_address` and custom tokens, were deferred the same way and have been
-> delivered since (PR #NNN); their items are removed from the list and the
+> delivered since (PR #319); their items are removed from the list and the
 > as-built notes under R36.1.2 and R36.2.4 describe them. The source numbers of
 > the other items are unchanged.
 >
@@ -710,7 +710,7 @@ terms; the clean implementer works from this list):
 > Reloaded: derive the public key from the activated private key; verify with an
 > HD-mode signing test before relying on HD Tendermint swaps.
 >
-> **As built (Reloaded; PR #NNN).** Done. Reloaded derives the public key of an
+> **As built (Reloaded; PR #319).** Done. Reloaded derives the public key of an
 > HD-activated coin from the activated private key, and a test signs a
 > withdrawal at a non-default path and verifies the signature against that
 > path's public key and against neither the default path's key nor the wallet's

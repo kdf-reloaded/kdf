@@ -58,7 +58,7 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    (R36.1.2, R36.1.4 step 3). The ch. 36 code-quality finding applies: derive
    the public key from the activated private key, not the wallet's root public
    key, and verify with an HD signing test.
-   *Implemented (PR #NNN).* Under an HD login the coin's key is derived from the
+   *Implemented (PR #319).* Under an HD login the coin's key is derived from the
    seed at the coin's `derivation_path` plus `path_to_address`, with the
    derivation the UTXO coins use; an iguana login is unchanged. The public key is
    derived from the activated private key, and a test signs a withdrawal at a
@@ -71,7 +71,7 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    A custom token must be wallet-only, as for EVM (ch. 35 R35.2.7); the EVM
    side was fixed by `e18eca319` of 2026-10-12, merged with PR #21 on
    2026-10-13 (issue #16, closed).
-   *Implemented (PR #NNN).* Both methods accept the inline `TENDERMINTTOKEN`
+   *Implemented (PR #319).* Both methods accept the inline `TENDERMINTTOKEN`
    protocol; a duplicate of a configured ticker is the `CustomTokenError`; the
    token is marked custom and is wallet-only.
 4. **`tx_history: true`** starts background transaction-history fetching
@@ -156,7 +156,7 @@ here an operator should be able to turn on, so this is deliberately *not* a
 compatibility switch and takes no default-side weighing under
 [`../COMPAT_SWITCHES.md`](../COMPAT_SWITCHES.md).
 
-*Implemented (PR #NNN).* The wallet-only predicate of the Tendermint coin and
+*Implemented (PR #319).* The wallet-only predicate of the Tendermint coin and
 token (`tendermint_wallet_only`, `mm2src/coins/tendermint/tendermint_types.rs`)
 now also answers `true` when the activation policy holds no local private key,
 so order placement refuses the coin; a token uses its platform coin's policy.
