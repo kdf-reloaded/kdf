@@ -831,6 +831,38 @@ what the reference lineage *reports* about Radiant on the legacy swap
 path, and why that report — reported, not verified by this project —
 does not close this item.
 
+*Evidence recorded 2026-11-09 (lab, mainnet, two KDF Reloaded nodes,
+RXD against RIN, the coins entry of the shared registry with
+`fork_id_rxd`, a transaction fee of 0.1 RXD per kilobyte and two
+confirmations; the build is the `dev` head 4c476883e).* The five items
+above, one by one:
+
+- *HTLC script acceptance:* the payment and the spend transactions of two
+  swaps (RXD as the maker's coin and as the taker's coin) and the refund
+  transactions of a maker and of a taker were accepted by Radiant and
+  mined. Both swaps finished with no failure event.
+- *Relay-fee floor against the configured fee:* a plain withdrawal paid
+  0.0374 RXD for 374 bytes, the configured 0.1 RXD per kilobyte, which is
+  about 100,000 times the relay floor the Electrum server reports
+  (0.000001 RXD per kilobyte). No transaction was rejected for its fee.
+  The configured fee is more than the network requires; whether to lower
+  it is a separate question.
+- *Lock time against 300-second blocks:* the maker's refund was broadcast
+  27 minutes after the lock time recorded in the payment transaction (that
+  lock time was 4 h 25 min after the payment), the taker's 18 minutes after
+  its own (that lock time was 2 h 19 min after the payment); neither refund
+  was rejected. Only these
+  two timings were measured; no cause is claimed. The maker's payment took
+  842 seconds to reach two confirmations.
+- *Block-header family and Electrum server behavior:* the rows used the
+  servers and the header handling of the coins entry, and no header or
+  server error appeared in any of them. They were not tested separately.
+
+Not covered: an RXD swap with Komodo DeFi Framework 2.6.0-beta (that build
+has no Radiant dialect, R58.4A) and with GLEEC KDF. This item is
+**closed for swaps between two KDF Reloaded nodes** and stays open for
+those two.
+
 **D3.** *Reference-bearing outputs.* **Partly corroborated on chain,
 2026-10-25; open for two details.** R58.4.2 left the non-zero-reference
 form corroborated only by Radiant-Core. T3's second vector — a mainnet
@@ -925,6 +957,10 @@ sign it" for a caller-supplied script through the raw-transaction
 signing RPC. No funds-safety consequence hinges on it — the tolerant walk
 can never produce a signature that the network accepts over a different
 preimage — so it does not gate the beta.
+
+*Decided 2026-11-09 (the maintainer's decision).* The signing stays
+tolerant for 0.4.0. The fatal form described above becomes a separate
+post-beta change (size M); this item stays open until then.
 
 ## 58.8 Baseline Verifications
 

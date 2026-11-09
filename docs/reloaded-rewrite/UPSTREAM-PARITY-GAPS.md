@@ -427,21 +427,23 @@ non-fungible flavours.
 
 ---
 
-## #9 — UTXO: `signature_version` value `fork_id_rxd` unsupported (Radiant) — **OPEN (signing implemented in PR #65, merged; trading fitness, ch. 58 D2, still open)**
+## #9 — UTXO: `signature_version` value `fork_id_rxd` unsupported (Radiant) — **signing CLOSED (PR #65, merged); trading tested between two KDF Reloaded nodes 2026-11-09 (ch. 58 D2); interop with Komodo DeFi Framework and GLEEC KDF OPEN**
 
 CRD reference:
 [`58-utxo-signature-version-and-radiant-sighash.md`](./58-utxo-signature-version-and-radiant-sighash.md).
 Reference designation: `v3.0.0-beta` (the dialect is not in `v2.6.0-beta`).
 
-*Status (2026-10-25).* The first two items below are **implemented in
-PR #65** (`feat/rxd-signature-version`, stacked on PR #54; merge order
-#57 → #54 → #65) from the cleared chapter and public Radiant-Core alone;
-ch. 58 §58.5 carries the as-built statement. The checkboxes stay open
-until the PR is merged. The third item — trading fitness (ch. 58 D2) — is
-**separately still open** and is not touched by PR #65: Radiant is not to
-be called tradable on the strength of the signing work.
+*Status (2026-11-09).* The first two items below were **implemented in
+PR #65** (`feat/rxd-signature-version`, stacked on PR #54, both merged)
+from the cleared chapter and public Radiant-Core alone; ch. 58 §58.5
+carries the as-built statement. The third item — trading fitness (ch. 58
+D2) — was tested on 2026-11-09 between two KDF Reloaded nodes (mainnet,
+RXD against RIN: both directions, a maker refund and a taker refund); the
+evidence is recorded in ch. 58 D2. It is **still open** for swaps with
+Komodo DeFi Framework 2.6.0-beta (no Radiant dialect) and with GLEEC KDF,
+which are not tested.
 
-- [ ] The shipped coins configuration gives the Radiant entry
+- [x] The shipped coins configuration gives the Radiant entry
   `"signature_version": "fork_id_rxd"` with `"fork_id": "0x40"`. Reloaded's
   value set has three entries and not that one, so the value fails to
   deserialize and the coin silently falls back to the Bitcoin-Cash BIP-143
@@ -451,13 +453,15 @@ be called tradable on the strength of the signing work.
   strict-encoding mask. **No** new transaction-hash algorithm is needed
   (ch. 58 R58.2.4) and no `chain_variant` work is needed
   (ch. 58 R58.2.6).
-- [ ] Implement the algorithm **from Radiant-Core**, which is public and
+- [x] Implement the algorithm **from Radiant-Core**, which is public and
   permitted: ch. 58 R58.4.1 establishes on public-network evidence that the
   reference's dialect matches Radiant's own, so the public source is both the
   correct and the authoritative route (ch. 58 R58.4.3). Add the mainnet
   signature vector of ch. 58 T3 as the parity guard.
-- [ ] Separately: enabling Radiant for **trading** is not covered by the above
-  and is unestablished (ch. 58 D2).
+- [ ] Separately: enabling Radiant for **trading** is not covered by the
+  signing work (ch. 58 D2). Established between two KDF Reloaded nodes on
+  2026-11-09 (see the status above); open for swaps with Komodo DeFi
+  Framework 2.6.0-beta and with GLEEC KDF.
 
 ---
 

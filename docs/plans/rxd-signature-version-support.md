@@ -1,6 +1,6 @@
 # Plan: Radiant signature-hash support
 
-**Status:** parked (signing shipped in PRs #54, #65, with its compatibility bookkeeping; step 8 open) — **Last reviewed:** 2026-11-08
+**Status:** parked (signing shipped in PRs #54, #65, with its compatibility bookkeeping; swaps between two KDF Reloaded nodes tested on the mainnet 2026-11-09; step 8 open and post-beta) — **Last reviewed:** 2026-11-09
 
 > **Context:** Radiant (`RXD`) is the one coin in the shipped registry whose
 > `signature_version` names a signing dialect this build did not implement.
@@ -20,7 +20,8 @@
 | Step 5 (close the records) | ch.58: R58.5.1 closed, R58.5.2 implemented, D1 and D4 closed, D3 partly corroborated — done 2026-10-25 |
 | Step 6 (compatibility bookkeeping) | **done** in PR #65 (commit `1c0dc2a4a`, 2026-10-25): the switch's wording in `docs/GLEEC_COMPATIBILITY.md` and `RELOADED_VS_GLEEC.md` lists `fork_id_rxd` as recognized (see step 6) |
 | R58.3.3 correction against Radiant-Core | **done** in ch.58 on 2026-10-25 (see "The R58.3.3 correction" below) |
-| Fail-early follow-up (ch.58 D5) | **open**, owner ch.58 §58.3, not a beta item |
+| Swap fitness between two KDF Reloaded nodes (ch.58 D2) | **tested 2026-11-09** on the mainnet, RXD against RIN: both directions finished (930 s and 720 s), a maker refund and a taker refund of an RXD payment went out after the lock time (broadcast 27 and 18 minutes after the lock time recorded in the payment transaction, not rejected), a plain withdrawal confirmed within about 90 seconds; interop with Komodo DeFi Framework 2.6.0-beta (no Radiant dialect) and GLEEC KDF is not tested |
+| Fail-early follow-up (ch.58 D5) | **open**, owner ch.58 §58.3, not a beta item; the maintainer's decision of 2026-11-09: the signing stays tolerant for 0.4.0 and the stricter form becomes a separate post-beta change |
 
 ## Current state
 
