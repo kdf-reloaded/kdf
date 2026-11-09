@@ -19,7 +19,7 @@
 > activation back on (ch.21 D6) precedes the activation-time steps below and is
 > part of any revival of this plan.
 
-## Relation to the 0.4.0 TRON lane (2026-11-08)
+## Relation to the TRON work (2026-11-08)
 
 The maintainer decided on 2026-11-08 that the branch is not revived as such: the topic is covered by a new chapter and
 new PRs, and the branch stays until the second PR below has landed.
@@ -36,9 +36,10 @@ new PRs, and the branch stays until the second PR below has landed.
     secret is a credential under ch.35 R35.1.17;
   - the activation route that ch.21 D21.B1 decided (the mmrpc 2.0 route for TRON, legacy kept), for the
     activation-time provider binding (§49.3.1–§49.3.2).
-- **Bytecode blocker.** The official open-source GasFree JS SDK publishes the proxy creation bytecode together with
-  custody-address vectors. Take both from there, a public source, and verify `derive_gasfree_address` against at
-  least two vectors per network, as in step 1 below. Open question 1 is answered.
+- **Bytecode blocker.** The proxy creation bytecode is taken from the public chain (the input of the transactions
+  that deployed the GasFree contracts), with the official open-source GasFree JS SDK as a cross-check. The SDK's
+  published custody-address vectors are cited data, and the derivation must reproduce every one of them; no SDK
+  code is used (maintainer decision of 2026-11-09). Open question 1 is answered.
 - **Topic coverage** ([coverage note](../reloaded-rewrite/notes/coverage-upstream-prs-2026-11-08.md) §B). The
   reference's GasFree pull request was an open, unmerged draft. Against the GasFree chapter on the parked branch:
   - *Covered there:* the token activation block (B.1.2), the withdraw request fields (B.1.4), the fee details, relay
@@ -57,8 +58,8 @@ new PRs, and the branch stays until the second PR below has landed.
     whole.
   - *Maintainer decision:* parity or not on the wire discriminants (B.1.5, B.1.7, B.1.8).
   - *Also open:* the chapter 26 transport row (B.2.6), and a Nile or WASM end-to-end test row (B.4.5).
-- **Chapter number.** Both 49 and 57 are taken on `dev`; the chapter gets the next free number, and its Status
-  comes from the closed set.
+- **Chapter number.** Both 49 and 57 were taken on `dev`; the chapter is re-established as chapter 63, in its
+  own PR.
 - **ch.21 ordering.** The swap-chapter ordering note below no longer applies. TRON swaps were added as a new section
   (§21.11B), not as a rewrite of §21.11, so the §21.10 cross-reference can be re-applied at any time.
 - **Withdraw task path.** dev ch.49 R49.9 refuses TRON withdrawals under hardware signing. The gasless rail states how

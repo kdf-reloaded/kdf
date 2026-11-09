@@ -19,7 +19,7 @@
 > planned to return in the next beta; turning activation back on (ch.21 D6)
 > comes before, and is part of, any revival of this branch.
 
-## Relation to the 0.4.0 TRON lane (2026-11-08)
+## Relation to the TRON work (2026-11-08)
 
 TRON swaps are being built for 0.4.0 as a series of new PRs, from CRD ch.21 §21.11B and the maintainer decisions of
 2026-11-08 on its open points D21.B1–D21.B9. This branch is not merged, rebased or revived, and its name is not
@@ -55,7 +55,7 @@ reused. The blocker below is settled: the KDF Dirty Gate failed the chapter rewr
   - *Node access.* The branch adds an event query to the old request loop. The new work first rewrites the TRON node
     client: 10 s per attempt, failover on an HTTP error status or a malformed answer, no lock held across requests,
     and optional per-node request headers for API keys.
-  - *Hash width on the EVM path.* dev's EVM V1 path now stores a 20-byte value derived from a 32-byte hash, which the
+  - *Hash width on the EVM path.* dev's EVM V1 path now embeds a 20-byte value derived from a 32-byte hash, which the
     branch predates. The TRON payment must not go through it and carries the 32-byte hash unchanged (R21.B6).
   - *Wallet path.* The branch leaves the TRON balance read and the wallet broadcast unwired: its balance read still
     returns an error, only the wording changed. With TRON switched on, dev's legacy activation fails at that same
@@ -76,7 +76,7 @@ reused. The blocker below is settled: the KDF Dirty Gate failed the chapter rewr
   | Watcher-reward variants | A.13 | Pending (§21.11 D4) |
   | TRON swap test rows | A.15 | Open: part of the swap-operations PR |
   | Coins-file entries with the swap contract | A.16 | Open: coins repository |
-  | EVM V1 ERC20 payment amount check | A.18 | Reloaded already compares the amount unconditionally; a regression test pins it |
+  | EVM V1 ERC20 payment amount check | A.18 | Reloaded already compares the amount unconditionally, pinned by a regression test in PR #313 |
 
 - **Order of the new PRs:** wallet path (balance and broadcast, node client, activation route), secret-hash arm,
   contract interop, swap operations, switch-on. Lab rows on Nile accompany each step.
