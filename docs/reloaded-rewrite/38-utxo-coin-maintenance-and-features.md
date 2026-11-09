@@ -2993,8 +2993,9 @@ measurement rounds only, at the agreed tip height only, and only with two
 agreeing servers. A natural reorganization at the tip resolves itself in the
 next round, because nothing is suspended.
 
-D38.6.4o.9 *(Decided 2026-11-09, maintainer intent of the plan's example of a
-testnet server in a mainnet list.)* *A bound above the agreed tip.* With the
+D38.6.4o.9 *(Reloaded rule derived on 2026-11-09 from D38.6.4o.1 and D38.6.4o.2
+and the plan's example of a testnet server in a mainnet list; open for the
+maintainer's confirmation.)* *A bound above the agreed tip.* With the
 lag alone, a server far above the agreed tip has lag 0: it would stay eligible
 and keep its share of reads, which is the failure the agreed tip exists to
 prevent. Eligibility and the out-of-date state therefore bound the distance
@@ -4350,8 +4351,8 @@ R38.8.6 **Tests (two-direction, observable).**
   finding fails a chapter; dictated-interop and public-surface tokens were
   excluded from the measured set.
 - *Reloaded-original addition (2026-11-09, maintainer decisions D38.6.4o.1 –
-  D38.6.4o.9), clean side -- R38.6.4o, T38.6.4o.1 – T38.6.4o.11, D38.6.4o.1 –
-  D38.6.4o.9, and the amendments they name in R38.6.4a items 6 and 7, R38.6.4f
+  D38.6.4o.8 and the rule D38.6.4o.9), clean side -- R38.6.4o, T38.6.4o.1 –
+  T38.6.4o.11, D38.6.4o.1 – D38.6.4o.9, and the amendments they name in R38.6.4a items 6 and 7, R38.6.4f
   item 4, R38.6.4l items 1, 4, 6 and 7, the test preamble of R38.6.4l,
   T38.6.4a.5, T38.6.4l.1, T38.6.4l.3, T38.6.4l.15 and D38.6.4a.1.* Written by a session that never read
   the forbidden corpus. The inputs are this repository's own code and chapter

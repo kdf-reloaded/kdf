@@ -2,8 +2,9 @@
 
 **Status:** in progress (decisions D1–D7 taken 2026-11-09; one PR for all items) — **Last reviewed:** 2026-11-09
 
-**CRD:** ch.38 R38.6.4o with T38.6.4o.1–T38.6.4o.11 and D38.6.4o.1–D38.6.4o.8 (new), amending
-R38.6.4a items 6 and 7, R38.6.4f item 4 and R38.6.4l items 1, 4, 6 and 7 (Reloaded-original).
+**CRD:** ch.38 R38.6.4o with T38.6.4o.1–T38.6.4o.11 and D38.6.4o.1–D38.6.4o.9 (new), amending
+R38.6.4a items 6 and 7, R38.6.4f items 2 and 4, R38.6.4j items 2 and 4 and R38.6.4l items 1, 4, 6
+and 7, with T38.6.4.14, T38.6.4j.1, T38.6.4a.9, D38.6.4a.4 and D38.6.4j.1 (Reloaded-original).
 Builds on [the measured server order](electrum-measured-server-order.md) and carries work package 5
 (the tip check of the near sessions) of [order-posting latency](order-posting-latency.md).
 

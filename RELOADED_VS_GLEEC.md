@@ -193,6 +193,17 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   logs no such line. What `disable_cert_verification` accepts and refuses is
   the same on both. See CRD ch.38 R38.6.4m and R38.6.4n and
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+- **A coin's Electrum servers that are behind the chain or stuck are asked last, and a swap's
+  confirmation wait polls one server.** Reloaded asks each connected Electrum server for its newest
+  block when it joins and compares the heights: a server more than the coin's tolerance (180 seconds
+  of blocks, at least 1 and at most 20) behind or ahead of the height two or more servers have reached, or one
+  that sends no new block for three block times or ten minutes while another does, is tried after
+  the others for reads and broadcasts, and logged once per change of state; a confirmation wait
+  polls one up-to-date server for the whole wait and moves on only when it fails. The read-only
+  request `electrum_servers` shows the servers' state. GLEEC KDF ranks by the list position and has
+  none of this, so a lagging server keeps answering there. No peer observes it. To get GLEEC KDF's
+  routing, set `electrum_tip_checks` to `false` (see the settings list below). Row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.38 R38.6.4o.
 - **Bitcoin II (BC2) transactions are signed the way the BC2 network requires.**
   Since block 57,750 the BC2 network checks every signature against a digest
   that carries an extra 4-byte field after the signature-hash type, and refuses
@@ -546,16 +557,6 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   listed server at once and succeeds as soon as one connects; GLEEC KDF's per-attempt bounds do not
   depend on how many servers remain, and it does not wait at activation. Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.38
   R38.6.4j.
-- **A coin's Electrum servers that are behind the chain or stuck are asked last, and a swap's
-  confirmation wait polls one server.** Reloaded asks each connected Electrum server for its newest
-  block when it joins and compares the heights: a server more than the coin's tolerance (180 seconds
-  of blocks, at least 1 and at most 20) behind or ahead of the height two or more servers have reached, or one
-  that sends no new block for three block times or ten minutes while another does, is tried after
-  the others for reads and broadcasts, and logged once per change of state; a confirmation wait
-  polls one up-to-date server for the whole wait and moves on only when it fails. The read-only
-  request `electrum_servers` shows the servers' state. GLEEC KDF ranks by the list position and has
-  none of this, so a lagging server keeps answering there. No peer observes it. Row in
-  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.38 R38.6.4o.
 - **A shielded coin's `lightwalletd` endpoints are named and suspended on failure.** The endpoint that
   rejected a broadcast is named (host-only) in the error and the log; an endpoint that fails at
   transport level is suspended for 20 s, doubling up to 12 hours, and endpoints that are not
