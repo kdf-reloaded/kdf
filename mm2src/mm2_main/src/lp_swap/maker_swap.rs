@@ -868,13 +868,14 @@ impl MakerSwap {
         } else {
             let transaction_f = self
                 .maker_coin
-                .check_if_my_payment_sent(
+                .check_if_my_payment_sent_for_amount(
                     self.r().data.maker_payment_lock as u32,
                     &*self.r().my_maker_coin_htlc_pub,
                     &*self.r().other_maker_coin_htlc_pub,
                     &secret_hash,
                     self.r().data.maker_coin_start_block,
                     &self.r().data.maker_coin_swap_contract_address,
+                    &self.maker_amount,
                 )
                 .compat();
             transaction_f.await
@@ -1560,13 +1561,14 @@ impl MakerSwap {
                 );
                 let maybe_maker_payment = try_s!(
                     self.maker_coin
-                        .check_if_my_payment_sent(
+                        .check_if_my_payment_sent_for_amount(
                             maker_payment_lock,
                             search_pub.as_slice(),
                             other_maker_coin_htlc_pub.as_slice(),
                             &secret_hash.0,
                             maker_coin_start_block,
                             &maker_coin_swap_contract_address,
+                            &self.maker_amount,
                         )
                         .compat()
                         .await

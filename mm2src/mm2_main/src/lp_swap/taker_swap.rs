@@ -1574,13 +1574,14 @@ impl TakerSwap {
         let already_sent = if skip_already_sent {
             Ok(None)
         } else {
-            let f = self.taker_coin.check_if_my_payment_sent(
+            let f = self.taker_coin.check_if_my_payment_sent_for_amount(
                 self.r().data.taker_payment_lock as u32,
                 &*self.r().my_taker_coin_htlc_pub,
                 self.r().other_taker_coin_htlc_pub.as_slice(),
                 &self.r().secret_hash.0,
                 self.r().data.taker_coin_start_block,
                 &self.r().data.taker_coin_swap_contract_address,
+                &self.taker_amount.to_decimal(),
             );
             f.compat().await
         };
@@ -2406,13 +2407,14 @@ impl TakerSwap {
                 );
                 let maybe_sent = try_s!(
                     self.taker_coin
-                        .check_if_my_payment_sent(
+                        .check_if_my_payment_sent_for_amount(
                             taker_payment_lock as u32,
                             search_pub.as_slice(),
                             other_taker_coin_htlc_pub.as_slice(),
                             &secret_hash,
                             taker_coin_start_block,
                             &taker_coin_swap_contract_address,
+                            &self.taker_amount.to_decimal(),
                         )
                         .compat()
                         .await

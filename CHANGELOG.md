@@ -540,6 +540,26 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   `my_orders`, `order_status` and `orderbook_depth` stay legacy-only, as on GLEEC KDF: called with
   `mmrpc`, they answer `NoSuchMethod`. Detail: PR #312; CRD ch.43 §43.1A, R43.1A.1a–R43.1A.1e.
 
+#### Tendermint (Cosmos) coins
+
+- **The Tendermint swap code follows the CRD's swap rules more closely; Tendermint swaps stay off.**
+  Swaps of Tendermint coins remain switched off in this release, and their code was brought closer to
+  the rules they will follow when they return:
+  - the check of a taker's DEX fee requires exactly one message, the exact recipients, sender and
+    amounts (the burn form included), the swap uuid as memo, and a byte-equal copy of the transaction
+    on the node;
+  - after a restart, a node finds its own payment by the HTLC id, so a payment to another receiver or
+    of another amount is no longer taken for it;
+  - a swap secret must be exactly 32 bytes;
+  - a token's trade fees are labeled with the platform coin and its decimals, since the platform coin
+    pays them;
+  - a chain without an HTLC module, such as ATOM or OSMO, is refused when an order is placed, and a
+    counterparty whose order carries protocol information, where an IBC route would travel, is
+    declined.
+
+  One change applies today: a coin entry with `avg_blocktime` 0 now fails activation with an error
+  naming the key. Detail: PR #299; CRD ch.18 §18.11.
+
 ### Fixed
 
 #### ARRR and other shielded coins
@@ -870,6 +890,13 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   to the public BCH testnet from a wallet that every CI run shares. It already retried a broadcast
   rejected as a mempool conflict. A broadcast rejected with "Missing inputs" failed the test
   instead; it is now retried the same way. The node itself is unchanged. Detail: PR #297.
+
+- **The Tendermint swap code has its first swap-flow tests.** 50 unit tests drive an Iris and a
+  Nucleus coin against a scripted test node on a loopback port: the HTLC messages, the payment checks
+  and searches, the spend search, the refund answers, the check of the DEX fee, the secret
+  extraction, the confirmation wait and the activation check. Three of them still record behavior
+  that a later change replaces: the payment check does not compare the time lock, and a refund that
+  the chain makes by itself is reported as a failed refund. Detail: PR #299; CRD ch.18 §18.3, §18.5, §18.11.
 
 ### Documentation
 
