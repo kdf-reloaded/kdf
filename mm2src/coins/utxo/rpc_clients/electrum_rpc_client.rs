@@ -1,5 +1,5 @@
 #[cfg(test)] use super::electrum_pool::ServerStateSnapshot;
-use super::electrum_pool::{ElectrumPoolOptions, ElectrumServersView, PoolShared};
+use super::electrum_pool::{call_budget_of_caller, ElectrumPoolOptions, ElectrumServersView, PoolShared};
 use super::*;
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::header_time_only::read_window_times;
@@ -513,7 +513,7 @@ async fn electrum_request_multi(
     client: ElectrumClient,
     request: JsonRpcRequestEnum,
 ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), String> {
-    let budget = client.pool.timings.call_budget;
+    let budget = call_budget_of_caller(client.pool.timings.call_budget);
     client.pool.route(request, budget).await
 }
 
@@ -3089,7 +3089,8 @@ pub(crate) fn electrum_client_over_stub(
 }
 
 /// An Electrum client over several loopback stub servers, ranked in the given order, with the default pool settings
-/// (read spreading on). Returns once every server is in the maintained set.
+/// (read spreading on) but the tip checks off. Returns once every server is in the maintained set and has answered a
+/// ping, so that each has a smoothed latency: a session that has answered nothing takes no read (R38.6.4a item 6).
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) async fn electrum_client_over_stubs(servers: &[&super::electrum_stub_server::StubServer]) -> ElectrumClient {
     let client = client_without_tip_checks();
@@ -3109,6 +3110,7 @@ pub(crate) async fn electrum_client_over_stubs(servers: &[&super::electrum_stub_
         );
         common::executor::Timer::sleep(0.01).await;
     }
+    client.pool.ping_maintained().await;
     ElectrumClient(client)
 }
 

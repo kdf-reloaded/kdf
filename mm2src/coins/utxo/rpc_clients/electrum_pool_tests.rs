@@ -953,6 +953,8 @@ fn the_wallet_maintainers_case_dead_servers_first_and_a_live_one_last() {
 /// Waits until the activation probe has ended: every server of the pool is either maintained, or has no
 /// connection and is suspended or removed.
 async fn wait_for_probe_end(client: &ElectrumClientImpl) {
+    // A connection joins the set as it is made, so "every server maintained or released" no longer tells the end.
+    wait_until("the probe to end", || client.pool.probe_ended()).await;
     wait_until("the probe to end", || {
         client.pool_snapshot().iter().all(|server| {
             server.maintained || (!server.connected && (server.removed || server.suspended_until.is_some()))
@@ -965,6 +967,7 @@ async fn wait_for_probe_end(client: &ElectrumClientImpl) {
 /// Unlike [`wait_for_probe_end`] it does not need a released server to be suspended still, which suits tests with a
 /// short suspension.
 async fn wait_for_probe_released(client: &ElectrumClientImpl) {
+    wait_until("the probe to end", || client.pool.probe_ended()).await;
     wait_until("the probe to release its connections", || {
         client
             .pool_snapshot()
@@ -1859,19 +1862,6 @@ async fn near_pool_at(
     (servers, client)
 }
 
-/// Three reads: no session has a figure yet, so every session is near, each takes one turn and gets its first
-/// sample. This holds when the sessions' delays do not differ: a slow session that sampled before a session with
-/// no sample yet would be far by then.
-async fn warm_up_by_reads(servers: &[StubServer; 3], client: &ElectrumClientImpl) {
-    for _ in 0..3 {
-        ask(client, READ).await.unwrap();
-    }
-    for server in servers {
-        assert_eq!(server.requests(READ), 1);
-        assert_eq!(snap_of(client, server).samples, 1);
-    }
-}
-
 /// One ping over every maintained session gives each its first sample, whatever the delays are.
 async fn warm_up(servers: &[StubServer; 3], client: &ElectrumClientImpl) {
     client.pool.ping_maintained().await;
@@ -1894,7 +1884,7 @@ fn t38_6_4a_2_reads_avoid_a_far_session() {
             near_timings(),
         )
         .await;
-        warm_up_by_reads(&servers, &client).await;
+        warm_up(&servers, &client).await;
         let mut answered = Vec::new();
         for _ in 0..30 {
             answered.push(ask(&client, READ).await.unwrap());
@@ -1903,8 +1893,8 @@ fn t38_6_4a_2_reads_avoid_a_far_session() {
         assert_eq!(count(&servers[2]), 0, "{answered:?}");
         assert!((14..=16).contains(&count(&servers[0])), "{answered:?}");
         assert!((14..=16).contains(&count(&servers[1])), "{answered:?}");
-        // The far one was asked once only, by the warm-up.
-        assert_eq!(servers[2].requests(READ), 1);
+        // The far one was not asked at all: the warm-up is a ping.
+        assert_eq!(servers[2].requests(READ), 0);
         // The turn goes to the near sessions one after the other.
         assert!(answered.windows(2).all(|pair| pair[0] != pair[1]), "{answered:?}");
     });
@@ -2044,16 +2034,17 @@ fn t38_6_4a_5_samples_under_random_and_listed() {
                 assert_eq!(snap_of(&client, server).samples, 0, "{order:?}");
                 assert_eq!(snap_of(&client, server).smoothed_ms, None, "{order:?}");
             }
-            // Three reads, each on its own session, give each a first sample ...
-            warm_up_by_reads(&servers, &client).await;
+            // A ping over every maintained session gives each a first sample ...
+            warm_up(&servers, &client).await;
             assert!(servers
                 .iter()
                 .all(|server| snap_of(&client, server).smoothed_ms.is_some()));
-            // ... and a ping over every maintained session gives each another.
+            // ... and another ping gives each another.
             client.pool.ping_maintained().await;
             for server in &servers {
                 assert_eq!(snap_of(&client, server).samples, 2, "{order:?}");
-                assert_eq!(server.requests("server.ping"), 1, "{order:?}");
+                // The warm-up was a ping, and this is the second.
+                assert_eq!(server.requests("server.ping"), 2, "{order:?}");
             }
             // Still no header request anywhere, no round, nothing judged.
             Timer::sleep(0.2).await;
@@ -2069,7 +2060,7 @@ fn t38_6_4a_5_samples_under_random_and_listed() {
         }
 
         // With the default `electrum_tip_checks` (true) exactly one header request goes out on joining, under both
-        // orders (R38.6.4o item 3); it is no sample, and nothing is judged.
+        // orders (R38.6.4o item 3); its answer is the first sample (R38.6.4a item 7), and nothing is judged.
         for order in [ServerOrder::Listed, ServerOrder::Random] {
             let servers = [stub_at(5, 100).await, stub_at(5, 100).await, stub_at(5, 100).await];
             let client = checked_pool(
@@ -2089,7 +2080,7 @@ fn t38_6_4a_5_samples_under_random_and_listed() {
             Timer::sleep(0.2).await;
             for server in &servers {
                 assert_eq!(server.requests(HEADERS), 1, "{order:?}");
-                assert_eq!(snap_of(&client, server).samples, 0, "{order:?}");
+                assert_eq!(snap_of(&client, server).samples, 1, "{order:?}");
             }
             assert!(client.pool.remeasure_rounds().is_empty(), "{order:?}");
         }
@@ -2208,6 +2199,7 @@ fn t38_6_4a_6_a_wide_offset_gives_every_session_its_turn() {
             near_timings(),
         )
         .await;
+        warm_up(&servers, &client).await;
         for _ in 0..9 {
             ask(&client, READ).await.unwrap();
         }
@@ -2508,10 +2500,11 @@ fn t38_6_4l_1_random_and_listed_measure_nothing() {
             }
             assert!(client.pool.remeasure_rounds().is_empty(), "{order:?}");
             // The six reads went to the first-ranked server and are six samples (the delay of one server only
-            // is not the point: the rank, under `random`, is a draw); the header requests are no samples.
+            // is not the point: the rank, under `random`, is a draw); the answer to each stub's header request on
+            // joining is a sample too (R38.6.4a item 7), three more.
             assert_eq!(
                 client.pool_snapshot().iter().map(|state| state.samples).sum::<u32>(),
-                6,
+                9,
                 "{order:?}"
             );
             assert!(client.pool_snapshot().iter().all(|state| !state.poor));
@@ -2751,8 +2744,8 @@ fn t38_6_4l_15_a_connection_joining_through_a_pass_sends_a_header_request() {
                 assert_eq!(methods_received(server)[..2], ["server.version", HEADERS], "{order:?}");
                 assert_eq!(server.accepted(), 1, "{order:?}");
             }
-            // The request is not a sample of the smoothed latency, and no re-measure round ran.
-            assert!(client.pool_snapshot().iter().all(|state| state.samples == 0));
+            // Its answer is the first sample of the smoothed latency (R38.6.4a item 7), and no re-measure round ran.
+            assert!(client.pool_snapshot().iter().all(|state| state.samples == 1));
             assert!(client.pool.remeasure_rounds().is_empty());
 
             // P1 covers the joined connection: two consecutive notifications 2 blocks behind trigger it.
@@ -2921,8 +2914,10 @@ fn t38_6_4l_9_p2_needs_five_slow_samples() {
         );
         activate_and_start(&client).await;
         a.set_reply_delay("blockchain.block.header", ms(1_200));
-        // Four slow samples (asked at once, so they take as long as one): not enough.
-        ask_together(&client, "blockchain.block.header", 4).await;
+        // The answer to the activation header request is the first sample (R38.6.4a item 7), so three slow samples
+        // (asked at once, so they take as long as one) make four: not enough.
+        assert_eq!(snap_of(&client, &a).samples, 1);
+        ask_together(&client, "blockchain.block.header", 3).await;
         wait_until("four samples", || snap_of(&client, &a).samples == 4).await;
         let state = snap_of(&client, &a);
         assert!(!state.poor, "{state:?}");
@@ -2930,7 +2925,8 @@ fn t38_6_4l_9_p2_needs_five_slow_samples() {
         ask(&client, "blockchain.block.header").await.unwrap();
         wait_until("the slow connection to be marked poor", || snap_of(&client, &a).poor).await;
         let first = snap_of(&client, &a);
-        assert!(first.smoothed_ms.unwrap() > 1_000.);
+        // The average started at the few milliseconds of the header answer and moved towards 1.2 s.
+        assert!(first.smoothed_ms.unwrap() > 500.);
 
         // It stays maintained and keeps answering (T38.6.4l.10); a further slow sample restarts the mark.
         assert_eq!(maintained(&client), vec![0]);
@@ -3950,5 +3946,205 @@ fn t38_6_4o_10_the_view_lists_the_pool_and_sends_nothing() {
         assert_eq!(wire["servers"][2]["out_of_date"], "behind");
         assert!(wire["servers"][0]["out_of_date"].is_null());
         assert!(wire["servers"][3]["height"].is_null() && wire["servers"][3]["lag"].is_null());
+    });
+}
+
+// ---- CRD ch.38 field fix: a dead and a refusing server at activation (plan step 0) ------------------------------
+
+const BALANCE: &str = "blockchain.scripthash.get_balance";
+const SCRIPT_HASH: &str = "00000000000000000000000000000000000000000000000000000000000000aa";
+
+/// A good stub that answers its header request and a balance.
+async fn good_stub() -> StubServer {
+    let good = stub_at(5, 100).await;
+    good.set_result(BALANCE, json!({"confirmed": 7, "unconfirmed": 0}));
+    good
+}
+
+/// T38.6.4.14: with three stubs, one that never completes a connection (it accepts the TCP connection and never
+/// answers: a listener that never accepts cannot be told from it in-process, and an address that black-holes depends
+/// on the network of the host), one that refuses every connection at once and one good one, `max_connected` 2 and a
+/// draw that ranks the good stub last, under `mixed` and `random`: when the build returns the maintained set holds the
+/// good stub, and a balance read with the caller's budget (20 s, scaled to 400 ms) is answered by it within that
+/// budget, in each of 20 runs.
+#[test]
+fn t38_6_4_14_a_dead_and_a_refusing_server_at_activation() {
+    block_on(async {
+        let (dead, refusing) = (
+            StubServer::start(StubBehavior::Silent).await,
+            StubServer::start(StubBehavior::Down).await,
+        );
+        let good = good_stub().await;
+        let budget = ms(400);
+        for order in [ServerOrder::Mixed, ServerOrder::Fixed(vec![0, 1, 2])] {
+            for run in 0..20 {
+                let client = checked_pool(
+                    &[&dead, &refusing, &good],
+                    PoolSetup {
+                        max_connected: Some(2),
+                        order: order.clone(),
+                        ..PoolSetup::new(TICKER)
+                    },
+                    test_timings(),
+                    // The first shuffle leaves the listed order: the good stub ranks last.
+                    script_draw(&identity(3), 0.5),
+                );
+                assert_eq!(
+                    ranked_addrs(&client).last(),
+                    Some(&good.addr()),
+                    "{order:?} run {run}: the good stub ranks last"
+                );
+                let started = Instant::now();
+                client.activation_probe().await.unwrap();
+                assert!(
+                    snap_of(&client, &good).maintained,
+                    "{order:?} run {run}: the set holds the good stub when the build returns"
+                );
+                client.start_pool(false);
+                let electrum = ElectrumClient(client.clone());
+                let balance = with_call_budget(budget, electrum.scripthash_get_balance(SCRIPT_HASH).compat())
+                    .await
+                    .unwrap();
+                assert_eq!(balance.confirmed, 7, "{order:?} run {run}");
+                assert!(
+                    started.elapsed() < budget,
+                    "{order:?} run {run}: {:?}",
+                    started.elapsed()
+                );
+            }
+        }
+        assert!(good.requests(BALANCE) >= 40);
+        assert_eq!(dead.requests(BALANCE) + refusing.requests(BALANCE), 0);
+    });
+}
+
+/// R38.6.4k-R item 3 (the regression behind T38.6.4.14): under `mixed` and `measured` the maintained set is not empty
+/// when `activation_probe` returns, although every header answer is still on its way.
+#[test]
+fn t38_6_4l_2_the_set_is_not_empty_when_the_build_returns_under_a_measured_order() {
+    block_on(async {
+        for order in [ServerOrder::Mixed, ServerOrder::Measured] {
+            let servers = [
+                stub_at(300, 100).await,
+                stub_at(300, 100).await,
+                stub_at(300, 100).await,
+            ];
+            let client = measured_pool(
+                &[&servers[0], &servers[1], &servers[2]],
+                Some(2),
+                order.clone(),
+                lenient(),
+                None,
+                script_draw(&identity(3), 0.5),
+            );
+            let started = Instant::now();
+            client.activation_probe().await.unwrap();
+            assert!(
+                started.elapsed() < ms(300),
+                "{order:?}: the build waited for a header answer"
+            );
+            assert!(!maintained(&client).is_empty(), "{order:?}: the set is empty");
+            // Each stub still gets exactly one header request: the probe's, not one on joining as well.
+            wait_for_probe_end(&client).await;
+            for server in &servers {
+                assert_eq!(server.requests(HEADERS), 1, "{order:?}");
+            }
+            // The kept connections were measured: a server that joined at establishment has its answer as a sample.
+            assert!(maintained(&client).len() <= 2);
+            for server in &servers {
+                let state = snap_of(&client, server);
+                assert!(state.activation_ms.is_some(), "{order:?}: {state:?}");
+                if state.maintained {
+                    assert_eq!(state.samples, 1, "{order:?}: {state:?}");
+                }
+            }
+        }
+    });
+}
+
+/// T38.6.4j.1: with an empty maintained set, `max_connected` 2 and three servers in the visiting order dead (never
+/// answers), refusing (fails at once) and good, the good server is asked as soon as the refusing one has failed, not
+/// after the dead one's attempt ends, and answers the request.
+#[test]
+fn t38_6_4j_1_the_retry_is_a_sliding_window() {
+    block_on(async {
+        let dead = StubServer::start(StubBehavior::Silent).await;
+        let refusing = StubServer::start(StubBehavior::Down).await;
+        let good = good_stub().await;
+        let client = checked_pool(
+            &[&dead, &refusing, &good],
+            PoolSetup {
+                max_connected: Some(2),
+                tip_checks: false,
+                ..PoolSetup::new(TICKER)
+            },
+            test_timings(),
+            script_draw(&[], 0.5),
+        );
+        assert!(maintained(&client).is_empty());
+        let started = Instant::now();
+        let answered = ask(&client, READ).await.unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(answered, good.addr());
+        // The dead server's attempt ends at the 400 ms establishment bound; the good one answers long before.
+        assert!(elapsed < ms(250), "{elapsed:?}");
+
+        // Every server is named once when all of them fail (R38.6.4i), and the call ends within its budget.
+        good.set_behavior(StubBehavior::Down).await;
+        let client = checked_pool(
+            &[&dead, &refusing, &good],
+            PoolSetup {
+                max_connected: Some(2),
+                tip_checks: false,
+                ..PoolSetup::new(TICKER)
+            },
+            ElectrumPoolTimings {
+                call_budget: ms(1_000),
+                ..test_timings()
+            },
+            script_draw(&[], 0.5),
+        );
+        let started = Instant::now();
+        let failure = ask(&client, READ).await.unwrap_err();
+        assert!(started.elapsed() < ms(1_000), "{:?}", started.elapsed());
+        for stub in [&dead, &refusing, &good] {
+            assert_eq!(failure.matches(&stub.addr()).count(), 1, "{failure}");
+        }
+    });
+}
+
+/// T38.6.4a.9: with two maintained stubs, one with a smoothed latency and one joined whose header request on joining
+/// is not answered yet, every read-only query goes to the first; once the second answers its header request it has a
+/// figure and is judged by the limit and the floor of two as usual.
+#[test]
+fn t38_6_4a_9_a_session_that_has_answered_nothing_takes_no_read() {
+    block_on(async {
+        let (first, second) = (stub_at(5, 100).await, stub_at(800, 100).await);
+        let client = checked_pool(
+            &[&first, &second],
+            PoolSetup {
+                near_factor: super::electrum_measure::NEAR_FACTOR_DEFAULT,
+                ..PoolSetup::new("NOFIGURE")
+            },
+            lenient(),
+            script_draw(&[], 0.5),
+        );
+        client.pool.run_pass().await;
+        assert_eq!(maintained(&client).len(), 2);
+        wait_until("the first stub's figure", || snap_of(&client, &first).samples == 1).await;
+        // The second stub's header request is still unanswered: no figure, no height.
+        let state = snap_of(&client, &second);
+        assert_eq!((state.samples, state.height), (0, None), "{state:?}");
+        let answered = answered_by(&client, 10).await;
+        assert!(answered.iter().all(|addr| *addr == first.addr()), "{answered:?}");
+        assert_eq!(second.requests(READ), 0);
+
+        // The answer is a sample, so the second stub has a figure at once. It is far, but with two maintained
+        // sessions the floor of two keeps both near: reads take turns again.
+        wait_until("the second stub's figure", || snap_of(&client, &second).samples == 1).await;
+        let figure = snap_of(&client, &second).smoothed_ms.unwrap();
+        assert!(figure >= 800., "{figure}");
+        let answered = answered_by(&client, 10).await;
+        assert!(answered.contains(&second.addr()), "{answered:?}");
     });
 }

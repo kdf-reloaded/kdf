@@ -438,15 +438,16 @@ pub(super) const NEAR_OFFSET_DEFAULT_MS: f64 = 20.0;
 
 /// Which of the maintained sessions are near (CRD ch.38 R38.6.4a item 6). `figures` holds the smoothed latency
 /// of each maintained session in priority order, `None` for one that has none yet; the answer holds one flag per
-/// figure, in the same order. With *f* the lowest figure, a session is near when it has no figure or when its
-/// figure is at most the larger of `factor` x *f* and *f* + `offset_ms` (the form of the limit is D38.6.4a.2, and
-/// this line is the only place that holds it). Without any figure, and with a `factor` of `0`, every session is
-/// near. A `factor` above `0` and below `1` acts as `1`: `factor` x *f* is then below *f* + `offset_ms`, which
+/// figure, in the same order. With *f* the lowest figure, a session is near when its figure is at most the larger
+/// of `factor` x *f* and *f* + `offset_ms` (the form of the limit is D38.6.4a.2, and this line is the only place
+/// that holds it). A session without a figure is not near while another session has one: it has answered nothing
+/// yet and takes no read before it has answered once (D38.6.4a.4). Without any figure, and with a `factor` of `0`,
+/// every session is near. A `factor` above `0` and below `1` acts as `1`: `factor` x *f* is then below *f* + `offset_ms`, which
 /// decides.
 ///
 /// The floor of two (R38.6.4a item 6, D38.6.4a.3): when two or more sessions are given and the limit leaves fewer
 /// than two of them near, the session with the next-lowest figure after the fastest is near as well, and between
-/// equal figures the one earlier in the list, which is the priority order. A coin with two sessions therefore
+/// equal figures the one earlier in the list, which is the priority order. Only a session with a figure is picked. A coin with two sessions therefore
 /// always spreads over both, and one with more over at least its two fastest. This too is held here only.
 pub(super) fn near_sessions(figures: &[Option<f64>], factor: f64, offset_ms: f64) -> Vec<bool> {
     let fastest = figures.iter().flatten().copied().reduce(f64::min);
@@ -456,11 +457,11 @@ pub(super) fn near_sessions(figures: &[Option<f64>], factor: f64, offset_ms: f64
     let limit = (factor * fastest).max(fastest + offset_ms);
     let mut near: Vec<bool> = figures
         .iter()
-        .map(|figure| figure.map_or(true, |figure| figure <= limit))
+        .map(|figure| figure.map_or(false, |figure| figure <= limit))
         .collect();
     if near.len() >= 2 && near.iter().filter(|near| **near).count() < 2 {
-        // Only the fastest is near, so every other session has a figure. `min_by` keeps the first of equal
-        // figures, which is the earlier one in priority order.
+        // Only the fastest is near. The next-lowest figure among the other sessions, if any has one, is near too;
+        // `min_by` keeps the first of equal figures, which is the earlier one in priority order.
         let next = figures
             .iter()
             .enumerate()
@@ -633,15 +634,21 @@ mod tests {
         assert_eq!(near_for(&[50., 100., 100.1], 2.), [true, true, false]);
     }
 
-    /// T38.6.4a.1: a session without a figure is near, and so is every session when none has one.
+    /// T38.6.4a.1 as amended by D38.6.4a.4: a session without a figure is not near while another one has one; every
+    /// session is near when none has one.
     #[test]
-    fn t38_6_4a_1_a_session_without_a_figure_is_near() {
+    fn t38_6_4a_1_a_session_without_a_figure_is_not_near_while_another_has_one() {
         let mut figures: Vec<Option<f64>> = RIN_FIGURES.iter().map(|figure| Some(*figure)).collect();
         figures[5] = None;
-        assert_eq!(near_sessions(&figures, 2., 20.), [true, true, true, false, false, true]);
+        // A session without a figure is not near while another one has a figure (D38.6.4a.4).
+        assert_eq!(near_sessions(&figures, 2., 20.), [
+            true, true, true, false, false, false
+        ]);
         // The lowest figure is taken among the present ones only.
         figures[0] = None;
-        assert_eq!(near_sessions(&figures, 2., 20.), [true, true, true, false, false, true]);
+        assert_eq!(near_sessions(&figures, 2., 20.), [
+            false, true, true, false, false, false
+        ]);
         assert_eq!(near_sessions(&[None, None, None], 2., 20.), [true; 3]);
         assert_eq!(near_sessions(&[None, None, None], 0., 20.), [true; 3]);
         assert!(near_sessions(&[], 2., 20.).is_empty());
@@ -656,10 +663,14 @@ mod tests {
         assert_eq!(near_for(&[25., 230., 266.], 2.), [true, true, false]);
         // 230, 25, 230: the lowest figure, then the earlier of the two equal ones.
         assert_eq!(near_for(&[230., 25., 230.], 2.), [true, true, false]);
-        // 25, 230 and none: the one without a figure is near already, so the floor adds nothing.
+        // 25, 230 and none: the one without a figure is not near, so the floor picks the 230 ms one, which has one.
         assert_eq!(near_sessions(&[Some(25.), Some(230.), None], 2., 20.), [
-            true, false, true
+            true, true, false
         ]);
+        // One session with a figure and the others without: only it is near, and the floor has nobody to add.
+        assert_eq!(near_sessions(&[None, Some(25.), None], 2., 20.), [false, true, false]);
+        // With the factor at 0 every session is near, figure or not.
+        assert_eq!(near_sessions(&[None, Some(25.), None], 0., 20.), [true; 3]);
         // A single session is near.
         assert_eq!(near_for(&[230.], 2.), [true]);
     }

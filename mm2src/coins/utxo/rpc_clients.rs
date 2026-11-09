@@ -85,7 +85,7 @@ pub(crate) mod electrum_measure;
 
 #[path = "rpc_clients/electrum_pool.rs"]
 pub(crate) mod electrum_pool;
-pub use electrum_pool::{ElectrumPoolOptions, ElectrumPoolTimings, ServerOrder};
+pub use electrum_pool::{with_call_budget, ElectrumPoolOptions, ElectrumPoolTimings, ServerOrder};
 
 #[path = "rpc_clients/electrum_rpc_client.rs"]
 pub(crate) mod electrum_rpc_client;
