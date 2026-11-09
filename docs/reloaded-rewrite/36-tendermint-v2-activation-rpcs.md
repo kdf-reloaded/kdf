@@ -472,8 +472,7 @@ member and is ignored under the extra-config-keys note of §36.3.1.
 > (`PlatformCoinCreationError`, the class R36.3.2 uses for `decimals`),
 > an array containing a non-positive or non-finite figure, because such a
 > figure makes the fee of chapter 18 §18.6B zero or undefined; whether to
-> also require the non-decreasing order was left to D36.4, which accepts any
-> order.
+> also require the non-decreasing order is left to D36.4.
 
 T36.16 *`priority_gas_prices` shape (R36.3.5).* A `TENDERMINT` entry with
 `priority_gas_prices: [0.015, 0.025, 0.04]` activates and the three levels
@@ -491,7 +490,7 @@ T36.17 *Non-positive figure (divergence note).* An entry with
 `PlatformCoinCreationError` and registers no coin. *(Reloaded-original; the
 reference draft accepts it.)*
 
-> **As built (2026-11-09; written by the clean-room Coder, R36.3.5, R36.3.6, T36.16, T36.17).**
+> **As built (2026-11-09; R36.3.5, R36.3.6, T36.16, T36.17).**
 > The `TENDERMINT` arm of the coin protocol carries `priority_gas_prices` as an optional array of exactly
 > three `f64` (`null` and absent are `None`; it is not serialized when absent), so every shape of R36.3.5 item 1
 > fails `CoinProtocolParseError` through the existing protocol parse. The platform builder reads the same

@@ -571,7 +571,7 @@ amount equals the level-high amount of T18.6B.1; the same at `gas_limit`
 with gas limit 187,500, an undelegation with 250,000, an IBC transfer
 with 150,000.
 
-> **As built (2026-11-09; written by the clean-room Coder, R18.6B.1 -- R18.6B.4, T18.6B.1, T18.6B.2).**
+> **As built (2026-11-09; R18.6B.1 -- R18.6B.4, T18.6B.1, T18.6B.2).**
 > One function of the platform coin returns `(selected price, gas limit)` for a fee-intent value that is either a
 > request (the request's optional fee descriptor and the operation's default gas limit) or a swap. A request
 > takes the explicit price of `CosmosGas`, the level of `CosmosGasPriority` (positions 0, 1, 2 of

@@ -102,8 +102,8 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   `High` or `Default`, spelled exactly so). The gas limit is the one the transaction is signed with. The
   fee amount is still derived from the node's gas simulation, `ceil(gas used x 1.5 x price)`, not from
   the limit times the price. UTXO, EVM, QRC20 and Siacoin coins refuse the two forms with
-  `InvalidFeePolicy` (a shielded coin refuses any `fee`, as before), and a Tendermint request that carries a form of another family ignores it and uses the default price
-  and gas limit. Detail: PR #323; CRD ch.49 R49.28 to R49.30, ch.18 R18.6B.2.
+  `InvalidFeePolicy` (a shielded coin refuses any `fee`, as before), and a Tendermint request that
+  carries a form of another family ignores it and uses the default price and gas limit. Detail: PR #323; CRD ch.49 R49.28 to R49.30, ch.18 R18.6B.2.
 - **`get_swap_gas_fee_policy` and `set_swap_gas_fee_policy` now accept a Tendermint platform
   coin.** The policy (`Legacy`, `Low`, `Medium`, `High`, starting at `Legacy`) selects the gas price of
   the coin's swap transactions and of its trade-fee estimates: `Low`, `Medium` and `High` pick the low,

@@ -350,10 +350,20 @@ designations and at the draft row, a `fee` descriptor of a **non-Cosmos**
 type that parses (`UtxoFixed`, `UtxoPerKbyte`, `EthGas`, `EthGasEip1559`,
 `Qrc20Gas`) on a Tendermint withdraw, staking or IBC request is **ignored
 without error**: the default gas price and the operation's default gas
-limit are used as if no descriptor had been sent. Reloaded shall do the
-same, for parity (D49.1, option (b)): such a descriptor is ignored without
-error on the direct method, on the task route and on the staking and IBC
-requests.
+limit are used as if no descriptor had been sent. Reloaded shall **not**
+copy this: such a descriptor shall be refused with the structured
+withdrawal error of R49.20, discriminant `InvalidFeePolicy`, HTTP 400 (the
+arm R49.27a already lists for a fee descriptor of a type the coin does not
+take, [Chapter 38](38-utxo-coin-maintenance-and-features.md)
+R38.6.6l/R38.6.6m), on the direct method and in `details` on the task
+route, and the staking requests shall answer their own structured error
+with the same meaning. *(Reloaded divergence; D49.1.)*
+
+*Reloaded status (2026-11-09):* by the maintainer's decision of 2026-11-09
+(D49.1, option (b)) such a descriptor is ignored without error, for parity,
+on the direct method, on the task route and on the staking requests: the
+default gas price and the operation's default gas limit apply. The refusal
+above records the state before that decision.
 
 R49.31. *What the completed payload shows.* For a Tendermint withdraw the
 `fee_details` member of the transaction-details object (R49.25) carries the
@@ -371,8 +381,8 @@ with. T18.6B.1 of chapter 18 asserts the amount through this member.
 > R49.30 and the level selection of chapter 18 §18.6B closes the gap. The
 > `fee_details` shape of R49.31 already matches.
 >
-> *As built 2026-11-09 (clean-side note): implemented; R49.30 states the decided behavior (ignore, D49.1
-> option (b)); see the As-built note of §49.2A.*
+> *As built 2026-11-09 (clean-side note): implemented; the status note after R49.30 records the decided
+> behavior (ignore, D49.1 option (b)); see the As-built note of §49.2A.*
 
 **D49.1 (maintainer decision; resolved).** *Resolved: the maintainer's decision of 2026-11-09, option (b), ignore for parity (R49.30); to be reassessed after field use.* *Foreign fee form on a Cosmos
 request.* R49.30 binds a refusal where every reference state silently
@@ -403,14 +413,24 @@ selects the default price and no error is raised; on a token the platform's
 array is used; `gas_price_option: "high"` (lower case) and
 `gas_price_option: "Medium"` each fail request parsing on both routes.
 
-T49.30. *Foreign form ignored (R49.30).* A Tendermint withdraw carrying
-`{"type": "EthGas", "gas_price": 1, "gas": 21000}` succeeds on the direct
-method and on the task route, signed with the coin's default gas price and
-the operation's default gas limit, exactly as the same withdraw without a
-descriptor; the same with a `UtxoFixed` descriptor; `add_delegation` with an
-`EthGas` descriptor signs with the delegation's default gas limit.
+T49.30. *Foreign form refused (R49.30; Reloaded-original).* A Tendermint
+withdraw carrying `{"type": "EthGas", "gas_price": 1, "gas": 21000}` answers
+HTTP 400 with `error_type: "InvalidFeePolicy"` on the direct method and
+`details.error_type == "InvalidFeePolicy"` on the task route, and no
+transaction is simulated or broadcast; the same with a `UtxoFixed`
+descriptor; `add_delegation` with an `EthGas` descriptor answers its
+structured error and broadcasts nothing.
 
-> **As built (2026-11-09; written by the clean-room Coder, R49.28 -- R49.31, T49.28 -- T49.30).** The shared fee
+*Reloaded status (2026-11-09):* by the maintainer's decision of 2026-11-09
+(D49.1, option (b)) the test is built as: the same withdraw with an `EthGas`
+descriptor succeeds on the direct method and on the task route, signed with
+the coin's default gas price and the operation's default gas limit, exactly
+as the same withdraw without a descriptor; the same with a `UtxoFixed`
+descriptor; a delegation fee computed with an `EthGas` descriptor uses the
+delegation's default gas limit. The sentence above records the state before
+that decision.
+
+> **As built (2026-11-09; R49.28 -- R49.31, T49.28 -- T49.30).** The shared fee
 > descriptor has two more variants: `CosmosGas {gas_limit: u64, gas_price: f64}` and
 > `CosmosGasPriority {gas_limit: u64, gas_price_option}`, with the tags spelled exactly so and the four
 > case-sensitive level strings `Low`, `Average`, `High`, `Default`; a missing member or another string fails
@@ -953,10 +973,10 @@ addresses.
   or control-flow transcription, error/log wording, internal module tree or
   internal test name) — below threshold, PASS.
 - *Clean-context addition (2026-11-09, forbidden corpus not consulted):* the
-  recorded resolution of D49.1, the final wording of R49.30 and T49.30 (the
-  decided behavior that replaces the refusal the gated text proposed), the as-
-  built note of §49.2A with its test-coverage sentence, and the two clean-side
-  notes after the cross-reference under R49.1 and the Reloaded status note
-  describe the maintainer's decision of 2026-11-09 and this repository's code.
+  recorded resolution of D49.1, the dated status notes after R49.30 and
+  T49.30 (the decided behavior; the cleared text above them is unchanged), the
+  as-built note of §49.2A with its test-coverage sentence, and the two
+  clean-side notes after the cross-reference under R49.1 and the Reloaded
+  status note describe the maintainer's decision of 2026-11-09 and this repository's code.
   They take no forbidden-class input, so chapter 01 R38 is not engaged and no
   gate pass is required.

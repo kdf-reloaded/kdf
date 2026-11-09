@@ -1539,14 +1539,22 @@ R35.6.9 *Error cases and non-cases.* Beyond R35.6.5:
    as at the draft row; the caller addresses the platform coin;
 2. a Tendermint platform coin **without** `priority_gas_prices`: at the
    draft row both RPCs succeed and the stored policy has no observable
-   effect. Reloaded (D35.12 item (i), option (c)) accepts `set` of any
-   value, stores it and returns it from `get`, logs one warning that the
-   coin has no `priority_gas_prices` and cannot honor the level, and prices
-   at the default;
+   effect. Reloaded's behavior is D35.12 item (i); until it is decided,
+   `get` returns the stored value and `set` of a non-`Legacy` value shall be
+   refused with `NotSupported` (HTTP 400), so that a caller is told the
+   coin cannot honor a level rather than silently priced at the default —
+   the recommended option;
 3. an unknown coin is `NoSuchCoin` (400) and a policy string outside the
    four values is the request-parse failure of R35.1.1 (`InvalidRequest`),
    both as for an EVM coin;
 4. every other coin family remains `NotSupported` (R35.6.4).
+
+*Reloaded status (2026-11-09):* by the maintainer's decision of 2026-11-09
+(D35.12 item (i), option (c)) Reloaded accepts `set` of any value on a
+Tendermint platform coin without `priority_gas_prices`, stores it, returns it
+from `get`, logs one warning that the coin cannot honor the level, and prices
+at the default; the interim sentence of item 2 records the state before that
+decision.
 
 > **Reloaded status (informative; this repository's tree, 2026-11-08).**
 > Reloaded's two RPCs resolve the ticker to an EVM coin and answer
@@ -1564,12 +1572,17 @@ and create-HTLC in that state are priced at position 2 of the array
 (chapter 18 T18.6B.1); a withdraw in the same state is priced at the default
 price. On a Tendermint token ticker both RPCs answer HTTP 400
 `NotSupported`. On a Tendermint platform coin without the array, `set` with
-`Medium` returns `Medium`, `get` then returns `Medium`, one warning is
-logged, and a simulated dex-fee send is priced at the default price
-(R35.6.9 item 2). *(Reloaded-original test
+`Medium` answers HTTP 400 `NotSupported` and `get` returns `Legacy`
+(R35.6.9 item 2, until D35.12 decides otherwise). *(Reloaded-original test
 written to the gated rules.)*
 
-> **As built (2026-11-09; written by the clean-room Coder, R35.6.8, R35.6.9, T35.38).** A Tendermint platform coin
+*Reloaded status (2026-11-09):* by the maintainer's decision of 2026-11-09
+(D35.12 item (i), option (c)) the last case is built as: `set` with `Medium`
+returns `Medium`, `get` then returns `Medium`, one warning is logged, and a
+simulated dex-fee send is priced at the default price; the sentence above
+records the state before that decision.
+
+> **As built (2026-11-09; R35.6.8, R35.6.9, T35.38).** A Tendermint platform coin
 > holds a policy slot (`Legacy` at construction; no activation parameter or coins-file key sets it). Both RPCs
 > resolve an EVM coin or a Tendermint platform coin; a Tendermint token ticker is `NotSupported`. The setter
 > stores any of the four values; on a coin without `priority_gas_prices` it logs one warning for every value,
@@ -2799,8 +2812,9 @@ is decided together with this item.
   wording, internal module tree or internal test name) — below threshold,
   PASS.
 - *Clean-context addition (2026-11-09, forbidden corpus not consulted):* the
-  recorded resolution of D35.12, the final wording of R35.6.9 item 2 and
-  T35.38 (the decided behavior that replaces the interim rule named in the
-  item above), and the as-built note under §35.6.1 describe the maintainer's
+  recorded resolution of D35.12, the dated status notes after R35.6.9 and
+  T35.38 (the decided behavior; the cleared interim text above them is
+  unchanged), and the as-built note under §35.6.1 describe the maintainer's
   decision of 2026-11-09 and this repository's code. They take no
-  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is required.
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+  is required.
