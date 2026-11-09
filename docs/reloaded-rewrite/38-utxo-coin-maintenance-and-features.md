@@ -2491,16 +2491,18 @@ watched address produces a streamed balance event.
 > 8. **A repeating failure is logged once and backs off.**
 >    - **Logging:** when the history loop's balance read or history request fails
 >      with the same error text again and again, the node logs it once, then at most
->      one summary line per 10 minutes with the count, then one line when the request
->      succeeds again. Two texts that differ only in their numbers, such as a time or
+>      one summary line per 10 minutes with the count and the latest text, then one
+>      line when the request succeeds again. Two texts that differ only in their numbers, such as a time or
 >      a count of seconds, count as the same error. A different error text is logged
->      anew. The QRC20 history loop
->      logs the same way.
+>      anew. The QRC20 history loop logs the same way.
 >    - **Backoff:** while the UTXO history request keeps failing, the wait before the
 >      next attempt grows from 10 s to 60 s, then doubles up to 300 s, and returns to
->      10 s after the first success. After the server recovers, the history can thus
->      resume up to 300 s later. The QRC20 loop keeps its own backoff.
+>      10 s after the first successful history request, or as soon as the loop goes
+>      idle again because the balance is read and unchanged. After the server
+>      recovers, the history can thus resume up to 300 s later. The QRC20 loop keeps
+>      its own backoff.
 >    - **Unaffected:** item 7's floor applies to the healthy loop and is unchanged.
+>      The BCH and SLP history state machine keeps its own retry lines and cooldown.
 >    - **Tests:** the throttle and the delays are unit-tested; the loop's use of them
 >      is covered by construction.
 
@@ -3801,3 +3803,7 @@ R38.8.6 **Tests (two-direction, observable).**
   blocks. *Measure:* 0.03, read against the standard that any discretionary
   finding fails a chapter; dictated-interop and public-surface tokens were
   excluded from the measured set.
+- *Reloaded-original addition (2026-11-09, PR #327), clean side -- §38.6.5
+  item 8.* Inputs: this repository's code and a field report of an Electrum
+  server with an expired certificate; no forbidden-class input, so chapter 01
+  R38 is not engaged and no gate pass is required.

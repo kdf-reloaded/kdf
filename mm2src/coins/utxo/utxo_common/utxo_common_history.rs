@@ -132,10 +132,10 @@ fn failure_key(text: &str) -> String {
 /// Throttles the log lines and the retry delay of one failing source of the history loop (the
 /// balance read, or the history request). The loop holds one per source, so they never share state.
 ///
-/// While a request keeps failing: the first failure and each change of the error text log one WARN
+/// While a request keeps failing: the first failure and each change of the error text log one
 /// line, a repeat of the same text logs nothing except one summary line per
 /// [`FAILURE_SUMMARY_INTERVAL_MS`], and the retry delay grows 10, 60, 120, 240, 300, 300, ... seconds.
-/// The first success logs one INFO line and resets everything. The clock is an argument, so the
+/// The first success logs one line and resets everything. The clock is an argument, so the
 /// throttle is testable without sleeping.
 #[derive(Debug, Default)]
 pub(crate) struct FailureThrottle {
@@ -145,7 +145,7 @@ pub(crate) struct FailureThrottle {
     consecutive: u32,
     /// Failures of the same text since the last line was logged.
     unreported: u32,
-    /// When the last WARN or summary line was logged, in ms.
+    /// When the last first-failure or summary line was logged, in ms.
     last_logged_ms: u64,
 }
 
@@ -179,6 +179,9 @@ impl FailureThrottle {
         (failed_attempts > 0).then_some(failed_attempts)
     }
 
+    /// Resets the state quietly: [`Self::on_success`] without a line to log for the caller.
+    pub(crate) fn reset(&mut self) { *self = Self::default(); }
+
     /// The seconds to wait before the next attempt: 10 after the first failure, 60 after the
     /// second, then doubling up to 300; 10 when nothing has failed.
     pub(crate) fn delay_secs(&self) -> u64 {
@@ -207,7 +210,7 @@ impl FailureThrottle {
                 "",
                 "tx_history",
                 "coin" => ticker;
-                fmt = "tx_history {}: {} failed {} more times in the last 10 minutes: {}", ticker, what, repeats, error
+                fmt = "tx_history {}: {} failed {} more times since the last line: {}", ticker, what, repeats, error
             ),
             FailureReport::Silent => (),
         }
@@ -335,6 +338,12 @@ where
                 // address moved, whichever comes first; the balance is re-read
                 // at the top of the loop either way, so the notification only
                 // decides *when* to look, never *what* is true.
+                //
+                // The balance read worked and nothing is pending, so the server answers again: end
+                // a history backoff quietly (the balance source logs its own recovery). While the
+                // balance differs or an update is pending this branch is not taken, so a server that
+                // answers the balance and fails the history keeps its backoff.
+                history_failures.reset();
                 let idle = Timer::sleep(30.);
                 futures::pin_mut!(idle);
                 let woken = futures::StreamExt::next(&mut wake_rx);
@@ -1275,5 +1284,22 @@ mod tests {
         // a text that differs in words is a different failure
         let other = field(1794225804, 2515312, 279).replace("certificate expired", "unknown issuer");
         assert_eq!(throttle.on_failure(&other, 20_000), FailureReport::Warn);
+    }
+
+    #[test]
+    fn failure_throttle_reset_returns_to_the_start() {
+        let mut throttle = FailureThrottle::default();
+        for i in 0..4 {
+            throttle.on_failure(TLS_ERROR, i * 1000);
+        }
+        assert_eq!(throttle.delay_secs(), 240);
+
+        throttle.reset();
+        assert_eq!(throttle.delay_secs(), 10);
+        // nothing is left to report as a recovery
+        assert_eq!(throttle.on_success(), None);
+        // the same text after the reset is a first failure again, with the first delay
+        assert_eq!(throttle.on_failure(TLS_ERROR, 5000), FailureReport::Warn);
+        assert_eq!(throttle.delay_secs(), 10);
     }
 }

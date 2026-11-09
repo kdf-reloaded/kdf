@@ -134,6 +134,11 @@ impl Qrc20Coin {
 
             let need_update = self.check_if_history_update_is_needed(&history_map, &my_balance, &actual_balance);
             if !need_update {
+                // The balance read worked and nothing is pending, so the server answers again: end a
+                // history backoff quietly (the balance source logs its own recovery). While the
+                // balance differs or an update is pending this branch is not taken, so a server that
+                // answers the balance and fails the history keeps its backoff.
+                history_failures.reset();
                 Timer::sleep(30.).await;
                 continue;
             }
