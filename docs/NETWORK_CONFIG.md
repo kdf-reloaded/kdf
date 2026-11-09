@@ -311,8 +311,8 @@ List at least three servers for a coin. With fewer than three, the node cannot a
 from one that follows another chain, and it logs a warning when the coin is activated. When the servers
 disagree about the chain (one is far ahead of the others, or two answer different block headers for the
 same height), the activation fails with an error that names the servers and no coin is registered. After
-activation the coin refuses new orders, new swaps and withdrawals until the servers agree again, while
-balance and history reads and running swaps go on. The remedy is the same in both cases: remove the servers
+activation the coin refuses new orders and withdrawals with the error and starts no new swap, until the
+servers agree again, while balance and history reads and running swaps go on. The remedy is the same in both cases: remove the servers
 that follow the other chain from the coin's list, or activate the coin with servers that agree. The checks
 are on by default and the top-level `MM2.json` boolean `electrum_tip_checks` set to `false` turns them off.
 

@@ -259,7 +259,7 @@ available; the retry over every server stays.
 Replaces the idea of hiding a far-ahead server (CRD ch.38 R38.6.4o items 12 and 13, D38.6.4o.9–13).
 Servers far apart in height are compared by one directed header request each at a common height; a far-ahead
 server or a header difference fails the activation (5 s window) and, later, puts the coin in a state that
-refuses new orders, new swaps and withdrawals. *Implemented (PR #324): a346ebdda.*
+refuses new orders, new swaps and withdrawals. *Implemented (PR #324): a346ebdda, cdf4c018d, 0417392bf.*
 
 ## Decisions (taken 2026-11-09, maintainer)
 

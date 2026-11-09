@@ -1697,9 +1697,13 @@ failure, naming each server, from the activation itself.
 >   server that never answers builds in about 5 s longer than before.
 > - *After activation.* `MmCoin::chain_disagreement` (default `None`) is answered for the UTXO coin types through
 >   `electrum_chain_disagreement`. It refuses a withdrawal (`WithdrawError::ChainDisagreement`, in `withdraw` and
->   `init_withdraw`), a new order (`create_maker_order_impl` and `lp_auto_buy`) and a new swap (the maker and the
->   taker start in `lp_connect_start_bob` and `lp_connected_alice`, before anything moves; v1 and v2 both pass
->   there). `electrum_servers` has the field `chain_disagreement`. With `electrum_tip_checks` `false` nothing of this
+>   `init_withdraw`) and a new order (`create_maker_order_impl` and `lp_auto_buy`) with the error text. A new swap
+>   is not started: the maker start `lp_connect_start_bob` and the taker start `lp_connected_alice` log the error
+>   and return before anything moves. They are the only places in this tree that call `run_maker_swap` or
+>   `run_taker_swap` with `StartNew` (both handle the two atomic-lock-time versions), no other path starts a new
+>   swap from a match, and the `KickStart` in `swap_rpc.rs` restarts a saved swap. An SLP token answers from its BCH
+>   platform coin's client; QRC20 and Qtum do the same; a ZCoin has no override, since its Electrum client is only a
+>   fallback for swap-path reads. `electrum_servers` has the field `chain_disagreement`. With `electrum_tip_checks` `false` nothing of this
 >   runs.
 > - *Tests.* `t38_6_4o_6_a_far_ahead_server_fails_the_activation`,
 >   `t38_6_4o_8_different_headers_fail_the_activation_only_below_the_tip`, `t38_6_4o_12_two_servers_stale_or_diverged`,
@@ -1708,10 +1712,17 @@ failure, naming each server, from the activation itself.
 >   `t38_6_4o_16_a_pair_is_compared_at_most_once_per_limit`, with `set_block_header` and `set_default_block_header`
 >   on the stub. The old far-ahead test is now `t38_6_4o_6_a_far_ahead_server_is_kept_out_of_the_reads` (item 4).
 >   `t38_6_4o_7_different_headers_in_notifications_start_a_comparison` covers item 7 for notifications.
+>   A comparison runs as a task of its own and counts itself through a drop guard, so one that is slower than the
+>   activation window finishes and records its result (`t38_6_4o_12_a_comparison_slower_than_the_window_is_not_dropped`).
+>   A pair that did not answer records nothing and is tried again after the comparison limit; a pair that was found
+>   to differ is compared again at the same height after the limit, so a resolved fork ends the state
+>   (`t38_6_4o_12_a_resolved_fork_ends_the_state`). `pending` holds at most one entry per pair, keeps the first
+>   difference found, and drops entries for servers that left the pool and entries older than ten comparison limits.
 >   T38.6.4o.14 is tested at the pool (the state, the two log lines, `electrum_servers`, `chain_disagreement`) and at
 >   the withdrawal (`a_withdrawal_is_refused_while_the_servers_disagree` in `rpc_command/electrum_servers.rs`). The
->   refusals of a new order and of a swap start are one `if let Some(error) = ...chain_disagreement()` each and have
->   no test of their own.
+>   refusals of a new order and of the maker swap start are tested in `ordermatch_tests.rs`
+>   (`a_chain_disagreement_refuses_a_new_order`, `a_chain_disagreement_starts_no_new_maker_swap`, with the helper
+>   `chain_disagreement` mocked); the taker start has the same check and no test of its own.
 
 > **As-built note (2026-11-09), the activation stall (plan step 0).**
 > - *R38.6.4k-R item 3 and R38.6.4l item 2.* Before, `run_probe` offered a connection to the maintained set

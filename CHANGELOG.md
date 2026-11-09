@@ -409,8 +409,8 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   error that names every server with a height, and the coin is not registered. The legacy `electrum`
   and `enable` calls and the task activations report that text. After activation, when the servers
   come to disagree, the node logs one error line, and the coin refuses a new order with it as base
-  or rel, a new swap and a withdrawal with the same text until the servers agree again; balance and
-  other reads and swaps that have started go on. To fix it, remove the servers that follow the other
+  or rel and a withdrawal with the same text, and does not start a new swap (the error line says
+  why), until the servers agree again; balance and other reads and swaps that have started go on. To fix it, remove the servers that follow the other
   chain from the coin's list or activate the coin with servers that agree. With two servers the node
   compares the block headers at a common height when they are far apart: the same header means the
   lower server is only behind (the higher one is used), a different header is a disagreement. A coin
