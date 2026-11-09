@@ -410,14 +410,14 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   and `enable` calls and the task activations report that text. After activation, when the servers
   come to disagree, the node logs one error line, and the coin refuses a new order with it as base
   or rel and a withdrawal with the same text, and does not start a new swap (the error line says
-  why), until the servers agree again; balance and other reads and swaps that have started go on. To fix it, remove the servers that follow the other
-  chain from the coin's list or activate the coin with servers that agree. With two servers the node
-  compares the block headers at a common height when they are far apart: the same header means the
-  lower server is only behind (the higher one is used), a different header is a disagreement. A coin
-  activated with fewer than three servers logs one warning, because with fewer the node cannot
-  always tell a stale server from one on another chain. `electrum_tip_checks` set to `false` turns
-  all of this off. The `electrum_servers` answer has a new field `chain_disagreement`. Detail: PR
-  #324; CRD ch.38 R38.6.4o items 12–13.
+  why), until the servers agree again; balance and other reads and swaps that have started go on. To
+  fix it, remove the servers that follow the other chain from the coin's list or activate the coin
+  with servers that agree. With two servers the node compares the block headers at a common height
+  when they are far apart: the same header means the lower server is only behind (the higher one is
+  used), a different header is a disagreement. A coin activated with fewer than three servers logs
+  one warning, because with fewer the node cannot always tell a stale server from one on another
+  chain. `electrum_tip_checks` set to `false` turns all of this off. The `electrum_servers` answer
+  has a new field `chain_disagreement`. Detail: PR #324; CRD ch.38 R38.6.4o items 12–13.
 - **A coin's Electrum servers that are behind the chain, or stopped following it, are no longer
   asked.** A server that is 1,000 blocks behind used to keep its share of balance and history reads,
   and a swap's wait for a confirmation could be answered by any server in turn. Now the node asks

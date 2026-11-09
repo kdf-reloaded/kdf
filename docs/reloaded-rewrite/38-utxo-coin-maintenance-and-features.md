@@ -1697,7 +1697,8 @@ failure, naming each server, from the activation itself.
 >   server that never answers builds in about 5 s longer than before.
 > - *After activation.* `MmCoin::chain_disagreement` (default `None`) is answered for the UTXO coin types through
 >   `electrum_chain_disagreement`. It refuses a withdrawal (`WithdrawError::ChainDisagreement`, in `withdraw` and
->   `init_withdraw`) and a new order (`create_maker_order_impl` and `lp_auto_buy`) with the error text. A new swap
+>   `init_withdraw`) and a new order (`create_maker_order_impl`, `buy_impl`, `sell_impl` and `lp_auto_buy`) with the
+>   error text. A new swap
 >   is not started: the maker start `lp_connect_start_bob` and the taker start `lp_connected_alice` log the error
 >   and return before anything moves. They are the only places in this tree that call `run_maker_swap` or
 >   `run_taker_swap` with `StartNew` (both handle the two atomic-lock-time versions), no other path starts a new
@@ -2543,6 +2544,10 @@ from turning every node into a periodic prober of the public servers.
 >   single server that claims a height that does not exist makes the honest
 >   one look behind, and reads then prefer it. With three or more servers the
 >   bound above the agreed tip (D38.6.4o.9) covers that case.
+> - When a comparison of item 12 is still running as an activation fails, it
+>   ends later and can log the after-activation ERROR line of item 12 for the
+>   coin that was not registered. This is rare and has no effect beyond that
+>   log line.
 
 T38.6.4.1 *Bounds and validation.* A test shall activate against an in-process
 Electrum test server set with `min_connected` 0, with `min_connected` above
