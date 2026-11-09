@@ -97,6 +97,10 @@ impl Qrc20Coin {
         let mut my_balance: Option<CoinBalance> = None;
         let mut success_iteration = 0i32;
         let mut history_retry_delay_secs = HISTORY_RETRY_INITIAL_DELAY_SECS;
+        // A repeating failure of one source is logged once and then summarized (the retry delays
+        // below are this loop's own and stay as they are). The two sources are independent.
+        let mut balance_failures = utxo_common::FailureThrottle::default();
+        let mut history_failures = utxo_common::FailureThrottle::default();
         loop {
             if ctx.is_stopping() {
                 break;
@@ -112,12 +116,16 @@ impl Qrc20Coin {
             }
 
             let actual_balance = match self.my_balance().compat().await {
-                Ok(b) => b,
+                Ok(b) => {
+                    balance_failures.record_success(&ctx, &self.utxo.conf.ticker, "balance read");
+                    b
+                },
                 Err(err) => {
-                    ctx.log.log(
-                        "😟",
-                        &[&"tx_history", &self.utxo.conf.ticker],
-                        &ERRL!("Error {:?} on getting balance", err),
+                    balance_failures.record_failure(
+                        &ctx,
+                        &self.utxo.conf.ticker,
+                        "balance read",
+                        &err.get_inner().to_string(),
                     );
                     Timer::sleep(10.).await;
                     continue;
@@ -132,13 +140,12 @@ impl Qrc20Coin {
 
             let metrics = ctx.metrics.clone();
             let tx_ids = match self.request_tx_history(metrics).await {
-                RequestTxHistoryResult::Ok(tx_ids) => tx_ids,
+                RequestTxHistoryResult::Ok(tx_ids) => {
+                    history_failures.record_success(&ctx, &self.utxo.conf.ticker, "history request");
+                    tx_ids
+                },
                 RequestTxHistoryResult::Retry { error } => {
-                    ctx.log.log(
-                        "",
-                        &[&"tx_history", &self.utxo.conf.ticker],
-                        &ERRL!("{}, retrying in {} seconds", error, history_retry_delay_secs),
-                    );
+                    history_failures.record_failure(&ctx, &self.utxo.conf.ticker, "history request", &error);
                     Timer::sleep(history_retry_delay_secs as f64).await;
                     history_retry_delay_secs = next_history_retry_delay(history_retry_delay_secs);
                     continue;

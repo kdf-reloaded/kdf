@@ -2485,6 +2485,24 @@ watched address produces a streamed balance event.
 >    completes cause one refresh, not a queue.
 > 7. **The 10-second poll floor stays** (chapter 10 R25). Lowering it would be a
 >    separate decision, because of the load it puts on public Electrum servers.
+>
+> **Addition (2026-11-09; Reloaded-original, clean side; PR #NNN).**
+>
+> 8. **A repeating failure is logged once and backs off.**
+>    - **Logging:** when the history loop's balance read or history request fails
+>      with the same error text again and again, the node logs it once, then at most
+>      one summary line per 10 minutes with the count, then one line when the request
+>      succeeds again. Two texts that differ only in their numbers, such as a time or
+>      a count of seconds, count as the same error. A different error text is logged
+>      anew. The QRC20 history loop
+>      logs the same way.
+>    - **Backoff:** while the UTXO history request keeps failing, the wait before the
+>      next attempt grows from 10 s to 60 s, then doubles up to 300 s, and returns to
+>      10 s after the first success. After the server recovers, the history can thus
+>      resume up to 300 s later. The QRC20 loop keeps its own backoff.
+>    - **Unaffected:** item 7's floor applies to the healthy loop and is unchanged.
+>    - **Tests:** the throttle and the delays are unit-tested; the loop's use of them
+>      is covered by construction.
 
 ### 38.6.6 Fee policy, the whole-kilobyte fixed-fee option, and the UTXO trading floors
 

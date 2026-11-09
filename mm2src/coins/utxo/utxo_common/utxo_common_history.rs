@@ -66,6 +66,168 @@ fn load_history_working_set(
     (history_map, healed)
 }
 
+/// At most one summary line per this long while the same failure repeats.
+const FAILURE_SUMMARY_INTERVAL_MS: u64 = 10 * 60 * 1000;
+/// The retry delay after the first failure, and the floor of the loop's poll rate.
+const FAILURE_FIRST_DELAY_SECS: u64 = 10;
+/// The retry delay after the second failure; it doubles on each further failure.
+const FAILURE_SECOND_DELAY_SECS: u64 = 60;
+/// The retry delay never exceeds this.
+const FAILURE_MAX_DELAY_SECS: u64 = 300;
+
+/// What a failed attempt asks the caller to log.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum FailureReport {
+    /// The first failure, or a failure whose text differs from the previous one: log it once.
+    Warn,
+    /// The same text again and a summary is due: `repeats` failures since the last line was logged,
+    /// this one included.
+    Summary { repeats: u32 },
+    /// The same text again and no summary is due yet: log nothing.
+    Silent,
+}
+
+/// Removes the leading `file:line] ` location markers that `ERRL!` prepends, so that two failures
+/// of the same cause compare equal wherever they were raised.
+fn strip_location_prefix(mut text: &str) -> &str {
+    while let Some((head, rest)) = text.split_once("] ") {
+        let is_location = head.rsplit_once(':').is_some_and(|(file, line)| {
+            !file.is_empty()
+                && !file.contains(char::is_whitespace)
+                && !line.is_empty()
+                && line.bytes().all(|b| b.is_ascii_digit())
+        });
+        if !is_location {
+            break;
+        }
+        text = rest;
+    }
+    text
+}
+
+/// The key two failures are compared by: the text without its location prefix, with every run of
+/// ASCII digits replaced by one `#`. An error text can carry values that change on each attempt
+/// (a verification time, "N seconds ago"), and such a repeat is the same failure.
+///
+/// A different server address that differs only in digits compares equal. That is acceptable: the
+/// source and the ticker are fixed per throttle, and the text still differs in its words when the
+/// cause does.
+fn failure_key(text: &str) -> String {
+    let mut key = String::with_capacity(text.len());
+    let mut in_digits = false;
+    for c in strip_location_prefix(text).chars() {
+        if c.is_ascii_digit() {
+            if !in_digits {
+                key.push('#');
+            }
+            in_digits = true;
+        } else {
+            key.push(c);
+            in_digits = false;
+        }
+    }
+    key
+}
+
+/// Throttles the log lines and the retry delay of one failing source of the history loop (the
+/// balance read, or the history request). The loop holds one per source, so they never share state.
+///
+/// While a request keeps failing: the first failure and each change of the error text log one WARN
+/// line, a repeat of the same text logs nothing except one summary line per
+/// [`FAILURE_SUMMARY_INTERVAL_MS`], and the retry delay grows 10, 60, 120, 240, 300, 300, ... seconds.
+/// The first success logs one INFO line and resets everything. The clock is an argument, so the
+/// throttle is testable without sleeping.
+#[derive(Debug, Default)]
+pub(crate) struct FailureThrottle {
+    /// The [`failure_key`] of the previous failure.
+    last_key: Option<String>,
+    /// Failures in a row since the last success.
+    consecutive: u32,
+    /// Failures of the same text since the last line was logged.
+    unreported: u32,
+    /// When the last WARN or summary line was logged, in ms.
+    last_logged_ms: u64,
+}
+
+impl FailureThrottle {
+    /// Records a failure at `now_ms` and says what to log. Failures are compared by [`failure_key`].
+    pub(crate) fn on_failure(&mut self, error: &str, now_ms: u64) -> FailureReport {
+        let key = failure_key(error);
+        self.consecutive = self.consecutive.saturating_add(1);
+        if self.last_key.as_deref() != Some(key.as_str()) {
+            self.last_key = Some(key);
+            self.unreported = 0;
+            self.last_logged_ms = now_ms;
+            return FailureReport::Warn;
+        }
+        self.unreported = self.unreported.saturating_add(1);
+        if now_ms.saturating_sub(self.last_logged_ms) >= FAILURE_SUMMARY_INTERVAL_MS {
+            let repeats = self.unreported;
+            self.unreported = 0;
+            self.last_logged_ms = now_ms;
+            FailureReport::Summary { repeats }
+        } else {
+            FailureReport::Silent
+        }
+    }
+
+    /// Records a success. Returns the number of failed attempts that preceded it when there were
+    /// any, and resets the state.
+    pub(crate) fn on_success(&mut self) -> Option<u32> {
+        let failed_attempts = self.consecutive;
+        *self = Self::default();
+        (failed_attempts > 0).then_some(failed_attempts)
+    }
+
+    /// The seconds to wait before the next attempt: 10 after the first failure, 60 after the
+    /// second, then doubling up to 300; 10 when nothing has failed.
+    pub(crate) fn delay_secs(&self) -> u64 {
+        match self.consecutive {
+            0 | 1 => FAILURE_FIRST_DELAY_SECS,
+            n => FAILURE_SECOND_DELAY_SECS
+                .saturating_mul(1u64 << (n - 2).min(8))
+                .min(FAILURE_MAX_DELAY_SECS),
+        }
+    }
+
+    /// Records a failure of `what` for the coin `ticker` and logs what the throttle asks for, to the
+    /// ctx log tail (the channel the loop has always used).
+    pub(crate) fn record_failure(&mut self, ctx: &MmArc, ticker: &str, what: &str, error: &str) {
+        let error = strip_location_prefix(error);
+        match self.on_failure(error, now_ms()) {
+            FailureReport::Warn => log_tag!(
+                ctx,
+                "",
+                "tx_history",
+                "coin" => ticker;
+                fmt = "tx_history {}: {} failed: {}", ticker, what, error
+            ),
+            FailureReport::Summary { repeats } => log_tag!(
+                ctx,
+                "",
+                "tx_history",
+                "coin" => ticker;
+                fmt = "tx_history {}: {} failed {} more times in the last 10 minutes: {}", ticker, what, repeats, error
+            ),
+            FailureReport::Silent => (),
+        }
+    }
+
+    /// Records a success of `what` for the coin `ticker` and logs the recovery to the ctx log tail
+    /// when it follows failures.
+    pub(crate) fn record_success(&mut self, ctx: &MmArc, ticker: &str, what: &str) {
+        if let Some(attempts) = self.on_success() {
+            log_tag!(
+                ctx,
+                "",
+                "tx_history",
+                "coin" => ticker;
+                fmt = "tx_history {}: {} recovered after {} failed attempts", ticker, what, attempts
+            );
+        }
+    }
+}
+
 #[allow(clippy::cognitive_complexity)]
 pub async fn process_history_loop<T>(coin: T, ctx: MmArc)
 where
@@ -127,6 +289,10 @@ where
     };
 
     let mut success_iteration = 0i32;
+    // A repeating failure of one source is logged once and then summarized, and a failing history
+    // request backs the loop off (CRD ch.38 R38.6.5 decision 8). The two sources are independent.
+    let mut balance_failures = FailureThrottle::default();
+    let mut history_failures = FailureThrottle::default();
     loop {
         if ctx.is_stopping() {
             break;
@@ -145,14 +311,17 @@ where
         }
 
         let actual_balance = match coin.my_balance().compat().await {
-            Ok(actual_balance) => Some(actual_balance),
+            Ok(actual_balance) => {
+                balance_failures.record_success(&ctx, &coin.as_ref().conf.ticker, "balance read");
+                Some(actual_balance)
+            },
             Err(err) => {
-                log_tag!(
-                    ctx,
-                    "",
-                    "tx_history",
-                    "coin" => coin.as_ref().conf.ticker;
-                    fmt = "Error {:?} on getting balance", err
+                // The inner error's own text: the `{:?}` of the traced wrapper carries code locations.
+                balance_failures.record_failure(
+                    &ctx,
+                    &coin.as_ref().conf.ticker,
+                    "balance read",
+                    &err.get_inner().to_string(),
                 );
                 None
             },
@@ -181,16 +350,17 @@ where
 
         let metrics = ctx.metrics.clone();
         let tx_ids = match coin.request_tx_history(metrics).await {
-            RequestTxHistoryResult::Ok(tx_ids) => tx_ids,
+            RequestTxHistoryResult::Ok(tx_ids) => {
+                // Only a successful history request resets the backoff. A successful balance read
+                // does not: a server can answer the balance and still fail the history.
+                history_failures.record_success(&ctx, &coin.as_ref().conf.ticker, "history request");
+                tx_ids
+            },
             RequestTxHistoryResult::Retry { error } => {
-                log_tag!(
-                    ctx,
-                    "",
-                    "tx_history",
-                    "coin" => coin.as_ref().conf.ticker;
-                    fmt = "{}, retrying", error
-                );
-                Timer::sleep(10.).await;
+                history_failures.record_failure(&ctx, &coin.as_ref().conf.ticker, "history request", &error);
+                // 10 s after the first failure, then 60, 120, 240, 300 s. This sleep does not wake on a
+                // script-hash notification: the retry re-reads everything at its end anyway.
+                Timer::sleep(history_failures.delay_secs() as f64).await;
                 continue;
             },
             RequestTxHistoryResult::HistoryTooLarge => {
@@ -930,5 +1100,180 @@ mod tests {
             (unconfirmed.txid, unconfirmed.block_height()),
             (H256Json::from([0x22; 32]), 0)
         );
+    }
+
+    const MINUTE_MS: u64 = 60 * 1000;
+    const TLS_ERROR: &str = "transport: the certificate of electrum1.example:50002 has expired";
+
+    // The failure times of the throttle test: 50 failures of one text across 30 minutes, three of
+    // them exactly 10, 20 and 30 minutes after the first, the rest between those, never a full
+    // summary interval after the previous summary.
+    fn failure_times_over_30_minutes() -> Vec<u64> {
+        let mut times = vec![0, 1000];
+        for segment in 0..3u64 {
+            for step in 1..=15u64 {
+                times.push(segment * 10 * MINUTE_MS + step * 37_000);
+            }
+            times.push((segment + 1) * 10 * MINUTE_MS);
+        }
+        times.sort_unstable();
+        times
+    }
+
+    #[test]
+    fn failure_throttle_logs_a_repeating_error_once_and_summarizes() {
+        let times = failure_times_over_30_minutes();
+        assert_eq!(times.len(), 50);
+
+        let mut throttle = FailureThrottle::default();
+        let reports: Vec<FailureReport> = times
+            .iter()
+            .map(|t| throttle.on_failure(&format!("utxo_common_history.rs:423] {TLS_ERROR}"), *t))
+            .collect();
+
+        let warns = reports.iter().filter(|r| **r == FailureReport::Warn).count();
+        let silent = reports.iter().filter(|r| **r == FailureReport::Silent).count();
+        let summaries: Vec<u32> = reports
+            .iter()
+            .filter_map(|r| match r {
+                FailureReport::Summary { repeats } => Some(*repeats),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warns, 1);
+        assert_eq!(reports[0], FailureReport::Warn);
+        assert_eq!(summaries, vec![17, 16, 16]);
+        assert_eq!(silent, 46);
+    }
+
+    #[test]
+    fn failure_throttle_ignores_the_location_prefix() {
+        assert_eq!(
+            strip_location_prefix("utxo_common_history.rs:423] a:1] Error x on y"),
+            "Error x on y"
+        );
+        // not a location marker: left as it is
+        assert_eq!(strip_location_prefix("Error x] on y"), "Error x] on y");
+        assert_eq!(strip_location_prefix("plain"), "plain");
+
+        let mut throttle = FailureThrottle::default();
+        assert_eq!(throttle.on_failure("a.rs:1] same", 0), FailureReport::Warn);
+        // the same cause raised from another line is the same failure
+        assert_eq!(throttle.on_failure("b.rs:99] same", 1000), FailureReport::Silent);
+        assert_eq!(throttle.on_failure("same", 2000), FailureReport::Silent);
+    }
+
+    #[test]
+    fn failure_throttle_delay_backs_off_and_is_bounded() {
+        let mut throttle = FailureThrottle::default();
+        assert_eq!(throttle.delay_secs(), 10);
+        let mut delays = vec![];
+        for i in 0..8 {
+            throttle.on_failure(TLS_ERROR, i * 1000);
+            delays.push(throttle.delay_secs());
+        }
+        assert_eq!(delays, vec![10, 60, 120, 240, 300, 300, 300, 300]);
+
+        // a very long failure run does not overflow the shift
+        for i in 8..200 {
+            throttle.on_failure(TLS_ERROR, i * 1000);
+        }
+        assert_eq!(throttle.delay_secs(), 300);
+    }
+
+    #[test]
+    fn failure_throttle_logs_a_changed_error_text_again() {
+        let mut throttle = FailureThrottle::default();
+        assert_eq!(throttle.on_failure(TLS_ERROR, 0), FailureReport::Warn);
+        assert_eq!(throttle.on_failure(TLS_ERROR, 1000), FailureReport::Silent);
+        assert_eq!(
+            throttle.on_failure("transport: connection refused by electrum1.example:50002", 2000),
+            FailureReport::Warn
+        );
+        // the new text is the one that repeats now, and the delay keeps growing
+        assert_eq!(
+            throttle.on_failure("transport: connection refused by electrum1.example:50002", 3000),
+            FailureReport::Silent
+        );
+        assert_eq!(throttle.delay_secs(), 240);
+        // going back to the first text is a change too
+        assert_eq!(throttle.on_failure(TLS_ERROR, 4000), FailureReport::Warn);
+    }
+
+    #[test]
+    fn failure_throttle_recovers_once_and_resets() {
+        let mut throttle = FailureThrottle::default();
+        // a success with no failure before it says nothing
+        assert_eq!(throttle.on_success(), None);
+
+        for i in 0..5 {
+            throttle.on_failure(TLS_ERROR, i * 1000);
+        }
+        assert_eq!(throttle.delay_secs(), 300);
+        assert_eq!(throttle.on_success(), Some(5));
+        assert_eq!(throttle.delay_secs(), 10);
+        // one recovery line only
+        assert_eq!(throttle.on_success(), None);
+
+        // the same text after the recovery is a first failure again
+        assert_eq!(throttle.on_failure(TLS_ERROR, 10_000), FailureReport::Warn);
+        assert_eq!(throttle.delay_secs(), 10);
+    }
+
+    #[test]
+    fn failure_throttles_of_the_two_sources_are_independent() {
+        let mut balance = FailureThrottle::default();
+        let mut history = FailureThrottle::default();
+
+        assert_eq!(balance.on_failure(TLS_ERROR, 0), FailureReport::Warn);
+        // the same text on the other source is its own first failure
+        assert_eq!(history.on_failure(TLS_ERROR, 500), FailureReport::Warn);
+        assert_eq!(balance.on_failure(TLS_ERROR, 1000), FailureReport::Silent);
+        assert_eq!(history.on_failure(TLS_ERROR, 1500), FailureReport::Silent);
+
+        // a summary of one source does not reset the other's clock
+        assert_eq!(balance.on_failure(TLS_ERROR, 10 * MINUTE_MS), FailureReport::Summary {
+            repeats: 2
+        });
+        assert_eq!(
+            history.on_failure(TLS_ERROR, 10 * MINUTE_MS + 500),
+            FailureReport::Summary { repeats: 2 }
+        );
+
+        // a history success resets only the history source: the balance still fails and backs off
+        assert_eq!(history.on_success(), Some(3));
+        assert_eq!(balance.delay_secs(), 120);
+        assert_eq!(history.delay_secs(), 10);
+        assert_eq!(balance.on_success(), Some(3));
+    }
+
+    #[test]
+    fn failure_throttle_treats_changing_numbers_as_the_same_error() {
+        let field = |verified: u64, ago: u64, line: u32| {
+            format!(
+                "utxo_common_history.rs:{line}] Error MmError {{ etype: Transport(\"invalid peer certificate: \
+                 certificate expired: verification time {verified} (UNIX), but certificate is not valid after \
+                 1791710492 ({ago} seconds ago)\") }} on getting balance"
+            )
+        };
+        assert_eq!(
+            failure_key(&field(1794225784, 2515292, 279)),
+            failure_key(&field(1794225794, 2515302, 311))
+        );
+
+        let mut throttle = FailureThrottle::default();
+        assert_eq!(
+            throttle.on_failure(&field(1794225784, 2515292, 279), 0),
+            FailureReport::Warn
+        );
+        // the verification time and the seconds count advanced, the cause did not
+        assert_eq!(
+            throttle.on_failure(&field(1794225794, 2515302, 311), 10_000),
+            FailureReport::Silent
+        );
+
+        // a text that differs in words is a different failure
+        let other = field(1794225804, 2515312, 279).replace("certificate expired", "unknown issuer");
+        assert_eq!(throttle.on_failure(&other, 20_000), FailureReport::Warn);
     }
 }
