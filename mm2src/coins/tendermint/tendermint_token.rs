@@ -515,8 +515,8 @@ impl MmCoin for TendermintToken {
     /// Wallet-only while [`TENDERMINT_SWAPS_AVAILABLE`] is `false` (swaps for the family are postponed for the
     /// current beta), whatever the coins-config entry says; otherwise the entry decides. A token of a chain whose
     /// account prefix selects no HTLC dialect is wallet-only in either case (CRD ch.18 R18.11.23), and so is a
-    /// custom token and a token whose platform coin holds no local private key (CRD ch.36 R36.1.2). Only order
-    /// placement asks this: a swap that has already started never does.
+    /// custom token (CRD ch.36 R36.1.2) and a token whose platform coin holds no local private key (CRD ch.18
+    /// R18.11.23a). Only order placement asks this: a swap that has already started never does.
     fn wallet_only(&self, ctx: &MmArc) -> bool { self.wallet_only_with_switch(ctx, TENDERMINT_SWAPS_AVAILABLE) }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {

@@ -2198,8 +2198,9 @@ fn nyan_token(platform: &TendermintCoin, custom_token: bool) -> TendermintToken 
 
 #[test]
 fn tm_act_the_predicate_is_true_for_each_reason_alone() {
-    // CRD ch.18 R18.11.23, ch.36 R36.1.2: with swaps on, a chain with an HTLC module, no coins-file flag, a local
-    // key and no custom token is the one case that can trade; each other input alone makes the coin wallet-only.
+    // CRD ch.18 R18.11.23, R18.11.23a, ch.36 R36.1.2: with swaps on, a chain with an HTLC module, no coins-file
+    // flag, a local key and no custom token is the one case that can trade; each other input alone makes the coin
+    // wallet-only.
     assert!(!tendermint_wallet_only(true, "iaa", false, true, false));
     assert!(tendermint_wallet_only(false, "iaa", false, true, false), "swaps off");
     assert!(
@@ -2216,7 +2217,7 @@ fn tm_act_the_predicate_is_true_for_each_reason_alone() {
 
 #[test]
 fn tm_act_a_coin_and_token_without_a_local_key_are_wallet_only() {
-    // CRD ch.36 R36.1.2 (Reloaded rule): a coin whose activation policy holds no local key, and a token of such a
+    // CRD ch.18 R18.11.23a (Reloaded rule): a coin whose activation policy holds no local key, and a token of such a
     // coin, are wallet-only, so order placement refuses them before the legacy swap path could announce this
     // node's own key as the coin's HTLC public key. The build switch is off, so the coin and the token are
     // evaluated with the switch on.
