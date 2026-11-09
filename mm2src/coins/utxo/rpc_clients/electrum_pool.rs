@@ -704,6 +704,8 @@ struct Comparison {
     at: f64,
     /// The heights of the two servers, the one with the lower id first, when it ended.
     heights: (u64, u64),
+    /// The height at which the two were compared.
+    compared_at: u64,
     /// The two servers answered different header bytes.
     diverged: bool,
 }
@@ -714,10 +716,32 @@ struct DisagreementState {
     comparisons: HashMap<(usize, usize), Comparison>,
     /// Pairs found at different headers at one height, to be compared once both servers report heights at least *T*
     /// above it: the two server ids and that height (item 7).
-    pending: Vec<(usize, usize, u64)>,
+    /// At most one per pair, with the time it was noted.
+    pending: Vec<(usize, usize, u64, f64)>,
+    /// The pairs being compared now.
+    in_flight: HashSet<(usize, usize)>,
+    /// When a comparison of a pair last got no answer; the pair is tried again after the comparison limit.
+    unanswered: HashMap<(usize, usize), f64>,
     /// The error text while the coin is in the disagreement state.
     current: Option<String>,
 }
+
+/// Counts a running comparison, and stops counting it when it ends or is dropped.
+struct ComparingGuard(Arc<PoolShared>);
+
+impl ComparingGuard {
+    fn new(pool: &Arc<PoolShared>) -> ComparingGuard {
+        pool.comparing.fetch_add(1, AtomicOrdering::SeqCst);
+        ComparingGuard(pool.clone())
+    }
+}
+
+impl Drop for ComparingGuard {
+    fn drop(&mut self) { self.0.comparing.fetch_sub(1, AtomicOrdering::SeqCst); }
+}
+
+/// A pair that waits for its heights is dropped after this many comparison limits (R38.6.4o item 12).
+const PENDING_MAX_AGE_LIMITS: f64 = 10.;
 
 /// The pool's figures of the measured order that are not a server's (R38.6.4l items 2 and 7).
 #[derive(Default)]
@@ -1399,8 +1423,11 @@ impl PoolShared {
         loop {
             let pairs = self.due_comparisons(true);
             if !pairs.is_empty() {
+                // The comparisons run as tasks of their own: one that is still running when the window ends is not
+                // dropped, it finishes and records its result.
+                let done = self.spawn_comparisons(pairs);
                 let left = secs_left(deadline).max(self.timings.request.min(Duration::from_millis(200)));
-                let _ = self.clone().run_comparisons(pairs).boxed().timeout(left).await;
+                let _ = done.boxed().timeout(left).await;
             }
             if self.settled() && self.due_comparisons(true).is_empty() {
                 break;
@@ -1480,16 +1507,30 @@ impl PoolShared {
                 }
             }
         }
-        let state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
-        for (a, b, at_height) in &state.pending {
+        let now = now_float();
+        let limit = self.timings.compare_limit.as_secs_f64();
+        let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+        // A pair that left the pool for good, or waited too long for its heights, is dropped.
+        state.pending.retain(|(a, b, _, noted)| {
+            now - noted < PENDING_MAX_AGE_LIMITS * limit
+                && [a, b]
+                    .iter()
+                    .all(|id| self.slot_by_id(**id).map_or(false, |slot| !slot.is_removed()))
+        });
+        for (a, b, at_height, _) in &state.pending {
             if let (Some(height_a), Some(height_b)) = (height_of(*a), height_of(*b)) {
                 if height_a >= at_height + tolerance && height_b >= at_height + tolerance {
                     wanted.push((*a, *b, *at_height, true));
                 }
             }
         }
-        let now = now_float();
-        let limit = self.timings.compare_limit.as_secs_f64();
+        // A pair that was found to differ is compared again at the same height once the limit has passed, so that a
+        // resolved fork ends the disagreement state (item 12).
+        for ((a, b), known) in &state.comparisons {
+            if known.diverged {
+                wanted.push((*a, *b, known.compared_at, false));
+            }
+        }
         let mut due: Vec<(Arc<ServerSlot>, Arc<ServerSlot>, u64)> = Vec::new();
         for (a, b, at_height, forced) in wanted {
             let key = (a.min(b), a.max(b));
@@ -1501,7 +1542,12 @@ impl PoolShared {
                     && known.heights.0.abs_diff(height_a) <= tolerance
                     && known.heights.1.abs_diff(height_b) <= tolerance
             });
-            if (recent && !forced) || due.iter().any(|(x, y, _)| (x.id.min(y.id), x.id.max(y.id)) == key) {
+            let unanswered = state.unanswered.get(&key).map_or(false, |at| now - at < limit);
+            if (recent && !forced)
+                || unanswered
+                || state.in_flight.contains(&key)
+                || due.iter().any(|(x, y, _)| (x.id.min(y.id), x.id.max(y.id)) == key)
+            {
                 continue;
             }
             if let (Some((slot_a, _)), Some((slot_b, _))) = (
@@ -1538,30 +1584,63 @@ impl PoolShared {
         Some(header(answer_a)? == header(answer_b)?)
     }
 
-    /// Runs the comparisons of `pairs` at once and records each result (item 12).
+    /// Starts the comparisons of `pairs` as a task and returns the signal that it has ended. The pairs count as in
+    /// flight at once, so that nothing starts them a second time.
+    fn spawn_comparisons(
+        self: &Arc<Self>,
+        pairs: Vec<(Arc<ServerSlot>, Arc<ServerSlot>, u64)>,
+    ) -> futures::channel::oneshot::Receiver<()> {
+        {
+            let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+            for (a, b, _) in &pairs {
+                state.in_flight.insert((a.id.min(b.id), a.id.max(b.id)));
+            }
+        }
+        let (done_tx, done_rx) = futures::channel::oneshot::channel();
+        let pool = self.clone();
+        spawn(async move {
+            pool.clone().run_comparisons(pairs).await;
+            pool.update_disagreement();
+            let _ = done_tx.send(());
+        });
+        done_rx
+    }
+
+    /// Runs the comparisons of `pairs` at once and records each result (item 12). A pair whose servers did not answer
+    /// records nothing and stays pending, to be tried again after the comparison limit; so does one whose connection
+    /// closed meanwhile.
     async fn run_comparisons(self: Arc<Self>, pairs: Vec<(Arc<ServerSlot>, Arc<ServerSlot>, u64)>) {
         let runs = pairs.into_iter().map(|(a, b, height)| {
             let pool = self.clone();
             async move {
-                pool.comparing.fetch_add(1, AtomicOrdering::SeqCst);
+                let _counting = ComparingGuard::new(&pool);
                 let same = pool.compare_pair(&a, &b, height).await;
-                pool.comparing.fetch_sub(1, AtomicOrdering::SeqCst);
                 (a, b, height, same)
             }
         });
         for (a, b, height, same) in join_all(runs).await {
             let key = (a.id.min(b.id), a.id.max(b.id));
             let heights = self.live_heights();
-            let height_of = |id: usize| heights.iter().find(|(slot, _)| slot.id == id).map_or(0, |(_, h)| *h);
+            let height_of = |id: usize| heights.iter().find(|(slot, _)| slot.id == id).map(|(_, h)| *h);
             let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+            state.in_flight.remove(&key);
+            let Some(same) = same else {
+                state.unanswered.insert(key, now_float());
+                continue;
+            };
+            state.unanswered.remove(&key);
+            let (Some(height_low), Some(height_high)) = (height_of(key.0), height_of(key.1)) else {
+                continue;
+            };
             state.comparisons.insert(key, Comparison {
                 at: now_float(),
-                heights: (height_of(key.0), height_of(key.1)),
-                diverged: same == Some(false),
+                heights: (height_low, height_high),
+                compared_at: height,
+                diverged: !same,
             });
             state
                 .pending
-                .retain(|(x, y, at)| !((*x.min(y), *x.max(y)) == key && *at == height));
+                .retain(|(x, y, at, _)| !((*x.min(y), *x.max(y)) == key && *at == height));
         }
     }
 
@@ -1569,7 +1648,7 @@ impl PoolShared {
     async fn run_due_comparisons(self: &Arc<Self>) {
         let pairs = self.due_comparisons(false);
         if !pairs.is_empty() {
-            self.clone().run_comparisons(pairs).await;
+            let _ = self.spawn_comparisons(pairs).await;
         }
         self.update_disagreement();
     }
@@ -1684,11 +1763,14 @@ impl PoolShared {
 
     /// Adds `pairs`, each two server ids and a height, to the comparisons that wait for their heights (item 7).
     fn add_pending(&self, pairs: Vec<(usize, usize, u64)>) {
+        let now = now_float();
         let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
         for (a, b, height) in pairs {
-            let pair = (a.min(b), a.max(b), height);
-            if !state.pending.contains(&pair) {
-                state.pending.push(pair);
+            // At most one entry per pair: the first difference found waits for its heights, and a difference found
+            // later at the tip, when the tip has moved on, does not replace it.
+            let key = (a.min(b), a.max(b));
+            if !state.pending.iter().any(|(x, y, _, _)| (*x, *y) == key) {
+                state.pending.push((key.0, key.1, height, now));
             }
         }
     }
@@ -2438,6 +2520,10 @@ impl PoolShared {
 
     pub(super) fn probe_ended(&self) -> bool { self.probe_ended.load(AtomicOrdering::SeqCst) }
 
+    /// Tests: how many comparisons are running.
+    #[cfg(test)]
+    pub(super) fn comparisons_running(&self) -> usize { self.comparing.load(AtomicOrdering::SeqCst) }
+
     #[cfg(test)]
     pub(super) fn remeasure_rounds(&self) -> Vec<f64> { self.measure_state().rounds.clone() }
 
@@ -2951,7 +3037,9 @@ async fn maintenance_loop(client: Weak<ElectrumClientImpl>, mut trigger_rx: futu
         let Some(client) = client.upgrade() else { return };
         let pool = client.pool.clone();
         if compare_due {
-            pool.run_due_comparisons().await;
+            // Not awaited here: a slow comparison must not hold up the maintenance pass.
+            let pool = pool.clone();
+            spawn(async move { pool.run_due_comparisons().await });
         }
         if pass_due {
             pool.run_pass().await;

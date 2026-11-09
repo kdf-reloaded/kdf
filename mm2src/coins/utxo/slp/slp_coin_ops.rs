@@ -4,6 +4,11 @@ use super::*;
 impl MmCoin for SlpToken {
     fn is_asset_chain(&self) -> bool { false }
 
+    /// An SLP token is served by its BCH platform coin's Electrum client (CRD ch.38 R38.6.4o item 12).
+    fn chain_disagreement(&self) -> Option<String> {
+        crate::utxo::electrum_chain_disagreement(self.platform_coin.as_ref())
+    }
+
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut {
         Box::new(
             utxo_common::get_raw_transaction(self.platform_coin.as_ref(), req)

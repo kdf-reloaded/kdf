@@ -4302,8 +4302,10 @@ fn t38_6_4o_14_the_disagreement_state_after_activation() {
         wait_until("the end of the state", || client.chain_disagreement().is_none()).await;
         assert!(client.servers_view().chain_disagreement.is_none());
         if capturing {
-            let lines = warn_lines(ticker);
             let agree = format!("WARN {ticker}: the Electrum servers agree about the chain again");
+            // The capture of the log may trail the line by a moment.
+            wait_until("the log line", || warn_lines(ticker).iter().any(|line| *line == agree)).await;
+            let lines = warn_lines(ticker);
             assert_eq!(lines.iter().filter(|line| **line == agree).count(), 1, "{lines:?}");
         }
     });
@@ -4420,6 +4422,96 @@ fn t38_6_4o_7_different_headers_in_notifications_start_a_comparison() {
                 Timer::sleep(0.2).await;
                 assert!(client.chain_disagreement().is_none());
             }
+        }
+    });
+}
+
+/// R38.6.4o item 12 (the window): a comparison that is slower than the activation window is not dropped. The
+/// activation judges at the window's end without it, the comparison finishes and records its result, and a later due
+/// comparison still runs (the running count is back at 0).
+#[test]
+fn t38_6_4o_12_a_comparison_slower_than_the_window_is_not_dropped() {
+    block_on(async {
+        const H: u64 = 5_000;
+        let (high, low) = (stub_at(5, H).await, stub_at(5, H - 1_000).await);
+        for stub in [&high, &low] {
+            stub.set_default_block_header("aa");
+            stub.set_reply_delay("blockchain.block.header", ms(700));
+        }
+        // The request bound is wider than the comparison, so its answer is not cut off.
+        let client = checked_pool(
+            &[&low, &high],
+            PoolSetup::new("SLOWCMP"),
+            ElectrumPoolTimings {
+                request: ms(2_000),
+                ..test_timings()
+            },
+            script_draw(&[], 0.5),
+        );
+        let started = Instant::now();
+        // The window is 300 ms; the comparison takes 700 ms.
+        activate_judged(&client).await.unwrap();
+        assert!(started.elapsed() < ms(600), "{:?}", started.elapsed());
+        assert_eq!(client.pool.comparisons_running(), 1);
+        wait_until("the late comparison", || client.pool.comparisons_running() == 0).await;
+        // Its result was recorded: judged again, nothing is sent.
+        client.judge_activation().await.unwrap();
+        let counts = |s: &StubServer| s.requests("blockchain.block.header");
+        assert_eq!((counts(&high), counts(&low)), (1, 1));
+        // A later due comparison still runs: one height moves by more than T.
+        high.set_tip(H + 10);
+        wait_until("the new height", || snap_of(&client, &high).height == Some(H + 10)).await;
+        client.judge_activation().await.unwrap();
+        wait_until("the second comparison", || {
+            counts(&high) == 2 && client.pool.comparisons_running() == 0
+        })
+        .await;
+        assert_eq!(counts(&low), 2);
+    });
+}
+
+/// R38.6.4o item 12 (the state ends): a pair found to differ is compared again at the same height once the limit has
+/// passed, so when the fork has resolved the state ends, with one WARN line.
+#[test]
+fn t38_6_4o_12_a_resolved_fork_ends_the_state() {
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        let ticker = "FORKEND";
+        let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
+        a.set_header_hex("aa");
+        b.set_header_hex("bb");
+        for stub in [&a, &b] {
+            stub.set_default_block_header("dd");
+        }
+        a.set_block_header(H, "x1");
+        b.set_block_header(H, "x2");
+        let client = checked_pool(
+            &[&a, &b],
+            PoolSetup::new(ticker),
+            ElectrumPoolTimings {
+                compare_limit: ms(300),
+                ..test_timings()
+            },
+            script_draw(&[], 0.5),
+        );
+        client.start_pool(false);
+        wait_until("the heights", || {
+            snap_of(&client, &a).height.is_some() && snap_of(&client, &b).height.is_some()
+        })
+        .await;
+        a.set_tip(H + 2);
+        b.set_tip(H + 2);
+        wait_until("the disagreement state", || client.chain_disagreement().is_some()).await;
+
+        // The fork resolves: both answer the same header at H. After the limit the pair is compared again.
+        a.set_block_header(H, "same");
+        b.set_block_header(H, "same");
+        wait_until("the end of the state", || client.chain_disagreement().is_none()).await;
+        if capturing {
+            let agree = format!("WARN {ticker}: the Electrum servers agree about the chain again");
+            let lines = warn_lines(ticker);
+            assert_eq!(lines.iter().filter(|line| **line == agree).count(), 1, "{lines:?}");
         }
     });
 }

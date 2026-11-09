@@ -17802,6 +17802,58 @@ mod t05_12b_swap_key_check_tests {
         assert!(err.ends_with(&refusal("ETH", EVM_REASON)), "{err}");
     }
 
+    /// The error text of a disagreement about the chain, as a coin answers it (CRD ch.38 R38.6.4o item 12).
+    const DISAGREEMENT: &str = "ETH: the Electrum servers disagree about the chain (a.example:50002 at 5000000, b.example:50002 at 1000, c.example:50002 at 1000; tolerance 3 blocks). New orders, swaps and withdrawals are refused until they agree again; remove the servers that follow the other chain from the coin's list, or activate the coin again with servers that agree";
+
+    /// CRD ch.38 R38.6.4o item 12: while a coin's Electrum servers disagree about the chain, a new order with it
+    /// (`setprice`, `buy`, `sell`) is refused with the error of the rule.
+    #[test]
+    fn a_chain_disagreement_refuses_a_new_order() {
+        mock_coins();
+        chain_disagreement.mock_safe(|_, _| MockResult::Return(Some(DISAGREEMENT.to_owned())));
+        let ctx = ctx_with(json!({}), false, &["ETH", "KMD"]);
+        let req: SetPriceReq =
+            json::from_value(json!({ "base": "ETH", "rel": "KMD", "price": "1", "volume": "1" })).unwrap();
+        let err = block_on(create_maker_order(&ctx, req)).err().unwrap();
+        assert!(err.ends_with(DISAGREEMENT), "{err}");
+        for method in ["buy", "sell"] {
+            let body = json!({ "base": "ETH", "rel": "KMD", "price": "1", "volume": "1", "method": method });
+            let err = match method {
+                "buy" => block_on(buy(ctx.clone(), body)),
+                _ => block_on(sell(ctx.clone(), body)),
+            }
+            .err()
+            .unwrap();
+            assert!(err.ends_with(DISAGREEMENT), "{method}: {err}");
+        }
+    }
+
+    /// CRD ch.38 R38.6.4o item 12: while a coin's Electrum servers disagree about the chain, the maker start of a
+    /// matched order does not start a swap. (The start itself is run on the test thread, where the mock of the check
+    /// holds; `lp_connect_start_bob` only spawns it.)
+    #[test]
+    fn a_chain_disagreement_starts_no_new_maker_swap() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static ASKED: AtomicBool = AtomicBool::new(false);
+        mock_coins();
+        chain_disagreement.mock_safe(|_, _| {
+            ASKED.store(true, Ordering::SeqCst);
+            MockResult::Return(Some(DISAGREEMENT.to_owned()))
+        });
+        let ctx = ctx_with(json!({}), false, &["ETH", "JST"]);
+        let maker_order: MakerOrder = json::from_str(MATCHED_ORDER_JSON).unwrap();
+        let maker_match = maker_order.matches.values().next().cloned().unwrap();
+        block_on(maker_swap_start(ctx.clone(), maker_match, maker_order));
+        assert!(
+            ASKED.load(Ordering::SeqCst),
+            "the start did not ask whether the servers agree"
+        );
+        assert_eq!(crate::mm2::lp_swap::running_swaps_num(&ctx), 0);
+    }
+
+    /// The order of the tests above: one match, already connected.
+    const MATCHED_ORDER_JSON: &str = r#"{"max_base_vol":"1","max_base_vol_rat":[[1,[1]],[1,[1]]],"min_base_vol":"0","min_base_vol_rat":[[0,[]],[1,[1]]],"price":"1","price_rat":[[1,[1]],[1,[1]]],"created_at":1589265312093,"updated_at":1589265312093,"base":"ETH","rel":"JST","matches":{"2f9afe84-7a89-4194-8947-45fba563118f":{"request":{"base":"ETH","rel":"JST","base_amount":"0.1","base_amount_rat":[[1,[1]],[1,[10]]],"rel_amount":"0.2","rel_amount_rat":[[1,[1]],[1,[5]]],"action":"Buy","uuid":"2f9afe84-7a89-4194-8947-45fba563118f","method":"request","sender_pubkey":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3","dest_pub_key":"0000000000000000000000000000000000000000000000000000000000000000","match_by":{"type":"Any"}},"reserved":{"base":"ETH","rel":"JST","base_amount":"0.1","base_amount_rat":[[1,[1]],[1,[10]]],"rel_amount":"0.1","rel_amount_rat":[[1,[1]],[1,[10]]],"taker_order_uuid":"2f9afe84-7a89-4194-8947-45fba563118f","maker_order_uuid":"5f6516ea-ccaa-453a-9e37-e1c2c0d527e3","method":"reserved","sender_pubkey":"c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed","dest_pub_key":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3"},"connect":{"taker_order_uuid":"2f9afe84-7a89-4194-8947-45fba563118f","maker_order_uuid":"5f6516ea-ccaa-453a-9e37-e1c2c0d527e3","method":"connect","sender_pubkey":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3","dest_pub_key":"c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed"},"connected":{"taker_order_uuid":"2f9afe84-7a89-4194-8947-45fba563118f","maker_order_uuid":"5f6516ea-ccaa-453a-9e37-e1c2c0d527e3","method":"connected","sender_pubkey":"c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed","dest_pub_key":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3"},"last_updated":1589265314408}},"started_swaps":["2f9afe84-7a89-4194-8947-45fba563118f"],"uuid":"5f6516ea-ccaa-453a-9e37-e1c2c0d527e3"}"#;
+
     /// T15: the same requests under an iguana login, and with the switch off, are not refused by this check (they
     /// stop later, at the first thing `TestCoin` cannot answer).
     #[test]
