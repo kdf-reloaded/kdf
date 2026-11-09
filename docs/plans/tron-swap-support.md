@@ -1,6 +1,6 @@
 # Plan: Tron V1 atomic-swap participation
 
-**Status:** parked (branch-only; its ch.21 rewrite must pass the KDF Dirty Gate first) — **Last reviewed:** 2026-11-08
+**Status:** parked (the branch is not revived; its topics move to the 0.4.0 TRON work, see below) — **Last reviewed:** 2026-11-08
 
 > **Context:** written 2026-10-18, when a review of three stale June-2026
 > branches found a fully wired Tron V1 swap implementation and a 568-line
@@ -18,6 +18,71 @@
 > being activated describe `dev` with the constant set to `true`. TRON is
 > planned to return in the next beta; turning activation back on (ch.21 D6)
 > comes before, and is part of, any revival of this branch.
+
+## Relation to the TRON work (2026-11-08)
+
+TRON swaps are being built for 0.4.0 as a series of new PRs, from CRD ch.21 §21.11B and the maintainer decisions of
+2026-11-08 on its open points D21.B1–D21.B9. This branch is not merged, rebased or revived, and its name is not
+reused. The blocker below is settled: the KDF Dirty Gate failed the chapter rewrite, and §21.11B replaces it.
+
+- **Chapter.** The gate failed this branch's ch.21 rewrite and its ch.30 index row; neither is reused. §21.11B
+  (Spec Reader, 2026-11-08, gate PASS) records the reference state instead: no released reference build swaps TRON,
+  so TRON swaps are a Reloaded extension between Reloaded nodes only (R21.B1), against the public MIT Tron-VM V1
+  contract.
+- **Code.** The gate passed the code and test hunks, with a few identifiers to rename before reuse. Its design is not
+  taken over. Its test cases serve as fixtures for the new PRs: the hash and swap-id cases, the call encodings, the
+  payment and fee validation cases, the allowance cases and the event cases, each re-checked against the public
+  contract.
+- **Where the new work differs from this branch:**
+  - *Secret-hash choice.* The branch chooses per coin and widens the stored secret-hash field from 20 bytes to a
+    variable length, which changes the saved-swap format. The new work adds a TRON arm to the pair-based choice of
+    ch.51 R71/R72 (R21.B6); the saved-swap format does not change.
+  - *Activation.* The branch reads the swap contract on the legacy route and adds a TRON-specific
+    `event_indexer_url`. The new work adds the mmrpc 2.0 route for TRON and keeps the legacy route (D21.B1, decided),
+    and binds the contract with the EVM rule (`swap_contract_address`, R21.B2).
+  - *Contract.* The new work adopts the public MIT contract with Reloaded-operated deployments; the existing Nile
+    instance serves lab rows only (D21.B2, decided).
+  - *Contract encoding.* The branch uses `ethabi`, which is no longer a dependency. The new work uses dev's
+    alloy-backed ABI layer, which gains log decoding.
+  - *Spend and refund detection.* The branch reads the payment state from an event indexer. The new work reads it
+    from the contract's `payments(id)` through the ordinary node API, takes only the revealed secret from the claim
+    event, and falls back to reading blocks. It never refunds while the contract says the payment was spent (D21.B8,
+    decided).
+  - *Token approval.* The branch always resets the allowance to zero first. The new work approves the exact amount
+    and resets to zero only when the current allowance is non-zero and too small (D21.B6, decided).
+  - *Fees.* The branch uses fixed default energies. The new work caps each call at the dry-run energy times a fixed
+    margin (D21.B5, decided).
+  - *Node access.* The branch adds an event query to the old request loop. The new work first rewrites the TRON node
+    client: 10 s per attempt, failover on an HTTP error status or a malformed answer, no lock held across requests,
+    and optional per-node request headers for API keys.
+  - *Hash width on the EVM path.* dev's EVM V1 path now embeds a 20-byte value derived from a 32-byte hash, which the
+    branch predates. The TRON payment must not go through it and carries the 32-byte hash unchanged (R21.B6).
+  - *Wallet path.* The branch leaves the TRON balance read and the wallet broadcast unwired: its balance read still
+    returns an error, only the wording changed. With TRON switched on, dev's legacy activation fails at that same
+    balance read (lab, 2026-11-08). The new work wires the balance and the broadcast first.
+- **Topic coverage** ([coverage note](../reloaded-rewrite/notes/coverage-upstream-prs-2026-11-08.md) §A). The
+  reference side of this topic is planning documents only: no pull request and no client code. Against ch.21 §21.11B:
+
+  | Topic | Coverage note | Status |
+  |---|---|---|
+  | Contract, hash lock, ABI, swap id, non-boolean tokens | A.1, A.10, A.17 | Covered: §21.11B.2; D21.B2, D21.B4 decided |
+  | Deployments | A.2 | Fact recorded (F21.B5); Reloaded-operated deployments (D21.B2) |
+  | Address form, contract binding, orderbook address | A.3–A.5 | Covered: R21.B2, R21.B4, D21.B7 |
+  | Fee cap and energy estimate | A.7 | D21.B5, decided |
+  | Spend and refund discovery, finality | A.8, A.14 | D21.B8, decided; R21.B5 |
+  | DEX fee | A.9 | D21.B9, decided: the EVM shape |
+  | Trade-fee estimation | A.11 | Legacy preimage: D21.B5; V2 swaps deferred (§21.11 D2) |
+  | Secret-hash choice | A.12 | Covered: R21.B6 with ch.51 R71/R72 |
+  | Watcher-reward variants | A.13 | Pending (§21.11 D4) |
+  | TRON swap test rows | A.15 | Open: part of the swap-operations PR |
+  | Coins-file entries with the swap contract | A.16 | Open: coins repository |
+  | EVM V1 ERC20 payment amount check | A.18 | Reloaded already compares the amount unconditionally, pinned by a regression test in PR #313 |
+
+- **Order of the new PRs:** wallet path (balance and broadcast, node client, activation route), secret-hash arm,
+  contract interop, swap operations, switch-on. Lab rows on Nile accompany each step.
+
+The section "Revive as a rewrite from the gated chapter" below is superseded by this one: its step 1 is done (the
+gate failed the chapter, and §21.11B replaces it), and steps 3–6 are covered by the new PRs.
 
 ## BLOCKER: the ch.21 swap chapter never passed the KDF Dirty Gate
 
