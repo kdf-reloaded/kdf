@@ -512,7 +512,7 @@ what that PR changed.
 > (parity). One latent defect of the bot is fixed with them: a zero `rel` price
 > now gives no rate (R62.5.1 d) instead of a division by zero.
 
-> **Status update (reloaded, 2026-11-09).** The price service compares like with
+> **Status update (Reloaded, 2026-11-09).** The price service compares like with
 > like and has the `price_conflict` switch of D62.2 (amended 2026-11-09): a ticker
 > on which the sources disagree is priced from one provider's agreeing records or,
 > by default, from the first source, with a WARN; the value `"refuse"` leaves it
@@ -630,7 +630,7 @@ the same provider. For a ticker in more than one source:
    the ticker meanwhile.
 
 **Risk, recorded.** Gaps above 5 % seen earlier included figures that were a
-factor of two or more apart (KMD at 0.00313 against 0.00678). Under
+factor of two or more apart (KMD at 0.00313 against 0.00680 USD). Under
 `first_source` a wrong figure of the first source is used, with a WARN;
 `refuse` is the operator's way back to the strict check.
 
