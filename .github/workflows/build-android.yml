@@ -12,7 +12,8 @@ name: Build Android
 # Called from release.yml (signed releases) and dev-build.yml / staging-build.yml
 # (unsigned snapshots); also runnable manually. The artifact is named after the Rust
 # target triple (`libkdf-<triple>`); the NDK ABI directory names are arm64-v8a
-# (aarch64-linux-android) and armeabi-v7a (armv7-linux-androideabi). NDK API 21.
+# (aarch64-linux-android), armeabi-v7a (armv7-linux-androideabi) and x86_64 (x86_64-linux-android).
+# NDK API 21.
 
 on:
   workflow_dispatch:
@@ -56,6 +57,8 @@ jobs:
       CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: aarch64-linux-android21-clang
       CC_armv7_linux_androideabi: armv7a-linux-androideabi21-clang
       CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: armv7a-linux-androideabi21-clang
+      CC_x86_64_linux_android: x86_64-linux-android21-clang
+      CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER: x86_64-linux-android21-clang
 
     strategy:
       fail-fast: false
@@ -65,6 +68,8 @@ jobs:
             ndk-abi: arm64-v8a
           - target: armv7-linux-androideabi
             ndk-abi: armeabi-v7a
+          - target: x86_64-linux-android
+            ndk-abi: x86_64
 
     steps:
       - uses: actions/checkout@v7

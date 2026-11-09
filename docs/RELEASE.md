@@ -13,7 +13,8 @@ Releases are **tag-driven**. Pushing an annotated, GPG-signed `v*` tag triggers
    container, the last two cross-compiled there (glibc 2.31 floor → runs on Debian 11/12,
    Ubuntu 20.04+, RHEL 9, …);
 2. builds macOS (x86_64 / aarch64 / universal) and Windows binaries, and the
-   `libkdf.a` static libraries for Android (aarch64, armv7) and iOS (aarch64), via the
+   `libkdf.a` static libraries for Android (aarch64, armv7, x86_64) and iOS (aarch64 device, aarch64 and x86_64 simulator) and their C header
+   (checked against the library by `check-header.yml`), via the
    existing per-platform workflows;
 3. writes a `SHA256SUMS` manifest over all binaries;
 4. **GPG-signs** `SHA256SUMS` with the maintainer key
