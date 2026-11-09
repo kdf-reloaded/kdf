@@ -541,6 +541,10 @@ next node:
 A request whose first node answers is not retried anywhere else; a subset of
 failing nodes is not an error (R35.1.2 last paragraph).
 
+*(Added 2026-11-08.)* *Reloaded divergence (D35.11):* a node whose cutoff
+elapses is still listened to after the request has moved on; see the note
+after R35.1.10.
+
 *(Added 2026-11-02.)* The hostname of a node URL is resolved through the
 node's resolver (chapter 45 §45.6B). A failed lookup is a node failure of the
 first kind above.
@@ -572,6 +576,35 @@ to about *N* × 10 s before R35.1.11 applies (item (d)).
 > snapshot, the last store winning; the stored order is therefore always a
 > complete permutation of the nodes, and a node reaches the front only by
 > answering. No lock guarding the order is held while a node is being asked.
+
+> **Reloaded divergence (D35.11, maintainer decision 2026-11-08): a node that
+> hits the cutoff is kept listening.** In Reloaded the 10-second cutoff is the
+> point at which the request *moves on* to the next node, as R35.1.8 says; it
+> is not the point at which the exchange is given up. The exchange of a node
+> that has not answered by then keeps running until **30 seconds from its own
+> start** (the lower-layer bound named in R35.1.10), and the request keeps it.
+> While the request waits for the node it asked last, and after it has asked
+> the last node, the first decodable, successful answer from **any** node it
+> has already asked ends the request. That node is the answering node of
+> R35.1.9: the nodes before it in the walk move to the tail in their previous
+> relative order, the nodes after it keep their order behind it, stored with
+> the last-store-wins rule of the Informative note above. After the last node
+> the request waits for the exchanges that are left, until each has answered,
+> failed or reached its 30-second bound. **Nothing is sent twice:** no node is
+> asked again and no new request is created; the request only stops throwing
+> away an answer it has already asked for, so the load on a rate-limited host
+> does not grow. The all-failed error of R35.1.11 keeps its form, with each
+> node counted by its final outcome: a failure a kept exchange returns late is
+> that node's failure, a kept exchange that reaches its bound counts as a
+> cutoff, the nodes are taken in the order they were asked, and a request on
+> which every node ran out keeps the "nodes unreachable" text. The worst case
+> of a request over *N* nodes becomes about (*N* − 1) × 10 s + 30 s instead of
+> *N* × 10 s (two nodes: 40 s instead of 20 s). A transport that talks to one
+> node, with or without failover (R35.1.12 steps 1 and 2 and a one-node
+> `nodes` list), has no later node to move on to and is unchanged: its
+> exchange ends at its own bound. The change is not peer-visible: it changes
+> only which RPC node's answer is used and how long a request may take, so it
+> carries no switch. D35.11 records the decision and the options not taken.
 
 R35.1.11 **All nodes failed (G, both rows).** When every node fails the caller
 shall receive a single error that is:
@@ -883,8 +916,10 @@ weaken security. It is recorded in `docs/GLEEC_COMPATIBILITY.md` with
 > its own time bound was reached, an answer arrived and was discarded, or it
 > failed. A failure is named only by its kind, never by its error text,
 > because the transport's error text carries the full URL. The line used to
-> name nothing. This is the usual trace of an EVM node that hit the failover
+> name nothing. This was the usual trace of an EVM node that hit the failover
 > cutoff, since the transport's own line for that attempt is at debug level.
+> Since D35.11 the line appears for such a node only when the request ended,
+> or was dropped, while the node's exchange was still being kept.
 > The `mm2_net` tests check the line for a URL carrying userinfo, a key in the
 > path and a token in the query.
 >
@@ -2012,8 +2047,9 @@ decomposition is the implementer's choice.
   (§35.6A).
 - Node access follows §35.1.F: a node that answers HTTP 200 with a JSON-RPC
   error object is failed over like a dead node (R35.1.8), the answering node
-  is tried first next time (R35.1.9), no node holds a request longer than 10 s
-  (R35.1.10), the all-failed error is the last non-cutoff failure or a generic
+  is tried first next time (R35.1.9), the request moves on from a node after
+  10 s (R35.1.10) and Reloaded keeps that node's exchange for up to 30 s from
+  its start (D35.11), the all-failed error is the last non-cutoff failure or a generic
   unreachable error (R35.1.11), signed transactions are broadcast to the
   highest-nonce nodes concurrently (R35.1.12), and no emitted text names a
   node by more than scheme, host and port (R35.1.14, R35.1.15).
@@ -2163,6 +2199,33 @@ that only checks an internal variant does not satisfy these rules.
   parts; the same holds for the display form of every error the activation
   and a failing request return. A node entry or request that carries no
   secret renders as before. Applies to the TRON client too (ch. 21 §21.9).
+- **T35.37** *A cut-off exchange is kept; the first answer wins (the note
+  after R35.1.10, D35.11).* With stub nodes and a scaled cutoff (the exchange
+  bound is three times it):
+  1. Node one answers 12 s into the request and node two answers HTTP 429 at
+     once: the caller gets node one's answer, and node one is first in the
+     order of the next request. With three nodes where the middle one is slow
+     and the others fail at once, the stored order is the slow node, the node
+     after it, the node before it.
+  2. Node one answers at 15 s, node two (asked at the cutoff) would answer at
+     18 s into the request: node one's answer is used.
+  3. Node one answers at 12 s, node two hangs: the third node is never asked.
+  4. Node one fails at 12 s while node two is being waited for: the wait for
+     node two goes on and its answer is used.
+  5. Every node fails at once: the error text and the timing are as before
+     (no wait for any cutoff), for transport failures and for JSON-RPC errors.
+  6. Every node hangs: the error is the unchanged "nodes unreachable" text and
+     the request ends at (*N* − 1) cutoffs plus the exchange bound; each
+     exchange was given the exchange bound.
+  7. A kept exchange fails late (a transport failure, or a JSON-RPC error)
+     while the last node fails or hangs: the error lists the late failure for
+     that node, not a cutoff, and a late JSON-RPC error is the last non-cutoff
+     failure.
+  8. A transport with one node is unchanged: it gives up at the cutoff and its
+     exchange bound equals the cutoff; an answer after it is not used.
+  9. In every case above each node is asked at most once per request. The
+     cutoff line and the late-answer line name the node in the host-only
+     form of R35.1.14 and R35.1.16 and carry no path, query or credential.
 
 ## 35.8B Foreign-transaction decoding tests (binding)
 
@@ -2347,7 +2410,7 @@ is peer-visible, so none carries a switch.
   object, or which does not decode, is one node failure for the whole batch
   (R35.1.8, item (a)).
 - (iii) **Requests on one coin instance run concurrently**, with the
-  last-store-wins order of the note after R35.1.10. The maintainer approved
+  last-store-wins order of the *Informative* note after R35.1.10. The maintainer approved
   this on a written scenario analysis covering racing requests, flapping
   nodes, lock discipline, connection growth, slow or malicious nodes and the
   signed broadcast. The analysis found no blocked state and no new attack
@@ -2386,6 +2449,38 @@ URL's path is removed even though it is often harmless, because hosted
 providers put the API key there and the dump cannot tell the two apart. The
 change is to the dump's own redaction, not to R35.1.14 or R35.1.17. T35.35
 tests it.
+
+**D35.11** *(Resolved 2026-11-08, maintainer decision.)* *A node that hits the
+cutoff is kept listening.* A request over two nodes failed as "all failed"
+although the first node answered a little after the 10-second cutoff: the
+second node, asked at the cutoff, had answered HTTP 429 at once, and the
+first node's answer then arrived and was thrown away. R35.1.8 and R35.1.10
+(both marked G) bind one node at a time and no deadline beyond about *N* ×
+10 s, so keeping the exchange is a Reloaded divergence. The maintainer chose
+option (A):
+
+- **(A) Keep listening (chosen).** The request moves on at the cutoff, keeps
+  the cut-off exchange for up to 30 s from its start, and accepts the first
+  decodable success from any node already asked; after the last node it waits
+  for the exchanges that are left. Nothing is sent twice. Worst case about
+  (*N* − 1) × 10 s + 30 s. The rule is the note after R35.1.10.
+- **(B) Wait only at the end (not taken).** An earlier node's answer is used
+  only after the last node has failed. It has the same worst case and the same
+  divergence, but is slower whenever the earlier node answers during a later
+  attempt, and is no simpler to build.
+- **(C) No change (not taken).** R35.1.8 and R35.1.10 stay as the reference
+  has them; the field case stays a failed request, and the advice would be to
+  put the less rate-limited node first.
+
+The divergence is not peer-visible, so it has no switch, for the reason given
+in D35.8. Two consequences are accepted. A request that ends while it still
+holds kept exchanges (an earlier node answered, or the caller dropped the
+request) drops them; the native HTTP task of such an exchange ends at its own
+bound, 1 s past the 30 s, so a node that never answers holds a connection for
+up to 31 s per request instead of 11 s. On the WASM target the browser fetch
+cannot be aborted here, and the timer alone ends the wait at the bound (not
+tested in a browser build: the WASM target is compile-checked only, and T35.37
+runs on the native target). T35.37 tests the rule.
 
 ## 35.9 Provenance Footer
 
@@ -2531,6 +2626,13 @@ tests it.
   paragraph on resolving a node's hostname after R35.1.8 is Reloaded-original.
   It points to chapter 45 §45.6B, from the maintainer's decision of 2026-11-02
   and this repository's own code, so chapter 01 R38 is not engaged.
+- *Clean-context addition (2026-11-08, forbidden corpus not consulted):* the
+  note after R35.1.10, the pointer after R35.1.8, the clarified reference in
+  D35.8 (iii), the closing sentence added to the log remark of R35.1.17's
+  status note, the acceptance wording in §35.8, T35.37 and D35.11 are
+  Reloaded-original. They rest on the maintainer decision of 2026-11-08 and
+  this repository's own code; they take no forbidden-class input, so chapter
+  01 R38 is not engaged and no gate pass is required.
 - *Pointer added 2026-11-07 -- the note under the R35.1.1 table on the TRON
   platform protocol.* It restates chapter 21 §21.4's reference-behavior note
   in one clause and records this repository's as-built state from chapter 55

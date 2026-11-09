@@ -267,8 +267,14 @@ fn the_production_bounds_are_ten_seconds_for_failover_and_thirty_for_a_direct_no
     let failover =
         AlloyTransport::with_event_handlers(listed_nodes("TEST", vec![A.to_owned(), B.to_owned()]), vec![]).unwrap();
     assert_eq!(failover.inner.cutoff_s, NODE_CUTOFF_S);
+    // A cut-off exchange of the failover path is kept until the lower-layer bound (CRD ch.35 D35.11).
+    assert_eq!(failover.inner.exchange_bound_s, DIRECT_NODE_TIMEOUT_S);
     let direct = AlloyTransport::direct(listed_nodes("TEST", vec![A.to_owned()]).remove(0), vec![]).unwrap();
     assert_eq!(direct.inner.cutoff_s, DIRECT_NODE_TIMEOUT_S);
+    assert_eq!(direct.inner.exchange_bound_s, DIRECT_NODE_TIMEOUT_S);
+    // One node has no later node to move on to: no exchange outlives its cutoff.
+    let single = AlloyTransport::with_event_handlers(listed_nodes("TEST", vec![A.to_owned()]), vec![]).unwrap();
+    assert_eq!(single.inner.exchange_bound_s, NODE_CUTOFF_S);
 }
 
 #[test]
@@ -681,6 +687,220 @@ fn t35_36_the_debug_form_of_the_transport_names_each_node_host_only() {
         );
         for secret in ["user", "secret", "/v3/", "APIKEY", "THIRDKEY", "token=", "/key/"] {
             assert!(!rendered.contains(secret), "a credential part is rendered");
+        }
+    }
+}
+
+// ---- T35.37: a cut-off exchange is kept and the first answer wins (CRD ch.35 R35.1.10, D35.11) ----
+
+/// The cutoff of the keep-listening tests. The bound of a kept exchange is three times it, as 30 s are three times
+/// 10 s in production.
+const SLOW_CUTOFF: f64 = 0.4;
+
+/// `paper_s` seconds of the production scale (10 s cutoff, 30 s exchange bound) in the scaled time of these tests.
+fn scaled(paper_s: f64) -> f64 { paper_s * SLOW_CUTOFF / NODE_CUTOFF_S }
+
+/// Every host in `hosts` was asked exactly once and no other host was asked: nothing is sent twice.
+fn asked_once(sender: &StubSender, hosts: &[&str]) {
+    let mut asked = sender.hosts();
+    asked.sort();
+    assert_eq!(asked, hosts, "each node asked once");
+}
+
+#[test]
+fn t35_37_a_slow_first_node_wins_over_a_second_node_that_fails_at_once() {
+    // Node A answers 12 s into the request (past the cutoff), node B answers HTTP 429 at once.
+    let (transport, sender) = stub_transport(&[A, B], SLOW_CUTOFF, |call| match call.host.as_str() {
+        "a.test" => Reply::BodyAfter(scaled(12.), result_body(&call.request, r#""0xaaa""#)),
+        _ => Reply::Fail("HTTP 429 Too Many Requests".to_owned()),
+    });
+    let provider = provider_from_transport(transport.clone());
+    let started = Instant::now();
+    assert_eq!(eth_call(&provider).unwrap(), "0xaaa");
+    let took = started.elapsed().as_secs_f64();
+    assert!(took >= scaled(12.) * 0.9, "took {took}");
+    asked_once(&sender, &["a.test", "b.test"]);
+    assert_eq!(transport.order_labels(), [A, B], "the answering node is first");
+
+    // The rotation follows the node that answered, not the node asked last: B is slow, A and C fail at once.
+    let (transport, sender) = stub_transport(&[A, B, C], SLOW_CUTOFF, |call| match call.host.as_str() {
+        "b.test" => Reply::BodyAfter(scaled(12.), result_body(&call.request, r#""0xbbb""#)),
+        _ => Reply::Fail("HTTP 429 Too Many Requests".to_owned()),
+    });
+    let provider = provider_from_transport(transport.clone());
+    assert_eq!(eth_call(&provider).unwrap(), "0xbbb");
+    asked_once(&sender, &["a.test", "b.test", "c.test"]);
+    // The answering node first, the node after it behind it, the node that failed before it last.
+    assert_eq!(transport.order_labels(), [B, C, A]);
+}
+
+#[test]
+fn t35_37_the_first_answer_wins_while_a_later_node_is_also_slow() {
+    // A answers 15 s into the request. B, asked at the cutoff, would answer at 18 s into the request: 8 s after it
+    // was asked.
+    let (transport, sender) = stub_transport(&[A, B], SLOW_CUTOFF, |call| match call.host.as_str() {
+        "a.test" => Reply::BodyAfter(scaled(15.), result_body(&call.request, r#""0xaaa""#)),
+        _ => Reply::BodyAfter(scaled(8.), result_body(&call.request, r#""0xbbb""#)),
+    });
+    let provider = provider_from_transport(transport.clone());
+    let started = Instant::now();
+    assert_eq!(eth_call(&provider).unwrap(), "0xaaa");
+    let took = started.elapsed().as_secs_f64();
+    assert!(took >= scaled(15.) * 0.9, "took {took}");
+    asked_once(&sender, &["a.test", "b.test"]);
+    assert_eq!(transport.order_labels(), [A, B]);
+}
+
+#[test]
+fn t35_37_a_late_answer_stops_the_walk_before_the_next_node_is_asked() {
+    // A answers 12 s in, B hangs from the cutoff on; C would be asked at 20 s, but A has answered by then.
+    let (provider, sender) = stub_provider(&[A, B, C], SLOW_CUTOFF, |call| match call.host.as_str() {
+        "a.test" => Reply::BodyAfter(scaled(12.), result_body(&call.request, r#""0xaaa""#)),
+        "b.test" => Reply::Hang,
+        _ => Reply::Body(result_body(&call.request, r#""0xccc""#)),
+    });
+    assert_eq!(eth_call(&provider).unwrap(), "0xaaa");
+    asked_once(&sender, &["a.test", "b.test"]);
+}
+
+#[test]
+fn t35_37_a_late_failure_of_an_earlier_node_does_not_end_the_wait_for_the_node_being_asked() {
+    // A fails 12 s in, while B (asked at the cutoff) is still being waited for; B answers 5 s after it was asked.
+    let (transport, sender) = stub_transport(&[A, B], SLOW_CUTOFF, |call| match call.host.as_str() {
+        "a.test" => Reply::FailAfter(scaled(12.), "HTTP 502 Bad Gateway".to_owned()),
+        _ => Reply::BodyAfter(scaled(5.), result_body(&call.request, r#""0xbbb""#)),
+    });
+    let provider = provider_from_transport(transport.clone());
+    assert_eq!(eth_call(&provider).unwrap(), "0xbbb");
+    asked_once(&sender, &["a.test", "b.test"]);
+    assert_eq!(transport.order_labels(), [B, A]);
+}
+
+#[test]
+fn t35_37_when_every_node_fails_fast_the_error_and_the_timing_are_unchanged() {
+    let (provider, sender) = stub_provider(&[A, B, C], SLOW_CUTOFF, |_| Reply::Fail("HTTP 429".to_owned()));
+    let started = Instant::now();
+    let text = eth_call(&provider).unwrap_err().to_string();
+    let took = started.elapsed().as_secs_f64();
+    assert!(took < 2. * SLOW_CUTOFF, "no wait for a cutoff, took {took}");
+    let listing = "http://a.test: HTTP 429; http://b.test: HTTP 429; http://c.test: HTTP 429";
+    assert_eq!(text, format!("all EVM nodes failed: {listing}"));
+    asked_once(&sender, &["a.test", "b.test", "c.test"]);
+
+    // The same for JSON-RPC errors: the last node's error, at once.
+    let (provider, sender) = stub_provider(&[A, B], SLOW_CUTOFF, |call| {
+        Reply::Body(error_body(&call.request, 3, &format!("revert from {}", call.host)))
+    });
+    let started = Instant::now();
+    let err = eth_call(&provider).unwrap_err();
+    let took = started.elapsed().as_secs_f64();
+    assert!(took < 2. * SLOW_CUTOFF, "no wait for a cutoff, took {took}");
+    let TransportError::ErrorResp(payload) = &err else {
+        panic!("expected an error response, got {err}")
+    };
+    assert_eq!(payload.message, "revert from b.test (node http://b.test)");
+    asked_once(&sender, &["a.test", "b.test"]);
+}
+
+#[test]
+fn t35_37_when_every_node_times_out_the_text_is_unchanged_and_the_request_ends_at_its_bound() {
+    let (provider, sender) = stub_provider(&[A, B, C], SLOW_CUTOFF, |_| Reply::Hang);
+    let started = Instant::now();
+    let err = eth_call(&provider).unwrap_err();
+    let took = started.elapsed().as_secs_f64();
+    // Two cutoffs to reach the third node, then that node's exchange runs to its bound of three cutoffs:
+    // (N - 1) x 10 s + 30 s on the production scale.
+    let expected = 2. * SLOW_CUTOFF + 3. * SLOW_CUTOFF;
+    assert!(took >= expected * 0.98 && took < expected + 0.8, "took {took}");
+    assert!(err.is_transport_error(), "{err}");
+    let unreachable = format!("EVM nodes unreachable: no node answered within {SLOW_CUTOFF} s");
+    assert_eq!(err.to_string(), unreachable);
+    asked_once(&sender, &["a.test", "b.test", "c.test"]);
+    // Every exchange was given the bound of a kept exchange, so that the work it starts ends by it.
+    let bounds = sender.bounds();
+    assert_eq!(bounds.len(), 3);
+    assert!(bounds.iter().all(|b| (b - 3. * SLOW_CUTOFF).abs() < 1e-9), "{bounds:?}");
+}
+
+#[test]
+fn t35_37_a_kept_exchange_that_fails_late_is_that_nodes_failure_not_a_cutoff() {
+    // A fails 12 s in with a 502; B fails at once with a 429 when asked at the cutoff.
+    let (provider, sender) = stub_provider(&[A, B], SLOW_CUTOFF, |call| match call.host.as_str() {
+        "a.test" => Reply::FailAfter(scaled(12.), "HTTP 502 Bad Gateway".to_owned()),
+        _ => Reply::Fail("HTTP 429 Too Many Requests".to_owned()),
+    });
+    let text = eth_call(&provider).unwrap_err().to_string();
+    let listing = "http://a.test: HTTP 502 Bad Gateway; http://b.test: HTTP 429 Too Many Requests";
+    assert_eq!(text, format!("all EVM nodes failed: {listing}"));
+    asked_once(&sender, &["a.test", "b.test"]);
+
+    // A late JSON-RPC error of the first node, then a cutoff of the second: the last non-cutoff failure is A's.
+    let (provider, sender) = stub_provider(&[A, B], SLOW_CUTOFF, |call| match call.host.as_str() {
+        "a.test" => Reply::BodyAfter(scaled(12.), error_body(&call.request, 3, "revert")),
+        _ => Reply::Hang,
+    });
+    let err = eth_call(&provider).unwrap_err();
+    let TransportError::ErrorResp(payload) = &err else {
+        panic!("expected an error response, got {err}")
+    };
+    assert_eq!(payload.message, "revert (node http://a.test)");
+    asked_once(&sender, &["a.test", "b.test"]);
+}
+
+#[test]
+fn t35_37_a_single_node_transport_is_unchanged() {
+    // The node that is silent at the cutoff ends the request there, not at three times the cutoff.
+    let (provider, sender) = stub_provider(&[A], SLOW_CUTOFF, |_| Reply::Hang);
+    let started = Instant::now();
+    let text = eth_call(&provider).unwrap_err().to_string();
+    let took = started.elapsed().as_secs_f64();
+    assert!(took >= SLOW_CUTOFF * 0.98 && took < 2. * SLOW_CUTOFF, "took {took}");
+    let unreachable = format!("EVM nodes unreachable: no node answered within {SLOW_CUTOFF} s");
+    assert_eq!(text, unreachable);
+    assert_eq!(sender.bounds(), [SLOW_CUTOFF], "the exchange is bound by the cutoff");
+
+    // An answer after the cutoff is not used.
+    let (provider, sender) = stub_provider(&[A], SLOW_CUTOFF, |call| {
+        Reply::BodyAfter(scaled(12.), result_body(&call.request, r#""0xaaa""#))
+    });
+    assert!(eth_call(&provider).is_err());
+    asked_once(&sender, &["a.test"]);
+}
+
+#[test]
+fn t35_37_the_kept_exchange_and_its_late_answer_are_logged_by_host_only_name() {
+    let capturing = install_log_capture();
+    let nodes = four_nodes_of("T3537LOG");
+    let (transport, _) = stub_transport_of_nodes(nodes[..2].to_vec(), SLOW_CUTOFF, vec![], |call| {
+        if call.uri.contains("path1") {
+            Reply::BodyAfter(scaled(12.), result_body(&call.request, r#""0xaaa""#))
+        } else {
+            Reply::Fail("HTTP 429".to_owned())
+        }
+    });
+    let provider = provider_from_transport(transport.clone());
+    assert_eq!(eth_call(&provider).unwrap(), "0xaaa");
+    let node = &transport.inner.nodes[0];
+    let listening = still_listening_line(node, "eth_call", SLOW_CUTOFF);
+    let late = late_answer_line(node, "eth_call");
+    assert_eq!(
+        listening,
+        "[T3537LOG] EVM RPC http://same.test (node 1 of 4) has no answer to eth_call within 0.4 s, still listening"
+    );
+    assert_eq!(
+        late,
+        "[T3537LOG] EVM RPC http://same.test (node 1 of 4) answered eth_call after its cutoff; the answer is used"
+    );
+    if capturing {
+        let lines = lines_of("T3537LOG");
+        for wanted in [&listening, &late] {
+            let count = lines.iter().filter(|l| l.ends_with(wanted.as_str())).count();
+            assert_eq!(count, 1, "{wanted}: {lines:?}");
+        }
+        for line in &lines {
+            for secret in ["path1", "KEY1"] {
+                assert!(!line.contains(secret), "a URL part is rendered in a log line");
+            }
         }
     }
 }
