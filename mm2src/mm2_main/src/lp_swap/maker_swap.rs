@@ -1,6 +1,7 @@
 use super::check_balance::{check_base_coin_balance_for_swap, check_my_coin_balance_for_swap, CheckBalanceError,
                            CheckBalanceResult};
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
+use super::stale_tip_watch::{sleep_observing_tip, StaleTipWatch};
 use super::swap_lock::{SwapLock, SwapLockOps};
 use super::trade_preimage::{TradePreimageRequest, TradePreimageRpcError, TradePreimageRpcResult};
 use super::{already_sent_check_pubkey, check_held_htlc_key, derive_htlc_pubkeys, recover_within, recovery_key_pairs,
@@ -868,13 +869,14 @@ impl MakerSwap {
         } else {
             let transaction_f = self
                 .maker_coin
-                .check_if_my_payment_sent(
+                .check_if_my_payment_sent_for_amount(
                     self.r().data.maker_payment_lock as u32,
                     &*self.r().my_maker_coin_htlc_pub,
                     &*self.r().other_maker_coin_htlc_pub,
                     &secret_hash,
                     self.r().data.maker_coin_start_block,
                     &self.r().data.maker_coin_swap_contract_address,
+                    &self.maker_amount,
                 )
                 .compat();
             transaction_f.await
@@ -1184,11 +1186,15 @@ impl MakerSwap {
         non_final_retry_secs: f64,
     ) -> Result<(Option<MakerSwapCommand>, Vec<MakerSwapEvent>), String> {
         let locktime = self.r().data.maker_payment_lock;
+        // CRD ch.51 R79-R81: the refund wait reads the tip height of the paying coin between its sleeps.
+        let mut stale_tip_watch = StaleTipWatch::new();
         let transaction = loop {
             loop {
                 match self.maker_coin.can_refund_htlc(locktime).compat().await {
                     Ok(CanRefundHtlc::CanRefundNow) => break,
-                    Ok(CanRefundHtlc::HaveToWait(to_sleep)) => Timer::sleep(to_sleep as f64).await,
+                    Ok(CanRefundHtlc::HaveToWait(to_sleep)) => {
+                        sleep_observing_tip(&self.maker_coin, &self.uuid, to_sleep as f64, &mut stale_tip_watch).await
+                    },
                     Err(e) => {
                         error!("Error {} on can_refund_htlc, retrying in 30 seconds", e);
                         Timer::sleep(30.).await;
@@ -1556,13 +1562,14 @@ impl MakerSwap {
                 );
                 let maybe_maker_payment = try_s!(
                     self.maker_coin
-                        .check_if_my_payment_sent(
+                        .check_if_my_payment_sent_for_amount(
                             maker_payment_lock,
                             search_pub.as_slice(),
                             other_maker_coin_htlc_pub.as_slice(),
                             &secret_hash.0,
                             maker_coin_start_block,
                             &maker_coin_swap_contract_address,
+                            &self.maker_amount,
                         )
                         .compat()
                         .await

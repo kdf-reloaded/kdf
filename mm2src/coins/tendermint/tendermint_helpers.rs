@@ -122,7 +122,8 @@ impl TendermintCoin {
     pub(super) fn gas_price(&self) -> f64 { self.protocol_info.gas_price.unwrap_or(DEFAULT_GAS_PRICE) }
 
     pub(super) fn estimate_blocks_from_duration(&self, duration: u64) -> i64 {
-        let estimated = (duration / self.avg_blocktime as u64) as i64;
+        // Activation refuses `avg_blocktime` 0 (CRD ch.18 R18.11.1); the `max` keeps the division safe regardless.
+        let estimated = (duration / (self.avg_blocktime as u64).max(1)) as i64;
         estimated.clamp(MIN_TIME_LOCK, MAX_TIME_LOCK)
     }
 

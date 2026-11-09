@@ -5,6 +5,7 @@
 //! platform coin.
 
 use super::tendermint_helpers::TendermintCommons;
+use super::tendermint_swap_ops::PAYMENT_SENT_NEEDS_AMOUNT;
 use super::tendermint_types::*;
 use crate::utxo::sat_from_big_decimal;
 use crate::utxo::utxo_common::{big_decimal_from_sat, big_decimal_from_sat_unsigned};
@@ -262,7 +263,20 @@ impl SwapOps for TendermintToken {
             .validate_payment_for_denom(input, &sender_pub, self.denom.clone(), self.decimals)
     }
 
+    /// Answers an error, as the platform coin's does: the lookup needs the amount (CRD ch.18 R18.11.22).
     fn check_if_my_payment_sent(
+        &self,
+        _time_lock: u32,
+        _my_pub: &[u8],
+        _other_pub: &[u8],
+        _secret_hash: &[u8],
+        _search_from_block: u64,
+        _swap_contract_address: &Option<BytesJson>,
+    ) -> Box<dyn futures01::Future<Item = Option<TransactionEnum>, Error = String> + Send> {
+        Box::new(futures01::future::err(PAYMENT_SENT_NEEDS_AMOUNT.to_string()))
+    }
+
+    fn check_if_my_payment_sent_for_amount(
         &self,
         _time_lock: u32,
         _my_pub: &[u8],
@@ -270,9 +284,16 @@ impl SwapOps for TendermintToken {
         secret_hash: &[u8],
         _search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
+        amount: &BigDecimal,
     ) -> Box<dyn futures01::Future<Item = Option<TransactionEnum>, Error = String> + Send> {
-        self.platform_coin
-            .check_if_my_payment_sent_for_denom(other_pub, secret_hash)
+        // The token's own denom and decimals, the platform's account and RPC.
+        self.platform_coin.check_if_my_payment_sent_for_denom(
+            other_pub,
+            secret_hash,
+            amount,
+            self.denom.clone(),
+            self.decimals,
+        )
     }
 
     async fn search_for_swap_tx_spend_my(
@@ -447,10 +468,15 @@ impl MmCoin for TendermintToken {
     fn is_asset_chain(&self) -> bool { false }
 
     /// Wallet-only while [`TENDERMINT_SWAPS_AVAILABLE`] is `false` (swaps for the family are postponed for the
-    /// current beta), whatever the coins-config entry says; otherwise the entry decides. Only order placement
-    /// asks this: a swap that has already started never does.
+    /// current beta), whatever the coins-config entry says; otherwise the entry decides. A token of a chain whose
+    /// account prefix selects no HTLC dialect is wallet-only in either case (CRD ch.18 R18.11.23). Only order
+    /// placement asks this: a swap that has already started never does.
     fn wallet_only(&self, ctx: &MmArc) -> bool {
-        !TENDERMINT_SWAPS_AVAILABLE || crate::is_wallet_only_ticker(ctx, self.ticker())
+        tendermint_wallet_only(
+            TENDERMINT_SWAPS_AVAILABLE,
+            &self.platform_coin.protocol_info.account_prefix,
+            crate::is_wallet_only_ticker(ctx, self.ticker()),
+        )
     }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
@@ -634,8 +660,9 @@ impl MmCoin for TendermintToken {
         let amount = match value {
             TradePreimageValue::Exact(d) | TradePreimageValue::UpperBound(d) => d,
         };
+        // The fee is paid in the platform denom: labeled and converted as the platform coin's (R18.11.11).
         self.platform_coin
-            .get_sender_trade_fee_for_denom(self.ticker.clone(), self.denom.clone(), self.decimals, amount)
+            .get_sender_trade_fee_for_denom(self.denom.clone(), self.decimals, amount)
             .await
     }
 
@@ -648,8 +675,9 @@ impl MmCoin for TendermintToken {
         dex_fee_amount: BigDecimal,
         _stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
+        // The network fee is paid in the platform denom: labeled and converted as the platform coin's (R18.11.11).
         self.platform_coin
-            .get_fee_to_send_taker_fee_for_denom(self.ticker.clone(), self.denom.clone(), self.decimals, dex_fee_amount)
+            .get_fee_to_send_taker_fee_for_denom(self.denom.clone(), self.decimals, dex_fee_amount)
             .await
     }
 
@@ -672,7 +700,11 @@ impl MmCoin for TendermintToken {
     fn coin_protocol_info(&self) -> Vec<u8> { Vec::new() }
 
     /// Declines every new match while [`TENDERMINT_SWAPS_AVAILABLE`] is `false`, so an order saved before the
-    /// switch was turned off, or a peer's request against one, cannot start a new swap. This is asked only when
-    /// an order is matched, never by a swap that is running, being kick-started or recovered.
-    fn is_coin_protocol_supported(&self, info: &Option<Vec<u8>>) -> bool { TENDERMINT_SWAPS_AVAILABLE }
+    /// switch was turned off, or a peer's request against one, cannot start a new swap. It also declines a match
+    /// whose counterparty information is not empty, which is where an IBC routing channel would travel
+    /// (CRD ch.18 R18.11.25). This is asked only when an order is matched, never by a swap that is running,
+    /// being kick-started or recovered.
+    fn is_coin_protocol_supported(&self, info: &Option<Vec<u8>>) -> bool {
+        tendermint_protocol_info_supported(TENDERMINT_SWAPS_AVAILABLE, info)
+    }
 }

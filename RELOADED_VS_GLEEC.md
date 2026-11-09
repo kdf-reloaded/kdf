@@ -576,7 +576,14 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   startup. A swap already in progress still
   completes or is recovered. Orders and swaps are planned to return in a later
   release. No switch exists: the build constant `TENDERMINT_SWAPS_AVAILABLE`
-  (`coins/lp_coins_ops.rs`) is `false`.
+  (`coins/lp_coins_ops.rs`) is `false`. When they return, three points will
+  differ from GLEEC KDF (CRD ch.18 §18.11): a token's sender-side trade fee and
+  its fee to send the DEX fee are labeled with the platform coin, which pays
+  them, where GLEEC KDF labels them with the token; a chain without an HTLC
+  module is refused when an order is placed, where GLEEC KDF fails at the first
+  payment unless the coins file marks the coin wallet-only; and a counterparty
+  whose Tendermint order carries protocol information, where an IBC route would
+  travel, is declined, where GLEEC KDF accepts any. PR #299.
 - **A node does not watch swaps of UTXO, BCH and QTUM coins.** The checks a
   watcher runs are not implemented for these coins yet, so a node with
   `is_watcher` set does not subscribe to their watcher topics. GLEEC KDF

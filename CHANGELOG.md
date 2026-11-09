@@ -156,6 +156,11 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### Start-up and configuration
 
+- **A warning when the full key export is switched on.** With `allow_insecure_key_export: true`
+  in `MM2.json`, the node now logs a warning at start-up that says `get_private_keys` can export the
+  keys of every configured coin, and another warning for each call that uses the full export, with
+  the mode and the number of coins asked for. Neither warning contains a key. Detail: PR #305; CRD
+  ch.07 R-K1.
 - **The start-up log now lists the files the node uses.** At start the node logs, at INFO and as
   absolute paths, where its configuration came from (the command line, the default file or the file
   named by `MM_CONF_PATH`), where its coins list came from, the log file, the database folders and the
@@ -189,6 +194,15 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### EVM coins
 
+- **A request no longer fails when one node answers a little after 10 seconds while the other
+  nodes fail fast.** An EVM request asks one node at a time and moves on to the next after 10
+  seconds. Earlier builds then threw away a slow node's answer, so a slow first node followed by a
+  second node that refused at once (for example with HTTP 429) failed the whole request, although
+  the first node answered. The request now keeps listening to a node that is slow for up to 30
+  seconds from the moment it was asked, uses the first good answer from any node it has already
+  asked, and sends nothing twice. When every node fails, the error reads as before. A request in
+  which every node stays silent can now take about 20 seconds longer than before (two nodes: 40
+  seconds instead of 20). A coin with one node is not affected. Detail: PR #313; CRD ch.35 D35.11.
 - **The quoted fee for sending an EVM taker fee is now the fee at the gas limit the node sends it
   with.** `trade_preimage`, the taker's balance check before a swap and the maximum taker volume
   used to price the taker-fee transfer at the node's gas estimate, while the transfer is sent with
@@ -213,9 +227,19 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   coin whose floor is below the safe spend amount, a `setprice` without `min_volume` that the
   spend-safety check refused until now is accepted at the raised minimum. When the fee estimate is
   unavailable, the plain default is used if `pre_trade_spend_check` is off, with a warning in the
-  log; with the check on, the order is refused as before. *Compatibility:* set `spend_safe_min_volume` to `false` in `MM2.json`
-  for the GLEEC KDF default. Detail: PR #315; CRD
+  log; with the check on, the order is refused as before. *Compatibility:* set
+  `spend_safe_min_volume` to `false` in `MM2.json` for the GLEEC KDF default. Detail: PR #315; CRD
   ch.60 R60.6.8.
+- **A relay connection that a network cut ended can be dialed again before the 5-minute wait.** The
+  node does not dial an address again within 5 minutes of its last dial, as on GLEEC KDF, so a
+  connection the node had dialed and that a cut ended could stay down for up to 5 minutes. Now an
+  address whose connection was established, lasted at least 30 seconds and ended by a network error,
+  a close from the peer or a failed ping check may be dialed again at the next 30-second maintenance
+  check while the node is short of relays, at most twice in 5 minutes. A connection closed for being
+  idle, by the clock check or by the relay count keeps the 5-minute wait, and so does one closed as
+  stuck unless that close ends in a network error. Detail: PR #303;
+  CRD ch.28 R27a item 1a.
+
 - **Messages from other nodes are checked for nesting depth and declared lengths before they are
   read.** Every value a peer sends is checked first: arrays and maps may nest at most 64 levels, and every
   declared length and count must fit in the bytes that follow. A value outside these bounds is
@@ -527,6 +551,39 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   a client that sends `from` under an iguana login stops sending it. Detail: PR #270; CRD ch.49
   R49.27b.
 
+#### RPC interface
+
+- **A request without `mmrpc` whose method only the mmrpc 2.0 interface knows is now answered
+  through that interface, as on GLEEC KDF.** When the legacy method table has no entry for the
+  request's method, the node retries the request once as an mmrpc 2.0 request and answers in the
+  mmrpc 2.0 envelope: the method's result, its typed error, `InvalidRequest` (HTTP 400) when the body
+  has members other than `userpass`, `method`, `params` and `id`, or `NoSuchMethod` (HTTP 400) when
+  neither interface knows the name. Until now such a request answered the legacy error body with
+  HTTP 500. A request that needs a password and lacks a valid `userpass` is still refused with the
+  legacy error body before any retry. `setprice`, `buy`, `sell`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
+  `my_orders`, `order_status` and `orderbook_depth` stay legacy-only, as on GLEEC KDF: called with
+  `mmrpc`, they answer `NoSuchMethod`. Detail: PR #312; CRD ch.43 §43.1A, R43.1A.1a–R43.1A.1e.
+
+#### Tendermint (Cosmos) coins
+
+- **The Tendermint swap code follows the CRD's swap rules more closely; Tendermint swaps stay off.**
+  Swaps of Tendermint coins remain switched off in this release, and their code was brought closer to
+  the rules they will follow when they return:
+  - the check of a taker's DEX fee requires exactly one message, the exact recipients, sender and
+    amounts (the burn form included), the swap uuid as memo, and a byte-equal copy of the transaction
+    on the node;
+  - after a restart, a node finds its own payment by the HTLC id, so a payment to another receiver or
+    of another amount is no longer taken for it;
+  - a swap secret must be exactly 32 bytes;
+  - a token's trade fees are labeled with the platform coin and its decimals, since the platform coin
+    pays them;
+  - a chain without an HTLC module, such as ATOM or OSMO, is refused when an order is placed, and a
+    counterparty whose order carries protocol information, where an IBC route would travel, is
+    declined.
+
+  One change applies today: a coin entry with `avg_blocktime` 0 now fails activation with an error
+  naming the key. Detail: PR #299; CRD ch.18 §18.11.
+
 ### Fixed
 
 #### ARRR and other shielded coins
@@ -632,6 +689,10 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
 
 #### Order book and peer-to-peer network
 
+- **The mmrpc 2.0 `orderbook` names its internal failure `Internal`, as on GLEEC KDF.** It answered
+  `InternalError`; HTTP 500 and the message are unchanged. *Upgrade note:* a client that checks
+  `error_type` for `InternalError` on `orderbook` must check `Internal` instead. Detail: PR #312; CRD
+  ch.43 R43.1A.6, D43.1A.3.
 - **A maker with `maker_update_coalescing` on is no longer held at its lowest rate by steady
   traffic.** The maker slows down when a relay falls behind.
   - **The old signal.** It was raised once a relay's queue had stayed non-empty for 2 seconds,
@@ -653,6 +714,12 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   usual redial rules apply. In a lab test toward a frozen peer, such a close ended after 30 seconds
   with the deadline; without it, the close stayed open 13 minutes and ended after the peer was
   resumed. Detail: PR #280; CRD ch.28 R27c.
+- **An order whose save to the order history failed is reported as failed and no longer comes back
+  as a live order after a restart, and a buy or sell whose save failed no longer sends its request.**
+  Detail: PR #309; CRD ch.32 R-GH8a.
+- **A buy or sell whose save failed no longer comes back after a restart, even when the first
+  attempt to remove its record fails.** The removal is now tried up to three times, as it already
+  was for a maker order. Detail: PR #314; CRD ch.12 R7c.
 
 #### Siacoin
 
@@ -674,6 +741,13 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   one hasting. The Siacoin miner fee shown for a swap is now the 0.00002 SC actually paid, not
   0.00001 SC. Detail: PR #278; CRD ch.20 R-S11, ch.60 R60.6.7.
 
+#### Start-up and configuration
+
+- **An invalid `wc_session_persistence` now stops the start, as documented.** The value `encrypted`,
+  an unknown word or a value that is not a string is refused at start-up with a configuration error
+  that names the setting. Before, the node started and only the first WalletConnect call failed.
+  Detail: PR #308; CRD ch.22 §22.5.1.
+
 #### Swap recovery
 
 - **`recover_funds_of_swap` no longer refunds the maker payment of a swap whose spend of the taker
@@ -681,6 +755,17 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   sent. The call now refuses, whether or not the refund time has passed, and builds nothing. A swap with a
   confirmed spend was already refused. A swap whose maker payment is spent or refunded on the chain is
   answered as before. Detail: PRs #276, #284; CRD ch.51 R75.
+- **A swap that waits to refund its payment now writes a warning when the coin's node has not advanced
+  for an hour (and again at most hourly).** Before, a refund could wait for hours behind a stalled node
+  and the log did not say so; in a test, a refund started four hours after the HTLC lock expired, while
+  the coin's node had stood still for almost six hours. The warning names the swap, the coin, the height
+  and how long it has not changed. It does not name the cause, and the wait and the refund themselves
+  are unchanged. The node is asked for its height about every five minutes, alongside the wait, so the
+  wait is never longer for it. The warning is not written while a swap waits for a payment to be
+  confirmed, for swaps of the second protocol version or for the watcher. The warning is verified by
+  unit tests only; nobody has yet watched it on a stalled node in real time. More in the release tests,
+  [finding F4](docs/release-tests/0.4.0-beta.1.md#findings-and-dispositions). Detail: PR #306; CRD
+  ch.51 R79-R81.
 
 #### UTXO coins and Electrum
 
@@ -746,9 +831,9 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   market-maker bot used for its default prices and which the node asks when a swap ends for the USD prices
   it stores with the swap, no longer resolves. Since then the bot could not fetch prices unless you named
   another service, and no swap completed stored USD prices. The default is now two sources asked at the
-  same time: the GLEEC price service (and, if it does not answer, its cache) and the cipig price service,
-  each with `?expire_at=259200` so that no price older than 72 hours is served. A coin that only one source
-  prices is priced from it. A coin both price must agree within 5 %; if they do not, the coin gets no
+  same time: the GLEEC price service (and, if it does not answer, its cache) and the prices.cipig.net price
+  service, each with `?expire_at=259200` so that no price older than 72 hours is served. A coin that only one
+  source prices is priced from it. A coin both price must agree within 5 %; if they do not, the coin gets no
   price from either, and the bot quotes no pair with it. A source that does not answer is skipped. The bot
   and the swap prices use the same sources. Two new top-level keys in `MM2.json` change them: `price_urls`
   (an array of sources, each one address or an array of addresses tried in order) replaces the default
@@ -790,6 +875,9 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   that read one DOC and one MARTY transaction from the live chains use transactions that exist
   today. The Firo test that expected a fee the server no longer sends is ignored, and an offline test
   checks that fee path instead. The node itself is unchanged. Detail: PR #285.
+- **The QRC20 Docker tests now mine a block before their own confirmation waits and wait up to 90 s.**
+  Nine swap tests that shared one fixed secret or secret hash and a time lock of now minus 200 s now
+  draw their own random secret or secret hash per run. The node itself is unchanged. Detail: PR #310.
 - **The tests run before the next beta are listed in
   [`docs/release-tests/0.4.0-beta.1.md`](docs/release-tests/0.4.0-beta.1.md).** The lab rows of
   the cycle's second and third batches are recorded there; the fourth batch and the release campaign
@@ -826,6 +914,13 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   to the public BCH testnet from a wallet that every CI run shares. It already retried a broadcast
   rejected as a mempool conflict. A broadcast rejected with "Missing inputs" failed the test
   instead; it is now retried the same way. The node itself is unchanged. Detail: PR #297.
+
+- **The Tendermint swap code has its first swap-flow tests.** 50 unit tests drive an Iris and a
+  Nucleus coin against a scripted test node on a loopback port: the HTLC messages, the payment checks
+  and searches, the spend search, the refund answers, the check of the DEX fee, the secret
+  extraction, the confirmation wait and the activation check. Three of them still record behavior
+  that a later change replaces: the payment check does not compare the time lock, and a refund that
+  the chain makes by itself is reported as a failed refund. Detail: PR #299; CRD ch.18 §18.3, §18.5, §18.11.
 
 ### Documentation
 
@@ -1157,11 +1252,6 @@ lives.
   activation log line says `gas_limit: defaults`. More in
   [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md). Detail: PR #105, PR #200; CRD
   ch.57 R57.5.2, R57.5.3, R57.5.5.
-- **A refund can wait without a log message saying why.** If the node a coin talks to stops advancing,
-  a refund waits until it advances again, and the log does not say so. In a test, a refund started
-  four hours after the HTLC lock expired, because the coin's node had stood still for almost six
-  hours; the log only repeated "wait refund till" every 24 seconds. More in the release tests,
-  [finding F4](docs/release-tests/0.4.0-beta.1.md#findings-and-dispositions). Detail: PR #239.
 - **A maker payment is not refunded after the spend of the taker payment was sent, even if that spend
   never confirms.** If the node's spend of the taker payment was broadcast but dropped from the chain,
   and the other side refunded its payment, `recover_funds_of_swap` refuses to refund the maker payment:

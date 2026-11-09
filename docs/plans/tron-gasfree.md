@@ -19,7 +19,65 @@
 > activation back on (ch.21 D6) precedes the activation-time steps below and is
 > part of any revival of this plan.
 
+## Relation to the TRON work (2026-11-08)
+
+The maintainer decided on 2026-11-08 that the branch is not revived as such: the topic is covered by a new chapter and
+new PRs, and the branch stays until the second PR below has landed.
+
+- **Gate state.** On 2026-11-08 the KDF Dirty Gate passed most of this branch. A Spec Reader pass re-establishes the
+  rest before reuse: the error module's sanitizer helper and four display strings, the outcome list of §49.7, and
+  the chapter's provenance footer and state row. A few names and one refusal message change, and the commit history
+  is not carried over.
+- **Independent of TRON swaps, dependent on the TRON wallet path.** GasFree needs:
+  - the TRC20 withdraw and broadcast that the 0.4.0 work wires first, for the native fallback and the custody
+    address's balance;
+  - the rewritten TRON node client's bounded request with per-node headers. The branch's own
+    `slurp_post_json_with_headers` has no time bound, so GasFree uses the shared helper instead. The provider's HMAC
+    secret is a credential under ch.35 R35.1.17;
+  - the activation route that ch.21 D21.B1 decided (the mmrpc 2.0 route for TRON, legacy kept), for the
+    activation-time provider binding (§49.3.1–§49.3.2).
+- **Bytecode blocker.** The proxy creation bytecode is taken from the public chain (the input of the transactions
+  that deployed the GasFree contracts), with the official open-source GasFree JS SDK as a cross-check. The SDK's
+  published custody-address vectors are cited data, and the derivation must reproduce every one of them; no SDK
+  code is used (maintainer decision of 2026-11-09). Open question 1 is answered.
+- **Topic coverage** ([coverage note](../reloaded-rewrite/notes/coverage-upstream-prs-2026-11-08.md) §B). The
+  reference's GasFree pull request was an open, unmerged draft. Against the GasFree chapter on the parked branch:
+  - *Covered there:* the token activation block (B.1.2), the withdraw request fields (B.1.4), the fee details, relay
+    payload and progress values (B.1.5–B.1.7), the provider client, payload parsing and permit (B.2.2–B.2.4),
+    eligibility, gasless mode, preflight order and sign-only behavior (B.3.1, B.3.2, B.3.5, B.3.9).
+  - *Amendments before the first PR:*
+    - the `auto` direction (B.3.3), which the branch chapter has the other way round from the reference;
+    - how provider failures collapse at the withdraw RPC (B.3.7);
+    - where the custody address appears across the balance and address RPCs (B.1.3);
+    - which error each preflight outcome maps to (B.3.6);
+    - a typed early refusal for signing policies without a local key (B.3.8);
+    - a deferred item for sweeping a stranded custody balance (B.4.2);
+    - the unbound defaults (B.1.1, B.3.4).
+
+    A Spec Reader round makes these amendments in the renumbered chapter; the chapter is then gated again as a
+    whole.
+  - *Maintainer decision:* parity or not on the wire discriminants (B.1.5, B.1.7, B.1.8).
+  - *Also open:* the chapter 26 transport row (B.2.6), and a Nile or WASM end-to-end test row (B.4.5).
+- **Chapter number.** Both 49 and 57 were taken on `dev`; the chapter is re-established as chapter 63, in its
+  own PR.
+- **ch.21 ordering.** The swap-chapter ordering note below no longer applies. TRON swaps were added as a new section
+  (§21.11B), not as a rewrite of §21.11, so the §21.10 cross-reference can be re-applied at any time.
+- **Withdraw task path.** dev ch.49 R49.9 refuses TRON withdrawals under hardware signing. The gasless rail states how
+  it relates to `task::withdraw`.
+- **PRs.**
+  - First, after the amended chapter passes the gate: the chapter with its gate verdict in the text, and the module
+    with the pinned and verified bytecode. No shared request or balance fields; unreachable.
+  - Then, after the activation route: the activation binding, the request and balance fields, the withdraw
+    dispatcher, and submission with settlement tracking, all in the release that carries the fields.
+
 ## Blocker: the derived custody address is knowingly wrong
+
+> **Resolved by [Chapter 63](../reloaded-rewrite/63-tron-gasfree-fee-delegation.md)
+> (2026-11-09).** The proxy creation bytecode is taken from the public chain,
+> with the public GasFree SDK as a cross-check (§63.5 sourcing rule), and the
+> derivation must reproduce every custody-address vector the SDK publishes:
+> five per network, Shasta included (T1). The text below records the state of
+> the parked branch.
 
 **Nothing reachable may be built on this derivation until the proxy creation
 bytecode is pinned and the derivation is verified against at least two
@@ -211,6 +269,10 @@ must land in the same release as the fields, not before.
 
 ## Chapter renumbering: 49 → 57
 
+> **Done differently (2026-11-09).** Chapter 57 was taken by then. The chapter
+> was re-established as [Chapter 63](../reloaded-rewrite/63-tron-gasfree-fee-delegation.md)
+> and passed the KDF Dirty Gate on its own; the text below is the earlier plan.
+
 `dev` has its own `docs/reloaded-rewrite/49-withdrawal-task-path.md` on a wholly
 different topic, and `dev`'s chapter sequence currently runs to 55. **56 is being
 taken by the EVM EIP-1559 fee-estimation revival in flight**, so this chapter
@@ -225,6 +287,10 @@ to resolve wrongly and end up with two chapter 49s in the tree. Do the rename
 before resolving the index.
 
 ## Migrate the Dirty Gate verdict into the chapter
+
+> **Superseded (2026-11-09).** Chapter 63 carries its own clearance record (a new
+> pass on 2026-11-08); the branch's earlier verdict does not carry over, as
+> §63.15 states.
 
 `76a3bbd81`'s message ends *"Dirty Gate PASS (0.08)."* **That commit message is
 the only record of the verdict anywhere.** Recent chapters on `dev` carry gate
@@ -273,6 +339,14 @@ them as claims to confirm, not as facts.
 
 ## Open questions for a KDF Spec Reader
 
+> **Answered by Chapter 63 (2026-11-09).** (1) Bytecode: §63.5 and the sourcing
+> rule; vectors: T1 and T2. (2) The reference row is sign-only; submission and
+> settlement tracking are deferred (D63.6). (3) The wire contract of the shared
+> fields: §63.3, at every placement §63.3.3 lists. (4) `auto` is native-first
+> (R16, D63.1); a fallback never substitutes silently (R24). (5) The error family
+> and its statuses: §63.9, with the provider-failure collapse of R17 and the
+> preflight mapping of R19. The maintainer decided D63.1–D63.5 on 2026-11-09.
+
 To be dispatched when the work is picked up, not before. Question 1 is the
 blocking one.
 
@@ -311,8 +385,8 @@ blocking one.
 
 ## Governing CRD
 
-- **Chapter 49 on the branch** (`docs/reloaded-rewrite/49-tron-gasfree-fee-delegation.md`
-  at `76a3bbd81`), to be renumbered 57. Not on `dev`.
+- [Chapter 63](../reloaded-rewrite/63-tron-gasfree-fee-delegation.md) -- Tron
+  GasFree fee delegation; supersedes the parked branch's chapter 49.
 - [Chapter 21](../reloaded-rewrite/21-tron-integration.md) -- Tron integration;
   this branch adds a §21.10 cross-reference to ch.49.
 - [Chapter 49 on `dev`](../reloaded-rewrite/49-withdrawal-task-path.md) -- the

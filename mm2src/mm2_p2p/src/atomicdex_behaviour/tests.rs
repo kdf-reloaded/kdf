@@ -906,6 +906,7 @@ async fn test_failed_startup_dial_is_not_repeated_before_the_guard_interval() {
     let config = RedialGuardConfig {
         interval: Duration::from_secs(3),
         tick: Duration::from_millis(200),
+        ..RedialGuardConfig::default()
     };
     let seed_port = next_port();
 
@@ -938,6 +939,7 @@ async fn test_connected_seed_gets_no_second_connection_over_ten_ticks() {
     let config = RedialGuardConfig {
         interval: Duration::from_millis(400),
         tick: Duration::from_millis(100),
+        ..RedialGuardConfig::default()
     };
     let (seed_port, node_port) = (next_port(), next_port());
     let _seed = Node::spawn_with_guards(NodeType::RelayInMemory { port: seed_port }, vec![], config, |_, _| ()).await;

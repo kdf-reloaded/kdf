@@ -3803,7 +3803,8 @@ mod t32_k1b_final_cancel_tests {
 mod t12_7c_restore_guard_tests {
     use super::*;
     use crate::mm2::database::my_orders::CREATE_MY_ORDERS_TABLE;
-    use crate::mm2::lp_ordermatch::my_orders_storage::{delete_active_maker_order_attempt, MyOrdersError};
+    use crate::mm2::lp_ordermatch::my_orders_storage::{delete_active_maker_order_attempt,
+                                                       delete_active_taker_order_attempt, MyOrdersError};
     use common::log::log_crate::{set_logger, set_max_level, Level, LevelFilter, Log, Metadata, Record};
     use futures::compat::Future01CompatExt;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -4233,6 +4234,281 @@ mod t12_7c_restore_guard_tests {
         let ordermatch_ctx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
         let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
         assert!(taker_orders.contains_key(&order.request.uuid));
+    }
+
+    // B4-1 (CRD ch.32 R-GH8a, as built): a failed history write deletes the active record just written.
+
+    /// The history database loses its orders table, so the history write of a new order fails.
+    fn break_history_database(node: &Node) {
+        node.ctx
+            .sqlite_connection()
+            .execute("DROP TABLE my_orders", [])
+            .unwrap();
+    }
+
+    #[test]
+    fn t_b4_1_a_maker_failed_history_write_leaves_no_active_record() {
+        let mut node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = maker(true);
+
+        let err = block_on(save_my_new_maker_order(node.ctx.clone(), &order)).unwrap_err();
+
+        assert!(matches!(err.get_inner(), MyOrdersError::ErrorSaving(_)), "{err}");
+        assert!(!node.active_file(&order.uuid));
+        let stored = block_on(node.storage().load_active_maker_orders()).unwrap();
+        assert!(stored.iter().all(|stored| stored.uuid != order.uuid));
+        // A restart does not bring the order back.
+        node.restore();
+        assert!(!node.restored_makers().contains(&order.uuid));
+        node.assert_nothing_published();
+    }
+
+    #[test]
+    fn t_b4_1_b_taker_failed_history_write_leaves_no_active_record() {
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = taker(true);
+
+        let err = block_on(save_my_new_taker_order(node.ctx.clone(), &order)).unwrap_err();
+
+        assert!(matches!(err.get_inner(), MyOrdersError::ErrorSaving(_)), "{err}");
+        assert!(!my_taker_order_file_path(&node.ctx, &order.request.uuid).exists());
+        let stored = block_on(node.storage().load_active_taker_orders()).unwrap();
+        assert!(stored.iter().all(|stored| stored.request.uuid != order.request.uuid));
+        // A restart does not bring the order back.
+        node.restore();
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
+        assert!(!taker_orders.contains_key(&order.request.uuid));
+    }
+
+    /// The other orders that are stored stay: only the record of the failed order goes.
+    #[test]
+    fn t_b4_1_c_a_failed_history_write_deletes_only_its_own_record() {
+        let node = Node::new(json!({}));
+        let kept_maker = maker(false);
+        let kept_taker = taker(false);
+        block_on(save_my_new_maker_order(node.ctx.clone(), &kept_maker)).unwrap();
+        block_on(save_my_new_taker_order(node.ctx.clone(), &kept_taker)).unwrap();
+        break_history_database(&node);
+
+        assert!(block_on(save_my_new_maker_order(node.ctx.clone(), &maker(true))).is_err());
+        assert!(block_on(save_my_new_taker_order(node.ctx.clone(), &taker(true))).is_err());
+
+        assert!(node.active_file(&kept_maker.uuid));
+        assert!(my_taker_order_file_path(&node.ctx, &kept_taker.request.uuid).exists());
+    }
+
+    /// An order that is not kept in the history has no history write to fail: its record stays.
+    #[test]
+    fn t_b4_1_d_an_order_outside_the_history_keeps_its_record() {
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let maker_order = maker(false);
+        let taker_order = taker(false);
+
+        block_on(save_my_new_maker_order(node.ctx.clone(), &maker_order)).unwrap();
+        block_on(save_my_new_taker_order(node.ctx.clone(), &taker_order)).unwrap();
+
+        assert!(node.active_file(&maker_order.uuid));
+        assert!(my_taker_order_file_path(&node.ctx, &taker_order.request.uuid).exists());
+    }
+
+    /// Regression: a successful save leaves the active record and the history row.
+    #[test]
+    fn t_b4_1_e_a_successful_save_keeps_the_record_and_the_history_row() {
+        let node = Node::new(json!({}));
+        let maker_order = maker(true);
+        let taker_order = taker(true);
+
+        block_on(save_my_new_maker_order(node.ctx.clone(), &maker_order)).unwrap();
+        block_on(save_my_new_taker_order(node.ctx.clone(), &taker_order)).unwrap();
+
+        assert!(node.active_file(&maker_order.uuid));
+        assert!(my_taker_order_file_path(&node.ctx, &taker_order.request.uuid).exists());
+        assert_eq!(node.row(&maker_order.uuid).unwrap().0, "Created");
+        assert_eq!(node.row(&taker_order.request.uuid).unwrap().0, "Created");
+    }
+
+    // B4-1b (CRD ch.12 R7c item 4, ch.32 R-GH8a): the taker record gets the retrying deletion too.
+
+    /// Mocks the taker attempt: it fails `failures` times and then runs the real attempt. Returns the call count.
+    fn mock_taker_attempts_then_real(failures: usize) -> Arc<AtomicUsize> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        delete_active_taker_order_attempt.mock_safe(move |ctx, uuid| {
+            if counted.fetch_add(1, AtomicOrdering::SeqCst) < failures {
+                let err = MmError::err(MyOrdersError::ErrorSaving("disk full".to_owned()));
+                MockResult::Return(Box::new(futures01::future::result(err)))
+            } else {
+                MockResult::Continue((ctx, uuid))
+            }
+        });
+        calls
+    }
+
+    /// The same for the maker attempt.
+    fn mock_maker_attempts_then_real(failures: usize) -> Arc<AtomicUsize> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        delete_active_maker_order_attempt.mock_safe(move |ctx, uuid| {
+            if counted.fetch_add(1, AtomicOrdering::SeqCst) < failures {
+                let err = MmError::err(MyOrdersError::ErrorSaving("disk full".to_owned()));
+                MockResult::Return(Box::new(futures01::future::result(err)))
+            } else {
+                MockResult::Continue((ctx, uuid))
+            }
+        });
+        calls
+    }
+
+    /// The first deletion attempt fails, a later one succeeds: no taker record remains, the history error is
+    /// returned, and the one failed attempt is logged once.
+    #[test]
+    fn t_b4_1b_a_taker_deletion_that_fails_once_and_then_succeeds_leaves_no_record() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = taker(true);
+        let calls = mock_taker_attempts_then_real(1);
+        let started = Instant::now();
+
+        let err = block_on(save_my_new_taker_order(node.ctx.clone(), &order)).unwrap_err();
+
+        assert!(matches!(err.get_inner(), MyOrdersError::ErrorSaving(_)), "{err}");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2, "one retry");
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "the attempts are spaced"
+        );
+        assert!(!my_taker_order_file_path(&node.ctx, &order.request.uuid).exists());
+        if logs {
+            let lines = lines_for(order.request.uuid);
+            assert_eq!(lines.len(), 1, "one warn line for the one failed attempt");
+            assert!(lines[0].starts_with("WARN") && lines[0].contains("taker order"));
+            assert!(lines[0].contains("attempt 1 of 3"));
+        }
+    }
+
+    /// A restart after the retried deletion restores no taker order.
+    #[test]
+    fn t_b4_1b_b_a_restart_after_the_retried_deletion_restores_no_taker_order() {
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = taker(true);
+        let _calls = mock_taker_attempts_then_real(2);
+
+        assert!(block_on(save_my_new_taker_order(node.ctx.clone(), &order)).is_err());
+        node.restore();
+
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&node.ctx).unwrap();
+        let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
+        assert!(!taker_orders.contains_key(&order.request.uuid));
+    }
+
+    /// Every attempt fails: three attempts and no fourth, the same give-up line as the maker's, and the history
+    /// error is still returned.
+    #[test]
+    fn t_b4_1b_c_a_taker_deletion_that_fails_three_times_gives_up_and_names_the_order() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = taker(true);
+        let calls = mock_taker_attempts_then_real(usize::MAX);
+        let started = Instant::now();
+
+        let err = block_on(save_my_new_taker_order(node.ctx.clone(), &order)).unwrap_err();
+
+        assert!(matches!(err.get_inner(), MyOrdersError::ErrorSaving(_)), "{err}");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 3, "no fourth attempt");
+        assert!(started.elapsed() >= Duration::from_millis(400), "two pauses");
+        if logs {
+            let lines = lines_for(order.request.uuid);
+            assert_eq!(lines.len(), 4, "three failed attempts and the give-up line");
+            assert!(lines[..3]
+                .iter()
+                .all(|l| l.starts_with("WARN") && l.contains("taker order")));
+            assert!(lines[3].contains("Giving up") && lines[3].contains("taker order"));
+        }
+    }
+
+    /// A record that is already missing counts as deleted by the real attempt, so it adds no warn line.
+    #[test]
+    fn t_b4_1b_d_a_missing_taker_record_counts_as_deleted() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        let order = taker(false);
+        assert!(!my_taker_order_file_path(&node.ctx, &order.request.uuid).exists());
+
+        block_on(delete_active_taker_order_attempt(node.ctx.clone(), order.request.uuid).compat()).unwrap();
+
+        if logs {
+            assert!(lines_for(order.request.uuid).is_empty());
+        }
+    }
+
+    /// An existing record is deleted at the first attempt, with no pause and no warn line.
+    #[test]
+    fn t_b4_1b_e_an_existing_taker_record_is_deleted_at_the_first_attempt() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = taker(true);
+        let calls = mock_taker_attempts_then_real(0);
+
+        assert!(block_on(save_my_new_taker_order(node.ctx.clone(), &order)).is_err());
+
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "one attempt, no retry");
+        assert!(!my_taker_order_file_path(&node.ctx, &order.request.uuid).exists());
+        if logs {
+            assert!(lines_for(order.request.uuid).is_empty());
+        }
+    }
+
+    /// Regression: the maker save keeps its retrying deletion and its log lines, now through the shared loop.
+    #[test]
+    fn t_b4_1b_f_the_maker_retry_of_the_failed_save_is_unchanged() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        break_history_database(&node);
+        let order = maker(true);
+        let calls = mock_maker_attempts_then_real(2);
+        let started = Instant::now();
+
+        let err = block_on(save_my_new_maker_order(node.ctx.clone(), &order)).unwrap_err();
+
+        assert!(matches!(err.get_inner(), MyOrdersError::ErrorSaving(_)), "{err}");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 3);
+        assert!(started.elapsed() >= Duration::from_millis(400), "two pauses");
+        assert!(!node.active_file(&order.uuid));
+        if logs {
+            let lines = lines_for(order.uuid);
+            assert_eq!(lines.len(), 2, "one warn line per failed attempt");
+            assert!(lines[0].contains("Deleting the active record of maker order"));
+            assert!(lines[0].contains("failed (attempt 1 of 3): "));
+            assert!(lines[1].contains("failed (attempt 2 of 3): "));
+            assert!(lines.iter().all(|line| line.contains("disk full")));
+        }
+    }
+
+    /// Regression: the maker give-up line keeps its text.
+    #[test]
+    fn t_b4_1b_g_the_maker_give_up_line_is_unchanged() {
+        let logs = capture_installed();
+        let node = Node::new(json!({}));
+        let order = maker(false);
+        let calls = mock_attempts(3);
+
+        remove(&node, &order);
+
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 3);
+        if logs {
+            let lines = lines_for(order.uuid);
+            assert_eq!(lines.len(), 4);
+            assert!(lines[3].starts_with("WARN Giving up deleting the active record of maker order "));
+            assert!(lines[3].ends_with(" after 3 attempts"));
+        }
     }
 }
 
@@ -11319,6 +11595,100 @@ mod t60_7_maker_balance_watch_tests {
             assert!(err.contains("Error saving an order"), "{err}");
             assert_eq!(maker.probe.count("read BASE"), 1, "the balance check ran first");
             maker.assert_pair_unchanged(&previous, root);
+        }
+
+        /// R-GH8a, the orphan residual: a `setprice` whose history write fails returns the error and leaves no
+        /// active record of the new order, so a restart cannot restore it. It holds at the default and with the
+        /// switch on.
+        #[test]
+        fn t_gh8a_g_a_failed_history_write_leaves_no_active_record_of_the_new_order() {
+            for extra in [json!({}), json!({ "setprice_replace_after_checks": true })] {
+                let maker = Maker::new(extra.clone());
+                let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().unwrap();
+                let _ = maker
+                    .ctx
+                    .sqlite_connection
+                    .pin(Arc::new(std::sync::Mutex::new(connection)));
+
+                let err = refused(maker.set_price_with_history(false, 3, None, true));
+
+                assert!(err.contains("Error saving an order"), "{extra}: {err}");
+                let stored = block_on(MyOrdersStorage::new(maker.ctx.clone()).load_active_maker_orders()).unwrap();
+                assert!(stored.is_empty(), "{extra}: {stored:?}");
+                assert_eq!(maker.own_orders(), HashSet::new(), "{extra}");
+                std::fs::create_dir_all(my_taker_orders_dir(&maker.ctx)).unwrap();
+                block_on(orders_kick_start(&maker.ctx)).unwrap();
+                assert_eq!(
+                    maker.own_orders(),
+                    HashSet::new(),
+                    "{extra}: restored at the next start"
+                );
+            }
+        }
+
+        /// `buy` of 3 BASE at price 1 on the node, through `lp_auto_buy`, with the choice of `save_in_history`.
+        fn buy(maker: &Maker, save_in_history: bool) -> Result<String, String> {
+            let base = block_on(lp_coinfind(&maker.ctx, "BASE")).unwrap().unwrap();
+            let rel = block_on(lp_coinfind(&maker.ctx, "REL")).unwrap().unwrap();
+            let input: AutoBuyInput = json::from_value(json!({
+                "base": "BASE", "rel": "REL", "price": 1, "volume": 3, "method": "buy",
+                "save_in_history": save_in_history
+            }))
+            .unwrap();
+            block_on(lp_auto_buy(&maker.ctx, &base, &rel, input))
+        }
+
+        /// The taker requests that left the node.
+        fn taker_requests(maker: &mut Maker) -> usize {
+            drain(&mut maker.rx)
+                .into_iter()
+                .filter(|published| matches!(published.message, OrdermatchMessage::TakerRequest(_)))
+                .count()
+        }
+
+        /// R-GH8a, the taker path: a `buy` whose history write fails returns the error, subscribes to no topic,
+        /// publishes no taker request, keeps no active taker record and inserts no taker order, so a restart
+        /// restores nothing.
+        #[test]
+        fn t_gh8a_h_a_failed_taker_save_sends_no_request() {
+            let mut maker = Maker::new(json!({}));
+            std::fs::create_dir_all(my_taker_orders_dir(&maker.ctx)).unwrap();
+            let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().unwrap();
+            let _ = maker
+                .ctx
+                .sqlite_connection
+                .pin(Arc::new(std::sync::Mutex::new(connection)));
+
+            let err = match buy(&maker, true) {
+                Ok(result) => panic!("the buy must fail, got {result}"),
+                Err(e) => e,
+            };
+
+            assert!(err.contains("Error saving an order"), "{err}");
+            assert_eq!(taker_requests(&mut maker), 0, "no taker request is published");
+            assert!(maker.ordermatch_ctx().orderbook_subscriptions.read().is_empty());
+            let stored = block_on(MyOrdersStorage::new(maker.ctx.clone()).load_active_taker_orders()).unwrap();
+            assert!(stored.is_empty(), "{stored:?}");
+            assert!(block_on(maker.ordermatch_ctx().my_taker_orders.lock()).is_empty());
+            block_on(orders_kick_start(&maker.ctx)).unwrap();
+            assert!(block_on(maker.ordermatch_ctx().my_taker_orders.lock()).is_empty());
+        }
+
+        /// Regression: with a save that works (an order kept outside the history; the history row of a successful
+        /// save is covered by `t_b4_1_e_a_successful_save_keeps_the_record_and_the_history_row`), the same `buy`
+        /// subscribes, publishes one taker request and keeps its order and its active record.
+        #[test]
+        fn t_gh8a_h_a_taker_save_that_works_sends_one_request() {
+            let mut maker = Maker::new(json!({}));
+            std::fs::create_dir_all(my_taker_orders_dir(&maker.ctx)).unwrap();
+
+            buy(&maker, false).unwrap();
+
+            assert_eq!(taker_requests(&mut maker), 1);
+            assert_eq!(maker.ordermatch_ctx().orderbook_subscriptions.read().len(), 1);
+            let stored = block_on(MyOrdersStorage::new(maker.ctx.clone()).load_active_taker_orders()).unwrap();
+            assert_eq!(stored.len(), 1);
+            assert_eq!(block_on(maker.ordermatch_ctx().my_taker_orders.lock()).len(), 1);
         }
 
         /// T-GH8a bullet 3 with T-GH8 and T-GH9: after a failed re-pricing, the next one whose checks pass

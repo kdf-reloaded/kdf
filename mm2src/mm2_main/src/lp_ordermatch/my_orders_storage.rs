@@ -10,6 +10,7 @@ use futures::{FutureExt, TryFutureExt};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 #[cfg(test)] use mocktopus::macros::*;
+use std::future::Future;
 use uuid::Uuid;
 
 pub type MyOrdersResult<T> = Result<T, MmError<MyOrdersError>>;
@@ -37,7 +38,16 @@ pub enum MyOrdersError {
     InternalError(String),
 }
 
+/// Saves a new maker order: its active record, then, when the order is kept in the history, its filtering-history
+/// row. A failed write of the active record is only logged. When the history write fails, the active record just
+/// written is deleted again and the history error is returned: the callers report the order as not placed, and a
+/// record left behind would bring it back as a live order at the next start (CRD ch.32 R-GH8a).
+///
+/// # Errors
+///
+/// The error of the filtering-history write.
 pub async fn save_my_new_maker_order(ctx: MmArc, order: &MakerOrder) -> MyOrdersResult<()> {
+    let deletion_ctx = ctx.clone();
     let storage = MyOrdersStorage::new(ctx);
     storage
         .save_new_active_maker_order(order)
@@ -45,12 +55,25 @@ pub async fn save_my_new_maker_order(ctx: MmArc, order: &MakerOrder) -> MyOrders
         .error_log_with_msg("!save_new_active_maker_order");
 
     if order.save_in_history {
-        storage.save_maker_order_in_filtering_history(order).await?;
+        if let Err(e) = storage.save_maker_order_in_filtering_history(order).await {
+            // A record that is already missing counts as deleted, so a failed active write adds no noise.
+            delete_active_maker_order_with_retry(&deletion_ctx, order.uuid).await;
+            return Err(e);
+        }
     }
     Ok(())
 }
 
+/// Saves a new taker order: its active record, then, when the order is kept in the history, its filtering-history
+/// row. A failed write of the active record is only logged. When the history write fails, the active record just
+/// written is deleted again, with the retrying deletion of CRD ch.12 R7c item 4, and the history error is returned
+/// (CRD ch.32 R-GH8a).
+///
+/// # Errors
+///
+/// The error of the filtering-history write.
 pub async fn save_my_new_taker_order(ctx: MmArc, order: &TakerOrder) -> MyOrdersResult<()> {
+    let deletion_ctx = ctx.clone();
     let storage = MyOrdersStorage::new(ctx);
     storage
         .save_new_active_taker_order(order)
@@ -58,7 +81,11 @@ pub async fn save_my_new_taker_order(ctx: MmArc, order: &TakerOrder) -> MyOrders
         .error_log_with_msg("!save_new_active_taker_order");
 
     if order.save_in_history {
-        storage.save_taker_order_in_filtering_history(order).await?;
+        if let Err(e) = storage.save_taker_order_in_filtering_history(order).await {
+            // A record that is already missing counts as deleted, so a failed active write adds no noise.
+            delete_active_taker_order_with_retry(&deletion_ctx, order.request.uuid).await;
+            return Err(e);
+        }
     }
     Ok(())
 }
@@ -119,7 +146,7 @@ pub fn delete_my_taker_order(ctx: MmArc, order: TakerOrder, reason: TakerOrderCa
     Box::new(fut.boxed().compat())
 }
 
-/// Number of times the deletion of a removed maker order's active record is tried (CRD ch.12 R7c item 4).
+/// Number of times the deletion of an active record is tried (CRD ch.12 R7c item 4).
 const ACTIVE_RECORD_DELETE_ATTEMPTS: usize = 3;
 /// Pause between two such attempts.
 const ACTIVE_RECORD_DELETE_PAUSE_SECS: f64 = 0.2;
@@ -151,27 +178,69 @@ pub(crate) fn delete_active_maker_order_attempt(ctx: MmArc, uuid: Uuid) -> BoxFu
     Box::new(fut.boxed().compat())
 }
 
-/// CRD ch.12 R7c item 4: tries to delete the active record up to [`ACTIVE_RECORD_DELETE_ATTEMPTS`] times,
-/// 200 ms apart. Each failed attempt is logged once at warn level; after the last failure one more warn line
-/// gives up and names the order. Nothing else is logged.
+/// One attempt to delete the active record of a taker order, with the same rule as
+/// [`delete_active_maker_order_attempt`]: a failed deletion is followed by a read of the stored records, and a
+/// record the read does not find counts as deleted.
+#[cfg_attr(test, mockable)]
+pub(crate) fn delete_active_taker_order_attempt(ctx: MmArc, uuid: Uuid) -> BoxFut<(), MmError<MyOrdersError>> {
+    let fut = async move {
+        let storage = MyOrdersStorage::new(ctx);
+        match storage.delete_active_taker_order(uuid).await {
+            Ok(()) => Ok(()),
+            Err(delete_err) => match storage.load_active_taker_orders().await {
+                Ok(stored) if stored.iter().all(|order| order.request.uuid != uuid) => Ok(()),
+                _ => Err(delete_err),
+            },
+        }
+    };
+    Box::new(fut.boxed().compat())
+}
+
+/// CRD ch.12 R7c item 4: tries to delete the active record of a maker order up to [`ACTIVE_RECORD_DELETE_ATTEMPTS`]
+/// times, 200 ms apart. See [`delete_active_record_with_retry`].
 async fn delete_active_maker_order_with_retry(ctx: &MmArc, uuid: Uuid) {
-    for attempt in 1..=ACTIVE_RECORD_DELETE_ATTEMPTS {
-        match delete_active_maker_order_attempt(ctx.clone(), uuid).compat().await {
+    delete_active_record_with_retry("maker", uuid, || {
+        delete_active_maker_order_attempt(ctx.clone(), uuid).compat()
+    })
+    .await
+}
+
+/// CRD ch.12 R7c item 4: the same retrying deletion for the active record of a taker order, which
+/// `orders_kick_start` restores like a maker record.
+async fn delete_active_taker_order_with_retry(ctx: &MmArc, uuid: Uuid) {
+    delete_active_record_with_retry("taker", uuid, || {
+        delete_active_taker_order_attempt(ctx.clone(), uuid).compat()
+    })
+    .await
+}
+
+/// Runs `attempt` up to [`ACTIVE_RECORD_DELETE_ATTEMPTS`] times, 200 ms apart, until it succeeds. Each failed
+/// attempt is logged once at warn level; after the last failure one more warn line gives up and names the order.
+/// Nothing else is logged. `kind` is `maker` or `taker`.
+async fn delete_active_record_with_retry<F, Fut>(kind: &str, uuid: Uuid, mut attempt: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = MyOrdersResult<()>>,
+{
+    for attempt_number in 1..=ACTIVE_RECORD_DELETE_ATTEMPTS {
+        match attempt().await {
             Ok(()) => return,
             Err(e) => common::log::warn!(
-                "Deleting the active record of maker order {} failed (attempt {} of {}): {}",
+                "Deleting the active record of {} order {} failed (attempt {} of {}): {}",
+                kind,
                 uuid,
-                attempt,
+                attempt_number,
                 ACTIVE_RECORD_DELETE_ATTEMPTS,
                 e
             ),
         }
-        if attempt < ACTIVE_RECORD_DELETE_ATTEMPTS {
+        if attempt_number < ACTIVE_RECORD_DELETE_ATTEMPTS {
             Timer::sleep(ACTIVE_RECORD_DELETE_PAUSE_SECS).await;
         }
     }
     common::log::warn!(
-        "Giving up deleting the active record of maker order {} after {} attempts",
+        "Giving up deleting the active record of {} order {} after {} attempts",
+        kind,
         uuid,
         ACTIVE_RECORD_DELETE_ATTEMPTS
     );

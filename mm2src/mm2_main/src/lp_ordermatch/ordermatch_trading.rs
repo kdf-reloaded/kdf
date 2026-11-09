@@ -2290,6 +2290,12 @@ pub async fn lp_auto_buy(
     }
     let order = try_s!(order_builder.build());
 
+    // The save comes first (CRD ch.32 R-GH8a): a failed save returns its error with nothing subscribed and no
+    // request sent.
+    save_my_new_taker_order(ctx.clone(), &order)
+        .await
+        .map_err(|e| ERRL!("{}", e))?;
+
     let request_orderbook = false;
     try_s!(
         subscribe_to_orderbook_topic(
@@ -2315,9 +2321,6 @@ pub async fn lp_auto_buy(
         rel_orderbook_ticker: &order.rel_orderbook_ticker,
     } });
 
-    save_my_new_taker_order(ctx.clone(), &order)
-        .await
-        .map_err(|e| ERRL!("{}", e))?;
     my_taker_orders.insert(order.request.uuid, order);
     Ok(result.to_string())
 }

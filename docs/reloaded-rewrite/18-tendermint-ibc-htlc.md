@@ -80,6 +80,7 @@ The chapter is structured as:
 | §18.8   | External references |
 | §18.9   | Baseline Verifications |
 | §18.10  | Provenance Footer |
+| §18.11  | Swap behavior of the reference (passed the KDF Dirty Gate on 2026-11-08): time lock, fee and gas, HTLC id, refund recognition, confirmations, fee validation, dialect refusal, watchers, designation agreement |
 
 ---
 
@@ -199,13 +200,13 @@ case-sensitive.
 
 ```
 Send:    sender calls   MsgCreateHTLC(to, amount, hashLock, timeLock, ...)
-              → chain stores HTLC under id = hash(sender || to || amount || hashLock || timeLock || timestamp)
+              → chain stores HTLC under id = sha256(hashLock || sender || to || amount-string)
+                (exact derivation: §18.11.3 R18.11.12)
 Spend:   recipient calls MsgClaimHTLC(id, secret)
               → chain verifies sha256(secret) == hashLock, transfers amount to recipient
-Refund:  *no broadcast required* — the chain auto-refunds on the block in which
-              block.timestamp >= timestamp + timeLock (where timeLock is a
-              block-count duration encoded relative to the create-tx's
-              timestamp).
+Refund:  *no broadcast required* — the chain auto-refunds in the block whose
+              height reaches expiration_height = creation height + timeLock
+              (timeLock is a block count; corrected 2026-11-08, see §18.11.1).
 ```
 
 The auto-refund is the most important divergence from the UTXO and
@@ -236,8 +237,8 @@ recognises as "no refund tx is needed; the chain will auto-refund".
 | `sender_on_other_chain`     | string (Iris-only)    | Optional cross-chain provenance.         |
 | `amount`                    | `Vec<Coin>`           | Amount in `{denom, amount}` per denom.    |
 | `hash_lock`                 | hex string            | `sha256(secret)`.                         |
-| `timestamp`                 | uint64                | UNIX seconds; floor for timelock math.   |
-| `time_lock`                 | uint64                | Block-count duration after `timestamp`.  |
+| `timestamp`                 | uint64                | Hash-lock salt, not a lock parameter: non-zero makes the module hash secret and timestamp together; the swap surface sets it to 0 (§18.11.1 R18.11.2). |
+| `time_lock`                 | uint64                | Block count from the creating block to expiry; module interval [50, 34560] (§18.11.1 R18.11.1). |
 | `transfer`                  | bool (Iris-only)      | If `true`, this HTLC is part of an IBC transfer. |
 
 `MsgClaimHTLC`:
@@ -284,7 +285,7 @@ Defaults:
 
 - `timeout_timestamp = block-time + 15 minutes` (configurable via
   the deferred RPC handler in §18.7.2).
-- Gas limit: `150_000` nanos.
+- Gas limit: 150,000 gas units (a withdrawal figure; swap transactions use 125,000, §18.11.2 R18.11.7).
 
 The transfer wire surface is fully defined here; the stand-alone
 RPC handler that exposes it to GUI callers is one of the deferred
@@ -611,3 +612,477 @@ The chapter relies on one baseline-state claim:
   2026-10-25 with [Chapter 60](60-trading-floors-and-refusal-contract.md)
   (PASS, measure 0.02, no findings; scope attestation recorded in
   chapter 60 §60.12).
+  §18.11 (added 2026-11-08, Spec Reader round 0.4.0-7) was distilled
+  from the same two designations and from the `dev (as of 2026-03-27)`
+  row, read read-only, for the swap behavior of the Tendermint module
+  (time lock, fee and gas, HTLC id, refund, confirmations, fee
+  validation, dialects, watchers); the §18.3.1 lifecycle, the
+  §18.3.2 `timestamp`/`time_lock` rows and the §18.4 gas-unit line were
+  corrected in the same pass from the public irismod module semantics.
+  The verification notes of §18.11 name a public-network observation (a
+  50-block HTLC on the public Iris testnet `nyancat-9` refunds in about
+  four minutes, with state `Refunded` and no transaction); it is an input
+  of permitted-input class R6.
+  *Dirty Gate clearance (chapter 01 T1, R40).* **KDF Dirty Gate: PASS on
+  2026-11-08, measure 0.05, no findings.** The pass covered §18.11 and
+  the corrections of §18.3.1, §18.3.2 and §18.4 made in the same pass.
+  *Extent:* the Tendermint HTLC swap subsystem: the construction and
+  validation of the create and claim messages, fee and gas, the HTLC
+  id, the spend search and refund recognition, confirmation and claim
+  polling, the sending and validation of the DEX fee, the protocol
+  dialects, the watcher and burn hooks, and the IBC gating; compared at
+  `v3.0.0-beta` (10 files), at `v2.6.0-beta` (a 3-file difference
+  against `v3.0.0-beta`) and at `dev (as of 2026-03-27)` (a 20-file
+  comparison, identical). *Method:* line-by-line reading with a
+  mechanical difference and token scan; the gate script was not run
+  because there are no code blocks. *Measure:* 0.05 on the
+  discretionary-expression basis.
+
+---
+
+## 18.11 Swap behavior of the reference
+
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-08, measure
+> 0.05** (attestation in the provenance footer above). This
+> section was written by the dirty-side specification author on
+> 2026-11-08 (Spec Reader round 0.4.0-7) from the reference designations
+> `v2.6.0-beta` and `v3.0.0-beta`, from the public Cosmos SDK and
+> irismod HTLC module specifications, and from this repository's own
+> tree. It answers the
+> open questions of the project's Tendermint swap analysis (time lock,
+> fee and gas, HTLC id and hash lock, refund recognition, confirmations
+> and claim polling, fee validation, IBC denoms and dialect refusal,
+> watchers, designation differences). Rules are numbered R18.11.x;
+> maintainer decisions D18.11.x.
+
+The two designations behave identically for everything in this section
+(§18.11.9). The behavior below is the behavior of a reference node on
+netid 8762 and on netid 6133 alike; nothing in it is network-dependent.
+
+### 18.11.1 Time lock of the create-HTLC message
+
+The on-chain HTLC module (public irismod `x/htlc` and its Nucleus
+derivative) expresses the lock as a **number of blocks**: the module
+records `expiration_height = inclusion height + time_lock` and refunds
+the HTLC automatically in the block that reaches that height. The
+`timestamp` field is not a lock parameter: when it is non-zero the module
+derives the hash lock from the secret *and* the timestamp; when it is
+zero the hash lock is the plain SHA-256 of the secret. The module accepts
+`time_lock` only in the closed interval 50 to 34,560 blocks.
+
+- **R18.11.1.** *Unit and derivation.* The `time_lock` field of a
+  create-HTLC message MUST be a block count derived from the swap's
+  negotiated payment lock duration in seconds (the "lock duration" of
+  [Chapter 51 R10](51-legacy-v1-swap-state-machine.md), *not* the
+  maker-side multiplied locktime) as the integer quotient of that
+  duration by the coin's configured `avg_blocktime` (coins-file field,
+  whole seconds, required for activation), then clamped into the module's
+  interval [50, 34560]. The same formula applies to the maker payment and
+  the taker payment: both reference sides pass the *base* lock duration.
+
+> **As-built note (2026-11-08, clean side, PR #299).** `TendermintConf`
+> refuses an `avg_blocktime` of 0 at activation with the existing
+> `TendermintInitError` shape, naming the key; the block-count division
+> keeps a divisor of at least 1 regardless.
+- **R18.11.2.** *Timestamp.* The `timestamp` field MUST be zero, so that
+  the hash lock is the plain 32-byte SHA-256 of the swap secret
+  ([Chapter 51 R72](51-legacy-v1-swap-state-machine.md): a Tendermint
+  coin on either side forces the 32-byte algorithm).
+- **R18.11.3.** *Hash lock encoding.* `hash_lock` MUST be the
+  hex encoding of the 32-byte secret hash; the reference emits lower-case
+  hex and compares hash locks case-insensitively, while HTLC ids are
+  upper-case hex. An implementation MUST accept either case of a hash
+  lock on input.
+- **R18.11.4.** *Other create fields.* `sender` is the payer's own bech32
+  account; `to` is the bech32 account derived from the counterparty's
+  HTLC public key (`dhash160`, §18.2.2) with the coin's own prefix;
+  `amount` is exactly one `{denom, amount}` coin in base units of the
+  payment denom (platform denom for the platform coin, the token's denom
+  for a token); the Iris-only fields `receiver_on_other_chain` and
+  `sender_on_other_chain` are empty strings and `transfer` is `false`.
+  The transaction memo is empty.
+- **R18.11.5.** *Counterparty lock validation (receiving side).* The
+  receiving side MUST decode the counterparty's create-HTLC message
+  (exactly one message in the transaction body, of the dialect the coin's
+  account prefix selects) and MUST require it to be *field-for-field
+  equal* to the message it would itself have built from the swap
+  parameters: sender = counterparty's derived account, `to` = own
+  account, the single expected coin, the hex secret hash, `timestamp` 0,
+  and `time_lock` recomputed by R18.11.1 from the same base lock
+  duration. It MUST then fetch the transaction from a node by its hash
+  (SHA-256 of the raw transaction bytes, upper-case hex), require the
+  node's copy to equal the supplied bytes, query the HTLC by its id
+  (§18.11.3) and require the module state `Open`. Any other state is the
+  distinct unexpected-payment-state validation error.
+
+> **Upstream divergence (informative).** The validation of R18.11.5 is an
+> equality check, not a sufficiency check: a counterparty's lock is
+> accepted only when it equals the receiver's own estimate, which couples
+> the two peers to the same `avg_blocktime` value and the same clamping.
+> Two peers whose coins files disagree on `avg_blocktime` for the same
+> chain cannot swap with each other. The reference does not check that
+> the lock is *long enough* for the swap in any other way.
+
+> **Code-quality finding (informative; trigger: contradiction between two
+> things read side by side).** The reference derives the *maker* payment's
+> block lock from the base lock duration (R18.11.1), while the swap
+> machine fixes the maker payment's locktime at start time plus the lock
+> duration scaled by the maker-locktime multiplier (default two; Chapter
+> 51 R10/R22/R25 call this asymmetry the protocol's safety margin). For a
+> Tendermint maker payment the on-chain expiry therefore falls at roughly
+> *half* the time the machine assumes, at about the same moment the
+> taker's payment on the other chain becomes refundable. The maker, who
+> knows the secret, can wait for its own HTLC to auto-refund and then
+> claim the taker's payment; the machine's refund deadlines (Chapter 51
+> R18) do not protect against this because they are computed from the
+> doubled locktime. Proposed fix (decision D18.11.1): derive the maker
+> payment's block lock from the *multiplied* maker locktime, and make the
+> taker's validation of a maker payment require at least that; this
+> breaks message equality with a reference counterparty and so must be
+> paired with the compatibility decision below.
+
+- **D18.11.1 (maintainer decision).** Interoperability versus safety for
+  the maker lock: (a) reproduce R18.11.1 exactly so that a reference
+  counterparty's equality check passes, accepting the halved maker
+  margin on Tendermint maker payments; (b) use the multiplied maker
+  locktime for our own maker payments and require a minimum relative
+  lock when validating, giving up swaps with reference makers/takers on
+  the affected leg; (c) a negotiated or network-conditional choice.
+  Chapter 51 R10 and the 8762 contract (`AGENTS.md` §3) favor (a) for
+  netid 8762 unless the maintainer accepts the incompatibility.
+- **D18.11.2 (maintainer decision).** Whether validation should tolerate
+  a lock *longer* than the receiver's estimate (a sufficiency check in
+  addition to, or instead of, equality), which the reference does not do.
+  *Decided 2026-11-09, together with D18.11.1: the maintainer's decision,
+  option (c), asymmetric.* Two Reloaded nodes that both declare a
+  Tendermint lock capability in their protocol information use the
+  multiplied maker lock. The receiving side then requires a lock of at
+  least the expected value. Toward a counterparty without that
+  capability, in either role, the reference derivation of R18.11.1 and
+  the equality check of R18.11.5 apply, with no decline and no switch.
+  The choice is made per swap when the match is made, and the saved swap
+  keeps it. *Not implemented yet: a later change implements it, and its
+  rule lands with that change.*
+
+### 18.11.2 Fee and gas for create, claim and the dex fee
+
+- **R18.11.6.** *Simulation-based fee.* Before broadcasting a create,
+  claim or fee-send transaction the sender MUST simulate the signed
+  transaction through the Cosmos tx service's simulate query
+  (`/cosmos.tx.v1beta1.Service/Simulate`) with a zero fee and the fixed
+  gas limit of R18.11.7, and MUST set the fee amount to
+  `ceil(gas_used × 1.5 × gas_price)` in base units of the **platform
+  denom**, where `gas_price` is the coin's configured gas price or 0.25
+  when the configuration omits it. A simulation rejected for an account
+  sequence mismatch MUST be retried with the sequence the node reports;
+  any other non-zero simulation code is a fee-estimation failure.
+- **R18.11.7.** *Gas limit.* Every swap transaction (create, claim, fee
+  send) carries the fixed gas limit 125,000 gas units. The figure 150,000
+  is the gas limit of an IBC `MsgTransfer` withdrawal (§18.4) and plays
+  no role in swaps. Both are gas units; neither is a nanosecond value.
+- **R18.11.8.** *Height timeout.* Every swap transaction MUST carry a
+  body `timeout_height` of the current chain height plus 100 blocks.
+- **R18.11.9.** *External signer fallback.* When the coin has no local
+  private key (external signing session), the fee MUST be computed from a
+  fixed assumed gas usage of 50,000 instead of a simulation:
+  `ceil(50,000 × 1.5 × gas_price)`.
+- **R18.11.10.** *Trade-fee preimages.* The sender-side trade fee MUST be
+  estimated by simulating a create-HTLC to the fee-address account for the
+  requested amount with a fresh random 32-byte hash lock and a 1,750-block
+  lock; the receiver-side trade fee MUST reuse the same simulation (the
+  reference treats claim and create cost as equal because a claim cannot
+  be simulated before the HTLC exists); the fee-to-send-the-dex-fee MUST
+  be estimated by simulating a bank send of the fee amount to the
+  fee-address account. All three report `paid_from_trading_vol = false`.
+  The amount does not influence the fee, so the generic trade-fee query
+  uses the minimum transaction amount.
+- **R18.11.11.** *Tokens pay in the platform denom.* A token's HTLC and
+  fee-send transactions carry the token denom in the message amount and
+  the platform denom in the fee; a token's receiver-side trade fee is the
+  platform coin's.
+
+> **Code-quality finding (informative; trigger: apparent with little
+> extra effort).** For a token, the reference labels the sender-side
+> trade fee and the fee-to-send-the-dex-fee with the *token's* ticker
+> although the amount is paid in the platform denom (and, in the second
+> case, converts the base-unit figure with the token's decimals). The
+> swap machine reserves and checks balances by that label, so a token
+> taker's platform-coin fee is checked against the token balance. The
+> receiver-side fee is labeled with the platform coin, as its own comment
+> says it must be. Proposed fix: label all three with the platform ticker
+> and convert with the platform decimals.
+
+> **As-built note (2026-11-08, clean side, PR #299).** The proposed fix is
+> applied: for a token, the sender-side trade fee and the
+> fee-to-send-the-dex-fee are labeled with the platform ticker and
+> converted with the platform decimals. The two `_for_denom` helpers take
+> the payment denom and its decimals for the amount only; the fee label
+> and decimals are the platform coin's own. The receiver-side fee is
+> unchanged.
+
+### 18.11.3 HTLC id, hash lock and the claim
+
+- **R18.11.12.** *HTLC id.* The id under which the module stores an HTLC
+  is the upper-case hex SHA-256 of the concatenation: the 32 raw bytes of
+  the hash lock, the raw bytes of the sender account, the raw bytes of the
+  `to` account, and the ASCII string of the amount in the module's coin
+  notation (`<integer amount><denom>`, several coins joined by commas in
+  the module's sorted order). This is the public module's own id
+  derivation; an implementation MUST reproduce it exactly, because every
+  query, claim and spend search addresses the HTLC by this id.
+- **R18.11.13.** *Claim message.* A claim MUST carry the claimer's own
+  bech32 account as `sender`, the id of R18.11.12 and the 32-byte secret
+  hex-encoded. The claimer derives the id from the counterparty's
+  create-HTLC transaction (its sender, `to` and amount fields) together
+  with the swap's secret hash; it does not trust an id carried in the
+  payment. The claim transaction's memo is empty, its fee and gas follow
+  §18.11.2.
+- **R18.11.14.** *Secret extraction.* The secret is recovered from a
+  claim transaction by decoding its first message as the dialect's claim
+  message and hex-decoding its `secret` field to exactly 32 bytes.
+
+> **As-built note (2026-11-08, clean side, PR #299).** `extract_secret`
+> (coin and token) refuses a secret whose hex decodes to any length other
+> than 32 bytes, with an error naming the length.
+
+### 18.11.4 Refund: what the reference does and what it reports
+
+The module refunds an expired HTLC itself; there is no refund message
+(§18.3.1).
+
+- **R18.11.15.** *Reference refund outcome (both designations).* The
+  reference does **not** declare the Tendermint family auto-refundable to
+  the swap machine: both refund methods answer a plain error, the family
+  does not override the wall-clock refundability hook, and the machine's
+  execute stage therefore waits until the locktime has passed, calls the
+  refund method, receives the error and records a *refund-failed* event
+  (`MakerPaymentRefundFailed` / `TakerPaymentRefundFailed`, Chapter 51
+  R18/R31) even though the funds have returned on chain. Manual recovery
+  of such a swap reports the payment as already refunded (R18.11.16) and
+  stops. Reloaded MUST NOT copy this outcome; it is the behavior the
+  reference exhibits, recorded here so that the field can be read.
+- **R18.11.16.** *Refund recognition by query.* The spend search for a
+  payment MUST compute the HTLC id (R18.11.12) from the payment
+  transaction's create message and the swap secret hash, query the module
+  state, and answer: `Open` → no spend; `Completed` → the claim
+  transaction found by a transaction search `claim_htlc.id='<id>'`
+  (ascending, first result; its absence is an error); `Refunded` → a
+  *refunded* result whose transaction is an **empty placeholder** (the
+  module records no transaction for an automatic refund). Any other
+  state is an error.
+- **R18.11.17.** *Reloaded refund path.* Reloaded MUST treat
+  the family as auto-refundable in the sense of Chapter 51 R18: the
+  execute stage waits for the chain's own refund instead of broadcasting.
+  The wait MUST be **height-based**: poll the HTLC state (R18.11.16) and
+  finish with `*PaymentRefunded` carrying no transaction identifier when
+  the state is `Refunded`; finish as a *spend* if the state turns
+  `Completed` meanwhile (the counterparty claimed; the machine's spend
+  path applies); and keep polling while the state is `Open`, because the
+  module's expiry is `inclusion height + time_lock` and a wall-clock
+  estimate from `avg_blocktime` can be early. The wall-clock locktime
+  remains the deadline for giving up with a refund-failed event.
+- **D18.11.3 (maintainer decision).** Whether the refunded outcome
+  should carry an empty placeholder transaction as the reference does
+  (which the recovery and history surfaces print as an all-zero hash), a
+  synthetic marker naming the HTLC id and the closing block height
+  (`closed_block` from the module's HTLC record), or no transaction at
+  all (as Chapter 51 R18 already allows for auto-refunding coins).
+  *Decided 2026-11-09: the maintainer's decision, option (b), the synthetic
+  marker in the swap event.* How a coin's transaction history shows the
+  refund is decided with Tendermint history fetching (chapter 36, plan
+  item 4). *Not implemented yet: R18.11.17 lands with a later change.*
+
+### 18.11.5 Confirmations, reorgs and claim polling
+
+- **R18.11.18.** *Confirmation rule.* A Tendermint coin and token report
+  zero required confirmations and no notarization requirement, and ignore
+  attempts to set either. Waiting for a payment's confirmation MUST poll
+  the tx service (`/cosmos.tx.v1beta1.Service/GetTx`) by the transaction
+  hash (SHA-256 of the raw bytes, upper-case hex) at the machine's
+  check interval (Chapter 51: 15 seconds) until the deadline; a found
+  transaction with result code 0 is confirmed; a found transaction with a
+  non-zero code is a definitive failure; an absent transaction is not yet
+  confirmed. No block-depth or reorg handling exists: Tendermint
+  consensus gives instant finality, so inclusion is final.
+- **R18.11.19.** *Claim polling.* Waiting for a payment to be spent MUST
+  derive the HTLC id from the payment's create message and the swap
+  secret hash and repeat the transaction search `claim_htlc.id='<id>'`
+  (ascending, one result) every 5 seconds until a claim is found or the
+  deadline passes; the found claim is returned re-encoded as a raw
+  transaction (body, auth info, signatures).
+
+### 18.11.6 Dex-fee transaction, its validation, and "my payment sent"
+
+- **R18.11.20.** *Fee transaction.* The taker fee is a bank `MsgSend` of
+  the fee amount to the fee address (bech32 of the dex pubkey hash with
+  the coin's prefix) for the standard descriptor, or a `MsgMultiSend`
+  with one input (sender, fee + burn) and two outputs (fee address with
+  the fee amount, then burn address — bech32 of the burn pubkey hash —
+  with the burn amount) for the burn descriptor (§18.5.1). Its memo MUST
+  be the swap uuid in hyphenated textual form. Fee and gas follow
+  §18.11.2. The broadcast is bounded by the fee-send deadline passed in
+  by the machine.
+- **R18.11.21.** *Fee validation.* The maker MUST decode the fee
+  transaction body and require: exactly one message; for the standard
+  descriptor a `MsgSend` whose recipient is the fee address, whose amount
+  list has exactly one coin equal (denom and decimal string) to the
+  expected fee in base units, and whose sender is the taker's derived
+  account; for the burn descriptor a `MsgMultiSend` with exactly two
+  outputs — the first to the fee address with exactly one coin equal to
+  the fee, the second to the burn address with exactly one coin equal to
+  the burn amount — and exactly one input whose address is the taker's
+  derived account. The memo MUST equal the swap uuid. The maker MUST then
+  fetch the transaction by hash from a node and require byte equality
+  with the supplied transaction. A no-fee descriptor is rejected on both
+  the sending and the validating side (see the §18.5.1 finding).
+
+> **As-built note (2026-11-08, clean side, PR #299).** The validation
+> also requires the message type URL of the form (`MsgSend` or
+> `MsgMultiSend`). The node's copy is fetched with the tx-service
+> `GetTx` query that the confirmation wait uses; its decoded transaction
+> is re-encoded to the raw form for the byte comparison. The maker's fee
+> validation repeats on any error, up to three more times 10 seconds
+> apart, so a transaction the node has not indexed yet is retried.
+- **R18.11.22.** *My-payment-sent check.* To find its own payment after a
+  restart the sender MUST compute the HTLC id from its own account, the
+  counterparty account derived from the counterparty pubkey, the single
+  expected coin and the secret hash (R18.11.12), query the module: no
+  HTLC → not sent; state `Open`, `Completed` or `Refunded` → search
+  `create_htlc.id='<id>'` (descending, one result), fail if that
+  transaction's result code is non-zero, decode its create message and
+  accept it when its hash lock equals the module's recorded hash lock
+  case-insensitively. Amount and counterparty therefore participate
+  through the id.
+
+> **As-built note (2026-11-08, clean side, PR #299).** The swap machine
+> asks the new provided trait method `check_if_my_payment_sent_for_amount`
+> (same arguments plus the payment amount, default: the old method), at
+> its four call sites with the amount the payment send uses. The
+> Tendermint coin and token override it with the id-first lookup (the
+> token with its own denom and decimals, the platform's account and node)
+> and answer an error from the old method, which carries no amount.
+
+### 18.11.7 Dialects, IBC denominations and chains without an HTLC module
+
+- **R18.11.23.** *Dialect selection and refusal.* The HTLC dialect is
+  selected by the coin's bech32 account prefix: `iaa` → Iris
+  (`irismod.htlc`), `nuc` → Nucleus (`nucleus.htlc`). For any other
+  prefix the create, claim, validate, query and search operations fail
+  with an unsupported-account-type error at the moment they are
+  attempted. The reference performs **no** refusal at
+  order or negotiation time in its default build: its counterparty
+  protocol-info check always accepts and its protocol-info payload is
+  empty; the operative guard for chains without the module (ATOM, OSMO)
+  is the coins-file `wallet_only` flag. Reloaded SHOULD refuse such
+  coins at order time (Chapter 60 refusal contract) rather than at
+  payment time.
+
+> **As-built note (2026-11-08, clean side, PR #299).** A coin or token
+> whose account prefix selects no dialect (a token uses its platform
+> coin's prefix) reports `wallet_only` true in addition to the build
+> switch and the coins-file flag, so the existing order refusal applies.
+> Chapter 60 R60.2.3 asks for an orderly error for a coin that cannot
+> trade, which that refusal is; it needs no other shape.
+- **R18.11.24.** *IBC denominations.* A token whose denom is an IBC
+  voucher (`ibc/<HASH>`) or a CW20 denom is swapped exactly like a native
+  token: the denom appears in the HTLC amount coin; the fee is paid in
+  the platform denom (R18.11.11). No denom translation occurs.
+- **R18.11.25.** *IBC-routed swaps do not exist at either designation.*
+  The IBC swap-routing capability of §18.7.5 is compiled out of both
+  designations' default builds (the feature is not a default feature of
+  any crate), and even when enabled its swap-start hooks are unfinished:
+  the two match-connection paths that would cross-check the routing
+  channel stop unconditionally. The only live pieces are the order-time
+  minimum-balance check and the channel id carried in order metadata.
+  Reloaded MUST NOT advertise or accept an IBC-routed swap.
+
+> **As-built note (2026-11-08, clean side, PR #299).** With the feature
+> `ibc-routing-for-swaps` on, its only hook is the order-time
+> minimum-balance check, which neither advertises a route nor accepts a
+> request. The coin and token advertise empty protocol information, and
+> their acceptance check now also declines a counterparty's non-empty
+> protocol information (where a routing channel would travel), with or
+> without the feature.
+
+### 18.11.8 Watchers
+
+- **R18.11.26.** The Tendermint coin and token do not override the
+  watcher-support hook, so the family answers *not supported*; every
+  watcher branch of the taker machine (Chapter 09, Chapter 51) is skipped
+  when either side of a swap is a Tendermint coin. This is an opt-out at
+  both designations and in reloaded; §18.3.1's trait-shape remark that
+  the family's watcher trait is empty remains accurate.
+
+### 18.11.9 Designations and the baseline anchor
+
+- **R18.11.27.** *Designation agreement.* `v2.6.0-beta` and `v3.0.0-beta`
+  agree on every rule of this section. The reference's Tendermint module
+  differs between the two only in: a saturating subtraction replacing an
+  equivalent checked-subtraction-with-default when computing broadcast
+  deadlines; the secret-extraction trait method losing a watcher-reward
+  parameter the family never used; and test fixtures. The `dev (as of
+  2026-03-27)` state is identical to `v3.0.0-beta` for the module.
+- **R18.11.28.** *Burn flag.* At both designations the family reports
+  that the dex fee should not be burned (Chapter 16 table), with a code
+  comment deferring the burn to a future negotiation version; a reference
+  Tendermint taker therefore always sends the standard fee form while
+  still being able to validate the burn form it receives.
+- *Baseline anchor.* The baseline tree has no Tendermint support (§18.9);
+  every rule here is post-anchor behavior distilled through the two-team
+  procedure.
+
+> **Code-quality finding (informative; trigger: apparent with little
+> extra effort).** The reference's broadcast helper shortens the deadline
+> it is given by five seconds with an unchecked duration subtraction. A
+> claim attempted when fewer than five seconds remain before the lock, or
+> after it (the machine passes the remaining lock time, saturating at
+> zero), or a fee send with an already-passed deadline, overflows that
+> subtraction and aborts the swap task. Proposed fix: saturate the
+> subtraction (or treat a deadline under five seconds as expired).
+
+### 18.11.10 Our side (informative, from this repository's tree)
+
+Checked against the present working tree on 2026-11-08: the HTLC id
+derivation, the create message shape (timestamp 0, block lock clamped
+to [50, 34560]), the spend search by module state with an empty
+placeholder for `Refunded`, the 5-second claim poll, the confirmation
+wait by transaction status, zero required confirmations and the dialect
+selection by prefix already match R18.11.1–R18.11.4, R18.11.12–R18.11.14,
+R18.11.16, R18.11.18–R18.11.19 and R18.11.23. Differences to close before
+swaps return:
+
+- the lock duration passed to the create message is derived from the
+  absolute locktime minus the current time (so the maker payment gets the
+  multiplied duration — safer, but not equal to a reference
+  counterparty's recomputation; D18.11.1);
+- payment validation checks hash lock, sender, receiver and amount but
+  neither `time_lock`, `timestamp`, node byte-equality nor the `Open`
+  state (R18.11.5);
+- burn-form fee validation checked only the sender and the first output's
+  address, not the amounts, the burn output or the message/output counts
+  (R18.11.21): closed (PR #299);
+- the my-payment-sent check searched the sender's recent create
+  transactions and matched the hash lock only (R18.11.22): closed
+  (PR #299);
+- the refund methods answer an error and the machine records a
+  refund-failed event — the same outcome as the reference, R18.11.15,
+  which R18.11.17 replaces;
+- the broadcast helper ignores the deadline it is given (no five-second
+  overflow, but also no bounded wait);
+- tokens' trade-fee labels followed the reference (finding in §18.11.2):
+  closed (PR #299).
+
+### 18.11.11 Verification notes
+
+- The lock interval [50, 34560] blocks, the `expiration_height`
+  semantics, the id derivation and the hash-lock-with-timestamp rule are
+  public irismod `x/htlc` module facts; verify them against the module's
+  published source and its `HTLC` proto (`expiration_height`,
+  `closed_block`, `state`), not against the reference.
+- `v2.6.0-beta` versus `v3.0.0-beta` agreement was established by a
+  read-only diff of the reference's Tendermint module between the two
+  tags (both tabled in chapter 02 §2.15A); no untabled state was read.
+- Live checks for the lab: a 50-block HTLC on the Iris testnet
+  (`nyancat-9`) refunds in about four minutes; the module returns state
+  `Refunded` with no transaction, which is what R18.11.16/R18.11.17 rely
+  on.

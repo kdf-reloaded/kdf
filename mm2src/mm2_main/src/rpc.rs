@@ -25,6 +25,7 @@ use coins::node_url::redact_urls_in_text;
 use common::log::{error, info};
 use common::{err_to_rpc_json_string, err_tp_rpc_json, HttpStatusCode};
 use derive_more::Display;
+use dispatcher_legacy::LegacyOutcome;
 use futures::future::join_all;
 use http::header::{HeaderValue, ACCESS_CONTROL_ALLOW_ORIGIN};
 use http::request::Parts;
@@ -310,9 +311,17 @@ pub fn escape_answer<'a, S: Into<Cow<'a, str>>>(input: S) -> Cow<'a, str> {
 async fn process_single_request(ctx: MmArc, req: Json, client: SocketAddr) -> Result<Response<Vec<u8>>, String> {
     let local_only = ctx.conf["rpc_local_only"].as_bool().unwrap_or(true);
     if req["mmrpc"].is_null() {
-        return dispatcher_legacy::process_single_request(ctx, req, client, local_only)
+        let outcome = dispatcher_legacy::process_single_request(ctx.clone(), req, client, local_only)
             .await
-            .map_err(|e| ERRL!("{}", e));
+            .map_err(|e| ERRL!("{}", e))?;
+        return match outcome {
+            LegacyOutcome::Answered(response) => Ok(response),
+            // CRD ch.43 R43.1A.1a: the legacy checks passed and the legacy table has no such method. The request is
+            // retried once on the versioned surface; the versioned surface never falls back to the legacy one.
+            LegacyOutcome::NoLegacyMethod(req) => {
+                Ok(process_legacy_fallback_request(ctx, req, client, local_only).await)
+            },
+        };
     }
 
     let id = req["id"].as_u64().map(|id| id as usize);
@@ -325,13 +334,42 @@ async fn process_single_request(ctx: MmArc, req: Json, client: SocketAddr) -> Re
         },
     };
 
+    Ok(process_versioned_request(ctx, req, client, local_only, version, id).await)
+}
+
+/// Runs a request through the versioned dispatcher and renders a dispatcher failure as the mmrpc error envelope.
+async fn process_versioned_request(
+    ctx: MmArc,
+    req: Json,
+    client: SocketAddr,
+    local_only: bool,
+    version: MmRpcVersion,
+    id: Option<usize>,
+) -> Response<Vec<u8>> {
     match dispatcher::process_single_request(ctx, req, client, local_only).await {
-        Ok(response) => Ok(response),
-        Err(e) => {
-            // return always serialized response
-            Ok(response_from_dispatcher_error(e, version, id))
-        },
+        Ok(response) => response,
+        // return always serialized response
+        Err(e) => response_from_dispatcher_error(e, version, id),
     }
+}
+
+/// CRD ch.43 R43.1A.1b-R43.1A.1c: the legacy-to-versioned fallback. The legacy body is converted by setting its
+/// top-level `mmrpc` key to `"2.0"` and nothing else, then goes through the same versioned path as a request that
+/// carried the key from the start: strict decoding, the versioned local-only, ban and authentication checks, and the
+/// mmrpc 2.0 envelope for every outcome. `id` is echoed when it is a non-negative integer and is `null` otherwise.
+/// This function never goes back to the legacy dispatcher.
+async fn process_legacy_fallback_request(
+    ctx: MmArc,
+    mut req: Json,
+    client: SocketAddr,
+    local_only: bool,
+) -> Response<Vec<u8>> {
+    let id = req["id"].as_u64().map(|id| id as usize);
+    // A body that is not an object stays as it is and is refused by the strict decoding as `InvalidRequest`.
+    if let Json::Object(body) = &mut req {
+        body.insert("mmrpc".to_owned(), Json::String("2.0".to_owned()));
+    }
+    process_versioned_request(ctx, req, client, local_only, MmRpcVersion::V2, id).await
 }
 
 /// Response body of the RPC server: buffered for the JSON-RPC answers, streaming for the SSE endpoint.
@@ -921,6 +959,250 @@ mod server_tests {
                 }
             }
         }
+    }
+
+    /// The order-management methods that only the legacy method table knows (CRD ch.43 R43.1A.4).
+    const LEGACY_ONLY_ORDER_METHODS: [&str; 9] = [
+        "setprice",
+        "buy",
+        "sell",
+        "update_maker_order",
+        "cancel_order",
+        "cancel_all_orders",
+        "my_orders",
+        "order_status",
+        "orderbook_depth",
+    ];
+
+    fn assert_http_status(status_line: &str, code: u16) {
+        assert!(
+            status_line.starts_with(&format!("HTTP/1.1 {code}")),
+            "expected HTTP {code}, got {status_line}"
+        );
+    }
+
+    /// Sends a legacy request (no `mmrpc` key, `params` inline next to `method`, the server password) and returns
+    /// the status line and the JSON body, exactly as [`post`] does.
+    fn post_legacy(addr: SocketAddr, method: &str, params: Json) -> (String, Json) {
+        let mut request = json!({ "userpass": "pw", "method": method });
+        for (key, value) in params.as_object().expect("the inline parameters are an object") {
+            request[key.as_str()] = value.clone();
+        }
+        post(addr, &request)
+    }
+
+    /// CRD ch.43 R43.1A.1, R43.1A.3, R43.1A.4: a versioned request for a method that only the legacy table knows is
+    /// answered like any unknown versioned method: the mmrpc error envelope, `NoSuchMethod`, no `error_data`,
+    /// HTTP 400, `mmrpc` and `id` echoed (`id` is `null` when the request has none). There is no versioned alias.
+    #[test]
+    fn versioned_requests_for_legacy_only_order_methods_answer_no_such_method() {
+        let (_ctx, addr) = start_server();
+        for method in LEGACY_ONLY_ORDER_METHODS {
+            for id in [Some(7), None] {
+                let mut request = json!({ "mmrpc": "2.0", "userpass": "pw", "method": method, "params": {} });
+                if let Some(id) = id {
+                    request["id"] = json!(id);
+                }
+                let (status, body) = post(addr, &request);
+                assert_http_status(&status, 400);
+                assert_eq!(body["mmrpc"], "2.0", "{method}: {body}");
+                assert_eq!(body["error_type"], "NoSuchMethod", "{method}: {body}");
+                assert!(body.get("error_data").is_none(), "{method}: {body}");
+                assert_eq!(
+                    body.get("id"),
+                    Some(&id.map_or(Json::Null, |id| json!(id))),
+                    "{method}: {body}"
+                );
+            }
+        }
+    }
+
+    /// CRD ch.43 R43.1A.3: the authentication runs before the method lookup, so an unauthenticated versioned call of
+    /// a legacy-only (hence unknown) protected method answers 403, not 400.
+    #[test]
+    fn versioned_request_for_a_legacy_only_order_method_is_authenticated_before_the_lookup() {
+        let (_ctx, addr) = start_server();
+        let request = json!({ "mmrpc": "2.0", "method": "setprice", "params": {}, "id": 5 });
+        let (status, body) = post(addr, &request);
+        assert_http_status(&status, 403);
+        assert_eq!(body["mmrpc"], "2.0", "{body}");
+        assert_eq!(body["error_type"], "UserpassIsNotSet", "{body}");
+        assert!(body.get("error_data").is_none(), "{body}");
+        assert_eq!(body["id"], 5, "{body}");
+    }
+
+    /// CRD ch.43 R43.1A.2: a legacy-shaped body (parameters inline) with an added `"mmrpc": "2.0"` is not routed to
+    /// the legacy handler: it is undecodable under the versioned envelope and answers `InvalidRequest` (string
+    /// payload, HTTP 400) before any method lookup. One order method and one other method.
+    #[test]
+    fn legacy_shaped_body_with_an_mmrpc_key_answers_invalid_request() {
+        let (_ctx, addr) = start_server();
+        let cases = [
+            (
+                "setprice",
+                json!({ "base": "RIN", "rel": "KMD", "price": 1, "volume": 1 }),
+            ),
+            ("my_balance", json!({ "coin": "RIN" })),
+        ];
+        for (method, inline) in cases {
+            let mut request = json!({ "mmrpc": "2.0", "userpass": "pw", "method": method, "id": 3 });
+            for (key, value) in inline.as_object().unwrap() {
+                request[key.as_str()] = value.clone();
+            }
+            let (status, body) = post(addr, &request);
+            assert_http_status(&status, 400);
+            assert_eq!(body["mmrpc"], "2.0", "{method}: {body}");
+            assert_eq!(body["error_type"], "InvalidRequest", "{method}: {body}");
+            assert!(body["error_data"].is_string(), "{method}: {body}");
+            assert_eq!(body["id"], 3, "{method}: {body}");
+        }
+    }
+
+    /// The answer must be the mmrpc 2.0 error envelope with this `error_type`, HTTP status and `id`.
+    fn assert_mmrpc_error(answer: &(String, Json), code: u16, error_type: &str, id: Json) {
+        let (status, body) = answer;
+        assert_http_status(status, code);
+        assert_eq!(body["mmrpc"], "2.0", "{body}");
+        assert_eq!(body["error_type"], error_type, "{body}");
+        assert_eq!(body.get("id"), Some(&id), "{body}");
+    }
+
+    /// The answer must be the legacy error body: HTTP 500, exactly one member `error`, no mmrpc envelope.
+    fn assert_legacy_error_body(answer: &(String, Json)) {
+        let (status, body) = answer;
+        assert_http_status(status, 500);
+        assert_eq!(body.as_object().map(|object| object.len()), Some(1), "{body}");
+        assert!(body["error"].is_string(), "{body}");
+    }
+
+    /// CRD ch.43 R43.1A.1a-R43.1A.1c: a legacy request (no `mmrpc`) shaped like a versioned one minus the key, for a
+    /// method only the versioned table knows, is answered in the mmrpc 2.0 envelope with the result, HTTP 200 and
+    /// the `id` echoed (`null` when absent).
+    #[test]
+    fn legacy_body_shaped_as_a_versioned_request_is_answered_through_the_fallback() {
+        let (ctx, addr) = start_server();
+        crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "legacy fallback test passphrase")
+            .expect("initialize the crypto context");
+        for (request, id) in [
+            (
+                json!({ "userpass": "pw", "method": "get_public_key", "id": 11 }),
+                json!(11),
+            ),
+            (
+                json!({ "userpass": "pw", "method": "get_public_key", "params": {} }),
+                Json::Null,
+            ),
+        ] {
+            let (status, body) = post(addr, &request);
+            assert_http_status(&status, 200);
+            assert_eq!(body["mmrpc"], "2.0", "{body}");
+            assert!(body["result"]["public_key"].is_string(), "{body}");
+            assert_eq!(body.get("id"), Some(&id), "{body}");
+        }
+    }
+
+    /// CRD ch.43 R43.1A.1b: an inline member next to `method` makes the converted request undecodable: the answer is
+    /// `InvalidRequest` (string payload, HTTP 400) in the mmrpc 2.0 envelope, before any method lookup.
+    #[test]
+    fn legacy_body_with_inline_parameters_for_a_versioned_only_method_answers_invalid_request() {
+        let (_ctx, addr) = start_server();
+        let answer = post_legacy(addr, "get_public_key", json!({ "coin": "RIN", "id": 12 }));
+        assert_mmrpc_error(&answer, 400, "InvalidRequest", json!(12));
+        assert!(answer.1["error_data"].is_string(), "{}", answer.1);
+    }
+
+    /// CRD ch.43 R43.1A.1c: a legacy request for a name neither table knows, with the right password, answers
+    /// `NoSuchMethod` (no `error_data`, HTTP 400) in the mmrpc 2.0 envelope with the `id` echoed or `null`.
+    #[test]
+    fn legacy_request_for_a_name_no_table_knows_answers_no_such_method_in_the_2_0_envelope() {
+        let (_ctx, addr) = start_server();
+        for id in [Some(9), None] {
+            let mut request = json!({ "userpass": "pw", "method": "no_such_method_in_any_table" });
+            if let Some(id) = id {
+                request["id"] = json!(id);
+            }
+            let answer = post(addr, &request);
+            assert_mmrpc_error(&answer, 400, "NoSuchMethod", id.map_or(Json::Null, |id| json!(id)));
+            assert!(answer.1.get("error_data").is_none(), "{}", answer.1);
+        }
+    }
+
+    /// CRD ch.43 R43.1A.1d: an unknown name is protected at the legacy layer, so without or with a wrong `userpass`
+    /// it is refused with the legacy error body (HTTP 500) before the fallback.
+    #[test]
+    fn legacy_request_for_an_unknown_name_without_a_valid_password_keeps_the_legacy_body() {
+        let (_ctx, addr) = start_server();
+        let without = post(addr, &json!({ "method": "no_such_method_in_any_table", "id": 1 }));
+        assert_legacy_error_body(&without);
+        let wrong = post(
+            addr,
+            &json!({ "userpass": "wrong", "method": "no_such_method_in_any_table", "id": 1 }),
+        );
+        assert_legacy_error_body(&wrong);
+        // The same applies to a name only the versioned table knows.
+        let versioned_only = post(addr, &json!({ "method": "get_public_key", "id": 1 }));
+        assert_legacy_error_body(&versioned_only);
+    }
+
+    /// CRD ch.43 R43.1A.1a, R43.1A.1d: a missing or non-string `method` is public at the legacy layer, reaches the
+    /// fallback without a password and answers `InvalidRequest` (HTTP 400) in the mmrpc 2.0 envelope. A name of the
+    /// public set that neither table serves answers `NoSuchMethod` (HTTP 400) without a password.
+    #[test]
+    fn legacy_request_without_a_usable_method_or_with_a_public_unserved_name_needs_no_password() {
+        let (_ctx, addr) = start_server();
+        let missing = post(addr, &json!({ "id": 4 }));
+        assert_mmrpc_error(&missing, 400, "InvalidRequest", json!(4));
+        assert!(missing.1["error_data"].is_string(), "{}", missing.1);
+        let not_a_string = post(addr, &json!({ "method": 5, "id": 4 }));
+        assert_mmrpc_error(&not_a_string, 400, "InvalidRequest", json!(4));
+        let public_unserved = post(addr, &json!({ "method": "getprice", "id": 4 }));
+        assert_mmrpc_error(&public_unserved, 400, "NoSuchMethod", json!(4));
+        assert!(public_unserved.1.get("error_data").is_none(), "{}", public_unserved.1);
+    }
+
+    /// CRD ch.43 R43.1A.1c: an `id` that is not a non-negative integer is reported as `null`, and the converted
+    /// request is undecodable (`InvalidRequest`, HTTP 400).
+    #[test]
+    fn legacy_request_with_a_string_id_answers_invalid_request_with_a_null_id() {
+        let (_ctx, addr) = start_server();
+        let answer = post(
+            addr,
+            &json!({ "userpass": "pw", "method": "no_such_method_in_any_table", "id": "abc" }),
+        );
+        assert_mmrpc_error(&answer, 400, "InvalidRequest", Json::Null);
+        assert!(answer.1["error_data"].is_string(), "{}", answer.1);
+    }
+
+    /// CRD ch.43 R43.1A.1e: the legacy layer authenticates `userpass` only. A protected unknown name sent with
+    /// `rpc_pass` is refused with the legacy error body before the fallback; the alias is honored only where no
+    /// password is needed (a public name no table serves), where the converted request decodes and answers
+    /// `NoSuchMethod`.
+    #[test]
+    fn legacy_request_with_rpc_pass_is_authenticated_by_userpass_only() {
+        let (_ctx, addr) = start_server();
+        let protected = post(
+            addr,
+            &json!({ "rpc_pass": "pw", "method": "no_such_method_in_any_table", "id": 6 }),
+        );
+        assert_legacy_error_body(&protected);
+        let public = post(addr, &json!({ "rpc_pass": "pw", "method": "getprice", "id": 6 }));
+        assert_mmrpc_error(&public, 400, "NoSuchMethod", json!(6));
+    }
+
+    /// CRD ch.43 R43.1A.1a: a legacy method that the legacy table knows keeps its legacy answer: a success is the
+    /// legacy body, and a failing handler is the legacy error body (HTTP 500); neither is re-dispatched.
+    #[test]
+    fn known_legacy_methods_keep_their_legacy_answers() {
+        let (_ctx, addr) = start_server();
+        let (status, body) = post_legacy(addr, "version", json!({}));
+        assert_http_status(&status, 200);
+        assert!(body["result"].is_string(), "{body}");
+        assert!(body.get("mmrpc").is_none(), "{body}");
+
+        let failure = post_legacy(addr, "my_balance", json!({ "coin": "NO_SUCH_COIN" }));
+        assert_legacy_error_body(&failure);
+        let error = failure.1["error"].as_str().unwrap();
+        assert!(error.contains("No such coin: NO_SUCH_COIN"), "{}", failure.1);
     }
 
     /// The SSE answer must stay open and deliver events as they happen, not only once the body ends.

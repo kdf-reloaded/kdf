@@ -133,7 +133,7 @@ fn mine_qtum_blocks(client: &NativeClient, address: &str, blocks: u32) {
 }
 
 /// Mines one block on the QTUM regtest node if `coin` is one of its coins; any other coin is left alone.
-fn mine_qtum_block_for<T>(coin: &T)
+pub(crate) fn mine_qtum_block_for<T>(coin: &T)
 where
     T: MarketCoinOps + AsRef<UtxoCoinFields>,
 {
@@ -152,6 +152,23 @@ where
         },
         Err(e) => log!({ "mine_qtum_block_for: getaddressesbylabel failed: {:?}", e }),
     }
+}
+
+/// Waits until `tx_hex` has `confirmations` confirmations on the QTUM regtest node, after mining that many blocks
+/// for `coin` (best effort, see [`mine_qtum_block_for`]). The node's own timer can leave a gap between blocks
+/// that is longer than a short wait on a busy runner, so the test does not rely on it; the wait is at least
+/// [`QTUM_WAIT_SECS_MIN`] and stays finite, a node that never confirms still fails the test.
+pub fn confirm_on_qtum_regtest<T>(coin: &T, tx_hex: &[u8], confirmations: u64)
+where
+    T: MarketCoinOps + AsRef<UtxoCoinFields>,
+{
+    for _ in 0..confirmations {
+        mine_qtum_block_for(coin);
+    }
+    let wait_until = now_ms() / 1000 + QTUM_WAIT_SECS_MIN;
+    coin.wait_for_confirmations(tx_hex, confirmations, false, wait_until, 1)
+        .wait()
+        .unwrap_or_else(|e| panic!("{} transaction was not confirmed {} times: {}", coin.ticker(), confirmations, e));
 }
 
 /// Waits until the QTUM regtest node returns the code of the contract at `contract`, mining a block per second

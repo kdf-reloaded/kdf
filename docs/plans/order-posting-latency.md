@@ -137,10 +137,11 @@ the second time with the beta head first.
 - **Monitoring: the near-session rule and its defaults.** Decided but not closed. Revisit on field behavior
   and user reports. Input: the swaplab timing rows of 2026-11-06 (RIN helped, DOGE
   slowed, now Decision CX), the timing row of work package 6 and the first user reports on 0.4.0.
-- **Follow-up after batch 3: an orphan order file after a failed history write.** Saving a new maker order
-  writes its active-order file before the history row. When only the history write fails, the order is not
-  placed, but its active file stays, so a restart restores it as a live order; this holds at the default too.
-  Fix idea: delete the active record when the history write fails. Owner: session 6a.
+- **Done (PR #309): an orphan order file after a failed history write.** Saving a new maker order wrote its
+  active-order file before the history row. When only the history write failed, the order was not placed,
+  but its active file stayed, so a restart restored it as a live order; this held at the default too. A
+  failed history write now deletes the active record again, for maker and taker orders, and still returns the
+  history error (ch.32 R-GH8a as-built note). Owner: session 6a.
 
 ## Work packages
 

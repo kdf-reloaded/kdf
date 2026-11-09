@@ -154,6 +154,14 @@ fixed before W6 (HTTP status), which in turn comes before request leniency
 | 9 | GUI storage, MetaMask, WalletConnect, Trezor (non-activation) | `gui_storage::*`, `task::connect_metamask::*`, `wc_*`, Trezor helpers | 24, 47, 22, 50 |
 | 10 | Daemon and misc | `version`, `stop`, `metrics`, `get_my_peer_id`, `ban_pubkey`, `list_banned_pubkeys`, `get_directly_connected_peers`, `sign_message`, `verify_message`, ... | 43, 28 |
 
+*Request surfaces of batches 3 and 4 (2026-11-08; CRD ch.43 §43.1A, which passed the KDF Dirty Gate on
+2026-11-08).* Of batch 3, only `orderbook`, `best_orders` and `trade_preimage` have a versioned
+(`mmrpc: "2.0"`) form in the reference. `setprice`, `buy`, `sell`, `update_maker_order`, `cancel_order`,
+`cancel_all_orders`, `my_orders`, `order_status` and `orderbook_depth` are legacy-only there and in KDF
+Reloaded. "Legacy and v2" in row 3 therefore means the two generations of the dual methods, not a
+versioned form of every method. One `error_type` token deviation existed in batch 3 (D43.1A.3); PR #312 renamed it. In batch
+4, `my_recent_swaps` has both forms, with matching members.
+
 Each batch is one branch, one PR, and is merged before the next starts. A batch
 that turns up a deviation in a shared component (the envelope, the legacy error
 body, the response writer) fixes it once in ch.43, and later batches inherit

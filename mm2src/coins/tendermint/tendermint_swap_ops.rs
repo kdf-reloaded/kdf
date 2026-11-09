@@ -34,11 +34,29 @@ use uuid::Uuid;
 const MSG_SEND_TYPE_URL: &str = "/cosmos.bank.v1beta1.MsgSend";
 const MSG_MULTI_SEND_TYPE_URL: &str = "/cosmos.bank.v1beta1.MsgMultiSend";
 
+/// The length of a swap secret in bytes (CRD ch.18 R18.11.14).
+const SECRET_LEN: usize = 32;
+
+/// The answer of `check_if_my_payment_sent` of the Tendermint coin and token (CRD ch.18 R18.11.22).
+pub(super) const PAYMENT_SENT_NEEDS_AMOUNT: &str =
+    "The Tendermint payment lookup needs the payment amount: use check_if_my_payment_sent_for_amount";
+
 // ————————————————————————————————————————————————————————————————
 // Denom-parameterised helpers (pub(super) for token reuse)
 // ————————————————————————————————————————————————————————————————
 
 impl TendermintCoin {
+    /// The account that receives the burn part of a burn-form DEX fee: the bech32 of `dhash160` of the burn
+    /// pubkey, with the coin's prefix. The fee sender and the fee validator derive it the same way.
+    fn burn_account_id(&self, burn_destination: &DexFeeBurnDestination) -> Result<AccountId, String> {
+        let burn_pubkey = match burn_destination {
+            DexFeeBurnDestination::PreBurnAccount { burn_pubkey } => burn_pubkey,
+            _ => return Err("KmdOpReturn not supported on Tendermint".to_string()),
+        };
+        let burn_pubkey_hash = dhash160(burn_pubkey);
+        AccountId::new(&self.protocol_info.account_prefix, burn_pubkey_hash.as_slice()).map_err(|e| e.to_string())
+    }
+
     /// Broadcast a taker DEX-fee transaction (MsgSend or MsgMultiSend).
     pub(super) fn send_taker_fee_for_denom(
         &self,
@@ -81,15 +99,7 @@ impl TendermintCoin {
                 burn_destination,
                 ..
             } => {
-                let burn_pubkey = match burn_destination {
-                    DexFeeBurnDestination::PreBurnAccount { burn_pubkey } => burn_pubkey.clone(),
-                    _ => try_tx_fus!(Err::<Vec<u8>, String>("KmdOpReturn not supported on Tendermint".into())),
-                };
-                let burn_pubkey_hash = dhash160(&burn_pubkey);
-                let burn_address = try_tx_fus!(AccountId::new(
-                    &self.protocol_info.account_prefix,
-                    burn_pubkey_hash.as_slice()
-                ));
+                let burn_address = try_tx_fus!(self.burn_account_id(burn_destination));
                 let burn_dec: BigDecimal = burn_amount.clone().into();
                 let burn_sat = try_tx_fus!(sat_from_big_decimal(&burn_dec, decimals));
                 let total_sat = fee_amount_sat + burn_sat;
@@ -253,7 +263,11 @@ impl TendermintCoin {
         Box::new(fut.boxed().compat())
     }
 
-    /// Validate a taker DEX-fee transaction for a given denom.
+    /// Validate a taker DEX-fee transaction for a given denom (CRD ch.18 R18.11.21).
+    ///
+    /// The memo is the swap uuid; the body has exactly one message; the message is the standard `MsgSend` or the
+    /// burn-form `MsgMultiSend` with the exact recipients, sender and single-coin amounts; and the node holds a
+    /// copy of the transaction that is byte-equal to the supplied one.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn validate_fee_for_denom(
         &self,
@@ -285,8 +299,32 @@ impl TendermintCoin {
 
         let fee_amount_dec: BigDecimal = dex_fee.fee_amount().into();
         let fee_amount_sat = try_fus!(sat_from_big_decimal(&fee_amount_dec, decimals));
+        let fee_coin = CoinProto {
+            denom: denom.clone(),
+            amount: fee_amount_sat.to_string(),
+        };
 
-        let dex_fee = dex_fee.clone();
+        // The burn-form descriptor also names the burn account and the burn coin; the standard one has neither.
+        let burn = match dex_fee {
+            DexFee::NoFee => return Box::new(futures01::future::err("Unexpected DexFee::NoFee".to_string())),
+            DexFee::Standard(_) => None,
+            DexFee::WithBurn {
+                burn_amount,
+                burn_destination,
+                ..
+            } => {
+                let burn_address = try_fus!(self.burn_account_id(burn_destination));
+                let burn_dec: BigDecimal = burn_amount.clone().into();
+                let burn_sat = try_fus!(sat_from_big_decimal(&burn_dec, decimals));
+                let burn_coin = CoinProto {
+                    denom,
+                    amount: burn_sat.to_string(),
+                };
+                Some((burn_address, burn_coin))
+            },
+        };
+
+        let coin = self.clone();
         let fut = async move {
             let tx_body = try_s!(TxBody::decode(tx.data.body_bytes.as_slice()));
 
@@ -294,59 +332,48 @@ impl TendermintCoin {
                 return Err(format!("Invalid memo: expected {}, found {}", uuid_str, tx_body.memo));
             }
 
-            let first_msg = try_s!(tx_body.messages.first().ok_or("No messages in tx body"));
+            let msg = match tx_body.messages.as_slice() {
+                [msg] => msg,
+                messages => {
+                    return Err(format!(
+                        "Invalid number of messages in the fee tx: {}, expected exactly 1",
+                        messages.len()
+                    ))
+                },
+            };
 
-            match &dex_fee {
-                DexFee::Standard(_) => {
-                    let msg = try_s!(MsgSendProto::decode(first_msg.value.as_slice()));
-                    if msg.from_address != expected_sender_addr.to_string() {
-                        return Err(format!(
-                            "Invalid sender: {}, expected {}",
-                            msg.from_address, expected_sender_addr
-                        ));
-                    }
-                    if msg.to_address != expected_fee_addr.to_string() {
-                        return Err(format!(
-                            "Invalid receiver: {}, expected {}",
-                            msg.to_address, expected_fee_addr
-                        ));
-                    }
-                    let expected = CoinProto {
-                        denom,
-                        amount: fee_amount_sat.to_string(),
-                    };
-                    if msg.amount.first() != Some(&expected) {
-                        return Err(format!(
-                            "Invalid fee amount: {:?}, expected {:?}",
-                            msg.amount.first(),
-                            expected
-                        ));
-                    }
-                },
-                DexFee::WithBurn { .. } => {
-                    let msg = try_s!(MsgMultiSendProto::decode(first_msg.value.as_slice()));
-                    if let Some(input) = msg.inputs.first() {
-                        if input.address != expected_sender_addr.to_string() {
-                            return Err(format!(
-                                "Invalid sender: {}, expected {}",
-                                input.address, expected_sender_addr
-                            ));
-                        }
-                    } else {
-                        return Err("MsgMultiSend has no inputs".to_string());
-                    }
-                    if let Some(output) = msg.outputs.first() {
-                        if output.address != expected_fee_addr.to_string() {
-                            return Err(format!(
-                                "Invalid fee output address: {}, expected {}",
-                                output.address, expected_fee_addr
-                            ));
-                        }
-                    } else {
-                        return Err("MsgMultiSend has no outputs".to_string());
-                    }
-                },
-                DexFee::NoFee => return Err("Unexpected DexFee::NoFee".to_string()),
+            match &burn {
+                None => check_standard_fee_msg(
+                    &msg.type_url,
+                    msg.value.as_slice(),
+                    &expected_sender_addr,
+                    &expected_fee_addr,
+                    &fee_coin,
+                )?,
+                Some((burn_address, burn_coin)) => check_burn_fee_msg(
+                    &msg.type_url,
+                    msg.value.as_slice(),
+                    &expected_sender_addr,
+                    &expected_fee_addr,
+                    &fee_coin,
+                    burn_address,
+                    burn_coin,
+                )?,
+            }
+
+            // The node must hold the very transaction that was supplied (its hash is the SHA-256 of the raw
+            // bytes, upper-case hex). The node's copy is a decoded transaction; its encoding is the raw form.
+            let tx_bytes = tx.data.encode_to_vec();
+            let tx_hash = hex::encode_upper(kdf_crypto::sha256(&tx_bytes).as_slice());
+            let node_tx = coin.request_tx(tx_hash.clone()).await.map_err(|e| {
+                format!(
+                    "The fee tx {} cannot be fetched from the node: {}",
+                    tx_hash,
+                    e.into_inner()
+                )
+            })?;
+            if node_tx.encode_to_vec() != tx_bytes {
+                return Err(format!("The fee tx {} differs from the copy held by the node", tx_hash));
             }
 
             Ok(())
@@ -433,70 +460,186 @@ impl TendermintCoin {
         Box::new(fut.boxed().compat())
     }
 
-    /// Search for an HTLC we sent, matching by secret hash.
+    /// Look up the HTLC we sent for a swap (CRD ch.18 R18.11.22).
     ///
-    /// The fork's trait does not pass `amount`, so we search create_htlc
-    /// events from our address and match the hash_lock field.
+    /// The HTLC id is computed from our own account, the counterparty account, the single expected coin and the
+    /// secret hash, so the amount and the counterparty take part in it. The module is asked for that id: no HTLC
+    /// means the payment was not sent. Otherwise the create transaction is searched by the id, and accepted when
+    /// its hash lock equals the one the module recorded (without regard to the letter case).
     pub(super) fn check_if_my_payment_sent_for_denom(
         &self,
         other_pub: &[u8],
         secret_hash: &[u8],
+        amount: &BigDecimal,
+        denom: Denom,
+        decimals: u8,
     ) -> Box<dyn futures01::Future<Item = Option<TransactionEnum>, Error = String> + Send> {
-        let secret_hash_hex = hex::encode(secret_hash).to_uppercase();
-        let coin = self.clone();
-        let _other_pub = other_pub.to_vec();
-        let fut = async move {
-            let rpc_client = try_s!(coin.rpc_client().await);
-            let query = format!("create_htlc.sender='{}'", coin.account_id);
+        let account_prefix = self.protocol_info.account_prefix.clone();
+        let other_hash = dhash160(other_pub);
+        let to = try_fus!(AccountId::new(&account_prefix, other_hash.as_slice()));
+        let expected_coin = Coin {
+            denom,
+            amount: try_fus!(sat_from_big_decimal(amount, decimals)).into(),
+        };
+        let htlc_id = self.calculate_htlc_id(&self.account_id, &to, &[expected_coin], secret_hash);
 
+        let coin = self.clone();
+        let fut = async move {
+            let htlc_type = try_s!(HtlcType::from_str(&account_prefix));
+
+            let response = try_s!(coin.query_htlc(htlc_id.clone()).await);
+            let (state, recorded_hash_lock) = match (response.htlc_state(), response.hash_lock()) {
+                (Some(state), Some(hash_lock)) => (state, hash_lock.to_owned()),
+                // The module has no HTLC under this id: the payment was not sent.
+                _ => return Ok(None),
+            };
+            match state {
+                HTLC_STATE_OPEN | HTLC_STATE_COMPLETED | HTLC_STATE_REFUNDED => {},
+                unexpected => return Err(format!("Unexpected state {} of the HTLC {}", unexpected, htlc_id)),
+            }
+
+            let rpc_client = try_s!(coin.rpc_client().await);
             let response = try_s!(
                 rpc_client
                     .perform(TxSearchRequest {
-                        query,
+                        query: format!("create_htlc.id='{htlc_id}'"),
                         order_by: TendermintResultOrder::Descending.into(),
                         page: 1,
-                        per_page: 50,
+                        per_page: 1,
                         prove: false,
                     })
                     .await
             );
-
-            let htlc_type = match HtlcType::from_str(&coin.protocol_info.account_prefix) {
-                Ok(t) => t,
-                Err(e) => return Err(format!("{}", e)),
+            let raw_tx = match response.txs.first() {
+                Some(raw_tx) => raw_tx,
+                None => return Err(format!("The create tx of the HTLC {} is not found", htlc_id)),
             };
-
-            for raw_tx in &response.txs {
-                if let cosmrs::tendermint::abci::Code::Err(_) = raw_tx.tx_result.code {
-                    continue; // skip failed txs
-                }
-
-                let tx = match cosmrs::Tx::from_bytes(&raw_tx.tx) {
-                    Ok(tx) => tx,
-                    Err(_) => continue,
-                };
-                let msg = match tx.body.messages.first() {
-                    Some(m) => m,
-                    None => continue,
-                };
-                let htlc_proto = match CreateHtlcProto::decode(htlc_type, msg.value.as_slice()) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-
-                if htlc_proto.hash_lock().to_uppercase() == secret_hash_hex {
-                    let htlc = TransactionEnum::CosmosTransaction(CosmosTransaction {
-                        data: try_s!(TxRaw::decode(raw_tx.tx.as_slice())),
-                    });
-                    return Ok(Some(htlc));
-                }
+            if let cosmrs::tendermint::abci::Code::Err(code) = raw_tx.tx_result.code {
+                return Err(format!(
+                    "The create tx of the HTLC {} failed with the result code {}",
+                    htlc_id, code
+                ));
             }
 
-            Ok(None)
+            let tx = try_s!(cosmrs::Tx::from_bytes(&raw_tx.tx));
+            let msg = try_s!(tx.body.messages.first().ok_or("Tx body couldn't be read."));
+            let htlc_proto = try_s!(CreateHtlcProto::decode(htlc_type, msg.value.as_slice()));
+            if !htlc_proto.hash_lock().eq_ignore_ascii_case(&recorded_hash_lock) {
+                return Err(format!(
+                    "The hash lock {} of the create tx of the HTLC {} differs from the recorded {}",
+                    htlc_proto.hash_lock(),
+                    htlc_id,
+                    recorded_hash_lock
+                ));
+            }
+
+            Ok(Some(TransactionEnum::CosmosTransaction(CosmosTransaction {
+                data: try_s!(TxRaw::decode(raw_tx.tx.as_slice())),
+            })))
         };
 
         Box::new(fut.boxed().compat())
     }
+}
+
+/// The standard descriptor of a DEX fee: a `MsgSend` of exactly one coin, from the taker to the fee address
+/// (CRD ch.18 R18.11.21).
+fn check_standard_fee_msg(
+    type_url: &str,
+    value: &[u8],
+    from: &AccountId,
+    fee_address: &AccountId,
+    fee_coin: &CoinProto,
+) -> Result<(), String> {
+    if type_url != MSG_SEND_TYPE_URL {
+        return Err(format!(
+            "Invalid fee message type: {}, expected {}",
+            type_url, MSG_SEND_TYPE_URL
+        ));
+    }
+    let msg = try_s!(MsgSendProto::decode(value));
+    if msg.from_address != from.to_string() {
+        return Err(format!("Invalid sender: {}, expected {}", msg.from_address, from));
+    }
+    if msg.to_address != fee_address.to_string() {
+        return Err(format!(
+            "Invalid receiver: {}, expected {}",
+            msg.to_address, fee_address
+        ));
+    }
+    if msg.amount.as_slice() != std::slice::from_ref(fee_coin) {
+        return Err(format!(
+            "Invalid fee amount: {:?}, expected exactly one coin {:?}",
+            msg.amount, fee_coin
+        ));
+    }
+    Ok(())
+}
+
+/// The burn descriptor of a DEX fee: a `MsgMultiSend` with one input (the taker) and two outputs, the fee address
+/// with exactly the fee coin, then the burn address with exactly the burn coin (CRD ch.18 R18.11.21).
+fn check_burn_fee_msg(
+    type_url: &str,
+    value: &[u8],
+    from: &AccountId,
+    fee_address: &AccountId,
+    fee_coin: &CoinProto,
+    burn_address: &AccountId,
+    burn_coin: &CoinProto,
+) -> Result<(), String> {
+    if type_url != MSG_MULTI_SEND_TYPE_URL {
+        return Err(format!(
+            "Invalid fee message type: {}, expected {}",
+            type_url, MSG_MULTI_SEND_TYPE_URL
+        ));
+    }
+    let msg = try_s!(MsgMultiSendProto::decode(value));
+    let input = match msg.inputs.as_slice() {
+        [input] => input,
+        inputs => {
+            return Err(format!(
+                "Invalid number of inputs: {}, expected exactly 1",
+                inputs.len()
+            ))
+        },
+    };
+    let (fee_output, burn_output) = match msg.outputs.as_slice() {
+        [fee_output, burn_output] => (fee_output, burn_output),
+        outputs => {
+            return Err(format!(
+                "Invalid number of outputs: {}, expected exactly 2",
+                outputs.len()
+            ))
+        },
+    };
+    if input.address != from.to_string() {
+        return Err(format!("Invalid sender: {}, expected {}", input.address, from));
+    }
+    if fee_output.address != fee_address.to_string() {
+        return Err(format!(
+            "Invalid fee output address: {}, expected {}",
+            fee_output.address, fee_address
+        ));
+    }
+    if fee_output.coins.as_slice() != std::slice::from_ref(fee_coin) {
+        return Err(format!(
+            "Invalid fee output amount: {:?}, expected exactly one coin {:?}",
+            fee_output.coins, fee_coin
+        ));
+    }
+    if burn_output.address != burn_address.to_string() {
+        return Err(format!(
+            "Invalid burn output address: {}, expected {}",
+            burn_output.address, burn_address
+        ));
+    }
+    if burn_output.coins.as_slice() != std::slice::from_ref(burn_coin) {
+        return Err(format!(
+            "Invalid burn output amount: {:?}, expected exactly one coin {:?}",
+            burn_output.coins, burn_coin
+        ));
+    }
+    Ok(())
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -650,7 +793,22 @@ impl SwapOps for TendermintCoin {
         )
     }
 
+    /// Answers an error: the payment lookup needs the amount (CRD ch.18 R18.11.22), which this method does not
+    /// carry. A hash-lock-only fallback would find a payment of another amount or receiver, so none is offered;
+    /// the swap machine calls [`SwapOps::check_if_my_payment_sent_for_amount`].
     fn check_if_my_payment_sent(
+        &self,
+        _time_lock: u32,
+        _my_pub: &[u8],
+        _other_pub: &[u8],
+        _secret_hash: &[u8],
+        _search_from_block: u64,
+        _swap_contract_address: &Option<BytesJson>,
+    ) -> Box<dyn futures01::Future<Item = Option<TransactionEnum>, Error = String> + Send> {
+        Box::new(futures01::future::err(PAYMENT_SENT_NEEDS_AMOUNT.to_string()))
+    }
+
+    fn check_if_my_payment_sent_for_amount(
         &self,
         _time_lock: u32,
         _my_pub: &[u8],
@@ -658,8 +816,15 @@ impl SwapOps for TendermintCoin {
         secret_hash: &[u8],
         _search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
+        amount: &BigDecimal,
     ) -> Box<dyn futures01::Future<Item = Option<TransactionEnum>, Error = String> + Send> {
-        self.check_if_my_payment_sent_for_denom(other_pub, secret_hash)
+        self.check_if_my_payment_sent_for_denom(
+            other_pub,
+            secret_hash,
+            amount,
+            self.protocol_info.denom.clone(),
+            self.protocol_info.decimals,
+        )
     }
 
     async fn search_for_swap_tx_spend_my(
@@ -700,7 +865,16 @@ impl SwapOps for TendermintCoin {
         let htlc_proto = try_s!(ClaimHtlcProto::decode(htlc_type, msg.value.as_slice()));
         let htlc = try_s!(ClaimHtlcMsg::try_from(htlc_proto));
 
-        hex::decode(htlc.secret()).map_err(|e| format!("{}", e))
+        // CRD ch.18 R18.11.14: the secret of a claim is exactly 32 bytes.
+        let secret = hex::decode(htlc.secret()).map_err(|e| format!("{}", e))?;
+        if secret.len() != SECRET_LEN {
+            return Err(format!(
+                "Invalid secret length: {} bytes, expected {}",
+                secret.len(),
+                SECRET_LEN
+            ));
+        }
+        Ok(secret)
     }
 
     fn negotiate_swap_contract_addr(

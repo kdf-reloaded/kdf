@@ -258,16 +258,28 @@ order's removal MUST NOT bring the order back at the next start
    entry, so its record is restored as before, and so is one whose
    history write failed together with the deletion;
 3. the top-level `MM2.json` boolean `maker_restore_skips_cancelled`,
-   default `true`, turns items 1 and 4 off; only a JSON `false` does. Off
-   is the reference's behavior: every stored active record is restored,
-   and a record that outlived its cancel brings the order back;
+   default `true`, turns off item 1 and the retrying deletion of a
+   removed order's record in item 4; only a JSON `false` does. Off is the
+   reference's behavior: every stored active record is restored, and a
+   record that outlived its cancel brings the order back. The deletion
+   after a failed history write at an order's save (the end of item 4)
+   is outside the switch;
 4. when an order is removed, the deletion of its active record is tried
    up to three times, 200 ms apart. A record that is already missing
    counts as deleted. Each failed attempt is logged once, at warn level;
    after the third failure one warn line gives up and names the order's
    identifier; nothing else is logged. The removal's history writes
-   follow as before;
-5. taker records are not affected.
+   follow as before. The same retrying deletion, with the same spacing
+   and log lines, deletes the active record of a maker or a taker order
+   whose history write failed at its save
+   ([Chapter 32](32-orderbook-p2p-and-trie.md) R-GH8a): `orders_kick_start`
+   restores maker and taker records alike, so a failed deletion would bring
+   back an order that was reported as failed. The log lines say "taker
+   order" where a maker's say "maker order". This deletion undoes the
+   record of an order that was never placed, so the switch of item 3 does
+   not govern it. Other deletions of a taker record, such as the removal
+   of a taker order, stay a single attempt;
+5. taker records are not affected by items 1 to 3.
 
 ## 12.5 Bound TTL Semantics
 
@@ -438,7 +450,11 @@ restored. (c) With `maker_restore_skips_cancelled: false` the record of
 succeeds leaves no record and logs two warn lines; one that fails three
 times logs three warn lines and one give-up line naming the identifier;
 a missing record is not retried. (e) A stored taker record is restored as
-before.
+before. (f) A taker order whose history write fails at its save, and whose
+first deletion attempt of its active record also fails, leaves no active
+record after a later attempt succeeds, the history error is returned, and
+one warn line names the order; with every attempt failing there are three
+attempts and the give-up line, and a missing record is not retried.
 
 ## 12.11 Deferred Work
 
