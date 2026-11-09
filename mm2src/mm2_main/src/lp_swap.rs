@@ -110,6 +110,7 @@ pub(crate) use dex_fee::{compute_dex_fee_v2_with_taker_pubkey_from_coin, dex_fee
 #[path = "lp_swap/recreate_swap_data.rs"] mod recreate_swap_data;
 #[path = "lp_swap/refund_retry.rs"] mod refund_retry;
 #[path = "lp_swap/saved_swap.rs"] mod saved_swap;
+#[path = "lp_swap/stale_tip_watch.rs"] mod stale_tip_watch;
 #[path = "lp_swap/swap_events.rs"] pub(crate) mod swap_events;
 #[path = "lp_swap/swap_lock.rs"] mod swap_lock;
 #[path = "lp_swap/mm2_swap_v2.pb.rs"]

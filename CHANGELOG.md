@@ -696,6 +696,17 @@ A login without `enable_hd` is not affected. Detail: PRs #253, #254; CRD ch.05 R
   sent. The call now refuses, whether or not the refund time has passed, and builds nothing. A swap with a
   confirmed spend was already refused. A swap whose maker payment is spent or refunded on the chain is
   answered as before. Detail: PRs #276, #284; CRD ch.51 R75.
+- **A swap that waits to refund its payment now writes a warning when the coin's node has not advanced
+  for an hour (and again at most hourly).** Before, a refund could wait for hours behind a stalled node
+  and the log did not say so; in a test, a refund started four hours after the HTLC lock expired, while
+  the coin's node had stood still for almost six hours. The warning names the swap, the coin, the height
+  and how long it has not changed. It does not name the cause, and the wait and the refund themselves
+  are unchanged. The node is asked for its height about every five minutes, alongside the wait, so the
+  wait is never longer for it. The warning is not written while a swap waits for a payment to be
+  confirmed, for swaps of the second protocol version or for the watcher. The warning is verified by
+  unit tests only; nobody has yet watched it on a stalled node in real time. More in the release tests,
+  [finding F4](docs/release-tests/0.4.0-beta.1.md#findings-and-dispositions). Detail: PR #306; CRD
+  ch.51 R79-R81.
 
 #### UTXO coins and Electrum
 
@@ -1172,11 +1183,6 @@ lives.
   activation log line says `gas_limit: defaults`. More in
   [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md). Detail: PR #105, PR #200; CRD
   ch.57 R57.5.2, R57.5.3, R57.5.5.
-- **A refund can wait without a log message saying why.** If the node a coin talks to stops advancing,
-  a refund waits until it advances again, and the log does not say so. In a test, a refund started
-  four hours after the HTLC lock expired, because the coin's node had stood still for almost six
-  hours; the log only repeated "wait refund till" every 24 seconds. More in the release tests,
-  [finding F4](docs/release-tests/0.4.0-beta.1.md#findings-and-dispositions). Detail: PR #239.
 - **A maker payment is not refunded after the spend of the taker payment was sent, even if that spend
   never confirms.** If the node's spend of the taker payment was broadcast but dropped from the chain,
   and the other side refunded its payment, `recover_funds_of_swap` refuses to refund the maker payment:

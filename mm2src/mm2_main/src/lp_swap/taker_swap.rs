@@ -1,6 +1,7 @@
 use super::check_balance::{check_my_coin_balance_for_swap, CheckBalanceError, CheckBalanceResult,
                            TakerFeeAdditionalInfo};
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
+use super::stale_tip_watch::{sleep_observing_tip, StaleTipWatch};
 use super::swap_lock::{SwapLock, SwapLockOps};
 use super::trade_preimage::{TradePreimageRequest, TradePreimageRpcError, TradePreimageRpcResult};
 use super::{already_sent_check_pubkey, check_held_htlc_key, derive_htlc_pubkeys, recover_within, recovery_key_pairs,
@@ -1916,6 +1917,8 @@ impl TakerSwap {
         let mut last_chain_look_ms = now_ms();
 
         let locktime = self.r().data.taker_payment_lock;
+        // CRD ch.51 R79-R81: the refund wait reads the tip height of the paying coin between its sleeps.
+        let mut stale_tip_watch = StaleTipWatch::new();
         let transaction = loop {
             loop {
                 match self.taker_coin.can_refund_htlc(locktime).compat().await {
@@ -1925,7 +1928,7 @@ impl TakerSwap {
                         // looked at when the previous look is old enough, so a gate that answers "wait a few
                         // seconds" again and again does not search the chain each time.
                         let step = (to_sleep as f64).clamp(pacing.min_wait_step_secs, pacing.max_wait_step_secs);
-                        Timer::sleep(step).await;
+                        sleep_observing_tip(&self.taker_coin, &self.uuid, step, &mut stale_tip_watch).await;
                         let since_look_secs = now_ms().saturating_sub(last_chain_look_ms) as f64 / 1000.;
                         if since_look_secs < pacing.chain_look_interval_secs {
                             continue;
@@ -4886,6 +4889,8 @@ mod taker_swap_tests {
         let (taker_swap, _published) = taker_swap_ready_to_refund(100);
         // On entry and after the first step nothing is spent; the second step finds the spend.
         mock_chain(2, spent_by_the_maker, &SEARCHES);
+        // The refund wait reads the tip height between its sleeps (CRD ch.51 R79).
+        TestCoin::current_block.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(700))));
         TestCoin::can_refund_htlc.mock_safe(|_, _| {
             GATES.fetch_add(1, Ordering::SeqCst);
             MockResult::Return(Box::new(futures01::future::ok(CanRefundHtlc::HaveToWait(0))))
@@ -4910,6 +4915,8 @@ mod taker_swap_tests {
         static SENDS: AtomicUsize = AtomicUsize::new(0);
         let (taker_swap, _published) = taker_swap_ready_to_refund(100);
         mock_chain(usize::MAX, spent_by_the_maker, &SEARCHES);
+        // The refund wait reads the tip height between its sleeps (CRD ch.51 R79).
+        TestCoin::current_block.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(700))));
         TestCoin::can_refund_htlc.mock_safe(|_, _| {
             let answer = if GATES.fetch_add(1, Ordering::SeqCst) < 5 {
                 CanRefundHtlc::HaveToWait(0)

@@ -801,6 +801,80 @@ payment is spent and the taker payment is not.
 > `cargo test -p mm2_main --lib test_recover_funds` passed, 42 tests of which these five
 > are new, and the formatting check passed.
 
+## 51.6B Bound Warning for a Refund Wait on a Stalled Node
+
+> **Status (Reloaded-original; batch 4, 2026-11-08).** These rules record no
+> claim about the reference implementation. They add a log line only; the
+> events, the resume map (R19, R32) and the persisted log shape of chapter 44
+> are unchanged.
+
+While a maker or taker swap waits to refund its own payment, the wait
+consults the coin only through the refundability check, which answers "wait
+this many seconds" (at most an hour at a time) and never says why the answer
+does not change. When the coin's node stops advancing, the answer stays
+"wait", the swap keeps waiting and the log says nothing that points to the
+node. A wait that outlives a stalled node therefore looks like an ordinary
+wait.
+
+**R79.** *A refund wait observes the coin's tip height, beside the wait.* While a
+swap of this chapter waits for the refund of its own payment, the swap MUST read
+the tip height of the paying coin once every 5 minutes, and MUST NOT read it more
+often (a wait that is cut into shorter steps reads once per 5-minute period, not
+once per step; one second of clock rounding is tolerated). The read runs
+alongside the sleep of the step and is abandoned when that sleep ends, so it is
+never on the path of the wait; a read that fails or does not finish by then is not
+an observation and is skipped. The wait itself (its length, the refund decision,
+the events and the state) MUST NOT change because of the observation.
+
+**R80.** *A tip that does not advance is warned about, at most hourly.* When
+the observed height has not changed for 60 minutes, the swap MUST write one
+warning to the log that names the coin by its ticker, the height and the number
+of whole minutes the height has not changed. While the height stays the same
+the warning MUST NOT be repeated more often than once every 60 minutes. A
+change of height ends the stall, and a later stall counts from the change. The
+warning MUST NOT contain a server address, URL, host or response text; the
+ticker is the only name of the coin's node source. The clock of the stall
+starts at the first observation of the wait; a restart of the node starts it
+again.
+
+**R81.** *What the rule does not cover.* The warning exists for the refund waits
+of the maker and the taker of this chapter. It is not written for the wait for
+the confirmation of a payment, for the swaps of the second protocol version
+or for the watcher. It is not written while the refundability check itself fails (that
+case keeps its existing error line and 30-second retry). It does not name the
+cause (a stopped node, a node that is behind, a chain that has stopped).
+
+> **As built (batch 4, 2026-11-08).** The rule lives in
+> `mm2src/mm2_main/src/lp_swap/stale_tip_watch.rs`: a pure `StaleTipWatch`
+> (`observe(now_secs, height)`, no clock inside) and `sleep_observing_tip`, which
+> cuts the wait into slices of at most 300 s. At the start of a slice, when the
+> height is due, `current_block()` of the paying coin is read alongside the
+> slice's sleep (`sleep_beside_read`: the read raced against the sleep). The slice
+> ends exactly when the sleep ends. A read that finishes first is observed and the
+> sleep is awaited on; a read that fails, or has not finished when the sleep
+> ends, is dropped and skipped, so no read is ever awaited after its sleep and
+> the wait is not lengthened. A read is due only when 300 s (less 1 s of clock
+> rounding) have passed since the previous one, so the short steps of the taker's
+> refund wait read the coin once per 5 minutes, not at every step. The maker's
+> refund wait (`refund_maker_payment_retrying`) uses it in place of its
+> `HaveToWait` sleep; the taker's (`refund_taker_payment_paced`) in place of its
+> step sleep, one watch per refund wait, created before the inner loop. The `Err`
+> arm (30 s retry) is unchanged. Tests: the `t33_*` tests of that module (fake
+> clock, sleeper and reads); two existing taker tests that answer "wait" now mock
+> `current_block`; only the taker's call site runs in a test (through those two
+> tests), the maker's call site is covered by construction. A read is counted as
+> made when it starts, so a maker wait that ends in very short sleeps (a wait of
+> 0 to 2 seconds close to the lock time) whose read takes longer than the sleep
+> has that read dropped and its 5-minute period used up; such a wait may observe
+> rarely, while the taker's steps (5 to 300 seconds by default) and the
+> 300-second slices of the maker's observe as the rule says.
+> Run on 2026-11-08: `cargo test -p mm2_main --lib -- stale_tip_watch` passed (15
+> tests), `-- r31a` passed (10 tests), and the formatting check passed. The warning
+> is verified by these unit tests only: the timing is driven by a fake sleeper
+> and a fake height source, and no real-time observation of it on a stalled
+> node exists. A lab row that observes it on a frozen tip is an optional
+> follow-up, not a condition of this rule.
+
 ## 51.7 Bound Message Contract
 
 **R41.** *Six message kinds, one envelope.* The legacy swap message
@@ -1970,6 +2044,25 @@ Existing unit tests that cover items 1 to 3 and 5:
 `test_recover_funds_should_not_refund_on_the_successful_swap` (items 1 to 3),
 `test_recover_funds_maker_swap_not_finished` and
 `test_recover_funds_maker_swap_maker_payment_refunded` (item 5).
+
+**T33.** *The stale-tip warning (R79-R81).* With a height source and a clock
+that the test controls:
+
+1. a height that has not changed for 59 minutes of observation gives no
+   warning; at 60 minutes it gives exactly one, naming the ticker, the
+   height and 60 minutes;
+2. while the height stays the same, no second warning before 120 minutes; at
+   120 minutes a second one, naming 120 minutes;
+3. a change of height gives no warning and starts a new stall clock; a stall of
+   59 minutes after the change gives none;
+4. a read that fails, or does not finish before the sleep of its step ends, is skipped: it neither warns nor resets the clock, and the
+   observation after it counts from the last successful read;
+5. the first observation of a wait only records the height;
+6. the text of the warning contains the ticker and no address, URL or host;
+7. in the maker's and the taker's refund wait the sleep is cut into slices of
+   at most 5 minutes, the height is read once per 5-minute period (not once per
+   shorter step), the total sleep and the refund decision are those of the
+   unchanged wait, and the warning is written once the stall reaches 60 minutes.
 
 ## 51.13 Deferred Work
 
