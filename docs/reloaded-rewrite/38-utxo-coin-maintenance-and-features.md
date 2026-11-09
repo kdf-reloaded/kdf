@@ -2546,8 +2546,7 @@ from turning every node into a periodic prober of the public servers.
 >   bound above the agreed tip (D38.6.4o.9) covers that case.
 > - When a comparison of item 12 is still running as an activation fails, it
 >   ends later and can log the after-activation ERROR line of item 12 for the
->   coin that was not registered. This is rare and has no effect beyond that
->   log line.
+>   coin that was not registered. It has no effect beyond that log line.
 
 T38.6.4.1 *Bounds and validation.* A test shall activate against an in-process
 Electrum test server set with `min_connected` 0, with `min_connected` above
