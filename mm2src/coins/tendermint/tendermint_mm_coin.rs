@@ -11,7 +11,7 @@ use crate::utxo::utxo_common::{big_decimal_from_sat, big_decimal_from_sat_unsign
 use crate::{BalanceError, FeeApproxStage, HistorySyncState, MarketCoinOps, MmCoin, RawTransactionError,
             RawTransactionFut, RawTransactionRequest, RawTransactionRes, TradeFee, TradePreimageError,
             TradePreimageFut, TradePreimageResult, TradePreimageValue, TransactionDetails, TransactionType,
-            TxFeeDetails, ValidateAddressResult, WithdrawError, WithdrawFee, WithdrawFut, WithdrawRequest,
+            TxFeeDetails, ValidateAddressResult, WithdrawError, WithdrawFut, WithdrawRequest,
             TENDERMINT_SWAPS_AVAILABLE};
 use bigdecimal::BigDecimal;
 use common::mm_number::MmNumber;
@@ -99,7 +99,12 @@ impl TendermintCoin {
         let timeout_height = current_block + TIMEOUT_HEIGHT_DELTA;
 
         let fee = self
-            .calculate_fee(create_htlc_tx.msg_payload, timeout_height, TX_DEFAULT_MEMO, None)
+            .calculate_fee(
+                create_htlc_tx.msg_payload,
+                timeout_height,
+                TX_DEFAULT_MEMO,
+                &FeeIntent::Swap,
+            )
             .await
             .map_err(|e| MmError::new(TradePreimageError::Transport(e.to_string())))?;
 
@@ -151,7 +156,7 @@ impl TendermintCoin {
         let timeout_height = current_block + TIMEOUT_HEIGHT_DELTA;
 
         let fee = self
-            .calculate_fee(tx_payload, timeout_height, TX_DEFAULT_MEMO, None)
+            .calculate_fee(tx_payload, timeout_height, TX_DEFAULT_MEMO, &FeeIntent::Swap)
             .await
             .map_err(|e| MmError::new(TradePreimageError::Transport(e.to_string())))?;
 
@@ -260,7 +265,10 @@ impl MmCoin for TendermintCoin {
                 .map_to_mm(WithdrawError::Transport)?;
             let timeout_height = current_block + TIMEOUT_HEIGHT_DELTA;
 
-            let (_, gas_limit) = coin.gas_info_for_withdraw(&req.fee, GAS_LIMIT_DEFAULT);
+            // The price and gas limit of the request's descriptor; a foreign fee form is ignored (CRD ch.49 R49.30)
+            // and the swap fee policy is never consulted (CRD ch.18 R18.6B.4).
+            let fee_intent = FeeIntent::request(req.fee, GAS_LIMIT_DEFAULT);
+            let (_, gas_limit) = coin.selected_gas_price_and_limit(&fee_intent);
 
             let fee_amount_u64 = coin
                 .calculate_account_fee_amount_as_u64(
@@ -269,7 +277,7 @@ impl MmCoin for TendermintCoin {
                     msg_payload.clone(),
                     timeout_height,
                     &memo,
-                    req.fee,
+                    &fee_intent,
                 )
                 .await
                 .map_mm_err()?;

@@ -1984,7 +1984,9 @@ fn tm_flow_conf_refuses_an_avg_blocktime_of_zero_and_names_the_key() {
 // ---------------------------------------------------------------------------
 
 /// A node that estimates fees: it reports the block height, serves the account and simulates every transaction
-/// with the given gas use. At the gas price 0.25 the fee is `ceil(gas_used * 1.5 * 0.25)` base units.
+/// with the given gas use. At the gas price 0.25 the fee is `ceil(gas_used * 1.5 * 0.25)` base units. It also
+/// answers every balance query with [`SCRIPTED_BALANCE_SAT`] base units, which the withdraw tests of the priority
+/// fee (`priority_fee_tests`) need.
 fn script_fee_estimation(fx: &Fixture, gas_used: u64) {
     let account = QueryAccountResponse {
         account: Some(Any {
@@ -2006,6 +2008,13 @@ fn script_fee_estimation(fx: &Fixture, gas_used: u64) {
         ..Default::default()
     }
     .encode_to_vec();
+    let balance = QueryBalanceResponse {
+        balance: Some(CoinProto {
+            denom: "scripted".to_owned(),
+            amount: SCRIPTED_BALANCE_SAT.to_string(),
+        }),
+    }
+    .encode_to_vec();
     fx.node.answer(move |method, params| match method {
         "abci_info" => Some(json!({
             "response": {
@@ -2017,10 +2026,15 @@ fn script_fee_estimation(fx: &Fixture, gas_used: u64) {
             }
         })),
         "abci_query" if params["path"] == "/cosmos.auth.v1beta1.Query/Account" => Some(abci_value(&account)),
+        "abci_query" if params["path"] == "/cosmos.bank.v1beta1.Query/Balance" => Some(abci_value(&balance)),
         "abci_query" if params["path"] == "/cosmos.tx.v1beta1.Service/Simulate" => Some(abci_value(&simulation)),
         _ => None,
     });
 }
+
+/// The balance, in base units of whatever denom is asked, that [`script_fee_estimation`] reports: 10,000 coins at
+/// the 6 decimals of the test chains.
+const SCRIPTED_BALANCE_SAT: u64 = 10_000_000_000;
 
 #[test]
 fn tm_flow_token_trade_fees_carry_the_platform_ticker_and_decimals() {
@@ -2581,3 +2595,5 @@ fn tm_act_hd_withdrawal_is_signed_with_the_key_at_the_path() {
         );
     }
 }
+
+mod priority_fee_tests;

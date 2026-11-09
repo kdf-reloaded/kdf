@@ -470,6 +470,13 @@ pub enum CoinProtocol {
         /// defaults to an empty map when absent.
         #[serde(default)]
         ibc_channels: HashMap<String, u64>,
+        /// The chain's published gas prices in base denom per gas unit, in the fixed order low, average, high
+        /// (positions 0, 1, 2; CRD ch.36 R36.3.5). Optional; `null` and an absent member are the same. An
+        /// array of any other length, a non-array value or a non-numeric element fails parsing of the
+        /// protocol descriptor (CRD ch.36 R36.3.5 item 1). The figures are checked when the platform coin is
+        /// built (CRD ch.36 T36.17), not here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority_gas_prices: Option<[f64; 3]>,
     },
     TENDERMINTTOKEN {
         platform: String,
@@ -706,7 +713,10 @@ mod coin_protocol_tests {
                 account_prefix,
                 chain_id,
                 ibc_channels,
+                priority_gas_prices,
             } => {
+                // `priority_gas_prices` is absent from this entry (CRD ch.36 R36.3.5 item 3).
+                assert_eq!(priority_gas_prices, None);
                 assert_eq!(denom, "uatom");
                 assert_eq!(decimals, 6);
                 assert_eq!(account_prefix, "cosmos");
@@ -734,6 +744,114 @@ mod coin_protocol_tests {
         {
             CoinProtocol::TENDERMINT { ibc_channels, .. } => assert!(ibc_channels.is_empty()),
             other => panic!("expected TENDERMINT, got {:?}", other),
+        }
+    }
+
+    /// The `protocol_data` of a `TENDERMINT` entry with the given extra member.
+    fn tendermint_with_priority_gas_prices(member: Option<serde_json::Value>) -> serde_json::Value {
+        let mut protocol_data = json!({
+            "denom": "uatom",
+            "decimals": 6,
+            "account_prefix": "cosmos",
+            "chain_id": "cosmoshub-4"
+        });
+        if let Some(member) = member {
+            protocol_data["priority_gas_prices"] = member;
+        }
+        json!({ "type": "TENDERMINT", "protocol_data": protocol_data })
+    }
+
+    #[test]
+    fn tendermint_priority_gas_prices_parses_three_numbers_in_any_order() {
+        // T36.16 / T36.17 (R36.3.5): exactly three numbers, integers included; neither the sign nor the order is
+        // checked while parsing (a non-positive figure is refused when the platform coin is built).
+        for (member, expected) in [
+            (json!([0.015, 0.025, 0.04]), [0.015, 0.025, 0.04]),
+            (json!([0.04, 0.025, 0.015]), [0.04, 0.025, 0.015]),
+            (json!([1, 2, 3]), [1.0, 2.0, 3.0]),
+            (json!([0, 0.025, 0.04]), [0.0, 0.025, 0.04]),
+        ] {
+            match CoinProtocol::from_conf_json(tendermint_with_priority_gas_prices(Some(member.clone()))).unwrap() {
+                CoinProtocol::TENDERMINT {
+                    priority_gas_prices, ..
+                } => assert_eq!(priority_gas_prices, Some(expected), "{member}"),
+                other => panic!("expected TENDERMINT, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn tendermint_priority_gas_prices_null_and_absent_are_the_same() {
+        // T36.16: `null` and an absent member both mean "no array" (R36.3.5 item 1 and 3).
+        for member in [None, Some(serde_json::Value::Null)] {
+            match CoinProtocol::from_conf_json(tendermint_with_priority_gas_prices(member.clone())).unwrap() {
+                CoinProtocol::TENDERMINT {
+                    priority_gas_prices, ..
+                } => assert_eq!(priority_gas_prices, None, "{member:?}"),
+                other => panic!("expected TENDERMINT, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn tendermint_priority_gas_prices_of_another_shape_fails_parsing() {
+        // T36.16: two or four elements, a string element, an object and a scalar in place of the array each fail
+        // parsing of the protocol descriptor.
+        for member in [
+            json!([0.015, 0.025]),
+            json!([0.015, 0.025, 0.04, 0.05]),
+            json!([]),
+            json!([0.015, "0.025", 0.04]),
+            json!([0.015, null, 0.04]),
+            json!({ "low": 0.015, "average": 0.025, "high": 0.04 }),
+            json!("0.015"),
+            json!(0.015),
+        ] {
+            assert!(
+                CoinProtocol::from_conf_json(tendermint_with_priority_gas_prices(Some(member.clone()))).is_err(),
+                "{member}"
+            );
+        }
+    }
+
+    #[test]
+    fn tendermint_priority_gas_prices_is_not_serialized_when_absent() {
+        // The protocol shown in an error carries the member only when the entry has it.
+        let absent = CoinProtocol::from_conf_json(tendermint_with_priority_gas_prices(None)).unwrap();
+        assert!(serde_json::to_value(&absent).unwrap()["protocol_data"]
+            .get("priority_gas_prices")
+            .is_none());
+        let present =
+            CoinProtocol::from_conf_json(tendermint_with_priority_gas_prices(Some(json!([0.015, 0.025, 0.04]))))
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&present).unwrap()["protocol_data"]["priority_gas_prices"],
+            json!([0.015, 0.025, 0.04])
+        );
+    }
+
+    #[test]
+    fn tendermint_token_protocol_ignores_a_priority_gas_prices_member() {
+        // T36.16 (R36.3.6): a token entry carrying the member activates with the member ignored.
+        match CoinProtocol::from_conf_json(json!({
+            "type": "TENDERMINTTOKEN",
+            "protocol_data": {
+                "platform": "IRIS",
+                "denom": "unyan",
+                "decimals": 6,
+                "priority_gas_prices": [0, "not", "checked"]
+            }
+        }))
+        .unwrap()
+        {
+            CoinProtocol::TENDERMINTTOKEN {
+                platform,
+                denom,
+                decimals,
+            } => {
+                assert_eq!((platform.as_str(), denom.as_str(), decimals), ("IRIS", "unyan", 6));
+            },
+            other => panic!("expected TENDERMINTTOKEN, got {:?}", other),
         }
     }
 
