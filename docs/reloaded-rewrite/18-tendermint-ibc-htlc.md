@@ -753,6 +753,16 @@ zero the hash lock is the plain SHA-256 of the secret. The module accepts
 - **D18.11.2 (maintainer decision).** Whether validation should tolerate
   a lock *longer* than the receiver's estimate (a sufficiency check in
   addition to, or instead of, equality), which the reference does not do.
+  *Decided 2026-11-09, together with D18.11.1: the maintainer's decision,
+  option (c), asymmetric.* Two Reloaded nodes that both declare a
+  Tendermint lock capability in their protocol information use the
+  multiplied maker lock. The receiving side then requires a lock of at
+  least the expected value. Toward a counterparty without that
+  capability, in either role, the reference derivation of R18.11.1 and
+  the equality check of R18.11.5 apply, with no decline and no switch.
+  The choice is made per swap when the match is made, and the saved swap
+  keeps it. *Not implemented yet: a later change implements it, and its
+  rule lands with that change.*
 
 ### 18.11.2 Fee and gas for create, claim and the dex fee
 
@@ -877,6 +887,10 @@ The module refunds an expired HTLC itself; there is no refund message
   synthetic marker naming the HTLC id and the closing block height
   (`closed_block` from the module's HTLC record), or no transaction at
   all (as Chapter 51 R18 already allows for auto-refunding coins).
+  *Decided 2026-11-09: the maintainer's decision, option (b), the synthetic
+  marker in the swap event.* How a coin's transaction history shows the
+  refund is decided with Tendermint history fetching (chapter 36, plan
+  item 4). *Not implemented yet: R18.11.17 lands with a later change.*
 
 ### 18.11.5 Confirmations, reorgs and claim polling
 
