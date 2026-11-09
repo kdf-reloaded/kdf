@@ -64,6 +64,9 @@ struct StubState {
     tip: Mutex<Option<u64>>,
     /// The header bytes (hex) the tip's header carries in `blockchain.headers.subscribe` answers and notifications.
     header_hex: Mutex<String>,
+    /// The header (hex) `blockchain.block.header` answers per height; a height without one gets the default.
+    block_headers: Mutex<HashMap<u64, String>>,
+    default_block_header: Mutex<Option<String>>,
     /// How long the stub waits before it answers a method (CRD ch.38 R38.6.4l tests).
     reply_delays: Mutex<HashMap<String, Duration>>,
     /// The open connections, with whether each has been answered a `blockchain.headers.subscribe`.
@@ -113,6 +116,8 @@ impl StubServer {
             accepted: AtomicUsize::new(0),
             tip: Mutex::new(None),
             header_hex: Mutex::new("00".to_owned()),
+            block_headers: Mutex::new(HashMap::new()),
+            default_block_header: Mutex::new(None),
             reply_delays: Mutex::new(HashMap::new()),
             live: Mutex::new(Vec::new()),
             listener_stop: Mutex::new(None),
@@ -258,6 +263,16 @@ impl StubServer {
         self.push_header(height);
     }
 
+    /// Sets the header (hex) `blockchain.block.header` answers for `height` (CRD ch.38 R38.6.4o item 12).
+    pub fn set_block_header(&self, height: u64, hex: &str) {
+        self.state.block_headers.lock().unwrap().insert(height, hex.to_owned());
+    }
+
+    /// Sets the header (hex) `blockchain.block.header` answers for every height that has none of its own.
+    pub fn set_default_block_header(&self, hex: &str) {
+        *self.state.default_block_header.lock().unwrap() = Some(hex.to_owned());
+    }
+
     /// Sets the header bytes (hex) every header the stub answers or pushes carries, so that two stubs at one height can
     /// answer the same header or different ones (CRD ch.38 R38.6.4o item 7). The default is `00`.
     pub fn set_header_hex(&self, hex: &str) { *self.state.header_hex.lock().unwrap() = hex.to_owned(); }
@@ -372,6 +387,23 @@ fn answer(state: &StubState, behavior: StubBehavior, request: &Json, subscribed:
         _ if state.errors.lock().unwrap().contains_key(&method) => {
             let message = state.errors.lock().unwrap().get(&method).cloned().unwrap_or_default();
             error(&message)
+        },
+        (_, "blockchain.block.header")
+            if request["params"][0].as_u64().map_or(false, |height| {
+                state.block_headers.lock().unwrap().contains_key(&height)
+                    || state.default_block_header.lock().unwrap().is_some()
+            }) =>
+        {
+            let height = request["params"][0].as_u64().unwrap_or_default();
+            let hex = state
+                .block_headers
+                .lock()
+                .unwrap()
+                .get(&height)
+                .cloned()
+                .or_else(|| state.default_block_header.lock().unwrap().clone())
+                .unwrap_or_default();
+            result(json!(hex))
         },
         (_, "blockchain.headers.subscribe") if state.tip.lock().unwrap().is_some() => {
             subscribed.store(true, Ordering::SeqCst);

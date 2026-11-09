@@ -15,12 +15,12 @@
 //! Every duration is held in [`ElectrumPoolTimings`]; production uses [`ElectrumPoolTimings::default`],
 //! tests build the pool with millisecond values.
 
-use super::electrum_measure::{agreed_tip, block_interval_from_conf, eligible_servers, is_beyond_tolerance, is_slow,
-                              lag, lead, near_sessions, next_round_at, out_of_date_states, pick_replacement,
-                              rank_after_round, rank_with_replacement, remeasure_gap, round_agreed_tip, shuffle,
-                              signed_lag, stale_limit, tolerance_blocks, Draw, Measurement, Measuring, OutOfDate,
-                              PoorReason, RoundServer, ServerQuality, TipFigure, NEAR_FACTOR_DEFAULT,
-                              NEAR_OFFSET_DEFAULT_MS};
+use super::electrum_measure::{agreed_tip, block_interval_from_conf, common_height, eligible_servers,
+                              header_differences, is_beyond_tolerance, is_far_ahead, is_slow, lag, lead,
+                              near_sessions, next_round_at, out_of_date_states, pick_replacement, rank_after_round,
+                              rank_with_replacement, remeasure_gap, round_agreed_tip, shuffle, signed_lag,
+                              stale_limit, tolerance_blocks, Draw, Measurement, Measuring, OutOfDate, PoorReason,
+                              RoundServer, ServerQuality, TipFigure, NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
 use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, ServerSpec, Session, SessionEnded,
                                  TlsNotice};
 use super::*;
@@ -68,6 +68,11 @@ pub struct ElectrumPoolTimings {
     /// The longest the least time between two re-measure rounds grows to after rounds without a replacement
     /// (R38.6.4o item 8).
     pub remeasure_cap: Duration,
+    /// How long the build waits, after its first connection, for the other servers' heights and the comparisons
+    /// before it judges whether the servers agree about the chain (R38.6.4o item 12, D38.6.4o.10).
+    pub activation_window: Duration,
+    /// The least time between two comparisons of the same two servers (R38.6.4o item 12).
+    pub compare_limit: Duration,
     /// How long a poor connection stays poor-demoted after its last trigger (R38.6.4l item 7).
     pub poor_demotion: Duration,
     /// The least time without a header notification that makes a lone connection stale (R38.6.4l item 6).
@@ -94,6 +99,8 @@ impl Default for ElectrumPoolTimings {
             round_floor: Duration::from_secs(5),
             remeasure_limit: Duration::from_secs(5 * 60),
             remeasure_cap: Duration::from_secs(60 * 60),
+            activation_window: Duration::from_secs(5),
+            compare_limit: Duration::from_secs(5 * 60),
             poor_demotion: Duration::from_secs(15 * 60),
             stale_floor: Duration::from_secs(10 * 60),
             latency_floor: Duration::from_millis(300),
@@ -480,6 +487,8 @@ enum Wake {
     Pass,
     /// Place the script-hash subscriptions again (R38.6.4h); no pass is needed for that.
     Resubscribe,
+    /// Run the comparisons that are due (R38.6.4o item 12).
+    Compare,
 }
 
 /// Why an attempt to establish a connection failed (CRD ch.38 R38.6.4d items 1 and 3).
@@ -502,6 +511,9 @@ struct SlotState {
     /// connection may have joined the maintained set already (R38.6.4k-R item 3); it then sends no header request
     /// of its own, and when it is displaced it stays open until its measurement has ended.
     probing: bool,
+    /// The header request over the server's connection has ended, answered or not (the activation waits for it, R38.6.4o
+    /// item 12).
+    header_resolved: bool,
 }
 
 /// One server of the pool. `id` is its place in the list of the pool and never changes. `rank` is its place
@@ -543,6 +555,7 @@ impl ServerSlot {
                 suspension: Suspension::default(),
                 quality: ServerQuality::default(),
                 probing: false,
+                header_resolved: false,
             }),
         }
     }
@@ -641,6 +654,8 @@ pub struct ElectrumServersView {
     pub tolerance_blocks: u64,
     /// The running agreed tip of the maintained connections (R38.6.4o item 4); `None` when there is none.
     pub agreed_tip: Option<u64>,
+    /// The error text while the servers disagree about the chain (R38.6.4o item 12), otherwise `None`.
+    pub chain_disagreement: Option<String>,
     /// Every server of the pool, in the coin's current rank.
     pub servers: Vec<ElectrumServerView>,
 }
@@ -682,6 +697,27 @@ struct HeaderAnswer {
 
 /// The most connections a re-measure round has in flight at a time (R38.6.4o item 8).
 const REMEASURE_IN_FLIGHT: usize = 4;
+
+/// A comparison of two servers' headers at a common height (R38.6.4o item 12).
+struct Comparison {
+    /// When it ended (seconds since the epoch).
+    at: f64,
+    /// The heights of the two servers, the one with the lower id first, when it ended.
+    heights: (u64, u64),
+    /// The two servers answered different header bytes.
+    diverged: bool,
+}
+
+/// What the pool knows about the servers' agreement about the chain (R38.6.4o item 12).
+#[derive(Default)]
+struct DisagreementState {
+    comparisons: HashMap<(usize, usize), Comparison>,
+    /// Pairs found at different headers at one height, to be compared once both servers report heights at least *T*
+    /// above it: the two server ids and that height (item 7).
+    pending: Vec<(usize, usize, u64)>,
+    /// The error text while the coin is in the disagreement state.
+    current: Option<String>,
+}
 
 /// The pool's figures of the measured order that are not a server's (R38.6.4l items 2 and 7).
 #[derive(Default)]
@@ -730,9 +766,13 @@ pub(super) struct PoolShared {
     tolerance: u64,
     /// R38.6.4o item 11.
     tip_checks: bool,
-    /// Tests: the activation probe has ended, its measured rank applied.
-    #[cfg(test)]
+    /// The activation probe has ended, its measured rank applied.
     probe_ended: AtomicBool,
+    disagreement: StdMutex<DisagreementState>,
+    /// The comparisons running now.
+    comparing: AtomicUsize,
+    /// When the build had its first connection (seconds since the epoch).
+    first_connection_at: StdMutex<Option<f64>>,
     measure: StdMutex<MeasureState>,
     /// Where the random choices of the measured order come from; tests inject their own.
     draw: StdMutex<DrawSource>,
@@ -773,8 +813,10 @@ impl PoolShared {
             block_interval: options.block_interval,
             tolerance: tolerance_blocks(options.block_interval),
             tip_checks: options.tip_checks,
-            #[cfg(test)]
             probe_ended: AtomicBool::new(false),
+            disagreement: StdMutex::new(DisagreementState::default()),
+            comparing: AtomicUsize::new(0),
+            first_connection_at: StdMutex::new(None),
             measure: StdMutex::new(MeasureState::default()),
             draw: StdMutex::new(random_draw()),
             measure_tx,
@@ -1119,6 +1161,7 @@ impl PoolShared {
                 {
                     let mut state = slot.state();
                     state.session = Some(session.clone());
+                    state.header_resolved = false;
                     state.suspension.on_success();
                 }
                 if session.is_closed() {
@@ -1317,13 +1360,307 @@ impl PoolShared {
     /// failure names the coin and, for each server, its address and failure (R38.6.4i). The probe goes on in
     /// the background until every attempt ended, offering each success to the maintained set.
     pub(super) async fn activation_probe(self: &Arc<Self>) -> Result<(), String> {
+        // R38.6.4o item 13: a short list is flagged whatever the tip checks say.
+        let listed = self.usable_count();
+        if listed < 3 {
+            warn!(
+                "{}: only {} Electrum servers are listed; with fewer than three the node cannot always tell a stale server from one on another chain",
+                self.ticker, listed
+            );
+        }
         let deadline = now_float() + self.timings.call_budget.as_secs_f64();
         let (first_tx, first_rx) = futures::channel::oneshot::channel();
         let pool = self.clone();
         spawn(async move { pool.run_probe(deadline, first_tx).await });
-        first_rx
+        let first = first_rx
             .await
-            .map_err(|_| format!("{}: the Electrum activation probe was abandoned", self.ticker))?
+            .map_err(|_| format!("{}: the Electrum activation probe was abandoned", self.ticker))?;
+        if first.is_ok() {
+            *self.first_connection_at.lock().unwrap_or_else(|p| p.into_inner()) = Some(now_float());
+        }
+        first
+    }
+
+    /// Judges after the activation probe whether the servers agree about the chain (CRD ch.38 R38.6.4o item 12,
+    /// D38.6.4o.10). It waits, up to the activation window after the first connection, until every connected server
+    /// has answered its header request and every comparison has ended, and judges on what arrived: a server that has
+    /// not answered by then is not judged. With the tip checks off it does nothing. On disagreement it returns the
+    /// error of the activation, naming every server with a height.
+    pub(super) async fn judge_activation(self: &Arc<Self>) -> Result<(), String> {
+        if !self.tip_checks {
+            return Ok(());
+        }
+        let first = self
+            .first_connection_at
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(now_float);
+        let deadline = first + self.timings.activation_window.as_secs_f64();
+        loop {
+            let pairs = self.due_comparisons(true);
+            if !pairs.is_empty() {
+                let left = secs_left(deadline).max(self.timings.request.min(Duration::from_millis(200)));
+                let _ = self.clone().run_comparisons(pairs).boxed().timeout(left).await;
+            }
+            if self.settled() && self.due_comparisons(true).is_empty() {
+                break;
+            }
+            if secs_left(deadline).is_zero() {
+                break;
+            }
+            Timer::sleep(0.01).await;
+        }
+        match self.disagreement_servers() {
+            Some(servers) => Err(self.disagreement_text(&servers, true)),
+            None => {
+                self.update_disagreement();
+                Ok(())
+            },
+        }
+    }
+
+    /// Whether every connected server's header request has ended, the probe has ended and no comparison is running.
+    fn settled(&self) -> bool {
+        self.probe_ended.load(AtomicOrdering::SeqCst)
+            && self.comparing.load(AtomicOrdering::SeqCst) == 0
+            && self.slots().iter().all(|slot| {
+                let state = slot.state();
+                state
+                    .session
+                    .as_ref()
+                    .filter(|session| !session.is_closed())
+                    .map_or(true, |_| state.header_resolved)
+            })
+    }
+
+    // ---- the disagreement about the chain (R38.6.4o item 12) ----------------------------------
+
+    /// The servers with an open connection that has a height, in rank order, with their heights.
+    fn live_heights(&self) -> Vec<(Arc<ServerSlot>, u64)> {
+        self.slots()
+            .into_iter()
+            .filter_map(|slot| {
+                let height = slot
+                    .state()
+                    .session
+                    .as_ref()
+                    .filter(|session| !session.is_closed())
+                    .and_then(|session| session.headers().tip())?;
+                Some((slot, height))
+            })
+            .collect()
+    }
+
+    /// The comparisons that are due now (item 12): two servers more than *T* apart when exactly two heights are known;
+    /// at activation, the server at the agreed tip against each server within *T* of it; the pairs of item 7 whose
+    /// heights have come at least *T* above the height of the difference. A pair compared within the limit is left
+    /// out, unless one of its heights moved by more than *T* since.
+    fn due_comparisons(&self, activation: bool) -> Vec<(Arc<ServerSlot>, Arc<ServerSlot>, u64)> {
+        let heights = self.live_heights();
+        let tolerance = self.tolerance;
+        let height_of = |id: usize| {
+            heights
+                .iter()
+                .find(|(slot, _)| slot.id == id)
+                .map(|(_, height)| *height)
+        };
+        let mut wanted: Vec<(usize, usize, u64, bool)> = Vec::new();
+        if let [(a, height_a), (b, height_b)] = heights.as_slice() {
+            if height_a.abs_diff(*height_b) > tolerance {
+                wanted.push((a.id, b.id, common_height(*height_a, *height_b, tolerance), false));
+            }
+        }
+        let plain: Vec<u64> = heights.iter().map(|(_, height)| *height).collect();
+        if let (true, Some(tip)) = (activation, agreed_tip(&plain)) {
+            if let Some((top, top_height)) = heights.iter().find(|(_, height)| *height == tip) {
+                for (slot, height) in &heights {
+                    if slot.id != top.id && height.abs_diff(tip) <= tolerance {
+                        wanted.push((top.id, slot.id, common_height(*top_height, *height, tolerance), false));
+                    }
+                }
+            }
+        }
+        let state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+        for (a, b, at_height) in &state.pending {
+            if let (Some(height_a), Some(height_b)) = (height_of(*a), height_of(*b)) {
+                if height_a >= at_height + tolerance && height_b >= at_height + tolerance {
+                    wanted.push((*a, *b, *at_height, true));
+                }
+            }
+        }
+        let now = now_float();
+        let limit = self.timings.compare_limit.as_secs_f64();
+        let mut due: Vec<(Arc<ServerSlot>, Arc<ServerSlot>, u64)> = Vec::new();
+        for (a, b, at_height, forced) in wanted {
+            let key = (a.min(b), a.max(b));
+            let (Some(height_a), Some(height_b)) = (height_of(key.0), height_of(key.1)) else {
+                continue;
+            };
+            let recent = state.comparisons.get(&key).map_or(false, |known| {
+                now - known.at < limit
+                    && known.heights.0.abs_diff(height_a) <= tolerance
+                    && known.heights.1.abs_diff(height_b) <= tolerance
+            });
+            if (recent && !forced) || due.iter().any(|(x, y, _)| (x.id.min(y.id), x.id.max(y.id)) == key) {
+                continue;
+            }
+            if let (Some((slot_a, _)), Some((slot_b, _))) = (
+                heights.iter().find(|(slot, _)| slot.id == a),
+                heights.iter().find(|(slot, _)| slot.id == b),
+            ) {
+                due.push((slot_a.clone(), slot_b.clone(), at_height));
+            }
+        }
+        due
+    }
+
+    /// Asks both servers, with one directed request each, for the header at `height` and compares the bytes: `Some(true)`
+    /// when they are the same, `None` when either server did not answer within the request bound (it is not judged).
+    async fn compare_pair(self: &Arc<Self>, a: &ServerSlot, b: &ServerSlot, height: u64) -> Option<bool> {
+        let request = |slot: &ServerSlot| {
+            let request = JsonRpcRequestEnum::Single(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: self.fresh_request_id(),
+                method: "blockchain.block.header".into(),
+                params: vec![json::json!(height)],
+            });
+            let pool = self.clone();
+            let addr = slot.addr.clone();
+            async move { pool.route_directed(request, &addr).await }
+        };
+        let (answer_a, answer_b) = futures::future::join(request(a), request(b)).await;
+        let header = |answer: Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), String>| match answer {
+            Ok((_, JsonRpcResponseEnum::Single(single))) if single.error.is_null() => {
+                single.result.as_str().map(|hex| hex.to_ascii_lowercase())
+            },
+            _ => None,
+        };
+        Some(header(answer_a)? == header(answer_b)?)
+    }
+
+    /// Runs the comparisons of `pairs` at once and records each result (item 12).
+    async fn run_comparisons(self: Arc<Self>, pairs: Vec<(Arc<ServerSlot>, Arc<ServerSlot>, u64)>) {
+        let runs = pairs.into_iter().map(|(a, b, height)| {
+            let pool = self.clone();
+            async move {
+                pool.comparing.fetch_add(1, AtomicOrdering::SeqCst);
+                let same = pool.compare_pair(&a, &b, height).await;
+                pool.comparing.fetch_sub(1, AtomicOrdering::SeqCst);
+                (a, b, height, same)
+            }
+        });
+        for (a, b, height, same) in join_all(runs).await {
+            let key = (a.id.min(b.id), a.id.max(b.id));
+            let heights = self.live_heights();
+            let height_of = |id: usize| heights.iter().find(|(slot, _)| slot.id == id).map_or(0, |(_, h)| *h);
+            let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+            state.comparisons.insert(key, Comparison {
+                at: now_float(),
+                heights: (height_of(key.0), height_of(key.1)),
+                diverged: same == Some(false),
+            });
+            state
+                .pending
+                .retain(|(x, y, at)| !((*x.min(y), *x.max(y)) == key && *at == height));
+        }
+    }
+
+    /// Runs the comparisons that are due after the activation, then judges the state again.
+    async fn run_due_comparisons(self: &Arc<Self>) {
+        let pairs = self.due_comparisons(false);
+        if !pairs.is_empty() {
+            self.clone().run_comparisons(pairs).await;
+        }
+        self.update_disagreement();
+    }
+
+    /// The servers with a height, in rank order with their heights, when the coin's servers disagree about the chain:
+    /// a server is far ahead of the agreed tip, or a comparison found different headers (item 12).
+    fn disagreement_servers(&self) -> Option<Vec<(String, u64)>> {
+        if !self.tip_checks {
+            return None;
+        }
+        let heights = self.live_heights();
+        let plain: Vec<u64> = heights.iter().map(|(_, height)| *height).collect();
+        let diverged = {
+            let state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+            state.comparisons.iter().any(|((a, b), known)| {
+                known.diverged
+                    && heights.iter().any(|(slot, _)| slot.id == *a)
+                    && heights.iter().any(|(slot, _)| slot.id == *b)
+            })
+        };
+        (is_far_ahead(&plain, self.tolerance) || diverged).then(|| {
+            heights
+                .iter()
+                .map(|(slot, height)| (slot.label.clone(), *height))
+                .collect()
+        })
+    }
+
+    /// The error text of item 12: `activation` gives the text of the failed activation, otherwise the text of the
+    /// refusals and the ERROR line.
+    fn disagreement_text(&self, servers: &[(String, u64)], activation: bool) -> String {
+        let list = servers
+            .iter()
+            .map(|(label, height)| format!("{label} at {height}"))
+            .join(", ");
+        let tail = if activation {
+            "The node cannot tell which one is right; check the servers or remove the wrong ones from the coin's list"
+        } else {
+            "New orders, swaps and withdrawals are refused until they agree again; remove the servers that follow the other chain from the coin's list, or activate the coin again with servers that agree"
+        };
+        format!(
+            "{}: the Electrum servers disagree about the chain ({}; tolerance {} blocks). {}",
+            self.ticker, list, self.tolerance, tail
+        )
+    }
+
+    /// Judges the disagreement state anew and logs each entry (ERROR) and exit (WARN) once (item 9, item 12); asks for
+    /// the comparisons that are due.
+    fn update_disagreement(&self) {
+        if !self.tip_checks {
+            return;
+        }
+        let now = self
+            .disagreement_servers()
+            .map(|servers| self.disagreement_text(&servers, false));
+        let (entered, left) = {
+            let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+            let was = state.current.is_some();
+            state.current = now.clone();
+            (!was && now.is_some(), was && now.is_none())
+        };
+        if let (true, Some(text)) = (entered, &now) {
+            error!("{}", text);
+        }
+        if left {
+            warn!("{}: the Electrum servers agree about the chain again", self.ticker);
+        }
+        if self.comparing.load(AtomicOrdering::SeqCst) == 0 && !self.due_comparisons(false).is_empty() {
+            let _ = self.trigger_tx.unbounded_send(Wake::Compare);
+        }
+    }
+
+    /// The error text while the coin is in the disagreement state, `None` otherwise (item 12). Used to refuse new
+    /// orders, new swaps and withdrawals.
+    pub(super) fn chain_disagreement(&self) -> Option<String> {
+        self.update_disagreement();
+        self.disagreement
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .current
+            .clone()
+    }
+
+    /// Notes the pairs of a measurement round that answered different header bytes at one height (item 7).
+    fn note_header_differences(&self, round: &[RoundServer]) {
+        let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+        for pair in header_differences(round) {
+            if !state.pending.contains(&pair) {
+                state.pending.push(pair);
+            }
+        }
     }
 
     async fn run_probe(
@@ -1439,7 +1776,6 @@ impl PoolShared {
             // The measured rank takes effect when the probe ends (R38.6.4l item 5, D38.6.4l.2).
             self.rank_activation_round(mode, measurements);
         }
-        #[cfg(test)]
         self.probe_ended.store(true, AtomicOrdering::SeqCst);
         if let Some(first_tx) = first_tx.take() {
             let _ = first_tx.send(Err(failures.describe_as(
@@ -1466,6 +1802,7 @@ impl PoolShared {
         let round = self.round_servers(&measurements);
         let reported = self.reported_heights();
         self.warn_measured_behind(&round, &reported);
+        self.note_header_differences(&round);
         let eligible = eligible_servers(&round, &reported, self.tolerance, self.latency_floor_ms());
         let all: Vec<usize> = self.slots().iter().map(|slot| slot.id).collect();
         let order = self.with_draw(|draw| rank_after_round(mode, &eligible, &all, draw));
@@ -1606,6 +1943,7 @@ impl PoolShared {
                 if stored {
                     self.close_slot_session(slot, session);
                 }
+                slot.state().header_resolved = true;
                 return None;
             },
         };
@@ -1632,6 +1970,7 @@ impl PoolShared {
             // The connection now receives header notifications, which the watch for poor connections counts.
             self.signal_measure();
         }
+        slot.state().header_resolved = true;
         self.refresh_out_of_date();
         answer
     }
@@ -1772,6 +2111,7 @@ impl PoolShared {
                 None => warn!("{}: Electrum server {} is up to date again", self.ticker, slot.label),
             }
         }
+        self.update_disagreement();
         maintained.into_iter().zip(states).collect()
     }
 
@@ -1958,6 +2298,7 @@ impl PoolShared {
         let round = self.round_servers(&measured);
         let reported = self.reported_heights();
         self.warn_measured_behind(&round, &reported);
+        self.note_header_differences(&round);
         let eligible = eligible_servers(&round, &reported, self.tolerance, self.latency_floor_ms());
         // The poor connection the round is for: the highest-ranked one that is marked (a further one waits for
         // the next round).
@@ -2063,7 +2404,6 @@ impl PoolShared {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn probe_ended(&self) -> bool { self.probe_ended.load(AtomicOrdering::SeqCst) }
 
     #[cfg(test)]
@@ -2237,6 +2577,9 @@ impl PoolShared {
             server_order: self.order.name(),
             tolerance_blocks: self.tolerance,
             agreed_tip: agreed,
+            chain_disagreement: self
+                .disagreement_servers()
+                .map(|servers| self.disagreement_text(&servers, false)),
             servers,
         }
     }
@@ -2560,16 +2903,24 @@ async fn maintenance_loop(client: Weak<ElectrumClientImpl>, mut trigger_rx: futu
     let mut next_pass_at = 0.;
     loop {
         let wait = (next_pass_at - now_float()).max(0.);
+        let mut compare_due = false;
         let mut pass_due = match select_future(Box::pin(Timer::sleep(wait)), Box::pin(trigger_rx.next())).await {
             EitherFuture::Left(_) => true,
             EitherFuture::Right((None, _)) => return,
-            EitherFuture::Right((Some(wake), _)) => wake == Wake::Pass,
+            EitherFuture::Right((Some(wake), _)) => {
+                compare_due = wake == Wake::Compare;
+                wake == Wake::Pass
+            },
         };
         while let Ok(wake) = trigger_rx.try_recv() {
             pass_due |= wake == Wake::Pass;
+            compare_due |= wake == Wake::Compare;
         }
         let Some(client) = client.upgrade() else { return };
         let pool = client.pool.clone();
+        if compare_due {
+            pool.run_due_comparisons().await;
+        }
         if pass_due {
             pool.run_pass().await;
             next_pass_at = now_float() + pool.next_pass_delay().as_secs_f64();
@@ -2728,6 +3079,9 @@ mod budget_tests {
         assert_eq!(t.remeasure_limit, secs(300));
         // R38.6.4o item 8: the least time between rounds grows from 5 to at most 60 minutes.
         assert_eq!(t.remeasure_cap, secs(3600));
+        // R38.6.4o item 12: the activation window and the comparison limit.
+        assert_eq!(t.activation_window, secs(5));
+        assert_eq!(t.compare_limit, secs(300));
         assert_eq!(t.poor_demotion, secs(900));
         assert_eq!(t.stale_floor, secs(600));
         assert_eq!(t.latency_floor, Duration::from_millis(300));

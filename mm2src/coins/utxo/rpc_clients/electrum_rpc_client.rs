@@ -549,6 +549,15 @@ impl ElectrumClientImpl {
     /// To be called after the servers are added and before [`Self::start_pool`].
     pub async fn activation_probe(self: &Arc<Self>) -> Result<(), String> { self.pool.activation_probe().await }
 
+    /// Judges after [`Self::activation_probe`] whether the servers agree about the chain, waiting up to the activation
+    /// window after the first connection (CRD ch.38 R38.6.4o item 12). The error is the text of the failed
+    /// activation. With the tip checks off it does nothing.
+    pub async fn judge_activation(self: &Arc<Self>) -> Result<(), String> { self.pool.judge_activation().await }
+
+    /// The error text while the servers disagree about the chain, `None` otherwise (R38.6.4o item 12): new orders,
+    /// new swaps and withdrawals of the coin are refused with it.
+    pub fn chain_disagreement(&self) -> Option<String> { self.pool.chain_disagreement() }
+
     /// Starts the background maintenance of the pool: the first pass connects the servers in the
     /// background and later passes keep the maintained set (CRD ch.38 R38.6.4c). Nothing waits for it.
     /// With `spawn_ping` the maintained connections are pinged on a regular cadence.
@@ -2981,6 +2990,8 @@ mod tls_tests {
                 let warns: Vec<String> = captured_log_lines()
                     .into_iter()
                     .filter(|line| line.starts_with("WARN ") && line.contains("PINMISMATCH"))
+                    // The short-list warning of R38.6.4o item 13 is about the list, not the pin.
+                    .filter(|line| !line.contains("Electrum servers are listed"))
                     .collect();
                 let expected = format!(
                     "WARN PINMISMATCH: Electrum server {}:{}: the server's key does not match spki_sha256",

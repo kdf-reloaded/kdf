@@ -818,6 +818,11 @@ pub(crate) fn broadcast_ordermatch_message(
 }
 
 #[cfg_attr(test, mockable)]
+/// The error text while the Electrum servers of either coin disagree about the chain (CRD ch.38 R38.6.4o item 12).
+fn chain_disagreement(first: &MmCoinEnum, second: &MmCoinEnum) -> Option<String> {
+    first.chain_disagreement().or_else(|| second.chain_disagreement())
+}
+
 pub(crate) fn lp_connect_start_bob(ctx: MmArc, maker_match: MakerMatch, maker_order: MakerOrder) {
     spawn(async move {
         // aka "maker_loop"
@@ -847,6 +852,12 @@ pub(crate) fn lp_connect_start_bob(ctx: MmArc, maker_match: MakerMatch, maker_or
         // CRD ch.05 R37: the swap is not started for a pair whose swap key is not the key it pays from.
         if let Some(mismatch) = swap_key_mismatch(&ctx, &maker_coin, &taker_coin) {
             log::warn!("Swap {} not started: {}", maker_match.request.uuid, mismatch);
+            return;
+        }
+        // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain. Nothing has
+        // moved yet.
+        if let Some(error) = chain_disagreement(&maker_coin, &taker_coin) {
+            log::error!("Swap {} not started: {}", maker_match.request.uuid, error);
             return;
         }
         let alice = bits256::from(maker_match.request.sender_pubkey.0);
@@ -942,6 +953,12 @@ pub(crate) fn lp_connected_alice(ctx: MmArc, taker_order: TakerOrder, taker_matc
                 taker_match.reserved.taker_order_uuid,
                 mismatch
             );
+            return;
+        }
+        // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain. Nothing has
+        // moved yet.
+        if let Some(error) = chain_disagreement(&maker_coin, &taker_coin) {
+            log::error!("Swap {} not started: {}", taker_match.reserved.taker_order_uuid, error);
             return;
         }
         // CRD ch.05 R45: a swap started now runs with the node key, whose public key is its persistent key.
@@ -2261,6 +2278,10 @@ pub async fn lp_auto_buy(
         Some("sell") => TakerAction::Sell,
         _ => return ERR!("Auto buy must be called only from buy/sell RPC methods"),
     };
+    // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain.
+    if let Some(error) = chain_disagreement(base_coin, rel_coin) {
+        return ERR!("{}", error);
+    }
     // CRD ch.60 R60.6.7 item 3: the smallest trade the order can produce must be spendable on both legs.
     try_s!(check_pre_trade_spend_safety(ctx, base_coin, rel_coin, input.min_volume.clone(), &input.price).await);
     let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
@@ -2582,6 +2603,10 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
     if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
         return ERR!("{}", mismatch);
+    }
+    // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain.
+    if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
+        return ERR!("{}", error);
     }
     if base_coin.wallet_only(ctx) {
         return ERR!("Base coin {} is wallet only", req.base);

@@ -37,6 +37,8 @@ fn test_timings() -> ElectrumPoolTimings {
         round_floor: ms(100),
         remeasure_limit: ms(600),
         remeasure_cap: ms(7_200),
+        activation_window: ms(300),
+        compare_limit: ms(60_000),
         poor_demotion: ms(900),
         stale_floor: ms(300),
         latency_floor: ms(300),
@@ -3480,7 +3482,7 @@ fn t38_6_4o_5_a_silent_connection_is_stuck_while_another_one_hears_news() {
 /// maintained under `random` the liar is out of date as ahead, takes no reads and is named in one WARN line; a stub at
 /// H + T stays up to date.
 #[test]
-fn t38_6_4o_6_a_liar_does_not_steer() {
+fn t38_6_4o_6_a_far_ahead_server_is_kept_out_of_the_reads() {
     let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
     block_on(async {
         const H: u64 = 700_000;
@@ -3707,60 +3709,6 @@ fn t38_6_4o_11_with_the_checks_off_the_wait_polls_the_first_connection() {
             .unwrap();
         assert_eq!(first.requests(TX_GET), 1);
         assert_eq!(second.requests(TX_GET), 0);
-    });
-}
-
-/// T38.6.4o.8: in a measurement round under `measured`, with three stubs at the same height, two answering the same
-/// header bytes and one other bytes, the third is not eligible and is neither suspended nor removed. With two stubs
-/// at that height and different bytes and no third there, both stay eligible.
-#[test]
-fn t38_6_4o_8_a_header_that_differs_makes_a_server_not_eligible() {
-    block_on(async {
-        // The odd one out is the fastest, so that it would rank first if it were eligible.
-        let x = stub_at(10, 100).await;
-        x.set_header_hex("bb");
-        let (y, z) = (stub_at(200, 100).await, stub_at(250, 100).await);
-        y.set_header_hex("aa");
-        z.set_header_hex("aa");
-        let client = checked_pool(
-            &[&x, &y, &z],
-            PoolSetup {
-                order: ServerOrder::Measured,
-                spread_reads: false,
-                ..PoolSetup::new("HDR8")
-            },
-            lenient(),
-            script_draw(&identity(3), 0.5),
-        );
-        client.activation_probe().await.unwrap();
-        wait_for_probe_end(&client).await;
-        // The measured rank is applied when the probe ends, a moment after every server is in the set.
-        wait_until("the measured rank", || rank_of(&client)[2] == x.addr()).await;
-        let state = snap_of(&client, &x);
-        assert!(
-            !state.removed && state.suspended_until.is_none() && state.maintained,
-            "{state:?}"
-        );
-
-        // Two stubs at the height with different bytes and no third: both are eligible.
-        let x = stub_at(10, 100).await;
-        x.set_header_hex("bb");
-        let y = stub_at(200, 100).await;
-        y.set_header_hex("aa");
-        // Listed second, so that only the measured rank can put it first.
-        let client = checked_pool(
-            &[&y, &x],
-            PoolSetup {
-                order: ServerOrder::Measured,
-                spread_reads: false,
-                ..PoolSetup::new("HDR8B")
-            },
-            lenient(),
-            script_draw(&identity(2), 0.5),
-        );
-        client.activation_probe().await.unwrap();
-        wait_for_probe_end(&client).await;
-        wait_until("the measured rank", || rank_of(&client)[0] == x.addr()).await;
     });
 }
 
@@ -4146,5 +4094,288 @@ fn t38_6_4a_9_a_session_that_has_answered_nothing_takes_no_read() {
         assert!(figure >= 800., "{figure}");
         let answered = answered_by(&client, 10).await;
         assert!(answered.contains(&second.addr()), "{answered:?}");
+    });
+}
+
+// ---- CRD ch.38 R38.6.4o item 12-13: a disagreement about the chain -----------------------------------------------
+
+/// The activation of a pool as the builder runs it: the probe, then the judgment of item 12.
+async fn activate_judged(client: &Arc<ElectrumClientImpl>) -> Result<(), String> {
+    client.activation_probe().await?;
+    client.judge_activation().await
+}
+
+/// A pool of `servers` with the tip checks on, in the listed order, for the tests of the disagreement.
+fn agreement_pool(ticker: &'static str, servers: &[&StubServer], tip_checks: bool) -> Arc<ElectrumClientImpl> {
+    checked_pool(
+        servers,
+        PoolSetup {
+            tip_checks,
+            ..PoolSetup::new(ticker)
+        },
+        test_timings(),
+        script_draw(&[], 0.5),
+    )
+}
+
+/// T38.6.4o.6: with three stubs at H + 1,000,000, H and H the activation fails with the error of item 12 naming all
+/// three; a stub at H + T does not fail it; with the tip checks off the first case activates.
+#[test]
+fn t38_6_4o_6_a_far_ahead_server_fails_the_activation() {
+    block_on(async {
+        const H: u64 = 700_000;
+        let (liar, x, y) = (
+            stub_at(5, H + 1_000_000).await,
+            stub_at(5, H).await,
+            stub_at(5, H).await,
+        );
+        for stub in [&liar, &x, &y] {
+            stub.set_default_block_header("aa");
+        }
+        let client = agreement_pool("FARAHEAD", &[&liar, &x, &y], true);
+        let error = activate_judged(&client).await.unwrap_err();
+        let expected = format!(
+            "FARAHEAD: the Electrum servers disagree about the chain ({} at {}, {} at {}, {} at {}; tolerance 1 blocks). The node cannot tell which one is right; check the servers or remove the wrong ones from the coin's list",
+            liar.addr(),
+            H + 1_000_000,
+            x.addr(),
+            H,
+            y.addr(),
+            H
+        );
+        assert_eq!(error, expected);
+
+        // A stub at H + T (T = 1 without avg_blocktime) does not fail it.
+        let (near, x, y) = (stub_at(5, H + 1).await, stub_at(5, H).await, stub_at(5, H).await);
+        for stub in [&near, &x, &y] {
+            stub.set_default_block_header("aa");
+        }
+        activate_judged(&agreement_pool("NEARAHEAD", &[&near, &x, &y], true))
+            .await
+            .unwrap();
+
+        // With the tip checks off the first case activates.
+        let (liar, x, y) = (
+            stub_at(5, H + 1_000_000).await,
+            stub_at(5, H).await,
+            stub_at(5, H).await,
+        );
+        activate_judged(&agreement_pool("CHECKSOFF", &[&liar, &x, &y], false))
+            .await
+            .unwrap();
+    });
+}
+
+/// T38.6.4o.8: with three stubs at one height, two answering the same header at H - T and one other bytes there, the
+/// activation fails; with three that differ only in the header at H and agree at H - T it succeeds and no stub is
+/// excluded for it.
+#[test]
+fn t38_6_4o_8_different_headers_fail_the_activation_only_below_the_tip() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let stubs = [stub_at(5, H).await, stub_at(5, H).await, stub_at(5, H).await];
+        stubs[0].set_block_header(H - 1, "bb");
+        stubs[1].set_block_header(H - 1, "aa");
+        stubs[2].set_block_header(H - 1, "aa");
+        let error = activate_judged(&agreement_pool("DIFFBELOW", &[&stubs[0], &stubs[1], &stubs[2]], true))
+            .await
+            .unwrap_err();
+        assert!(
+            error.starts_with("DIFFBELOW: the Electrum servers disagree about the chain ("),
+            "{error}"
+        );
+
+        let stubs = [stub_at(5, H).await, stub_at(5, H).await, stub_at(5, H).await];
+        for (stub, tip_header) in stubs.iter().zip(["aa", "bb", "cc"]) {
+            stub.set_default_block_header("dd");
+            stub.set_header_hex(tip_header);
+        }
+        let client = agreement_pool("DIFFTIP", &[&stubs[0], &stubs[1], &stubs[2]], true);
+        activate_judged(&client).await.unwrap();
+        assert!(client.chain_disagreement().is_none());
+    });
+}
+
+/// T38.6.4o.12: with two stubs at H and H - 1000 that answer the same header at H - 1000 - T the activation succeeds,
+/// every read goes to the higher stub and the lower is out of date as behind; with different headers there it fails.
+#[test]
+fn t38_6_4o_12_two_servers_stale_or_diverged() {
+    block_on(async {
+        const H: u64 = 5_000;
+        let (high, low) = (stub_at(5, H).await, stub_at(5, H - 1_000).await);
+        high.set_default_block_header("aa");
+        low.set_default_block_header("aa");
+        let client = agreement_pool("TWOSTALE", &[&low, &high], true);
+        activate_judged(&client).await.unwrap();
+        client.pool.run_pass().await;
+        wait_until("the heights", || {
+            snap_of(&client, &high).height.is_some() && snap_of(&client, &low).height.is_some()
+        })
+        .await;
+        let answered = answered_by(&client, 10).await;
+        assert!(answered.iter().all(|addr| *addr == high.addr()), "{answered:?}");
+        assert_eq!(view_of(&client, &low).out_of_date, Some("behind"));
+
+        let (high, low) = (stub_at(5, H).await, stub_at(5, H - 1_000).await);
+        high.set_default_block_header("aa");
+        low.set_default_block_header("bb");
+        let error = activate_judged(&agreement_pool("TWODIVERGED", &[&low, &high], true))
+            .await
+            .unwrap_err();
+        assert!(error.contains(&high.addr()) && error.contains(&low.addr()), "{error}");
+    });
+}
+
+/// T38.6.4o.13: with three stubs, one of them silent, the activation judges the other two and returns within the
+/// window of its first connection, and the silent stub is not named in the error.
+#[test]
+fn t38_6_4o_13_the_activation_window_does_not_wait_for_a_silent_server() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let silent = StubServer::start(StubBehavior::Silent).await;
+        let (x, y) = (stub_at(5, H).await, stub_at(5, H).await);
+        x.set_default_block_header("aa");
+        y.set_default_block_header("bb");
+        let client = agreement_pool("WINDOW", &[&silent, &x, &y], true);
+        let started = Instant::now();
+        let error = activate_judged(&client).await.unwrap_err();
+        // The window is 300 ms in these tests; the silent stub's own attempt would take 400 ms.
+        assert!(started.elapsed() < ms(380), "{:?}", started.elapsed());
+        assert!(error.contains(&x.addr()) && error.contains(&y.addr()), "{error}");
+        assert!(!error.contains(&silent.addr()), "{error}");
+
+        // Agreeing servers activate in the same time.
+        y.set_default_block_header("aa");
+        let client = agreement_pool("WINDOW2", &[&silent, &x, &y], true);
+        let started = Instant::now();
+        activate_judged(&client).await.unwrap();
+        assert!(started.elapsed() < ms(380), "{:?}", started.elapsed());
+    });
+}
+
+/// T38.6.4o.14: with three maintained stubs at H, when one moves to H + T + 1 the coin enters the disagreement state
+/// with one ERROR line and `electrum_servers` shows it; when the others reach that height it ends with one WARN line.
+#[test]
+fn t38_6_4o_14_the_disagreement_state_after_activation() {
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        let ticker = "DISAGREE";
+        let stubs = [stub_at(5, H).await, stub_at(5, H).await, stub_at(5, H).await];
+        for stub in &stubs {
+            stub.set_default_block_header("aa");
+        }
+        let client = agreement_pool(ticker, &[&stubs[0], &stubs[1], &stubs[2]], true);
+        activate_judged(&client).await.unwrap();
+        client.pool.run_pass().await;
+        wait_until("the heights", || {
+            stubs.iter().all(|s| snap_of(&client, s).height.is_some())
+        })
+        .await;
+        assert!(client.chain_disagreement().is_none());
+
+        stubs[0].set_tip(H + 2);
+        wait_until("the disagreement state", || client.chain_disagreement().is_some()).await;
+        let error = client.chain_disagreement().unwrap();
+        assert!(
+            error.starts_with(&format!("{ticker}: the Electrum servers disagree about the chain (")),
+            "{error}"
+        );
+        assert!(
+            error.contains("New orders, swaps and withdrawals are refused until they agree again"),
+            "{error}"
+        );
+        assert_eq!(client.servers_view().chain_disagreement, Some(error.clone()));
+        if capturing {
+            use crate::eth::alloy_compat::transport::test_support::captured_log_lines;
+            let errors: Vec<String> = captured_log_lines()
+                .into_iter()
+                .filter(|line| line.starts_with(&format!("ERROR {ticker}: ")))
+                .collect();
+            assert_eq!(errors, vec![format!("ERROR {error}")]);
+        }
+        // Balance and other reads keep working.
+        ask(&client, READ).await.unwrap();
+
+        stubs[1].set_tip(H + 2);
+        stubs[2].set_tip(H + 2);
+        wait_until("the end of the state", || client.chain_disagreement().is_none()).await;
+        assert!(client.servers_view().chain_disagreement.is_none());
+        if capturing {
+            let lines = warn_lines(ticker);
+            let agree = format!("WARN {ticker}: the Electrum servers agree about the chain again");
+            assert_eq!(lines.iter().filter(|line| **line == agree).count(), 1, "{lines:?}");
+        }
+    });
+}
+
+/// T38.6.4o.15: a coin activated with two servers, and with one, logs the WARN of item 13 once; with three it does
+/// not, and it is logged whatever the switch says.
+#[test]
+fn t38_6_4o_15_fewer_than_three_servers_are_flagged() {
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        let stubs = [stub_at(5, 100).await, stub_at(5, 100).await, stub_at(5, 100).await];
+        for (ticker, count, tip_checks) in [("FEWTWO", 2, true), ("FEWONE", 1, false), ("FEWTHREE", 3, true)] {
+            let servers: Vec<&StubServer> = stubs.iter().take(count).collect();
+            let client = agreement_pool(ticker, &servers, tip_checks);
+            client.activation_probe().await.unwrap();
+            if capturing {
+                let lines = warn_lines(ticker);
+                if count < 3 {
+                    assert_eq!(lines, vec![format!(
+                        "WARN {ticker}: only {count} Electrum servers are listed; with fewer than three the node cannot always tell a stale server from one on another chain"
+                    )]);
+                } else {
+                    assert!(lines.is_empty(), "{lines:?}");
+                }
+            }
+        }
+    });
+}
+
+/// T38.6.4o.16: two servers compared once are not compared again within the limit unless one of their heights moved
+/// by more than T.
+#[test]
+fn t38_6_4o_16_a_pair_is_compared_at_most_once_per_limit() {
+    block_on(async {
+        const H: u64 = 5_000;
+        let (high, low) = (stub_at(5, H).await, stub_at(5, H - 1_000).await);
+        high.set_default_block_header("aa");
+        low.set_default_block_header("aa");
+        let client = agreement_pool("LIMIT", &[&low, &high], true);
+        activate_judged(&client).await.unwrap();
+        assert_eq!(
+            (
+                high.requests("blockchain.block.header"),
+                low.requests("blockchain.block.header")
+            ),
+            (1, 1)
+        );
+        // Judged again at once: the pair was compared a moment ago, nothing moved.
+        client.judge_activation().await.unwrap();
+        assert_eq!(
+            (
+                high.requests("blockchain.block.header"),
+                low.requests("blockchain.block.header")
+            ),
+            (1, 1)
+        );
+        // One height moves by more than T: compared again.
+        client.pool.run_pass().await;
+        wait_until("the heights", || {
+            snap_of(&client, &high).height.is_some() && snap_of(&client, &low).height.is_some()
+        })
+        .await;
+        high.set_tip(H + 10);
+        wait_until("the new height", || snap_of(&client, &high).height == Some(H + 10)).await;
+        client.judge_activation().await.unwrap();
+        assert_eq!(
+            (
+                high.requests("blockchain.block.header"),
+                low.requests("blockchain.block.header")
+            ),
+            (2, 2)
+        );
     });
 }

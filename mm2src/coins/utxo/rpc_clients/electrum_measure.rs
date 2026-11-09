@@ -242,36 +242,45 @@ pub(super) fn round_agreed_tip(round: &[RoundServer], reported: &[(usize, u64)])
     agreed_tip(&round_heights(round, reported))
 }
 
-/// The header bytes at the agreed tip height that at least two measured servers answered and no other bytes
-/// answered as often (R38.6.4o item 7). `None` when no bytes are shared by two servers, or when two different bytes
-/// are each shared by as many servers as the most shared: no side is then known to be right.
-fn consensus_header(round: &[RoundServer], tip: u64) -> Option<&[u8]> {
-    let mut groups: Vec<(&[u8], usize)> = Vec::new();
-    for header in round
+/// The pairs of servers measured at the same height that answered different header bytes there, with that height
+/// (CRD ch.38 R38.6.4o item 7): each starts a comparison (item 12) once both report heights at least *T* above it.
+pub(super) fn header_differences(round: &[RoundServer]) -> Vec<(usize, usize, u64)> {
+    let measured: Vec<(usize, u64, &[u8])> = round
         .iter()
-        .filter_map(|server| server.measurement.as_ref())
-        .filter(|m| m.height == tip)
-        .filter_map(|m| m.header.as_deref())
-    {
-        match groups.iter_mut().find(|(known, _)| *known == header) {
-            Some(group) => group.1 += 1,
-            None => groups.push((header, 1)),
+        .filter_map(|server| {
+            let m = server.measurement.as_ref()?;
+            Some((server.id, m.height, m.header.as_deref()?))
+        })
+        .collect();
+    let mut pairs = Vec::new();
+    for (i, (id_a, height_a, header_a)) in measured.iter().enumerate() {
+        for (id_b, height_b, header_b) in measured.iter().skip(i + 1) {
+            if height_a == height_b && header_a != header_b {
+                pairs.push((*id_a, *id_b, *height_a));
+            }
         }
     }
-    let top = groups.iter().map(|group| group.1).max()?;
-    if top < 2 {
-        return None;
-    }
-    let mut leaders = groups.iter().filter(|group| group.1 == top);
-    let first = leaders.next()?;
-    leaders.next().is_none().then_some(first.0)
+    pairs
+}
+
+/// The common height at which two servers are compared (CRD ch.38 R38.6.4o item 12): the lower of their heights
+/// minus the tolerance, not below 0, so that a race at the tip never counts.
+pub(super) fn common_height(height_a: u64, height_b: u64, tolerance: u64) -> u64 {
+    height_a.min(height_b).saturating_sub(tolerance)
+}
+
+/// Whether, with three or more heights, one of them has a lead over the agreed tip of more than `tolerance`
+/// (R38.6.4o item 12, *far ahead*).
+pub(super) fn is_far_ahead(heights: &[u64], tolerance: u64) -> bool {
+    heights.len() >= 3
+        && agreed_tip(heights).map_or(false, |tip| heights.iter().any(|height| lead(tip, *height) > tolerance))
 }
 
 /// The eligible servers of a round, in the order of `round`. `reported` holds the heights the maintained
 /// connections currently report, by server id (D38.6.4l.3); `tolerance` is the coin's *T* (R38.6.4o item 1);
 /// `latency_floor_ms` is the 300 ms floor. The best tip is the agreed tip (R38.6.4o item 2) over the heights of the
-/// round and `reported`, and a server whose header differs from the one two or more others answer at that height
-/// is not eligible (R38.6.4o item 7).
+/// round and `reported`. A difference in the header at the same height does not exclude a server: it starts a
+/// comparison (R38.6.4o item 7, [`header_differences`]).
 pub(super) fn eligible_servers(
     round: &[RoundServer],
     reported: &[(usize, u64)],
@@ -280,7 +289,6 @@ pub(super) fn eligible_servers(
 ) -> Vec<Eligible> {
     let measured = || round.iter().filter_map(|server| server.measurement.as_ref());
     let best_tip = round_agreed_tip(round, reported);
-    let consensus = best_tip.and_then(|tip| consensus_header(round, tip));
     let best_latency = measured().map(|m| m.latency_ms).fold(f64::INFINITY, f64::min);
     if !best_latency.is_finite() {
         return Vec::new();
@@ -290,15 +298,10 @@ pub(super) fn eligible_servers(
         .iter()
         .filter_map(|server| {
             let m = server.measurement.as_ref()?;
-            let header_agrees = match (best_tip, consensus, m.header.as_deref()) {
-                (Some(tip), Some(consensus), Some(header)) if m.height == tip => header == consensus,
-                _ => true,
-            };
             let eligible = !server.removed
                 && !server.poor_demoted
                 && !m.suspended
                 && !is_outside_tolerance(best_tip, m.height, tolerance)
-                && header_agrees
                 && m.latency_ms <= latency_limit;
             eligible.then(|| Eligible {
                 id: server.id,
@@ -930,21 +933,23 @@ mod tests {
         server
     }
 
-    /// T38.6.4o.8: header agreement at the agreed tip height.
+    /// T38.6.4o.8 (item 7): a header that differs at the same height does not exclude a server; the pair starts a
+    /// comparison.
     #[test]
-    fn t38_6_4o_8_a_header_that_differs_from_two_agreeing_ones_is_not_eligible() {
+    fn t38_6_4o_8_a_header_that_differs_starts_a_comparison_and_excludes_nobody() {
         let same = |id| with_header(server(id, 50., 100), b"aa");
         let other = |id| with_header(server(id, 50., 100), b"bb");
-        // Two answer the same bytes and one other bytes: the third is not eligible.
-        assert_eq!(eligible_ids(&[same(0), same(1), other(2)]), vec![0, 1]);
-        // Two at the same height with different bytes and no third there: both stay eligible.
-        assert_eq!(eligible_ids(&[same(0), other(1)]), vec![0, 1]);
-        // Two and two: neither side is known to be right, so no one is excluded.
-        assert_eq!(eligible_ids(&[same(0), same(1), other(2), other(3)]), vec![0, 1, 2, 3]);
-        // Servers at other heights are not compared, and a server without readable header bytes is not either.
+        let round = [same(0), same(1), other(2)];
+        assert_eq!(eligible_ids(&round), vec![0, 1, 2]);
+        assert_eq!(header_differences(&round), vec![(0, 2, 100), (1, 2, 100)]);
+        // Servers at other heights, or without readable header bytes, are not compared.
         let lower = with_header(server(3, 50., 99), b"cc");
-        let unreadable = server(4, 50., 100);
-        assert_eq!(eligible_ids(&[same(0), same(1), lower, unreadable]), vec![0, 1, 3, 4]);
+        assert!(header_differences(&[same(0), lower, server(4, 50., 100)]).is_empty());
+        assert_eq!(common_height(100, 90, 3), 87);
+        assert_eq!(common_height(2, 100, 3), 0);
+        assert!(is_far_ahead(&[1_000_100, 1_000, 1_000], 3));
+        assert!(!is_far_ahead(&[1_003, 1_000, 1_000], 3));
+        assert!(!is_far_ahead(&[1_000_100, 1_000], 3));
     }
 
     /// T38.6.4o item 8: the least time between two re-measure rounds doubles, up to the cap.

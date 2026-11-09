@@ -587,6 +587,9 @@ pub enum WithdrawError {
         required: BigDecimal,
         locked: BigDecimal,
     },
+    /// The Electrum servers of the coin disagree about the chain (CRD ch.38 R38.6.4o item 12); the text is the error.
+    #[display(fmt = "{}", _0)]
+    ChainDisagreement(String),
     #[display(fmt = "Balance is zero")]
     ZeroBalanceToWithdrawMax,
     #[display(fmt = "The amount {} is too small, required at least {}", amount, threshold)]
@@ -649,6 +652,7 @@ impl HttpStatusCode for WithdrawError {
             | WithdrawError::UnexpectedUserAction { .. }
             | WithdrawError::NotSufficientBalance { .. }
             | WithdrawError::BalanceLockedByUnconfirmedTransaction { .. }
+            | WithdrawError::ChainDisagreement(_)
             | WithdrawError::ZeroBalanceToWithdrawMax
             | WithdrawError::AmountTooLow { .. }
             | WithdrawError::InvalidAddress(_)

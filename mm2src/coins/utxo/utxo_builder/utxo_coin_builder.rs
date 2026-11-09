@@ -84,6 +84,10 @@ pub enum UtxoCoinBuildError {
     /// with its failure (CRD ch.38 R38.6.4k-R item 5, R38.6.4i).
     #[display(fmt = "{}", _0)]
     FailedToConnectToElectrums(String),
+    /// The Electrum servers disagree about the chain; the text names every server with a height (CRD ch.38
+    /// R38.6.4o item 12).
+    #[display(fmt = "{}", _0)]
+    ElectrumServersDisagree(String),
     #[display(
         fmt = "No usable Electrum servers for {}: none are configured, or every configured server was rejected as \
                unusable by this build (native builds cannot use 'ws'/'wss' servers).",
@@ -550,6 +554,11 @@ pub(crate) async fn build_electrum_client(
         .activation_probe()
         .await
         .map_to_mm(UtxoCoinBuildError::FailedToConnectToElectrums)?;
+    // The servers must agree about the chain before the coin is registered (R38.6.4o item 12).
+    client
+        .judge_activation()
+        .await
+        .map_to_mm(UtxoCoinBuildError::ElectrumServersDisagree)?;
     client.start_pool(args.spawn_ping);
 
     Ok(ElectrumClient(client))
