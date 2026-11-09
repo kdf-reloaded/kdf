@@ -4379,3 +4379,47 @@ fn t38_6_4o_16_a_pair_is_compared_at_most_once_per_limit() {
         );
     });
 }
+
+/// T38.6.4o item 7 (notifications): two maintained stubs that report the same height with different header bytes start a
+/// comparison once both are T above it. If they agree at that height there is no state; if they differ there the coin
+/// enters the disagreement state.
+#[test]
+fn t38_6_4o_7_different_headers_in_notifications_start_a_comparison() {
+    block_on(async {
+        const H: u64 = 1_000;
+        for (ticker, diverge) in [("NOTIFYAGREE", false), ("NOTIFYDIVERGE", true)] {
+            let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
+            // The tips differ in their bytes; below the tip the two either agree or not.
+            a.set_header_hex("aa");
+            b.set_header_hex("bb");
+            a.set_default_block_header("dd");
+            b.set_default_block_header("dd");
+            if diverge {
+                a.set_block_header(H, "x1");
+                b.set_block_header(H, "x2");
+            }
+            let client = agreement_pool(ticker, &[&a, &b], true);
+            client.start_pool(false);
+            wait_until("the heights", || {
+                snap_of(&client, &a).height.is_some() && snap_of(&client, &b).height.is_some()
+            })
+            .await;
+            // A race at the tip is no state, and nothing is compared before both are T above the height.
+            assert!(client.chain_disagreement().is_none());
+            assert_eq!(
+                a.requests("blockchain.block.header") + b.requests("blockchain.block.header"),
+                0
+            );
+            // Both move on: the pair is compared at H.
+            a.set_tip(H + 2);
+            b.set_tip(H + 2);
+            if diverge {
+                wait_until("the disagreement state", || client.chain_disagreement().is_some()).await;
+            } else {
+                wait_until("the comparison", || a.requests("blockchain.block.header") >= 1).await;
+                Timer::sleep(0.2).await;
+                assert!(client.chain_disagreement().is_none());
+            }
+        }
+    });
+}

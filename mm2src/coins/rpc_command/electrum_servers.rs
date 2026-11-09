@@ -114,6 +114,51 @@ mod tests {
         assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
     }
 
+    /// T38.6.4o.14: while the coin's Electrum servers disagree about the chain, a withdrawal is refused with the error of
+    /// item 12, as `ChainDisagreement`.
+    #[test]
+    fn a_withdrawal_is_refused_while_the_servers_disagree() {
+        let ticker = "WDISAGREE";
+        let (stubs, client) = block_on(async {
+            let stubs = [
+                StubServer::start(StubBehavior::Answer).await,
+                StubServer::start(StubBehavior::Answer).await,
+                StubServer::start(StubBehavior::Answer).await,
+            ];
+            for (stub, height) in stubs.iter().zip([2_000_000u64, 1_000, 1_000]) {
+                stub.set_tip(height);
+            }
+            let client = ElectrumClientImpl::new(ticker.to_owned(), vec![]);
+            for stub in &stubs {
+                client.add_server(&stub.request()).unwrap();
+            }
+            let client = Arc::new(client);
+            client.activation_probe().await.unwrap();
+            // The three connections answer their header requests on joining; the first is far ahead of the others.
+            let started = std::time::Instant::now();
+            while client.chain_disagreement().is_none() {
+                assert!(started.elapsed() < std::time::Duration::from_secs(8), "no disagreement");
+                common::executor::Timer::sleep(0.01).await;
+            }
+            (stubs, client)
+        });
+        let native = NativeClient(Arc::new(NativeClientImpl::default()));
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native), None, false);
+        fields.conf.ticker = ticker.to_owned();
+        fields.rpc_client = ElectrumClient(client.clone()).into();
+        let ctx = ctx_with(utxo_coin_from_fields(fields));
+        let request: crate::WithdrawRequest =
+            serde_json::from_value(serde_json::json!({"coin": ticker, "to": "x", "amount": "1"})).unwrap();
+        let error = block_on(crate::withdraw(ctx, request)).unwrap_err().into_inner();
+        let expected = client.chain_disagreement().unwrap();
+        assert!(
+            matches!(&error, crate::WithdrawError::ChainDisagreement(text) if *text == expected),
+            "{error}"
+        );
+        assert!(expected.contains("New orders, swaps and withdrawals are refused until they agree again"));
+        drop(stubs);
+    }
+
     /// T38.6.4o.10: an Electrum-backed coin answers the snapshot of its pool, in the shape of the chapter.
     #[test]
     fn an_electrum_coin_answers_its_pool() {

@@ -257,6 +257,9 @@ pub(crate) struct HeaderTrack {
     answered_at_ms: AtomicU64,
     /// When the last header notification came, in milliseconds since the epoch.
     notified_at_ms: AtomicU64,
+    /// The height and the header bytes of the last header answer or notification that carried readable bytes (CRD ch.38
+    /// R38.6.4o item 7).
+    last_header: StdMutex<Option<(u64, Vec<u8>)>>,
     on_notification: HeaderNotified,
 }
 
@@ -267,6 +270,7 @@ impl HeaderTrack {
             tip: AtomicU64::new(NO_TIP),
             answered_at_ms: AtomicU64::new(NO_TIME_MS),
             notified_at_ms: AtomicU64::new(NO_TIME_MS),
+            last_header: StdMutex::new(None),
             on_notification,
         }
     }
@@ -280,6 +284,21 @@ impl HeaderTrack {
             self.answered_at_ms.store(now_ms(), AtomicOrdering::Relaxed);
         }
         self.notifying.store(true, AtomicOrdering::Relaxed);
+    }
+
+    /// Keeps the header bytes (hex) that came with `height`; bytes that cannot be read leave what was kept.
+    fn store_header(&self, height: u64, hex: Option<&str>) {
+        if let Some(bytes) = hex
+            .and_then(|hex| hex::decode(hex).ok())
+            .filter(|bytes| !bytes.is_empty())
+        {
+            *self.last_header.lock().unwrap_or_else(|p| p.into_inner()) = Some((height, bytes));
+        }
+    }
+
+    /// The height and the header bytes of the last header the connection carried.
+    pub(crate) fn last_header(&self) -> Option<(u64, Vec<u8>)> {
+        self.last_header.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// A header notification: the connection's height moves, and the pool is told.
@@ -405,6 +424,7 @@ impl Session {
             if request.method == BLOCKCHAIN_HEADERS_SUB_ID && response.error.is_null() {
                 if let Some(height) = response.result["height"].as_u64() {
                     self.headers.note_answer(height);
+                    self.headers.store_header(height, response.result["hex"].as_str());
                 }
             }
         }
@@ -1580,6 +1600,7 @@ async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShare
                     if let (Some(headers), Some(height)) =
                         (headers, req.params.first().and_then(|p| p["height"].as_u64()))
                     {
+                        headers.store_header(height, req.params.first().and_then(|p| p["hex"].as_str()));
                         headers.note_notification(height);
                     }
                     BLOCKCHAIN_HEADERS_SUB_ID

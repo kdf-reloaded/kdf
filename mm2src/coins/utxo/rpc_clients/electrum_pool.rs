@@ -1654,9 +1654,39 @@ impl PoolShared {
     }
 
     /// Notes the pairs of a measurement round that answered different header bytes at one height (item 7).
-    fn note_header_differences(&self, round: &[RoundServer]) {
+    fn note_header_differences(&self, round: &[RoundServer]) { self.add_pending(header_differences(round)); }
+
+    /// Notes the pairs of maintained connections whose last header, from the answer to the header request or from a
+    /// notification, is at one height with different bytes (item 7). The comparison follows once both are at least
+    /// *T* above that height.
+    fn note_same_height_differences(&self) {
+        if !self.tip_checks {
+            return;
+        }
+        let headers: Vec<(usize, u64, Vec<u8>)> = self
+            .maintained_slots()
+            .iter()
+            .filter_map(|slot| {
+                let (height, bytes) = slot.state().session.as_ref()?.headers().last_header()?;
+                Some((slot.id, height, bytes))
+            })
+            .collect();
+        let mut pairs = Vec::new();
+        for (i, (id_a, height_a, bytes_a)) in headers.iter().enumerate() {
+            for (id_b, height_b, bytes_b) in headers.iter().skip(i + 1) {
+                if height_a == height_b && bytes_a != bytes_b {
+                    pairs.push((*id_a, *id_b, *height_a));
+                }
+            }
+        }
+        self.add_pending(pairs);
+    }
+
+    /// Adds `pairs`, each two server ids and a height, to the comparisons that wait for their heights (item 7).
+    fn add_pending(&self, pairs: Vec<(usize, usize, u64)>) {
         let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
-        for pair in header_differences(round) {
+        for (a, b, height) in pairs {
+            let pair = (a.min(b), a.max(b), height);
             if !state.pending.contains(&pair) {
                 state.pending.push(pair);
             }
@@ -1971,6 +2001,7 @@ impl PoolShared {
             self.signal_measure();
         }
         slot.state().header_resolved = true;
+        self.note_same_height_differences();
         self.refresh_out_of_date();
         answer
     }
@@ -2017,6 +2048,7 @@ impl PoolShared {
     /// connections moves, and the maintained connections are judged again for being out of date.
     fn header_notified(&self, id: usize, session_id: u64, height: u64) {
         let Some(slot) = self.slot_by_id(id) else { return };
+        self.note_same_height_differences();
         let mut wake = false;
         if self.measuring().is_some() {
             // The heights the maintained connections report, the notifier's own included (the connection took the
