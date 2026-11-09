@@ -445,6 +445,17 @@ the broadcast endpoint (§21.9).
 (converted from SUN at `1 TRX = 10^6 SUN`), with the fee broken
 into bandwidth and energy components (R-F2).
 
+> **GasFree fee delegation (pointer, 2026-11-08).** A second,
+> provider-relayed withdraw rail for TRC20 tokens -- the user signs
+> an off-chain `PermitTransfer` authorization and a GasFree provider
+> pays the resource cost, charging its fee in the token -- is
+> specified by [Chapter 63](63-tron-gasfree-fee-delegation.md). That
+> chapter extends the shared withdraw request (`fee_method`,
+> `gasless`), the balance reports (`gasfree_address`) and the
+> EVM/Tron activation requests. R-W1–R-W6 above are the native rail
+> chapter 63 calls `fee_method = native`; they are unchanged by it.
+> Chapter 63 passed the KDF Dirty Gate on 2026-11-08.
+
 ## 21.11 Deferred Work
 
 The following are explicit gaps, documented as deferred work
