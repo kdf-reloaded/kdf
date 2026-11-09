@@ -34,15 +34,35 @@ the armv7 binary. musl-based systems (Alpine) are not covered either.
 The libraries are the daemon as a static archive for the host application to link, not a standalone program.
 Simulator targets (`aarch64-apple-ios-sim`, `x86_64-apple-ios`) and Android `x86_64` are not built.
 
-The host application calls four C functions: `mm2_main` (start the daemon in a background thread from a JSON
-configuration string and a log callback), `mm2_main_status` (0 not running, 1 starting, 2 context ready,
-3 RPC up), `mm2_stop` and `mm2_test`. The archive also exports two internal helper functions
-(`log_stacktrace`, `is_loopback_ip`) and the C symbols of the libraries built into it, among them SQLite
-(`sqlite3_*`) and libusb (`libusb_*`) under their usual names. No C header is shipped yet.
+## C header (`kdf-<tag>.h`)
+
+`kdf-<tag>.h` declares the C interface of the libraries above, with the exact prototypes and the callback type.
+It needs only `<stdint.h>`, has include guards and works from C++.
+
+The host application calls four functions:
+
+- `int8_t mm2_main(const char *conf, kdf_log_callback log_cb)` starts the daemon in a background thread from a
+  JSON configuration string and returns at once (0 started, 1 already running, 2 no configuration, 3 the
+  configuration is not UTF-8, 5 the thread could not be started);
+- `int8_t mm2_main_status(void)` (0 not running, 1 starting, 2 context ready, 3 RPC up);
+- `int8_t mm2_stop(void)` (0 stopped, 1 not running, 2 error while stopping, 3 already stopping);
+- `int32_t mm2_test(int32_t torch, kdf_log_callback log_cb)` runs the built-in self tests.
+
+**The log callback** is `typedef void (*kdf_log_callback)(const char *line)`. It uses the C calling convention (the
+platform default), must not be NULL, receives a NUL-terminated line that is valid only during the call (copy it if you
+need it later), and is called from whichever thread logs, so it can run on any thread and must be thread-safe.
+
+The archive also exports `log_stacktrace` and `is_loopback_ip`. The header declares them in a separate block marked
+"exported for internal use, not a supported API, may change without notice". The archive also contains the C symbols
+of the libraries built into it, among them SQLite (`sqlite3_*`) and libusb (`libusb_*`) under their usual names.
+
+CI checks the header on every release: it builds the Linux library, compiles a C program against the header with
+strict warnings, links and runs it, and compares the KDF symbols the header declares with the ones the library
+exports.
 
 ## Checksums and signature
 
-- `SHA256SUMS` lists every file above plus the license files `COPYING`, `LICENSE` and `THIRDPARTY-LICENSES`.
+- `SHA256SUMS` lists every file above, the C header, plus the license files `COPYING`, `LICENSE` and `THIRDPARTY-LICENSES`.
 - `SHA256SUMS.asc` is the detached GPG signature of `SHA256SUMS`, made with the maintainer key
   `FEE1ACA52C65FF3EBF31818CB5595E1752BC2A82` (public key: [`keys/takologi.asc`](keys/takologi.asc)).
 

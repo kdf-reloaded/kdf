@@ -120,13 +120,20 @@ jobs:
     with:
       profile: release
 
+  # The C header must match the library it describes: build, compile, link and
+  # run a test program against include/kdf.h (see check-header.yml).
+  header:
+    needs: gate
+    if: ${{ needs.gate.outputs.proceed == 'true' }}
+    uses: ./.github/workflows/check-header.yml
+
   # Collect every binary and library, name them with the version tag and write
   # the SHA-256 manifest. No secrets and no environment: this part runs for tags
   # and for the manual dry run alike. The assembled directory is handed to the
   # signing job (tags) or the dry-run signing self-test (manual runs) as the
   # `release-assets` artifact.
   assemble:
-    needs: [gate, linux, macos, windows, android, ios]
+    needs: [gate, linux, macos, windows, android, ios, header]
     if: ${{ needs.gate.outputs.proceed == 'true' }}
     runs-on: ubuntu-latest
     permissions:
@@ -142,7 +149,9 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: src
-          sparse-checkout: LEGAL
+          sparse-checkout: |
+            LEGAL
+            include
 
       - name: Assemble version-tagged release assets
         run: |
@@ -178,7 +187,9 @@ jobs:
           for f in COPYING LICENSE THIRDPARTY-LICENSES; do
             cp "src/LEGAL/$f" "release-assets/$f"
           done
-          # Fail loudly if a Linux binary, the macOS universal binary or a mobile library is missing, so a
+          # The C header for libkdf.a, named with the version tag.
+          cp src/include/kdf.h "release-assets/kdf-${tag}.h"
+          # Fail loudly if a Linux binary, the macOS universal binary, a mobile library or the header is missing, so a
           # skipped matrix leg can never produce a release without it.
           for want in \
             "kdf-${tag}-x86_64-unknown-linux-gnu" \
@@ -187,7 +198,8 @@ jobs:
             "kdf-${tag}-universal-apple-darwin" \
             "libkdf-${tag}-aarch64-linux-android.a" \
             "libkdf-${tag}-armv7-linux-androideabi.a" \
-            "libkdf-${tag}-aarch64-apple-ios.a"; do
+            "libkdf-${tag}-aarch64-apple-ios.a" \
+            "kdf-${tag}.h"; do
             [ -s "release-assets/$want" ] || { echo "::error::missing release asset: $want"; exit 1; }
           done
           echo "Assembled:"
