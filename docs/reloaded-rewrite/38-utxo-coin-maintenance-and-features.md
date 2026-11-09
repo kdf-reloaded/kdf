@@ -1690,6 +1690,11 @@ failure, naming each server, from the activation itself.
 >   `electrum_measure.rs`. The tests of T38.6.4a.2 and T38.6.4a.5 warm the sessions with a ping, since a read no
 >   longer gives a second session a first figure. The P2 test counts the header answer as the first of the five
 >   samples.
+> - *A side effect of D38.6.4a.4.* With the default `electrum_tip_checks` `true`, a session that joins answers its
+>   header request on joining within its round trip and has a figure at once. With `electrum_tip_checks` `false`,
+>   no header request is sent on joining under `random` and `listed`, so a session that joins gets its first
+>   figure from its first answered ping (R38.6.4e item 4, every 30 s). Until then it takes no read while another
+>   maintained session has a figure; it still answers when those fail (R38.6.4a item 3).
 
 R38.6.4l **Measured server order (Reloaded-original, maintainer design
 approval 2026-10-28; binds the `mixed` and `measured` values of R38.6.4b-R
