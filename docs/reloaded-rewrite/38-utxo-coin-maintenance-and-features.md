@@ -1483,10 +1483,7 @@ R38.6.4f **Routing of ordinary requests.**
 2. A request that fails over every maintained connection, or finds the set
    empty, is retried over *all* servers still in the pool, connecting them as
    needed, with up to `max_connected` servers in flight at a time; the first
-   answer ends the request. The servers in flight form a sliding window: as
-   soon as one attempt ends without an answer, the next server in the
-   visiting order starts, so one attempt that is slow to fail never holds
-   back servers that could answer (Reloaded, D38.6.4j.1). Connections this retry opened to servers outside
+   answer ends the request. Connections this retry opened to servers outside
    the maintained set are released afterwards (closed, hence suspended under
    R38.6.4d item 1); a losing parallel attempt may be released at once or
    left to lapse under the idle cutoff of R38.6.4e item 3. The order in which
@@ -1494,6 +1491,11 @@ R38.6.4f **Routing of ordinary requests.**
    it in no particular order; Reloaded visits the servers not yet tried in this
    call before those that already failed in it, and R38.6.4i still names each
    server once).
+
+   *Amended 2026-11-09 (clean side; R38.6.4j, D38.6.4j.1):* the servers in
+   flight form a sliding window: as soon as one attempt ends without an
+   answer, the next server in the visiting order starts, so one attempt that
+   is slow to fail never holds back servers that could answer.
 3. Informative: while the retry of item 2 connects servers in parallel, a
    maintenance pass may be connecting as well, so the number of open
    connections can briefly exceed the ceiling during this recovery. The
@@ -1503,9 +1505,11 @@ R38.6.4f **Routing of ordinary requests.**
    retried over the pool. Broadcasts, subscriptions and the ping keep the
    routing R38.6.4a item 2 names; with `electrum_spread_reads` enabled,
    R38.6.4a decides on which maintained connection a read-only query starts,
-   and the failover of item 1 continues from there. Connections that are out
-   of date (R38.6.4o item 4) are tried after the up-to-date ones, for reads
-   and broadcasts alike (R38.6.4o item 5).
+   and the failover of item 1 continues from there.
+
+   *Amended 2026-11-09 (clean side; R38.6.4o item 5):* connections that are
+   out of date (R38.6.4o item 4) are tried after the up-to-date ones, for
+   reads and broadcasts alike.
 
 R38.6.4g **Directed requests.** A request addressed to one named server --
 header retrieval from a chosen server, the per-server block-count survey, and
@@ -1540,21 +1544,30 @@ R38.6.4j **Per-attempt budget derived from the call budget (Reloaded-original,
    budget *B*. *B* defaults to 60 s -- the figure Reloaded's request path
    already uses as its budget -- and a caller with a tighter deadline may pass
    a smaller one.
-2. Before each attempt starts, the attempt's budget is the smaller of (a) the
+2. Before each round of attempts, the round's budget is the smaller of (a) the
    establishment bound of R38.6.4e item 1 plus the per-request bound of item 2
    and (b) (*B* − 5 s) / *N*, where *N* is the number of rounds the call may
    still make: the maintained connections still to be tried one at a time
-   (R38.6.4f item 1) plus the retry rounds of R38.6.4f item 2, counted as the
-   retry's servers not yet started, this one included, divided by
-   `max_connected` and rounded up. The attempt's budget is never below 5 s and
-   bounds everything the attempt does, connecting included (D38.6.4j.1).
+   (R38.6.4f item 1) plus the retry rounds of R38.6.4f item 2, each of up to
+   `max_connected` servers in parallel. The round's budget is never below 5 s
+   and bounds everything the round does, connecting included.
+
+   *Amended 2026-11-09 (clean side; D38.6.4j.1):* with the sliding window of
+   R38.6.4f item 2 the budget is computed before each attempt starts, not
+   before each round: it is the smaller of (a) and (b) above, where the retry
+   rounds in *N* are counted as the retry's servers not yet started, this one
+   included, divided by `max_connected` and rounded up. It is never below 5 s
+   and bounds everything the attempt does, connecting included.
 3. When *B* is exhausted the call ends with the failure of R38.6.4i even if
    servers remain untried.
-4. Before the retry has started, item 2 counts its rounds as the number of
-   servers in the pool divided by `max_connected`, rounded up; during the
-   retry, as item 2 states. It always takes the call's *remaining* budget as
-   *B*. The 5 s reserve is not spent, so a call whose servers all
+4. Item 2 counts the retry rounds as the number of servers in the pool
+   divided by `max_connected`, rounded up, and takes the call's *remaining*
+   budget as *B*. The 5 s reserve is not spent, so a call whose servers all
    fail ends no later than *B*.
+
+   *Amended 2026-11-09 (clean side; D38.6.4j.1):* the count above holds before
+   the retry has started; during the retry, the count of the amendment to
+   item 2 applies. The call's *remaining* budget is still taken as *B*.
 
 *Rationale.* Under R38.6.4e as the reference applies it, every attempt gets the
 same 20 s regardless of how many servers remain, so a call made while several
