@@ -2397,6 +2397,22 @@ from turning every node into a periodic prober of the public servers.
 > `set_header_hex` for the header bytes of each tip. The tests of R38.6.4a and
 > R38.6.4l that are not about R38.6.4o build their pool with the tip checks off,
 > so that they stay about those rules.
+>
+> *Known limitations (code read of 2026-11-09).*
+> - The confirmation wait of item 6 chooses again only when a request to its
+>   server fails. When the chosen server turns out of date during the wait, the
+>   wait keeps polling it until its deadline. A behind or stuck server reports
+>   too few confirmations, never too many, so the cost is a longer wait or a
+>   timed-out swap step, not a false confirmation. Choosing again when the
+>   chosen server turns out of date is a candidate for a later change.
+> - The per-round WARN of item 9 (a measured server behind or ahead) is logged
+>   in every re-measure round, without the once-per-change state of the WARNs
+>   for maintained connections, and can repeat the text of such a WARN for the
+>   same server. Rounds are 5 to 60 minutes apart (item 8).
+> - With exactly two servers the agreed tip is the higher one (D38.6.4o.2): a
+>   single server that claims a height that does not exist makes the honest
+>   one look behind, and reads then prefer it. With three or more servers the
+>   bound above the agreed tip (D38.6.4o.9) covers that case.
 
 T38.6.4.1 *Bounds and validation.* A test shall activate against an in-process
 Electrum test server set with `min_connected` 0, with `min_connected` above
