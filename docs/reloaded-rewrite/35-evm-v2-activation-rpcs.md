@@ -2798,3 +2798,9 @@ is decided together with this item.
   any private identifier, body or control-flow transcription, error/log
   wording, internal module tree or internal test name) — below threshold,
   PASS.
+- *Clean-context addition (2026-11-09, forbidden corpus not consulted):* the
+  recorded resolution of D35.12, the final wording of R35.6.9 item 2 and
+  T35.38 (the decided behavior that replaces the interim rule named in the
+  item above), and the as-built note under §35.6.1 describe the maintainer's
+  decision of 2026-11-09 and this repository's code. They take no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is required.

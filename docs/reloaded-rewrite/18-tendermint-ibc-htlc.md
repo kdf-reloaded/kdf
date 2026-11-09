@@ -587,7 +587,10 @@ with 150,000.
 > staking requests pass. **IBC transfer:** the transfer message exists but no request or withdraw route sends
 > it yet (§18.7.2), so nothing is wired; the 150,000 default constant is the value the caller that will be
 > added passes. **Open:** an explicit `CosmosGas` price of zero or less is not refused (the rules name no
-> check); the amount would be zero, which the chain rejects at broadcast.
+> check); the amount would be zero, which the chain rejects at broadcast. An explicit `gas_limit` of 0 is not
+> refused either.
+> Test coverage: the staking requests, the task route and the swap sends are covered through the fee computation
+> they share, not end to end (`docs/UNIT_TESTS.md`).
 
 ---
 
@@ -833,6 +836,11 @@ The chapter relies on one baseline-state claim:
   tokens excluded; FAIL on any private identifier, body or control-flow
   transcription, error/log wording, internal module tree or internal test
   name) — below threshold, PASS.
+- *Clean-context addition (2026-11-09, forbidden corpus not consulted):* the
+  recorded resolution of D18.6B.1, the as-built note under §18.6B and its
+  test-coverage sentence describe the maintainer's decision of 2026-11-09 and
+  this repository's code. They take no forbidden-class input, so chapter 01
+  R38 is not engaged and no gate pass is required.
 
 ---
 

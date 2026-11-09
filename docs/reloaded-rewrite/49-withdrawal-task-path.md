@@ -51,6 +51,8 @@ shape.
 > priority one of an unmerged reference draft -- are bound in §49.2A (gated
 > text; passed the KDF Dirty Gate on 2026-11-08), with their arithmetic in
 > [Chapter 18](18-tendermint-ibc-htlc.md) §18.6B.
+>
+> *As built 2026-11-09 (clean-side note): implemented; see the As-built note of §49.2A.*
 
 R49.2. When `from` is present, it shall be an HD-address selector in exactly one
 of these public JSON wire forms:
@@ -368,6 +370,9 @@ with. T18.6B.1 of chapter 18 asserts the amount through this member.
 > helpers records the missing form). Adding both forms, the refusal of
 > R49.30 and the level selection of chapter 18 §18.6B closes the gap. The
 > `fee_details` shape of R49.31 already matches.
+>
+> *As built 2026-11-09 (clean-side note): implemented; R49.30 states the decided behavior (ignore, D49.1
+> option (b)); see the As-built note of §49.2A.*
 
 **D49.1 (maintainer decision; resolved).** *Resolved: the maintainer's decision of 2026-11-09, option (b), ignore for parity (R49.30); to be reassessed after field use.* *Foreign fee form on a Cosmos
 request.* R49.30 binds a refusal where every reference state silently
@@ -414,9 +419,11 @@ descriptor; the same with a `UtxoFixed` descriptor; `add_delegation` with an
 > Tendermint request is ignored without error (R49.30, D49.1 option (b)). The UTXO, SLP, EVM, QRC20 and Siacoin
 > withdraw paths refuse both forms through their existing wrong-fee-type arm (`InvalidFeePolicy`; the NFT
 > withdraw's `InvalidRequest`); the shielded coin refuses any `fee` as before. **Not changed:** the TRON
-> withdraw never inspects `fee`. **Note:** `EthGasEip1559`, named in R49.30, is not a variant of this
+> and Solana (SOL, SPL) withdraws never inspect `fee`. **Note:** `EthGasEip1559`, named in R49.30, is not a variant of this
 > repository's descriptor, so such a request fails parsing before it reaches any coin. `gas_price` is read as a
 > JSON number (`f64`), so a numeric string fails parsing.
+> Test coverage: the staking requests, the task route and the swap sends are covered through the fee computation
+> they share, not end to end (`docs/UNIT_TESTS.md`).
 
 ## 49.3 Status request and retention
 
@@ -945,3 +952,11 @@ addresses.
   and contract-constant tokens excluded; FAIL on any private identifier, body
   or control-flow transcription, error/log wording, internal module tree or
   internal test name) — below threshold, PASS.
+- *Clean-context addition (2026-11-09, forbidden corpus not consulted):* the
+  recorded resolution of D49.1, the final wording of R49.30 and T49.30 (the
+  decided behavior that replaces the refusal the gated text proposed), the as-
+  built note of §49.2A with its test-coverage sentence, and the two clean-side
+  notes after the cross-reference under R49.1 and the Reloaded status note
+  describe the maintainer's decision of 2026-11-09 and this repository's code.
+  They take no forbidden-class input, so chapter 01 R38 is not engaged and no
+  gate pass is required.

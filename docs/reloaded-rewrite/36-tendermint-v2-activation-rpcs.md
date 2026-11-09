@@ -530,6 +530,8 @@ from anywhere other than its own `protocol_data`.
 > `protocol_data` keys so surplus config does not fail activation. The
 > `priority_gas_prices` member of §36.3.1A (gated text) is not yet parsed
 > and is dropped the same way.
+>
+> *As built 2026-11-09 (clean-side note): implemented; see the As-built note of §36.3.1A.*
 
 > **Reloaded status (informative).** Reloaded enforces the `decimals <= 18`
 > bound while *parsing* the coin protocol, so a value above 18 currently fails
@@ -1070,3 +1072,8 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   FAIL on any private identifier, body or control-flow transcription,
   error/log wording, internal module tree or internal test name) — below
   threshold, PASS.
+- *Clean-context addition (2026-11-09, forbidden corpus not consulted):* the
+  recorded resolution of D36.4, the as-built note under §36.3.1A and the
+  clean-side note closing the §36.3.3 status note describe the maintainer's
+  decision of 2026-11-09 and this repository's code. They take no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is required.

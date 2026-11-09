@@ -93,7 +93,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   unit (the chain registry publishes them). A withdraw, a delegation, an undelegation or a reward claim
   that names `Low`, `Average` or `High` is priced with the matching figure; `Default`, and any name on a
   coin without the array, keep the coin's usual `gas_price`. The array is optional, the figures may be in
-  any order, and a token is priced with its platform coin's array. A coin without the member behaves
+  any order, and a token is priced with its platform coin's array. A coin without the member is priced
   exactly as before. Detail: PR #323; CRD ch.36 R36.3.5, ch.18 R18.6B.1.
 - **A Tendermint request can set the gas limit and the gas price, or the price level.** The `fee`
   member of `withdraw`, `task::withdraw::init` and the staking requests now takes two more forms for a
@@ -101,14 +101,14 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   `{"type": "CosmosGasPriority", "gas_limit": 125000, "gas_price_option": "High"}` (`Low`, `Average`,
   `High` or `Default`, spelled exactly so). The gas limit is the one the transaction is signed with. The
   fee amount is still derived from the node's gas simulation, `ceil(gas used x 1.5 x price)`, not from
-  the limit times the price. Every other coin family refuses the two forms with `InvalidFeePolicy`,
-  and a Tendermint request that carries a form of another family ignores it and uses the default price
+  the limit times the price. UTXO, EVM, QRC20 and Siacoin coins refuse the two forms with
+  `InvalidFeePolicy` (a shielded coin refuses any `fee`, as before), and a Tendermint request that carries a form of another family ignores it and uses the default price
   and gas limit. Detail: PR #323; CRD ch.49 R49.28 to R49.30, ch.18 R18.6B.2.
 - **`get_swap_gas_fee_policy` and `set_swap_gas_fee_policy` now accept a Tendermint platform
   coin.** The policy (`Legacy`, `Low`, `Medium`, `High`, starting at `Legacy`) selects the gas price of
   the coin's swap transactions and of its trade-fee estimates: `Low`, `Medium` and `High` pick the low,
   average and high figure of `priority_gas_prices`, `Legacy` the default price. It never changes a
-  withdraw, a delegation or a transfer between chains. A Tendermint token has no policy of its own and
+  withdraw or a staking transaction. A Tendermint token has no policy of its own and
   the two methods answer `NotSupported` for its ticker. On a coin without `priority_gas_prices` the
   methods still accept and store any value, with one warning in the log that the coin cannot honor the
   level, and prices stay at the default. Detail: PR #323; CRD ch.35 R35.6.8, R35.6.9.

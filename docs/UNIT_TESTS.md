@@ -631,7 +631,7 @@ wallet-only tests evaluate the coin and the token with the switch on through `wa
 One existing test changed: `tm_flow_a_chain_without_an_htlc_module_is_wallet_only` passes the two new arguments of the
 predicate. The token helpers of the wire tests (`token_failure`) now call `enable_tendermint_token`.
 
-## Tendermint priority gas prices (23 tests, plus one case in an existing test)
+## Tendermint priority gas prices (23 tests, plus two cases in an existing test)
 
 Locations: the module `priority_fee_tests` of `mm2src/coins/tendermint/tendermint_swap_flow_tests/priority_fee_tests.rs`
 (native builds only, a child of the swap-flow module above; 13 tests), `coins/lp_coins_context.rs` (5 tests of the
@@ -640,7 +640,9 @@ cross-family test each in `coins/eth/eth_tests.rs` and `coins/utxo/slp.rs`; the 
 `other_fee_variants_are_rejected_naming_the_accepted_type` gained two cases. CRD: chapter 36 §36.3.1A, chapter 18
 §18.6B, chapter 49 §49.2A and chapter 35 §35.6.1. Run with
 `cargo test -p coins --lib tendermint::tendermint_swap_flow_tests::priority_fee_tests`,
-`cargo test -p coins --lib tendermint_priority_gas_prices`,
+`cargo test -p coins --lib tendermint_priority_gas_prices` (four of the five descriptor tests),
+`cargo test -p coins --lib tendermint_token_protocol_ignores_a_priority_gas_prices_member`,
+`cargo test -p coins --lib other_fee_variants_are_rejected_naming_the_accepted_type` (Siacoin),
 `cargo test -p coins_activation --lib priority_gas_price` and
 `cargo test -p coins --lib -- cosmos_fee`.
 
@@ -678,10 +680,12 @@ units: 3,675 at the high price, 2,297 at the average, 1,378 at the low and 2,756
 | `a_foreign_fee_form_is_ignored_on_every_cosmos_request` | T49.30 | `EthGas`, `UtxoFixed`, `UtxoPerKbyte` and `Qrc20Gas` on a withdraw, a token withdraw and a staking fee computation give the default price and limit, no error |
 | `the_tendermint_swap_fee_policy_round_trip` | T35.38 | Starts at `Legacy`, `set` echoes, `get` returns; a token ticker is `NotSupported`, an unknown coin `NoSuchCoin`, an outside value fails parsing |
 | `a_policy_without_the_array_is_stored_with_one_warning_and_priced_at_the_default` | T35.38, R35.6.9 | `Medium` without the array: stored, returned, one warning, default price; `Legacy` logs its own warning too |
-| `test_withdraw_impl_refuses_the_cosmos_fee_forms` (EVM), `test_slp_withdraw_cosmos_fee_descriptors_are_invalid_fee_policy` (UTXO) | R49.28, R49.29 | The two forms are `InvalidFeePolicy` for another family |
+| `test_withdraw_impl_refuses_the_cosmos_fee_forms` (EVM), `test_slp_withdraw_cosmos_fee_descriptors_are_invalid_fee_policy` (SLP) | R49.28, R49.29 | The two forms are `InvalidFeePolicy` for another family |
 
 Not covered: the staking requests themselves (the delegation, undelegation and reward-claim flows need a node that
 also answers the broadcast), so their default gas limits are tested at the fee computation they call; the
 task-route withdraw (it calls the same `withdraw`); an IBC transfer (the request is not implemented yet, so only
-its default limit is tested); and the fixed 50,000 gas units of a coin with no local key (the activated coin
-always has one).
+its default limit is tested); the swap sends themselves (create-HTLC, claim, DEX-fee send) under a policy other
+than `Legacy`, and the receiver trade-fee estimate: covered through the fee computation they share; and the fixed
+50,000 gas units of a coin with no local key (the activated coin always has one). The warning-count assertions run
+only when the test owns the process logger.
