@@ -114,7 +114,8 @@ ignore = [
     # outside its model. Fixed only in libsqlite3-sys >= 0.39.0, i.e. rusqlite
     # 0.41. That bump is blocked upstream: the shielded-coin wallet store
     # (vendored zcash_client_sqlite, latest release 0.23.0) and schemerz-rusqlite
-    # pin rusqlite ^0.37. Decision: post-beta, after the shielded-coin wallet
+    # pin rusqlite ^0.37, and db_common carries its own exact `=0.37.0` pin that
+    # must move with them. Decision: post-beta, after the shielded-coin wallet
     # library upgrades to the new rusqlite (no local patch of the vendored
     # crate). See the CHANGELOG entry of the accepting PR. Accepted 2026-11-10;
     # remove this entry when rusqlite leaves the lockfile at 0.37.x.
