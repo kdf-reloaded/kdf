@@ -574,14 +574,16 @@ own exact-value check of item 3 against the reference's arithmetic.
 >
 > *Later the same day:* the discounted rate was proven on netid 8762
 > instead, with KMD on the other side of the pair (the maintainer's
-> decision of 2026-11-10): a maker of the netid-8762 reference lineage
-> (the GLEEC development build the lab names K), behind the same kind of
-> pool-reply proxy, recorded `TakerFeeValidated` on a fee of exactly
-> 9/7770 of a 1 SC taker volume in hastings and the swap completed on both
-> sides; two attempts without the proxy failed at the pool reply before
-> the amount was checked (R-N4 class). Both rate cases of item 1 are
-> therefore lab-proven; the exact-value check of item 3 was reached and
-> passed on both netids.
+> decision of 2026-11-10): a GLEEC KDF development build of the netid-8762
+> lineage as the maker, behind the same kind of pool-reply proxy, recorded
+> `TakerFeeValidated` on a fee of exactly 9/7770 of a 1 SC taker volume in
+> hastings and the swap completed on both sides; two attempts without the
+> proxy failed at the pool reply before the amount was checked (R-N4
+> class). One case of each rate is therefore lab-proven, the base rate on
+> netid 6133 and the discounted rate on netid 8762; the netid-6133
+> discounted case (GLEEC in the pair) and the netid-8762 base case did not
+> run. The exact-value check of item 3 was reached and passed on both
+> netids.
 
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method
