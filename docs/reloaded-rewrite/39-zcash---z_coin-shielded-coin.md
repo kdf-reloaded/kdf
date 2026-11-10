@@ -6275,6 +6275,22 @@ endpoints (R39.11.4), and it does not suspend the endpoint (R39.11.31(h)). The
 endpoint's name is part of the human-readable message only; it changes no
 `error_type`, `error_data` shape or HTTP status.
 
+> **Status note (2026-11-10, Reloaded-original).** Before a light-mode
+> broadcast the coin checks its wallet database for the transaction id of the
+> bytes it was given. A transaction the database already holds -- recorded by
+> this wallet as broadcast and not yet mined, or already scanned in a block,
+> with its height -- is refused with a typed error that names the transaction
+> id (display order) and that state ("waiting to be mined" or "mined in block
+> N"), and the bytes are not handed to any endpoint; one `info` line carries the
+> same text. Bytes that do not parse, and transactions without a Sapling spend,
+> are not checked and go out as before. A failure of the lookup does not block
+> the broadcast (it is logged at `debug` level). The rejection of R39.11.30
+> therefore no longer shows a duplicate-nullifier answer for a transaction this
+> wallet itself sent. Tests: `a_rebroadcast_is_refused_by_state_and_the_text_names_the_transaction`
+> and `the_rebroadcast_guard_ignores_unreadable_bytes`
+> (`z_coin_wallet_db.rs`). A withdrawal build also logs one `info` line with its
+> duration, its number of Sapling spends and whether it has an Ironwood output.
+
 R39.11.31 **A failing endpoint is suspended with a doubling backoff (Reloaded;
 clean-room original; maintainer decision 2026-10-28; no switch).**
 

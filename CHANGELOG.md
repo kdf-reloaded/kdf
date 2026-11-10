@@ -779,6 +779,16 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 #### ARRR and other shielded coins
 
+- **The node no longer sends a shielded transaction again that it already broadcast.** Before a
+  light-mode broadcast it looks the transaction id up in the wallet database. A transaction it
+  already recorded as sent answers with its state, "waiting to be mined" or "mined in block N",
+  and nothing is handed to a server. Until now a second send of the same bytes after the
+  transaction was mined reached the node, which answered with a duplicate-nullifier error that read
+  like a note-reuse defect. Bytes that are no transaction and transactions without a Sapling spend
+  go out as before, and a failed lookup does not block the broadcast. A withdrawal build now also
+  logs one line with its duration and its number of Sapling spends. Detail: CRD ch.39, status note
+  of 2026-11-10.
+
 - **An incoming ARRR payment now shows as pending before it is mined.** In light mode the node
   checks the mempool for payments to the wallet and counts them in the non-spendable part of the
   balance. It ran that check only after it had scanned a new block. A payment mined in the next

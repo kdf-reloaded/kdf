@@ -1413,6 +1413,72 @@ mod in_flight_tests {
     }
 }
 
+/// Why a shielded transaction is not broadcast again: the wallet database already holds it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RebroadcastRefusal {
+    /// The block scan has seen the transaction, at `height`.
+    Mined { coin: String, txid: H256Json, height: u32 },
+    /// This wallet recorded the broadcast and no scanned block holds the transaction yet.
+    Pending { coin: String, txid: H256Json },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Display for RebroadcastRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RebroadcastRefusal::Mined { coin, txid, height } => write!(
+                f,
+                "{coin}: transaction {txid:?} was already broadcast by this wallet and is mined in block {height}; \
+                 it is not sent again"
+            ),
+            RebroadcastRefusal::Pending { coin, txid } => write!(
+                f,
+                "{coin}: transaction {txid:?} was already broadcast by this wallet and is waiting to be mined; \
+                 it is not sent again"
+            ),
+        }
+    }
+}
+
+/// Decides whether `tx_bytes` must not be broadcast because the wallet database already holds the
+/// transaction. `None` (broadcast as usual) for bytes that do not parse, for a transaction with no
+/// Sapling spend, for a transaction the database does not know, and when the lookup fails: a database
+/// problem never blocks a broadcast.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn rebroadcast_refusal(
+    ticker: &str,
+    history: &ZCoinShieldedHistory,
+    tx_bytes: &[u8],
+) -> Option<RebroadcastRefusal> {
+    let tx = z_tx_read::read_tx(tx_bytes).ok()?;
+    if !tx
+        .sapling_bundle()
+        .is_some_and(|bundle| !bundle.shielded_spends().is_empty())
+    {
+        return None;
+    }
+    let txid = z_tx_read::txid_display(&tx);
+    match history.known_transaction(tx.txid().as_ref()) {
+        Ok(None) => None,
+        Ok(Some(known)) => Some(match known.mined_height {
+            Some(height) => RebroadcastRefusal::Mined {
+                coin: ticker.to_owned(),
+                txid,
+                height,
+            },
+            None => RebroadcastRefusal::Pending {
+                coin: ticker.to_owned(),
+                txid,
+            },
+        }),
+        Err(e) => {
+            log::debug!("ZCoin {ticker}: could not look up transaction {txid:?} before broadcasting it: {e}");
+            None
+        },
+    }
+}
+
 /// Records raw transaction bytes the backend has accepted, deriving everything from the bytes.
 ///
 /// `Ok(None)` when the bytes are not a transaction that spends Sapling notes (nothing to record).
