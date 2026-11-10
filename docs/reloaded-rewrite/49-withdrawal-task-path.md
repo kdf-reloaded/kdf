@@ -445,6 +445,9 @@ that decision.
 > Test coverage: the staking requests, the task route and the swap sends are covered through the fee computation
 > they share, not end to end (`docs/UNIT_TESTS.md`).
 
+*2026-11-10 (clean-side note): a TRON withdraw now refuses any `fee` descriptor with `InvalidFeePolicy`
+(ch.21 R-WP6); Solana still does not read it.*
+
 ## 49.3 Status request and retention
 
 R49.11. `task::withdraw::status` shall accept:

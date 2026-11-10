@@ -1168,9 +1168,9 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   CRD PR #267; CRD ch.05 R35a–R35c, ch.09 R24, ch.21 §21.4, ch.28 RQ1b, ch.32 R-Q6b, ch.38
   R38.6.4m, ch.39 R39.5A.3, ch.49 R49.27b.
 
-- **The CRD records how the reference handles TRON swaps.** It covers the public TRON swap contract,
-  its deployments and the state a TRON swap reads, as the basis for the TRON swap work. The node
-  itself is unchanged. Detail: PR #333; CRD ch.21 §21.11B.
+- **The design notes record that no released GLEEC KDF build has TRON swaps**, and describe the
+  public TRON swap contract, its testnet deployment and the state a TRON swap reads, as the basis for
+  the TRON swap work. The node itself is unchanged. Detail: PR #333; CRD ch.21 §21.11B.
 
 ### Plans touched
 

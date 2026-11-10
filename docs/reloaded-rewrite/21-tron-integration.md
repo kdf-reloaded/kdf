@@ -52,7 +52,7 @@ coin activates with no swap-contract binding, and every
 swap/NFT-adjacent call site refuses Tron coins behind a typed
 deferral, kept unreachable in production by the activation gate.
 
-*Amended 2026-11-09 (clean-side status note):* the sentence above
+*Amended 2026-11-10 (clean-side status note):* the sentence above
 that calls the withdraw pipeline functional overstated the code
 until this date. Withdraw itself built, signed and broadcast Tron
 transfers, but the coin's generic wallet surface did not: the
@@ -494,8 +494,8 @@ an error, never zero.
 and a 2xx answer whose JSON object has a top-level `Error` key,
 is a node failure. The request moves to the next configured node.
 When the last node fails with the `Error` form, the caller gets
-that node's error, typed, with the node named host-only and no
-credential part (R-N1).
+that node's own error text, typed, with no node URL or credential
+part (R-N1).
 
 **R-WP3 (TRC20 balance).** The TRC20 balance is `balanceOf(owner)`
 through the constant-contract endpoint (§21.9). The result MUST be
@@ -1114,7 +1114,8 @@ V3. The address encoding, protobuf transaction/contract formats,
   set.
 - *Clean-context addition (2026-11-10, forbidden corpus not consulted):*
   §21.10A (R-WP1–R-WP6, T-WP) and the dated status notes in §21.0 and
-  after R-W3 are Reloaded-original. They rest on this repository's code,
+  after R-W3 are Reloaded-original, as is the dated note in chapter 49
+  §49.2A that points to R-WP6. They rest on this repository's code,
   chapter 49's fee-descriptor rule, the public Tron node HTTP API, and a
   public-network observation of the Nile testnet node on 2026-11-10
   (chapter 01 R6) for the node's empty-account and `Error` answer forms.
