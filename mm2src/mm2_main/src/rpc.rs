@@ -1127,6 +1127,38 @@ mod server_tests {
         }
     }
 
+    /// CRD ch.43 (the endpoint never panics the daemon in response to a request), decision HB: without the
+    /// `sim-panic-rpc` feature (every build that ships) the legacy `sim_panic` method does not exist. An
+    /// authenticated legacy request for it is answered like any unknown name: `NoSuchMethod` in the mmrpc 2.0
+    /// envelope (no `error_data`), HTTP 400. A versioned request for it answers the same.
+    #[cfg(not(feature = "sim-panic-rpc"))]
+    #[test]
+    fn sim_panic_is_not_routed_without_the_sim_panic_rpc_feature() {
+        let (_ctx, addr) = start_server();
+        let legacy = post_legacy(addr, "sim_panic", json!({}));
+        assert_mmrpc_error(&legacy, 400, "NoSuchMethod", Json::Null);
+        assert!(legacy.1.get("error_data").is_none(), "{}", legacy.1);
+
+        let versioned = post(
+            addr,
+            &json!({ "mmrpc": "2.0", "userpass": "pw", "method": "sim_panic", "params": {}, "id": 2 }),
+        );
+        assert_mmrpc_error(&versioned, 400, "NoSuchMethod", json!(2));
+        assert!(versioned.1.get("error_data").is_none(), "{}", versioned.1);
+    }
+
+    /// CRD ch.43, decision HB: with the test-only `sim-panic-rpc` feature the legacy `sim_panic` method is routed.
+    /// A request without `mode` lists the supported modes. Never send `"mode": "simple"` here: it panics the
+    /// process.
+    #[cfg(feature = "sim-panic-rpc")]
+    #[test]
+    fn sim_panic_without_a_mode_lists_the_modes_with_the_sim_panic_rpc_feature() {
+        let (_ctx, addr) = start_server();
+        let (status, body) = post_legacy(addr, "sim_panic", json!({}));
+        assert_http_status(&status, 200);
+        assert_eq!(body, json!({ "modes": ["simple"] }));
+    }
+
     /// CRD ch.43 R43.1A.1d: an unknown name is protected at the legacy layer, so without or with a wrong `userpass`
     /// it is refused with the legacy error body (HTTP 500) before the fallback.
     #[test]

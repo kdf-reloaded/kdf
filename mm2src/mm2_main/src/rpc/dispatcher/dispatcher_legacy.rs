@@ -109,6 +109,7 @@ pub fn dispatcher(req: Json, ctx: MmArc) -> DispatcherRes {
         "orderbook" => hyres(orderbook_rpc(ctx, req)),
         "orderbook_depth" => hyres(orderbook_depth_rpc(ctx, req)),
         "peer_connection_healthcheck" => hyres(peer_connection_healthcheck(ctx, req)),
+        #[cfg(feature = "sim-panic-rpc")]
         "sim_panic" => hyres(sim_panic(req)),
         "recover_funds_of_swap" => spawn_highload_future(move || hyres(recover_funds_of_swap(ctx, req))),
         "sell" => hyres(sell(ctx, req)),
