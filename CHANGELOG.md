@@ -1451,7 +1451,7 @@ lives.
   Siacoin payment has unit tests only. Siacoin in a browser (WASM) build is untested. A swap in
   which a GLEEC KDF maker on netid 6133 validates a Siacoin taker fee from a KDF Reloaded taker did
   not complete in the lab on November 6, 2026 (recorded only); the row that checks it again is
-  pending. The fee rule and the fee address are the same on both nodes (CRD ch.20 R-S12). Detail:
+  pending. The fee rule and the fee address are the same on both nodes. Detail:
   PRs #239, #278, #290, #291; CRD ch.20 D5, D7, R-S8, R-S11, R-S12, T-S1.
 - **Lightning cannot place orders or swap.** Orders and trade previews involving a Lightning coin
   are refused with an error naming the coin; `trade_preimage` answers `TradingNotSupported`. More in
