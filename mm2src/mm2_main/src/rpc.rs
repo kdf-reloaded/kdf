@@ -274,8 +274,14 @@ async fn process_json_request(ctx: MmArc, req_json: Json, client: SocketAddr) ->
 /// warning, anything else is an error. The log text and the answer are not affected.
 pub(crate) fn rpc_error_log_level(status: StatusCode) -> Level {
     // 401 and 403 stay errors: a wrong password, a ban or a non-local client is reported like a failure, not like a
-    // mistyped request.
-    if status.is_client_error() && status != StatusCode::UNAUTHORIZED && status != StatusCode::FORBIDDEN {
+    // mistyped request. So does 408: in this tree it is the status of timeouts, which are not the request's fault.
+    // The status is taken as the handler declares it: a few handler errors map a node-side failure to 400 (for
+    // example `EnableLightningError::RpcError`, `WalletConnectRpcError::InitializationError`) and therefore warn.
+    if status.is_client_error()
+        && status != StatusCode::UNAUTHORIZED
+        && status != StatusCode::FORBIDDEN
+        && status != StatusCode::REQUEST_TIMEOUT
+    {
         Level::Warn
     } else {
         Level::Error
@@ -1429,8 +1435,8 @@ mod server_tests {
             let status = StatusCode::from_u16(code).unwrap();
             assert_eq!(rpc_error_log_level(status), Level::Warn, "{code}");
         }
-        // Authentication and access refusals are reported like failures.
-        for code in [401, 403, 500, 501, 502, 503, 504] {
+        // Authentication, access and timeout refusals are reported like failures.
+        for code in [401, 403, 408, 500, 501, 502, 503, 504] {
             let status = StatusCode::from_u16(code).unwrap();
             assert_eq!(rpc_error_log_level(status), Level::Error, "{code}");
         }
@@ -1540,6 +1546,7 @@ mod server_tests {
         );
 
         if !capturing {
+            eprintln!("legacy_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged: another logger owns the process, line assertions skipped");
             return;
         }
         let lines = capture::lines_with("No such coin: NO_SUCH_COIN_LOG_LEVEL_A");
@@ -1570,6 +1577,7 @@ mod server_tests {
         );
 
         if !capturing {
+            eprintln!("versioned_handler_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged: another logger owns the process, line assertions skipped");
             return;
         }
         let lines = capture::lines_with("No such coin: NO_SUCH_COIN_LOG_LEVEL_B");
@@ -1593,6 +1601,7 @@ mod server_tests {
         assert!(answer.1.get("error_data").is_none(), "{}", answer.1);
 
         if !capturing {
+            eprintln!("dispatcher_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged: another logger owns the process, line assertions skipped");
             return;
         }
         let lines = capture::lines_with("No such method");
@@ -1602,8 +1611,9 @@ mod server_tests {
         }
     }
 
-    /// A refusal that is not the request's fault stays an error: a GET request is answered by the legacy error body
-    /// (HTTP 500) and the line is logged at ERROR. (No cheaper genuine 5xx path exists on the stub server.)
+    /// A legacy refusal whose text is not listed stays an error: a GET request is answered by the legacy error body
+    /// (HTTP 500) and the line is logged at ERROR, because its text is not in the table. (No cheaper genuine 5xx path
+    /// exists on the stub server.)
     #[test]
     fn legacy_failure_that_is_not_client_caused_is_logged_at_error_and_answered_unchanged() {
         let capturing = capture::installed();
@@ -1614,6 +1624,7 @@ mod server_tests {
         assert!(error.contains("Only POST requests are supported!"), "{}", failure.1);
 
         if !capturing {
+            eprintln!("legacy_failure_that_is_not_client_caused_is_logged_at_error_and_answered_unchanged: another logger owns the process, line assertions skipped");
             return;
         }
         let lines = capture::lines_with("Only POST requests are supported!");
