@@ -105,6 +105,22 @@ ignore = [
     # entry when crypto-bigint leaves the lockfile at 0.5.x.
     "RUSTSEC-2026-0387", # crypto-bigint 0.5.5 (elliptic-curve 0.13 / k256 / ecdsa 0.16)
 
+    # --- Bundled SQLite (libsqlite3-sys 0.35.0 via rusqlite 0.37.0, db_common) ---
+    # RUSTSEC-2026-0459 / CVE-2026-119375: SQLite before 3.54.0 can return
+    # uninitialized page-cache memory when a process opens a database file
+    # together with a -wal file that a less trusted party could have written. The
+    # node opens only database files it creates itself under its own data
+    # directory, and nothing else writes their -wal files, so the condition is
+    # outside its model. Fixed only in libsqlite3-sys >= 0.39.0, i.e. rusqlite
+    # 0.41. That bump is blocked upstream: the shielded-coin wallet store
+    # (vendored zcash_client_sqlite, latest release 0.23.0) and schemerz-rusqlite
+    # pin rusqlite ^0.37, and db_common carries its own exact `=0.37.0` pin that
+    # must move with them. Decision: post-beta, after the shielded-coin wallet
+    # library upgrades to the new rusqlite (no local patch of the vendored
+    # crate). See the CHANGELOG entry of the accepting PR. Accepted 2026-11-10;
+    # remove this entry when rusqlite leaves the lockfile at 0.37.x.
+    "RUSTSEC-2026-0459", # libsqlite3-sys 0.35.0 (bundled SQLite < 3.54.0)
+
     # --- Unsound advisories (transitive) ---
     # Listed as accepted risk. (These were added believing schema v2 made
     # `unsound` a hard error; it does not -- see the CORRECTION at the top of this
