@@ -709,6 +709,10 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   legacy error body before any retry. `setprice`, `buy`, `sell`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
   `my_orders`, `order_status` and `orderbook_depth` stay legacy-only, as on GLEEC KDF: called with
   `mmrpc`, they answer `NoSuchMethod`. Detail: PR #312; CRD ch.43 §43.1A, R43.1A.1a–R43.1A.1e.
+- **RPC refusals that the request itself caused are logged at WARN instead of ERROR.** An unknown
+  or inactive coin, a volume or price below the minimum, not enough balance and an invalid request
+  no longer fill the log with errors. The log text, the response body and the HTTP status are
+  unchanged; genuine failures such as a node that does not answer stay at ERROR. (PR #TBD)
 
 #### Tendermint (Cosmos) coins
 

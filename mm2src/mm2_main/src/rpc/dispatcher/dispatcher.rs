@@ -65,7 +65,7 @@ use coins_activation::{cancel_init_platform_coin_with_tokens, cancel_init_token,
 use coins_activation::{cancel_init_standalone_coin, cancel_l2_activation, enable_l2, enable_platform_coin_with_tokens,
                        enable_tendermint_token, enable_token, init_l2, init_l2_status, init_l2_user_action,
                        init_standalone_coin, init_standalone_coin_status, init_standalone_coin_user_action};
-use common::log::{debug, error, warn};
+use common::log::{debug, warn};
 use common::HttpStatusCode;
 use futures::Future as Future03;
 use http::Response;
@@ -150,7 +150,11 @@ where
     let params = json::from_value(params_value)?;
     let result = handler(ctx, params).await;
     if let Err(ref e) = result {
-        error!("RPC error response: {}", e);
+        common::log::log_crate::log!(
+            crate::mm2::rpc::rpc_error_log_level(e.get_inner().status_code()),
+            "RPC error response: {}",
+            e
+        );
     }
 
     let response = MmRpcBuilder::from_result(result)
