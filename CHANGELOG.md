@@ -1257,14 +1257,14 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
-- [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md) — new, in progress: the Bitcoin II
+- [`bc2-replay-protection`](docs/plans/bc2-replay-protection.md) — new, parked: the Bitcoin II
   network has required an extra field in every signature digest since block 57,750, so
   transactions signed the ordinary way are rejected. The rule is written (CRD chapter 61, PR
   #261), and the signing change and the counterparty requirement are implemented (PR #264). On the
   live chain a withdrawal and a swap between two KDF Reloaded nodes passed, and the decline of a
   counterparty that does not sign with the suffix was checked (release tests, "BC2 confirmation" and
-  "BC2 swap check"). The coins-file entries and the P2PKH
-  live check are open.
+  "BC2 swap check"). The KDF Reloaded coins file carries the `BC2` and `BC2-segwit` entries since
+  2026-11-10; the shared coins list and the P2PKH live check are open.
 - [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md) — planning: its target now reads "after the 0.4.0 beta".
 - [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — in progress: the field tests of 2026-10-26 to
   2026-10-29 are recorded, and the two open items of the earlier deadline are closed as history; a
@@ -1318,7 +1318,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   check from field logs and the repeated-cancel refresh are open.
 - [`gossip-send-queue-bound`](docs/plans/gossip-send-queue-bound.md) — done: its follow-ups now name the PRs they shipped in
   (CRD PR #129; PRs #148, #159, #160, #166).
-- [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, in progress: under an HD login, one
+- [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, parked: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
   complete, which is now done (item H1: `swap_key_check`, PRs #231, #233), as is one swap key per
@@ -1342,7 +1342,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   was measured in two 6.5-hour runs and on start-up, activation, eight swaps and query latency; no cost
   was resolved and the default stays (PR #225); executor sizing and an allocator comparison wait for
   their triggers.
-- [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
+- [`order-posting-latency`](docs/plans/order-posting-latency.md) — parked: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
   with its two switches and their defaults (PR #201), and implemented (PR #215). The SwapLab timing
   rows ran on 2026-11-06: on RIN orders were posted in a quarter to a third of the time, and on DOGE
@@ -1350,8 +1350,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   0.3.0-beta.1, is written (PR #260) and implemented (PR #262), and the SwapLab run on it passed
   (release tests, rows 4–8). The opt-in `setprice_replace_after_checks`, which replaces the previous
   orders only after the new order passes its checks, is written (PR #265) and implemented (PR #286);
-  a lab row with a failing check passed on 2026-11-08, to be recorded on the release-tests page with
-  the third batch's close.
+  a lab row with a failing check passed on 2026-11-08 (release tests, "Setprice option"). Nothing
+  else is in flight; the tip check (work package 5) has not started.
 - [`orderbook-queue-and-history-caps`](docs/plans/orderbook-queue-and-history-caps.md) — parked: PRs #131, #134, #137 and #164
   are merged; the early-purge point waits for the maintainer.
 - [`orderbook-wipe-recovery`](docs/plans/orderbook-wipe-recovery.md) — parked: the CRD and both switches are merged (PRs #132,
@@ -1380,19 +1380,21 @@ file carries the detail. "New" means the plan was created in this cycle.
   started. Two of its features are implemented: custom tokens (wallet-only) and the HD
   `path_to_address` (PR #319). The trade-fee row owed by PR #323 passed on 2026-11-10 on a local
   chain.
-- [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
+- [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — done: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
   recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226). On an SLP
   token withdrawal they charge it in proportion too; that is now recorded (PR #232), and KDF
   Reloaded now charges it that way there as well (PR #234). The Sia floor was revised (PR #278), and
   the UTXO change-fee rounding found in the release tests was fixed (PR #247). The default-side arm 3 is chosen
   (2026-11-08): a raised advertised minimum, on by default, with a compatibility switch for the
-  reference value; its work is planned.
-- [`tron-gasfree`](docs/plans/tron-gasfree.md) — parked: TRON support was added to the 0.4.0 scope on 2026-11-08.
-- [`tron-support`](docs/plans/tron-support.md) — in progress: TRON support was added to the 0.4.0 scope on 2026-11-08; the
+  reference value; it is merged (PR #315), and the lab row L-MINVOL passed on 2026-11-09.
+- [`tron-gasfree`](docs/plans/tron-gasfree.md) — parked: TRON support was added to the 0.4.0 scope on 2026-11-08 and
+  stops at the wallet path (PR #333).
+- [`tron-support`](docs/plans/tron-support.md) — parked at the 0.4.0 freeze: TRON support was added to the 0.4.0 scope on 2026-11-08; the
   decisions a TRON swap needs were put to the maintainer that day. The activation route was decided
   on 2026-11-08 (work package 1), the wallet path's balance, address and broadcast are wired (work
-  package 4), and TRON stays switched off in this beta (decided 2026-11-10).
+  package 4), and TRON stays switched off in this beta (decided 2026-11-10). The work stops after PR
+  #333, the wallet path; swaps are not built.
 - [`tron-swap-support`](docs/plans/tron-swap-support.md) — parked: the chapter rewrite on its branch failed the KDF Dirty
   Gate on 2026-11-08 and is not reused; the reference's TRON swap state is recorded by a gated Spec
   Reader round that lands with the first TRON code PR.

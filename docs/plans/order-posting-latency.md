@@ -1,6 +1,6 @@
 # Plan: order-posting latency
 
-**Status:** in progress (all passes merged, Decision AM in PR #149; timing run done 2026-10-31; read spreading by round trip, Decision BI: rule and code written 2026-11-02, swaplab rows run 2026-11-06; floor of two near sessions, Decision CX: rule written 2026-11-06 (PR #260), code implemented 2026-11-06 (PR #262), DOGE timing row passed 2026-11-07; re-pricing can keep the previous orders when the new one fails its checks, opt-in, Decisions DB and DG: rule merged in PR #265, code merged in PR #286; tip check, work package 5, not started) — **Last reviewed:** 2026-11-08
+**Status:** parked (the setprice option row passed on 2026-11-08 (release tests 0.4.0-beta.1); the decision on the `mixed` default server order belongs to plan `electrum-measured-server-order`; all passes merged, Decision AM in PR #149; timing run done 2026-10-31; read spreading by round trip, Decision BI: rule and code written 2026-11-02, swaplab rows run 2026-11-06; floor of two near sessions, Decision CX: rule written 2026-11-06 (PR #260), code implemented 2026-11-06 (PR #262), DOGE timing row passed 2026-11-07; re-pricing can keep the previous orders when the new one fails its checks, opt-in, Decisions DB and DG: rule merged in PR #265, code merged in PR #286; tip check, work package 5, not started) — **Last reviewed:** 2026-11-10
 
 > **Context:** a market maker found order posting on Reloaded slower than on GLEEC KDF, about 20 % on
 > UTXO and EVM coins and about 100 % on DOGE. Orders carrying `timeout_in_minutes` expired in the
