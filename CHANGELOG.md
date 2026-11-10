@@ -799,7 +799,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   own close, so the address waits the full 5-minute redial guard. Earlier builds told that close apart
   only when it ended cleanly; one that ended with a transport error looked like a cut and could be
   dialed again within about 30 s. The gossip layer now marks the connections it closes as stuck, and
-  the redial guard reads the mark. Detail: PR #N; CRD ch.28 R27a item 1a.
+  the redial guard reads the mark. Detail: PR #328; CRD ch.28 R27a item 1a.
 - **The mmrpc 2.0 `orderbook` names its internal failure `Internal`, as on GLEEC KDF.** It answered
   `InternalError`; HTTP 500 and the message are unchanged. *Upgrade note:* a client that checks
   `error_type` for `InternalError` on `orderbook` must check `Internal` instead. Detail: PR #312; CRD
