@@ -470,7 +470,9 @@ a single flag.
 
 - **D1 -- V1 atomic swaps.** No HTLC contract is bound for Tron;
   the V1 swap-operations surface is not implemented and Tron
-  coins are refused by the swap pipeline.
+  coins are refused by the swap pipeline. What the reference itself
+  does on this point, and the decisions a Reloaded TRON swap needs,
+  are recorded in §21.11B (passed the KDF Dirty Gate on 2026-11-08).
 - **D2 -- V2 atomic swaps.** Likewise unbound; the V2
   maker/taker funding, validation, approval, and spend paths
   refuse Tron coins.
@@ -505,6 +507,380 @@ their minimum trading volume is the EVM rule of
 10^-2 for TRX; the chapter-57 change (PR #66) corrects TRON with the rest
 of the EVM family. No peer observes the value while D1–D2 keep Tron out
 of swaps ([Chapter 60](60-trading-floors-and-refusal-contract.md) row T1).
+
+## 21.11B Swap behavior of the reference (Spec Reader 2026-11-08)
+
+> **Status of this section.** Written by the dirty-side specification
+> author on 2026-11-08 for round 0.4.0-6 (topic: the reference TRON
+> swap); it **passed the KDF Dirty Gate on 2026-11-08**, measure 0.01
+> (clearance record in §21.13). It answers one question first -- *does any
+> released reference build carry a TRON atomic swap?* -- and then records
+> what the historical record and the public swap-contract repository do
+> carry, so that the maintainer decisions D21.B1-D21.B9 below can be taken
+> on facts rather than on the unreviewed branch rewrite of this chapter
+> that lives on `origin/feat/tron-swap-support` in this repository.
+
+### 21.11B.1 Finding: no released reference build carries a TRON swap
+
+**F21.B1 (the two designations).** Neither `v2.6.0-beta` nor
+`v3.0.0-beta` (chapter 02 §2.15A) carries a TRON atomic-swap
+implementation: there is no TRON contract call for a payment, a spend or
+a refund, no TRON swap-contract binding, no TRON payment validation, no
+TRON spend discovery, no TRON DEX-fee send or validation, and no TRON
+trade-fee estimator in either release. The release notes of both
+designations describe TRON as groundwork (`v2.6.0-beta`) and as
+*wallet-only* support (`v3.0.0-beta`). The `dev (as of 2026-03-27)` row
+is identical to `v3.0.0-beta` on this point.
+
+**F21.B2 (what `v2.6.0-beta` has).** The `TRX` protocol case, its network
+selector and the address encoding of §21.5 exist; the TRON module is a
+placeholder. There is no TRC20 protocol case, no TRON node client, no
+TRON transaction builder, no withdraw, and nothing swap-related.
+
+**F21.B3 (what `v3.0.0-beta` does when a TRON coin meets the swap
+pipeline).** The wallet-only integration of §21.2-§21.10 is what the
+release has. Where the swap pipeline touches a TRON coin, the observable
+behavior is:
+
+- *Order placement.* Deriving an orderbook address for a coin whose
+  protocol is `TRX` or `TRC20` is refused with a typed outcome that
+  reports the coin as unsupported, so an order for a TRON coin cannot be
+  created or matched at this release. (The *generic* public-key-to-address
+  helper of the coin layer, used by RPCs that render an address for a
+  given public key and coin config, does already produce the base58check
+  display form of §21.5 for `TRX` and `TRC20`; only the orderbook path
+  refuses.)
+- *Swap-contract fields at activation.* The one-shot and task-based
+  activation routes of §21.4 accept `swap_contract_address` and
+  `fallback_swap_contract` for a TRON platform exactly as for any EVM
+  platform: for a coin whose config says `"wallet_only": true` the values
+  are accepted and ignored; for a trading-capable coin (`wallet_only`
+  absent or `false`) a non-zero `swap_contract_address` is required and a
+  zero `fallback_swap_contract` is rejected. There is no TRON-specific
+  rule. The release's own TRON coin configurations (its test fixtures)
+  are `wallet_only: true`, declare `required_confirmations: 1`, and set
+  `avg_blocktime: 3`.
+- *Version-1 payment, spend, refund, taker fee.* The EVM family's V1
+  swap operations build an Ethereum-type transaction and decode
+  counterparty transactions as RLP; a TRON coin has no EVM chain
+  identifier and no EVM node transport, so a TRON payment or taker-fee
+  send fails at the signing step with an untyped error before anything
+  is broadcast, and validation, spend, refund and spend-search would fail on
+  the RLP decode or on the absent EVM transport. No TRON contract call
+  is ever built. None of this is reachable in practice because of the
+  orderbook refusal above.
+- *Secret-hash algorithm.* The V1 pair selection of the release lists the
+  Tendermint and Sia families as the ones forcing the 32-byte SHA-256
+  alternate; a TRON coin is not listed and would take the 20-byte default
+  ([Chapter 51](51-legacy-v1-swap-state-machine.md) R71/R72 describe the
+  same selection). The release's EVM V1 payment path additionally narrows
+  a 32-byte secret hash to 20 bytes by RIPEMD-160 before encoding it for
+  the EVM V1 contract (chapter 51 R72A).
+- *Version-2 swaps, watchers, NFT.* Unchanged from §21.11 D2, D4, D5.
+
+**F21.B4 (the reference branch row).** The row `feat/tron-swap-support
+(as of 2026-04-23)` of chapter 02 §2.15A -- the historical record's own
+branch of that name, not this repository's -- carries **no TRON swap
+code**. It is a single commit over its base `dev (as of 2026-03-09)`,
+and the files that commit adds are documents only -- no source file is
+added or changed. At that base the TRON module is an earlier state of
+the `v3.0.0-beta` module (the release's later withdraw and fee
+refinements are absent) and the activation surfaces are identical to the
+release (the §21.4 note). Nothing on this row is behavior at a state
+beyond what `dev (as of 2026-03-09)` already has; **no R-rule of this
+chapter derives from it**.
+
+**F21.B5 (the public swap-contract repository).** The project's V1 swap
+contract lives in a sibling public repository (chapter 01 R14
+citation in §21.11B.6). That repository's branch `feat/tron-v1-swap`,
+tabled as `etomic-swap feat/tron-v1-swap (as of 2026-09-01)` in chapter
+02 §2.15A, carries a Tron-VM build of the V1 HTLC contract under the MIT
+license, TronBox compile and deployment tooling for the Nile testnet and
+mainnet, a contract test suite, and a Nile proof script. It records a
+deployment on the **Nile testnet** at the address below; it records **no
+mainnet and no Shasta deployment**. The branch is a contract-side
+artifact only: no released reference client calls it, and the KDF-side
+code that would call it exists at no tabled state.
+
+| Network | Deployed TRON V1 swap contract | Verified |
+| --- | --- | --- |
+| Nile (testnet) | `TTTzsLDg81qoUkiEbeHsKbXZ4rWi1uFpo3` (hex wire form `41bfec12aa6f266fc0010df10b9e5a9d49149a5c4e`) | Public-network observation on 2026-11-08 (chapter 01 R6): the Nile full-node contract query returns a contract of that name whose ABI is the one of §21.11B.2 |
+| Mainnet | none recorded at any tabled state | -- |
+| Shasta (testnet) | none recorded at any tabled state | -- |
+
+**Answer to the decisive question.** A TRON swap *contract* exists on a
+branch of the public contract repository and on the Nile testnet; a
+TRON swap *client* exists in no released reference build and on no
+branch of the historical record. There is therefore **no reference
+counterparty** a Reloaded TRON swap could be tested against today, and
+no released behavior to be wire-compatible with. Whatever Reloaded binds
+for TRON swaps is a Reloaded extension (D21.B3).
+
+### 21.11B.2 The public Tron-VM V1 swap contract (dictated interop, conditional)
+
+The following is the interop surface of the contract of F21.B5. It is
+recorded because any client that talks to that contract -- or to a
+Reloaded deployment of the same source -- must conform to it (R29/R31/
+R33). The ABI symbols are quoted under chapter 01 R11's
+inter-operability carve-out (contract Application Binary Interface
+symbols); the deployment facts rest on the public-network observation of
+chapter 01 R6 (the ABI and the code hash are readable from the chain);
+the repository is cited under chapter 01 R14 in §21.11B.6. It binds
+Reloaded **only if** D21.B2 selects this contract.
+
+| ABI member (dictated signature) | Role |
+| --- | --- |
+| `ethPayment(bytes32 id, address receiver, bytes32 secretHash, uint64 lockTime)` *(payable)* | Lock a native-TRX payment; the amount is the call value and must be positive |
+| `erc20Payment(bytes32 id, uint256 amount, address tokenAddress, address receiver, bytes32 secretHash, uint64 lockTime)` | Lock a TRC20 payment; pulls `amount` from the caller through the token's `transferFrom`, so an allowance for the contract must exist first |
+| `receiverSpend(bytes32 id, uint256 amount, bytes32 secret, address tokenAddress, address sender)` | Claim a payment by revealing the 32-byte secret |
+| `senderRefund(bytes32 id, uint256 amount, bytes32 secretHash, address tokenAddress, address receiver)` | Refund a payment once the chain time has reached `lockTime` |
+| `payments(bytes32 id)` → `(bytes32 paymentHash, uint64 lockTime, uint8 state)` | Read stored payment state; `state` is 0 uninitialized, 1 payment sent, 2 receiver spent, 3 sender refunded |
+| event `PaymentSent(bytes32 id)` | Emitted on lock |
+| event `ReceiverSpent(bytes32 id, bytes32 secret)` | Emitted on spend; carries the revealed secret |
+| event `SenderRefunded(bytes32 id)` | Emitted on refund |
+| error `SafeERC20FailedOperation(address token)` | The token-safety wrapper's failure (OpenZeppelin), surfaced when `transferFrom` fails |
+
+Contract semantics a client depends on (all verifiable against the
+deployed code and the public source):
+
+- **Hash lock: SHA-256, 32 bytes.** The contract stores a *payment hash*
+  computed as SHA-256 over the packed encoding of `(receiver, sender,
+  secretHash, tokenAddress, amount)` with the zero address standing for
+  native TRX; a spend recomputes it with `SHA-256(secret)` in place of
+  `secretHash`. The secret hash a client must supply is therefore
+  `SHA-256(secret)`, 32 bytes -- **not** the 20-byte
+  `RIPEMD-160(SHA-256(secret))` of the EVM V1 contract -- and a client
+  MUST NOT narrow it. The payment-hash composition is why a client's
+  validation can read `payments(id)` and compare against the arguments
+  it decoded from the counterparty's call: a mismatch in any of
+  receiver, sender, secret hash, token or amount changes the stored hash.
+- **Lock time** is compared against the chain's block timestamp in
+  seconds (`block.timestamp >= lockTime`); the node API reports block
+  times in milliseconds (TRON developer documentation, the *Transaction*
+  protocol page), so a client comparing the two divides by 1000.
+- **Addresses in the ABI** are the bare 20-byte payloads of §21.5 (no
+  `0x41` prefix inside the ABI encoding); the zero address denotes native
+  TRX.
+- **Token transfers.** The payment leg uses the safe-transfer wrapper
+  for `transferFrom`; the spend and refund legs send the token with a
+  plain `transfer` and verify the receiver's balance increased by
+  `amount`, tolerating tokens that return no boolean or `false` on
+  success (the mainnet TRON USDT behavior). The token's *allowance*
+  semantics (including a zero-first requirement some tokens impose) are
+  the token's, not the contract's; see D21.B6.
+- **Swap identifier.** The contract does not compute `id`; the client
+  does. The V1 client derivation this repository already carries for the
+  EVM family (baseline-derived, `mm2src/coins/eth/eth_impl.rs`) is
+  `SHA-256( little-endian uint32(lockTime) ‖ secretHash )`. No tabled
+  state binds the TRON variant's input width; with a 32-byte secret hash
+  the natural reading is the same derivation over the 32-byte value
+  (D21.B4).
+
+### 21.11B.3 Reference facts that bind now (requirements)
+
+**R21.B1 (no compatibility claim).** Reloaded MUST NOT state or imply
+wire compatibility of TRON swaps with `v2.6.0-beta` or `v3.0.0-beta`;
+both lack the capability (F21.B1). Operator-facing compatibility
+documents MUST list TRON swaps as a Reloaded extension with a
+Reloaded-only counterparty set until a reference release carries them.
+
+**R21.B2 (activation-time contract binding follows the EVM rule).**
+When TRON swaps are enabled, the swap contract MUST be bound at
+activation through the EVM family's `swap_contract_address` (and
+optional `fallback_swap_contract`) with the reference's generic
+validation of F21.B3: required and non-zero for a trading-capable coin,
+ignored for a `wallet_only` coin. No TRON-specific activation field is
+introduced. The address MUST be accepted in either form of R-AD1
+(base58check or hex) and normalized to the 20-byte payload; the form
+operators are told to write is D21.B7.
+
+**R21.B3 (a wallet-only TRON coin never reaches a swap operation).**
+R-D1 continues to hold for a TRON coin activated with `wallet_only:
+true` or without a swap-contract binding; the refusal MUST remain typed
+and MUST occur before any transaction is built.
+
+**R21.B4 (orderbook address).** When TRON swaps are enabled, the
+orderbook address derived from an order's public key for a `TRX` or
+`TRC20` coin MUST be the base58check display form of §21.5 -- the form
+the reference's generic public-key-to-address helper already yields
+(F21.B3) -- so that a TRON address shown for an order and the address
+shown for a balance are the same string. The order and swap messages
+themselves carry public keys, not addresses; no wire change is implied.
+
+**R21.B5 (confirmations).** The confirmation depth a TRON leg waits for
+MUST come from `required_confirmations` with the EVM family's request-
+over-config override (F21.B3); the coin configurations of the reference
+and of the lab use 1. Whether Reloaded waits for *solidified* blocks in
+addition is D21.B8.
+
+**R21.B6 (secret-hash arm follows the contract).** If D21.B2 selects the
+Tron-VM contract of §21.11B.2, the TRON coin family MUST force the
+32-byte SHA-256 alternate of chapter 51 R71/R72 on whichever side it
+appears, and the TRON payment path MUST pass the 32-byte value through
+unnarrowed (chapter 51 R72A). Chapter 51 R72's list of forcing families
+then gains TRON; that amendment is part of the same change and MUST NOT
+be made for a contract with a 20-byte lock.
+
+### 21.11B.4 Open maintainer decisions
+
+**D21.B1 -- Activation-route parity.** The reference activates TRON only
+through `enable_eth_with_tokens` and `task::enable_eth::*` and refuses
+the legacy methods (§21.4 note); Reloaded has the opposite shape
+([Chapter 55](55-coin-activation-wire-contract.md) D55.5). TRON swaps
+need `swap_contract_address` at activation, which the mmrpc 2.0 route
+already carries for every EVM platform. Options: (a) add the mmrpc 2.0
+route for the TRON platform (parity; chapters 21, 35, 55 to agree) and
+keep the legacy route as a documented extension; (b) extend the legacy
+route with the swap-contract fields instead. The umbrella plan
+`docs/plans/tron-support.md` work package 1 is this decision.
+
+**D21.B2 -- Contract choice.** No released reference client exists, so
+the contract is Reloaded's to choose: (a) adopt the public MIT Tron-VM
+V1 contract of §21.11B.2 (same source, Reloaded-operated deployments on
+Nile and mainnet; the existing Nile instance of F21.B5 was deployed by a
+third-party key and is suitable for lab rows only); (b) a Reloaded-own
+contract (own audit and deployment; frees the hash arm and ABI); (c)
+wait for a reference release. Under (a) the MIT license is compatible
+(chapter 01 R5); the source is public and its deployment bytes are
+verifiable on chain; the contract itself has no published audit at any
+tabled state.
+
+**D21.B3 -- Interop scope.** Reloaded-to-Reloaded only (R21.B1), with the
+compatibility documents saying so; cross-implementation rows in the lab
+only when a counterparty release appears.
+
+**D21.B4 -- Hash arm and swap id.** With (a) of D21.B2: 32-byte SHA-256,
+chapter 51 R72 amended per R21.B6, swap id over the 32-byte secret hash.
+With (b): decided with the contract.
+
+**D21.B5 -- Fee handling.** Native payment as a smart-contract trigger
+carrying the amount as call value (a plain transfer does not reach a
+contract on TRON; TRON Developer Hub, *Smart Contract Deployment and
+Invocation*); every contract call carries a `fee_limit` cap in SUN that
+bounds the caller-side energy budget, staked and burned alike (TRON
+Developer Hub, *Resource Model*; *Transaction* protocol page); energy
+estimated by the constant-contract dry run the withdraw path already
+uses (§21.8, §21.9), plus bandwidth; the safety margin and the cap policy
+are Reloaded's, and MUST follow the charging semantics those pages
+state for a call whose cap is below its need. No reference figure exists
+for any TRON swap leg; the trade-preimage numbers for TRON are therefore
+Reloaded-defined.
+
+**D21.B6 -- TRC20 allowance.** Before `erc20Payment` the client must
+ensure the contract's allowance; whether to set the allowance to zero
+first for tokens that reject a non-zero-to-non-zero change, and whether
+to approve exactly the amount or more, is Reloaded's to decide per
+token; no tabled state has a behavior.
+
+**D21.B7 -- Address form in config and documents.** base58check (`T...`,
+what explorers show) or hex (`41...`/`0x`-prefixed payload, what the
+EVM request type otherwise takes). R21.B2 requires both to be accepted;
+the documented form is the decision.
+
+**D21.B8 -- Spend discovery and finality.** TRON full nodes expose no
+log filter; discovery of a counterparty spend or refund needs either the
+indexed contract-event endpoint of the event service (TRON Developer
+Hub, *Event*; HTTP reference *Get events by contract address* -- served
+by the event service, not by the plain full-node API of §21.9) or
+polling of the transaction-info endpoint for transactions the client
+already knows (HTTP reference *Get Transaction Info By Id*, which
+returns the receipt and the log entries). If the discovery source is
+unavailable, the operation MUST fail typed and MUST NOT report "not
+spent" (a refund over a completed leg is the hazard). Whether to wait
+for solidified data (the `/walletsolidity/...` endpoint family of the
+public HTTP API serves only blocks the super-representative majority has
+confirmed) or for `required_confirmations` only is part of this
+decision.
+
+**D21.B9 -- DEX fee on TRON.** No tabled state has one. The EVM family's
+shape is a plain transfer of the fee amount to the fee address derived
+from the DEX fee public key ([Chapter 08](08-fee-routing-engine.md)),
+with no burn share on EVM ([Chapter 16](16-swap-v2-pre-burn-output.md)).
+Parity would be a `TransferContract` for TRX and a TRC20 `transfer` for
+tokens to the base58check form of that address, validated by decoding
+the protobuf transaction; the maintainer decides whether TRON takes the
+EVM shape.
+
+### 21.11B.5 Relation to the branch rewrite of this chapter in this repository
+
+This repository's `origin/feat/tron-swap-support` carries a rewrite of
+this chapter that binds TRON V1 swaps as if they were reference
+behavior. Read against the facts above:
+
+- *Agrees with the public contract* (§21.11B.2): the ABI table, the
+  32-byte SHA-256 hash lock, the four lifecycle methods, the three
+  events, the `payments(id)` tuple and the swap-id derivation. These
+  are now verifiable against the deployed Nile contract and the MIT
+  source, which is a sounder basis than the rewrite's own provenance
+  footer (it claims the corpus was not consulted while binding facts
+  that, at the time of its writing, existed at no released state and in
+  no public source this chapter can cite).
+- *Disagrees with the tabled states*: it presents the SHA-256 arm, the
+  indexed-event discovery, the approve-to-zero-first allowance sequence
+  and the base58check config form as dictated by "the deployed
+  contract and the counterparty protocol". No released reference client
+  has any of them; they are design choices (D21.B2, D21.B6-D21.B8).
+  Its contract-side token-safety wording ("a safe-transfer wrapper")
+  also differs from the public contract, which uses the wrapper on the
+  payment leg and balance-checked plain transfers on the spend and
+  refund legs.
+- *Disagrees with chapter 51*: its per-coin secret-hash selection is the
+  one `docs/plans/tron-swap-support.md` already records as unsound
+  against R71/R72's pair selection.
+
+Nothing from that rewrite is incorporated here; this section was
+authored from the tabled states and the public sources named in
+§21.11B.6.
+
+### 21.11B.6 Verification notes and provenance (section-scoped)
+
+- *Re-verifying F21.B5 (public network, chapter 01 R6):* query any Nile
+  full node's contract endpoint for the address of the table; the
+  response names the contract, lists the ABI of §21.11B.2 and carries the
+  runtime bytecode. The SHA-256 of the bytecode returned on 2026-11-08
+  was `92f0d9fc6e41ad269798300b3a1c4fb5c098fa918102eda46705139b0f79e357`;
+  a Reloaded deployment of the same source and compiler settings is
+  expected to match it only if the compiler pin and optimizer settings
+  are identical.
+- *Sibling-repository citation (chapter 01 R14):* the public swap-
+  contract repository `KomodoPlatform/etomic-swap` (mirrored
+  commit-for-commit at `GLEECBTC/etomic-swap`), branch
+  `feat/tron-v1-swap`; earliest commit containing the Tron-VM contract
+  `cb3c7bf7e4f18e2eb983321f11708f315c15f6dd` (2026-04-23); earliest
+  commit containing the Nile proof script and its deployed address
+  `d928cfd0b95e92a95ab507fe1932db3946dd43a8` (2026-09-01); contract
+  license MIT by its SPDX header (the repository root carries no license
+  file at that branch). Not part of the forbidden corpus. The citation
+  carries the repository and its state only; the ABI symbols of
+  §21.11B.2 are admitted by chapter 01 R11's inter-operability class
+  (contract ABI symbols), and the deployment facts of F21.B5 by the
+  public-network observation of chapter 01 R6 above.
+- *Public TRON documentation cited (chapter 01 R12/R13):* TRON Developer
+  Hub, *Resource Model* (energy and bandwidth charging; the `fee_limit`
+  cap on the caller-side energy budget); TRON Developer Hub, *Transaction*
+  protocol page (the `fee_limit` field of the raw transaction body and the
+  smart-contract trigger); TRON Developer Hub, *Smart Contract Deployment
+  and Invocation*; TRON Developer Hub, *Event* (event subscription and the
+  event-query service) and the HTTP reference *Get events by contract
+  address* (the indexed contract-event endpoint, served by the event
+  service rather than by the plain full-node API) and *Get Transaction
+  Info By Id* (receipt and log entries of a known transaction); the public
+  full-node HTTP API's solidity endpoint family (`/walletsolidity/...`),
+  which serves solidified data only. These are the D21.B5 and D21.B8
+  inputs.
+- *Not determined:* any mainnet or Shasta deployment (none recorded);
+  any reference client-side TRON swap figure (fee, `fee_limit`,
+  confirmation count, discovery endpoint) -- none exists at a tabled
+  state; the provenance of the branch rewrite in this repository (its
+  footer's "corpus not consulted" claim could not be confirmed from any
+  tabled state or public source).
+- *States read for this section:* `v2.6.0-beta`, `v3.0.0-beta`,
+  `dev (as of 2026-03-27)`, `dev (as of 2026-03-09)`,
+  `feat/tron-swap-support (as of 2026-04-23)` and
+  `etomic-swap feat/tron-v1-swap (as of 2026-09-01)` (chapter 02 §2.15A).
+  No other state of the historical record was read for this section.
+- *Clearance:* **passed the KDF Dirty Gate on 2026-11-08**, measure 0.01
+  (chapter 01 R37-R41); the attestation is in the scoped record of §21.13.
 
 ## 21.12 Baseline Verifications
 
@@ -589,6 +965,46 @@ V3. The address encoding, protobuf transaction/contract formats,
   conformant realisation to the historical lineage is governed by
   the R35 gate and the R36 binding-scope notes that head every
   code-bearing section of this chapter.
+- *Scoped addition (2026-11-08) -- §21.11B, swap behavior of the
+  reference.* **KDF Dirty Gate: PASS on 2026-11-08 (second pass), measure
+  0.01, no findings.** *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`,
+  `v3.0.0-beta`, `dev (as of 2026-03-27)`, `dev (as of 2026-03-09)` and
+  `feat/tron-swap-support (as of 2026-04-23)` of chapter 02 §2.15A,
+  consulted **only** to establish whether a TRON swap client exists at
+  any of them, how the swap pipeline treats a TRON coin at `v3.0.0-beta`
+  (orderbook refusal, swap-contract field validation, failure before
+  broadcast, secret-hash pair selection), and the kind of change the
+  branch row carries over its base (documents only, no source); the
+  sibling public swap-contract repository at the row `etomic-swap
+  feat/tron-v1-swap (as of 2026-09-01)` (chapter 01 R14 citation in
+  §21.11B.6; MIT-licensed contract source; ABI symbols under the R11
+  inter-operability class) for the contract ABI and the Nile deployment
+  record; a public-
+  network observation of the Nile testnet on 2026-11-08 (chapter 01 R6)
+  for the deployed contract's name, ABI and code hash; this repository's
+  own code for the EVM V1 swap-id derivation; and cross-chapter contracts
+  (Chapters 08, 16, 51, 55). Public method strings, public config fields,
+  the public contract ABI and behavior only; no private identifier,
+  function body, helper decomposition, error, log, comment or
+  document text was reproduced. *Dirty Gate clearance (chapter 01
+  T1, R40).* PASS on 2026-11-08 at the second pass, measure 0.01, no
+  findings. *Extent:* the TRON swap capability and the swap pipeline's
+  treatment of a TRON coin (orderbook address derivation, the
+  activation-time swap-contract fields, the V1 swap operations and their
+  signing path, the secret-hash pair selection, test fixtures and release
+  notes), at `v2.6.0-beta`, `v3.0.0-beta`, `dev (as of 2026-03-27)`,
+  `dev (as of 2026-03-09)` and `feat/tron-swap-support (as of
+  2026-04-23)`: about eight source files read at `v3.0.0-beta`, the
+  subsystem's file sets compared at three rows, and the branch row's
+  single commit of nine documents read in the relevant passages and
+  searched by pattern; plus the sibling row `etomic-swap feat/tron-v1-swap
+  (as of 2026-09-01)` (the contract, its proof script and deployment
+  record, on both mirrors) and one public Nile network observation (the
+  contract's name, nine ABI members and its bytecode hash). *Method:*
+  reading, with mechanical git and pattern checks, a remote reference
+  listing and an on-chain query; the gate script was not run because there
+  are no code blocks. *Measure:* 0.01 on the discretionary-expression
+  basis.
 - *Clean-context addition (2026-10-28, forbidden corpus not consulted):* the
   sentence in §21.9 R-N1 that applies chapter 35 R35.1.17 to the Tron client,
   with its status remark, is Reloaded-original. It rests on the maintainer
