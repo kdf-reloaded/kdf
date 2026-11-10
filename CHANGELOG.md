@@ -1506,8 +1506,10 @@ lives.
   recommended for the transaction's size in the tests; every such transaction so far was mined in
   the next block, and the fee has not been tested under load. Manual recovery (`recover_funds_of_swap`) of a Siacoin swap
   was tested only on swaps whose record already held the final event; it refused each time and
-  broadcast nothing, as it should, so the recovery that reads the chain for a spend or a refund of a
-  Siacoin payment has unit tests only. Siacoin in a browser (WASM) build is untested. A GLEEC KDF
+  broadcast nothing, as it should, so the recovery method's chain reading for a Siacoin payment has
+  unit tests only; a taker that was stopped after its Siacoin payment and resumed after its lock did
+  find the maker's spend on chain and completed the swap (November 10, 2026). Siacoin in a browser
+  (WASM) build is untested. A GLEEC KDF
   3.0.0-beta maker on netid 6133 validated a KDF Reloaded taker's Siacoin fee at the network's base
   rate on November 10, 2026, with its Sia node's pool reply passed through a lab proxy that rewrites
   the entry it cannot read (see the item above), and that swap completed. The same check at the

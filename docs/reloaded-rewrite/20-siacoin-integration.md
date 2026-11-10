@@ -1117,7 +1117,13 @@ rather than defects. None is a correctness claim.
   "unspent" outcome was exercised live only by the taker refund's chain
   look (chapter 51 R31a) of 2026-11-04; "spent" and "refunded" have unit
   tests only. A taker-side row that resumes a swap after the maker's
-  spend is scheduled to exercise "spent".
+  spend is scheduled to exercise "spent". *Later the same day:* that row
+  passed: a taker stopped after its payment and resumed after its lock
+  entered the refund chain, and the chain look of chapter 51 R31a found
+  the maker's spend by the event walk, read the secret (R-S6) and spent
+  the maker payment; no refund was made (release-tests page, "Siacoin
+  resumed taker"). "Spent" is therefore exercised live through the swap
+  machine; "refunded" by the event walk still has unit tests only.
 
 - **D4 -- Message signing.** *Closed.* `sign_message`/`verify_message`
   are wired to Sia's ed25519 keypair, using the bound Sia client
