@@ -47,8 +47,8 @@ lookups of R8c item 7 onto the shared resolver, and they become asynchronous wit
   both connections were closed and came back. Traffic resumed 23 and 40 seconds after the restore.
   This is input for P4. The earlier redial of a connection that a cut ended was decided on
   2026-11-08 (ch.28 R27a item 1a) and implemented in PR #303 (batch 4 item B4-13; lab row L-RELINK
-  passed 2026-11-08); PR #328 closed its remaining gap, so that a stuck-peer close ending with a
-  transport error is no longer taken for a cut.
+  passed 2026-11-08, recorded in that PR); PR #328 closed its remaining gap, so that a stuck-peer
+  close ending with a transport error is no longer taken for a cut.
 - **Resolver (P5), 2026-11-02.**
   - One setting, `dns_resolver`, for every hostname. Google Public DNS is the default for all
     names, `"google"` names it explicitly, and `"system"` is the way back to the operating
@@ -68,8 +68,8 @@ lookups of R8c item 7 onto the shared resolver, and they become asynchronous wit
 ## Open points
 
 - **P4:** whether the threshold changes at all. Open after this beta; it waits for field data.
-- **P5b, P5c, P8:** open after this beta (a later release, no estimate, and lab-only, as their
-  rows say). No code of theirs is in 0.4.0.
+- **P5b, P5c, P8:** open after this beta. P5b follows in a later release, P5c has no estimate,
+  P8 is lab-only, as their rows say. No code of theirs is in 0.4.0.
 
 ## Verification
 

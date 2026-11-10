@@ -123,5 +123,5 @@
   the raised minimum; with the switch off, the plain default and no refusal;
   a bid below the raised minimum gets no reservation; a volume between the
   floor and the raised value is accepted with the minimum capped at the
-  volume. With this row every work package of the plan is merged and
-  live-tested.
+  volume. With this row every work package of the plan is merged; rows 2 and
+  4 carry live tests (S7, L-MINVOL).
