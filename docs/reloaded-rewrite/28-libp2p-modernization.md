@@ -2586,3 +2586,7 @@ per-peer IHAVE and IWANT caps of R13a) MUST be confirmed to add no rule that rea
   gated facts of RQ1a items 3 and 4 as already recorded in this chapter.
   Written by a context that never read the forbidden corpus. It needs no
   Dirty Gate pass of its own.
+- *Status note added 2026-11-10 -- under R27a item 1a.* Reloaded-original,
+  clean side: it records this repository's stuck-close mark (PR #328) and
+  takes no forbidden-class input, so chapter 01 R38 is not engaged and no
+  gate pass is required.
