@@ -193,6 +193,20 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   logs no such line. What `disable_cert_verification` accepts and refuses is
   the same on both. See CRD ch.38 R38.6.4m and R38.6.4n and
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+- **A coin's Electrum servers that are behind the chain or stuck are asked last, and a swap's
+  confirmation wait polls one server.** Reloaded asks each connected Electrum server for its newest
+  block when it joins and compares the heights: a server more than the coin's tolerance (180 seconds
+  of blocks, at least 1 and at most 20) behind the height two or more servers have reached, or one
+  that sends no new block for three block times or ten minutes while another does, is tried after
+  the others for reads and broadcasts, and logged once per change of state; a confirmation wait
+  polls one up-to-date server for the whole wait and moves on only when it fails. The read-only
+  request `electrum_servers` shows the servers' state. GLEEC KDF ranks by the list position and has
+  none of this, so a lagging server keeps answering there. No peer observes it. To get GLEEC KDF's
+  routing, set `electrum_tip_checks` to `false` (see the settings list below). Servers that disagree
+  about the chain (one far ahead of the rest, or two with different headers at a common height) fail
+  the activation with an error naming them, and after activation the coin refuses new orders and
+  withdrawals with that error, and starts no new swap, until they agree again; GLEEC KDF has no such
+  check. Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.38 R38.6.4o.
 - **Bitcoin II (BC2) transactions are signed the way the BC2 network requires.**
   Since block 57,750 the BC2 network checks every signature against a digest
   that carries an extra 4-byte field after the signature-hash type, and refuses
@@ -771,6 +785,12 @@ behavior, except for `swap_key_check`; the row of each switch in
   servers when two or more are connected), then have no effect.
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
   listed instead of by a random draw.
+- `electrum_tip_checks: false` — the node does not compare the block heights of a coin's Electrum
+  servers, does not fail an activation or refuse trades when they disagree about the chain: a server
+  that is behind the chain or stopped following it keeps its place in reads, broadcasts and a swap's
+  confirmation wait, which polls the first connected server in priority order. Together with the two
+  switches above this gives GLEEC KDF's routing. The `electrum_servers` request has no GLEEC KDF
+  equivalent.
 - `orderbook_sync_names_held_root: false` — a sync request names the root the maker advertised
   instead of the one this node holds.
 - `order_messages_refresh_liveness: false` — only keep-alives keep a maker's order book alive.

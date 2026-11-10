@@ -321,6 +321,18 @@ value).
   sources only the GLEEC addresses do, so a browser build gets its prices from them alone (the
   prices.cipig.net price service counts as not answering). The swap prices are not taken in a browser build.
 
+### Electrum server lists
+
+List at least three servers for a coin. With fewer than three, the node cannot always tell a stale
+server from one that follows another chain, and it logs a warning when the coin is activated. When
+the servers disagree about the chain (one is far ahead of the others, or two answer different block
+headers for the same height), the activation fails with an error that names the servers and no coin
+is registered. After activation the coin refuses new orders and withdrawals with the error and
+starts no new swap, until the servers agree again, while balance and history reads and running swaps
+go on. The remedy is the same in both cases: remove the servers that follow the other chain from the
+coin's list, or activate the coin with servers that agree. The checks are on by default and the
+top-level `MM2.json` boolean `electrum_tip_checks` set to `false` turns them off.
+
 ### Electrum Servers over TLS
 
 An Electrum server entry with `"protocol": "SSL"` is reached over TLS. The entry sits in the

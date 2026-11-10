@@ -2,8 +2,9 @@
 //!
 //! This module holds the decisions as pure functions of figures and of explicit times: which measured
 //! servers are eligible, the `mixed` weights, the two orders, the smoothed latency, the poor-connection
-//! tests and the replacement in the rank. The pool (`electrum_pool.rs`) gathers the figures, calls these
-//! and acts on the result. Every random choice takes a [`Draw`], a source of numbers in `[0, 1)`, so tests
+//! tests, the replacement in the rank, and the staleness decisions of R38.6.4o (the tolerance, the agreed
+//! tip, the out-of-date state of a connection and the re-measure backoff). The pool (`electrum_pool.rs`)
+//! gathers the figures, calls these and acts on the result. Every random choice takes a [`Draw`], a source of numbers in `[0, 1)`, so tests
 //! inject the draw instead of seeding a generator.
 
 use std::time::Duration;
@@ -27,10 +28,10 @@ const MIN_SAMPLES: u32 = 5;
 /// A server is eligible when its latency is at most this many times the best latency (item 4), ...
 const ELIGIBLE_LATENCY_FACTOR: f64 = 4.;
 /// ... or when it is below the floor of [`crate::utxo::rpc_clients::ElectrumPoolTimings::latency_floor`].
-/// A server is eligible when its height is at most this many blocks below the best tip (item 4).
-const ELIGIBLE_TIP_LAG: u64 = 1;
-/// P1: the number of blocks below the best height that counts as stale (item 6).
-const STALE_TIP_LAG: u64 = 2;
+/// The window of the tolerance of R38.6.4o item 1: how long a server may be behind the others, in seconds.
+const TOLERANCE_WINDOW_SECS: f64 = 180.;
+/// The most blocks the tolerance of R38.6.4o item 1 can be.
+const TOLERANCE_MAX_BLOCKS: u64 = 20;
 /// P1 with one maintained connection: the limit is this many block intervals (item 6).
 const STALE_BLOCK_INTERVALS: u32 = 3;
 /// P2: the smoothed latency is slow above this many times the connection's own reference latency ...
@@ -39,18 +40,21 @@ const SLOW_OWN_FACTOR: f64 = 4.;
 const SLOW_BEST_FACTOR: f64 = 2.;
 
 /// One server's figures from a measurement round (R38.6.4l item 2).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Measurement {
     pub id: usize,
     pub latency_ms: f64,
     pub height: u64,
+    /// The header bytes the server answered at its height, when the answer carried a readable header (R38.6.4o
+    /// item 7).
+    pub header: Option<Vec<u8>>,
     /// Whether the server was suspended when it was measured (D38.6.4l.8). The release that follows a
     /// measurement does not count.
     pub suspended: bool,
 }
 
 /// One server as a round sees it: its measurement, if it has one, and the marks that bar it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct RoundServer {
     pub id: usize,
     pub removed: bool,
@@ -65,28 +69,239 @@ pub(super) struct Eligible {
     pub quality: f64,
 }
 
-/// The eligible servers of a round, in the order of `round`. `reported_tip` is the highest height a
-/// maintained connection currently reports (D38.6.4l.3); `latency_floor_ms` is the 300 ms floor.
+/// The coin's tolerance *T* in blocks (CRD ch.38 R38.6.4o item 1): ceil(180 s / block interval), at least 1 and
+/// at most 20. A coin without a block interval has *T* = 1.
+pub(super) fn tolerance_blocks(block_interval: Option<Duration>) -> u64 {
+    let Some(interval) = block_interval else {
+        return 1;
+    };
+    let blocks = (TOLERANCE_WINDOW_SECS / interval.as_secs_f64()).ceil();
+    // A float-to-integer cast saturates, so even a nonsensical interval lands inside the bounds.
+    (blocks as u64).clamp(1, TOLERANCE_MAX_BLOCKS)
+}
+
+/// The agreed tip of a set of heights, one per server (R38.6.4o item 2): with 3 or more heights the
+/// second-highest, with exactly 2 the higher, with 1 or none there is none (D38.6.4o.2).
+pub(super) fn agreed_tip(heights: &[u64]) -> Option<u64> {
+    let mut sorted = heights.to_vec();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    match sorted.len() {
+        0 | 1 => None,
+        2 => sorted.first().copied(),
+        _ => sorted.get(1).copied(),
+    }
+}
+
+/// A server's lag: the agreed tip minus its height, or 0 when its height is at or above the agreed tip.
+pub(super) fn lag(agreed_tip: u64, height: u64) -> u64 { agreed_tip.saturating_sub(height) }
+
+/// A server's lead: its height minus the agreed tip, or 0 when its height is at or below the agreed tip (R38.6.4o
+/// item 2, D38.6.4o.9).
+pub(super) fn lead(agreed_tip: u64, height: u64) -> u64 { height.saturating_sub(agreed_tip) }
+
+/// The lag as `electrum_servers` reports it: negative for a server above the agreed tip, its lead negated (R38.6.4o
+/// item 10). `None` when the distance does not fit.
+pub(super) fn signed_lag(agreed_tip: u64, height: u64) -> Option<i64> {
+    if height > agreed_tip {
+        i64::try_from(lead(agreed_tip, height)).ok().map(|lead| -lead)
+    } else {
+        i64::try_from(lag(agreed_tip, height)).ok()
+    }
+}
+
+/// Whether `height` is more than `tolerance` blocks below the agreed tip. Without an agreed tip no server is judged
+/// by height.
+pub(super) fn is_beyond_tolerance(agreed_tip: Option<u64>, height: u64, tolerance: u64) -> bool {
+    agreed_tip.map_or(false, |tip| lag(tip, height) > tolerance)
+}
+
+/// Whether `height` is more than `tolerance` blocks below or more than `tolerance` blocks above the agreed tip
+/// (R38.6.4l item 4, R38.6.4o items 2 and 4, D38.6.4o.9).
+pub(super) fn is_outside_tolerance(agreed_tip: Option<u64>, height: u64, tolerance: u64) -> bool {
+    agreed_tip.map_or(false, |tip| {
+        lag(tip, height) > tolerance || lead(tip, height) > tolerance
+    })
+}
+
+/// Why a maintained connection is out of date (R38.6.4o item 4).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum OutOfDate {
+    /// Its lag to the running agreed tip is more than the tolerance.
+    Behind { lag: u64, tip: u64 },
+    /// Its lead over the running agreed tip is more than the tolerance (D38.6.4o.9).
+    Ahead { lead: u64, tip: u64 },
+    /// It sent no header notification for longer than the stuck period while another connection did.
+    Stuck { silent_secs: f64 },
+}
+
+/// The state of an out-of-date connection without its figures: what a change of state compares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OutOfDateKind {
+    Behind,
+    Ahead,
+    Stuck,
+}
+
+impl OutOfDate {
+    pub(super) fn kind(&self) -> OutOfDateKind {
+        match self {
+            OutOfDate::Behind { .. } => OutOfDateKind::Behind,
+            OutOfDate::Ahead { .. } => OutOfDateKind::Ahead,
+            OutOfDate::Stuck { .. } => OutOfDateKind::Stuck,
+        }
+    }
+}
+
+impl OutOfDateKind {
+    /// The word `electrum_servers` reports (R38.6.4o item 10).
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            OutOfDateKind::Behind => "behind",
+            OutOfDateKind::Ahead => "ahead",
+            OutOfDateKind::Stuck => "stuck",
+        }
+    }
+}
+
+/// What the out-of-date judgment knows of one maintained connection that has a height (R38.6.4o items 3 and 4).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TipFigure {
+    pub height: u64,
+    /// When the answer to its header request arrived or its last notification, whichever is later (seconds since the
+    /// epoch).
+    pub since: f64,
+    /// When its last header notification arrived, if one has.
+    pub notified_at: Option<f64>,
+}
+
+/// The out-of-date state of each maintained connection (CRD ch.38 R38.6.4o item 4). `figures` holds one entry per
+/// maintained connection, `None` for one without a height, which no judgment applies to. The running agreed tip is
+/// the agreed tip of the heights given. A connection is *behind* when its lag to it exceeds `tolerance`, and
+/// *ahead* when its lead over it exceeds `tolerance` (D38.6.4o.9), and *stuck* when there are two or more
+/// connections with a height, it has had no news for longer than `stuck_after` and at least one other has received a
+/// header notification within `stuck_after` (D38.6.4o.7); when none has, the chain itself may have stopped and none
+/// is stuck. Behind and ahead win over stuck.
+pub(super) fn out_of_date_states(
+    figures: &[Option<TipFigure>],
+    tolerance: u64,
+    stuck_after: Duration,
+    now: f64,
+) -> Vec<Option<OutOfDate>> {
+    let heights: Vec<u64> = figures.iter().flatten().map(|figure| figure.height).collect();
+    let agreed = agreed_tip(&heights);
+    let stuck_after = stuck_after.as_secs_f64();
+    figures
+        .iter()
+        .enumerate()
+        .map(|(index, figure)| {
+            let figure = (*figure)?;
+            if let Some(tip) = agreed {
+                let behind = lag(tip, figure.height);
+                if behind > tolerance {
+                    return Some(OutOfDate::Behind { lag: behind, tip });
+                }
+                let ahead = lead(tip, figure.height);
+                if ahead > tolerance {
+                    return Some(OutOfDate::Ahead { lead: ahead, tip });
+                }
+            }
+            let silent = now - figure.since;
+            if heights.len() >= 2 && silent > stuck_after {
+                let another_notified = figures.iter().enumerate().any(|(other, figure)| {
+                    other != index
+                        && figure
+                            .and_then(|figure| figure.notified_at)
+                            .map_or(false, |at| now - at <= stuck_after)
+                });
+                if another_notified {
+                    return Some(OutOfDate::Stuck { silent_secs: silent });
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+/// The heights of a measurement round, one per server: those measured in the round, and for every other server the
+/// height its maintained connection currently reports (`reported`, by server id) (R38.6.4l item 4, D38.6.4l.3).
+fn round_heights(round: &[RoundServer], reported: &[(usize, u64)]) -> Vec<u64> {
+    let mut heights: Vec<(usize, u64)> = round
+        .iter()
+        .filter_map(|server| server.measurement.as_ref().map(|m| (server.id, m.height)))
+        .collect();
+    for (id, height) in reported {
+        if !heights.iter().any(|(known, _)| known == id) {
+            heights.push((*id, *height));
+        }
+    }
+    heights.into_iter().map(|(_, height)| height).collect()
+}
+
+/// The agreed tip of a measurement round (R38.6.4o item 2), over `round_heights`.
+pub(super) fn round_agreed_tip(round: &[RoundServer], reported: &[(usize, u64)]) -> Option<u64> {
+    agreed_tip(&round_heights(round, reported))
+}
+
+/// The pairs of servers measured at the same height that answered different header bytes there, with that height
+/// (CRD ch.38 R38.6.4o item 7): each starts a comparison (item 12) once both report heights at least *T* above it.
+pub(super) fn header_differences(round: &[RoundServer]) -> Vec<(usize, usize, u64)> {
+    let measured: Vec<(usize, u64, &[u8])> = round
+        .iter()
+        .filter_map(|server| {
+            let m = server.measurement.as_ref()?;
+            Some((server.id, m.height, m.header.as_deref()?))
+        })
+        .collect();
+    let mut pairs = Vec::new();
+    for (i, (id_a, height_a, header_a)) in measured.iter().enumerate() {
+        for (id_b, height_b, header_b) in measured.iter().skip(i + 1) {
+            if height_a == height_b && header_a != header_b {
+                pairs.push((*id_a, *id_b, *height_a));
+            }
+        }
+    }
+    pairs
+}
+
+/// The common height at which two servers are compared (CRD ch.38 R38.6.4o item 12): the lower of their heights
+/// minus the tolerance, not below 0, so that a race at the tip never counts.
+pub(super) fn common_height(height_a: u64, height_b: u64, tolerance: u64) -> u64 {
+    height_a.min(height_b).saturating_sub(tolerance)
+}
+
+/// Whether, with three or more heights, one of them has a lead over the agreed tip of more than `tolerance`
+/// (R38.6.4o item 12, *far ahead*).
+pub(super) fn is_far_ahead(heights: &[u64], tolerance: u64) -> bool {
+    heights.len() >= 3
+        && agreed_tip(heights).map_or(false, |tip| heights.iter().any(|height| lead(tip, *height) > tolerance))
+}
+
+/// The eligible servers of a round, in the order of `round`. `reported` holds the heights the maintained
+/// connections currently report, by server id (D38.6.4l.3); `tolerance` is the coin's *T* (R38.6.4o item 1);
+/// `latency_floor_ms` is the 300 ms floor. The best tip is the agreed tip (R38.6.4o item 2) over the heights of the
+/// round and `reported`. A difference in the header at the same height does not exclude a server: it starts a
+/// comparison (R38.6.4o item 7, [`header_differences`]).
 pub(super) fn eligible_servers(
     round: &[RoundServer],
-    reported_tip: Option<u64>,
+    reported: &[(usize, u64)],
+    tolerance: u64,
     latency_floor_ms: f64,
 ) -> Vec<Eligible> {
-    let measured = || round.iter().filter_map(|server| server.measurement);
-    let best_tip = measured().map(|m| m.height).chain(reported_tip).max();
+    let measured = || round.iter().filter_map(|server| server.measurement.as_ref());
+    let best_tip = round_agreed_tip(round, reported);
     let best_latency = measured().map(|m| m.latency_ms).fold(f64::INFINITY, f64::min);
-    let (Some(best_tip), true) = (best_tip, best_latency.is_finite()) else {
+    if !best_latency.is_finite() {
         return Vec::new();
-    };
+    }
     let latency_limit = (ELIGIBLE_LATENCY_FACTOR * best_latency).max(latency_floor_ms);
     round
         .iter()
         .filter_map(|server| {
-            let m = server.measurement?;
+            let m = server.measurement.as_ref()?;
             let eligible = !server.removed
                 && !server.poor_demoted
                 && !m.suspended
-                && m.height + ELIGIBLE_TIP_LAG >= best_tip
+                && !is_outside_tolerance(best_tip, m.height, tolerance)
                 && m.latency_ms <= latency_limit;
             eligible.then(|| Eligible {
                 id: server.id,
@@ -226,15 +441,16 @@ pub(super) const NEAR_OFFSET_DEFAULT_MS: f64 = 20.0;
 
 /// Which of the maintained sessions are near (CRD ch.38 R38.6.4a item 6). `figures` holds the smoothed latency
 /// of each maintained session in priority order, `None` for one that has none yet; the answer holds one flag per
-/// figure, in the same order. With *f* the lowest figure, a session is near when it has no figure or when its
-/// figure is at most the larger of `factor` x *f* and *f* + `offset_ms` (the form of the limit is D38.6.4a.2, and
-/// this line is the only place that holds it). Without any figure, and with a `factor` of `0`, every session is
-/// near. A `factor` above `0` and below `1` acts as `1`: `factor` x *f* is then below *f* + `offset_ms`, which
+/// figure, in the same order. With *f* the lowest figure, a session is near when its figure is at most the larger
+/// of `factor` x *f* and *f* + `offset_ms` (the form of the limit is D38.6.4a.2, and this line is the only place
+/// that holds it). A session without a figure is not near while another session has one: it has answered nothing
+/// yet and takes no read before it has answered once (D38.6.4a.4). Without any figure, and with a `factor` of `0`,
+/// every session is near. A `factor` above `0` and below `1` acts as `1`: `factor` x *f* is then below *f* + `offset_ms`, which
 /// decides.
 ///
 /// The floor of two (R38.6.4a item 6, D38.6.4a.3): when two or more sessions are given and the limit leaves fewer
 /// than two of them near, the session with the next-lowest figure after the fastest is near as well, and between
-/// equal figures the one earlier in the list, which is the priority order. A coin with two sessions therefore
+/// equal figures the one earlier in the list, which is the priority order. Only a session with a figure is picked. A coin with two sessions therefore
 /// always spreads over both, and one with more over at least its two fastest. This too is held here only.
 pub(super) fn near_sessions(figures: &[Option<f64>], factor: f64, offset_ms: f64) -> Vec<bool> {
     let fastest = figures.iter().flatten().copied().reduce(f64::min);
@@ -244,11 +460,11 @@ pub(super) fn near_sessions(figures: &[Option<f64>], factor: f64, offset_ms: f64
     let limit = (factor * fastest).max(fastest + offset_ms);
     let mut near: Vec<bool> = figures
         .iter()
-        .map(|figure| figure.map_or(true, |figure| figure <= limit))
+        .map(|figure| figure.map_or(false, |figure| figure <= limit))
         .collect();
     if near.len() >= 2 && near.iter().filter(|near| **near).count() < 2 {
-        // Only the fastest is near, so every other session has a figure. `min_by` keeps the first of equal
-        // figures, which is the earlier one in priority order.
+        // Only the fastest is near. The next-lowest figure among the other sessions, if any has one, is near too;
+        // `min_by` keeps the first of equal figures, which is the earlier one in priority order.
         let next = figures
             .iter()
             .enumerate()
@@ -281,9 +497,6 @@ pub(super) fn is_slow(
         && value > slow_floor_ms
 }
 
-/// P1 with several maintained connections (R38.6.4l item 6): `own` is 2 or more blocks below `best`.
-pub(super) fn lags_behind(best: u64, own: u64) -> bool { best >= own.saturating_add(STALE_TIP_LAG) }
-
 /// P1 with one maintained connection: the time without a header notification that makes it stale, the larger
 /// of 3 block intervals and `floor` (10 minutes). Without a block interval, `floor`.
 pub(super) fn stale_limit(block_interval: Option<Duration>, floor: Duration) -> Duration {
@@ -301,6 +514,32 @@ pub(super) fn next_round_at(last_round_started: Option<f64>, limit: Duration) ->
     last_round_started.map_or(0., |started| started + limit.as_secs_f64())
 }
 
+/// The least time between two re-measure rounds after `level` rounds without a replacement (R38.6.4o item 8): `base`
+/// doubled once per level, never more than `cap`. With the production figures of 5 minutes and 60 minutes the levels
+/// 0, 1, 2, 3 and 4 or more give 5, 10, 20, 40 and 60 minutes.
+pub(super) fn remeasure_gap(base: Duration, cap: Duration, level: u32) -> Duration {
+    let factor = 2u32.checked_pow(level.min(30)).unwrap_or(u32::MAX);
+    base.checked_mul(factor).map_or(cap, |gap| gap.min(cap)).max(base)
+}
+
+/// Why a poor connection was marked (R38.6.4o item 9, the reason of a replacement).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PoorReason {
+    Behind,
+    Stuck,
+    Slow,
+}
+
+impl PoorReason {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            PoorReason::Behind => "behind",
+            PoorReason::Stuck => "stuck",
+            PoorReason::Slow => "slow",
+        }
+    }
+}
+
 /// The per-server figures the measured order keeps (R38.6.4l items 2 and 6).
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ServerQuality {
@@ -316,6 +555,10 @@ pub(super) struct ServerQuality {
     pub lag_strikes: u32,
     /// The poor-demotion mark lasts until this time (seconds since the epoch).
     pub poor_until: f64,
+    /// Why the connection was last marked poor.
+    pub poor_reason: Option<PoorReason>,
+    /// The out-of-date state last reported in the log, so that a line is logged once per change (R38.6.4o item 9).
+    pub reported_state: Option<OutOfDateKind>,
 }
 
 impl ServerQuality {
@@ -327,6 +570,7 @@ impl ServerQuality {
         self.smoothed = Smoothed::default();
         self.notified_at = now;
         self.lag_strikes = 0;
+        self.reported_state = None;
     }
 
     pub(super) fn is_poor_demoted(&self, now: f64) -> bool { now < self.poor_until }
@@ -353,13 +597,14 @@ mod tests {
                 id,
                 latency_ms,
                 height,
+                header: None,
                 suspended: false,
             }),
         }
     }
 
     fn eligible_ids(round: &[RoundServer]) -> Vec<usize> {
-        eligible_servers(round, None, FLOOR).iter().map(|e| e.id).collect()
+        eligible_servers(round, &[], 1, FLOOR).iter().map(|e| e.id).collect()
     }
 
     fn near_with_offset(figures: &[f64], factor: f64, offset_ms: f64) -> Vec<bool> {
@@ -392,15 +637,21 @@ mod tests {
         assert_eq!(near_for(&[50., 100., 100.1], 2.), [true, true, false]);
     }
 
-    /// T38.6.4a.1: a session without a figure is near, and so is every session when none has one.
+    /// T38.6.4a.1 as amended by D38.6.4a.4: a session without a figure is not near while another one has one; every
+    /// session is near when none has one.
     #[test]
-    fn t38_6_4a_1_a_session_without_a_figure_is_near() {
+    fn t38_6_4a_1_a_session_without_a_figure_is_not_near_while_another_has_one() {
         let mut figures: Vec<Option<f64>> = RIN_FIGURES.iter().map(|figure| Some(*figure)).collect();
         figures[5] = None;
-        assert_eq!(near_sessions(&figures, 2., 20.), [true, true, true, false, false, true]);
+        // A session without a figure is not near while another one has a figure (D38.6.4a.4).
+        assert_eq!(near_sessions(&figures, 2., 20.), [
+            true, true, true, false, false, false
+        ]);
         // The lowest figure is taken among the present ones only.
         figures[0] = None;
-        assert_eq!(near_sessions(&figures, 2., 20.), [true, true, true, false, false, true]);
+        assert_eq!(near_sessions(&figures, 2., 20.), [
+            false, true, true, false, false, false
+        ]);
         assert_eq!(near_sessions(&[None, None, None], 2., 20.), [true; 3]);
         assert_eq!(near_sessions(&[None, None, None], 0., 20.), [true; 3]);
         assert!(near_sessions(&[], 2., 20.).is_empty());
@@ -415,10 +666,14 @@ mod tests {
         assert_eq!(near_for(&[25., 230., 266.], 2.), [true, true, false]);
         // 230, 25, 230: the lowest figure, then the earlier of the two equal ones.
         assert_eq!(near_for(&[230., 25., 230.], 2.), [true, true, false]);
-        // 25, 230 and none: the one without a figure is near already, so the floor adds nothing.
+        // 25, 230 and none: the one without a figure is not near, so the floor picks the 230 ms one, which has one.
         assert_eq!(near_sessions(&[Some(25.), Some(230.), None], 2., 20.), [
-            true, false, true
+            true, true, false
         ]);
+        // One session with a figure and the others without: only it is near, and the floor has nobody to add.
+        assert_eq!(near_sessions(&[None, Some(25.), None], 2., 20.), [false, true, false]);
+        // With the factor at 0 every session is near, figure or not.
+        assert_eq!(near_sessions(&[None, Some(25.), None], 0., 20.), [true; 3]);
         // A single session is near.
         assert_eq!(near_for(&[230.], 2.), [true]);
     }
@@ -455,14 +710,259 @@ mod tests {
         assert_eq!(near_for(&RIN_FIGURES, NEAR_FACTOR_DEFAULT), expected);
     }
 
-    /// T38.6.4l.3: the height rule.
+    /// T38.6.4l.3: the height rule, with the agreed tip (R38.6.4o item 2) and a tolerance of one block.
     #[test]
-    fn a_server_two_blocks_behind_is_not_eligible() {
-        let round = [server(0, 50., 100), server(1, 50., 99), server(2, 50., 98)];
+    fn a_server_two_blocks_behind_the_agreed_tip_is_not_eligible() {
+        // H, H and H - 2: the agreed tip is H, so the third is two blocks behind.
+        let round = [server(0, 50., 100), server(1, 50., 100), server(2, 50., 98)];
         assert_eq!(eligible_ids(&round), vec![0, 1]);
-        // The heights a maintained connection reports count for the best tip (D38.6.4l.3).
-        let reported = eligible_servers(&round, Some(101), FLOOR);
-        assert_eq!(reported.iter().map(|e| e.id).collect::<Vec<_>>(), vec![0]);
+        // H, H - 1 and H - 2: the agreed tip is H - 1 and all three are eligible.
+        let round = [server(0, 50., 100), server(1, 50., 99), server(2, 50., 98)];
+        assert_eq!(eligible_ids(&round), vec![0, 1, 2]);
+        // The heights a maintained connection reports count for the agreed tip, one height per server
+        // (D38.6.4l.3): with 101 reported by server 7 the agreed tip is 100.
+        let reported = eligible_servers(&round, &[(7, 101)], 1, FLOOR);
+        assert_eq!(reported.iter().map(|e| e.id).collect::<Vec<_>>(), vec![0, 1]);
+        // A server that is both measured and reported counts once, with its measured height.
+        let again = eligible_servers(&round, &[(0, 150), (1, 150)], 1, FLOOR);
+        assert_eq!(again.iter().map(|e| e.id).collect::<Vec<_>>(), vec![0, 1, 2]);
+    }
+
+    /// T38.6.4o item 1: the tolerance decides the limit; the cap and the floor keep it between 1 and 20.
+    #[test]
+    fn the_tolerance_replaces_the_fixed_block_limit() {
+        let round = [server(0, 50., 100), server(1, 50., 100), server(2, 50., 97)];
+        let at = |tolerance| {
+            eligible_servers(&round, &[], tolerance, FLOOR)
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(at(1), vec![0, 1]);
+        assert_eq!(at(2), vec![0, 1]);
+        assert_eq!(at(3), vec![0, 1, 2]);
+    }
+
+    /// T38.6.4o.1: the tolerance from the block interval.
+    #[test]
+    fn t38_6_4o_1_the_tolerance_from_avg_blocktime() {
+        let t = |value: serde_json::Value| {
+            tolerance_blocks(block_interval_from_conf(&serde_json::json!({ "avg_blocktime": value })))
+        };
+        for (avg, expected) in [(600, 1), (150, 2), (60, 3), (15, 12), (10, 18)] {
+            assert_eq!(t(serde_json::json!(avg)), expected, "avg_blocktime {avg}");
+        }
+        assert_eq!(t(serde_json::json!(1.5)), 20);
+        // The cap.
+        assert_eq!(t(serde_json::json!(0.5)), 20);
+        assert_eq!(t(serde_json::json!(0.000_000_001)), 20);
+        // A block time above the window, and every value that is not a positive number, give 1.
+        assert_eq!(t(serde_json::json!(100_000)), 1);
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(-60),
+            serde_json::json!("60"),
+            serde_json::json!(null),
+        ] {
+            assert_eq!(t(bad.clone()), 1, "{bad}");
+        }
+        assert_eq!(tolerance_blocks(block_interval_from_conf(&serde_json::json!({}))), 1);
+        assert_eq!(tolerance_blocks(None), 1);
+    }
+
+    /// T38.6.4o.2: the agreed tip and the lag.
+    #[test]
+    fn t38_6_4o_2_the_agreed_tip_is_the_second_highest_height() {
+        const H: u64 = 5_000_000;
+        assert_eq!(agreed_tip(&[]), None);
+        assert_eq!(agreed_tip(&[H]), None);
+        assert_eq!(agreed_tip(&[H, H - 1000]), Some(H));
+        assert_eq!(agreed_tip(&[H - 1000, H]), Some(H));
+        assert_eq!(agreed_tip(&[H, H, H - 1]), Some(H));
+        assert_eq!(agreed_tip(&[H + 1_000_000, H, H - 1]), Some(H));
+        assert_eq!(agreed_tip(&[H + 5, H + 3, H]), Some(H + 3));
+        assert_eq!(agreed_tip(&[H, H + 5, H + 3]), Some(H + 3));
+        // A server above the agreed tip has lag 0; one below has the difference.
+        assert_eq!(lag(H + 3, H + 5), 0);
+        assert_eq!(lag(H + 3, H + 3), 0);
+        assert_eq!(lag(H + 3, H), 3);
+        assert!(!is_beyond_tolerance(Some(H + 3), H, 3));
+        assert!(is_beyond_tolerance(Some(H + 3), H - 1, 3));
+        assert!(!is_beyond_tolerance(None, 0, 1));
+        // The lead is the distance above the agreed tip, 0 at or below it; the lag as reported is signed.
+        assert_eq!(lead(H + 3, H + 5), 2);
+        assert_eq!(lead(H + 3, H + 3), 0);
+        assert_eq!(lead(H + 3, H), 0);
+        assert_eq!(signed_lag(H + 3, H), Some(3));
+        assert_eq!(signed_lag(H + 3, H + 5), Some(-2));
+        assert_eq!(signed_lag(H, H), Some(0));
+        assert_eq!(signed_lag(0, u64::MAX), None);
+        // Outside the tolerance is more than T below or more than T above.
+        assert!(!is_outside_tolerance(Some(H), H + 3, 3));
+        assert!(is_outside_tolerance(Some(H), H + 4, 3));
+        assert!(!is_outside_tolerance(Some(H), H - 3, 3));
+        assert!(is_outside_tolerance(Some(H), H - 4, 3));
+        assert!(!is_outside_tolerance(None, 0, 1));
+    }
+
+    fn figure(height: u64, since: f64, notified_at: Option<f64>) -> Option<TipFigure> {
+        Some(TipFigure {
+            height,
+            since,
+            notified_at,
+        })
+    }
+
+    /// T38.6.4o items 4 and 5: a connection more than the tolerance behind the running agreed tip is out of date as
+    /// behind, and is up to date again when it catches up; a connection at the tolerance never is.
+    #[test]
+    fn a_connection_is_behind_only_beyond_the_tolerance() {
+        let states = |heights: [u64; 3]| {
+            let figures: Vec<_> = heights.iter().map(|height| figure(*height, 0., Some(0.))).collect();
+            out_of_date_states(&figures, 3, Duration::from_secs(600), 1.)
+        };
+        assert_eq!(states([100, 100, 96]), vec![
+            None,
+            None,
+            Some(OutOfDate::Behind { lag: 4, tip: 100 })
+        ]);
+        assert_eq!(states([100, 100, 97]), vec![None, None, None]);
+        assert_eq!(states([100, 100, 100]), vec![None, None, None]);
+        // The field case: two connections, one far behind. The agreed tip is the higher of the two.
+        let two = out_of_date_states(
+            &[figure(2_000, 0., Some(0.)), figure(1_000, 0., Some(0.))],
+            3,
+            Duration::from_secs(600),
+            1.,
+        );
+        assert_eq!(two, vec![None, Some(OutOfDate::Behind { lag: 1_000, tip: 2_000 })]);
+        // One height, or none, judges nobody; a connection without a height is never judged.
+        assert_eq!(
+            out_of_date_states(&[figure(1, 0., None), None], 3, Duration::from_secs(600), 1.),
+            vec![None, None]
+        );
+    }
+
+    /// T38.6.4o item 4: stuck needs two connections with a height, more silence than the period and another
+    /// connection that was notified within the period.
+    #[test]
+    fn a_connection_is_stuck_when_another_one_hears_news_and_it_does_not() {
+        let period = Duration::from_secs(600);
+        // Joined at 0, silent since; the other notified at 700. At 700 the silent one has been quiet for 700 s.
+        let figures = [figure(100, 0., None), figure(100, 700., Some(700.))];
+        assert_eq!(out_of_date_states(&figures, 3, period, 700.), vec![
+            Some(OutOfDate::Stuck { silent_secs: 700. }),
+            None
+        ]);
+        // Not before the period: at exactly 600 s of silence it is not stuck (more than, not at).
+        let figures = [figure(100, 0., None), figure(100, 600., Some(600.))];
+        assert_eq!(out_of_date_states(&figures, 3, period, 600.), vec![None, None]);
+        // Every connection silent for longer than the period: the chain may have halted, none is stuck.
+        let figures = [figure(100, 0., Some(0.)), figure(100, 0., Some(0.))];
+        assert_eq!(out_of_date_states(&figures, 3, period, 1_000.), vec![None, None]);
+        // The answer to a header request is no notification: a connection that only answered recently does not
+        // vouch for the chain.
+        let figures = [figure(100, 0., None), figure(100, 900., None)];
+        assert_eq!(out_of_date_states(&figures, 3, period, 1_000.), vec![None, None]);
+        // A single connection with a height is never stuck.
+        let figures = [figure(100, 0., None), None];
+        assert_eq!(out_of_date_states(&figures, 3, period, 1_000.), vec![None, None]);
+        // Behind wins over stuck.
+        let figures = [
+            figure(100, 0., None),
+            figure(200, 700., Some(700.)),
+            figure(200, 700., Some(700.)),
+        ];
+        assert_eq!(
+            out_of_date_states(&figures, 3, period, 700.)[0],
+            Some(OutOfDate::Behind { lag: 100, tip: 200 })
+        );
+    }
+
+    /// T38.6.4o.6 (liar): one server far above the others does not make the honest ones look behind; it is itself
+    /// out of date as ahead and not eligible, while a server at H + T is up to date and eligible.
+    #[test]
+    fn a_liar_above_the_others_is_ahead_and_does_not_make_them_look_behind() {
+        const H: u64 = 700_000;
+        let figures = [
+            figure(H + 1_000_000, 0., Some(0.)),
+            figure(H, 0., Some(0.)),
+            figure(H, 0., Some(0.)),
+        ];
+        assert_eq!(out_of_date_states(&figures, 3, Duration::from_secs(600), 1.), vec![
+            Some(OutOfDate::Ahead {
+                lead: 1_000_000,
+                tip: H
+            }),
+            None,
+            None
+        ]);
+        // In a measurement round the two at H are eligible and the liar is not.
+        let round = [server(0, 50., H + 1_000_000), server(1, 50., H), server(2, 50., H)];
+        assert_eq!(eligible_ids(&round), vec![1, 2]);
+        // A server at H + T stays eligible and up to date (T = 3); one block more is ahead.
+        let figures = [
+            figure(H + 3, 0., Some(0.)),
+            figure(H, 0., Some(0.)),
+            figure(H, 0., Some(0.)),
+        ];
+        assert_eq!(out_of_date_states(&figures, 3, Duration::from_secs(600), 1.), vec![
+            None;
+            3
+        ]);
+        let figures = [
+            figure(H + 4, 0., Some(0.)),
+            figure(H, 0., Some(0.)),
+            figure(H, 0., Some(0.)),
+        ];
+        assert_eq!(
+            out_of_date_states(&figures, 3, Duration::from_secs(600), 1.)[0],
+            Some(OutOfDate::Ahead { lead: 4, tip: H })
+        );
+        let round = [server(0, 50., H + 3), server(1, 50., H), server(2, 50., H)];
+        assert_eq!(eligible_servers(&round, &[], 3, FLOOR).len(), 3);
+        // With two servers the agreed tip is the higher one: nobody is ahead.
+        let figures = [figure(H + 1_000_000, 0., Some(0.)), figure(H, 0., Some(0.))];
+        assert_eq!(out_of_date_states(&figures, 3, Duration::from_secs(600), 1.)[0], None);
+    }
+
+    fn with_header(mut server: RoundServer, header: &[u8]) -> RoundServer {
+        if let Some(m) = server.measurement.as_mut() {
+            m.header = Some(header.to_vec());
+        }
+        server
+    }
+
+    /// T38.6.4o.8 (item 7): a header that differs at the same height does not exclude a server; the pair starts a
+    /// comparison.
+    #[test]
+    fn t38_6_4o_8_a_header_that_differs_starts_a_comparison_and_excludes_nobody() {
+        let same = |id| with_header(server(id, 50., 100), b"aa");
+        let other = |id| with_header(server(id, 50., 100), b"bb");
+        let round = [same(0), same(1), other(2)];
+        assert_eq!(eligible_ids(&round), vec![0, 1, 2]);
+        assert_eq!(header_differences(&round), vec![(0, 2, 100), (1, 2, 100)]);
+        // Servers at other heights, or without readable header bytes, are not compared.
+        let lower = with_header(server(3, 50., 99), b"cc");
+        assert!(header_differences(&[same(0), lower, server(4, 50., 100)]).is_empty());
+        assert_eq!(common_height(100, 90, 3), 87);
+        assert_eq!(common_height(2, 100, 3), 0);
+        assert!(is_far_ahead(&[1_000_100, 1_000, 1_000], 3));
+        assert!(!is_far_ahead(&[1_003, 1_000, 1_000], 3));
+        assert!(!is_far_ahead(&[1_000_100, 1_000], 3));
+    }
+
+    /// T38.6.4o item 8: the least time between two re-measure rounds doubles, up to the cap.
+    #[test]
+    fn the_remeasure_gap_doubles_up_to_the_cap() {
+        let base = Duration::from_secs(5 * 60);
+        let cap = Duration::from_secs(60 * 60);
+        let gaps: Vec<u64> = (0..8)
+            .map(|level| remeasure_gap(base, cap, level).as_secs() / 60)
+            .collect();
+        assert_eq!(gaps, vec![5, 10, 20, 40, 60, 60, 60, 60]);
+        assert_eq!(remeasure_gap(base, cap, u32::MAX), cap);
+        assert_eq!(remeasure_gap(base, cap, 0), base);
     }
 
     /// T38.6.4l.3: the latency rule, with its 300 ms floor.
@@ -500,13 +1000,13 @@ mod tests {
                 server(0, 50., 10),
                 removed,
                 poor,
-                unmeasured,
+                unmeasured.clone(),
                 was_suspended,
                 released_after
             ]),
             vec![0, 5]
         );
-        assert!(eligible_servers(&[unmeasured], None, FLOOR).is_empty());
+        assert!(eligible_servers(&[unmeasured.clone()], &[], 1, FLOOR).is_empty());
     }
 
     /// The best latency is the lowest measured in the round, whoever is eligible; quality is best / latency.
@@ -514,7 +1014,8 @@ mod tests {
     fn quality_is_the_best_latency_over_the_latency() {
         let eligible = eligible_servers(
             &[server(0, 50., 10), server(1, 100., 10), server(2, 200., 10)],
-            None,
+            &[],
+            1,
             FLOOR,
         );
         let q: Vec<f64> = eligible.iter().map(|e| e.quality).collect();
@@ -525,7 +1026,7 @@ mod tests {
     #[test]
     fn non_eligible_servers_rank_after_every_eligible_one() {
         let round = [server(0, 50., 8), server(1, 60., 10), server(2, 70., 10)];
-        let eligible = eligible_servers(&round, None, FLOOR);
+        let eligible = eligible_servers(&round, &[], 1, FLOOR);
         for numbers in [[0.0; 6], [0.99; 6]] {
             let rank = rank_after_round(Measuring::Measured, &eligible, &[0, 1, 2], &mut scripted(&numbers));
             assert_eq!(&rank[..2], &[1, 2]);
@@ -538,7 +1039,8 @@ mod tests {
     fn mixed_weights_of_the_plan_example() {
         let eligible = eligible_servers(
             &[server(0, 50., 10), server(1, 100., 10), server(2, 150., 10)],
-            None,
+            &[],
+            1,
             FLOOR,
         );
         let weights = mixed_weights(&eligible);
@@ -555,7 +1057,8 @@ mod tests {
     fn mixed_order_follows_the_injected_draw() {
         let eligible = eligible_servers(
             &[server(0, 50., 10), server(1, 100., 10), server(2, 150., 10)],
-            None,
+            &[],
+            1,
             FLOOR,
         );
         let order = |numbers: &[f64]| rank_after_round(Measuring::Mixed, &eligible, &[0, 1, 2], &mut scripted(numbers));
@@ -574,7 +1077,8 @@ mod tests {
     fn mixed_first_places_follow_the_weights() {
         let eligible = eligible_servers(
             &[server(0, 50., 10), server(1, 100., 10), server(2, 150., 10)],
-            None,
+            &[],
+            1,
             FLOOR,
         );
         let weights = mixed_weights(&eligible);
@@ -600,7 +1104,8 @@ mod tests {
                 server(2, 100., 10),
                 server(3, 150., 10),
             ],
-            None,
+            &[],
+            1,
             FLOOR,
         );
         let order =
@@ -677,13 +1182,13 @@ mod tests {
         assert_eq!(quality.reference_ms(), Some(50.));
     }
 
-    /// T38.6.4l.7: 2 or more blocks below is lagging; 1 is not.
+    /// T38.6.4l.7 with the tolerance of one block: 2 or more blocks below is lagging; 1 is not.
     #[test]
-    fn two_blocks_below_the_best_lag() {
-        assert!(!lags_behind(100, 100));
-        assert!(!lags_behind(100, 99));
-        assert!(lags_behind(100, 98));
-        assert!(!lags_behind(100, 101));
+    fn two_blocks_below_the_best_lag_with_a_tolerance_of_one() {
+        assert!(!is_beyond_tolerance(Some(100), 100, 1));
+        assert!(!is_beyond_tolerance(Some(100), 99, 1));
+        assert!(is_beyond_tolerance(Some(100), 98, 1));
+        assert!(!is_beyond_tolerance(Some(100), 101, 1));
     }
 
     /// T38.6.4l.8: the limit of P1 for one maintained connection, with the production floor of 10 minutes.
@@ -762,7 +1267,7 @@ mod tests {
     /// without an eligible server there is none (T38.6.4l.13).
     #[test]
     fn the_replacement_is_picked_by_the_mode() {
-        let eligible = eligible_servers(&[server(2, 100., 10), server(3, 50., 10)], None, FLOOR);
+        let eligible = eligible_servers(&[server(2, 100., 10), server(3, 50., 10)], &[], 1, FLOOR);
         assert_eq!(
             pick_replacement(Measuring::Measured, &eligible, &mut scripted(&[0.0])),
             Some(3)
@@ -776,8 +1281,8 @@ mod tests {
             pick_replacement(Measuring::Mixed, &eligible, &mut scripted(&[0.9])),
             Some(3)
         );
-        // With a reported tip of 10, every candidate at 8 is at least 2 blocks behind.
-        let none = eligible_servers(&[server(2, 100., 8), server(3, 50., 8)], Some(10), FLOOR);
+        // With two maintained connections reporting 10, every candidate at 8 is 2 blocks behind the agreed tip.
+        let none = eligible_servers(&[server(2, 100., 8), server(3, 50., 8)], &[(0, 10), (1, 10)], 1, FLOOR);
         assert!(none.is_empty());
         assert_eq!(pick_replacement(Measuring::Mixed, &none, &mut scripted(&[])), None);
         assert_eq!(pick_replacement(Measuring::Measured, &none, &mut scripted(&[])), None);

@@ -817,92 +817,107 @@ pub(crate) fn broadcast_ordermatch_message(
     );
 }
 
+/// The error text while the Electrum servers of either coin disagree about the chain (CRD ch.38 R38.6.4o item 12).
+#[cfg_attr(test, mockable)]
+pub(crate) fn chain_disagreement(first: &MmCoinEnum, second: &MmCoinEnum) -> Option<String> {
+    first.chain_disagreement().or_else(|| second.chain_disagreement())
+}
+
 #[cfg_attr(test, mockable)]
 pub(crate) fn lp_connect_start_bob(ctx: MmArc, maker_match: MakerMatch, maker_order: MakerOrder) {
-    spawn(async move {
-        // aka "maker_loop"
-        let taker_coin = match lp_coinfind(&ctx, &maker_order.rel).await {
-            Ok(Some(c)) => c,
-            Ok(None) => {
-                log::error!("Coin {} is not found/enabled", maker_order.rel);
-                return;
-            },
-            Err(e) => {
-                log::error!("!lp_coinfind({}): {}", maker_order.rel, e);
-                return;
-            },
-        };
+    spawn(maker_swap_start(ctx, maker_match, maker_order));
+}
 
-        let maker_coin = match lp_coinfind(&ctx, &maker_order.base).await {
-            Ok(Some(c)) => c,
-            Ok(None) => {
-                log::error!("Coin {} is not found/enabled", maker_order.base);
-                return;
-            },
-            Err(e) => {
-                log::error!("!lp_coinfind({}): {}", maker_order.base, e);
-                return;
-            },
-        };
-        // CRD ch.05 R37: the swap is not started for a pair whose swap key is not the key it pays from.
-        if let Some(mismatch) = swap_key_mismatch(&ctx, &maker_coin, &taker_coin) {
-            log::warn!("Swap {} not started: {}", maker_match.request.uuid, mismatch);
+/// The maker side of a matched order: finds the coins and starts the swap, unless a rule refuses it.
+pub(crate) async fn maker_swap_start(ctx: MmArc, maker_match: MakerMatch, maker_order: MakerOrder) {
+    // aka "maker_loop"
+    let taker_coin = match lp_coinfind(&ctx, &maker_order.rel).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            log::error!("Coin {} is not found/enabled", maker_order.rel);
             return;
-        }
-        let alice = bits256::from(maker_match.request.sender_pubkey.0);
-        let maker_amount = maker_match.reserved.get_base_amount().to_decimal();
-        let taker_amount = maker_match.reserved.get_rel_amount().to_decimal();
-        // CRD ch.05 R45: a swap started now runs with the node key, whose public key is its persistent key.
-        let node_key_pair = *ctx.secp256k1_key_pair();
-        let uuid = maker_match.request.uuid;
-        let my_conf_settings = choose_maker_confs_and_notas(
-            maker_order.conf_settings,
-            &maker_match.request,
-            &maker_coin,
-            &taker_coin,
-        );
-        // detect atomic lock time version implicitly by conf_settings existence in taker request
-        let atomic_locktime_v = match maker_match.request.conf_settings {
-            Some(_) => {
-                let other_conf_settings =
-                    choose_taker_confs_and_notas(&maker_match.request, &maker_match.reserved, &maker_coin, &taker_coin);
-                AtomicLocktimeVersion::V2 {
-                    my_conf_settings,
-                    other_conf_settings,
-                }
-            },
-            None => AtomicLocktimeVersion::V1,
-        };
-        let lock_time = lp_atomic_locktime(maker_coin.ticker(), taker_coin.ticker(), atomic_locktime_v);
-        log_tag!(
-            ctx,
-            "";
-            fmt = "Entering the maker_swap_loop {}/{} with uuid: {}",
-            maker_coin.ticker(),
-            taker_coin.ticker(),
-            uuid
-        );
+        },
+        Err(e) => {
+            log::error!("!lp_coinfind({}): {}", maker_order.rel, e);
+            return;
+        },
+    };
 
-        let now = now_ms() / 1000;
-        if let Err(e) = insert_new_swap_to_db(ctx.clone(), maker_coin.ticker(), taker_coin.ticker(), uuid, now).await {
-            error!("Error {} on new swap insertion", e);
-        }
-        let maker_swap = MakerSwap::new(
-            ctx.clone(),
-            alice,
-            maker_amount,
-            taker_amount,
-            node_key_pair,
-            uuid,
-            Some(maker_order.uuid),
-            my_conf_settings,
-            maker_coin,
-            taker_coin,
-            lock_time,
-            maker_order.p2p_privkey.map(SerializableSecp256k1Keypair::into_inner),
-        );
-        run_maker_swap(RunMakerSwapInput::StartNew(maker_swap), ctx).await;
-    });
+    let maker_coin = match lp_coinfind(&ctx, &maker_order.base).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            log::error!("Coin {} is not found/enabled", maker_order.base);
+            return;
+        },
+        Err(e) => {
+            log::error!("!lp_coinfind({}): {}", maker_order.base, e);
+            return;
+        },
+    };
+    // CRD ch.05 R37: the swap is not started for a pair whose swap key is not the key it pays from.
+    if let Some(mismatch) = swap_key_mismatch(&ctx, &maker_coin, &taker_coin) {
+        log::warn!("Swap {} not started: {}", maker_match.request.uuid, mismatch);
+        return;
+    }
+    // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain. Nothing has
+    // moved yet.
+    if let Some(error) = chain_disagreement(&maker_coin, &taker_coin) {
+        log::error!("Swap {} not started: {}", maker_match.request.uuid, error);
+        return;
+    }
+    let alice = bits256::from(maker_match.request.sender_pubkey.0);
+    let maker_amount = maker_match.reserved.get_base_amount().to_decimal();
+    let taker_amount = maker_match.reserved.get_rel_amount().to_decimal();
+    // CRD ch.05 R45: a swap started now runs with the node key, whose public key is its persistent key.
+    let node_key_pair = *ctx.secp256k1_key_pair();
+    let uuid = maker_match.request.uuid;
+    let my_conf_settings = choose_maker_confs_and_notas(
+        maker_order.conf_settings,
+        &maker_match.request,
+        &maker_coin,
+        &taker_coin,
+    );
+    // detect atomic lock time version implicitly by conf_settings existence in taker request
+    let atomic_locktime_v = match maker_match.request.conf_settings {
+        Some(_) => {
+            let other_conf_settings =
+                choose_taker_confs_and_notas(&maker_match.request, &maker_match.reserved, &maker_coin, &taker_coin);
+            AtomicLocktimeVersion::V2 {
+                my_conf_settings,
+                other_conf_settings,
+            }
+        },
+        None => AtomicLocktimeVersion::V1,
+    };
+    let lock_time = lp_atomic_locktime(maker_coin.ticker(), taker_coin.ticker(), atomic_locktime_v);
+    log_tag!(
+        ctx,
+        "";
+        fmt = "Entering the maker_swap_loop {}/{} with uuid: {}",
+        maker_coin.ticker(),
+        taker_coin.ticker(),
+        uuid
+    );
+
+    let now = now_ms() / 1000;
+    if let Err(e) = insert_new_swap_to_db(ctx.clone(), maker_coin.ticker(), taker_coin.ticker(), uuid, now).await {
+        error!("Error {} on new swap insertion", e);
+    }
+    let maker_swap = MakerSwap::new(
+        ctx.clone(),
+        alice,
+        maker_amount,
+        taker_amount,
+        node_key_pair,
+        uuid,
+        Some(maker_order.uuid),
+        my_conf_settings,
+        maker_coin,
+        taker_coin,
+        lock_time,
+        maker_order.p2p_privkey.map(SerializableSecp256k1Keypair::into_inner),
+    );
+    run_maker_swap(RunMakerSwapInput::StartNew(maker_swap), ctx).await;
 }
 
 pub(crate) fn lp_connected_alice(ctx: MmArc, taker_order: TakerOrder, taker_match: TakerMatch) {
@@ -942,6 +957,12 @@ pub(crate) fn lp_connected_alice(ctx: MmArc, taker_order: TakerOrder, taker_matc
                 taker_match.reserved.taker_order_uuid,
                 mismatch
             );
+            return;
+        }
+        // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain. Nothing has
+        // moved yet.
+        if let Some(error) = chain_disagreement(&maker_coin, &taker_coin) {
+            log::error!("Swap {} not started: {}", taker_match.reserved.taker_order_uuid, error);
             return;
         }
         // CRD ch.05 R45: a swap started now runs with the node key, whose public key is its persistent key.
@@ -2110,6 +2131,11 @@ async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     if let Some(mismatch) = swap_key_mismatch(&ctx, &base_coin, &rel_coin) {
         return ERR!("{}", mismatch);
     }
+    // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain, before any
+    // balance check.
+    if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
+        return ERR!("{}", error);
+    }
     if base_coin.wallet_only(&ctx) {
         return ERR!("Base coin {} is wallet only", input.base);
     }
@@ -2153,6 +2179,11 @@ async fn sell_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
     if let Some(mismatch) = swap_key_mismatch(&ctx, &base_coin, &rel_coin) {
         return ERR!("{}", mismatch);
+    }
+    // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain, before any
+    // balance check.
+    if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
+        return ERR!("{}", error);
     }
     if base_coin.wallet_only(&ctx) {
         return ERR!("Base coin {} is wallet only", input.base);
@@ -2261,6 +2292,10 @@ pub async fn lp_auto_buy(
         Some("sell") => TakerAction::Sell,
         _ => return ERR!("Auto buy must be called only from buy/sell RPC methods"),
     };
+    // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain.
+    if let Some(error) = chain_disagreement(base_coin, rel_coin) {
+        return ERR!("{}", error);
+    }
     // CRD ch.60 R60.6.7 item 3: the smallest trade the order can produce must be spendable on both legs.
     try_s!(check_pre_trade_spend_safety(ctx, base_coin, rel_coin, input.min_volume.clone(), &input.price).await);
     let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
@@ -2582,6 +2617,10 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
     if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
         return ERR!("{}", mismatch);
+    }
+    // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain.
+    if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
+        return ERR!("{}", error);
     }
     if base_coin.wallet_only(ctx) {
         return ERR!("Base coin {} is wallet only", req.base);

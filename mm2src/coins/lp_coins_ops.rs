@@ -366,6 +366,10 @@ pub async fn validate_address(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>
 }
 pub async fn withdraw(ctx: MmArc, req: WithdrawRequest) -> WithdrawResult {
     let coin = lp_coinfind_or_err(&ctx, &req.coin).await.mm_err(Into::into)?;
+    // A withdrawal is not built while the coin's Electrum servers disagree about the chain (CRD ch.38 R38.6.4o item 12).
+    if let Some(error) = coin.chain_disagreement() {
+        return MmError::err(WithdrawError::ChainDisagreement(error));
+    }
     #[cfg(not(target_arch = "wasm32"))]
     let publish_zcoin_tx_history = matches!(coin, MmCoinEnum::ZCoin(_));
     #[cfg(target_arch = "wasm32")]

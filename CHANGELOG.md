@@ -158,6 +158,17 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 #### UTXO coins and Electrum
 
+- **A new request, `electrum_servers`, shows which Electrum server a coin uses and how far behind
+  each one is.** Send `{"mmrpc": "2.0", "method": "electrum_servers", "params": {"coin": "RIN"}}`
+  for an active coin that uses Electrum servers. The answer lists every server of the coin in the
+  order the node ranks them, by host and port: whether it is connected, whether reads are being sent
+  to it, its latest block height, how many blocks it is behind the other servers, whether it is out
+  of date (`behind`, `ahead` or `stuck`), its smoothed round trip, whether it is suspended or marked
+  as poor, and whether it was removed from the coin's list. It also gives the coin's tolerance in
+  blocks and the block height most servers agree on. The request only reads what the node already
+  knows and sends nothing to any server. A coin that is not active answers `NoSuchCoin`; a coin that
+  does not use an Electrum client (a coin with a local daemon, a shielded coin, a token of another
+  family) answers `CoinIsNotElectrum`. Detail: PR #324; CRD ch.38 R38.6.4o.
 - **Radiant (RXD) swaps between two KDF Reloaded nodes are tested on the mainnet.** On 2026-11-09, RXD against
   RIN completed in both directions (RXD as the maker's coin and as the taker's coin), and a refund of an RXD
   payment went out for the maker and for the taker after the lock time. The first swap took 930 seconds, of which
@@ -419,6 +430,52 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 #### UTXO coins and Electrum
 
+- **A coin whose Electrum servers disagree about the chain now fails to activate, and later refuses
+  new trades.** A server that is far ahead of the rest is not simply wrong: it can be the one that
+  followed a network upgrade while the others stopped. The node cannot tell which side is right, so
+  it stops instead of choosing. A server counts as far ahead when, with three or more servers, it is
+  more than the coin's tolerance (three minutes of blocks) above the height the others reach. Two
+  servers that answer different block headers for the same height, compared at a height below the
+  tip, also count. When the node activates a coin it waits up to 5 seconds after its first
+  connection for the other servers' heights and the comparison, then fails the activation with an
+  error that names every server with a height, and the coin is not registered. The legacy `electrum`
+  and `enable` calls and the task activations report that text. After activation, when the servers
+  come to disagree, the node logs one error line, and the coin refuses a new order with it as base
+  or rel and a withdrawal with the same text, and does not start a new swap (the error line says
+  why), until the servers agree again; balance and other reads and swaps that have started go on. To
+  fix it, remove the servers that follow the other chain from the coin's list or activate the coin
+  with servers that agree. With two servers the node compares the block headers at a common height
+  when they are far apart: the same header means the lower server is only behind (the higher one is
+  used), a different header is a disagreement. A coin activated with fewer than three servers logs
+  one warning, because with fewer the node cannot always tell a stale server from one on another
+  chain. `electrum_tip_checks` set to `false` turns all of this off. The `electrum_servers` answer
+  has a new field `chain_disagreement`. Detail: PR #324; CRD ch.38 R38.6.4o items 12–13.
+- **A coin's Electrum servers that are behind the chain, or stopped following it, are no longer
+  asked.** A server that is 1,000 blocks behind used to keep its share of balance and history reads,
+  and a swap's wait for a confirmation could be answered by any server in turn. Now the node asks
+  every connected server for its newest block when it joins the coin's set, under every
+  `electrum_server_order`, and compares them. A server is *behind* when it is more than the coin's
+  tolerance below the height two or more servers have reached (with two servers, below the higher
+  one). The tolerance is three minutes of blocks, at least 1 and at most 20: 1 for BTC, 2 for LTC, 3
+  for RIN and KMD, 12 for DGB. A server far above that height is not hidden: see the entry on
+  disagreement about the chain. A server is *stuck* when it sends no new block for longer than three
+  block times or ten minutes while another server does. Such a server stays in the set and keeps
+  answering when the others fail, but reads, transaction broadcasts and confirmation waits go to the
+  others first, and it is asked again as soon as it has caught up. The node logs one warning, naming
+  the server by host and port, when a server falls behind or is stuck, and when it is up to date
+  again. A swap's confirmation wait now asks one server for the whole wait (the first connected one
+  that is up to date) and moves to another only when that one fails, so the weakest of several
+  servers can no longer end it early. A single server that claims a height far above the others, or
+  a server of another network in the list, no longer makes the honest servers look behind. With
+  `electrum_server_order` set to `mixed` or `measured`, the same tolerance decides which measured
+  servers count as fresh, and repeated searches for a replacement wait 5, 10, 20, 40 and then 60
+  minutes, so a halted chain does not make every node probe the public servers every five minutes,
+  and a search for a replacement connects at most four servers at a time. For the old behavior, set
+  the `MM2.json` boolean `electrum_tip_checks` to `false` (and `electrum_server_order` to `listed`
+  and `electrum_spread_reads` to `false` to match GLEEC KDF). **`mixed` does not become the default
+  yet.** The change is in two stages: this release brings the checks; the default order changes from
+  `random` to `mixed` in a later release, after a field run on RIN, DGB and a coin with 600-second
+  blocks has shown no false marks. Detail: PR #324; CRD ch.38 R38.6.4o.
 - **`fetch_utxos`, `consolidate_utxos` and the automatic merge (`utxo_merge_params`) now work
   under an HD login**, as they do in GLEEC KDF. Until now the two commands were refused and the
   automatic merge stayed off.
@@ -874,6 +931,29 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 #### UTXO coins and Electrum
 
+- **A coin with several Electrum servers no longer fails to activate when one server never answers
+  and another is refused.** A field report: the legacy `electrum` call for UNO, with
+  `electrum_server_order` set to `mixed`, three servers and `max_connected` 2, answered "The balance
+  was not received within 20 seconds" in 3 of 16 lab runs, and 0 of 16 with `random`. One server
+  never accepted a connection, one was refused at once (its certificate had expired) and one was
+  good. Three things went wrong together, and each is fixed:
+  - Under `mixed` and `measured` the node offered a connection to the coin's set of connected
+    servers only after its first block-height answer, so the activation returned with an empty set
+    and the balance read had to try every server. Now every connection is offered as it is made, as
+    under `random`, and the block-height answer still ranks the servers afterwards.
+  - When the set is empty or every connected server fails, the node tried the remaining servers in
+    fixed pairs (`max_connected` at a time), and a pair of the silent and the refused server waited
+    for the silent one, so the pair with the good server was not reached in time. Now the next
+    server starts as soon as one attempt fails, and each attempt's time is worked out from the
+    servers still to try.
+  - The 20 seconds of the `electrum` and `enable` balance read were not known to the Electrum
+    client, which budgeted its attempts against 60 seconds. Now the read passes its 20 seconds on,
+    so the client moves to the next server inside it.
+  A server that has answered nothing yet no longer takes its turn of the reads while another has
+  answered: before, a server that was connected but silent took its share of the reads and each of
+  them waited for the failover. The answer to the block-height request a server gets when it joins
+  now counts as its first measured round trip. Detail: PR #324; CRD ch.38 R38.6.4a, R38.6.4f,
+  R38.6.4j, R38.6.4k-R.
 - **A coin whose Electrum servers keep failing no longer fills the log with two errors every 10
   seconds.** With `tx_history` on, the history loop logged the failed balance read and the failed
   history request on every attempt, for as long as the server failed, for example on an expired

@@ -15,10 +15,12 @@
 //! Every duration is held in [`ElectrumPoolTimings`]; production uses [`ElectrumPoolTimings::default`],
 //! tests build the pool with millisecond values.
 
-use super::electrum_measure::{block_interval_from_conf, eligible_servers, is_slow, lags_behind, near_sessions,
-                              next_round_at, pick_replacement, rank_after_round, rank_with_replacement, shuffle,
-                              stale_limit, Draw, Measurement, Measuring, RoundServer, ServerQuality,
-                              NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
+use super::electrum_measure::{agreed_tip, block_interval_from_conf, common_height, eligible_servers,
+                              header_differences, is_beyond_tolerance, is_far_ahead, is_slow, lag, lead,
+                              near_sessions, next_round_at, out_of_date_states, pick_replacement, rank_after_round,
+                              rank_with_replacement, remeasure_gap, round_agreed_tip, shuffle, signed_lag,
+                              stale_limit, tolerance_blocks, Draw, Measurement, Measuring, OutOfDate, PoorReason,
+                              RoundServer, ServerQuality, TipFigure, NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
 use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, ServerSpec, Session, SessionEnded,
                                  TlsNotice};
 use super::*;
@@ -30,6 +32,7 @@ use futures::stream::FuturesUnordered;
 use mm2_core::mm_ctx::MmArc;
 use rand::seq::SliceRandom;
 use rand::Rng;
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Mutex as StdMutex, RwLock, Weak};
@@ -62,6 +65,14 @@ pub struct ElectrumPoolTimings {
     pub round_floor: Duration,
     /// The shortest time between the starts of two re-measure rounds of a coin (R38.6.4l items 3 and 7).
     pub remeasure_limit: Duration,
+    /// The longest the least time between two re-measure rounds grows to after rounds without a replacement
+    /// (R38.6.4o item 8).
+    pub remeasure_cap: Duration,
+    /// How long the build waits, after its first connection, for the other servers' heights and the comparisons
+    /// before it judges whether the servers agree about the chain (R38.6.4o item 12, D38.6.4o.10).
+    pub activation_window: Duration,
+    /// The least time between two comparisons of the same two servers (R38.6.4o item 12).
+    pub compare_limit: Duration,
     /// How long a poor connection stays poor-demoted after its last trigger (R38.6.4l item 7).
     pub poor_demotion: Duration,
     /// The least time without a header notification that makes a lone connection stale (R38.6.4l item 6).
@@ -87,6 +98,9 @@ impl Default for ElectrumPoolTimings {
             budget_reserve: Duration::from_secs(5),
             round_floor: Duration::from_secs(5),
             remeasure_limit: Duration::from_secs(5 * 60),
+            remeasure_cap: Duration::from_secs(60 * 60),
+            activation_window: Duration::from_secs(5),
+            compare_limit: Duration::from_secs(5 * 60),
             poor_demotion: Duration::from_secs(15 * 60),
             stale_floor: Duration::from_secs(10 * 60),
             latency_floor: Duration::from_millis(300),
@@ -120,6 +134,18 @@ impl ServerOrder {
     pub(super) fn shuffle_with<T, R: rand::Rng>(mut items: Vec<T>, rng: &mut R) -> Vec<T> {
         items.shuffle(rng);
         items
+    }
+
+    /// The value of `electrum_server_order` this order is (R38.6.4o item 10).
+    pub(super) fn name(&self) -> &'static str {
+        match self {
+            ServerOrder::Listed => "listed",
+            ServerOrder::Random => "random",
+            ServerOrder::Mixed => "mixed",
+            ServerOrder::Measured => "measured",
+            #[cfg(test)]
+            ServerOrder::Fixed(_) => "fixed",
+        }
     }
 
     /// Which measured order this is, if it is one.
@@ -216,6 +242,36 @@ pub(crate) fn electrum_spread_reads(ctx: &MmArc) -> bool {
     spread
 }
 
+/// Whether `conf` asks for the tip checks, and the warning to log when its `electrum_tip_checks` is not a boolean. An
+/// absent key and a JSON `null` mean `true`, without a warning (CRD ch.38 R38.6.4o item 11, D38.6.4o.5).
+pub(super) fn parse_tip_checks(conf: &Json) -> (bool, Option<String>) {
+    match &conf["electrum_tip_checks"] {
+        Json::Null => (true, None),
+        Json::Bool(checks) => (*checks, None),
+        other => (
+            true,
+            Some(format!(
+                "electrum_tip_checks {other} is not a boolean; using true (the tip checks are on)"
+            )),
+        ),
+    }
+}
+
+/// CRD ch.38 R38.6.4o item 11: the `MM2.json` boolean `electrum_tip_checks`, read at coin activation, default
+/// `true`. With `false`, the header request on joining is sent only under `mixed` and `measured`, no connection is
+/// ever out of date (so reads, broadcasts and confirmation waits ignore the chain tips) and the warnings about
+/// out-of-date servers are not logged. A value that is not a boolean is taken as `true` and one warning is logged.
+///
+/// **Compatibility:** for behaviour matching GLEEC KDF, set `electrum_tip_checks` to `false`, together with
+/// `electrum_server_order` `listed` and `electrum_spread_reads` `false`.
+pub(crate) fn electrum_tip_checks(ctx: &MmArc) -> bool {
+    let (checks, warning) = parse_tip_checks(&ctx.conf);
+    if let Some(warning) = warning {
+        warn!("{warning}");
+    }
+    checks
+}
+
 /// The non-negative number `conf` holds under `key`, and the warning to log when the key holds anything else. An
 /// absent key means `default`, without a warning.
 fn parse_non_negative_number(conf: &Json, key: &str, default: f64) -> (f64, Option<String>) {
@@ -272,6 +328,48 @@ pub(crate) fn electrum_spread_near_offset_ms(ctx: &MmArc) -> f64 {
 /// (CRD ch.38 R38.6.4l item 6). `None` when the coin has none or it is not a positive number.
 pub(crate) fn electrum_block_interval(coin_conf: &Json) -> Option<Duration> { block_interval_from_conf(coin_conf) }
 
+thread_local! {
+    /// The budget a caller has given the calls it makes on this thread, while it polls them (see [`with_call_budget`]).
+    static CALL_BUDGET: Cell<Option<Duration>> = const { Cell::new(None) };
+}
+
+/// Puts a caller's budget in force while the future it polls runs, and restores the previous one afterwards.
+struct CallBudgetScope(Option<Duration>);
+
+impl CallBudgetScope {
+    fn enter(budget: Duration) -> CallBudgetScope {
+        // A scope inside another one never has more than the outer one.
+        let previous =
+            CALL_BUDGET.with(|cell| cell.replace(Some(cell.get().map_or(budget, |outer| outer.min(budget)))));
+        CallBudgetScope(previous)
+    }
+}
+
+impl Drop for CallBudgetScope {
+    fn drop(&mut self) { CALL_BUDGET.with(|cell| cell.set(self.0)); }
+}
+
+/// Runs `future` with the overall budget *B* of every Electrum call it makes set to `budget`, when that is shorter
+/// than the pool's own (CRD ch.38 R38.6.4j item 1: a caller with a tighter deadline may pass a smaller one). The
+/// pool then derives the budget of each attempt from it, so that failing over to the next server happens inside the
+/// caller's own bound. The budget applies to the calls the future starts while it is polled; a call made from a
+/// task the future spawns does not see it. It has no effect on a client that is not an Electrum client.
+pub async fn with_call_budget<F: std::future::Future>(budget: Duration, future: F) -> F::Output {
+    let mut future = Box::pin(future);
+    futures::future::poll_fn(move |cx| {
+        let _scope = CallBudgetScope::enter(budget);
+        std::future::Future::poll(future.as_mut(), cx)
+    })
+    .await
+}
+
+/// The budget of a call: the caller's, when it gave a shorter one, else `default` (R38.6.4j item 1).
+pub(super) fn call_budget_of_caller(default: Duration) -> Duration {
+    CALL_BUDGET
+        .with(|cell| cell.get())
+        .map_or(default, |budget| budget.min(default))
+}
+
 /// The Electrum methods whose request is a read-only query in the sense of CRD ch.38 R38.6.4a item 1: balance,
 /// unspent-list, history, header, block-count, transaction-get, fee-estimate and relay-fee requests. The list
 /// is closed: a method that is not on it keeps the priority routing.
@@ -303,6 +401,14 @@ pub(super) fn is_read_only(request: &JsonRpcRequestEnum) -> bool {
     }
 }
 
+/// The Electrum method of a transaction broadcast (R38.6.4a item 2, R38.6.4o item 5).
+const BROADCAST_METHOD: &str = "blockchain.transaction.broadcast";
+
+/// Whether `request` is a transaction broadcast.
+fn is_broadcast(request: &JsonRpcRequestEnum) -> bool {
+    matches!(request, JsonRpcRequestEnum::Single(single) if single.method == BROADCAST_METHOD)
+}
+
 /// How a coin's pool is set up (CRD ch.38 R38.6.4b).
 #[derive(Clone, Debug)]
 pub struct ElectrumPoolOptions {
@@ -322,8 +428,12 @@ pub struct ElectrumPoolOptions {
     pub near_factor: f64,
     /// The near offset *A* of R38.6.4a item 6, in milliseconds.
     pub near_offset_ms: f64,
-    /// The coin's block interval, from its `avg_blocktime` (R38.6.4l item 6); `None` when it has none.
+    /// The coin's block interval, from its `avg_blocktime` (R38.6.4l item 6); `None` when it has none. The coin's
+    /// tolerance (R38.6.4o item 1) is derived from it once, when the pool is built.
     pub block_interval: Option<Duration>,
+    /// Whether the chain tips of the maintained connections are checked (R38.6.4o item 11): the header request on
+    /// joining under every order, the out-of-date state of a connection and what follows from it.
+    pub tip_checks: bool,
 }
 
 impl Default for ElectrumPoolOptions {
@@ -338,6 +448,7 @@ impl Default for ElectrumPoolOptions {
             near_factor: NEAR_FACTOR_DEFAULT,
             near_offset_ms: NEAR_OFFSET_DEFAULT_MS,
             block_interval: None,
+            tip_checks: true,
         }
     }
 }
@@ -356,6 +467,10 @@ pub(crate) fn round_budget(
     share.min(attempt_cap).max(timings.round_floor)
 }
 
+/// How many rounds `servers` servers take with `width` attempts in flight at a time, rounded up: the count of rounds
+/// R38.6.4j items 2 and 4 divide the remaining budget by.
+fn rounds_of(servers: usize, width: usize) -> usize { (servers + width - 1) / width }
+
 fn secs_left(deadline: f64) -> Duration {
     let left = deadline - now_float();
     if left > 0. {
@@ -372,6 +487,8 @@ enum Wake {
     Pass,
     /// Place the script-hash subscriptions again (R38.6.4h); no pass is needed for that.
     Resubscribe,
+    /// Run the comparisons that are due (R38.6.4o item 12).
+    Compare,
 }
 
 /// Why an attempt to establish a connection failed (CRD ch.38 R38.6.4d items 1 and 3).
@@ -390,6 +507,13 @@ struct SlotState {
     suspension: Suspension,
     /// What the measured order knows about the server (R38.6.4l); unused under `random` and `listed`.
     quality: ServerQuality,
+    /// The activation probe has a header request in flight over the server's connection (R38.6.4l item 2). The
+    /// connection may have joined the maintained set already (R38.6.4k-R item 3); it then sends no header request
+    /// of its own, and when it is displaced it stays open until its measurement has ended.
+    probing: bool,
+    /// The header request over the server's connection has ended, answered or not (the activation waits for it, R38.6.4o
+    /// item 12).
+    header_resolved: bool,
 }
 
 /// One server of the pool. `id` is its place in the list of the pool and never changes. `rank` is its place
@@ -430,6 +554,8 @@ impl ServerSlot {
                 session: None,
                 suspension: Suspension::default(),
                 quality: ServerQuality::default(),
+                probing: false,
+                header_resolved: false,
             }),
         }
     }
@@ -493,6 +619,47 @@ impl Failures {
     }
 }
 
+/// One server of a coin's pool as the `electrum_servers` request reports it (CRD ch.38 R38.6.4o item 10).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ElectrumServerView {
+    /// The host-only label of the server (R38.6.9a).
+    pub server: String,
+    /// The position in the coin's current rank, from 0.
+    pub rank: usize,
+    pub maintained: bool,
+    /// The near decision of R38.6.4a item 6 with R38.6.4o item 5, judged at the moment of the request; `false` for a
+    /// server that is not maintained.
+    pub near: bool,
+    /// The height the server's open connection reports; `None` for a server without one.
+    pub height: Option<u64>,
+    /// The agreed tip minus the height; negative for a server above the agreed tip, its lead negated; `None` without a
+    /// height or an agreed tip.
+    pub lag: Option<i64>,
+    /// `"behind"`, `"ahead"` or `"stuck"` for a maintained connection that is out of date, otherwise `None`.
+    pub out_of_date: Option<&'static str>,
+    /// The smoothed latency of a maintained connection (R38.6.4l item 2).
+    pub latency_ms: Option<f64>,
+    pub suspended: bool,
+    pub poor_demoted: bool,
+    pub removed: bool,
+}
+
+/// A coin's pool as the `electrum_servers` request reports it (CRD ch.38 R38.6.4o item 10).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ElectrumServersView {
+    pub coin: String,
+    /// The value of `electrum_server_order` in force.
+    pub server_order: &'static str,
+    /// The coin's tolerance *T* in blocks (R38.6.4o item 1).
+    pub tolerance_blocks: u64,
+    /// The running agreed tip of the maintained connections (R38.6.4o item 4); `None` when there is none.
+    pub agreed_tip: Option<u64>,
+    /// The error text while the servers disagree about the chain (R38.6.4o item 12), otherwise `None`.
+    pub chain_disagreement: Option<String>,
+    /// Every server of the pool, in the coin's current rank.
+    pub servers: Vec<ElectrumServerView>,
+}
+
 /// What a test sees of one server of the pool.
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
@@ -520,6 +687,62 @@ pub struct ServerStateSnapshot {
     pub poor_until: f64,
 }
 
+/// What the answer to a header request tells (R38.6.4l item 2, R38.6.4o item 7).
+struct HeaderAnswer {
+    latency_ms: f64,
+    height: u64,
+    /// The header bytes the answer carried, when it carried a readable header.
+    header: Option<Vec<u8>>,
+}
+
+/// The most connections a re-measure round has in flight at a time (R38.6.4o item 8).
+const REMEASURE_IN_FLIGHT: usize = 4;
+
+/// A comparison of two servers' headers at a common height (R38.6.4o item 12).
+struct Comparison {
+    /// When it ended (seconds since the epoch).
+    at: f64,
+    /// The heights of the two servers, the one with the lower id first, when it ended.
+    heights: (u64, u64),
+    /// The height at which the two were compared.
+    compared_at: u64,
+    /// The two servers answered different header bytes.
+    diverged: bool,
+}
+
+/// What the pool knows about the servers' agreement about the chain (R38.6.4o item 12).
+#[derive(Default)]
+struct DisagreementState {
+    comparisons: HashMap<(usize, usize), Comparison>,
+    /// Pairs found at different headers at one height, to be compared once both servers report heights at least *T*
+    /// above it: the two server ids and that height (item 7).
+    /// At most one per pair, with the time it was noted.
+    pending: Vec<(usize, usize, u64, f64)>,
+    /// The pairs being compared now.
+    in_flight: HashSet<(usize, usize)>,
+    /// When a comparison of a pair last got no answer; the pair is tried again after the comparison limit.
+    unanswered: HashMap<(usize, usize), f64>,
+    /// The error text while the coin is in the disagreement state.
+    current: Option<String>,
+}
+
+/// Counts a running comparison, and stops counting it when it ends or is dropped.
+struct ComparingGuard(Arc<PoolShared>);
+
+impl ComparingGuard {
+    fn new(pool: &Arc<PoolShared>) -> ComparingGuard {
+        pool.comparing.fetch_add(1, AtomicOrdering::SeqCst);
+        ComparingGuard(pool.clone())
+    }
+}
+
+impl Drop for ComparingGuard {
+    fn drop(&mut self) { self.0.comparing.fetch_sub(1, AtomicOrdering::SeqCst); }
+}
+
+/// A pair that waits for its heights is dropped after this many comparison limits (R38.6.4o item 12).
+const PENDING_MAX_AGE_LIMITS: f64 = 10.;
+
 /// The pool's figures of the measured order that are not a server's (R38.6.4l items 2 and 7).
 #[derive(Default)]
 struct MeasureState {
@@ -527,6 +750,11 @@ struct MeasureState {
     activation_best_ms: Option<f64>,
     /// When the last re-measure round started (seconds since the epoch).
     last_round_started: Option<f64>,
+    /// How many re-measure rounds in a row ended without a replacement (R38.6.4o item 8); the least time before the
+    /// round after the next one doubles with each.
+    backoff_level: u32,
+    /// The backoff level that applied when the last round started: the least time before the next round.
+    gap_level: u32,
     /// Tests: the start of every re-measure round.
     #[cfg(test)]
     rounds: Vec<f64>,
@@ -558,6 +786,17 @@ pub(super) struct PoolShared {
     read_cursor: AtomicUsize,
     /// The coin's block interval (R38.6.4l item 6).
     block_interval: Option<Duration>,
+    /// The coin's tolerance *T* in blocks, computed once from the block interval (R38.6.4o item 1).
+    tolerance: u64,
+    /// R38.6.4o item 11.
+    tip_checks: bool,
+    /// The activation probe has ended, its measured rank applied.
+    probe_ended: AtomicBool,
+    disagreement: StdMutex<DisagreementState>,
+    /// The comparisons running now.
+    comparing: AtomicUsize,
+    /// When the build had its first connection (seconds since the epoch).
+    first_connection_at: StdMutex<Option<f64>>,
     measure: StdMutex<MeasureState>,
     /// Where the random choices of the measured order come from; tests inject their own.
     draw: StdMutex<DrawSource>,
@@ -596,6 +835,12 @@ impl PoolShared {
             near_offset_ms: options.near_offset_ms,
             read_cursor: AtomicUsize::new(0),
             block_interval: options.block_interval,
+            tolerance: tolerance_blocks(options.block_interval),
+            tip_checks: options.tip_checks,
+            probe_ended: AtomicBool::new(false),
+            disagreement: StdMutex::new(DisagreementState::default()),
+            comparing: AtomicUsize::new(0),
+            first_connection_at: StdMutex::new(None),
             measure: StdMutex::new(MeasureState::default()),
             draw: StdMutex::new(random_draw()),
             measure_tx,
@@ -940,6 +1185,7 @@ impl PoolShared {
                 {
                     let mut state = slot.state();
                     state.session = Some(session.clone());
+                    state.header_resolved = false;
                     state.suspension.on_success();
                 }
                 if session.is_closed() {
@@ -1052,8 +1298,9 @@ impl PoolShared {
     // ---- maintenance (R38.6.4c) ---------------------------------------------------------------
 
     /// Adds the connection of `slot` to the maintained set, demoting the lowest-ranked member if the set
-    /// then exceeds the ceiling (R38.6.4c item 2). Under a measured order, a connection that joins with no
-    /// header request sent over it sends one right after joining (R38.6.4l item 6, D38.6.4l.4).
+    /// then exceeds the ceiling (R38.6.4c item 2). A connection that joins with no header request sent over it
+    /// sends one right after joining, under every order unless the tip checks are off (R38.6.4o item 3,
+    /// D38.6.4o.4); under a measured order always (R38.6.4l item 6, D38.6.4l.4).
     fn join_maintained(self: &Arc<Self>, slot: &Arc<ServerSlot>, session: &Arc<Session>) {
         if session.is_closed() {
             return;
@@ -1079,24 +1326,28 @@ impl PoolShared {
         let maintained = self.maintained_slots();
         if maintained.len() > self.ceiling() {
             if let Some(lowest) = maintained.last() {
-                let demoted = lowest.state().session.clone();
-                lowest.state().maintained = false;
-                if let Some(session) = demoted {
-                    // The demoted server is no longer pinged nor asked; its connection is closed at once.
+                let (demoted, measuring) = {
+                    let mut state = lowest.state();
+                    state.maintained = false;
+                    (state.session.clone(), state.probing)
+                };
+                // The demoted server is no longer pinged nor asked; its connection is closed at once, unless the
+                // activation probe is still measuring over it: the probe releases it when the answer is in.
+                if let (Some(session), false) = (demoted, measuring) {
                     self.close_slot_session(lowest, &session);
                 }
             }
         }
-        // Under `random` and `listed` there is no header request on joining (R38.6.4a item 7).
-        if joined && self.measuring().is_some() && !session.headers().is_notifying() {
+        let probing = slot.state().probing;
+        if joined && !probing && (self.tip_checks || self.measuring().is_some()) && !session.headers().is_notifying() {
             self.request_header_on_join(slot, session);
         }
     }
 
     /// The header request a connection sends right after it joins the maintained set without one (R38.6.4l
-    /// item 6, D38.6.4l.4). Its answer is the connection's height and the server then pushes a notification for
-    /// each new tip. It is a one-off per join: it is neither a sample of the smoothed latency nor a
-    /// measurement round, so the limit on re-measure rounds does not count it.
+    /// item 6, D38.6.4l.4; R38.6.4o item 3). Its answer is the connection's height and the server then pushes a
+    /// notification for each new tip. It is a one-off per join: it is neither a sample of the smoothed latency nor
+    /// a measurement round, so the limit on re-measure rounds does not count it.
     fn request_header_on_join(self: &Arc<Self>, slot: &Arc<ServerSlot>, session: &Arc<Session>) {
         if session.is_closed() || !slot.is_maintained() {
             return;
@@ -1112,13 +1363,19 @@ impl PoolShared {
     /// rule of R38.6.4c item 2: it joins while the set is below the ceiling or while it outranks the
     /// lowest-ranked member (which is then demoted); otherwise it is released at once (R38.6.4k-R item 3).
     fn offer_probed(self: &Arc<Self>, slot: &Arc<ServerSlot>, session: &Arc<Session>) {
-        let maintained = self.maintained_slots();
-        let outranks_lowest = maintained.last().map_or(false, |lowest| slot.rank() < lowest.rank());
-        if maintained.len() < self.ceiling() || outranks_lowest {
+        if self.would_join(slot) {
             self.join_maintained(slot, session);
         } else {
             self.release_one(slot, session.id());
         }
+    }
+
+    /// Whether the rule of R38.6.4c item 2 lets `slot` join the maintained set now: the set is below the ceiling, or
+    /// the server outranks the lowest-ranked member.
+    fn would_join(&self, slot: &ServerSlot) -> bool {
+        let maintained = self.maintained_slots();
+        let outranks_lowest = maintained.last().map_or(false, |lowest| slot.rank() < lowest.rank());
+        maintained.len() < self.ceiling() || outranks_lowest
     }
 
     /// The activation probe (CRD ch.38 R38.6.4k-R): connects every server of the pool in parallel, whatever
@@ -1127,13 +1384,395 @@ impl PoolShared {
     /// failure names the coin and, for each server, its address and failure (R38.6.4i). The probe goes on in
     /// the background until every attempt ended, offering each success to the maintained set.
     pub(super) async fn activation_probe(self: &Arc<Self>) -> Result<(), String> {
+        // R38.6.4o item 13: a short list is flagged whatever the tip checks say.
+        let listed = self.usable_count();
+        if listed < 3 {
+            warn!(
+                "{}: only {} Electrum servers are listed; with fewer than three the node cannot always tell a stale server from one on another chain",
+                self.ticker, listed
+            );
+        }
         let deadline = now_float() + self.timings.call_budget.as_secs_f64();
         let (first_tx, first_rx) = futures::channel::oneshot::channel();
         let pool = self.clone();
         spawn(async move { pool.run_probe(deadline, first_tx).await });
-        first_rx
+        let first = first_rx
             .await
-            .map_err(|_| format!("{}: the Electrum activation probe was abandoned", self.ticker))?
+            .map_err(|_| format!("{}: the Electrum activation probe was abandoned", self.ticker))?;
+        if first.is_ok() {
+            *self.first_connection_at.lock().unwrap_or_else(|p| p.into_inner()) = Some(now_float());
+        }
+        first
+    }
+
+    /// Judges after the activation probe whether the servers agree about the chain (CRD ch.38 R38.6.4o item 12,
+    /// D38.6.4o.10). It waits, up to the activation window after the first connection, until every connected server
+    /// has answered its header request and every comparison has ended, and judges on what arrived: a server that has
+    /// not answered by then is not judged. With the tip checks off it does nothing. On disagreement it returns the
+    /// error of the activation, naming every server with a height.
+    pub(super) async fn judge_activation(self: &Arc<Self>) -> Result<(), String> {
+        if !self.tip_checks {
+            return Ok(());
+        }
+        let first = self
+            .first_connection_at
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(now_float);
+        let deadline = first + self.timings.activation_window.as_secs_f64();
+        loop {
+            let pairs = self.due_comparisons(true);
+            if !pairs.is_empty() {
+                // The comparisons run as tasks of their own: one that is still running when the window ends is not
+                // dropped, it finishes and records its result.
+                let done = self.spawn_comparisons(pairs);
+                let left = secs_left(deadline).max(self.timings.request.min(Duration::from_millis(200)));
+                let _ = done.boxed().timeout(left).await;
+            }
+            if self.settled() && self.due_comparisons(true).is_empty() {
+                break;
+            }
+            if secs_left(deadline).is_zero() {
+                break;
+            }
+            Timer::sleep(0.01).await;
+        }
+        match self.disagreement_servers() {
+            Some(servers) => Err(self.disagreement_text(&servers, true)),
+            None => {
+                self.update_disagreement();
+                Ok(())
+            },
+        }
+    }
+
+    /// Whether every connected server's header request has ended, the probe has ended and no comparison is running.
+    fn settled(&self) -> bool {
+        self.probe_ended.load(AtomicOrdering::SeqCst)
+            && self.comparing.load(AtomicOrdering::SeqCst) == 0
+            && self.slots().iter().all(|slot| {
+                let state = slot.state();
+                state
+                    .session
+                    .as_ref()
+                    .filter(|session| !session.is_closed())
+                    .map_or(true, |_| state.header_resolved)
+            })
+    }
+
+    // ---- the disagreement about the chain (R38.6.4o item 12) ----------------------------------
+
+    /// The servers with an open connection that has a height, in rank order, with their heights.
+    fn live_heights(&self) -> Vec<(Arc<ServerSlot>, u64)> {
+        self.slots()
+            .into_iter()
+            .filter_map(|slot| {
+                let height = slot
+                    .state()
+                    .session
+                    .as_ref()
+                    .filter(|session| !session.is_closed())
+                    .and_then(|session| session.headers().tip())?;
+                Some((slot, height))
+            })
+            .collect()
+    }
+
+    /// The comparisons that are due now (item 12): two servers more than *T* apart when exactly two heights are known;
+    /// at activation, the server at the agreed tip against each server within *T* of it; the pairs of item 7 whose
+    /// heights have come at least *T* above the height of the difference. A pair compared within the limit is left
+    /// out, unless one of its heights moved by more than *T* since.
+    fn due_comparisons(&self, activation: bool) -> Vec<(Arc<ServerSlot>, Arc<ServerSlot>, u64)> {
+        let heights = self.live_heights();
+        let tolerance = self.tolerance;
+        let height_of = |id: usize| {
+            heights
+                .iter()
+                .find(|(slot, _)| slot.id == id)
+                .map(|(_, height)| *height)
+        };
+        let mut wanted: Vec<(usize, usize, u64, bool)> = Vec::new();
+        if let [(a, height_a), (b, height_b)] = heights.as_slice() {
+            if height_a.abs_diff(*height_b) > tolerance {
+                wanted.push((a.id, b.id, common_height(*height_a, *height_b, tolerance), false));
+            }
+        }
+        let plain: Vec<u64> = heights.iter().map(|(_, height)| *height).collect();
+        if let (true, Some(tip)) = (activation, agreed_tip(&plain)) {
+            if let Some((top, top_height)) = heights.iter().find(|(_, height)| *height == tip) {
+                for (slot, height) in &heights {
+                    if slot.id != top.id && height.abs_diff(tip) <= tolerance {
+                        wanted.push((top.id, slot.id, common_height(*top_height, *height, tolerance), false));
+                    }
+                }
+            }
+        }
+        let now = now_float();
+        let limit = self.timings.compare_limit.as_secs_f64();
+        let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+        // A pair that left the pool for good, or waited too long for its heights, is dropped.
+        state.pending.retain(|(a, b, _, noted)| {
+            now - noted < PENDING_MAX_AGE_LIMITS * limit
+                && [a, b]
+                    .iter()
+                    .all(|id| self.slot_by_id(**id).map_or(false, |slot| !slot.is_removed()))
+        });
+        for (a, b, at_height, _) in &state.pending {
+            if let (Some(height_a), Some(height_b)) = (height_of(*a), height_of(*b)) {
+                if height_a >= at_height + tolerance && height_b >= at_height + tolerance {
+                    wanted.push((*a, *b, *at_height, true));
+                }
+            }
+        }
+        // A pair that was found to differ is compared again at the same height once the limit has passed, so that a
+        // resolved fork ends the disagreement state (item 12).
+        for ((a, b), known) in &state.comparisons {
+            if known.diverged {
+                wanted.push((*a, *b, known.compared_at, false));
+            }
+        }
+        let mut due: Vec<(Arc<ServerSlot>, Arc<ServerSlot>, u64)> = Vec::new();
+        for (a, b, at_height, forced) in wanted {
+            let key = (a.min(b), a.max(b));
+            let (Some(height_a), Some(height_b)) = (height_of(key.0), height_of(key.1)) else {
+                continue;
+            };
+            let recent = state.comparisons.get(&key).map_or(false, |known| {
+                now - known.at < limit
+                    && known.heights.0.abs_diff(height_a) <= tolerance
+                    && known.heights.1.abs_diff(height_b) <= tolerance
+            });
+            let unanswered = state.unanswered.get(&key).map_or(false, |at| now - at < limit);
+            if (recent && !forced)
+                || unanswered
+                || state.in_flight.contains(&key)
+                || due.iter().any(|(x, y, _)| (x.id.min(y.id), x.id.max(y.id)) == key)
+            {
+                continue;
+            }
+            if let (Some((slot_a, _)), Some((slot_b, _))) = (
+                heights.iter().find(|(slot, _)| slot.id == a),
+                heights.iter().find(|(slot, _)| slot.id == b),
+            ) {
+                due.push((slot_a.clone(), slot_b.clone(), at_height));
+            }
+        }
+        due
+    }
+
+    /// Asks both servers, with one directed request each, for the header at `height` and compares the bytes: `Some(true)`
+    /// when they are the same, `None` when either server did not answer within the request bound (it is not judged).
+    async fn compare_pair(self: &Arc<Self>, a: &ServerSlot, b: &ServerSlot, height: u64) -> Option<bool> {
+        let request = |slot: &ServerSlot| {
+            let request = JsonRpcRequestEnum::Single(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: self.fresh_request_id(),
+                method: "blockchain.block.header".into(),
+                params: vec![json::json!(height)],
+            });
+            let pool = self.clone();
+            let addr = slot.addr.clone();
+            async move { pool.route_directed(request, &addr).await }
+        };
+        let (answer_a, answer_b) = futures::future::join(request(a), request(b)).await;
+        let header = |answer: Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), String>| match answer {
+            Ok((_, JsonRpcResponseEnum::Single(single))) if single.error.is_null() => {
+                single.result.as_str().map(|hex| hex.to_ascii_lowercase())
+            },
+            _ => None,
+        };
+        Some(header(answer_a)? == header(answer_b)?)
+    }
+
+    /// Starts the comparisons of `pairs` as a task and returns the signal that it has ended. The pairs count as in
+    /// flight at once, so that nothing starts them a second time.
+    fn spawn_comparisons(
+        self: &Arc<Self>,
+        pairs: Vec<(Arc<ServerSlot>, Arc<ServerSlot>, u64)>,
+    ) -> futures::channel::oneshot::Receiver<()> {
+        {
+            let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+            for (a, b, _) in &pairs {
+                state.in_flight.insert((a.id.min(b.id), a.id.max(b.id)));
+            }
+        }
+        let (done_tx, done_rx) = futures::channel::oneshot::channel();
+        let pool = self.clone();
+        spawn(async move {
+            pool.clone().run_comparisons(pairs).await;
+            pool.update_disagreement();
+            let _ = done_tx.send(());
+        });
+        done_rx
+    }
+
+    /// Runs the comparisons of `pairs` at once and records each result (item 12). A pair whose servers did not answer
+    /// records nothing and stays pending, to be tried again after the comparison limit; so does one whose connection
+    /// closed meanwhile.
+    async fn run_comparisons(self: Arc<Self>, pairs: Vec<(Arc<ServerSlot>, Arc<ServerSlot>, u64)>) {
+        let runs = pairs.into_iter().map(|(a, b, height)| {
+            let pool = self.clone();
+            async move {
+                let _counting = ComparingGuard::new(&pool);
+                let same = pool.compare_pair(&a, &b, height).await;
+                (a, b, height, same)
+            }
+        });
+        for (a, b, height, same) in join_all(runs).await {
+            let key = (a.id.min(b.id), a.id.max(b.id));
+            let heights = self.live_heights();
+            let height_of = |id: usize| heights.iter().find(|(slot, _)| slot.id == id).map(|(_, h)| *h);
+            let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+            state.in_flight.remove(&key);
+            let Some(same) = same else {
+                state.unanswered.insert(key, now_float());
+                continue;
+            };
+            state.unanswered.remove(&key);
+            let (Some(height_low), Some(height_high)) = (height_of(key.0), height_of(key.1)) else {
+                continue;
+            };
+            state.comparisons.insert(key, Comparison {
+                at: now_float(),
+                heights: (height_low, height_high),
+                compared_at: height,
+                diverged: !same,
+            });
+            state
+                .pending
+                .retain(|(x, y, at, _)| !((*x.min(y), *x.max(y)) == key && *at == height));
+        }
+    }
+
+    /// Runs the comparisons that are due after the activation, then judges the state again.
+    async fn run_due_comparisons(self: &Arc<Self>) {
+        let pairs = self.due_comparisons(false);
+        if !pairs.is_empty() {
+            let _ = self.spawn_comparisons(pairs).await;
+        }
+        self.update_disagreement();
+    }
+
+    /// The servers with a height, in rank order with their heights, when the coin's servers disagree about the chain:
+    /// a server is far ahead of the agreed tip, or a comparison found different headers (item 12).
+    fn disagreement_servers(&self) -> Option<Vec<(String, u64)>> {
+        if !self.tip_checks {
+            return None;
+        }
+        let heights = self.live_heights();
+        let plain: Vec<u64> = heights.iter().map(|(_, height)| *height).collect();
+        let diverged = {
+            let state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+            state.comparisons.iter().any(|((a, b), known)| {
+                known.diverged
+                    && heights.iter().any(|(slot, _)| slot.id == *a)
+                    && heights.iter().any(|(slot, _)| slot.id == *b)
+            })
+        };
+        (is_far_ahead(&plain, self.tolerance) || diverged).then(|| {
+            heights
+                .iter()
+                .map(|(slot, height)| (slot.label.clone(), *height))
+                .collect()
+        })
+    }
+
+    /// The error text of item 12: `activation` gives the text of the failed activation, otherwise the text of the
+    /// refusals and the ERROR line.
+    fn disagreement_text(&self, servers: &[(String, u64)], activation: bool) -> String {
+        let list = servers
+            .iter()
+            .map(|(label, height)| format!("{label} at {height}"))
+            .join(", ");
+        let tail = if activation {
+            "The node cannot tell which one is right; check the servers or remove the wrong ones from the coin's list"
+        } else {
+            "New orders, swaps and withdrawals are refused until they agree again; remove the servers that follow the other chain from the coin's list, or activate the coin again with servers that agree"
+        };
+        format!(
+            "{}: the Electrum servers disagree about the chain ({}; tolerance {} blocks). {}",
+            self.ticker, list, self.tolerance, tail
+        )
+    }
+
+    /// Judges the disagreement state anew and logs each entry (ERROR) and exit (WARN) once (item 9, item 12); asks for
+    /// the comparisons that are due.
+    fn update_disagreement(&self) {
+        if !self.tip_checks {
+            return;
+        }
+        let now = self
+            .disagreement_servers()
+            .map(|servers| self.disagreement_text(&servers, false));
+        let (entered, left) = {
+            let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+            let was = state.current.is_some();
+            state.current = now.clone();
+            (!was && now.is_some(), was && now.is_none())
+        };
+        if let (true, Some(text)) = (entered, &now) {
+            error!("{}", text);
+        }
+        if left {
+            warn!("{}: the Electrum servers agree about the chain again", self.ticker);
+        }
+        if self.comparing.load(AtomicOrdering::SeqCst) == 0 && !self.due_comparisons(false).is_empty() {
+            let _ = self.trigger_tx.unbounded_send(Wake::Compare);
+        }
+    }
+
+    /// The error text while the coin is in the disagreement state, `None` otherwise (item 12). Used to refuse new
+    /// orders, new swaps and withdrawals.
+    pub(super) fn chain_disagreement(&self) -> Option<String> {
+        self.update_disagreement();
+        self.disagreement
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .current
+            .clone()
+    }
+
+    /// Notes the pairs of a measurement round that answered different header bytes at one height (item 7).
+    fn note_header_differences(&self, round: &[RoundServer]) { self.add_pending(header_differences(round)); }
+
+    /// Notes the pairs of maintained connections whose last header, from the answer to the header request or from a
+    /// notification, is at one height with different bytes (item 7). The comparison follows once both are at least
+    /// *T* above that height.
+    fn note_same_height_differences(&self) {
+        if !self.tip_checks {
+            return;
+        }
+        let headers: Vec<(usize, u64, Vec<u8>)> = self
+            .maintained_slots()
+            .iter()
+            .filter_map(|slot| {
+                let (height, bytes) = slot.state().session.as_ref()?.headers().last_header()?;
+                Some((slot.id, height, bytes))
+            })
+            .collect();
+        let mut pairs = Vec::new();
+        for (i, (id_a, height_a, bytes_a)) in headers.iter().enumerate() {
+            for (id_b, height_b, bytes_b) in headers.iter().skip(i + 1) {
+                if height_a == height_b && bytes_a != bytes_b {
+                    pairs.push((*id_a, *id_b, *height_a));
+                }
+            }
+        }
+        self.add_pending(pairs);
+    }
+
+    /// Adds `pairs`, each two server ids and a height, to the comparisons that wait for their heights (item 7).
+    fn add_pending(&self, pairs: Vec<(usize, usize, u64)>) {
+        let now = now_float();
+        let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+        for (a, b, height) in pairs {
+            // At most one entry per pair: the first difference found waits for its heights, and a difference found
+            // later at the tip, when the tip has moved on, does not replace it.
+            let key = (a.min(b), a.max(b));
+            if !state.pending.iter().any(|(x, y, _, _)| (*x, *y) == key) {
+                state.pending.push((key.0, key.1, height, now));
+            }
+        }
     }
 
     async fn run_probe(
@@ -1187,9 +1826,15 @@ impl PoolShared {
             match step {
                 ProbeStep::Connected(slot, was_suspended, Ok((session, _))) => {
                     if measuring.is_some() {
-                        // The build returns on the first establishment; the header request of the activation
-                        // round follows on the same connection and is part of this server's attempt
-                        // (R38.6.4l item 2). The server is offered to the set when it has been answered.
+                        // The server is offered to the set as it connects, as under `random` (R38.6.4k-R item 3,
+                        // D38.6.4l.2), so the set is never empty when the build returns. The header request of
+                        // the activation round follows on the same connection and is part of this server's
+                        // attempt (R38.6.4l item 2). A server that does not join now is offered again when it has
+                        // been answered, and released then, so that it is measured all the same.
+                        slot.state().probing = true;
+                        if self.would_join(&slot) {
+                            self.join_maintained(&slot, &session);
+                        }
                         if let Some(first_tx) = first_tx.take() {
                             let _ = first_tx.send(Ok(()));
                         }
@@ -1204,10 +1849,11 @@ impl PoolShared {
                                     .await
                                     .ok()
                                     .flatten()
-                                    .map(|(latency_ms, height)| Measurement {
+                                    .map(|answer| Measurement {
                                         id: slot.id,
-                                        latency_ms,
-                                        height,
+                                        latency_ms: answer.latency_ms,
+                                        height: answer.height,
+                                        header: answer.header,
                                         suspended: was_suspended,
                                     });
                                 ProbeStep::Measured(slot, session, measured)
@@ -1223,8 +1869,15 @@ impl PoolShared {
                 },
                 ProbeStep::Connected(slot, _, Err(e)) => failures.record(&slot.label, e),
                 ProbeStep::Measured(slot, session, measurement) => {
+                    slot.state().probing = false;
+                    let latency_ms = measurement.as_ref().map(|m| m.latency_ms);
                     measurements.extend(measurement);
                     self.offer_probed(&slot, &session);
+                    // The answer to the header request is the first sample of a session that joined only now
+                    // (R38.6.4a item 7); one that joined earlier has it already.
+                    if let Some(latency_ms) = latency_ms {
+                        self.record_first_sample(&slot, session.id(), latency_ms);
+                    }
                 },
             }
         }
@@ -1235,6 +1888,7 @@ impl PoolShared {
             // The measured rank takes effect when the probe ends (R38.6.4l item 5, D38.6.4l.2).
             self.rank_activation_round(mode, measurements);
         }
+        self.probe_ended.store(true, AtomicOrdering::SeqCst);
         if let Some(first_tx) = first_tx.take() {
             let _ = first_tx.send(Err(failures.describe_as(
                 &self.ticker,
@@ -1258,7 +1912,10 @@ impl PoolShared {
             }
         }
         let round = self.round_servers(&measurements);
-        let eligible = eligible_servers(&round, self.reported_tip(), self.latency_floor_ms());
+        let reported = self.reported_heights();
+        self.warn_measured_behind(&round, &reported);
+        self.note_header_differences(&round);
+        let eligible = eligible_servers(&round, &reported, self.tolerance, self.latency_floor_ms());
         let all: Vec<usize> = self.slots().iter().map(|slot| slot.id).collect();
         let order = self.with_draw(|draw| rank_after_round(mode, &eligible, &all, draw));
         self.apply_rank(&order);
@@ -1305,17 +1962,43 @@ impl PoolShared {
 
     fn latency_floor_ms(&self) -> f64 { self.timings.latency_floor.as_secs_f64() * 1000. }
 
-    /// The highest height a maintained connection currently reports (D38.6.4l.3).
-    fn reported_tip(&self) -> Option<u64> {
+    /// The height each maintained connection currently reports, by server id (D38.6.4l.3, R38.6.4o item 2): one
+    /// height per server, for the agreed tip of a measurement round.
+    fn reported_heights(&self) -> Vec<(usize, u64)> {
         self.maintained_slots()
             .iter()
             .filter_map(|slot| {
-                slot.state()
-                    .session
-                    .as_ref()
-                    .and_then(|session| session.headers().tip())
+                let height = slot.state().session.as_ref()?.headers().tip()?;
+                Some((slot.id, height))
             })
-            .max()
+            .collect()
+    }
+
+    /// For each measured server of a round whose lag or lead to the round's agreed tip is more than the tolerance,
+    /// one WARN line, the *behind* or the *ahead* one (R38.6.4o item 9).
+    fn warn_measured_behind(&self, round: &[RoundServer], reported: &[(usize, u64)]) {
+        let Some(tip) = round_agreed_tip(round, reported) else {
+            return;
+        };
+        for server in round {
+            let Some(m) = &server.measurement else { continue };
+            let behind = lag(tip, m.height);
+            let ahead = lead(tip, m.height);
+            let Some(slot) = self.slot_by_id(server.id) else {
+                continue;
+            };
+            if behind > self.tolerance {
+                warn!(
+                    "{}: Electrum server {} is {} blocks behind the other servers (tip {})",
+                    self.ticker, slot.label, behind, tip
+                );
+            } else if ahead > self.tolerance {
+                warn!(
+                    "{}: Electrum server {} is {} blocks ahead of the other servers (tip {})",
+                    self.ticker, slot.label, ahead, tip
+                );
+            }
+        }
     }
 
     /// Every server of the pool as a measurement round sees it.
@@ -1329,7 +2012,7 @@ impl PoolShared {
                     id: slot.id,
                     removed: state.removed.is_some(),
                     poor_demoted: state.quality.is_poor_demoted(now),
-                    measurement: measurements.iter().find(|m| m.id == slot.id).copied(),
+                    measurement: measurements.iter().find(|m| m.id == slot.id).cloned(),
                 }
             })
             .collect()
@@ -1346,17 +2029,18 @@ impl PoolShared {
         }
     }
 
-    /// The header request of a measurement or of a joining connection (R38.6.4l items 2 and 6) over `session`,
-    /// answered within `timeout`: the round trip in milliseconds and the height of the answered tip. `None` when
-    /// the server did not answer or the answer has no height. A request that fails closes a connection the slot
-    /// holds (`stored`), as any failed request does (R38.6.4f item 1); the caller releases a connection of its own.
+    /// The header request of a measurement or of a joining connection (R38.6.4l items 2 and 6, R38.6.4o item 3) over
+    /// `session`, answered within `timeout`: the round trip in milliseconds, the height of the answered tip and the
+    /// header bytes the answer carried. `None` when the server did not answer or the answer has no height. A request
+    /// that fails closes a connection the slot holds (`stored`), as any failed request does (R38.6.4f item 1); the
+    /// caller releases a connection of its own.
     async fn header_measurement(
         &self,
         slot: &ServerSlot,
         session: &Session,
         stored: bool,
         timeout: Duration,
-    ) -> Option<(f64, u64)> {
+    ) -> Option<HeaderAnswer> {
         let request = JsonRpcRequestEnum::Single(JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: self.fresh_request_id(),
@@ -1371,15 +2055,44 @@ impl PoolShared {
                 if stored {
                     self.close_slot_session(slot, session);
                 }
+                slot.state().header_resolved = true;
                 return None;
             },
         };
         let latency_ms = (now_float() - started) * 1000.;
-        match response {
+        let answer = match response {
             JsonRpcResponseEnum::Single(single) if single.error.is_null() => {
-                single.result["height"].as_u64().map(|height| (latency_ms, height))
+                single.result["height"].as_u64().map(|height| HeaderAnswer {
+                    latency_ms,
+                    height,
+                    header: single.result["hex"]
+                        .as_str()
+                        .and_then(|hex| hex::decode(hex).ok())
+                        .filter(|bytes| !bytes.is_empty()),
+                })
             },
             _ => None,
+        };
+        // The answer is the connection's height; the connections are judged again (R38.6.4o item 4). Over a
+        // maintained connection the round trip is a sample of the smoothed latency (R38.6.4a item 7).
+        if stored && answer.is_some() {
+            self.record_sample(slot, session.id(), latency_ms);
+        }
+        if answer.is_some() {
+            // The connection now receives header notifications, which the watch for poor connections counts.
+            self.signal_measure();
+        }
+        slot.state().header_resolved = true;
+        self.note_same_height_differences();
+        self.refresh_out_of_date();
+        answer
+    }
+
+    /// Records `sample_ms` as the first sample of the maintained connection `session_id` of `slot`, when it has none:
+    /// the answer to the header request it joined with is a sample (R38.6.4a item 7).
+    fn record_first_sample(&self, slot: &ServerSlot, session_id: u64, sample_ms: f64) {
+        if slot.state().quality.smoothed.samples() == 0 {
+            self.record_sample(slot, session_id, sample_ms);
         }
     }
 
@@ -1413,53 +2126,119 @@ impl PoolShared {
     }
 
     /// A header notification of the height `height` arrived over the connection `session_id` of server `id`
-    /// (R38.6.4l items 2 and 6): the count of P1 with several maintained connections moves.
+    /// (R38.6.4l items 2 and 6, R38.6.4o item 4): under a measured order the count of P1 with several maintained
+    /// connections moves, and the maintained connections are judged again for being out of date.
     fn header_notified(&self, id: usize, session_id: u64, height: u64) {
-        if self.measuring().is_none() {
-            return;
-        }
         let Some(slot) = self.slot_by_id(id) else { return };
-        // The connections that receive notifications, and the highest height any of them reported.
-        let notifying: Vec<u64> = self
-            .maintained_slots()
-            .iter()
-            .filter_map(|slot| {
-                let state = slot.state();
-                let session = state.session.as_ref()?;
-                session
-                    .headers()
-                    .is_notifying()
-                    .then(|| session.headers().tip())
-                    .flatten()
-            })
-            .collect();
-        let best = notifying.iter().copied().max().unwrap_or(height).max(height);
-        let lagging = notifying.len() >= 2 && lags_behind(best, height);
-        let stale = {
-            let mut state = slot.state();
-            if !state.maintained || state.session.as_ref().map(|session| session.id()) != Some(session_id) {
-                return;
-            }
-            state.quality.notified_at = now_float();
-            state.quality.lag_strikes = if lagging { state.quality.lag_strikes + 1 } else { 0 };
-            state.quality.lag_strikes >= 2
-        };
-        if stale {
+        self.note_same_height_differences();
+        let mut wake = false;
+        if self.measuring().is_some() {
+            // The heights the maintained connections report, the notifier's own included (the connection took the
+            // height before this call), and the agreed tip over them.
+            let heights: Vec<u64> = self
+                .maintained_slots()
+                .iter()
+                .filter_map(|slot| slot.state().session.as_ref()?.headers().tip())
+                .collect();
+            let lagging = is_beyond_tolerance(agreed_tip(&heights), height, self.tolerance);
+            let stale = {
+                let mut state = slot.state();
+                if state.maintained && state.session.as_ref().map(|session| session.id()) == Some(session_id) {
+                    state.quality.notified_at = now_float();
+                    state.quality.lag_strikes = if lagging { state.quality.lag_strikes + 1 } else { 0 };
+                    state.quality.lag_strikes >= 2
+                } else {
+                    false
+                }
+            };
+            // A notification can end the silence of a connection or make another one stuck (R38.6.4o item 4).
+            wake = stale || self.tip_checks;
+        }
+        self.refresh_out_of_date();
+        if wake {
             self.signal_measure();
         }
     }
 
-    /// The time without a header notification that makes a lone connection stale (R38.6.4l item 6).
+    /// The time without a header notification that makes a lone connection stale (R38.6.4l item 6), and the stuck
+    /// period of a connection among several (R38.6.4o item 4, D38.6.4o.7): the larger of 3 block intervals and 10
+    /// minutes.
     fn stale_limit(&self) -> Duration { stale_limit(self.block_interval, self.timings.stale_floor) }
+
+    /// What the out-of-date judgment needs to know of the connection of `slot`: its height and the times of its
+    /// header answer and last notification. `None` for a connection without a height.
+    fn tip_figure(slot: &ServerSlot) -> Option<TipFigure> {
+        let state = slot.state();
+        let headers = state.session.as_ref()?.headers();
+        let height = headers.tip()?;
+        let answered_at = headers.answered_at()?;
+        let notified_at = headers.notified_at();
+        Some(TipFigure {
+            height,
+            since: notified_at.map_or(answered_at, |at| at.max(answered_at)),
+            notified_at,
+        })
+    }
+
+    /// The out-of-date state of each of `maintained` at `now` (R38.6.4o item 4), from the figures at that moment.
+    /// With the tip checks off no connection is ever out of date (item 11). Nothing is logged or changed.
+    fn judge_out_of_date(&self, maintained: &[Arc<ServerSlot>], now: f64) -> Vec<Option<OutOfDate>> {
+        if !self.tip_checks {
+            return vec![None; maintained.len()];
+        }
+        let figures: Vec<Option<TipFigure>> = maintained.iter().map(|slot| Self::tip_figure(slot)).collect();
+        out_of_date_states(&figures, self.tolerance, self.stale_limit(), now)
+    }
+
+    /// Judges the maintained connections anew and logs each change of state once (R38.6.4o items 4 and 9): on
+    /// becoming out of date as behind or as stuck, and on becoming up to date again. Returns the maintained
+    /// connections in priority order with their states.
+    fn refresh_out_of_date(&self) -> Vec<(Arc<ServerSlot>, Option<OutOfDate>)> {
+        let maintained = self.maintained_slots();
+        let states = self.judge_out_of_date(&maintained, now_float());
+        for (slot, state) in maintained.iter().zip(&states) {
+            let kind = state.as_ref().map(OutOfDate::kind);
+            let changed = {
+                let mut slot_state = slot.state();
+                let changed = slot_state.quality.reported_state != kind;
+                slot_state.quality.reported_state = kind;
+                changed
+            };
+            if !changed {
+                continue;
+            }
+            match state {
+                Some(OutOfDate::Behind { lag, tip }) => warn!(
+                    "{}: Electrum server {} is {} blocks behind the other servers (tip {})",
+                    self.ticker, slot.label, lag, tip
+                ),
+                Some(OutOfDate::Ahead { lead, tip }) => warn!(
+                    "{}: Electrum server {} is {} blocks ahead of the other servers (tip {})",
+                    self.ticker, slot.label, lead, tip
+                ),
+                Some(OutOfDate::Stuck { silent_secs }) => warn!(
+                    "{}: Electrum server {} has sent no new block for {} s while another server did",
+                    self.ticker,
+                    slot.label,
+                    silent_secs.round() as u64
+                ),
+                None => warn!("{}: Electrum server {} is up to date again", self.ticker, slot.label),
+            }
+        }
+        self.update_disagreement();
+        maintained.into_iter().zip(states).collect()
+    }
 
     /// Judges the maintained connections (R38.6.4l item 6) and marks each poor one poor-demoted for the
     /// demotion time from `now`; a connection that is still poor restarts its mark (item 7 step 1). Returns
-    /// whether any connection is poor.
+    /// whether any connection is poor. P1 covers a connection that is behind on two consecutive notifications, one
+    /// that is stuck (R38.6.4o item 4) and a lone connection that has gone silent; P2 a slow one.
     pub(super) fn mark_poor_connections(&self, now: f64) -> bool {
         let best_activation = self.measure_state().activation_best_ms;
         let slow_floor_ms = self.timings.slow_floor.as_secs_f64() * 1000.;
         let limit = self.stale_limit().as_secs_f64();
         let maintained = self.maintained_slots();
+        let states = self.judge_out_of_date(&maintained, now);
         let notifying = maintained
             .iter()
             .filter(|slot| {
@@ -1470,7 +2249,7 @@ impl PoolShared {
             })
             .count();
         let mut any = false;
-        for slot in &maintained {
+        for (slot, out_of_date) in maintained.iter().zip(states) {
             let mut state = slot.state();
             let receives = state.session.as_ref().map_or(false, |s| s.headers().is_notifying());
             let slow = is_slow(
@@ -1480,18 +2259,33 @@ impl PoolShared {
                 slow_floor_ms,
             );
             let behind = receives && notifying >= 2 && state.quality.lag_strikes >= 2;
+            let stuck = matches!(out_of_date, Some(OutOfDate::Stuck { .. }));
             let silent = receives && notifying == 1 && now - state.quality.notified_at > limit;
-            if slow || behind || silent {
+            if slow || behind || stuck || silent {
                 state.quality.poor_until = now + self.timings.poor_demotion.as_secs_f64();
                 any = true;
-                let reason = if slow { "slow" } else { "behind the chain" };
-                debug!("{}: Electrum server {} is poor ({})", self.ticker, slot.label, reason);
+                let reason = if behind {
+                    PoorReason::Behind
+                } else if stuck || silent {
+                    PoorReason::Stuck
+                } else {
+                    PoorReason::Slow
+                };
+                state.quality.poor_reason = Some(reason);
+                debug!(
+                    "{}: Electrum server {} is poor ({})",
+                    self.ticker,
+                    slot.label,
+                    reason.as_str()
+                );
             }
         }
         any
     }
 
-    /// When the next lone connection turns stale, if one will (R38.6.4l item 6): the moment to look again.
+    /// When the next connection may turn stale, if one will (R38.6.4l item 6, R38.6.4o item 4): the moment to look
+    /// again. That is when a lone connection's silence passes the limit, and when the silence of a connection passes
+    /// the stuck period.
     fn next_stale_check(&self, now: f64) -> Option<f64> {
         let limit = self.stale_limit().as_secs_f64();
         let maintained = self.maintained_slots();
@@ -1504,9 +2298,23 @@ impl PoolShared {
                     .map_or(false, |s| s.headers().is_notifying())
             })
             .collect();
-        match notifying.as_slice() {
+        let lone = match notifying.as_slice() {
             [only] => Some(only.state().quality.notified_at + limit).filter(|at| *at > now),
             _ => None,
+        };
+        let stuck = if self.tip_checks {
+            maintained
+                .iter()
+                .filter_map(|slot| Self::tip_figure(slot))
+                .map(|figure| figure.since + limit)
+                .filter(|at| *at > now)
+                .reduce(f64::min)
+        } else {
+            None
+        };
+        match (lone, stuck) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
     }
 
@@ -1543,14 +2351,18 @@ impl PoolShared {
     }
 
     /// A re-measure round (R38.6.4l items 2 and 7): every server that is not maintained, not suspended and not
-    /// removed is connected and sent one header request. The connections are released, but for the one that
-    /// replaces the poor connection, which joins the maintained set over the connection it was measured on.
+    /// removed is connected and sent one header request, at most [`REMEASURE_IN_FLIGHT`] connection attempts at a
+    /// time (R38.6.4o item 8). The connections are released, but for the one that replaces the poor connection,
+    /// which joins the maintained set over the connection it was measured on.
     pub(super) async fn run_remeasure_round(self: &Arc<Self>) {
         let Some(mode) = self.measuring() else { return };
         let started = now_float();
         {
             let mut state = self.measure_state();
             state.last_round_started = Some(started);
+            // The least time before the next round is the one that applies now; a round without a replacement
+            // doubles the one after it (R38.6.4o item 8).
+            state.gap_level = state.backoff_level;
             #[cfg(test)]
             state.rounds.push(started);
         }
@@ -1559,8 +2371,7 @@ impl PoolShared {
             .into_iter()
             .filter(|slot| !slot.is_maintained() && !slot.is_suspended(started))
             .collect();
-        let mut attempts: FuturesUnordered<_> = candidates
-            .into_iter()
+        let mut attempts = futures::stream::iter(candidates)
             .map(|slot| {
                 let pool = self.clone();
                 async move {
@@ -1578,16 +2389,17 @@ impl PoolShared {
                     let measured = pool
                         .header_measurement(&slot, &session, !owned, pool.timings.request)
                         .await
-                        .map(|(latency_ms, height)| Measurement {
+                        .map(|answer| Measurement {
                             id: slot.id,
-                            latency_ms,
-                            height,
+                            latency_ms: answer.latency_ms,
+                            height: answer.height,
+                            header: answer.header,
                             suspended: false,
                         });
                     (slot, measured, Some((session, owned)))
                 }
             })
-            .collect();
+            .buffer_unordered(REMEASURE_IN_FLIGHT);
         let mut measured = Vec::new();
         let mut connections = Vec::new();
         while let Some((slot, measurement, connection)) = attempts.next().await {
@@ -1598,7 +2410,10 @@ impl PoolShared {
 
         let now = now_float();
         let round = self.round_servers(&measured);
-        let eligible = eligible_servers(&round, self.reported_tip(), self.latency_floor_ms());
+        let reported = self.reported_heights();
+        self.warn_measured_behind(&round, &reported);
+        self.note_header_differences(&round);
+        let eligible = eligible_servers(&round, &reported, self.tolerance, self.latency_floor_ms());
         // The poor connection the round is for: the highest-ranked one that is marked (a further one waits for
         // the next round).
         let poor = self
@@ -1608,6 +2423,16 @@ impl PoolShared {
         let replacement = poor
             .as_ref()
             .and_then(|_| self.with_draw(|draw| pick_replacement(mode, &eligible, draw)));
+        if poor.is_some() {
+            // A round without a replacement doubles the least time before the next one; a replacement returns it
+            // to the base (R38.6.4o item 8).
+            let mut state = self.measure_state();
+            state.backoff_level = if replacement.is_some() {
+                0
+            } else {
+                state.backoff_level.saturating_add(1)
+            };
+        }
         debug!(
             "{}: Electrum re-measure round: {} measured, {} eligible, replacement {}",
             self.ticker,
@@ -1654,12 +2479,27 @@ impl PoolShared {
             }
             if let Some(session) = session {
                 self.join_maintained(&slot, &session);
+                // The answer to the measurement's header request is the first sample of the joined session
+                // (R38.6.4a item 7).
+                if let Some(latency_ms) = latency {
+                    self.record_first_sample(&slot, session.id(), latency_ms);
+                }
             }
+            let reason = poor.state().quality.poor_reason;
             self.demote(&poor);
-            debug!(
-                "{}: Electrum server {} replaces {} in the maintained set",
-                self.ticker, slot.label, poor.label
-            );
+            match reason {
+                Some(reason) => warn!(
+                    "{}: Electrum server {} was replaced by {} ({})",
+                    self.ticker,
+                    poor.label,
+                    slot.label,
+                    reason.as_str()
+                ),
+                None => warn!(
+                    "{}: Electrum server {} was replaced by {}",
+                    self.ticker, poor.label, slot.label
+                ),
+            }
         }
     }
 
@@ -1677,6 +2517,12 @@ impl PoolShared {
             self.close_slot_session(slot, &session);
         }
     }
+
+    pub(super) fn probe_ended(&self) -> bool { self.probe_ended.load(AtomicOrdering::SeqCst) }
+
+    /// Tests: how many comparisons are running.
+    #[cfg(test)]
+    pub(super) fn comparisons_running(&self) -> usize { self.comparing.load(AtomicOrdering::SeqCst) }
 
     #[cfg(test)]
     pub(super) fn remeasure_rounds(&self) -> Vec<f64> { self.measure_state().rounds.clone() }
@@ -1757,6 +2603,105 @@ impl PoolShared {
         }
     }
 
+    // ---- confirmation waits and the `electrum_servers` view (R38.6.4o items 6 and 10) -----------
+
+    /// The server a wait for a transaction's confirmations polls (CRD ch.38 R38.6.4o item 6): the first
+    /// maintained connection in priority order that is up to date; if none is, the first maintained connection; if
+    /// the set is empty, the first server of the rank that is not removed. The servers in `failed` (those that
+    /// failed during this wait) are left out while another choice exists. The server is named by its configured
+    /// address, which a directed request (R38.6.4g) takes. `None` when the pool has no usable server.
+    pub(super) fn choose_wait_server(&self, failed: &[String]) -> Option<String> {
+        self.wait_choice(failed).or_else(|| self.wait_choice(&[]))
+    }
+
+    fn wait_choice(&self, excluded: &[String]) -> Option<String> {
+        let allowed = |slot: &Arc<ServerSlot>| !excluded.contains(&slot.addr);
+        let maintained: Vec<(Arc<ServerSlot>, Option<OutOfDate>)> = self
+            .refresh_out_of_date()
+            .into_iter()
+            .filter(|(slot, _)| allowed(slot))
+            .collect();
+        let chosen = maintained
+            .iter()
+            .find(|(_, state)| state.is_none())
+            .or_else(|| maintained.first())
+            .map(|(slot, _)| slot.clone());
+        chosen
+            .or_else(|| self.usable_slots().into_iter().find(allowed))
+            .map(|slot| slot.addr.clone())
+    }
+
+    /// A snapshot of the pool for the `electrum_servers` request (CRD ch.38 R38.6.4o item 10): every server in the
+    /// coin's current rank with its figures at this moment. It sends nothing to any server and changes nothing
+    /// (it logs no change of state either).
+    pub(super) fn servers_view(&self) -> ElectrumServersView {
+        let now = now_float();
+        let maintained = self.maintained_slots();
+        let states = self.judge_out_of_date(&maintained, now);
+        let heights: Vec<u64> = maintained
+            .iter()
+            .filter_map(|slot| Self::tip_figure(slot).map(|figure| figure.height))
+            .collect();
+        let agreed = agreed_tip(&heights);
+        // The near decision runs over the up-to-date connections; when none is up to date, over all of them
+        // (R38.6.4o item 5).
+        let mut candidates: Vec<Arc<ServerSlot>> = maintained
+            .iter()
+            .zip(&states)
+            .filter(|(_, state)| state.is_none())
+            .map(|(slot, _)| slot.clone())
+            .collect();
+        if candidates.is_empty() {
+            candidates = maintained.clone();
+        }
+        let near_ids: Vec<usize> = candidates
+            .iter()
+            .zip(self.near_flags(&candidates))
+            .filter(|(_, near)| *near)
+            .map(|(slot, _)| slot.id)
+            .collect();
+        let servers = self
+            .slots()
+            .iter()
+            .enumerate()
+            .map(|(rank, slot)| {
+                let position = maintained.iter().position(|member| member.id == slot.id);
+                let state = slot.state();
+                let height = state
+                    .session
+                    .as_ref()
+                    .filter(|session| !session.is_closed())
+                    .and_then(|session| session.headers().tip());
+                ElectrumServerView {
+                    server: slot.label.clone(),
+                    rank,
+                    maintained: position.is_some(),
+                    near: near_ids.contains(&slot.id),
+                    height,
+                    lag: agreed.zip(height).and_then(|(tip, height)| signed_lag(tip, height)),
+                    out_of_date: position
+                        .and_then(|position| states.get(position))
+                        .and_then(|state| state.as_ref())
+                        .map(|state| state.kind().as_str()),
+                    latency_ms: position.and_then(|_| state.quality.smoothed.value_ms()),
+                    suspended: state.suspension.is_suspended(now),
+                    poor_demoted: state.quality.is_poor_demoted(now),
+                    removed: state.removed.is_some(),
+                }
+            })
+            .collect();
+        ElectrumServersView {
+            coin: self.ticker.clone(),
+            server_order: self.order.name(),
+            tolerance_blocks: self.tolerance,
+            agreed_tip: agreed,
+            chain_disagreement: self
+                .disagreement_servers()
+                .map(|servers| self.disagreement_text(&servers, false)),
+            servers,
+        }
+    }
+
     // ---- routing (R38.6.4f, R38.6.4g, R38.6.4j) -----------------------------------------------
 
     /// Sends `request` over `session`; a failure closes the connection (R38.6.4f item 1).
@@ -1834,21 +2779,24 @@ impl PoolShared {
         }
     }
 
-    /// The maintained connections in the order `request` tries them: the priority order, except that a
-    /// read-only query with `electrum_spread_reads` on tries the near connections first (R38.6.4a item 6),
-    /// starting at the one whose turn it is and going round them, and then the others in priority order
-    /// (items 1, 3 and 5). Everything else, and a set of one, keeps the priority order.
+    /// The maintained connections in the order `request` tries them. A read-only query or a transaction broadcast
+    /// tries the up-to-date connections first and the out-of-date ones after them, in priority order among
+    /// themselves (R38.6.4o item 5; when none is up to date, all count as up to date). Among the up-to-date
+    /// connections, a read-only query with `electrum_spread_reads` on tries the near ones first (R38.6.4a item 6),
+    /// starting at the one whose turn it is and going round them, and then the others in priority order (items 1,
+    /// 3 and 5). Everything else, and a set of one, keeps the priority order.
     fn in_turn_for(&self, request: &JsonRpcRequestEnum, maintained: Vec<Arc<ServerSlot>>) -> Vec<Arc<ServerSlot>> {
-        if !(self.spread_reads && is_read_only(request)) {
+        let read = is_read_only(request);
+        if !(read || is_broadcast(request)) {
             return maintained;
         }
+        let (up_to_date, out_of_date) = self.split_by_state(maintained);
+        if !(self.spread_reads && read) {
+            return up_to_date.into_iter().chain(out_of_date).collect();
+        }
         let turn = self.read_cursor.fetch_add(1, AtomicOrdering::Relaxed);
-        let figures: Vec<Option<f64>> = maintained
-            .iter()
-            .map(|slot| slot.state().quality.smoothed.value_ms())
-            .collect();
-        let near = near_sessions(&figures, self.near_factor, self.near_offset_ms);
-        let (mut turns, others): (Vec<_>, Vec<_>) = maintained
+        let near = self.near_flags(&up_to_date);
+        let (mut turns, others): (Vec<_>, Vec<_>) = up_to_date
             .into_iter()
             .zip(near)
             .partition::<Vec<_>, _>(|(_, near)| *near);
@@ -1856,7 +2804,38 @@ impl PoolShared {
         if size > 1 {
             turns.rotate_left(turn % size);
         }
-        turns.into_iter().chain(others).map(|(slot, _)| slot).collect()
+        turns
+            .into_iter()
+            .chain(others)
+            .map(|(slot, _)| slot)
+            .chain(out_of_date)
+            .collect()
+    }
+
+    /// Splits `maintained`, given in priority order, into the up-to-date and the out-of-date connections, each in
+    /// priority order (R38.6.4o item 5). The connections are judged anew first. When none is up to date, every one
+    /// of them is taken as up to date.
+    fn split_by_state(&self, maintained: Vec<Arc<ServerSlot>>) -> (Vec<Arc<ServerSlot>>, Vec<Arc<ServerSlot>>) {
+        let states = self.refresh_out_of_date();
+        let (out_of_date, up_to_date): (Vec<_>, Vec<_>) = maintained.into_iter().partition::<Vec<_>, _>(|slot| {
+            states
+                .iter()
+                .any(|(other, state)| other.id == slot.id && state.is_some())
+        });
+        if up_to_date.is_empty() {
+            (out_of_date, Vec::new())
+        } else {
+            (up_to_date, out_of_date)
+        }
+    }
+
+    /// Which of `slots` are near (R38.6.4a item 6), from their smoothed latencies at this moment.
+    fn near_flags(&self, slots: &[Arc<ServerSlot>]) -> Vec<bool> {
+        let figures: Vec<Option<f64>> = slots
+            .iter()
+            .map(|slot| slot.state().quality.smoothed.value_ms())
+            .collect();
+        near_sessions(&figures, self.near_factor, self.near_offset_ms)
     }
 
     async fn route_inner(
@@ -1868,7 +2847,7 @@ impl PoolShared {
     ) -> Option<(JsonRpcRemoteAddr, JsonRpcResponseEnum)> {
         let timings = &self.timings;
         let width = self.ceiling();
-        let retry_rounds = |servers: usize| (servers + width - 1) / width;
+        let retry_rounds = |servers: usize| rounds_of(servers, width);
         let maintained = self.maintained_slots();
         let usable_at_start = self.usable_count();
 
@@ -1898,38 +2877,45 @@ impl PoolShared {
             }
         }
 
-        // Item 2: every server of the pool, `width` at a time; the servers not yet tried come first.
+        // Item 2: every server of the pool in a sliding window of `width` attempts in flight; the servers not yet
+        // tried come first. As soon as an attempt ends without an answer, the next server starts (D38.6.4j.1), so one
+        // attempt that is slow to fail never holds back a server that could answer. The budget of an attempt is
+        // derived from the servers not yet started, this one included (R38.6.4j item 2).
         let usable = self.usable_slots();
         let (untried, retried): (Vec<_>, Vec<_>) = usable.into_iter().partition(|slot| !tried.contains(&slot.id));
         let order: Vec<Arc<ServerSlot>> = untried.into_iter().chain(retried).collect();
-        let groups: Vec<&[Arc<ServerSlot>]> = order.chunks(width).collect();
-        for (i, group) in groups.iter().enumerate() {
-            let remaining = secs_left(deadline);
-            if remaining.is_zero() {
-                return None;
-            }
-            let cap = group
-                .iter()
-                .map(|slot| slot.establish_timeout)
-                .max()
-                .unwrap_or(timings.establishment)
-                + timings.request;
-            let round = round_budget(remaining, groups.len() - i, cap, timings).min(remaining);
-            let mut attempts: FuturesUnordered<_> = group
-                .iter()
-                .map(|slot| async move {
-                    let result = self.attempt_with_connect(slot, request, round, opened).await;
-                    (slot.clone(), result)
-                })
-                .collect();
-            while let Some((slot, result)) = attempts.next().await {
-                match result {
-                    Ok(response) => return Some((JsonRpcRemoteAddr(slot.label.clone()), response)),
-                    Err(e) => failures.record(&slot.label, e),
+        let mut next = 0;
+        let mut in_flight = FuturesUnordered::new();
+        loop {
+            while in_flight.len() < width && next < order.len() {
+                let remaining = secs_left(deadline);
+                if remaining.is_zero() {
+                    break;
                 }
+                let slot = order[next].clone();
+                let rounds_left = retry_rounds(order.len() - next);
+                let round = round_budget(
+                    remaining,
+                    rounds_left,
+                    slot.establish_timeout + timings.request,
+                    timings,
+                )
+                .min(remaining);
+                next += 1;
+                in_flight.push(async move {
+                    let result = self.attempt_with_connect(&slot, request, round, opened).await;
+                    (slot, result)
+                });
+            }
+            // The attempts in flight end within the budget they were started with, so the call ends within *B*.
+            let Some((slot, result)) = in_flight.next().await else {
+                return None;
+            };
+            match result {
+                Ok(response) => return Some((JsonRpcRemoteAddr(slot.label.clone()), response)),
+                Err(e) => failures.record(&slot.label, e),
             }
         }
-        None
     }
 
     /// `server.ping` goes over every maintained connection at once and waits for all of them; a
@@ -2035,16 +3021,26 @@ async fn maintenance_loop(client: Weak<ElectrumClientImpl>, mut trigger_rx: futu
     let mut next_pass_at = 0.;
     loop {
         let wait = (next_pass_at - now_float()).max(0.);
+        let mut compare_due = false;
         let mut pass_due = match select_future(Box::pin(Timer::sleep(wait)), Box::pin(trigger_rx.next())).await {
             EitherFuture::Left(_) => true,
             EitherFuture::Right((None, _)) => return,
-            EitherFuture::Right((Some(wake), _)) => wake == Wake::Pass,
+            EitherFuture::Right((Some(wake), _)) => {
+                compare_due = wake == Wake::Compare;
+                wake == Wake::Pass
+            },
         };
         while let Ok(wake) = trigger_rx.try_recv() {
             pass_due |= wake == Wake::Pass;
+            compare_due |= wake == Wake::Compare;
         }
         let Some(client) = client.upgrade() else { return };
         let pool = client.pool.clone();
+        if compare_due {
+            // Not awaited here: a slow comparison must not hold up the maintenance pass.
+            let pool = pool.clone();
+            spawn(async move { pool.run_due_comparisons().await });
+        }
         if pass_due {
             pool.run_pass().await;
             next_pass_at = now_float() + pool.next_pass_delay().as_secs_f64();
@@ -2065,20 +3061,28 @@ async fn maintenance_loop(client: Weak<ElectrumClientImpl>, mut trigger_rx: futu
 /// (R38.6.4l items 6 and 7). A round waits until 5 minutes have passed since the last one started; while a
 /// connection stays poor and no replacement is found, the next round follows under the same limit.
 async fn measure_loop(pool: Weak<PoolShared>, mut wake_rx: futures_mpsc::UnboundedReceiver<()>) {
-    let mut round_due = false;
     loop {
         let Some(strong) = pool.upgrade() else { return };
         let now = now_float();
-        if strong.mark_poor_connections(now) {
-            round_due = true;
+        // A round is called for while a maintained connection is poor.
+        let round_due = strong.mark_poor_connections(now);
+        if !round_due {
+            // No maintained connection is poor any more: no round is called for, and the least time between rounds
+            // returns to the base (R38.6.4o item 8).
+            let mut state = strong.measure_state();
+            state.backoff_level = 0;
+            state.gap_level = 0;
         }
         let wait = if round_due {
+            let (last_started, gap_level) = {
+                let state = strong.measure_state();
+                (state.last_round_started, state.gap_level)
+            };
             let at = next_round_at(
-                strong.measure_state().last_round_started,
-                strong.timings.remeasure_limit,
+                last_started,
+                remeasure_gap(strong.timings.remeasure_limit, strong.timings.remeasure_cap, gap_level),
             );
             if now >= at {
-                round_due = false;
                 strong.run_remeasure_round().await;
                 // Look at the connections again at once: a connection that is still poor waits for the limit.
                 continue;
@@ -2146,6 +3150,21 @@ mod budget_tests {
         }
     }
 
+    /// R38.6.4j items 2 and 4 (D38.6.4j.1): the rounds left of a retry are the servers not yet started, the one
+    /// starting included, over the width, rounded up.
+    #[test]
+    fn the_rounds_of_a_sliding_retry_count_the_servers_not_yet_started() {
+        // Three servers, a window of two: the first attempt counts 2 rounds, the second 1, the third 1.
+        assert_eq!((0..3).map(|next| rounds_of(3 - next, 2)).collect::<Vec<_>>(), vec![
+            2, 1, 1
+        ]);
+        // Four servers, a window of two: 2, 2, 1, 1. A window as wide as the pool is one round.
+        assert_eq!((0..4).map(|next| rounds_of(4 - next, 2)).collect::<Vec<_>>(), vec![
+            2, 2, 1, 1
+        ]);
+        assert_eq!(rounds_of(3, 3), 1);
+    }
+
     #[test]
     fn round_budget_floor_and_tight_budgets() {
         let timings = ElectrumPoolTimings::default();
@@ -2178,6 +3197,11 @@ mod budget_tests {
         // R38.6.4l: the 5-minute round limit, the 15-minute mark, the 10-minute stale floor, the 300 ms
         // eligibility floor and the 1 s floor of P2.
         assert_eq!(t.remeasure_limit, secs(300));
+        // R38.6.4o item 8: the least time between rounds grows from 5 to at most 60 minutes.
+        assert_eq!(t.remeasure_cap, secs(3600));
+        // R38.6.4o item 12: the activation window and the comparison limit.
+        assert_eq!(t.activation_window, secs(5));
+        assert_eq!(t.compare_limit, secs(300));
         assert_eq!(t.poor_demotion, secs(900));
         assert_eq!(t.stale_floor, secs(600));
         assert_eq!(t.latency_floor, Duration::from_millis(300));

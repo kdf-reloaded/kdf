@@ -85,7 +85,7 @@ pub(crate) mod electrum_measure;
 
 #[path = "rpc_clients/electrum_pool.rs"]
 pub(crate) mod electrum_pool;
-pub use electrum_pool::{ElectrumPoolOptions, ElectrumPoolTimings, ServerOrder};
+pub use electrum_pool::{with_call_budget, ElectrumPoolOptions, ElectrumPoolTimings, ServerOrder};
 
 #[path = "rpc_clients/electrum_rpc_client.rs"]
 pub(crate) mod electrum_rpc_client;
@@ -299,6 +299,24 @@ impl UtxoRpcClientEnum {
             let fut = async move {
                 client
                     .wait_for_confirmations(tx_hash, expiry_height, confirmations, wait_until, check_every)
+                    .await
+            };
+            return Box::new(fut.boxed().compat());
+        }
+        // An Electrum client polls one server for the whole wait, so that the answer that ends it always comes from
+        // the server being polled (CRD ch.38 R38.6.4o item 6). The native client has one server.
+        if let UtxoRpcClientEnum::Electrum(client) = self {
+            let client = client.clone();
+            let fut = async move {
+                client
+                    .wait_for_confirmations_on_one_server(
+                        tx_hash,
+                        expiry_height,
+                        confirmations,
+                        requires_notarization,
+                        wait_until,
+                        check_every,
+                    )
                     .await
             };
             return Box::new(fut.boxed().compat());

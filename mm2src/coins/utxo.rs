@@ -983,6 +983,15 @@ impl MatureUnspentList {
     }
 }
 
+/// The error text while the Electrum servers of a UTXO coin disagree about the chain (CRD ch.38 R38.6.4o item 12),
+/// `None` for a coin without an Electrum client.
+pub(crate) fn electrum_chain_disagreement(fields: &UtxoCoinFields) -> Option<String> {
+    match &fields.rpc_client {
+        UtxoRpcClientEnum::Electrum(client) => client.chain_disagreement(),
+        _ => None,
+    }
+}
+
 #[async_trait]
 #[cfg_attr(test, mockable)]
 pub trait UtxoCommonOps:

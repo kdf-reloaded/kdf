@@ -673,6 +673,11 @@ pub trait MmCoin: SwapOps + WatcherOps + MarketCoinOps + fmt::Debug + Send + Syn
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut;
 
+    /// The error text while the coin's Electrum servers disagree about the chain, `None` otherwise and for a coin
+    /// without an Electrum client (CRD ch.38 R38.6.4o item 12). While it is `Some`, a new order with the coin, the start
+    /// of a new swap with it and a withdrawal of it are refused with this text.
+    fn chain_disagreement(&self) -> Option<String> { None }
+
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut;
 
     /// Maximum number of digits after decimal point used to denominate integer coin units (satoshis, wei, etc.)

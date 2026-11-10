@@ -9104,11 +9104,14 @@ mod electrum_pool_activation {
         });
         let started = Instant::now();
         let client = build_client(&[&servers[0], &servers[1], &servers[2]]).unwrap();
-        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        // The build waits up to the activation window of 5 s after its first connection for the heights of the
+        // other servers (CRD ch.38 R38.6.4o item 12, D38.6.4o.10), and a silent server never answers: that window,
+        // not the silent server's 20 s, is what it costs.
+        assert!(started.elapsed() < Duration::from_secs(7), "{:?}", started.elapsed());
         assert_eq!(block_on(client.count_connected()), 1);
         let height = block_on(client.get_block_count().compat()).unwrap();
         assert_eq!(height, 4242);
-        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(7), "{:?}", started.elapsed());
     }
 }
 

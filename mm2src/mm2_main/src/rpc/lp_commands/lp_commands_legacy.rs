@@ -17,6 +17,7 @@
 //  marketmaker
 //
 
+use coins::utxo::rpc_clients::with_call_budget;
 use coins::{disable_coin as disable_coin_impl, lp_coinfind, lp_coininit, CoinBalance, CoinsContext, MmCoinEnum};
 use common::custom_futures::FutureTimerExt;
 use common::executor::{spawn, Timer};
@@ -163,8 +164,13 @@ async fn legacy_activation_response(
     keep_coin_on_failure: bool,
 ) -> Result<Response<Vec<u8>>, String> {
     let ticker = coin.ticker().to_owned();
+    // The caller's bound is also the budget of the Electrum calls of the read, so that an Electrum client fails over
+    // from a server that does not answer inside that bound (CRD ch.38 R38.6.4j item 1). Other clients ignore it.
+    let call_budget = bound_secs.map_or(std::time::Duration::MAX, std::time::Duration::from_secs_f64);
     let balance = balance_of_registered_coin(
-        async { coin.my_balance().compat().await.map_err(|e| e.to_string()) },
+        with_call_budget(call_budget, async {
+            coin.my_balance().compat().await.map_err(|e| e.to_string())
+        }),
         bound_secs,
         keep_coin_on_failure,
         || deregister_coin_after_failed_balance_read(ctx, &ticker),
