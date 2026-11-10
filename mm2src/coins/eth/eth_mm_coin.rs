@@ -112,7 +112,13 @@ impl MmCoin for EthCoin {
     }
 
     fn validate_address(&self, address: &str) -> ValidateAddressResult {
-        let result = self.address_from_str(address);
+        let result = match &self.coin_type {
+            // TRON addresses are Base58Check (or the 21-byte hex wire form), the same forms withdraw accepts.
+            EthCoinType::Tron | EthCoinType::Trc20 { .. } => crate::eth::tron::TronAddress::parse(address)
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            EthCoinType::Eth | EthCoinType::Erc20 { .. } => self.address_from_str(address).map(|_| ()),
+        };
         ValidateAddressResult {
             is_valid: result.is_ok(),
             reason: result.err(),

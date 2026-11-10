@@ -1,6 +1,6 @@
 # Plan: make TRON work again
 
-**Status:** in progress (added to the 0.4.0 scope on 2026-11-08; activation and the wallet path first, swaps after) — **Last reviewed:** 2026-11-08
+**Status:** in progress (added to the 0.4.0 scope on 2026-11-08; activation and the wallet path first, swaps after) — **Last reviewed:** 2026-11-10
 
 > **Context:** created 2026-10-28 as the umbrella plan for bringing TRON (TRX,
 > TRC20) back. By maintainer decision TRON activation is switched off on `dev`
@@ -33,6 +33,11 @@ the next beta. Swap participation follows once its own blocker is cleared
    decision on the route, or a Spec Reader pass if the decision depends on how
    the reference activates TRON. Then ch. 21, ch. 35 and ch. 55 must be made
    to agree. Until then no activation code is written.
+
+   *Decided 2026-11-08:* TRON gets the mmrpc 2.0 route (`enable_eth_with_tokens`,
+   `task::enable_eth::*`) and keeps the legacy route. *Decided 2026-11-10:* TRON
+   stays switched off in the 0.4.0 beta; the node-client, activation-route and
+   switch-on changes move to a later version.
 2. **Switch activation back on** (ch. 21 D6): set the constant to `true` and
    retire the refusal tests that go with it.
 3. **Node access.** Check Reloaded's TRON node client against ch. 21 §21.9
@@ -47,6 +52,12 @@ the next beta. Swap participation follows once its own blocker is cleared
 4. **Wallet path end to end.** Activation, balance, history and withdraw for
    TRX and one TRC20 token, on a testnet first, then on mainnet with small
    amounts.
+
+   *2026-11-10:* the balance (TRX from the account query, TRC20 through
+   `balanceOf`), the coin's own address in the base58check form, `validateaddress`
+   and raw-transaction broadcast are wired behind the availability constant (CRD
+   ch. 21 §21.10A); the testnet rows follow on a lab build with the constant
+   flipped.
 5. **Parked branches.** Each has its own plan with its blocker; revive them
    only after work packages 1 and 2:
    - [`tron-swap-support.md`](tron-swap-support.md): `feat/tron-swap-support`,

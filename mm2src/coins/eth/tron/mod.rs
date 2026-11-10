@@ -7,11 +7,17 @@
 pub mod activation;
 pub mod address;
 pub mod api;
+pub(crate) mod balance;
+pub(crate) mod broadcast;
 pub mod fee;
 pub mod proto;
 pub mod sign;
 pub mod tx_builder;
 pub mod withdraw;
+
+#[cfg(all(test, not(target_arch = "wasm32")))] mod test_node;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod wallet_path_tests;
 
 pub use activation::tron_coin_from_conf_and_request;
 pub use address::TronAddress;

@@ -1,13 +1,23 @@
 //! MarketCoinOps trait implementation for EthCoin.
 
 use super::*;
+use crate::eth::tron::broadcast::broadcast_raw_tx;
+use crate::eth::tron::TronAddress;
 use crate::one_smallest_unit;
 
 #[cfg_attr(test, mockable)]
 impl MarketCoinOps for EthCoin {
     fn ticker(&self) -> &str { &self.ticker[..] }
 
-    fn my_address(&self) -> Result<String, String> { Ok(checksum_address(&format!("{:#02x}", self.my_address))) }
+    fn my_address(&self) -> Result<String, String> {
+        match &self.coin_type {
+            // TRON displays its address as Base58Check of the 21-byte wire form (CRD ch.21 §21.5).
+            EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
+                Ok(TronAddress::from_evm_address(self.my_address).to_base58())
+            },
+            EthCoinType::Eth | EthCoinType::Erc20 { .. } => Ok(checksum_address(&format!("{:#02x}", self.my_address))),
+        }
+    }
 
     fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> { Ok(self.display_public_key()) }
 
@@ -90,6 +100,10 @@ impl MarketCoinOps for EthCoin {
             tx = &tx[2..];
         }
         let bytes = try_fus!(hex::decode(tx));
+        if matches!(self.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
+            // TRON has its own node API: the signed protobuf transaction goes to `/wallet/broadcasthex`.
+            return Box::new(broadcast_raw_tx(self.tron_api.clone(), bytes).boxed().compat());
+        }
         let selfi = self.clone();
         let fut = async move {
             let provider = selfi.alloy_provider();
@@ -107,6 +121,10 @@ impl MarketCoinOps for EthCoin {
         use alloy::providers::Provider;
 
         let bytes = tx.to_vec();
+        if matches!(self.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
+            // TRON has its own node API: the signed protobuf transaction goes to `/wallet/broadcasthex`.
+            return Box::new(broadcast_raw_tx(self.tron_api.clone(), bytes).boxed().compat());
+        }
         let selfi = self.clone();
         let fut = async move {
             let provider = selfi.alloy_provider();

@@ -52,6 +52,16 @@ coin activates with no swap-contract binding, and every
 swap/NFT-adjacent call site refuses Tron coins behind a typed
 deferral, kept unreachable in production by the activation gate.
 
+*Amended 2026-11-09 (clean-side status note):* the sentence above
+that calls the withdraw pipeline functional overstated the code
+until this date. Withdraw itself built, signed and broadcast Tron
+transfers, but the coin's generic wallet surface did not: the
+balance query answered an internal "not wired" error for TRX and
+TRC20, raw-transaction broadcast went to the EVM node interface,
+and the coin's own address was shown in the EVM form. §21.10A
+records the wallet path as it stands from this date. All of it
+stays unreachable while the availability constant is `false`.
+
 This chapter's subject is the *contract*: the public coin-trait
 and activation surface the rest of the workspace calls, the
 Tron-protocol interop the module must conform to, the
@@ -432,6 +442,11 @@ amount.
 account-resource, chain-parameters, and (for TRC20)
 constant-contract endpoints.
 
+*Amended 2026-11-10 (clean-side status note):* the fee of a Tron
+withdraw is always estimated as R-W3 describes. Until this date a
+`fee` descriptor in the request was silently ignored; from this
+date it is refused by R-WP6 (§21.10A).
+
 **R-W4.** Build the dictated contract -- a native `TransferContract`
 or a TRC20 `TriggerSmartContract` carrying the ABI-encoded
 `transfer(address,uint256)` call (§21.6) -- with the resolved
@@ -455,6 +470,70 @@ into bandwidth and energy components (R-F2).
 > EVM/Tron activation requests. R-W1–R-W6 above are the native rail
 > chapter 63 calls `fee_method = native`; they are unchanged by it.
 > Chapter 63 passed the KDF Dirty Gate on 2026-11-08.
+
+## 21.10A Wallet Path (clean-side, added 2026-11-10)
+
+Reloaded-original rules for the coin's generic wallet surface:
+the balance query, raw-transaction broadcast, the coin's own
+address and the withdraw fee descriptor. The node's answer forms
+they rely on are public-network observations of the Nile testnet
+node on 2026-11-10 (chapter 01 R6): an account the chain has not
+created yet answers HTTP 200 with an empty JSON object, and a
+request the node cannot serve answers HTTP 200 with a JSON object
+carrying a top-level `Error` string.
+
+**R-WP1 (TRX balance).** The TRX balance is the account query's
+`balance` in SUN (§21.9), converted at `1 TRX = 10^6 SUN`. Only a
+2xx empty object means an account the chain has not created yet,
+and only it reads as a zero balance. A non-empty answer with
+neither `balance` nor `create_time` is an error. A non-2xx status,
+an unreachable node, an undecodable body or a negative balance is
+an error, never zero.
+
+**R-WP2 (node failure).** A non-2xx answer from any node endpoint,
+and a 2xx answer whose JSON object has a top-level `Error` key,
+is a node failure. The request moves to the next configured node.
+When the last node fails with the `Error` form, the caller gets
+that node's error, typed, with the node named host-only and no
+credential part (R-N1).
+
+**R-WP3 (TRC20 balance).** The TRC20 balance is `balanceOf(owner)`
+through the constant-contract endpoint (§21.9). The result MUST be
+exactly 32 bytes, read big-endian and scaled by the token's
+decimals. A missing, empty, non-hex or wrong-length result
+(revert data included) is an error. The withdraw path reads the
+balance by the same rule.
+
+**R-WP4 (broadcast).** Raw-transaction broadcast posts the
+lowercase hex of the signed transaction to the hex broadcast
+endpoint (§21.9), never to an EVM node. Success needs the success
+flag and a 32-byte `txid`. The id is returned as lowercase hex
+without `0x`, the form the EVM path returns. A refusal
+(`result: false`) carries the node's code and message. An answer
+without the success flag or without a usable `txid` is an error,
+never an empty or invented id.
+
+**R-WP5 (own address).** The coin's own address is shown in the
+base58check display form of §21.5. Address validation for a Tron
+coin accepts exactly the forms a Tron withdraw accepts: the
+base58check form and the 21-byte wire form in hex (`41…`,
+optionally behind `0x`). An EVM `0x` 20-byte form is refused.
+
+**R-WP6 (withdraw fee descriptor).** A Tron withdraw request that
+carries a `fee` descriptor of any form is refused with
+`InvalidFeePolicy` before any node request, the answer chapter 49
+gives for a fee descriptor of a type the coin does not take. The
+fee is the R-W3 estimate. A request without `fee` is unchanged.
+
+**T-WP (tests).** Unit tests against a loopback stub node
+(`coins/eth/tron/wallet_path_tests.rs`, `tron/balance.rs`,
+`tron/broadcast.rs`, `tron/address.rs`) cover each rule: the
+absent-account, `Error`-form, non-2xx, undecodable and negative
+answers of R-WP1/R-WP2, including failover to a second node;
+the exactly-32-byte result of R-WP3; accepted, refused and
+malformed broadcast answers of R-WP4; the display and validation
+forms of R-WP5 for TRX, TRC20 and an unchanged EVM coin; and every
+fee descriptor form of R-WP6, with no node request made.
 
 ## 21.11 Deferred Work
 
@@ -1033,3 +1112,9 @@ V3. The address encoding, protobuf transaction/contract formats,
   against the standard that any discretionary finding fails a chapter;
   dictated-interop and public-surface tokens were excluded from the measured
   set.
+- *Clean-context addition (2026-11-10, forbidden corpus not consulted):*
+  §21.10A (R-WP1–R-WP6, T-WP) and the dated status notes in §21.0 and
+  after R-W3 are Reloaded-original. They rest on this repository's code,
+  chapter 49's fee-descriptor rule, the public Tron node HTTP API, and a
+  public-network observation of the Nile testnet node on 2026-11-10
+  (chapter 01 R6) for the node's empty-account and `Error` answer forms.

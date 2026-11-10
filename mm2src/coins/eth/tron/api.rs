@@ -6,7 +6,7 @@
 
 use derive_more::Display;
 use mm2_err_handle::prelude::*;
-use mm2_net::transport::{post_json, SlurpError};
+use mm2_net::transport::{slurp_post_json, SlurpError};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -31,6 +31,9 @@ pub enum TronApiError {
     InvalidResponse(String),
     #[display(fmt = "All nodes failed. Last error: {}", _0)]
     AllNodesFailed(String),
+    /// A 2xx answer that is the node's error form: a JSON object with a top-level `Error` string.
+    #[display(fmt = "Node error: {}", _0)]
+    NodeError(String),
 }
 
 impl std::error::Error for TronApiError {}
@@ -60,12 +63,46 @@ impl TronApiError {
             },
             TronApiError::InvalidResponse(text) => TronApiError::InvalidResponse(scrub(text)),
             TronApiError::AllNodesFailed(text) => TronApiError::AllNodesFailed(scrub(text)),
+            TronApiError::NodeError(text) => TronApiError::NodeError(scrub(text)),
         }
     }
 }
 
 /// Whether a TRON API error is retryable on the next node.
-fn is_retryable(e: &TronApiError) -> bool { matches!(e, TronApiError::Transport(_) | TronApiError::Timeout(_)) }
+fn is_retryable(e: &TronApiError) -> bool {
+    matches!(
+        e,
+        TronApiError::Transport(_) | TronApiError::Timeout(_) | TronApiError::NodeError(_)
+    )
+}
+
+/// POST a JSON body to one node and decode a 2xx answer as `Resp`.
+///
+/// A non-2xx status is a node failure (retryable on the next node), whatever its body says: a rate-limit or
+/// error body that happens to fit `Resp` must never be taken for an answer (for example `{}` on `getaccount`
+/// means "account does not exist" only as a 2xx answer). The node's own error form is a 2xx answer, a JSON object
+/// with a top-level `Error` string (measured on the public Nile node, on every endpoint); it is a
+/// [`TronApiError::NodeError`] (retryable) and never decodes as `Resp`. The error texts carry no URL.
+async fn post_json_checked<Resp>(url: &str, json_body: String) -> Result<Resp, TronApiError>
+where
+    Resp: serde::de::DeserializeOwned,
+{
+    let (status, _headers, body) = slurp_post_json(url, json_body).await.map_err(TronApiError::from)?;
+    if !status.is_success() {
+        return Err(TronApiError::Transport(format!(
+            "node answered HTTP status {}",
+            status.as_u16()
+        )));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| TronApiError::InvalidResponse(format!("node answer does not decode: {e}")))?;
+    if let Some(error) = value.as_object().and_then(|object| object.get("Error")) {
+        let text = error.as_str().map_or_else(|| error.to_string(), str::to_owned);
+        return Err(TronApiError::NodeError(text));
+    }
+    serde_json::from_value(value)
+        .map_err(|e| TronApiError::InvalidResponse(format!("node answer does not decode: {e}")))
+}
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -244,7 +281,7 @@ impl TronApiClient {
 
         for i in 0..nodes.len() {
             let url = format!("{}{}", nodes[i], path);
-            match post_json::<Resp>(&url, json_body.clone()).await {
+            match post_json_checked::<Resp>(&url, json_body.clone()).await {
                 Ok(resp) => {
                     // Promote this node to front.
                     if i > 0 {
@@ -253,7 +290,7 @@ impl TronApiClient {
                     return Ok(resp);
                 },
                 Err(e) => {
-                    let api_err = TronApiError::from(e).without_node_urls(&[&url, &nodes[i]]);
+                    let api_err = e.without_node_urls(&[&url, &nodes[i]]);
                     if !is_retryable(&api_err) {
                         return Err(api_err);
                     }
@@ -262,7 +299,11 @@ impl TronApiClient {
             }
         }
 
-        Err(TronApiError::AllNodesFailed(last_err.to_string()))
+        // The failure of the last node, kept typed when it is the node's own error answer.
+        match last_err {
+            node_error @ TronApiError::NodeError(_) => Err(node_error),
+            other => Err(TronApiError::AllNodesFailed(other.to_string())),
+        }
     }
 
     /// Get the current block (for TAPOS data and timestamp).
@@ -272,20 +313,31 @@ impl TronApiClient {
         self.try_post("/wallet/getnowblock", &Empty {}).await
     }
 
-    /// Get account info. Returns `None` if the account does not exist on-chain.
+    /// Get account info. Returns `None` only when the node answers a 2xx empty JSON object `{}`, its documented
+    /// form for an account that does not exist on chain.
+    ///
+    /// Any other answer is an existing account when it carries a `balance` or a `create_time`, and an
+    /// [`TronApiError::InvalidResponse`] otherwise (a non-object, or a non-empty object with neither field).
     pub async fn get_account(&self, address: &TronAddress) -> Result<Option<AccountInfo>, TronApiError> {
         let req = GetAccountRequest {
             address: address.to_base58(),
             visible: true,
         };
-        // TRON returns `{}` for non-existent accounts, which deserializes to
-        // AccountInfo with defaults. We detect this via missing create_time.
-        let resp: AccountInfo = self.try_post("/wallet/getaccount", &req).await?;
-        if resp.create_time.is_none() {
-            Ok(None)
-        } else {
-            Ok(Some(resp))
+        let answer: serde_json::Value = self.try_post("/wallet/getaccount", &req).await?;
+        let object = answer
+            .as_object()
+            .ok_or_else(|| TronApiError::InvalidResponse("getaccount answer is not a JSON object".to_owned()))?;
+        if object.is_empty() {
+            return Ok(None);
         }
+        if !object.contains_key("balance") && !object.contains_key("create_time") {
+            return Err(TronApiError::InvalidResponse(
+                "getaccount answer carries neither a balance nor a creation time".to_owned(),
+            ));
+        }
+        serde_json::from_value(answer)
+            .map(Some)
+            .map_err(|e| TronApiError::InvalidResponse(format!("node answer does not decode: {e}")))
     }
 
     /// Call a smart contract in read-only mode (no broadcast).

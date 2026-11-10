@@ -734,6 +734,17 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   new `fee` forms. The fee amount comes from the node's gas simulation and does not change. Detail: PR
   #323; CRD ch.18 R18.6B.3.
 
+#### TRON coins
+
+- **TRON coins show their balance, their own address and can broadcast a signed transaction through
+  the usual wallet calls.** The balance of TRX and of TRC20 tokens is read from the TRON node; an
+  account the chain has not seen yet shows a zero balance, and a node error is reported as an error,
+  never as zero. The coin's address is shown in the TRON form that starts with `T`, and
+  `validateaddress` accepts the same forms as a TRON withdrawal. A raw transaction is sent to the
+  TRON node instead of an EVM node. A TRON withdrawal that names a `fee` is refused with
+  `InvalidFeePolicy` instead of ignoring it, since TRON works out its own fee. There is no user
+  effect while TRON is switched off in this build. Detail: PR #N; CRD ch.21 §21.10A.
+
 #### Price service and the maker bot
 
 - **A coin on which the price sources disagree is now priced from the first source, with a warning, instead of
@@ -1157,6 +1168,10 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   CRD PR #267; CRD ch.05 R35a–R35c, ch.09 R24, ch.21 §21.4, ch.28 RQ1b, ch.32 R-Q6b, ch.38
   R38.6.4m, ch.39 R39.5A.3, ch.49 R49.27b.
 
+- **The CRD records how the reference handles TRON swaps.** It covers the public TRON swap contract,
+  its deployments and the state a TRON swap reads, as the basis for the TRON swap work. The node
+  itself is unchanged. Detail: PR #N; CRD ch.21 §21.11B.
+
 ### Plans touched
 
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
@@ -1293,7 +1308,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   reference value; its work is planned.
 - [`tron-gasfree`](docs/plans/tron-gasfree.md) — parked: TRON support was added to the 0.4.0 scope on 2026-11-08.
 - [`tron-support`](docs/plans/tron-support.md) — in progress: TRON support was added to the 0.4.0 scope on 2026-11-08; the
-  decisions a TRON swap needs were put to the maintainer that day.
+  decisions a TRON swap needs were put to the maintainer that day. The activation route was decided
+  on 2026-11-08 (work package 1), the wallet path's balance, address and broadcast are wired (work
+  package 4), and TRON stays switched off in this beta (decided 2026-11-10).
 - [`tron-swap-support`](docs/plans/tron-swap-support.md) — parked: the chapter rewrite on its branch failed the KDF Dirty
   Gate on 2026-11-08 and is not reused; the reference's TRON swap state is recorded by a gated Spec
   Reader round that lands with the first TRON code PR.
@@ -1448,9 +1465,12 @@ lives.
 - **TRON (TRX, TRC20) and Solana (SOL, SPL) cannot be activated in this beta.** Their support is not
   finished. TRON activation answers "TRON support is not available in this build";
   `enable_solana_with_tokens` and `enable_spl` answer "Solana support is not available in this
-  build"; the rest of the node is unaffected. Both are planned to return in the next beta. More in
+  build"; the rest of the node is unaffected. TRON stays switched off in this beta because its
+  wallet path (balance, address and broadcast) was only now wired, its node client has no time limit
+  per request and no API-key handling yet, and its activation route and swaps are unfinished; it
+  returns in a later version. Solana is planned to return in the next beta. More in
   [`tron-support`](docs/plans/tron-support.md) and [`solana-support`](docs/plans/solana-support.md).
-  Detail: PR #93.
+  Detail: PRs #93, #N.
 - **Tendermint (Cosmos) coins are wallet-only in this beta.** Activation, balances and withdrawals
   work; orders and swaps are planned to return in a later release. A swap already in progress still
   completes, and an order with a Tendermint coin saved by an earlier version is cancelled at startup.
