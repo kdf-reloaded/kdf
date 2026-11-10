@@ -426,9 +426,9 @@ asserted here.
 | Reloaded method string | Legacy surface | V2 surface | Note |
 | --- | --- | --- | --- |
 | `peer_connection_healthcheck` | routed | routed (listed above) | on both surfaces in Reloaded |
-| `sim_panic` | routed | not routed | test helper that panics the process; not a client method |
+| `sim_panic` | routed only with the test-only Cargo feature `sim-panic-rpc` (since 2026-11-10; absent from shipped builds) | not routed | test helper that panics the process; not a client method |
 
-Reloaded's legacy table therefore routes 54 distinct strings. Twelve of them are also
+Reloaded's legacy table therefore routes 54 distinct strings with that feature, 53 without it. Twelve of them are also
 routed on V2 in Reloaded: the census's nine, `peer_connection_healthcheck`, and
 `max_taker_vol` and `min_trading_vol`, which Reloaded's V2 dispatcher routes and the
 reference V2 table above does not list. The totals and the 232 / 223 reconciliation
