@@ -575,6 +575,43 @@ fn withdraw_without_a_fee_descriptor_still_reaches_the_node() {
     }
 }
 
+const NOW_BLOCK_BODY: &str = r#"{"blockID":"0000000003456789abcdef0123456789abcdef0123456789abcdef0123456789","block_header":{"raw_data":{"number":58251145,"txTrieRoot":"0000000000000000000000000000000000000000000000000000000000000000","witness_address":"41ab","parentHash":"0000000000000000000000000000000000000000000000000000000000000000","version":32,"timestamp":1700000000000},"witness_signature":"ab"},"transactions":[]}"#;
+
+/// A node that serves the withdraw's endpoints with the answer forms of the public node.
+fn withdraw_node() -> StubNode {
+    StubNode::start(|path, _| match path {
+        "/wallet/getaccount" => Reply::ok(r#"{"balance":50000000,"create_time":1700000000000}"#),
+        "/wallet/triggerconstantcontract" => Reply::ok(&format!(
+            r#"{{"constant_result":["{:064x}"],"energy_used":14000}}"#,
+            5_000_000u64
+        )),
+        "/wallet/getnowblock" => Reply::ok(NOW_BLOCK_BODY),
+        "/wallet/getchainparameters" => Reply::ok(
+            r#"{"chainParameter":[{"key":"getTransactionFee","value":1000},{"key":"getEnergyFee","value":420}]}"#,
+        ),
+        "/wallet/getaccountresource" => Reply::ok(r#"{"freeNetLimit":600,"NetLimit":0,"EnergyLimit":0}"#),
+        other => Reply::status(404, &format!("unexpected endpoint {other}")),
+    })
+}
+
+#[test]
+fn withdraw_gets_past_tapos_with_the_nodes_getnowblock_form() {
+    for trc20 in [false, true] {
+        let node = withdraw_node();
+        let result = block_on(async {
+            let (_ctx, coin) = if trc20 {
+                trc20_coin(&node.url()).await
+            } else {
+                trx_coin(&node.url()).await
+            };
+            withdraw_tron(coin.clone(), withdraw_request(&coin, None)).await
+        });
+        let details = result.unwrap_or_else(|e| panic!("the withdraw must succeed (trc20={trc20}): {e:?}"));
+        assert!(!details.tx_hex.0.is_empty());
+        assert!(node.bodies_for("/wallet/getnowblock").len() == 1);
+    }
+}
+
 const NODE_ERROR_BODY: &str = r#"{"Error":"class org.tron.api.ParseException : invalid address for field"}"#;
 
 #[test]

@@ -108,9 +108,9 @@ where
 // Request / Response types
 // ---------------------------------------------------------------------------
 
-/// `/wallet/getnowblock` response.
+/// `/wallet/getnowblock` response. The node's keys are `blockID` and snake-case `block_header` (measured on the
+/// public Nile node); the unused keys (`transactions`, `witness_signature`, ...) are ignored.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GetNowBlockResponse {
     #[serde(rename = "blockID")]
     pub block_id: String,
@@ -428,6 +428,22 @@ mod tests {
         // ref_block_hash = block_id bytes[8..16]
         let id_bytes = hex::decode(&resp.block_id).unwrap();
         assert_eq!(tapos.ref_block_hash, id_bytes[8..16].to_vec());
+    }
+
+    #[test]
+    fn get_now_block_decodes_the_nodes_answer_form() {
+        let id = "0000000003456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let zeros = "0".repeat(64);
+        let json = format!(
+            r#"{{"blockID":"{id}","block_header":{{"raw_data":{{"number":1,"txTrieRoot":"{zeros}","witness_address":"41ab","parentHash":"{zeros}","version":32,"timestamp":1}},"witness_signature":"ab"}},"transactions":[]}}"#
+        );
+        let resp: GetNowBlockResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp.block_id, id);
+        assert_eq!(resp.block_header.raw_data.number, 1);
+        assert_eq!(resp.block_header.raw_data.timestamp, 1);
+        // The camel-case spelling is not the node's form and must not decode.
+        let wrong = format!(r#"{{"blockID":"{id}","blockHeader":{{"raw_data":{{"number":1,"timestamp":1}}}}}}"#);
+        assert!(serde_json::from_str::<GetNowBlockResponse>(&wrong).is_err());
     }
 
     #[test]

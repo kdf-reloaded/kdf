@@ -1467,9 +1467,10 @@ lives.
   `enable_solana_with_tokens` and `enable_spl` answer "Solana support is not available in this
   build"; the rest of the node is unaffected. TRON stays switched off in this beta because its
   wallet path (balance, address and broadcast) was only now wired, its node client has no time limit
-  per request and no API-key handling yet, and its activation route and swaps are unfinished; it
-  returns in a later version. Solana stays switched off as well: the Solana SDK the build uses is
-  pinned to a version that could only be upgraded through a fork. More in
+  per request and no API-key handling yet, its transaction history is not available, and its
+  activation route and swaps are unfinished; it returns in a later version. Solana stays switched
+  off as well: the Solana SDK the build uses is pinned to a version that could only be upgraded
+  through a fork. More in
   [`tron-support`](docs/plans/tron-support.md) and [`solana-support`](docs/plans/solana-support.md).
   Detail: PRs #93, #333.
 - **Tendermint (Cosmos) coins are wallet-only in this beta.** Activation, balances and withdrawals
