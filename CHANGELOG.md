@@ -1317,6 +1317,55 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md) — planning: it records that 0.3.0-beta.1 fixed
   the earlier problem (PR #181); the two ideas left are not in 0.4.0.
 
+### Not in this release
+
+Work that was planned or started for this cycle but is postponed to a later version. Each item says
+why and where the plan lives; what a user meets today is under Known limitations below.
+
+- **TRON (TRX, TRC20) activation and swaps.** TRON support is not finished, so TRON activation
+  stays off in this beta (see Known limitations), and TRON swaps are not built yet. More in
+  [`tron-support`](docs/plans/tron-support.md).
+- **TRON GasFree (gasless TRC20 withdrawals).** It is specified (CRD ch.63) but not in this build:
+  an earlier implementation stays parked on a branch and is not revived, and the new work needs
+  TRON activation and a pinned GasFree proxy creation bytecode first. More in
+  [`tron-gasfree`](docs/plans/tron-gasfree.md).
+- **Tendermint (Cosmos) orders and swaps.** Tendermint coins stay wallet-only; orders and swaps
+  return only with a swap plan of their own and its tests, which do not exist yet. The activation
+  features not built yet are in
+  [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md).
+- **Solana (SOL, SPL).** Activation stays off: the support is not finished, and the Solana SDK the
+  build uses is pinned to a version that could only be upgraded through a fork. More in
+  [`solana-support`](docs/plans/solana-support.md) and
+  [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md).
+- **Siacoin (SC): V2 swaps, a watcher's spend of a maker payment, and a rate-based swap fee.** SC
+  swaps use the V1 swap protocol; the V2 path is a draft only. A watcher cannot spend an SC maker
+  payment for its owner, a gap no coin has closed yet. Every SC swap transaction pays the fixed
+  miner fee of 0.00002 SC; a fee computed from the network's fee rate is postponed, and is needed
+  only if transactions stop being mined at the fixed fee. No plan yet. Detail: CRD ch.20 D5 and D7,
+  ch.54.
+- **The swap watcher.** No swap hands its data to a watcher yet (see Known limitations). A watcher
+  framework is planned for the next version; its plan is not written yet.
+- **mmrpc 2.0 forms of the legacy-only methods.** Methods such as `setprice`, `cancel_order` and
+  `my_orders` answer only legacy requests, as in GLEEC KDF. Versioned forms of them are a candidate
+  for the next version. More in [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md).
+- **ARRR (Pirate) native mode, the Ironwood pool and Pirate1 receiving addresses.** This release
+  receives Ironwood deposits that carry a Sapling output and pays Pirate1 addresses. Native mode (a
+  shielded coin served by its own full node) is refused, and the wallet does not yet hold, scan or
+  spend notes in the Ironwood pool or hand out a Pirate1 receiving address. More in
+  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Finding a swap's
+  transactions by walking the light-wallet server's blocks also follows after this beta: more in
+  [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md).
+- **Lightning orders and swaps.** Lightning coins cannot trade, and the work on their activation
+  features and on the LDK library upgrade is parked. More in
+  [`lightning-activation-features`](docs/plans/lightning-activation-features.md) and
+  [`lightning-ldk-upgrade`](docs/plans/lightning-ldk-upgrade.md).
+- **QTUM and QRC20 stabilization.** It is analyzed and planned, but not started. More in
+  [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md).
+- **A typed error for the Radiant (RXD) signature check.** An RXD swap with a build without the
+  Radiant signature dialect did not complete in the 0.3.0 tests (see Known limitations); a typed
+  error for the four signature-hash cases the dialect treats as fatal is a later step. More in
+  [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) (step 8).
+
 ### Known limitations
 
 What does not work yet, or works only in part, in this release. Each item says where more detail
