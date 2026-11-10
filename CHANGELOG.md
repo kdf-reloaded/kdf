@@ -1122,7 +1122,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   surface.** `peer_connection_healthcheck` answers on both envelopes here, and the test helper
   `sim_panic` on the legacy one; the census tables and totals, which count the reference, are
   unchanged. Two source comments on the Cosmos withdraw-fee forms now say exactly how each other coin
-  family treats them. Detail: PR #N.
+  family treats them. Detail: PR #330.
 - **The published signing key carries the release signing subkey.** The key file in
   `docs/keys/takologi.asc` now includes the ed25519 subkey that signs tags and releases, and
   `SECURITY.md` names that subkey, gives the keyserver explicitly, notes that the key file in tags up
