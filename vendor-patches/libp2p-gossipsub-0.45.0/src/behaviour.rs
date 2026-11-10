@@ -424,6 +424,10 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     /// When a relay was last closed as stuck, for the guard for relays (CRD ch.28 §28.9B RQ1 item 5).
     last_stuck_relay_close: Option<Instant>,
 
+    /// The connections that a stuck-peer close has started to close and that the caller has not yet asked about
+    /// (CRD ch.28 R27a item 1a). [`Behaviour::take_stuck_close`] removes an entry.
+    stuck_closing: HashSet<ConnectionId>,
+
     peer_connections: HashMap<PeerId, Vec<(ConnectionId, ConnectedPoint)>>,
 
     connected_addresses: Vec<Multiaddr>,
@@ -592,6 +596,7 @@ where
             relays_low_report: WatermarkReport::default(),
             relays_high_report: WatermarkReport::default(),
             last_stuck_relay_close: None,
+            stuck_closing: HashSet::new(),
             peer_connections: HashMap::new(),
             connected_addresses: Vec::new(),
             send_queue_stats: HashMap::new(),
@@ -3919,6 +3924,14 @@ where
         matches!(&self.last_peer_close, Some(close) if close.peer_id == *peer && close.relay_outside_relay_mesh)
     }
 
+    /// Whether the connection `connection_id`, which the swarm has just reported closed, was closed because the send
+    /// queue of its peer was stuck (CRD ch.28 R27a item 1a). Forgets the connection. The caller asks it for every
+    /// closed connection, because the behaviour is told of a close before the swarm event reaches the caller, so
+    /// the behaviour cannot forget the entry itself; this way no entry outlives its connection.
+    pub fn take_stuck_close(&mut self, connection_id: ConnectionId) -> bool {
+        self.stuck_closing.remove(&connection_id)
+    }
+
     /// Decides what to do with a connection of `peer` whose send queue is stuck (CRD ch.28 §28.9B RQ1 item 5).
     /// A peer that is not a connected relay is closed. A relay is held back if another relay was closed as stuck
     /// within the guard interval before `now`, or if fewer than the minimum number of relays would remain
@@ -4086,6 +4099,12 @@ where
                 // closed or too few relays would remain (guard for relays).
                 match self.stuck_action(&propagation_source, Instant::now()) {
                     StuckAction::Close => {
+                        // Mark every connection of the peer, so that the caller can tell these closes from a
+                        // transport error (CRD ch.28 R27a item 1a).
+                        if let Some(peer_connections) = self.connected_peers.get(&propagation_source) {
+                            self.stuck_closing
+                                .extend(peer_connections.connections.iter().copied());
+                        }
                         log::warn!(
                             "Closing every connection to peer {propagation_source}: gossip send queue {}, {} \
                              messages dropped",

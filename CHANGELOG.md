@@ -855,6 +855,12 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 #### Order book and peer-to-peer network
 
+- **A connection closed for a stuck gossip queue is no longer dialed again early.** A node closes
+  every connection to a peer whose gossip send queue stays stuck. Such a close counts as this node's
+  own close, so the address waits the full 5-minute redial guard. Earlier builds told that close apart
+  only when it ended cleanly; one that ended with a transport error looked like a cut and could be
+  dialed again within about 30 s. The gossip layer now marks the connections it closes as stuck, and
+  the redial guard reads the mark. Detail: PR #328; CRD ch.28 R27a item 1a.
 - **The mmrpc 2.0 `orderbook` names its internal failure `Internal`, as on GLEEC KDF.** It answered
   `InternalError`; HTTP 500 and the message are unchanged. *Upgrade note:* a client that checks
   `error_type` for `InternalError` on `orderbook` must check `Internal` instead. Detail: PR #312; CRD
@@ -1052,6 +1058,11 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 ### Tests
 
+- **The log-capture test helper answers the same to tests that start at the same moment.** About
+  thirty `coins` tests capture the log to check that no credential leaks and skip that check when
+  another logger owns the process. Two such tests starting together could make the second one skip
+  although the capture was in place. The helper now decides once per process, and a test checks
+  eight concurrent callers get one answer. The node itself is unchanged. Detail: PR #329.
 - **A lab row checks what a short network outage does to a relay connection.** With every packet
   between a relay and a peer dropped and no socket reset, a 10-second outage kept the connection and
   traffic resumed within 6 seconds, three times out of three. After a 30-second outage the
@@ -1122,6 +1133,11 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 ### Documentation
 
+- **The RPC method census notes two names that only KDF Reloaded routes on the legacy
+  surface.** `peer_connection_healthcheck` answers on both envelopes here, and the test helper
+  `sim_panic` on the legacy one; the census tables and totals, which count the reference, are
+  unchanged. Two source comments on the Cosmos withdraw-fee forms now say exactly how each other coin
+  family treats them. Detail: PR #330.
 - **The published signing key carries the release signing subkey.** The key file in
   `docs/keys/takologi.asc` now includes the ed25519 subkey that signs tags and releases, and
   `SECURITY.md` names that subkey, gives the keyserver explicitly, notes that the key file in tags up

@@ -257,6 +257,17 @@ queue reports nothing; the series starts over), run with the filter
 `rq1_stuck_peer_with_two_connections_loses_both` and
 `rq1_stuck_relay_is_held_back_when_only_two_relays_are_connected` in `mm2_p2p/tests/gossip_send_queue.rs`.
 
+**Stuck-close mark for the redial guard (CRD ch.28 R27a item 1a).** `src/behaviour.rs` keeps a set
+`stuck_closing` of connection IDs. In the `StuckAction::Close` arm, before `CloseConnection::All` is
+requested, every connection of the peer in `connected_peers` is added to it; a held-back relay is not
+marked. The public `Behaviour::take_stuck_close(connection_id) -> bool` removes and reports an entry. The
+caller (KDF's connection-event loop) asks it once for every closed connection, so no entry outlives its
+connection; the behaviour cannot forget entries itself, because the swarm tells it of a close before the
+close event reaches the caller. The early-redial guard uses the mark to class a stuck-peer close as this
+node's own close whatever the close event reports. Tests in `src/behaviour/tests.rs`:
+`test_stuck_close_marks_every_connection_of_the_peer_once` and
+`test_held_back_stuck_relay_marks_no_connection`.
+
 ## Log levels (not security-related)
 
 Log lines only; behavior and wire are unchanged.

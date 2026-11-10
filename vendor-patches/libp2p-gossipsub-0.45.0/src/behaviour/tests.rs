@@ -5566,6 +5566,78 @@ fn test_send_queue_stuck_closes_every_connection_to_the_peer() {
     assert!(matches!(closes[0].1, CloseConnection::All));
 }
 
+/// Establishes the connection `conn` to `peer`, which has `other_established` other connections.
+fn connect(
+    gs: &mut Behaviour<IdentityTransform, AllowAllSubscriptionFilter>,
+    peer: PeerId,
+    conn: usize,
+    other_established: usize,
+) {
+    gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+        peer_id: peer,
+        connection_id: ConnectionId::new_unchecked(conn),
+        endpoint: &ConnectedPoint::Listener {
+            local_addr: Multiaddr::empty(),
+            send_back_addr: Multiaddr::empty(),
+        },
+        failed_addresses: &[],
+        other_established,
+    }));
+}
+
+#[test]
+// A stuck-peer close marks every connection of the peer that it closes, and only those; the caller learns each mark
+// once (CRD ch.28 R27a item 1a, T15).
+fn test_stuck_close_marks_every_connection_of_the_peer_once() {
+    let (mut gs, _, _) = inject_nodes1()
+        .peer_no(0)
+        .topics(vec![])
+        .to_subscribe(false)
+        .create_network();
+    let (peer, other) = (PeerId::random(), PeerId::random());
+    connect(&mut gs, peer, 1, 0);
+    connect(&mut gs, peer, 2, 1);
+    connect(&mut gs, other, 3, 0);
+    flush_events(&mut gs);
+    // Nothing is marked before the close.
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(1)));
+
+    gs.on_connection_handler_event(peer, ConnectionId::new_unchecked(1), stuck_event());
+    assert!(gs.take_stuck_close(ConnectionId::new_unchecked(1)));
+    assert!(gs.take_stuck_close(ConnectionId::new_unchecked(2)));
+    // Each mark is given once, and the connection of the other peer is not marked.
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(1)));
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(2)));
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(3)));
+    assert!(gs.stuck_closing.is_empty());
+}
+
+#[test]
+// A relay whose close is held back marks nothing, while a relay that is closed marks all its connections (CRD ch.28
+// R27a item 1a, T15).
+fn test_held_back_stuck_relay_marks_no_connection() {
+    // With 2 relays connected, a stuck relay is held back: fewer than 2 would remain.
+    let (mut gs, relays) = node_with_relays(2);
+    connect(&mut gs, relays[0], 10, 0);
+    connect(&mut gs, relays[1], 20, 0);
+    let (closed, restarted) = report_stuck(&mut gs, relays[0], 10);
+    assert!(closed.is_empty());
+    assert_eq!(restarted, vec![(relays[0], ConnectionId::new_unchecked(10))]);
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(10)));
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(20)));
+    assert!(gs.stuck_closing.is_empty());
+
+    // With 3 relays the close is allowed and marks every connection of that relay only.
+    let (mut gs, relays) = node_with_relays(3);
+    connect(&mut gs, relays[0], 10, 0);
+    connect(&mut gs, relays[0], 11, 1);
+    connect(&mut gs, relays[1], 20, 0);
+    assert_eq!(report_stuck(&mut gs, relays[0], 10), (vec![relays[0]], vec![]));
+    assert!(gs.take_stuck_close(ConnectionId::new_unchecked(10)));
+    assert!(gs.take_stuck_close(ConnectionId::new_unchecked(11)));
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(20)));
+}
+
 fn stuck_event() -> HandlerEvent {
     HandlerEvent::SendQueueStuck(StuckReport {
         reason: StuckReason::AtCap {
