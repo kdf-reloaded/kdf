@@ -415,6 +415,23 @@ exists.
 
 ---
 
+## Reloaded legacy-surface additions (clean-side record, 2026-11-10)
+
+The LEGACY table and the totals below describe the reference corpus. KDF Reloaded's
+own legacy dispatcher routes two further strings, checked against this repository's
+dispatcher tables on dev (`mm2_main/src/rpc/dispatcher/dispatcher_legacy.rs`,
+`dispatcher.rs`); whether the reference routes them on its legacy surface is not
+asserted here.
+
+| Reloaded method string | Legacy surface | V2 surface | Note |
+| --- | --- | --- | --- |
+| `peer_connection_healthcheck` | routed | routed (listed above) | a tenth name on both surfaces in Reloaded |
+| `sim_panic` | routed | not routed | test helper that panics the process; not a client method |
+
+Reloaded's legacy table therefore routes 54 distinct strings, 10 of them also on V2.
+The totals and the 232 / 223 reconciliation below are unchanged, because they count
+the reference.
+
 ## Distinct method-string totals per surface
 
 | surface | distinct method strings |
