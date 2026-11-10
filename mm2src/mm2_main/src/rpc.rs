@@ -1127,8 +1127,8 @@ mod server_tests {
         }
     }
 
-    /// CRD ch.43 (the endpoint never panics the daemon in response to a request), decision HB: without the
-    /// `sim-panic-rpc` feature (every build that ships) the legacy `sim_panic` method does not exist. An
+    /// CRD ch.43 (the endpoint never panics the daemon in response to a request), maintainer decision of 2026-11-10:
+    /// without the `sim-panic-rpc` feature (every build that ships) the legacy `sim_panic` method does not exist. An
     /// authenticated legacy request for it is answered like any unknown name: `NoSuchMethod` in the mmrpc 2.0
     /// envelope (no `error_data`), HTTP 400. A versioned request for it answers the same.
     #[cfg(not(feature = "sim-panic-rpc"))]
@@ -1147,9 +1147,9 @@ mod server_tests {
         assert!(versioned.1.get("error_data").is_none(), "{}", versioned.1);
     }
 
-    /// CRD ch.43, decision HB: with the test-only `sim-panic-rpc` feature the legacy `sim_panic` method is routed.
-    /// A request without `mode` lists the supported modes. Never send `"mode": "simple"` here: it panics the
-    /// process.
+    /// CRD ch.43, maintainer decision of 2026-11-10: with the test-only `sim-panic-rpc` feature the legacy `sim_panic`
+    /// method is routed. A request without `mode` lists the supported modes. Never send `"mode": "simple"` here: it
+    /// panics the process.
     #[cfg(feature = "sim-panic-rpc")]
     #[test]
     fn sim_panic_without_a_mode_lists_the_modes_with_the_sim_panic_rpc_feature() {

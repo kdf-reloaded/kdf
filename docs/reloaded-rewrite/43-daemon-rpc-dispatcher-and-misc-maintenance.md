@@ -476,7 +476,7 @@ Invalid input shall produce a structured JSON error response and the daemon shal
 continue serving. Method handlers in the RPC path shall avoid unwrap/expect on
 caller-controlled data.
 
-> **Status note (2026-11-10, clean-side record; maintainer decision HB (a)).**
+> **Status note (2026-11-10, clean-side record; the maintainer's decision of 2026-11-10).**
 > The legacy method table of this repository routed a test helper,
 > `sim_panic`, in every build; on request it panicked the process, which
 > contradicted R43.4.1 and the chapter's one-sentence claim; the method
@@ -656,6 +656,6 @@ shall be wound down as part of shutdown rather than abandoned.
   module tree or test name is present; none was found.
 - *Status note added 2026-11-10 -- under R43.4.1 (§43.4).* Reloaded-original,
   clean side: it records this repository's gating of the `sim_panic` test
-  helper behind a Cargo feature (decision HB (a)) and takes no
+  helper behind a Cargo feature (the maintainer's decision of 2026-11-10) and takes no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required.
