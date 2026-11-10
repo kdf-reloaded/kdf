@@ -50,9 +50,11 @@ extension.
    inventory source, reconciled with Reloaded's dispatchers. On dev as of 2026-11-09 the legacy table
    routes 54 names, 10 of them on both surfaces, which leaves 44 legacy-only names. The census counts
    52 and 9. It does not list `peer_connection_healthcheck` on the legacy surface, where Reloaded
-   also routes it, nor the test helper `sim_panic`. *(Amended 2026-11-10: `sim_panic` is now compiled
-   only with the test-only Cargo feature `sim-panic-rpc`, so a shipped build's legacy table routes 53
-   names; see CRD ch.43 §43.4 status note.)*
+   also routes it, nor the test helper `sim_panic`. *(Amended 2026-11-10: 12 of the 54 names are on both
+   surfaces, since `max_taker_vol` and `min_trading_vol` are also routed on V2 here, so 42 are
+   legacy-only. `sim_panic` is now compiled only with the test-only Cargo feature `sim-panic-rpc`, so a
+   shipped build's legacy table routes 53 names, 41 of them legacy-only; see CRD ch.43 §43.4 status
+   note.)*
 3. **`docs/plans/rpc-api-reference-wire-parity.md`** supplies:
    - the seven wire dimensions W1–W7 that each versioned form binds;
    - the divergence record of §2.2;

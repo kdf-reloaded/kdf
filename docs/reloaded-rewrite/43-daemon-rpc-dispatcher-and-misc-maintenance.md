@@ -479,8 +479,9 @@ caller-controlled data.
 > **Status note (2026-11-10, clean-side record; maintainer decision HB (a)).**
 > The legacy method table of this repository routed a test helper,
 > `sim_panic`, in every build; on request it panicked the process, which
-> contradicted R43.4.1 and the one-sentence claim above (authenticated
-> method, so no unauthenticated exposure). The helper and its table arm are
+> contradicted R43.4.1 and the chapter's one-sentence claim; the method
+> required the RPC password, so it was never reachable without
+> authentication. The helper and its table arm are
 > now compiled only with the Cargo feature `sim-panic-rpc`, which no shipped
 > build enables. Without the feature a legacy or versioned request for the
 > name answers like any unknown method (R43.1A.1a–R43.1A.1c: `NoSuchMethod`
