@@ -90,7 +90,8 @@ jobs:
     #     our own code and never clippy-invokes `lightning` as a primary target.
     #   * `--all-features` would turn on features that never ship in the `kdf`
     #     binary (mm2_main `regtest-netid`,
-    #     `unsafe-rpc-wire-dump-release-override`, `custom-swap-locktime`) plus
+    #     `unsafe-rpc-wire-dump-release-override`, `custom-swap-locktime`,
+    #     `counting-alloc`, `sim-panic-rpc`) plus
     #     test-only Trezor-emulator / Foundry scaffolding, i.e. it would enforce
     #     -D warnings over code that never ships. Default features are what the
     #     `kdf` binary builds, so that is what we lint.
