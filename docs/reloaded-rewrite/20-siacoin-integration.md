@@ -426,6 +426,11 @@ floor is a maintainer decision (chapter 60 D60.2).
 > preimage showed 0.00001 SC as the miner fee of a Siacoin payment, half of the
 > fixed fee actually paid (fixed 2026-11-07).
 >
+> **Observed rate, continued (2026-11-10, informative).** Six more swap
+> transactions and two refunds (two swaps on netid 6133, one maker-side
+> refund, one refund at a restart) paid the fixed fee; the refunds were mined
+> in the next block. The watch item stands.
+>
 > **Revision (2026-11-07, clean-room-original).** Reloaded raises its Sia
 > minimum trading volume to ten times the fixed miner fee (0.0002 SC). The
 > one-hasting floor let the default minimum volume of a Sia order fall under
@@ -960,6 +965,15 @@ rather than defects. None is a correctness claim.
   this D3 entry previously described. `recover_funds` (chapter 51
   R33) can now correctly determine "already spent" instead of
   refusing outright. Code: `mm2src/coins/siacoin/siacoin_swap_ops.rs`.
+  *Lab status (2026-11-10, informative):* the recovery method was
+  called on a refunded swap, on a swap refunded at a restart and on two
+  finished swaps; every call was refused from the swap record (the
+  record already held the final event) and broadcast nothing, so the
+  event-walk outcomes of R-S8 were not reached through recovery. The
+  "unspent" outcome was exercised live only by the taker refund's chain
+  look (chapter 51 R31a) of 2026-11-04; "spent" and "refunded" have unit
+  tests only. A taker-side row that resumes a swap after the maker's
+  spend is scheduled to exercise "spent".
 
 - **D4 -- Message signing.** *Closed.* `sign_message`/`verify_message`
   are wired to Sia's ed25519 keypair, using the bound Sia client
@@ -983,7 +997,13 @@ rather than defects. None is a correctness claim.
   designations, with the interop limits recorded in the changelog's
   Known limitations), and one refund of a Sia payment between two KDF
   Reloaded nodes was mined. The earlier "postponed until after the
-  beta" statement is withdrawn.
+  beta" statement is withdrawn. *Lab-verified 2026-11-10, between two
+  KDF Reloaded nodes:* the maker-side refund of a Sia payment
+  (automatic; broadcast once the node's median block time passed the
+  lock, about an hour and a half after it; mined in the next block),
+  the automatic refund of a swap resumed at start, and an SC/RIN swap
+  in both directions on netid 6133 with that network's fee schedule
+  (2 %) and the same fee key as netid 8762.
 - **D6 -- Size-aware fee estimation.** *Closed.* The withdraw path
   now estimates the fee from a probe transaction's real serialized
   size (`V2TransactionBuilder::weight()`) times the live

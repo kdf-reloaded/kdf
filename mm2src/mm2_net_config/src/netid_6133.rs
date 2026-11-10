@@ -34,9 +34,10 @@ const DEX_FEE_Z_ADDR: &str = "zs1lgdrlg6kv6lmf0n9ps2uhj6sc8rdn30vx44qzu7hqa5ms4a
 
 /// Hex-encoded ed25519 public key for Siacoin-style DEX fee collection.
 ///
-/// The GLEEC 2022 fork did not override the upstream Siacoin fee key, so
-/// netid 6133 inherits the same observed network constant. Operators who
-/// want a distinct destination on 6133 can change this value here.
+/// A dictated interoperability constant, the same value as on netid 8762: the
+/// reference nodes of both networks pay the Sia taker fee to the address derived
+/// from this key and a reference maker refuses a fee paid anywhere else. It is
+/// not an operator setting (CRD ch.20 R-S12 item 2; ch.06 §6.1, R8).
 const DEX_FEE_PUBKEY_ED25519: &str = "77b0936728f63257b074c7b3fb2c4fad98df345f57de1ec418fc42619e4e29f8";
 
 /// Seed nodes for P2P bootstrapping on netid 6133.

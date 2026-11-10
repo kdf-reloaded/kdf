@@ -650,8 +650,13 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 - **Siacoin (SC) swaps are supported.** Atomic swaps of SC were verified on the live chain on
   November 4, 2026: between two KDF Reloaded nodes in both directions, including a refund, and
   with Komodo KDF and GLEEC KDF nodes in the cases that Known limitations does not exclude. Earlier
-  releases said SC swaps were postponed; that statement is withdrawn. Detail: PR #239; CRD ch.20
-  D5, R-S11.
+  releases said SC swaps were postponed; that statement is withdrawn. On November 10, 2026 three
+  more cases passed between two KDF Reloaded nodes: a maker that sells SC refunds its payment by
+  itself when the taker stops (the refund waits for the Sia node's median block time, about an hour
+  and a half after the lock, and was mined in the next block); a node restarted after such a stop
+  refunds by itself at start; and an SC/RIN swap in both directions on netid 6133, with that
+  network's 2 % fee. Detail: PR #239; CRD ch.20 D5, R-S11; release tests, "Siacoin refund,
+  recovery and netid 6133".
 
 #### Withdrawals
 
@@ -1434,6 +1439,19 @@ lives.
   since this release (PR #291); the GLEEC release does not, so such swaps fail intermittently. A
   GLEEC node that sells SC as the order base is not affected. Detail: PRs #239, #291; CRD ch.20
   R-N4.
+- **Siacoin (SC) swaps: what is not covered.** SC swaps run on the first swap protocol only; the
+  second protocol is not implemented for SC. A node that watches other traders' swaps can refund a
+  Siacoin payment for an offline taker but cannot spend the maker's payment for it. Every Siacoin
+  swap transaction pays a fixed fee of 0.00002 SC, far below the rate the Sia node recommends; every
+  such transaction so far was mined in the next block, but under heavy load a spend or refund can
+  wait or drop out of the node's pool. Manual recovery (`recover_funds_of_swap`) of a Siacoin swap
+  was tested only on swaps whose record already held the final event; it refused each time and
+  broadcast nothing, as it should, so the recovery that reads the chain for a spend or a refund of a
+  Siacoin payment has unit tests only. Siacoin in a browser (WASM) build is untested. A swap in
+  which a GLEEC KDF maker on netid 6133 validates a Siacoin taker fee from a KDF Reloaded taker has
+  not completed in the lab yet: the fee rule and the fee address are the same on both nodes, so the
+  remaining question is the exact hasting value, and the row that settles it is pending. Detail:
+  PRs #239, #278, #290, #291; CRD ch.20 D5, D7, R-S8, R-S11, R-S12, T-S1.
 - **Lightning cannot place orders or swap.** Orders and trade previews involving a Lightning coin
   are refused with an error naming the coin; `trade_preimage` answers `TradingNotSupported`. More in
   [`lightning-activation-features`](docs/plans/lightning-activation-features.md). Detail: PR #66; CRD
