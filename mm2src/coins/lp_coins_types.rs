@@ -509,7 +509,8 @@ pub enum WithdrawFee {
     /// the simulation-derived fee amount (CRD ch.18 R18.6B.1 item 1, R18.6B.2); the amount is **not**
     /// `gas_limit * gas_price`. `gas_price` is in the platform's base denom per gas unit. Only a Tendermint coin
     /// takes this form; the other families that take a fee descriptor refuse it as a fee type they do not take,
-    /// ZCoin refuses every custom fee (CRD ch.49 R49.27a), and TRON and Solana do not read the descriptor.
+    /// ZCoin refuses every custom fee (CRD ch.49 R49.27a), a TRON withdraw refuses any descriptor
+    /// (CRD ch.21 R-WP6), and Solana does not read the descriptor.
     CosmosGas {
         gas_limit: u64,
         gas_price: f64,
@@ -517,7 +518,8 @@ pub enum WithdrawFee {
     /// Cosmos priority fee (CRD ch.49 R49.29): the signed transaction's gas limit and a named level of the
     /// platform coin's `priority_gas_prices` (CRD ch.36 R36.3.5; CRD ch.18 R18.6B.1 item 2). Only a Tendermint
     /// coin takes this form; the other families that take a fee descriptor refuse it as a fee type they do not
-    /// take, ZCoin refuses every custom fee (CRD ch.49 R49.27a), and TRON and Solana do not read the descriptor.
+    /// take, ZCoin refuses every custom fee (CRD ch.49 R49.27a), a TRON withdraw refuses any descriptor
+    /// (CRD ch.21 R-WP6), and Solana does not read the descriptor.
     CosmosGasPriority {
         gas_limit: u64,
         gas_price_option: CosmosGasPriceOption,

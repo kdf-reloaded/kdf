@@ -2855,11 +2855,10 @@ impl EthCoin {
                         },
                     }
                 },
-                // TRON balance is fetched via the dedicated TRON HTTP API,
-                // not via web3. Activation gating prevents this branch. P10.2.5.
-                EthCoinType::Tron | EthCoinType::Trc20 { .. } => MmError::err(BalanceError::Internal(
-                    "TRON balance lookup not yet wired (pending P10.2.5)".to_owned(),
-                )),
+                // TRON balance is fetched via the dedicated TRON HTTP API, not via web3.
+                EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
+                    crate::eth::tron::balance::coin_balance_units(&coin).await
+                },
             }
         };
         Box::new(fut.boxed().compat())
