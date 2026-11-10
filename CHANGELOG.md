@@ -12,6 +12,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Within each heading, entries are grouped by area. Each entry ends with the pull request that made
 it and, where one exists, the CRD rule, for readers who want more.
 
+### Highlights
+
+The most important changes of this release in short. Each item points to the detailed entry below.
+
+#### What is new
+
+- **Siacoin (SC) swaps are supported.** PRs #239, #278, #290, #291.
+- **Electrum servers that fall behind the chain or stop following it are no longer asked, and
+  servers that disagree about the chain stop the coin from trading.** PR #324.
+- **Under an HD login, each coin trades, withdraws and keeps its accounts with its own key and
+  address.** PRs #249, #250, #253, #254, #270, #279, #281, #293.
+- **ARRR pays Pirate1 addresses and declines swaps with nodes that cannot build the Ironwood
+  format.** PRs #229, #230, #241, #246.
+- **Bitcoin II (BC2) works with its sighash suffix (with the `sighash_suffix` key in the coin
+  entry), and an Electrum server can be pinned by its key.** PRs #261, #264, #273.
+- **The order book holds up better: a lost cancellation heals sooner, and stuck connections, cut
+  links and sync gaps recover faster.** PRs #207, #223, #243, #258, #280, #303, #328.
+- **Prices come from two sources that check each other.** PRs #287, #326.
+- **Tendermint coins take custom tokens, `path_to_address` and the chain's priority gas prices.**
+  PRs #319, #323.
+- **Releases ship Linux ARM builds and the mobile libraries with a C header.** PRs #300, #321.
+- **Compatibility switches restore GLEEC KDF behavior where KDF Reloaded differs.** More in
+  [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md).
+
+#### Major fixes
+
+- **A swap between Siacoin, or another coin with a 32-byte hash lock, and an EVM coin or token can
+  complete.** PR #290.
+- **An EVM taker on a chain with fast blocks, such as Monad, finds the maker's spend, also when it
+  comes late, shortly before a refund.** PRs #248, #255.
+- **`recover_funds_of_swap` no longer refunds a maker payment after the spend of the taker payment
+  was sent.** PRs #276, #284.
+- **A coin with several Electrum servers no longer fails to activate when one server is silent and
+  another refuses.** PR #324.
+- **An order whose save failed no longer comes back after a restart.** PRs #309, #314.
+- **The ARRR history names recipients, a swap's addresses and the fees of the wallet's own sends.**
+  PRs #268, #271, #277, #288.
+- **SLP withdrawals no longer give BCH to the miner (unit tests), and BCA HTLC spends and refunds can
+  be built.** PRs #220, #221, #236.
+
+#### Warnings and gaps
+
+All of these are described under Not in this release and Known limitations below.
+
+- **Do not run two KDF instances on the same seed at the same time.**
+- **The swap watcher does not work yet**, so keep your node running until your swaps have finished.
+- **TRON and Solana cannot be activated, and Tendermint coins are wallet-only.**
+- **ARRR swaps work only between two KDF Reloaded nodes of this release or later**; native mode and
+  the Ironwood pool are postponed.
+- **Every Siacoin swap transaction pays a fixed fee about 450 to 850 times below the rate the Sia
+  node recommends**, and some Siacoin recovery paths have unit tests only.
+- **Under a Trezor key, some UTXO operations are not available.**
+
 ### Upgrade note: name lookups go to Google Public DNS
 
 **If your node runs on a network that blocks Google Public DNS, set `dns_resolver` before you
@@ -250,9 +303,9 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 - **Every pull request now builds the node for 64-bit ARM Linux.** The check cross-builds `kdf` for
   aarch64, tests the glibc floor and starts the binary under an emulator, so a change that breaks
   the ARM build is found before it merges. It is not a required check at first; it becomes one after
-  about ten green runs on `dev` (roughly two weeks). Detail: the Tests workflow.
-- **The mobile libraries now also cover the Android x86_64 ABI and the iOS simulator.** Each signed release carries `libkdf.a` for Android x86_64 (emulators and Chromebooks), and for the iOS simulator on Apple silicon (`aarch64-apple-ios-sim`) and Intel (`x86_64-apple-ios`) Macs, as separate libraries next to the device one. The dev and staging builds carry them too. Detail: `docs/RELEASE_ARTIFACTS.md`.
-- **Releases now include a C header for the mobile libraries.** `kdf-<tag>.h` declares the functions of `libkdf.a` with their exact prototypes and the log callback type, so an Android or iOS app can call the library without writing the declarations itself. CI builds the library, compiles and runs a test program against the header, and checks that the header and the library agree. Detail: the Release workflow and `docs/RELEASE_ARTIFACTS.md`.
+  about ten green runs on `dev` (roughly two weeks). Detail: PR #320; the Tests workflow.
+- **The mobile libraries now also cover the Android x86_64 ABI and the iOS simulator.** Each signed release carries `libkdf.a` for Android x86_64 (emulators and Chromebooks), and for the iOS simulator on Apple silicon (`aarch64-apple-ios-sim`) and Intel (`x86_64-apple-ios`) Macs, as separate libraries next to the device one. The dev and staging builds carry them too. Detail: PR #321; `docs/RELEASE_ARTIFACTS.md`.
+- **Releases now include a C header for the mobile libraries.** `kdf-<tag>.h` declares the functions of `libkdf.a` with their exact prototypes and the log callback type, so an Android or iOS app can call the library without writing the declarations itself. CI builds the library, compiles and runs a test program against the header, and checks that the header and the library agree. Detail: PR #321; the Release workflow and `docs/RELEASE_ARTIFACTS.md`.
 - **Releases now include Linux builds for 64-bit and 32-bit ARM, and the mobile libraries.** Besides the x86_64 binary, each signed release carries `kdf` for aarch64 and armv7 Linux (glibc 2.31 or newer, like the x86_64 one), and `libkdf.a` static libraries for Android (aarch64 and armv7) and iOS (aarch64) apps. The macOS binary that runs on both Intel and Apple silicon is attached as well; earlier releases did not include it. Every file is in the signed checksum list. The names, target triples and minimum system versions are in `docs/RELEASE_ARTIFACTS.md`. Detail: PR #300.
 
 ### Changed
@@ -1158,6 +1211,15 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 ### Documentation
 
+- **The design documents, plans and release documents were kept current through the cycle.** The
+  CRD gained a coverage note on three unmerged reference pull requests, chapter 63 on TRON GasFree
+  fee delegation, and a correction of the Radiant relay-fee finding; plans were opened for the
+  mmrpc 2.0 forms of the legacy-only methods, refreshed for TRON and trading floors, and brought in
+  line with their states before this release; the compatibility documents, the release notes and
+  the release-tests page were updated at each batch close. The node itself is unchanged. Detail:
+  PRs #202, #212, #295, #296, #298, #304, #307, #311, #316, #317, #318, #325, #334, #335, #336, #337;
+  the branch and version housekeeping of the cycle is in PRs #198, #217.
+
 - **The RPC method census notes two names that only KDF Reloaded routes on the legacy
   surface.** `peer_connection_healthcheck` answers on both envelopes here, and the test helper
   `sim_panic` on the legacy one; the census tables and totals, which count the reference, are
@@ -1313,9 +1375,11 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — parked: Solana stays switched off; the release it returns in is not
   set.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — parked: Tendermint swaps were added to the
-  0.4.0 scope on 2026-11-08; accepting both forms of the activation parameters is decided and not
+  0.4.0 scope on 2026-11-08 and put aside again on 2026-11-10 by the maintainer's decision; the
+  coins stay wallet-only. Accepting both forms of the activation parameters is decided and not
   started. Two of its features are implemented: custom tokens (wallet-only) and the HD
-  `path_to_address` (PR #319).
+  `path_to_address` (PR #319). The trade-fee row owed by PR #323 passed on 2026-11-10 on a local
+  chain.
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
   GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
   recorded (PR #222), and KDF Reloaded now charges it the same way on UTXO coins (PR #226). On an SLP
@@ -1347,16 +1411,18 @@ file carries the detail. "New" means the plan was created in this cycle.
 Work that was planned or started for this cycle but is postponed to a later version. Each item says
 why and where the plan lives; what a user meets today is under Known limitations below.
 
-- **TRON (TRX, TRC20) activation and swaps.** TRON support is not finished, so TRON activation
-  stays off in this beta (see Known limitations), and TRON swaps are not built yet. More in
-  [`tron-support`](docs/plans/tron-support.md).
+- **TRON (TRX, TRC20) activation and swaps.** The TRON work stops for this release at the wallet
+  path: balance, address and broadcast are in the code (PR #333) but cannot be reached, because TRON
+  activation stays off in this beta (see Known limitations). The activation route and TRON swaps
+  are not finished. More in [`tron-support`](docs/plans/tron-support.md).
 - **TRON GasFree (gasless TRC20 withdrawals).** It is specified (CRD ch.63) but not in this build:
   an earlier implementation stays parked on a branch and is not revived, and the new work needs
   TRON activation and a pinned GasFree proxy creation bytecode first. More in
   [`tron-gasfree`](docs/plans/tron-gasfree.md).
-- **Tendermint (Cosmos) orders and swaps.** Tendermint coins stay wallet-only; orders and swaps
-  return only with a swap plan of their own and its tests, which do not exist yet. The activation
-  features not built yet are in
+- **Tendermint (Cosmos) orders and swaps.** Tendermint coins stay wallet-only. Orders and swaps were
+  added to this release's scope on 2026-11-08 and put aside again on 2026-11-10 by the maintainer's
+  decision; they return only with a swap plan of their own and its tests, which do not exist yet.
+  The activation features not built yet are in
   [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md).
 - **Solana (SOL, SPL).** Activation stays off: the support is not finished, and the Solana SDK the
   build uses is pinned to a version that could only be upgraded through a fork. More in
