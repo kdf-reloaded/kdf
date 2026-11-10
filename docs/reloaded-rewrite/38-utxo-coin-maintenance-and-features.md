@@ -3274,7 +3274,11 @@ orders, swaps and withdrawals until it was activated again. The comparisons
 therefore compare the first 80 bytes. Those bytes start with the version, the
 previous block hash and the merkle root in the Bitcoin-style layout that UTXO
 headers share, the longer Zcash-style and proof-of-stake headers included, so
-a real fork still differs in them; no per-coin setting is needed.
+a real fork still differs in them; no per-coin setting is needed. On
+Zcash-style headers the time and the nonce follow byte 80, so two sibling
+blocks with the same parent and the same merkle root would compare equal at
+the fork height. Their coinbases differ, so their merkle roots differ, and at
+every later height the previous block hash differs.
 
 D38.6.4o.15 *(Decided 2026-11-10, maintainer.)* *A disagreement after
 activation is confirmed before it stops trading.* A field log of a maker
@@ -3288,8 +3292,8 @@ again within seconds or minutes:
   the next comparison, after 210 to 606 s.
 
 Each entry logged an ERROR line and refused the maker's orders while it
-lasted. Servers that index blocks in bursts, and short reorganizations, cause
-such entries, while a real split lasts. After activation, therefore, a
+lasted. Entries this short fit servers that index blocks in bursts, or a short
+reorganization; a real split lasts. After activation, therefore, a
 disagreement puts the coin into the state only after it has lasted two block
 times, and at least 60 s. The activation itself keeps its 5 s judgment. The
 length of the period is watched in field runs and evaluated.
