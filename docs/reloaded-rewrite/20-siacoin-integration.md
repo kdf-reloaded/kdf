@@ -571,6 +571,19 @@ own exact-value check of item 3 against the reference's arithmetic.
 > Reloaded maker against a reference taker) has not been run. The source
 > comment the code-quality finding refers to (`netid_6133.rs`) was reworded
 > in the change that added this note.
+>
+> *Later the same day:* the discounted rate was proven on netid 8762
+> instead, with KMD on the other side of the pair (the maintainer's
+> decision of 2026-11-10): a GLEEC KDF development build of the netid-8762
+> lineage as the maker, behind the same kind of pool-reply proxy, recorded
+> `TakerFeeValidated` on a fee of exactly 9/7770 of a 1 SC taker volume in
+> hastings and the swap completed on both sides; two attempts without the
+> proxy failed at the pool reply before the amount was checked (R-N4
+> class). One case of each rate is therefore lab-proven, the base rate on
+> netid 6133 and the discounted rate on netid 8762; the netid-6133
+> discounted case (GLEEC in the pair) and the netid-8762 base case did not
+> run. The exact-value check of item 3 was reached and passed on both
+> netids.
 
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method
@@ -1106,7 +1119,13 @@ rather than defects. None is a correctness claim.
   "unspent" outcome was exercised live only by the taker refund's chain
   look (chapter 51 R31a) of 2026-11-04; "spent" and "refunded" have unit
   tests only. A taker-side row that resumes a swap after the maker's
-  spend is scheduled to exercise "spent".
+  spend is scheduled to exercise "spent". *Later the same day:* that row
+  passed: a taker stopped after its payment and resumed after its lock
+  entered the refund chain, and the chain look of chapter 51 R31a found
+  the maker's spend by the event walk, read the secret (R-S6) and spent
+  the maker payment; no refund was made (release-tests page, "Siacoin
+  resumed taker"). "Spent" is therefore exercised live through the swap
+  machine; "refunded" by the event walk still has unit tests only.
 
 - **D4 -- Message signing.** *Closed.* `sign_message`/`verify_message`
   are wired to Sia's ed25519 keypair, using the bound Sia client
