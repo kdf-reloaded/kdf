@@ -966,6 +966,19 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 #### UTXO coins and Electrum
 
+- **DOGE and other merged-mining coins no longer refuse new trades because their Electrum servers
+  seem to disagree about the chain.** The chain comparison added in this release compared whole
+  block headers. On merged-mining (AuxPoW) coins a header carries a merged-mining proof after its
+  first 80 bytes, which the block hash does not cover, and two servers can store one block with
+  different proofs. On DOGE, two public servers answered the same height with 763 and 727 bytes
+  whose first 80 bytes were equal; 2 of about 420 heights checked differ this way. When such a
+  block arrived, the node compared the servers at that height, found a difference, and kept
+  finding it every 5 minutes, so the coin refused new orders, swaps and withdrawals until it was
+  activated again. In a field run the state began 12 minutes after the start and did not end in
+  about 16 hours. The comparison now compares the first 80 bytes of the headers, which hold the
+  version, the previous block hash and the merkle root, so a real fork is still found. Detail:
+  CRD ch.38 R38.6.4o items 7 and 12, D38.6.4o.14.
+
 - **A coin with several Electrum servers no longer fails to activate when one server never answers
   and another is refused.** A field report: the legacy `electrum` call for UNO, with
   `electrum_server_order` set to `mixed`, three servers and `max_connected` 2, answered "The balance

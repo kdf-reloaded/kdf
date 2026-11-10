@@ -2251,6 +2251,12 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    until it has ended neither is excluded for it. A difference at the tip
    alone is an ordinary race between two new blocks and resolves itself
    (D38.6.4o.8, D38.6.4o.12).
+
+   *Amended 2026-11-10 (clean side; D38.6.4o.14):* "different header bytes"
+   means a different base header: the first 80 bytes of the header differ. The
+   bytes after them are not compared, so two servers that answer the same
+   block of a merged-mining (AuxPoW) coin with different merged-mining proofs
+   start no comparison.
 8. *Re-measure backoff (amends R38.6.4l item 7 step 2).* A re-measure round
    that finds no eligible replacement doubles the least time before the coin's
    next re-measure round: 5, 10, 20, 40, then 60 minutes, and 60 minutes from
@@ -2388,6 +2394,11 @@ holds under every value of `electrum_server_order` unless it says otherwise.
       history and other reads keep working, and a swap that has already
       started goes on. Item 4 still keeps a far-ahead server out of the
       reads. The state ends as soon as neither condition holds.
+
+    *Amended 2026-11-10 (clean side; D38.6.4o.14):* a comparison compares the
+    base headers, the first 80 bytes of the two answers, and *diverged* means
+    that they differ. Two answers that agree in those 80 bytes and differ only
+    after them name the same block.
 13. *Fewer than three servers.* When a coin is activated with fewer than three
     servers in its pool that are not removed, the activation logs one WARN:
     `<ticker>: only <n> Electrum servers are listed; with fewer than three the node cannot always tell a stale server from one on another chain`
@@ -2991,6 +3002,19 @@ T38.6.4o.16 *Comparison limit.* Two servers compared once shall not be
 compared again within 5 minutes unless one of their heights has moved by more
 than *T* (item 12).
 
+T38.6.4o.17 *Merged-mining headers.* Two servers that answer the same 80-byte
+base header with different bytes after it, in their header notifications and
+below the tip, shall activate the coin, shall start no comparison from the
+notifications, and shall not put the coin into the disagreement state, also
+after both have moved more than *T* blocks on; with two such servers far apart
+the activation shall succeed. A difference inside the 80 bytes shall still fail
+the activation (items 7 and 12, D38.6.4o.14).
+
+T38.6.4o.18 *Same block.* Two headers shall count as the same block when their
+first 80 bytes are equal, whatever follows them; a difference in the 80th byte
+shall count; headers shorter than 80 bytes shall be compared whole (items 7
+and 12, D38.6.4o.14).
+
 D38.6.4l.1 *(Resolved 2026-10-28, maintainer decision.)* *When `mixed`
 becomes the default.* The plan intends `mixed` as the default and left the
 moment to the maintainer: with the implementation, or after a field run on a
@@ -3202,6 +3226,20 @@ servers far apart, a header comparison at a common height tells a stale server
 on the same chain (the higher one is used) from two servers on different
 chains (the activation fails). Lists of fewer than three servers get a warning
 at activation, because with them the node cannot always tell the cases apart.
+
+D38.6.4o.14 *(Recorded 2026-11-10, clean side; defect fix.)* *The base header
+names the block.* On merged-mining (AuxPoW) coins a header carries, after its
+80-byte base header, a merged-mining proof that the block hash does not cover,
+and two Electrum servers can store one block with different proofs. On DOGE,
+two public servers answered the same height with 763 and 727 bytes whose first
+80 bytes were equal. Comparing whole headers treated that block as two chains:
+the comparison at that height kept finding a difference, the repeated
+comparison at the same height never ended the state, and the coin refused new
+orders, swaps and withdrawals until it was activated again. The comparisons
+therefore compare the first 80 bytes. Those bytes start with the version, the
+previous block hash and the merkle root in the Bitcoin-style layout that UTXO
+headers share, the longer Zcash-style and proof-of-stake headers included, so
+a real fork still differs in them; no per-coin setting is needed.
 
 > **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
 > T38.6.4.12 against an in-process stub server set, with two exceptions:
@@ -4602,3 +4640,10 @@ R38.8.6 **Tests (two-direction, observable).**
   item 8.* Inputs: this repository's code and a field report of an Electrum
   server with an expired certificate; no forbidden-class input, so chapter 01
   R38 is not engaged and no gate pass is required.
+- *Reloaded-original amendment (2026-11-10, D38.6.4o.14), clean side --
+  R38.6.4o items 7 and 12 (dated amendment paragraphs), T38.6.4o.17,
+  T38.6.4o.18 and D38.6.4o.14.* Written by a session that never read the
+  forbidden corpus. The inputs are this repository's code, the public Electrum
+  protocol, a field report of refused DOGE orders, and this project's own
+  queries of two public DOGE Electrum servers. They take no forbidden-class
+  input, so chapter 01 R38 is not engaged and no gate pass is required.

@@ -18,7 +18,7 @@
 use super::electrum_measure::{agreed_tip, block_interval_from_conf, common_height, eligible_servers,
                               header_differences, is_beyond_tolerance, is_far_ahead, is_slow, lag, lead,
                               near_sessions, next_round_at, out_of_date_states, pick_replacement, rank_after_round,
-                              rank_with_replacement, remeasure_gap, round_agreed_tip, shuffle, signed_lag,
+                              rank_with_replacement, remeasure_gap, round_agreed_tip, same_block, shuffle, signed_lag,
                               stale_limit, tolerance_blocks, Draw, Measurement, Measuring, OutOfDate, PoorReason,
                               RoundServer, ServerQuality, TipFigure, NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
 use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, ServerSpec, Session, SessionEnded,
@@ -1560,8 +1560,9 @@ impl PoolShared {
         due
     }
 
-    /// Asks both servers, with one directed request each, for the header at `height` and compares the bytes: `Some(true)`
-    /// when they are the same, `None` when either server did not answer within the request bound (it is not judged).
+    /// Asks both servers, with one directed request each, for the header at `height` and compares the base headers
+    /// ([`same_block`]): `Some(true)` when they name the same block, `None` when either server did not answer with a
+    /// readable header within the request bound (it is not judged).
     async fn compare_pair(self: &Arc<Self>, a: &ServerSlot, b: &ServerSlot, height: u64) -> Option<bool> {
         let request = |slot: &ServerSlot| {
             let request = JsonRpcRequestEnum::Single(JsonRpcRequest {
@@ -1577,11 +1578,11 @@ impl PoolShared {
         let (answer_a, answer_b) = futures::future::join(request(a), request(b)).await;
         let header = |answer: Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), String>| match answer {
             Ok((_, JsonRpcResponseEnum::Single(single))) if single.error.is_null() => {
-                single.result.as_str().map(|hex| hex.to_ascii_lowercase())
+                single.result.as_str().and_then(|hex| hex::decode(hex).ok())
             },
             _ => None,
         };
-        Some(header(answer_a)? == header(answer_b)?)
+        Some(same_block(&header(answer_a)?, &header(answer_b)?))
     }
 
     /// Starts the comparisons of `pairs` as a task and returns the signal that it has ended. The pairs count as in
@@ -1732,11 +1733,11 @@ impl PoolShared {
             .clone()
     }
 
-    /// Notes the pairs of a measurement round that answered different header bytes at one height (item 7).
+    /// Notes the pairs of a measurement round that answered different base headers at one height (item 7).
     fn note_header_differences(&self, round: &[RoundServer]) { self.add_pending(header_differences(round)); }
 
     /// Notes the pairs of maintained connections whose last header, from the answer to the header request or from a
-    /// notification, is at one height with different bytes (item 7). The comparison follows once both are at least
+    /// notification, is at one height with a different base header ([`same_block`], item 7). The comparison follows once both are at least
     /// *T* above that height.
     fn note_same_height_differences(&self) {
         if !self.tip_checks {
@@ -1753,7 +1754,7 @@ impl PoolShared {
         let mut pairs = Vec::new();
         for (i, (id_a, height_a, bytes_a)) in headers.iter().enumerate() {
             for (id_b, height_b, bytes_b) in headers.iter().skip(i + 1) {
-                if height_a == height_b && bytes_a != bytes_b {
+                if height_a == height_b && !same_block(bytes_a, bytes_b) {
                     pairs.push((*id_a, *id_b, *height_a));
                 }
             }

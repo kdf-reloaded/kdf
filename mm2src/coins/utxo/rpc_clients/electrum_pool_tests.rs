@@ -4397,8 +4397,8 @@ fn t38_6_4o_7_different_headers_in_notifications_start_a_comparison() {
             a.set_default_block_header("dd");
             b.set_default_block_header("dd");
             if diverge {
-                a.set_block_header(H, "x1");
-                b.set_block_header(H, "x2");
+                a.set_block_header(H, "e1");
+                b.set_block_header(H, "e2");
             }
             let client = agreement_pool(ticker, &[&a, &b], true);
             client.start_pool(false);
@@ -4423,6 +4423,71 @@ fn t38_6_4o_7_different_headers_in_notifications_start_a_comparison() {
                 assert!(client.chain_disagreement().is_none());
             }
         }
+    });
+}
+
+/// A header of `base` (one byte repeated over the 80 bytes of the base header) followed by `tail` (bytes after it, as
+/// a merged-mining proof carries them), in hex.
+fn header_with_tail(base: u8, tail: &[u8]) -> String {
+    let mut bytes = vec![base; super::electrum_measure::BASE_HEADER_LEN];
+    bytes.extend_from_slice(tail);
+    hex::encode(bytes)
+}
+
+/// T38.6.4o.17 (items 7 and 12, merged-mining headers): two servers that answer the same 80-byte base header with
+/// different bytes after it, in their tip notifications and below the tip, name the same block. The activation
+/// succeeds, the comparison that the different tip bytes start finds no difference, and the coin never enters the
+/// disagreement state; with two servers far apart the higher one is used. A difference inside the 80 bytes still
+/// enters the state.
+#[test]
+fn t38_6_4o_17_merged_mining_proof_bytes_are_not_a_different_chain() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let proof_a = header_with_tail(0x11, &[0xab; 20]);
+        let proof_b = header_with_tail(0x11, &[0xcd; 38]);
+        for (ticker, base_b, diverge) in [("AUXSAME", 0x11u8, false), ("AUXBASEDIFF", 0x12u8, true)] {
+            let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
+            let other = header_with_tail(base_b, &[0xcd; 38]);
+            // The tips carry the same block with different proof bytes, as do the headers below the tip.
+            a.set_header_hex(&proof_a);
+            b.set_header_hex(&proof_b);
+            a.set_default_block_header(&proof_a);
+            b.set_default_block_header(if diverge { &other } else { &proof_b });
+            let client = agreement_pool(ticker, &[&a, &b], true);
+            if diverge {
+                // The comparison at activation already finds the different base header.
+                let error = activate_judged(&client).await.unwrap_err();
+                assert!(error.contains(&a.addr()) && error.contains(&b.addr()), "{error}");
+                continue;
+            }
+            activate_judged(&client).await.unwrap();
+            client.start_pool(false);
+            wait_until("the heights", || {
+                snap_of(&client, &a).height.is_some() && snap_of(&client, &b).height.is_some()
+            })
+            .await;
+            assert!(client.chain_disagreement().is_none());
+            // Both move on past T: a pair noted from different tip bytes would be compared now; none is noted, and a
+            // comparison that runs finds the same block.
+            a.set_tip(H + 2);
+            b.set_tip(H + 2);
+            wait_until("the new heights", || {
+                snap_of(&client, &a).height == Some(H + 2) && snap_of(&client, &b).height == Some(H + 2)
+            })
+            .await;
+            Timer::sleep(0.3).await;
+            assert!(client.chain_disagreement().is_none());
+            assert!(client.servers_view().chain_disagreement.is_none());
+        }
+
+        // Two servers far apart with different proof bytes below the tip: a stale server on the same chain.
+        let (high, low) = (stub_at(5, H + 1_000).await, stub_at(5, H).await);
+        high.set_default_block_header(&proof_a);
+        low.set_default_block_header(&proof_b);
+        let client = agreement_pool("AUXSTALE", &[&low, &high], true);
+        activate_judged(&client).await.unwrap();
+        assert!(high.requests("blockchain.block.header") >= 1 && low.requests("blockchain.block.header") >= 1);
+        assert!(client.chain_disagreement().is_none());
     });
 }
 
@@ -4484,8 +4549,8 @@ fn t38_6_4o_12_a_resolved_fork_ends_the_state() {
         for stub in [&a, &b] {
             stub.set_default_block_header("dd");
         }
-        a.set_block_header(H, "x1");
-        b.set_block_header(H, "x2");
+        a.set_block_header(H, "e1");
+        b.set_block_header(H, "e2");
         let client = checked_pool(
             &[&a, &b],
             PoolSetup::new(ticker),
@@ -4505,8 +4570,8 @@ fn t38_6_4o_12_a_resolved_fork_ends_the_state() {
         wait_until("the disagreement state", || client.chain_disagreement().is_some()).await;
 
         // The fork resolves: both answer the same header at H. After the limit the pair is compared again.
-        a.set_block_header(H, "same");
-        b.set_block_header(H, "same");
+        a.set_block_header(H, "5a5e");
+        b.set_block_header(H, "5a5e");
         wait_until("the end of the state", || client.chain_disagreement().is_none()).await;
         if capturing {
             let agree = format!("WARN {ticker}: the Electrum servers agree about the chain again");
