@@ -904,3 +904,21 @@ fn t35_37_the_kept_exchange_and_its_late_answer_are_logged_by_host_only_name() {
         }
     }
 }
+
+#[test]
+fn install_log_capture_answers_the_same_to_concurrent_callers() {
+    const CALLERS: usize = 8;
+    let barrier = Arc::new(std::sync::Barrier::new(CALLERS));
+    let handles: Vec<_> = (0..CALLERS)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                install_log_capture()
+            })
+        })
+        .collect();
+    let answers: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(answers.iter().all(|a| *a == answers[0]), "{answers:?}");
+    assert_eq!(install_log_capture(), answers[0]);
+}

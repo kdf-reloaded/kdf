@@ -6,7 +6,7 @@ use crate::eth::alloy_compat::provider::provider_from_transport;
 use crate::eth::alloy_compat::KdfProvider;
 use crate::node_url::listed_nodes;
 use serde_json::{json, Value as Json};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 /// What a stub node does with one request.
 pub(crate) enum Reply {
@@ -171,7 +171,7 @@ pub(crate) fn stub_provider(
 struct CapturingLogger;
 
 static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
-static INSTALLED: AtomicBool = AtomicBool::new(false);
+static INSTALL: OnceLock<bool> = OnceLock::new();
 static LOGGER: CapturingLogger = CapturingLogger;
 
 impl common::log::log_crate::Log for CapturingLogger {
@@ -196,16 +196,15 @@ impl common::log::LogCallback for CapturingCallback {
     }
 }
 
-/// Installs the capturing logger and the `log!` capture. `false` when another logger already owns the process, in which case the
-/// captured lines are empty and a test must not assert that a line is present.
+/// Installs the capturing logger and the `log!` capture. The answer is decided once per process, by the first caller,
+/// and every caller gets the same one: `false` means another logger was installed first and owns the process, in which
+/// case the captured lines are empty and a test must not assert that a line is present.
 pub(crate) fn install_log_capture() -> bool {
     use common::log::log_crate::{set_logger, set_max_level, LevelFilter};
-    if set_logger(&LOGGER).is_ok() {
-        INSTALLED.store(true, Ordering::SeqCst);
-    }
+    let installed = *INSTALL.get_or_init(|| set_logger(&LOGGER).is_ok());
     set_max_level(LevelFilter::Trace);
     common::log::register_callback(CapturingCallback);
-    INSTALLED.load(Ordering::SeqCst)
+    installed
 }
 
 /// Every line captured so far.
