@@ -476,6 +476,19 @@ Invalid input shall produce a structured JSON error response and the daemon shal
 continue serving. Method handlers in the RPC path shall avoid unwrap/expect on
 caller-controlled data.
 
+> **Status note (2026-11-10, clean-side record; the maintainer's decision of 2026-11-10).**
+> The legacy method table of this repository routed a test helper,
+> `sim_panic`, in every build; on request it panicked the process, which
+> contradicted R43.4.1 and the chapter's one-sentence claim; the method
+> required the RPC password, so it was never reachable without
+> authentication. The helper and its table arm are
+> now compiled only with the Cargo feature `sim-panic-rpc`, which no shipped
+> build enables. Without the feature a legacy or versioned request for the
+> name answers like any unknown method (R43.1A.1a–R43.1A.1c: `NoSuchMethod`
+> in the mmrpc 2.0 envelope, HTTP 400). Tests: the `server_tests` cases for
+> both feature states in `mm2_main/src/rpc.rs`. This records this
+> repository's behavior only and states nothing about the reference.
+
 ## 43.5 Daemon lifecycle & graceful shutdown
 
 R43.5.1 The daemon shall install OS termination-signal handling and, on receiving
@@ -641,3 +654,8 @@ shall be wound down as part of shutdown rather than abandoned.
   or serialized interface and no function body, control-flow transcription,
   private non-wire identifier, discretionary error or log wording, internal
   module tree or test name is present; none was found.
+- *Status note added 2026-11-10 -- under R43.4.1 (§43.4).* Reloaded-original,
+  clean side: it records this repository's gating of the `sim_panic` test
+  helper behind a Cargo feature (the maintainer's decision of 2026-11-10) and takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.

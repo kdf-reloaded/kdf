@@ -29,7 +29,7 @@ use http::Response;
 use mm2_core::mm_ctx::MmArc;
 use mm2_metrics::MetricsOps;
 use serde_json::{self as json, Value as Json};
-use std::borrow::Cow;
+#[cfg(feature = "sim-panic-rpc")] use std::borrow::Cow;
 use std::future::Future;
 
 use crate::mm2::lp_dispatcher::{dispatch_lp_event, StopCtxEvent};
@@ -300,6 +300,7 @@ pub async fn stop(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
     Ok(try_s!(Response::builder().body(res)))
 }
 
+#[cfg(feature = "sim-panic-rpc")]
 pub async fn sim_panic(req: Json) -> Result<Response<Vec<u8>>, String> {
     #[derive(Deserialize)]
     struct Req {
