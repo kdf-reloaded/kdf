@@ -571,6 +571,17 @@ own exact-value check of item 3 against the reference's arithmetic.
 > Reloaded maker against a reference taker) has not been run. The source
 > comment the code-quality finding refers to (`netid_6133.rs`) was reworded
 > in the change that added this note.
+>
+> *Later the same day:* the discounted rate was proven on netid 8762
+> instead, with KMD on the other side of the pair (the maintainer's
+> decision of 2026-11-10): a maker of the netid-8762 reference lineage
+> (the GLEEC development build the lab names K), behind the same kind of
+> pool-reply proxy, recorded `TakerFeeValidated` on a fee of exactly
+> 9/7770 of a 1 SC taker volume in hastings and the swap completed on both
+> sides; two attempts without the proxy failed at the pool reply before
+> the amount was checked (R-N4 class). Both rate cases of item 1 are
+> therefore lab-proven; the exact-value check of item 3 was reached and
+> passed on both netids.
 
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method
