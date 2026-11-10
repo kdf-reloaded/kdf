@@ -1336,8 +1336,8 @@ why and where the plan lives; what a user meets today is under Known limitations
 - **QTUM and QRC20 stabilization.** It is analyzed and planned, but not started. More in
   [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md).
 - **A typed error for the Radiant (RXD) signature check.** An RXD swap with a build without the
-  Radiant signature dialect fails (see Known limitations); a typed error for the four signature-hash
-  cases the dialect treats as fatal is a later step. More in
+  Radiant signature dialect did not complete in the 0.3.0 tests (see Known limitations); a typed
+  error for the four signature-hash cases the dialect treats as fatal is a later step. More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) (step 8).
 
 ### Known limitations
