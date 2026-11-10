@@ -972,7 +972,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   forty `coins` tests capture the log to check that no credential leaks and skip that check when
   another logger owns the process. Two such tests starting together could make the second one skip
   although the capture was in place. The helper now decides once per process, and a test checks
-  eight concurrent callers get one answer. The node itself is unchanged. Detail: PR #N.
+  eight concurrent callers get one answer. The node itself is unchanged. Detail: PR #329.
 - **A lab row checks what a short network outage does to a relay connection.** With every packet
   between a relay and a peer dropped and no socket reset, a 10-second outage kept the connection and
   traffic resumed within 6 seconds, three times out of three. After a 30-second outage the
