@@ -645,7 +645,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   a database is opened together with a `-wal` file written by a less trusted party. The node opens
   only database files it creates itself in its own data directory, so the condition is outside its
   model. The fix is a `rusqlite` update, which waits for the shielded-coin wallet library to move
-  to that version. The node itself is unchanged. Detail: PR #N.
+  to that version. The node itself is unchanged. Detail: PR #332.
 - **The old DNS libraries are gone from the build.** The peer-to-peer transport no longer uses
   its own DNS layer, so that layer and the unmaintained resolver library it pulled in
   (trust-dns 0.22, with an accepted `idna` advisory) are no longer built. The dependency policy
