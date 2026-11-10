@@ -439,6 +439,127 @@ floor is a maintainer decision (chapter 60 D60.2).
 > reported as paid from the HTLC value, and all reported Sia miner-fee figures
 > are the fixed 0.00002 SC.
 
+**R-S12 (taker DEX fee by network; Spec Reader round 0.4.0-14, passed
+the KDF Dirty Gate on 2026-11-10).**
+
+> **Clearance (chapter 01 R40) -- passed the KDF Dirty Gate on
+> 2026-11-10, measure 0.03 (attestation in §20.12).** R-S12, T-S1, the
+> code-quality note under them and the matching §20.12 entry were
+> authored in Spec Reader round 0.4.0-14 from forbidden-class input
+> taken under chapter 01 §1.4A at the two designations `v2.6.0-beta` and
+> `v3.0.0-beta` of [Chapter 02](02-baseline-state.md) §2.15A.
+
+The facts below hold at `v2.6.0-beta` (the netid-8762 reference) and at
+`v3.0.0-beta` (the netid-6133 reference); where the two differ the item
+says so.
+
+1. **Rate: the general schedule, no Sia-specific figure.** At neither
+   designation does the Sia taker fee have a rate of its own. Its amount
+   is the general fee descriptor of [Chapter 08](08-fee-routing-engine.md):
+   the build's global base rate -- 1/777 at `v2.6.0-beta`, 2/100 at
+   `v3.0.0-beta` -- or that build's discounted rate when either ticker of
+   the pair is the build's discount ticker (`"KMD"` selecting 9/7770 at
+   `v2.6.0-beta`; `"GLEEC"` selecting 1/100 at `v3.0.0-beta`), multiplied
+   by the taker volume and floored at the taker coin's minimum
+   transaction amount, which for Sia is one hasting (R-S11). The rate is
+   selected by the pair's two tickers against the build's single global
+   schedule ([Chapter 06](06-network-id-seed-node.md) §6.6A.4): not per
+   netid, not per coin, not per coin family, and not by any field of the
+   coin's configuration entry. Sia participates in no burn form at either
+   designation; a Sia fee is always the plain single-output form of
+   chapter 08 R15 (`Standard`). For Reloaded, this means the rate the
+   active per-netid `NetConfig` returns under chapter 06 R17 (1/777 and
+   9/7770 by `"KMD"` on netid 8762; 2/100 and 1/100 by `"GLEEC"` on netid
+   6133) is exactly the rate the reference of that netid charges and
+   expects for Sia, and **no Sia-specific rate field is to be added** to
+   the network configuration.
+
+2. **Destination: one ed25519 key, identical on both netids.** At both
+   designations the fee output pays the Sia address derived from a single
+   ed25519 public key compiled into the build's shared constants, derived
+   once at load and reused for every swap; the secp256k1 fee key the swap
+   engine hands the coin layer plays no part for Sia. That ed25519 key is
+   the **same value** at `v2.6.0-beta` and at `v3.0.0-beta`, although the
+   secp256k1 fee key and the burn key did change between those
+   designations. The Sia fee destination is therefore identical on netid
+   8762 and netid 6133. Reloaded already records that value as the
+   ed25519 flavour of both netids (chapter 06 §6.1, R8), and §20.4.2
+   derives the address from it. For both netids the value is a dictated
+   inter-operability constant: changing it on either netid makes every
+   reference maker of that netid refuse this node's Sia taker fee
+   (item 3), so it MUST NOT be presented as an operator-tunable setting.
+
+3. **Maker validation.** A maker of either designation accepts a Sia
+   taker fee only if all of the following hold, in the taker coin's
+   native units:
+   - the fee transaction is found by its id either confirmed at a height
+     not below the taker-coin start block of the swap, or else in the
+     transaction pool while the current height is not below that block;
+     no confirmation beyond visibility is required;
+   - every input is spent from the taker's own address, the address of
+     the taker's negotiated ed25519 key (R-S9);
+   - the transaction has one or two outputs;
+   - the first output pays the fee address of item 2 exactly;
+   - the first output's value equals the expected fee amount in hastings
+     **exactly** -- no tolerance in either direction, unlike the
+     one-sided tolerance of chapter 08 R15B for UTXO coins;
+   - the arbitrary-data channel carries the swap UUID (R-S1).
+   Any mismatch is a validation error. The generic maker machine retries
+   the validation the bounded number of times, with the fixed delay, of
+   [Chapter 51](51-legacy-v1-swap-state-machine.md) R15 -- a
+   deterministic mismatch such as a wrong amount or a wrong destination
+   is retried just like a not-yet-visible transaction -- and then emits
+   `TakerFeeValidateFailed` and finishes the swap (chapter 51 R13). It
+   is a hard failure of that swap: no re-negotiation, no second rate, no
+   request for another fee. The taker learns of it only indirectly, as
+   the absence of a maker payment: it exhausts its maker-payment budget,
+   emits `MakerPaymentValidateFailed` and finishes (chapter 51 R28),
+   having paid its fee.
+
+4. **Control: netid 8762 at `v2.6.0-beta`.** Items 2 and 3 are the same
+   at both designations; the Sia module's fee construction and fee
+   validation did not change between them. The only difference is the
+   global schedule of item 1: 1/777 and 9/7770 by `"KMD"` at
+   `v2.6.0-beta` against 2/100 and 1/100 by `"GLEEC"` at `v3.0.0-beta`.
+
+5. **Consequence for a Reloaded taker on netid 6133.** A Reloaded taker
+   whose coin is SC, paying the netid-6133 schedule rate of chapter 06
+   R17 (2/100, or 1/100 with GLEEC on the other side of the pair) to the
+   shared ed25519 destination, with the UUID embedded and every input
+   from its own address, is **accepted** by a `v3.0.0-beta` maker,
+   provided the hasting value it sends equals, to the hasting, the value
+   the maker computes from the same rational rate and the same
+   decimal-to-hasting conversion -- the one point a lab row has to prove
+   (T-S1). A taker that paid the netid-8762 rate on netid 6133 would be
+   **rejected** after the retries of item 3; on its side the rejection
+   looks like a maker that never pays, ending in
+   `MakerPaymentValidateFailed` after the maker-payment budget, and the
+   fee is spent.
+
+**T-S1 (lab proving row: Reloaded taker against a reference maker on
+netid 6133; Spec Reader round 0.4.0-14, passed the KDF Dirty Gate on 2026-11-10).** On netid
+6133 a reference `v3.0.0-beta` maker posts an order that **buys** SC (SC
+is the order's rel coin, so the taker's coin -- and the fee coin -- is
+SC); a Reloaded taker takes it. MUST pass: the maker records
+`TakerFeeValidated` and sends its payment, and the swap completes on both
+sides. MUST record, for every run: the taker's fee transaction id, the
+first output's value in hastings, the rate case (base or discounted) and,
+on a failure, the maker's reported expected value, so that a hasting-level
+rounding difference is distinguishable from a destination or UUID
+failure. MUST repeat with GLEEC on the other side of the pair, which
+exercises the discounted rate. Companion row (optional): the same pair
+with a Reloaded maker and a reference taker, which exercises Reloaded's
+own exact-value check of item 3 against the reference's arithmetic.
+
+> **Code-quality finding (informative; this repository's own code, not the
+> corpus).** The netid-6133 network-configuration entry carries a comment
+> presenting the ed25519 fee key as a value an operator may change to get a
+> distinct destination on netid 6133. Item 2 shows that doing so breaks
+> inter-operation with every reference maker on that netid, which refuses a
+> fee paid elsewhere. Proposed fix: reword the comment to state that the
+> value is a dictated inter-operability constant shared with netid 8762 and
+> is not an operator setting. No code change is implied.
+
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method
 > table keyed to private helpers, no method bodies, and no
@@ -1247,3 +1368,38 @@ V3. The unit ratio, ed25519 scheme, address encoding, walletd
   PR #279, merged 2026-11-07; see the D1 note). Written from this repository's own
   code and chapter 46; it takes no forbidden-class input and needs no gate
   pass.
+- *Spec Reader round 0.4.0-14 (2026-11-10; forbidden corpus consulted):*
+  R-S12, T-S1 and the code-quality note under them rest on
+  forbidden-class input taken under the two-team procedure of chapter 01
+  §1.4A at exactly the two designations `v2.6.0-beta` and `v3.0.0-beta`
+  of [Chapter 02](02-baseline-state.md) §2.15A, for exactly three
+  subject areas: the taker DEX-fee rate schedule and the inputs that
+  select it; the Sia fee-destination key, its derivation and its value
+  across the two designations; and the maker-side validation of a Sia
+  taker fee with its retry and failure outcome. They also rest on this
+  repository's own network-configuration crate and Sia swap-ops code and
+  on chapters 06, 08 and 51. The round established no fact that
+  contradicts §6.6A of chapter 06; it adds the one qualification chapter
+  06 now cross-references under its §6.6A.5 table. No discretionary
+  expression -- no private identifier, body, control-flow transcription,
+  local name, or error or log literal -- was reproduced. **KDF Dirty
+  Gate: PASS on 2026-11-10, measure 0.03, no findings** (chapter 01 R40;
+  R13 check clean). *Dirty Gate clearance (chapter 01 T1, R40):* PASS,
+  2026-11-10. *Extent:* compared at the two rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, for the four subject areas the
+  dispatch named — the taker DEX-fee rate schedule and its selection
+  inputs; the Siacoin taker-fee construction (amount, destination key
+  and derived address, data field); the Siacoin maker-side fee
+  validation and its failure path; and the legacy swap state machines'
+  fee-validation retry and failure events plus the taker's
+  maker-payment-wait failure event — five source files per state (ten
+  reads) and the inter-state diff of the same five files. Reloaded's own
+  network-configuration crate was also read to verify the premise of the
+  informative code-quality note. *Method:* by reading, plus mechanical
+  `git diff` between the two tabled states. No embedded code blocks are
+  present in the candidate, so `tools/clean_room_gate.py` was not run.
+  *Measure:* 0.03 on the R35 discretionary-expression basis
+  (dictated-interop and pinned-interface tokens excluded), read against
+  the standard that any single item of discretionary expression fails
+  regardless of score; none was found. For orientation only, the
+  repository tooling's absolute cap of 0.50 was not approached.
