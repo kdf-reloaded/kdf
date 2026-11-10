@@ -686,7 +686,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 - **The test helper `sim_panic` is no longer part of release builds.** This legacy method made
   the node panic on request; it is now compiled only with the Cargo feature `sim-panic-rpc`, which
   no published build enables. A request for the name answers `NoSuchMethod` like any unknown
-  method. Detail: PR #N; CRD ch.43 R43.4.1 status note.
+  method. Detail: PR #331; CRD ch.43 R43.4.1 status note.
 - **A request without `mmrpc` whose method only the mmrpc 2.0 interface knows is now answered
   through that interface, as on GLEEC KDF.** When the legacy method table has no entry for the
   request's method, the node retries the request once as an mmrpc 2.0 request and answers in the
