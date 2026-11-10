@@ -568,7 +568,8 @@ own exact-value check of item 3 against the reference's arithmetic.
 > taker fee validated by a reference maker on netid 6133"). The
 > discounted-rate repeat with GLEEC on the other side of the pair has not
 > been run (no GLEEC in the lab); the companion row has not been run. The
-> comment of the code-quality finding was reworded in the same change.
+> source comment the code-quality finding refers to (`netid_6133.rs`) was
+> reworded in the same change.
 
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method
