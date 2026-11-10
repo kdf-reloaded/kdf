@@ -3283,8 +3283,9 @@ headers share, the longer Zcash-style and proof-of-stake headers included, so
 a real fork still differs in them; no per-coin setting is needed. On
 Zcash-style headers the time and the nonce follow byte 80, so two sibling
 blocks with the same parent and the same merkle root would compare equal at
-the fork height. Their coinbases differ, so their merkle roots differ, and at
-every later height the previous block hash differs.
+the fork height. Such siblings usually differ in their coinbase and so in their
+merkle root; in any case the previous block hash differs at every later
+height, and the comparisons are made below the tip.
 
 D38.6.4o.15 *(Decided 2026-11-10, maintainer.)* *A disagreement after
 activation is confirmed before it stops trading.* A field log of a maker
@@ -3299,10 +3300,11 @@ again within seconds or minutes:
 
 Each entry logged an ERROR line and refused the maker's orders while it
 lasted. The field log does not show why the servers differed for these short
-times; a disagreement that lasts is the case the state is for. After activation, therefore, a
-disagreement puts the coin into the state only after it has lasted two block
-times, and at least 60 s. The activation itself keeps its 5 s judgment. The
-length of the period is watched in field runs and evaluated.
+times; a disagreement that lasts is the case the state is for. After
+activation, therefore, a disagreement puts the coin into the state only after
+it has lasted two block times, and at least 60 s. The activation itself keeps
+its 5 s judgment. The length of the period is watched in field runs and
+evaluated.
 
 > **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
 > T38.6.4.12 against an in-process stub server set, with two exceptions:
