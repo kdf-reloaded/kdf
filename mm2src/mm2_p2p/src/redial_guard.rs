@@ -156,8 +156,9 @@ impl SeedPeers {
 pub(crate) enum LocalClose {
     /// The ping safeguard (R9). The only local close that allows an early redial.
     PingSafeguard,
-    /// Any other close of this node that a call site recorded: the peer-clock admission check (RP2) and the
-    /// relay-count maintenance (R27).
+    /// Any other close of this node that was recorded when it was started: the peer-clock admission check (RP2) and
+    /// the relay-count maintenance (R27), which their call sites record, and the stuck-peer close (RQ1 item 5), which
+    /// gossipsub marks.
     Other,
 }
 
@@ -175,9 +176,9 @@ pub(crate) enum CloseCause {
     CloseTimedOut,
     /// A connection handler failed. R27a item 1a does not list it, so no early redial.
     HandlerError,
-    /// A close that this node started and that no call site recorded as the ping safeguard: the stuck-peer close
-    /// (RQ1 item 5), the admission close (RP2), the relay-count close (R27), or a close with another purpose. No
-    /// early redial.
+    /// A close that this node started and that was not recorded as the ping safeguard: the stuck-peer close (RQ1
+    /// item 5, marked by gossipsub), the admission close (RP2), the relay-count close (R27), or a close with another
+    /// purpose. No early redial.
     LocalClose,
 }
 
@@ -195,8 +196,8 @@ fn is_close_timed_out(error: &io::Error) -> bool { error.to_string().contains(CL
 /// Tells the cause of a `SwarmEvent::ConnectionClosed` (R27a item 1a).
 ///
 /// `cause` is the cause of the event. The swarm reports `None` when the close was started on this node's side and
-/// finished without an error, whatever started it, so `None` alone does not name the reason: `local` is what the call
-/// site that started the close recorded. A close that ended with an error is a transport error or a close from the
+/// finished without an error, whatever started it, so `None` alone does not name the reason: `local` is what was
+/// recorded when the close was started (by its call site, or by gossipsub for the stuck-peer close). A close that ended with an error is a transport error or a close from the
 /// peer, unless `local` says that this node had started it. The idle timeout, the handler error and the R27c timeout
 /// are told by their error.
 pub(crate) fn classify_close<E>(cause: Option<&ConnectionError<E>>, local: Option<LocalClose>) -> CloseCause {
@@ -295,8 +296,8 @@ impl EarlyRedials {
     }
 
     /// This node has started to close the connections to `peer` for the reason `close`. It marks the connections to
-    /// `peer` that it dialed, so that their close is not taken for a transport error. The ping safeguard is not
-    /// recorded here: [`AdexPing`](crate::adex_ping::AdexPing) records it.
+    /// `peer` that it dialed, so that their close is not taken for a transport error. The ping safeguard and the
+    /// stuck-peer close are not recorded here: [`AdexPing`](crate::adex_ping::AdexPing) and gossipsub record them.
     pub(crate) fn mark_local_close(&mut self, peer: PeerId, close: LocalClose) {
         for connection in self
             .established
@@ -308,21 +309,23 @@ impl EarlyRedials {
     }
 
     /// The connection with `connection_id` closed at `now` with `cause`. `closed_by_ping` is whether the ping
-    /// safeguard had started the close. Returns what the close means for its address, or `None` when this node did
+    /// safeguard had started the close, `closed_by_stuck` whether the stuck-peer close of RQ1 item 5 had (gossipsub
+    /// marks it); the latter counts as [`LocalClose::Other`]. Returns what the close means for its address, or `None` when this node did
     /// not dial the connection.
     pub(crate) fn connection_closed<E>(
         &mut self,
         connection_id: ConnectionId,
         cause: Option<&ConnectionError<E>>,
         closed_by_ping: bool,
+        closed_by_stuck: bool,
         now: Instant,
     ) -> Option<DialedClose> {
         let connection = self.established.remove(&connection_id)?;
-        // When both recorded a close, the one that does not allow an early redial wins.
-        let local = match (connection.local_close, closed_by_ping) {
-            (Some(LocalClose::Other), _) => Some(LocalClose::Other),
-            (_, true) => Some(LocalClose::PingSafeguard),
-            (recorded, false) => recorded,
+        // When more than one recorded a close, the one that does not allow an early redial wins.
+        let local = match (connection.local_close, closed_by_ping, closed_by_stuck) {
+            (Some(LocalClose::Other), ..) | (_, _, true) => Some(LocalClose::Other),
+            (_, true, false) => Some(LocalClose::PingSafeguard),
+            (recorded, false, false) => recorded,
         };
         let cause = classify_close(cause, local);
         let lifetime = now.duration_since(connection.established_at);
@@ -788,9 +791,28 @@ mod tests {
         closed_by_ping: bool,
         at: Instant,
     ) -> DialedClose {
+        close_with_stuck_mark(guards, id, cause, closed_by_ping, false, at)
+    }
+
+    /// Closes the connection with the identifier `id` at `at`, with gossipsub's answer whether the stuck-peer close
+    /// had started the close.
+    fn close_with_stuck_mark(
+        guards: &mut RedialGuards,
+        id: u64,
+        cause: Option<&ConnectionError<()>>,
+        closed_by_ping: bool,
+        closed_by_stuck: bool,
+        at: Instant,
+    ) -> DialedClose {
         guards
             .early
-            .connection_closed(ConnectionId::new_unchecked(id as usize), cause, closed_by_ping, at)
+            .connection_closed(
+                ConnectionId::new_unchecked(id as usize),
+                cause,
+                closed_by_ping,
+                closed_by_stuck,
+                at,
+            )
             .expect("the connection was dialed by this node")
     }
 
@@ -939,7 +961,8 @@ mod tests {
 
     /// T15: the idle timeout, the R27c close timeout (bare and wrapped), a handler error, and every close that this
     /// node started for another reason (the stuck-peer close, the admission close of RP2, the relay-count close of
-    /// R27) leave the address guarded, however long the connection lasted.
+    /// R27) leave the address guarded, however long the connection lasted. Gossipsub's mark of the stuck-peer close
+    /// is the input `closed_by_stuck`; the admission and relay-count closes are recorded by their call sites.
     #[test]
     fn non_exempt_causes_stay_guarded() {
         let start = Instant::now();
@@ -957,8 +980,8 @@ mod tests {
                 false,
             ),
             ("handler error", Some(ConnectionError::Handler(())), false),
-            // The stuck-peer close ends without an error and no call site names it.
-            ("stuck-peer close", None, false),
+            // A close that ends without an error and that nothing marked.
+            ("unmarked clean close", None, false),
             // The admission close and the relay-count close are recorded where the node calls the close.
             ("recorded close, clean", None, true),
             ("recorded close, cut short by an error", Some(transport_error()), true),
@@ -983,6 +1006,38 @@ mod tests {
             assert!(dialable(&guards, &address, secs(start, 10)), "{}", name);
         }
 
+        // The stuck-peer close, which gossipsub marks, whatever the connection ended with, and whether or not the
+        // ping safeguard had also marked it (T15, R27a item 1a).
+        for (name, cause, by_ping) in [
+            ("stuck-peer close, clean", None, false),
+            (
+                "stuck-peer close, cut short by an error",
+                Some(transport_error()),
+                false,
+            ),
+            ("stuck-peer close and ping safeguard, clean", None, true),
+            (
+                "stuck-peer close and ping safeguard, cut short by an error",
+                Some(transport_error()),
+                true,
+            ),
+        ] {
+            let mut guards = new_guards();
+            dial_and_establish(&mut guards, &address, 1, peer, start);
+            let closed = close_with_stuck_mark(&mut guards, 1, cause.as_ref(), by_ping, true, secs(start, 6));
+            assert_eq!(closed.cause, CloseCause::LocalClose, "{}", name);
+            assert!(!closed.early_redial_allowed, "{}", name);
+            for tick in 6..10 {
+                assert!(
+                    !dialable(&guards, &address, secs(start, tick)),
+                    "{}, tick {}",
+                    name,
+                    tick
+                );
+            }
+            assert!(dialable(&guards, &address, secs(start, 10)), "{}", name);
+        }
+
         // A recorded close of another purpose wins over the ping safeguard.
         let mut guards = new_guards();
         dial_and_establish(&mut guards, &address, 1, peer, start);
@@ -990,6 +1045,26 @@ mod tests {
         let closed = close(&mut guards, 1, None, true, secs(start, 6));
         assert_eq!(closed.cause, CloseCause::LocalClose);
         assert!(!dialable(&guards, &address, secs(start, 7)));
+    }
+
+    /// T15: the stuck-peer mark of gossipsub changes only the connection that it names: without it, the same close
+    /// that ended with an I/O error is a transport error and allows an early redial, as before.
+    #[test]
+    fn stuck_mark_decides_between_transport_error_and_local_close() {
+        let start = Instant::now();
+        let address = addr(1);
+        for (id, marked, want_cause, want_early) in [
+            (1, false, CloseCause::Transport, true),
+            (2, true, CloseCause::LocalClose, false),
+        ] {
+            let mut guards = new_guards();
+            dial_and_establish(&mut guards, &address, id, PeerId::random(), start);
+            let closed =
+                close_with_stuck_mark(&mut guards, id, Some(&transport_error()), false, marked, secs(start, 6));
+            assert_eq!(closed.cause, want_cause);
+            assert_eq!(closed.early_redial_allowed, want_early);
+            assert_eq!(dialable(&guards, &address, secs(start, 7)), want_early);
+        }
     }
 
     /// The close of a connection that this node did not dial changes nothing, and a record of a close of this node's
@@ -1010,6 +1085,7 @@ mod tests {
             .connection_closed(
                 ConnectionId::new_unchecked(50),
                 Some(&transport_error()),
+                false,
                 false,
                 secs(start, 5)
             )
