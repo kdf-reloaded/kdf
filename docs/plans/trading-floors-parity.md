@@ -34,6 +34,12 @@
    *Open for later (default-side arm 3, not chosen):* raising the advertised
    default minimum volume instead of refusing. That would change a value
    peers see (W1), so it needs a project-team decision.
+   *Chosen 2026-11-08 (the maintainer's decision; batch 4 item B4-15):* arm 3
+   as the default side. A maker order without `min_volume` advertises at
+   least ten times the HTLC spend fee (ch. 60 R60.6.8, T60.8); the
+   compatibility switch `spend_safe_min_volume` (`false` = the reference
+   default) is recorded in `RELOADED_VS_GLEEC.md` and
+   `docs/GLEEC_COMPATIBILITY.md`. *Done (PR #315, merged 2026-11-09).*
 4. **Sia: parity floor, orderly spend and refund refusal (R60.6.4), plus the
    same pre-trade check.** *Rejected:* a raised local Sia floor (peers would
    see a different advertised minimum). *Revised 2026-11-07 (PR #278; ch. 20
@@ -80,6 +86,7 @@
 | 1 | `fix/evm-min-trading-volume` (PR #66, widened) | EVM/QRC20/TRON (done); UTXO floor: no `BTC` exception, truncated fee term (R60.6.1, R38.6.6i items 1–2); Lightning floors (R60.6.5); Solana requests answer without abnormal end | 0 |
 | 2 | new: UTXO fee policy | `dingo_fee` classification and arithmetic, proportional plain fixed fees, the whole-kB fee term in the floor, the 496-byte legacy spend estimate (R38.6.6a–c, R38.6.6i items 3–4, R60.6.2) | 1 |
 | 3 | new: spend safety | orderly spend and refund refusal for UTXO and Sia, version-two funding fee plus dust (R60.6.4); pre-trade check and its switch (R60.6.7) | 2; PR #60 merged first (same refund code) |
+| 4 | `feat/raised-min-volume` (PR #315, batch 4 item B4-15) | default-side arm 3: a maker order without `min_volume` advertises at least ten times the HTLC spend fee, with the switch `spend_safe_min_volume` (R60.6.8, T60.8) | 3 |
 
 ## State
 
@@ -109,3 +116,12 @@
   the switch `pre_trade_spend_check`. The Sia miner fee turned out to be
   0.00002 SC, not 0.02 SC as the chapter first said; the chapter is
   corrected.
+- 4: raised default minimum volume merged in PR #315 (2026-11-09): R60.6.8 with
+  the switch `spend_safe_min_volume`, the compatibility entries and the
+  CHANGELOG entry. Lab row L-MINVOL passed 2026-11-09 (SwapLab, release build
+  of the PR, closed lab netid, RIN/DOGE): the maker and an observer both show
+  the raised minimum; with the switch off, the plain default and no refusal;
+  a bid below the raised minimum gets no reservation; a volume between the
+  floor and the raised value is accepted with the minimum capped at the
+  volume. With this row every work package of the plan is merged; rows 2 and
+  4 carry live tests (S7, L-MINVOL).
