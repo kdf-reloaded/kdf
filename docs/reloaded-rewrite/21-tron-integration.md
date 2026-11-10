@@ -452,6 +452,14 @@ or a TRC20 `TriggerSmartContract` carrying the ABI-encoded
 `transfer(address,uint256)` call (§21.6) -- with the resolved
 TAPOS and fee-limit.
 
+*Amended 2026-11-10 (clean-side status note):* until this date no
+Tron withdraw reached the chain. The current-block answer was read
+under a key the node does not send (the node sends `block_header`),
+and a native `TransferContract` was encoded without its contract-type
+field, which the node then read as type 0. Both were found by testnet
+withdrawals on 2026-11-10 (chapter 01 R6) and are fixed; T-WP pins the
+node's block answer and the encoded contract bytes.
+
 **R-W5.** Hash the raw body with SHA-256, sign it with secp256k1,
 assemble the full transaction, hex-encode it, and broadcast it via
 the broadcast endpoint (§21.9).
@@ -533,7 +541,12 @@ answers of R-WP1/R-WP2, including failover to a second node;
 the exactly-32-byte result of R-WP3; accepted, refused and
 malformed broadcast answers of R-WP4; the display and validation
 forms of R-WP5 for TRX, TRC20 and an unchanged EVM coin; and every
-fee descriptor form of R-WP6, with no node request made.
+fee descriptor form of R-WP6, with no node request made. Further
+tests decode the node's current-block answer in its observed form,
+take a TRX and a TRC20 withdraw through a stub node to a signed
+transaction, and check that the encoded contract of a TRX transfer
+starts with its type field (`08 01`) and that of a TRC20 transfer
+with `08 1f`.
 
 ## 21.11 Deferred Work
 

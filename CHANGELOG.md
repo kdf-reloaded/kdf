@@ -742,8 +742,10 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   never as zero. The coin's address is shown in the TRON form that starts with `T`, and
   `validateaddress` accepts the same forms as a TRON withdrawal. A raw transaction is sent to the
   TRON node instead of an EVM node. A TRON withdrawal that names a `fee` is refused with
-  `InvalidFeePolicy` instead of ignoring it, since TRON works out its own fee. There is no user
-  effect while TRON is switched off in this build. Detail: PR #333; CRD ch.21 §21.10A.
+  `InvalidFeePolicy` instead of ignoring it, since TRON works out its own fee. Two defects that kept
+  every TRON withdrawal from reaching the network are fixed: the current block is read in the form
+  the node sends, and a TRX transfer now carries its contract type. There is no user effect while
+  TRON is switched off in this build. Detail: PR #333; CRD ch.21 §21.10A.
 
 #### Price service and the maker bot
 

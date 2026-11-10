@@ -220,4 +220,61 @@ mod tests {
         assert_eq!(inner.call_value, 0);
         assert_eq!(inner.data.len(), 68); // ABI-encoded transfer call
     }
+
+    #[test]
+    fn test_build_trx_transfer_contract_wire_bytes() {
+        let raw = build_trx_transfer(
+            &test_address_a(),
+            &test_address_b(),
+            1_000_000,
+            &dummy_tapos(),
+            1700000000000,
+        );
+        let contract_bytes = raw.contract[0].encode_to_vec();
+        assert_eq!(&contract_bytes[..3], &[0x08, 0x01, 0x12]);
+    }
+
+    #[test]
+    fn test_build_trc20_transfer_contract_wire_bytes() {
+        let contract_addr = TronAddress::from_hex("410000000000000000000000000000000000000099").unwrap();
+        let raw = build_trc20_transfer(
+            &test_address_a(),
+            &contract_addr,
+            &test_address_b(),
+            5_000_000,
+            &dummy_tapos(),
+            1700000000000,
+            100_000_000,
+        );
+        let contract_bytes = raw.contract[0].encode_to_vec();
+        assert_eq!(&contract_bytes[..3], &[0x08, 0x1f, 0x12]);
+    }
+
+    #[test]
+    fn test_trx_transfer_raw_encoding_carries_contract_type() {
+        let raw = build_trx_transfer(
+            &test_address_a(),
+            &test_address_b(),
+            1_000_000,
+            &dummy_tapos(),
+            1700000000000,
+        );
+        let contract_bytes = raw.contract[0].encode_to_vec();
+        let raw_bytes = raw.encode_to_vec();
+
+        // The encoded contract message appears inside the encoded raw data
+        // (field 11, wire type 2 => tag 0x5a, then length).
+        assert!(
+            raw_bytes
+                .windows(contract_bytes.len())
+                .any(|w| w == contract_bytes.as_slice()),
+            "encoded contract not found in encoded raw data"
+        );
+        assert!(raw_bytes.contains(&0x5a));
+
+        let decoded = TransactionContract::decode(contract_bytes.as_slice()).unwrap();
+        assert_eq!(decoded.r#type, 1);
+        let decoded_raw = TransactionRaw::decode(raw_bytes.as_slice()).unwrap();
+        assert_eq!(decoded_raw.contract[0].r#type, 1);
+    }
 }

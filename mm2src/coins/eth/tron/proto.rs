@@ -56,6 +56,9 @@ pub struct TransactionContract {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum ContractType {
+    /// Account creation. Value 0 is the protocol's default for this field, and
+    /// prost omits a field equal to its default, so this MUST be the `Default`.
+    AccountCreateContract = 0,
     /// TRX native transfer.
     TransferContract = 1,
     /// TRC10 token transfer.
@@ -65,7 +68,7 @@ pub enum ContractType {
 }
 
 impl Default for ContractType {
-    fn default() -> Self { ContractType::TransferContract }
+    fn default() -> Self { ContractType::AccountCreateContract }
 }
 
 impl TryFrom<i32> for ContractType {
@@ -73,6 +76,7 @@ impl TryFrom<i32> for ContractType {
 
     fn try_from(value: i32) -> Result<Self, Self::Error> {
         match value {
+            0 => Ok(ContractType::AccountCreateContract),
             1 => Ok(ContractType::TransferContract),
             2 => Ok(ContractType::TransferAssetContract),
             31 => Ok(ContractType::TriggerSmartContract),
@@ -196,5 +200,31 @@ mod tests {
         assert_eq!(tx, decoded);
         assert_eq!(decoded.signature.len(), 1);
         assert_eq!(decoded.signature[0].len(), 65);
+    }
+
+    #[test]
+    fn test_contract_type_default_is_protocol_zero() {
+        assert_eq!(ContractType::default() as i32, 0);
+        assert_eq!(ContractType::try_from(0), Ok(ContractType::AccountCreateContract));
+        assert_eq!(ContractType::try_from(1), Ok(ContractType::TransferContract));
+        assert_eq!(ContractType::try_from(31), Ok(ContractType::TriggerSmartContract));
+    }
+
+    #[test]
+    fn test_transaction_contract_type_field_is_on_the_wire() {
+        // Regression: with a non-zero enum default, field 1 (type = 1) was
+        // skipped and the encoding started with the parameter tag 0x12.
+        let contract = TransactionContract {
+            r#type: ContractType::TransferContract as i32,
+            parameter: Some(prost_types::Any {
+                type_url: TRANSFER_CONTRACT_TYPE_URL.to_string(),
+                value: vec![0x0a, 0x01, 0x41],
+            }),
+        };
+        let encoded = contract.encode_to_vec();
+        assert_ne!(encoded[0], 0x12, "type field omitted from the wire");
+        assert_eq!(&encoded[..3], &[0x08, 0x01, 0x12]);
+        let decoded = TransactionContract::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.r#type, 1);
     }
 }
