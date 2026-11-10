@@ -712,7 +712,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 - **RPC refusals that the request itself caused are logged at WARN instead of ERROR.** An unknown
   or inactive coin, a volume or price below the minimum, not enough balance and an invalid request
   no longer fill the log with errors. The log text, the response body and the HTTP status are
-  unchanged; genuine failures such as a node that does not answer stay at ERROR. (PR #TBD)
+  unchanged; genuine failures such as a node that does not answer stay at ERROR. (PR #340)
 
 #### Tendermint (Cosmos) coins
 
