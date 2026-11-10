@@ -1296,11 +1296,12 @@ file carries the detail. "New" means the plan was created in this cycle.
 Work that was planned or started for this cycle but is postponed to a later version. Each item says
 why and where the plan lives; what a user meets today is under Known limitations below.
 
-- **TRON (TRX, TRC20) activation and swaps.** The wallet path is in place, but the node client and
-  the activation route are not finished, so TRON activation stays off in this beta; TRON swaps are
-  not built yet. More in [`tron-support`](docs/plans/tron-support.md).
-- **TRON GasFree (gasless TRC20 withdrawals).** It is specified (CRD ch.63) but not implemented; it
-  needs TRON activation, which is not finished. More in
+- **TRON (TRX, TRC20) activation and swaps.** TRON support is not finished, so TRON activation
+  stays off in this beta (see Known limitations), and TRON swaps are not built yet. More in
+  [`tron-support`](docs/plans/tron-support.md).
+- **TRON GasFree (gasless TRC20 withdrawals).** It is specified (CRD ch.63) but not in this build:
+  an earlier implementation stays parked on a branch and is not revived, and the new work needs
+  TRON activation and a pinned GasFree proxy creation bytecode first. More in
   [`tron-gasfree`](docs/plans/tron-gasfree.md).
 - **Tendermint (Cosmos) orders and swaps.** Tendermint coins stay wallet-only; orders and swaps
   return only with a swap plan of their own and its tests, which do not exist yet. The activation
@@ -1311,10 +1312,11 @@ why and where the plan lives; what a user meets today is under Known limitations
   [`solana-support`](docs/plans/solana-support.md) and
   [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md).
 - **Siacoin (SC): V2 swaps, a watcher's spend of a maker payment, and a rate-based swap fee.** SC
-  swaps use the V1 swap protocol; the V2 path is a draft only (CRD ch.20 D5, ch.54). A watcher
-  cannot spend an SC maker payment for its owner, a gap no coin has closed yet (CRD ch.20 D7). Every
-  SC swap transaction pays the fixed miner fee of 0.00002 SC; a fee computed from the network's fee
-  rate is postponed, and is needed only if transactions stop being mined at the fixed fee.
+  swaps use the V1 swap protocol; the V2 path is a draft only. A watcher cannot spend an SC maker
+  payment for its owner, a gap no coin has closed yet. Every SC swap transaction pays the fixed
+  miner fee of 0.00002 SC; a fee computed from the network's fee rate is postponed, and is needed
+  only if transactions stop being mined at the fixed fee. No plan yet. Detail: CRD ch.20 D5 and D7,
+  ch.54.
 - **The swap watcher.** No swap hands its data to a watcher yet (see Known limitations). A watcher
   framework is planned for the next version; its plan is not written yet.
 - **mmrpc 2.0 forms of the legacy-only methods.** Methods such as `setprice`, `cancel_order` and
@@ -1333,11 +1335,9 @@ why and where the plan lives; what a user meets today is under Known limitations
   [`lightning-ldk-upgrade`](docs/plans/lightning-ldk-upgrade.md).
 - **QTUM and QRC20 stabilization.** It is analyzed and planned, but not started. More in
   [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md).
-- **Radiant (RXD) swaps with Komodo DeFi Framework 2.6.0-beta, and the early failure of the Radiant
-  signature check.** RXD swaps were tested between KDF Reloaded nodes and with GLEEC KDF
-  3.0.0-beta; a swap with a build that lacks the Radiant signature dialect did not complete in the
-  0.3.0 tests. A typed error for the four signature-hash cases the dialect treats as fatal is a
-  later step. More in
+- **A typed error for the Radiant (RXD) signature check.** An RXD swap with a build without the
+  Radiant signature dialect fails (see Known limitations); a typed error for the four signature-hash
+  cases the dialect treats as fatal is a later step. More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) (step 8).
 
 ### Known limitations
