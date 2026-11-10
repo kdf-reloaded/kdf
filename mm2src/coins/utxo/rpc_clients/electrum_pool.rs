@@ -73,6 +73,10 @@ pub struct ElectrumPoolTimings {
     pub activation_window: Duration,
     /// The least time between two comparisons of the same two servers (R38.6.4o item 12).
     pub compare_limit: Duration,
+    /// The floor of the confirmation period: after activation a disagreement about the chain must last this long, or
+    /// two block times when that is longer, before the coin enters the disagreement state (R38.6.4o item 12,
+    /// D38.6.4o.15).
+    pub confirm_floor: Duration,
     /// How long a poor connection stays poor-demoted after its last trigger (R38.6.4l item 7).
     pub poor_demotion: Duration,
     /// The least time without a header notification that makes a lone connection stale (R38.6.4l item 6).
@@ -101,6 +105,7 @@ impl Default for ElectrumPoolTimings {
             remeasure_cap: Duration::from_secs(60 * 60),
             activation_window: Duration::from_secs(5),
             compare_limit: Duration::from_secs(5 * 60),
+            confirm_floor: Duration::from_secs(60),
             poor_demotion: Duration::from_secs(15 * 60),
             stale_floor: Duration::from_secs(10 * 60),
             latency_floor: Duration::from_millis(300),
@@ -706,8 +711,11 @@ struct Comparison {
     heights: (u64, u64),
     /// The height at which the two were compared.
     compared_at: u64,
-    /// The two servers answered different header bytes.
+    /// The two servers answered different base headers.
     diverged: bool,
+    /// While the pair keeps being found diverged: when the first comparison of that run ended. The divergence is
+    /// confirmed once a later comparison, at least the confirmation period after it, still finds it (D38.6.4o.15).
+    diverged_since: Option<f64>,
 }
 
 /// What the pool knows about the servers' agreement about the chain (R38.6.4o item 12).
@@ -724,6 +732,10 @@ struct DisagreementState {
     unanswered: HashMap<(usize, usize), f64>,
     /// The error text while the coin is in the disagreement state.
     current: Option<String>,
+    /// Since when a server has been seen far ahead without a look in between that found none (D38.6.4o.15).
+    far_since: Option<f64>,
+    /// When a wake is already scheduled for the end of a confirmation period.
+    confirm_wake_at: Option<f64>,
 }
 
 /// Counts a running comparison, and stops counting it when it ends or is dropped.
@@ -1526,9 +1538,16 @@ impl PoolShared {
         }
         // A pair that was found to differ is compared again at the same height once the limit has passed, so that a
         // resolved fork ends the disagreement state (item 12).
+        // A divergence that is not confirmed yet is compared again, at the same height, once the confirmation period
+        // has passed since the first comparison that found it (D38.6.4o.15).
+        let confirm = self.confirm_period();
         for ((a, b), known) in &state.comparisons {
             if known.diverged {
-                wanted.push((*a, *b, known.compared_at, false));
+                match known.diverged_since.filter(|since| known.at - since < confirm) {
+                    Some(since) if now >= since + confirm => wanted.push((*a, *b, known.compared_at, true)),
+                    Some(_) => (),
+                    None => wanted.push((*a, *b, known.compared_at, false)),
+                }
             }
         }
         let mut due: Vec<(Arc<ServerSlot>, Arc<ServerSlot>, u64)> = Vec::new();
@@ -1633,11 +1652,18 @@ impl PoolShared {
             let (Some(height_low), Some(height_high)) = (height_of(key.0), height_of(key.1)) else {
                 continue;
             };
+            let at = now_float();
+            let diverged_since = match (same, state.comparisons.get(&key)) {
+                (true, _) => None,
+                (false, Some(known)) if known.diverged => known.diverged_since.or(Some(known.at)),
+                (false, _) => Some(at),
+            };
             state.comparisons.insert(key, Comparison {
-                at: now_float(),
+                at,
                 heights: (height_low, height_high),
                 compared_at: height,
                 diverged: !same,
+                diverged_since,
             });
             state
                 .pending
@@ -1678,6 +1704,77 @@ impl PoolShared {
         })
     }
 
+    /// The confirmation period of a disagreement after activation (D38.6.4o.15): two block times, and at least the
+    /// floor.
+    pub(super) fn confirm_period(&self) -> f64 {
+        let blocks = self.block_interval.map_or(0., |interval| 2. * interval.as_secs_f64());
+        blocks.max(self.timings.confirm_floor.as_secs_f64())
+    }
+
+    /// Like [`Self::disagreement_servers`], for the state after activation (D38.6.4o.15): a server far ahead counts
+    /// once it has been seen far ahead for the confirmation period with no look in between that found none, and a
+    /// divergence once a comparison at least the confirmation period after the first one that found it still finds
+    /// it. While a condition waits for its confirmation, a wake is scheduled for the end of its period.
+    fn confirmed_disagreement_servers(&self) -> Option<Vec<(String, u64)>> {
+        if !self.tip_checks {
+            return None;
+        }
+        let heights = self.live_heights();
+        let plain: Vec<u64> = heights.iter().map(|(_, height)| *height).collect();
+        let now = now_float();
+        let confirm = self.confirm_period();
+        let far = is_far_ahead(&plain, self.tolerance);
+        let live = |id: usize| heights.iter().any(|(slot, _)| slot.id == id);
+        let (confirmed, wake_at) = {
+            let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
+            if far {
+                state.far_since.get_or_insert(now);
+            } else {
+                state.far_since = None;
+            }
+            let mut wake_at: Option<f64> = None;
+            let mut note_wake = |at: f64| wake_at = Some(wake_at.map_or(at, |earlier: f64| earlier.min(at)));
+            let far_confirmed = match state.far_since {
+                Some(since) if now - since >= confirm => true,
+                Some(since) => {
+                    note_wake(since + confirm);
+                    false
+                },
+                None => false,
+            };
+            let mut diverged_confirmed = false;
+            for ((a, b), known) in &state.comparisons {
+                if !known.diverged || !live(*a) || !live(*b) {
+                    continue;
+                }
+                match known.diverged_since {
+                    Some(since) if known.at - since < confirm => note_wake(since + confirm),
+                    _ => diverged_confirmed = true,
+                }
+            }
+            // One wake per period end: a later call does not schedule a second one for the same or a later time.
+            let scheduled = state.confirm_wake_at.filter(|at| *at > now);
+            let wake_at = wake_at.filter(|at| scheduled.map_or(true, |scheduled| *at < scheduled));
+            if let Some(at) = wake_at {
+                state.confirm_wake_at = Some(at);
+            }
+            (far_confirmed || diverged_confirmed, wake_at)
+        };
+        if let Some(at) = wake_at {
+            let trigger = self.trigger_tx.clone();
+            spawn(async move {
+                Timer::sleep((at - now_float()).max(0.) + 0.01).await;
+                let _ = trigger.unbounded_send(Wake::Compare);
+            });
+        }
+        confirmed.then(|| {
+            heights
+                .iter()
+                .map(|(slot, height)| (slot.label.clone(), *height))
+                .collect()
+        })
+    }
+
     /// The error text of item 12: `activation` gives the text of the failed activation, otherwise the text of the
     /// refusals and the ERROR line.
     fn disagreement_text(&self, servers: &[(String, u64)], activation: bool) -> String {
@@ -1703,7 +1800,7 @@ impl PoolShared {
             return;
         }
         let now = self
-            .disagreement_servers()
+            .confirmed_disagreement_servers()
             .map(|servers| self.disagreement_text(&servers, false));
         let (entered, left) = {
             let mut state = self.disagreement.lock().unwrap_or_else(|p| p.into_inner());
@@ -2697,7 +2794,7 @@ impl PoolShared {
             tolerance_blocks: self.tolerance,
             agreed_tip: agreed,
             chain_disagreement: self
-                .disagreement_servers()
+                .confirmed_disagreement_servers()
                 .map(|servers| self.disagreement_text(&servers, false)),
             servers,
         }
@@ -3203,6 +3300,7 @@ mod budget_tests {
         // R38.6.4o item 12: the activation window and the comparison limit.
         assert_eq!(t.activation_window, secs(5));
         assert_eq!(t.compare_limit, secs(300));
+        assert_eq!(t.confirm_floor, secs(60));
         assert_eq!(t.poor_demotion, secs(900));
         assert_eq!(t.stale_floor, secs(600));
         assert_eq!(t.latency_floor, Duration::from_millis(300));

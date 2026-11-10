@@ -2399,6 +2399,25 @@ holds under every value of `electrum_server_order` unless it says otherwise.
     base headers, the first 80 bytes of the two answers, and *diverged* means
     that they differ. Two answers that agree in those 80 bytes and differ only
     after them name the same block.
+
+    *Amended 2026-11-10 (clean side; D38.6.4o.15):* after activation the coin
+    enters the disagreement state only when the disagreement is *confirmed*,
+    that is, when it has lasted the *confirmation period*: two block times
+    (two `avg_blocktime`), and at least 60 s.
+    - A server far ahead counts once it has been seen far ahead for the
+      confirmation period with no look in between that found none.
+    - A divergence counts once a comparison of the same two servers at the same
+      height, made at least the confirmation period after the first comparison
+      that found it, still finds it. That second comparison is made when the
+      period has passed, without waiting for the 5-minute limit between
+      comparisons.
+
+    The ERROR line, the refusals and the `chain_disagreement` field of
+    `electrum_servers` begin with the confirmation; the per-server WARN lines of
+    item 9 are unchanged. The judgment at activation is unchanged: it does not
+    wait for a confirmation (D38.6.4o.10). The state still ends as soon as
+    neither condition holds. The length of the period is watched in field runs
+    and evaluated; it can change.
 13. *Fewer than three servers.* When a coin is activated with fewer than three
     servers in its pool that are not removed, the activation logs one WARN:
     `<ticker>: only <n> Electrum servers are listed; with fewer than three the node cannot always tell a stale server from one on another chain`
@@ -3015,6 +3034,22 @@ first 80 bytes are equal, whatever follows them; a difference in the 80th byte
 shall count; headers shorter than 80 bytes shall be compared whole (items 7
 and 12, D38.6.4o.14).
 
+T38.6.4o.19 *A short lead.* After activation, a server more than *T* blocks
+ahead of the other two for less than the confirmation period shall put the
+coin into no disagreement state and log no ERROR line; a server that stays
+that far ahead shall put the coin into the state once the period has passed,
+and not before, with one ERROR line (item 12, D38.6.4o.15).
+
+T38.6.4o.20 *A divergence confirmed.* After activation, two servers found at
+different headers that answer the same header when they are compared again
+after the confirmation period shall put the coin into no disagreement state;
+when the difference is still there, the coin shall enter the state, and not
+before the period has passed (item 12, D38.6.4o.15).
+
+T38.6.4o.21 *The confirmation period.* With an `avg_blocktime` of 600 s the
+period shall be 1,200 s, with 60 s it shall be 120 s, and with 10 s or none it
+shall be 60 s (item 12, D38.6.4o.15).
+
 D38.6.4l.1 *(Resolved 2026-10-28, maintainer decision.)* *When `mixed`
 becomes the default.* The plan intends `mixed` as the default and left the
 moment to the maintainer: with the implementation, or after a field run on a
@@ -3240,6 +3275,24 @@ therefore compare the first 80 bytes. Those bytes start with the version, the
 previous block hash and the merkle root in the Bitcoin-style layout that UTXO
 headers share, the longer Zcash-style and proof-of-stake headers included, so
 a real fork still differs in them; no per-coin setting is needed.
+
+D38.6.4o.15 *(Decided 2026-11-10, maintainer.)* *A disagreement after
+activation is confirmed before it stops trading.* A field log of a maker
+running 16 hours with many coins showed the disagreement state begin and end
+again within seconds or minutes:
+- VRSC entered it 43 times. One of three servers was 4 to 6 blocks ahead of the
+  other two, with *T* = 3, and the others caught up after 0 to 11 s.
+- NENG entered it 5 times (4 blocks ahead, up to 8 s), and DPC and FIRO once
+  each (2 blocks ahead with *T* = 1, up to 2 s).
+- CHTA entered it 5 times with a difference between headers that was gone at
+  the next comparison, after 210 to 606 s.
+
+Each entry logged an ERROR line and refused the maker's orders while it
+lasted. Servers that index blocks in bursts, and short reorganizations, cause
+such entries, while a real split lasts. After activation, therefore, a
+disagreement puts the coin into the state only after it has lasted two block
+times, and at least 60 s. The activation itself keeps its 5 s judgment. The
+length of the period is watched in field runs and evaluated.
 
 > **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
 > T38.6.4.12 against an in-process stub server set, with two exceptions:
@@ -4640,10 +4693,12 @@ R38.8.6 **Tests (two-direction, observable).**
   item 8.* Inputs: this repository's code and a field report of an Electrum
   server with an expired certificate; no forbidden-class input, so chapter 01
   R38 is not engaged and no gate pass is required.
-- *Reloaded-original amendment (2026-11-10, D38.6.4o.14), clean side --
-  R38.6.4o items 7 and 12 (dated amendment paragraphs), T38.6.4o.17,
-  T38.6.4o.18 and D38.6.4o.14.* Written by a session that never read the
-  forbidden corpus. The inputs are this repository's code, the public Electrum
-  protocol, a field report of refused DOGE orders, and this project's own
-  queries of two public DOGE Electrum servers. They take no forbidden-class
-  input, so chapter 01 R38 is not engaged and no gate pass is required.
+- *Reloaded-original amendment (2026-11-10, D38.6.4o.14 and maintainer
+  decision D38.6.4o.15), clean side -- R38.6.4o items 7 and 12 (dated amendment
+  paragraphs), T38.6.4o.17 – T38.6.4o.21, D38.6.4o.14 and D38.6.4o.15.* Written
+  by a session that never read the forbidden corpus. The inputs are this
+  repository's code, the public Electrum protocol, a field report and a field
+  log of a maker with refused orders, this project's own queries of two public
+  DOGE Electrum servers, and the maintainer's decision of 2026-11-10. They take
+  no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+  is required.

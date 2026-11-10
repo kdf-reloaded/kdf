@@ -204,9 +204,9 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   none of this, so a lagging server keeps answering there. No peer observes it. To get GLEEC KDF's
   routing, set `electrum_tip_checks` to `false` (see the settings list below). Servers that disagree
   about the chain (one far ahead of the rest, or two with different headers at a common height) fail
-  the activation with an error naming them, and after activation the coin refuses new orders and
-  withdrawals with that error, and starts no new swap, until they agree again; GLEEC KDF has no such
-  check. Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.38 R38.6.4o.
+  the activation with an error naming them, and after activation, once the disagreement has lasted
+  two block times and at least 60 s, the coin refuses new orders and withdrawals with that error,
+  and starts no new swap, until they agree again; GLEEC KDF has no such check. Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.38 R38.6.4o.
 - **Bitcoin II (BC2) transactions are signed the way the BC2 network requires.**
   Since block 57,750 the BC2 network checks every signature against a digest
   that carries an extra 4-byte field after the signature-hash type, and refuses

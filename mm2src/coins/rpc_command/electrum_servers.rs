@@ -73,7 +73,8 @@ pub async fn electrum_servers_rpc(
 mod tests {
     use super::*;
     use crate::utxo::rpc_clients::electrum_stub_server::{StubBehavior, StubServer};
-    use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, NativeClient, NativeClientImpl};
+    use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumPoolOptions, ElectrumPoolTimings,
+                                   NativeClient, NativeClientImpl};
     use crate::utxo::utxo_tests::{software_coin_for_test, utxo_coin_fields_for_test, utxo_coin_from_fields};
     use crate::CoinsContext;
     use common::block_on;
@@ -128,7 +129,15 @@ mod tests {
             for (stub, height) in stubs.iter().zip([2_000_000u64, 1_000, 1_000]) {
                 stub.set_tip(height);
             }
-            let client = ElectrumClientImpl::new(ticker.to_owned(), vec![]);
+            let mut client = ElectrumClientImpl::new(ticker.to_owned(), vec![]);
+            // A short confirmation period, so that the state begins within the test (D38.6.4o.15).
+            client.configure_pool(ElectrumPoolOptions {
+                timings: ElectrumPoolTimings {
+                    confirm_floor: std::time::Duration::from_millis(200),
+                    ..ElectrumPoolTimings::default()
+                },
+                ..ElectrumPoolOptions::default()
+            });
             for stub in &stubs {
                 client.add_server(&stub.request()).unwrap();
             }

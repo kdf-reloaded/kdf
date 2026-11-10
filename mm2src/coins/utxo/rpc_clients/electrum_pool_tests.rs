@@ -39,6 +39,7 @@ fn test_timings() -> ElectrumPoolTimings {
         remeasure_cap: ms(7_200),
         activation_window: ms(300),
         compare_limit: ms(60_000),
+        confirm_floor: ms(200),
         poor_demotion: ms(900),
         stale_floor: ms(300),
         latency_floor: ms(300),
@@ -3215,6 +3216,16 @@ fn warn_lines(ticker: &str) -> Vec<String> {
         .collect()
 }
 
+/// The ERROR lines of the pool of `ticker` logged so far, in order; empty under the same condition as [`warn_lines`].
+fn error_lines(ticker: &str) -> Vec<String> {
+    use crate::eth::alloy_compat::transport::test_support::captured_log_lines;
+    let prefix = format!("ERROR {ticker}: ");
+    captured_log_lines()
+        .into_iter()
+        .filter(|line| line.starts_with(&prefix))
+        .collect()
+}
+
 /// Joins every server of `client` through a maintenance pass and waits until each connection has its height, which
 /// is the answer to the header request it sends on joining (R38.6.4o item 3).
 async fn join_with_heights(client: &Arc<ElectrumClientImpl>, servers: &[&StubServer]) {
@@ -4489,6 +4500,129 @@ fn t38_6_4o_17_merged_mining_proof_bytes_are_not_a_different_chain() {
         assert!(high.requests("blockchain.block.header") >= 1 && low.requests("blockchain.block.header") >= 1);
         assert!(client.chain_disagreement().is_none());
     });
+}
+
+/// T38.6.4o.19 (D38.6.4o.15): after activation, a server far ahead for less than the confirmation period puts the coin
+/// into no disagreement state and logs no ERROR line; one that stays far ahead puts it into the state only once the
+/// period has passed.
+#[test]
+fn t38_6_4o_19_a_short_lead_is_no_disagreement() {
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        let ticker = "BURST";
+        let stubs = [stub_at(5, H).await, stub_at(5, H).await, stub_at(5, H).await];
+        for stub in &stubs {
+            stub.set_default_block_header("aa");
+        }
+        let client = agreement_pool(ticker, &[&stubs[0], &stubs[1], &stubs[2]], true);
+        activate_judged(&client).await.unwrap();
+        client.pool.run_pass().await;
+        wait_until("the heights", || {
+            stubs.iter().all(|stub| snap_of(&client, stub).height.is_some())
+        })
+        .await;
+        let period = client.pool.confirm_period();
+        assert!((period - 0.2).abs() < 1e-9, "{period}");
+
+        // A burst: one server leads by more than T for less than the period, then the others catch up.
+        stubs[0].set_tip(H + 5);
+        wait_until("the lead", || snap_of(&client, &stubs[0]).height == Some(H + 5)).await;
+        let started = Instant::now();
+        while started.elapsed() < ms(100) {
+            assert!(client.chain_disagreement().is_none());
+            Timer::sleep(0.01).await;
+        }
+        stubs[1].set_tip(H + 5);
+        stubs[2].set_tip(H + 5);
+        wait_until("the others", || {
+            stubs.iter().all(|stub| snap_of(&client, stub).height == Some(H + 5))
+        })
+        .await;
+        Timer::sleep(0.3).await;
+        assert!(client.chain_disagreement().is_none());
+        assert!(client.servers_view().chain_disagreement.is_none());
+
+        // A lead that lasts: the state begins only after the period.
+        stubs[0].set_tip(H + 10);
+        wait_until("the second lead", || snap_of(&client, &stubs[0]).height == Some(H + 10)).await;
+        let started = Instant::now();
+        assert!(client.chain_disagreement().is_none());
+        wait_until("the disagreement state", || client.chain_disagreement().is_some()).await;
+        assert!(started.elapsed() >= ms(150), "{:?}", started.elapsed());
+        if capturing {
+            let errors = error_lines(ticker);
+            assert_eq!(errors.len(), 1, "{errors:?}");
+        }
+    });
+}
+
+/// T38.6.4o.20 (D38.6.4o.15): after activation, two servers found at different headers that agree when they are
+/// compared again after the confirmation period put the coin into no disagreement state; a difference that is still
+/// there then does, and not before the period has passed.
+#[test]
+fn t38_6_4o_20_a_divergence_is_confirmed_by_a_second_comparison() {
+    block_on(async {
+        const H: u64 = 1_000;
+        for (ticker, lasting) in [("REORGSHORT", false), ("REORGLASTS", true)] {
+            let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
+            a.set_header_hex("aa");
+            b.set_header_hex("bb");
+            for stub in [&a, &b] {
+                stub.set_default_block_header("dd");
+            }
+            a.set_block_header(H, "e1");
+            b.set_block_header(H, "e2");
+            let client = agreement_pool(ticker, &[&a, &b], true);
+            client.start_pool(false);
+            wait_until("the heights", || {
+                snap_of(&client, &a).height.is_some() && snap_of(&client, &b).height.is_some()
+            })
+            .await;
+            a.set_tip(H + 2);
+            b.set_tip(H + 2);
+            // The first comparison finds the difference: no state yet.
+            wait_until("the first comparison", || {
+                a.requests("blockchain.block.header") >= 1 && b.requests("blockchain.block.header") >= 1
+            })
+            .await;
+            let found = Instant::now();
+            assert!(client.chain_disagreement().is_none());
+            if !lasting {
+                // A short reorg: the servers agree at H before the second look.
+                a.set_block_header(H, "5a5e");
+                b.set_block_header(H, "5a5e");
+                wait_until("the second comparison", || a.requests("blockchain.block.header") >= 2).await;
+                Timer::sleep(0.2).await;
+                assert!(client.chain_disagreement().is_none());
+                continue;
+            }
+            wait_until("the disagreement state", || client.chain_disagreement().is_some()).await;
+            assert!(found.elapsed() >= ms(150), "{:?}", found.elapsed());
+            assert!(a.requests("blockchain.block.header") >= 2);
+        }
+    });
+}
+
+/// T38.6.4o.21 (D38.6.4o.15): the confirmation period is two block times and at least the floor of 60 s.
+#[test]
+fn t38_6_4o_21_the_confirmation_period() {
+    let stub_free = |block_interval: Option<Duration>| {
+        let client = checked_pool(
+            &[],
+            PoolSetup {
+                block_interval,
+                ..PoolSetup::new("PERIOD")
+            },
+            ElectrumPoolTimings::default(),
+            script_draw(&[], 0.5),
+        );
+        client.pool.confirm_period()
+    };
+    assert_eq!(stub_free(None), 60.);
+    assert_eq!(stub_free(Some(Duration::from_secs(10))), 60.);
+    assert_eq!(stub_free(Some(Duration::from_secs(60))), 120.);
+    assert_eq!(stub_free(Some(Duration::from_secs(600))), 1200.);
 }
 
 /// R38.6.4o item 12 (the window): a comparison that is slower than the activation window is not dropped. The
