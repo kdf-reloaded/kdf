@@ -1448,10 +1448,11 @@ lives.
   the next block, and the fee has not been tested under load. Manual recovery (`recover_funds_of_swap`) of a Siacoin swap
   was tested only on swaps whose record already held the final event; it refused each time and
   broadcast nothing, as it should, so the recovery that reads the chain for a spend or a refund of a
-  Siacoin payment has unit tests only. Siacoin in a browser (WASM) build is untested. A swap in
-  which a GLEEC KDF maker on netid 6133 validates a Siacoin taker fee from a KDF Reloaded taker did
-  not complete in the lab on November 6, 2026 (recorded only); the row that checks it again is
-  pending. The fee rule and the fee address are the same on both nodes. Detail:
+  Siacoin payment has unit tests only. Siacoin in a browser (WASM) build is untested. A GLEEC KDF
+  3.0.0-beta maker on netid 6133 validated a KDF Reloaded taker's Siacoin fee at the network's base
+  rate on November 10, 2026, and that swap completed; the same check at the discounted rate (GLEEC
+  on the other side of the pair) has not been run. The fee rule and the fee address are the same on
+  both nodes. Detail:
   PRs #239, #278, #290, #291; CRD ch.20 D5, D7, R-S8, R-S11, R-S12, T-S1.
 - **Lightning cannot place orders or swap.** Orders and trade previews involving a Lightning coin
   are refused with an error naming the coin; `trade_preimage` answers `TradingNotSupported`. More in

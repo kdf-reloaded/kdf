@@ -560,6 +560,16 @@ own exact-value check of item 3 against the reference's arithmetic.
 > value is a dictated inter-operability constant shared with netid 8762 and
 > is not an operator setting. No code change is implied.
 
+> **Lab status (2026-11-10, clean side, informative).** T-S1's base-rate
+> run passed on netid 6133: a `v3.0.0-beta` maker buying SC with RIN
+> recorded `TakerFeeValidated` and the swap completed on both sides; the
+> fee transaction's first output was exactly 2 % of the taker volume in
+> hastings, to the fee address of item 2 (release-tests page, "Siacoin
+> taker fee validated by a reference maker on netid 6133"). The
+> discounted-rate repeat with GLEEC on the other side of the pair has not
+> been run (no GLEEC in the lab); the companion row has not been run. The
+> comment of the code-quality finding was reworded in the same change.
+
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method
 > table keyed to private helpers, no method bodies, and no
