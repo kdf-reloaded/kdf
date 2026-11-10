@@ -6277,17 +6277,25 @@ endpoint's name is part of the human-readable message only; it changes no
 
 > **Status note (2026-11-10, Reloaded-original).** Before a light-mode
 > broadcast the coin checks its wallet database for the transaction id of the
-> bytes it was given. A transaction the database already holds -- recorded by
-> this wallet as broadcast and not yet mined, or already scanned in a block,
-> with its height -- is refused with a typed error that names the transaction
-> id (display order) and that state ("waiting to be mined" or "mined in block
-> N"), and the bytes are not handed to any endpoint; one `info` line carries the
-> same text. Bytes that do not parse, and transactions without a Sapling spend,
-> are not checked and go out as before. A failure of the lookup does not block
-> the broadcast (it is logged at `debug` level). The rejection of R39.11.30
-> therefore no longer shows a duplicate-nullifier answer for a transaction this
-> wallet itself sent. Tests: `a_rebroadcast_is_refused_by_state_and_the_text_names_the_transaction`
-> and `the_rebroadcast_guard_ignores_unreadable_bytes`
+> bytes it was given. A transaction the database holds as mined -- a broadcast
+> this wallet recorded or any other transaction the block scan has stored, with
+> its height (hence "known to this wallet") -- is refused through the
+> broadcast's existing error path, with a message that names the transaction
+> id (display order) and its state ("mined in block N"); the bytes are not
+> handed to any endpoint; it changes no `error_type`, `error_data` shape or
+> HTTP status; one `info` line carries the same message. The refusal is an
+> `Err`, so the RPC layer also logs its usual error line next to the `info`
+> line. A row without a mined height -- a recorded broadcast not yet scanned, or
+> one a reorg rewound -- is not refused and goes out as before, so a re-push
+> stays possible for a dropped or rewound transaction. Bytes that do not parse,
+> and transactions without a Sapling spend (by construction; not covered by a
+> test), are not checked and go out as before. A failure of the lookup does not
+> block the broadcast (it is logged at `debug` level). The rejection of
+> R39.11.30 therefore no longer shows a duplicate-nullifier answer for a
+> transaction the wallet database holds as mined. Tests:
+> `a_rebroadcast_is_refused_by_state_and_the_text_names_the_transaction`,
+> `the_rebroadcast_guard_ignores_unreadable_bytes` and
+> `the_rebroadcast_guard_does_not_block_when_the_lookup_fails`
 > (`z_coin_wallet_db.rs`). A withdrawal build also logs one `info` line with its
 > duration, its number of Sapling spends and whether it has an Ironwood output.
 

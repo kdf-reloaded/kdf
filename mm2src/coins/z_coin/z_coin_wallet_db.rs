@@ -7620,17 +7620,13 @@ pub(crate) mod tests {
         // Built but never submitted: nothing is known, the broadcast goes ahead.
         assert_eq!(rebroadcast_refusal("ARRR", &fixture.history, &bytes), None);
 
-        // Recorded as broadcast, not yet mined.
+        // Recorded as broadcast, not yet mined: not refused.
         fixture.broadcast(&tx);
-        let pending = rebroadcast_refusal("ARRR", &fixture.history, &bytes).expect("a recorded broadcast is refused");
-        assert_eq!(pending, RebroadcastRefusal::Pending {
-            coin: "ARRR".to_owned(),
-            txid: display
-        });
-        let text = pending.to_string();
-        assert!(text.contains(&display_hex), "{text}");
-        assert!(text.starts_with("ARRR: transaction "), "{text}");
-        assert!(text.contains("waiting to be mined"), "{text}");
+        assert_eq!(
+            rebroadcast_refusal("ARRR", &fixture.history, &bytes),
+            None,
+            "an unmined row is not refused: a re-push stays possible"
+        );
 
         // Scanned in block 12.
         let mut block = empty_compact_block(12, 12, 11);
@@ -7658,7 +7654,10 @@ pub(crate) mod tests {
         let text = mined.to_string();
         assert!(text.contains(&display_hex), "{text}");
         assert!(text.starts_with("ARRR: transaction "), "{text}");
-        assert!(text.contains("mined in block 12"), "{text}");
+        assert!(
+            text.contains("is already known to this wallet and is mined in block 12"),
+            "{text}"
+        );
     }
 
     /// Bytes that are no transaction are not this guard's business. (A parsable transaction with no
@@ -7673,6 +7672,25 @@ pub(crate) mod tests {
             None
         );
         assert_eq!(rebroadcast_refusal("ARRR", &fixture.history, &[]), None);
+    }
+
+    /// A wallet database that cannot be read never blocks a broadcast.
+    #[test]
+    fn the_rebroadcast_guard_does_not_block_when_the_lookup_fails() {
+        use crate::z_coin::z_coin_ops::rebroadcast_refusal;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let tx = fixture.build().unwrap();
+        let mut bytes = Vec::new();
+        tx.write(&mut bytes).unwrap();
+        let mut broken = fixture.history.clone();
+        broken.wallet_db_path = fixture
+            .history
+            .wallet_db_path()
+            .with_file_name("does-not-exist")
+            .join("w.db");
+        assert!(broken.known_transaction(tx.txid().as_ref()).is_err());
+        assert_eq!(rebroadcast_refusal("ARRR", &broken, &bytes), None);
     }
 
     // ---- the fee of a history row (CRD ch.39 R39.8.9e1, T39.8.9e1) ----
