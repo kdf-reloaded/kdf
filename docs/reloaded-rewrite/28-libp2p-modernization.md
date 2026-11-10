@@ -992,8 +992,9 @@ relay-connection maintenance of RQ1a item 4 MUST follow these rules:
    > a stuck-peer close gives no early redial whether it ended cleanly or
    > with an error. A relay whose stuck close is held back (RQ1 item 5, guard
    > for relays) is not marked. The sentence "one that ends with another
-   > transport error counts as a transport error" above describes the state
-   > before this note. Tests: the T15 cases for the stuck mark in
+   > transport error counts as a transport error" in the rule text above, and
+   > "a stuck-peer close, which gossipsub starts, by its clean end" in the
+   > as-built note, describe the state before this note. Tests: the T15 cases for the stuck mark in
    > `redial_guard.rs` and the mark tests in the vendored gossipsub.
 
 2. **Connected seed.** The node MUST NOT dial a configured bootstrap
