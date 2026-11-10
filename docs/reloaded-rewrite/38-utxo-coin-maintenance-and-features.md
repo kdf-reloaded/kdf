@@ -3050,6 +3050,12 @@ T38.6.4o.21 *The confirmation period.* With an `avg_blocktime` of 600 s the
 period shall be 1,200 s, with 60 s it shall be 120 s, and with 10 s or none it
 shall be 60 s (item 12, D38.6.4o.15).
 
+T38.6.4o.22 *An unanswered second look.* After activation, when the comparison
+that would confirm a divergence goes unanswered, the pair shall stay
+unconfirmed, the coin shall not enter the disagreement state, and no further
+wake shall be scheduled for the period end that has passed; the pair is tried
+again after the comparison limit (item 12, D38.6.4o.15).
+
 D38.6.4l.1 *(Resolved 2026-10-28, maintainer decision.)* *When `mixed`
 becomes the default.* The plan intends `mixed` as the default and left the
 moment to the maintainer: with the implementation, or after a field run on a
@@ -3292,8 +3298,8 @@ again within seconds or minutes:
   the next comparison, after 210 to 606 s.
 
 Each entry logged an ERROR line and refused the maker's orders while it
-lasted. Entries this short fit servers that index blocks in bursts, or a short
-reorganization; a real split lasts. After activation, therefore, a
+lasted. The field log does not show why the servers differed for these short
+times; a disagreement that lasts is the case the state is for. After activation, therefore, a
 disagreement puts the coin into the state only after it has lasted two block
 times, and at least 60 s. The activation itself keeps its 5 s judgment. The
 length of the period is watched in field runs and evaluated.
@@ -4699,7 +4705,7 @@ R38.8.6 **Tests (two-direction, observable).**
   R38 is not engaged and no gate pass is required.
 - *Reloaded-original amendment (2026-11-10, D38.6.4o.14 and maintainer
   decision D38.6.4o.15), clean side -- R38.6.4o items 7 and 12 (dated amendment
-  paragraphs), T38.6.4o.17 – T38.6.4o.21, D38.6.4o.14 and D38.6.4o.15.* Written
+  paragraphs), T38.6.4o.17 – T38.6.4o.22, D38.6.4o.14 and D38.6.4o.15.* Written
   by a session that never read the forbidden corpus. The inputs are this
   repository's code, the public Electrum protocol, a field report and a field
   log of a maker with refused orders, this project's own queries of two public

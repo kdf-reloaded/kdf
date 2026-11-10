@@ -4581,26 +4581,91 @@ fn t38_6_4o_20_a_divergence_is_confirmed_by_a_second_comparison() {
             .await;
             a.set_tip(H + 2);
             b.set_tip(H + 2);
-            // The first comparison finds the difference: no state yet.
-            wait_until("the first comparison", || {
-                a.requests("blockchain.block.header") >= 1 && b.requests("blockchain.block.header") >= 1
+            // The first comparison finds the difference: no state yet, and a wake is scheduled for the end of the
+            // pair's period.
+            wait_until("the difference", || {
+                assert!(client.chain_disagreement().is_none());
+                client.pool.confirm_wakes() >= 1
             })
             .await;
             let found = Instant::now();
-            assert!(client.chain_disagreement().is_none());
+            let asked = a.requests("blockchain.block.header");
             if !lasting {
                 // A short reorg: the servers agree at H before the second look.
                 a.set_block_header(H, "5a5e");
                 b.set_block_header(H, "5a5e");
-                wait_until("the second comparison", || a.requests("blockchain.block.header") >= 2).await;
+                wait_until("the second comparison", || {
+                    a.requests("blockchain.block.header") > asked
+                })
+                .await;
                 Timer::sleep(0.2).await;
                 assert!(client.chain_disagreement().is_none());
                 continue;
             }
             wait_until("the disagreement state", || client.chain_disagreement().is_some()).await;
-            assert!(found.elapsed() >= ms(150), "{:?}", found.elapsed());
-            assert!(a.requests("blockchain.block.header") >= 2);
+            assert!(found.elapsed() >= ms(100), "{:?}", found.elapsed());
+            assert!(a.requests("blockchain.block.header") > asked);
         }
+    });
+}
+
+/// T38.6.4o.22 (D38.6.4o.15): when the re-comparison that would confirm a divergence goes unanswered,
+/// the pair stays unconfirmed, the coin enters no state, and no further wake is scheduled for the past period end.
+#[test]
+fn t38_6_4o_22_an_unanswered_second_comparison_schedules_no_repeated_wakes() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
+        a.set_header_hex("aa");
+        b.set_header_hex("bb");
+        for stub in [&a, &b] {
+            stub.set_default_block_header("dd");
+        }
+        a.set_block_header(H, "e1");
+        b.set_block_header(H, "e2");
+        let client = agreement_pool("NOANSWER", &[&a, &b], true);
+        client.start_pool(false);
+        wait_until("the heights", || {
+            snap_of(&client, &a).height.is_some() && snap_of(&client, &b).height.is_some()
+        })
+        .await;
+        a.set_tip(H + 2);
+        b.set_tip(H + 2);
+        // The first comparison finds the difference: the pair waits for its confirmation, and a wake is scheduled for
+        // the end of its period.
+        wait_until("the difference", || {
+            assert!(client.chain_disagreement().is_none());
+            client.pool.confirm_wakes() >= 1
+        })
+        .await;
+        // From now on one server answers the header request with an error: the second comparison is not judged.
+        b.set_error("blockchain.block.header", "unavailable");
+        let asked = b.requests("blockchain.block.header");
+        wait_until("the second comparison", || {
+            b.requests("blockchain.block.header") > asked
+        })
+        .await;
+        // A failed request can close the connection; join both again, so that the pair is judged while it is past its
+        // period end and unanswered.
+        client.pool.run_pass().await;
+        wait_until("both connections again", || {
+            snap_of(&client, &a).height == Some(H + 2) && snap_of(&client, &b).height == Some(H + 2)
+        })
+        .await;
+        let wakes = client.pool.confirm_wakes();
+        // Keep looking at the state well past the period end, as orders and withdrawals would.
+        let period = client.pool.confirm_period();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs_f64(period + 0.5) {
+            assert!(client.chain_disagreement().is_none());
+            Timer::sleep(0.01).await;
+        }
+        assert!(
+            client.pool.confirm_wakes() <= wakes + 1,
+            "{} wakes after {wakes}",
+            client.pool.confirm_wakes()
+        );
+        assert!(client.servers_view().chain_disagreement.is_none());
     });
 }
 

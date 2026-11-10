@@ -807,6 +807,9 @@ pub(super) struct PoolShared {
     disagreement: StdMutex<DisagreementState>,
     /// The comparisons running now.
     comparing: AtomicUsize,
+    /// The wakes scheduled for the end of a confirmation period, counted for the tests (D38.6.4o.15).
+    #[cfg(test)]
+    confirm_wakes: AtomicUsize,
     /// When the build had its first connection (seconds since the epoch).
     first_connection_at: StdMutex<Option<f64>>,
     measure: StdMutex<MeasureState>,
@@ -852,6 +855,8 @@ impl PoolShared {
             probe_ended: AtomicBool::new(false),
             disagreement: StdMutex::new(DisagreementState::default()),
             comparing: AtomicUsize::new(0),
+            #[cfg(test)]
+            confirm_wakes: AtomicUsize::new(0),
             first_connection_at: StdMutex::new(None),
             measure: StdMutex::new(MeasureState::default()),
             draw: StdMutex::new(random_draw()),
@@ -1704,6 +1709,10 @@ impl PoolShared {
         })
     }
 
+    /// The number of confirmation wakes scheduled so far (tests only).
+    #[cfg(test)]
+    pub(super) fn confirm_wakes(&self) -> usize { self.confirm_wakes.load(AtomicOrdering::SeqCst) }
+
     /// The confirmation period of a disagreement after activation (D38.6.4o.15): two block times, and at least the
     /// floor.
     pub(super) fn confirm_period(&self) -> f64 {
@@ -1747,8 +1756,17 @@ impl PoolShared {
                 if !known.diverged || !live(*a) || !live(*b) {
                     continue;
                 }
+                // Only a period end still to come is woken for. A pair past its period end is started by the
+                // comparisons that `update_disagreement` asks for, or, when its re-comparison went unanswered, after the
+                // comparison limit like any unanswered pair; a wake for a past time would only repeat itself.
+                // A divergence counts as confirmed against the current period: should the period grow (a new block
+                // time), a pair confirmed under the old one waits for the new one.
                 match known.diverged_since {
-                    Some(since) if known.at - since < confirm => note_wake(since + confirm),
+                    Some(since) if known.at - since < confirm => {
+                        if since + confirm > now {
+                            note_wake(since + confirm);
+                        }
+                    },
                     _ => diverged_confirmed = true,
                 }
             }
@@ -1761,6 +1779,8 @@ impl PoolShared {
             (far_confirmed || diverged_confirmed, wake_at)
         };
         if let Some(at) = wake_at {
+            #[cfg(test)]
+            self.confirm_wakes.fetch_add(1, AtomicOrdering::SeqCst);
             let trigger = self.trigger_tx.clone();
             spawn(async move {
                 Timer::sleep((at - now_float()).max(0.) + 0.01).await;
@@ -2793,9 +2813,7 @@ impl PoolShared {
             server_order: self.order.name(),
             tolerance_blocks: self.tolerance,
             agreed_tip: agreed,
-            chain_disagreement: self
-                .confirmed_disagreement_servers()
-                .map(|servers| self.disagreement_text(&servers, false)),
+            chain_disagreement: self.chain_disagreement(),
             servers,
         }
     }
