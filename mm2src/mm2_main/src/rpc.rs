@@ -20,6 +20,7 @@
 use crate::mm2::rpc::rate_limiter::RateLimitError;
 #[cfg(feature = "unsafe-rpc-wire-dump")]
 use coins::node_url::redact_urls_in_text;
+use common::log::log_crate::Level;
 #[cfg(feature = "unsafe-rpc-wire-dump")] use common::log::trace;
 #[cfg(not(target_arch = "wasm32"))] use common::log::warn;
 use common::log::{error, info};
@@ -269,12 +270,77 @@ async fn process_json_request(ctx: MmArc, req_json: Json, client: SocketAddr) ->
     process_single_request(ctx, req_json, client).await
 }
 
+/// The level an RPC refusal is logged at, by the HTTP status of the answer: a refusal the request caused (4xx) is a
+/// warning, anything else is an error. The log text and the answer are not affected.
+pub(crate) fn rpc_error_log_level(status: StatusCode) -> Level {
+    // 401 and 403 stay errors: a wrong password, a ban or a non-local client is reported like a failure, not like a
+    // mistyped request. So does 408: in this tree it is the status of timeouts, which are not the request's fault.
+    // The status is taken as the handler declares it: a few handler errors map a node-side failure to 400 (for
+    // example `EnableLightningError::RpcError`, `WalletConnectRpcError::InitializationError`) and therefore warn.
+    if status.is_client_error()
+        && status != StatusCode::UNAUTHORIZED
+        && status != StatusCode::FORBIDDEN
+        && status != StatusCode::REQUEST_TIMEOUT
+    {
+        Level::Warn
+    } else {
+        Level::Error
+    }
+}
+
+/// Texts of the legacy surface, which has no status class: every entry is a list of fragments that must all occur in
+/// the error text (the ERRL macros prefix `file:line] ` and handlers nest messages, so the match is a `contains`).
+/// An entry is a refusal the request itself can cause. Authentication, rate-limit, ban and transport texts are not
+/// listed on purpose: they stay errors.
+#[cfg(not(target_arch = "wasm32"))]
+const CLIENT_CAUSED_LEGACY_ERRORS: &[&[&str]] = &[
+    // An unknown or an inactive coin.
+    &["No such coin"],
+    &["coin ", " is not found"],
+    &["is not found or inactive"],
+    &[" is not activated"],
+    &[" are not activated"],
+    // Not enough balance for the requested trade.
+    &["Not enough ", " for swap"],
+    &["IBC routing requires minimum balance"],
+    // A volume or a price below its minimum, or a volume that is not valid.
+    &["Max base vol "],
+    &["Min base vol "],
+    &["Max rel vol "],
+    &["Base amount ", " is too low"],
+    &["Rel amount ", " is too low"],
+    &["Min volume ", " is too low"],
+    &["Price ", " is too low"],
+    &["The volume ", " is too low"],
+    &["is below min base vol"],
+    &["less than minimum transaction amount"],
+    &["New volume ", " should be more than"],
+    // A pair or a coin that cannot trade.
+    &["Rel coin can not be same as base"],
+    &["Base and rel must be different coins"],
+    &["Trading is not supported for coin"],
+    &[" is wallet only"],
+];
+
+/// `true` when the text of a legacy handler error is a refusal the request itself caused, so it is logged as a
+/// warning (see [`CLIENT_CAUSED_LEGACY_ERRORS`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn legacy_error_is_client_caused(text: &str) -> bool {
+    CLIENT_CAUSED_LEGACY_ERRORS
+        .iter()
+        .any(|fragments| fragments.iter().all(|fragment| text.contains(fragment)))
+}
+
 fn response_from_dispatcher_error(
     error: MmError<DispatcherError>,
     version: MmRpcVersion,
     id: Option<usize>,
 ) -> Response<Vec<u8>> {
-    error!("RPC dispatcher error: {}", error);
+    common::log::log_crate::log!(
+        rpc_error_log_level(error.get_inner().status_code()),
+        "RPC dispatcher error: {}",
+        error
+    );
     let response: MmRpcResponse<(), _> = MmRpcBuilder::err(error).version(version).id(id).build();
     response.serialize_http_response()
 }
@@ -387,8 +453,13 @@ async fn rpc_service(req: Request<Incoming>, ctx_h: u32, client: SocketAddr) -> 
             match $value {
                 Ok(ok) => ok,
                 Err(err) => {
-                    error!("RPC error response: {}", err);
-                    let ebody = err_to_rpc_json_string(&fomat!((err)));
+                    let text = fomat!((err));
+                    if legacy_error_is_client_caused(&text) {
+                        warn!("RPC error response: {}", text);
+                    } else {
+                        error!("RPC error response: {}", text);
+                    }
+                    let ebody = err_to_rpc_json_string(&text);
                     // generate a `Response` with the headers specified in `$header_key` and `$header_val`
                     let response = Response::builder().status(500) $(.header($header_key, $header_val))* .body(full_body(ebody)).unwrap();
                     return response;
@@ -1262,5 +1333,304 @@ mod server_tests {
         assert!(received.contains(r#""origin":"HEARTBEAT""#), "{received}");
         assert!(received.contains(r#""payload":{"probe":1}"#), "{received}");
         assert!(received.contains(r#""error":false"#), "{received}");
+    }
+
+    // ----- The level RPC refusals are logged at (client-caused refusals warn, genuine failures stay errors) -----
+
+    /// Every refusal text the legacy surface can send for a request that is itself at fault, as the handlers word it.
+    const CLIENT_CAUSED_TEXTS: &[&str] = &[
+        "No such coin: RIN",
+        "No such coin RIN",
+        "Base coin RIN is not found",
+        "Rel coin LTC-segwit is not found",
+        "Rel coin is not found or inactive",
+        "Base coin is not found or inactive",
+        "Coin KMDCL is not activated",
+        "Base coin RIN and/or rel coin KMD are not activated",
+        "Not enough FLR for swap: available 0, required at least 1, locked by swaps None",
+        "Not enough base coin ETH balance for swap: available 0, required at least 1, locked by swaps None",
+        "IBC routing requires minimum balance on HTLC coin ATOM: required 1, current 0",
+        "Max base vol 0.5 is below min base vol: 1",
+        "Max base vol 0.00000001 is too low, required: 0.0001",
+        "Min base vol 0.00000001 is too low, required: 0.0001",
+        "Max rel vol 0.00000001 is too low, required: 0.0001",
+        "Base amount 0.00000001 is too low, required: 0.0001",
+        "Rel amount 0.00000001 is too low, required: 0.0001",
+        "Min volume 0.00000001 is too low, required: 0.0001",
+        "Price 0.000000001 is too low, required: 0.00000001",
+        "Price is too low, minimum is 0.00000001",
+        "The volume 0.00000001 of the RIN coin is too low, required at least 0.0001: a payment of that size could not be spent or refunded",
+        "The volume 0.00000001 of the RIN coin less than minimum transaction amount 0.0001",
+        "New volume 0 should be more than zero",
+        "New volume 1 should be more than reserved amount for order matches 2",
+        "Rel coin can not be same as base",
+        "Base and rel must be different coins",
+        "Trading is not supported for coin LN",
+        "Base coin RIN is wallet only",
+        "Rel coin RIN is wallet only",
+    ];
+
+    /// Texts of refusals that are not the request's fault, or that no list may soften: they stay errors.
+    const GENUINE_FAILURE_TEXTS: &[&str] = &[
+        "Transport error: all EVM nodes failed: connection refused",
+        "Userpass is invalid!",
+        "Userpass is not set!",
+        "Your ip is banned.",
+        "Internal error: database is locked",
+        "Only POST requests are supported!",
+        "Invalid input",
+        "expected value at line 1 column 1",
+        "Cannot check the RIN coin spend safety: no fee estimate",
+        "Taker payment is not found, swap is not recoverable",
+        "No such mode: simple",
+        "",
+    ];
+
+    /// An error text as the ERRL macros nest it: every layer adds its `file:line] ` prefix.
+    fn nested(text: &str) -> String { format!("lp_ordermatch:2611] lp_commands_legacy:84] {text}") }
+
+    #[test]
+    fn legacy_refusals_the_request_caused_are_classified_as_client_caused() {
+        for text in CLIENT_CAUSED_TEXTS {
+            assert!(legacy_error_is_client_caused(text), "{text}");
+            assert!(
+                legacy_error_is_client_caused(&format!("lp_ordermatch:2611] {text}")),
+                "{text}"
+            );
+            assert!(legacy_error_is_client_caused(&nested(text)), "{text}");
+            assert!(
+                legacy_error_is_client_caused(&format!("{} (retry)", nested(text))),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_failures_of_the_node_are_not_classified_as_client_caused() {
+        for text in GENUINE_FAILURE_TEXTS {
+            assert!(!legacy_error_is_client_caused(text), "{text:?}");
+            assert!(!legacy_error_is_client_caused(&nested(text)), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_fragment_of_a_pair_alone_does_not_classify_a_text() {
+        // Each of these carries only one half of a fragment pair.
+        for text in [
+            "The coin RIN is fine",
+            "Rel amount 5 was accepted",
+            "Min volume 5 was accepted",
+            "Price 5 was accepted",
+            "Not enough peers",
+            "x is too low",
+            "the swap is not recoverable",
+        ] {
+            assert!(!legacy_error_is_client_caused(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn rpc_error_log_level_warns_for_client_errors_and_errors_otherwise() {
+        for code in [400, 404, 409, 422, 429, 499] {
+            let status = StatusCode::from_u16(code).unwrap();
+            assert_eq!(rpc_error_log_level(status), Level::Warn, "{code}");
+        }
+        // Authentication, access and timeout refusals are reported like failures.
+        for code in [401, 403, 408, 500, 501, 502, 503, 504] {
+            let status = StatusCode::from_u16(code).unwrap();
+            assert_eq!(rpc_error_log_level(status), Level::Error, "{code}");
+        }
+        // The dispatcher's own statuses.
+        for error in [
+            DispatcherError::NoSuchMethod,
+            DispatcherError::InvalidRequest("x".to_owned()),
+            DispatcherError::InvalidMmRpcVersion("x".to_owned()),
+        ] {
+            assert_eq!(rpc_error_log_level(error.status_code()), Level::Warn);
+        }
+        for error in [
+            DispatcherError::Banned,
+            DispatcherError::LocalHostOnly,
+            DispatcherError::UserpassIsNotSet,
+        ] {
+            assert_eq!(rpc_error_log_level(error.status_code()), Level::Error);
+        }
+    }
+
+    mod capture {
+        use common::log::log_crate::{set_logger, set_max_level, Level, LevelFilter, Log, Metadata, Record};
+        use std::sync::Mutex;
+
+        static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+        struct Capture;
+
+        impl Log for Capture {
+            fn enabled(&self, metadata: &Metadata) -> bool { metadata.level() <= Level::Warn }
+
+            fn log(&self, record: &Record) {
+                if self.enabled(record.metadata()) {
+                    LINES.lock().unwrap_or_else(|e| e.into_inner()).push(format!(
+                        "{} {}",
+                        record.level(),
+                        record.args()
+                    ));
+                }
+            }
+
+            fn flush(&self) {}
+        }
+
+        static CAPTURE: Capture = Capture;
+
+        /// Installs the capture of the warn and error lines. `false` when another logger already owns the process, in
+        /// which case a test must not assert that a line is present.
+        pub(super) fn installed() -> bool {
+            let installed = set_logger(&CAPTURE).is_ok();
+            if installed {
+                set_max_level(LevelFilter::Warn);
+            }
+            // `set_logger` fails the second time too: the capture is ours when a line can be seen.
+            common::log::log_crate::warn!("rpc log level capture probe");
+            installed
+                || LINES
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .any(|l| l.contains("rpc log level capture probe"))
+        }
+
+        /// The captured lines (`"{level} {text}"`) that contain `needle`.
+        pub(super) fn lines_with(needle: &str) -> Vec<String> {
+            LINES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|l| l.contains(needle))
+                .cloned()
+                .collect()
+        }
+    }
+
+    /// Sends `body` with the request line `method / HTTP/1.1` and returns the status line and the JSON body, as
+    /// [`post`] does for a POST.
+    fn send_with_method(addr: SocketAddr, method: &str, body: &str) -> (String, Json) {
+        let mut stream = connect(addr);
+        write!(
+            stream,
+            "{method} / HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let status = response.lines().next().unwrap_or_default().to_owned();
+        let (_, payload) = response.split_once("\r\n\r\n").expect("a complete response");
+        let payload = serde_json::from_str(payload).unwrap_or_else(|e| panic!("{e}: {response}"));
+        (status, payload)
+    }
+
+    /// A legacy request that the request itself caused to fail (an unknown coin): the answer is unchanged (the legacy
+    /// error body, HTTP 500) and the line is logged at WARN, not at ERROR.
+    #[test]
+    fn legacy_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged() {
+        let capturing = capture::installed();
+        let (_ctx, addr) = start_server();
+        let failure = post_legacy(addr, "my_balance", json!({ "coin": "NO_SUCH_COIN_LOG_LEVEL_A" }));
+        assert_legacy_error_body(&failure);
+        let error = failure.1["error"].as_str().unwrap();
+        assert!(
+            error.contains("No such coin: NO_SUCH_COIN_LOG_LEVEL_A"),
+            "{}",
+            failure.1
+        );
+
+        if !capturing {
+            eprintln!("legacy_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged: another logger owns the process, line assertions skipped");
+            return;
+        }
+        let lines = capture::lines_with("No such coin: NO_SUCH_COIN_LOG_LEVEL_A");
+        assert!(!lines.is_empty(), "the refusal is logged");
+        for line in &lines {
+            assert!(line.starts_with("WARN RPC error response: "), "{line}");
+        }
+    }
+
+    /// A versioned request whose handler answers a 4xx: the mmrpc error is unchanged and the line is logged at WARN.
+    #[test]
+    fn versioned_handler_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged() {
+        let capturing = capture::installed();
+        let (_ctx, addr) = start_server();
+        let request = json!({
+            "mmrpc": "2.0",
+            "userpass": "pw",
+            "method": "min_trading_vol",
+            "params": { "coin": "NO_SUCH_COIN_LOG_LEVEL_B" },
+            "id": 8,
+        });
+        let answer = post(addr, &request);
+        assert_mmrpc_error(&answer, 400, "NoSuchCoin", json!(8));
+        assert_eq!(
+            answer.1["error_data"]["coin"], "NO_SUCH_COIN_LOG_LEVEL_B",
+            "{}",
+            answer.1
+        );
+
+        if !capturing {
+            eprintln!("versioned_handler_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged: another logger owns the process, line assertions skipped");
+            return;
+        }
+        let lines = capture::lines_with("No such coin: NO_SUCH_COIN_LOG_LEVEL_B");
+        assert!(!lines.is_empty(), "the refusal is logged");
+        for line in &lines {
+            assert!(line.starts_with("WARN RPC error response: "), "{line}");
+        }
+    }
+
+    /// A request the dispatcher itself refuses with a 4xx (an unknown method): the mmrpc error is unchanged and the
+    /// line is logged at WARN. Other tests produce the same text, which is also a 400, so every such line is checked.
+    #[test]
+    fn dispatcher_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged() {
+        let capturing = capture::installed();
+        let (_ctx, addr) = start_server();
+        let answer = post(
+            addr,
+            &json!({ "mmrpc": "2.0", "userpass": "pw", "method": "no_such_method_in_any_table", "params": {}, "id": 9 }),
+        );
+        assert_mmrpc_error(&answer, 400, "NoSuchMethod", json!(9));
+        assert!(answer.1.get("error_data").is_none(), "{}", answer.1);
+
+        if !capturing {
+            eprintln!("dispatcher_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged: another logger owns the process, line assertions skipped");
+            return;
+        }
+        let lines = capture::lines_with("No such method");
+        assert!(!lines.is_empty(), "the refusal is logged");
+        for line in &lines {
+            assert!(line.starts_with("WARN RPC dispatcher error: "), "{line}");
+        }
+    }
+
+    /// A legacy refusal whose text is not listed stays an error: a GET request is answered by the legacy error body
+    /// (HTTP 500) and the line is logged at ERROR, because its text is not in the table. (No cheaper genuine 5xx path
+    /// exists on the stub server.)
+    #[test]
+    fn legacy_failure_that_is_not_client_caused_is_logged_at_error_and_answered_unchanged() {
+        let capturing = capture::installed();
+        let (_ctx, addr) = start_server();
+        let failure = send_with_method(addr, "GET", "{}");
+        assert_legacy_error_body(&failure);
+        let error = failure.1["error"].as_str().unwrap();
+        assert!(error.contains("Only POST requests are supported!"), "{}", failure.1);
+
+        if !capturing {
+            eprintln!("legacy_failure_that_is_not_client_caused_is_logged_at_error_and_answered_unchanged: another logger owns the process, line assertions skipped");
+            return;
+        }
+        let lines = capture::lines_with("Only POST requests are supported!");
+        assert!(!lines.is_empty(), "the failure is logged");
+        for line in &lines {
+            assert!(line.starts_with("ERROR RPC error response: "), "{line}");
+        }
     }
 }
