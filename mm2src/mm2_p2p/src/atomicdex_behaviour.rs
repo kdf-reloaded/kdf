@@ -1564,16 +1564,20 @@ fn start_gossipsub(
                                 .connection_established(*connection_id, *peer_id, Instant::now());
                         },
                         // How a dialed connection ended decides whether its address may be dialed again early (CRD
-                        // ch.28 R27a item 1a). The ping safeguard recorded its close in the ping behaviour; the other
-                        // closes of this node were recorded by their call sites.
+                        // ch.28 R27a item 1a). The ping safeguard recorded its close in the ping behaviour and the
+                        // stuck-peer close in gossipsub, each of which is asked for every closed connection so that
+                        // no mark outlives its connection; the other closes of this node were recorded by their call
+                        // sites.
                         SwarmEvent::ConnectionClosed {
                             connection_id, cause, ..
                         } => {
                             let closed_by_ping = swarm.behaviour_mut().ping.take_ping_close(*connection_id);
+                            let closed_by_stuck = swarm.behaviour_mut().gossipsub.take_stuck_close(*connection_id);
                             if let Some(closed) = guards.early.connection_closed(
                                 *connection_id,
                                 cause.as_ref(),
                                 closed_by_ping,
+                                closed_by_stuck,
                                 Instant::now(),
                             ) {
                                 debug!(

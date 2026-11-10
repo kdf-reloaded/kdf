@@ -982,6 +982,21 @@ relay-connection maintenance of RQ1a item 4 MUST follow these rules:
    > "not below the low watermark" is covered by construction: the
    > early-redial check runs only in the below-watermark branch.
 
+   > **Status note (2026-11-10, clean-side record).** The gap the rule text
+   > above records for a stuck-peer close that ends with another transport
+   > error is closed. A stuck-peer close is now recorded when it starts: the
+   > vendored gossipsub marks every connection of the peer before it requests
+   > the close of all of them, the connection-event loop asks for that mark
+   > on every closed connection, and the early-redial guard treats a marked
+   > connection as a close of this node whatever the close event reports, so
+   > a stuck-peer close gives no early redial whether it ended cleanly or
+   > with an error. A relay whose stuck close is held back (RQ1 item 5, guard
+   > for relays) is not marked. The sentence "one that ends with another
+   > transport error counts as a transport error" in the rule text above, and
+   > "a stuck-peer close, which gossipsub starts, by its clean end" in the
+   > as-built note, describe the state before this note. Tests: the T15 cases for the stuck mark in
+   > `redial_guard.rs` and the mark tests in the vendored gossipsub.
+
 2. **Connected seed.** The node MUST NOT dial a configured bootstrap
    address while the peer that the address belongs to is connected,
    inbound or outbound. An address belongs to the peer that the last
@@ -2572,3 +2587,7 @@ per-peer IHAVE and IWANT caps of R13a) MUST be confirmed to add no rule that rea
   gated facts of RQ1a items 3 and 4 as already recorded in this chapter.
   Written by a context that never read the forbidden corpus. It needs no
   Dirty Gate pass of its own.
+- *Status note added 2026-11-10 -- under R27a item 1a.* Reloaded-original,
+  clean side: it records this repository's stuck-close mark (PR #328) and
+  takes no forbidden-class input, so chapter 01 R38 is not engaged and no
+  gate pass is required.
