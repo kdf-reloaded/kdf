@@ -6,7 +6,7 @@ use crate::node_url::{host_only, lightwalletd_endpoint_url, scrub_node_url, scru
 use crate::utxo::utxo_common::big_decimal_from_sat_unsigned;
 use common::mm_number::BigDecimal;
 use common::{calc_total_pages, log, PagingOptionsEnum};
-use db_common::sqlite::rusqlite::{params, types::ValueRef, Connection, OpenFlags};
+use db_common::sqlite::rusqlite::{params, types::ValueRef, Connection, OpenFlags, OptionalExtension};
 use futures::StreamExt;
 use lazy_static::lazy_static;
 use mm2_err_handle::prelude::*;
@@ -151,6 +151,13 @@ fn wallet_db_mutation_lock(wallet_db_path: &Path) -> Arc<Mutex<()>> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RecordedTransaction {
     pub(crate) raw: Vec<u8>,
+    pub(crate) mined_height: Option<u32>,
+}
+
+/// What the wallet database knows of one transaction id: it holds a row, mined at `mined_height` or
+/// still unmined (`None`).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct KnownTransaction {
     pub(crate) mined_height: Option<u32>,
 }
 
@@ -7590,6 +7597,102 @@ pub(crate) mod tests {
         assert_eq!(sapling_nullifiers(&first), sapling_nullifiers(&retry));
     }
 
+    // ---- a transaction the wallet database holds is not broadcast again (CRD ch.39, status note 2026-11-10) ----
+
+    /// The txid in display order and, for a mined refusal, the block it was scanned in.
+    #[test]
+    fn a_rebroadcast_is_refused_by_state_and_the_text_names_the_transaction() {
+        use crate::z_coin::z_coin_ops::{rebroadcast_refusal, RebroadcastRefusal};
+        use crate::z_coin::z_tx_read;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let tx = fixture.build().unwrap();
+        let mut bytes = Vec::new();
+        tx.write(&mut bytes).unwrap();
+        let display = z_tx_read::txid_display(&tx);
+        let display_hex = hex::encode(display.0);
+        assert_ne!(
+            display_hex,
+            hex::encode(tx.txid().as_ref()),
+            "the fixture's txid must differ from its reverse, or the order is not tested"
+        );
+
+        // Built but never submitted: nothing is known, the broadcast goes ahead.
+        assert_eq!(rebroadcast_refusal("ARRR", &fixture.history, &bytes), None);
+
+        // Recorded as broadcast, not yet mined: not refused.
+        fixture.broadcast(&tx);
+        assert_eq!(
+            rebroadcast_refusal("ARRR", &fixture.history, &bytes),
+            None,
+            "an unmined row is not refused: a re-push stays possible"
+        );
+
+        // Scanned in block 12.
+        let mut block = empty_compact_block(12, 12, 11);
+        block.chain_metadata = None;
+        block.vtx.push(zcash_compact::CompactTx {
+            index: 1,
+            txid: tx.txid().as_ref().to_vec(),
+            spends: sapling_nullifiers(&tx)
+                .into_iter()
+                .map(|nf| zcash_compact::CompactSaplingSpend { nf: nf.to_vec() })
+                .collect(),
+            ..Default::default()
+        });
+        fixture.history.insert_compact_blocks(&[block]).unwrap();
+        fixture
+            .history
+            .scan_cached_blocks_to_height(fixture.params.clone(), 12, 1_000, 0, |_, _| {})
+            .unwrap();
+        let mined = rebroadcast_refusal("ARRR", &fixture.history, &bytes).expect("a scanned transaction is refused");
+        assert_eq!(mined, RebroadcastRefusal::Mined {
+            coin: "ARRR".to_owned(),
+            txid: display,
+            height: 12
+        });
+        let text = mined.to_string();
+        assert!(text.contains(&display_hex), "{text}");
+        assert!(text.starts_with("ARRR: transaction "), "{text}");
+        assert!(
+            text.contains("is already known to this wallet and is mined in block 12"),
+            "{text}"
+        );
+    }
+
+    /// Bytes that are no transaction are not this guard's business. (A parsable transaction with no
+    /// Sapling spend is not covered: the fixture has no cheap way to build one.)
+    #[test]
+    fn the_rebroadcast_guard_ignores_unreadable_bytes() {
+        use crate::z_coin::z_coin_ops::rebroadcast_refusal;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        assert_eq!(
+            rebroadcast_refusal("ARRR", &fixture.history, b"not a transaction"),
+            None
+        );
+        assert_eq!(rebroadcast_refusal("ARRR", &fixture.history, &[]), None);
+    }
+
+    /// A wallet database that cannot be read never blocks a broadcast.
+    #[test]
+    fn the_rebroadcast_guard_does_not_block_when_the_lookup_fails() {
+        use crate::z_coin::z_coin_ops::rebroadcast_refusal;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let tx = fixture.build().unwrap();
+        let mut bytes = Vec::new();
+        tx.write(&mut bytes).unwrap();
+        let mut broken = fixture.history.clone();
+        broken.wallet_db_path = fixture
+            .history
+            .wallet_db_path()
+            .with_file_name("does-not-exist")
+            .join("w.db");
+        assert!(broken.known_transaction(tx.txid().as_ref()).is_err());
+        assert_eq!(rebroadcast_refusal("ARRR", &broken, &bytes), None);
+    }
+
     // ---- the fee of a history row (CRD ch.39 R39.8.9e1, T39.8.9e1) ----
 
     /// Sets (or clears) the fee the wallet database holds for the transaction `id_tx`.
@@ -7920,6 +8023,25 @@ impl ZCoinShieldedHistory {
             )
             .map_err(|e| e.to_string())?;
         Ok(count > 0)
+    }
+
+    /// The wallet database's row for `txid` (internal byte order), if it holds one: a broadcast this
+    /// wallet recorded (R39.8.0ap) or a transaction the block scan has seen. `None` when no row exists.
+    /// Read-only; an error is the database's, never an empty answer.
+    pub(crate) fn known_transaction(&self, txid: &[u8; 32]) -> Result<Option<KnownTransaction>, String> {
+        let conn = Connection::open_with_flags(&self.wallet_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT mined_height FROM transactions WHERE txid = ?1;",
+            params![&txid[..]],
+            |row| {
+                Ok(KnownTransaction {
+                    mined_height: row.get(0)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())
     }
 
     /// The transactions the wallet database holds in full whose bytes contain `script_pubkey`, with the

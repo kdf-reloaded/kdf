@@ -3236,6 +3236,16 @@ impl MarketCoinOps for ZCoin {
     /// (R39.8.0ap, D39.8.0e). Recording happens only after the backend accepted the transaction,
     /// and a failure to record never fails the broadcast.
     fn send_raw_tx_bytes(&self, tx: &[u8]) -> Box<dyn Future<Item = String, Error = String> + Send> {
+        // A transaction the wallet database already holds is not handed to any endpoint again: the
+        // node would only answer with a duplicate-nullifier error that reads like a note-reuse defect.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.is_light() {
+            if let Some(refusal) = z_coin_ops::rebroadcast_refusal(self.ticker(), &self.z_fields.shielded_history, tx) {
+                let text = refusal.to_string();
+                log::info!("{text}");
+                return Box::new(futures::future::err(text).boxed().compat());
+            }
+        }
         let fut = utxo_common::send_raw_tx_bytes(self.as_ref(), tx);
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -3436,6 +3446,7 @@ impl MmCoin for ZCoin {
                     .map_to_mm(|_| NumConversError(format!("Failed to get ZCash amount from {}", amount)))
                     .mm_err(Into::into)?;
 
+                let build_started = std::time::Instant::now();
                 let (tx, data) = match destination {
                     z_pirate1::WithdrawDestination::Sapling(to_addr) => {
                         let z_output = ZOutput {
@@ -3461,6 +3472,14 @@ impl MmCoin for ZCoin {
                     .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
                 let mut tx_hash = tx.txid().as_ref().to_vec();
                 tx_hash.reverse();
+                log::info!(
+                    "ZCoin {}: withdrawal {} built in {:.1} s: {} Sapling spends, Ironwood output: {}",
+                    coin.ticker(),
+                    hex::encode(&tx_hash),
+                    build_started.elapsed().as_secs_f64(),
+                    tx.sapling_bundle().map_or(0, |bundle| bundle.shielded_spends().len()),
+                    if tx.ironwood_bundle().is_some() { "yes" } else { "no" }
+                );
 
                 // Keep the destination as the request gave it, for the history row of this transaction
                 // (CRD ch.39 R39.8.9d2 (a)). A failure only costs the row its recipient, so the
