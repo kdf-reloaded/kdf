@@ -242,8 +242,9 @@ pub(super) fn round_agreed_tip(round: &[RoundServer], reported: &[(usize, u64)])
     agreed_tip(&round_heights(round, reported))
 }
 
-/// The pairs of servers measured at the same height that answered different header bytes there, with that height
-/// (CRD ch.38 R38.6.4o item 7): each starts a comparison (item 12) once both report heights at least *T* above it.
+/// The pairs of servers measured at the same height that answered different base headers there ([`same_block`]),
+/// with that height (CRD ch.38 R38.6.4o item 7): each starts a comparison (item 12) once both report heights at least
+/// *T* above it.
 pub(super) fn header_differences(round: &[RoundServer]) -> Vec<(usize, usize, u64)> {
     let measured: Vec<(usize, u64, &[u8])> = round
         .iter()
@@ -255,7 +256,7 @@ pub(super) fn header_differences(round: &[RoundServer]) -> Vec<(usize, usize, u6
     let mut pairs = Vec::new();
     for (i, (id_a, height_a, header_a)) in measured.iter().enumerate() {
         for (id_b, height_b, header_b) in measured.iter().skip(i + 1) {
-            if height_a == height_b && header_a != header_b {
+            if height_a == height_b && !same_block(header_a, header_b) {
                 pairs.push((*id_a, *id_b, *height_a));
             }
         }
@@ -267,6 +268,18 @@ pub(super) fn header_differences(round: &[RoundServer]) -> Vec<(usize, usize, u6
 /// minus the tolerance, not below 0, so that a race at the tip never counts.
 pub(super) fn common_height(height_a: u64, height_b: u64, tolerance: u64) -> u64 {
     height_a.min(height_b).saturating_sub(tolerance)
+}
+
+/// The length of the base header that every UTXO header family starts with: version, previous block hash, merkle
+/// root, and the fields that follow up to 80 bytes.
+pub(super) const BASE_HEADER_LEN: usize = 80;
+
+/// Whether two headers at one height name the same block (CRD ch.38 R38.6.4o items 7 and 12): their first
+/// [`BASE_HEADER_LEN`] bytes are equal. The bytes after them are not compared: on merged-mining (AuxPoW) coins they
+/// carry the merged-mining proof, which the block hash does not cover, so two servers can store one block with
+/// different proof bytes.
+pub(super) fn same_block(header_a: &[u8], header_b: &[u8]) -> bool {
+    header_a[..header_a.len().min(BASE_HEADER_LEN)] == header_b[..header_b.len().min(BASE_HEADER_LEN)]
 }
 
 /// Whether, with three or more heights, one of them has a lead over the agreed tip of more than `tolerance`
@@ -926,6 +939,26 @@ mod tests {
         assert_eq!(out_of_date_states(&figures, 3, Duration::from_secs(600), 1.)[0], None);
     }
 
+    /// T38.6.4o.18 (items 7 and 12): two headers name the same block when their first 80 bytes are equal; the bytes after
+    /// them do not count, a difference inside them does, and shorter headers are compared whole.
+    #[test]
+    fn t38_6_4o_18_the_same_block_is_the_same_base_header() {
+        let base = [7u8; BASE_HEADER_LEN];
+        let mut other_base = base;
+        other_base[BASE_HEADER_LEN - 1] = 8;
+        let with_tail = |base: &[u8], tail: &[u8]| [base, tail].concat();
+        assert!(same_block(&with_tail(&base, &[1; 20]), &with_tail(&base, &[2; 38])));
+        assert!(same_block(&with_tail(&base, &[1; 20]), &base));
+        assert!(!same_block(
+            &with_tail(&base, &[1; 20]),
+            &with_tail(&other_base, &[1; 20])
+        ));
+        assert!(!same_block(&base[..40], &other_base));
+        assert!(same_block(b"aa", b"aa"));
+        assert!(!same_block(b"aa", b"bb"));
+        assert!(!same_block(b"aa", &base));
+    }
+
     fn with_header(mut server: RoundServer, header: &[u8]) -> RoundServer {
         if let Some(m) = server.measurement.as_mut() {
             m.header = Some(header.to_vec());
@@ -945,6 +978,11 @@ mod tests {
         // Servers at other heights, or without readable header bytes, are not compared.
         let lower = with_header(server(3, 50., 99), b"cc");
         assert!(header_differences(&[same(0), lower, server(4, 50., 100)]).is_empty());
+        // Merged-mining headers: the same 80-byte base header with different bytes after it is the same block.
+        let base = [7u8; BASE_HEADER_LEN];
+        let proof = |tail: &[u8]| [&base[..], tail].concat();
+        let aux = |id, tail: &[u8]| with_header(server(id, 50., 100), &proof(tail));
+        assert!(header_differences(&[aux(0, &[1; 20]), aux(1, &[2; 38])]).is_empty());
         assert_eq!(common_height(100, 90, 3), 87);
         assert_eq!(common_height(2, 100, 3), 0);
         assert!(is_far_ahead(&[1_000_100, 1_000, 1_000], 3));

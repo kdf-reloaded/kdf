@@ -971,6 +971,31 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 #### UTXO coins and Electrum
 
+- **DOGE and other merged-mining coins no longer refuse new trades because their Electrum servers
+  seem to disagree about the chain.** The chain comparison added in this release compared whole
+  block headers. On merged-mining (AuxPoW) coins a header carries a merged-mining proof after its
+  first 80 bytes, which the block hash does not cover, and two servers can store one block with
+  different proofs. On DOGE, two public servers answered the same height with 763 and 727 bytes
+  whose first 80 bytes were equal; 2 of about 420 heights checked differ this way. When such a
+  block arrived, the node compared the servers at that height, found a difference, and kept
+  finding it every 5 minutes, so the coin refused new orders, swaps and withdrawals until it was
+  activated again. In a field run the state began 12 minutes after the start and did not end in
+  about 16 hours. The comparison now compares the first 80 bytes of the headers, which hold the
+  version, the previous block hash and the merkle root, so a real fork is still found. Detail:
+  CRD ch.38 R38.6.4o items 7 and 12, D38.6.4o.14.
+
+- **A short disagreement between Electrum servers no longer stops a coin's trading.** After
+  activation, a server briefly ahead of the others, or a difference between block headers that the
+  next comparison no longer finds, put the coin into the refusal state at once. A field log of a
+  maker running 16 hours showed this 43 times for VRSC (one server 4 to 6 blocks ahead for 0 to 11
+  seconds), 5 times for NENG, once each for DPC and FIRO, and 5 times for CHTA (a header difference
+  gone at the next comparison, after 3.5 to 10 minutes). Each time the node logged an error line
+  and refused the maker's orders. After activation the node now enters the refusal state only when
+  the disagreement has lasted two block times, and at least 60 seconds: a server ahead must still
+  be ahead, and two servers at different headers are compared again at the same height once that
+  time has passed. The activation itself still fails at once. The length of this period is watched
+  in field runs and may change. Detail: CRD ch.38 R38.6.4o item 12, D38.6.4o.15.
+
 - **A coin with several Electrum servers no longer fails to activate when one server never answers
   and another is refused.** A field report: the legacy `electrum` call for UNO, with
   `electrum_server_order` set to `mixed`, three servers and `max_connected` 2, answered "The balance

@@ -329,8 +329,12 @@ the servers disagree about the chain (one is far ahead of the others, or two ans
 headers for the same height), the activation fails with an error that names the servers and no coin
 is registered. After activation the coin refuses new orders and withdrawals with the error and
 starts no new swap, until the servers agree again, while balance and history reads and running swaps
-go on. The remedy is the same in both cases: remove the servers that follow the other chain from the
-coin's list, or activate the coin with servers that agree. The checks are on by default and the
+go on. After activation a disagreement counts only once it has lasted two block times, and at least
+60 seconds, so a server briefly ahead during a burst of blocks or a short reorganization does not
+stop trading; this period is watched in field runs and may change. Block headers are compared by
+their first 80 bytes, so the merged-mining proof that follows them on coins such as DOGE does not
+count. The remedy is the same in both cases: remove the servers that follow the other chain from
+the coin's list, or activate the coin with servers that agree. The checks are on by default and the
 top-level `MM2.json` boolean `electrum_tip_checks` set to `false` turns them off.
 
 ### Electrum Servers over TLS

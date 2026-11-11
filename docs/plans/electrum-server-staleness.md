@@ -261,6 +261,11 @@ Servers far apart in height are compared by one directed header request each at 
 server or a header difference fails the activation (5 s window) and, later, puts the coin in a state that
 refuses new orders, new swaps and withdrawals. *Implemented (PR #324): a346ebdda, cdf4c018d, 0417392bf.*
 
+*Field follow-up (2026-11-10):* headers are compared by their first 80 bytes, so merged-mining proofs
+do not count as another chain (D38.6.4o.14), and after activation a disagreement stops trading only
+once it has lasted two block times, and at least 60 s (D38.6.4o.15). The length of that period is
+watched in field runs, the step 6 run included, and evaluated.
+
 ## Decisions (taken 2026-11-09, maintainer)
 
 - D1a window W: 180 s.
