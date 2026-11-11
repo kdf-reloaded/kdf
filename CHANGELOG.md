@@ -1684,6 +1684,13 @@ lives.
   activation log line says `gas_limit: defaults`. More in
   [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md). Detail: PR #105, PR #200; CRD
   ch.57 R57.5.2, R57.5.3, R57.5.5.
+- **An EVM request fails at once when every node of the coin refuses it.** When every configured
+  node of an EVM coin refuses a request at the same moment (for example public endpoints answering
+  HTTP 429 Too Many Requests), the request fails at once; KDF Reloaded does not pause and retry.
+  Order placement and balance RPCs report the failure and can be repeated; a swap step without a
+  wait loop (taker-payment validation, the spend) fails the swap into its refund path. For an EVM
+  coin used for making orders, configure at least one node with its own request allowance. Detail:
+  CRD ch.35 R35.1.8, R35.1.11.
 - **A maker payment is not refunded after the spend of the taker payment was sent, even if that spend
   never confirms.** If the node's spend of the taker payment was broadcast but dropped from the chain,
   and the other side refunded its payment, `recover_funds_of_swap` refuses to refund the maker payment:
