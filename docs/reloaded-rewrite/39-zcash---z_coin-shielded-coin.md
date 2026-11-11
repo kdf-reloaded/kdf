@@ -6275,6 +6275,30 @@ endpoints (R39.11.4), and it does not suspend the endpoint (R39.11.31(h)). The
 endpoint's name is part of the human-readable message only; it changes no
 `error_type`, `error_data` shape or HTTP status.
 
+> **Status note (2026-11-10, Reloaded-original).** Before a light-mode
+> broadcast the coin checks its wallet database for the transaction id of the
+> bytes it was given. A transaction the database holds as mined -- a broadcast
+> this wallet recorded or any other transaction the block scan has stored, with
+> its height (hence "known to this wallet") -- is refused through the
+> broadcast's existing error path, with a message that names the transaction
+> id (display order) and its state ("mined in block N"); the bytes are not
+> handed to any endpoint; it changes no `error_type`, `error_data` shape or
+> HTTP status; one `info` line carries the same message. The refusal is an
+> `Err`, so the RPC layer also logs its usual error line next to the `info`
+> line. A row without a mined height -- a recorded broadcast not yet scanned, or
+> one a reorg rewound -- is not refused and goes out as before, so a re-push
+> stays possible for a dropped or rewound transaction. Bytes that do not parse,
+> and transactions without a Sapling spend (by construction; not covered by a
+> test), are not checked and go out as before. A failure of the lookup does not
+> block the broadcast (it is logged at `debug` level). The rejection of
+> R39.11.30 therefore no longer shows a duplicate-nullifier answer for a
+> transaction the wallet database holds as mined. Tests:
+> `a_rebroadcast_is_refused_by_state_and_the_text_names_the_transaction`,
+> `the_rebroadcast_guard_ignores_unreadable_bytes` and
+> `the_rebroadcast_guard_does_not_block_when_the_lookup_fails`
+> (`z_coin_wallet_db.rs`). A withdrawal build also logs one `info` line with its
+> duration, its number of Sapling spends and whether it has an Ironwood output.
+
 R39.11.31 **A failing endpoint is suspended with a doubling backoff (Reloaded;
 clean-room original; maintainer decision 2026-10-28; no switch).**
 
