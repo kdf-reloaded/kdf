@@ -1907,8 +1907,8 @@ impl LightwalletdBackend {
     /// Broadcasts the transaction. The answer is the identifier the server's node accepted it under, when the
     /// service returned one.
     pub(crate) async fn send_transaction(&self, data: Vec<u8>) -> Result<Option<String>, LightwalletdError> {
-        // The identifier is computed from the bytes, as the broadcast path does (the service answers with a
-        // status only); a rejection names it (R39.11.30).
+        // The identifier is computed from the bytes, as the broadcast path does (the answer may carry the
+        // accepted identifier, which the caller logs); a rejection names it (R39.11.30).
         let txid = ZTransaction::read(data.as_slice(), BranchId::Sapling)
             .map(|parsed| format!("{:?}", txid_internal_to_display(*parsed.txid().as_ref())))
             .unwrap_or_else(|_| "(unreadable transaction)".to_owned());
@@ -1963,7 +1963,13 @@ fn accepted_identifier(response: z_coin_grpc::SendResponse) -> Result<Option<Str
             message: response.error_message,
         });
     }
+    // The message may be the raw JSON result of the node's call: the identifier in double quotes.
     let message = response.error_message.trim();
+    let message = message
+        .strip_prefix('"')
+        .and_then(|m| m.strip_suffix('"'))
+        .unwrap_or(message)
+        .trim();
     Ok((!message.is_empty()).then(|| message.to_owned()))
 }
 
@@ -2165,8 +2171,8 @@ impl UtxoRpcClientOps for LightwalletdClient {
     fn send_raw_transaction(&self, tx: BytesJson) -> UtxoRpcFut<H256Json> {
         let this = self.clone();
         let fut = async move {
-            // The service answers with a status only, so the identifier comes from the bytes. The
-            // Zcash reader is used because the shared UTXO parser misreads version 5 and 6.
+            // The answer may carry the accepted identifier, which is logged below; the identifier returned
+            // comes from the bytes. The Zcash reader is used because the shared UTXO parser misreads version 5 and 6.
             let parsed = ZTransaction::read(tx.0.as_slice(), BranchId::Sapling).map_err(|e| {
                 MmError::new(UtxoRpcError::InvalidResponse(format!(
                     "cannot read the transaction: {}",

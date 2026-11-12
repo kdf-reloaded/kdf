@@ -6303,9 +6303,11 @@ endpoint's name is part of the human-readable message only; it changes no
 > the lightwalletd service to a successful broadcast carries the identifier its
 > node accepted. The coin now logs that identifier beside the locally computed
 > one in one `info` line, and writes a warning when the two differ (the
-> comparison ignores case and surrounding whitespace). The identifier returned
-> to the caller stays the locally computed one. The lines name no server, and an
-> empty answer logs nothing. Tests (`z_lightwalletd/tests.rs`):
+> comparison ignores case, surrounding whitespace and the JSON quotes the
+> service may put around the identifier). The identifier returned to the caller
+> stays the locally computed one. The lines name no server, and an empty answer
+> logs nothing. Checked with fakes; the live form of the answer is recorded by
+> the lab. Tests (`z_lightwalletd/tests.rs`):
 > `a_successful_send_answer_yields_the_returned_identifier_or_none`,
 > `the_returned_identifier_is_compared_with_the_local_one_ignoring_case_and_whitespace`
 > and `send_raw_transaction_keeps_the_local_identifier_whatever_the_server_returns`.

@@ -796,6 +796,12 @@ fn a_successful_send_answer_yields_the_returned_identifier_or_none() {
     };
     assert_eq!(accepted_identifier(answer(0, "ab12")), Ok(Some("ab12".to_owned())));
     assert_eq!(accepted_identifier(answer(0, " ab12\n")), Ok(Some("ab12".to_owned())));
+    assert_eq!(accepted_identifier(answer(0, "\"ab12\"")), Ok(Some("ab12".to_owned())));
+    assert_eq!(
+        accepted_identifier(answer(0, " \"ab12\" ")),
+        Ok(Some("ab12".to_owned()))
+    );
+    assert_eq!(accepted_identifier(answer(0, "\"\"")), Ok(None));
     assert_eq!(accepted_identifier(answer(0, "")), Ok(None));
     assert_eq!(accepted_identifier(answer(0, "  ")), Ok(None));
     assert_eq!(
@@ -814,7 +820,8 @@ fn the_returned_identifier_is_compared_with_the_local_one_ignoring_case_and_whit
     assert_eq!(returned_identifier_matches("ab12", Some("cd34")), Some(false));
 }
 
-/// The backend hands back the identifier the server returned; `send_raw_transaction` still answers with the
+/// The backend hands back the identifier the server returned (here the fake transport, which does not strip
+/// quotes; the stripping is `accepted_identifier`'s); `send_raw_transaction` still answers with the
 /// locally computed identifier, whether the server returned the same one, another one or none.
 #[tokio::test]
 async fn send_raw_transaction_keeps_the_local_identifier_whatever_the_server_returns() {
@@ -827,7 +834,12 @@ async fn send_raw_transaction_keeps_the_local_identifier_whatever_the_server_ret
         fn record(&self, _: u32) -> Result<(), String> { Ok(()) }
     }
     let local = DEPOSIT.txid_display.to_owned();
-    for returned in [Some(local.to_uppercase()), Some("00".repeat(32)), None] {
+    for returned in [
+        Some(local.to_uppercase()),
+        Some(format!("\"{}\"", local)),
+        Some("00".repeat(32)),
+        None,
+    ] {
         let transport = Arc::new(FakeTransport::default());
         let mut script = healthy(&[]);
         script.send = Some(Ok(returned.clone()));
