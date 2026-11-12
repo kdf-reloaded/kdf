@@ -5699,6 +5699,12 @@ R39.11.15 **Version coverage of the two parsers (public facts, for planning).**
 > parser reads what -- is a property of a change not yet made and shall be
 > re-checked when it is.
 
+> *Status (2026-11-12, public facts; clean side):* ZIP 230 was withdrawn; the
+> version-6 transaction format is specified by ZIP 229. Since the Zcash network
+> upgrade NU7 (mainnet height 3,543,405, ZIP 259) a Zcash transaction's version
+> must be 5 or 6, also for a transparent-only transaction (ZIP 2003, ZIP 259).
+> For the transparent coin ZEC see plan `zec-v5-transactions`.
+
 R39.11.16 **Requirement for Ironwood-era support.** Before a shielded coin may
 transact on a network whose standardness rule requires a transaction version the
 shared UTXO parser does not implement, every swap step of R39.11.13 shall read
