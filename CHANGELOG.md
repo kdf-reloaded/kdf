@@ -1558,13 +1558,14 @@ lives.
   planned for a later release. More in
   [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PRs #229,
   #246; CRD ch.39 §39.6.5.
-- **ARRR swaps use the Sapling pool only.** An ARRR swap's HTLC is funded from and paid back into
-  the Sapling pool. The Pirate network does not accept HTLC scripts in the Ironwood pool, and
-  changing that needs a Pirate network upgrade, so KDF Reloaded cannot offer swaps funded from the
-  Ironwood pool until then. Funds held at an Ironwood (Pirate1, `pirate1…`) address, for example in
-  another Pirate wallet, must be sent to the wallet's Sapling (`zs1…`) address before they can be
-  traded. Withdrawals to a Pirate1 address, and incoming payments that carry a Sapling output, keep
-  working as described in the ARRR entries above. More in
+- **ARRR swaps use the Sapling pool only.** An ARRR swap's HTLC payment is funded from the Sapling
+  pool, and its spend and refund pay into the Sapling pool. The Pirate network accepts an HTLC
+  payment only in a transaction that spends at least one Sapling note, so a payment funded from the
+  Ironwood pool alone is invalid; changing that needs a Pirate network upgrade, so KDF Reloaded
+  cannot offer swaps funded from the Ironwood pool until then. Funds held at an Ironwood (Pirate1,
+  `pirate1…`) address, for example in another Pirate wallet, must be sent to the wallet's Sapling
+  (`zs1…`) address before they can be traded. Withdrawals to a Pirate1 address, and incoming
+  payments that carry a Sapling output, keep working as described in the ARRR entries above. More in
   [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md). Detail: CRD ch.39
   §39.6.5.
 - **The Komodo DeFi Framework and GLEEC KDF builds available in November 2026 cannot spend BC2
