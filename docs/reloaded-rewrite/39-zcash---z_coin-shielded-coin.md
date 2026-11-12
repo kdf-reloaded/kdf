@@ -6299,6 +6299,17 @@ endpoint's name is part of the human-readable message only; it changes no
 > (`z_coin_wallet_db.rs`). A withdrawal build also logs one `info` line with its
 > duration, its number of Sapling spends and whether it has an Ironwood output.
 
+> **Status note (2026-11-12, Reloaded-original).** In light mode the answer of
+> the lightwalletd service to a successful broadcast carries the identifier its
+> node accepted. The coin now logs that identifier beside the locally computed
+> one in one `info` line, and writes a warning when the two differ (the
+> comparison ignores case and surrounding whitespace). The identifier returned
+> to the caller stays the locally computed one. The lines name no server, and an
+> empty answer logs nothing. Tests (`z_lightwalletd/tests.rs`):
+> `a_successful_send_answer_yields_the_returned_identifier_or_none`,
+> `the_returned_identifier_is_compared_with_the_local_one_ignoring_case_and_whitespace`
+> and `send_raw_transaction_keeps_the_local_identifier_whatever_the_server_returns`.
+
 R39.11.31 **A failing endpoint is suspended with a doubling backoff (Reloaded;
 clean-room original; maintainer decision 2026-10-28; no switch).**
 

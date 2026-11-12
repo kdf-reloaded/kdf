@@ -769,6 +769,10 @@ The reason is honesty toward the taker: once the maker has spent the taker
 payment, the maker payment belongs to the taker, whatever the technical chance to
 refund it.
 
+> **Status note (2026-11-12, Reloaded-original).** R83 narrows item 2: when the
+> taker payment is shown on its own chain to be refunded by the taker, with a
+> confirmation, the maker payment may be refunded by the manual recovery.
+
 **R76.** *The refusal changes nothing.* A refusal of R75 MUST NOT append an
 event to the log of the swap, change its status or its recoverable flag, or
 write the swap record. The recoverable flag is derived from the events of the
@@ -963,6 +967,78 @@ dropped and the taker refunded) is not part of this rule.
 > (also checks the lock time and key the restored swap passes to the search),
 > `the_taker_payment_search_result_is_classified_into_the_four_outcomes`.
 > Run on 2026-11-12: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 81 tests of which these twelve
+> are new, and the formatting check passed.
+
+## 51.6D Bound Manual Refund After a Lost Claim
+
+> **Status (Reloaded-original; 2026-11-12).** This rule records no claim about
+> the reference implementation. It narrows item 2 of R75 for the manual
+> recovery only. It adds no event and no RPC field; the persisted log shape of
+> chapter 44 and the resume map (R19, R32) are unchanged.
+
+A maker swap can end with the log holding the sent claim of the taker payment
+(`TakerPaymentSpent`) although the claim never reached the chain: the
+transaction was built and logged as broadcast, the confirmation wait failed at
+its deadline, and the search of R82 could not read the backend. The taker then
+refunds the taker payment on its own chain. The record is not confirmed, the
+maker payment is unspent, and R75 item 2 refuses the manual recovery: the maker
+holds neither payment, and the taker, who knows the secret from the broadcast,
+can still claim the maker payment. D8 described this case.
+
+**R83.** *The manual recovery refunds after a lost claim only when the taker's
+refund is shown.* For a swap whose record holds the sent spend of the taker
+payment without its confirmation, and whose maker payment is unspent on its
+chain, `recover_funds_of_swap` MUST look at the taker payment on the taker
+coin's chain before it answers, with the key that rebuilds the taker payment's
+script (the key the recovery's own spend of the taker payment uses), and a spend
+or refund that is found counts only with at least one confirmation. It
+answers:
+
+1. the taker's refund of the taker payment is found with a confirmation: the
+   maker payment MAY be refunded. One info line names the swap and both tickers.
+   The refund time, the refund gate and the refund build are exactly as for a swap
+   without a spend (R78);
+2. the maker's own spend of the taker payment is found with a confirmation: the
+   call MUST refuse with the text of R75 item 2, unchanged;
+3. the maker's spend is found without a confirmation, or the refund is found
+   without a confirmation, or the search fails or cannot decide: the call MUST
+   refuse with a text that says the state of the taker payment on that coin could
+   not be determined (or that the spend is found but not confirmed) and that the
+   maker payment is not refunded, and MUST build no transaction;
+4. nothing spent the taker payment: the call MUST refuse with the text of R75
+   item 2 and MUST add that the taker payment is still unspent on that coin and
+   that the call is to be repeated once the taker has refunded (the claim may
+   still be in a mempool).
+
+R75 item 1 (a completed swap, whose spend is confirmed) is unchanged and refuses
+before any look at a chain. A refusal of this rule changes nothing (R76): no
+event, no status, no recoverable flag and no record write. The run loop is not
+changed by this rule.
+
+> **As built (2026-11-12).** `MakerSwap::recover_funds_tracked` in
+> `mm2src/mm2_main/src/lp_swap/maker_swap.rs`: in the arm of the maker payment
+> search that finds the maker payment unspent, a record that holds the sent spend
+> calls `look_at_taker_payment_for_recovery`, which resolves the recovery key of
+> the taker payment with `resolve_recovery_htlc_key`, records the `SearchSpend`
+> stage of the taker coin, runs `search_for_swap_tx_spend_other` and hands the
+> result to `classify_taker_payment_search`. A found spend or refund is checked
+> with `confirm_found_spend` (`wait_for_confirmations` of the taker coin, one
+> confirmation, for at most the retry wait of the refund stage, which the
+> run loop's look at the taker payment uses too); a found refund that cannot be
+> confirmed is reported as undetermined. The answer to a confirmed refund goes on
+> into the existing refund code (refund time, refund gate, build) unchanged.
+> `TakerPaymentOutcome::RefundedByTaker` now carries the refund transaction.
+> Tests (`maker_swap_tests` in the same file, 8 new, 2 adapted to mock the taker
+> search):
+> `test_recover_funds_lost_claim_taker_refund_confirmed_refunds_the_maker_payment`,
+> `test_recover_funds_lost_claim_taker_refund_unconfirmed_is_refused`,
+> `test_recover_funds_lost_claim_own_confirmed_spend_keeps_the_sent_spend_refusal`,
+> `test_recover_funds_lost_claim_own_unconfirmed_spend_is_refused_naming_the_reason`,
+> `test_recover_funds_lost_claim_unspent_taker_payment_is_refused_with_a_repeat_note`,
+> `test_recover_funds_lost_claim_failed_taker_search_is_refused_as_undetermined`,
+> `test_recover_funds_lost_claim_completed_swap_refuses_without_looking_at_the_chain`,
+> `test_recover_funds_lost_claim_taker_refund_confirmed_before_the_lock_is_too_early`.
+> Run on 2026-11-12: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 89 tests of which these eight
 > are new, and the formatting check passed.
 
 ## 51.7 Bound Message Contract
@@ -2234,6 +2310,9 @@ is not changed here.
 > **Status note (2026-11-12, Reloaded-original).** The automatic half is
 > decided: see R82. The reverse case (claim dropped, taker refunded) stays under
 > consideration.
+
+> **Status note (2026-11-12, Reloaded-original).** The reverse case is decided
+> for this version: see R83 (manual recovery only; the run loop is unchanged).
 
 ## 51.14 Baseline Verifications
 
