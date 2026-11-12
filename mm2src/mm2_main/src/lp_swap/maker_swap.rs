@@ -22,7 +22,7 @@ use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, retried_refund_rejection, tx_hel
 use crate::mm2::MM_VERSION;
 use coins::{CanRefundHtlc, DexFee, FeeApproxStage, FoundSwapTxSpend, MmCoinEnum, PaymentInstructions, TradeFee,
             TradePreimageValue, TransactionEnum, ValidateFeeArgs, ValidatePaymentInput};
-use common::log::{debug, error, warn};
+use common::log::{debug, error, info, warn};
 use common::mm_number::{BigDecimal, MmNumber};
 use common::{bits256, executor::Timer, now_ms};
 use crypto::privkey::SerializableSecp256k1Keypair;
@@ -208,6 +208,44 @@ pub struct MakerSwapMut {
     my_taker_coin_htlc_pub: H264,
 }
 
+/// What the taker coin's chain says about the taker payment when the maker is about to refund (CRD ch.51 R82).
+enum TakerPaymentOutcome {
+    /// The maker's own claim of the taker payment is on the chain and has at least one confirmation.
+    SpentByUs(Box<TransactionEnum>),
+    /// A claim of the taker payment is found, but its confirmation could not be established; the reason is the
+    /// confirmation check's error text.
+    SpentUnconfirmed(String),
+    /// The taker refunded its payment; the refund transaction is carried, its confirmation is not checked here.
+    RefundedByTaker(Box<TransactionEnum>),
+    /// Nothing spent the taker payment.
+    Unspent,
+    /// The search failed; the reason is the search's error text.
+    Undetermined(String),
+}
+
+fn classify_taker_payment_search(result: Result<Option<FoundSwapTxSpend>, String>) -> TakerPaymentOutcome {
+    match result {
+        Ok(Some(FoundSwapTxSpend::Spent(tx))) => TakerPaymentOutcome::SpentByUs(Box::new(tx)),
+        Ok(Some(FoundSwapTxSpend::Refunded(tx))) => TakerPaymentOutcome::RefundedByTaker(Box::new(tx)),
+        Ok(None) => TakerPaymentOutcome::Unspent,
+        Err(e) => TakerPaymentOutcome::Undetermined(e),
+    }
+}
+
+/// A spend or refund of the taker payment that was found is accepted only with one confirmation, checked for at
+/// most `bound_secs` (CRD ch.51 R82, R83). The error is the confirmation check's text.
+async fn confirm_found_spend(coin: &MmCoinEnum, tx: &TransactionEnum, bound_secs: u64) -> Result<(), String> {
+    coin.wait_for_confirmations(
+        &tx.tx_hex(),
+        1,
+        false,
+        now_ms() / 1000 + bound_secs,
+        WAIT_CONFIRM_INTERVAL,
+    )
+    .compat()
+    .await
+}
+
 pub struct MakerSwap {
     ctx: MmArc,
     maker_coin: MmCoinEnum,
@@ -223,6 +261,10 @@ pub struct MakerSwap {
     my_order_uuid: Option<Uuid>,
     taker_payment_lock: AtomicU64,
     taker_payment_confirmed: AtomicBool,
+    /// Whether the swap reached the claim step of the taker payment: the claim was sent, the claim call failed,
+    /// or the wait for the claim's confirmation failed. Derived from the events in `apply_event`, so a swap
+    /// restored from its saved log has it too (CRD ch.51 R82).
+    taker_payment_spend_attempted: AtomicBool,
     errors: PaMutex<Vec<SwapError>>,
     finished_at: AtomicU64,
     mutable: RwLock<MakerSwapMut>,
@@ -327,11 +369,20 @@ impl MakerSwap {
             },
             MakerSwapEvent::TakerPaymentValidateFailed(err) => self.errors.lock().push(err),
             MakerSwapEvent::TakerPaymentWaitConfirmFailed(err) => self.errors.lock().push(err),
-            MakerSwapEvent::TakerPaymentSpent(tx) => self.w().taker_payment_spend = Some(tx),
-            MakerSwapEvent::TakerPaymentSpendFailed(err) => self.errors.lock().push(err),
+            MakerSwapEvent::TakerPaymentSpent(tx) => {
+                self.taker_payment_spend_attempted.store(true, Ordering::Relaxed);
+                self.w().taker_payment_spend = Some(tx)
+            },
+            MakerSwapEvent::TakerPaymentSpendFailed(err) => {
+                self.taker_payment_spend_attempted.store(true, Ordering::Relaxed);
+                self.errors.lock().push(err)
+            },
             MakerSwapEvent::TakerPaymentSpendConfirmStarted => (),
             MakerSwapEvent::TakerPaymentSpendConfirmed => self.w().taker_payment_spend_confirmed = true,
-            MakerSwapEvent::TakerPaymentSpendConfirmFailed(err) => self.errors.lock().push(err),
+            MakerSwapEvent::TakerPaymentSpendConfirmFailed(err) => {
+                self.taker_payment_spend_attempted.store(true, Ordering::Relaxed);
+                self.errors.lock().push(err)
+            },
             MakerSwapEvent::MakerPaymentWaitRefundStarted { .. } => (),
             MakerSwapEvent::MakerPaymentRefundStarted => (),
             MakerSwapEvent::MakerPaymentRefunded(tx) => self.w().maker_payment_refund = Some(tx),
@@ -388,6 +439,7 @@ impl MakerSwap {
             errors: PaMutex::new(Vec::new()),
             finished_at: AtomicU64::new(0),
             taker_payment_confirmed: AtomicBool::new(false),
+            taker_payment_spend_attempted: AtomicBool::new(false),
             conf_settings,
             payment_locktime,
             p2p_privkey,
@@ -1175,6 +1227,146 @@ impl MakerSwap {
         ]))
     }
 
+    /// Searches the taker coin's chain for the spend of the taker payment, with the swap's own keys
+    /// (CRD ch.51 R82).
+    /// A spend that is found is accepted only with one confirmation, checked for at most `confirm_wait_secs`.
+    async fn look_at_taker_payment(&self, confirm_wait_secs: u64) -> TakerPaymentOutcome {
+        // The guard returned by r() is not Send, so the values are read before the await.
+        let (taker_payment_hex, my_pub, other_pub, start_block, contract_address, secret_hash) = {
+            let r = self.r();
+            let secret_hash = r
+                .data
+                .secret_hash
+                .clone()
+                .map(|h| h.0)
+                .unwrap_or_else(|| dhash160(&r.data.secret.0).take().to_vec());
+            (
+                match r.taker_payment.as_ref() {
+                    Some(tx) => tx.tx_hex.clone(),
+                    None => return TakerPaymentOutcome::Undetermined("the taker payment is not known".to_owned()),
+                },
+                r.my_taker_coin_htlc_pub,
+                r.other_taker_coin_htlc_pub,
+                r.data.taker_coin_start_block,
+                r.data.taker_coin_swap_contract_address.clone(),
+                secret_hash,
+            )
+        };
+        let timelock = self.taker_payment_lock.load(Ordering::Relaxed) as u32;
+        let outcome = classify_taker_payment_search(
+            self.taker_coin
+                .search_for_swap_tx_spend_other(
+                    timelock,
+                    my_pub.as_slice(),
+                    other_pub.as_slice(),
+                    &secret_hash,
+                    &taker_payment_hex,
+                    start_block,
+                    &contract_address,
+                )
+                .await,
+        );
+        let TakerPaymentOutcome::SpentByUs(tx) = outcome else {
+            return outcome;
+        };
+        // A claim that is only in a mempool is not a spend yet: if it drops, the taker can refund.
+        match confirm_found_spend(&self.taker_coin, &tx, confirm_wait_secs).await {
+            Ok(()) => TakerPaymentOutcome::SpentByUs(tx),
+            Err(e) => TakerPaymentOutcome::SpentUnconfirmed(e),
+        }
+    }
+
+    /// The recovery's look at the taker payment (CRD ch.51 R83): the search uses the key that rebuilds the taker
+    /// payment's script, as the recovery's own spend of it does. A spend or a refund that is found counts only
+    /// with one confirmation; a refund that cannot be confirmed is reported as undetermined.
+    async fn look_at_taker_payment_for_recovery(
+        &self,
+        secret_hash: &[u8],
+        stages: &RecoveryStages,
+    ) -> TakerPaymentOutcome {
+        // The guard returned by r() is not Send, so the values are read before the await.
+        let (taker_payment_hex, other_pub, my_pub, my_keypair, start_block, contract_address, saved_privkey, unique) = {
+            let r = self.r();
+            (
+                match r.taker_payment.as_ref() {
+                    Some(tx) => tx.tx_hex.clone(),
+                    None => return TakerPaymentOutcome::Undetermined("the taker payment is not known".to_owned()),
+                },
+                r.other_taker_coin_htlc_pub,
+                r.my_taker_coin_htlc_pub,
+                r.my_taker_coin_htlc_keypair,
+                r.data.taker_coin_start_block,
+                r.data.taker_coin_swap_contract_address.clone(),
+                r.data.taker_coin_htlc_privkey,
+                maker_htlc_key_input(&r.data),
+            )
+        };
+        let timelock = self.taker_payment_lock.load(Ordering::Relaxed) as u32;
+        let (derived_keypair, saved_keypair) =
+            match recovery_key_pairs(&self.taker_coin, &unique, my_keypair, &saved_privkey) {
+                Ok(pairs) => pairs,
+                Err(e) => return TakerPaymentOutcome::Undetermined(e),
+            };
+        let taker_key = match resolve_recovery_htlc_key(RecoveryKeyRequest {
+            ctx: &self.ctx,
+            coin: &self.taker_coin,
+            owner: PaymentOwner::Other,
+            per_swap_pubkey: my_pub,
+            derived_keypair,
+            saved_keypair,
+            other_pubkey: other_pub.as_slice(),
+            time_lock: timelock,
+            secret_hash,
+            payment_tx: &taker_payment_hex,
+            stages,
+        })
+        .await
+        {
+            Ok(key) => key,
+            Err(e) => return TakerPaymentOutcome::Undetermined(e),
+        };
+        stages.enter(
+            RecoveryStage::SearchSpend,
+            &self.taker_coin,
+            Some(&taker_payment_hex),
+            Some(HtlcDetectionParams {
+                time_lock: timelock,
+                first_pub: other_pub.to_vec(),
+                second_pub: taker_key.pubkey.to_vec(),
+                secret_hash: secret_hash.to_vec(),
+            }),
+        );
+        let outcome = classify_taker_payment_search(
+            self.taker_coin
+                .search_for_swap_tx_spend_other(
+                    timelock,
+                    taker_key.pubkey.as_slice(),
+                    other_pub.as_slice(),
+                    secret_hash,
+                    &taker_payment_hex,
+                    start_block,
+                    &contract_address,
+                )
+                .await,
+        );
+        let confirm_secs = NON_FINAL_REFUND_RETRY_SECS.ceil() as u64;
+        match outcome {
+            TakerPaymentOutcome::SpentByUs(tx) => {
+                match confirm_found_spend(&self.taker_coin, &tx, confirm_secs).await {
+                    Ok(()) => TakerPaymentOutcome::SpentByUs(tx),
+                    Err(e) => TakerPaymentOutcome::SpentUnconfirmed(e),
+                }
+            },
+            TakerPaymentOutcome::RefundedByTaker(tx) => {
+                match confirm_found_spend(&self.taker_coin, &tx, confirm_secs).await {
+                    Ok(()) => TakerPaymentOutcome::RefundedByTaker(tx),
+                    Err(e) => TakerPaymentOutcome::Undetermined(format!("the refund is found but not confirmed: {e}")),
+                }
+            },
+            other => other,
+        }
+    }
+
     async fn refund_maker_payment(&self) -> Result<(Option<MakerSwapCommand>, Vec<MakerSwapEvent>), String> {
         self.refund_maker_payment_retrying(NON_FINAL_REFUND_RETRY_SECS).await
     }
@@ -1188,6 +1380,11 @@ impl MakerSwap {
         let locktime = self.r().data.maker_payment_lock;
         // CRD ch.51 R79-R81: the refund wait reads the tip height of the paying coin between its sleeps.
         let mut stale_tip_watch = StaleTipWatch::new();
+        // CRD ch.51 R82: a swap that reached the claim step looks at the taker payment before it refunds.
+        let claim_step_reached =
+            self.taker_payment_spend_attempted.load(Ordering::Relaxed) && self.r().taker_payment.is_some();
+        // The warning is written once per distinct situation; its repeats are logged at debug.
+        let (mut warned_undetermined, mut warned_unconfirmed) = (false, false);
         let transaction = loop {
             loop {
                 match self.maker_coin.can_refund_htlc(locktime).compat().await {
@@ -1198,6 +1395,83 @@ impl MakerSwap {
                     Err(e) => {
                         error!("Error {} on can_refund_htlc, retrying in 30 seconds", e);
                         Timer::sleep(30.).await;
+                    },
+                }
+            }
+
+            if claim_step_reached {
+                match self.look_at_taker_payment(non_final_retry_secs.ceil() as u64).await {
+                    TakerPaymentOutcome::SpentByUs(tx) => {
+                        info!(
+                            "Swap {}: the spend of the taker payment is on the chain; the maker payment is not refunded ({})",
+                            self.uuid,
+                            self.taker_coin.ticker()
+                        );
+                        let mut events = Vec::with_capacity(2);
+                        if self.r().taker_payment_spend.is_none() {
+                            events.push(MakerSwapEvent::TakerPaymentSpent(TransactionIdentifier {
+                                tx_hex: tx.tx_hex().into(),
+                                tx_hash: tx.tx_hash(),
+                            }));
+                        }
+                        events.push(MakerSwapEvent::TakerPaymentSpendConfirmed);
+                        return Ok((Some(MakerSwapCommand::Finish), events));
+                    },
+                    TakerPaymentOutcome::RefundedByTaker(_) | TakerPaymentOutcome::Unspent => (),
+                    TakerPaymentOutcome::Undetermined(reason) => {
+                        let ticker = self.taker_coin.ticker();
+                        debug!("Swap {}: the taker payment search failed: {}", self.uuid, reason);
+                        if now_ms() / 1000 >= self.wait_refund_until() {
+                            return Ok((Some(MakerSwapCommand::Finish), vec![
+                                MakerSwapEvent::MakerPaymentRefundFailed(
+                                    ERRL!(
+                                        "the state of the taker payment could not be determined on {}, the maker payment is not refunded; manual recovery applies",
+                                        ticker
+                                    )
+                                    .into(),
+                                ),
+                            ]));
+                        }
+                        let text = format!(
+                            "Swap {}: the state of the taker payment could not be determined on {}, the maker payment is not refunded, retrying in {} s",
+                            self.uuid, ticker, non_final_retry_secs
+                        );
+                        if std::mem::replace(&mut warned_undetermined, true) {
+                            debug!("{}", text);
+                        } else {
+                            warn!("{}", text);
+                        }
+                        Timer::sleep(non_final_retry_secs).await;
+                        continue;
+                    },
+                    TakerPaymentOutcome::SpentUnconfirmed(reason) => {
+                        let ticker = self.taker_coin.ticker();
+                        debug!(
+                            "Swap {}: the confirmation check of the taker payment spend failed: {}",
+                            self.uuid, reason
+                        );
+                        if now_ms() / 1000 >= self.wait_refund_until() {
+                            return Ok((Some(MakerSwapCommand::Finish), vec![
+                                MakerSwapEvent::MakerPaymentRefundFailed(
+                                    ERRL!(
+                                        "the claim of the taker payment on {} is found but not confirmed; the maker payment is not refunded; manual recovery applies",
+                                        ticker
+                                    )
+                                    .into(),
+                                ),
+                            ]));
+                        }
+                        let text = format!(
+                            "Swap {}: the claim of the taker payment on {} is found but not confirmed, the maker payment is not refunded, retrying in {} s",
+                            self.uuid, ticker, non_final_retry_secs
+                        );
+                        if std::mem::replace(&mut warned_unconfirmed, true) {
+                            debug!("{}", text);
+                        } else {
+                            warn!("{}", text);
+                        }
+                        Timer::sleep(non_final_retry_secs).await;
+                        continue;
                     },
                 }
             }
@@ -1643,10 +1917,43 @@ impl MakerSwap {
             Ok(None) => {
                 // CRD ch.51 R75 item 2: the record holds the sent spend of the taker payment (a confirmed one
                 // was refused above), so the unspent maker payment is not refunded, whatever its refund time.
+                // CRD ch.51 R83: the taker payment is looked at first; the maker payment is refunded only when the
+                // taker's refund of the taker payment is found with a confirmation. A refusal changes nothing (R76).
                 if self.r().taker_payment_spend.is_some() {
-                    return ERR!(
-                        "Taker payment spend transaction has been sent, the maker payment belongs to the taker and is not refunded"
-                    );
+                    let taker_ticker = self.taker_coin.ticker();
+                    match self.look_at_taker_payment_for_recovery(&secret_hash.0, stages).await {
+                        TakerPaymentOutcome::RefundedByTaker(_) => info!(
+                            "Swap {}: the taker payment on {} was refunded by the taker; the maker payment on {} is refunded",
+                            self.uuid,
+                            taker_ticker,
+                            self.maker_coin.ticker()
+                        ),
+                        TakerPaymentOutcome::SpentByUs(_) => {
+                            return ERR!(
+                                "Taker payment spend transaction has been sent, the maker payment belongs to the taker and is not refunded"
+                            );
+                        },
+                        TakerPaymentOutcome::SpentUnconfirmed(reason) => {
+                            return ERR!(
+                                "The spend of the taker payment on {} is found but not confirmed ({}), the maker payment is not refunded",
+                                taker_ticker,
+                                reason
+                            );
+                        },
+                        TakerPaymentOutcome::Undetermined(reason) => {
+                            return ERR!(
+                                "The state of the taker payment on {} could not be determined ({}), the maker payment is not refunded",
+                                taker_ticker,
+                                reason
+                            );
+                        },
+                        TakerPaymentOutcome::Unspent => {
+                            return ERR!(
+                                "Taker payment spend transaction has been sent, the maker payment belongs to the taker and is not refunded; the taker payment is still unspent on {}, repeat the call once the taker has refunded",
+                                taker_ticker
+                            );
+                        },
+                    }
                 }
                 // our payment is not spent, try to refund
                 log!("Trying to refund MakerPayment");
@@ -2679,6 +2986,7 @@ mod maker_swap_tests {
     use mm2_core::mm_ctx::MmCtxBuilder;
     use mocktopus::mocking::*;
     use serde_json as json;
+    use std::sync::atomic::AtomicUsize;
 
     /// A finished maker swap whose payment transaction is reported as failed but was actually sent.
     const MAKER_SAVED_PAYMENT_ERRORED_BUT_SENT: &str = r#"{"error_events":["StartFailed","NegotiateFailed","TakerFeeValidateFailed","MakerPaymentTransactionFailed","MakerPaymentDataSendFailed","TakerPaymentValidateFailed","TakerPaymentSpendFailed","TakerPaymentSpendConfirmFailed","MakerPaymentRefunded","MakerPaymentRefundFailed"],"events":[{"event":{"data":{"lock_duration":7800,"maker_amount":"3.54932734","maker_coin":"KMD","maker_coin_start_block":1452970,"maker_payment_confirmations":1,"maker_payment_lock":1563759539,"my_persistent_pub":"031bb83b58ec130e28e0a6d5d2acf2eb01b0d3f1670e021d47d31db8a858219da8","secret":"0000000000000000000000000000000000000000000000000000000000000000","started_at":1563743939,"taker":"101ace6b08605b9424b0582b5cce044b70a3c8d8d10cb2965e039b0967ae92b9","taker_amount":"0.02004833998671660000000000","taker_coin":"ETH","taker_coin_start_block":8196380,"taker_payment_confirmations":1,"uuid":"3447b727-fe93-4357-8e5a-8cf2699b7e86"},"type":"Started"},"timestamp":1563743939211},{"event":{"data":{"taker_payment_locktime":1563751737,"taker_pubkey":"03101ace6b08605b9424b0582b5cce044b70a3c8d8d10cb2965e039b0967ae92b9"},"type":"Negotiated"},"timestamp":1563743979835},{"event":{"data":{"tx_hash":"a59203eb2328827de00bed699a29389792906e4f39fdea145eb40dc6b3821bd6","tx_hex":"f8690284ee6b280082520894d8997941dd1346e9231118d5685d866294f59e5b865af3107a4000801ca0743d2b7c9fad65805d882179062012261be328d7628ae12ee08eff8d7657d993a07eecbd051f49d35279416778faa4664962726d516ce65e18755c9b9406a9c2fd"},"type":"TakerFeeValidated"},"timestamp":1563744052878},{"event":{"data":{"error":"lp_swap:1888] eth:654] RPC error: Error { code: ServerError(-32010), message: \"Transaction with the same hash was already imported.\", data: None }"},"type":"MakerPaymentTransactionFailed"},"timestamp":1563744118577},{"event":{"type":"Finished"},"timestamp":1563763243350}],"success_events":["Started","Negotiated","TakerFeeValidated","MakerPaymentSent","TakerPaymentReceived","TakerPaymentWaitConfirmStarted","TakerPaymentValidatedAndConfirmed","TakerPaymentSpent","TakerPaymentSpendConfirmStarted","TakerPaymentSpendConfirmed","TakerPaymentSpendConfirmStarted","TakerPaymentSpendConfirmed","Finished"],"uuid":"3447b727-fe93-4357-8e5a-8cf2699b7e86"}"#;
@@ -3941,6 +4249,8 @@ mod maker_swap_tests {
         let maker_swap = maker_swap_with_sent_taker_payment_spend();
         assert!(maker_swap.r().data.maker_payment_lock + 3700 < now_ms() / 1000);
         mock_unspent_maker_payment(&REFUND_BUILT, &GATE_ASKED);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        mock_taker_payment_search(|| Ok(None), &SEARCHES);
         let lock_before = maker_swap.r().data.maker_payment_lock;
 
         let err = block_on(maker_swap.recover_funds()).expect_err("Expected an error");
@@ -3964,6 +4274,8 @@ mod maker_swap_tests {
         let maker_swap = maker_swap_with_sent_taker_payment_spend();
         maker_swap.w().data.maker_payment_lock = now_ms() / 1000 + 100_000;
         mock_unspent_maker_payment(&REFUND_BUILT, &GATE_ASKED);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        mock_taker_payment_search(|| Ok(None), &SEARCHES);
 
         let err = block_on(maker_swap.recover_funds()).expect_err("Expected an error");
         assert!(err.contains(SENT_SPEND_REFUSAL), "{err}");
@@ -4059,6 +4371,163 @@ mod maker_swap_tests {
         assert!(err.contains("Maker payment was already refunded"), "{err}");
         assert!(!err.contains(SENT_SPEND_REFUSAL), "{err}");
         assert!(!SPEND_BUILT.load(Ordering::SeqCst));
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+    }
+
+    /// The recovery of a maker swap whose record holds the sent spend, the maker payment unspent, with the taker
+    /// chain answering `search` and its confirmation check answering `confirm` (CRD ch.51 R83).
+    fn recover_after_lost_claim(
+        maker_swap: &MakerSwap,
+        search: fn() -> Result<Option<FoundSwapTxSpend>, String>,
+        confirm: fn() -> Result<(), String>,
+        refund_built: &'static AtomicBool,
+    ) -> Result<RecoveredSwap, String> {
+        static GATE_ASKED: AtomicBool = AtomicBool::new(false);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static CHECKS: AtomicUsize = AtomicUsize::new(0);
+        mock_unspent_maker_payment(refund_built, &GATE_ASKED);
+        mock_taker_payment_search(search, &SEARCHES);
+        mock_spend_confirmation(confirm, &CHECKS);
+        block_on(maker_swap.recover_funds())
+    }
+
+    fn assert_record_unchanged_by_refusal(maker_swap: &MakerSwap) {
+        // R76: a refusal writes no event, no status and no recoverable flag.
+        assert!(maker_swap.r().taker_payment_spend.is_some());
+        assert!(!maker_swap.r().taker_payment_spend_confirmed);
+        assert!(maker_swap.r().maker_payment_refund.is_none());
+        assert!(maker_swap.finished_at.load(Ordering::Relaxed) != 0);
+    }
+
+    /// R83 item 1: the taker's refund of the taker payment is found with a confirmation; the maker payment is
+    /// refunded.
+    #[test]
+    fn test_recover_funds_lost_claim_taker_refund_confirmed_refunds_the_maker_payment() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        let result = recover_after_lost_claim(
+            &maker_swap,
+            || Ok(Some(FoundSwapTxSpend::Refunded(eth_tx_for_test().into()))),
+            || Ok(()),
+            &REFUND_BUILT,
+        );
+        let expected = Ok(RecoveredSwap {
+            coin: "ticker".into(),
+            action: RecoveredSwapAction::RefundedMyPayment,
+            transaction: eth_tx_for_test().into(),
+        });
+        assert_eq!(result, expected);
+        assert!(REFUND_BUILT.load(Ordering::SeqCst));
+    }
+
+    /// R83 item 1, the confirmation of the found refund fails: nothing is built.
+    #[test]
+    fn test_recover_funds_lost_claim_taker_refund_unconfirmed_is_refused() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        let err = recover_after_lost_claim(
+            &maker_swap,
+            || Ok(Some(FoundSwapTxSpend::Refunded(eth_tx_for_test().into()))),
+            || Err("not confirmed".to_owned()),
+            &REFUND_BUILT,
+        )
+        .expect_err("Expected an error");
+        assert!(err.contains("could not be determined"), "{err}");
+        assert!(err.contains("not confirmed"), "{err}");
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+        assert_record_unchanged_by_refusal(&maker_swap);
+    }
+
+    /// R83 item 2: our own confirmed claim is found; the R75 item 2 refusal, unchanged.
+    #[test]
+    fn test_recover_funds_lost_claim_own_confirmed_spend_keeps_the_sent_spend_refusal() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        let err = recover_after_lost_claim(
+            &maker_swap,
+            || Ok(Some(FoundSwapTxSpend::Spent(eth_tx_for_test().into()))),
+            || Ok(()),
+            &REFUND_BUILT,
+        )
+        .expect_err("Expected an error");
+        assert!(err.contains(SENT_SPEND_REFUSAL), "{err}");
+        assert!(!err.contains("still unspent"), "{err}");
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+        assert_record_unchanged_by_refusal(&maker_swap);
+    }
+
+    /// R83 item 3: our claim is found without a confirmation.
+    #[test]
+    fn test_recover_funds_lost_claim_own_unconfirmed_spend_is_refused_naming_the_reason() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        let err = recover_after_lost_claim(
+            &maker_swap,
+            || Ok(Some(FoundSwapTxSpend::Spent(eth_tx_for_test().into()))),
+            || Err("not confirmed".to_owned()),
+            &REFUND_BUILT,
+        )
+        .expect_err("Expected an error");
+        assert!(err.contains("found but not confirmed"), "{err}");
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+        assert_record_unchanged_by_refusal(&maker_swap);
+    }
+
+    /// R83 item 4: nothing spent the taker payment; the refusal says to repeat the call.
+    #[test]
+    fn test_recover_funds_lost_claim_unspent_taker_payment_is_refused_with_a_repeat_note() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        let err = recover_after_lost_claim(&maker_swap, || Ok(None), || Ok(()), &REFUND_BUILT)
+            .expect_err("Expected an error");
+        assert!(err.contains(SENT_SPEND_REFUSAL), "{err}");
+        assert!(err.contains("still unspent"), "{err}");
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+        assert_record_unchanged_by_refusal(&maker_swap);
+    }
+
+    /// R83 item 3, the search fails: the state cannot be determined, nothing is built.
+    #[test]
+    fn test_recover_funds_lost_claim_failed_taker_search_is_refused_as_undetermined() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        let err = recover_after_lost_claim(&maker_swap, || Err("backend down".to_owned()), || Ok(()), &REFUND_BUILT)
+            .expect_err("Expected an error");
+        assert!(err.contains("could not be determined"), "{err}");
+        assert!(err.contains("backend down"), "{err}");
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+        assert_record_unchanged_by_refusal(&maker_swap);
+    }
+
+    /// R75 item 1 is unchanged: a completed swap refuses before any look at either chain.
+    #[test]
+    fn test_recover_funds_lost_claim_completed_swap_refuses_without_looking_at_the_chain() {
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        maker_swap.w().taker_payment_spend_confirmed = true;
+        mock_taker_payment_search(|| Ok(None), &SEARCHES);
+        let err = block_on(maker_swap.recover_funds()).expect_err("Expected an error");
+        assert!(
+            err.contains("Taker payment spend transaction has been sent and confirmed"),
+            "{err}"
+        );
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 0);
+    }
+
+    /// The look at the taker payment comes first; the refund-time check after it is as before.
+    #[test]
+    fn test_recover_funds_lost_claim_taker_refund_confirmed_before_the_lock_is_too_early() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_sent_taker_payment_spend();
+        maker_swap.w().data.maker_payment_lock = now_ms() / 1000 + 100_000;
+        let err = recover_after_lost_claim(
+            &maker_swap,
+            || Ok(Some(FoundSwapTxSpend::Refunded(eth_tx_for_test().into()))),
+            || Ok(()),
+            &REFUND_BUILT,
+        )
+        .expect_err("Expected an error");
+        assert!(err.contains("Too early to refund"), "{err}");
         assert!(!REFUND_BUILT.load(Ordering::SeqCst));
     }
 
@@ -4466,6 +4935,441 @@ mod maker_swap_tests {
             "{err}"
         );
         assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CRD ch.51 R82: a swap that reached the claim step looks at the taker payment before it refunds.
+    // ---------------------------------------------------------------------------------------------
+
+    /// A swap ready to refund that reached the claim step: the taker payment is known and the claim events
+    /// were applied, as a restored swap would apply them.
+    fn maker_swap_after_the_claim_step(
+        lock_age_secs: u64,
+        claim_events: Vec<MakerSwapEvent>,
+    ) -> (
+        MakerSwap,
+        futures::channel::mpsc::Receiver<mm2_p2p::atomicdex_behaviour::AdexBehaviourCmd>,
+    ) {
+        let (maker_swap, published) = maker_swap_ready_to_refund(lock_age_secs);
+        maker_swap.w().taker_payment = Some(TransactionIdentifier {
+            tx_hex: vec![3u8].into(),
+            tx_hash: vec![4u8].into(),
+        });
+        for event in claim_events {
+            maker_swap.apply_event(event);
+        }
+        (maker_swap, published)
+    }
+
+    fn spend_failed_event() -> MakerSwapEvent { MakerSwapEvent::TakerPaymentSpendFailed(ERRL!("claim failed").into()) }
+
+    fn spend_confirm_failed_event() -> MakerSwapEvent {
+        MakerSwapEvent::TakerPaymentSpendConfirmFailed(ERRL!("confirmation failed").into())
+    }
+
+    fn spend_event() -> MakerSwapEvent {
+        MakerSwapEvent::TakerPaymentSpent(TransactionIdentifier {
+            tx_hex: vec![5u8].into(),
+            tx_hash: vec![6u8].into(),
+        })
+    }
+
+    /// Answers every search for the spend of the taker payment with `answer`, counting the searches.
+    fn mock_taker_payment_search(
+        answer: fn() -> Result<Option<FoundSwapTxSpend>, String>,
+        searches: &'static std::sync::atomic::AtomicUsize,
+    ) {
+        TestCoin::search_for_swap_tx_spend_other.mock_safe(move |_, _, _, _, _, _, _, _| {
+            searches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            MockResult::Return(Box::pin(futures::future::ready(answer())))
+        });
+    }
+
+    /// Answers every confirmation check of a found spend with `answer`, counting the checks.
+    fn mock_spend_confirmation(answer: fn() -> Result<(), String>, checks: &'static std::sync::atomic::AtomicUsize) {
+        TestCoin::wait_for_confirmations.mock_safe(move |_, _, _, _, _, _| {
+            checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::result(answer())))
+        });
+    }
+
+    /// Counts the refunds the swap builds; the refund is a transaction when it is built.
+    fn mock_refund_counting(sends: &'static std::sync::atomic::AtomicUsize) {
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, sends);
+    }
+
+    #[test]
+    fn a_taker_payment_spend_found_on_the_chain_stops_the_refund_and_completes_the_record() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        let (maker_swap, mut published) = maker_swap_after_the_claim_step(100, vec![spend_failed_event()]);
+        mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
+        mock_taker_payment_search(
+            || Ok(Some(FoundSwapTxSpend::Spent(eth_tx_for_test().into()))),
+            &SEARCHES,
+        );
+        static CHECKS: AtomicUsize = AtomicUsize::new(0);
+        mock_spend_confirmation(|| Ok(()), &CHECKS);
+        mock_refund_counting(&SENDS);
+
+        let (next, events) = block_on(maker_swap.refund_maker_payment_retrying(0.01)).unwrap();
+
+        assert!(matches!(next, Some(MakerSwapCommand::Finish)));
+        assert!(
+            matches!(events.as_slice(), [
+                MakerSwapEvent::TakerPaymentSpent(_),
+                MakerSwapEvent::TakerPaymentSpendConfirmed
+            ]),
+            "{events:?}"
+        );
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 1);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0, "no refund is built");
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    #[test]
+    fn a_taker_payment_spend_found_after_the_confirmation_failed_adds_only_the_confirmation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        let (maker_swap, mut published) =
+            maker_swap_after_the_claim_step(100, vec![spend_event(), spend_confirm_failed_event()]);
+        mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
+        mock_taker_payment_search(
+            || Ok(Some(FoundSwapTxSpend::Spent(eth_tx_for_test().into()))),
+            &SEARCHES,
+        );
+        static CHECKS: AtomicUsize = AtomicUsize::new(0);
+        mock_spend_confirmation(|| Ok(()), &CHECKS);
+        mock_refund_counting(&SENDS);
+
+        let (next, events) = block_on(maker_swap.refund_maker_payment_retrying(0.01)).unwrap();
+
+        assert!(matches!(next, Some(MakerSwapCommand::Finish)));
+        assert!(
+            matches!(events.as_slice(), [MakerSwapEvent::TakerPaymentSpendConfirmed]),
+            "{events:?}"
+        );
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0, "no refund is built");
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    #[test]
+    fn a_taker_refund_found_on_the_chain_lets_the_maker_refund() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        let (maker_swap, mut published) = maker_swap_after_the_claim_step(100, vec![spend_confirm_failed_event()]);
+        mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
+        mock_taker_payment_search(
+            || Ok(Some(FoundSwapTxSpend::Refunded(eth_tx_for_test().into()))),
+            &SEARCHES,
+        );
+        mock_refund_counting(&SENDS);
+
+        let (_, events) = block_on(maker_swap.refund_maker_payment_retrying(0.01)).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [MakerSwapEvent::MakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 1);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+        assert_eq!(published_count(&mut published), 1);
+    }
+
+    #[test]
+    fn an_unspent_taker_payment_lets_the_maker_refund() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        let (maker_swap, _published) = maker_swap_after_the_claim_step(100, vec![spend_failed_event()]);
+        mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
+        mock_taker_payment_search(|| Ok(None), &SEARCHES);
+        mock_refund_counting(&SENDS);
+
+        let (_, events) = block_on(maker_swap.refund_maker_payment_retrying(0.01)).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [MakerSwapEvent::MakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 1);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_unreadable_taker_chain_holds_the_refund_until_the_deadline_and_reports_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        // The lock time passed 3699 s ago: the deadline (lock time + 3700 s) is about a second away.
+        let (maker_swap, mut published) = maker_swap_after_the_claim_step(3_699, vec![spend_confirm_failed_event()]);
+        mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
+        mock_taker_payment_search(|| Err("server unreachable".to_owned()), &SEARCHES);
+        mock_refund_counting(&SENDS);
+
+        let (next, events) = block_on(maker_swap.refund_maker_payment_retrying(0.2)).unwrap();
+
+        assert!(matches!(next, Some(MakerSwapCommand::Finish)));
+        match events.as_slice() {
+            [MakerSwapEvent::MakerPaymentRefundFailed(err)] => {
+                let text = err.error.clone();
+                assert!(text.contains("could not be determined"), "{text}");
+                assert!(text.contains("ticker"), "{text}");
+                assert!(text.contains("manual recovery applies"), "{text}");
+                assert!(
+                    !text.contains("unreachable"),
+                    "the search error text is not recorded: {text}"
+                );
+            },
+            other => panic!("expected a refund failure, got {other:?}"),
+        }
+        assert!(SEARCHES.load(Ordering::SeqCst) >= 2, "the search is retried");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0, "no refund is built");
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    #[test]
+    fn an_unreadable_taker_chain_after_the_deadline_reports_at_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        let (maker_swap, _published) = maker_swap_after_the_claim_step(3_701, vec![spend_failed_event()]);
+        mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
+        mock_taker_payment_search(|| Err("server unreachable".to_owned()), &SEARCHES);
+        mock_refund_counting(&SENDS);
+
+        let (_, events) = block_on(maker_swap.refund_maker_payment_retrying(0.01)).unwrap();
+
+        assert!(is_refund_failed(&events), "{events:?}");
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 1);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_swap_that_never_reached_the_claim_step_refunds_without_a_search() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        let (maker_swap, _published) =
+            maker_swap_after_the_claim_step(100, vec![MakerSwapEvent::TakerPaymentValidateFailed(
+                ERRL!("validation failed").into(),
+            )]);
+        mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
+        mock_taker_payment_search(
+            || Ok(Some(FoundSwapTxSpend::Spent(eth_tx_for_test().into()))),
+            &SEARCHES,
+        );
+        mock_refund_counting(&SENDS);
+
+        let (_, events) = block_on(maker_swap.refund_maker_payment_retrying(0.01)).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [MakerSwapEvent::MakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(
+            SEARCHES.load(Ordering::SeqCst),
+            0,
+            "the taker coin's chain is not searched"
+        );
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_swap_without_a_taker_payment_refunds_without_a_search() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        let (maker_swap, _published) = maker_swap_ready_to_refund(100);
+        maker_swap.apply_event(spend_failed_event());
+        mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
+        mock_taker_payment_search(
+            || Ok(Some(FoundSwapTxSpend::Spent(eth_tx_for_test().into()))),
+            &SEARCHES,
+        );
+        mock_refund_counting(&SENDS);
+
+        let (_, events) = block_on(maker_swap.refund_maker_payment_retrying(0.01)).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [MakerSwapEvent::MakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 0);
+    }
+
+    /// A restart after the claim confirmation failed: the saved log ends in the two events that send the swap
+    /// back to the refund, and the flag is set by the replay of the log.
+    #[test]
+    fn a_restored_swap_after_a_failed_claim_confirmation_does_not_refund_a_spent_taker_payment() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        let mut saved: MakerSavedSwap = json::from_str(SAVED_WITH_MAKER_COIN_HTLC_PUB).unwrap();
+        saved.events.truncate(2);
+        // The fixture has no taker coin key: save one, so the search is checked against it.
+        let saved_taker_pub = match &mut saved.events[0].event {
+            MakerSwapEvent::Started(data) => {
+                data.taker_coin_htlc_pubkey = data.maker_coin_htlc_pubkey;
+                let pubkey: H264 = data.taker_coin_htlc_pubkey.unwrap().into();
+                pubkey
+            },
+            other => panic!("unexpected first event {other:?}"),
+        };
+        let negotiated_locktime = match &saved.events[1].event {
+            MakerSwapEvent::Negotiated(data) => data.taker_payment_locktime,
+            other => panic!("unexpected second event {other:?}"),
+        };
+        let at = saved.events[0].timestamp;
+        let tx = |b: u8| TransactionIdentifier {
+            tx_hex: vec![b].into(),
+            tx_hash: vec![b + 1].into(),
+        };
+        for event in [
+            MakerSwapEvent::TakerFeeValidated(tx(1)),
+            MakerSwapEvent::MakerPaymentSent(tx(3)),
+            MakerSwapEvent::TakerPaymentReceived(tx(5)),
+            MakerSwapEvent::TakerPaymentValidatedAndConfirmed,
+            MakerSwapEvent::TakerPaymentSpent(tx(7)),
+            MakerSwapEvent::TakerPaymentSpendConfirmStarted,
+            spend_confirm_failed_event(),
+            MakerSwapEvent::MakerPaymentWaitRefundStarted { wait_until: at },
+        ] {
+            saved.events.push(MakerSavedEvent { timestamp: at, event });
+        }
+        let key_pair =
+            key_pair_from_seed("spice describe gravity federal blast come thank unfair canal monkey style afraid")
+                .unwrap();
+        let ctx = test_ctx_with_netid(key_pair);
+        TestCoin::ticker.mock_safe(|_| MockResult::Return("ticker"));
+        TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
+        let (maker_swap, command) = MakerSwap::load_from_saved(
+            ctx.clone(),
+            MmCoinEnum::Test(TestCoin::default()),
+            MmCoinEnum::Test(TestCoin::default()),
+            crate::mm2::lp_swap::recorded_by_maker(saved, &ctx),
+        )
+        .unwrap();
+        assert!(matches!(command, Some(MakerSwapCommand::RefundMakerPayment)));
+        assert!(maker_swap.taker_payment_spend_attempted.load(Ordering::Relaxed));
+        maker_swap.w().data.maker_payment_lock = now_ms() / 1000 - 100;
+        let (tx, _rx) = futures::channel::mpsc::channel(10);
+        crate::mm2::lp_network::P2PContext::new(tx).store_to_mm_arc(&maker_swap.ctx);
+        mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
+        static SEARCH_TIME_LOCK: AtomicUsize = AtomicUsize::new(0);
+        static SEARCH_MY_PUB: PaMutex<Vec<u8>> = parking_lot::const_mutex(Vec::new());
+        TestCoin::search_for_swap_tx_spend_other.mock_safe(|_, time_lock, my_pub, _, _, _, _, _| {
+            SEARCHES.fetch_add(1, Ordering::SeqCst);
+            SEARCH_TIME_LOCK.store(time_lock as usize, Ordering::SeqCst);
+            *SEARCH_MY_PUB.lock() = my_pub.to_vec();
+            MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Spent(
+                eth_tx_for_test().into(),
+            ))))))
+        });
+        static CHECKS: AtomicUsize = AtomicUsize::new(0);
+        mock_spend_confirmation(|| Ok(()), &CHECKS);
+        mock_refund_counting(&SENDS);
+
+        let (next, events) = block_on(maker_swap.refund_maker_payment_retrying(0.01)).unwrap();
+
+        assert!(matches!(next, Some(MakerSwapCommand::Finish)));
+        assert!(
+            matches!(events.as_slice(), [MakerSwapEvent::TakerPaymentSpendConfirmed]),
+            "{events:?}"
+        );
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0, "no refund is built");
+        assert_eq!(
+            SEARCH_TIME_LOCK.load(Ordering::SeqCst),
+            negotiated_locktime as usize,
+            "the search uses the restored taker payment lock time"
+        );
+        assert_eq!(
+            *SEARCH_MY_PUB.lock(),
+            saved_taker_pub.as_slice().to_vec(),
+            "the search uses the saved taker coin key"
+        );
+    }
+
+    #[test]
+    fn a_taker_payment_spend_that_is_found_but_not_confirmed_holds_the_refund_until_the_deadline() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static CHECKS: AtomicUsize = AtomicUsize::new(0);
+        let (maker_swap, mut published) = maker_swap_after_the_claim_step(3_699, vec![spend_failed_event()]);
+        mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
+        mock_taker_payment_search(
+            || Ok(Some(FoundSwapTxSpend::Spent(eth_tx_for_test().into()))),
+            &SEARCHES,
+        );
+        mock_spend_confirmation(|| Err("not confirmed".to_owned()), &CHECKS);
+        mock_refund_counting(&SENDS);
+
+        let (next, events) = block_on(maker_swap.refund_maker_payment_retrying(0.2)).unwrap();
+
+        assert!(matches!(next, Some(MakerSwapCommand::Finish)));
+        match events.as_slice() {
+            [MakerSwapEvent::MakerPaymentRefundFailed(err)] => {
+                let text = err.error.clone();
+                assert!(text.contains("found but not confirmed"), "{text}");
+                assert!(text.contains("ticker"), "{text}");
+                assert!(text.contains("manual recovery applies"), "{text}");
+            },
+            other => panic!("expected a refund failure, got {other:?}"),
+        }
+        assert!(SEARCHES.load(Ordering::SeqCst) >= 2, "the search is repeated");
+        assert!(CHECKS.load(Ordering::SeqCst) >= 2, "the confirmation is checked again");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0, "no refund is built");
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    #[test]
+    fn an_unconfirmed_taker_payment_spend_after_the_deadline_reports_at_once_and_records_nothing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static CHECKS: AtomicUsize = AtomicUsize::new(0);
+        let (maker_swap, _published) = maker_swap_after_the_claim_step(3_701, vec![spend_confirm_failed_event()]);
+        mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
+        mock_taker_payment_search(
+            || Ok(Some(FoundSwapTxSpend::Spent(eth_tx_for_test().into()))),
+            &SEARCHES,
+        );
+        mock_spend_confirmation(|| Err("not confirmed".to_owned()), &CHECKS);
+        mock_refund_counting(&SENDS);
+
+        let (_, events) = block_on(maker_swap.refund_maker_payment_retrying(0.01)).unwrap();
+
+        // Neither TakerPaymentSpent nor TakerPaymentSpendConfirmed is recorded for an unconfirmed claim.
+        assert!(
+            matches!(events.as_slice(), [MakerSwapEvent::MakerPaymentRefundFailed(_)]),
+            "{events:?}"
+        );
+        assert_eq!(CHECKS.load(Ordering::SeqCst), 1);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn the_taker_payment_search_result_is_classified_into_the_four_outcomes() {
+        assert!(matches!(
+            classify_taker_payment_search(Ok(Some(FoundSwapTxSpend::Spent(eth_tx_for_test().into())))),
+            TakerPaymentOutcome::SpentByUs(_)
+        ));
+        assert!(matches!(
+            classify_taker_payment_search(Ok(Some(FoundSwapTxSpend::Refunded(eth_tx_for_test().into())))),
+            TakerPaymentOutcome::RefundedByTaker(_)
+        ));
+        assert!(matches!(
+            classify_taker_payment_search(Ok(None)),
+            TakerPaymentOutcome::Unspent
+        ));
+        assert!(matches!(
+            classify_taker_payment_search(Err("boom".to_owned())),
+            TakerPaymentOutcome::Undetermined(reason) if reason == "boom"
+        ));
     }
 }
 

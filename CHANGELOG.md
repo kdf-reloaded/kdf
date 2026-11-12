@@ -799,6 +799,13 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   Windows CI job builds only). Detail: PR #346; CRD ch.39, status note of 2026-11-12 (Sapling
   parameter path).
 
+- **A shielded broadcast now logs the identifier the server returned beside the local one.** In
+  light mode the lightwalletd service answers a successful broadcast with the identifier its node
+  accepted. The node used to discard the answer and log only the identifier it computed from the
+  bytes. It now logs both in one `info` line, and writes a `warning` when they differ. The identifier
+  the node returns to the caller is still the locally computed one. The lines name no server.
+  Detail: CRD ch.39, status note of 2026-11-12 after R39.11.30.
+
 - **The node no longer sends a shielded transaction again that is already mined.** Before a
   light-mode broadcast it looks the transaction id up in the wallet database. A transaction the
   database holds as mined is refused with an error that names its state ("mined in block N"), and
@@ -996,6 +1003,29 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   unit tests only; nobody has yet watched it on a stalled node in real time. More in the release tests,
   [finding F4](docs/release-tests/0.4.0-beta.1.md#findings-and-dispositions). Detail: PR #306; CRD
   ch.51 R79-R81.
+- **A maker whose claim of the taker payment was mined no longer refunds its own payment after the
+  claim call or the wait for the claim's confirmation failed.** Before, the swap went to the refund
+  without looking at the taker coin's chain, so a claim that was in fact mined could be followed by
+  a refund, and the maker then held both payments. Now the swap first searches the taker coin's
+  chain for the spend of the taker payment. When the spend is found, the swap completes with the
+  spend and no refund is made; the swap completes only when that spend is confirmed, and a spend
+  that is found but not confirmed holds the refund like an unreadable chain. When the taker's refund
+  is found, or nothing is found, the refund goes on as before. When the chain cannot be read, the
+  refund is held and the search repeated until the refund deadline; the swap then ends with a failed
+  refund whose text says the state of the taker payment could not be determined on that coin (or
+  that the claim is found but not confirmed), and manual recovery applies. Swaps that never reached
+  the claim are unchanged. Detail: CRD ch.51 R82.
+- **A maker whose claim of the taker payment was lost, and whose taker then refunded, can now
+  recover its own payment with `recover_funds_of_swap`.** Before, the call refused, because the
+  record holds the sent claim and the maker payment was taken to belong to the taker, although the
+  claim never reached the chain and the taker had refunded: the maker then held neither payment.
+  Now the call first looks at the taker payment on its own chain, and refunds the maker payment only
+  when the taker's refund of the taker payment is found with at least one confirmation. When the
+  maker's own claim is found and confirmed, the call refuses as before. When the claim is found but
+  not confirmed, or the chain cannot be read, or a found refund has no confirmation, it refuses and
+  says so. When nothing spent the taker payment yet, it refuses and says to repeat the call once
+  the taker has refunded. A refusal builds nothing and writes nothing. A completed swap is refused
+  as before. The automatic refund of the run loop is unchanged. Detail: CRD ch.51 R83.
 
 #### UTXO coins and Electrum
 
