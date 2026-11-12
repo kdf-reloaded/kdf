@@ -1355,10 +1355,10 @@ file carries the detail. "New" means the plan was created in this cycle.
   "BC2 swap check"). The KDF Reloaded coins file carries the `BC2` and `BC2-segwit` entries since
   2026-11-10; the shared coins list and the P2PKH live check are open.
 - [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md) — planning: its target now reads "after the 0.4.0 beta".
-- [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — in progress: the field tests of 2026-10-26 to
+- [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — done: the field tests of 2026-10-26 to
   2026-10-29 are recorded, and the two open items of the earlier deadline are closed as history.
-  Of its last gate, a live HTLC round trip from the desktop wallet on Windows (gate 8), an ARRR buy
-  passed on 2026-11-11; an ARRR sale is pending.
+  Its last gate, a live HTLC round trip from the desktop wallet on Windows (gate 8), passed with an
+  ARRR buy on 2026-11-11 and an ARRR sale on 2026-11-12.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
   Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
   they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its

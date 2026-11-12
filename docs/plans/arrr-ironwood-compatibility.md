@@ -1,6 +1,6 @@
 # Plan: Pirate Chain (ARRR) v6.0 / Ironwood compatibility for KDF Reloaded
 
-**Status:** in progress (steps A–E landed; field tests passed 2026-10-26 to 10-29; §8 gate 8: ARRR buy from the Windows wallet passed 2026-11-11, ARRR sell pending) — **Last reviewed:** 2026-11-12
+**Status:** done (steps A–E landed; field tests passed 2026-10-26 to 10-29; §8 gate 8 passed from the Windows desktop wallet: ARRR buy 2026-11-11, ARRR sale 2026-11-12; release tests 0.4.0-beta.1) — **Last reviewed:** 2026-11-12
 
 > **Context:** accepted 2026-09-17; implementation ran through 2026-10-12 (steps A–E) and
 > the reorg-recovery fix merged 2026-10-16. The §7 consultation with the Pirate Chain team
