@@ -1592,21 +1592,24 @@ lives.
   [`ghost-orders`](docs/plans/ghost-orders.md). Detail: PRs #188, #208, #224, #251; CRD ch.32 D12,
   R-Q5d, R-GH14.
 - **The log warns repeatedly about peer addresses that cannot be reached.** A node logs warnings
-  such as "P2P outgoing connection failed for peer …: Failed to negotiate transport protocol(s): […:
-  connection refused]", or the same with "Timeout has been reached", at most once per hour for each
-  address. The wording comes from the transport library; no protocol was negotiated, because each of
-  these is a TCP connection that was refused or timed out. The addresses are peer records that other
-  nodes hand out in the peer exchange and that no longer accept connections. KDF Reloaded relays
-  store and pass on such records the same way: a record is dropped only when a dial reaches a
-  different peer, not when the address is unreachable. The node asks a random known peer for more
-  peers every 5 minutes; when the dial fails, it drops that peer and asks another at once, and a
-  live seed's next answer hands out the same records again. A node with fewer than 2 relays also
-  dials them while looking for relays, and each dial tries the address twice. In a 29-hour run of
-  the desktop wallet on Windows, 557 such warnings named 32 addresses; a check of all 32 a day later
-  found none that accepted a connection, two of them retired seed nodes. The effect is log noise,
-  wasted dials and slower answers to the peer exchange. Order books and swaps were not affected in
-  that run, in which the node stayed connected through its six configured seeds. A hold-off for
-  unreachable addresses is planned for a later release. Detail: CRD ch.28 R8c item 6; plan
+  such as "P2P outgoing connection failed for peer …: Failed to negotiate transport protocol(s):
+  […]", where the brackets hold the operating system's connection-refused text ("os error 10061" on
+  Windows) or "Timeout has been reached", at most once per hour for each address. The wording comes
+  from the transport library; no protocol was negotiated, because each of these is a TCP connection
+  that was refused or timed out. The addresses are peer records that other nodes hand out in the
+  peer exchange and that no longer accept connections. KDF Reloaded relays store and pass on such
+  records the same way: a record is dropped only when a dial reaches a different peer, not when the
+  address is unreachable. The node asks a random known peer for more peers every 5 minutes; when the
+  dial fails, it drops that peer and asks another at once, and a live seed's next answer hands out
+  the same records again. A node that is not a relay and has fewer than 2 relays also dials them
+  while looking for relays, and each dial tries the address twice. In a 29-hour run of the desktop
+  wallet on Windows, 557 such warnings named 33 addresses of 32 peers; a check of all 33 on
+  2026-11-12, after the run, found none that accepted a connection (11 refused, 22 gave no answer);
+  two of them are the addresses that names still used for seed nodes resolve to. The effect is log
+  noise and wasted dials, and a peer-exchange request sent to such a peer waits for the dial to fail
+  before another peer is asked. Order books and swaps were not affected in that run, in which the
+  node stayed connected through its six configured seeds. A hold-off for unreachable addresses is
+  planned for a later release. Detail: CRD ch.28 R8c item 6; plan
   [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md).
 - **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes of this release or later.**
   ARRR now uses a newer transaction format (v6, from the Ironwood upgrade) that no other KDF

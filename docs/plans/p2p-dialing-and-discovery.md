@@ -71,8 +71,8 @@ lookups of R8c item 7 onto the shared resolver, and they become asynchronous wit
 
 - **P4:** whether the threshold changes at all. Open after this beta; it waits for field data.
 - **P9:** the hold-off periods and the failure count that starts them; open after this beta, with
-  its ch.28 rule. In a 29-hour run of the desktop wallet on Windows, 557 dial warnings named 32
-  addresses that other nodes hand out in the peer exchange and that accepted no connection.
+  its ch.28 rule. In a 29-hour run of the desktop wallet on Windows, 557 dial warnings named 33
+  addresses of 32 peers that other nodes hand out in the peer exchange and that accepted no connection.
 - **P5b, P5c, P8:** open after this beta. P5b follows in a later release, P5c has no estimate,
   P8 is lab-only, as their rows say. No code of theirs is in 0.4.0.
 
