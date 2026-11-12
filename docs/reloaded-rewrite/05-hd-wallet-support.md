@@ -2394,8 +2394,8 @@ surface.
   rows are shaped and loaded; how an account is rebuilt from a stored row
   under the coin's configured path; what happens to accounts and addresses
   after the configured derivation path changes between sessions; and whether
-  the reference's own tests record that behaviour as a known defect. What
-  crosses is behaviour; no private identifier, function body, error, log or
+  the reference's own tests record that behavior as a known defect. What
+  crosses is behavior; no private identifier, function body, error, log or
   comment text was reproduced. The Reloaded half of the note and the WARN
   text it quotes rest on this repository's own code; that text does not
   occur in the corpus.
@@ -2403,11 +2403,11 @@ surface.
   0.00, no leaks. The pass covered this note only. *Extent:* the HD account
   storage layer (row shape, the loading of all accounts, the rebuilding of
   an account from a stored row), the UTXO HD account loading, and the
-  reference's tests of HD behaviour across a derivation-path change; 16 HD
+  reference's tests of HD behavior across a derivation-path change; 16 HD
   wallet source files compared for identity across the two rows, 4 of them
   and 1 test file read in depth, and the two-row difference of the UTXO
   builder (2 files) inspected; the one HD file that differs between the two
-  rows does not touch the described behaviour. *Method:* reading, with a
+  rows does not touch the described behavior. *Method:* reading, with a
   mechanical identity comparison between the rows and a corpus-wide text
   search for the quoted WARN text; the gate script was not run because there
   are no code blocks. *Measure:* 0.00 on the discretionary-expression basis.
