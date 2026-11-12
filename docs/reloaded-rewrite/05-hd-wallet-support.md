@@ -1137,6 +1137,30 @@ at the anchor was `Iguana`, and the device was the only HD key source
 > therefore holds also for rows written before this change. Tests:
 > `test_r55_*` in `coins/hd_wallet_storage/mod.rs`.
 
+> *Status (2026-11-11, informative): a coin's `derivation_path` changed
+> between sessions under a software HD login.* **KDF Dirty Gate: PASS
+> on 2026-11-11, measure 0.00.** *Reference*,
+> identical at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A: a stored HD account row holds the account-level extended
+> public key, and rows are loaded as stored, each account's path rebuilt
+> from the configured path and its index. After the configured path
+> changes, the old accounts and their addresses stay in use while the
+> reported path is the new one; the reference's own tests record this as
+> a known defect. *Reloaded*, verified: a software-policy coin compares
+> each stored row's account key with the key the seed derives for that
+> index below the currently configured path (the check described above);
+> a row that differs is deleted with one WARN and not loaded, so after a
+> path change the coin starts as a fresh HD wallet at the new path
+> (account 0 created, addresses scanned under the gap limit); restoring
+> the previous path brings the earlier accounts back the same way. A
+> `Trezor`-policy coin skips the comparison and loads rows as stored. No
+> key material is lost in either implementation, since every address is
+> re-derivable from the seed at its path; what differs is which
+> addresses are shown and used. A behavioral divergence without a
+> compatibility switch; catalogue it per `docs/COMPAT_SWITCHES.md`. The
+> WARN's wording ("the wallet's seed did not derive") is inaccurate: the
+> seed did derive the rows, at the previous path.
+
 > **Code-quality finding (informative; this repository, 2026-11-08).**
 > *Trigger:* a contradiction between two things read side by side — the
 > reference's per-coin policy keying (R52) and the presence keying at six
@@ -2359,3 +2383,31 @@ surface.
   against this repository's tree, each match classified under the
   forced-versus-free test; the gate script was not run because there are no
   code blocks. *Measure:* 0.02 on the discretionary-expression basis.
+- *Scoped addition (2026-11-11) -- the dated status note of 2026-11-11 in
+  §5.10B (a coin's `derivation_path` changed between sessions under a
+  software HD login).* **KDF Dirty Gate: PASS on 2026-11-11, measure 0.00,
+  no leaks**; the attestation follows this item. *Inputs:* the forbidden
+  corpus at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+  the `v3.0.0-beta` row checked against the `staging (as of 2026-03-27)` row
+  it merges, which it equals for the HD wallet; the *baseline anchor (R1)*
+  was not consulted. Consulted **only** to establish: how stored HD account
+  rows are shaped and loaded; how an account is rebuilt from a stored row
+  under the coin's configured path; what happens to accounts and addresses
+  after the configured derivation path changes between sessions; and whether
+  the reference's own tests record that behavior as a known defect. What
+  crosses is behavior; no private identifier, function body, error, log or
+  comment text was reproduced. The Reloaded half of the note and the WARN
+  text it quotes rest on this repository's own code; that text does not
+  occur in the corpus.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-11, measure
+  0.00, no leaks. The pass covered this note only. *Extent:* the HD account
+  storage layer (row shape, the loading of all accounts, the rebuilding of
+  an account from a stored row), the UTXO HD account loading, and the
+  reference's tests of HD behavior across a derivation-path change; 16 HD
+  wallet source files compared for identity across the two rows, 4 of them
+  and 1 test file read in depth, and the two-row difference of the UTXO
+  builder (2 files) inspected; the one HD file that differs between the two
+  rows does not touch the described behavior. *Method:* reading, with a
+  mechanical identity comparison between the rows and a corpus-wide text
+  search for the quoted WARN text; the gate script was not run because there
+  are no code blocks. *Measure:* 0.00 on the discretionary-expression basis.

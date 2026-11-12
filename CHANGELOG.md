@@ -1299,6 +1299,11 @@ file carries the detail. "New" means the plan was created in this cycle.
   check from field logs and the repeated-cancel refresh are open.
 - [`gossip-send-queue-bound`](docs/plans/gossip-send-queue-bound.md) — done: its follow-ups now name the PRs they shipped in
   (CRD PR #129; PRs #148, #159, #160, #166).
+- [`hd-account-storage-on-path-change`](docs/plans/hd-account-storage-on-path-change.md) — new,
+  planning: after a change of a coin's `derivation_path`, KDF Reloaded removes the coin's stored HD
+  accounts and starts it as a new HD wallet at the new path, where GLEEC KDF keeps the earlier
+  accounts in use. This release documents the behavior (Known limitations); the options for a
+  friendlier handling are analyzed after the beta.
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — new, in progress: under an HD login, one
   swap key per coin and one trading identity for the node. Eight work packages, starting with
   corrections to the documentation (PR #228) and with refusing up front the swaps that cannot
@@ -1444,6 +1449,24 @@ lives.
   and an HD coin has many. GLEEC KDF fails the same way, and this stays. Use `account_balance` for
   the balance and the mmrpc 2.0 `get_enabled_coins` for the list. For an EVM coin both legacy
   methods answer with the activated address. Detail: PR #228; CRD ch.05 §5.9B R35.
+- **Changing a coin's `derivation_path` makes it start as a new, empty HD wallet.** Under an HD
+  login with the seed as the key source, when a coin's `derivation_path` in the coins file changes
+  between two sessions, the coin's stored accounts no longer match the keys the seed derives under
+  the new path. KDF Reloaded removes them and logs one WARN per coin at each activation that removes
+  accounts, "removed N stored HD account(s) that the wallet's seed did not derive"; for this case
+  the wording is misleading, because the seed did derive them, under the previous path. The coin
+  then starts as a new HD wallet at the new path: the first account (or the one `path_to_address`
+  names) is created and, by default, its addresses are scanned up to the gap limit. Nothing is lost:
+  every address can be derived from the seed again at its path. To see the earlier addresses again,
+  restore the previous `derivation_path` and activate the coin. By default its addresses are scanned
+  again up to the gap limit. Other accounts are added again with `task::create_new_account`, and
+  addresses beyond the gap limit with `get_new_address`. Alternatively, move the funds and keep the
+  new path. A coin activated with a Trezor keeps its stored accounts. GLEEC KDF behaves differently:
+  the earlier accounts stay in use while the reported path is the new one. No switch changes this in
+  this release. Normal use does not change a coin's path; it takes an edit of the coins file, or a
+  switch between coins files that give a ticker different paths. Detail: CRD ch.05 §5.10B, status
+  note of 2026-11-11; plan
+  [`hd-account-storage-on-path-change`](docs/plans/hd-account-storage-on-path-change.md).
 - **Do not run two KDF instances on the same seed at the same time.** If you do, for any coin (RIN
   included), both instances can pick the same funds for two different transactions. The network
   accepts one and rejects the other, and the instance that loses gets no explanation and may try
