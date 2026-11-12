@@ -2976,7 +2976,10 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for ZCoinBuilder<'a> {
         // cannot build shielded transactions without the param files).
         #[cfg(not(target_arch = "wasm32"))]
         let z_tx_prover = {
-            let params_dir = self.zcash_params_path.clone().unwrap_or_else(zcash_params_path);
+            let params_dir = match self.zcash_params_path.clone() {
+                Some(path) => path,
+                None => zcash_params_path().map_err(|reason| ZCoinBuildError::ZCashParamsDirUnresolved { reason })?,
+            };
             verify_zcash_params_integrity(&params_dir)?;
             tokio::task::block_in_place(|| {
                 LocalTxProver::new(

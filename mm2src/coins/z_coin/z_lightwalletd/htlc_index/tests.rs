@@ -652,7 +652,7 @@ impl LightwalletdTransport for Scripted {
             .unwrap_or_else(|| Err(EndpointError::Service("502 Bad Gateway".to_owned())))
     }
 
-    async fn send_transaction(&self, _server: &str, _data: Vec<u8>) -> Result<(), EndpointError> {
+    async fn send_transaction(&self, _server: &str, _data: Vec<u8>) -> Result<Option<String>, EndpointError> {
         Err(EndpointError::Transport("not scripted".to_owned()))
     }
 

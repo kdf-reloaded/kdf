@@ -293,6 +293,13 @@ pub enum ZCoinBuildError {
     ZCashParamsDirNotFound {
         path: String,
     },
+    #[display(
+        fmt = "the default Zcash parameters directory could not be determined: {}; set zcash_params_path",
+        reason
+    )]
+    ZCashParamsDirUnresolved {
+        reason: String,
+    },
     ZCashParamsNotFound,
     #[display(fmt = "HD shielded key derivation failed: {}", _0)]
     HdDerivationError(String),

@@ -7270,7 +7270,7 @@ pub(crate) mod tests {
         ) -> Option<WithdrawFixture> {
             let dir = std::env::var_os("ARRR_SAPLING_PARAMS")
                 .map(PathBuf::from)
-                .unwrap_or_else(crate::utxo::zcash_params_path);
+                .unwrap_or_else(|| crate::utxo::zcash_params_path().expect("default Zcash parameters directory"));
             let (spend, output) = (
                 dir.join(crate::z_coin::SAPLING_SPEND_NAME),
                 dir.join(crate::z_coin::SAPLING_OUTPUT_NAME),

@@ -324,7 +324,7 @@ fn with_version_6_supported_neither_gate_engages() {
 fn sapling_prover() -> Option<LocalTxProver> {
     let dir = std::env::var_os("ARRR_SAPLING_PARAMS")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(crate::utxo::zcash_params_path);
+        .unwrap_or_else(|| crate::utxo::zcash_params_path().expect("default Zcash parameters directory"));
     let (spend, output) = (dir.join(SAPLING_SPEND_NAME), dir.join(SAPLING_OUTPUT_NAME));
     if spend.exists() && output.exists() {
         Some(LocalTxProver::new(&spend, &output))

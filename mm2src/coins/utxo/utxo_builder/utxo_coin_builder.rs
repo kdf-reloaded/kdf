@@ -114,6 +114,8 @@ pub enum UtxoCoinBuildError {
     },
     #[display(fmt = "Can not detect the user home directory")]
     CantDetectUserHome,
+    #[display(fmt = "Can not detect the default data directory: {}", _0)]
+    CantDetectDataDir(String),
     #[display(fmt = "Unexpected derivation method: {}", _0)]
     UnexpectedDerivationMethod(String),
     #[display(fmt = "Hardware Wallet context is not initialized")]
@@ -802,7 +804,8 @@ pub trait UtxoCoinBuilderCommonOps {
                         },
                     }
                 };
-                let data_dir = coin_daemon_data_dir(name, is_asset_chain);
+                let data_dir =
+                    coin_daemon_data_dir(name, is_asset_chain).map_to_mm(UtxoCoinBuildError::CantDetectDataDir)?;
                 let confname = format!("{}.conf", name);
 
                 return Ok(data_dir.join(&confname[..]));

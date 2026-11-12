@@ -182,7 +182,7 @@ jobs:
           # docs/plans/librustzcash-upgrade.md and
           # docs/plans/arrr-ironwood-compatibility.md.
           - name: shielded
-            cmd: "cargo test -p coins --lib z_coin::"
+            cmd: "cargo test -p coins --lib -- z_coin:: utxo::data_dir_tests"
           # `scripted_node_ports` runs real EVM code against an in-process scripted
           # JSON-RPC node: deterministic, no binary, no network. Previously
           # unreachable from any cell (the `eth-utility` cell names five tests).
