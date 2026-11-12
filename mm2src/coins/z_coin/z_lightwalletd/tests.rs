@@ -754,8 +754,9 @@ async fn a_transport_failure_on_broadcast_does_move_on_to_the_next_endpoint() {
 }
 
 /// CRD ch.39 T39.6.5a (R39.8.0bb): the identifier `send_raw_transaction` computes from the bytes -- the
-/// service answers with a status only -- is the chain's, for a mainnet transaction that carries Ironwood
-/// actions, and the bytes reach the transport unchanged.
+/// service's answer may carry the accepted identifier; the identifier returned comes from the bytes -- is
+/// the chain's, for a mainnet transaction that carries Ironwood actions, and the bytes reach the transport
+/// unchanged.
 #[tokio::test]
 async fn t39_6_5a_send_raw_transaction_names_a_mainnet_ironwood_transaction_by_the_chain_identifier() {
     use crate::utxo::rpc_clients::UtxoRpcClientOps;
