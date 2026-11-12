@@ -899,20 +899,28 @@ wait for its confirmation failed; the taker payment is known), the swap MUST
 search the taker coin's chain for the spend of the taker payment, with the
 swap's own keys, before it builds the refund, and decides as follows:
 
-1. A spend of the taker payment by the maker's claim is found: the swap MUST NOT
-   refund. The record completes: `TakerPaymentSpent` (only when the record does
-   not hold the spend yet) and `TakerPaymentSpendConfirmed` are recorded, and the
-   swap finishes. One info line names the swap and the ticker of the taker coin.
+1. A *confirmed* spend of the taker payment by the maker's claim is found: the
+   swap MUST NOT refund. The record completes: `TakerPaymentSpent` (only when the
+   record does not hold the spend yet) and `TakerPaymentSpendConfirmed` are
+   recorded, and the swap finishes. One info line names the swap and the ticker
+   of the taker coin. A spend that is found but has no confirmation (it may be
+   only in a mempool and may drop, after which the taker could refund) records
+   nothing and is handled as item 3: the refund is held and the search is
+   repeated, and at the deadline the failed-refund text says that the claim is
+   found but not confirmed.
 2. The taker's refund of the taker payment is found, or nothing is found: the
    refund goes on as before (a fair race of the two refund times is what the
    protocol intends).
-3. The search fails or cannot decide: the swap MUST NOT refund. It writes one
-   warning naming the swap and the ticker of the taker coin (no server address,
-   URL, host or response text), waits and searches again, until the refund
-   deadline of the swap. At the deadline the swap records
-   `MakerPaymentRefundFailed` with a text that says the state of the taker
-   payment could not be determined on that coin, that the maker payment is not
-   refunded, and that manual recovery applies; the swap then finishes.
+3. The search fails or cannot decide, or a spend is found but not confirmed: the
+   swap MUST NOT refund. It writes one warning naming the swap and the ticker of
+   the taker coin (no server address, URL, host or response text) the first
+   time each of the two situations occurs, logs the repeats at debug level,
+   waits and searches again, until the refund deadline of the swap. At the
+   deadline the swap records `MakerPaymentRefundFailed` with a text that says
+   the state of the taker payment could not be determined on that coin (or that
+   the claim of the taker payment on that coin is found but not confirmed),
+   that the maker payment is not refunded, and that manual recovery applies; the
+   swap then finishes.
 
 No new event is added. A swap that did not reach the claim step (the refund
 follows a failure before it, or the taker payment is not known) refunds as
@@ -930,19 +938,31 @@ dropped and the taker refunded) is not part of this rule.
 > `search_for_swap_tx_spend_other` of the taker coin and hands the result to the
 > pure `classify_taker_payment_search`
 > (`TakerPaymentOutcome::{SpentByUs, RefundedByTaker, Unspent, Undetermined}`).
+> A found spend is then checked with `wait_for_confirmations` of the taker coin
+> for one confirmation, for at most the retry wait; a failed check turns it into
+> `TakerPaymentOutcome::SpentUnconfirmed`, which is held like `Undetermined`.
 > The wait between searches is the retry wait the refund stage already takes
-> (30 s in the node). Tests (`maker_swap_tests` in the same file, 10 new):
+> (30 s in the node). The warning is written once for each of the two held
+> situations (undetermined, found but not confirmed) and the repeats go to the
+> debug log; the search or confirmation error text is logged at debug level only.
+> The deadline check comes before the sleep, so the last search may run up to one
+> retry wait after the refund deadline; if that search answers "unspent" the
+> refund is built just after the deadline, which is harmless on the chain.
+> Tests (`maker_swap_tests` in the same file, 12 new):
 > `a_taker_payment_spend_found_on_the_chain_stops_the_refund_and_completes_the_record`,
 > `a_taker_payment_spend_found_after_the_confirmation_failed_adds_only_the_confirmation`,
 > `a_taker_refund_found_on_the_chain_lets_the_maker_refund`,
 > `an_unspent_taker_payment_lets_the_maker_refund`,
 > `an_unreadable_taker_chain_holds_the_refund_until_the_deadline_and_reports_it`,
 > `an_unreadable_taker_chain_after_the_deadline_reports_at_once`,
+> `a_taker_payment_spend_that_is_found_but_not_confirmed_holds_the_refund_until_the_deadline`,
+> `an_unconfirmed_taker_payment_spend_after_the_deadline_reports_at_once_and_records_nothing`,
 > `a_swap_that_never_reached_the_claim_step_refunds_without_a_search`,
 > `a_swap_without_a_taker_payment_refunds_without_a_search`,
-> `a_restored_swap_after_a_failed_claim_confirmation_does_not_refund_a_spent_taker_payment`,
+> `a_restored_swap_after_a_failed_claim_confirmation_does_not_refund_a_spent_taker_payment`
+> (also checks the lock time and key the restored swap passes to the search),
 > `the_taker_payment_search_result_is_classified_into_the_four_outcomes`.
-> Run on 2026-11-12: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 79 tests of which these ten
+> Run on 2026-11-12: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 81 tests of which these twelve
 > are new, and the formatting check passed.
 
 ## 51.7 Bound Message Contract
