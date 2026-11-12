@@ -45,7 +45,7 @@ fn test_pacing(in_flight_wait_secs: u64) -> SendPacing {
 fn sapling_params_dir() -> Option<PathBuf> {
     let dir = std::env::var_os("ARRR_SAPLING_PARAMS")
         .map(PathBuf::from)
-        .unwrap_or_else(crate::utxo::zcash_params_path);
+        .unwrap_or_else(|| crate::utxo::zcash_params_path().expect("default Zcash parameters directory"));
     if dir.join(SAPLING_SPEND_NAME).exists() && dir.join(SAPLING_OUTPUT_NAME).exists() {
         return Some(dir);
     }

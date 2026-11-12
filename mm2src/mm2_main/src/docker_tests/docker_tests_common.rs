@@ -240,7 +240,7 @@ pub struct UtxoDockerNode<'a> {
 pub fn utxo_asset_docker_node<'a>(docker: &'a Cli, ticker: &'static str, port: u16) -> UtxoDockerNode<'a> {
     let args = vec![
         "-v".into(),
-        format!("{}:/root/.zcash-params", zcash_params_path().display()),
+        format!("{}:/root/.zcash-params", zcash_params_path().expect("default Zcash parameters directory").display()),
         "-p".into(),
         format!("{}:{}", port, port),
     ];
@@ -259,7 +259,7 @@ pub fn utxo_asset_docker_node<'a>(docker: &'a Cli, ticker: &'static str, port: u
         .with_env_var("COIN_RPC_PORT", port.to_string())
         .with_wait_for(WaitFor::message_on_stdout("config is ready"));
     let container = docker.run(image);
-    let mut conf_path = coin_daemon_data_dir(ticker, true);
+    let mut conf_path = coin_daemon_data_dir(ticker, true).expect("default coin data directory");
     std::fs::create_dir_all(&conf_path).unwrap();
     conf_path.push(format!("{}.conf", ticker));
     Command::new("docker")

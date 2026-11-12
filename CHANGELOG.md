@@ -784,6 +784,21 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 #### ARRR and other shielded coins
 
+- **A Windows user profile path with non-ASCII characters no longer crashes ARRR activation.** The
+  default Sapling parameter directory was read through a call that returns the profile path in the
+  ANSI code page and was converted without a check, so a user name such as one with accented letters
+  made the activation task panic and never answer. The default directory of ARRR, and the default data
+  directory that native-mode UTXO coins and QRC20 coins use to find their daemon configuration file,
+  are now read losslessly (the `APPDATA` variable first, then the system's known-folder lookup; the
+  home directory on other systems). A lookup that fails is reported as an activation error that
+  names the reason and, for ARRR, `zcash_params_path` as the remedy, never as a crash. Checked with
+  unit tests on Linux and with a Windows profile run of this PR's build on 2026-11-12 (profile path
+  with non-ASCII characters: two activation attempts without the parameter files returned reported
+  errors, the third activated and scanned, one swap as maker finished with the node spending the
+  shielded HTLC payment, 0 panics); the Windows variant of the unit test has not executed (the
+  Windows CI job builds only). Detail: PR #346; CRD ch.39, status note of 2026-11-12 (Sapling
+  parameter path).
+
 - **A shielded broadcast now logs the identifier the server returned beside the local one.** In
   light mode the lightwalletd service answers a successful broadcast with the identifier its node
   accepted. The node used to discard the answer and log only the identifier it computed from the

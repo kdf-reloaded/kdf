@@ -961,6 +961,27 @@ semantics in R39.8.0g).
 >   the top-level request field and, on native targets, loads the Sapling
 >   proving/verifying parameters from that directory, falling back to the fixed
 >   platform default when absent.
+>
+> **Status note (2026-11-12, Reloaded-original).** The default Sapling
+> parameter directory is resolved losslessly from the platform's data
+> directory: on Windows from the `APPDATA` variable, then the system's
+> known-folder lookup (a set `APPDATA` variable takes precedence over the
+> known-folder lookup), on other platforms from the home directory. A profile
+> path with non-ASCII characters is read losslessly. A failed lookup is a reported
+> activation error (`CoinCreationError`) that names the reason and the
+> `zcash_params_path` field as the remedy, never a crash. Tests:
+> `data_dir_tests::roaming_app_data_keeps_a_non_utf8_value`,
+> `roaming_app_data_falls_back_when_the_variable_is_missing_or_empty`,
+> `roaming_app_data_error_names_the_variable`,
+> `default_directories_resolve_on_this_host` (coins crate) and
+> `unresolved_default_params_directory_is_a_reported_activation_error`
+> (coins_activation crate). Checked with unit tests on Linux and with a
+> Windows profile run of this PR's build on 2026-11-12 (profile path with
+> non-ASCII characters: two activation attempts without the parameter files
+> returned reported errors, the third activated and scanned, one swap as maker
+> finished with the node spending the shielded HTLC payment, 0 panics). The
+> Windows variant of the unit test has not executed (the Windows CI job
+> builds only).
 
 ### 39.6.3 Sapling-parameter integrity verification
 R39.6.3 Before use, the loaded Sapling spend/output parameters shall be verified
