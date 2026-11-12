@@ -965,8 +965,9 @@ semantics in R39.8.0g).
 > **Status note (2026-11-12, Reloaded-original).** The default Sapling
 > parameter directory is resolved losslessly from the platform's data
 > directory: on Windows from the `APPDATA` variable, then the system's
-> known-folder lookup, on other platforms from the home directory. A profile
-> path with non-ASCII characters is supported. A failed lookup is a reported
+> known-folder lookup (a set `APPDATA` variable takes precedence over the
+> known-folder lookup), on other platforms from the home directory. A profile
+> path with non-ASCII characters is read losslessly. A failed lookup is a reported
 > activation error (`CoinCreationError`) that names the reason and the
 > `zcash_params_path` field as the remedy, never a crash. Tests:
 > `data_dir_tests::roaming_app_data_keeps_a_non_utf8_value`,
@@ -974,7 +975,9 @@ semantics in R39.8.0g).
 > `roaming_app_data_error_names_the_variable`,
 > `default_directories_resolve_on_this_host` (coins crate) and
 > `unresolved_default_params_directory_is_a_reported_activation_error`
-> (coins_activation crate).
+> (coins_activation crate). Checked with unit tests on Linux; the Windows
+> test variant and a Windows profile run are pending (the lab row runs the
+> PR's Windows build).
 
 ### 39.6.3 Sapling-parameter integrity verification
 R39.6.3 Before use, the loaded Sapling spend/output parameters shall be verified
