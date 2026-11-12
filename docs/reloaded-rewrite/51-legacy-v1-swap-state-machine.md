@@ -781,6 +781,9 @@ swap whose record already holds the refund of the maker payment is refused as
 not recoverable. The refund that the run loop makes after the confirmation of
 the spend failed is not changed by this section (D8).
 
+> **Status note (2026-11-12, Reloaded-original).** The refund that the run loop
+> makes after the claim step is now bound by R82 (2026-11-12).
+
 **R78.** *Other swaps are unchanged.* A swap without a spend keeps every answer
 of the manual recovery as it is, including the refund of an unspent maker
 payment after its refund time and the spend of the taker payment when the maker
@@ -874,6 +877,73 @@ cause (a stopped node, a node that is behind, a chain that has stopped).
 > and a fake height source, and no real-time observation of it on a stalled
 > node exists. A lab row that observes it on a frozen tip is an optional
 > follow-up, not a condition of this rule.
+
+## 51.6C Bound Automatic Refund After the Claim Step
+
+> **Status (Reloaded-original; 2026-11-12).** This rule records no claim about
+> the reference implementation. It binds the refund that the maker's run loop
+> makes, which R77 and D8 left unchanged. It adds no event; the persisted log
+> shape of chapter 44 and the resume map (R19, R32) are unchanged.
+
+The maker's run loop goes to the refund of the maker payment when the claim of
+the taker payment fails with a built transaction, when the wait for the
+confirmation of the claim fails, and after a restart that finds either failure
+in the log. None of these proves that the claim is not on the chain: the claim
+may be mined while the answer that reached the node was an error or a lagging
+backend. A refund after a mined claim leaves the maker holding both payments.
+
+**R82.** *The refund after the claim step looks at the taker payment first.* When
+the run loop reaches the refund of the maker payment of a swap that reached the
+claim step (the claim was sent, the claim failed with a built transaction, or the
+wait for its confirmation failed; the taker payment is known), the swap MUST
+search the taker coin's chain for the spend of the taker payment, with the
+swap's own keys, before it builds the refund, and decides as follows:
+
+1. A spend of the taker payment by the maker's claim is found: the swap MUST NOT
+   refund. The record completes: `TakerPaymentSpent` (only when the record does
+   not hold the spend yet) and `TakerPaymentSpendConfirmed` are recorded, and the
+   swap finishes. One info line names the swap and the ticker of the taker coin.
+2. The taker's refund of the taker payment is found, or nothing is found: the
+   refund goes on as before (a fair race of the two refund times is what the
+   protocol intends).
+3. The search fails or cannot decide: the swap MUST NOT refund. It writes one
+   warning naming the swap and the ticker of the taker coin (no server address,
+   URL, host or response text), waits and searches again, until the refund
+   deadline of the swap. At the deadline the swap records
+   `MakerPaymentRefundFailed` with a text that says the state of the taker
+   payment could not be determined on that coin, that the maker payment is not
+   refunded, and that manual recovery applies; the swap then finishes.
+
+No new event is added. A swap that did not reach the claim step (the refund
+follows a failure before it, or the taker payment is not known) refunds as
+before and searches nothing. The restart path is the same code: the claim step
+is derived from the events of the saved log. The reverse case of D8 (the claim
+dropped and the taker refunded) is not part of this rule.
+
+> **As built (2026-11-12).** `MakerSwap::refund_maker_payment_retrying` in
+> `mm2src/mm2_main/src/lp_swap/maker_swap.rs`: after the refund gate answers
+> "refund now" and before the refund is built, a swap whose
+> `taker_payment_spend_attempted` flag is set (set by `apply_event` for
+> `TakerPaymentSpent`, `TakerPaymentSpendFailed` and
+> `TakerPaymentSpendConfirmFailed`, so a restored swap has it) and that holds the
+> taker payment calls `look_at_taker_payment`, which runs
+> `search_for_swap_tx_spend_other` of the taker coin and hands the result to the
+> pure `classify_taker_payment_search`
+> (`TakerPaymentOutcome::{SpentByUs, RefundedByTaker, Unspent, Undetermined}`).
+> The wait between searches is the retry wait the refund stage already takes
+> (30 s in the node). Tests (`maker_swap_tests` in the same file, 10 new):
+> `a_taker_payment_spend_found_on_the_chain_stops_the_refund_and_completes_the_record`,
+> `a_taker_payment_spend_found_after_the_confirmation_failed_adds_only_the_confirmation`,
+> `a_taker_refund_found_on_the_chain_lets_the_maker_refund`,
+> `an_unspent_taker_payment_lets_the_maker_refund`,
+> `an_unreadable_taker_chain_holds_the_refund_until_the_deadline_and_reports_it`,
+> `an_unreadable_taker_chain_after_the_deadline_reports_at_once`,
+> `a_swap_that_never_reached_the_claim_step_refunds_without_a_search`,
+> `a_swap_without_a_taker_payment_refunds_without_a_search`,
+> `a_restored_swap_after_a_failed_claim_confirmation_does_not_refund_a_spent_taker_payment`,
+> `the_taker_payment_search_result_is_classified_into_the_four_outcomes`.
+> Run on 2026-11-12: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 79 tests of which these ten
+> are new, and the formatting check passed.
 
 ## 51.7 Bound Message Contract
 
@@ -2140,6 +2210,10 @@ The refund that the run loop makes after the confirmation of the spend failed
 (the confirmation wait ends, the log records the failure, and the refund chain
 follows) makes no look at the taker payment either; it is a separate decision and
 is not changed here.
+
+> **Status note (2026-11-12, Reloaded-original).** The automatic half is
+> decided: see R82. The reverse case (claim dropped, taker refunded) stays under
+> consideration.
 
 ## 51.14 Baseline Verifications
 
