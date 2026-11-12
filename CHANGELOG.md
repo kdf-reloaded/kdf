@@ -1558,6 +1558,15 @@ lives.
   planned for a later release. More in
   [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). Detail: PRs #229,
   #246; CRD ch.39 §39.6.5.
+- **ARRR swaps use the Sapling pool only.** An ARRR swap's HTLC is funded from and paid back into
+  the Sapling pool. The Pirate network does not accept HTLC scripts in the Ironwood pool, and
+  changing that needs a Pirate network upgrade, so KDF Reloaded cannot offer swaps funded from the
+  Ironwood pool until then. Funds held at an Ironwood (Pirate1, `pirate1…`) address, for example in
+  another Pirate wallet, must be sent to the wallet's Sapling (`zs1…`) address before they can be
+  traded. Withdrawals to a Pirate1 address, and incoming payments that carry a Sapling output, keep
+  working as described in the ARRR entries above. More in
+  [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md). Detail: CRD ch.39
+  §39.6.5.
 - **The Komodo DeFi Framework and GLEEC KDF builds available in November 2026 cannot spend BC2
   (Bitcoin II).** Since block 57,750 the BC2 network rejects every spend signed without the chain's
   sighash suffix, and those builds do not sign with it, so they can neither withdraw BC2 nor complete
@@ -1622,12 +1631,13 @@ lives.
 - **ZEC cannot send since the Zcash network upgrade NU7.** Since NU7 activated on the Zcash mainnet
   (height 3,543,405), the network accepts only transactions of version 5 or 6 (ZIP 2003). KDF
   Reloaded builds ZEC transactions in the version-4 format, so the network rejects every ZEC
-  withdrawal, swap payment and refund with "transaction version 4 not supported by the network
-  upgrade Nu7". The balance, read from the Electrum servers, still shows incoming payments;
-  transactions made since NU7 may be missing from the history or shown wrongly, because the node
-  does not read the version-5 format yet. Do not place or take ZEC orders: a swap fails at its first
-  ZEC transaction, and a ZEC refund cannot be sent either. The other Zcash-family coins of the coins
-  file (KMD, ZER, BTCZ, FLUX) are not affected; their networks still accept version 4. Detail: plan
+  withdrawal, swap payment and refund; a field report shows the rejection "transaction version 4 not
+  supported by the network upgrade Nu7". The balance, read from the Electrum servers, should still
+  show incoming payments (not tested); transactions made since NU7 may be missing from the history
+  or shown wrongly, because the node does not read the version-5 format yet. Do not place or take
+  ZEC orders: a swap fails at its first ZEC transaction, and a ZEC refund cannot be sent either. The
+  other Zcash-family coins of the coins file (KMD, ZER, BTCZ, FLUX) run their own networks; NU7 is
+  an upgrade of the Zcash network only. Detail: plan
   [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md); CRD ch.39 R39.11.15.
 - **TRON (TRX, TRC20) and Solana (SOL, SPL) cannot be activated in this beta.** Their support is not
   finished. TRON activation answers "TRON support is not available in this build";

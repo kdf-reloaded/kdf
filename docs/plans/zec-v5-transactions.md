@@ -4,7 +4,7 @@
 
 > **Context.** The Zcash network upgrade NU7 activated on mainnet at height 3,543,405 (ZIP 259,
 > consensus branch id `0x77190AD9`). From NU7 on, a transaction's version must be 5 or 6, also for a
-> transaction with only transparent inputs and outputs (ZIP 2003). Version 5 is the layout of
+> transaction with only transparent inputs and outputs (ZIP 2003; ZIP 259). Version 5 is the layout of
 > ZIP 225; version 6 is that of ZIP 229. NU7 also changes the block spacing to 25 seconds
 > (ZIP 218).
 >
@@ -23,7 +23,7 @@
 >
 > The coins file (komodo-coins-rin) lists ZEC with `txversion` 4, `version_group_id` `0x892f2085`
 > and `consensus_branch_id` `0x37a5165b`. The other Zcash-family coins of the coins file (KMD, ZER,
-> BTCZ, FLUX) are not affected: their networks still accept version 4.
+> BTCZ, FLUX) run their own networks; NU7 is an upgrade of the Zcash network only.
 >
 > 0.4.0-beta.1 records the limitation in the CHANGELOG (Known limitations); the work below follows
 > after the beta.
@@ -46,8 +46,12 @@
   in our own code.
 - **(B) Build, sign and read version-5 transactions through `zcash_primitives`**, already in the
   tree (MIT or Apache-2.0, compatible with the project's license), for coins configured with
-  `txversion` 5: a transparent-only bundle. Check whether the pinned crate's branch ids include NU7;
-  if not, supply the id or update the crate.
+  `txversion` 5: a transparent-only bundle. The pinned `zcash_protocol` 0.10.6 knows NU7 only behind
+  its unstable `nu7` build option, with a placeholder branch id and no activation height, so the
+  NU7 branch id has to be supplied, or the crate updated.
+
+CRD ch.39 R39.11.16a chose the Zcash library reader, not an extension of the shared parser, for the
+swap path of the shielded coins; (B) follows the same route for ZEC.
 
 **Recommendation:** (B); (A) only where (B) cannot serve the swap scripts.
 
