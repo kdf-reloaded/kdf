@@ -981,6 +981,18 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   unit tests only; nobody has yet watched it on a stalled node in real time. More in the release tests,
   [finding F4](docs/release-tests/0.4.0-beta.1.md#findings-and-dispositions). Detail: PR #306; CRD
   ch.51 R79-R81.
+- **A maker whose claim of the taker payment was mined no longer refunds its own payment after the
+  claim call or the wait for the claim's confirmation failed.** Before, the swap went to the refund
+  without looking at the taker coin's chain, so a claim that was in fact mined could be followed by a
+  refund, and the maker then held both payments. Now the swap first searches the taker coin's chain
+  for the spend of the taker payment. When the spend is found, the swap completes with the spend and
+  no refund is made; the swap completes only when that spend is confirmed, and a spend that is found
+  but not confirmed holds the refund like an unreadable chain. When the taker's refund is found, or nothing is found, the refund goes on as
+  before. When the chain cannot be read, the refund is held and the search repeated until the refund
+  deadline; the swap then ends with a failed refund whose text says the state of the taker payment
+  could not be determined on that coin (or that the claim is found but not confirmed), and manual
+  recovery applies. Swaps that never reached the
+  claim are unchanged. Detail: CRD ch.51 R82.
 
 #### UTXO coins and Electrum
 
