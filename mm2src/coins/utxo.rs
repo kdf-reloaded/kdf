@@ -151,29 +151,33 @@ pub type HistoryUtxoTxMap = HashMap<H256Json, HistoryUtxoTx>;
 pub type MatureUnspentMap = HashMap<Address, MatureUnspentList>;
 pub type RecentlySpentOutPointsGuard<'a> = AsyncMutexGuard<'a, RecentlySpentOutPoints>;
 
-#[cfg(windows)]
+/// Resolves the roaming application-data directory from the value of the `APPDATA` variable and a
+/// fallback lookup. The variable is taken as an `OsString`, so a profile path that is not valid UTF-8 is
+/// kept as is.
 #[cfg(not(target_arch = "wasm32"))]
-fn get_special_folder_path() -> PathBuf {
-    use libc::c_char;
-    use std::ffi::CStr;
-    use std::mem::zeroed;
-    use std::ptr::null_mut;
-    use winapi::shared::minwindef::MAX_PATH;
-    use winapi::um::shlobj::SHGetSpecialFolderPathA;
-    use winapi::um::shlobj::CSIDL_APPDATA;
-
-    let mut buf: [c_char; MAX_PATH + 1] = unsafe { zeroed() };
-    // https://docs.microsoft.com/en-us/windows/desktop/api/shlobj_core/nf-shlobj_core-shgetspecialfolderpatha
-    let rc = unsafe { SHGetSpecialFolderPathA(null_mut(), buf.as_mut_ptr(), CSIDL_APPDATA, 1) };
-    if rc != 1 {
-        panic!("!SHGetSpecialFolderPathA")
+fn resolve_roaming_app_data(
+    appdata: Option<std::ffi::OsString>,
+    fallback: impl FnOnce() -> Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    match appdata {
+        Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
+        _ => fallback().ok_or_else(|| {
+            "the APPDATA environment variable is not set and the roaming application-data folder could not be \
+             determined"
+                .to_owned()
+        }),
     }
-    Path::new(unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap()).to_path_buf()
 }
 
-#[cfg(not(windows))]
+/// The roaming application-data directory of the current Windows user
+/// (`c:\Users\$username\AppData\Roaming` on Vista and later).
 #[cfg(not(target_arch = "wasm32"))]
-fn get_special_folder_path() -> PathBuf { panic!("!windows") }
+fn roaming_app_data_dir() -> Result<PathBuf, String> {
+    resolve_roaming_app_data(std::env::var_os("APPDATA"), dirs::data_dir)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const HOME_DIR_NOT_FOUND: &str = "the home directory could not be determined";
 
 impl Transaction for UtxoTx {
     fn tx_hex(&self) -> Vec<u8> {
@@ -1320,23 +1324,21 @@ pub struct UtxoFeeDetails {
 #[cfg(not(target_arch = "wasm32"))]
 // https://github.com/KomodoPlatform/komodo/blob/master/zcutil/fetch-params.sh#L5
 // https://github.com/KomodoPlatform/komodo/blob/master/zcutil/fetch-params.bat#L4
-pub fn zcash_params_path() -> PathBuf {
+pub fn zcash_params_path() -> Result<PathBuf, String> {
     if cfg!(windows) {
         // >= Vista: c:\Users\$username\AppData\Roaming
-        get_special_folder_path().join("ZcashParams")
+        Ok(roaming_app_data_dir()?.join("ZcashParams"))
     } else if cfg!(target_os = "macos") {
-        home_dir()
-            .unwrap()
-            .join("Library")
-            .join("Application Support")
-            .join("ZcashParams")
+        let home = home_dir().ok_or_else(|| HOME_DIR_NOT_FOUND.to_owned())?;
+        Ok(home.join("Library").join("Application Support").join("ZcashParams"))
     } else {
-        home_dir().unwrap().join(".zcash-params")
+        let home = home_dir().ok_or_else(|| HOME_DIR_NOT_FOUND.to_owned())?;
+        Ok(home.join(".zcash-params"))
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn coin_daemon_data_dir(name: &str, is_asset_chain: bool) -> PathBuf {
+pub fn coin_daemon_data_dir(name: &str, is_asset_chain: bool) -> Result<PathBuf, String> {
     // komodo/util.cpp/GetDefaultDataDir
     let mut data_dir = match dirs::home_dir() {
         Some(hd) => hd,
@@ -1345,7 +1347,7 @@ pub fn coin_daemon_data_dir(name: &str, is_asset_chain: bool) -> PathBuf {
 
     if cfg!(windows) {
         // >= Vista: c:\Users\$username\AppData\Roaming
-        data_dir = get_special_folder_path();
+        data_dir = roaming_app_data_dir()?;
         if is_asset_chain {
             data_dir.push("Komodo");
         } else {
@@ -1368,7 +1370,7 @@ pub fn coin_daemon_data_dir(name: &str, is_asset_chain: bool) -> PathBuf {
     if is_asset_chain {
         data_dir.push(name)
     };
-    data_dir
+    Ok(data_dir)
 }
 
 /// Electrum protocol version verifier.
@@ -2552,4 +2554,67 @@ fn test_parse_hex_encoded_u32() {
     assert_eq!(parse_hex_encoded_u32("0x892f2085"), Ok(2301567109));
     assert_eq!(parse_hex_encoded_u32("892f2085"), Ok(2301567109));
     assert_eq!(parse_hex_encoded_u32("0x7361707a"), Ok(1935765626));
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod data_dir_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[cfg(unix)]
+    #[test]
+    fn roaming_app_data_keeps_a_non_utf8_value() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        // "C:\\Users\\Tom" followed by two bytes that are not valid UTF-8 (CP1250 letters).
+        let mut bytes = b"C:\\Users\\Tom".to_vec();
+        bytes.extend_from_slice(&[0xE1, 0xF8]);
+        let value = OsString::from_vec(bytes.clone());
+        let path = resolve_roaming_app_data(Some(value), || panic!("fallback must not be asked")).unwrap();
+        assert_eq!(path.as_os_str().as_bytes(), bytes.as_slice());
+        assert!(path.to_str().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn roaming_app_data_keeps_a_non_utf8_value() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let wide: Vec<u16> = "C:\\Users\\Tom".encode_utf16().chain([0xD800u16]).collect();
+        let value = OsString::from_wide(&wide);
+        let path = resolve_roaming_app_data(Some(value), || panic!("fallback must not be asked")).unwrap();
+        assert_eq!(path.as_os_str().encode_wide().collect::<Vec<_>>(), wide);
+        assert!(path.to_str().is_none());
+    }
+
+    #[test]
+    fn roaming_app_data_falls_back_when_the_variable_is_missing_or_empty() {
+        let fallback = || Some(PathBuf::from("/fallback/Roaming"));
+        assert_eq!(
+            resolve_roaming_app_data(None, fallback).unwrap(),
+            PathBuf::from("/fallback/Roaming")
+        );
+        assert_eq!(
+            resolve_roaming_app_data(Some(OsString::new()), fallback).unwrap(),
+            PathBuf::from("/fallback/Roaming")
+        );
+    }
+
+    #[test]
+    fn roaming_app_data_error_names_the_variable() {
+        let error = resolve_roaming_app_data(None, || None).unwrap_err();
+        assert!(error.contains("APPDATA"), "{error}");
+        assert!(error.contains("could not be determined"), "{error}");
+    }
+
+    #[test]
+    fn default_directories_resolve_on_this_host() {
+        assert!(zcash_params_path().unwrap().ends_with(if cfg!(windows) {
+            "ZcashParams"
+        } else if cfg!(target_os = "macos") {
+            "Application Support/ZcashParams"
+        } else {
+            ".zcash-params"
+        }));
+        assert!(coin_daemon_data_dir("rin", false).is_ok());
+        assert!(coin_daemon_data_dir("RICK", true).unwrap().ends_with("RICK"));
+    }
 }
