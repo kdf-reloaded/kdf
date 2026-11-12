@@ -1389,6 +1389,11 @@ file carries the detail. "New" means the plan was created in this cycle.
   closed by PR #219.
 - [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md) — planning: it records that 0.3.0-beta.1 fixed
   the earlier problem (PR #181); the two ideas left are not in 0.4.0.
+- [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — new, planning: since the Zcash
+  network upgrade NU7 the network accepts only transactions of version 5 or 6, and KDF Reloaded
+  builds ZEC transactions in the version-4 format, so ZEC cannot send (Known limitations). The plan
+  describes what a version-5 send needs, the options (the Zcash library already in the tree is
+  recommended) and the work items.
 
 ### Not in this release
 
@@ -1614,6 +1619,16 @@ lives.
 - **SLP tokens on BCH are untested on mainnet.** The shared coins file lists BCH and tBCH as plain
   UTXO coins and carries no SLP token entries, so SLP tokens cannot be enabled with it. The SLP
   changes of this release are covered by unit tests only. Detail: PRs #234, #236.
+- **ZEC cannot send since the Zcash network upgrade NU7.** Since NU7 activated on the Zcash mainnet
+  (height 3,543,405), the network accepts only transactions of version 5 or 6 (ZIP 2003). KDF
+  Reloaded builds ZEC transactions in the version-4 format, so the network rejects every ZEC
+  withdrawal, swap payment and refund with "transaction version 4 not supported by the network
+  upgrade Nu7". The balance, read from the Electrum servers, still shows incoming payments;
+  transactions made since NU7 may be missing from the history or shown wrongly, because the node
+  does not read the version-5 format yet. Do not place or take ZEC orders: a swap fails at its first
+  ZEC transaction, and a ZEC refund cannot be sent either. The other Zcash-family coins of the coins
+  file (KMD, ZER, BTCZ, FLUX) are not affected; their networks still accept version 4. Detail: plan
+  [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md); CRD ch.39 R39.11.15.
 - **TRON (TRX, TRC20) and Solana (SOL, SPL) cannot be activated in this beta.** Their support is not
   finished. TRON activation answers "TRON support is not available in this build";
   `enable_solana_with_tokens` and `enable_spl` answer "Solana support is not available in this
