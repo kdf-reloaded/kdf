@@ -1,6 +1,6 @@
 # Plan: peer-to-peer dialing, discovery and send-queue follow-ups (0.4.0)
 
-**Status:** in progress — **Last reviewed:** 2026-11-10
+**Status:** in progress — **Last reviewed:** 2026-11-12
 
 > **Context.** These are the peer-to-peer items deferred from the 0.3.0 beta and the field
 > findings made around it. The maintainer approved batch 1 (P1 to P3, then P5) on 2026-11-02;
@@ -24,6 +24,7 @@
 | P5c | **Encrypted DNS** for the Google and fixed modes. | ch.45 D45.7 | Plan row only, no estimate |
 | P6 | **Bounded connection close:** a 30 s deadline on every close, in the vendored yamux wrapper. | ch.28 R27c, RQ1 item 5, D8 | Implemented in batch 3: PR #280; lab row L-CLOSE passed (2026-11-07); its memory criterion was restated after the run, from "back to baseline" to "flat after the close, where the control keeps growing" |
 | P8 | **Lab capture** confirming that GLEEC KDF relays send nothing on the peers topic. | ch.28, note after R8c | Lab only, any time |
+| P9 | **Unreachable peer addresses.** After repeated refused or timed-out dials, an address is skipped as a peer-exchange target and as a maintenance candidate for a period that grows with each failure; a connected relay is preferred as the peer-exchange target; the dial address list carries each address once; the warning names the TCP cause instead of the transport library's negotiation wording. Reloaded-original. | a new ch.28 rule, to be written | Planning, after 0.4.0-beta.1 (CHANGELOG, Known limitations) |
 
 Item P7 (asynchronous hostname lookups) was dropped from 0.4.0 on 2026-11-02. P5 brings the
 lookups of R8c item 7 onto the shared resolver, and they become asynchronous with it.
@@ -69,6 +70,9 @@ lookups of R8c item 7 onto the shared resolver, and they become asynchronous wit
 ## Open points
 
 - **P4:** whether the threshold changes at all. Open after this beta; it waits for field data.
+- **P9:** the hold-off periods and the failure count that starts them; open after this beta, with
+  its ch.28 rule. In a 29-hour run of the desktop wallet on Windows, 557 dial warnings named 32
+  addresses that other nodes hand out in the peer exchange and that accepted no connection.
 - **P5b, P5c, P8:** open after this beta. P5b follows in a later release, P5c has no estimate,
   P8 is lab-only, as their rows say. No code of theirs is in 0.4.0.
 

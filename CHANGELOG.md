@@ -59,6 +59,7 @@ All of these are described under Not in this release and Known limitations below
 - **Do not run two KDF instances on the same seed at the same time.**
 - **The swap watcher does not work yet**, so keep your node running until your swaps have finished.
 - **TRON and Solana cannot be activated, and Tendermint coins are wallet-only.**
+- **ZEC cannot send since the Zcash network upgrade NU7; do not trade ZEC.**
 - **ARRR swaps work only between two KDF Reloaded nodes of this release or later**; native mode and
   the Ironwood pool are postponed.
 - **Every Siacoin swap transaction pays a fixed fee about 450 to 850 times below the rate the Sia
@@ -1309,10 +1310,10 @@ file carries the detail. "New" means the plan was created in this cycle.
   "BC2 swap check"). The KDF Reloaded coins file carries the `BC2` and `BC2-segwit` entries since
   2026-11-10; the shared coins list and the P2PKH live check are open.
 - [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md) — planning: its target now reads "after the 0.4.0 beta".
-- [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — done: the field tests of 2026-10-26 to
-  2026-10-29 are recorded, and the two open items of the earlier deadline are closed as history;
-  its last gate, a live HTLC round trip from the desktop wallet on Windows (gate 8), passed on
-  2026-11-11.
+- [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — in progress: the field tests of 2026-10-26 to
+  2026-10-29 are recorded, and the two open items of the earlier deadline are closed as history.
+  Of its last gate, a live HTLC round trip from the desktop wallet on Windows (gate 8), an ARRR buy
+  passed on 2026-11-11; an ARRR sale is pending.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: what
   Komodo and GLEEC KDF do with a Pirate `pirate1…` address is now recorded, and so is the fact that
   they would still trade with a KDF Reloaded ARRR order that adds a capability marker after its
@@ -1411,7 +1412,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   shares and the queue-signal fix (PRs #204, #214), and one resolver for every hostname (PRs #216,
   #219); the remaining lookups (Sia, WalletConnect, Lightning, statistics) and encrypted DNS are
   new rows for later. A close that a non-reading peer would hold forever now ends after 30 seconds
-  (item P6, PR #280).
+  (item P6, PR #280). A hold-off for peer addresses that cannot be reached is a new row for a later
+  release (item P9; Known limitations).
 - [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — parked: it records that PRs #17 and #21 landed.
 - [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — parked: it records that PRs #54 and #65 landed,
   with their compatibility bookkeeping, and the 2026-11-09 mainnet swap tests; step 8 (a stricter signing of malformed
@@ -1589,6 +1591,23 @@ lives.
   that relay received the cancellation. Until then the order stays visible. More in
   [`ghost-orders`](docs/plans/ghost-orders.md). Detail: PRs #188, #208, #224, #251; CRD ch.32 D12,
   R-Q5d, R-GH14.
+- **The log warns repeatedly about peer addresses that cannot be reached.** A node logs warnings
+  such as "P2P outgoing connection failed for peer …: Failed to negotiate transport protocol(s): […:
+  connection refused]", or the same with "Timeout has been reached", at most once per hour for each
+  address. The wording comes from the transport library; no protocol was negotiated, because each of
+  these is a TCP connection that was refused or timed out. The addresses are peer records that other
+  nodes hand out in the peer exchange and that no longer accept connections. KDF Reloaded relays
+  store and pass on such records the same way: a record is dropped only when a dial reaches a
+  different peer, not when the address is unreachable. The node asks a random known peer for more
+  peers every 5 minutes; when the dial fails, it drops that peer and asks another at once, and a
+  live seed's next answer hands out the same records again. A node with fewer than 2 relays also
+  dials them while looking for relays, and each dial tries the address twice. In a 29-hour run of
+  the desktop wallet on Windows, 557 such warnings named 32 addresses; a check of all 32 a day later
+  found none that accepted a connection, two of them retired seed nodes. The effect is log noise,
+  wasted dials and slower answers to the peer exchange. Order books and swaps were not affected in
+  that run, in which the node stayed connected through its six configured seeds. A hold-off for
+  unreachable addresses is planned for a later release. Detail: CRD ch.28 R8c item 6; plan
+  [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md).
 - **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes of this release or later.**
   ARRR now uses a newer transaction format (v6, from the Ironwood upgrade) that no other KDF
   implementation can handle, so a swap with a Komodo or GLEEC counterparty cannot complete (observed
