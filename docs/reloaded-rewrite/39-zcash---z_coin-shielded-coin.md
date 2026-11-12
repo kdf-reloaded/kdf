@@ -975,9 +975,13 @@ semantics in R39.8.0g).
 > `roaming_app_data_error_names_the_variable`,
 > `default_directories_resolve_on_this_host` (coins crate) and
 > `unresolved_default_params_directory_is_a_reported_activation_error`
-> (coins_activation crate). Checked with unit tests on Linux; the Windows
-> test variant and a Windows profile run are pending (the lab row runs the
-> PR's Windows build).
+> (coins_activation crate). Checked with unit tests on Linux and with a
+> Windows profile run of this PR's build on 2026-11-12 (profile path with
+> non-ASCII characters: two activation attempts without the parameter files
+> returned reported errors, the third activated and scanned, one swap as maker
+> finished with the node spending the shielded HTLC payment, 0 panics). The
+> Windows variant of the unit test has not executed (the Windows CI job
+> builds only).
 
 ### 39.6.3 Sapling-parameter integrity verification
 R39.6.3 Before use, the loaded Sapling spend/output parameters shall be verified
