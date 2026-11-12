@@ -70,7 +70,7 @@ fn endpoint_script(tip: u64, params: &ZcoinConsensusParams) -> WireScript {
         info: Some(Ok(server_info)),
         tip_floor: Some(tip),
         tip_after_send: Some(tip.max(12)),
-        send: Some(Ok(())),
+        send: Some(Ok(None)),
         // The height only has to be a mined one the tip has reached once the transaction is broadcast.
         transaction: Some(Ok(RawTx {
             data: Vec::new(),
@@ -439,7 +439,7 @@ impl LightCoinFixture {
         ZTransaction::read(&bytes[..], BranchId::Canopy).unwrap()
     }
 
-    fn script_send(&self, answer: Result<(), EndpointError>) {
+    fn script_send(&self, answer: Result<Option<String>, EndpointError>) {
         for script in self.transport.scripts.lock().values_mut() {
             script.send = Some(answer.clone());
         }
@@ -663,7 +663,7 @@ async fn a_rejected_broadcast_leaves_the_note_reusable_and_the_balance_unchanged
     assert_eq!(fixture.wallet_balance(), balance_before);
     assert!(fixture.in_flight().is_empty());
 
-    fixture.script_send(Ok(()));
+    fixture.script_send(Ok(None));
     let retry = fixture.send(100_000_000).await.expect("the immediate retry succeeds");
     assert_eq!(
         nullifiers(&retry),

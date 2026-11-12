@@ -410,7 +410,7 @@ pub(crate) struct Script {
     /// Set as `tip_floor` the moment a broadcast is accepted: the chain mines the transaction.
     pub(crate) tip_after_send: Option<u64>,
     pub(crate) transaction: Option<Result<RawTx, EndpointError>>,
-    pub(crate) send: Option<Result<(), EndpointError>>,
+    pub(crate) send: Option<Result<Option<String>, EndpointError>>,
     /// How long a broadcast takes to be answered, to widen a race around it.
     pub(crate) send_delay: Option<std::time::Duration>,
     pub(crate) balance: Option<Result<i64, EndpointError>>,
@@ -516,7 +516,7 @@ impl LightwalletdTransport for FakeTransport {
             .unwrap_or_else(|| Err(Self::unscripted()))
     }
 
-    async fn send_transaction(&self, server: &str, data: Vec<u8>) -> Result<(), EndpointError> {
+    async fn send_transaction(&self, server: &str, data: Vec<u8>) -> Result<Option<String>, EndpointError> {
         self.record(server, "send");
         let observer = self.on_send.lock().clone();
         if let Some(observer) = observer {
@@ -712,7 +712,7 @@ async fn a_rejected_broadcast_is_reported_and_not_retried_elsewhere() {
         message: "tx-expiring-soon".to_owned(),
     }));
     let mut second = healthy(&[]);
-    second.send = Some(Ok(()));
+    second.send = Some(Ok(None));
     transport.serve("first", first);
     transport.serve("second", second);
     let backend = backend_over(&transport, &["first", "second"]);
@@ -743,7 +743,7 @@ async fn a_transport_failure_on_broadcast_does_move_on_to_the_next_endpoint() {
     let mut first = healthy(&[]);
     first.send = Some(Err(EndpointError::Transport("reset".to_owned())));
     let mut second = healthy(&[]);
-    second.send = Some(Ok(()));
+    second.send = Some(Ok(None));
     transport.serve("first", first);
     transport.serve("second", second);
     let backend = backend_over(&transport, &["first", "second"]);
@@ -754,8 +754,9 @@ async fn a_transport_failure_on_broadcast_does_move_on_to_the_next_endpoint() {
 }
 
 /// CRD ch.39 T39.6.5a (R39.8.0bb): the identifier `send_raw_transaction` computes from the bytes -- the
-/// service answers with a status only -- is the chain's, for a mainnet transaction that carries Ironwood
-/// actions, and the bytes reach the transport unchanged.
+/// service's answer may carry the accepted identifier; the identifier returned comes from the bytes -- is
+/// the chain's, for a mainnet transaction that carries Ironwood actions, and the bytes reach the transport
+/// unchanged.
 #[tokio::test]
 async fn t39_6_5a_send_raw_transaction_names_a_mainnet_ironwood_transaction_by_the_chain_identifier() {
     use crate::utxo::rpc_clients::UtxoRpcClientOps;
@@ -769,7 +770,7 @@ async fn t39_6_5a_send_raw_transaction_names_a_mainnet_ironwood_transaction_by_t
     for recorded in [&WITHDRAW, &DEPOSIT] {
         let transport = Arc::new(FakeTransport::default());
         let mut script = healthy(&[]);
-        script.send = Some(Ok(()));
+        script.send = Some(Ok(None));
         transport.serve("only", script);
         let backend = backend_over(&transport, &["only"]);
         backend.bind_wallet(Arc::new(Bound));
@@ -783,6 +784,78 @@ async fn t39_6_5a_send_raw_transaction_names_a_mainnet_ironwood_transaction_by_t
             .unwrap();
         assert_eq!(hex::encode(txid.0), recorded.txid_display);
         assert_eq!(*transport.sent.lock(), vec![bytes]);
+    }
+}
+
+/// The service puts the identifier the node accepted into the message of a successful answer; an empty message
+/// means none was returned, and a non-zero code is a rejection.
+#[test]
+fn a_successful_send_answer_yields_the_returned_identifier_or_none() {
+    let answer = |code: i32, message: &str| z_coin_grpc::SendResponse {
+        error_code: code,
+        error_message: message.to_owned(),
+    };
+    assert_eq!(accepted_identifier(answer(0, "ab12")), Ok(Some("ab12".to_owned())));
+    assert_eq!(accepted_identifier(answer(0, " ab12\n")), Ok(Some("ab12".to_owned())));
+    assert_eq!(accepted_identifier(answer(0, "\"ab12\"")), Ok(Some("ab12".to_owned())));
+    assert_eq!(
+        accepted_identifier(answer(0, " \"ab12\" ")),
+        Ok(Some("ab12".to_owned()))
+    );
+    assert_eq!(accepted_identifier(answer(0, "\"\"")), Ok(None));
+    assert_eq!(accepted_identifier(answer(0, "")), Ok(None));
+    assert_eq!(accepted_identifier(answer(0, "  ")), Ok(None));
+    assert_eq!(
+        accepted_identifier(answer(-1, "bad")),
+        Err(EndpointError::Rejected {
+            code: -1,
+            message: "bad".to_owned()
+        })
+    );
+}
+
+#[test]
+fn the_returned_identifier_is_compared_with_the_local_one_ignoring_case_and_whitespace() {
+    assert_eq!(returned_identifier_matches("ab12", None), None);
+    assert_eq!(returned_identifier_matches("ab12", Some("AB12 ")), Some(true));
+    assert_eq!(returned_identifier_matches("ab12", Some("cd34")), Some(false));
+}
+
+/// The backend hands back the identifier the server returned (here the fake transport, which does not strip
+/// quotes; the stripping is `accepted_identifier`'s); `send_raw_transaction` still answers with the
+/// locally computed identifier, whether the server returned the same one, another one or none.
+#[tokio::test]
+async fn send_raw_transaction_keeps_the_local_identifier_whatever_the_server_returns() {
+    use crate::utxo::rpc_clients::UtxoRpcClientOps;
+    use crate::z_coin::z_ironwood_read_tests::DEPOSIT;
+    struct Bound;
+    impl WalletBranchStore for Bound {
+        fn state(&self) -> Result<WalletBranchState, String> { Ok(scanned_wallet(IRONWOOD_BRANCH)) }
+
+        fn record(&self, _: u32) -> Result<(), String> { Ok(()) }
+    }
+    let local = DEPOSIT.txid_display.to_owned();
+    for returned in [
+        Some(local.to_uppercase()),
+        Some(format!("\"{}\"", local)),
+        Some("00".repeat(32)),
+        None,
+    ] {
+        let transport = Arc::new(FakeTransport::default());
+        let mut script = healthy(&[]);
+        script.send = Some(Ok(returned.clone()));
+        transport.serve("only", script);
+        let backend = backend_over(&transport, &["only"]);
+        backend.bind_wallet(Arc::new(Bound));
+        assert_eq!(backend.send_transaction(DEPOSIT.bytes()).await.unwrap(), returned);
+        let client = LightwalletdClient(Arc::new(backend));
+
+        let txid = client
+            .send_raw_transaction(BytesJson::from(DEPOSIT.bytes()))
+            .compat()
+            .await
+            .unwrap();
+        assert_eq!(hex::encode(txid.0), local);
     }
 }
 
@@ -2261,7 +2334,7 @@ mod naming_and_suspension {
         }));
         transport.serve(first, a);
         let mut b = healthy(&[]);
-        b.send = Some(Ok(()));
+        b.send = Some(Ok(None));
         transport.serve("https://second.rejecting.example:9067", b);
         let (backend, _now) = clocked(&transport, &[first, "https://second.rejecting.example:9067"]);
 

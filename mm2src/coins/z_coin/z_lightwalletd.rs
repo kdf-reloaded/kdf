@@ -865,7 +865,8 @@ pub(crate) trait LightwalletdTransport: Send + Sync + fmt::Debug + 'static {
     async fn block_hash(&self, server: &str, height: u64) -> Result<[u8; 32], EndpointError>;
     /// `txid` is in internal byte order (R39.11.4c).
     async fn transaction(&self, server: &str, txid: [u8; 32]) -> Result<RawTx, EndpointError>;
-    async fn send_transaction(&self, server: &str, data: Vec<u8>) -> Result<(), EndpointError>;
+    /// The identifier the server's node accepted the transaction under, when the answer carries one.
+    async fn send_transaction(&self, server: &str, data: Vec<u8>) -> Result<Option<String>, EndpointError>;
     async fn taddr_balance(&self, server: &str, addresses: Vec<String>) -> Result<i64, EndpointError>;
     async fn taddr_txids(&self, server: &str, address: &str, start: u64, end: u64) -> WindowRead;
     async fn address_utxos(&self, server: &str, address: &str) -> Result<Vec<TransparentUtxo>, EndpointError>;
@@ -1052,23 +1053,14 @@ impl LightwalletdTransport for GrpcTransport {
         self.evict_on_transport_failure(server, result)
     }
 
-    async fn send_transaction(&self, server: &str, data: Vec<u8>) -> Result<(), EndpointError> {
+    async fn send_transaction(&self, server: &str, data: Vec<u8>) -> Result<Option<String>, EndpointError> {
         let mut client = self.client(server).await?;
         let result = Self::timed(
             client.send_transaction(z_coin_grpc::RawTransaction { data, height: 0 }),
             "SendTransaction",
         )
         .await
-        .and_then(|response| {
-            if response.error_code == 0 {
-                Ok(())
-            } else {
-                Err(EndpointError::Rejected {
-                    code: response.error_code,
-                    message: response.error_message,
-                })
-            }
-        });
+        .and_then(accepted_identifier);
         self.evict_on_transport_failure(server, result)
     }
 
@@ -1912,9 +1904,11 @@ impl LightwalletdBackend {
         .await
     }
 
-    pub(crate) async fn send_transaction(&self, data: Vec<u8>) -> Result<(), LightwalletdError> {
-        // The identifier is computed from the bytes, as the broadcast path does (the service answers with a
-        // status only); a rejection names it (R39.11.30).
+    /// Broadcasts the transaction. The answer is the identifier the server's node accepted it under, when the
+    /// service returned one.
+    pub(crate) async fn send_transaction(&self, data: Vec<u8>) -> Result<Option<String>, LightwalletdError> {
+        // The identifier is computed from the bytes, as the broadcast path does (the answer may carry the
+        // accepted identifier, which the caller logs); a rejection names it (R39.11.30).
         let txid = ZTransaction::read(data.as_slice(), BranchId::Sapling)
             .map(|parsed| format!("{:?}", txid_internal_to_display(*parsed.txid().as_ref())))
             .unwrap_or_else(|_| "(unreadable transaction)".to_owned());
@@ -1957,6 +1951,46 @@ impl LightwalletdBackend {
             async move { t.address_utxos(&s, &address).await }.boxed()
         })
         .await
+    }
+}
+
+/// The identifier of a successful `SendTransaction` answer: the service puts the identifier the node accepted
+/// into the message when the code is 0. An empty message means none was returned.
+fn accepted_identifier(response: z_coin_grpc::SendResponse) -> Result<Option<String>, EndpointError> {
+    if response.error_code != 0 {
+        return Err(EndpointError::Rejected {
+            code: response.error_code,
+            message: response.error_message,
+        });
+    }
+    // The message may be the raw JSON result of the node's call: the identifier in double quotes.
+    let message = response.error_message.trim();
+    let message = message
+        .strip_prefix('"')
+        .and_then(|m| m.strip_suffix('"'))
+        .unwrap_or(message)
+        .trim();
+    Ok((!message.is_empty()).then(|| message.to_owned()))
+}
+
+/// Whether the identifier the server returned is the one computed locally; `None` when none was returned. Both
+/// are in display order; the comparison ignores case and surrounding whitespace.
+fn returned_identifier_matches(local: &str, returned: Option<&str>) -> Option<bool> {
+    returned.map(|returned| returned.trim().eq_ignore_ascii_case(local.trim()))
+}
+
+/// Logs the identifier the server returned beside the locally computed one, and warns when they differ.
+fn log_accepted_identifier(local: &str, returned: Option<&str>) {
+    match (returned_identifier_matches(local, returned), returned) {
+        (Some(true), Some(returned)) => {
+            common::log::info!("broadcast of {}: the server returned {}", local, returned.trim())
+        },
+        (Some(false), Some(returned)) => common::log::warn!(
+            "broadcast of {}: the server returned a different identifier {}",
+            local,
+            returned.trim()
+        ),
+        _ => (),
     }
 }
 
@@ -2137,8 +2171,8 @@ impl UtxoRpcClientOps for LightwalletdClient {
     fn send_raw_transaction(&self, tx: BytesJson) -> UtxoRpcFut<H256Json> {
         let this = self.clone();
         let fut = async move {
-            // The service answers with a status only, so the identifier comes from the bytes. The
-            // Zcash reader is used because the shared UTXO parser misreads version 5 and 6.
+            // The answer may carry the accepted identifier, which is logged below; the identifier returned
+            // comes from the bytes. The Zcash reader is used because the shared UTXO parser misreads version 5 and 6.
             let parsed = ZTransaction::read(tx.0.as_slice(), BranchId::Sapling).map_err(|e| {
                 MmError::new(UtxoRpcError::InvalidResponse(format!(
                     "cannot read the transaction: {}",
@@ -2146,10 +2180,12 @@ impl UtxoRpcClientOps for LightwalletdClient {
                 )))
             })?;
             let txid = txid_internal_to_display(*parsed.txid().as_ref());
-            this.0
+            let accepted = this
+                .0
                 .send_transaction(tx.0)
                 .await
                 .map_err(|e| e.into_rpc_error("SendTransaction"))?;
+            log_accepted_identifier(&format!("{:?}", txid), accepted.as_deref());
             Ok(txid)
         };
         Box::new(fut.boxed().compat())
