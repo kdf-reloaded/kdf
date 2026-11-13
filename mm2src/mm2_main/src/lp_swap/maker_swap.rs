@@ -1955,6 +1955,47 @@ impl MakerSwap {
                         },
                     }
                 }
+                // CRD ch.51 R84: the claim step was reached but no spend was recorded as sent (the claim call
+                // failed), so the claim may still have been mined; the taker payment is looked at first.
+                else if self.taker_payment_spend_attempted.load(Ordering::Relaxed) && self.r().taker_payment.is_some()
+                {
+                    let taker_ticker = self.taker_coin.ticker();
+                    match self.look_at_taker_payment_for_recovery(&secret_hash.0, stages).await {
+                        TakerPaymentOutcome::RefundedByTaker(_) => info!(
+                            "Swap {}: the taker payment on {} is refunded by the taker; the maker payment on {} is refunded",
+                            self.uuid,
+                            taker_ticker,
+                            self.maker_coin.ticker()
+                        ),
+                        TakerPaymentOutcome::Unspent => info!(
+                            "Swap {}: the taker payment on {} is unspent after a failed claim call; the maker payment on {} is refunded",
+                            self.uuid,
+                            taker_ticker,
+                            self.maker_coin.ticker()
+                        ),
+                        TakerPaymentOutcome::SpentByUs(_) => {
+                            return ERR!(
+                                "The claim of the taker payment on {} is on the chain, the maker payment on {} belongs to the taker and is not refunded",
+                                taker_ticker,
+                                self.maker_coin.ticker()
+                            );
+                        },
+                        TakerPaymentOutcome::SpentUnconfirmed(reason) => {
+                            return ERR!(
+                                "The spend of the taker payment on {} is found but not confirmed ({}), the maker payment is not refunded",
+                                taker_ticker,
+                                reason
+                            );
+                        },
+                        TakerPaymentOutcome::Undetermined(reason) => {
+                            return ERR!(
+                                "The state of the taker payment on {} could not be determined ({}), the maker payment is not refunded",
+                                taker_ticker,
+                                reason
+                            );
+                        },
+                    }
+                }
                 // our payment is not spent, try to refund
                 log!("Trying to refund MakerPayment");
                 if now_ms() / 1000 < self.r().data.maker_payment_lock + 3700 {
@@ -3839,6 +3880,9 @@ mod maker_swap_tests {
 
         TestCoin::search_for_swap_tx_spend_my
             .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+        // CRD ch.51 R84: the claim step was reached, so the taker payment is looked at; nothing spent it.
+        static TAKER_SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        mock_taker_payment_search(|| Ok(None), &TAKER_SEARCHES);
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
         let (maker_swap, _) = MakerSwap::load_from_saved(
@@ -4529,6 +4573,161 @@ mod maker_swap_tests {
         .expect_err("Expected an error");
         assert!(err.contains("Too early to refund"), "{err}");
         assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+    }
+
+    /// The saved swap with the sent spend, the log restored with the claim call having failed instead
+    /// (`TakerPaymentSpendFailed`, no `TakerPaymentSpent`); the flag is set by the replay (CRD ch.51 R84).
+    fn maker_swap_with_failed_claim_call(claim_step_reached: bool) -> MakerSwap {
+        let mut saved: MakerSavedSwap = json::from_str(SAVED_WITH_SENT_TAKER_PAYMENT_SPEND).unwrap();
+        for saved_event in saved.events.iter_mut() {
+            match &saved_event.event {
+                MakerSwapEvent::TakerPaymentSpent(_) if claim_step_reached => saved_event.event = spend_failed_event(),
+                MakerSwapEvent::TakerPaymentSpent(_) => {
+                    saved_event.event = MakerSwapEvent::TakerPaymentValidatedAndConfirmed
+                },
+                _ => (),
+            }
+        }
+        let key_pair =
+            key_pair_from_seed("spice describe gravity federal blast come thank unfair canal monkey style afraid")
+                .unwrap();
+        let ctx = test_ctx_with_netid(key_pair);
+        TestCoin::ticker.mock_safe(|_| MockResult::Return("ticker"));
+        TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
+        let (maker_swap, _) = MakerSwap::load_from_saved(
+            ctx.clone(),
+            MmCoinEnum::Test(TestCoin::default()),
+            MmCoinEnum::Test(TestCoin::default()),
+            crate::mm2::lp_swap::recorded_by_maker(saved, &ctx),
+        )
+        .unwrap();
+        assert!(maker_swap.r().taker_payment_spend.is_none());
+        assert_eq!(
+            maker_swap.taker_payment_spend_attempted.load(Ordering::Relaxed),
+            claim_step_reached
+        );
+        maker_swap
+    }
+
+    fn assert_record_unchanged_by_claim_look_refusal(maker_swap: &MakerSwap) {
+        assert!(maker_swap.r().taker_payment_spend.is_none());
+        assert!(maker_swap.r().maker_payment_refund.is_none());
+    }
+
+    /// R84 item 1: the claim is found with a confirmation; the refund is refused.
+    #[test]
+    fn test_recover_funds_failed_claim_call_confirmed_own_claim_is_refused() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_failed_claim_call(true);
+        let err = recover_after_lost_claim(
+            &maker_swap,
+            || Ok(Some(FoundSwapTxSpend::Spent(eth_tx_for_test().into()))),
+            || Ok(()),
+            &REFUND_BUILT,
+        )
+        .expect_err("Expected an error");
+        assert!(
+            err.contains("The claim of the taker payment on ticker is on the chain, the maker payment on ticker belongs to the taker and is not refunded"),
+            "{err}"
+        );
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+        assert_record_unchanged_by_claim_look_refusal(&maker_swap);
+    }
+
+    /// R84 item 2: the claim is found, its confirmation fails.
+    #[test]
+    fn test_recover_funds_failed_claim_call_unconfirmed_own_claim_is_refused() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_failed_claim_call(true);
+        let err = recover_after_lost_claim(
+            &maker_swap,
+            || Ok(Some(FoundSwapTxSpend::Spent(eth_tx_for_test().into()))),
+            || Err("not mined".to_owned()),
+            &REFUND_BUILT,
+        )
+        .expect_err("Expected an error");
+        assert!(err.contains("found but not confirmed"), "{err}");
+        assert!(err.contains("not mined"), "{err}");
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+        assert_record_unchanged_by_claim_look_refusal(&maker_swap);
+    }
+
+    /// R84 item 2, the search fails.
+    #[test]
+    fn test_recover_funds_failed_claim_call_failed_taker_search_is_refused_as_undetermined() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_failed_claim_call(true);
+        let err = recover_after_lost_claim(&maker_swap, || Err("backend down".to_owned()), || Ok(()), &REFUND_BUILT)
+            .expect_err("Expected an error");
+        assert!(err.contains("could not be determined"), "{err}");
+        assert!(err.contains("backend down"), "{err}");
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+        assert_record_unchanged_by_claim_look_refusal(&maker_swap);
+    }
+
+    /// R84 item 3: the taker's refund is found and confirmed; the maker payment is refunded.
+    #[test]
+    fn test_recover_funds_failed_claim_call_taker_refund_confirmed_refunds_the_maker_payment() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_failed_claim_call(true);
+        let result = recover_after_lost_claim(
+            &maker_swap,
+            || Ok(Some(FoundSwapTxSpend::Refunded(eth_tx_for_test().into()))),
+            || Ok(()),
+            &REFUND_BUILT,
+        );
+        let expected = Ok(RecoveredSwap {
+            coin: "ticker".into(),
+            action: RecoveredSwapAction::RefundedMyPayment,
+            transaction: eth_tx_for_test().into(),
+        });
+        assert_eq!(result, expected);
+        assert!(REFUND_BUILT.load(Ordering::SeqCst));
+    }
+
+    /// R84 item 3: nothing spent the taker payment; the maker payment is refunded after the lock.
+    #[test]
+    fn test_recover_funds_failed_claim_call_unspent_taker_payment_refunds_the_maker_payment() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_failed_claim_call(true);
+        let result = recover_after_lost_claim(&maker_swap, || Ok(None), || Ok(()), &REFUND_BUILT);
+        let expected = Ok(RecoveredSwap {
+            coin: "ticker".into(),
+            action: RecoveredSwapAction::RefundedMyPayment,
+            transaction: eth_tx_for_test().into(),
+        });
+        assert_eq!(result, expected);
+        assert!(REFUND_BUILT.load(Ordering::SeqCst));
+    }
+
+    /// R84 item 3: before the lock the existing too-early check answers and nothing is built.
+    #[test]
+    fn test_recover_funds_failed_claim_call_unspent_taker_payment_before_the_lock_is_too_early() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        let maker_swap = maker_swap_with_failed_claim_call(true);
+        maker_swap.w().data.maker_payment_lock = now_ms() / 1000 + 100_000;
+        let err = recover_after_lost_claim(&maker_swap, || Ok(None), || Ok(()), &REFUND_BUILT)
+            .expect_err("Expected an error");
+        assert!(err.contains("Too early to refund"), "{err}");
+        assert!(!REFUND_BUILT.load(Ordering::SeqCst));
+    }
+
+    /// R84: a swap that did not reach the claim step makes no search of the taker payment.
+    #[test]
+    fn test_recover_funds_claim_step_not_reached_makes_no_taker_payment_search() {
+        static REFUND_BUILT: AtomicBool = AtomicBool::new(false);
+        static GATE_ASKED: AtomicBool = AtomicBool::new(false);
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        let maker_swap = maker_swap_with_failed_claim_call(false);
+        mock_unspent_maker_payment(&REFUND_BUILT, &GATE_ASKED);
+        mock_taker_payment_search(
+            || Ok(Some(FoundSwapTxSpend::Spent(eth_tx_for_test().into()))),
+            &SEARCHES,
+        );
+        let result = block_on(maker_swap.recover_funds());
+        assert_eq!(result.map(|r| r.action), Ok(RecoveredSwapAction::RefundedMyPayment));
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 0);
+        assert!(REFUND_BUILT.load(Ordering::SeqCst));
     }
 
     #[test]
