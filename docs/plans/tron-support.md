@@ -1,6 +1,6 @@
 # Plan: make TRON work again
 
-**Status:** in progress (added to the 0.4.0 scope on 2026-11-08; activation and the wallet path first, swaps after) — **Last reviewed:** 2026-11-10
+**Status:** parked at the 0.4.0 freeze (added to the 0.4.0 scope on 2026-11-08; the work stops after PR #333, the TRON wallet path, with TRON activation still off; swaps not built) — **Last reviewed:** 2026-11-10
 
 > **Context:** created 2026-10-28 as the umbrella plan for bringing TRON (TRX,
 > TRC20) back. By maintainer decision TRON activation is switched off on `dev`

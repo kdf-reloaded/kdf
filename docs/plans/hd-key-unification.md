@@ -1,6 +1,6 @@
 # Plan: one key per coin and one trading identity under an HD login
 
-**Status:** in progress (H0 to H5 shipped in PRs #228 to #281; the hardware-context work of this release is tracked in CRD ch.05 §5.10B; H6 and H7 not started) — **Last reviewed:** 2026-11-08
+**Status:** parked (H0 to H5 shipped in PRs #228 to #281; the hardware-context work of this release is tracked in CRD ch.05 §5.10B; H6 and H7 not started) — **Last reviewed:** 2026-11-10
 
 > **Context.** Under an HD login (`enable_hd: true`) the node holds three different secp256k1
 > keys, where an iguana login holds one:

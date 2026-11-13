@@ -1,6 +1,6 @@
 # Plan: Tendermint activation features
 
-**Status:** parked (deferred by maintainer decision 2026-10-11; nothing started) — **Last reviewed:** 2026-11-08
+**Status:** parked (deferred by maintainer decision 2026-10-11; custom tokens and the HD `path_to_address` shipped in PR #319; the swap-path fixes and the priority fees in PRs #299 and #323; Tendermint swaps added to the 0.4.0 scope on 2026-11-08 and put aside again on 2026-11-10; the per-swap lock choice and the chain-refund path (CRD ch.18 D18.11.1–D18.11.3) not built) — **Last reviewed:** 2026-11-10
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity`. That branch brings Tendermint activation to wire
@@ -12,7 +12,8 @@
 
 > **Beta availability (2026-10-26).** By maintainer decision Tendermint coins
 > and tokens are wallet-only in 0.3.0-beta.1 and on `dev` as of 2026-11-08 (Tendermint
-> swaps were added to the 0.4.0 scope on 2026-11-08): while
+> swaps were added to the 0.4.0 scope on 2026-11-08 and put aside again on
+> 2026-11-10): while
 > `TENDERMINT_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`, activation,
 > balances and `withdraw` work, while `setprice`, `buy`, `sell` and
 > `start_swap` refuse the coin and an order with a Tendermint coin saved
@@ -100,6 +101,8 @@ becomes `true`, in the change that switches swaps on:
   policy value (`Legacy`, `Low`, `Medium`, `High`) gives fees in the ratio of the
   selected gas prices (CRD ch.18 T18.6B.1, ch.35 T35.38). PR #323 covers this with
   unit tests only.
+  *2026-11-10: PASSED on a local single-validator chain with the HTLC module: all four
+  policy values gave fees in the ratio of the selected gas prices.*
 
 ## Latent hazard: a key-less policy on the legacy HTLC path
 

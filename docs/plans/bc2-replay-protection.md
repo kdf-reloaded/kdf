@@ -1,6 +1,6 @@
 # Plan: Bitcoin II (BC2) sighash suffix in the signature hash
 
-**Status:** in progress (signing and the counterparty requirement shipped, PRs #261, #264; the coins-file entries and the P2PKH live check open) — **Last reviewed:** 2026-11-08
+**Status:** parked (signing and the counterparty requirement shipped, PRs #261, #264; the KDF Reloaded coins file carries the `BC2` and `BC2-segwit` entries since 2026-11-10, the change to the shared coins repository is open; the P2PKH live check is open) — **Last reviewed:** 2026-11-10
 
 > **Context:** since block 57,750 the Bitcoin II network checks every
 > signature against a digest that carries an extra 4-byte field, the
@@ -20,7 +20,7 @@
 | Analysis | **done** — the rule, its activation height (57,750) and its value (`0x01324342`) are verified against the mined chain (CRD ch.61 §61.0, T1) |
 | CRD chapter 61 | **merged** in PR #261 (2026-11-07; R61.2–R61.4, tests T1–T9, decisions D1–D5); §61.5A added in PR #264 |
 | Code | **merged** in PR #264 (2026-11-07) — the suffix enters the one digest routine, both configuration keys are parsed (`sighash_suffix_height` is only validated, decision D1), hardware refusal, activation warning, tests T1–T8 |
-| Coins file | **open** — `sighash_suffix` on the `BC2` and `BC2-segwit` entries (separate change in the shared coins repository) |
+| Coins file | **open** — `sighash_suffix` on the `BC2` and `BC2-segwit` entries (separate change in the shared coins repository). *Reloaded status (2026-11-10):* the KDF Reloaded coins file carries both entries; the shared coins repository does not yet |
 | Counterparty requirement | **merged** in PR #264 (2026-11-07) — a coin with a suffix sends the capability word `sighash_suffix` and declines a counterparty without it before any swap starts; switch `require_suffix_counterparty` (CRD ch.61 R61.5A, ch.59 §59.4A). The lab row "BC2 swap check" passed on 2026-11-07 (release tests 0.4.0-beta.1) |
 | Live check | **partly done (2026-11-07)** — a withdrawal of 0.05 BC2 from the untouched native-segwit output was accepted by the network, and a swap between two KDF Reloaded nodes finished; the swap with a Komodo KDF taker failed because that build cannot spend BC2. A P2PKH withdrawal is open |
 | Issue #252 | open — the reporter's failure ("Maker payment validate failed") is not yet placed; this change is one confirmed cause of BC2 transactions being rejected, not necessarily the whole report |

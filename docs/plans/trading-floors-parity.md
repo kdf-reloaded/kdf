@@ -1,6 +1,6 @@
 # Plan: trading-floor parity for every coin family
 
-**Status:** in progress (all four PRs merged and live-tested; default-side arm 3 chosen 2026-11-08: a raised advertised minimum, on by default, with a compatibility switch for the reference value) — **Last reviewed:** 2026-11-08
+**Status:** done (all four PRs merged and live-tested; default-side arm 3 chosen 2026-11-08: a raised advertised minimum, on by default, with a compatibility switch for the reference value, merged in PR #315 and lab row L-MINVOL passed 2026-11-09; items 6 and 7 belong to the plans of their coin families (`solana-support`, `tron-swap-support`)) — **Last reviewed:** 2026-11-10
 
 > **Context:** a field report of a refused WBTC-PLG20 buy led to the EVM fix of
 > PR #66 (plan `evm-min-trading-volume`). The maintainer then asked how the UTXO
@@ -77,6 +77,10 @@
 > 0.4.0 scope on 2026-11-08, Solana's return is not set); turning the
 > families back on belongs to plans `solana-support`, `tron-swap-support` and
 > `tendermint-activation-features`, not to this one.
+>
+> *Reloaded status (2026-11-10):* Tendermint swaps were put aside again on
+> 2026-11-10, and the TRON work stops at the wallet path (PR #333) with TRON
+> activation still off; all three constants stay `false` in 0.4.0-beta.1.
 
 ## Work packages and merge order
 

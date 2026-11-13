@@ -1,6 +1,6 @@
 # Plan: peer-to-peer dialing, discovery and send-queue follow-ups (0.4.0)
 
-**Status:** in progress — **Last reviewed:** 2026-11-08
+**Status:** in progress — **Last reviewed:** 2026-11-12
 
 > **Context.** These are the peer-to-peer items deferred from the 0.3.0 beta and the field
 > findings made around it. The maintainer approved batch 1 (P1 to P3, then P5) on 2026-11-02;
@@ -14,6 +14,7 @@
 | Id | What | CRD | State |
 |---|---|---|---|
 | P1 | **Redial guards.** No address is dialed again within 5 minutes, as GLEEC KDF does. No configured seed is dialed while its peer is connected, which ends a dial-and-close loop every 150 s. The short-of-relays warning appears at most once per 5 minutes. | ch.28 R27a, T12 | Spec PR #199; code PR #206; lab row L-SEED passed 2026-11-05 (release tests 0.4.0-beta.1, row 14) |
+| P1a | **Early redial after a cut.** A connection the node dialed that lived at least 30 s and ended in a cut is dialed again at the next maintenance tick, at most twice in 5 minutes; a peer that flaps keeps the 5-minute guard. Added 2026-11-08 (batch 4 item B4-13). | ch.28 R27a item 1a, T15 | Code PR #303; PR #328 stopped a stuck-peer close ending with a transport error from counting as a cut; lab row L-RELINK passed 2026-11-08 (release tests 0.4.0-beta.1, fourth batch) |
 | P2 | **Peer-exchange polish.** Skipped addresses are logged at DEBUG, with an hourly INFO summary. The idle close of a relay outside the relay mesh logs at INFO. The routability ranges are aligned with GLEEC KDF. Two wording fixes (R8c, R23 item 3). | ch.28 R8c items 4 and 7, R23 item 3, R24, R27b, T6a, T13, D9; ch.32 note under R-F3b | Spec PR #203; code PR #211; peer-exchange probe passed 2026-11-05 (release tests 0.4.0-beta.1, row 15; the hourly summary was not exercised) |
 | P3a | **Send-queue windows visible.** Each connection's dropped share per 60 s window, as a DEBUG line and a gauge. | ch.28 RQ1 items 6 and 8, T-RQ1.13; ch.32 R-MP5, T-MP10 | Spec PR #204; code PR #214 |
 | P3b | **Queue-signal clear rule.** The signal clears when nothing has waited 2 s or more, not only after a 5 s empty queue. It affects only makers with `maker_update_coalescing` on (see `maker-gossip-rate-control.md`). | ch.32 R-MP2 item 2, T-MP5, D9 | Spec PR #204; code PR #214 |
@@ -23,6 +24,7 @@
 | P5c | **Encrypted DNS** for the Google and fixed modes. | ch.45 D45.7 | Plan row only, no estimate |
 | P6 | **Bounded connection close:** a 30 s deadline on every close, in the vendored yamux wrapper. | ch.28 R27c, RQ1 item 5, D8 | Implemented in batch 3: PR #280; lab row L-CLOSE passed (2026-11-07); its memory criterion was restated after the run, from "back to baseline" to "flat after the close, where the control keeps growing" |
 | P8 | **Lab capture** confirming that GLEEC KDF relays send nothing on the peers topic. | ch.28, note after R8c | Lab only, any time |
+| P9 | **Unreachable peer addresses.** After repeated refused or timed-out dials, an address is skipped as a peer-exchange target and as a maintenance candidate for a period that grows with each failure; a connected relay is preferred as the peer-exchange target; the dial address list carries each address once; the warning names the TCP cause instead of the transport library's negotiation wording. Reloaded-original. | a new ch.28 rule, to be written | Planning, after 0.4.0-beta.1 (CHANGELOG, Known limitations) |
 
 Item P7 (asynchronous hostname lookups) was dropped from 0.4.0 on 2026-11-02. P5 brings the
 lookups of R8c item 7 onto the shared resolver, and they become asynchronous with it.
@@ -68,6 +70,9 @@ lookups of R8c item 7 onto the shared resolver, and they become asynchronous wit
 ## Open points
 
 - **P4:** whether the threshold changes at all. Open after this beta; it waits for field data.
+- **P9:** the hold-off periods and the failure count that starts them; open after this beta, with
+  its ch.28 rule. In a 29-hour run of the desktop wallet on Windows, 557 dial warnings named 33
+  addresses of 32 peers that other nodes hand out in the peer exchange and that accepted no connection.
 - **P5b, P5c, P8:** open after this beta. P5b follows in a later release, P5c has no estimate,
   P8 is lab-only, as their rows say. No code of theirs is in 0.4.0.
 
