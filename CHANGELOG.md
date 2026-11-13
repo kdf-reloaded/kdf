@@ -1080,6 +1080,13 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   says so. When nothing spent the taker payment yet, it refuses and says to repeat the call once
   the taker has refunded. A refusal builds nothing and writes nothing. A completed swap is refused
   as before. The automatic refund of the run loop is unchanged. Detail: CRD ch.51 R83.
+- **Manual recovery of a maker swap whose claim call failed now looks at the taker payment first.**
+  Before, `recover_funds_of_swap` refunded the maker payment after the refund time without looking at
+  the taker coin's chain, although the claim may have been mined. Now a claim that is found on the
+  chain and confirmed refuses the refund. A claim that is found but not confirmed, or a chain that
+  cannot be read, refuses and says so. When the taker's refund is found, or nothing spent the taker
+  payment, the refund goes on as before. A refusal builds nothing and writes nothing. The automatic
+  refund of the run loop is unchanged. Detail: CRD ch.51 R84.
 
 #### UTXO coins and Electrum
 

@@ -773,6 +773,10 @@ refund it.
 > taker payment is shown on its own chain to be refunded by the taker, with a
 > confirmation, the maker payment may be refunded by the manual recovery.
 
+> **Status note (2026-11-13, Reloaded-original).** R84 narrows item 2 further: a
+> record that holds no sent spend because the claim call failed is not covered by
+> item 2, and the manual recovery looks at the taker payment first.
+
 **R76.** *The refusal changes nothing.* A refusal of R75 MUST NOT append an
 event to the log of the swap, change its status or its recoverable flag, or
 write the swap record. The recoverable flag is derived from the events of the
@@ -1040,6 +1044,61 @@ changed by this rule.
 > `test_recover_funds_lost_claim_taker_refund_confirmed_before_the_lock_is_too_early`.
 > Run on 2026-11-12: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 89 tests of which these eight
 > are new, and the formatting check passed.
+
+> **Status note (2026-11-13, Reloaded-original).** R84 narrows R83: it covers the
+> record without a sent spend, after a failed claim call.
+
+> **Status (Reloaded-original; 2026-11-13).** This rule records no claim about
+> the reference implementation. It adds no event and no RPC field; the persisted
+> log shape of chapter 44 and the resume map (R19, R32) are unchanged.
+
+**R84.** *The manual recovery looks at the taker payment after a failed claim
+call.* For a swap whose claim step was reached (the log holds
+`TakerPaymentSpent`, `TakerPaymentSpendFailed` or `TakerPaymentSpendConfirmFailed`,
+the same condition R82 uses), whose record holds no sent spend (the claim call
+returned an error, so the claim may still have been mined), whose record holds
+the taker payment, and whose maker payment is unspent on its chain,
+`recover_funds_of_swap` MUST look at the taker payment exactly as R83 does
+(same key, same one-confirmation rule) before it answers:
+
+1. the maker's own spend of the taker payment is found with a confirmation: the
+   call MUST refuse with a text that says the claim of the taker payment on the
+   taker coin is on the chain and that the maker payment on the maker coin belongs
+   to the taker and is not refunded;
+2. the spend is found without a confirmation, or the search fails or cannot
+   decide: the call MUST refuse with the texts of R83 item 3, and MUST build no
+   transaction;
+3. the taker's refund of the taker payment is found with a confirmation, or
+   nothing spent the taker payment: the maker payment MAY be refunded. One info
+   line names the swap and both tickers and says which of the two applies. The
+   refund time, the refund gate and the refund build are exactly as for a swap
+   without a spend (R78). Unlike R83 item 4, an unspent taker payment does not
+   refuse here, because no spend was recorded as sent (the same answer as R82
+   item 2 gives in the run loop).
+
+A swap that did not reach the claim step makes no search and is unchanged. R83
+(a record that holds the sent spend) is unchanged. A refusal of this rule changes
+nothing (R76). The automatic refund of the run loop (R82) is not changed by this
+rule.
+
+> **As built (2026-11-13).** `MakerSwap::recover_funds_tracked` in
+> `mm2src/mm2_main/src/lp_swap/maker_swap.rs`: in the arm of the maker payment
+> search that finds the maker payment unspent, a second branch, taken when the
+> record holds no sent spend, `taker_payment_spend_attempted` is set (the replay of
+> the saved events sets it) and the taker payment is known, calls
+> `look_at_taker_payment_for_recovery` unchanged and answers as above; a refund or
+> an unspent payment goes on into the existing refund code. Tests
+> (`maker_swap_tests` in the same file, 7 new):
+> `test_recover_funds_failed_claim_call_confirmed_own_claim_is_refused`,
+> `test_recover_funds_failed_claim_call_unconfirmed_own_claim_is_refused`,
+> `test_recover_funds_failed_claim_call_failed_taker_search_is_refused_as_undetermined`,
+> `test_recover_funds_failed_claim_call_taker_refund_confirmed_refunds_the_maker_payment`,
+> `test_recover_funds_failed_claim_call_unspent_taker_payment_refunds_the_maker_payment`,
+> `test_recover_funds_failed_claim_call_unspent_taker_payment_before_the_lock_is_too_early`,
+> `test_recover_funds_claim_step_not_reached_makes_no_taker_payment_search`.
+> Every fixture is restored from a saved log with `TakerPaymentSpendFailed`. One existing test
+> (`test_recover_funds_maker_payment_refund_errored`, a restored swap that ended in the failed
+> refund) now mocks the taker search, because its log holds the failed claim call.
 
 ## 51.7 Bound Message Contract
 
