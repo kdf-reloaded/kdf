@@ -1096,9 +1096,15 @@ rule.
 > `test_recover_funds_failed_claim_call_unspent_taker_payment_refunds_the_maker_payment`,
 > `test_recover_funds_failed_claim_call_unspent_taker_payment_before_the_lock_is_too_early`,
 > `test_recover_funds_claim_step_not_reached_makes_no_taker_payment_search`.
-> Every fixture is restored from a saved log with `TakerPaymentSpendFailed`. One existing test
-> (`test_recover_funds_maker_payment_refund_errored`, a restored swap that ended in the failed
-> refund) now mocks the taker search, because its log holds the failed claim call.
+> The six fixtures that reach the claim step are restored from a saved log in which
+> `TakerPaymentSpendFailed` takes the place of `TakerPaymentSpent`; the seventh,
+> `test_recover_funds_claim_step_not_reached_makes_no_taker_payment_search`, from the same log with
+> `TakerPaymentSpent` replaced by `TakerPaymentValidatedAndConfirmed`, so that neither the spend nor
+> its failure is in the log. One existing test (`test_recover_funds_maker_payment_refund_errored`, a
+> restored swap that ended in the failed refund) now mocks the taker search, because its log holds
+> the failed claim call.
+> Run on 2026-11-13: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 96 tests of which these
+> seven are new.
 
 ## 51.7 Bound Message Contract
 

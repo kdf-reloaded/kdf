@@ -207,8 +207,10 @@ jobs:
           # in `ordermatch_tests`, which another cell runs. T-MP8 itself, toward relays
           # that read 1 and 0.3 messages per second, takes about 15 minutes and is
           # `#[ignore]` (`t_mp8_relay_1_msg_per_s`, `t_mp8_relay_0_3_msg_per_s`).
+          # The legacy maker-swap unit tests of `lp_swap::maker_swap` (the CRD ch.51 recovery
+          # rules R82 to R84 among them) also run in this cell.
           - name: maker-outbox
-            cmd: "cargo test -p mm2_main --lib -- maker_outbox:: t_mp8_harness"
+            cmd: "cargo test -p mm2_main --lib -- maker_outbox:: t_mp8_harness lp_swap::maker_swap::"
           # The bounds on a value received from a peer (CRD ch.28 R16a, T4a): the check itself,
           # its use by the node's decode sites in `mm2_p2p`, `coins` and `mm2_main`, and the
           # deepest message the node sends. The `ordermatch_tests` ones also run in the
