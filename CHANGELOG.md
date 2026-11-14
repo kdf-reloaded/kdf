@@ -491,7 +491,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   then draws the order with a weight that favors the faster up-to-date servers, half of each weight
   staying uniform so that nodes do not all pick the same server. A maintained server that falls
   behind or turns slow is replaced by another listed server, at most once per 5 minutes, and the
-  node logs why. To keep the previous behavior, set `electrum_server_order` to `random`; for the
+  node logs the replacement, with its reason when it has one. To keep the previous behavior, set `electrum_server_order` to `random`; for the
   behavior of GLEEC KDF, which keeps the listed order, set it to `listed`. Detail: PR #349; CRD
   ch.38 R38.6.4b-R, R38.6.4l.
 
