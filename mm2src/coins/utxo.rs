@@ -27,6 +27,7 @@ mod bchd_grpc;
 #[path = "utxo/pb.rs"]
 mod bchd_pb;
 pub mod header_layout_fallback;
+mod header_time_only;
 pub mod qtum;
 pub mod rpc_clients;
 pub mod slp;
@@ -97,7 +98,8 @@ use utxo_common::{big_decimal_from_sat, UtxoTxBuilder};
 use utxo_signer::sign_params::{SendingOutputInfo, SpendingInputInfo, UtxoSignTxParamsBuilder};
 use utxo_signer::with_key_pair::sign_tx_with_p2pk;
 use utxo_signer::with_trezor::TrezorTxSigner;
-use utxo_signer::{TxProvider, TxProviderError, UtxoSignTxError, UtxoSignTxResult};
+use utxo_signer::{refuse_sighash_suffix_for_hardware_wallet, TxProvider, TxProviderError, UtxoSignTxError,
+                  UtxoSignTxResult};
 
 use self::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumRpcRequest, EstimateFeeMethod, EstimateFeeMode,
                         NativeClient, UnspentInfo, UnspentMap, UtxoRpcClientEnum, UtxoRpcError, UtxoRpcFut,
@@ -149,29 +151,33 @@ pub type HistoryUtxoTxMap = HashMap<H256Json, HistoryUtxoTx>;
 pub type MatureUnspentMap = HashMap<Address, MatureUnspentList>;
 pub type RecentlySpentOutPointsGuard<'a> = AsyncMutexGuard<'a, RecentlySpentOutPoints>;
 
-#[cfg(windows)]
+/// Resolves the roaming application-data directory from the value of the `APPDATA` variable and a
+/// fallback lookup. The variable is taken as an `OsString`, so a profile path that is not valid UTF-8 is
+/// kept as is.
 #[cfg(not(target_arch = "wasm32"))]
-fn get_special_folder_path() -> PathBuf {
-    use libc::c_char;
-    use std::ffi::CStr;
-    use std::mem::zeroed;
-    use std::ptr::null_mut;
-    use winapi::shared::minwindef::MAX_PATH;
-    use winapi::um::shlobj::SHGetSpecialFolderPathA;
-    use winapi::um::shlobj::CSIDL_APPDATA;
-
-    let mut buf: [c_char; MAX_PATH + 1] = unsafe { zeroed() };
-    // https://docs.microsoft.com/en-us/windows/desktop/api/shlobj_core/nf-shlobj_core-shgetspecialfolderpatha
-    let rc = unsafe { SHGetSpecialFolderPathA(null_mut(), buf.as_mut_ptr(), CSIDL_APPDATA, 1) };
-    if rc != 1 {
-        panic!("!SHGetSpecialFolderPathA")
+fn resolve_roaming_app_data(
+    appdata: Option<std::ffi::OsString>,
+    fallback: impl FnOnce() -> Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    match appdata {
+        Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
+        _ => fallback().ok_or_else(|| {
+            "the APPDATA environment variable is not set and the roaming application-data folder could not be \
+             determined"
+                .to_owned()
+        }),
     }
-    Path::new(unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap()).to_path_buf()
 }
 
-#[cfg(not(windows))]
+/// The roaming application-data directory of the current Windows user
+/// (`c:\Users\$username\AppData\Roaming` on Vista and later).
 #[cfg(not(target_arch = "wasm32"))]
-fn get_special_folder_path() -> PathBuf { panic!("!windows") }
+fn roaming_app_data_dir() -> Result<PathBuf, String> {
+    resolve_roaming_app_data(std::env::var_os("APPDATA"), dirs::data_dir)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const HOME_DIR_NOT_FOUND: &str = "the home directory could not be determined";
 
 impl Transaction for UtxoTx {
     fn tx_hex(&self) -> Vec<u8> {
@@ -653,6 +659,15 @@ pub struct UtxoCoinConf {
     pub fork_id: u32,
     /// Signature version
     pub signature_version: SignatureVersion,
+    /// The sighash suffix (CRD ch.61): four little-endian bytes appended to every legacy and BIP-143
+    /// signature-hash preimage of this coin. Zero (the key is absent) appends nothing.
+    pub sighash_suffix: u32,
+    /// The optional `sighash_suffix_height` key, validated at activation. No signing site gates on it yet
+    /// (CRD ch.61 decision D1): the suffix applies at every height.
+    pub sighash_suffix_height: Option<u64>,
+    /// The `require_suffix_counterparty` key (CRD ch.61 R61.5A.4, default `true`): whether a coin with a
+    /// non-zero `sighash_suffix` declines a counterparty that does not declare suffix signing.
+    pub require_suffix_counterparty: bool,
     pub required_confirmations: AtomicU64,
     /// if set to true MM2 will check whether calculated fee is lower than relay fee and use
     /// relay fee amount instead of calculated
@@ -685,6 +700,9 @@ pub struct UtxoCoinConf {
     /// Set once the fallback has picked a layout for this coin, so the suggestion to pin it with
     /// `header_layout` is logged once per activation.
     pub header_layout_fallback_logged: Arc<AtomicBool>,
+    /// Set once a median-time-past list of this coin was read by size (CRD ch.37 R37.5.10e), so the
+    /// info line is logged once per activation.
+    pub header_time_only_logged: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -834,6 +852,7 @@ impl UtxoCoinFields {
             zcash: self.conf.zcash,
             str_d_zeel,
             hash_algo: self.tx_hash_algo.into(),
+            sighash_suffix: self.conf.sighash_suffix,
         }
     }
 }
@@ -965,6 +984,15 @@ impl MatureUnspentList {
             spendable: self.mature.iter().fold(BigDecimal::default(), fold),
             unspendable: self.immature.iter().fold(BigDecimal::default(), fold),
         }
+    }
+}
+
+/// The error text while the Electrum servers of a UTXO coin disagree about the chain (CRD ch.38 R38.6.4o item 12),
+/// `None` for a coin without an Electrum client.
+pub(crate) fn electrum_chain_disagreement(fields: &UtxoCoinFields) -> Option<String> {
+    match &fields.rpc_client {
+        UtxoRpcClientEnum::Electrum(client) => client.chain_disagreement(),
+        _ => None,
     }
 }
 
@@ -1296,23 +1324,21 @@ pub struct UtxoFeeDetails {
 #[cfg(not(target_arch = "wasm32"))]
 // https://github.com/KomodoPlatform/komodo/blob/master/zcutil/fetch-params.sh#L5
 // https://github.com/KomodoPlatform/komodo/blob/master/zcutil/fetch-params.bat#L4
-pub fn zcash_params_path() -> PathBuf {
+pub fn zcash_params_path() -> Result<PathBuf, String> {
     if cfg!(windows) {
         // >= Vista: c:\Users\$username\AppData\Roaming
-        get_special_folder_path().join("ZcashParams")
+        Ok(roaming_app_data_dir()?.join("ZcashParams"))
     } else if cfg!(target_os = "macos") {
-        home_dir()
-            .unwrap()
-            .join("Library")
-            .join("Application Support")
-            .join("ZcashParams")
+        let home = home_dir().ok_or_else(|| HOME_DIR_NOT_FOUND.to_owned())?;
+        Ok(home.join("Library").join("Application Support").join("ZcashParams"))
     } else {
-        home_dir().unwrap().join(".zcash-params")
+        let home = home_dir().ok_or_else(|| HOME_DIR_NOT_FOUND.to_owned())?;
+        Ok(home.join(".zcash-params"))
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn coin_daemon_data_dir(name: &str, is_asset_chain: bool) -> PathBuf {
+pub fn coin_daemon_data_dir(name: &str, is_asset_chain: bool) -> Result<PathBuf, String> {
     // komodo/util.cpp/GetDefaultDataDir
     let mut data_dir = match dirs::home_dir() {
         Some(hd) => hd,
@@ -1321,7 +1347,7 @@ pub fn coin_daemon_data_dir(name: &str, is_asset_chain: bool) -> PathBuf {
 
     if cfg!(windows) {
         // >= Vista: c:\Users\$username\AppData\Roaming
-        data_dir = get_special_folder_path();
+        data_dir = roaming_app_data_dir()?;
         if is_asset_chain {
             data_dir.push("Komodo");
         } else {
@@ -1344,7 +1370,7 @@ pub fn coin_daemon_data_dir(name: &str, is_asset_chain: bool) -> PathBuf {
     if is_asset_chain {
         data_dir.push(name)
     };
-    data_dir
+    Ok(data_dir)
 }
 
 /// Electrum protocol version verifier.
@@ -2107,6 +2133,9 @@ fn map_utxo_sign_error(ticker: &str, error: UtxoSignTxError) -> String {
         UtxoSignTxError::TrezorDoesntSupportP2WPKH => {
             "hardware_wallet:unsupported_script_signing_mode: Trezor UTXO signer does not support this address/script mode".to_owned()
         },
+        sign_error @ UtxoSignTxError::SighashSuffixNotSupportedByHardwareWallet { .. } => {
+            format!("hardware_wallet:unsupported_sighash_suffix: {}", sign_error)
+        },
         UtxoSignTxError::TrezorError(trezor) => map_trezor_error(trezor),
         UtxoSignTxError::InvalidSignParam { param, description } => format!(
             "hardware_wallet:missing_derivation_metadata: invalid Trezor signing parameter '{}': {}",
@@ -2203,6 +2232,9 @@ where
             "UTXO Swap V2 Trezor input signing",
         ))
     })?;
+    // CRD ch.61 R61.4.4: refuse before the device is contacted.
+    refuse_sighash_suffix_for_hardware_wallet(unsigned.sighash_suffix)
+        .map_err(|e| TransactionErr::Plain(map_utxo_sign_error(&fields.conf.ticker, e.into_inner())))?;
     let hw_ctx = fields.hw_ctx.as_ref().ok_or_else(|| {
         TransactionErr::Plain(
             "hardware_wallet:transport_failure: initialized hardware wallet context is unavailable".to_owned(),
@@ -2522,4 +2554,67 @@ fn test_parse_hex_encoded_u32() {
     assert_eq!(parse_hex_encoded_u32("0x892f2085"), Ok(2301567109));
     assert_eq!(parse_hex_encoded_u32("892f2085"), Ok(2301567109));
     assert_eq!(parse_hex_encoded_u32("0x7361707a"), Ok(1935765626));
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod data_dir_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[cfg(unix)]
+    #[test]
+    fn roaming_app_data_keeps_a_non_utf8_value() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        // "C:\\Users\\Tom" followed by two bytes that are not valid UTF-8 (CP1250 letters).
+        let mut bytes = b"C:\\Users\\Tom".to_vec();
+        bytes.extend_from_slice(&[0xE1, 0xF8]);
+        let value = OsString::from_vec(bytes.clone());
+        let path = resolve_roaming_app_data(Some(value), || panic!("fallback must not be asked")).unwrap();
+        assert_eq!(path.as_os_str().as_bytes(), bytes.as_slice());
+        assert!(path.to_str().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn roaming_app_data_keeps_a_non_utf8_value() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let wide: Vec<u16> = "C:\\Users\\Tom".encode_utf16().chain([0xD800u16]).collect();
+        let value = OsString::from_wide(&wide);
+        let path = resolve_roaming_app_data(Some(value), || panic!("fallback must not be asked")).unwrap();
+        assert_eq!(path.as_os_str().encode_wide().collect::<Vec<_>>(), wide);
+        assert!(path.to_str().is_none());
+    }
+
+    #[test]
+    fn roaming_app_data_falls_back_when_the_variable_is_missing_or_empty() {
+        let fallback = || Some(PathBuf::from("/fallback/Roaming"));
+        assert_eq!(
+            resolve_roaming_app_data(None, fallback).unwrap(),
+            PathBuf::from("/fallback/Roaming")
+        );
+        assert_eq!(
+            resolve_roaming_app_data(Some(OsString::new()), fallback).unwrap(),
+            PathBuf::from("/fallback/Roaming")
+        );
+    }
+
+    #[test]
+    fn roaming_app_data_error_names_the_variable() {
+        let error = resolve_roaming_app_data(None, || None).unwrap_err();
+        assert!(error.contains("APPDATA"), "{error}");
+        assert!(error.contains("could not be determined"), "{error}");
+    }
+
+    #[test]
+    fn default_directories_resolve_on_this_host() {
+        assert!(zcash_params_path().unwrap().ends_with(if cfg!(windows) {
+            "ZcashParams"
+        } else if cfg!(target_os = "macos") {
+            "Application Support/ZcashParams"
+        } else {
+            ".zcash-params"
+        }));
+        assert!(coin_daemon_data_dir("rin", false).is_ok());
+        assert!(coin_daemon_data_dir("RICK", true).unwrap().ends_with("RICK"));
+    }
 }

@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use best_orders::BestOrdersAction;
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
-use coins::utxo::{compressed_pub_key_from_priv_raw, ChecksumType, UtxoAddressFormat};
+use coins::utxo::UtxoAddressFormat;
 use coins::{coin_conf, find_pair, lp_coinfind, BalanceTradeFeeUpdatedHandler, CoinProtocol, FeeApproxStage, MmCoinEnum};
 use common::executor::{spawn, Timer};
 use common::log::{error, LogOnError};
@@ -61,8 +61,9 @@ use timed_map::TimedMap;
 use trie_db::NodeCodec as NodeCodecT;
 use uuid::Uuid;
 
-use crate::mm2::lp_network::{broadcast_p2p_msg_with_priority, relay_queue_signal, relay_queue_signal_count,
-                             request_any_relay, request_one_peer, subscribe_to_topic, Libp2pPeerId, P2PRequest};
+use crate::mm2::lp_network::{broadcast_p2p_msg_with_priority, connected_relays, relay_queue_signal,
+                             relay_queue_signal_count, request_any_relay, request_one_peer, subscribe_to_topic,
+                             Libp2pPeerId, P2PRequest};
 use crate::mm2::lp_swap::{calc_max_maker_vol, check_balance_for_maker_swap, check_balance_for_taker_swap,
                           check_other_coin_balance_for_swap, insert_new_swap_to_db, is_pubkey_banned,
                           lp_atomic_locktime, run_maker_swap, run_taker_swap, swap_versioning::SwapVersion,
@@ -71,9 +72,9 @@ use crate::mm2::lp_swap::{calc_max_maker_vol, check_balance_for_maker_swap, chec
 
 pub use best_orders::{best_orders_rpc, best_orders_rpc_v2};
 use maker_balance_watch::{start_maker_balance_watch, BalanceWatches};
-use my_orders_storage::{delete_my_maker_order, delete_my_taker_order, save_my_new_maker_order,
-                        save_my_new_taker_order, MyActiveOrders, MyOrdersFilteringHistory, MyOrdersHistory,
-                        MyOrdersStorage};
+use my_orders_storage::{delete_my_maker_order, delete_my_taker_order, maker_restore_skips_cancelled,
+                        removal_recorded_in_history, save_my_new_maker_order, save_my_new_taker_order, MyActiveOrders,
+                        MyOrdersFilteringHistory, MyOrdersHistory, MyOrdersStorage};
 use order_write_gate::{OrderWriteGate, PublishedState, RemovedMakerOrder};
 pub use orderbook_depth::orderbook_depth_rpc;
 pub use orderbook_rpc::{orderbook_rpc, orderbook_rpc_v2};
@@ -89,9 +90,9 @@ cfg_wasm32! {
 #[path = "lp_ordermatch/lp_bot.rs"] mod lp_bot;
 #[path = "lp_ordermatch/maker_balance_watch.rs"]
 mod maker_balance_watch;
+pub use lp_bot::{price_service, start_simple_market_maker_bot, stop_simple_market_maker_bot, TradingBotEvent};
 #[cfg(test)]
-pub use lp_bot::{process_price_request, StartSimpleMakerBotRequest, KMD_PRICE_ENDPOINT};
-pub use lp_bot::{start_simple_market_maker_bot, stop_simple_market_maker_bot, TradingBotEvent};
+pub use lp_bot::{process_price_request, StartSimpleMakerBotRequest};
 
 #[path = "lp_ordermatch/my_orders_storage.rs"]
 mod my_orders_storage;
@@ -130,12 +131,16 @@ pub use ordermatch_orderbook::*;
 
 #[path = "lp_ordermatch/sync_answer_deferral.rs"]
 mod sync_answer_deferral;
-pub(crate) use sync_answer_deferral::{answer_sync_request, sync_answer_deferral_ms, sync_request_retry_ms,
-                                      SyncAnswerDeferral, SyncAnswerReply, SyncInFlight};
+pub(crate) use sync_answer_deferral::{answer_orderbook_request, answer_sync_request, register_keep_alive_handling,
+                                      sync_answer_deferral_ms, sync_request_alternate_relay, sync_request_retry_ms,
+                                      wait_until_applied, SyncAnswerDeferral, SyncAnswerReply, SyncInFlight};
+
+#[path = "lp_ordermatch/mismatch_watch.rs"] mod mismatch_watch;
+pub(crate) use mismatch_watch::{MismatchWatch, SkipCounts, WatchGuard};
 
 #[path = "lp_ordermatch/sync_log.rs"] mod sync_log;
-pub(crate) use sync_log::{classify_sync_request, debug_enabled, pairs_label, AnswerClass, AnswerEvent, AnswerPath,
-                          AtOnce, RequestEvent, SyncLog};
+pub(crate) use sync_log::{classify_sync_request, debug_enabled, pairs_label, AltEvent, AltReason, AnswerClass,
+                          AnswerEvent, AnswerPath, AtOnce, Attempt, RequestEvent, SyncLog};
 
 #[path = "lp_ordermatch/ordermatch_trading.rs"]
 mod ordermatch_trading;
@@ -396,6 +401,11 @@ pub(crate) struct OrdermatchContext {
     pub orderbook: PaMutex<Orderbook>,
     /// Trie data store extracted from `Orderbook` to reduce contention.
     pub trie_store: Arc<PaMutex<TrieStore>>,
+    /// The liveness instants of the pairs of other makers (CRD ch.32 R-GH14), shared with the trie store.
+    pub pair_liveness: Arc<PairLiveness>,
+    /// The watch behind the DEBUG tail of the trigger (b) line of CRD ch.32 R-Q5d (logging is left to the
+    /// implementation, R36), shared with the trie store.
+    pub mismatch_watch: Arc<MismatchWatch>,
     /// Sender to enqueue trie mutations for background application.
     pub trie_ops_tx: UnboundedSender<Vec<TrieOp>>,
     /// Tracks which orderbook topics we are subscribed to, separate from the order index.
@@ -426,7 +436,10 @@ impl Default for OrdermatchContext {
     /// The receiver side is spawned as a local future (requires an active async
     /// runtime or the `common::executor` threadpool).
     fn default() -> Self {
-        let trie_store = Arc::new(PaMutex::new(TrieStore::default()));
+        let trie_store = TrieStore::default();
+        let pair_liveness = trie_store.pair_liveness.clone();
+        let mismatch_watch = trie_store.mismatch_watch.clone();
+        let trie_store = Arc::new(PaMutex::new(trie_store));
         let (trie_ops_tx, trie_ops_rx) = unbounded::<Vec<TrieOp>>();
         // Drive the worker on the common executor so trie ops are applied even in
         // unit-test contexts that don't have a full MmCtx runtime.
@@ -440,6 +453,8 @@ impl Default for OrdermatchContext {
             my_taker_orders: Default::default(),
             orderbook: Default::default(),
             trie_store,
+            pair_liveness,
+            mismatch_watch,
             trie_ops_tx,
             orderbook_subscriptions: PaRwLock::new(HashMap::default()),
             sync_answer_deferral: Default::default(),
@@ -477,14 +492,19 @@ pub fn init_ordermatch_context(ctx: &MmArc) -> OrdermatchInitResult<()> {
         }
     }
 
-    let trie_store = Arc::new(PaMutex::new(TrieStore::default()));
+    let trie_store = TrieStore::for_ctx(ctx);
+    let pair_liveness = trie_store.pair_liveness.clone();
+    let mismatch_watch = trie_store.mismatch_watch.clone();
+    let trie_store = Arc::new(PaMutex::new(trie_store));
     let trie_ops_tx = spawn_trie_store_worker(ctx, trie_store.clone());
 
     let ordermatch_context = OrdermatchContext {
         maker_orders_ctx: Default::default(),
         my_taker_orders: Default::default(),
-        orderbook: Default::default(),
+        orderbook: PaMutex::new(Orderbook::for_ctx(ctx)),
         trie_store,
+        pair_liveness,
+        mismatch_watch,
         trie_ops_tx,
         orderbook_subscriptions: PaRwLock::new(HashMap::default()),
         sync_answer_deferral: Default::default(),
@@ -509,13 +529,18 @@ impl OrdermatchContext {
     fn from_ctx(ctx: &MmArc) -> Result<Arc<OrdermatchContext>, String> {
         let ctx2 = ctx.clone();
         Ok(try_s!(from_ctx(&ctx.ordermatch_ctx, move || {
-            let trie_store = Arc::new(PaMutex::new(TrieStore::default()));
+            let trie_store = TrieStore::for_ctx(&ctx2);
+            let pair_liveness = trie_store.pair_liveness.clone();
+            let mismatch_watch = trie_store.mismatch_watch.clone();
+            let trie_store = Arc::new(PaMutex::new(trie_store));
             let trie_ops_tx = spawn_trie_store_worker(&ctx2, trie_store.clone());
             Ok(OrdermatchContext {
                 maker_orders_ctx: Default::default(),
                 my_taker_orders: Default::default(),
-                orderbook: Default::default(),
+                orderbook: PaMutex::new(Orderbook::for_ctx(&ctx2)),
                 trie_store,
+                pair_liveness,
+                mismatch_watch,
                 trie_ops_tx,
                 orderbook_subscriptions: PaRwLock::new(HashMap::default()),
                 sync_answer_deferral: Default::default(),
@@ -533,13 +558,18 @@ impl OrdermatchContext {
     fn from_ctx(ctx: &MmArc) -> Result<Arc<OrdermatchContext>, String> {
         let ctx2 = ctx.clone();
         Ok(try_s!(from_ctx(&ctx.ordermatch_ctx, move || {
-            let trie_store = Arc::new(PaMutex::new(TrieStore::default()));
+            let trie_store = TrieStore::for_ctx(&ctx2);
+            let pair_liveness = trie_store.pair_liveness.clone();
+            let mismatch_watch = trie_store.mismatch_watch.clone();
+            let trie_store = Arc::new(PaMutex::new(trie_store));
             let trie_ops_tx = spawn_trie_store_worker(&ctx2, trie_store.clone());
             Ok(OrdermatchContext {
                 maker_orders_ctx: Default::default(),
                 my_taker_orders: Default::default(),
-                orderbook: Default::default(),
+                orderbook: PaMutex::new(Orderbook::for_ctx(&ctx2)),
                 trie_store,
+                pair_liveness,
+                mismatch_watch,
                 trie_ops_tx,
                 orderbook_subscriptions: PaRwLock::new(HashMap::default()),
                 sync_answer_deferral: Default::default(),

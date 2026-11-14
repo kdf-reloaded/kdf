@@ -50,6 +50,10 @@ pub trait CoinWithdrawInit {
 
 pub async fn init_withdraw(ctx: MmArc, request: WithdrawRequest) -> WithdrawInitResult<InitWithdrawResponse> {
     let coin = lp_coinfind_or_err(&ctx, &request.coin).await.mm_err(Into::into)?;
+    // CRD ch.38 R38.6.4o item 12: no withdrawal is built while the coin's Electrum servers disagree about the chain.
+    if let Some(error) = coin.chain_disagreement() {
+        return MmError::err(WithdrawError::ChainDisagreement(error));
+    }
     let task = WithdrawTask {
         ctx: ctx.clone(),
         coin,

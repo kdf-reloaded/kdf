@@ -32,6 +32,7 @@ pub async fn create_new_account<'a, Coin, XPubExtractor>(
     coin: &Coin,
     hd_wallet: &'a UtxoHDWallet,
     xpub_extractor: Option<&XPubExtractor>,
+    index: NewAccountIndex,
 ) -> MmResult<HDAccountMut<'a, UtxoHDAccount>, NewAccountCreatingError>
 where
     Coin: ExtractExtendedPubkey<ExtendedPublicKey = Secp256k1ExtendedPublicKey>
@@ -39,21 +40,12 @@ where
         + Sync,
     XPubExtractor: HDXPubExtractor + Sync,
 {
-    const INIT_ACCOUNT_ID: u32 = 0;
-    let new_account_id = hd_wallet
-        .accounts
-        .lock()
-        .await
-        .iter()
-        // The last element of the BTreeMap has the max account index.
-        .last()
-        .map(|(account_id, _account)| *account_id + 1)
-        .unwrap_or(INIT_ACCOUNT_ID);
-    if new_account_id >= ChildNumber::HARDENED_FLAG {
-        return MmError::err(NewAccountCreatingError::AccountLimitReached {
-            max_accounts_number: ChildNumber::HARDENED_FLAG,
-        });
-    }
+    // The index is chosen, and an out-of-range or taken one refused, before any key is derived or any device is
+    // asked (CRD ch.05 R35c item 1).
+    let new_account_id = {
+        let accounts = hd_wallet.accounts.lock().await;
+        choose_new_account_id(&*accounts, index)?
+    };
 
     let account_child_hardened = true;
     let account_child = ChildNumber::new(new_account_id, account_child_hardened)
@@ -76,11 +68,10 @@ where
 
     let accounts = hd_wallet.accounts.lock().await;
     if accounts.contains_key(&new_account_id) {
-        let error = format!(
-            "Account '{}' has been activated while we proceed the 'create_new_account' function",
-            new_account_id
-        );
-        return MmError::err(NewAccountCreatingError::Internal(error));
+        // The index was free when it was chosen: the account was created while its key was being derived.
+        return MmError::err(NewAccountCreatingError::AccountAlreadyExists {
+            account_id: new_account_id,
+        });
     }
 
     coin.upload_new_account(hd_wallet, new_account.to_storage_item())
@@ -276,11 +267,22 @@ where
     Ok(balances)
 }
 
+/// Loads the stored HD accounts of a coin. `software_master` is the seed's BIP-32 master for a coin of the
+/// software policy: the rows that the seed did not derive are removed and not loaded (CRD ch.05 R55 (1)).
+/// A coin of the Trezor policy passes `None`: its rows are loaded as stored, since its keys need the device.
 pub async fn load_hd_accounts_from_storage(
     hd_wallet_storage: &HDWalletCoinStorage,
     derivation_path: &HDPathToCoin,
+    software_master: Option<&bip32::ExtendedPrivateKey<secp256k1::SecretKey>>,
 ) -> HDWalletStorageResult<HDAccountsMap<UtxoHDAccount>> {
-    let accounts = hd_wallet_storage.load_all_accounts().await?;
+    let accounts = match software_master {
+        Some(master) => {
+            hd_wallet_storage
+                .load_accounts_derived_from_seed(master, &derivation_path.to_derivation_path())
+                .await?
+        },
+        None => hd_wallet_storage.load_all_accounts().await?,
+    };
     let res: HDWalletStorageResult<HDAccountsMap<UtxoHDAccount>> = accounts
         .iter()
         .map(|account_info| {
@@ -299,6 +301,11 @@ pub async fn load_hd_accounts_from_storage(
     }
 }
 
+/// Provides the extended public key at `derivation_path`, from the source the coin's own key policy names (CRD
+/// ch.05 R35c, R35a): the device for a coin of the Trezor policy, the in-memory BIP-32 master for a coin of the
+/// software global-HD policy. `xpub_extractor` is the device the caller can offer (it exists whenever a hardware
+/// context does); a software-keyed coin never asks it, so a hardware context beside a software login cannot
+/// bind a software coin's account to the device's key.
 pub async fn extract_extended_pubkey<T, XPubExtractor>(
     coin: &T,
     xpub_extractor: Option<&XPubExtractor>,
@@ -308,9 +315,19 @@ where
     T: AsRef<UtxoCoinFields>,
     XPubExtractor: HDXPubExtractor,
 {
-    match xpub_extractor {
-        // Hardware source: require the coin's `trezor_coin` config and run the device protocol.
-        Some(extractor) => {
+    match &coin.as_ref().priv_key_policy {
+        // Software global-HD source: derive the account extended pubkey from the in-memory
+        // BIP-32 master held by the coin's HD priv-key policy. No `trezor_coin` and no device.
+        PrivKeyPolicy::HDWallet {
+            bip39_secp_priv_key, ..
+        } => crypto::derive_secp256k1_extended_pubkey(bip39_secp_priv_key.clone(), &derivation_path)
+            .mm_err(|e| HDExtractPubkeyError::Internal(format!("BIP32 derivation error: {}", e))),
+        // Hardware source: require the coin's `trezor_coin` config and run the device protocol. A coin of the
+        // Trezor policy whose device is not offered (the hardware context is gone) reports that.
+        PrivKeyPolicy::Trezor => {
+            let extractor = xpub_extractor.or_mm_err(|| HDExtractPubkeyError::HwContextNotInitialized)?;
+            // CRD ch.05 R58a: the device that would answer is the one the coin was activated with.
+            crate::hd_pubkey::require_extractor_device(coin.as_ref().hw_ctx.as_ref(), extractor)?;
             let trezor_coin = coin
                 .as_ref()
                 .conf
@@ -319,18 +336,8 @@ where
             let xpub = extractor.extract_utxo_xpub(trezor_coin, derivation_path).await?;
             Secp256k1ExtendedPublicKey::from_str(&xpub).map_to_mm(HDExtractPubkeyError::InvalidXpub)
         },
-        // Software global-HD source: derive the account extended pubkey from the in-memory
-        // BIP-32 master held by the coin's HD priv-key policy. No `trezor_coin` and no device.
-        None => {
-            let bip39_secp_priv_key = match &coin.as_ref().priv_key_policy {
-                PrivKeyPolicy::HDWallet {
-                    bip39_secp_priv_key, ..
-                } => bip39_secp_priv_key.clone(),
-                _ => return MmError::err(HDExtractPubkeyError::HwContextNotInitialized),
-            };
-            crypto::derive_secp256k1_extended_pubkey(bip39_secp_priv_key, &derivation_path)
-                .mm_err(|e| HDExtractPubkeyError::Internal(format!("BIP32 derivation error: {}", e)))
-        },
+        // A single-key coin has no HD wallet to take an account key for.
+        PrivKeyPolicy::KeyPair(_) => MmError::err(HDExtractPubkeyError::HwContextNotInitialized),
     }
 }
 
@@ -340,7 +347,8 @@ pub async fn get_withdraw_hd_sender<T>(
     hd_wallet: &T::HDWallet,
 ) -> MmResult<WithdrawSenderAddress<Address, Public>, WithdrawError>
 where
-    T: HDWalletCoinOps<Address = Address, Pubkey = Public>,
+    T: HDWalletCoinOps<Address = Address, Pubkey = Public, HDWallet = UtxoHDWallet, HDAccount = UtxoHDAccount>
+        + AsRef<UtxoCoinFields>,
 {
     let HDAddressId {
         account_id,
@@ -376,10 +384,26 @@ where
             },
         },
         None => {
-            // Compatibility divergence from upstream: when `from` is omitted for an HD wallet,
-            // default to the single enabled/active address (account 0, External chain, address 0)
-            // — the same address used for balance and swaps — so clients that don't send `from`
-            // can still preview and withdraw. Upstream rejects an omitted `from`.
+            // Compatibility divergence from upstream (CRD ch.49 R49.4, decisions BY, BZ and CU): when `from` is
+            // omitted for an HD wallet, the sender is the coin's activated address, the address at the
+            // activation's `path_to_address` with its full derivation path -- the address the coin's swaps use
+            // (CRD ch.05 R42) -- so clients that don't send `from` can still preview and withdraw. Upstream
+            // rejects an omitted `from`. This one place serves the task route and the direct `withdraw` method.
+            let fields: &UtxoCoinFields = coin.as_ref();
+            if let PrivKeyPolicy::HDWallet { path_to_address, .. } = &fields.priv_key_policy {
+                // The account of the activated address must be held, as for any other sender.
+                hd_wallet
+                    .get_account(path_to_address.account_id)
+                    .await
+                    .or_mm_err(|| WithdrawError::FromAddressNotFound)?;
+                let hd_address =
+                    crate::utxo::utxo_standard_swap_v2::enabled_hd_address_info(fields, hd_wallet, "withdraw")
+                        .await
+                        .map_to_mm(WithdrawError::InternalError)?;
+                return Ok(WithdrawSenderAddress::from(hd_address));
+            }
+            // A coin without a software HD key policy (the Trezor policy, which does not honor
+            // `path_to_address`) keeps account 0, External chain, address 0.
             let default_account = hd_wallet
                 .get_account(0)
                 .await

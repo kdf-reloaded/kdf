@@ -34,6 +34,12 @@ pub enum UtxoSignTxError {
     CoinNotSupportedWithTrezor { coin: String },
     #[display(fmt = "Trezor doesn't support P2WPKH outputs yet")]
     TrezorDoesntSupportP2WPKH,
+    #[display(
+        fmt = "The sighash suffix {:#010x} of this coin is not supported by hardware wallets: the device signs \
+               its own digest and cannot append the suffix",
+        suffix
+    )]
+    SighashSuffixNotSupportedByHardwareWallet { suffix: u32 },
     #[display(fmt = "Trezor client error: {}", _0)]
     TrezorError(TrezorError),
     #[display(fmt = "Encountered invalid parameter '{}': {}", param, description)]
@@ -61,6 +67,20 @@ pub enum UtxoSignTxError {
     Transport(String),
     #[display(fmt = "Internal error: {}", _0)]
     Internal(String),
+}
+
+/// A hardware wallet signs the digest its own firmware defines and cannot be given a sighash suffix (CRD ch.61
+/// R61.4.4). For a coin whose resolved suffix is non-zero, every hardware signing request must fail with this
+/// error before anything is sent to the device, instead of producing a transaction the network rejects.
+///
+/// # Errors
+///
+/// [`UtxoSignTxError::SighashSuffixNotSupportedByHardwareWallet`] when `sighash_suffix` is not zero.
+pub fn refuse_sighash_suffix_for_hardware_wallet(sighash_suffix: u32) -> UtxoSignTxResult<()> {
+    if sighash_suffix == 0 {
+        return Ok(());
+    }
+    MmError::err(UtxoSignTxError::SighashSuffixNotSupportedByHardwareWallet { suffix: sighash_suffix })
 }
 
 impl From<TrezorError> for UtxoSignTxError {
@@ -153,5 +173,30 @@ pub trait UtxoSignerOps {
                 Ok(signed)
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod sighash_suffix_tests {
+    use super::*;
+
+    /// CRD ch.61 T7: a coin with a non-zero suffix is refused for a hardware wallet with an error naming the
+    /// suffix, and a zero suffix is not. `TrezorTxSigner::sign_tx`, the wallet-funded V2 signing path and the
+    /// withdraw path call this function before any device is contacted, so the refusal precedes every device
+    /// message by construction.
+    #[test]
+    fn t7_a_hardware_wallet_refuses_a_non_zero_suffix() {
+        assert!(refuse_sighash_suffix_for_hardware_wallet(0).is_ok());
+
+        let err = refuse_sighash_suffix_for_hardware_wallet(0x0132_4342)
+            .unwrap_err()
+            .into_inner();
+        assert!(matches!(
+            err,
+            UtxoSignTxError::SighashSuffixNotSupportedByHardwareWallet { suffix: 0x0132_4342 }
+        ));
+        let message = err.to_string();
+        assert!(message.contains("sighash suffix 0x01324342"), "{message}");
+        assert!(message.contains("hardware wallet"), "{message}");
     }
 }

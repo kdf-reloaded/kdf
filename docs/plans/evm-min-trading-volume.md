@@ -1,6 +1,6 @@
 # Plan: the EVM minimum trading volume
 
-**Status:** in progress (PR #66 merged; an end-to-end preview on a real 8-decimal coin left) — **Last reviewed:** 2026-10-29
+**Status:** parked (PR #66 merged; only the end-to-end preview test on a real 8-decimal coin is open) — **Last reviewed:** 2026-11-08
 
 > **Context:** a field report of a refused WBTC-PLG20 buy traced to
 > `min_trading_vol` for EVM coins, which is computed from the coin's decimals by
@@ -16,12 +16,12 @@
 > of every coin family under plan `trading-floors-parity`, which now carries
 > the remaining steps. This plan's EVM/QRC20 scope is unchanged.
 
-**State (2026-10-25): implemented, PR #66, merge after #57.** Steps 2 and 3
+**State: merged 2026-10-25 (PR #66), after PR #57.** Steps 2 and 3
 were done on 2026-10-24 — the Spec Reader dispatch produced CRD ch.57 §57.7A
 (Part D: R57.7A.1–R57.7A.6, T10–T12, D7–D8, V4), and it passed the Dirty Gate
 the same day (PASS, measure 0.01, recorded in ch.57 §57.12's second
 scoped-addition item). Step 4 was implemented from the cleared chapter alone on
-branch `fix/evm-min-trading-volume` (PR #66), to be merged after PR #57. The
+branch `fix/evm-min-trading-volume` (PR #66, merged 2026-10-25). The
 one item of "What done looks like" not met is the end-to-end preview of the
 field report's volume on a real eight-decimal coin, recorded below as a
 coverage gap.

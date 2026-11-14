@@ -7,11 +7,10 @@ use mm2_err_handle::prelude::*;
 use rpc::v1::types::ToTxHash;
 
 use crate::{lp_coinfind_or_err,
-            utxo::{output_script,
-                   utxo_common::{big_decimal_from_sat_unsigned, merge_utxos, MergeConditions, UtxoMergeError},
+            utxo::{utxo_common::{big_decimal_from_sat_unsigned, merge_utxos_at_enabled_address, MergeConditions,
+                                 UtxoMergeError},
                    UtxoCommonOps, UtxoFeeDetails},
-            CoinFindError, DerivationMethod, MmCoinEnum, Transaction, TransactionDetails};
-use keys::Type as ScriptType;
+            CoinFindError, MmCoinEnum, Transaction, TransactionDetails};
 
 #[derive(Deserialize)]
 pub struct ConsolidateUtxoRequest {
@@ -62,6 +61,7 @@ impl From<UtxoMergeError> for ConsolidateUtxoError {
     fn from(err: UtxoMergeError) -> Self {
         match err {
             UtxoMergeError::BadMergeConditions(e) => ConsolidateUtxoError::BadMergeConditions(e),
+            UtxoMergeError::InvalidAddress(e) => ConsolidateUtxoError::InvalidAddress(e),
             UtxoMergeError::InternalError(e) => ConsolidateUtxoError::InternalError(e),
         }
     }
@@ -81,26 +81,12 @@ pub async fn consolidate_utxos_rpc(
     let coin = lp_coinfind_or_err(&ctx, &request.coin).await.map_mm_err()?;
     match coin {
         MmCoinEnum::UtxoCoin(coin) => {
-            let from_address = match &coin.as_ref().derivation_method {
-                DerivationMethod::Iguana(my_address) => my_address.clone(),
-                DerivationMethod::HDWallet(_) => {
-                    return Err(ConsolidateUtxoError::InvalidAddress(
-                        "HD wallet consolidation not yet supported".to_string(),
-                    )
-                    .into());
-                },
-            };
-            let to_script_pubkey = output_script(&from_address, ScriptType::P2PKH);
-
-            let (transaction, spent_utxos) = merge_utxos(
-                &coin,
-                &from_address,
-                &to_script_pubkey,
-                &request.merge_conditions,
-                request.broadcast,
-            )
-            .await
-            .map_mm_err()?;
+            // The coin's own address: the single address of an iguana coin, the enabled address of an HD coin
+            // (CRD ch.05 R35b). The merge pays that same address.
+            let (transaction, spent_utxos, from_address) =
+                merge_utxos_at_enabled_address(&coin, &request.merge_conditions, request.broadcast)
+                    .await
+                    .map_mm_err()?;
 
             let received_by_me = transaction.outputs.iter().map(|o| o.value).sum();
             let received_by_me = big_decimal_from_sat_unsigned(received_by_me, coin.as_ref().decimals);

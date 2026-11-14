@@ -151,7 +151,7 @@ R21. The superset has been removed; all three shapes now agree.
   and the corrected R21. Done on `dev` (commit `fd075e66e`); the shared struct and
   all activation handlers compile and the streaming_activations tests pass.
 
-## #6 — KMD swaps (issue #11): reward rule, fee split, no-fee waiver, V2 layout — **OPEN**
+## #6 — KMD swaps (issue #11): reward rule, fee split, no-fee waiver, V2 layout — **RESOLVED (issue #11 batches 1 and 2; the deferred and recorded-only items below are unchanged)**
 
 CRD references:
 - [`38-utxo-coin-maintenance-and-features.md`](./38-utxo-coin-maintenance-and-features.md)
@@ -167,30 +167,31 @@ CRD references:
 - [`06-network-id-seed-node.md`](./06-network-id-seed-node.md), accessor
   table.
 
-The chapters were corrected on 2026-09-27. The code has not been changed yet.
+The chapters were corrected on 2026-09-27. The code was fixed in two batches; see the
+CHANGELOG, 0.3.0-alpha.1 (issue #11).
 Each chapter carries an "Implementation obligations" note listing the files
 and tests to change.
 
-- [ ] **KMD reward (R38.4.1).** Apply the KIP-0001 ÷500 reduction for UTXOs
+- [x] **KMD reward (R38.4.1).** Apply the KIP-0001 ÷500 reduction for UTXOs
   confirmed at or after height 3,484,958. Without it, any KMD spend of an
   eligible post-fork UTXO over-claims and is rejected with
   `bad-txns-in-belowout`. This covers taker fees, swap payments and
   withdraws on both netids.
-- [ ] **KMD direct-burn split (ch.08 R8).** Implement the three ranges:
+- [x] **KMD direct-burn split (ch.08 R8).** Implement the three ranges:
   `Standard(dust)` at or below dust; a fee leg clamped to dust when 75% of
   the total is below dust; 75/25 above that. Withdraw the builder's
   under-dust exemption (ch.08 R15A). Without this fix, reloaded and
   `v2.6.0-beta` peers on netid 8762 reject each other's KMD taker fees for
   trades up to about 0.0115 KMD.
-- [ ] **No-fee waiver (ch.08 R15C, ch.16 R7; maintainer decision
+- [x] **No-fee waiver (ch.08 R15C, ch.16 R7; maintainer decision
   2026-09-27: adopt).** A non-privacy taker whose key equals the network
   burn key pays no fee, on both protocols. The keys are `0369aa…3153` on
   8762 and `03a778…bf5c` on 6133. Netid 8762 needs its burn key configured.
-- [ ] **Version-two KMD-pair exemption (ch.16 R12B).** On netid 8762, a
+- [x] **Version-two KMD-pair exemption (ch.16 R12B).** On netid 8762, a
   version-two swap with KMD on either side carries no dex fee. There is no
   such exemption on 6133, and none on the legacy protocol. This needs a new
   network-config ticker set (ch.06).
-- [ ] **Version-two UTXO taker-payment-spend contract (ch.16 R13–R20,
+- [x] **Version-two UTXO taker-payment-spend contract (ch.16 R13–R20,
   ch.15 R26–R28).** The project's current implementation differs on every
   point, so version-two UTXO swaps with reference nodes fail on both
   netids for any ticker. The required contract:
@@ -262,7 +263,10 @@ the same seed phrase. Left unchanged by maintainer decision (2026-10-11).
 - [ ] Establish which key the reference binds on legacy EVM `enable` under an HD
   wallet (Spec Reader question) and bind it in ch. 55 §55.4.
 - [ ] Align the legacy path, with an upgrade note like the one for the mmrpc 2.0
-  path in `CHANGELOG.md`.
+  path in `CHANGELOG.md`. Decision CB of 2026-11-04 (plan
+  [`hd-key-unification`](../plans/hd-key-unification.md) item H7; ch. 55
+  §55.4 R55.4.10 note) chose the coin key and a successful answer behind a
+  switch. Decided, not implemented yet.
 
 ### Solana / SPL swap and history surface — **TODO**
 
@@ -423,21 +427,23 @@ non-fungible flavours.
 
 ---
 
-## #9 — UTXO: `signature_version` value `fork_id_rxd` unsupported (Radiant) — **OPEN (implemented in PR #65, pending merge)**
+## #9 — UTXO: `signature_version` value `fork_id_rxd` unsupported (Radiant) — **signing CLOSED (PR #65, merged); trading tested between KDF Reloaded nodes and with GLEEC KDF 3.0.0-beta 2026-11-09 (ch. 58 D2); interop with Komodo DeFi Framework OPEN**
 
 CRD reference:
 [`58-utxo-signature-version-and-radiant-sighash.md`](./58-utxo-signature-version-and-radiant-sighash.md).
 Reference designation: `v3.0.0-beta` (the dialect is not in `v2.6.0-beta`).
 
-*Status (2026-10-25).* The first two items below are **implemented in
-PR #65** (`feat/rxd-signature-version`, stacked on PR #54; merge order
-#57 → #54 → #65) from the cleared chapter and public Radiant-Core alone;
-ch. 58 §58.5 carries the as-built statement. The checkboxes stay open
-until the PR is merged. The third item — trading fitness (ch. 58 D2) — is
-**separately still open** and is not touched by PR #65: Radiant is not to
-be called tradable on the strength of the signing work.
+*Status (2026-11-09).* The first two items below were **implemented in
+PR #65** (`feat/rxd-signature-version`, stacked on PR #54, both merged)
+from the cleared chapter and public Radiant-Core alone; ch. 58 §58.5
+carries the as-built statement. The third item — trading fitness (ch. 58
+D2) — was tested on 2026-11-09 between two KDF Reloaded nodes (mainnet,
+RXD against RIN: both directions, a maker refund and a taker refund) and
+with GLEEC KDF 3.0.0-beta (both directions); the evidence is recorded in
+ch. 58 D2. It is **still open** for swaps with Komodo DeFi Framework
+2.6.0-beta (no Radiant dialect), which did not complete in the 0.3.0 tests.
 
-- [ ] The shipped coins configuration gives the Radiant entry
+- [x] The shipped coins configuration gives the Radiant entry
   `"signature_version": "fork_id_rxd"` with `"fork_id": "0x40"`. Reloaded's
   value set has three entries and not that one, so the value fails to
   deserialize and the coin silently falls back to the Bitcoin-Cash BIP-143
@@ -447,13 +453,15 @@ be called tradable on the strength of the signing work.
   strict-encoding mask. **No** new transaction-hash algorithm is needed
   (ch. 58 R58.2.4) and no `chain_variant` work is needed
   (ch. 58 R58.2.6).
-- [ ] Implement the algorithm **from Radiant-Core**, which is public and
+- [x] Implement the algorithm **from Radiant-Core**, which is public and
   permitted: ch. 58 R58.4.1 establishes on public-network evidence that the
   reference's dialect matches Radiant's own, so the public source is both the
   correct and the authoritative route (ch. 58 R58.4.3). Add the mainnet
   signature vector of ch. 58 T3 as the parity guard.
-- [ ] Separately: enabling Radiant for **trading** is not covered by the above
-  and is unestablished (ch. 58 D2).
+- [ ] Separately: enabling Radiant for **trading** is not covered by the
+  signing work (ch. 58 D2). Established between KDF Reloaded nodes and with
+  GLEEC KDF 3.0.0-beta on 2026-11-09 (see the status above); open for swaps
+  with Komodo DeFi Framework 2.6.0-beta.
 
 ---
 
@@ -510,7 +518,7 @@ R6a / R10a.
 
 ---
 
-## #12 — EVM/QRC20 minimum trading volume: baseline formula, and the maker price floor — **OPEN (chapter cleared 2026-10-24; first item implemented in PR #66, pending merge)**
+## #12 — EVM/QRC20 minimum trading volume: baseline formula, and the maker price floor — **OPEN (chapter cleared 2026-10-24; first item implemented in PR #66, merged)**
 
 CRD reference: [`57-evm-fee-inputs.md`](./57-evm-fee-inputs.md) §57.7A
 (Part D), R57.7A.1–R57.7A.6, T10–T12, D7–D8, V4. Reference designations:
@@ -553,7 +561,7 @@ price validator and fully separable, and remains open.
 
 ---
 
-## #13 — UTXO header families: `RIC` and `MEWC` swaps fail at the HTLC spend where the reference's complete — **OPEN (chapter cleared 2026-10-25; resolution bound 2026-10-25 in two legs; the key landed in PR #62 for the median-time-past path; the registry-free structural fallback R37.5.9e, the key rename and the header-sync/store threading pending on the PR #62 follow-up)**
+## #13 — UTXO header families: `RIC` and `MEWC` swaps fail at the HTLC spend where the reference's complete — **OPEN (chapter cleared 2026-10-25; resolution bound 2026-10-25 in two legs; the key landed in PR #62 for the median-time-past path; the registry-free structural fallback R37.5.9e, the key rename and the header-sync/store threading landed in PRs #67 and #74)**
 
 CRD reference:
 [`37-utxo-spv-and-block-header-validation.md`](./37-utxo-spv-and-block-header-validation.md)
@@ -728,6 +736,8 @@ this value for every family that can swap.
   refusal. The Sia floor stays at parity; the pre-trade check of ch. 60
   R60.6.7 keeps such a payment from being created (maintainer decision
   2026-10-25, ch. 60 D60.2).
+  Revised 2026-11-07: reloaded raised its Sia minimum trading volume to
+  0.0002 SC, ten times the miner fee (ch. 20 R-S11 revision).
 - Informative, no action: TRON shares the EVM accessor, so PR #66 (#12)
   fixes its value too (ch. 21 §21.11A). Solana has no parity target,
   because neither tree can trade it (ch. 40 §40.6A, finding F6).
@@ -857,7 +867,7 @@ R59.6.2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
 
 ---
 
-## #19 — Relay forwards before it handles; unbounded per-peer outbound queue; orphaned trie nodes — **PARITY (reference facts authored 2026-10-28, second pass; passed the KDF Dirty Gate 2026-10-28)**
+## #21 — Relay forwards before it handles; unbounded per-peer outbound queue; orphaned trie nodes — **PARITY (reference facts authored 2026-10-28, second pass; passed the KDF Dirty Gate 2026-10-28)**
 
 CRD reference: [`32-orderbook-p2p-and-trie.md`](./32-orderbook-p2p-and-trie.md)
 §32.8 R-F3a/R-F3b (rewritten), §32.7.3 R-Q5a, §32.9A R-B1–R-B3, V5;
@@ -895,8 +905,10 @@ R59.6.4, D2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta`
 (agree); the reference's later, unreleased change is recorded as the row
 `PR #2605 (merged 2025-09-10)`, which neither release carries.
 
-- [ ] *Decided 2026-11-01 (ch. 32 D12): no change before the beta; after it,
-  asking a different relay once (D12 item 1), then candidates (e) and (a).*
+- [x] *Decided 2026-11-01 (ch. 32 D12): no change before the beta; after it,
+  asking a different relay once (D12 item 1), then candidates (e) and (a).
+  Carried out by 2026-11-06 in PRs #208, #224, #251 and #259 (the boxes
+  below).*
   At both release rows and in Reloaded a receiver removes another maker's
   entry only on a cancel message, on a synchronization answer for the pair
   that drops it, on eviction of the whole pubkey record (90 s after the last
@@ -912,6 +924,40 @@ R59.6.4, D2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta`
   the pair cleared on mismatch, clearing on an advertised zero root and a
   per-pair order on the sender's timestamp; the Reloaded candidates are
   listed under D12.
+- [x] *Done 2026-11-03 (ch. 32 R-Q5d, D12 item 1):* when a node's
+  keep-alive-driven synchronization request fails, timeout included, or the
+  answer leaves a pair out of step with the root the maker advertised, the
+  node asks one other connected relay once, for the pairs concerned, and
+  never empties a pair because of a mismatch; the reference asks only the
+  forwarding peer and waits for the next keep-alive. Wire-compatible; a
+  deliberate divergence with the opt-back switch
+  `sync_request_alternate_relay`.
+- [x] *Done 2026-11-03 (ch. 32 R-K1b, D12 item 2):* a cancel this node
+  received keeps the order out of every later order message and answer for
+  an hour by default; the reference re-admits it after 120 s. Memory is
+  bounded by the last 120 s of cancels plus at most
+  `cancel_final_max_entries` older ones. Wire-compatible; a deliberate
+  divergence with the opt-back switch `cancel_final_window_secs` (`120`).
+- [x] *Done 2026-11-03 (ch. 12 R7c):* at start, a maker does not restore an
+  order whose removal the order history already records, and it retries a
+  failed deletion of a removed order's record; the reference restores every
+  stored active record. A deliberate divergence with the opt-back switch
+  `maker_restore_skips_cancelled`.
+- [x] *Done 2026-11-05 (ch. 32 §32.9C.2 R-GH14, D12 item 3):* each pair of
+  another maker has its own liveness instant on the receiver's clock, and a
+  pair the maker stops advertising is pruned after the liveness window while
+  the maker's other pairs stay; at the reference release rows such a pair
+  stays until the maker's whole record expires. Wire-compatible; a deliberate
+  divergence with the opt-back switch `pair_liveness`.
+- [x] *Done 2026-11-06 (ch. 32 R-Q5b item 6 and R-GH12a, D12 item 4):* a
+  relay holds a synchronization request for a pair named by a keep-alive it
+  is still handling, before it has created the placeholder and sent its own
+  request, and answers it within the bound of R-Q5b; and an order-book answer
+  that lists a maker with no trie record yet waits up to the worker bound of
+  R-T3b before it fails. The reference answers both at once with a failure.
+  Wire-compatible; deliberate divergences with the opt-back switches
+  `sync_answer_deferral_before_placeholder` and
+  `orderbook_answer_waits_for_worker`.
 
 ---
 

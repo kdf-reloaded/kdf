@@ -1,6 +1,6 @@
 # Plan: finish Solana support
 
-**Status:** parked (nothing started; awaits a dedicated session) — **Last reviewed:** 2026-10-29
+**Status:** parked (nothing started; awaits a dedicated session) — **Last reviewed:** 2026-11-08
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity` when the coin-activation wire-parity work found
@@ -8,11 +8,11 @@
 > every wire aspect. To be executed in a dedicated session.
 
 > **Beta availability (2026-10-26).** By maintainer decision Solana (SOL, SPL)
-> is switched off for the coming beta: while `SOLANA_ACTIVATION_AVAILABLE`
+> is switched off in 0.3.0-beta.1 and on `dev` as of 2026-11-08: while `SOLANA_ACTIVATION_AVAILABLE`
 > (`coins/lp_coins_ops.rs`) is `false`, `enable_solana_with_tokens`,
 > `enable_spl` and the legacy `enable` / `electrum` answer "Solana support is
-> not available in this build" (CRD ch. 40 availability note). Solana is
-> planned to return in the next beta; turning it back on (work package 7) is
+> not available in this build" (CRD ch. 40 availability note). The release
+> Solana returns in is not set; turning it back on (work package 7) is
 > part of this plan. The decision below stands for that return.
 
 ## Decision this plan follows
@@ -27,8 +27,10 @@ Recorded in CRD ch. 40 (maintainer decision of 2026-10-11):
 - Backward compatibility still matters. The reference's surface -- the
   `experimental::enable_solana_with_assets` and
   `experimental::enable_solana_token` methods and the `SOLANA` /
-  `SOLANATOKEN` coin-configuration forms -- is added **alongside** the primary
-  surface as a compatibility surface (ch. 40 §40.1-§40.3, D40.3).
+  `SOLANATOKEN` coin-configuration forms -- is to be added **alongside** the
+  primary surface as a compatibility surface (ch. 40 §40.1-§40.3, D40.3). The
+  decision is taken; its implementation has not started (no PR, no code; see
+  gaps 1 to 3 below).
 
 ## Current gaps
 

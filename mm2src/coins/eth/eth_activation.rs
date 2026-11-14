@@ -10,7 +10,7 @@
 use super::*;
 use crate::eth::eth_hd_wallet::{EthHDAccount, EthHDWallet};
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
-use crate::hd_wallet_storage::HDWalletCoinStorage;
+use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageKeyPolicy};
 use crate::is_wallet_only_conf;
 use crate::node_url::{host_only, listed_nodes, scrub_node_url, ListedNode};
 use crate::rpc_command::get_my_address::PathToAddress;
@@ -165,6 +165,28 @@ pub const MAX_ETH_TX_TYPE_ABSENT_UNRESTRICTED_KEY: &str = "max_eth_tx_type_absen
 /// `"true"`, leaves the default.
 pub fn max_eth_tx_type_absent_unrestricted(ctx: &MmArc) -> bool {
     ctx.conf[MAX_ETH_TX_TYPE_ABSENT_UNRESTRICTED_KEY].as_bool() == Some(true)
+}
+
+/// The `MM2.json` key of the switch that makes the fee to send an EVM taker fee quote the gas estimate instead
+/// of the gas limit the transfer is sent with, CRD ch.57 R57.4.2.
+pub const EVM_TAKER_FEE_QUOTE_AT_LIMIT_KEY: &str = "evm_taker_fee_quote_at_limit";
+
+/// The value of the [`EVM_TAKER_FEE_QUOTE_AT_LIMIT_KEY`] switch in the node configuration `conf`, and the warning to
+/// log when the value is unusable (CRD ch.57 R57.4.2 item 3).
+///
+/// An absent key is `true` and silent. A JSON boolean is its own value. Any other value, a JSON `null` included,
+/// is `true` with a warning naming the key and the value.
+pub fn evm_taker_fee_quote_at_limit_from_conf(conf: &Json) -> (bool, Option<String>) {
+    match conf.get(EVM_TAKER_FEE_QUOTE_AT_LIMIT_KEY) {
+        None => (true, None),
+        Some(Json::Bool(value)) => (*value, None),
+        Some(other) => (
+            true,
+            Some(format!(
+                "MM2.json key {EVM_TAKER_FEE_QUOTE_AT_LIMIT_KEY} is {other}, which is not a boolean: using the default true"
+            )),
+        ),
+    }
 }
 
 /// Where the effective cap on the emitted transaction type of a coin came from.
@@ -388,21 +410,79 @@ pub fn eth_full_derivation_path(
     Ok(path)
 }
 
-/// Builds the HD wallet of an EVM coin: the stored accounts of the wallet namespace the daemon runs in.
+/// Builds the HD wallet of an EVM coin: the stored accounts of the wallet namespace of the coin's key policy
+/// (CRD ch.05 R29): the software identity for a software coin, the device identity for a Trezor-policy coin.
 pub async fn build_eth_hd_wallet(
     ctx: &MmArc,
     ticker: &str,
     conf: &Json,
     gap_limit: u32,
+    key_policy: HDWalletStorageKeyPolicy,
 ) -> Result<EthHDWallet, MmError<EthCoinBuildError>> {
     let derivation_path = eth_path_to_coin(conf)?;
-    let hd_wallet_storage = HDWalletCoinStorage::init(ctx, ticker.to_owned())
+    let hd_wallet_storage = HDWalletCoinStorage::init(ctx, ticker.to_owned(), key_policy)
         .await
         .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
-    let stored = hd_wallet_storage
-        .load_all_accounts()
+    load_eth_hd_wallet(ctx, derivation_path, gap_limit, key_policy, hd_wallet_storage).await
+}
+
+/// [`build_eth_hd_wallet`] for a Trezor-policy coin, over the storage of the device that `hw_ctx` identifies. The
+/// activation took `hw_ctx` once and uses it for the storage, the device read and the coin's record (CRD ch.05
+/// R58a).
+pub async fn build_eth_hd_wallet_for_device(
+    ctx: &MmArc,
+    ticker: &str,
+    conf: &Json,
+    gap_limit: u32,
+    hw_ctx: &crypto::HardwareWalletArc,
+) -> Result<EthHDWallet, MmError<EthCoinBuildError>> {
+    let derivation_path = eth_path_to_coin(conf)?;
+    let hd_wallet_storage = HDWalletCoinStorage::init_for_device(ctx, ticker.to_owned(), hw_ctx)
         .await
         .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
+    load_eth_hd_wallet(
+        ctx,
+        derivation_path,
+        gap_limit,
+        HDWalletStorageKeyPolicy::Hardware,
+        hd_wallet_storage,
+    )
+    .await
+}
+
+/// Loads the stored accounts of an opened storage into the HD wallet of an EVM coin.
+async fn load_eth_hd_wallet(
+    ctx: &MmArc,
+    derivation_path: Bip44PathToCoin,
+    gap_limit: u32,
+    key_policy: HDWalletStorageKeyPolicy,
+    hd_wallet_storage: HDWalletCoinStorage,
+) -> Result<EthHDWallet, MmError<EthCoinBuildError>> {
+    // A coin of the software policy loads only the accounts its seed derived; the rows it did not derive are
+    // removed (CRD ch.05 R55 (1)). A coin of the Trezor policy loads its rows as stored: its keys need the device.
+    let stored = match key_policy {
+        HDWalletStorageKeyPolicy::Software => {
+            use crypto::Bip32DerPathOps;
+
+            let crypto_ctx = crypto::CryptoCtx::from_ctx(ctx).mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
+            let global_hd = match crypto_ctx.key_pair_policy() {
+                crypto::KeyPairPolicy::GlobalHDAccount(global_hd) => global_hd,
+                crypto::KeyPairPolicy::Iguana => {
+                    return MmError::err(EthCoinBuildError::Internal(
+                        "An HD wallet needs a global-HD login".to_owned(),
+                    ))
+                },
+            };
+            hd_wallet_storage
+                .load_accounts_derived_from_seed(global_hd.root_priv_key(), &derivation_path.to_derivation_path())
+                .await
+                .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?
+        },
+        HDWalletStorageKeyPolicy::Hardware => hd_wallet_storage
+            .load_all_accounts()
+            .await
+            .mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?,
+    };
     let loaded: Result<HDAccountsMap<EthHDAccount>, _> = stored
         .iter()
         .map(|item| {
@@ -468,7 +548,7 @@ pub async fn eth_coin_from_params_with_global_hd(
     protocol: CoinProtocol,
 ) -> Result<EthCoin, MmError<EthCoinBuildError>> {
     let key_pair = derive_eth_hd_activation_key(global_hd, conf, path_to_address)?;
-    let hd_wallet = build_eth_hd_wallet(ctx, ticker, conf, gap_limit).await?;
+    let hd_wallet = build_eth_hd_wallet(ctx, ticker, conf, gap_limit, HDWalletStorageKeyPolicy::Software).await?;
     build_eth_coin(
         ctx,
         ticker,
@@ -682,6 +762,11 @@ pub(crate) async fn build_eth_coin(
         .map_to_mm(EthCoinBuildError::InvalidConfig)?;
     // The gas-estimate multiplier (CRD R57.5.3b) is read at the same point and under the same inheritance.
     let estimate_gas_mult = coin_estimate_gas_mult(ctx, conf, &protocol)?;
+    // The quote switch of R57.4.2 is a node-wide `MM2.json` key, read once for each coin built here.
+    let (taker_fee_quote_at_limit, switch_warning) = evm_taker_fee_quote_at_limit_from_conf(&ctx.conf);
+    if let Some(warning) = switch_warning {
+        warn!("{warning}");
+    }
     // A wallet-only coin has no swap, so its swap contracts are not required: none given means the zero address,
     // which `validate_swap_contracts` never lets through for a trading-capable coin.
     let swap_contract_address = params.swap_contract_address.unwrap_or_default();
@@ -760,11 +845,13 @@ pub(crate) async fn build_eth_coin(
         required_confirmations,
         chain_id: conf["chain_id"].as_u64(),
         logs_block_range: conf["logs_block_range"].as_u64().unwrap_or(DEFAULT_LOGS_BLOCK_RANGE),
+        logs_window: Default::default(),
         derivation_method,
         swap_v2_contracts,
         gas_limit,
         gas_limit_v2,
         estimate_gas_mult,
+        taker_fee_quote_at_limit,
         // ETH/ERC20 coins never use the TRON HTTP API; populated only by the
         // dedicated TRON activation path.
         tron_api: None,
@@ -785,6 +872,15 @@ pub(crate) async fn build_eth_coin(
             )
         );
     }
+    // CRD R57.5.5: the gas limits in effect, once the blocks have been accepted and the coin is built. For a
+    // platform coin `platform_conf` is `null`, which carries no block, so it can never be named as a source.
+    log_gas_limits(
+        ticker,
+        &[conf, &platform_conf],
+        &coin.gas_limit,
+        &coin.gas_limit_v2,
+        coin.estimate_gas_mult,
+    );
     Ok(EthCoin(Arc::new(coin)))
 }
 

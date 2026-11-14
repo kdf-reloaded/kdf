@@ -1,11 +1,12 @@
 use super::z_lightwalletd::{is_transport_code, EndpointHealth};
 use super::z_rpc::z_coin_grpc;
+use super::z_tx_addresses::{AddressSide, TxAddressStore, TxAddresses};
 use super::{CheckPointBlockInfo, ShieldedFetchError, ZCoinBuildError, ZcoinConsensusParams, ZcoinDecryptionParams};
 use crate::node_url::{host_only, lightwalletd_endpoint_url, scrub_node_url, scrub_urls_in_text, UNNAMED_NODE};
 use crate::utxo::utxo_common::big_decimal_from_sat_unsigned;
 use common::mm_number::BigDecimal;
 use common::{calc_total_pages, log, PagingOptionsEnum};
-use db_common::sqlite::rusqlite::{params, types::ValueRef, Connection, OpenFlags};
+use db_common::sqlite::rusqlite::{params, types::ValueRef, Connection, OpenFlags, OptionalExtension};
 use futures::StreamExt;
 use lazy_static::lazy_static;
 use mm2_err_handle::prelude::*;
@@ -153,10 +154,20 @@ pub(crate) struct RecordedTransaction {
     pub(crate) mined_height: Option<u32>,
 }
 
+/// What the wallet database knows of one transaction id: it holds a row, mined at `mined_height` or
+/// still unmined (`None`).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct KnownTransaction {
+    pub(crate) mined_height: Option<u32>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ZCoinShieldedHistory {
     compact_blocks_path: PathBuf,
     wallet_db_path: PathBuf,
+    /// The node's own record of the addresses a transaction names (R39.8.9d2), in a file of its own
+    /// that no wallet-database rebuild touches.
+    tx_addresses: TxAddressStore,
     consensus_params: ZcoinConsensusParams,
     extfvk: ExtendedFullViewingKey,
     initial_chain_state: Arc<Mutex<Option<ChainState>>>,
@@ -207,8 +218,12 @@ struct ZCoinStoredHistoryRow {
     timestamp: u64,
     received_by_me: u64,
     spent_by_me: u64,
-    received_addresses: Vec<String>,
-    sent_addresses: Vec<String>,
+    /// The fee the wallet database holds for the transaction, in the coin's smallest unit; `0` when it
+    /// holds none (R39.8.9e1).
+    fee: u64,
+    /// What the node's address store holds for this transaction (R39.8.9d2); empty when it holds
+    /// nothing. The wallet-database crate's own address lists are not used (R39.8.9d1).
+    recorded: TxAddresses,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -389,6 +404,7 @@ impl ZCoinShieldedHistory {
         Ok(ZCoinShieldedHistory {
             compact_blocks_path: paths.compact_blocks_path,
             wallet_db_path: paths.wallet_db_path,
+            tx_addresses: TxAddressStore::new(paths.tx_addresses_path),
             consensus_params,
             extfvk: extfvk.clone(),
             initial_chain_state: Arc::new(Mutex::new(initial_chain_state)),
@@ -399,6 +415,55 @@ impl ZCoinShieldedHistory {
     }
 
     pub(crate) fn wallet_db_path(&self) -> &Path { &self.wallet_db_path }
+
+    pub(crate) fn tx_addresses_path(&self) -> &Path { self.tx_addresses.path() }
+
+    /// Keeps the destination of a withdrawal, exactly as the request gave it, for the history row of
+    /// the transaction `txid` (R39.8.9d2 (a)). `txid` is in the internal byte order of the wallet
+    /// database. Nothing is recorded about notes.
+    pub(crate) fn record_withdraw_recipient(
+        &self,
+        txid: &[u8; 32],
+        expiry_height: u32,
+        destination: &str,
+    ) -> Result<(), String> {
+        self.record_address(txid, expiry_height, AddressSide::To, destination)
+    }
+
+    /// Keeps `address` on `side` of the transaction `txid` for its history row (R39.8.9d2 (a),
+    /// R39.8.9d3). `txid` is in the internal byte order of the wallet database. Nothing is recorded
+    /// about notes.
+    pub(crate) fn record_address(
+        &self,
+        txid: &[u8; 32],
+        expiry_height: u32,
+        side: AddressSide,
+        address: &str,
+    ) -> Result<(), String> {
+        self.tx_addresses.record(txid, expiry_height, side, address)
+    }
+
+    /// Removes the address entries of transactions that expired without being mined (R39.8.9d2 (c)).
+    ///
+    /// Called at the end of each scan pass, when the scanned height has just moved. An entry goes only
+    /// when the wallet database has scanned past the expiry height of its transaction and holds no mined
+    /// transaction with that id, so a wallet database that was rebuilt and is still rescanning keeps the
+    /// entries of the transactions the rescan has not reached.
+    fn prune_tx_addresses(&self) -> Result<usize, String> {
+        let Some(scanned) = self.scanned_block_height()? else {
+            return Ok(0);
+        };
+        let conn = Connection::open_with_flags(&self.wallet_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+        self.tx_addresses.prune(scanned, |txid| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM transactions WHERE txid = ?1 AND mined_height IS NOT NULL)",
+                params![txid],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|e| e.to_string())
+        })
+    }
 
     pub(crate) fn compact_blocks_path(&self) -> &Path { &self.compact_blocks_path }
 
@@ -967,11 +1032,18 @@ impl ZCoinShieldedHistory {
         } else {
             endpoint
         };
+        // The name goes through the node's resolver (CRD ch.45 R45.6B.9 item 5). The connector stands for the one tonic
+        // builds itself (`Endpoint::connect`): plain TCP, with the settings the endpoint would have given it. tonic
+        // applies the endpoint's TLS configuration on top of any connector, so TLS keeps the hostname of the URL.
+        let mut connector = common::wio::http_connector();
+        connector.enforce_http(false);
+        connector.set_nodelay(true);
+        connector.set_connect_timeout(Some(LIGHTWALLETD_CONNECT_TIMEOUT));
         let endpoint = endpoint
             .http2_keep_alive_interval(Duration::from_secs(20))
             .keep_alive_timeout(Duration::from_secs(10))
             .keep_alive_while_idle(true)
-            .connect()
+            .connect_with_connector(connector)
             .await
             .map_err(|e| scrubbed(&e))?;
         Ok(z_coin_grpc::compact_tx_streamer_client::CompactTxStreamerClient::new(
@@ -1536,14 +1608,20 @@ impl ZCoinShieldedHistory {
         // database files out from under it. See `WALLET_DB_MUTATION_LOCKS`.
         let mutation_lock = wallet_db_mutation_lock(&self.wallet_db_path);
         let _guard = mutation_lock.lock();
-        self.scan_cached_blocks_to_height_with_sleeper(
+        let scanned = self.scan_cached_blocks_to_height_with_sleeper(
             consensus_params,
             target_height,
             blocks_per_iteration,
             inter_iteration_interval_ms,
             progress,
             std::thread::sleep,
-        )
+        )?;
+        // The prune point of the address record (R39.8.9d2 (c)). Best effort: a failure leaves entries
+        // that the next pass removes.
+        if let Err(e) = self.prune_tx_addresses() {
+            log::warn!("Could not prune the shielded address record: {}", e);
+        }
+        Ok(scanned)
     }
 
     fn scan_cached_blocks_to_height_with_sleeper<F, S>(
@@ -1765,6 +1843,16 @@ impl ZCoinShieldedHistory {
     /// (the wallet database's `expired_unmined` flag, which is set from the expiry height once the
     /// chain tip has passed it, R39.8.0ar).
     fn load_rows(&self, include_unmined_sends: bool) -> Result<Vec<ZCoinStoredHistoryRow>, String> {
+        // The node's own address record (R39.8.9d2). A store that cannot be read costs the rows their
+        // recorded addresses and nothing else: the history is still served.
+        let recorded = self.tx_addresses.load().unwrap_or_else(|e| {
+            log::warn!(
+                "Could not read the shielded address record {}: {}. The history rows list no recorded address.",
+                self.tx_addresses.path().display(),
+                e
+            );
+            Default::default()
+        });
         let conn = Connection::open(&self.wallet_db_path).map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
@@ -1775,21 +1863,7 @@ impl ZCoinShieldedHistory {
                     COALESCE(vt.block_time, 0) AS timestamp,
                     COALESCE(SUM(vt.total_received), 0) AS received_by_me,
                     COALESCE(SUM(vt.total_spent), 0) AS spent_by_me,
-                    COALESCE((
-                        SELECT GROUP_CONCAT(DISTINCT outputs.to_address)
-                        FROM v_tx_outputs outputs
-                        WHERE outputs.transaction_id = t.id_tx
-                          AND outputs.to_account_uuid IS NOT NULL
-                          AND outputs.to_address IS NOT NULL
-                    ), '') AS received_addresses,
-                    COALESCE((
-                        SELECT GROUP_CONCAT(DISTINCT outputs.to_address)
-                        FROM v_tx_outputs outputs
-                        WHERE outputs.transaction_id = t.id_tx
-                          AND outputs.from_account_uuid IS NOT NULL
-                          AND outputs.to_account_uuid IS NULL
-                          AND outputs.to_address IS NOT NULL
-                    ), '') AS sent_addresses
+                    COALESCE(MAX(vt.fee_paid), 0) AS fee_paid
                 FROM v_transactions vt
                 INNER JOIN transactions t ON t.txid = vt.txid
                 WHERE vt.mined_height IS NOT NULL
@@ -1804,6 +1878,8 @@ impl ZCoinShieldedHistory {
                 let txid: Vec<u8> = row.get(1)?;
                 let received: i64 = row.get(4)?;
                 let spent: i64 = row.get(5)?;
+                let fee: i64 = row.get(6)?;
+                let row_recorded = recorded.get(&txid).cloned().unwrap_or_default();
                 Ok(ZCoinStoredHistoryRow {
                     internal_id: row.get(0)?,
                     tx_hash: encode_display_txid(txid),
@@ -1811,8 +1887,8 @@ impl ZCoinShieldedHistory {
                     timestamp: row.get::<_, u32>(3)? as u64,
                     received_by_me: non_negative_amount(received, 4)?,
                     spent_by_me: non_negative_amount(spent, 5)?,
-                    received_addresses: split_group_concat(row.get::<_, String>(6)?),
-                    sent_addresses: split_group_concat(row.get::<_, String>(7)?),
+                    fee: non_negative_amount(fee, 6)?,
+                    recorded: row_recorded,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -1842,15 +1918,18 @@ impl ZCoinStoredHistoryRow {
     ) -> ZCoinTxHistoryDetails {
         let received_by_me = big_decimal_from_sat_unsigned(self.received_by_me, decimals);
         let spent_by_me = big_decimal_from_sat_unsigned(self.spent_by_me, decimals);
-        let mut from = Vec::new();
+        // The wallet's own address is listed only in the form `my_balance` reports, `wallet_z_address`
+        // (R39.8.9d1). The wallet-database crate's own address lists are not read at all: its form of
+        // the account's address is a unified address no wallet of the coin accepts. What else a row
+        // lists comes from the node's address record (R39.8.9d2).
+        let mut from = self.recorded.from;
         if self.spent_by_me > 0 {
             from.push(wallet_z_address.to_owned());
         }
         from.sort();
         from.dedup();
 
-        let mut to = self.received_addresses;
-        to.extend(self.sent_addresses);
+        let mut to = self.recorded.to;
         if self.received_by_me > 0 {
             to.push(wallet_z_address.to_owned());
         }
@@ -1867,7 +1946,7 @@ impl ZCoinStoredHistoryRow {
             block_height: self.block_height,
             confirmations: confirmations(current_block, self.block_height),
             timestamp: self.timestamp,
-            transaction_fee: BigDecimal::from(0),
+            transaction_fee: big_decimal_from_sat_unsigned(self.fee, decimals),
             coin: ticker.to_owned(),
             internal_id: self.internal_id,
         }
@@ -3087,6 +3166,7 @@ fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
 struct ZCoinShieldedHistoryPaths {
     compact_blocks_path: PathBuf,
     wallet_db_path: PathBuf,
+    tx_addresses_path: PathBuf,
     legacy_compact_blocks_path: PathBuf,
     legacy_wallet_db_path: PathBuf,
 }
@@ -3099,10 +3179,13 @@ impl ZCoinShieldedHistoryPaths {
         legacy_compact_blocks_path.push(format!("{}_COMPACT_BLOCKS.db", ticker));
         let mut legacy_wallet_db_path = db_dir_path.clone();
         legacy_wallet_db_path.push(format!("{}_WALLET.db", ticker));
+        let mut tx_addresses_path = db_dir_path.clone();
+        tx_addresses_path.push(format!("{}_RELOADED_TX_ADDRESSES.db", ticker));
         db_dir_path.push(format!("{}_RELOADED_WALLET.db", ticker));
         ZCoinShieldedHistoryPaths {
             compact_blocks_path,
             wallet_db_path: db_dir_path,
+            tx_addresses_path,
             legacy_compact_blocks_path,
             legacy_wallet_db_path,
         }
@@ -3155,14 +3238,6 @@ fn non_negative_amount(amount: i64, column: usize) -> Result<u64, db_common::sql
             Box::new(e),
         )
     })
-}
-
-fn split_group_concat(value: String) -> Vec<String> {
-    if value.is_empty() {
-        Vec::new()
-    } else {
-        value.split(',').map(str::to_owned).collect()
-    }
 }
 
 #[cfg(test)]
@@ -3354,6 +3429,11 @@ pub(crate) mod tests {
             blocks: &[zcash_compact::CompactBlock],
         ) -> Result<(), String> {
             self.insert_compact_blocks(blocks)
+        }
+
+        /// Test access to the node's address record (R39.8.9d2), by transaction id.
+        pub(crate) fn recorded_addresses_for_test(&self) -> HashMap<Vec<u8>, TxAddresses> {
+            self.tx_addresses.load().unwrap()
         }
     }
 
@@ -4275,6 +4355,319 @@ pub(crate) mod tests {
         }
         let user_version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
         assert_eq!(user_version, 8);
+    }
+
+    // ---- the addresses of a history row (CRD ch.39 R39.8.9d1, R39.8.9d2) ----
+
+    /// One destination in each form a withdrawal accepts: a Sapling address and a Pirate1 address.
+    fn recipient_destinations() -> Vec<String> {
+        let sapling = zcash_keys::encoding::encode_payment_address(
+            "zs",
+            &ExtendedSpendingKey::master(&[3; 32]).default_address().1,
+        );
+        vec![sapling, crate::z_coin::z_pirate1_tests::MAIN_ADDRESS.to_owned()]
+    }
+
+    fn sorted(mut entries: Vec<String>) -> Vec<String> {
+        entries.sort();
+        entries
+    }
+
+    fn row_of(page: &ZCoinTxHistoryPage, internal_id: i64) -> &ZCoinTxHistoryDetails {
+        page.transactions
+            .iter()
+            .find(|tx| tx.internal_id == internal_id)
+            .expect("the row is served")
+    }
+
+    /// The address sets of every row of a page, by internal id.
+    fn address_sets(page: &ZCoinTxHistoryPage) -> Vec<(i64, Vec<String>, Vec<String>)> {
+        page.transactions
+            .iter()
+            .map(|tx| (tx.internal_id, tx.from.clone(), tx.to.clone()))
+            .collect()
+    }
+
+    /// Replaces the transaction id of a snapshot row with one that is not byte-order symmetric. The
+    /// snapshot's own ids (`[5; 32]` and the like) read the same both ways round, so they could not show
+    /// a missing reversal between the wallet database's byte order and the displayed one.
+    fn give_snapshot_row_a_txid(history: &ZCoinShieldedHistory, id_tx: i64, txid: [u8; 32]) {
+        let (conn, _, _) = snapshot_connection(history);
+        conn.execute("UPDATE transactions SET txid = ?1 WHERE id_tx = ?2", params![
+            txid.to_vec(),
+            id_tx
+        ])
+        .unwrap();
+    }
+
+    fn reopen_snapshot_history(db_dir: &Path) -> ZCoinShieldedHistory {
+        ZCoinShieldedHistory::open_or_create("ARRR", db_dir.to_path_buf(), test_params(), &test_extfvk(7), None)
+            .unwrap()
+    }
+
+    /// T39.8.9d1: a deposit row and a withdrawal row with change list the wallet's own address only in the
+    /// form the caller passes (the one `my_balance` reports). The wallet-database crate keeps a unified
+    /// address for the account; no entry of `from` or `to` is that string.
+    #[test]
+    fn t39_8_9d1_the_own_address_is_listed_only_in_the_form_my_balance_reports() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-own-address"));
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+
+        // The test has teeth only if the crate's form is in the database.
+        let (conn, _, _) = snapshot_connection(&history);
+        let mut stmt = conn.prepare("SELECT address FROM addresses").unwrap();
+        let crate_forms: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(!crate_forms.is_empty(), "the account has its unified address");
+
+        let page = snapshot_page(&history, page_number(1), 10, true);
+        assert_eq!(page.total, 5);
+        for row in &page.transactions {
+            for entry in row.from.iter().chain(row.to.iter()) {
+                assert_eq!(entry, "zs-wallet", "row {}", row.internal_id);
+                assert!(!crate_forms.contains(entry), "row {}", row.internal_id);
+            }
+        }
+        // The deposits: no sender, the wallet as receiver.
+        for id in 1..=4 {
+            let row = row_of(&page, id);
+            assert!(row.from.is_empty(), "row {id}");
+            assert_eq!(row.to, vec!["zs-wallet".to_owned()], "row {id}");
+        }
+        // The withdrawal with change: the wallet spends and receives.
+        let withdrawal = row_of(&page, 5);
+        assert_eq!(withdrawal.from, vec!["zs-wallet".to_owned()]);
+        assert_eq!(withdrawal.to, vec!["zs-wallet".to_owned()]);
+    }
+
+    /// T39.8.9d2: the destination of a withdrawal, Sapling and Pirate1 alike, is listed exactly as given
+    /// in the unmined row, in the mined row and after the store is reopened, beside the wallet's own
+    /// address for the change. No other row lists it.
+    #[test]
+    fn t39_8_9d2_the_recipient_is_listed_unmined_mined_and_after_a_restart() {
+        for (n, destination) in recipient_destinations().iter().enumerate() {
+            let db_dir = test_db_dir(&format!("snapshot-recipient-{n}"));
+            let history = open_snapshot_history(&db_dir);
+            insert_snapshot(&history, SNAPSHOT_EXPIRY);
+            let txid = FIXTURE_SPEND_TXID_INTERNAL;
+            give_snapshot_row_a_txid(&history, 5, txid);
+            history
+                .record_withdraw_recipient(&txid, SNAPSHOT_EXPIRY, destination)
+                .unwrap();
+            let expected = sorted(vec![destination.clone(), "zs-wallet".to_owned()]);
+
+            let check = |history: &ZCoinShieldedHistory, tip: u64| {
+                let page = history
+                    .load_page("ARRR", "zs-wallet", 8, tip, &page_number(1), 10, true)
+                    .unwrap();
+                assert_eq!(page.total, 5);
+                let row = row_of(&page, 5);
+                assert_eq!(row.tx_hash, FIXTURE_SPEND_TXID_DISPLAY);
+                assert_eq!(row.to, expected, "destination {n}");
+                assert_eq!(row.from, vec!["zs-wallet".to_owned()]);
+                for other in page.transactions.iter().filter(|row| row.internal_id != 5) {
+                    assert!(!other.to.contains(destination), "row {}", other.internal_id);
+                }
+            };
+
+            // The unmined row, and after a restart.
+            check(&history, 4_184_456);
+            drop(history);
+            let history = reopen_snapshot_history(&db_dir);
+            check(&history, 4_184_456);
+
+            // The mined row, and after a restart.
+            let (conn, _, _) = snapshot_connection(&history);
+            let mined_at = SNAPSHOT_HEIGHTS[3] + 1;
+            insert_snapshot_block(&conn, mined_at);
+            conn.execute(
+                "UPDATE transactions SET block = ?1, mined_height = ?1, tx_index = 0 WHERE id_tx = 5",
+                params![mined_at],
+            )
+            .unwrap();
+            drop(conn);
+            check(&history, u64::from(mined_at));
+            drop(history);
+            let history = reopen_snapshot_history(&db_dir);
+            check(&history, u64::from(mined_at));
+        }
+    }
+
+    /// T39.8.9d2: an entry for a transaction the wallet database does not hold (a withdrawal that was
+    /// built and not broadcast) adds no row and no address; a row with no entry lists no recipient, with
+    /// no store file at all and with a store that cannot be read, and neither is an error.
+    #[test]
+    fn t39_8_9d2_an_entry_without_a_row_adds_none_and_a_row_without_an_entry_lists_no_recipient() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-no-entry"));
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+
+        // No store file: the rows list the wallet's own address only.
+        assert!(!history.tx_addresses_path().exists());
+        let without_store = snapshot_page(&history, page_number(1), 10, true);
+        assert_eq!(without_store.total, 5);
+        assert_eq!(row_of(&without_store, 5).to, vec!["zs-wallet".to_owned()]);
+
+        // Built, never broadcast: the wallet database holds no such transaction.
+        for destination in recipient_destinations() {
+            history
+                .record_withdraw_recipient(&[0xab; 32], SNAPSHOT_EXPIRY, &destination)
+                .unwrap();
+        }
+        assert!(history.tx_addresses_path().exists());
+        let with_orphans = snapshot_page(&history, page_number(1), 10, true);
+        assert_eq!(with_orphans.total, 5);
+        assert_eq!(address_sets(&with_orphans), address_sets(&without_store));
+
+        // A store the node cannot read costs the rows their recorded addresses, and nothing else.
+        std::fs::write(history.tx_addresses_path(), b"this is not a database").unwrap();
+        let unreadable = snapshot_page(&history, page_number(1), 10, true);
+        assert_eq!(address_sets(&unreadable), address_sets(&without_store));
+    }
+
+    /// T39.8.9d2: an entry whose transaction expired and is not mined is removed; the entry of a mined
+    /// transaction is kept however old, and so is one whose expiry has not been passed by the scan and
+    /// one with no expiry height (0).
+    #[test]
+    fn t39_8_9d2_an_expired_entry_is_removed_unless_its_transaction_is_mined() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-prune"));
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+        let scanned = SNAPSHOT_HEIGHTS[3];
+        assert_eq!(history.scanned_block_height().unwrap(), Some(u64::from(scanned)));
+        let mined = FIXTURE_RECEIVE_TXID_INTERNAL;
+        give_snapshot_row_a_txid(&history, 1, mined);
+
+        let destination = recipient_destinations().remove(1);
+        let entries: [([u8; 32], u32); 5] = [
+            (mined, scanned - 10),  // expired, but mined: kept
+            ([9; 32], scanned - 1), // expired, never mined: removed
+            ([8; 32], scanned),     // the scan has not passed it yet: kept
+            ([7; 32], scanned + 1), // kept
+            ([6; 32], 0),           // no expiry height (0), never expires: kept
+        ];
+        for (txid, expiry) in entries {
+            history.record_withdraw_recipient(&txid, expiry, &destination).unwrap();
+        }
+
+        assert_eq!(history.prune_tx_addresses().unwrap(), 1);
+        let mut kept: Vec<Vec<u8>> = history.tx_addresses.load().unwrap().into_keys().collect();
+        kept.sort();
+        let mut expected: Vec<Vec<u8>> = vec![mined.to_vec(), [8; 32].to_vec(), [7; 32].to_vec(), [6; 32].to_vec()];
+        expected.sort();
+        assert_eq!(kept, expected);
+
+        // The mined transaction's row still names its recipient.
+        let page = snapshot_page(&history, page_number(1), 10, true);
+        assert!(row_of(&page, 1).to.contains(&destination));
+        // A second pass has nothing left to remove.
+        assert_eq!(history.prune_tx_addresses().unwrap(), 0);
+    }
+
+    /// T39.8.9d3: entries on both sides join the row of their transaction: a `to` entry beside the wallet's
+    /// own address for the change (a payment, a fee payment), and a `from` entry on a row that spends no
+    /// wallet note (a spend or refund, which lists the script address and the wallet as receiver). The sets
+    /// are the same after the store is reopened, and an entry of another transaction does not leak in.
+    #[test]
+    fn t39_8_9d3_entries_on_both_sides_join_the_row_and_survive_a_reopen() {
+        let db_dir = test_db_dir("snapshot-swap-addresses");
+        let history = open_snapshot_history(&db_dir);
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+        let payment = FIXTURE_SPEND_TXID_INTERNAL;
+        let spend = FIXTURE_RECEIVE_TXID_INTERNAL;
+        give_snapshot_row_a_txid(&history, 5, payment);
+        give_snapshot_row_a_txid(&history, 1, spend);
+        history
+            .record_address(&payment, SNAPSHOT_EXPIRY, AddressSide::To, "script-address")
+            .unwrap();
+        history
+            .record_address(&payment, SNAPSHOT_EXPIRY, AddressSide::To, "fee-address")
+            .unwrap();
+        history
+            .record_address(&spend, SNAPSHOT_EXPIRY, AddressSide::From, "script-address")
+            .unwrap();
+        history
+            .record_address(&[0xcd; 32], SNAPSHOT_EXPIRY, AddressSide::From, "unrelated")
+            .unwrap();
+
+        let check = |history: &ZCoinShieldedHistory| {
+            let page = snapshot_page(history, page_number(1), 10, true);
+            assert_eq!(page.total, 5);
+            // The payment row: spends and receives, so the wallet is on both sides, and both recorded
+            // `to` entries are listed.
+            let payment_row = row_of(&page, 5);
+            assert_eq!(payment_row.from, vec!["zs-wallet".to_owned()]);
+            assert_eq!(
+                payment_row.to,
+                sorted(vec![
+                    "fee-address".to_owned(),
+                    "script-address".to_owned(),
+                    "zs-wallet".to_owned()
+                ])
+            );
+            // The spend row spends no wallet note: the script address is the only sender.
+            let spend_row = row_of(&page, 1);
+            assert_eq!(spend_row.from, vec!["script-address".to_owned()]);
+            assert_eq!(spend_row.to, vec!["zs-wallet".to_owned()]);
+            // Nothing leaks onto the other rows.
+            for id in 2..=4 {
+                let other = row_of(&page, id);
+                assert!(other.from.is_empty(), "row {id}");
+                assert_eq!(other.to, vec!["zs-wallet".to_owned()], "row {id}");
+            }
+        };
+        check(&history);
+        drop(history);
+        check(&reopen_snapshot_history(&db_dir));
+    }
+
+    /// T39.8.9d2: the scan pass is the prune point: after a completed pass the entries whose expiry the
+    /// scanned height has passed, and whose transaction is not mined, are gone.
+    #[test]
+    fn t39_8_9d2_a_completed_scan_pass_prunes_the_address_record() {
+        let history = open_checkpointed_test_history(10);
+        history.record_withdraw_recipient(&[9; 32], 5, "dest").unwrap();
+        history.record_withdraw_recipient(&[8; 32], 11, "dest").unwrap();
+        history.record_withdraw_recipient(&[7; 32], 12, "dest").unwrap();
+        history
+            .insert_compact_blocks_for_test(&[empty_compact_block(11, 11, 9)])
+            .unwrap();
+        assert_eq!(
+            history
+                .scan_cached_blocks_to_height(test_params(), 11, 1_000, 0, |_, _| {})
+                .unwrap(),
+            11
+        );
+
+        let mut kept: Vec<Vec<u8>> = history.tx_addresses.load().unwrap().into_keys().collect();
+        kept.sort();
+        assert_eq!(kept, vec![[7; 32].to_vec(), [8; 32].to_vec()]);
+    }
+
+    /// T39.8.9d2: the store is a file of its own beside the wallet database, so a rebuild of the wallet
+    /// database (which renames only that file) leaves the entries in place.
+    #[test]
+    fn t39_8_9d2_the_address_record_survives_a_wallet_database_rebuild() {
+        let history = open_checkpointed_test_history(10);
+        history
+            .record_withdraw_recipient(&FIXTURE_SPEND_TXID_INTERNAL, 500, "dest")
+            .unwrap();
+        assert_eq!(
+            history.tx_addresses_path().file_name().unwrap(),
+            "ARRR_RELOADED_TX_ADDRESSES.db"
+        );
+        assert_eq!(history.tx_addresses_path().parent(), history.wallet_db_path().parent());
+
+        history.reset_wallet_scan_state().unwrap();
+        let entries = history.tx_addresses.load().unwrap();
+        assert_eq!(
+            entries.get(&FIXTURE_SPEND_TXID_INTERNAL.to_vec()),
+            Some(&TxAddresses {
+                from: Vec::new(),
+                to: vec!["dest".to_owned()],
+            })
+        );
     }
 
     /// A shielded transaction ID must be reported in the same byte order as every
@@ -5599,6 +5992,29 @@ pub(crate) mod tests {
         );
     }
 
+    /// Raw `CompactBlock` protobuf for testnet height 389.
+    const BLOCK_389_HEX: &str = concat!(
+        "1085031a200f74f26e7742237702f44b6548952aee87649d4264e43d8db82b4c314c58030422",
+        "2051ac3c0a025f331fcfdb288f278a45fb424b765086b350cf1c57746dce466406288f9da0d3",
+        "063afe040801122008ced81faa87809f83cd6a4df74b2a956fa3785292116683552e2fba134d",
+        "e9ec22220a20050899d5d9c1fa66ca3e1bce6f0bc9187c08e229a7df1f6b7b0c4fc3d01559c0",
+        "2a7a0a209161e18aad6a412a3c57fd040ac15f532d5296603a7c608d4d9020c7eead82641220",
+        "aadf17949507e6bcbb0e0c4316b56eb59fec0cb1814592dab833db55e401b6e31a34913f9664",
+        "d14935fae8fd1bc6b6b3d7a49fa499d24269aa87099f7adacc4f190879b5d25a8b9e88177b99",
+        "a12e9019be2784bbaafe2a7a0a205e32f4d009420beec8469345c1ae3809735bb5e820b42993",
+        "b3e076562426e62b1220db59b0eb8e21888d871ca951d93cbfcff3709e99a357b7c3e9ea2427",
+        "8df7a72a1a34da12a43877c3a4ce873e52999d011826a46958ed713efbc2bc1b20d2f4410b9b",
+        "2c77882378cf22a381bf7c8d2efdbe4d2f21674b329c010a202caefca055a245598c3d888ecb",
+        "4a978232c79e9cfa1b89000d3f22963a2fb21512209ee073ca70f29bcbfa59bb04f325567cb8",
+        "8a14679cf0f016374c01b72f7d2f141a20d1ef7b44c85f83d17ffc67376eca3c1f7558996e42",
+        "f6de7b2e9e4614467f589f22340180351dac92aca0cdeee51fa7480d77309da90931fa42944f",
+        "374f37821d712294769a0700b6602cf5981503d02b11629ca56f26329c010a2061acce9276ba",
+        "361d4deb56e56fb8aa0e0c3c768c394a902ee4d5a60bcca0080c1220c25fcc41b88ade59fc8b",
+        "d80dd17d6a8104064ad444d5fe6a02b15f640c526b321a20ff503325721da4b314a2622fa428",
+        "1ee1234a7c9df0ab0656bca6add1b206e7182234c63633711fba0bea09b39aa264ebea4e59da",
+        "ab6a410b65f86590a4dc7408b8481f55446b57d0bc5fa4037d120e89b35639990364",
+    );
+
     /// Pirate testnet block 389 -- captured from `testlightwalletd1.cryptoforge.cc`
     /// on 2026-09-28, when that chain was at tip 53 202 with
     /// `branchId=37a5165b`, i.e. **Ironwood already active** (it activates at
@@ -5627,28 +6043,6 @@ pub(crate) mod tests {
     fn a_post_ironwood_v6_block_scans_to_the_same_sapling_tree_lightwalletd_reports() {
         use prost::Message;
 
-        /// Raw `CompactBlock` protobuf for testnet height 389.
-        const BLOCK_389_HEX: &str = concat!(
-            "1085031a200f74f26e7742237702f44b6548952aee87649d4264e43d8db82b4c314c58030422",
-            "2051ac3c0a025f331fcfdb288f278a45fb424b765086b350cf1c57746dce466406288f9da0d3",
-            "063afe040801122008ced81faa87809f83cd6a4df74b2a956fa3785292116683552e2fba134d",
-            "e9ec22220a20050899d5d9c1fa66ca3e1bce6f0bc9187c08e229a7df1f6b7b0c4fc3d01559c0",
-            "2a7a0a209161e18aad6a412a3c57fd040ac15f532d5296603a7c608d4d9020c7eead82641220",
-            "aadf17949507e6bcbb0e0c4316b56eb59fec0cb1814592dab833db55e401b6e31a34913f9664",
-            "d14935fae8fd1bc6b6b3d7a49fa499d24269aa87099f7adacc4f190879b5d25a8b9e88177b99",
-            "a12e9019be2784bbaafe2a7a0a205e32f4d009420beec8469345c1ae3809735bb5e820b42993",
-            "b3e076562426e62b1220db59b0eb8e21888d871ca951d93cbfcff3709e99a357b7c3e9ea2427",
-            "8df7a72a1a34da12a43877c3a4ce873e52999d011826a46958ed713efbc2bc1b20d2f4410b9b",
-            "2c77882378cf22a381bf7c8d2efdbe4d2f21674b329c010a202caefca055a245598c3d888ecb",
-            "4a978232c79e9cfa1b89000d3f22963a2fb21512209ee073ca70f29bcbfa59bb04f325567cb8",
-            "8a14679cf0f016374c01b72f7d2f141a20d1ef7b44c85f83d17ffc67376eca3c1f7558996e42",
-            "f6de7b2e9e4614467f589f22340180351dac92aca0cdeee51fa7480d77309da90931fa42944f",
-            "374f37821d712294769a0700b6602cf5981503d02b11629ca56f26329c010a2061acce9276ba",
-            "361d4deb56e56fb8aa0e0c3c768c394a902ee4d5a60bcca0080c1220c25fcc41b88ade59fc8b",
-            "d80dd17d6a8104064ad444d5fe6a02b15f640c526b321a20ff503325721da4b314a2622fa428",
-            "1ee1234a7c9df0ab0656bca6add1b206e7182234c63633711fba0bea09b39aa264ebea4e59da",
-            "ab6a410b65f86590a4dc7408b8481f55446b57d0bc5fa4037d120e89b35639990364",
-        );
         /// `GetTreeState` at 388 -- the anchor the wallet starts from.
         const TREE_388_HEX: &str = concat!(
             "01fce57d8fee40b8268479aa4839759f951bd7cca5f94237b0193a03e5e9884613001f000000",
@@ -5744,6 +6138,215 @@ pub(crate) mod tests {
             CheckpointOutcome::Accepted,
             "our Sapling tree after the v6 block must equal lightwalletd's own"
         );
+    }
+
+    /// Value of the Sapling note the Ironwood-deposit tests below pay to the test wallet.
+    const IRONWOOD_DEPOSIT_NOTE_VALUE: u64 = WithdrawFixture::NOTE_VALUE;
+
+    /// The two Ironwood actions of the recorded Pirate testnet block 389, as the dictated wire carries
+    /// them: `CompactTx` field 6. The backend crate's message type names field 6 the Orchard actions;
+    /// this project's own definition (`compact_formats.proto`) has no field 6 at all.
+    fn recorded_field_6_actions() -> Vec<zcash_compact::CompactOrchardAction> {
+        let block = zcash_compact::CompactBlock::decode(hex::decode(BLOCK_389_HEX).unwrap().as_slice()).unwrap();
+        let actions = block.vtx[0].actions.clone();
+        assert_eq!(
+            actions.len(),
+            2,
+            "the recorded transaction carries two Ironwood actions"
+        );
+        assert!(block.vtx[0].ironwood_actions.is_empty());
+        actions
+    }
+
+    /// Asserts that wire bytes of `wire_len` carry field 6 (`carried_actions` of them, read with the
+    /// backend crate's message type) and that this project's message definition drops it: the
+    /// message decoded with it is smaller (`decoded_len`, re-encoded).
+    fn assert_field_6_is_dropped(wire_len: usize, carried_actions: usize, decoded_len: usize) {
+        assert_eq!(carried_actions, 2, "the wire bytes must carry the two Ironwood actions");
+        assert!(
+            decoded_len < wire_len,
+            "this project's message definition has no field 6, so decoding must drop it"
+        );
+    }
+
+    /// A compact block paying `extfvk` one Sapling note, in a transaction that also carries two Ironwood
+    /// actions in field 6. It is built as wire bytes and decoded as `z_coin_grpc::CompactBlock`, the
+    /// type production decodes, so the drop of field 6 is exercised rather than skipped.
+    fn ironwood_deposit_block_from_wire(extfvk: &ExtendedFullViewingKey) -> z_coin_grpc::CompactBlock {
+        let mut block = compact_block_with_received_note(11, 11, 9, extfvk, IRONWOOD_DEPOSIT_NOTE_VALUE);
+        block.vtx[0].actions = recorded_field_6_actions();
+        let wire = block.encode_to_vec();
+        let carried = zcash_compact::CompactBlock::decode(wire.as_slice()).unwrap();
+        let decoded = z_coin_grpc::CompactBlock::decode(wire.as_slice()).unwrap();
+        assert_field_6_is_dropped(wire.len(), carried.vtx[0].actions.len(), decoded.encoded_len());
+        assert_eq!(
+            decoded.vtx[0].outputs.len(),
+            1,
+            "the Sapling output survives the decode"
+        );
+        decoded
+    }
+
+    /// The Sapling commitment tree (serialized) after `cmu` is appended to an empty one.
+    fn sapling_tree_with_one_commitment(cmu: &[u8]) -> Vec<u8> {
+        let cmu = sapling::note::ExtractedNoteCommitment::from_bytes(cmu.try_into().unwrap()).unwrap();
+        let mut tree = sapling::CommitmentTree::empty();
+        tree.append(sapling::Node::from_cmu(&cmu)).unwrap();
+        let mut bytes = Vec::new();
+        zcash_primitives::merkle_tree::write_commitment_tree(&tree, &mut bytes).unwrap();
+        bytes
+    }
+
+    /// CRD ch.39 T39.8.0i, scan side (R39.8.0bb): a compact block whose transaction pays the wallet a
+    /// Sapling note and carries Ironwood actions in field 6 scans to the note, the Sapling tree
+    /// lightwalletd would report, and a balance that counts the note once.
+    #[test]
+    fn t39_8_0i_a_deposit_with_ironwood_actions_scans_to_the_note_the_tree_and_the_balance() {
+        let params = test_params_with_zip212();
+        let extsk = ExtendedSpendingKey::master(&[15; 32]);
+        #[allow(deprecated)]
+        let extfvk = extsk.to_extended_full_viewing_key();
+        let checkpoint = CheckPointBlockInfo {
+            height: 10,
+            hash: rpc::v1::types::H256([9u8; 32]),
+            time: 10,
+            sapling_tree: empty_sapling_tree_bytes().into(),
+        };
+        let history = ZCoinShieldedHistory::open_or_create(
+            "ARRR",
+            test_db_dir("ironwood-deposit-scan"),
+            params.clone(),
+            &extfvk,
+            Some(&checkpoint),
+        )
+        .unwrap();
+
+        let block = ironwood_deposit_block_from_wire(&extfvk);
+        let cmu = block.vtx[0].outputs[0].cmu.clone();
+        history
+            .insert_compact_block(convert_compact_block(block).unwrap())
+            .unwrap();
+        assert_eq!(
+            history
+                .scan_cached_blocks_to_height(params.clone(), 11, 1_000, 0, |_, _| {})
+                .unwrap(),
+            11
+        );
+
+        assert_eq!(
+            history.balance(params.clone()).unwrap(),
+            IRONWOOD_DEPOSIT_NOTE_VALUE,
+            "the note counts once: the Ironwood actions add nothing and hide nothing"
+        );
+        // The Sapling tree size: one commitment, as the server's tree for that block would hold. The
+        // Ironwood actions contribute nothing to the Sapling tree.
+        assert_eq!(
+            history
+                .init_wallet_checkpoint_from_tree_state(params, z_coin_grpc::TreeState {
+                    network: "main".to_owned(),
+                    height: 11,
+                    hash: hex::encode([11u8; 32]),
+                    time: 11,
+                    tree: hex::encode(sapling_tree_with_one_commitment(&cmu)),
+                    ..Default::default()
+                })
+                .unwrap(),
+            CheckpointOutcome::Accepted,
+            "our Sapling tree after the deposit block must hold exactly the one Sapling commitment"
+        );
+    }
+
+    /// CRD ch.39 T39.8.0i, spend side (R39.8.0bb): a following build selects the deposited note and
+    /// spends it, under the same anchor and witness rules as any other note.
+    #[test]
+    fn t39_8_0i_a_following_build_spends_the_note_deposited_with_ironwood_actions() {
+        let Some(fixture) = WithdrawFixture::with_block(ironwood_deposit_block_from_wire_converted) else {
+            return;
+        };
+        let tx = fixture.build().unwrap();
+        assert_eq!(sapling_nullifiers(&tx).len(), 1, "the deposited note is the one spent");
+        let recorded = fixture.broadcast(&tx);
+        assert_eq!(recorded.as_ref().map(|t| t.txid()), Some(tx.txid()));
+        assert_eq!(
+            fixture.history.spent_value_of_transaction(tx.txid().as_ref()).unwrap(),
+            IRONWOOD_DEPOSIT_NOTE_VALUE,
+            "the wallet recorded the deposited note as the one this transaction spends"
+        );
+    }
+
+    /// The deposit block as production hands it to the cache: decoded from the wire, then converted.
+    fn ironwood_deposit_block_from_wire_converted(extfvk: &ExtendedFullViewingKey) -> zcash_compact::CompactBlock {
+        convert_compact_block(ironwood_deposit_block_from_wire(extfvk)).unwrap()
+    }
+
+    /// CRD ch.39 T39.8.0i, mempool side (R39.8.0bb, §39.8.0.6): the same transaction offered as a
+    /// `GetMempoolTx` compact transaction counts as pending until its block is scanned, and not after.
+    #[test]
+    fn t39_8_0i_the_same_transaction_in_the_mempool_counts_as_pending() {
+        use sapling::keys::PreparedIncomingViewingKey;
+        use zcash_primitives::transaction::components::sapling::zip212_enforcement;
+
+        let params = test_params_with_zip212();
+        let extsk = ExtendedSpendingKey::master(&[15; 32]);
+        #[allow(deprecated)]
+        let extfvk = extsk.to_extended_full_viewing_key();
+
+        // The streamed message: one compact transaction, field 6 on the wire, decoded as production does.
+        let mut compact = compact_block_with_received_note(11, 11, 9, &extfvk, IRONWOOD_DEPOSIT_NOTE_VALUE)
+            .vtx
+            .remove(0);
+        compact.actions = recorded_field_6_actions();
+        let wire = compact.encode_to_vec();
+        let carried = zcash_compact::CompactTx::decode(wire.as_slice()).unwrap();
+        let streamed = z_coin_grpc::CompactTx::decode(wire.as_slice()).unwrap();
+        assert_field_6_is_dropped(wire.len(), carried.actions.len(), streamed.encoded_len());
+
+        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk.vk.ivk());
+        let enforcement = zip212_enforcement(&ZcoinDecryptionParams::new(params.clone()), BlockHeight::from_u32(11));
+        let receipts = pending_receipts_in_tx(&ivk, enforcement, &streamed);
+        assert_eq!(
+            receipts,
+            vec![PendingReceipt {
+                txid: [68u8; 32],
+                output_index: 0,
+                value: IRONWOOD_DEPOSIT_NOTE_VALUE,
+            }],
+            "the Sapling output is found and its value recovered"
+        );
+
+        // Another wallet's key finds nothing in the same transaction.
+        let other = test_extfvk(31);
+        let other_ivk = PreparedIncomingViewingKey::new(&other.fvk.vk.ivk());
+        assert!(pending_receipts_in_tx(&other_ivk, enforcement, &streamed).is_empty());
+
+        // It counts as pending while the wallet database has not scanned it, and the mined note
+        // replaces it afterwards (R39.8.0ah): one output is never counted from both sources.
+        let checkpoint = CheckPointBlockInfo {
+            height: 10,
+            hash: rpc::v1::types::H256([9u8; 32]),
+            time: 10,
+            sapling_tree: empty_sapling_tree_bytes().into(),
+        };
+        let history = ZCoinShieldedHistory::open_or_create(
+            "ARRR",
+            test_db_dir("ironwood-deposit-mempool"),
+            params.clone(),
+            &extfvk,
+            Some(&checkpoint),
+        )
+        .unwrap();
+        assert!(!history.transaction_is_scanned(&receipts[0].txid).unwrap());
+        history
+            .insert_compact_block(convert_compact_block(ironwood_deposit_block_from_wire(&extfvk)).unwrap())
+            .unwrap();
+        assert_eq!(
+            history
+                .scan_cached_blocks_to_height(params.clone(), 11, 1_000, 0, |_, _| {})
+                .unwrap(),
+            11
+        );
+        assert!(history.transaction_is_scanned(&receipts[0].txid).unwrap());
+        assert_eq!(history.balance(params).unwrap(), IRONWOOD_DEPOSIT_NOTE_VALUE);
     }
 
     #[test]
@@ -6657,9 +7260,17 @@ pub(crate) mod tests {
         const SEND_SAT: u64 = 1_000_000;
 
         fn new() -> Option<WithdrawFixture> {
+            Self::with_block(|extfvk| compact_block_with_received_note(11, 11, 9, extfvk, Self::NOTE_VALUE))
+        }
+
+        /// The same fixture with the note arriving in the block `make_block` builds for the wallet's
+        /// viewing key (a block at height 11 chained to the checkpoint at 10, paying `NOTE_VALUE`).
+        fn with_block(
+            make_block: impl FnOnce(&ExtendedFullViewingKey) -> zcash_compact::CompactBlock,
+        ) -> Option<WithdrawFixture> {
             let dir = std::env::var_os("ARRR_SAPLING_PARAMS")
                 .map(PathBuf::from)
-                .unwrap_or_else(crate::utxo::zcash_params_path);
+                .unwrap_or_else(|| crate::utxo::zcash_params_path().expect("default Zcash parameters directory"));
             let (spend, output) = (
                 dir.join(crate::z_coin::SAPLING_SPEND_NAME),
                 dir.join(crate::z_coin::SAPLING_OUTPUT_NAME),
@@ -6692,9 +7303,7 @@ pub(crate) mod tests {
                 Some(&checkpoint),
             )
             .unwrap();
-            history
-                .insert_compact_block(compact_block_with_received_note(11, 11, 9, &extfvk, Self::NOTE_VALUE))
-                .unwrap();
+            history.insert_compact_block(make_block(&extfvk)).unwrap();
             assert_eq!(
                 history
                     .scan_cached_blocks_to_height(params.clone(), 11, 1_000, 0, |_, _| {})
@@ -6743,9 +7352,16 @@ pub(crate) mod tests {
         fn build(
             &self,
         ) -> Result<zcash_primitives::transaction::Transaction, crate::z_coin::z_coin_errors::GenTxError> {
-            crate::z_coin::z_coin_ops::build_from_wallet_db(&self.inputs(), vec![], vec![self.output()], self.fee(), 12)
-                .map(|(tx, _)| tx)
-                .map_err(|e| e.into_inner())
+            crate::z_coin::z_coin_ops::build_from_wallet_db(
+                &self.inputs(),
+                vec![],
+                vec![self.output()],
+                None,
+                self.fee(),
+                12,
+            )
+            .map(|(tx, _)| tx)
+            .map_err(|e| e.into_inner())
         }
 
         /// The second step of the withdraw contract: the caller submits the serialized transaction
@@ -6980,6 +7596,238 @@ pub(crate) mod tests {
             .expect("the note is free once the transaction has expired");
         assert_eq!(sapling_nullifiers(&first), sapling_nullifiers(&retry));
     }
+
+    // ---- a transaction the wallet database holds is not broadcast again (CRD ch.39, status note 2026-11-10) ----
+
+    /// The txid in display order and, for a mined refusal, the block it was scanned in.
+    #[test]
+    fn a_rebroadcast_is_refused_by_state_and_the_text_names_the_transaction() {
+        use crate::z_coin::z_coin_ops::{rebroadcast_refusal, RebroadcastRefusal};
+        use crate::z_coin::z_tx_read;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let tx = fixture.build().unwrap();
+        let mut bytes = Vec::new();
+        tx.write(&mut bytes).unwrap();
+        let display = z_tx_read::txid_display(&tx);
+        let display_hex = hex::encode(display.0);
+        assert_ne!(
+            display_hex,
+            hex::encode(tx.txid().as_ref()),
+            "the fixture's txid must differ from its reverse, or the order is not tested"
+        );
+
+        // Built but never submitted: nothing is known, the broadcast goes ahead.
+        assert_eq!(rebroadcast_refusal("ARRR", &fixture.history, &bytes), None);
+
+        // Recorded as broadcast, not yet mined: not refused.
+        fixture.broadcast(&tx);
+        assert_eq!(
+            rebroadcast_refusal("ARRR", &fixture.history, &bytes),
+            None,
+            "an unmined row is not refused: a re-push stays possible"
+        );
+
+        // Scanned in block 12.
+        let mut block = empty_compact_block(12, 12, 11);
+        block.chain_metadata = None;
+        block.vtx.push(zcash_compact::CompactTx {
+            index: 1,
+            txid: tx.txid().as_ref().to_vec(),
+            spends: sapling_nullifiers(&tx)
+                .into_iter()
+                .map(|nf| zcash_compact::CompactSaplingSpend { nf: nf.to_vec() })
+                .collect(),
+            ..Default::default()
+        });
+        fixture.history.insert_compact_blocks(&[block]).unwrap();
+        fixture
+            .history
+            .scan_cached_blocks_to_height(fixture.params.clone(), 12, 1_000, 0, |_, _| {})
+            .unwrap();
+        let mined = rebroadcast_refusal("ARRR", &fixture.history, &bytes).expect("a scanned transaction is refused");
+        assert_eq!(mined, RebroadcastRefusal::Mined {
+            coin: "ARRR".to_owned(),
+            txid: display,
+            height: 12
+        });
+        let text = mined.to_string();
+        assert!(text.contains(&display_hex), "{text}");
+        assert!(text.starts_with("ARRR: transaction "), "{text}");
+        assert!(
+            text.contains("is already known to this wallet and is mined in block 12"),
+            "{text}"
+        );
+    }
+
+    /// Bytes that are no transaction are not this guard's business. (A parsable transaction with no
+    /// Sapling spend is not covered: the fixture has no cheap way to build one.)
+    #[test]
+    fn the_rebroadcast_guard_ignores_unreadable_bytes() {
+        use crate::z_coin::z_coin_ops::rebroadcast_refusal;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        assert_eq!(
+            rebroadcast_refusal("ARRR", &fixture.history, b"not a transaction"),
+            None
+        );
+        assert_eq!(rebroadcast_refusal("ARRR", &fixture.history, &[]), None);
+    }
+
+    /// A wallet database that cannot be read never blocks a broadcast.
+    #[test]
+    fn the_rebroadcast_guard_does_not_block_when_the_lookup_fails() {
+        use crate::z_coin::z_coin_ops::rebroadcast_refusal;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let tx = fixture.build().unwrap();
+        let mut bytes = Vec::new();
+        tx.write(&mut bytes).unwrap();
+        let mut broken = fixture.history.clone();
+        broken.wallet_db_path = fixture
+            .history
+            .wallet_db_path()
+            .with_file_name("does-not-exist")
+            .join("w.db");
+        assert!(broken.known_transaction(tx.txid().as_ref()).is_err());
+        assert_eq!(rebroadcast_refusal("ARRR", &broken, &bytes), None);
+    }
+
+    // ---- the fee of a history row (CRD ch.39 R39.8.9e1, T39.8.9e1) ----
+
+    /// Sets (or clears) the fee the wallet database holds for the transaction `id_tx`.
+    fn set_snapshot_fee(history: &ZCoinShieldedHistory, id_tx: i64, fee: Option<i64>) {
+        let (conn, _, _) = snapshot_connection(history);
+        conn.execute("UPDATE transactions SET fee = ?1 WHERE id_tx = ?2", params![fee, id_tx])
+            .unwrap();
+    }
+
+    /// The `transaction_fee` of every row of a page, by internal id.
+    fn fees_by_id(page: &ZCoinTxHistoryPage) -> Vec<(i64, BigDecimal)> {
+        let mut fees: Vec<_> = page
+            .transactions
+            .iter()
+            .map(|tx| (tx.internal_id, tx.transaction_fee.clone()))
+            .collect();
+        fees.sort_by_key(|(id, _)| *id);
+        fees
+    }
+
+    /// T39.8.9e1 (b), (c): a row for which the wallet database holds no fee reports `0`: the four
+    /// deposits of the snapshot and, as after a rebuild of the wallet database, the own send.
+    #[test]
+    fn t39_8_9e1_a_row_with_no_recorded_fee_reports_zero() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-fee-none"));
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+
+        // The test has teeth only if the column is NULL, not a stored zero.
+        let (conn, _, _) = snapshot_connection(&history);
+        let recorded: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transactions WHERE fee IS NOT NULL", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(recorded, 0);
+
+        let page = snapshot_page(&history, page_number(1), 10, true);
+        assert_eq!(page.total, 5);
+        for (id, fee) in fees_by_id(&page) {
+            assert_eq!(fee, BigDecimal::from(0), "row {id}");
+        }
+        // Row 5 is the own send: it spends wallet notes and still reports 0, because no fee is held.
+        assert!(row_of(&page, 5).spent_by_me > BigDecimal::from(0));
+    }
+
+    /// T39.8.9e1 (a): the fee the wallet database holds for an own send is reported, in the coin's
+    /// decimals, by the unmined row, by the mined row and after a restart of each; no other row
+    /// reports a fee.
+    #[test]
+    fn t39_8_9e1_a_recorded_fee_is_reported_unmined_mined_and_after_a_restart() {
+        let db_dir = test_db_dir("snapshot-fee-recorded");
+        let history = open_snapshot_history(&db_dir);
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+        let fee_sat = 10_000;
+        set_snapshot_fee(&history, 5, Some(fee_sat));
+
+        let check = |history: &ZCoinShieldedHistory, tip: u64| {
+            let page = history
+                .load_page("ARRR", "zs-wallet", 8, tip, &page_number(1), 10, true)
+                .unwrap();
+            assert_eq!(page.total, 5);
+            let own_send = row_of(&page, 5);
+            assert_eq!(own_send.transaction_fee, sat_amount(fee_sat));
+            for (id, fee) in fees_by_id(&page).into_iter().filter(|(id, _)| *id != 5) {
+                assert_eq!(fee, BigDecimal::from(0), "row {id}");
+            }
+        };
+
+        // The unmined row, and after a restart.
+        check(&history, 4_184_456);
+        drop(history);
+        let history = reopen_snapshot_history(&db_dir);
+        check(&history, 4_184_456);
+
+        // The mined row, and after a restart. The block fields are the ones a scan sets; it does not
+        // touch the fee column.
+        let (conn, _, _) = snapshot_connection(&history);
+        let mined_at = SNAPSHOT_HEIGHTS[3] + 1;
+        insert_snapshot_block(&conn, mined_at);
+        conn.execute(
+            "UPDATE transactions SET block = ?1, mined_height = ?1, tx_index = 0 WHERE id_tx = 5",
+            params![mined_at],
+        )
+        .unwrap();
+        drop(conn);
+        check(&history, u64::from(mined_at));
+        drop(history);
+        let history = reopen_snapshot_history(&db_dir);
+        check(&history, u64::from(mined_at));
+    }
+
+    /// T39.8.9e1 (b): a deposit reports `0` even when the wallet database holds a fee for another
+    /// transaction; the fee of one row is never carried to another.
+    #[test]
+    fn t39_8_9e1_a_fee_belongs_to_its_own_row_only() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-fee-own-row"));
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+        set_snapshot_fee(&history, 5, Some(10_000));
+        set_snapshot_fee(&history, 2, Some(25_000));
+
+        let page = snapshot_page(&history, page_number(1), 10, true);
+        assert_eq!(fees_by_id(&page), vec![
+            (1, BigDecimal::from(0)),
+            (2, sat_amount(25_000)),
+            (3, BigDecimal::from(0)),
+            (4, BigDecimal::from(0)),
+            (5, sat_amount(10_000)),
+        ]);
+    }
+
+    /// A fee the wallet database holds as a negative number is an unreadable row, like a negative
+    /// amount: the page is refused, not served with a `0` that would look like "no fee".
+    #[test]
+    fn t39_8_9e1_a_negative_stored_fee_refuses_the_page() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-fee-negative"));
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+        set_snapshot_fee(&history, 5, Some(-1));
+
+        assert!(history
+            .load_page("ARRR", "zs-wallet", 8, 4_184_456, &page_number(1), 10, true)
+            .is_err());
+    }
+
+    impl ZCoinShieldedHistory {
+        /// Test access to the rebuild of the wallet database at an anchor (R39.8.0ad), which is private
+        /// to this module: the wallet database is replaced by a fresh one holding the account, anchored
+        /// at the empty chain state of `height` and `hash`, and the compact-block cache is emptied.
+        pub(crate) fn rebuild_wallet_at_empty_anchor_for_test(
+            &self,
+            height: u32,
+            hash: [u8; 32],
+        ) -> Result<(), String> {
+            self.rebuild_wallet_at_anchor(ChainState::empty(BlockHeight::from_u32(height), BlockHash(hash)))
+        }
+    }
 }
 
 /// An unspent wallet note of a transaction that is recorded in the wallet database but not mined.
@@ -7026,6 +7874,61 @@ pub(crate) struct PendingReceipt {
     pub(crate) value: u64,
 }
 
+/// The wallet-owned Sapling outputs of one compact mempool transaction, by trial decryption with `ivk`.
+///
+/// Only the Sapling outputs of the compact transaction are read. Any other field of the dictated wire
+/// message, the Ironwood actions of a version-6 transaction included, is not part of this project's
+/// message definition and never reaches this reader (CRD ch.39 R39.8.0bb).
+fn pending_receipts_in_tx(
+    ivk: &sapling::keys::PreparedIncomingViewingKey,
+    enforcement: sapling::note_encryption::Zip212Enforcement,
+    tx: &z_coin_grpc::CompactTx,
+) -> Vec<PendingReceipt> {
+    use sapling::note::ExtractedNoteCommitment;
+    use sapling::note_encryption::{try_sapling_compact_note_decryption, CompactOutputDescription};
+    use sapling::Note;
+    use zcash_note_encryption::{EphemeralKeyBytes, COMPACT_NOTE_SIZE};
+
+    let mut found = Vec::new();
+    let txid: [u8; 32] = match tx.hash.as_slice().try_into() {
+        Ok(hash) => hash,
+        // A malformed identifier cannot be reconciled against the
+        // wallet database later, so the entry is unusable.
+        Err(_) => return Vec::new(),
+    };
+    for (index, output) in tx.outputs.iter().enumerate() {
+        let Some(cmu) = Option::from(ExtractedNoteCommitment::from_bytes(
+            &match output.cmu.as_slice().try_into() {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            },
+        )) else {
+            continue;
+        };
+        let epk: [u8; 32] = match output.epk.as_slice().try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let enc_ciphertext: [u8; COMPACT_NOTE_SIZE] = match output.ciphertext.as_slice().try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let description = CompactOutputDescription {
+            ephemeral_key: EphemeralKeyBytes(epk),
+            cmu,
+            enc_ciphertext,
+        };
+        if let Some((note, _addr)) = try_sapling_compact_note_decryption(ivk, &description, enforcement) {
+            found.push(PendingReceipt {
+                txid,
+                output_index: index as u32,
+                value: Note::value(&note).inner(),
+            });
+        }
+    }
+    found
+}
+
 impl ZCoinShieldedHistory {
     /// Trial-decrypt the backend's current mempool and return every
     /// wallet-owned output it contains that the wallet database has not
@@ -7041,10 +7944,6 @@ impl ZCoinShieldedHistory {
         tip: u64,
     ) -> Vec<PendingReceipt> {
         use sapling::keys::PreparedIncomingViewingKey;
-        use sapling::note::ExtractedNoteCommitment;
-        use sapling::note_encryption::{try_sapling_compact_note_decryption, CompactOutputDescription};
-        use sapling::Note;
-        use zcash_note_encryption::{EphemeralKeyBytes, COMPACT_NOTE_SIZE};
         use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 
         let ivk = PreparedIncomingViewingKey::new(&self.extfvk.fvk.vk.ivk());
@@ -7098,44 +7997,7 @@ impl ZCoinShieldedHistory {
                         break;
                     },
                 };
-                let txid: [u8; 32] = match tx.hash.as_slice().try_into() {
-                    Ok(hash) => hash,
-                    // A malformed identifier cannot be reconciled against the
-                    // wallet database later, so the entry is unusable.
-                    Err(_) => continue,
-                };
-                for (index, output) in tx.outputs.iter().enumerate() {
-                    let Some(cmu) =
-                        Option::from(ExtractedNoteCommitment::from_bytes(
-                            &match output.cmu.as_slice().try_into() {
-                                Ok(bytes) => bytes,
-                                Err(_) => continue,
-                            },
-                        ))
-                    else {
-                        continue;
-                    };
-                    let epk: [u8; 32] = match output.epk.as_slice().try_into() {
-                        Ok(bytes) => bytes,
-                        Err(_) => continue,
-                    };
-                    let enc_ciphertext: [u8; COMPACT_NOTE_SIZE] = match output.ciphertext.as_slice().try_into() {
-                        Ok(bytes) => bytes,
-                        Err(_) => continue,
-                    };
-                    let description = CompactOutputDescription {
-                        ephemeral_key: EphemeralKeyBytes(epk),
-                        cmu,
-                        enc_ciphertext,
-                    };
-                    if let Some((note, _addr)) = try_sapling_compact_note_decryption(&ivk, &description, enforcement) {
-                        found.push(PendingReceipt {
-                            txid,
-                            output_index: index as u32,
-                            value: Note::value(&note).inner(),
-                        });
-                    }
-                }
+                found.extend(pending_receipts_in_tx(&ivk, enforcement, &tx));
             }
             return found;
         }
@@ -7161,6 +8023,25 @@ impl ZCoinShieldedHistory {
             )
             .map_err(|e| e.to_string())?;
         Ok(count > 0)
+    }
+
+    /// The wallet database's row for `txid` (internal byte order), if it holds one: a broadcast this
+    /// wallet recorded (R39.8.0ap) or a transaction the block scan has seen. `None` when no row exists.
+    /// Read-only; an error is the database's, never an empty answer.
+    pub(crate) fn known_transaction(&self, txid: &[u8; 32]) -> Result<Option<KnownTransaction>, String> {
+        let conn = Connection::open_with_flags(&self.wallet_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT mined_height FROM transactions WHERE txid = ?1;",
+            params![&txid[..]],
+            |row| {
+                Ok(KnownTransaction {
+                    mined_height: row.get(0)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())
     }
 
     /// The transactions the wallet database holds in full whose bytes contain `script_pubkey`, with the
@@ -7357,5 +8238,43 @@ mod v6_transaction_parsing_tests {
             assert_eq!(out, raw, "height {height} round trip");
         }
         assert_eq!((v4, v6), (1, 18));
+    }
+}
+
+/// CRD ch.45 T45.19: the name of a lightwalletd server goes through the node's resolver. The TLS case (the certificate
+/// checked against the name) is not covered here: tonic applies the endpoint's TLS configuration on top of whatever
+/// connector it is given, and the configuration trusts the bundled roots only, so a test certificate cannot be trusted
+/// without a seam in `connect_lightwalletd`.
+#[cfg(test)]
+mod lightwalletd_dns_tests {
+    use super::*;
+    use common::dns_resolver::{gauges, install_test_map};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn the_server_name_is_resolved_through_the_installed_resolver() {
+        let guard = install_test_map(&[("lwd.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)])]);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let port = listener.local_addr().unwrap().port();
+            let accepted = tokio::spawn(async move { listener.accept().await.map(|(stream, _)| stream) });
+            // The loopback listener does not speak gRPC: the outcome of the connection is not the point, only that the
+            // name reached the listener.
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                ZCoinShieldedHistory::connect_lightwalletd(&format!("http://lwd.test:{}", port)),
+            )
+            .await;
+            let reached = tokio::time::timeout(Duration::from_secs(3), accepted).await;
+            assert!(matches!(reached, Ok(Ok(Ok(_)))), "the listener was not reached");
+        });
+        // The gauges are process-wide and tests that do not hold the test lock look up names beside this one: the name
+        // counts exactly, the gauge at least.
+        assert_eq!(guard.lookups_of("lwd.test"), 1);
+        assert!(gauges().unwrap().lookups >= 1);
     }
 }

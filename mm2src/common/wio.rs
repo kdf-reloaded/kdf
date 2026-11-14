@@ -1,5 +1,6 @@
 //! `wio` stands for "web I/O", it contains the parts which aren't directly available with WASM.
 
+use crate::dns_resolver::SharedDnsResolve;
 use futures::compat::Future01CompatExt;
 use futures::executor::ThreadPool;
 use futures01::sync::oneshot::{self, Receiver};
@@ -197,6 +198,11 @@ pub fn bind_listener(addr: std::net::SocketAddr) -> std::io::Result<tokio::net::
     socket.listen(LISTEN_BACKLOG)
 }
 
+/// The plain-HTTP connector of the native clients: every name goes through the node's resolver (CRD ch.45 R45.6B.9 items
+/// 3 and 5), not through the system lookup of `HttpConnector::new`. `enforce_http` is left at its default (only `http`
+/// URIs); the HTTPS connector and the lightwalletd client turn it off.
+pub fn http_connector() -> HttpConnector<SharedDnsResolve> { HttpConnector::new_with_resolver(SharedDnsResolve) }
+
 /// Builds the HTTPS connector shared by the native HTTP clients (`HYPER` and the Tendermint RPC client).
 ///
 /// The `ring` crypto provider is passed explicitly instead of relying on the process-global default
@@ -204,8 +210,15 @@ pub fn bind_listener(addr: std::net::SocketAddr) -> std::io::Result<tokio::net::
 /// and nothing here should depend on what else in the process installed. Trust anchors are the bundled
 /// `webpki-roots` set, TLS 1.2 and 1.3 are both enabled (`tls12` feature), and HTTP/1.1 and HTTP/2 are
 /// negotiated through ALPN.
-pub fn https_connector() -> HttpsConnector<HttpConnector> {
+///
+/// Names are looked up through the resolver the node installed ([`SharedDnsResolve`], CRD ch.45 R45.6B.9 item 3); TLS
+/// keeps the hostname of the URL for the server name and the certificate check.
+pub fn https_connector() -> HttpsConnector<HttpConnector<SharedDnsResolve>> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
+    // The wrapped connector must accept `https` URIs too, which `HttpsConnectorBuilder::build` does by turning
+    // `enforce_http` off on its own connector.
+    let mut http = http_connector();
+    http.enforce_http(false);
     // Please note there was a problem on iOS if native roots are used instead.
     HttpsConnectorBuilder::new()
         .with_provider_and_webpki_roots(provider)
@@ -213,11 +226,11 @@ pub fn https_connector() -> HttpsConnector<HttpConnector> {
         .https_or_http()
         .enable_http1()
         .enable_http2()
-        .build()
+        .wrap_connector(http)
 }
 
 /// The shared HTTP client type: request bodies are fully buffered.
-pub type HyperClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
+pub type HyperClient = Client<HttpsConnector<HttpConnector<SharedDnsResolve>>, Full<Bytes>>;
 
 lazy_static! {
     /// NB: With a shared client there is a possibility that keep-alive connections will be reused.

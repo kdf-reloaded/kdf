@@ -530,6 +530,14 @@ fn ctx_with_hw(material_client: TrezorClient, internal_pubkey: H264) -> MmArc {
 // EthCoin fixtures under the Trezor signing policy
 // ---------------------------------------------------------------------------
 
+/// The hardware context the fixture's coin is activated with: the one `ctx_with_hw` installed (CRD ch.05 R58a).
+fn activation_hw_ctx(ctx: &MmArc) -> crypto::HardwareWalletArc {
+    CryptoCtx::from_ctx(ctx)
+        .expect("a CryptoCtx")
+        .hw_ctx()
+        .expect("a hardware context")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_trezor_coin(
     ctx: &MmArc,
@@ -569,11 +577,13 @@ fn build_trezor_coin(
         custom_token: false,
         chain_id: Some(1),
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+        logs_window: Default::default(),
         derivation_method,
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
         estimate_gas_mult: None,
+        taker_fee_quote_at_limit: true,
     }))
 }
 
@@ -596,6 +606,7 @@ fn device_trezor_iguana_coin(
         derivation_path: DerivationPath::from_str(EVM_PATH).unwrap(),
         address,
         public,
+        hw_ctx: activation_hw_ctx(ctx),
     });
     build_trezor_coin(
         ctx,
@@ -640,6 +651,7 @@ fn device_trezor_hd_coin(
         derivation_path: DerivationPath::from_str(EVM_PATH).unwrap(),
         address: leaf_address,
         public: leaf_public,
+        hw_ctx: activation_hw_ctx(ctx),
     });
     let derivation_method = DerivationMethod::HDWallet(EthHDWallet {
         hd_wallet_storage: HDWalletCoinStorage::default(),
@@ -888,7 +900,7 @@ fn emulator_trezor_withdraw_tron_unsupported() {
 
     let err = drive_withdraw(&ctx, coin, req, Duration::from_secs(20)).expect_err("TRON must be unsupported");
     println!("TRON_ERR = {:?}", err);
-    assert!(matches!(err, WithdrawError::UnsupportedUnderTrezor(_)));
+    assert!(matches!(err, WithdrawError::UnsupportedError(_)));
 }
 
 /// T50.10: an unresolvable / foreign `from` selector fails with the ch. 49

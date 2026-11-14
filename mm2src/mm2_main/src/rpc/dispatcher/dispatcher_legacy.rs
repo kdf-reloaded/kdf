@@ -109,6 +109,7 @@ pub fn dispatcher(req: Json, ctx: MmArc) -> DispatcherRes {
         "orderbook" => hyres(orderbook_rpc(ctx, req)),
         "orderbook_depth" => hyres(orderbook_depth_rpc(ctx, req)),
         "peer_connection_healthcheck" => hyres(peer_connection_healthcheck(ctx, req)),
+        #[cfg(feature = "sim-panic-rpc")]
         "sim_panic" => hyres(sim_panic(req)),
         "recover_funds_of_swap" => spawn_highload_future(move || hyres(recover_funds_of_swap(ctx, req))),
         "sell" => hyres(sell(ctx, req)),
@@ -167,12 +168,22 @@ where
     Box::new(fut.boxed().compat())
 }
 
+/// How a request that carries no `mmrpc` key left the legacy path.
+pub enum LegacyOutcome {
+    /// The legacy handler answered.
+    Answered(Response<Vec<u8>>),
+    /// The legacy checks passed and the legacy method table has no entry for the request's `method`, including a
+    /// missing or non-string `method` (CRD ch.43 R43.1A.1a). The untouched request body is handed back so that the
+    /// caller can retry it once on the versioned surface.
+    NoLegacyMethod(Json),
+}
+
 pub async fn process_single_request(
     ctx: MmArc,
     req: Json,
     client: SocketAddr,
     local_only: bool,
-) -> Result<Response<Vec<u8>>, String> {
+) -> Result<LegacyOutcome, String> {
     // https://github.com/artemii235/SuperNET/issues/368
     if local_only && !client.ip().is_loopback() && !PUBLIC_METHODS.contains(&req["method"].as_str()) {
         return ERR!("Selected method can be called from localhost only!");
@@ -185,9 +196,9 @@ pub async fn process_single_request(
 
     let handler = match dispatcher(req, ctx.clone()) {
         DispatcherRes::Match(handler) => handler,
-        DispatcherRes::NoMatch(_) => return ERR!("No such method."),
+        DispatcherRes::NoMatch(req) => return Ok(LegacyOutcome::NoLegacyMethod(req)),
     };
-    Ok(try_s!(handler.compat().await))
+    Ok(LegacyOutcome::Answered(try_s!(handler.compat().await)))
 }
 
 /// The set of functions that convert the result of the updated handlers into the legacy format.

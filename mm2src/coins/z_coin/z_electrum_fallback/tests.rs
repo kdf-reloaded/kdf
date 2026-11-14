@@ -1026,6 +1026,7 @@ async fn unreachable_servers_fail_the_question_not_the_activation() {
         url: "127.0.0.1:1".to_owned(),
         protocol: Default::default(),
         disable_cert_verification: false,
+        spki_sha256: None,
         timeout_sec: None,
     };
     let fallback = ElectrumFallback::for_activation(ctx.weak(), "ARRR", vec![refused]);

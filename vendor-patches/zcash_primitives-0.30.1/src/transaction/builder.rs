@@ -279,6 +279,12 @@ pub struct BundlePadding {
     /// action count reveals the transaction shape (acceptable when that shape is already
     /// public, e.g. pool migrations).
     pub pad_to_minimum: Option<u8>,
+    /// KDF Reloaded extension: build the bundle with spends disabled and outputs enabled
+    /// ([`orchard::bundle::Flags::SPENDS_DISABLED`]) instead of the bundle version's default
+    /// flags, so that it can only pay into the pool. Honoured by the **Ironwood** builder of
+    /// [`BuildConfig::Standard`] only; the Orchard builder always uses the default flags. The
+    /// padding actions still carry the zero-value dummy spend the circuit requires.
+    pub spends_disabled: bool,
 }
 
 impl BundlePadding {
@@ -287,6 +293,16 @@ impl BundlePadding {
     pub const DEFAULT: BundlePadding = BundlePadding {
         bundle_required: false,
         pad_to_minimum: None,
+        spends_disabled: false,
+    };
+
+    /// [`Self::DEFAULT`] padding with spends disabled (KDF Reloaded extension): an output-only
+    /// bundle, as a payment into the Ironwood pool from another pool is built. Only the Ironwood
+    /// builder honours it.
+    pub const OUTPUT_ONLY: BundlePadding = BundlePadding {
+        bundle_required: false,
+        pad_to_minimum: None,
+        spends_disabled: true,
     };
 
     /// Unpadded transactional padding, matching [`orchard::builder::BundleType::UNPADDED`]:
@@ -295,6 +311,7 @@ impl BundlePadding {
     pub const UNPADDED: BundlePadding = BundlePadding {
         bundle_required: false,
         pad_to_minimum: Some(1),
+        spends_disabled: false,
     };
 
     /// Returns the orchard [`BundleType`](orchard::builder::BundleType) selecting this
@@ -386,13 +403,19 @@ impl BuildConfig {
                 ironwood_padding,
                 ..
             } => ironwood_anchor.as_ref().map(|a| {
+                // KDF Reloaded extension: `spends_disabled` selects the output-only flag set.
+                let flags = if ironwood_padding.spends_disabled {
+                    orchard::bundle::Flags::SPENDS_DISABLED
+                } else {
+                    bundle_version.default_flags()
+                };
                 orchard::builder::Builder::new(
                     ironwood_padding.bundle_type(),
                     bundle_version,
-                    bundle_version.default_flags(),
+                    flags,
                     *a,
                 )
-                .expect("a transactional bundle type with default flags is always representable")
+                .expect("a transactional bundle type with default or spends-disabled flags is always representable")
             }),
             BuildConfig::Coinbase { .. } => Some(
                 orchard::builder::Builder::new(

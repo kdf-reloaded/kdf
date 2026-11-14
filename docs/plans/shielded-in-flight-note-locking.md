@@ -1,11 +1,12 @@
 # Plan: shielded in-flight note locking (ARRR taker swaps)
 
-**Status:** in progress (swap and `withdraw` paths shipped; T39.8.0h covered by the harness 2026-10-25; open: two-daemon detection, F3) — **Last reviewed:** 2026-10-29
+**Status:** parked (swap and withdraw paths shipped; two-daemon detection and F3 postponed, not started) — **Last reviewed:** 2026-11-08
 
-> **Postponed until after the beta, 2026-10-25.** The two open items, detection of two daemons on one
-> seed with separate wallet databases and F3 (the post-broadcast sync trigger, latency only), are not
-> worked on before the beta. A documented limitation is enough for the beta: the two-daemon case is
-> listed under *Known limitations* in `CHANGELOG.md` (run one instance per seed), and F3 changes
+> **Postponed past 0.3.0-beta.1, 2026-10-25; neither item has started as of 2026-11-08.** The two
+> open items, detection of two daemons on one seed with separate wallet databases and F3 (the
+> post-broadcast sync trigger, latency only), were not worked on before that beta. A documented
+> limitation was enough for it: the two-daemon case is listed under *Known limitations* in
+> `CHANGELOG.md` (run one instance per seed), in the 0.4.0 section as well, and F3 changes
 > latency, not correctness, because the lock is recorded in the wallet database. Nothing here is marked
 > done by this note.
 >

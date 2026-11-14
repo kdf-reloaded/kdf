@@ -280,6 +280,12 @@ sole discretion — nothing requires their inclusion and nothing precludes it.
   `test.yml`; repository settings do not change. `docker-tests`,
   `trezor-emulator-tests` and `external-network-tests` run but are not
   required, because they depend on third-party services or live networks.
+  `aarch64-linux` cross-builds the `kdf` binary for 64-bit ARM Linux (the pinned
+  Debian 11 container, glibc 2.31 floor check, qemu smoke test; no tests) on every
+  pull request. It runs but is not required yet, because it downloads from
+  third-party servers. Criterion: after about ten green runs on `dev` (roughly two
+  weeks) it becomes required by adding it to `tests-passed`'s `needs:` list, in a
+  one-line pull request.
 - Platform builds (Windows, macOS, iOS, Android, WASM) live under
   `.github/workflows/build-*.yml` and are dispatched manually until each
   runner is verified — see [CI_RUNNERS.md](./CI_RUNNERS.md).

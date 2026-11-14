@@ -70,6 +70,13 @@ pub enum GenTxError {
         coin: String,
         activation_time: u32,
     },
+    /// A payment to a Pirate1 (Ironwood) address cannot be built now, refused before any note is
+    /// selected (CRD ch.39 R39.6.5d).
+    #[display(fmt = "{} cannot pay a Pirate1 (Ironwood) address: {}", coin, reason)]
+    IronwoodPaymentRefused {
+        coin: String,
+        reason: String,
+    },
 }
 
 /// Why a shielded construction path could not obtain its builder target height (CRD ch.39
@@ -142,6 +149,8 @@ impl From<GenTxError> for WithdrawError {
                 locked,
             },
             GenTxError::Rpc(e) => WithdrawError::Transport(e.to_string()),
+            // The destination form is not payable by this coin right now (R39.6.5d).
+            GenTxError::IronwoodPaymentRefused { .. } => WithdrawError::InvalidAddress(gen_tx.to_string()),
             GenTxError::BuilderHeight(BuilderHeightError::TipUnavailable(e)) => WithdrawError::Transport(e),
             GenTxError::BuilderHeight(BuilderHeightError::IronwoodActivation(_)) => {
                 WithdrawError::InternalError(gen_tx.to_string())
@@ -283,6 +292,13 @@ pub enum ZCoinBuildError {
     #[display(fmt = "Zcash parameters directory does not exist at {}", path)]
     ZCashParamsDirNotFound {
         path: String,
+    },
+    #[display(
+        fmt = "the default Zcash parameters directory could not be determined: {}; set zcash_params_path",
+        reason
+    )]
+    ZCashParamsDirUnresolved {
+        reason: String,
     },
     ZCashParamsNotFound,
     #[display(fmt = "HD shielded key derivation failed: {}", _0)]

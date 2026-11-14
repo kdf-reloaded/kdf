@@ -90,7 +90,8 @@ jobs:
     #     our own code and never clippy-invokes `lightning` as a primary target.
     #   * `--all-features` would turn on features that never ship in the `kdf`
     #     binary (mm2_main `regtest-netid`,
-    #     `unsafe-rpc-wire-dump-release-override`, `custom-swap-locktime`) plus
+    #     `unsafe-rpc-wire-dump-release-override`, `custom-swap-locktime`,
+    #     `counting-alloc`, `sim-panic-rpc`) plus
     #     test-only Trezor-emulator / Foundry scaffolding, i.e. it would enforce
     #     -D warnings over code that never ships. Default features are what the
     #     `kdf` binary builds, so that is what we lint.
@@ -171,8 +172,9 @@ jobs:
             cmd: cargo test -p coins --lib -- eth::eth_tests::test_addr_from_pubkey_str eth::eth_tests::test_gas_station_data eth::eth_tests::test_u256 eth::eth_tests::test_wei_from eth::eth_tests::test_wei_to
           - name: spv-validation
             cmd: cargo test -p kdf_spv_validation
+          # Also runs the capability-word tests of CRD ch.59 §59.4A T14 (coins side).
           - name: rpc-response
-            cmd: cargo test -p coins --lib rpc_response_tests
+            cmd: "cargo test -p coins --lib -- rpc_response_tests coin_protocol_capability::"
           # The shielded (ARRR/ZHTLC) store, scan and tree-state tests. Previously
           # unreachable from any matrix cell: the two `coins` cells above filter
           # to `eth::eth_tests::*` and `rpc_response_tests`, so nothing ran the
@@ -180,7 +182,7 @@ jobs:
           # docs/plans/librustzcash-upgrade.md and
           # docs/plans/arrr-ironwood-compatibility.md.
           - name: shielded
-            cmd: "cargo test -p coins --lib z_coin::"
+            cmd: "cargo test -p coins --lib -- z_coin:: utxo::data_dir_tests"
           # `scripted_node_ports` runs real EVM code against an in-process scripted
           # JSON-RPC node: deterministic, no binary, no network. Previously
           # unreachable from any cell (the `eth-utility` cell names five tests).
@@ -205,8 +207,28 @@ jobs:
           # in `ordermatch_tests`, which another cell runs. T-MP8 itself, toward relays
           # that read 1 and 0.3 messages per second, takes about 15 minutes and is
           # `#[ignore]` (`t_mp8_relay_1_msg_per_s`, `t_mp8_relay_0_3_msg_per_s`).
+          # The legacy maker-swap unit tests of `lp_swap::maker_swap` (the CRD ch.51 recovery
+          # rules R82 to R84 among them) also run in this cell.
           - name: maker-outbox
-            cmd: "cargo test -p mm2_main --lib -- maker_outbox:: t_mp8_harness"
+            cmd: "cargo test -p mm2_main --lib -- maker_outbox:: t_mp8_harness lp_swap::maker_swap::"
+          # The bounds on a value received from a peer (CRD ch.28 R16a, T4a): the check itself,
+          # its use by the node's decode sites in `mm2_p2p`, `coins` and `mm2_main`, and the
+          # deepest message the node sends. The `ordermatch_tests` ones also run in the
+          # `ordermatch` cell. `application` enables the request tests of `mm2_p2p`.
+          - name: peer-decoding
+            cmd: "cargo test -p common --lib msgpack_bounds:: && cargo test -p mm2_p2p --features application --lib t4a_ && cargo test -p coins --lib t4a_ && cargo test -p mm2_main --lib t4a_"
+          # The bounded close (CRD ch.28 R27c, T14): the vendored yamux crate's own tests,
+          # which include the deadline of the multiplexer's close. The crate is excluded
+          # from the workspace, so it is run by manifest path (its own Cargo.lock).
+          - name: bounded-close
+            cmd: "cargo test --manifest-path vendor-patches/libp2p-yamux-0.44.0/Cargo.toml"
+          # The withdraw, Qtum, Bitcoin Cash and SLP tests of `coins`, selected by a substring of
+          # the test path. The tests of these paths that need a public server carry
+          # `#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]`
+          # (docs/UNIT_TESTS.md, "Tests that need public servers"), so without that feature this
+          # cell runs only the offline ones.
+          - name: withdraw-family
+            cmd: "cargo test -p coins --lib -- withdraw qtum bch slp"
 
     steps:
       - uses: actions/checkout@v7
@@ -373,7 +395,13 @@ jobs:
         # private regtest chain, so no fixed seed is needed and none is
         # committed. See scripts/with-test-passphrases.sh and
         # docs/TEST_ENV_VARS.md.
-        run: scripts/with-test-passphrases.sh cargo test --bin docker_tests --features regtest-netid -- --test-threads=1 test_search_for_swap_tx_spend test_one_hundred_maker_payments test_withdraw test_utxo_merge test_send_and_validate test_validate_maker_payment_wrong_amount test_list_unspent test_multiple_sequential
+        #
+        # `live-network-tests` keeps this step running what it ran before the feature existed. Three tests
+        # that the name filters below select reach public servers (`test_withdraw_segwit`,
+        # `test_withdraw_cashaddresses`, `test_withdraw_to_different_cashaddress_network_should_fail`), and
+        # without the feature they would be ignored. The filters select the same tests as before, so the
+        # feature does not add a live test to this job. See docs/UNIT_TESTS.md.
+        run: scripts/with-test-passphrases.sh cargo test --bin docker_tests --features regtest-netid,live-network-tests -- --test-threads=1 test_search_for_swap_tx_spend test_one_hundred_maker_payments test_withdraw test_utxo_merge test_send_and_validate test_validate_maker_payment_wrong_amount test_list_unspent test_multiple_sequential
         env:
           RUST_LOG: debug
           
@@ -659,6 +687,23 @@ jobs:
           if grep -qi "skipping" "$RUNNER_TEMP/evm-geth.log"; then
             echo "::error::a geth test reported skipping"; exit 1
           fi
+
+  # Cross-builds the `kdf` binary for aarch64 Linux on every PR, so a change that
+  # breaks the 64-bit ARM build is caught before it merges instead of at release
+  # time. It reuses build-linux.yml: the pinned Debian 11 container, the Debian 11
+  # aarch64 cross toolchain, the glibc 2.31 floor check and a qemu `kdf --version`
+  # smoke test. Debug profile for speed; no tests (running them would need
+  # qemu-user and be slow); no artifact upload.
+  #
+  # Not in `tests-passed`' `needs:` yet, for the reason given there: it depends on
+  # third-party availability (snapshot.debian.org, the protoc download). Adding
+  # `aarch64-linux` to that list makes it required.
+  aarch64-linux:
+    uses: ./.github/workflows/build-linux.yml
+    with:
+      profile: dev
+      targets: '["aarch64-unknown-linux-gnu"]'
+      upload: false
 
   tests-passed:
     # The single required status check for dev, staging and main. Branch

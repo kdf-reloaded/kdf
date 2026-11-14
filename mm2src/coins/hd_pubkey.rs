@@ -1,4 +1,5 @@
 use crate::hd_wallet::{HDWalletRpcError, NewAccountCreatingError};
+use crate::WithdrawError;
 use async_trait::async_trait;
 use crypto::hw_rpc_task::{HwConnectStatuses, TrezorRpcTaskConnectProcessor};
 use crypto::trezor::trezor_rpc_task::TrezorRpcTaskProcessor;
@@ -112,6 +113,61 @@ pub trait HDXPubExtractor {
     async fn extract_eth_xpub(&self, _derivation_path: DerivationPath) -> MmResult<XPub, HDExtractPubkeyError> {
         MmError::err(HDExtractPubkeyError::CoinDoesntSupportTrezor)
     }
+
+    /// The hardware context this extractor reads the keys from, or `None` when it reads from none. A coin of the
+    /// Trezor policy compares it with the context the coin was activated with before it asks anything (CRD ch.05
+    /// R58a, [`require_extractor_device`]).
+    fn hardware_context(&self) -> Option<HardwareWalletArc>;
+}
+
+/// CRD ch.05 R58a: the check every device operation of a coin of the Trezor policy makes before it touches the
+/// device or the storage. `activated_with` is the hardware context the coin was activated with, `current` the one
+/// the operation would use. The same device (the same digest of R51) passes; another one answers
+/// [`HwError::FoundUnexpectedDevice`], which each caller maps through its own hardware error class. A coin without
+/// a record of its device cannot be told from a replaced one, so it is refused as well (`HwError::Internal`); an
+/// activated coin always has the record.
+pub(crate) fn require_same_device(
+    activated_with: Option<&HardwareWalletArc>,
+    current: &HardwareWalletArc,
+) -> Result<(), HwError> {
+    let activated_with = activated_with.ok_or_else(|| {
+        HwError::Internal("The coin keeps no record of the hardware wallet device it was activated with".to_owned())
+    })?;
+    activated_with.ensure_same_device(current)
+}
+
+/// CRD ch.05 R58a for signing with the device: the current hardware context, once it is the one `activated_with`
+/// names. An empty slot answers `NoTrezorDeviceAvailable` as before; another device answers `FoundUnexpectedDevice`.
+/// Both answers come before the device is contacted.
+pub(crate) fn hardware_context_for_signing(
+    ctx: &MmArc,
+    activated_with: Option<&HardwareWalletArc>,
+) -> MmResult<HardwareWalletArc, WithdrawError> {
+    let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
+    let hw_ctx = crypto_ctx
+        .hw_ctx()
+        .or_mm_err(|| WithdrawError::NoTrezorDeviceAvailable)?;
+    require_same_device(activated_with, &hw_ctx).map_to_mm(WithdrawError::from)?;
+    Ok(hw_ctx)
+}
+
+/// CRD ch.05 R58a for the read of an account's extended public key: the context `extractor` would read from is
+/// compared with the one the coin was activated with ([`require_same_device`]) before the extractor is asked. An
+/// extractor that reads from no device is not asked to prove an identity; it has no device to touch and answers
+/// with its own error.
+pub(crate) fn require_extractor_device<XPubExtractor>(
+    activated_with: Option<&HardwareWalletArc>,
+    extractor: &XPubExtractor,
+) -> MmResult<(), HDExtractPubkeyError>
+where
+    XPubExtractor: HDXPubExtractor + ?Sized,
+{
+    match extractor.hardware_context() {
+        Some(current) => {
+            require_same_device(activated_with, &current).map_to_mm(HDExtractPubkeyError::HardwareWalletError)
+        },
+        None => Ok(()),
+    }
 }
 
 pub enum RpcTaskXPubExtractor<'task, Task: RpcTask> {
@@ -154,6 +210,12 @@ where
                 task_handle,
                 statuses,
             } => Self::extract_eth_xpub_from_trezor(hw_ctx, task_handle, statuses, derivation_path).await,
+        }
+    }
+
+    fn hardware_context(&self) -> Option<HardwareWalletArc> {
+        match self {
+            RpcTaskXPubExtractor::Trezor { hw_ctx, .. } => Some(hw_ctx.clone()),
         }
     }
 }
@@ -260,5 +322,9 @@ where
             .map_err(Clone::clone)?
             .extract_eth_xpub(derivation_path)
             .await
+    }
+
+    fn hardware_context(&self) -> Option<HardwareWalletArc> {
+        self.0.as_ref().ok().and_then(|extractor| extractor.hardware_context())
     }
 }

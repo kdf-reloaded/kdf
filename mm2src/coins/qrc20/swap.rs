@@ -137,6 +137,8 @@ impl Qrc20Coin {
         };
 
         let erc20_payment = try_s!(self.erc20_payment_details_from_tx(&payment_tx).await);
+        // CRD ch.51 R72A: the `secret_hash` slot of the payment is compared with the value derived from the shared one.
+        eth::check_payment_secret_hash_arg(&Token::FixedBytes(erc20_payment.secret_hash.clone()), &secret_hash)?;
         if erc20_payment.contract_call_bytes != expected_call_bytes {
             return ERR!(
                 "Unexpected 'erc20Payment' contract call bytes: {:?}",
@@ -236,6 +238,8 @@ impl Qrc20Coin {
         if expected_swap_id != swap_id {
             return ERR!("Unexpected swap_id {}", hex::encode(swap_id));
         }
+        // CRD ch.51 R72A: the contract checks a spend against the derived value, so the spend search does too.
+        let secret_hash = try_s!(eth::contract_secret_hash(&secret_hash));
 
         // First try to find a 'receiverSpend' contract call.
         let spend_txs = try_s!(self.receiver_spend_transactions(receiver, search_from_block).await);
@@ -282,6 +286,9 @@ impl Qrc20Coin {
     }
 
     pub fn extract_secret_impl(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+        // CRD ch.51 R72A: the revealed secret is checked against the value derived from the shared `secret_hash`.
+        let derived_secret_hash = try_s!(eth::contract_secret_hash(secret_hash));
+        let secret_hash: &[u8] = &derived_secret_hash;
         let spend_tx: UtxoTx = try_s!(deserialize(spend_tx).map_err(|e| ERRL!("{:?}", e)));
         let spend_tx_hash: H256Json = spend_tx.hash().reversed().into();
         for output in spend_tx.outputs {
@@ -547,7 +554,11 @@ impl Qrc20Coin {
         })
     }
 
-    fn erc20_payment_call_bytes(
+    /// The `erc20Payment` call bytes of a payment for the shared `secret_hash`. The swap contract's `bytes20` slot
+    /// carries the value derived from it (CRD ch.51 R72A): the shared value unchanged when it has 20 bytes,
+    /// `RIPEMD160` of it when it has 32. `id` is the swap id, computed by the caller over the shared value. Both
+    /// the payment build and the payment validation take their bytes from here.
+    pub(super) fn erc20_payment_call_bytes(
         &self,
         id: Vec<u8>,
         value: U256,
@@ -555,13 +566,15 @@ impl Qrc20Coin {
         secret_hash: &[u8],
         receiver_addr: H160,
     ) -> Qrc20AbiResult<Vec<u8>> {
+        let contract_hash =
+            eth::contract_secret_hash(secret_hash).map_err(|e| MmError::new(Qrc20AbiError::InvalidParams(e)))?;
         let function = eth::SWAP_CONTRACT.function("erc20Payment")?;
         Ok(function.encode_input(&[
             Token::FixedBytes(id),
             Token::Uint(value),
             Token::Address(self.contract_address),
             Token::Address(receiver_addr),
-            Token::FixedBytes(secret_hash.to_vec()),
+            Token::FixedBytes(contract_hash.to_vec()),
             Token::Uint(U256::from(time_lock)),
         ])?)
     }

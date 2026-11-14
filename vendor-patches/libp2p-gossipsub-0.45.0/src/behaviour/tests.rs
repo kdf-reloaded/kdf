@@ -5448,7 +5448,8 @@ fn test_send_queue_pressure_and_snapshot() {
         crate::SendQueueSnapshot {
             queued: 3,
             max_per_connection: 3,
-            dropped: 2
+            dropped: 2,
+            ..Default::default()
         }
     );
 
@@ -5477,9 +5478,67 @@ fn test_send_queue_pressure_and_snapshot() {
         crate::SendQueueSnapshot {
             queued: 0,
             max_per_connection: 0,
-            dropped: 2
+            dropped: 2,
+            ..Default::default()
         }
     );
+}
+
+#[test]
+// The snapshot shows the highest dropped share of a recent window and the longest series of counting windows, and
+// both fall back to 0 two windows after the drops stop (CRD ch.28 §28.9B RQ1 item 8, T-RQ1.13; ch.32 R-MP5).
+fn test_send_queue_snapshot_window_share_and_series() {
+    let config = ConfigBuilder::default()
+        .send_queue_max_messages(3)
+        .send_queue_pressure_raise(100)
+        .send_queue_drop_window(Duration::from_millis(200))
+        .build()
+        .unwrap();
+    let (mut gs, _, _) = inject_nodes1()
+        .peer_no(0)
+        .topics(vec![])
+        .to_subscribe(false)
+        .gs_config(config)
+        .create_network();
+    let mut handler = gs
+        .handle_established_outbound_connection(
+            ConnectionId::new_unchecked(7),
+            PeerId::random(),
+            &Multiaddr::empty(),
+            Endpoint::Dialer,
+        )
+        .unwrap();
+    let mut push = |tag: u8| {
+        libp2p_swarm::ConnectionHandler::on_behaviour_event(&mut handler, HandlerIn::Message(proto::RPC {
+            subscriptions: vec![],
+            publish: vec![proto::Message {
+                from: None,
+                data: Some(vec![tag; 10]),
+                seqno: None,
+                topic: "t".into(),
+                signature: None,
+                key: None,
+            }],
+            control: None,
+        }));
+    };
+
+    // Five data RPCs into a queue of three: two of five (40 %) are dropped in the first window.
+    for tag in 0..5u8 {
+        push(tag);
+    }
+    // The window has not ended: nothing is published yet.
+    let snapshot = gs.send_queue_snapshot();
+    assert_eq!((snapshot.max_window_share_percent, snapshot.max_drop_series), (0, 0));
+    // The next push finds the window ended and closes it.
+    std::thread::sleep(Duration::from_millis(250));
+    push(5);
+    let snapshot = gs.send_queue_snapshot();
+    assert_eq!((snapshot.max_window_share_percent, snapshot.max_drop_series), (40, 1));
+    // The drops stop: two window lengths after the window ended both fall back to 0.
+    std::thread::sleep(Duration::from_millis(600));
+    let snapshot = gs.send_queue_snapshot();
+    assert_eq!((snapshot.max_window_share_percent, snapshot.max_drop_series), (0, 0));
 }
 
 #[test]
@@ -5505,6 +5564,78 @@ fn test_send_queue_stuck_closes_every_connection_to_the_peer() {
     assert_eq!(closes.len(), 1);
     assert_eq!(closes[0].0, peer);
     assert!(matches!(closes[0].1, CloseConnection::All));
+}
+
+/// Establishes the connection `conn` to `peer`, which has `other_established` other connections.
+fn connect(
+    gs: &mut Behaviour<IdentityTransform, AllowAllSubscriptionFilter>,
+    peer: PeerId,
+    conn: usize,
+    other_established: usize,
+) {
+    gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+        peer_id: peer,
+        connection_id: ConnectionId::new_unchecked(conn),
+        endpoint: &ConnectedPoint::Listener {
+            local_addr: Multiaddr::empty(),
+            send_back_addr: Multiaddr::empty(),
+        },
+        failed_addresses: &[],
+        other_established,
+    }));
+}
+
+#[test]
+// A stuck-peer close marks every connection of the peer that it closes, and only those; the caller learns each mark
+// once (CRD ch.28 R27a item 1a, T15).
+fn test_stuck_close_marks_every_connection_of_the_peer_once() {
+    let (mut gs, _, _) = inject_nodes1()
+        .peer_no(0)
+        .topics(vec![])
+        .to_subscribe(false)
+        .create_network();
+    let (peer, other) = (PeerId::random(), PeerId::random());
+    connect(&mut gs, peer, 1, 0);
+    connect(&mut gs, peer, 2, 1);
+    connect(&mut gs, other, 3, 0);
+    flush_events(&mut gs);
+    // Nothing is marked before the close.
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(1)));
+
+    gs.on_connection_handler_event(peer, ConnectionId::new_unchecked(1), stuck_event());
+    assert!(gs.take_stuck_close(ConnectionId::new_unchecked(1)));
+    assert!(gs.take_stuck_close(ConnectionId::new_unchecked(2)));
+    // Each mark is given once, and the connection of the other peer is not marked.
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(1)));
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(2)));
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(3)));
+    assert!(gs.stuck_closing.is_empty());
+}
+
+#[test]
+// A relay whose close is held back marks nothing, while a relay that is closed marks all its connections (CRD ch.28
+// R27a item 1a, T15).
+fn test_held_back_stuck_relay_marks_no_connection() {
+    // With 2 relays connected, a stuck relay is held back: fewer than 2 would remain.
+    let (mut gs, relays) = node_with_relays(2);
+    connect(&mut gs, relays[0], 10, 0);
+    connect(&mut gs, relays[1], 20, 0);
+    let (closed, restarted) = report_stuck(&mut gs, relays[0], 10);
+    assert!(closed.is_empty());
+    assert_eq!(restarted, vec![(relays[0], ConnectionId::new_unchecked(10))]);
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(10)));
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(20)));
+    assert!(gs.stuck_closing.is_empty());
+
+    // With 3 relays the close is allowed and marks every connection of that relay only.
+    let (mut gs, relays) = node_with_relays(3);
+    connect(&mut gs, relays[0], 10, 0);
+    connect(&mut gs, relays[0], 11, 1);
+    connect(&mut gs, relays[1], 20, 0);
+    assert_eq!(report_stuck(&mut gs, relays[0], 10), (vec![relays[0]], vec![]));
+    assert!(gs.take_stuck_close(ConnectionId::new_unchecked(10)));
+    assert!(gs.take_stuck_close(ConnectionId::new_unchecked(11)));
+    assert!(!gs.take_stuck_close(ConnectionId::new_unchecked(20)));
 }
 
 fn stuck_event() -> HandlerEvent {

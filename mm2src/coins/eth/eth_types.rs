@@ -14,7 +14,7 @@ pub(crate) const ERC20_ABI: &str = r#"[{"constant":true,"inputs":[],"name":"name
 /// Payment states from etomic swap smart contract: https://github.com/artemii235/etomic-swap/blob/master/contracts/EtomicSwap.sol#L5
 pub const PAYMENT_STATE_UNINITIALIZED: u8 = 0;
 pub const PAYMENT_STATE_SENT: u8 = 1;
-pub(crate) const _PAYMENT_STATE_SPENT: u8 = 2;
+pub(crate) const PAYMENT_STATE_SPENT: u8 = 2;
 pub(crate) const _PAYMENT_STATE_REFUNDED: u8 = 3;
 // Ethgasstation API returns response in 10^8 wei units. So 10 from their API mean 1 gwei
 pub(crate) const ETH_GAS_STATION_DECIMALS: u8 = 8;
@@ -325,6 +325,10 @@ pub(crate) struct EthTrezorSigner {
     pub(crate) address: Address,
     /// Uncompressed secp256k1 public key (64-byte `X || Y`) for the address.
     pub(crate) public: Public,
+    /// The hardware context the activation used. Its device digest (CRD ch.05 R51) is the identity the coin keeps
+    /// for the lifetime of its activation; every device operation compares the current context with it first
+    /// (CRD ch.05 R58a).
+    pub(crate) hw_ctx: crypto::HardwareWalletArc,
 }
 
 impl std::fmt::Debug for EthSigner {
@@ -454,6 +458,9 @@ pub struct EthCoinImpl {
     pub(crate) chain_id: Option<u64>,
     /// the block range used for eth_getLogs
     pub(crate) logs_block_range: u64,
+    /// The `eth_getLogs` window `W` in force, at most `logs_block_range`; it shrinks for the rest of the session
+    /// when a node refuses a range, and a token shares its platform's (CRD ch.17 R17.8.2).
+    pub(crate) logs_window: LogsWindow,
     /// HD wallet derivation method. Iguana when using a single key pair, HDWallet for BIP44 HD.
     pub derivation_method: DerivationMethod<Address, EthHDWallet>,
     /// V2 swap contract addresses (maker, taker). None if V2 not configured.
@@ -468,6 +475,10 @@ pub struct EthCoinImpl {
     /// parsed. `None` means no scaling. Applied only to the estimated gas limit of the legacy ERC-20 `approve`
     /// that precedes a V1 HTLC payment.
     pub(crate) estimate_gas_mult: Option<f64>,
+    /// Whether the fee to send the taker fee is quoted at the gas limit the transfer is sent with (`true`) or at the
+    /// node's gas estimate (`false`), CRD ch.57 R57.4.2. Read from the `evm_taker_fee_quote_at_limit` key of
+    /// `MM2.json` when the coin is built; a token takes its platform coin's value.
+    pub(crate) taker_fee_quote_at_limit: bool,
     /// HTTP API client for TRON full nodes. Populated only when
     /// `coin_type` is [`EthCoinType::Tron`] or [`EthCoinType::Trc20`].
     /// `None` for ETH/ERC20 coins.

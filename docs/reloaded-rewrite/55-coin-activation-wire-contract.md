@@ -209,14 +209,21 @@ risk.
 
 > **Reloaded status (informative).** The success and error envelopes, the
 > `id` echo, the adjacently tagged encoding and the dispatcher errors already
-> match. Two cross-cutting differences sit with
+> match. One cross-cutting difference sits with
 > [Chapter 43](43-daemon-rpc-dispatcher-and-misc-maintenance.md) rather than
 > with activation: Reloaded HTML-escapes `<`, `>` and `&` inside response
 > bodies (so an error string containing a node URL with a query string is
-> altered), which the reference release does not do; and a legacy request
-> whose method the legacy table does not know is answered as a legacy error,
-> whereas the reference release retries such a request on the mmrpc 2.0
-> dispatcher. Neither affects a bound field of this chapter.
+> altered), which the reference release does not do. A second one was closed
+> by PR #312: a legacy request whose method the legacy table does not know
+> was answered as a legacy error, whereas the reference release retries such
+> a request on the mmrpc 2.0 dispatcher; Reloaded now retries it too
+> (Chapter 43 R43.1A.1a–R43.1A.1e). Neither affects a bound field of this
+> chapter. The
+> envelope-selection rule behind the second difference, the strictness of
+> the versioned envelope, and the surfaces on which the order-management
+> methods exist are bound in Chapter 43 §43.1A (added 2026-11-08; passed the
+> KDF Dirty Gate on 2026-11-08), which also records that a versioned request for a
+> legacy-only method answers `NoSuchMethod` in the reference as it does here.
 
 ---
 
@@ -666,6 +673,30 @@ one-shot activation of the same ticker (R55.5.7).
 
 ---
 
+**R55.4.10** *The legacy methods under a global-HD login (reference
+contract; **passed the KDF Dirty Gate on 2026-11-04**, measure 0.03; Spec Reader 2026-11-04, rows
+`v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both).*
+Under a global-HD login ([Chapter 05](05-hd-wallet-support.md) R20) the
+reference accepts `enable` and `electrum` for a UTXO-family, QTUM, BCH, QRC20
+or EVM coin, builds the coin in HD mode with the coin key at
+`path_to_address` (default account 0, external, address 0) under the coin's
+configured `derivation_path` -- a configuration without `derivation_path`
+fails the activation -- reads its balance, **registers** it, and then fails
+the response at the `address` member of R55.4.5, because the single-address
+accessor is refused under HD. The caller receives an error while the coin
+stays enabled with that HD key; the `electrum` deregistration of R55.4.6
+covers only a failed balance read, not this failure. Chapter 05 §5.9B
+tabulates the keys. *Compatibility (this repository; not corpus-sourced):*
+Reloaded's legacy methods under HD bind the internal key and succeed. The
+maintainer decided on 2026-11-04 (decision CB in plan
+[`hd-key-unification`](../plans/hd-key-unification.md)): item H7 is to bind the
+coin key as the reference does and answer successfully with that key's
+address, behind a compatibility switch whose default keeps that answer and
+whose off position gives the reference's failed response (chapter 05 R35
+note). The H7 CRD names the switch. H7 is decided, not implemented yet:
+until it lands, Reloaded keeps the behavior stated at the start of this
+note.
+
 ## 55.5 Standalone-coin task family: shared contract
 
 **R55.5.1** *Members.* The standalone-coin task family comprises
@@ -794,7 +825,7 @@ another activation untouched when it is cancelled.
 | Field | Type | Required / default | Effect |
 | --- | --- | --- | --- |
 | `mode` | object `{"rpc": "Native"}` or `{"rpc": "Electrum", "rpc_data": {"servers": [...], "min_connected"?: int, "max_connected"?: int}}` | required | backend selection; the list order is the server priority and `min_connected`/`max_connected` bound the maintained set ([Chapter 38](38-utxo-coin-maintenance-and-features.md) R38.6.4b) |
-| `mode.rpc_data.servers[]` | object `{url: string (required), protocol?: "TCP" \| "SSL" \| "WS" \| "WSS", disable_cert_verification?: boolean (default false), timeout_sec?: number}` | at least one for Electrum | Electrum server; `protocol` defaults to `TCP` on native targets and `WSS` on WASM; `timeout_sec` (default 20) bounds connection establishment and version negotiation, not requests (Chapter 38 R38.6.4e) |
+| `mode.rpc_data.servers[]` | object `{url: string (required), protocol?: "TCP" \| "SSL" \| "WS" \| "WSS", disable_cert_verification?: boolean (default false), timeout_sec?: number, spki_sha256?: string \| string[]}` | at least one for Electrum | Electrum server; `protocol` defaults to `TCP` on native targets and `WSS` on WASM; `timeout_sec` (default 20) bounds connection establishment and version negotiation, not requests (Chapter 38 R38.6.4e); `disable_cert_verification` turns off authentication of an `SSL` server but not its encryption (Chapter 38 R38.6.4m); `spki_sha256` is a Reloaded addition, an optional pin on the server's key of 1 to 4 SHA-256 digests (Chapter 38 R38.6.4n) |
 | `utxo_merge_params` | object `{merge_at: int (required), check_every?: number (default 10), max_merge_at_once?: int (default 100)}` | optional | automatic UTXO consolidation |
 | `tx_history` | boolean | optional, default `false` | start history collection on success |
 | `required_confirmations` | integer | optional; default from configuration | swap confirmations |
@@ -1354,7 +1385,12 @@ rejects both there and requires an mmrpc 2.0 activation. Reloaded has no mmrpc
 entirely. Reloaded keeps them on the legacy path as a documented extension: a
 client written for the reference never sends such a request, so it is
 unaffected. Adding the mmrpc 2.0 TRON activation the reference uses is future
-work (the RPC wire-parity plan).
+work (the RPC wire-parity plan). *(Pointer added 2026-11-07.)* The
+reference's routes -- `enable_eth_with_tokens` and `task::enable_eth::*`
+serve TRX and TRC20, the legacy methods refuse them -- are recorded in
+[Chapter 21](21-tron-integration.md) §21.4's reference-behavior note, which
+passed the KDF Dirty Gate on 2026-11-07; chapter 21 §21.4 and chapter 35 R35.1.1 describe
+that target, this item the current tree.
 
 > **Suspended for the beta (maintainer decision, 2026-10-26).** TRON support
 > is not finished, so for the coming beta the extension is switched off: while
@@ -1562,3 +1598,41 @@ R55.4.5 and the error body of R55.1.10.
   repository's own code. They state Reloaded's own behavior and add no
   reference content, so chapter 01 R38 is not engaged and no clearance above
   is widened.
+- *Scoped addition (2026-11-04) -- R55.4.10.* **KDF Dirty Gate: PASS on 2026-11-04, measure 0.03.**
+  *Inputs:* the forbidden corpus at the rows `v2.6.0-beta` and `v3.0.0-beta`
+  of chapter 02 §2.15A, identical at both, consulted **only** to establish
+  what the legacy `enable` and `electrum` methods do under a global-HD login:
+  the key they bind, the configuration they require, the order of
+  registration and response, and where the response fails. Behavior and
+  dictated request members only; no private identifier, function body,
+  helper decomposition, error, log or comment text was reproduced. The
+  compatibility sentence rests on this repository's own code.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.03, no findings. *Extent:* the legacy activation methods under a global-HD
+  login, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole
+  batch, 30 source files and one dependency manifest were read at
+  `v3.0.0-beta`, 29 of them checked by hash against the tagged states of both
+  rows. *Method:* side-by-side reading of the compared regions against every
+  added or changed line, plus that hash check; the gate script was not run
+  because the candidate has no code blocks. *Measure:* 0.03, read against the
+  standard that any discretionary finding fails a file; dictated-interop and
+  public-surface tokens were excluded from the measured set.
+- *Clean-side amendment (2026-11-05) -- the compatibility clause under
+  R55.4.10.* It now records the maintainer's decision CB of 2026-11-04 (plan
+  `hd-key-unification` item H7: bind the coin key, answer successfully,
+  compatibility switch) in place of "until the maintainer decides". Written
+  by a session that never read the corpus, from that decision and this
+  repository's own code. The reference facts of R55.4.10 are unchanged. It
+  takes no forbidden-class input and needs no Dirty Gate pass.
+- *Clean-context addition (2026-11-05, forbidden corpus not consulted):* the
+  pointers to chapter 38 R38.6.4m and the planned Reloaded key `spki_sha256`
+  (R38.6.4n) in the `mode.rpc_data.servers[]` row of R55.5.10 are
+  Reloaded-original. They add no reference content, so chapter 01 R38 is not
+  engaged and no clearance above is widened.
+- *Pointer added 2026-11-07 -- the sentence under D55.5 naming chapter 21
+  §21.4's reference-behavior note.* It restates that note's fact in one
+  clause and carries no further reference content; its target passed the KDF
+  Dirty Gate on 2026-11-07, as chapter 21 records. **KDF Dirty Gate: PASS on 2026-11-07, measure 0.00.**
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.00, no findings; the pointer was judged with its target, whose clearance
+  is recorded in chapter 21's provenance footer of the same date.

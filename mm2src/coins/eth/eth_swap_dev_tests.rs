@@ -73,11 +73,13 @@ fn dev_eth_coin(coin_type: EthCoinType, node: &GethDev, swap_contract: Address) 
         custom_token: false,
         chain_id: Some(node.chain_id),
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+        logs_window: Default::default(),
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
         estimate_gas_mult: None,
+        taker_fee_quote_at_limit: true,
     }));
     (ctx, coin)
 }

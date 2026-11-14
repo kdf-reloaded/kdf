@@ -285,6 +285,10 @@ impl SwapOps for TestCoin {
 
     fn get_htlc_key_pair(&self) -> Option<KeyPair> { unimplemented!() }
 
+    fn own_signing_key_pair(&self) -> Option<KeyPair> { None }
+
+    fn swap_key_disagreement(&self, _node_pubkey: &keys::Public) -> Option<crate::SwapKeyDisagreement> { None }
+
     fn derives_swap_htlc_key(&self) -> bool { false }
 
     fn derive_swap_htlc_key_pair(&self, _swap_unique_input: &[u8]) -> Result<KeyPair, String> { unimplemented!() }

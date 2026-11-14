@@ -1,13 +1,16 @@
 use super::{MakerOrder, MakerOrderCancellationReason, MyOrdersFilter, Order, RecentOrdersSelectResult, TakerOrder,
             TakerOrderCancellationReason};
 use async_trait::async_trait;
+use common::executor::Timer;
 use common::log::LogOnError;
 use common::{BoxFut, PagingOptions};
 use derive_more::Display;
+use futures::compat::Future01CompatExt;
 use futures::{FutureExt, TryFutureExt};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 #[cfg(test)] use mocktopus::macros::*;
+use std::future::Future;
 use uuid::Uuid;
 
 pub type MyOrdersResult<T> = Result<T, MmError<MyOrdersError>>;
@@ -35,7 +38,16 @@ pub enum MyOrdersError {
     InternalError(String),
 }
 
+/// Saves a new maker order: its active record, then, when the order is kept in the history, its filtering-history
+/// row. A failed write of the active record is only logged. When the history write fails, the active record just
+/// written is deleted again and the history error is returned: the callers report the order as not placed, and a
+/// record left behind would bring it back as a live order at the next start (CRD ch.32 R-GH8a).
+///
+/// # Errors
+///
+/// The error of the filtering-history write.
 pub async fn save_my_new_maker_order(ctx: MmArc, order: &MakerOrder) -> MyOrdersResult<()> {
+    let deletion_ctx = ctx.clone();
     let storage = MyOrdersStorage::new(ctx);
     storage
         .save_new_active_maker_order(order)
@@ -43,12 +55,25 @@ pub async fn save_my_new_maker_order(ctx: MmArc, order: &MakerOrder) -> MyOrders
         .error_log_with_msg("!save_new_active_maker_order");
 
     if order.save_in_history {
-        storage.save_maker_order_in_filtering_history(order).await?;
+        if let Err(e) = storage.save_maker_order_in_filtering_history(order).await {
+            // A record that is already missing counts as deleted, so a failed active write adds no noise.
+            delete_active_maker_order_with_retry(&deletion_ctx, order.uuid).await;
+            return Err(e);
+        }
     }
     Ok(())
 }
 
+/// Saves a new taker order: its active record, then, when the order is kept in the history, its filtering-history
+/// row. A failed write of the active record is only logged. When the history write fails, the active record just
+/// written is deleted again, with the retrying deletion of CRD ch.12 R7c item 4, and the history error is returned
+/// (CRD ch.32 R-GH8a).
+///
+/// # Errors
+///
+/// The error of the filtering-history write.
 pub async fn save_my_new_taker_order(ctx: MmArc, order: &TakerOrder) -> MyOrdersResult<()> {
+    let deletion_ctx = ctx.clone();
     let storage = MyOrdersStorage::new(ctx);
     storage
         .save_new_active_taker_order(order)
@@ -56,7 +81,11 @@ pub async fn save_my_new_taker_order(ctx: MmArc, order: &TakerOrder) -> MyOrders
         .error_log_with_msg("!save_new_active_taker_order");
 
     if order.save_in_history {
-        storage.save_taker_order_in_filtering_history(order).await?;
+        if let Err(e) = storage.save_taker_order_in_filtering_history(order).await {
+            // A record that is already missing counts as deleted, so a failed active write adds no noise.
+            delete_active_taker_order_with_retry(&deletion_ctx, order.request.uuid).await;
+            return Err(e);
+        }
     }
     Ok(())
 }
@@ -117,6 +146,106 @@ pub fn delete_my_taker_order(ctx: MmArc, order: TakerOrder, reason: TakerOrderCa
     Box::new(fut.boxed().compat())
 }
 
+/// Number of times the deletion of an active record is tried (CRD ch.12 R7c item 4).
+const ACTIVE_RECORD_DELETE_ATTEMPTS: usize = 3;
+/// Pause between two such attempts.
+const ACTIVE_RECORD_DELETE_PAUSE_SECS: f64 = 0.2;
+
+/// CRD ch.12 R7c item 3: the top-level `MM2.json` boolean `maker_restore_skips_cancelled`, default `true`;
+/// only a JSON `false` turns it off. On, a stored active maker record whose removal the history already records
+/// is not restored at start and the deletion of the record of a removed order is retried; off, the reference's
+/// behavior.
+pub(crate) fn maker_restore_skips_cancelled(ctx: &MmArc) -> bool {
+    ctx.conf["maker_restore_skips_cancelled"].as_bool() != Some(false)
+}
+
+/// One attempt to delete the active record of a maker order (CRD ch.12 R7c item 4). A record that is already
+/// missing counts as deleted: the WASM storage answers success for it, the native storage fails with an error
+/// that does not tell the missing file from other failures, so a failed deletion is followed by a read, and a
+/// record the read reports as missing counts as deleted.
+#[cfg_attr(test, mockable)]
+pub(crate) fn delete_active_maker_order_attempt(ctx: MmArc, uuid: Uuid) -> BoxFut<(), MmError<MyOrdersError>> {
+    let fut = async move {
+        let storage = MyOrdersStorage::new(ctx);
+        match storage.delete_active_maker_order(uuid).await {
+            Ok(()) => Ok(()),
+            Err(delete_err) => match storage.load_active_maker_order(uuid).await {
+                Err(load_err) if matches!(load_err.get_inner(), MyOrdersError::NoSuchOrder { .. }) => Ok(()),
+                _ => Err(delete_err),
+            },
+        }
+    };
+    Box::new(fut.boxed().compat())
+}
+
+/// One attempt to delete the active record of a taker order, with the same rule as
+/// [`delete_active_maker_order_attempt`]: a failed deletion is followed by a read of the stored records, and a
+/// record the read does not find counts as deleted.
+#[cfg_attr(test, mockable)]
+pub(crate) fn delete_active_taker_order_attempt(ctx: MmArc, uuid: Uuid) -> BoxFut<(), MmError<MyOrdersError>> {
+    let fut = async move {
+        let storage = MyOrdersStorage::new(ctx);
+        match storage.delete_active_taker_order(uuid).await {
+            Ok(()) => Ok(()),
+            Err(delete_err) => match storage.load_active_taker_orders().await {
+                Ok(stored) if stored.iter().all(|order| order.request.uuid != uuid) => Ok(()),
+                _ => Err(delete_err),
+            },
+        }
+    };
+    Box::new(fut.boxed().compat())
+}
+
+/// CRD ch.12 R7c item 4: tries to delete the active record of a maker order up to [`ACTIVE_RECORD_DELETE_ATTEMPTS`]
+/// times, 200 ms apart. See [`delete_active_record_with_retry`].
+async fn delete_active_maker_order_with_retry(ctx: &MmArc, uuid: Uuid) {
+    delete_active_record_with_retry("maker", uuid, || {
+        delete_active_maker_order_attempt(ctx.clone(), uuid).compat()
+    })
+    .await
+}
+
+/// CRD ch.12 R7c item 4: the same retrying deletion for the active record of a taker order, which
+/// `orders_kick_start` restores like a maker record.
+async fn delete_active_taker_order_with_retry(ctx: &MmArc, uuid: Uuid) {
+    delete_active_record_with_retry("taker", uuid, || {
+        delete_active_taker_order_attempt(ctx.clone(), uuid).compat()
+    })
+    .await
+}
+
+/// Runs `attempt` up to [`ACTIVE_RECORD_DELETE_ATTEMPTS`] times, 200 ms apart, until it succeeds. Each failed
+/// attempt is logged once at warn level; after the last failure one more warn line gives up and names the order.
+/// Nothing else is logged. `kind` is `maker` or `taker`.
+async fn delete_active_record_with_retry<F, Fut>(kind: &str, uuid: Uuid, mut attempt: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = MyOrdersResult<()>>,
+{
+    for attempt_number in 1..=ACTIVE_RECORD_DELETE_ATTEMPTS {
+        match attempt().await {
+            Ok(()) => return,
+            Err(e) => common::log::warn!(
+                "Deleting the active record of {} order {} failed (attempt {} of {}): {}",
+                kind,
+                uuid,
+                attempt_number,
+                ACTIVE_RECORD_DELETE_ATTEMPTS,
+                e
+            ),
+        }
+        if attempt_number < ACTIVE_RECORD_DELETE_ATTEMPTS {
+            Timer::sleep(ACTIVE_RECORD_DELETE_PAUSE_SECS).await;
+        }
+    }
+    common::log::warn!(
+        "Giving up deleting the active record of {} order {} after {} attempts",
+        kind,
+        uuid,
+        ACTIVE_RECORD_DELETE_ATTEMPTS
+    );
+}
+
 #[cfg_attr(test, mockable)]
 pub fn delete_my_maker_order(ctx: MmArc, order: MakerOrder, reason: MakerOrderCancellationReason) -> BoxFut<(), ()> {
     let fut = async move {
@@ -124,16 +253,22 @@ pub fn delete_my_maker_order(ctx: MmArc, order: MakerOrder, reason: MakerOrderCa
         let uuid = order_to_save.uuid;
         let save_in_history = order_to_save.save_in_history;
 
+        let retry_deletion = maker_restore_skips_cancelled(&ctx);
+        let deletion_ctx = ctx.clone();
         let storage = MyOrdersStorage::new(ctx);
         if order_to_save.was_updated() {
             if let Ok(order_from_file) = storage.load_active_maker_order(order_to_save.uuid).await {
                 order_to_save = order_from_file;
             }
         }
-        storage
-            .delete_active_maker_order(uuid)
-            .await
-            .error_log_with_msg("!delete_active_maker_order");
+        if retry_deletion {
+            delete_active_maker_order_with_retry(&deletion_ctx, uuid).await;
+        } else {
+            storage
+                .delete_active_maker_order(uuid)
+                .await
+                .error_log_with_msg("!delete_active_maker_order");
+        }
 
         if save_in_history {
             storage
@@ -148,6 +283,41 @@ pub fn delete_my_maker_order(ctx: MmArc, order: MakerOrder, reason: MakerOrderCa
         Ok(())
     };
     Box::new(fut.boxed().compat())
+}
+
+/// The statuses of the filtering history that only a removed maker order carries: the reasons
+/// `delete_my_maker_order` writes. An active maker order carries `Created` (written when it is saved) or
+/// `Updated` (written by an update of its price or volume), on the native and on the WASM storage alike;
+/// nothing else writes a status of a maker order.
+fn is_removal_status(status: &str) -> bool {
+    [
+        MakerOrderCancellationReason::Fulfilled,
+        MakerOrderCancellationReason::InsufficientBalance,
+        MakerOrderCancellationReason::Cancelled,
+        MakerOrderCancellationReason::Expired,
+    ]
+    .iter()
+    .any(|reason| reason.to_string() == status)
+}
+
+/// CRD ch.12 R7c item 1: tells whether the history already records the removal of the order whose stored
+/// active record is `order`, and returns the status to log: the filtering-history status when there is one, else
+/// `none`. The removal is recorded when the history holds a record of the order, or when the filtering history
+/// carries a status only a removed order carries ([`is_removal_status`]). A lookup that fails counts as nothing
+/// found, so the order is restored: a missing record is not an error (the statuses are read only for an order
+/// kept in the history, as nothing writes them for another).
+pub(crate) async fn removal_recorded_in_history(storage: &MyOrdersStorage, order: &MakerOrder) -> Option<String> {
+    let in_history = storage.load_order_from_history(order.uuid).await.is_ok();
+    let status = if order.save_in_history {
+        storage.select_order_status(order.uuid).await.ok()
+    } else {
+        None
+    };
+    match status {
+        Some(status) if in_history || is_removal_status(&status) => Some(status),
+        None if in_history => Some("none".to_owned()),
+        _ => None,
+    }
 }
 
 #[async_trait]

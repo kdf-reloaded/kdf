@@ -17,6 +17,7 @@
 //!    fallback if the node does not return one.
 
 use super::api::{TronApiClient, TronApiError};
+use super::balance::{trc20_balance_units, trx_balance_sun};
 use super::fee::{estimate_trc20_transfer_fee, estimate_trx_transfer_fee, TronAccountResources, TronChainPrices,
                  TronTxFeeDetails};
 use super::proto;
@@ -47,7 +48,21 @@ const TRC20_TRANSFER_ENERGY_DEFAULT: i64 = 35_000;
 const TRC20_DEFAULT_FEE_LIMIT_SUN: i64 = 100_000_000;
 
 /// Entry point for TRX / TRC20 withdrawals.
+///
+/// # Errors
+///
+/// [`WithdrawError::InvalidFeePolicy`] for any `fee` descriptor, before a node is asked: the TRON fee is
+/// estimated from the account's bandwidth and energy (CRD ch.21 R-W3), and no `WithdrawFee` variant describes
+/// it. Other errors are those of the pipeline below.
 pub async fn withdraw_tron(coin: EthCoin, req: WithdrawRequest) -> WithdrawResult {
+    if let Some(fee) = &req.fee {
+        return MmError::err(WithdrawError::InvalidFeePolicy(format!(
+            "TRON withdraw takes no 'fee' descriptor, its fee is estimated from the account's bandwidth and \
+             energy; found {:?}",
+            fee
+        )));
+    }
+
     let api = coin
         .tron_api
         .clone()
@@ -240,27 +255,13 @@ async fn withdraw_trc20_token(
 }
 
 fn parse_tron_address(s: &str) -> MmResult<TronAddress, WithdrawError> {
-    if s.starts_with("0x") || s.starts_with("41") {
-        TronAddress::from_hex(s).map_to_mm(|e| WithdrawError::InvalidAddress(e.to_string()))
-    } else {
-        TronAddress::from_base58(s).map_to_mm(|e| WithdrawError::InvalidAddress(e.to_string()))
-    }
+    TronAddress::parse(s).map_to_mm(|e| WithdrawError::InvalidAddress(e.to_string()))
 }
 
 async fn fetch_trx_balance(api: &TronApiClient, address: &TronAddress) -> MmResult<(U256, BigDecimal), WithdrawError> {
-    let account = api
-        .get_account(address)
-        .await
-        .map_to_mm(|e| WithdrawError::Transport(e.to_string()))?;
-    let sun = account.map(|a| a.balance).unwrap_or(0);
-    if sun < 0 {
-        return MmError::err(WithdrawError::InternalError(
-            "TRON account reported negative balance".to_owned(),
-        ));
-    }
-    let u256 = U256::from(sun as u64);
-    let dec = u256_to_big_decimal(u256, TRX_DECIMALS).mm_err(Into::into)?;
-    Ok((u256, dec))
+    let sun = trx_balance_sun(api, address).await.map_to_mm(WithdrawError::from)?;
+    let dec = u256_to_big_decimal(sun, TRX_DECIMALS).mm_err(Into::into)?;
+    Ok((sun, dec))
 }
 
 async fn fetch_trc20_balance(
@@ -269,30 +270,11 @@ async fn fetch_trc20_balance(
     owner: &TronAddress,
     decimals: u8,
 ) -> MmResult<(U256, BigDecimal), WithdrawError> {
-    // ABI-encode balanceOf(address) parameter: 32-byte slot with the address
-    // left-padded to 12 zero bytes.
-    let mut parameter = [0u8; 32];
-    parameter[12..].copy_from_slice(owner.to_evm_address().as_ref());
-    let param_hex = hex::encode(parameter);
-
-    let resp = api
-        .trigger_constant_contract(owner, contract, "balanceOf(address)", &param_hex)
+    let units = trc20_balance_units(api, contract, owner)
         .await
-        .map_to_mm(|e| WithdrawError::Transport(e.to_string()))?;
-
-    let raw = resp
-        .constant_result
-        .and_then(|mut v: Vec<String>| v.pop())
-        .ok_or_else(|| WithdrawError::Transport("balanceOf returned no result".to_owned()))?;
-    let bytes = hex::decode(raw).map_to_mm(|e| WithdrawError::Transport(format!("bad hex: {e}")))?;
-    if bytes.len() < 32 {
-        return MmError::err(WithdrawError::Transport(
-            "balanceOf result shorter than 32 bytes".to_owned(),
-        ));
-    }
-    let u256 = U256::from_big_endian(&bytes[..32]);
-    let dec = u256_to_big_decimal(u256, decimals).mm_err(Into::into)?;
-    Ok((u256, dec))
+        .map_to_mm(WithdrawError::from)?;
+    let dec = u256_to_big_decimal(units, decimals).mm_err(Into::into)?;
+    Ok((units, dec))
 }
 
 async fn build_fee_details_trx(

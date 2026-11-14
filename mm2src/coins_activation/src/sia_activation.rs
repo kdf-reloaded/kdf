@@ -236,9 +236,10 @@ impl InitStandaloneCoinActivationOps for SiaCoin {
         // blanket impl UTXO/ETH's own activation results use, which branches on
         // `self.derivation_method()` (CRD ch.20 D1). `xpub_extractor` is
         // constructed the same way UTXO/ETH's own `get_activation_result` construct
-        // theirs, but for Sia it is *always* `None` in practice: a Trezor priv-key
-        // policy is rejected long before this point (R-T3, ch.46 R46.1.3), so
-        // `crypto_ctx.hw_ctx()` can never be `Some` for an activated `SiaCoin`.
+        // theirs. A Trezor priv-key policy is rejected long before this point
+        // (R-T3, ch.46 R46.1.3), so a `SiaCoin` always derives its accounts in
+        // software; a hardware context that exists beside a software login makes
+        // the extractor `Some`, and the coin ignores it (CRD ch.05 R35c).
         let xpub_extractor = RpcTaskXPubExtractor::new_unchecked(&ctx, task_handle, sia_xpub_extractor_rpc_statuses());
         let crypto_ctx = CryptoCtx::from_ctx(&ctx).mm_err(|error| SiaInitError::Internal(error.to_string()))?;
         let xpub_extractor = if crypto_ctx.hw_ctx().is_some() {
@@ -266,7 +267,7 @@ impl InitStandaloneCoinActivationOps for SiaCoin {
                 .mm_err(|error| SiaInitError::CouldNotGetBalance(error.to_string()))?;
             single_address_wallet_balance(address, balance)
         } else {
-            self.enable_coin_balance(xpub_extractor, EnableCoinScanPolicy::default(), 0)
+            self.enable_coin_balance(xpub_extractor, EnableCoinScanPolicy::default(), 0, None)
                 .await
                 .mm_err(|error| SiaInitError::CouldNotGetBalance(error.to_string()))?
         };

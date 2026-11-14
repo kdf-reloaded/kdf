@@ -128,6 +128,14 @@ It is a **separate** switch from `allow_weak_password`: the two address
 different threat models (key disclosure versus password strength) and MUST NOT
 be overloaded onto one flag. `allow_insecure_key_export` governs **only** the
 superset of R-K4; it MUST NOT alter the behaviour bound in R-K2, R-K3 or R-K7.
+*Runtime warning (Reloaded-original; added 2026-11-08, batch 4 item B4-11).*
+When the switch is `true`, the node logs one WARN at start-up that names the
+setting and says that `get_private_keys` can then export the private keys and
+viewing keys of every configured coin, activated or not; and it logs one WARN for
+every `get_private_keys` call that passes the switch gate, naming the mode, the
+number of tickers asked for, and the offline and viewing-key flags. Neither line
+carries key material or a ticker list. A reduced call and a call refused at the gate
+log nothing extra.
 
 **R-K2.** *Single-coin activated reveal \u2014 always available.* The legacy
 v1-dispatcher method `show_priv_key` reveals the private key of exactly one
@@ -184,7 +192,8 @@ contract. The bound conditions are: coin configuration not found; coin
 protocol could not be parsed; key derivation failed for a coin; the HD index
 range is invalid (inverted); the HD index range exceeds the bound maximum; a
 required protocol prefix value is missing; index parameters were supplied
-outside `hd` mode; a hardware-wallet session was used (see R-K6); and a
+outside `hd` mode; a ticker activated under the `Trezor` key policy was
+requested from the opt-in superset (see R-K6); and a
 catch-all internal error. Client-input faults map to HTTP 400; derivation and
 internal faults map to HTTP 500. The enum implements the project-wide
 type-tagged error-serialization trait and the HTTP-status trait bound in
@@ -193,8 +202,13 @@ Chapter 04.
 **R-K6.** *Guardrails (invariants in BOTH tiers).* For every key-export path
 bound in this section the following invariants hold regardless of the switch:
 
-- A hardware-wallet (Trezor) session MUST be rejected \u2014 host-side key export is
-  never performed for hardware wallets.
+- A coin activated under the `Trezor` key policy MUST be refused by every key-export
+  path: its key lives on the device and is never exported. The reduced form refuses it
+  per coin; the opt-in superset refuses a requested ticker that is activated under that
+  policy. A hardware context next to the software login refuses nothing by itself: the
+  software coins and the login's own mnemonic stay exportable. *(Amended 2026-11-08,
+  batch 4 item B4-2: a Reloaded decision, maintainer decision EB (b); the earlier text
+  refused the whole session whenever a hardware context existed.)*
 - Secret material MUST NOT be logged, traced, or persisted in plaintext; it is
   serialized exactly once, for the response only.
 - The surface is intended for localhost / trusted-channel use; the chapter does
@@ -276,8 +290,9 @@ hardening review is bound as deferred work, not as a current requirement: it
 should consider rate-limiting and/or an explicit confirmation step for the
 opt-in superset, an option to disable the export surface entirely, and audit
 logging of export events. Any hardened behaviour introduced later MUST NOT be
-weaker than the upstream protections this chapter adopts (hardware-wallet
-rejection, no-plaintext-logging, single-serialization, password authentication).
+weaker than the upstream protections this chapter adopts (the refusal of a
+`Trezor`-policy coin, no-plaintext-logging, single-serialization, password
+authentication).
 
 ## 7.4 Bound Error Surface
 
@@ -660,8 +675,9 @@ false, a `get_private_keys` request that asks for an offline (non-activated)
 coin, an `hd`-mode range, or a ZHTLC viewing key MUST be refused, while the
 reduced activated-coins form (R-K3), `show_priv_key` (R-K2) and `get_mnemonic`
 (R-K7) MUST still succeed. With the switch set to `true`, the same offline /
-`hd` / ZHTLC requests MUST succeed. A hardware-wallet session MUST be rejected
-by every key-export path in both switch states (R-K6).
+`hd` / ZHTLC requests MUST succeed. A coin activated under the `Trezor` key policy
+MUST be refused by every key-export path in both switch states, while a hardware
+context next to the software login refuses nothing by itself (R-K6).
 
 **T7.** *Own-address query.* A `get_my_address` request naming a configured
 EVM / ETH-protocol coin MUST return a response carrying the requested `coin`

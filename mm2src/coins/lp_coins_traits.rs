@@ -91,6 +91,33 @@ pub trait SwapOps {
         swap_contract_address: &Option<BytesJson>,
     ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send>;
 
+    /// [`SwapOps::check_if_my_payment_sent`] for a coin whose lookup needs the amount the payment was sent with
+    /// (CRD ch.18 R18.11.22: the Tendermint HTLC id covers the amount). The swap machine calls this method,
+    /// passing the exact amount of its payment send.
+    ///
+    /// The default ignores `amount` and answers the question of [`SwapOps::check_if_my_payment_sent`], so a coin
+    /// that does not need the amount is not changed.
+    #[allow(clippy::too_many_arguments)]
+    fn check_if_my_payment_sent_for_amount(
+        &self,
+        time_lock: u32,
+        my_pub: &[u8],
+        other_pub: &[u8],
+        secret_hash: &[u8],
+        search_from_block: u64,
+        swap_contract_address: &Option<BytesJson>,
+        _amount: &BigDecimal,
+    ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send> {
+        self.check_if_my_payment_sent(
+            time_lock,
+            my_pub,
+            other_pub,
+            secret_hash,
+            search_from_block,
+            swap_contract_address,
+        )
+    }
+
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,
@@ -203,6 +230,26 @@ pub trait SwapOps {
     ) -> Result<Option<BytesJson>, MmError<NegotiateSwapContractAddrErr>>;
 
     fn get_htlc_key_pair(&self) -> Option<KeyPair>;
+
+    /// The key pair this coin signs its swap transactions with, for a coin that holds one key of its own that
+    /// [`SwapOps::get_htlc_key_pair`] does not already supply: a UTXO-family coin with a single key and an EVM
+    /// coin with a software signer (CRD ch.05 R41 items 2 and 3).
+    ///
+    /// The swap announces and saves this pair only when it is not the node's persistent key
+    /// (`lp_swap::start_htlc_key_pair`); a coin whose key is the persistent key announces the persistent key and
+    /// saves nothing, as it always did. The default answers `None`: a coin with an HD key policy, a Tendermint
+    /// coin, a shielded coin, Sia, a hardware or external signer.
+    fn own_signing_key_pair(&self) -> Option<KeyPair> { None }
+
+    /// Whether the key a legacy swap of this coin announces (CRD ch.05 R36, the swap key) differs from the
+    /// key it pays from (the paying key), under a global-HD login. `node_pubkey` is the node's persistent
+    /// key, the swap key of a coin that supplies no [`SwapOps::get_htlc_key_pair`] of its own.
+    ///
+    /// `None` when the two agree and for a coin the rule does not apply to; the default answers `None`:
+    /// a coin that derives a fresh key for every swap, a coin whose key is not a secp256k1 key, a coin
+    /// activated with the Trezor policy, a coin that cannot trade. The caller asks only under a global-HD
+    /// login; under an iguana login the keys are one key.
+    fn swap_key_disagreement(&self, _node_pubkey: &Public) -> Option<SwapKeyDisagreement> { None }
 
     /// Whether this coin's per-swap HTLC key is derived from the swap (CRD ch.39 R39.5.6) rather than
     /// taken from [`SwapOps::get_htlc_key_pair`]. A derived key is never saved with the swap: every
@@ -625,6 +672,11 @@ pub trait MmCoin: SwapOps + WatcherOps + MarketCoinOps + fmt::Debug + Send + Syn
     }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut;
+
+    /// The error text while the coin's Electrum servers disagree about the chain, `None` otherwise and for a coin
+    /// without an Electrum client (CRD ch.38 R38.6.4o item 12). While it is `Some`, a new order with the coin, the start
+    /// of a new swap with it and a withdrawal of it are refused with this text.
+    fn chain_disagreement(&self) -> Option<String> { None }
 
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut;
 

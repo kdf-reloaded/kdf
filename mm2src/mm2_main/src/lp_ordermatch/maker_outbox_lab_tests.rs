@@ -719,7 +719,7 @@ fn run(params: Params) -> Outcome {
         relay.state.sync_requests.load(Ordering::Relaxed)
     );
     println!(
-        "SUMMARY gauges at the end: rate {} (thousandths msg/s), degraded {}, pressure {}, queue signals {}, close signals {}, queued {}, dropped {}",
+        "SUMMARY gauges at the end: rate {} (thousandths msg/s), degraded {}, pressure {}, queue signals {}, close signals {}, queued {}, dropped {}, window share {}, drop series {}",
         gauge(&ctx, "p2p.outbox.rate"),
         gauge(&ctx, "p2p.outbox.degraded"),
         gauge(&ctx, "p2p.outbox.pressure"),
@@ -727,7 +727,14 @@ fn run(params: Params) -> Outcome {
         gauge(&ctx, "p2p.outbox.signals.close.count"),
         gauge(&ctx, "p2p.send_queue.len"),
         gauge(&ctx, "p2p.send_queue.dropped.count"),
+        gauge(&ctx, "p2p.send_queue.window_share.max"),
+        gauge(&ctx, "p2p.send_queue.drop_series.max"),
     );
+    // T-MP10: the window share and series gauges (CRD ch.32 R-MP5) are recorded by the production recorder; a gauge
+    // that was never recorded reads -1.
+    for key in ["p2p.send_queue.window_share.max", "p2p.send_queue.drop_series.max"] {
+        assert!(gauge(&ctx, key) >= 0, "gauge {key} is missing");
+    }
     abort.abort();
     Outcome {
         first_signal_s,

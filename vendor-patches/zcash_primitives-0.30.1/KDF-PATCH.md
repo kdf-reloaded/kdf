@@ -20,3 +20,23 @@ supplies the new Ironwood and padding fields. The `Cargo.toml` `[patch]` that
 points `zcash_transparent` at the sibling vendored copy is kept for standalone
 test runs. Focused test:
 `transaction::builder::tests::kdf_builder_preserves_lock_time_and_raw_output_order`.
+
+## Output-only Ironwood bundle (added for CRD ch.39 R39.6.5d)
+
+A payment from Sapling into the Ironwood pool is built by the dictated chain's own wallets as an
+output-only bundle: spends disabled, outputs enabled, anchored at the empty-tree root. The builder
+could only build an Ironwood bundle with the bundle version's default flags (spends and outputs
+enabled). The extension is additive and tiny:
+
+- `BundlePadding` gained a public field `spends_disabled: bool` (documented in the source) and a
+  constant `BundlePadding::OUTPUT_ONLY` (`DEFAULT` with `spends_disabled: true`). `DEFAULT` and
+  `UNPADDED` set it to `false`, so every existing user of those constants is unchanged.
+- `BuildConfig::ironwood_builder` (the `Standard` arm only) builds the Ironwood bundle with
+  `orchard::bundle::Flags::SPENDS_DISABLED` when `ironwood_padding.spends_disabled` is set, and
+  with `bundle_version.default_flags()` otherwise, as before.
+
+What it does not touch: the Orchard builder (`orchard_builder`) ignores the field and always uses
+the default flags; the coinbase arm, the deferred-PCZT builder, signing, proof construction, fee
+arithmetic and the transaction format are unchanged. The field was put on `BundlePadding` rather
+than `BuildConfig::Standard` so that no existing `BuildConfig::Standard { .. }` literal, in this
+crate or in a dependant, has to change.

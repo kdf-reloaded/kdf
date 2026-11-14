@@ -73,3 +73,7 @@ zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 mm2_eth = { path = "../mm2_eth" }
 mm2_metamask = { path = "../mm2_metamask" }
+
+[dev-dependencies]
+# The scripted device the hardware-context tests talk to.
+trezor = { path = "../trezor", features = ["test-helpers"] }

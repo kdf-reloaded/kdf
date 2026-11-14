@@ -6,6 +6,8 @@ use super::*;
 impl MmCoin for Qrc20Coin {
     fn is_asset_chain(&self) -> bool { utxo_common::is_asset_chain(&self.utxo) }
 
+    fn chain_disagreement(&self) -> Option<String> { crate::utxo::electrum_chain_disagreement(&self.utxo) }
+
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         Box::new(qrc20_withdraw(self.clone(), req).boxed().compat())
     }

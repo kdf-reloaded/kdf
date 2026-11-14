@@ -1,11 +1,14 @@
-//! Top-level (unnamespaced) EVM swap gas-fee policy RPC handlers (CRD §35.6).
+//! Top-level (unnamespaced) swap gas-fee policy RPC handlers (CRD §35.6).
 //!
 //! `get_swap_gas_fee_policy` reads the per-coin swap gas-fee policy currently
 //! in effect; `set_swap_gas_fee_policy` updates it. The policy is one of
 //! `{Legacy, Low, Medium, High}` (default `Legacy`) and governs how an EVM coin
 //! prices gas for subsequent swap transactions (legacy gas price vs. an
-//! EIP-1559 max-fee / max-priority-fee tier). These RPCs apply only to
-//! EVM-family coins.
+//! EIP-1559 max-fee / max-priority-fee tier), and which of its
+//! `priority_gas_prices` a Tendermint platform coin prices its swap
+//! transactions and trade-fee simulations with (CRD R35.6.8). These RPCs apply
+//! only to EVM-family coins and Tendermint platform coins; a Tendermint token
+//! has no policy of its own (CRD R35.6.9).
 
 use common::HttpStatusCode;
 use derive_more::Display;
@@ -14,19 +17,20 @@ use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 
 use crate::eth::{EthCoin, SwapGasFeePolicy};
+use crate::tendermint::TendermintCoin;
 use crate::{lp_coinfind_or_err, CoinFindError, MmCoinEnum};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GetSwapGasFeePolicyRequest {
-    /// EVM coin ticker.
+    /// EVM coin or Tendermint platform coin ticker.
     pub coin: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetSwapGasFeePolicyRequest {
-    /// EVM coin ticker.
+    /// EVM coin or Tendermint platform coin ticker.
     pub coin: String,
     /// The policy to put into effect (defaults to `Legacy` when omitted).
     #[serde(default)]
@@ -58,11 +62,18 @@ impl From<CoinFindError> for SwapGasFeePolicyError {
     }
 }
 
-/// Resolve a ticker to an active EVM coin, rejecting non-EVM coins as
-/// `NotSupported` (CRD R35.6.4).
-async fn eth_coin_from_ticker(ctx: &MmArc, ticker: &str) -> MmResult<EthCoin, SwapGasFeePolicyError> {
+/// A coin that holds a swap gas-fee policy.
+enum PolicyCoin {
+    Eth(EthCoin),
+    Tendermint(TendermintCoin),
+}
+
+/// Resolve a ticker to an active EVM coin or Tendermint platform coin, rejecting every other coin, a Tendermint
+/// token included, as `NotSupported` (CRD R35.6.4, R35.6.9 item 1).
+async fn policy_coin_from_ticker(ctx: &MmArc, ticker: &str) -> MmResult<PolicyCoin, SwapGasFeePolicyError> {
     match lp_coinfind_or_err(ctx, ticker).await.map_mm_err()? {
-        MmCoinEnum::EthCoin(eth) => Ok(eth),
+        MmCoinEnum::EthCoin(eth) => Ok(PolicyCoin::Eth(eth)),
+        MmCoinEnum::TendermintCoin(tendermint) => Ok(PolicyCoin::Tendermint(tendermint)),
         _ => MmError::err(SwapGasFeePolicyError::NotSupported(ticker.to_owned())),
     }
 }
@@ -71,17 +82,27 @@ pub async fn get_swap_gas_fee_policy(
     ctx: MmArc,
     req: GetSwapGasFeePolicyRequest,
 ) -> MmResult<SwapGasFeePolicy, SwapGasFeePolicyError> {
-    let coin = eth_coin_from_ticker(&ctx, &req.coin).await?;
-    Ok(coin.swap_gas_fee_policy())
+    Ok(match policy_coin_from_ticker(&ctx, &req.coin).await? {
+        PolicyCoin::Eth(coin) => coin.swap_gas_fee_policy(),
+        PolicyCoin::Tendermint(coin) => coin.swap_gas_fee_policy(),
+    })
 }
 
 pub async fn set_swap_gas_fee_policy(
     ctx: MmArc,
     req: SetSwapGasFeePolicyRequest,
 ) -> MmResult<SwapGasFeePolicy, SwapGasFeePolicyError> {
-    let coin = eth_coin_from_ticker(&ctx, &req.coin).await?;
-    coin.set_swap_gas_fee_policy(req.swap_gas_fee_policy);
-    Ok(coin.swap_gas_fee_policy())
+    Ok(match policy_coin_from_ticker(&ctx, &req.coin).await? {
+        PolicyCoin::Eth(coin) => {
+            coin.set_swap_gas_fee_policy(req.swap_gas_fee_policy);
+            coin.swap_gas_fee_policy()
+        },
+        // A coin without `priority_gas_prices` accepts and stores any value, with one warning (CRD R35.6.9 item 2).
+        PolicyCoin::Tendermint(coin) => {
+            coin.set_swap_gas_fee_policy(req.swap_gas_fee_policy);
+            coin.swap_gas_fee_policy()
+        },
+    })
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 # Plan: Tendermint activation features
 
-**Status:** parked (deferred by maintainer decision 2026-10-11; nothing started) — **Last reviewed:** 2026-10-29
+**Status:** parked (deferred by maintainer decision 2026-10-11; custom tokens and the HD `path_to_address` shipped in PR #319; the swap-path fixes and the priority fees in PRs #299 and #323; Tendermint swaps added to the 0.4.0 scope on 2026-11-08 and put aside again on 2026-11-10; the per-swap lock choice and the chain-refund path (CRD ch.18 D18.11.1–D18.11.3) not built) — **Last reviewed:** 2026-11-10
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity`. That branch brings Tendermint activation to wire
@@ -11,7 +11,9 @@
 > branch.
 
 > **Beta availability (2026-10-26).** By maintainer decision Tendermint coins
-> and tokens are wallet-only in the coming beta: while
+> and tokens are wallet-only in 0.3.0-beta.1 and on `dev` as of 2026-11-08 (Tendermint
+> swaps were added to the 0.4.0 scope on 2026-11-08 and put aside again on
+> 2026-11-10): while
 > `TENDERMINT_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`, activation,
 > balances and `withdraw` work, while `setprice`, `buy`, `sell` and
 > `start_swap` refuse the coin and an order with a Tendermint coin saved
@@ -48,7 +50,8 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    - *Public-docs WalletConnect form* `{"priv_key_policy": {"type":
      "WalletConnect", "data": <topic>}}`, treated exactly as the WalletConnect
      form. The public docs show this form; the reference rejects it. The
-     maintainer decided to accept both forms.
+     maintainer decided to accept both forms. The decision is taken; its
+     implementation has not started (no PR, no code).
    - Malformed input is the dispatcher's `InvalidRequest`, never a crash (the
      reference panics on some malformed keys; Reloaded must not).
    - When this lands, drop the interim rejection above.
@@ -56,11 +59,22 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    (R36.1.2, R36.1.4 step 3). The ch. 36 code-quality finding applies: derive
    the public key from the activated private key, not the wallet's root public
    key, and verify with an HD signing test.
+   *Implemented (PR #319).* Under an HD login the coin's key is derived from the
+   seed at the coin's `derivation_path` plus `path_to_address`, with the
+   derivation the UTXO coins use; an iguana login is unchanged. The public key is
+   derived from the activated private key, and a test signs a withdrawal at a
+   non-default path and verifies it against that path's public key. Tendermint no
+   longer runs on the passphrase-hash key; the address changes at the upgrade
+   (changelog upgrade note).
 3. **Custom tokens**: the `protocol` member of `tokens_params[]` and of
    `enable_tendermint_token`, with `CustomTokenError`
    (`{"DuplicateTickerInConfig": {"ticker_in_config": ...}}`).
    A custom token must be wallet-only, as for EVM (ch. 35 R35.2.7); the EVM
-   implementation gap is tracked in kdf-reloaded/kdf#16.
+   side was fixed by `e18eca319` of 2026-10-12, merged with PR #21 on
+   2026-10-13 (issue #16, closed).
+   *Implemented (PR #319).* Both methods accept the inline `TENDERMINTTOKEN`
+   protocol; a duplicate of a configured ticker is the `CustomTokenError`; the
+   token is marked custom and is wallet-only.
 4. **`tx_history: true`** starts background transaction-history fetching
    (Reloaded accepts the flag and does nothing).
 5. **Hardware `priv_key_policy`.** The reference ignores `priv_key_policy` for
@@ -76,6 +90,19 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
 
 1 (it removes the interim rejection), then 2, 3, 4. Items 5 and 6 need a
 maintainer decision first.
+
+## Lab rows owed before swaps are switched on
+
+These rows run on a chain with the HTLC module before `TENDERMINT_SWAPS_AVAILABLE`
+becomes `true`, in the change that switches swaps on:
+
+- **Trade-fee estimate under the swap fee policy (PR #323).** With a funded account
+  and a lab-only `priority_gas_prices` array on the coin, `get_trade_fee` under each
+  policy value (`Legacy`, `Low`, `Medium`, `High`) gives fees in the ratio of the
+  selected gas prices (CRD ch.18 T18.6B.1, ch.35 T35.38). PR #323 covers this with
+  unit tests only.
+  *2026-11-10: PASSED on a local single-validator chain with the HTLC module: all four
+  policy values gave fees in the ratio of the selected gas prices.*
 
 ## Latent hazard: a key-less policy on the legacy HTLC path
 
@@ -142,6 +169,16 @@ R47.5.13a) when the coin's activation policy has no local key. There is nothing
 here an operator should be able to turn on, so this is deliberately *not* a
 compatibility switch and takes no default-side weighing under
 [`../COMPAT_SWITCHES.md`](../COMPAT_SWITCHES.md).
+
+*Implemented (PR #319).* The wallet-only predicate of the Tendermint coin and
+token (`tendermint_wallet_only`, `mm2src/coins/tendermint/tendermint_types.rs`)
+now also answers `true` when the activation policy holds no local private key,
+so order placement refuses the coin; a token uses its platform coin's policy.
+The test builds the one key-less policy that exists today
+(`PrivKeyPolicy::Trezor`) and checks a coin and a token of it. The refusal is
+the order-time one only; a swap that has already started never asks.
+The construction site now builds two policies, `PrivKeyPolicy::KeyPair` (iguana login) and
+`PrivKeyPolicy::HDWallet` (HD login); both hold a local key, so the hazard stays latent.
 
 **The gate must cover tokens as well as the platform coin.**
 `TendermintToken::get_htlc_key_pair` delegates straight to the platform coin

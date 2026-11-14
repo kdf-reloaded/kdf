@@ -635,6 +635,12 @@ impl SwapOps for BchCoin {
     }
 
     fn get_htlc_key_pair(&self) -> Option<KeyPair> { utxo_common::get_htlc_key_pair(self) }
+
+    fn own_signing_key_pair(&self) -> Option<KeyPair> { utxo_common::own_signing_key_pair(self) }
+
+    fn swap_key_disagreement(&self, _node_pubkey: &Public) -> Option<crate::SwapKeyDisagreement> {
+        utxo_common::swap_key_disagreement(self)
+    }
 }
 
 // No watcher methods are implemented for this family yet, so it does not opt in to watching (CRD ch.09 R17).
@@ -770,6 +776,8 @@ impl UtxoStandardOps for BchCoin {
 #[async_trait]
 impl MmCoin for BchCoin {
     fn is_asset_chain(&self) -> bool { utxo_common::is_asset_chain(&self.utxo_arc) }
+
+    fn chain_disagreement(&self) -> Option<String> { crate::utxo::electrum_chain_disagreement(&self.utxo_arc) }
 
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut {
         Box::new(utxo_common::get_raw_transaction(&self.utxo_arc, req).boxed().compat())
@@ -945,6 +953,7 @@ mod bch_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_get_slp_genesis_params() {
         let coin = tbch_coin_for_test();
         let token_id = "bb309e48930671582bea508f9a1d9b491e49b69be3d6f372dc08da2ac6e90eb7".into();
@@ -956,6 +965,7 @@ mod bch_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_plain_bch_tx_details() {
         let coin = tbch_coin_for_test();
         let storage = init_storage_for(coin.ticker());
@@ -998,6 +1008,7 @@ mod bch_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_slp_tx_details() {
         let coin = tbch_coin_for_test();
         let storage = init_storage_for(coin.ticker());
@@ -1160,6 +1171,7 @@ mod bch_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_sign_message() {
         let coin = tbch_coin_for_test();
         let signature = coin.sign_message("test").unwrap();
@@ -1170,6 +1182,7 @@ mod bch_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     #[cfg(not(target_arch = "wasm32"))]
     fn test_verify_message() {
         let coin = tbch_coin_for_test();

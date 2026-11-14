@@ -505,6 +505,11 @@ fn process_p2p_request(
             return lp_ordermatch::answer_sync_request(&ctx, peer_id, pubkey, trie_roots, reply)
                 .map_to_mm(P2PRequestError::SendError);
         },
+        // CRD ch.32 R-GH12a: the answer may wait briefly for the trie worker, on a task of its own.
+        Ok(P2PRequest::Ordermatch(lp_ordermatch::OrdermatchRequest::GetOrderbook { base, rel })) => {
+            return lp_ordermatch::answer_orderbook_request(&ctx, peer_id, base, rel, reply)
+                .map_to_mm(P2PRequestError::SendError);
+        },
         Ok(request) => {
             let result = match request {
                 P2PRequest::Ordermatch(req) => lp_ordermatch::process_peer_request(ctx.clone(), req),
@@ -682,6 +687,13 @@ pub async fn request_one_peer<T: de::DeserializeOwned>(
         PeerDecodedResponse::Err(e) => MmError::err(P2PRequestError::ResponseError(e)),
         PeerDecodedResponse::LocalErr(kind, e) => MmError::err(P2PRequestError::LocalResponseError(kind, e)),
     }
+}
+
+/// The relays this node is connected to, as peer ID strings. Empty when there is none, or when the
+/// networking layer cannot be asked (CRD ch.32 R-Q5d item 2).
+pub async fn connected_relays(ctx: &MmArc) -> Vec<String> {
+    let cmd_tx = P2PContext::fetch_from_mm_arc(ctx).cmd_tx.lock().clone();
+    mm2_p2p::atomicdex_behaviour::get_connected_relays(cmd_tx).await
 }
 
 fn parse_peers_responses<T: de::DeserializeOwned>(
@@ -915,5 +927,38 @@ mod tests {
 
         let result = block_on(peer_connection_healthcheck(ctx, "12D3KooWself".to_string())).unwrap();
         assert!(result);
+    }
+
+    /// CRD ch.28 R16a, T4a (a): the peer healthcheck messages the node sends pass the bounds check.
+    #[test]
+    fn t4a_a_healthcheck_messages_nest_within_half_the_bound() {
+        use super::PeerHealthcheckMsg;
+        use common::msgpack_bounds::{check_msgpack_bounds, max_nesting_depth, MAX_PEER_NESTING};
+
+        let messages = [
+            PeerHealthcheckMsg::Probe {
+                source_peer: "12D3KooWsource".into(),
+                target_peer: "12D3KooWtarget".into(),
+                nonce: u64::MAX,
+                expires_at: 1_700_000_000,
+            },
+            PeerHealthcheckMsg::Ack {
+                source_peer: "12D3KooWtarget".into(),
+                target_peer: "12D3KooWsource".into(),
+                nonce: 7,
+                expires_at: 1_700_000_000,
+            },
+        ];
+        for (i, message) in messages.iter().enumerate() {
+            let payload = mm2_p2p::encode_message(message).unwrap();
+            let envelope = mm2_p2p::encode_and_sign(message, &[3; 32]).unwrap();
+            for (what, encoded) in [("payload", &payload), ("envelope", &envelope)] {
+                assert_eq!(check_msgpack_bounds(encoded), Ok(encoded.len()), "{i} {what}");
+                let depth = max_nesting_depth(encoded);
+                println!("t4a depth PeerHealthcheckMsg {i} {what}: {depth}");
+                assert!(depth <= MAX_PEER_NESTING / 2, "{i} {what}: depth {depth}");
+            }
+            mm2_p2p::decode_signed::<PeerHealthcheckMsg>(&envelope).unwrap();
+        }
     }
 }

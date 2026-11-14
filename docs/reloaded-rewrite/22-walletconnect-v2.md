@@ -254,6 +254,15 @@ sessions are **written** to durable storage. It controls
 |             | implemented; selecting it now must stop startup with an          |
 |             | explanatory error.                                               |
 
+> *As built (2026-11-08, batch 4 item B4-12):* the node checks the value
+> at start-up, beside its other configuration checks
+> (`kdf_walletconnect::validate_session_persistence`, called from
+> `lp_init`). `encrypted`, an unknown string and a non-string value stop
+> the start with a configuration error that names
+> `wc_session_persistence`. Before, the check ran only when WalletConnect
+> was first used, so a bad value failed the first WalletConnect call
+> instead of the start.
+
 The `open` default is a **documented Security-versus-compatibility
 departure** (see `CODING_STANDARDS.md` §5.1 and the
 "Security-versus-compatibility departures" subsection of

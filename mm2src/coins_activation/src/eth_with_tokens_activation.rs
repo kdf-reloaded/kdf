@@ -14,6 +14,7 @@ use coins::eth::{eth_coin_from_params_with_global_hd, eth_coin_from_params_with_
                  EthCoinActivationParams, EthCoinBuildError, GasStationPricePolicy, SwapGasFeePolicy, SwapV2Contracts,
                  ETH_DEFAULT_GAP_LIMIT};
 use coins::hd_pubkey::HDXPubExtractor;
+use coins::hd_wallet::HDAddressId;
 use coins::my_tx_history_v2::TxHistoryStorage;
 use coins::nft::{fetch_and_store_owned_nfts, Chain, ChainTicker, EnableNftError, NftCtx, NftInfo, NftProvider};
 use coins::node_url::{host_only, ServiceUrl};
@@ -231,15 +232,6 @@ impl EthWithTokensActivationRequest {
     fn path_to_address(&self) -> PathToAddress { self.path_to_address.clone().unwrap_or_default() }
 
     fn gap_limit(&self) -> u32 { self.gap_limit.unwrap_or(ETH_DEFAULT_GAP_LIMIT) }
-
-    /// The number of external addresses every account of an HD report covers at least: the requested minimum,
-    /// and the enabled address, which must always be part of the report.
-    fn min_addresses_to_report(&self) -> u32 {
-        let enabled_address_id = self.path_to_address().address_id;
-        self.min_addresses_number
-            .unwrap_or_default()
-            .max(enabled_address_id.saturating_add(1))
-    }
 
     /// Whether the request selects a hardware wallet.
     fn is_trezor_policy(&self) -> bool {
@@ -666,7 +658,10 @@ impl PlatformWithTokensActivationOps for EthCoin {
                         hd_wallet,
                         xpub_extractor,
                         activation_request.scan_policy.unwrap_or_default(),
-                        activation_request.min_addresses_to_report(),
+                        activation_request.min_addresses_number.unwrap_or_default(),
+                        // The enabled address is listed, and its account created when the wallet holds none
+                        // (CRD ch.05 R35a); the other accounts are raised to the requested minimum alone.
+                        Some(HDAddressId::from(&activation_request.path_to_address())),
                     )
                     .await
                     .mm_err(enable_balance_error)?;

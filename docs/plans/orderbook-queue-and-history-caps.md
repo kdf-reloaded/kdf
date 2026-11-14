@@ -1,11 +1,11 @@
 # Plan: bound the trie mutation queue and each pair's delta history
 
-**Status:** in progress (AL-2 and AL-3 shipped in PR #164; the early-purge open point left) — **Last reviewed:** 2026-10-30
+**Status:** parked (AL-2 and AL-3 shipped in PR #164; the early-purge open point waits for the maintainer) — **Last reviewed:** 2026-11-08
 
 > **Context.** The seed-node memory incident of 2026-10-28 showed that a seed
 > keeps about 1.2 KB per received order update. The low-risk part (timer expiry,
-> capacity release, node release on clear, gauges, `malloc_trim`) is merged or
-> in review (PRs #131, #134, #137). This plan is the second part, decision AL
+> capacity release, node release on clear, gauges, `malloc_trim`) is merged
+> (PRs #131, #134, #137, 2026-10-28). This plan is the second part, decision AL
 > of 2026-10-29: two of its three items were approved before the beta, one was
 > rejected. Both approved items are Reloaded-original; the reference bounds neither
 > (CRD ch.32 §32.9A R-B1 rows 3 and 7).

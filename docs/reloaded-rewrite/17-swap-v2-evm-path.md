@@ -449,6 +449,103 @@ including on a JSON-RPC error body, sticky last-good node, 10 s per-node
 cutoff, host-only node naming), and every signed swap transaction this
 chapter broadcasts follows R35.1.12 there.
 
+**R17.8.1. Bounded log windows (Reloaded-original, 2026-11-05).** Every
+`eth_getLogs` that an EVM swap path issues covers at most `W` blocks, the
+inclusive range `[from, from + W − 1]`. That includes V1 (the payment-sent,
+spend and refund events, and the wait for a payment's spend) and V2 (this
+section). A longer range is searched as consecutive windows that neither
+overlap nor skip a block. `W` starts at the coin's `logs_block_range` (coins
+file, default 1,000) and never rises above it.
+
+**R17.8.2. Shrinking on a range refusal.** When a window fails on every node
+with an answer that refuses its size, `W` shrinks and the window is retried at
+once. An answer refuses the size when its JSON-RPC error code is -32005, or
+when its message names a block range or a limit ("range", "limit",
+"too large", "exceed" or "more than"). A bare -32602 without such a phrase is
+an ordinary failure: it can come from a malformed request of our own, and
+shrinking would hide that.
+- `W` shrinks to the block count the message names, when it names one below
+  `W`; otherwise to half of `W`; never below 1.
+- The reduced `W` holds for the rest of the coin's session. Its first
+  reduction is logged once at WARN, naming the coin, the new `W` and the node
+  by host only (Chapter 35 §35.1.F).
+- The window in effect is logged at INFO once, when the coin first queries
+  logs, and again at INFO on every change of `W`, with its value. A node
+  operator can therefore read it at the default log level.
+- Any other failure keeps `W` and is retried as before.
+
+**R17.8.3. The wait for a payment's spend.** While a node waits for one of its
+own V1 payments to be spent, it searches forward from a cursor.
+- The cursor starts at the block of the payment's receipt when that is known,
+  because the spend cannot precede the payment; otherwise at the search's
+  start block.
+- Each poll scans windows from the cursor to the current tip, and moves the
+  cursor past every window it scanned without error, but never higher than 12
+  blocks below the tip seen by that poll. A reorganization can replace the
+  newest blocks, so the next poll scans those 12 blocks again; that costs a
+  small part of one window.
+- The wait's deadline is checked on every poll, also after a failed query,
+  and before each window of a poll. A node whose every query fails therefore
+  still leaves the wait at the deadline and takes the refund path, instead of
+  waiting forever, and a poll far behind the tip does not overrun the deadline
+  by its whole scan. A spend found in a window already scanned is returned
+  before the deadline is looked at. When the wait ends at its deadline with a
+  spend found but its transaction not yet fetched, the timeout names that
+  spend.
+- Each poll also reads the payment's state from the swap contract. It is a
+  signal only: the contract keeps no secret and no block. When the state reads
+  as spent while no window has yet returned the spend, one WARN line says so
+  for that wait.
+- The V2 search for a funding spend (§17.5.5) likewise checks its deadline
+  after a failed query, so persistent failures cannot keep it from ending. It
+  also keeps a cursor across its polls, so a poll scans only the windows not
+  yet scanned. Like the V1 wait's, that cursor stays at least 12 blocks below
+  the tip.
+- The cursor of the V1 wait and that of the V2 search go back to their start
+  at most once every 60 seconds, after a poll that reached the tip without
+  finding the spend or the event. A window that a lagging node answered as
+  empty is therefore searched again within a minute.
+
+**R17.8.3a. The search for a spend or refund of a V1 payment.** The search a
+node runs to learn whether one of its V1 payments was spent or refunded runs in
+bounded time per call, however late the spend or refund came. It is the look on
+the chain of chapter 51 R31a, which runs under a budget of its own, and the
+search of the fund recovery.
+- For each payment, the node keeps the blocks it has already scanned, as a few
+  block intervals, for the rest of its session. The search's low end is the
+  higher of the search's start block and 12 blocks below the payment's receipt
+  block, when that is known. A reorganization that moves the payment into an
+  earlier block therefore cannot put the spend below the low end.
+- Each call scans the blocks not yet scanned from the tip downwards, newest
+  window first. Each window is the newest `W` blocks of the unscanned range
+  below the previous one. Blocks above the scanned intervals therefore come
+  first, then the gaps below them, down to the low end. A spend or refund that
+  came late, near the tip, is found within the first few windows.
+- The call ends when it finds the spend or the refund, or when no unscanned
+  block is left down to the low end.
+- A window is recorded as scanned after it has been searched without error and
+  without a result. A call cut short by its caller's budget therefore loses no
+  progress, and the next call rescans nothing it has already scanned. When a
+  window has to shrink (R17.8.2), its parts may be queried oldest first.
+- A node that is behind the tip can answer a window above its own head as
+  empty, and the tip and the logs can come from different nodes. So when a
+  call has scanned the whole range down to the low end without finding the
+  spend or the refund, the node forgets that payment's record, and the next
+  call scans the whole range again, newest first. A miss caused by a lagging
+  node costs one more pass, not the rest of the session.
+- A window in which an event matches but carries no transaction hash is not
+  recorded and not passed by a cursor. It is searched again.
+- A scan never records blocks closer than 12 below the tip it saw as scanned,
+  the reorganization margin of R17.8.3. The next call scans those blocks
+  again.
+
+**R17.8.4. Compatibility.** No switch. R17.8.1–R17.8.3 correct a defect: a V1
+spend wait that queried from the swap's start block to the tip in one request
+was refused by nodes that limit `eth_getLogs` ranges on chains with fast
+blocks. It also never reached its deadline, so a taker could neither learn the
+secret nor reach its refund path. Whether the reference bounds these queries
+has not been established.
+
 ---
 
 ## 17.9 NFT variant
@@ -793,6 +890,76 @@ requirements are enumerated in T17.9.1 through T17.9.10 because
 those branches are part of the maker-side state-machine and
 native persistence contract.
 
+**T17.8.1. Shrinking windows.** Against a stub EVM node that refuses any
+`eth_getLogs` range above 100 blocks with -32602 "block range too large", a
+spend search from 3,600 blocks below the tip with `W` = 1,000 shrinks `W` to
+500, 250, 125 and 62, then finds the spend. It logs the first-use INFO line,
+one WARN, and an INFO line per change of `W`.
+
+**T17.8.2. A named limit.** When the refusal names a limit (for example "limited
+to 100 blocks"), `W` becomes that count at once.
+
+**T17.8.3. Unrelated errors and failover.** A bare -32602 without a range or
+limit phrase leaves `W` unchanged and counts as an ordinary failure. A -32005
+shrinks `W` whatever its message says. A node that refuses a window which
+another node accepts causes a failover, not a shrink: `W` shrinks only when the
+window fails on every node. One node refusing and the next accepting is
+therefore the designed behavior, not a missed reduction.
+
+**T17.8.4. Windows.** With `W` = 1,000 and a range of blocks 0 to 2,499, the
+windows of the forward searches (the spend wait, the payment-sent search and the
+V2 event search) are [0, 999], [1,000, 1,999] and [2,000, 2,499]. Those of the
+spend and refund search of R17.8.3a, which runs newest first, are
+[1,500, 2,499], [500, 1,499] and [0, 499]. No block is queried twice, and none is
+skipped. `W` never exceeds the coin's `logs_block_range`.
+
+**T17.8.5. The cursor.** With the payment in block P and the swap's start block
+P − 3,555, the spend wait's first query starts at P.
+
+**T17.8.6. The deadline.** With every query failing, for any reason, the V1
+spend wait and the V2 funding-spend search each return their timeout error once
+their deadline has passed. With many windows still to scan when the deadline passes,
+the V1 wait returns its timeout before scanning them all. With the spend found but
+its transaction fetch failing, the timeout text names the spend.
+
+**T17.8.8. The reorganization margin.** The tip block of one poll is scanned
+without the spend, and is then replaced by a block that carries the spend. The
+next poll of the V1 wait finds the spend.
+
+**T17.8.9. A late spend.** On a node that refuses ranges above 100 blocks, with
+the payment 18,000 blocks below the tip and the spend 50 blocks below the tip,
+one search finds the spend within a budget of a few windows. It does not first
+walk up from the payment block.
+
+**T17.8.10. Progress across calls.** With a spend early in a range larger than one
+call can scan before its budget ends, a later call finds it without rescanning
+any window an earlier call scanned, except the newest 12 blocks. Blocks added
+above the scanned interval between calls are scanned first.
+
+**T17.8.11. The V2 cursor.** Across polls, the V2 funding-spend search scans each
+window once, except the newest 12 blocks.
+
+**T17.8.12. A reorganized block.** For the search of R17.8.3a and the V2 cursor:
+a block within 12 of the tip, scanned empty and then replaced by one carrying
+the spend or the event, is found by the next call or poll.
+
+**T17.8.13. A lagging node.** A node answers the window that holds the spend
+as empty once, then answers it correctly.
+- The search of R17.8.3a finds the spend on its next pass, after a pass that
+  reached the low end.
+- The V1 wait and the V2 search find it after their cursor goes back to the
+  start, within 60 seconds.
+- An event without a transaction hash is found again by the next poll or call.
+- The low end lies 12 blocks below the receipt block.
+
+*Lab case (2026-11-05).* The maker is held stopped until the taker's wait for
+the spend has ended at its deadline, then resumed so that it spends the taker
+payment. The taker's look on the chain (chapter 51 R31a) finds the late spend
+within its budget and claims the maker payment.
+
+**T17.8.7. The contract state.** With the contract reporting the payment as
+spent while the logs keep failing, one WARN line is logged for the wait.
+
 ---
 
 ## 17.13 Out of scope / known limitations
@@ -945,3 +1112,16 @@ The chapter relies on one baseline-state claim:
     none at six words or more; the 20 of the 509 identifiers that
     appear in the chapter are all serialized-schema tag values or
     public ERC-20 and ABI names.
+- *Clean-side addition (2026-11-05) -- R17.8.1–R17.8.4 and T17.8.1–T17.8.7.*
+  Reloaded-original. Written by a session that never read the forbidden corpus,
+  from this repository's own code and a laboratory observation of public node
+  behavior (nodes that refuse `eth_getLogs` ranges above a node-specific
+  limit). They take no forbidden-class input, so chapter 01 R38 is not
+  engaged and no gate pass is required.
+- *Clean-side addition (2026-11-05) -- R17.8.3a, the V2 cursor sentence of
+  R17.8.3 and T17.8.9–T17.8.12.* Reloaded-original. A second-session review of
+  PR #248 found that the look on the chain of chapter 51 R31a could not reach a
+  late spend within its budget. Written by a session that never read the
+  forbidden corpus, from this repository's own code. It takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.

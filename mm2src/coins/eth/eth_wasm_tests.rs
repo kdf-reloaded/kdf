@@ -46,6 +46,7 @@ async fn test_send() {
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
         estimate_gas_mult: None,
+        taker_fee_quote_at_limit: true,
         derivation_method: DerivationMethod::Iguana(key_pair.address()),
         web3_instances: vec![Web3Instance {
             web3: web3.clone(),
@@ -61,6 +62,7 @@ async fn test_send() {
         required_confirmations: 1.into(),
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+        logs_window: Default::default(),
         tron_api: None,
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),

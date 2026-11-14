@@ -1,5 +1,5 @@
 use crate::hd_pubkey::HDXPubExtractor;
-use crate::hd_wallet::{HDWalletCoinOps, NewAccountCreatingError};
+use crate::hd_wallet::{HDAddressId, HDWalletCoinOps, NewAccountCreatingError, NewAccountIndex};
 use crate::{BalanceError, BalanceResult, CoinBalance, CoinWithDerivationMethod, DerivationMethod, HDAddress,
             MarketCoinOps};
 use async_trait::async_trait;
@@ -108,11 +108,16 @@ impl Default for EnableCoinScanPolicy {
 
 #[async_trait]
 pub trait EnableCoinBalanceOps {
+    /// `path_to_address` is the address a software global-HD activation handles (CRD ch.05 R35a): its account is
+    /// created when the wallet holds none at that index, and its chain is listed up to that address. `None` for a
+    /// coin whose activation does not honor `path_to_address` (the Trezor policy), and it has no effect on a
+    /// single-address (Iguana) coin.
     async fn enable_coin_balance<XPubExtractor>(
         &self,
         xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
         min_addresses_number: u32,
+        path_to_address: Option<HDAddressId>,
     ) -> MmResult<EnableCoinBalance, EnableCoinBalanceError>
     where
         XPubExtractor: HDXPubExtractor + Sync;
@@ -132,6 +137,7 @@ where
         xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
         min_addresses_number: u32,
+        path_to_address: Option<HDAddressId>,
     ) -> MmResult<EnableCoinBalance, EnableCoinBalanceError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
@@ -149,7 +155,13 @@ where
                 })
                 .mm_err(EnableCoinBalanceError::from),
             DerivationMethod::HDWallet(hd_wallet) => self
-                .enable_hd_wallet(hd_wallet, xpub_extractor, scan_policy, min_addresses_number)
+                .enable_hd_wallet(
+                    hd_wallet,
+                    xpub_extractor,
+                    scan_policy,
+                    min_addresses_number,
+                    path_to_address,
+                )
                 .await
                 .map(EnableCoinBalance::HD),
         }
@@ -165,12 +177,19 @@ pub trait HDWalletBalanceOps: HDWalletCoinOps {
     /// Requests balances of already known addresses, and if it's prescribed by [`EnableCoinParams::scan_policy`],
     /// scans for new addresses of every HD account by using [`HDWalletBalanceOps::scan_for_new_addresses`].
     /// This method is used on coin initialization to index working addresses and to return the wallet balance to the user.
+    ///
+    /// `path_to_address` is the activated address of a software global-HD activation (CRD ch.05 R35a):
+    /// - when the wallet holds no account at its `account_id`, that account is created, and the result reports
+    ///   that account only;
+    /// - the known-address count of its chain is raised to at least `address_id + 1`, beside
+    ///   `min_addresses_number`, which raises the external chain of every account.
     async fn enable_hd_wallet<XPubExtractor>(
         &self,
         hd_wallet: &Self::HDWallet,
         xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
         min_addresses_number: u32,
+        path_to_address: Option<HDAddressId>,
     ) -> MmResult<HDWalletBalance, EnableCoinBalanceError>
     where
         XPubExtractor: HDXPubExtractor + Sync;
@@ -275,6 +294,29 @@ pub mod common_impl {
     use super::*;
     use crate::hd_wallet::{HDAccountOps, HDWalletOps};
 
+    /// The known-address counts an activation raises the chains of an account to (external, internal): the external
+    /// chain to `min_addresses_number`, and the chain of `path_to_address` to at least `address_id + 1` when the
+    /// account is the path's (CRD ch.05 R35a item 2, ch.38 R38.8.5). On the external chain the larger of the two
+    /// applies. A count of `0` leaves a chain alone.
+    pub(crate) fn minimum_known_addresses(
+        min_addresses_number: u32,
+        path_to_address: Option<&HDAddressId>,
+    ) -> (u32, u32) {
+        let mut external = min_addresses_number;
+        let mut internal = 0;
+        if let Some(path) = path_to_address {
+            // `address_id` can reach the limit of the hardened children; the sum stays beyond it and is refused.
+            let path_minimum = path.address_id.saturating_add(1);
+            match path.chain {
+                Bip44Chain::External => external = external.max(path_minimum),
+                Bip44Chain::Internal => internal = path_minimum,
+            }
+        }
+        (external, internal)
+    }
+
+    /// Activates `hd_account`: reports its known addresses, scans it when asked, and raises its chains to the
+    /// minimum counts of [`minimum_known_addresses`]. `path_to_address` is `Some` for the path's account only.
     pub(crate) async fn enable_hd_account<Coin>(
         coin: &Coin,
         hd_wallet: &Coin::HDWallet,
@@ -282,6 +324,7 @@ pub mod common_impl {
         address_scanner: &Coin::HDAddressScanner,
         scan_new_addresses: bool,
         min_addresses_number: u32,
+        path_to_address: Option<&HDAddressId>,
     ) -> MmResult<HDAccountBalance, EnableCoinBalanceError>
     where
         Coin: HDWalletBalanceOps + MarketCoinOps + Sync,
@@ -296,9 +339,30 @@ pub mod common_impl {
                     .mm_err(Into::into)?,
             );
         }
-        ensure_minimum_external_addresses(coin, hd_wallet, hd_account, min_addresses_number, &mut addresses)
+        let (external_minimum, internal_minimum) = minimum_known_addresses(min_addresses_number, path_to_address);
+        ensure_minimum_addresses(
+            coin,
+            hd_wallet,
+            hd_account,
+            Bip44Chain::External,
+            external_minimum,
+            &mut addresses,
+        )
+        .await
+        .mm_err(Into::into)?;
+        // A coin without an internal chain (the EVM coins) has nothing to raise there.
+        if internal_minimum > 0 && hd_account.known_addresses_number(Bip44Chain::Internal).is_ok() {
+            ensure_minimum_addresses(
+                coin,
+                hd_wallet,
+                hd_account,
+                Bip44Chain::Internal,
+                internal_minimum,
+                &mut addresses,
+            )
             .await
             .mm_err(Into::into)?;
+        }
 
         let total_balance = sum_hd_address_balances(coin.ticker(), &addresses);
         let account_balance = HDAccountBalance {
@@ -311,10 +375,14 @@ pub mod common_impl {
         Ok(account_balance)
     }
 
-    pub(crate) async fn ensure_minimum_external_addresses<Coin>(
+    /// Raises the number of known addresses of `chain` to `min_addresses_number`: the missing addresses are derived
+    /// at the next contiguous indices, their balances are read and the new count is persisted. An account that
+    /// already has that many is left alone.
+    pub(crate) async fn ensure_minimum_addresses<Coin>(
         coin: &Coin,
         hd_wallet: &Coin::HDWallet,
         hd_account: &mut Coin::HDAccount,
+        chain: Bip44Chain,
         min_addresses_number: u32,
         addresses: &mut Vec<HDAddressBalance>,
     ) -> BalanceResult<()>
@@ -323,7 +391,7 @@ pub mod common_impl {
         Coin::Address: fmt::Display + Clone,
     {
         let known_addresses_number = hd_account
-            .known_addresses_number(Bip44Chain::External)
+            .known_addresses_number(chain)
             .mm_err(|error| BalanceError::Internal(error.to_string()))?;
         if known_addresses_number >= min_addresses_number {
             return Ok(());
@@ -338,13 +406,9 @@ pub mod common_impl {
         }
 
         let new_addresses = coin
-            .known_addresses_balances_with_ids(
-                hd_account,
-                Bip44Chain::External,
-                known_addresses_number..min_addresses_number,
-            )
+            .known_addresses_balances_with_ids(hd_account, chain, known_addresses_number..min_addresses_number)
             .await?;
-        coin.set_known_addresses_number(hd_wallet, hd_account, Bip44Chain::External, min_addresses_number)
+        coin.set_known_addresses_number(hd_wallet, hd_account, chain, min_addresses_number)
             .await
             .mm_err(Into::into)?;
         addresses.extend(new_addresses);
@@ -357,30 +421,39 @@ pub mod common_impl {
         xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
         min_addresses_number: u32,
+        path_to_address: Option<HDAddressId>,
     ) -> MmResult<HDWalletBalance, EnableCoinBalanceError>
     where
         Coin: HDWalletBalanceOps + MarketCoinOps + Sync,
         Coin::Address: fmt::Display + Clone,
         XPubExtractor: HDXPubExtractor + Sync,
     {
-        let mut accounts = hd_wallet.get_accounts_mut().await;
         let address_scanner = coin.produce_hd_address_scanner().await.mm_err(Into::into)?;
 
-        let mut result = HDWalletBalance {
-            accounts: Vec::with_capacity(accounts.len() + 1),
+        // The account the activation must create (CRD ch.05 R35a item 1): the path's account when the wallet holds
+        // none at that index; without a path, the first account of an empty wallet.
+        let index_to_create = {
+            let accounts = hd_wallet.get_accounts_mut().await;
+            match &path_to_address {
+                Some(path) if !accounts.contains_key(&path.account_id) => {
+                    Some(NewAccountIndex::Requested(path.account_id))
+                },
+                Some(_) => None,
+                None if accounts.is_empty() => Some(NewAccountIndex::LowestUnused),
+                None => None,
+            }
         };
 
-        if accounts.is_empty() {
-            // Is seems that we couldn't find any HD account from the HD wallet storage.
-            drop(accounts);
+        if let Some(index) = index_to_create {
             info!(
-                "{} HD wallet hasn't been enabled before. Create default HD account",
-                coin.ticker()
+                "{} HD wallet holds no account at the activated index. Create it: {:?}",
+                coin.ticker(),
+                index
             );
 
-            // Create new HD account.
+            // Create the new HD account. The result reports this account only.
             let mut new_account = coin
-                .create_new_account(hd_wallet, xpub_extractor)
+                .create_new_account(hd_wallet, xpub_extractor, index)
                 .await
                 .mm_err(Into::into)?;
             let scan_new_addresses = matches!(
@@ -395,19 +468,27 @@ pub mod common_impl {
                 &address_scanner,
                 scan_new_addresses,
                 min_addresses_number,
+                path_to_address.as_ref(),
             )
             .await?;
-            result.accounts.push(account_balance);
-            return Ok(result);
+            return Ok(HDWalletBalance {
+                accounts: vec![account_balance],
+            });
         }
 
+        let mut accounts = hd_wallet.get_accounts_mut().await;
         debug!(
             "{} HD accounts were found on {} coin activation",
             accounts.len(),
             coin.ticker()
         );
+        let mut result = HDWalletBalance {
+            accounts: Vec::with_capacity(accounts.len()),
+        };
         let scan_new_addresses = matches!(scan_policy, EnableCoinScanPolicy::Scan);
-        for (_account_id, hd_account) in accounts.iter_mut() {
+        for (account_id, hd_account) in accounts.iter_mut() {
+            // Only the path's account is raised to the activated address.
+            let account_path = path_to_address.as_ref().filter(|path| path.account_id == *account_id);
             let account_balance = enable_hd_account(
                 coin,
                 hd_wallet,
@@ -415,6 +496,7 @@ pub mod common_impl {
                 &address_scanner,
                 scan_new_addresses,
                 min_addresses_number,
+                account_path,
             )
             .await?;
             result.accounts.push(account_balance);
@@ -427,6 +509,59 @@ pub mod common_impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn path(account_id: u32, chain: Bip44Chain, address_id: u32) -> HDAddressId {
+        HDAddressId {
+            account_id,
+            chain,
+            address_id,
+        }
+    }
+
+    /// CRD ch.05 R35a item 2: the path's chain is raised to `address_id + 1`, and on the external chain the larger
+    /// of that and `min_addresses_number` applies. Without a path, `min_addresses_number` alone applies.
+    #[test]
+    fn t14a_the_path_raises_its_own_chain() {
+        use common_impl::minimum_known_addresses;
+
+        // The default path: address 0 of the external chain is listed without `min_addresses_number`.
+        assert_eq!(
+            minimum_known_addresses(0, Some(&path(0, Bip44Chain::External, 0))),
+            (1, 0)
+        );
+        // Account 1, external, address 3, no minimum: addresses 0 to 3.
+        assert_eq!(
+            minimum_known_addresses(0, Some(&path(1, Bip44Chain::External, 3))),
+            (4, 0)
+        );
+        // The larger of the two wins on the external chain, in both directions.
+        assert_eq!(
+            minimum_known_addresses(10, Some(&path(0, Bip44Chain::External, 3))),
+            (10, 0)
+        );
+        assert_eq!(
+            minimum_known_addresses(2, Some(&path(0, Bip44Chain::External, 3))),
+            (4, 0)
+        );
+        // The internal chain is raised, not the external one.
+        assert_eq!(
+            minimum_known_addresses(0, Some(&path(0, Bip44Chain::Internal, 5))),
+            (0, 6)
+        );
+        assert_eq!(
+            minimum_known_addresses(2, Some(&path(0, Bip44Chain::Internal, 5))),
+            (2, 6)
+        );
+        // No path: `min_addresses_number` alone, and none forces an address.
+        assert_eq!(minimum_known_addresses(0, None), (0, 0));
+        assert_eq!(minimum_known_addresses(3, None), (3, 0));
+        // An address at the hardened limit leaves a minimum beyond it, which `ensure_minimum_addresses` refuses.
+        let (external, _) = minimum_known_addresses(
+            0,
+            Some(&path(0, Bip44Chain::External, crypto::ChildNumber::HARDENED_FLAG)),
+        );
+        assert!(external >= crypto::ChildNumber::HARDENED_FLAG);
+    }
 
     #[test]
     fn empty_hd_balance_keeps_ticker_key() {

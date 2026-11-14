@@ -71,6 +71,12 @@ PKCS#8, PKCS#1 and SEC1 DER (the 0.20 line accepted PKCS#8 and PKCS#1).
 (fixtures), payload exchange; plus the negative cases (untrusted certificate
 rejected, malformed key is an `Err`, key/certificate mismatch is an `Err`).
 
+The handshake tests dial `/dns4/localhost/...` through a test-local wrapper (`LocalhostDns` in
+`tests/wss_handshake.rs`) that maps `/dns4/localhost` to `/ip4/127.0.0.1` under the websocket layer. They used the
+fork's `libp2p-dns` before; the node no longer builds that crate (CRD ch.45 R45.6B.11, ch.28 R0b), so the dev-dependency
+is gone, and with it the doctests of `src/lib.rs` (`doctest = false` in `Cargo.toml`): their examples build the inner
+transport with `libp2p_dns`, and `lib.rs` stays byte-identical to the fork.
+
 `tests/fixtures/rsa_pkcs1_key.der` is a **throwaway test key** (2048-bit RSA,
 `CN=localhost`, `CA:FALSE`, 100-year validity) generated for this test only; it
 protects nothing. Regenerate with `openssl genrsa -traditional`,

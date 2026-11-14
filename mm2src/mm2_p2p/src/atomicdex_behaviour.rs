@@ -1,5 +1,6 @@
 use crate::{adex_ping::AdexPing,
             peers_exchange::{strip_p2p_suffix, PeerAddresses, PeersExchange},
+            redial_guard::{LocalClose, RedialGuardConfig, RedialGuards},
             request_response::{build_request_response_behaviour, LocalFailure, PeerRequest, PeerResponse,
                                RequestResponseBehaviour, RequestResponseBehaviourEvent, RequestResponseSender},
             runtime::{SwarmRuntimeOps, SWARM_RUNTIME},
@@ -19,7 +20,8 @@ use libp2p::{core::{ConnectedPoint, Multiaddr, Transport},
              multiaddr::Protocol,
              noise,
              request_response::ResponseChannel,
-             swarm::{ConnectionError, DialError, ListenError, NetworkBehaviour, Swarm, SwarmEvent},
+             swarm::{dial_opts::DialOpts, ConnectionError, DialError, ListenError, NetworkBehaviour, Swarm,
+                     SwarmEvent},
              PeerId};
 use log::{debug, error, info, warn, Level};
 use rand::seq::SliceRandom;
@@ -31,8 +33,10 @@ use std::{collections::hash_map::{DefaultHasher, HashMap},
           time::Duration};
 use wasm_timer::{Instant, Interval};
 
+use crate::decode_message;
+#[cfg(feature = "application")] use crate::encode_message;
 #[cfg(feature = "application")]
-use crate::{decode_message, encode_message};
+use common::msgpack_bounds::check_msgpack_bounds;
 #[cfg(feature = "application")] use futures::FutureExt;
 #[cfg(feature = "application")]
 use serde::{Deserialize, Serialize};
@@ -60,7 +64,7 @@ fn gossipsub_message_id(data: &[u8], sequence_number: Option<u64>) -> MessageId 
 }
 
 pub const PEERS_TOPIC: &str = "PEERS";
-const CONNECTED_RELAYS_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const CONNECTED_RELAYS_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(600);
 const ANNOUNCE_INITIAL_DELAY: Duration = Duration::from_secs(60);
 const CHANNEL_BUF_SIZE: usize = 1024 * 8;
@@ -123,6 +127,17 @@ pub async fn get_relay_mesh(mut cmd_tx: AdexCmdTx) -> Vec<String> {
     let cmd = AdexBehaviourCmd::GetRelayMesh { result_tx };
     cmd_tx.send(cmd).await.expect("Rx should be present");
     rx.await.expect("Tx should be present")
+}
+
+/// The relays this node is connected to, as peer ID strings. An empty list when the command cannot be sent
+/// or the reply channel is dropped: no relay is known then, which is never an error for the caller.
+pub async fn get_connected_relays(mut cmd_tx: AdexCmdTx) -> Vec<String> {
+    let (result_tx, rx) = oneshot::channel();
+    let cmd = AdexBehaviourCmd::GetConnectedRelays { result_tx };
+    if cmd_tx.send(cmd).await.is_err() {
+        return Vec::new();
+    }
+    rx.await.unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -193,6 +208,10 @@ pub enum AdexBehaviourCmd {
         result_tx: oneshot::Sender<HashMap<String, Vec<String>>>,
     },
     GetRelayMesh {
+        result_tx: oneshot::Sender<Vec<String>>,
+    },
+    /// The relays this node is connected to (not only those in the mesh).
+    GetConnectedRelays {
         result_tx: oneshot::Sender<Vec<String>>,
     },
     /// Add a reserved peer to the peer exchange.
@@ -357,6 +376,10 @@ fn gossipsub_event_to_adex(event: GossipsubEvent) -> Option<AdexBehaviourEvent> 
 impl AtomicDexBehaviour {
     #[cfg(feature = "application")]
     fn is_current_timestamp_request(request: &[u8]) -> bool {
+        // A value outside the bounds is dropped, and counted, where the request is decoded for handling.
+        if check_msgpack_bounds(request).is_err() {
+            return false;
+        }
         matches!(
             decode_message::<WireP2PRequest>(request),
             Ok(WireP2PRequest::NetworkInfo(NetworkInfoRequest::CurrentTimestamp))
@@ -431,6 +454,7 @@ impl AtomicDexBehaviour {
     fn process_pending_clock_checks(
         swarm: &mut AtomicDexSwarm,
         pending_clock_checks: &mut HashMap<PeerId, oneshot::Receiver<PeerResponse>>,
+        guards: &mut RedialGuards,
         cx: &mut Context,
     ) {
         let pending_checks = std::mem::take(pending_clock_checks);
@@ -443,6 +467,9 @@ impl AtomicDexBehaviour {
                     PeerClockCheck::Failed => {
                         if Swarm::disconnect_peer_id(swarm, peer_id).is_err() {
                             error!("Peer {} disconnect error after failed clock check", peer_id);
+                        } else {
+                            // The admission close allows no early redial (CRD ch.28 R27a item 1a).
+                            guards.early.mark_local_close(peer_id, LocalClose::Other);
                         }
                     },
                     PeerClockCheck::Inconclusive => {
@@ -625,6 +652,18 @@ impl AtomicDexBehaviour {
                     error!("Result rx is dropped");
                 }
             },
+            AdexBehaviourCmd::GetConnectedRelays { result_tx } => {
+                let result = swarm
+                    .behaviour()
+                    .gossipsub
+                    .connected_relays()
+                    .into_iter()
+                    .map(|peer| peer.to_string())
+                    .collect();
+                if result_tx.send(result).is_err() {
+                    error!("Result rx is dropped");
+                }
+            },
             AdexBehaviourCmd::AddReservedPeer { peer, addresses } => {
                 swarm
                     .behaviour_mut()
@@ -696,9 +735,12 @@ fn handle_behaviour_event(
         AtomicDexBehaviourEvent::Floodsub(FloodsubEvent::Message(message)) => {
             for topic in &message.topics {
                 if topic == &FloodsubTopic::new(PEERS_TOPIC) {
-                    let addresses: PeerAddresses = match rmp_serde::from_read_ref(&message.data) {
+                    let addresses: PeerAddresses = match decode_message(&message.data) {
                         Ok(a) => a,
-                        Err(_) => return,
+                        Err(e) => {
+                            debug!("peers topic: dropped a value from {} ({})", message.source, e);
+                            return;
+                        },
                     };
                     swarm
                         .behaviour_mut()
@@ -748,7 +790,20 @@ fn handle_behaviour_event(
 /// Custom types mapping the complex associated types of AtomicDexBehaviour to the ExpandedSwarm
 type AtomicDexSwarm = Swarm<AtomicDexBehaviour>;
 
-fn maintain_connection_to_relays(swarm: &mut AtomicDexSwarm, bootstrap_addresses: &[Multiaddr]) {
+/// How many known peers maintenance considers when it looks for dialable ones. The peers exchange keeps at most about
+/// a hundred known peers, so this takes all of them.
+const MAX_PEER_CANDIDATES: usize = 1024;
+
+/// One tick of the relay-connection maintenance (CRD ch.28 RQ1a item 4). The candidates are chosen among the
+/// addresses that the redial guards of R27a allow: an address dialed less than the guard interval ago (item 1) and a
+/// bootstrap address whose peer is connected (item 2) are filtered out before the candidates are chosen, so that
+/// they do not use up a dial slot.
+fn maintain_connection_to_relays(
+    swarm: &mut AtomicDexSwarm,
+    bootstrap_addresses: &[Multiaddr],
+    guards: &mut RedialGuards,
+    now: Instant,
+) {
     let behaviour = swarm.behaviour();
     let connected_relays = behaviour.gossipsub.connected_relays();
     let mesh_n_low = behaviour.gossipsub.get_config().mesh_n_low();
@@ -763,23 +818,42 @@ fn maintain_connection_to_relays(swarm: &mut AtomicDexSwarm, bootstrap_addresses
         let to_connect_num = mesh_n - connected_relays.len();
         // The node never dials itself (CRD ch.28 R8c item 5): peers exchange does not hold its own entry, and the
         // candidate filter excludes it as well.
-        let to_connect = swarm
+        let known_peers = swarm
             .behaviour_mut()
             .peers_exchange
-            .get_random_peers(to_connect_num, |peer| {
+            .get_random_peers(MAX_PEER_CANDIDATES, |peer| {
                 *peer != local_peer_id && !connected_relays.contains(peer)
             });
+        // A peer with no dialable address is not a candidate (R27a item 1).
+        let dialable_peers: Vec<(PeerId, Vec<Multiaddr>)> = known_peers
+            .into_iter()
+            .filter_map(|(peer, addresses)| {
+                let dialable = guards.dialable_peer_addresses(addresses, now, |addr| {
+                    swarm.behaviour().gossipsub.is_connected_to_addr(addr)
+                });
+                (!dialable.is_empty()).then_some((peer, dialable))
+            })
+            .collect();
+        let to_connect: Vec<(PeerId, Vec<Multiaddr>)> = dialable_peers
+            .choose_multiple(&mut rng, to_connect_num)
+            .cloned()
+            .collect();
 
         // choose some random bootstrap addresses to connect if peers exchange returned not enough peers
         if to_connect.len() < to_connect_num {
             let connect_bootstrap_num = to_connect_num - to_connect.len();
-            let available_bootstrap = bootstrap_addresses
-                .iter()
-                .filter(|addr| !swarm.behaviour().gossipsub.is_connected_to_addr(addr))
-                .collect::<Vec<_>>();
+            let available_bootstrap = guards.dialable_bootstrap(
+                bootstrap_addresses,
+                now,
+                |addr| swarm.behaviour().gossipsub.is_connected_to_addr(addr),
+                |peer| swarm.is_connected(peer),
+            );
 
             if to_connect.is_empty() && available_bootstrap.is_empty() {
-                warn!(
+                // CRD ch.28 R27a item 3: at most once per guard interval while the number of relays is unchanged.
+                let level = guards.short_of_relays.level(connected_relays.len(), now);
+                log::log!(
+                    level,
                     "P2P relays below low watermark: connected {}, need {}; no known peers or seednodes available to dial",
                     connected_relays.len(),
                     mesh_n_low
@@ -798,15 +872,16 @@ fn maintain_connection_to_relays(swarm: &mut AtomicDexSwarm, bootstrap_addresses
                 .map(|addr| (*addr).clone())
                 .collect();
             for addr in selected_bootstrap {
-                dial_bootstrap_addr(swarm, addr, "relay maintenance");
+                dial_bootstrap_addr(swarm, guards, addr, "relay maintenance", now);
             }
         }
         for (peer, addresses) in to_connect {
             for addr in addresses {
-                if swarm.behaviour().gossipsub.is_connected_to_addr(&addr) {
+                // A bootstrap dial of this tick may have dialed the address already.
+                if swarm.behaviour().gossipsub.is_connected_to_addr(&addr) || guards.is_guarded(&addr, now) {
                     continue;
                 }
-                dial_peer_addr(swarm, peer, addr, "peer exchange relay maintenance");
+                dial_peer_addr(swarm, guards, peer, addr, "peer exchange relay maintenance", now);
             }
         }
     }
@@ -823,6 +898,9 @@ fn maintain_connection_to_relays(swarm: &mut AtomicDexSwarm, bootstrap_addresses
                 info!("Disconnecting peer {}", peer);
                 if Swarm::disconnect_peer_id(swarm, **peer).is_err() {
                     error!("Peer {} disconnect error", peer);
+                } else {
+                    // The relay-count close allows no early redial (CRD ch.28 R27a item 1a).
+                    guards.early.mark_local_close(**peer, LocalClose::Other);
                 }
             }
         }
@@ -883,20 +961,55 @@ fn listen_on_addr(swarm: &mut AtomicDexSwarm, addr: Multiaddr) -> Result<(), Ade
     }
 }
 
-fn dial_bootstrap_addr(swarm: &mut AtomicDexSwarm, addr: Multiaddr, reason: &str) {
-    match Swarm::dial(swarm, addr.clone()) {
+/// Dials a configured bootstrap address. The dial is recorded for the dial guard (CRD ch.28 R27a item 1) whether or
+/// not it succeeds, and its connection ID is remembered so that the peer it reaches is recorded as the peer of the
+/// address (item 2) and the address is known when the connection closes (item 1a).
+fn dial_bootstrap_addr(
+    swarm: &mut AtomicDexSwarm,
+    guards: &mut RedialGuards,
+    addr: Multiaddr,
+    reason: &str,
+    now: Instant,
+) {
+    guards.record_dial(&addr, now);
+    let opts = DialOpts::unknown_peer_id().address(addr.clone()).build();
+    let connection_id = opts.connection_id();
+    guards.seeds.dial_started(addr.clone(), connection_id);
+    guards.early.dial_started(addr.clone(), connection_id);
+    match Swarm::dial(swarm, opts) {
         Ok(_) => info!("Dialed {} ({})", addr, reason),
-        Err(e) => error!("P2P bootstrap dial scheduling failed for {} ({}): {}", addr, reason, e),
+        Err(e) => {
+            guards.seeds.dial_not_scheduled(&addr, connection_id);
+            guards.early.dial_ended(connection_id);
+            error!("P2P bootstrap dial scheduling failed for {} ({}): {}", addr, reason, e)
+        },
     }
 }
 
-fn dial_peer_addr(swarm: &mut AtomicDexSwarm, peer: PeerId, addr: Multiaddr, reason: &str) {
-    match Swarm::dial(swarm, addr.clone()) {
+/// Dials an address of a known peer. The dial is recorded for the dial guard (CRD ch.28 R27a item 1), and its
+/// connection ID is remembered so that the address is known when the connection closes (item 1a).
+fn dial_peer_addr(
+    swarm: &mut AtomicDexSwarm,
+    guards: &mut RedialGuards,
+    peer: PeerId,
+    addr: Multiaddr,
+    reason: &str,
+    now: Instant,
+) {
+    guards.record_dial(&addr, now);
+    // The same options as `Swarm::dial` builds from an address; they carry the identifier of the connection.
+    let opts = DialOpts::unknown_peer_id().address(addr.clone()).build();
+    let connection_id = opts.connection_id();
+    guards.early.dial_started(addr.clone(), connection_id);
+    match Swarm::dial(swarm, opts) {
         Ok(_) => info!("Dialed peer {} at {} ({})", peer, addr, reason),
-        Err(e) => error!(
-            "P2P peer dial scheduling failed for peer {} at {} ({}): {}",
-            peer, addr, reason, e
-        ),
+        Err(e) => {
+            guards.early.dial_ended(connection_id);
+            error!(
+                "P2P peer dial scheduling failed for peer {} at {} ({}): {}",
+                peer, addr, reason, e
+            )
+        },
     }
 }
 
@@ -978,7 +1091,11 @@ enum ConnectionClosedLog<'a, E> {
     Clean,
     /// A surplus connection that idled out while the peer stays connected: INFO, "idle connection ... closed".
     IdleDuplicate,
-    /// Closed with a cause that is a failure, or the last connection to the peer idled out: WARN. Carries the cause.
+    /// The last connection to a connected relay that was not in the relay mesh idled out: INFO, "idle connection
+    /// ... closed" (CRD ch.28 R27b).
+    IdleRelayOutsideMesh,
+    /// Closed with a cause that is a failure, or the last connection to a relay-mesh member or to a peer that is not
+    /// a relay idled out: WARN. Carries the cause.
     Error(&'a ConnectionError<E>),
 }
 
@@ -995,13 +1112,23 @@ enum ConnectionClosedLog<'a, E> {
 /// connection busy goes away, which R-F3b as amended (D11) makes common. On a quiet mesh it happens whenever
 /// neither end sends on that connection.
 ///
-/// That is not an error, so a keep-alive timeout with `remaining > 0` is [`ConnectionClosedLog::IdleDuplicate`]. A
-/// keep-alive timeout of the last connection (`remaining == 0`), and every other cause, are
-/// [`ConnectionClosedLog::Error`], which carries the cause for the log line.
-fn connection_closed_log<E>(cause: Option<&ConnectionError<E>>, remaining: u32) -> ConnectionClosedLog<'_, E> {
+/// That is not an error, so a keep-alive timeout with `remaining > 0` is [`ConnectionClosedLog::IdleDuplicate`].
+///
+/// The last connection to a connected relay that was not in this node's relay mesh when it closed
+/// (`relay_outside_mesh`, CRD ch.28 R27b) idles out as the normal end of a connection nothing uses, so a keep-alive
+/// timeout of it is [`ConnectionClosedLog::IdleRelayOutsideMesh`]. The caller takes the input from the gossipsub
+/// behaviour (`closed_relay_outside_relay_mesh`), because the relay and relay-mesh state are already updated when
+/// the swarm event arrives. A keep-alive timeout of the last connection of a relay-mesh member or of a peer that is
+/// not a relay, and every other cause, are [`ConnectionClosedLog::Error`], which carries the cause for the log line.
+fn connection_closed_log<E>(
+    cause: Option<&ConnectionError<E>>,
+    remaining: u32,
+    relay_outside_mesh: bool,
+) -> ConnectionClosedLog<'_, E> {
     match cause {
         None => ConnectionClosedLog::Clean,
         Some(ConnectionError::KeepAliveTimeout) if remaining > 0 => ConnectionClosedLog::IdleDuplicate,
+        Some(ConnectionError::KeepAliveTimeout) if relay_outside_mesh => ConnectionClosedLog::IdleRelayOutsideMesh,
         Some(cause) => ConnectionClosedLog::Error(cause),
     }
 }
@@ -1038,9 +1165,12 @@ impl ConnectionFailureLogs {
     }
 }
 
+/// `relay_outside_mesh` is whether a `SwarmEvent::ConnectionClosed` closed the last connection to a connected relay
+/// that was not in the relay mesh (CRD ch.28 R27b); see [`connection_closed_log`].
 fn log_swarm_event<TBehaviourOutEvent, THandlerErr>(
     event: &SwarmEvent<TBehaviourOutEvent, THandlerErr>,
     failure_logs: &mut ConnectionFailureLogs,
+    relay_outside_mesh: bool,
 ) where
     TBehaviourOutEvent: std::fmt::Debug,
     THandlerErr: std::fmt::Debug,
@@ -1072,9 +1202,14 @@ fn log_swarm_event<TBehaviourOutEvent, THandlerErr>(
             num_established,
             cause,
             ..
-        } => match connection_closed_log(cause.as_ref(), *num_established) {
+        } => match connection_closed_log(cause.as_ref(), *num_established, relay_outside_mesh) {
             ConnectionClosedLog::IdleDuplicate => info!(
                 "P2P idle connection to peer {} via {:?} closed (KeepAliveTimeout); remaining connections to peer: {}",
+                peer_id, endpoint, num_established
+            ),
+            ConnectionClosedLog::IdleRelayOutsideMesh => info!(
+                "P2P idle connection to peer {} via {:?} closed (KeepAliveTimeout); the peer is a relay outside the relay \
+                 mesh; remaining connections to peer: {}",
                 peer_id, endpoint, num_established
             ),
             ConnectionClosedLog::Error(cause) => warn!(
@@ -1227,9 +1362,30 @@ pub async fn spawn_gossipsub(
     node_type: NodeType,
     on_poll: impl Fn(&AtomicDexSwarm) + Send + 'static,
 ) -> Result<(Sender<AdexBehaviourCmd>, AdexEventRx, PeerId, AbortHandle), AdexBehaviourError> {
+    spawn_gossipsub_with_guards(
+        force_key,
+        spawn_fn,
+        to_dial,
+        node_type,
+        on_poll,
+        RedialGuardConfig::default(),
+    )
+    .await
+}
+
+/// [`spawn_gossipsub`] with the timings of the redial guards (CRD ch.28 R27a) and of the maintenance tick set by the
+/// caller. A test shortens them; production uses the default.
+async fn spawn_gossipsub_with_guards(
+    force_key: Option<[u8; 32]>,
+    spawn_fn: fn(Box<dyn Future<Output = ()> + Send + Unpin + 'static>) -> (),
+    to_dial: Vec<RelayAddress>,
+    node_type: NodeType,
+    on_poll: impl Fn(&AtomicDexSwarm) + Send + 'static,
+    guard_config: RedialGuardConfig,
+) -> Result<(Sender<AdexBehaviourCmd>, AdexEventRx, PeerId, AbortHandle), AdexBehaviourError> {
     let (result_tx, result_rx) = futures::channel::oneshot::channel();
     let fut = async move {
-        let result = start_gossipsub(force_key, spawn_fn, to_dial, node_type, on_poll);
+        let result = start_gossipsub(force_key, spawn_fn, to_dial, node_type, on_poll, guard_config);
         result_tx.send(result).unwrap();
     };
 
@@ -1254,6 +1410,7 @@ fn start_gossipsub(
     to_dial: Vec<RelayAddress>,
     node_type: NodeType,
     on_poll: impl Fn(&AtomicDexSwarm) + Send + 'static,
+    guard_config: RedialGuardConfig,
 ) -> Result<(Sender<AdexBehaviourCmd>, AdexEventRx, PeerId, AbortHandle), AdexBehaviourError> {
     let i_am_relay = node_type.is_relay();
     let mut rng = rand::thread_rng();
@@ -1359,14 +1516,14 @@ fn start_gossipsub(
         _ => (),
     }
 
+    // The start-up dials count for the dial guard (CRD ch.28 R27a item 1).
+    let mut guards = RedialGuards::new(guard_config);
+    let startup = Instant::now();
     for relay in bootstrap.choose_multiple(&mut rng, mesh_n) {
-        dial_bootstrap_addr(&mut swarm, relay.clone(), "initial bootstrap");
+        dial_bootstrap_addr(&mut swarm, &mut guards, relay.clone(), "initial bootstrap", startup);
     }
 
-    let mut check_connected_relays_interval = Interval::new_at(
-        Instant::now() + CONNECTED_RELAYS_CHECK_INTERVAL,
-        CONNECTED_RELAYS_CHECK_INTERVAL,
-    );
+    let mut check_connected_relays_interval = Interval::new_at(Instant::now() + guard_config.tick, guard_config.tick);
     let mut announce_interval = Interval::new_at(Instant::now() + ANNOUNCE_INITIAL_DELAY, ANNOUNCE_INTERVAL);
     let mut listening = false;
     let mut failure_logs = ConnectionFailureLogs::default();
@@ -1382,7 +1539,66 @@ fn start_gossipsub(
         loop {
             match swarm.poll_next_unpin(cx) {
                 Poll::Ready(Some(event)) => {
-                    log_swarm_event(&event, &mut failure_logs);
+                    // The gossipsub behaviour already dropped the peer from its relay state (CRD ch.28 R27b).
+                    let relay_outside_mesh = match &event {
+                        SwarmEvent::ConnectionClosed {
+                            peer_id,
+                            num_established: 0,
+                            ..
+                        } => swarm.behaviour().gossipsub.closed_relay_outside_relay_mesh(peer_id),
+                        _ => false,
+                    };
+                    log_swarm_event(&event, &mut failure_logs, relay_outside_mesh);
+                    // The peer that an outbound connection reaches belongs to the bootstrap address that was dialed
+                    // (CRD ch.28 R27a item 2). The connection is matched by its ID, not by its address.
+                    match &event {
+                        SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            connection_id,
+                            endpoint,
+                            ..
+                        } if endpoint.is_dialer() => {
+                            guards.seeds.connection_established(*connection_id, *peer_id);
+                            guards
+                                .early
+                                .connection_established(*connection_id, *peer_id, Instant::now());
+                        },
+                        // How a dialed connection ended decides whether its address may be dialed again early (CRD
+                        // ch.28 R27a item 1a). The ping safeguard recorded its close in the ping behaviour and the
+                        // stuck-peer close in gossipsub, each of which is asked for every closed connection so that
+                        // no mark outlives its connection; the other closes of this node were recorded by their call
+                        // sites.
+                        SwarmEvent::ConnectionClosed {
+                            connection_id, cause, ..
+                        } => {
+                            let closed_by_ping = swarm.behaviour_mut().ping.take_ping_close(*connection_id);
+                            let closed_by_stuck = swarm.behaviour_mut().gossipsub.take_stuck_close(*connection_id);
+                            if let Some(closed) = guards.early.connection_closed(
+                                *connection_id,
+                                cause.as_ref(),
+                                closed_by_ping,
+                                closed_by_stuck,
+                                Instant::now(),
+                            ) {
+                                debug!(
+                                    "P2P connection dialed at {} lasted {:?} and ended on {:?}; early redial {}",
+                                    closed.address,
+                                    closed.lifetime,
+                                    closed.cause,
+                                    if closed.early_redial_allowed {
+                                        "allowed"
+                                    } else {
+                                        "not allowed"
+                                    }
+                                );
+                            }
+                        },
+                        SwarmEvent::OutgoingConnectionError { connection_id, .. } => {
+                            guards.seeds.dial_failed(*connection_id);
+                            guards.early.dial_ended(*connection_id);
+                        },
+                        _ => {},
+                    }
                     match event {
                         SwarmEvent::Behaviour(behaviour_event) => {
                             handle_behaviour_event(&mut swarm, &mut event_tx, behaviour_event)
@@ -1421,7 +1637,7 @@ fn start_gossipsub(
         }
 
         #[cfg(feature = "application")]
-        AtomicDexBehaviour::process_pending_clock_checks(&mut swarm, &mut pending_clock_checks, cx);
+        AtomicDexBehaviour::process_pending_clock_checks(&mut swarm, &mut pending_clock_checks, &mut guards, cx);
 
         if swarm.behaviour().gossipsub.is_relay() {
             while let Poll::Ready(Some(())) = announce_interval.poll_next_unpin(cx) {
@@ -1430,7 +1646,7 @@ fn start_gossipsub(
         }
 
         while let Poll::Ready(Some(())) = check_connected_relays_interval.poll_next_unpin(cx) {
-            maintain_connection_to_relays(&mut swarm, &bootstrap);
+            maintain_connection_to_relays(&mut swarm, &bootstrap, &mut guards, Instant::now());
         }
 
         if !listening && i_am_relay {
@@ -1466,12 +1682,15 @@ fn build_dns_ws_transport(
 ) -> Result<BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)>, AdexBehaviourError> {
     use libp2p::websocket::tls as libp2p_tls;
 
-    // The DNS-over-TCP transport is not `Clone` in the 0.52 API, so a fresh instance is built for
-    // the plain and the WebSocket paths.
+    use crate::resolving_transport::ResolvingTransport;
+
+    // The names of the addresses this transport dials are looked up through the node's resolver (CRD ch.28 R0b and
+    // R18, ch.45 R45.6B.9 item 1), not through the transport library's own DNS layer. The TCP transport is not `Clone`
+    // in the 0.52 API, so a fresh instance is built for the plain and the WebSocket paths. The WebSocket layer sits on
+    // top of the resolving one, so a `/wss` dial keeps the hostname for its TLS check.
     let new_dns_tcp = || {
         let tcp = libp2p::tcp::tokio::Transport::new(libp2p::tcp::Config::new().nodelay(true));
-        libp2p::dns::TokioDnsConfig::custom(tcp, libp2p::dns::ResolverConfig::google(), Default::default())
-            .expect("Building the DNS-over-TCP transport should never fail")
+        ResolvingTransport::new(tcp)
     };
 
     let dns_tcp = new_dns_tcp();
@@ -1678,6 +1897,18 @@ mod application_tests {
     }
 
     #[test]
+    fn t4a_a_requests_pass_the_check_within_half_the_bound() {
+        use common::msgpack_bounds::{check_msgpack_bounds, max_nesting_depth, MAX_PEER_NESTING};
+        for encoded in [
+            encode_message(&NetworkInfoRequest::CurrentTimestamp).unwrap(),
+            encode_message(&WireP2PRequest::NetworkInfo(NetworkInfoRequest::CurrentTimestamp)).unwrap(),
+        ] {
+            assert_eq!(check_msgpack_bounds(&encoded), Ok(encoded.len()));
+            assert!(max_nesting_depth(&encoded) <= MAX_PEER_NESTING / 2);
+        }
+    }
+
+    #[test]
     fn detects_timestamp_in_both_wire_shapes() {
         let wrapped = encode_message(&WireP2PRequest::NetworkInfo(NetworkInfoRequest::CurrentTimestamp)).unwrap();
         let bare = encode_message(&NetworkInfoRequest::CurrentTimestamp).unwrap();
@@ -1849,8 +2080,9 @@ mod connection_failure_log_tests {
         }
     }
 
-    /// A keep-alive timeout of a surplus connection is an INFO idle close; the same timeout of the last connection,
-    /// and every other cause, stay WARN and carry the cause printed as before; no cause is a clean close.
+    /// A keep-alive timeout of a surplus connection is an INFO idle close; the same timeout of the last connection
+    /// of a relay-mesh member or of a peer that is not a relay, and every other cause, stay WARN and carry the cause
+    /// printed as before; no cause is a clean close.
     #[test]
     fn connection_closed_is_classified_by_cause_type_and_remaining_connections() {
         let timeout = ConnectionError::<()>::KeepAliveTimeout;
@@ -1858,29 +2090,106 @@ mod connection_failure_log_tests {
         let handler = ConnectionError::Handler(());
 
         assert!(matches!(
-            connection_closed_log(Some(&timeout), 1),
+            connection_closed_log(Some(&timeout), 1, false),
             ConnectionClosedLog::IdleDuplicate
         ));
-        match connection_closed_log(Some(&timeout), 0) {
+        match connection_closed_log(Some(&timeout), 0, false) {
             ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "KeepAliveTimeout"),
             _ => panic!("the last connection idling out must be a WARN"),
         }
-        match connection_closed_log(Some(&io), 1) {
+        match connection_closed_log(Some(&io), 1, false) {
             ConnectionClosedLog::Error(cause) => assert!(format!("{:?}", cause).starts_with("IO(")),
             _ => panic!("an IO error must be a WARN"),
         }
-        match connection_closed_log(Some(&handler), 1) {
+        // CRD ch.28 T14 (R27c): a close that timed out is an IO cause too, and carries its text.
+        let timed_out = ConnectionError::<()>::IO(std::io::Error::new(std::io::ErrorKind::TimedOut, "close timed out"));
+        match connection_closed_log(Some(&timed_out), 1, false) {
+            ConnectionClosedLog::Error(cause) => assert!(format!("{:?}", cause).contains("close timed out")),
+            _ => panic!("a close that timed out must be a WARN"),
+        }
+        match connection_closed_log(Some(&handler), 1, false) {
             ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "Handler(())"),
             _ => panic!("a handler error must be a WARN"),
         }
         assert!(matches!(
-            connection_closed_log::<()>(None, 1),
+            connection_closed_log::<()>(None, 1, false),
             ConnectionClosedLog::Clean
         ));
         assert!(matches!(
-            connection_closed_log::<()>(None, 0),
+            connection_closed_log::<()>(None, 0, false),
             ConnectionClosedLog::Clean
         ));
+    }
+
+    /// CRD ch.28 T14 (R27c), the log: a close abandoned at its deadline reaches the swarm event as an IO cause of
+    /// kind `TimedOut`, "close timed out" (inside the swarm's wrapper of kind `Other`, as the boxed multiplexer
+    /// delivers it). It is a WARN that carries the cause whatever the connections left and the relay input are, so
+    /// the log line shows the text and the peer ID of the event.
+    #[test]
+    fn close_timed_out_is_a_warn_that_carries_the_cause() {
+        let timed_out = || std::io::Error::new(std::io::ErrorKind::TimedOut, "close timed out");
+        let bare = ConnectionError::<()>::IO(timed_out());
+        let boxed = ConnectionError::<()>::IO(std::io::Error::other(timed_out()));
+
+        for cause in [&bare, &boxed] {
+            for remaining in [0, 1] {
+                for relay_outside_mesh in [false, true] {
+                    match connection_closed_log(Some(cause), remaining, relay_outside_mesh) {
+                        ConnectionClosedLog::Error(cause) => {
+                            let text = format!("{:?}", cause);
+                            assert!(text.starts_with("IO("), "{text}");
+                            assert!(text.contains("TimedOut"), "{text}");
+                            assert!(text.contains("close timed out"), "{text}");
+                        },
+                        _ => panic!("a close that timed out must be a WARN that carries the cause"),
+                    }
+                }
+            }
+        }
+    }
+
+    /// CRD ch.28 T13 (R27b), tested on its inputs: the idle close of the last connection to a connected relay
+    /// outside the relay mesh is INFO; the same close of a relay-mesh member or of a non-relay peer (the input is
+    /// `false` for both) is WARN; an idle close with connections remaining is INFO; every other cause is WARN, and a
+    /// close without a cause is a clean INFO close, whatever the relay input says.
+    #[test]
+    fn idle_close_of_a_relay_outside_the_relay_mesh_is_info() {
+        let timeout = ConnectionError::<()>::KeepAliveTimeout;
+        let io = ConnectionError::<()>::IO(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"));
+        let handler = ConnectionError::Handler(());
+
+        // The last connection to a relay outside the relay mesh.
+        assert!(matches!(
+            connection_closed_log(Some(&timeout), 0, true),
+            ConnectionClosedLog::IdleRelayOutsideMesh
+        ));
+        // A relay-mesh member or a non-relay peer: the same close stays a WARN.
+        match connection_closed_log(Some(&timeout), 0, false) {
+            ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "KeepAliveTimeout"),
+            _ => panic!("the last connection of a relay-mesh member or a non-relay peer idling out must be a WARN"),
+        }
+        // Connections remaining: an INFO idle close, with or without the relay input.
+        for relay_outside_mesh in [false, true] {
+            assert!(matches!(
+                connection_closed_log(Some(&timeout), 1, relay_outside_mesh),
+                ConnectionClosedLog::IdleDuplicate
+            ));
+        }
+        // Every other cause is a WARN even for a relay outside the relay mesh, and no cause is a clean close.
+        for remaining in [0, 1] {
+            match connection_closed_log(Some(&io), remaining, true) {
+                ConnectionClosedLog::Error(cause) => assert!(format!("{:?}", cause).starts_with("IO(")),
+                _ => panic!("an IO error must be a WARN"),
+            }
+            match connection_closed_log(Some(&handler), remaining, true) {
+                ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "Handler(())"),
+                _ => panic!("a handler error must be a WARN"),
+            }
+            assert!(matches!(
+                connection_closed_log::<()>(None, remaining, true),
+                ConnectionClosedLog::Clean
+            ));
+        }
     }
 
     /// The remembered keys stay bounded: a full map is cleared.

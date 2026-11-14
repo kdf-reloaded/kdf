@@ -158,6 +158,7 @@ pub async fn tron_coin_from_conf_and_request(
         ctx: ctx.weak(),
         chain_id: conf["chain_id"].as_u64(),
         logs_block_range: 0,
+        logs_window: Default::default(),
         derivation_method: DerivationMethod::Iguana(my_address),
         swap_v2_contracts: None,
         // TRON has no V1 or V2 EVM swap and no EVM gas model (energy and bandwidth instead): the gas-limit
@@ -166,6 +167,7 @@ pub async fn tron_coin_from_conf_and_request(
         gas_limit_v2: EthGasLimitV2::default(),
         // No EVM estimation on TRON, so no multiplier (CRD R57.5.3b).
         estimate_gas_mult: None,
+        taker_fee_quote_at_limit: true,
         tron_api: Some(tron_api),
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),

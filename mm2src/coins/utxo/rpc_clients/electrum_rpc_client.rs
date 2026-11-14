@@ -1,7 +1,10 @@
 #[cfg(test)] use super::electrum_pool::ServerStateSnapshot;
-use super::electrum_pool::{ElectrumPoolOptions, PoolShared};
+use super::electrum_pool::{call_budget_of_caller, ElectrumPoolOptions, ElectrumServersView, PoolShared};
 use super::*;
-use crate::utxo::header_layout_fallback::{FallbackReadError, HeaderReadPolicy};
+use crate::utxo::header_layout_fallback::HeaderReadPolicy;
+use crate::utxo::header_time_only::read_window_times;
+#[cfg(not(target_arch = "wasm32"))]
+use common::dns_resolver::connect_tcp;
 use futures::channel::mpsc as futures_mpsc;
 use script::Script;
 use std::collections::{HashMap, HashSet};
@@ -19,7 +22,13 @@ use std::sync::Mutex as StdMutex;
 #[derive(Clone, Debug, Serialize)]
 enum ElectrumConfig {
     TCP,
-    SSL { dns_name: String, skip_validation: bool },
+    SSL {
+        dns_name: String,
+        skip_validation: bool,
+        /// The pinned keys, as SHA-256 digests of the `SubjectPublicKeyInfo` (CRD ch.38 R38.6.4n). When there are any, they
+        /// decide and `skip_validation` has no further effect.
+        spki_pins: Vec<[u8; 32]>,
+    },
 }
 
 /// Electrum client configuration
@@ -79,6 +88,70 @@ fn parse_host_port(addr: &str) -> Result<(String, u16), String> {
     Ok((host.to_owned(), port))
 }
 
+/// How many keys one server may pin (CRD ch.38 R38.6.4n item 1).
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_SPKI_PINS: usize = 4;
+
+/// The text of a malformed `spki_sha256` (CRD ch.38 R38.6.4n item 5). The configured value is not echoed.
+#[cfg(not(target_arch = "wasm32"))]
+const SPKI_MALFORMED: &str = "spki_sha256 is not a 64-digit hexadecimal SHA-256 digest";
+
+/// The text of a `spki_sha256` on a server without TLS (CRD ch.38 R38.6.4n item 5).
+#[cfg(not(target_arch = "wasm32"))]
+const SPKI_NEEDS_SSL: &str = "spki_sha256 needs protocol SSL";
+
+/// The text of a `spki_sha256` on a browser build (CRD ch.38 R38.6.4n item 6).
+#[cfg(target_arch = "wasm32")]
+const SPKI_IN_BROWSER: &str = "spki_sha256 is not supported in a browser";
+
+/// Reads the value of `spki_sha256`: a string, or an array of 1 to 4 strings, each 64 hexadecimal digits in either case
+/// with colons between byte pairs accepted and ignored (CRD ch.38 R38.6.4n items 1 and 5).
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_spki_pins(value: &Json) -> Result<Vec<[u8; 32]>, String> {
+    let entries: Vec<&Json> = match value {
+        Json::Array(entries) if (1..=MAX_SPKI_PINS).contains(&entries.len()) => entries.iter().collect(),
+        Json::Array(_) => return Err(SPKI_MALFORMED.to_owned()),
+        single => vec![single],
+    };
+    entries.into_iter().map(parse_spki_pin).collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_spki_pin(value: &Json) -> Result<[u8; 32], String> {
+    let text = value.as_str().ok_or_else(|| SPKI_MALFORMED.to_owned())?;
+    let digits: String = text.chars().filter(|c| *c != ':').collect();
+    let bytes = hex::decode(digits).map_err(|_| SPKI_MALFORMED.to_owned())?;
+    <[u8; 32]>::try_from(bytes).map_err(|_| SPKI_MALFORMED.to_owned())
+}
+
+/// What the TLS settings of a listed server call for at activation (CRD ch.38 R38.6.4m item 6, R38.6.4n item 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TlsNotice {
+    /// `disable_cert_verification` is set and no key is pinned: the connection is encrypted, the server is not
+    /// authenticated.
+    NotAuthenticated,
+    /// The server's key is pinned by `spki_sha256`.
+    Pinned,
+}
+
+impl ServerSpec {
+    /// The notice a server of this spec gets when it joins the pool. A `TCP` server and a browser build get none.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn tls_notice(&self) -> Option<TlsNotice> {
+        match &self.config {
+            ElectrumConfig::SSL { spki_pins, .. } if !spki_pins.is_empty() => Some(TlsNotice::Pinned),
+            ElectrumConfig::SSL {
+                skip_validation: true, ..
+            } => Some(TlsNotice::NotAuthenticated),
+            ElectrumConfig::SSL { .. } | ElectrumConfig::TCP => None,
+        }
+    }
+
+    /// A browser does the TLS of `WSS` and `disable_cert_verification` has no effect there (CRD ch.38 R38.6.4m item 9).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn tls_notice(&self) -> Option<TlsNotice> { None }
+}
+
 /// Attempts to process the request (parse url, etc) and build up what is needed to connect the server.
 /// An error means that retrying cannot cure it (CRD ch.38 R38.6.4d item 3). No error text echoes the configured
 /// address (CRD ch.38 R38.6.9a).
@@ -86,8 +159,19 @@ fn parse_host_port(addr: &str) -> Result<(String, u16), String> {
 pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String> {
     let (host, port) = parse_host_port(&req.url)?;
     let config = match req.protocol {
-        ElectrumProtocol::TCP => ElectrumConfig::TCP,
+        ElectrumProtocol::TCP => {
+            // A pin that cannot be enforced must not look enforced; a malformed one is reported as such first.
+            if let Some(value) = &req.spki_sha256 {
+                parse_spki_pins(value)?;
+                return Err(SPKI_NEEDS_SSL.to_owned());
+            }
+            ElectrumConfig::TCP
+        },
         ElectrumProtocol::SSL => {
+            let spki_pins = match &req.spki_sha256 {
+                Some(value) => parse_spki_pins(value)?,
+                None => Vec::new(),
+            };
             let uri: Uri = try_s!(req.url.parse());
             let host = uri.host().ok_or(ERRL!("Couldn't retrieve a host from the address"))?;
 
@@ -97,6 +181,7 @@ pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String
             ElectrumConfig::SSL {
                 dns_name: host.into(),
                 skip_validation: req.disable_cert_verification,
+                spki_pins,
             }
         },
         // Not a missing feature: 'ws'/'wss' are the browser/WASM transport, the same
@@ -120,6 +205,10 @@ pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String
 /// address (CRD ch.38 R38.6.9a).
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String> {
+    // The browser does the TLS of `WSS` and cannot be told to pin (CRD ch.38 R38.6.4n item 6).
+    if req.spki_sha256.is_some() {
+        return Err(SPKI_IN_BROWSER.to_owned());
+    }
     let uri: Uri = try_s!(req.url.parse());
 
     if uri.scheme().is_some() {
@@ -154,13 +243,23 @@ pub(crate) type HeaderNotified = Arc<dyn Fn(u64) + Send + Sync>;
 
 /// No tip is known yet.
 const NO_TIP: u64 = u64::MAX;
+/// No moment is known yet.
+const NO_TIME_MS: u64 = u64::MAX;
 
 /// What a connection has learned about the chain tip: the height of the last header it carried, and whether
 /// a header request was answered over it, which makes the server push a notification for each new tip
-/// (CRD ch.38 R38.6.4l items 2 and 6, D38.6.4l.4).
+/// (CRD ch.38 R38.6.4l items 2 and 6, D38.6.4l.4), and when the first answer and the last notification came
+/// (R38.6.4o item 4).
 pub(crate) struct HeaderTrack {
     notifying: AtomicBool,
     tip: AtomicU64,
+    /// When the first header answer came, in milliseconds since the epoch.
+    answered_at_ms: AtomicU64,
+    /// When the last header notification came, in milliseconds since the epoch.
+    notified_at_ms: AtomicU64,
+    /// The height and the header bytes of the last header answer or notification that carried readable bytes (CRD ch.38
+    /// R38.6.4o item 7).
+    last_header: StdMutex<Option<(u64, Vec<u8>)>>,
     on_notification: HeaderNotified,
 }
 
@@ -169,21 +268,53 @@ impl HeaderTrack {
         HeaderTrack {
             notifying: AtomicBool::new(false),
             tip: AtomicU64::new(NO_TIP),
+            answered_at_ms: AtomicU64::new(NO_TIME_MS),
+            notified_at_ms: AtomicU64::new(NO_TIME_MS),
+            last_header: StdMutex::new(None),
             on_notification,
         }
     }
 
-    /// The answer to a header request: the server now pushes the tips that follow.
+    /// The answer to a header request: the server now pushes the tips that follow. The first answer starts the
+    /// silence a stuck connection is counted from; a later one (a block-count read over the connection) only moves
+    /// the height.
     fn note_answer(&self, height: u64) {
-        self.tip.store(height, AtomicOrdering::Relaxed);
+        let first = self.tip.swap(height, AtomicOrdering::Relaxed) == NO_TIP;
+        if first {
+            self.answered_at_ms.store(now_ms(), AtomicOrdering::Relaxed);
+        }
         self.notifying.store(true, AtomicOrdering::Relaxed);
+    }
+
+    /// Keeps the header bytes (hex) that came with `height`; bytes that cannot be read leave what was kept.
+    fn store_header(&self, height: u64, hex: Option<&str>) {
+        if let Some(bytes) = hex
+            .and_then(|hex| hex::decode(hex).ok())
+            .filter(|bytes| !bytes.is_empty())
+        {
+            *self.last_header.lock().unwrap_or_else(|p| p.into_inner()) = Some((height, bytes));
+        }
+    }
+
+    /// The height and the header bytes of the last header the connection carried.
+    pub(crate) fn last_header(&self) -> Option<(u64, Vec<u8>)> {
+        self.last_header.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// A header notification: the connection's height moves, and the pool is told.
     fn note_notification(&self, height: u64) {
         self.note_answer(height);
+        self.notified_at_ms.store(now_ms(), AtomicOrdering::Relaxed);
         (self.on_notification)(height);
     }
+
+    /// When the first header answer came (seconds since the epoch).
+    pub(crate) fn answered_at(&self) -> Option<f64> { Self::seconds(self.answered_at_ms.load(AtomicOrdering::Relaxed)) }
+
+    /// When the last header notification came (seconds since the epoch).
+    pub(crate) fn notified_at(&self) -> Option<f64> { Self::seconds(self.notified_at_ms.load(AtomicOrdering::Relaxed)) }
+
+    fn seconds(ms: u64) -> Option<f64> { (ms != NO_TIME_MS).then(|| ms as f64 / 1000.) }
 
     /// The height of the last header the connection carried.
     pub(crate) fn tip(&self) -> Option<u64> {
@@ -293,6 +424,7 @@ impl Session {
             if request.method == BLOCKCHAIN_HEADERS_SUB_ID && response.error.is_null() {
                 if let Some(height) = response.result["height"].as_u64() {
                     self.headers.note_answer(height);
+                    self.headers.store_header(height, response.result["hex"].as_str());
                 }
             }
         }
@@ -401,7 +533,7 @@ async fn electrum_request_multi(
     client: ElectrumClient,
     request: JsonRpcRequestEnum,
 ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), String> {
-    let budget = client.pool.timings.call_budget;
+    let budget = call_budget_of_caller(client.pool.timings.call_budget);
     client.pool.route(request, budget).await
 }
 
@@ -437,6 +569,15 @@ impl ElectrumClientImpl {
     /// To be called after the servers are added and before [`Self::start_pool`].
     pub async fn activation_probe(self: &Arc<Self>) -> Result<(), String> { self.pool.activation_probe().await }
 
+    /// Judges after [`Self::activation_probe`] whether the servers agree about the chain, waiting up to the activation
+    /// window after the first connection (CRD ch.38 R38.6.4o item 12). The error is the text of the failed
+    /// activation. With the tip checks off it does nothing.
+    pub async fn judge_activation(self: &Arc<Self>) -> Result<(), String> { self.pool.judge_activation().await }
+
+    /// The error text while the servers disagree about the chain, `None` otherwise (R38.6.4o item 12): new orders,
+    /// new swaps and withdrawals of the coin are refused with it.
+    pub fn chain_disagreement(&self) -> Option<String> { self.pool.chain_disagreement() }
+
     /// Starts the background maintenance of the pool: the first pass connects the servers in the
     /// background and later passes keep the maintained set (CRD ch.38 R38.6.4c). Nothing waits for it.
     /// With `spawn_ping` the maintained connections are pinged on a regular cadence.
@@ -457,6 +598,10 @@ impl ElectrumClientImpl {
 
     /// Get available protocol versions.
     pub fn protocol_version(&self) -> &OrdRange<f32> { &self.protocol_version }
+
+    /// The pool as the `electrum_servers` request reports it (CRD ch.38 R38.6.4o item 10). It sends nothing to any
+    /// server and changes nothing.
+    pub fn servers_view(&self) -> ElectrumServersView { self.pool.servers_view() }
 
     /// What a test sees of each server of the pool.
     #[cfg(test)]
@@ -622,6 +767,105 @@ impl ElectrumClient {
     pub fn transaction_get_from(&self, server: &str, txid: &H256Json) -> RpcRes<BytesJson> {
         let verbose = false;
         rpc_func_from!(self, server, "blockchain.transaction.get", txid, verbose)
+    }
+
+    /// `blockchain.transaction.get` of `server` with the verbose flag: the transaction with its confirmations.
+    pub fn transaction_get_verbose_from(&self, server: &str, txid: &H256Json) -> RpcRes<RpcTransaction> {
+        let verbose = true;
+        rpc_func_from!(self, server, "blockchain.transaction.get", txid, verbose)
+    }
+
+    /// The wait for the confirmations of a transaction (CRD ch.38 R38.6.4o item 6). It chooses one server when it
+    /// starts (see [`PoolShared::choose_wait_server`]) and sends every transaction request and block-count request
+    /// to it as a directed request (R38.6.4g), so that the answer that ends the wait always comes from the server
+    /// being polled and never from whichever server a spread read reached. When a request to the server fails in
+    /// transport, the wait chooses again, leaving out the servers that failed during this wait while another choice
+    /// exists, and goes on with the new server. An error answer of the server is an answer, not a failure of the
+    /// server. No request is added: the wait asks as often as it did.
+    pub(crate) async fn wait_for_confirmations_on_one_server(
+        &self,
+        tx_hash: H256Json,
+        expiry_height: u32,
+        confirmations: u32,
+        requires_notarization: bool,
+        wait_until: u64,
+        check_every: u64,
+    ) -> Result<(), String> {
+        let mut failed: Vec<String> = Vec::new();
+        let mut server = self.pool.choose_wait_server(&failed);
+        loop {
+            if now_ms() / 1000 > wait_until {
+                return ERR!(
+                    "Waited too long until {} for transaction {:?} to be confirmed {} times",
+                    wait_until,
+                    tx_hash,
+                    confirmations
+                );
+            }
+            let Some(addr) = server.clone() else {
+                error!("No Electrum server to poll for the transaction {:?}, retrying", tx_hash);
+                Timer::sleep(check_every as f64).await;
+                server = self.pool.choose_wait_server(&failed);
+                continue;
+            };
+
+            match self.transaction_get_verbose_from(&addr, &tx_hash).compat().await {
+                Ok(t) => {
+                    let tx_confirmations = if requires_notarization {
+                        t.confirmations
+                    } else {
+                        t.rawconfirmations.unwrap_or(t.confirmations)
+                    };
+                    if tx_confirmations >= confirmations {
+                        return Ok(());
+                    } else {
+                        info!(
+                            "Waiting for tx {:?} confirmations, now {}, required {}, requires_notarization {}",
+                            tx_hash, tx_confirmations, confirmations, requires_notarization
+                        )
+                    }
+                },
+                Err(e) => {
+                    if e.error.is_transport() {
+                        failed.push(addr);
+                        server = self.pool.choose_wait_server(&failed);
+                        // Another server is asked at once; with none left to choose, the wait goes on as before.
+                        if server.as_ref().map_or(false, |next| !failed.contains(next)) {
+                            continue;
+                        }
+                    }
+                    if expiry_height > 0 {
+                        let Some(addr) = server.clone() else {
+                            Timer::sleep(check_every as f64).await;
+                            continue;
+                        };
+                        match self.blockchain_headers_subscribe_from(&addr).compat().await {
+                            Ok(header) => {
+                                let block = header.block_height();
+                                if block > expiry_height as u64 {
+                                    return ERR!("The transaction {:?} has expired, current block {}", tx_hash, block);
+                                }
+                            },
+                            Err(e) => {
+                                error!("Error {} getting block number, retrying in 10 seconds", e);
+                                if e.error.is_transport() {
+                                    failed.push(addr);
+                                    server = self.pool.choose_wait_server(&failed);
+                                }
+                                Timer::sleep(check_every as f64).await;
+                                continue;
+                            },
+                        }
+                    }
+                    error!(
+                        "Error {:?} getting the transaction {:?}, retrying in 10 seconds",
+                        e, tx_hash
+                    )
+                },
+            }
+
+            Timer::sleep(check_every as f64).await;
+        }
     }
 }
 
@@ -1200,24 +1444,43 @@ impl UtxoRpcClientOps for ElectrumClient {
         } else {
             starting_block - count.get() + 1
         };
-        Box::new(
-            self.blockchain_block_headers(from, count)
-                .map_to_mm_fut(UtxoRpcError::from)
-                .and_then(move |res| {
-                    if res.count == 0 {
-                        return MmError::err(UtxoRpcError::InvalidResponse("Server returned zero count".to_owned()));
+        let selfi = self.clone();
+        let fut = async move {
+            let res = selfi
+                .blockchain_block_headers(from, count)
+                .compat()
+                .await
+                .map_to_mm(UtxoRpcError::from)?;
+            if res.count == 0 {
+                return MmError::err(UtxoRpcError::InvalidResponse("Server returned zero count".to_owned()));
+            }
+            let count = usize::try_from(res.count).map_to_mm(|e| UtxoRpcError::InvalidResponse(e.to_string()))?;
+            // Step 1 is the layout-aware read of the policy; steps 2 to 4 (CRD ch.37 R37.5.10a) run only when
+            // it fails.
+            let mut timestamps = read_window_times(
+                &policy,
+                &selfi.coin_ticker,
+                &res.hex.0,
+                count,
+                from,
+                now_ms() / 1000,
+                |height| {
+                    let client = selfi.clone();
+                    async move {
+                        client
+                            .blockchain_block_header(height)
+                            .compat()
+                            .await
+                            .map(|bytes| bytes.0)
+                            .map_to_mm(UtxoRpcError::from)
                     }
-                    let count =
-                        usize::try_from(res.count).map_to_mm(|e| UtxoRpcError::InvalidResponse(e.to_string()))?;
-                    let headers = policy.read_list(&res.hex.0, count).map_err(|e| match e {
-                        FallbackReadError::Rejected(e) => MmError::new(UtxoRpcError::from(e)),
-                        other => MmError::new(UtxoRpcError::InvalidResponse(other.reason(|e| format!("{:?}", e)))),
-                    })?;
-                    let mut timestamps: Vec<_> = headers.into_iter().map(|block| block.time).collect();
-                    // can unwrap because count is non zero
-                    Ok(median(timestamps.as_mut_slice()).unwrap())
-                }),
-        )
+                },
+            )
+            .await?;
+            // can unwrap because count is non zero
+            Ok(median(timestamps.as_mut_slice()).unwrap())
+        };
+        Box::new(fut.boxed().compat())
     }
 
     async fn get_block_timestamp(&self, height: u64) -> Result<u64, MmError<UtxoRpcError>> {
@@ -1337,6 +1600,7 @@ async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShare
                     if let (Some(headers), Some(height)) =
                         (headers, req.params.first().and_then(|p| p["height"].as_u64()))
                     {
+                        headers.store_header(height, req.params.first().and_then(|p| p["hex"].as_str()));
                         headers.note_notification(height);
                     }
                     BLOCKCHAIN_HEADERS_SUB_ID
@@ -1490,6 +1754,23 @@ fn build_rustls_client_config(unsafe_conf: bool, cert_store: RootCertStore) -> A
     Arc::new(tls_config)
 }
 
+/// Builds the TLS client configuration of a server whose key is pinned (CRD ch.38 R38.6.4n item 2). The flag it returns
+/// is set when the presented key matched none of the pins. The configuration belongs to one connection, so the flag does
+/// too.
+#[cfg(not(target_arch = "wasm32"))]
+fn pinned_rustls_client_config(pins: Vec<[u8; 32]>) -> (Arc<ClientConfig>, Arc<AtomicBool>) {
+    let provider = Arc::new(rustls_ring::default_provider());
+    let builder = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .expect("the ring provider supports the default protocol versions");
+    let mismatch = Arc::new(AtomicBool::new(false));
+    let tls_config = builder
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedKeyVerification::new(provider, pins, mismatch.clone())))
+        .with_no_client_auth();
+    (Arc::new(tls_config), mismatch)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 lazy_static! {
     static ref SAFE_TLS_CONFIG: Arc<ClientConfig> = rustls_client_config(false);
@@ -1508,27 +1789,63 @@ pub(crate) async fn open_session(
     on_end: SessionEnded,
     on_header: HeaderNotified,
 ) -> Result<Session, String> {
+    open_session_with_tls(id, spec, event_handlers, idle_cutoff, on_end, on_header, None).await
+}
+
+/// [`open_session`], with the TLS client configuration of a validating session replaceable. Only the unit tests replace
+/// it (`Some`), to trust a certificate of their own; the node passes `None` and gets the bundled roots.
+#[cfg(not(target_arch = "wasm32"))]
+async fn open_session_with_tls(
+    id: u64,
+    spec: &ServerSpec,
+    event_handlers: Vec<RpcTransportEventHandlerShared>,
+    idle_cutoff: Duration,
+    on_end: SessionEnded,
+    on_header: HeaderNotified,
+    validating_tls_config: Option<Arc<ClientConfig>>,
+) -> Result<Session, String> {
     let addr = spec.addr.clone();
     let connect_f = match &spec.config {
         ElectrumConfig::TCP => {
-            Either::Left(TcpStream::connect((spec.host.as_str(), spec.port)).map_ok(ElectrumStream::Tcp))
+            // The name goes through the node's resolver (CRD ch.45 R45.6B.9 item 4); every address it resolves to is
+            // tried in turn. A failed lookup fails this establishment like a failed connect, inside the same bound.
+            Either::Left(connect_tcp(spec.host.as_str(), spec.port).map_ok(ElectrumStream::Tcp))
         },
         ElectrumConfig::SSL {
             dns_name,
             skip_validation,
+            spki_pins,
         } => {
-            let tls_connector = if *skip_validation {
-                TlsConnector::from(UNSAFE_TLS_CONFIG.clone())
+            // With a pin, the pin decides whatever the flag says (CRD ch.38 R38.6.4n item 4).
+            let (tls_connector, mismatch) = if !spki_pins.is_empty() {
+                let (config, mismatch) = pinned_rustls_client_config(spki_pins.clone());
+                (TlsConnector::from(config), Some(mismatch))
+            } else if *skip_validation {
+                (TlsConnector::from(UNSAFE_TLS_CONFIG.clone()), None)
             } else {
-                TlsConnector::from(SAFE_TLS_CONFIG.clone())
+                (
+                    TlsConnector::from(validating_tls_config.unwrap_or_else(|| SAFE_TLS_CONFIG.clone())),
+                    None,
+                )
             };
             let dns_name = dns_name.clone();
 
             Either::Right(
-                TcpStream::connect((spec.host.as_str(), spec.port)).and_then(move |stream| {
+                // `dns_name` (the server name of the TLS handshake) stays the host of the server, not an address.
+                connect_tcp(spec.host.as_str(), spec.port).and_then(move |stream| {
                     // Can use `unwrap` cause `dns_name` is pre-checked.
                     let dns = ServerName::try_from(dns_name).map_err(|e| fomat!([e])).unwrap();
-                    tls_connector.connect(dns, stream).map_ok(ElectrumStream::Tls)
+                    tls_connector
+                        .connect(dns, stream)
+                        .map_ok(ElectrumStream::Tls)
+                        .map_err(move |e| match &mismatch {
+                            // A key that matches no pin is reported in the words of R38.6.4n item 5, not in the TLS
+                            // library's.
+                            Some(mismatch) if mismatch.load(AtomicOrdering::SeqCst) => {
+                                io::Error::new(io::ErrorKind::InvalidData, SPKI_MISMATCH)
+                            },
+                            _ => e,
+                        })
                 }),
             )
         },
@@ -2010,7 +2327,16 @@ mod tls_tests {
         let certified = rcgen::generate_simple_self_signed(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
             .expect("self-signed certificate");
         let cert = CertificateDer::from(certified.cert.der().to_vec());
-        let key = rustls::pki_types::PrivateKeyDer::try_from(certified.key_pair.serialize_der()).expect("key");
+        spawn_server_with_cert(versions, cert, certified.key_pair.serialize_der()).await
+    }
+
+    /// [`spawn_server`] with the certificate and the private key (PKCS#8 DER) given.
+    async fn spawn_server_with_cert(
+        versions: &[&'static SupportedProtocolVersion],
+        cert: CertificateDer<'static>,
+        key_der: Vec<u8>,
+    ) -> TestServer {
+        let key = rustls::pki_types::PrivateKeyDer::try_from(key_der).expect("key");
         let provider = Arc::new(rustls_ring::default_provider());
         let config = ServerConfig::builder_with_provider(provider)
             .with_protocol_versions(versions)
@@ -2121,6 +2447,652 @@ mod tls_tests {
         assert!(DnsName::try_from("127.0.0.1").is_err());
         assert!(DnsName::try_from("").is_err());
     }
+
+    // ---- CRD ch.45 T45.19: the server names go through the node's resolver ----
+
+    use common::dns_resolver::{gauges, install_test_map};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn spec_of(url: String, protocol: ElectrumProtocol) -> ServerSpec {
+        server_spec(&request_of(url, protocol)).expect("a server spec")
+    }
+
+    fn request_of(url: String, protocol: ElectrumProtocol) -> ElectrumRpcRequest {
+        ElectrumRpcRequest {
+            url,
+            protocol,
+            disable_cert_verification: false,
+            spki_sha256: None,
+            timeout_sec: None,
+        }
+    }
+
+    fn no_op_callbacks() -> (SessionEnded, HeaderNotified) { (Arc::new(|_| {}), Arc::new(|_| {})) }
+
+    #[test]
+    fn a_tcp_server_name_is_resolved_through_the_installed_resolver() {
+        let guard = install_test_map(&[("electrum.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)])]);
+        run(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let port = listener.local_addr().unwrap().port();
+            let accepted = tokio::spawn(async move { listener.accept().await.map(|(stream, _)| stream) });
+            let spec = spec_of(format!("electrum.test:{}", port), ElectrumProtocol::TCP);
+            let (on_end, on_header) = no_op_callbacks();
+            let session = open_session(1, &spec, vec![], Duration::from_secs(60), on_end, on_header)
+                .await
+                .expect("the session opens");
+            accepted
+                .await
+                .unwrap()
+                .expect("the loopback server accepted the connection");
+            drop(session);
+        });
+        // The gauges are process-wide and the tests that do not hold the test lock look up names beside this one: the
+        // name counts exactly, the gauge at least.
+        assert_eq!(guard.lookups_of("electrum.test"), 1);
+        assert!(gauges().unwrap().lookups >= 1);
+    }
+
+    #[test]
+    fn a_failed_lookup_is_a_recoverable_establishment_failure_that_names_no_server() {
+        // The test resolver knows the name and has no address for it.
+        let guard = install_test_map(&[("empty.test", &[])]);
+        run(async {
+            let spec = spec_of("empty.test:50001".to_owned(), ElectrumProtocol::TCP);
+            let (on_end, on_header) = no_op_callbacks();
+            let error = open_session(1, &spec, vec![], Duration::from_secs(60), on_end, on_header)
+                .await
+                .err()
+                .expect("the lookup fails");
+            assert!(!error.is_empty());
+            assert!(!error.contains("empty.test"), "the error names no server: {}", error);
+        });
+        assert_eq!(guard.failures_of("empty.test"), 1);
+        assert!(gauges().unwrap().failures >= 1);
+    }
+
+    #[test]
+    fn a_tls_server_is_checked_against_its_name_and_not_its_address() {
+        let guard = install_test_map(&[
+            ("electrum.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+            ("other.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+        ]);
+        run(async {
+            // Two servers, each with a certificate for `electrum.test`: the test server serves one connection at a time and
+            // keeps the first open, so the second dial needs a server of its own.
+            let server = spawn_server(&[&TLS12, &TLS13], &["electrum.test"]).await;
+            let second = spawn_server(&[&TLS12, &TLS13], &["electrum.test"]).await;
+            let (on_end, on_header) = no_op_callbacks();
+
+            // The certificate is for `electrum.test`: the session to that name opens.
+            let spec = spec_of(format!("electrum.test:{}", server.port), ElectrumProtocol::SSL);
+            let opened = open_session_with_tls(
+                1,
+                &spec,
+                vec![],
+                Duration::from_secs(60),
+                on_end.clone(),
+                on_header.clone(),
+                Some(trusting(&server.cert)),
+            )
+            .await;
+            assert!(opened.is_ok(), "{:?}", opened.err());
+
+            // `other.test` resolves to the same address, but the certificate is not for that name.
+            let spec = spec_of(format!("other.test:{}", second.port), ElectrumProtocol::SSL);
+            let refused = open_session_with_tls(
+                2,
+                &spec,
+                vec![],
+                Duration::from_secs(60),
+                on_end,
+                on_header,
+                Some(trusting(&second.cert)),
+            )
+            .await;
+            assert!(
+                refused.is_err(),
+                "the certificate check must use the name, not the address"
+            );
+        });
+        assert_eq!(guard.lookups_of("electrum.test"), 1);
+        assert_eq!(guard.lookups_of("other.test"), 1);
+        assert!(gauges().unwrap().lookups >= 2);
+    }
+
+    // ---- CRD ch.38 T38.6.4m (c) and (e), T38.6.4n: the key pin and the warning ----
+
+    use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
+    use rcgen::{date_time_ymd, CertificateParams, KeyPair};
+
+    /// Static DER fixtures for T38.6.4m (c). No private key is kept: the refusals under test happen on the client, in
+    /// the check of the certificate and the handshake signature, and a `rustls` server cannot sign with a 1024-bit RSA
+    /// key anyway. Generated once with OpenSSL 3.0 (key files discarded; both certificates are valid until 2126):
+    ///
+    /// ```text
+    /// # version 1 certificate (an X.509 version 1 certificate carries no extensions), ECDSA P-256 key
+    /// openssl ecparam -name prime256v1 -genkey -noout -out ec.key
+    /// openssl req -new -key ec.key -subj "/CN=v1.electrum.test" -out v1.csr
+    /// openssl x509 -req -in v1.csr -signkey ec.key -days 36500 -out v1.pem
+    /// openssl x509 -in v1.pem -outform der -out v1-cert.der
+    /// # version 3 certificate with an RSA key of 1024 bits
+    /// openssl genrsa -out rsa1024.key 1024
+    /// openssl req -x509 -new -key rsa1024.key -sha256 -days 36500 -subj "/CN=rsa1024.electrum.test" \
+    ///     -addext "subjectAltName=DNS:rsa1024.electrum.test" -out rsa1024.pem
+    /// openssl x509 -in rsa1024.pem -outform der -out rsa1024-cert.der
+    /// # the pins below, the way R38.6.4n item 7 describes it
+    /// openssl x509 -in <cert>.pem -pubkey -noout | openssl pkey -pubin -outform der | sha256sum
+    /// ```
+    const V1_CERT: &[u8] = include_bytes!("../test-fixtures/electrum-tls/v1-cert.der");
+    const V1_CERT_SPKI_SHA256: &str = "8d620cd46b1e975750f8f5cf64b53ef9c46ad3b2a6f6808de4d1b5c1ba7d764c";
+    const RSA1024_CERT: &[u8] = include_bytes!("../test-fixtures/electrum-tls/rsa1024-cert.der");
+    const RSA1024_CERT_SPKI_SHA256: &str = "f48938b51c39c2053a415123a906423a0bbf27c11dc6c8ed5282e710668d0ecf";
+
+    const PIN_HOST: &str = "pin.test";
+
+    fn localhost_map() -> common::dns_resolver::TestResolverGuard {
+        install_test_map(&[
+            (PIN_HOST, &[IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+            ("other.test", &[IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+        ])
+    }
+
+    /// A self-signed certificate for `names` over `key`; `tweak` changes the parameters (validity, subject).
+    fn certificate_for(
+        key: &KeyPair,
+        names: &[&str],
+        tweak: impl FnOnce(&mut CertificateParams),
+    ) -> CertificateDer<'static> {
+        let mut params = CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+            .expect("certificate parameters");
+        tweak(&mut params);
+        CertificateDer::from(params.self_signed(key).expect("self-signed certificate").der().to_vec())
+    }
+
+    /// The pin of `key`: SHA-256 of its DER `SubjectPublicKeyInfo`, in lower-case hexadecimal.
+    fn pin_of(key: &KeyPair) -> String { hex::encode(Sha256::digest(&key.public_key_der())) }
+
+    fn colon_upper(pin: &str) -> String {
+        pin.as_bytes()
+            .chunks(2)
+            .map(|pair| std::str::from_utf8(pair).unwrap().to_uppercase())
+            .collect::<Vec<_>>()
+            .join(":")
+    }
+
+    /// Opens a session to a fresh loopback server (restricted to `version`, serving `cert` with `key`) the way the pool
+    /// does, for a server entry with `pin` and `flag`. The error is the establishment failure.
+    async fn dial(
+        version: &'static SupportedProtocolVersion,
+        key: &KeyPair,
+        cert: CertificateDer<'static>,
+        pin: Option<Json>,
+        flag: bool,
+    ) -> Result<(), String> {
+        let server = spawn_server_with_cert(&[version], cert, key.serialize_der()).await;
+        let request = ElectrumRpcRequest {
+            disable_cert_verification: flag,
+            spki_sha256: pin,
+            ..request_of(format!("{}:{}", PIN_HOST, server.port), ElectrumProtocol::SSL)
+        };
+        let spec = server_spec(&request).expect("a server spec");
+        let (on_end, on_header) = no_op_callbacks();
+        open_session(1, &spec, vec![], Duration::from_secs(60), on_end, on_header)
+            .await
+            .map(drop)
+    }
+
+    #[test]
+    fn t38_6_4n_a_matching_pin_is_accepted_on_tls12_and_tls13_and_in_every_form() {
+        let _guard = localhost_map();
+        run(async {
+            for version in [&TLS12, &TLS13] {
+                let key = KeyPair::generate().unwrap();
+                let other = pin_of(&KeyPair::generate().unwrap());
+                let pin = pin_of(&key);
+                for value in [
+                    json::json!(pin),
+                    json::json!(pin.to_uppercase()),
+                    json::json!(colon_upper(&pin)),
+                    // A second pin of an array matches; the first is another key's.
+                    json::json!([other, pin]),
+                    json::json!([pin, other, other, other]),
+                ] {
+                    let cert = certificate_for(&key, &[PIN_HOST], |_| {});
+                    let outcome = dial(version, &key, cert, Some(value.clone()), false).await;
+                    assert!(outcome.is_ok(), "{:?} {:?}", value, outcome);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn t38_6_4n_a_mismatch_is_refused_with_the_text_of_the_rule() {
+        let _guard = localhost_map();
+        run(async {
+            for version in [&TLS12, &TLS13] {
+                let key = KeyPair::generate().unwrap();
+                let cert = certificate_for(&key, &[PIN_HOST], |_| {});
+                let wrong = Some(json::json!([pin_of(&KeyPair::generate().unwrap())]));
+                let outcome = dial(version, &key, cert, wrong, false).await;
+                assert_eq!(outcome, Err("the server's key does not match spki_sha256".to_owned()));
+            }
+        });
+    }
+
+    #[test]
+    fn t38_6_4n_a_self_signed_expired_or_misnamed_certificate_with_the_pinned_key_is_accepted() {
+        let _guard = localhost_map();
+        run(async {
+            for version in [&TLS12, &TLS13] {
+                let key = KeyPair::generate().unwrap();
+                let pin = Some(json::json!(pin_of(&key)));
+                // Self-signed: without the pin the default verification refuses it (T38.6.4m (a)).
+                let cert = certificate_for(&key, &[PIN_HOST], |_| {});
+                assert!(dial(version, &key, cert.clone(), None, false).await.is_err());
+                assert!(dial(version, &key, cert, pin.clone(), false).await.is_ok());
+                // Expired.
+                let cert = certificate_for(&key, &[PIN_HOST], |params| {
+                    params.not_before = date_time_ymd(2001, 1, 1);
+                    params.not_after = date_time_ymd(2002, 1, 1);
+                });
+                assert!(dial(version, &key, cert, pin.clone(), false).await.is_ok());
+                // A name that is not the server's.
+                let cert = certificate_for(&key, &["unrelated.test"], |_| {});
+                assert!(dial(version, &key, cert, pin, false).await.is_ok());
+            }
+        });
+    }
+
+    #[test]
+    fn t38_6_4n_another_key_under_the_same_subject_is_refused() {
+        let _guard = localhost_map();
+        run(async {
+            for version in [&TLS12, &TLS13] {
+                let pinned = KeyPair::generate().unwrap();
+                let impostor = KeyPair::generate().unwrap();
+                // The same names and the same subject, another key: even a valid-looking certificate does not pass.
+                let cert = certificate_for(&impostor, &[PIN_HOST], |_| {});
+                let outcome = dial(version, &impostor, cert, Some(json::json!(pin_of(&pinned))), false).await;
+                assert_eq!(outcome, Err(SPKI_MISMATCH.to_owned()));
+            }
+        });
+    }
+
+    #[test]
+    fn t38_6_4n_the_flag_together_with_a_pin_behaves_as_the_pin_alone() {
+        let _guard = localhost_map();
+        run(async {
+            let key = KeyPair::generate().unwrap();
+            let other = KeyPair::generate().unwrap();
+            let cert = certificate_for(&key, &[PIN_HOST], |_| {});
+            // The flag alone accepts this self-signed certificate.
+            assert!(dial(&TLS13, &key, cert.clone(), None, true).await.is_ok());
+            // With a pin of another key the flag no longer helps.
+            let outcome = dial(&TLS13, &key, cert.clone(), Some(json::json!(pin_of(&other))), true).await;
+            assert_eq!(outcome, Err(SPKI_MISMATCH.to_owned()));
+            // With the right pin the connection is accepted, as with the pin alone.
+            assert!(dial(&TLS13, &key, cert, Some(json::json!(pin_of(&key))), true)
+                .await
+                .is_ok());
+        });
+    }
+
+    #[test]
+    fn t38_6_4m_c_a_version_1_certificate_and_an_rsa_1024_certificate_are_refused_under_the_flag() {
+        use rustls::internal::msgs::codec::{Codec, Reader};
+        fn signature(scheme: u16) -> DigitallySignedStruct {
+            let mut bytes = scheme.to_be_bytes().to_vec();
+            bytes.extend_from_slice(&128u16.to_be_bytes());
+            bytes.extend(std::iter::repeat(0u8).take(128));
+            DigitallySignedStruct::read(&mut Reader::init(&bytes)).expect("a signature structure")
+        }
+        const ECDSA_P256_SHA256: u16 = 0x0403;
+        const RSA_PKCS1_SHA256: u16 = 0x0401;
+        const RSA_PSS_SHA256: u16 = 0x0804;
+
+        let provider = Arc::new(rustls_ring::default_provider());
+        let flagged = NoCertificateVerification::new(provider);
+        let name = ServerName::try_from("x.test").unwrap();
+        let v1 = CertificateDer::from(V1_CERT.to_vec());
+        let rsa = CertificateDer::from(RSA1024_CERT.to_vec());
+        let message = b"handshake transcript";
+        for cert in [&v1, &rsa] {
+            // The chain, the name and the dates are skipped under the flag ...
+            assert!(flagged
+                .verify_server_cert(cert, &[], &name, &[], UnixTime::now())
+                .is_ok());
+        }
+        // ... the check of the certificate and of the key behind the handshake signature stays.
+        for scheme in [ECDSA_P256_SHA256, RSA_PSS_SHA256] {
+            assert!(flagged
+                .verify_tls12_signature(message, &v1, &signature(scheme))
+                .is_err());
+            assert!(flagged
+                .verify_tls13_signature(message, &v1, &signature(scheme))
+                .is_err());
+        }
+        for scheme in [RSA_PKCS1_SHA256, RSA_PSS_SHA256] {
+            assert!(flagged
+                .verify_tls12_signature(message, &rsa, &signature(scheme))
+                .is_err());
+        }
+        assert!(flagged
+            .verify_tls13_signature(message, &rsa, &signature(RSA_PSS_SHA256))
+            .is_err());
+    }
+
+    #[test]
+    fn t38_6_4n_a_pin_does_not_let_a_version_1_or_an_rsa_1024_certificate_through() {
+        use rustls::internal::msgs::codec::{Codec, Reader};
+        let provider = Arc::new(rustls_ring::default_provider());
+        let name = ServerName::try_from("x.test").unwrap();
+        let v1 = CertificateDer::from(V1_CERT.to_vec());
+        let rsa = CertificateDer::from(RSA1024_CERT.to_vec());
+        let pins = |hexes: &[&str]| -> Vec<[u8; 32]> {
+            hexes
+                .iter()
+                .map(|h| <[u8; 32]>::try_from(hex::decode(h).unwrap()).unwrap())
+                .collect()
+        };
+
+        // The digest the verifier computes is the one of the `openssl` pipeline of R38.6.4n item 7: it matches the
+        // value recorded from that pipeline for the RSA fixture.
+        let flag = Arc::new(AtomicBool::new(false));
+        let pinned = PinnedKeyVerification::new(provider.clone(), pins(&[RSA1024_CERT_SPKI_SHA256]), flag.clone());
+        assert!(pinned
+            .verify_server_cert(&rsa, &[], &name, &[], UnixTime::now())
+            .is_ok());
+        assert!(!flag.load(AtomicOrdering::SeqCst));
+        // The pinned key must still prove itself with an accepted scheme; a 1024-bit RSA key cannot.
+        let mut bytes = 0x0804u16.to_be_bytes().to_vec();
+        bytes.extend_from_slice(&128u16.to_be_bytes());
+        bytes.extend(std::iter::repeat(0u8).take(128));
+        let dss = DigitallySignedStruct::read(&mut Reader::init(&bytes)).expect("a signature structure");
+        assert!(pinned.verify_tls13_signature(b"transcript", &rsa, &dss).is_err());
+        assert!(pinned.verify_tls12_signature(b"transcript", &rsa, &dss).is_err());
+
+        // A version 1 certificate does not parse as the certificate of R38.6.4m item 5, with its pin or without it; that is
+        // not a key mismatch.
+        let flag = Arc::new(AtomicBool::new(false));
+        let pinned = PinnedKeyVerification::new(provider, pins(&[V1_CERT_SPKI_SHA256]), flag.clone());
+        assert!(pinned
+            .verify_server_cert(&v1, &[], &name, &[], UnixTime::now())
+            .is_err());
+        assert!(!flag.load(AtomicOrdering::SeqCst));
+
+        // A key that matches none of the pins sets the flag.
+        let pinned = PinnedKeyVerification::new(
+            Arc::new(rustls_ring::default_provider()),
+            pins(&[V1_CERT_SPKI_SHA256]),
+            flag.clone(),
+        );
+        assert!(pinned
+            .verify_server_cert(&rsa, &[], &name, &[], UnixTime::now())
+            .is_err());
+        assert!(flag.load(AtomicOrdering::SeqCst));
+    }
+
+    #[test]
+    fn t38_6_4n_pins_are_read_in_every_accepted_form_and_refused_in_every_malformed_one() {
+        let pin = "0123456789abcdef".repeat(4);
+        let expected = <[u8; 32]>::try_from(hex::decode(&pin).unwrap()).unwrap();
+        for accepted in [
+            json::json!(pin),
+            json::json!(pin.to_uppercase()),
+            json::json!(colon_upper(&pin)),
+            json::json!(colon_upper(&pin).to_lowercase()),
+        ] {
+            assert_eq!(parse_spki_pins(&accepted), Ok(vec![expected]), "{}", accepted);
+        }
+        // An array of 1 to 4.
+        for count in 1..=4 {
+            let array = Json::Array(vec![json::json!(pin); count]);
+            assert_eq!(parse_spki_pins(&array).map(|pins| pins.len()), Ok(count));
+        }
+        let malformed = Err("spki_sha256 is not a 64-digit hexadecimal SHA-256 digest".to_owned());
+        for bad in [
+            json::json!(&pin[..63]),
+            json::json!(format!("{}0", pin)),
+            json::json!(format!("{}g", &pin[..63])),
+            json::json!(format!("{}é", &pin[..62])),
+            json::json!(""),
+            json::json!(":::"),
+            json::json!([]),
+            Json::Array(vec![json::json!(pin); 5]),
+            json::json!([1]),
+            json::json!([pin, 7]),
+            json::json!([[pin]]),
+            json::json!(7),
+            json::json!(true),
+            json::json!({ "pin": pin }),
+            Json::Null,
+        ] {
+            assert_eq!(parse_spki_pins(&bad), malformed, "{}", bad);
+        }
+    }
+
+    #[test]
+    fn t38_6_4n_a_server_entry_with_a_pin_is_classified_when_it_is_read() {
+        let pin = pin_of(&KeyPair::generate().unwrap());
+        let entry = |protocol, flag: bool, pin: Option<Json>| ElectrumRpcRequest {
+            disable_cert_verification: flag,
+            spki_sha256: pin,
+            ..request_of("pin.test:50002".to_owned(), protocol)
+        };
+        let notice = |request: ElectrumRpcRequest| server_spec(&request).expect("a server spec").tls_notice();
+        let ssl = ElectrumProtocol::SSL;
+
+        // R38.6.4m item 6 and R38.6.4n item 4.
+        assert_eq!(notice(entry(ssl.clone(), false, None)), None);
+        assert_eq!(
+            notice(entry(ssl.clone(), true, None)),
+            Some(TlsNotice::NotAuthenticated)
+        );
+        assert_eq!(
+            notice(entry(ssl.clone(), false, Some(json::json!(pin)))),
+            Some(TlsNotice::Pinned)
+        );
+        assert_eq!(
+            notice(entry(ssl.clone(), true, Some(json::json!(pin)))),
+            Some(TlsNotice::Pinned)
+        );
+        assert_eq!(notice(entry(ElectrumProtocol::TCP, true, None)), None);
+
+        // R38.6.4n item 5: removal-class failures, and the configured value is never echoed.
+        let marker = "secret-marker";
+        let malformed = server_spec(&entry(ssl.clone(), false, Some(json::json!(marker))))
+            .expect_err("a malformed pin removes the server");
+        assert_eq!(malformed, "spki_sha256 is not a 64-digit hexadecimal SHA-256 digest");
+        let on_tcp = server_spec(&entry(ElectrumProtocol::TCP, false, Some(json::json!(pin))))
+            .expect_err("a pin on TCP removes the server");
+        assert_eq!(on_tcp, "spki_sha256 needs protocol SSL");
+        let malformed_on_tcp = server_spec(&entry(ElectrumProtocol::TCP, false, Some(json::json!(marker))))
+            .expect_err("a malformed pin on TCP removes the server");
+        assert_eq!(malformed_on_tcp, malformed);
+        assert!(!format!("{:?}", entry(ssl, false, Some(json::json!(marker)))).contains(marker));
+    }
+
+    #[test]
+    fn t38_6_4n_the_key_is_read_from_both_requests_as_a_string_or_an_array() {
+        let pin = pin_of(&KeyPair::generate().unwrap());
+        let read = |value: Json| -> ElectrumRpcRequest { json::from_value(value).expect("a server entry") };
+        let single = read(json::json!({ "url": "a.test:1", "protocol": "SSL", "spki_sha256": pin }));
+        assert_eq!(single.spki_sha256, Some(json::json!(pin)));
+        let array = read(json::json!({ "url": "a.test:1", "protocol": "SSL", "spki_sha256": [pin, pin] }));
+        assert_eq!(array.spki_sha256, Some(json::json!([pin, pin])));
+        // Without the key, or with a null, the entry behaves exactly as before.
+        assert!(read(json::json!({ "url": "a.test:1", "protocol": "SSL" }))
+            .spki_sha256
+            .is_none());
+        assert!(
+            read(json::json!({ "url": "a.test:1", "protocol": "SSL", "spki_sha256": null }))
+                .spki_sha256
+                .is_none()
+        );
+        // A malformed value does not fail the request: it removes this server when it joins the pool.
+        let malformed = read(json::json!({ "url": "a.test:1", "protocol": "SSL", "spki_sha256": 7 }));
+        assert!(server_spec(&malformed).is_err());
+        // The key survives a round trip and an absent key stays absent.
+        assert!(json::to_value(&single).unwrap().get("spki_sha256").is_some());
+        assert!(json::to_value(read(json::json!({ "url": "a.test:1" })))
+            .unwrap()
+            .get("spki_sha256")
+            .is_none());
+    }
+
+    #[test]
+    fn t38_6_4n_malformed_pins_and_a_pin_on_tcp_remove_the_server_and_nothing_connects() {
+        let _guard = localhost_map();
+        common::block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let port = listener.local_addr().unwrap().port();
+            let pin = pin_of(&KeyPair::generate().unwrap());
+            let malformed_tls = ElectrumRpcRequest {
+                spki_sha256: Some(json::json!("not-a-digest")),
+                ..request_of(format!("{}:{}", PIN_HOST, port), ElectrumProtocol::SSL)
+            };
+            let pinned_tcp = ElectrumRpcRequest {
+                spki_sha256: Some(json::json!(pin)),
+                ..request_of(format!("127.0.0.1:{}", port), ElectrumProtocol::TCP)
+            };
+            let client = ElectrumClientImpl::new("PINREMOVED".to_owned(), vec![]);
+            let mut removed = client.add_servers(&[malformed_tls, pinned_tcp]);
+            removed.sort();
+            assert_eq!(removed, vec![
+                (
+                    format!("127.0.0.1:{}", port),
+                    "spki_sha256 needs protocol SSL".to_owned()
+                ),
+                (
+                    format!("{}:{}", PIN_HOST, port),
+                    "spki_sha256 is not a 64-digit hexadecimal SHA-256 digest".to_owned()
+                ),
+            ]);
+            assert_eq!(client.count_connections().await, 0);
+            let client = Arc::new(client);
+            let _ = client.activation_probe().await;
+            let accepted = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+            assert!(accepted.is_err(), "a removed server is never connected");
+        });
+    }
+
+    #[test]
+    fn t38_6_4n_a_mismatch_suspends_the_server_and_is_logged_at_warn_every_time() {
+        let capturing = install_log_capture();
+        let _guard = localhost_map();
+        common::block_on(async {
+            let key = KeyPair::generate().unwrap();
+            let cert = certificate_for(&key, &[PIN_HOST], |_| {});
+            let server = spawn_server_with_cert(&[&TLS13], cert, key.serialize_der()).await;
+            let wrong = pin_of(&KeyPair::generate().unwrap());
+            let request = ElectrumRpcRequest {
+                spki_sha256: Some(json::json!(wrong)),
+                ..request_of(format!("{}:{}", PIN_HOST, server.port), ElectrumProtocol::SSL)
+            };
+            let client = ElectrumClientImpl::new("PINMISMATCH".to_owned(), vec![]);
+            assert!(client.add_servers(&[request]).is_empty());
+            let client = Arc::new(client);
+            for _ in 0..2 {
+                let error = client
+                    .activation_probe()
+                    .await
+                    .expect_err("the only server has another key");
+                assert!(error.contains(SPKI_MISMATCH), "{}", error);
+            }
+            // Suspended, not removed.
+            let snapshot = client.pool_snapshot();
+            assert_eq!(snapshot.len(), 1);
+            assert!(!snapshot[0].removed);
+            assert!(snapshot[0].suspended_until.is_some());
+            assert_eq!(client.count_connections().await, 1);
+
+            if capturing {
+                let warns: Vec<String> = captured_log_lines()
+                    .into_iter()
+                    .filter(|line| line.starts_with("WARN ") && line.contains("PINMISMATCH"))
+                    // The short-list warning of R38.6.4o item 13 is about the list, not the pin.
+                    .filter(|line| !line.contains("Electrum servers are listed"))
+                    .collect();
+                let expected = format!(
+                    "WARN PINMISMATCH: Electrum server {}:{}: the server's key does not match spki_sha256",
+                    PIN_HOST, server.port
+                );
+                assert_eq!(warns, vec![expected.clone(), expected]);
+            }
+        });
+    }
+
+    #[test]
+    fn t38_6_4m_e_the_warning_is_logged_once_per_activation_for_host_and_port_only() {
+        let capturing = install_log_capture();
+        let ticker = "WARNONCE";
+        let pin = pin_of(&KeyPair::generate().unwrap());
+        let entry = |url: &str, protocol, flag: bool, pin: Option<Json>| ElectrumRpcRequest {
+            disable_cert_verification: flag,
+            spki_sha256: pin,
+            ..request_of(url.to_owned(), protocol)
+        };
+        let client = ElectrumClientImpl::new(ticker.to_owned(), vec![]);
+        let removed = client.add_servers(&[
+            entry("flagged.test:50002", ElectrumProtocol::SSL, true, None),
+            entry("flagged-tcp.test:50001", ElectrumProtocol::TCP, true, None),
+            entry(
+                "flagged-pinned.test:50002",
+                ElectrumProtocol::SSL,
+                true,
+                Some(json::json!(pin)),
+            ),
+            entry(
+                "pinned.test:50002",
+                ElectrumProtocol::SSL,
+                false,
+                Some(json::json!([pin, pin])),
+            ),
+            entry("plain.test:50002", ElectrumProtocol::SSL, false, None),
+            // Removed (an IP literal has no host name): never connected, so no line.
+            entry("127.0.0.1:50002", ElectrumProtocol::SSL, true, None),
+        ]);
+        assert_eq!(removed.len(), 1);
+        if !capturing {
+            return;
+        }
+        let lines: Vec<String> = captured_log_lines()
+            .into_iter()
+            .filter(|line| line.contains(ticker))
+            .collect();
+        // T38.6.4m (e): exactly one WARN, naming `host:port` and nothing else; none for TCP, a pinned or a plain server.
+        let warns: Vec<&String> = lines.iter().filter(|line| line.starts_with("WARN ")).collect();
+        assert_eq!(warns, vec![&format!(
+            "WARN {}: Electrum server flagged.test:50002 has disable_cert_verification set: the connection is \
+             encrypted, but the server is not authenticated",
+            ticker
+        )]);
+        // T38.6.4n: one INFO line for each pinned server, and only for those.
+        let infos: Vec<&String> = lines.iter().filter(|line| line.starts_with("INFO ")).collect();
+        assert_eq!(infos.len(), 2, "{:?}", lines);
+        for name in ["flagged-pinned.test:50002", "pinned.test:50002"] {
+            let expected = format!("INFO {}: Electrum server {} is pinned by spki_sha256", ticker, name);
+            assert_eq!(
+                infos.iter().filter(|line| ***line == expected).count(),
+                1,
+                "{:?}",
+                infos
+            );
+        }
+    }
+}
+
+/// A client with the default pool settings but the tip checks off (CRD ch.38 R38.6.4o item 11): with them on, a
+/// connection sends a header request when it joins, which the tests that count request messages do not want to see.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn client_without_tip_checks() -> ElectrumClientImpl {
+    let mut client = ElectrumClientImpl::new("MOCK".to_owned(), vec![]);
+    client.configure_pool(ElectrumPoolOptions {
+        tip_checks: false,
+        ..Default::default()
+    });
+    client
 }
 
 /// An Electrum client connected to a loopback stub server (see `electrum_stub_server`), for tests that count request
@@ -2135,7 +3107,7 @@ pub(crate) fn electrum_client_over_stub(
     common::block_on(async {
         let server = StubServer::start(StubBehavior::Answer).await;
         script(&server);
-        let client = ElectrumClientImpl::new("MOCK".to_owned(), vec![]);
+        let client = client_without_tip_checks();
         client
             .add_server(&server.request())
             .expect("the stub is a usable server");
@@ -2149,10 +3121,11 @@ pub(crate) fn electrum_client_over_stub(
 }
 
 /// An Electrum client over several loopback stub servers, ranked in the given order, with the default pool settings
-/// (read spreading on). Returns once every server is in the maintained set.
+/// (read spreading on) but the tip checks off. Returns once every server is in the maintained set and has answered a
+/// ping, so that each has a smoothed latency: a session that has answered nothing takes no read (R38.6.4a item 6).
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) async fn electrum_client_over_stubs(servers: &[&super::electrum_stub_server::StubServer]) -> ElectrumClient {
-    let client = ElectrumClientImpl::new("MOCK".to_owned(), vec![]);
+    let client = client_without_tip_checks();
     for server in servers {
         client.add_server(&server.request()).expect("a stub is a usable server");
     }
@@ -2169,6 +3142,7 @@ pub(crate) async fn electrum_client_over_stubs(servers: &[&super::electrum_stub_
         );
         common::executor::Timer::sleep(0.01).await;
     }
+    client.pool.ping_maintained().await;
     ElectrumClient(client)
 }
 

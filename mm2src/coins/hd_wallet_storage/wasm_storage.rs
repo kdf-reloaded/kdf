@@ -257,6 +257,20 @@ impl HDWalletStorageInternalOps for HDWalletIndexedDbStorage {
             .mm_err(HDWalletStorageError::from)
     }
 
+    async fn remove_account(&self, wallet_id: HDWalletId, account_id: u32) -> HDWalletStorageResult<()> {
+        let shared_db = self.get_shared_db()?;
+        let locked_db = Self::lock_db(&shared_db).await?;
+
+        let transaction = locked_db.inner.transaction().await.map_mm_err()?;
+        let table = transaction.table::<HDAccountTable>().await.map_mm_err()?;
+
+        // An account the storage does not hold is not an error.
+        if let Some((account_item_id, _account)) = Self::find_account(&table, wallet_id, account_id).await? {
+            table.delete_item(account_item_id).await.map_mm_err()?;
+        }
+        Ok(())
+    }
+
     async fn clear_accounts(&self, wallet_id: HDWalletId) -> HDWalletStorageResult<()> {
         let shared_db = self.get_shared_db()?;
         let locked_db = Self::lock_db(&shared_db).await?;

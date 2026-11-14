@@ -8,8 +8,8 @@
 > value transfers in Sia's native units, and participates in the
 > V1 atomic-swap protocol by realising the HTLC as a native Sia
 > spend policy whose success path is unlocked by a SHA-256
-> preimage and whose refund path is unlocked by a block-height
-> time lock -- conforming on the wire to the public Sia
+> preimage and whose refund path is unlocked by a time lock
+> (a Unix timestamp) -- conforming on the wire to the public Sia
 > consensus/transaction formats and to the walletd HTTP API.
 
 ## 20.0 Executive Summary
@@ -266,9 +266,11 @@ contract the module MUST meet:
 
 **R-H1 (HTLC output).** A swap payment MUST fund a transaction
 output locked to a spend policy that encodes: the two
-counterparties' ed25519 public keys, a block-height time lock,
-and the SHA-256 secret hash. The funding output MUST be placed at
-a fixed, deterministic position in the funding transaction so
+counterparties' ed25519 public keys, a time lock given as a Unix
+timestamp (the policy's `after` form; the refund path becomes
+spendable once the chain's median block timestamp has passed it,
+R-H4), and the SHA-256 secret hash. The funding output MUST be
+placed at a fixed, deterministic position in the funding transaction so
 that validation and spend code can locate it positionally without
 scanning.
 
@@ -372,17 +374,22 @@ parsing is not the place that width is enforced or relaxed: it is
 entitled to assume chapter 51's negotiation layer already
 delivered a 32-byte value, and MUST continue to reject a
 `secret_hash` of any other length as a parse failure rather than
-attempt to pad or reinterpret it. Chapter 51 §51.9.1 records, as a
-code-quality finding, that this repository's negotiation layer
-does not yet perform the R72 selection for Sia; until it does,
-this module's own correct 32-byte-only parsing cannot by itself
-make a Sia-involved legacy swap complete.
+attempt to pad or reinterpret it. *(Updated 2026-11-07.)* The
+selection is performed: the legacy maker swap calls
+`select_secret_hash_algo` (`lp_swap.rs`) once per swap and the taker
+adopts the negotiated value, so a Sia-involved legacy swap negotiates
+the 32-byte value. The other leg's coin layer derives what its own
+construction needs from that shared value (chapter 51 R72A): the UTXO
+layer and, as of this change, the EVM coin layer do. This module's own
+parsing stays 32-byte-only, as above. Chapter 51 §51.9.1 records the
+detail.
 
 **R-S11 (trading floors; Spec Reader 2026-10-25, cleared by the
 Dirty Gate with chapter 60 on 2026-10-25).** Sia's minimum trading volume and
 minimum transaction amount are both one hasting (10^-24 SC) in both
 reference designations (`v2.6.0-beta` and `v3.0.0-beta` agree) and in
-reloaded. Every Sia HTLC spend and refund deducts a fixed miner fee of
+reloaded (the minimum trading volume only until 2026-11-07; see the
+revision note). Every Sia HTLC spend and refund deducts a fixed miner fee of
 0.00002 SC from the HTLC value in both trees, so a Sia payment of 0.00002 SC or
 less, which every order builder accepts, can be neither spent nor
 refunded; the module MUST refuse such a spend or refund with an orderly
@@ -400,6 +407,183 @@ floor is a maintainer decision (chapter 60 D60.2).
 > The constant is 2 × 10^19 hastings, which is 0.00002 SC. The text now
 > says so. **As built in PR #73:** the legacy refund and the version-two
 > spends and refund refuse a value not above the fee with an orderly error.
+>
+> **Observed rate (2026-11-04, informative).** Walletd's recommended fee
+> (`GET /api/txpool/fee`, hastings per weight unit) was 10^19 on the public
+> mainnet walletd, which is the absolute minimum the recommendation can take
+> (1 SC per 100 KB, walletd/coreutils). The fixed miner fee of this section is
+> 2 x 10^19 hastings in total. In mainnet tests (2026-11-04, seven
+> completed Siacoin swaps and one refund, wire sizes of 912 to 1,735 bytes)
+> every swap and refund transaction paid that fixed fee and was mined in the first block after it was
+> broadcast, also with up to 50 transactions in the pool; the fee was about 450
+> to 850 times below the recommended rate for the transaction's wire size. The
+> txpool has no minimum-fee check on admission (it evicts the lowest fee
+> density first when full). The fixed fee is therefore kept; whether it is
+> enough under congestion, when a spend or refund could wait or be evicted, is a
+> watch item. The size the withdraw estimator multiplies by the rate is the
+> length of the transaction's signature-hash form, which is smaller than its
+> wire form (§20.10 D6); the network accepted the resulting fees. The trade
+> preimage showed 0.00001 SC as the miner fee of a Siacoin payment, half of the
+> fixed fee actually paid (fixed 2026-11-07).
+>
+> **Observed rate, continued (2026-11-10, informative).** Six more swap
+> transactions and two refunds (two swaps on netid 6133, one maker-side
+> refund, one refund at a restart) paid the fixed fee; the refunds were mined
+> in the next block. The watch item stands.
+>
+> **Revision (2026-11-07, clean-room-original).** Reloaded raises its Sia
+> minimum trading volume to ten times the fixed miner fee (0.0002 SC). The
+> one-hasting floor let the default minimum volume of a Sia order fall under
+> the miner fee, which the pre-trade check of R60.6.7 then refused. The
+> minimum transaction amount stays one hasting. The receiver's trade fee is
+> reported as paid from the HTLC value, and all reported Sia miner-fee figures
+> are the fixed 0.00002 SC.
+
+**R-S12 (taker DEX fee by network; Spec Reader round 0.4.0-14, passed
+the KDF Dirty Gate on 2026-11-10).**
+
+> **Clearance (chapter 01 R40) -- passed the KDF Dirty Gate on
+> 2026-11-10, measure 0.03 (attestation in §20.12).** R-S12, T-S1, the
+> code-quality note under them and the matching §20.12 entry were
+> authored in Spec Reader round 0.4.0-14 from forbidden-class input
+> taken under chapter 01 §1.4A at the two designations `v2.6.0-beta` and
+> `v3.0.0-beta` of [Chapter 02](02-baseline-state.md) §2.15A.
+
+The facts below hold at `v2.6.0-beta` (the netid-8762 reference) and at
+`v3.0.0-beta` (the netid-6133 reference); where the two differ the item
+says so.
+
+1. **Rate: the general schedule, no Sia-specific figure.** At neither
+   designation does the Sia taker fee have a rate of its own. Its amount
+   is the general fee descriptor of [Chapter 08](08-fee-routing-engine.md):
+   the build's global base rate -- 1/777 at `v2.6.0-beta`, 2/100 at
+   `v3.0.0-beta` -- or that build's discounted rate when either ticker of
+   the pair is the build's discount ticker (`"KMD"` selecting 9/7770 at
+   `v2.6.0-beta`; `"GLEEC"` selecting 1/100 at `v3.0.0-beta`), multiplied
+   by the taker volume and floored at the taker coin's minimum
+   transaction amount, which for Sia is one hasting (R-S11). The rate is
+   selected by the pair's two tickers against the build's single global
+   schedule ([Chapter 06](06-network-id-seed-node.md) §6.6A.4): not per
+   netid, not per coin, not per coin family, and not by any field of the
+   coin's configuration entry. Sia participates in no burn form at either
+   designation; a Sia fee is always the plain single-output form of
+   chapter 08 R15 (`Standard`). For Reloaded, this means the rate the
+   active per-netid `NetConfig` returns under chapter 06 R17 (1/777 and
+   9/7770 by `"KMD"` on netid 8762; 2/100 and 1/100 by `"GLEEC"` on netid
+   6133) is exactly the rate the reference of that netid charges and
+   expects for Sia, and **no Sia-specific rate field is to be added** to
+   the network configuration.
+
+2. **Destination: one ed25519 key, identical on both netids.** At both
+   designations the fee output pays the Sia address derived from a single
+   ed25519 public key compiled into the build's shared constants, derived
+   once at load and reused for every swap; the secp256k1 fee key the swap
+   engine hands the coin layer plays no part for Sia. That ed25519 key is
+   the **same value** at `v2.6.0-beta` and at `v3.0.0-beta`, although the
+   secp256k1 fee key and the burn key did change between those
+   designations. The Sia fee destination is therefore identical on netid
+   8762 and netid 6133. Reloaded already records that value as the
+   ed25519 flavour of both netids (chapter 06 §6.1, R8), and §20.4.2
+   derives the address from it. For both netids the value is a dictated
+   inter-operability constant: changing it on either netid makes every
+   reference maker of that netid refuse this node's Sia taker fee
+   (item 3), so it MUST NOT be presented as an operator-tunable setting.
+
+3. **Maker validation.** A maker of either designation accepts a Sia
+   taker fee only if all of the following hold, in the taker coin's
+   native units:
+   - the fee transaction is found by its id either confirmed at a height
+     not below the taker-coin start block of the swap, or else in the
+     transaction pool while the current height is not below that block;
+     no confirmation beyond visibility is required;
+   - every input is spent from the taker's own address, the address of
+     the taker's negotiated ed25519 key (R-S9);
+   - the transaction has one or two outputs;
+   - the first output pays the fee address of item 2 exactly;
+   - the first output's value equals the expected fee amount in hastings
+     **exactly** -- no tolerance in either direction, unlike the
+     one-sided tolerance of chapter 08 R15B for UTXO coins;
+   - the arbitrary-data channel carries the swap UUID (R-S1).
+   Any mismatch is a validation error. The generic maker machine retries
+   the validation the bounded number of times, with the fixed delay, of
+   [Chapter 51](51-legacy-v1-swap-state-machine.md) R15 -- a
+   deterministic mismatch such as a wrong amount or a wrong destination
+   is retried just like a not-yet-visible transaction -- and then emits
+   `TakerFeeValidateFailed` and finishes the swap (chapter 51 R13). It
+   is a hard failure of that swap: no re-negotiation, no second rate, no
+   request for another fee. The taker learns of it only indirectly, as
+   the absence of a maker payment: it exhausts its maker-payment budget,
+   emits `MakerPaymentValidateFailed` and finishes (chapter 51 R28),
+   having paid its fee.
+
+4. **Control: netid 8762 at `v2.6.0-beta`.** Items 2 and 3 are the same
+   at both designations; the Sia module's fee construction and fee
+   validation did not change between them. The only difference is the
+   global schedule of item 1: 1/777 and 9/7770 by `"KMD"` at
+   `v2.6.0-beta` against 2/100 and 1/100 by `"GLEEC"` at `v3.0.0-beta`.
+
+5. **Consequence for a Reloaded taker on netid 6133.** A Reloaded taker
+   whose coin is SC, paying the netid-6133 schedule rate of chapter 06
+   R17 (2/100, or 1/100 with GLEEC on the other side of the pair) to the
+   shared ed25519 destination, with the UUID embedded and every input
+   from its own address, is **accepted** by a `v3.0.0-beta` maker,
+   provided the hasting value it sends equals, to the hasting, the value
+   the maker computes from the same rational rate and the same
+   decimal-to-hasting conversion -- the one point a lab row has to prove
+   (T-S1). A taker that paid the netid-8762 rate on netid 6133 would be
+   **rejected** after the retries of item 3; on its side the rejection
+   looks like a maker that never pays, ending in
+   `MakerPaymentValidateFailed` after the maker-payment budget, and the
+   fee is spent.
+
+**T-S1 (lab proving row: Reloaded taker against a reference maker on
+netid 6133; Spec Reader round 0.4.0-14, passed the KDF Dirty Gate on 2026-11-10).** On netid
+6133 a reference `v3.0.0-beta` maker posts an order that **buys** SC (SC
+is the order's rel coin, so the taker's coin -- and the fee coin -- is
+SC); a Reloaded taker takes it. MUST pass: the maker records
+`TakerFeeValidated` and sends its payment, and the swap completes on both
+sides. MUST record, for every run: the taker's fee transaction id, the
+first output's value in hastings, the rate case (base or discounted) and,
+on a failure, the maker's reported expected value, so that a hasting-level
+rounding difference is distinguishable from a destination or UUID
+failure. MUST repeat with GLEEC on the other side of the pair, which
+exercises the discounted rate. Companion row (optional): the same pair
+with a Reloaded maker and a reference taker, which exercises Reloaded's
+own exact-value check of item 3 against the reference's arithmetic.
+
+> **Code-quality finding (informative; this repository's own code, not the
+> corpus).** The netid-6133 network-configuration entry carries a comment
+> presenting the ed25519 fee key as a value an operator may change to get a
+> distinct destination on netid 6133. Item 2 shows that doing so breaks
+> inter-operation with every reference maker on that netid, which refuses a
+> fee paid elsewhere. Proposed fix: reword the comment to state that the
+> value is a dictated inter-operability constant shared with netid 8762 and
+> is not an operator setting. No code change is implied.
+
+> **Lab status (2026-11-10, clean side, informative).** T-S1's base-rate
+> run passed on netid 6133: a `v3.0.0-beta` maker buying SC with RIN
+> recorded `TakerFeeValidated` and the swap completed on both sides; the
+> fee transaction's first output was exactly 2 % of the taker volume in
+> hastings, to the fee address of item 2 (release-tests page, "Siacoin
+> taker fee validated by a reference maker on netid 6133"). The
+> discounted-rate repeat with GLEEC on the other side of the pair has not
+> been run (no GLEEC in the lab); T-S1's optional companion row (a KDF
+> Reloaded maker against a reference taker) has not been run. The source
+> comment the code-quality finding refers to (`netid_6133.rs`) was reworded
+> in the change that added this note.
+>
+> *Later the same day:* the discounted rate was proven on netid 8762
+> instead, with KMD on the other side of the pair (the maintainer's
+> decision of 2026-11-10): a GLEEC KDF development build of the netid-8762
+> lineage as the maker, behind the same kind of pool-reply proxy, recorded
+> `TakerFeeValidated` on a fee of exactly 9/7770 of a 1 SC taker volume in
+> hastings and the swap completed on both sides; two attempts without the
+> proxy failed at the pool reply before the amount was checked (R-N4
+> class). One case of each rate is therefore lab-proven, the base rate on
+> netid 6133 and the discounted rate on netid 8762; the netid-6133
+> discounted case (GLEEC in the pair) and the netid-8762 base case did not
+> run. The exact-value check of item 3 was reached and passed on both
+> netids.
 
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method
@@ -423,6 +607,18 @@ activation request -- no URL is embedded in the module:
 | `GET /api/outputs/siacoin/:output_id/spent` | Locate a spending transaction |
 | `GET /api/txpool/transactions` | Mempool inspection |
 | `POST /api/txpool/broadcast` | Broadcast a signed transaction |
+
+**R-N4 (reading the transaction pool; Reloaded; clean-room original;
+decision 2026-11-07; no switch).** The transaction-pool reply
+(`GET /api/txpool/transactions`) shall be read one transaction at a time, in both
+its lists: a transaction that the Sia library cannot read is left out of the list,
+and the rest of the reply is used. A lookup of a transaction in the pool (the
+fee validation of a swap, the raw-transaction lookup, the wait for a spend) then
+does not fail because of someone else's unreadable transaction in the same
+pool. A left-out transaction is visible only in the debug log of the Sia library,
+with its position in the list and the kind of its error, never its content;
+the node's own log does not name it. A reply whose list is not a list at all is
+still an error. This is a behavior of the pinned Sia library, not of the coin layer.
 
 **R-N1 (host-only naming of the walletd server; Reloaded; clean-room
 original; maintainer decision 2026-10-26; no switch).** Every log line, error
@@ -868,10 +1064,12 @@ rather than defects. None is a correctness claim.
   `derivation_method` field, and activation (`sia_activation.rs`)
   currently reports `wallet_balance` via the same generic
   `EnableCoinBalanceOps` shape UTXO/ETH use, branching automatically
-  on Iguana vs. HD-wallet mode. That HD branch is a wire deviation:
-  ch.46 R46.2.4 binds the activation result to the single-address
-  `"Iguana"` form in both modes (the HD account data stays reachable
-  through the post-activation HD RPC surface). Per ch.46 R46.1.3,
+  on Iguana vs. HD-wallet mode. That HD branch is the deliberate
+  divergence of ch.46 R46.2.4 (maintainer decision 2026-10-11): under
+  HD the activation result is the HD report by default, and the
+  compatibility switch `sia_activation_single_address_balance` restores
+  the single-address `"Iguana"` form the reference reports in both
+  modes *(corrected 2026-11-04)*. Per ch.46 R46.1.3,
   activation itself never grows the wallet past account 0; multi-
   account growth happens entirely through the post-activation HD RPC
   surface. `InitCreateHDAccountRpcOps` could not delegate to the
@@ -886,7 +1084,11 @@ rather than defects. None is a correctness claim.
   (UTXO/QTUM/ETH included) without a connected hardware wallet --
   Sia inherits this identically once wired. The existing
   single-address activation path is observably unaffected either
-  way. Code: `mm2src/coins/siacoin/sia_hd_wallet.rs`,
+  way. *(Open until 2026-11-07. Plan `hd-key-unification` item H5.4 fixed
+  it: the task builds the hardware-wallet extractor only under a hardware
+  login, so it serves Sia under a software login, as a documented Reloaded
+  extension (decision CC; chapter 05 R35c and its as-built note).)*
+  Code: `mm2src/coins/siacoin/sia_hd_wallet.rs`,
   `siacoin_helpers.rs`, `mod.rs`,
   `mm2src/coins_activation/src/sia_activation.rs`.
 
@@ -909,6 +1111,21 @@ rather than defects. None is a correctness claim.
   this D3 entry previously described. `recover_funds` (chapter 51
   R33) can now correctly determine "already spent" instead of
   refusing outright. Code: `mm2src/coins/siacoin/siacoin_swap_ops.rs`.
+  *Lab status (2026-11-10, informative):* the recovery method was
+  called on a refunded swap, on a swap refunded at a restart and on two
+  finished swaps; every call was refused from the swap record (the
+  record already held the final event) and broadcast nothing, so the
+  event-walk outcomes of R-S8 were not reached through recovery. The
+  "unspent" outcome was exercised live only by the taker refund's chain
+  look (chapter 51 R31a) of 2026-11-04; "spent" and "refunded" have unit
+  tests only. A taker-side row that resumes a swap after the maker's
+  spend is scheduled to exercise "spent". *Later the same day:* that row
+  passed: a taker stopped after its payment and resumed after its lock
+  entered the refund chain, and the chain look of chapter 51 R31a found
+  the maker's spend by the event walk, read the secret (R-S6) and spent
+  the maker payment; no refund was made (release-tests page, "Siacoin
+  resumed taker"). "Spent" is therefore exercised live through the swap
+  machine; "refunded" by the event walk still has unit tests only.
 
 - **D4 -- Message signing.** *Closed.* `sign_message`/`verify_message`
   are wired to Sia's ed25519 keypair, using the bound Sia client
@@ -925,7 +1142,20 @@ rather than defects. None is a correctness claim.
   implemented for Sia; swaps involving Sia run only over the V1
   protocol ([Chapter 13](13-swap-version-negotiation.md)). Binding
   design drafted in [Chapter 54](54-sia-swap-v2-path.md) (status:
-  DRAFT, not yet approved for implementation).
+  DRAFT, not yet approved for implementation). *Provenance
+  (lab-verified 2026-11-04):* V1 swaps with Sia on one side are
+  supported. On the live chain, seven swaps completed (two between
+  KDF Reloaded nodes, the others against nodes of the two reference
+  designations, with the interop limits recorded in the changelog's
+  Known limitations), and one refund of a Sia payment between two KDF
+  Reloaded nodes was mined. The earlier "postponed until after the
+  beta" statement is withdrawn. *Lab-verified 2026-11-10, between two
+  KDF Reloaded nodes:* the maker-side refund of a Sia payment
+  (automatic; broadcast once the node's median block time passed the
+  lock, about an hour and a half after it; mined in the next block),
+  the automatic refund of a swap resumed at start, and an SC/RIN swap
+  in both directions on netid 6133 with that network's fee schedule
+  (2 %) and the same fee key as netid 8762.
 - **D6 -- Size-aware fee estimation.** *Closed.* The withdraw path
   now estimates the fee from a probe transaction's real serialized
   size (`V2TransactionBuilder::weight()`) times the live
@@ -933,7 +1163,14 @@ rather than defects. None is a correctness claim.
   added, rather than a flat constant. Sia's V2 wire encoding writes
   every `Currency` as a fixed-width `u128`, so weight depends only on
   input/output counts, never amounts -- a zero-valued placeholder
-  transaction is exact, not approximate. Commit `836a6278c`.
+  transaction is exact for the amounts. *Known inaccuracy (recorded
+  2026-11-04, informative):* the length measured is the transaction's
+  signature-hash form, in which each input counts only as its 32-byte
+  output id, not the wire form with the input's proof and signatures. On
+  mainnet a withdrawal of one input and two outputs paid for 217 length units
+  while the signed transaction was 1,237 bytes; the network accepted and mined
+  it. The fee stays as built (see R-S11, observed rate).
+  Commit `836a6278c`.
 
 - **D7 -- Watcher eligibility.** *Closed, partial by design.* Four of
   the five non-trivial `WatcherOps` methods are implemented for real:
@@ -999,6 +1236,15 @@ rather than defects. None is a correctness claim.
   response body of a non-success answer. Whether that is allowed was chapter
   36 D36.3; the maintainer decided on 2026-10-29 that it is not, and R-N3
   binds it, also at Reloaded's boundary.
+- **D11 -- A Sia-shaped withdraw fee form.** *Deferred until a client needs
+  it.* R-W3 reads `UtxoPerKbyte` as SC per kilobyte, which is what the
+  Komodo wallet already sends for SC, so no new fee variant was added. A
+  Sia-specific form remains possible later: a hastings-per-byte rate, which
+  the size-aware estimator would multiply by the real weight and so fits the
+  coin's own fee model better, or a fixed total, which is easier for a user
+  to understand. Either would be a new arm of the withdraw fee object, with
+  its own invalid-fee-policy texts and verification items next to T-W6 and
+  T-W7.
 
 ## 20.11 Baseline Verifications
 
@@ -1146,3 +1392,45 @@ V3. The unit ratio, ed25519 scheme, address encoding, walletd
   maintainer decision AU of 2026-10-29 (chapter 36 D36.3), on walletd's public
   error format (an error answer carries its message as plain text) and on the
   bound revision of the external Sia library.
+- *Clean-context correction (2026-11-04, forbidden corpus not consulted):*
+  the D1 note now calls the HD activation result the deliberate divergence
+  of chapter 46 R46.2.4 instead of a wire deviation, and records that the
+  account-creation bug was still open then (plan item H5.4 fixed it in
+  PR #279, merged 2026-11-07; see the D1 note). Written from this repository's own
+  code and chapter 46; it takes no forbidden-class input and needs no gate
+  pass.
+- *Spec Reader round 0.4.0-14 (2026-11-10; forbidden corpus consulted):*
+  R-S12, T-S1 and the code-quality note under them rest on
+  forbidden-class input taken under the two-team procedure of chapter 01
+  §1.4A at exactly the two designations `v2.6.0-beta` and `v3.0.0-beta`
+  of [Chapter 02](02-baseline-state.md) §2.15A, for exactly three
+  subject areas: the taker DEX-fee rate schedule and the inputs that
+  select it; the Sia fee-destination key, its derivation and its value
+  across the two designations; and the maker-side validation of a Sia
+  taker fee with its retry and failure outcome. They also rest on this
+  repository's own network-configuration crate and Sia swap-ops code and
+  on chapters 06, 08 and 51. The round established no fact that
+  contradicts §6.6A of chapter 06; it adds the one qualification chapter
+  06 now cross-references under its §6.6A.5 table. No discretionary
+  expression -- no private identifier, body, control-flow transcription,
+  local name, or error or log literal -- was reproduced. **KDF Dirty
+  Gate: PASS on 2026-11-10, measure 0.03, no findings** (chapter 01 R40;
+  R13 check clean). *Dirty Gate clearance (chapter 01 T1, R40):* PASS,
+  2026-11-10. *Extent:* compared at the two rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, for the four subject areas the
+  dispatch named — the taker DEX-fee rate schedule and its selection
+  inputs; the Siacoin taker-fee construction (amount, destination key
+  and derived address, data field); the Siacoin maker-side fee
+  validation and its failure path; and the legacy swap state machines'
+  fee-validation retry and failure events plus the taker's
+  maker-payment-wait failure event — five source files per state (ten
+  reads) and the inter-state diff of the same five files. Reloaded's own
+  network-configuration crate was also read to verify the premise of the
+  informative code-quality note. *Method:* by reading, plus mechanical
+  `git diff` between the two tabled states. No embedded code blocks are
+  present in the candidate, so `tools/clean_room_gate.py` was not run.
+  *Measure:* 0.03 on the R35 discretionary-expression basis
+  (dictated-interop and pinned-interface tokens excluded), read against
+  the standard that any single item of discretionary expression fails
+  regardless of score; none was found. For orientation only, the
+  repository tooling's absolute cap of 0.50 was not approached.

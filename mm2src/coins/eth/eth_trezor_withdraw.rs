@@ -15,7 +15,7 @@ use crate::{CoinWithDerivationMethod, DerivationMethod, WithdrawError, WithdrawR
 use crypto::hw_rpc_task::{HwConnectStatuses, TrezorRpcTaskConnectProcessor};
 use crypto::trezor::client::TrezorClient;
 use crypto::trezor::ethereum::TrezorEthTxInput;
-use crypto::{Bip44DerivationPath, CryptoCtx, DerivationPath};
+use crypto::{Bip44DerivationPath, DerivationPath};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use std::str::FromStr;
@@ -121,14 +121,15 @@ fn trezor_connect_processor(task_handle: &WithdrawTaskHandle) -> TrezorRpcTaskCo
     .with_pin_timeout(TREZOR_PIN_TIMEOUT)
 }
 
+/// Connects to the device of the current hardware context. An empty slot answers `NoTrezorDeviceAvailable`; a
+/// context of another device than the one the coin was activated with answers `FoundUnexpectedDevice` before the
+/// device is contacted (CRD ch.05 R58a).
 async fn trezor_client(
     ctx: &MmArc,
+    signer: &EthTrezorSigner,
     processor: &TrezorRpcTaskConnectProcessor<'_, WithdrawTask>,
 ) -> MmResult<TrezorClient, WithdrawError> {
-    let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
-    let hw_ctx = crypto_ctx
-        .hw_ctx()
-        .or_mm_err(|| WithdrawError::NoTrezorDeviceAvailable)?;
+    let hw_ctx = crate::hd_pubkey::hardware_context_for_signing(ctx, Some(&signer.hw_ctx))?;
 
     hw_ctx.trezor(processor).await.mm_err(WithdrawError::from)
 }
@@ -139,8 +140,10 @@ async fn trezor_client(
 /// rejection can be asserted without a device or task handle.
 pub(crate) fn ensure_trezor_withdraw_supported(coin: &EthCoin) -> MmResult<(), WithdrawError> {
     if matches!(coin.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
-        return MmError::err(WithdrawError::UnsupportedUnderTrezor(
-            "TRON withdraw is not supported under the Trezor signing policy".to_owned(),
+        return MmError::err(WithdrawError::UnsupportedError(
+            "Unsupported under the Trezor signing policy: TRON withdraw is not supported under the Trezor signing \
+             policy"
+                .to_owned(),
         ));
     }
     Ok(())
@@ -204,7 +207,7 @@ pub(crate) async fn withdraw_trezor_impl(
     // so a PIN / passphrase re-requested in the fresh signing session is surfaced
     // the same way.
     let processor = trezor_connect_processor(task_handle);
-    let trezor_client = trezor_client(&ctx, &processor).await?;
+    let trezor_client = trezor_client(&ctx, &signer, &processor).await?;
 
     task_handle
         .update_in_progress_status(WithdrawInProgressStatus::WaitingForUserToConfirmSigning)

@@ -2,18 +2,66 @@
 // client and the server path. See PATCH-NOTES.md.
 
 use futures::prelude::*;
-use libp2p_core::{multiaddr::Protocol, transport::ListenerId, Multiaddr, Transport};
-use libp2p_dns as dns;
+use libp2p_core::transport::{ListenerId, TransportError, TransportEvent};
+use libp2p_core::{multiaddr::Protocol, Multiaddr, Transport};
 use libp2p_identity::PeerId;
 use libp2p_tcp as tcp;
 use libp2p_websocket::{tls, WsConfig};
+use std::net::Ipv4Addr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-type Dns = dns::DnsConfig<tcp::async_io::Transport>;
+/// The inner transport of the websocket layer under test: TCP, with `/dns4/localhost` mapped to `/ip4/127.0.0.1`. It
+/// stands where a DNS layer would, so that the dialed address carries a hostname for the websocket layer's TLS check
+/// (the hostname is the TLS server name), without a DNS library in the test.
+struct LocalhostDns<T>(T);
+
+/// `/dns4/localhost/...` becomes `/ip4/127.0.0.1/...`; every other address is left as it is.
+fn map_localhost(addr: Multiaddr) -> Multiaddr {
+    let is_localhost = matches!(addr.iter().next(), Some(Protocol::Dns4(name)) if name == "localhost");
+    if is_localhost {
+        addr.replace(0, |_| Some(Protocol::Ip4(Ipv4Addr::LOCALHOST)))
+            .unwrap_or(addr)
+    } else {
+        addr
+    }
+}
+
+impl<T: Transport + Unpin> Transport for LocalhostDns<T> {
+    type Output = T::Output;
+    type Error = T::Error;
+    type ListenerUpgrade = T::ListenerUpgrade;
+    type Dial = T::Dial;
+
+    fn listen_on(&mut self, id: ListenerId, addr: Multiaddr) -> Result<(), TransportError<Self::Error>> {
+        self.0.listen_on(id, addr)
+    }
+
+    fn remove_listener(&mut self, id: ListenerId) -> bool {
+        self.0.remove_listener(id)
+    }
+
+    fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
+        self.0.dial(map_localhost(addr))
+    }
+
+    fn dial_as_listener(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
+        self.0.dial_as_listener(map_localhost(addr))
+    }
+
+    fn address_translation(&self, listen: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
+        self.0.address_translation(listen, observed)
+    }
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<TransportEvent<Self::ListenerUpgrade, Self::Error>> {
+        Transport::poll(Pin::new(&mut self.get_mut().0), cx)
+    }
+}
+
+type Dns = LocalhostDns<tcp::async_io::Transport>;
 
 async fn new_ws(tls_config: tls::Config) -> WsConfig<Dns> {
-    let inner = dns::DnsConfig::system(tcp::async_io::Transport::new(tcp::Config::default()))
-        .await
-        .unwrap();
+    let inner = LocalhostDns(tcp::async_io::Transport::new(tcp::Config::default()));
     let mut ws = WsConfig::new(inner);
     ws.set_tls_config(tls_config);
     ws

@@ -1407,6 +1407,23 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_default_params_directory_is_a_reported_activation_error() {
+        let reason = "the APPDATA environment variable is not set and the roaming application-data folder could not \
+                      be determined";
+        let build_err = ZCoinBuildError::ZCashParamsDirUnresolved {
+            reason: reason.to_owned(),
+        };
+        let text = build_err.to_string();
+        assert!(text.contains(reason), "{text}");
+        assert!(text.ends_with("set zcash_params_path"), "{text}");
+        let (wire, status) = task_error(ZcoinInitError::from_build_err(build_err, "ARRR".to_owned()));
+        assert_eq!(wire["error_type"], "CoinCreationError");
+        assert_eq!(wire["error_data"]["ticker"], "ARRR");
+        assert_eq!(wire["error_data"]["error"], text);
+        assert_eq!(status, common::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
     fn unsupported_key_policy_is_a_coin_creation_error_and_never_a_priv_key_error() {
         // T39.10.4 (e) and (f), R39.10.13.
         let (wire, _) = task_error(ZcoinInitError::HardwareWalletsAreNotSupportedYet {

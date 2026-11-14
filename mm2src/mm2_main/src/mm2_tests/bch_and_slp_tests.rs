@@ -12,7 +12,7 @@ const T_BCH_ELECTRUMS: &[&str] = &[
 
 fn t_bch_electrums_legacy_json() -> Vec<Json> { T_BCH_ELECTRUMS.iter().map(|url| json!({ "url": url })).collect() }
 
-/// How many times [`withdraw_and_send_bch`] rebuilds and rebroadcasts after a mempool conflict.
+/// How many times [`withdraw_and_send_bch`] rebuilds and rebroadcasts after a conflict with an earlier spend.
 #[cfg(not(target_arch = "wasm32"))]
 const BCH_CONFLICT_RETRIES: usize = 12;
 /// How long [`withdraw_and_send_bch`] waits before each retry.
@@ -24,10 +24,10 @@ const BCH_CONFLICT_RETRY_DELAY: Duration = Duration::from_secs(10);
 ///
 /// The test wallet is a shared testnet wallet, and the Electrum servers can lag behind the wallet's
 /// own spends: a withdrawal built a few seconds after the previous broadcast can pick the coin that
-/// broadcast already spent, and the network then rejects it as a mempool conflict. Another CI run
-/// spending the same wallet at the same time ends the same way. Both clear once the servers have
-/// caught up, so a conflict rebuilds the withdrawal after a pause instead of failing the test; any
-/// other broadcast error still fails at once.
+/// broadcast already spent, and the network then rejects it as a mempool conflict or with "Missing
+/// inputs". Another CI run spending the same wallet at the same time ends the same way. Both clear
+/// once the servers have caught up, so such a rejection rebuilds the withdrawal after a pause instead
+/// of failing the test; any other broadcast error still fails at once.
 #[cfg(not(target_arch = "wasm32"))]
 fn withdraw_and_send_bch(mm: &MarketMakerIt, to: &str, expected_from: &str) {
     for attempt in 1..=BCH_CONFLICT_RETRIES + 1 {
@@ -75,7 +75,9 @@ fn withdraw_and_send_bch(mm: &MarketMakerIt, to: &str, expected_from: &str) {
             return;
         }
 
-        let conflict = send_tx.1.contains("txn-mempool-conflict") || send_tx.1.contains("missingorspent");
+        let conflict = send_tx.1.contains("txn-mempool-conflict")
+            || send_tx.1.contains("missingorspent")
+            || send_tx.1.contains("Missing inputs");
         assert!(
             conflict && attempt <= BCH_CONFLICT_RETRIES,
             "BCH send_raw_transaction (attempt {}): {}",
@@ -92,6 +94,7 @@ fn withdraw_and_send_bch(mm: &MarketMakerIt, to: &str, expected_from: &str) {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_withdraw_cashaddresses() {
     let coins = json!([
@@ -194,6 +197,7 @@ fn test_withdraw_cashaddresses() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_withdraw_to_different_cashaddress_network_should_fail() {
     let coins = json!([
@@ -255,6 +259,7 @@ fn test_withdraw_to_different_cashaddress_network_should_fail() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_common_cashaddresses() {
     let coins = json!([
@@ -357,6 +362,7 @@ async fn wait_till_history_has_records(
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_bch_and_slp_testnet_history() {
     let coins = json!([
@@ -438,6 +444,7 @@ fn test_bch_and_slp_testnet_history() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_sign_verify_message_bch() {
     let seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";
@@ -506,6 +513,7 @@ fn test_sign_verify_message_bch() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_sign_verify_message_slp() {
     let seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";

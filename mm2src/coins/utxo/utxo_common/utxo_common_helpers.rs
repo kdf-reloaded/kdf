@@ -1,7 +1,10 @@
 // utxo_common_helpers — address utilities, balance queries, config, withdraw
 
 use super::*;
+use crate::coin_protocol_capability::{append_capability_word, classify_capability_word, CapabilityWordStatus,
+                                      DeclineLines, DeclineLog, CAPABILITY_SIGHASH_SUFFIX};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
+use crate::utxo::utxo_builder::REQUIRE_SUFFIX_COUNTERPARTY_KEY;
 
 const FIXED_FEE_MIN_VOL_TX_SIZE_BYTES: u64 = 496;
 
@@ -417,6 +420,29 @@ where
     StandardUtxoWithdraw::new(coin, req)?.build().await
 }
 
+/// The direct `withdraw` of a coin that can be activated under a software global-HD login (UTXO standard and QTUM).
+///
+/// CRD ch.49 R49.4: under a software HD key policy the sender is resolved by the step the task route uses
+/// (`GetWithdrawSenderAddress`): `from` as given, and without it the coin's activated address; the key derived at the
+/// sender's path signs, and the change returns to the sender. Every other coin keeps the single-key withdraw
+/// unchanged, including a coin under the Trezor policy, which this route does not sign with a device (CRD ch.49
+/// R49.6 is the EVM analogue) and which answers as before.
+pub async fn withdraw_with_hd_sender<T>(coin: T, req: WithdrawRequest) -> WithdrawResult
+where
+    T: UtxoCommonOps
+        + GetUtxoListOps
+        + MarketCoinOps
+        + CoinWithDerivationMethod
+        + GetWithdrawSenderAddress<Address = Address, Pubkey = Public>,
+{
+    // Both conditions: a coin with an HD key policy but a single address (derivation method Iguana) keeps the
+    // single-key withdraw, and `new_with_hd_sender` must only see a sender with a derivation path.
+    if coin.has_hd_wallet_derivation_method() && coin.as_ref().priv_key_policy.is_hd_wallet() {
+        return StandardUtxoWithdraw::new_with_hd_sender(coin, req).await?.build().await;
+    }
+    StandardUtxoWithdraw::new(coin, req)?.build().await
+}
+
 pub async fn init_withdraw<T>(
     ctx: MmArc,
     coin: T,
@@ -439,9 +465,10 @@ where
     T: CoinWithDerivationMethod,
 {
     // Compatibility divergence from upstream: an omitted `from` for an HD wallet is intentionally
-    // NOT rejected here. `get_withdraw_hd_sender` resolves a missing `from` to the single enabled
-    // address (account 0 / External / 0) so clients that don't send `from` can still preview and
-    // withdraw. Upstream rejects an omitted `from`; this default keeps basic withdraw flows working.
+    // NOT rejected here. `get_withdraw_hd_sender` resolves a missing `from` to the coin's activated
+    // address (CRD ch.49 R49.4), for the task route and the direct `withdraw` alike, so clients that
+    // don't send `from` can still preview and withdraw. Upstream rejects an omitted `from`; this
+    // default keeps basic withdraw flows working.
     Ok(())
 }
 
@@ -451,7 +478,7 @@ pub async fn get_withdraw_from_address<T>(
 ) -> MmResult<WithdrawSenderAddress<Address, Public>, WithdrawError>
 where
     T: CoinWithDerivationMethod<Address = Address, HDWallet = <T as HDWalletCoinOps>::HDWallet>
-        + HDWalletCoinOps<Address = Address, Pubkey = Public>
+        + HDWalletCoinOps<Address = Address, Pubkey = Public, HDWallet = UtxoHDWallet, HDAccount = UtxoHDAccount>
         + UtxoCommonOps,
 {
     match coin.derivation_method() {
@@ -465,10 +492,7 @@ pub fn get_withdraw_iguana_sender<T: UtxoCommonOps>(
     req: &WithdrawRequest,
     my_address: &Address,
 ) -> MmResult<WithdrawSenderAddress<Address, Public>, WithdrawError> {
-    if req.from.is_some() {
-        let error = "'from' is not supported if the coin is initialized with an Iguana private key";
-        return MmError::err(WithdrawError::UnexpectedFromAddress(error.to_owned()));
-    }
+    crate::utxo::utxo_withdraw::refuse_from_for_single_key(req)?;
     let pubkey = coin
         .my_public_key()
         .mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
@@ -559,14 +583,126 @@ pub fn set_requires_notarization(coin: &UtxoCoinFields, requires_nota: bool) {
         .store(requires_nota, AtomicOrdering::Relaxed);
 }
 
+/// The protocol information a UTXO-family coin publishes: its encoded address format, followed by the
+/// capability word {`sighash_suffix`: `true`} when the coin's resolved `sighash_suffix` is non-zero
+/// (CRD ch.61 R61.5A.1). The word is sent at all times. A coin with a zero suffix sends the address
+/// format bytes alone, as before.
 pub fn coin_protocol_info<T: UtxoCommonOps>(coin: &T) -> Vec<u8> {
-    rmp_serde::to_vec(coin.addr_format()).expect("Serialization should not fail")
+    let address_format = rmp_serde::to_vec(coin.addr_format()).expect("Serialization should not fail");
+    if coin.as_ref().conf.sighash_suffix != 0 {
+        append_capability_word(address_format, &[CAPABILITY_SIGHASH_SUFFIX])
+    } else {
+        address_format
+    }
 }
 
 pub fn is_coin_protocol_supported<T: UtxoCommonOps>(coin: &T, info: &Option<Vec<u8>>) -> bool {
-    match info {
-        Some(format) => rmp_serde::from_read_ref::<_, UtxoAddressFormat>(format).is_ok(),
+    let first_value_accepted = match info {
+        // CRD ch.28 R16a: a value outside the decoding bounds counts as one that does not decode.
+        Some(format) => match common::msgpack_bounds::check_peer_value(format, "is_coin_protocol_supported") {
+            Ok(end) => rmp_serde::from_read_ref::<_, UtxoAddressFormat>(&format[..end]).is_ok(),
+            Err(_) => false,
+        },
         None => !coin.addr_format().is_segwit(),
+    };
+    if !first_value_accepted {
+        return false;
+    }
+    // CRD ch.61 R61.5A.2: the word is judged only after the first value passed.
+    let conf = &coin.as_ref().conf;
+    match suffix_counterparty_decline(conf.sighash_suffix, conf.require_suffix_counterparty, info) {
+        None => true,
+        Some(cause) => {
+            log_suffix_decline(&conf.ticker, cause, now_ms() / 1000);
+            false
+        },
+    }
+}
+
+/// Why a counterparty's protocol information does not declare `sighash_suffix` (CRD ch.61 R61.5A.5).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SuffixDecline {
+    /// Absent or empty information, or nothing after the first value.
+    NoWord,
+    /// Something after the first value that is not a well-formed word.
+    MalformedWord,
+    /// A well-formed word in which `sighash_suffix` is not `true`.
+    WithoutSuffix,
+}
+
+impl SuffixDecline {
+    fn cause(self) -> &'static str {
+        match self {
+            SuffixDecline::NoWord => "no capability word",
+            SuffixDecline::MalformedWord => "a malformed capability word",
+            SuffixDecline::WithoutSuffix => "a capability word without sighash_suffix",
+        }
+    }
+}
+
+/// `Some(cause)` when a coin with the resolved `own_suffix` and the switch `require_switch`
+/// (`require_suffix_counterparty`) must decline the counterparty's `info` (CRD ch.61 R61.5A.2). Fails
+/// closed. `None` for a zero own suffix or the switch off, whatever `info` holds.
+pub(crate) fn suffix_counterparty_decline(
+    own_suffix: u32,
+    require_switch: bool,
+    info: &Option<Vec<u8>>,
+) -> Option<SuffixDecline> {
+    if own_suffix == 0 || !require_switch {
+        return None;
+    }
+    match classify_capability_word(info.as_deref()) {
+        CapabilityWordStatus::NoWord => Some(SuffixDecline::NoWord),
+        CapabilityWordStatus::Malformed => Some(SuffixDecline::MalformedWord),
+        CapabilityWordStatus::WellFormed(declared) if declared.declares(CAPABILITY_SIGHASH_SUFFIX) => None,
+        CapabilityWordStatus::WellFormed(_) => Some(SuffixDecline::WithoutSuffix),
+    }
+}
+
+/// The log lines of one decline of `ticker` at `now_sec`, rate-limited by `log` (CRD ch.61 R61.5A.5): a
+/// debug line per decline, and a warning at most once an hour that carries the count since the previous
+/// warning and names the switch.
+pub(crate) fn suffix_decline_lines(
+    log: &mut DeclineLog,
+    ticker: &str,
+    cause: SuffixDecline,
+    now_sec: u64,
+) -> DeclineLines {
+    let debug = format!(
+        "{ticker}: declining a swap match -- a {ticker} swap requires a counterparty that signs with the suffix ({})",
+        cause.cause()
+    );
+    log.record(
+        debug,
+        |declined| {
+            format!(
+                "{ticker}: declined {declined} swap match(es) since the previous warning -- a {ticker} swap requires a \
+                 counterparty that signs with the suffix (`{}` in the coin's configuration switches the requirement \
+                 off)",
+                REQUIRE_SUFFIX_COUNTERPARTY_KEY
+            )
+        },
+        now_sec,
+    )
+}
+
+lazy_static! {
+    /// Per-coin state of the decline warning, keyed by ticker. Only coins that decline a counterparty
+    /// ever get an entry, so the map stays empty for every coin with a zero suffix.
+    static ref SUFFIX_DECLINE_LOGS: std::sync::Mutex<std::collections::HashMap<String, DeclineLog>> =
+        std::sync::Mutex::new(std::collections::HashMap::new());
+}
+
+fn log_suffix_decline(ticker: &str, cause: SuffixDecline, now_sec: u64) {
+    let lines = {
+        let mut logs = SUFFIX_DECLINE_LOGS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        suffix_decline_lines(logs.entry(ticker.to_owned()).or_default(), ticker, cause, now_sec)
+    };
+    debug!("{}", lines.debug);
+    if let Some(warning) = lines.warning {
+        warn!("{warning}");
     }
 }
 
@@ -759,7 +895,7 @@ mod tests {
     #[test]
     fn task_withdraw_hd_wallet_allows_omitted_sender() {
         // An omitted `from` is accepted at the validation gate; the sender is resolved to the
-        // enabled address (account 0 / External / 0) later by `get_withdraw_hd_sender`.
+        // coin's activated address later by `get_withdraw_hd_sender`.
         let coin = DummyDerivationCoin {
             derivation_method: DerivationMethod::HDWallet(()),
         };

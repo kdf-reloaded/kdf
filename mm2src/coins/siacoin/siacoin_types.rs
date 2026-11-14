@@ -145,6 +145,18 @@ pub(crate) fn htlc_value_after_miner_fee(htlc_value: Currency, miner_fee: Curren
 /// CRD ch.60 R60.6.7 item 2: the Sia safe amount, the fixed HTLC miner fee plus one hasting.
 pub(crate) fn htlc_safe_amount() -> BigDecimal { hastings_to_siacoin(Currency::DEFAULT_FEE + Currency::from(1u64)) }
 
+/// The Sia minimum trading volume is this many times the fixed miner fee (`Currency::DEFAULT_FEE`), the same
+/// fee-based rule the UTXO coins use (ten times the fee of a representative transaction). Change the value
+/// here only.
+pub(crate) const MIN_TRADING_VOL_FEE_MULTIPLIER: u128 = 10;
+
+/// The Sia minimum trading volume: `MIN_TRADING_VOL_FEE_MULTIPLIER` times the fixed miner fee, 0.0002 SC.
+/// Kept above `htlc_safe_amount` so the default minimum volume of an order never falls under the fee that the
+/// pre-trade check of CRD ch.60 R60.6.7 refuses.
+pub(crate) fn min_trading_vol_amount() -> BigDecimal {
+    hastings_to_siacoin(Currency(Currency::DEFAULT_FEE.0 * MIN_TRADING_VOL_FEE_MULTIPLIER))
+}
+
 /// Convert "coin" representation to hastings amount
 pub(crate) fn siacoin_to_hastings(siacoin: BigDecimal) -> Result<Currency, SiacoinToHastingsError> {
     let multiplier: BigDecimal = "1000000000000000000000000".parse().expect("valid decimal");

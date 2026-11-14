@@ -1,3 +1,5 @@
+use crate::coin_protocol_capability::{append_capability_word, classify_capability_word, CapabilityWordStatus,
+                                      CAPABILITY_TX_V6};
 use crate::node_url::lightwalletd_endpoint_label;
 use crate::rpc_command::get_my_address::PathToAddress;
 #[cfg(not(target_arch = "wasm32"))]
@@ -143,10 +145,16 @@ mod z_coin_ops;
 #[cfg(not(target_arch = "wasm32"))] mod z_electrum_fallback;
 #[cfg(not(target_arch = "wasm32"))] mod z_ironwood;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod z_ironwood_read_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_note_lock_tests;
+#[cfg(not(target_arch = "wasm32"))] mod z_pirate1;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod z_pirate1_tests;
 #[cfg(not(target_arch = "wasm32"))] mod z_refund_gate;
 #[cfg(not(target_arch = "wasm32"))] mod z_swap_ops;
 #[cfg(target_arch = "wasm32")] mod z_swap_ops_wasm;
+#[cfg(not(target_arch = "wasm32"))] mod z_tx_addresses;
 #[cfg(not(target_arch = "wasm32"))] mod z_tx_read;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_tx_read_fixtures;
@@ -304,6 +312,123 @@ fn ironwood_build_refused_at(activation_time: Option<u32>, v6_supported: bool, n
     now_sec >= u64::from(activation_time)
 }
 
+/// The protocol information a shielded coin publishes (CRD ch.39 R39.6.4f(a)): its encoded address
+/// format unchanged, followed by the capability word {`tx_v6`: `true`} when the coin has an Ironwood
+/// upgrade (a time or a height known for it) and the build constructs version-6 transactions. The word
+/// is sent at all times, not only inside the window of [`v6_counterparty_required_at`].
+fn v6_protocol_info(
+    address_format: Vec<u8>,
+    activation_time: Option<u32>,
+    activation_height: Option<u32>,
+    v6_supported: bool,
+) -> Vec<u8> {
+    if v6_supported && (activation_time.is_some() || activation_height.is_some()) {
+        append_capability_word(address_format, &[CAPABILITY_TX_V6])
+    } else {
+        address_format
+    }
+}
+
+/// Whether the acceptance check must require the `tx_v6` word of the counterparty as of `now_sec`
+/// (CRD ch.39 R39.6.4f(b), (c)).
+///
+/// `require_switch` is `require_v6_counterparty`. The window is open when an activation height is
+/// known, or when an activation time is known and `now_sec` is at or past that time less the freeze
+/// margin. The clock is injected and nothing is read from the network, as for
+/// [`ironwood_swap_freeze_active_at`]. `ironwood_gate_disabled` plays no part: the callers pass the
+/// time the gate switch does not suppress.
+fn v6_counterparty_required_at(
+    require_switch: bool,
+    activation_time: Option<u32>,
+    activation_height: Option<u32>,
+    freeze_margin_secs: u64,
+    now_sec: u64,
+) -> bool {
+    if !require_switch {
+        return false;
+    }
+    if activation_height.is_some() {
+        return true;
+    }
+    // Saturating, as in `ironwood_swap_freeze_active_at`.
+    activation_time.is_some_and(|time| now_sec >= u64::from(time).saturating_sub(freeze_margin_secs))
+}
+
+/// Why a counterparty's protocol information does not declare `tx_v6` (CRD ch.39 R39.6.4f(d)).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum V6Decline {
+    /// Absent or empty information, or nothing after the first value.
+    NoWord,
+    /// Something after the first value that is not a well-formed word.
+    MalformedWord,
+    /// A well-formed word in which `tx_v6` is not `true`.
+    WithoutTxV6,
+}
+
+impl V6Decline {
+    fn cause(self) -> &'static str {
+        match self {
+            V6Decline::NoWord => "no capability word",
+            V6Decline::MalformedWord => "a malformed capability word",
+            V6Decline::WithoutTxV6 => "a capability word without tx_v6",
+        }
+    }
+}
+
+/// `Some(cause)` when the counterparty's `info` does not declare `tx_v6`. Fails closed, exactly as
+/// `declares_capability` does; the cause only distinguishes the log line.
+fn v6_decline_cause(info: &Option<Vec<u8>>) -> Option<V6Decline> {
+    match classify_capability_word(info.as_deref()) {
+        CapabilityWordStatus::NoWord => Some(V6Decline::NoWord),
+        CapabilityWordStatus::Malformed => Some(V6Decline::MalformedWord),
+        CapabilityWordStatus::WellFormed(declared) if declared.declares(CAPABILITY_TX_V6) => None,
+        CapabilityWordStatus::WellFormed(_) => Some(V6Decline::WithoutTxV6),
+    }
+}
+
+/// The shortest gap between two warnings about declined counterparties (CRD ch.39 R39.6.4f(d)).
+const V6_DECLINE_WARNING_INTERVAL_SECS: u64 = 3_600;
+
+/// The log lines of one decline.
+#[derive(Debug, Eq, PartialEq)]
+struct V6DeclineLines {
+    /// One per decline.
+    debug: String,
+    /// At most one per coin per [`V6_DECLINE_WARNING_INTERVAL_SECS`], with the number of declines
+    /// since the previous warning (this one included).
+    warning: Option<String>,
+}
+
+/// Per-coin state of the decline warning. The clock is injected so the rate limit is testable.
+#[derive(Debug, Default)]
+struct V6DeclineLog {
+    declined_since_warning: u64,
+    last_warning_sec: Option<u64>,
+}
+
+impl V6DeclineLog {
+    fn record(&mut self, ticker: &str, cause: V6Decline, now_sec: u64) -> V6DeclineLines {
+        self.declined_since_warning += 1;
+        let debug = format!(
+            "{ticker}: declining a swap match -- the counterparty does not declare version-6 support ({})",
+            cause.cause()
+        );
+        let due = self.last_warning_sec.map_or(true, |last| {
+            now_sec.saturating_sub(last) >= V6_DECLINE_WARNING_INTERVAL_SECS
+        });
+        let warning = due.then(|| {
+            let declined = std::mem::take(&mut self.declined_since_warning);
+            self.last_warning_sec = Some(now_sec);
+            format!(
+                "{ticker}: declined {declined} swap match(es) with a counterparty that does not declare version-6 \
+                 support since the previous warning; a shielded swap needs it ahead of the Ironwood network upgrade \
+                 (`require_v6_counterparty` in the coin's consensus_params switches the requirement off)"
+            )
+        });
+        V6DeclineLines { debug, warning }
+    }
+}
+
 /// The warning given wherever `requires_notarization` is asserted for a ZHTLC coin: at activation,
 /// by `set_requires_notarization`, and by a confirmation wait that asks for it. The flag selects a
 /// notarized confirmation count, and a ZHTLC coin has none, so it has no effect
@@ -374,6 +499,13 @@ pub struct ZcoinConsensusParams {
     /// reproduce. Defaults to `false`. See `docs/GLEEC_COMPATIBILITY.md`.
     #[serde(default)]
     ironwood_gate_disabled: bool,
+    /// Whether a swap requires the counterparty to declare that it builds version-6
+    /// transactions (the `tx_v6` capability word), while the Ironwood window is open
+    /// (R39.6.4f). Defaults to `true`. With `false` the requirement does not apply, but the
+    /// coin still sends its own word. Independent of `ironwood_gate_disabled`, and per coin:
+    /// it applies on every chain that shares these parameters, test chains included.
+    #[serde(default = "common::true_f")]
+    require_v6_counterparty: bool,
     /// Ironwood activation height, once the network has derived and published it.
     ///
     /// Optional: the height is unknown until the upgrade is imminent, and a
@@ -394,6 +526,11 @@ pub struct ZcoinConsensusParams {
     hrp_sapling_extended_full_viewing_key: String,
     /// Bech32 HRP for shielded payment addresses.
     hrp_sapling_payment_address: String,
+    /// Bech32 HRP of Pirate1 (Ironwood) payment addresses, overriding the built-in prefix of the
+    /// network (R39.6.5a). Optional in both directions: a configuration omitting it takes the built-in
+    /// prefix, and a build that predates it ignores it.
+    #[serde(default)]
+    hrp_ironwood_payment_address: Option<String>,
     /// Base58Check version prefix for transparent p2pkh addresses.
     b58_pubkey_address_prefix: [u8; 2],
     /// Base58Check version prefix for transparent p2sh addresses.
@@ -453,11 +590,18 @@ impl ZcoinConsensusParams {
     /// Whether this coin opts out of Ironwood gating altogether.
     pub(crate) fn ironwood_gate_disabled(&self) -> bool { self.ironwood_gate_disabled }
 
+    /// Whether the counterparty of a swap must declare `tx_v6` while the window is open.
+    pub(crate) fn require_v6_counterparty(&self) -> bool { self.require_v6_counterparty }
+
     fn hrp_sapling_extended_spending_key(&self) -> &str { &self.hrp_sapling_extended_spending_key }
 
     fn hrp_sapling_extended_full_viewing_key(&self) -> &str { &self.hrp_sapling_extended_full_viewing_key }
 
     fn hrp_sapling_payment_address(&self) -> &str { &self.hrp_sapling_payment_address }
+
+    /// The configured Pirate1 prefix, when the configuration overrides the built-in one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hrp_ironwood_payment_address(&self) -> Option<&str> { self.hrp_ironwood_payment_address.as_deref() }
 
     fn b58_pubkey_address_prefix(&self) -> [u8; 2] { self.b58_pubkey_address_prefix }
 
@@ -839,6 +983,9 @@ pub struct ZCoinFields {
     /// Zcash consensus/network parameters sourced from `protocol_data`; the
     /// single authority for this coin's network-parameter lookups (R39.6.4).
     consensus_params: ZcoinConsensusParams,
+    /// Rate-limit state of the log lines about counterparties declined for lacking `tx_v6`
+    /// (R39.6.4f(d)).
+    v6_decline_log: Mutex<V6DeclineLog>,
     /// Optional sync-anchor checkpoint sourced from `protocol_data` (R39.1.4).
     check_point_block: Option<CheckPointBlockInfo>,
     /// Sync throughput tuning: blocks to process per iteration (R39.6.2).
@@ -1514,6 +1661,266 @@ mod ironwood_consensus_param_tests {
     }
 }
 
+/// CRD ch.39 T39.6.4f: the counterparty version-6 capability (R39.6.4f).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod ironwood_v6_counterparty_tests {
+    use super::*;
+    use crate::coin_protocol_capability::declares_capability;
+
+    /// See `ironwood_swap_freeze_tests::BUILD_WITHOUT_V6`.
+    const BUILD_WITHOUT_V6: bool = false;
+    const ACTIVATION: u32 = ARRR_IRONWOOD_ACTIVATION_TIME;
+    const WINDOW_START: u64 = ACTIVATION as u64 - IRONWOOD_SWAP_FREEZE_MARGIN_SECS;
+    /// The word {"tx_v6": true}: map(1), str(5) "tx_v6", true.
+    const WORD: [u8; 8] = [0x81, 0xa5, b't', b'x', b'_', b'v', b'6', 0xc3];
+    /// The word {"tx_v6": false}.
+    const FALSE_WORD: [u8; 8] = [0x81, 0xa5, b't', b'x', b'_', b'v', b'6', 0xc2];
+
+    fn arrr_params(extra: Json) -> ZcoinConsensusParams {
+        let mut cfg = json!({
+            "overwinter_activation_height": 152855,
+            "sapling_activation_height": 152855,
+            "blossom_activation_height": null,
+            "heartwood_activation_height": null,
+            "canopy_activation_height": null,
+            "coin_type": 133,
+            "hrp_sapling_extended_spending_key": "secret-extended-key-main",
+            "hrp_sapling_extended_full_viewing_key": "zxviews",
+            "hrp_sapling_payment_address": "zs",
+            "b58_pubkey_address_prefix": [0x1c, 0xb8],
+            "b58_script_address_prefix": [0x1c, 0xbd]
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            cfg[key] = value.clone();
+        }
+        serde_json::from_value(cfg).unwrap()
+    }
+
+    /// The first value of a shielded coin: its encoded address format.
+    fn first_value() -> Vec<u8> { rmp_serde::to_vec(&crate::utxo::UtxoAddressFormat::Standard).unwrap() }
+
+    /// The bytes ARRR would send, as the coin methods compute them from `params`.
+    fn sent_by(params: &ZcoinConsensusParams, ticker: &str, v6_supported: bool) -> Vec<u8> {
+        v6_protocol_info(
+            first_value(),
+            configured_or_builtin_ironwood_time(params, ticker),
+            params.effective_ironwood_activation_height(),
+            v6_supported,
+        )
+    }
+
+    /// Whether the acceptance check declines `info` for `params` at `now_sec` (the coin's own method
+    /// composes exactly these two functions around the log).
+    fn declined(params: &ZcoinConsensusParams, ticker: &str, info: &Option<Vec<u8>>, now_sec: u64) -> bool {
+        v6_counterparty_required_at(
+            params.require_v6_counterparty(),
+            configured_or_builtin_ironwood_time(params, ticker),
+            params.effective_ironwood_activation_height(),
+            IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+            now_sec,
+        ) && v6_decline_cause(info).is_some()
+    }
+
+    fn with_word(first: &[u8], word: &[u8]) -> Option<Vec<u8>> { Some([first, word].concat()) }
+
+    #[test]
+    fn t39_6_4f_a_protocol_info_is_the_address_format_then_the_word() {
+        let first = first_value();
+        let arrr = arrr_params(json!({}));
+        let sent = sent_by(&arrr, "ARRR", true);
+        assert_eq!(sent, [first.as_slice(), &WORD].concat());
+        // The first value is untouched, and a reader that stops after it sees the same format.
+        assert_eq!(&sent[..first.len()], first.as_slice());
+        assert!(declares_capability(&Some(sent), CAPABILITY_TX_V6));
+
+        // A configured time or height, or a discovered height, is an upgrade too.
+        for extra in [
+            json!({"ironwood_activation_time": ACTIVATION}),
+            json!({"ironwood_activation_height": 4_161_185u32}),
+        ] {
+            let params = arrr_params(extra);
+            assert_eq!(sent_by(&params, "OTHER", true), [first.as_slice(), &WORD].concat());
+        }
+        let discovered = arrr_params(json!({}));
+        assert_eq!(sent_by(&discovered, "OTHER", true), first);
+        discovered.record_discovered_ironwood_height(4_161_185);
+        assert_eq!(sent_by(&discovered, "OTHER", true), [first.as_slice(), &WORD].concat());
+
+        // A coin without an Ironwood upgrade sends its bytes unchanged.
+        assert_eq!(sent_by(&arrr, "OTHER", true), first);
+        // So does a build that does not construct version 6: it has nothing to declare.
+        assert_eq!(sent_by(&arrr, "ARRR", BUILD_WITHOUT_V6), first);
+    }
+
+    #[test]
+    fn t39_6_4f_b_inside_the_window_a_counterparty_without_the_word_is_declined() {
+        let params = arrr_params(json!({}));
+        let first = first_value();
+        let not_declared: Vec<(Option<Vec<u8>>, V6Decline)> = vec![
+            (None, V6Decline::NoWord),
+            (Some(Vec::new()), V6Decline::NoWord),
+            (Some(first.clone()), V6Decline::NoWord),
+            (with_word(&first, &[0x01]), V6Decline::MalformedWord),
+            (with_word(&first, &WORD[..WORD.len() - 1]), V6Decline::MalformedWord),
+            (with_word(&first, &FALSE_WORD), V6Decline::WithoutTxV6),
+            (with_word(&first, &[0x80]), V6Decline::WithoutTxV6),
+        ];
+        for now in [WINDOW_START, ACTIVATION as u64, ACTIVATION as u64 + 365 * 86_400] {
+            for (info, cause) in &not_declared {
+                assert!(declined(&params, "ARRR", info, now), "{info:?} at {now}");
+                assert_eq!(v6_decline_cause(info), Some(*cause), "{info:?}");
+            }
+            assert!(!declined(&params, "ARRR", &with_word(&first, &WORD), now));
+            // Bytes after the word and other keys are ignored.
+            let extended = [first.as_slice(), &[0x82, 0xa1, b'a', 0xc3], &WORD[1..], &[0xff]].concat();
+            assert!(!declined(&params, "ARRR", &Some(extended), now));
+        }
+    }
+
+    #[test]
+    fn t39_6_4f_c_before_the_window_nothing_is_required_and_a_configured_height_opens_it() {
+        let params = arrr_params(json!({}));
+        let first = Some(first_value());
+        assert!(!declined(&params, "ARRR", &first, WINDOW_START - 1));
+        assert!(declined(&params, "ARRR", &first, WINDOW_START));
+
+        // An activation time far ahead and no height: no window.
+        let far = arrr_params(json!({"ironwood_activation_time": u32::MAX}));
+        assert!(!declined(&far, "ARRR", &first, 1_800_000_000));
+        // A configured height alone opens it, with no time anywhere.
+        let height = arrr_params(json!({"ironwood_activation_height": 100u32}));
+        assert!(declined(&height, "OTHER", &first, 0));
+        // So does a discovered height.
+        let discovered = arrr_params(json!({}));
+        assert!(!declined(&discovered, "OTHER", &first, u64::MAX));
+        discovered.record_discovered_ironwood_height(100);
+        assert!(declined(&discovered, "OTHER", &first, 0));
+        // A coin without an Ironwood upgrade requires nothing.
+        assert!(!declined(&params, "OTHER", &first, u64::MAX));
+        // A time within the margin of the epoch does not wrap.
+        let early = arrr_params(json!({"ironwood_activation_time": 10}));
+        assert!(declined(&early, "OTHER", &first, 0));
+    }
+
+    #[test]
+    fn t39_6_4f_d_the_switch_and_the_gate_switch() {
+        let first = Some(first_value());
+        let now = ACTIVATION as u64;
+        let default = arrr_params(json!({}));
+        assert!(default.require_v6_counterparty());
+        assert!(declined(&default, "ARRR", &first, now));
+
+        // `false`: accepted, but the word is still sent.
+        let off = arrr_params(json!({"require_v6_counterparty": false}));
+        assert!(!off.require_v6_counterparty());
+        assert!(!declined(&off, "ARRR", &first, now));
+        assert!(!declined(&off, "ARRR", &None, now));
+        assert_eq!(sent_by(&off, "ARRR", true), [first_value().as_slice(), &WORD].concat());
+
+        // Optional in both directions: an explicit `true` parses, and so does a payload without the key.
+        assert!(arrr_params(json!({"require_v6_counterparty": true})).require_v6_counterparty());
+        let serialized = serde_json::to_value(&default).unwrap();
+        assert!(serde_json::from_value::<ZcoinConsensusParams>(serialized).is_ok());
+
+        // `ironwood_gate_disabled` changes none of the outcomes, for the word or the requirement.
+        for extra in [
+            json!({"ironwood_gate_disabled": true}),
+            json!({"ironwood_gate_disabled": true, "require_v6_counterparty": false}),
+        ] {
+            let gate = arrr_params(extra.clone());
+            let expected = extra.get("require_v6_counterparty").is_none();
+            assert_eq!(declined(&gate, "ARRR", &first, now), expected);
+            assert!(!declined(&gate, "ARRR", &with_word(&first_value(), &WORD), now));
+            assert_eq!(sent_by(&gate, "ARRR", true), [first_value().as_slice(), &WORD].concat());
+        }
+    }
+
+    #[test]
+    fn t39_6_4f_e_logs_one_debug_per_decline_and_one_warning_per_hour() {
+        let mut log = V6DeclineLog::default();
+        let t0 = 1_800_000_000u64;
+
+        // The first decline warns at once, with a count of one.
+        let first = log.record("ARRR", V6Decline::NoWord, t0);
+        assert!(first.debug.contains("ARRR") && first.debug.contains("no capability word"));
+        let warning = first.warning.expect("first decline warns");
+        assert!(warning.contains("ARRR") && warning.contains("declined 1 "), "{warning}");
+
+        // Within the hour: a debug line each, no warning, and the cause is named.
+        let causes = [
+            (V6Decline::NoWord, "no capability word"),
+            (V6Decline::MalformedWord, "malformed capability word"),
+            (V6Decline::WithoutTxV6, "without tx_v6"),
+        ];
+        for (i, (cause, text)) in causes.iter().enumerate() {
+            let lines = log.record("ARRR", *cause, t0 + 1 + i as u64 * 600);
+            assert!(lines.debug.contains(text), "{}", lines.debug);
+            assert!(lines.warning.is_none());
+        }
+        assert!(log
+            .record("ARRR", V6Decline::NoWord, t0 + V6_DECLINE_WARNING_INTERVAL_SECS - 1)
+            .warning
+            .is_none());
+
+        // At the hour: one warning carrying the 4 declines since the previous warning plus this one.
+        let at_hour = log.record("ARRR", V6Decline::NoWord, t0 + V6_DECLINE_WARNING_INTERVAL_SECS);
+        let warning = at_hour.warning.expect("warns again after an hour");
+        assert!(warning.contains("declined 5 "), "{warning}");
+
+        // The count starts again, and the hour is counted from the last warning.
+        assert!(log
+            .record("ARRR", V6Decline::NoWord, t0 + V6_DECLINE_WARNING_INTERVAL_SECS + 1)
+            .warning
+            .is_none());
+        let next = log.record("ARRR", V6Decline::NoWord, t0 + 2 * V6_DECLINE_WARNING_INTERVAL_SECS);
+        assert!(next.warning.expect("warns").contains("declined 2 "));
+
+        // The state is per coin instance, and a clock that steps back does not warn.
+        let mut other = V6DeclineLog::default();
+        assert!(other.record("ARRR", V6Decline::NoWord, 5).warning.is_some());
+        assert!(other.record("ARRR", V6Decline::NoWord, 0).warning.is_none());
+    }
+
+    #[test]
+    fn t39_6_4f_e_the_log_lines_do_not_carry_the_protocol_information() {
+        let mut log = V6DeclineLog::default();
+        let lines = log.record("ARRR", V6Decline::MalformedWord, 1);
+        let text = format!("{} {}", lines.debug, lines.warning.unwrap());
+        assert!(!text.contains("0x") && !text.contains('['), "{text}");
+    }
+
+    /// `is_coin_protocol_supported` consults the freeze first and returns on it, before it reads the
+    /// counterparty's bytes; the freeze predicate takes no protocol information at all. So for a build
+    /// without version 6 every counterparty is declined inside the window, whatever its word says.
+    #[test]
+    fn t39_6_4f_f_the_freeze_still_declines_everything_for_a_build_without_v6() {
+        let frozen = |now| {
+            ironwood_swap_freeze_active_at(
+                Some(ACTIVATION),
+                BUILD_WITHOUT_V6,
+                IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+                now,
+            )
+        };
+        // Such a build declares nothing itself.
+        assert_eq!(
+            sent_by(&arrr_params(json!({})), "ARRR", BUILD_WITHOUT_V6),
+            first_value()
+        );
+        for now in [WINDOW_START, ACTIVATION as u64, ACTIVATION as u64 + 365 * 86_400] {
+            assert!(frozen(now));
+        }
+        assert!(!frozen(WINDOW_START - 1));
+        // A build with version 6 is not frozen, and then only the word decides.
+        assert!(!ironwood_swap_freeze_active_at(
+            Some(ACTIVATION),
+            true,
+            IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+            ACTIVATION as u64
+        ));
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod shielded_history_status_tests {
     use super::*;
@@ -1674,6 +2081,7 @@ mod light_backend_tests {
                 url: "127.0.0.1:1".to_owned(),
                 protocol: Default::default(),
                 disable_cert_verification: false,
+                spki_sha256: None,
                 timeout_sec: None,
             };
             let backend = ZcoinBackend::Light {
@@ -2152,45 +2560,115 @@ async fn post_activation_shielded_sync(coin: ZCoin) {
             None => return,
         };
 
-        let tip = match coin.rpc_client().get_block_count().compat().await {
-            Ok(tip) => tip,
-            Err(e) => {
-                log::warn!("ZCoin periodic sync for {ticker}: could not get block count: {e}");
-                coin.set_shielded_sync_error(&format!("could not reach the chain tip: {e}"));
-                continue;
-            },
-        };
+        run_shielded_sync_pass(&ZCoinShieldedSyncSteps(&coin), &ticker).await;
+    }
+}
 
-        if tip <= coin.z_fields.wallet_db_scanned_through.load(AtomicOrdering::Relaxed) {
-            continue;
-        }
+/// The steps of one pass of [`post_activation_shielded_sync`], behind a trait so that the order of
+/// the steps can be tested without a network (T39.8.0g1).
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
+trait ShieldedSyncPassSteps: Send + Sync {
+    /// The chain tip, or why it could not be read.
+    async fn chain_tip(&self) -> Result<u64, String>;
 
+    /// The height the wallet database has been scanned through.
+    fn scanned_through(&self) -> u64;
+
+    /// Downloads the compact blocks up to `tip` into the wallet database's block cache.
+    async fn download_blocks(&self, tip: u64) -> Result<(), String>;
+
+    /// Scans the downloaded blocks up to `tip`; returns the height scanned through.
+    fn scan(&self, tip: u64) -> Result<u64, String>;
+
+    /// Rebuilds the pending-receipt view, reading the mempool at `height`.
+    async fn refresh_pending(&self, height: u64);
+
+    /// Records why the pass failed, for the reported history-sync state.
+    fn record_error(&self, message: &str);
+}
+
+/// One pass of the background sync. Every pass ends with a refresh of the pending view, whatever
+/// the pass found (R39.8.0aj1): no new block, a failed download, a failed scan, a scan that
+/// succeeded, or a tip that could not be read.
+#[cfg(not(target_arch = "wasm32"))]
+async fn run_shielded_sync_pass<S: ShieldedSyncPassSteps>(steps: &S, ticker: &str) {
+    let refresh_height = match steps.chain_tip().await {
+        Ok(tip) => {
+            if tip > steps.scanned_through() {
+                sync_wallet_db_to_tip(steps, ticker, tip).await;
+            }
+            tip
+        },
+        Err(e) => {
+            log::warn!("ZCoin periodic sync for {ticker}: could not get block count: {e}");
+            steps.record_error(&format!("could not reach the chain tip: {e}"));
+            // Without a tip, the wallet's last scanned height stands in for it.
+            steps.scanned_through()
+        },
+    };
+
+    // Deliberately last, and so after the scan on a pass that scanned: a transaction mined between
+    // the two reads is then already excluded by the scanned-state check of the refresh, so its
+    // value can never be counted from both the wallet database and the pending set (R39.8.0ah).
+    steps.refresh_pending(refresh_height).await;
+}
+
+/// The download and scan part of a pass that found a new block at `tip`.
+#[cfg(not(target_arch = "wasm32"))]
+async fn sync_wallet_db_to_tip<S: ShieldedSyncPassSteps>(steps: &S, ticker: &str, tip: u64) {
+    if let Err(e) = steps.download_blocks(tip).await {
+        log::warn!("ZCoin periodic sync for {ticker}: compact block fetch to height {tip} failed: {e}");
+        steps.record_error(&format!("compact block fetch to height {tip} failed: {e}"));
+        return;
+    }
+
+    match steps.scan(tip) {
+        Ok(scanned_height) => {
+            log::debug!("ZCoin periodic sync for {ticker}: wallet DB scanned through {scanned_height}");
+        },
+        // `scan_shielded_wallet_db_to_height` clears the scan-complete flag on
+        // failure, which blocks spending until a later pass succeeds. That is
+        // the intended conservative behaviour: the wallet's view of its own
+        // notes is incomplete, so it must not build transactions from it.
+        Err(e) => log::warn!("ZCoin periodic sync for {ticker}: wallet DB scan to height {tip} failed: {e}"),
+    }
+}
+
+/// The real steps of a pass: the coin's own chain reads, wallet database and pending view.
+#[cfg(not(target_arch = "wasm32"))]
+struct ZCoinShieldedSyncSteps<'a>(&'a ZCoin);
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
+impl ShieldedSyncPassSteps for ZCoinShieldedSyncSteps<'_> {
+    async fn chain_tip(&self) -> Result<u64, String> {
+        self.0
+            .rpc_client()
+            .get_block_count()
+            .compat()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn scanned_through(&self) -> u64 { self.0.z_fields.wallet_db_scanned_through.load(AtomicOrdering::Relaxed) }
+
+    async fn download_blocks(&self, tip: u64) -> Result<(), String> {
         let no_progress = |_: u64, _: u64| {};
-        if let Err(e) = coin
+        self.0
             .fetch_lightwalletd_compact_blocks_to_height(tip, None, true, &no_progress)
             .await
-        {
-            log::warn!("ZCoin periodic sync for {ticker}: compact block fetch to height {tip} failed: {e}");
-            coin.set_shielded_sync_error(&format!("compact block fetch to height {tip} failed: {e}"));
-            continue;
-        }
-
-        match coin.scan_shielded_wallet_db_to_height(tip, no_progress) {
-            Ok(scanned_height) => {
-                log::debug!("ZCoin periodic sync for {ticker}: wallet DB scanned through {scanned_height}");
-                // Deliberately after the scan: a transaction mined between the
-                // two reads is then already excluded by the scanned-state
-                // check below, so its value can never be counted from both the
-                // wallet database and the pending set (R39.8.0ah).
-                coin.refresh_pending_receipts(tip).await;
-            },
-            // `scan_shielded_wallet_db_to_height` clears the scan-complete flag on
-            // failure, which blocks spending until a later pass succeeds. That is
-            // the intended conservative behaviour: the wallet's view of its own
-            // notes is incomplete, so it must not build transactions from it.
-            Err(e) => log::warn!("ZCoin periodic sync for {ticker}: wallet DB scan to height {tip} failed: {e}"),
-        }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
+
+    fn scan(&self, tip: u64) -> Result<u64, String> {
+        self.0.scan_shielded_wallet_db_to_height(tip, |_: u64, _: u64| {})
+    }
+
+    async fn refresh_pending(&self, height: u64) { self.0.refresh_pending_receipts(height).await }
+
+    fn record_error(&self, message: &str) { self.0.set_shielded_sync_error(message) }
 }
 
 impl ZCoin {
@@ -2218,6 +2696,46 @@ impl ZCoin {
             IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
             now_ms() / 1000,
         )
+    }
+
+    /// The Ironwood activation time and height known for this coin, as R39.6.4f reads them: the time
+    /// configured or built-in, whether or not `ironwood_gate_disabled` is set, and the height
+    /// configured or discovered.
+    fn v6_capability_inputs(&self) -> (Option<u32>, Option<u32>) {
+        let params = &self.z_fields.consensus_params;
+        (
+            configured_or_builtin_ironwood_time(params, &self.utxo_arc.conf.ticker),
+            params.effective_ironwood_activation_height(),
+        )
+    }
+
+    /// R39.6.4f(b): whether `info` is declined for lacking `tx_v6`, as of `now_sec`. Logs a decline
+    /// (R39.6.4f(d)).
+    fn v6_counterparty_declined_at(&self, info: &Option<Vec<u8>>, now_sec: u64) -> bool {
+        let (time, height) = self.v6_capability_inputs();
+        if !v6_counterparty_required_at(
+            self.z_fields.consensus_params.require_v6_counterparty(),
+            time,
+            height,
+            IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+            now_sec,
+        ) {
+            return false;
+        }
+        let Some(cause) = v6_decline_cause(info) else {
+            return false;
+        };
+        let lines = self
+            .z_fields
+            .v6_decline_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record(&self.utxo_arc.conf.ticker, cause, now_sec);
+        log::debug!("{}", lines.debug);
+        if let Some(warning) = lines.warning {
+            log::warn!("{warning}");
+        }
+        true
     }
 
     /// The Ironwood activation time in force for this coin — configured value,
@@ -2458,7 +2976,10 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for ZCoinBuilder<'a> {
         // cannot build shielded transactions without the param files).
         #[cfg(not(target_arch = "wasm32"))]
         let z_tx_prover = {
-            let params_dir = self.zcash_params_path.clone().unwrap_or_else(zcash_params_path);
+            let params_dir = match self.zcash_params_path.clone() {
+                Some(path) => path,
+                None => zcash_params_path().map_err(|reason| ZCoinBuildError::ZCashParamsDirUnresolved { reason })?,
+            };
             verify_zcash_params_integrity(&params_dir)?;
             tokio::task::block_in_place(|| {
                 LocalTxProver::new(
@@ -2509,6 +3030,7 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for ZCoinBuilder<'a> {
             #[cfg(not(target_arch = "wasm32"))]
             pending_receipts: Mutex::new(HashMap::new()),
             consensus_params,
+            v6_decline_log: Mutex::new(V6DeclineLog::default()),
             check_point_block: self.protocol_info.check_point_block,
             blocks_per_iteration: self.protocol_info.blocks_per_iteration,
             inter_iteration_interval_ms: self.protocol_info.inter_iteration_interval_ms,
@@ -2717,6 +3239,16 @@ impl MarketCoinOps for ZCoin {
     /// (R39.8.0ap, D39.8.0e). Recording happens only after the backend accepted the transaction,
     /// and a failure to record never fails the broadcast.
     fn send_raw_tx_bytes(&self, tx: &[u8]) -> Box<dyn Future<Item = String, Error = String> + Send> {
+        // A transaction the wallet database already holds is not handed to any endpoint again: the
+        // node would only answer with a duplicate-nullifier error that reads like a note-reuse defect.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.is_light() {
+            if let Some(refusal) = z_coin_ops::rebroadcast_refusal(self.ticker(), &self.z_fields.shielded_history, tx) {
+                let text = refusal.to_string();
+                log::info!("{text}");
+                return Box::new(futures::future::err(text).boxed().compat());
+            }
+        }
         let fut = utxo_common::send_raw_tx_bytes(self.as_ref(), tx);
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -2870,17 +3402,31 @@ impl MmCoin for ZCoin {
         {
             let coin = self.clone();
             let fut = async move {
+                // CRD ch.49 R49.27a (b) and (c): the shared unsupported-operation arm, `fee` checked first.
+                // Both run before the destination is decoded or any note is selected.
                 if req.fee.is_some() {
-                    return MmError::err(WithdrawError::InternalError(
-                        "Setting a custom withdraw fee is not supported for ZCoin yet".to_owned(),
+                    return MmError::err(WithdrawError::UnsupportedError(
+                        "Setting a custom withdraw fee is not supported for ZCoin".to_owned(),
+                    ));
+                }
+                if req.from.is_some() {
+                    return MmError::err(WithdrawError::UnsupportedError(
+                        "Selecting a sender with `from` is not supported for ZCoin".to_owned(),
                     ));
                 }
 
-                let to_addr =
-                    decode_payment_address(coin.z_fields.consensus_params.hrp_sapling_payment_address(), &req.to)
-                        .map_to_mm(|e| WithdrawError::InvalidAddress(format!("{}", e)))?;
+                let destination =
+                    z_pirate1::decode_destination(&coin.z_fields.consensus_params, coin.ticker(), &req.to)
+                        .map_err(|refusal| MmError::new(WithdrawError::InvalidAddress(refusal.withdraw_reason())))?;
+                let pays_ironwood = matches!(destination, z_pirate1::WithdrawDestination::Ironwood(_));
                 let amount = if req.max {
-                    let fee = coin.get_one_kbyte_tx_fee().await.mm_err(Into::into)?;
+                    // A transaction with an Ironwood output pays the fixed fee, whatever `txfee` says
+                    // (R39.6.5f).
+                    let fee = if pays_ironwood {
+                        big_decimal_from_sat_unsigned(z_pirate1::IRONWOOD_PAYMENT_FEE_SAT, coin.decimals())
+                    } else {
+                        coin.get_one_kbyte_tx_fee().await.mm_err(Into::into)?
+                    };
                     let balance = coin.my_balance().compat().await.mm_err(Into::into)?;
                     // Nothing to send when the spendable balance does not cover the fee; subtracting
                     // anyway yields a negative amount that only fails later, as an internal error.
@@ -2899,24 +3445,68 @@ impl MmCoin for ZCoin {
                     req.amount
                 };
                 let satoshi = sat_from_big_decimal(&amount, coin.decimals()).mm_err(Into::into)?;
-                let z_output = ZOutput {
-                    to_addr,
-                    amount: Amount::from_u64(satoshi)
-                        .map_to_mm(|_| NumConversError(format!("Failed to get ZCash amount from {}", amount)))
-                        .mm_err(Into::into)?,
-                    // TODO add optional viewing_key and memo fields to the WithdrawRequest
-                    viewing_key: None,
-                    memo: None,
-                };
+                let zcash_amount = Amount::from_u64(satoshi)
+                    .map_to_mm(|_| NumConversError(format!("Failed to get ZCash amount from {}", amount)))
+                    .mm_err(Into::into)?;
 
-                let (tx, data) = coin.gen_tx(vec![], vec![z_output]).await.mm_err(Into::into)?;
+                let build_started = std::time::Instant::now();
+                let (tx, data) = match destination {
+                    z_pirate1::WithdrawDestination::Sapling(to_addr) => {
+                        let z_output = ZOutput {
+                            to_addr,
+                            amount: zcash_amount,
+                            // TODO add optional viewing_key and memo fields to the WithdrawRequest
+                            viewing_key: None,
+                            memo: None,
+                        };
+                        coin.gen_tx(vec![], vec![z_output]).await
+                    },
+                    z_pirate1::WithdrawDestination::Ironwood(recipient) => {
+                        coin.gen_ironwood_withdraw_tx(z_pirate1::IronwoodPayment {
+                            recipient,
+                            amount: zcash_amount,
+                        })
+                        .await
+                    },
+                }
+                .mm_err(Into::into)?;
                 let mut tx_bytes = Vec::with_capacity(1024);
                 tx.write(&mut tx_bytes)
                     .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
                 let mut tx_hash = tx.txid().as_ref().to_vec();
                 tx_hash.reverse();
+                log::info!(
+                    "ZCoin {}: withdrawal {} built in {:.1} s: {} Sapling spends, Ironwood output: {}",
+                    coin.ticker(),
+                    hex::encode(&tx_hash),
+                    build_started.elapsed().as_secs_f64(),
+                    tx.sapling_bundle().map_or(0, |bundle| bundle.shielded_spends().len()),
+                    if tx.ironwood_bundle().is_some() { "yes" } else { "no" }
+                );
 
-                let my_balance_change = data.spent_by_me - data.received_by_me;
+                // Keep the destination as the request gave it, for the history row of this transaction
+                // (CRD ch.39 R39.8.9d2 (a)). A failure only costs the row its recipient, so the
+                // withdrawal is not failed for it.
+                if let Err(e) = coin.z_fields.shielded_history.record_withdraw_recipient(
+                    tx.txid().as_ref(),
+                    u32::from(tx.expiry_height()),
+                    &req.to,
+                ) {
+                    log::warn!(
+                        "ZCoin {}: could not record the destination of the withdrawal {}: {}. \
+                         Its history row will not list the recipient.",
+                        coin.ticker(),
+                        hex::encode(&tx_hash),
+                        e
+                    );
+                }
+
+                // Received minus spent, negative for a withdrawal: the orientation of the history row
+                // (CRD ch.39 R39.5A.3). The two amounts are unsigned, so the difference is taken on the
+                // decimals.
+                let spent_by_me = big_decimal_from_sat_unsigned(data.spent_by_me, coin.decimals());
+                let received_by_me = big_decimal_from_sat_unsigned(data.received_by_me, coin.decimals());
+                let my_balance_change = received_by_me.clone() - spent_by_me.clone();
 
                 Ok(TransactionDetails {
                     tx_json: None,
@@ -2924,10 +3514,10 @@ impl MmCoin for ZCoin {
                     tx_hash: tx_hash.to_tx_hash(),
                     from: vec![coin.z_fields.my_z_addr_encoded.clone()],
                     to: vec![req.to],
-                    total_amount: big_decimal_from_sat_unsigned(data.spent_by_me, coin.decimals()),
-                    spent_by_me: big_decimal_from_sat_unsigned(data.spent_by_me, coin.decimals()),
-                    received_by_me: big_decimal_from_sat_unsigned(data.received_by_me, coin.decimals()),
-                    my_balance_change: big_decimal_from_sat_unsigned(my_balance_change, coin.decimals()),
+                    total_amount: spent_by_me.clone(),
+                    spent_by_me,
+                    received_by_me,
+                    my_balance_change,
                     block_height: 0,
                     timestamp: 0,
                     fee_details: Some(TxFeeDetails::Utxo(UtxoFeeDetails {
@@ -2967,6 +3557,22 @@ impl MmCoin for ZCoin {
     }
 
     fn validate_address(&self, address: &str) -> ValidateAddressResult {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // A Sapling address of the coin, or a Pirate1 (Ironwood) address of its network (R39.6.5b).
+            match z_pirate1::decode_destination(&self.z_fields.consensus_params, self.ticker(), address) {
+                Ok(_) => ValidateAddressResult {
+                    is_valid: true,
+                    reason: None,
+                },
+                Err(refusal) => ValidateAddressResult {
+                    is_valid: false,
+                    reason: Some(refusal.validate_reason()),
+                },
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
         match decode_payment_address(self.z_fields.consensus_params.hrp_sapling_payment_address(), address) {
             Ok(_) => ValidateAddressResult {
                 is_valid: true,
@@ -3094,7 +3700,15 @@ impl MmCoin for ZCoin {
 
     fn mature_confirmations(&self) -> Option<u32> { Some(self.utxo_arc.conf.mature_confirmations) }
 
-    fn coin_protocol_info(&self) -> Vec<u8> { utxo_common::coin_protocol_info(self) }
+    fn coin_protocol_info(&self) -> Vec<u8> {
+        let (time, height) = self.v6_capability_inputs();
+        v6_protocol_info(
+            utxo_common::coin_protocol_info(self),
+            time,
+            height,
+            IRONWOOD_V6_SUPPORTED,
+        )
+    }
 
     fn is_coin_protocol_supported(&self, info: &Option<Vec<u8>>) -> bool {
         // `wallet_only` gates the locally initiated paths (`buy`, `sell`,
@@ -3110,7 +3724,11 @@ impl MmCoin for ZCoin {
             );
             return false;
         }
-        utxo_common::is_coin_protocol_supported(self, info)
+        if !utxo_common::is_coin_protocol_supported(self, info) {
+            return false;
+        }
+        // R39.6.4f: the counterparty must declare that it builds version-6 transactions.
+        !self.v6_counterparty_declined_at(info, now_ms() / 1000)
     }
 }
 
@@ -3307,4 +3925,137 @@ fn derive_z_key_from_mm_seed() {
         encoded_addr,
         "zs1funuwrjr2stlr6fnhkdh7fyz3p7n0p8rxase9jnezdhc286v5mhs6q3myw0phzvad5mvqgfxpam"
     );
+}
+
+/// One pass of the background sync, with its steps scripted (CRD ch.39 T39.8.0g1, R39.8.0aj1).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod shielded_sync_pass_tests {
+    use super::*;
+
+    /// What a pass did, in the order it did it.
+    #[derive(Debug, PartialEq)]
+    enum Call {
+        ChainTip,
+        Download(u64),
+        Scan(u64),
+        RecordError(String),
+        Refresh(u64),
+    }
+
+    /// Steps whose outcomes the test scripts and whose calls it reads back.
+    struct ScriptedSteps {
+        scanned_through: u64,
+        tip: Result<u64, String>,
+        download: Result<(), String>,
+        scan: Result<u64, String>,
+        calls: Mutex<Vec<Call>>,
+    }
+
+    impl ScriptedSteps {
+        /// A wallet scanned through `scanned_through`, a chain at `tip`, and a download and scan that
+        /// succeed.
+        fn new(scanned_through: u64, tip: u64) -> ScriptedSteps {
+            ScriptedSteps {
+                scanned_through,
+                tip: Ok(tip),
+                download: Ok(()),
+                scan: Ok(tip),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn record(&self, call: Call) { self.calls.lock().unwrap().push(call); }
+
+        async fn run(&self) -> Vec<Call> {
+            run_shielded_sync_pass(self, "ARRR").await;
+            std::mem::take(&mut *self.calls.lock().unwrap())
+        }
+    }
+
+    #[async_trait]
+    impl ShieldedSyncPassSteps for ScriptedSteps {
+        async fn chain_tip(&self) -> Result<u64, String> {
+            self.record(Call::ChainTip);
+            self.tip.clone()
+        }
+
+        fn scanned_through(&self) -> u64 { self.scanned_through }
+
+        async fn download_blocks(&self, tip: u64) -> Result<(), String> {
+            self.record(Call::Download(tip));
+            self.download.clone()
+        }
+
+        fn scan(&self, tip: u64) -> Result<u64, String> {
+            self.record(Call::Scan(tip));
+            self.scan.clone()
+        }
+
+        async fn refresh_pending(&self, height: u64) { self.record(Call::Refresh(height)); }
+
+        fn record_error(&self, message: &str) { self.record(Call::RecordError(message.to_owned())); }
+    }
+
+    /// R39.8.0aj1: with no new block the pass downloads and scans nothing, yet refreshes once, with the
+    /// tip as the height.
+    #[tokio::test]
+    async fn t39_8_0g1_a_pass_with_no_new_block_refreshes_once_with_the_tip() {
+        let steps = ScriptedSteps::new(100, 100);
+        assert_eq!(steps.run().await, vec![Call::ChainTip, Call::Refresh(100)]);
+    }
+
+    /// R39.8.0aj1: a failed block download skips the scan and still refreshes, after recording the
+    /// failure.
+    #[tokio::test]
+    async fn t39_8_0g1_a_pass_whose_download_fails_still_refreshes() {
+        let mut steps = ScriptedSteps::new(100, 105);
+        steps.download = Err("no endpoint answered".to_owned());
+        assert_eq!(steps.run().await, vec![
+            Call::ChainTip,
+            Call::Download(105),
+            Call::RecordError("compact block fetch to height 105 failed: no endpoint answered".to_owned()),
+            Call::Refresh(105),
+        ]);
+    }
+
+    /// R39.8.0aj1: a failed scan still refreshes, after the scan attempt.
+    #[tokio::test]
+    async fn t39_8_0g1_a_pass_whose_scan_fails_still_refreshes_after_the_attempt() {
+        let mut steps = ScriptedSteps::new(100, 105);
+        steps.scan = Err("database is locked".to_owned());
+        assert_eq!(steps.run().await, vec![
+            Call::ChainTip,
+            Call::Download(105),
+            Call::Scan(105),
+            Call::Refresh(105),
+        ]);
+    }
+
+    /// R39.8.0aj1, R39.8.0ah: a pass that scans refreshes after its scan, never before, and once.
+    #[tokio::test]
+    async fn t39_8_0g1_a_pass_that_scans_refreshes_after_the_scan() {
+        let steps = ScriptedSteps::new(100, 105);
+        let calls = steps.run().await;
+        assert_eq!(calls, vec![
+            Call::ChainTip,
+            Call::Download(105),
+            Call::Scan(105),
+            Call::Refresh(105),
+        ]);
+        let position = |wanted: &Call| calls.iter().position(|call| call == wanted).unwrap();
+        assert!(position(&Call::Scan(105)) < position(&Call::Refresh(105)));
+    }
+
+    /// R39.8.0aj1: with the tip unreadable the pass records the failure and refreshes once, with the
+    /// wallet's scanned height in place of the tip.
+    #[tokio::test]
+    async fn t39_8_0g1_a_pass_that_cannot_read_the_tip_refreshes_with_the_scanned_height() {
+        let mut steps = ScriptedSteps::new(100, 105);
+        steps.tip = Err("no route to host".to_owned());
+        assert_eq!(steps.run().await, vec![
+            Call::ChainTip,
+            Call::RecordError("could not reach the chain tip: no route to host".to_owned()),
+            Call::Refresh(100),
+        ]);
+    }
 }

@@ -88,6 +88,20 @@ impl TronAddress {
         Self::from_bytes(&bytes)
     }
 
+    /// Parse an address as a caller supplies it: Base58Check (`T...`), or the 21-byte wire form in hex
+    /// (starting with `41`, optionally behind `0x`).
+    ///
+    /// # Errors
+    ///
+    /// The [`TronAddressError`] of the form the string looks like (Base58Check unless it starts with `0x` or `41`).
+    pub fn parse(s: &str) -> Result<Self, TronAddressError> {
+        if s.starts_with("0x") || s.starts_with("41") {
+            Self::from_hex(s)
+        } else {
+            Self::from_base58(s)
+        }
+    }
+
     /// Return the 20-byte EVM address.
     pub fn to_evm_address(&self) -> EthAddress { self.0 }
 
@@ -215,6 +229,18 @@ mod tests {
     fn test_display() {
         let addr = TronAddress::from_base58(TEST_BASE58).unwrap();
         assert_eq!(format!("{}", addr), TEST_BASE58);
+    }
+
+    #[test]
+    fn parse_accepts_base58_and_hex_forms_and_refuses_the_rest() {
+        let expected = TronAddress::from_base58(TEST_BASE58).unwrap();
+        assert_eq!(TronAddress::parse(TEST_BASE58).unwrap(), expected);
+        assert_eq!(TronAddress::parse(TEST_HEX).unwrap(), expected);
+        assert_eq!(TronAddress::parse(&format!("0x{TEST_HEX}")).unwrap(), expected);
+        // The 20-byte EVM form is not a TRON address.
+        assert!(TronAddress::parse("0x8840e6c55b9ada326d211d818c34a994aeced808").is_err());
+        assert!(TronAddress::parse("").is_err());
+        assert!(TronAddress::parse("not-an-address").is_err());
     }
 
     #[test]

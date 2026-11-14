@@ -28,6 +28,7 @@ use common::double_panic_crash;
 use common::log::LogLevel;
 use mm2_core::mm_ctx::MmCtxBuilder;
 
+use common::log::info;
 #[cfg(any(feature = "custom-swap-locktime", feature = "unsafe-rpc-wire-dump"))]
 use common::log::warn;
 #[cfg(feature = "custom-swap-locktime")]
@@ -45,6 +46,7 @@ use serde_json::{self as json, Value as Json};
 
 use std::env;
 use std::ffi::OsString;
+#[cfg(not(target_arch = "wasm32"))] use std::path::PathBuf;
 use std::process::exit;
 use std::ptr::null;
 use std::str;
@@ -78,6 +80,17 @@ pub mod mm2_tests;
 
 pub const MM_DATETIME: &str = env!("MM_DATETIME");
 pub const MM_VERSION: &str = env!("MM_VERSION");
+/// The version of the `mm2_bin_lib` crate (see `build.rs`), shown in the version text.
+pub const MM_CRATE_VERSION: &str = env!("MM_CRATE_VERSION");
+
+/// Formats the user-visible version text `<crate-version> (<short-hash>) DT <datetime>`.
+/// `MM_VERSION` itself stays the bare short hash; it is also used by the `version` RPC and the swap records.
+fn format_version_text(crate_version: &str, short_hash: &str, datetime: &str) -> String {
+    format!("{crate_version} ({short_hash}) DT {datetime}")
+}
+
+/// The version text of this binary, shown in the startup log lines.
+pub fn version_text() -> String { format_version_text(MM_CRATE_VERSION, MM_VERSION, MM_DATETIME) }
 pub const PASSWORD_MAXIMUM_CONSECUTIVE_CHARACTERS: usize = 3;
 
 #[cfg(feature = "custom-swap-locktime")]
@@ -107,10 +120,27 @@ impl Default for MmVersionResult {
 pub struct LpMainParams {
     conf: Json,
     filter: Option<LogLevel>,
+    /// Where the configuration and the coins list were loaded from, if KDF loaded them itself.
+    /// `None` when the host application supplied the configuration directly.
+    #[cfg(not(target_arch = "wasm32"))]
+    sources: Option<ConfigSources>,
 }
 
 impl LpMainParams {
-    pub fn with_conf(conf: Json) -> LpMainParams { LpMainParams { conf, filter: None } }
+    pub fn with_conf(conf: Json) -> LpMainParams {
+        LpMainParams {
+            conf,
+            filter: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            sources: None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn config_sources(mut self, sources: ConfigSources) -> LpMainParams {
+        self.sources = Some(sources);
+        self
+    }
 
     pub fn log_filter(mut self, filter: Option<LogLevel>) -> LpMainParams {
         self.filter = filter;
@@ -296,6 +326,11 @@ pub async fn lp_main(params: LpMainParams, ctx_cb: &dyn Fn(u32)) -> Result<(), S
         log!("Logger initialization failed: "(e))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    for line in startup_path_report(params.sources.as_ref(), env::var("MM_LOG").ok().as_deref()) {
+        info!("{}", line);
+    }
+
     #[cfg(feature = "unsafe-rpc-wire-dump")]
     maybe_warn_unsafe_rpc_wire_dump_enabled();
 
@@ -419,7 +454,7 @@ pub fn mm2_main() {
     use libc::c_char;
 
     init_crash_reports();
-    log!({"KDF-Reloaded DeFi Framework {} DT {}", MM_VERSION, MM_DATETIME});
+    log!({"KDF-Reloaded DeFi Framework {}", version_text()});
 
     // Temporarily simulate `argv[]` for the C version of the main method.
     let args: Vec<String> = env::args()
@@ -476,14 +511,109 @@ pub fn mm2_main() {
     }
 }
 
+/// Returns `path` made absolute against the current working directory for log output.
+/// No symlink resolution and no filesystem access; falls back to the path as given on failure.
+pub(crate) fn absolute_path_for_log(path: &std::path::Path) -> String {
+    match std::path::absolute(path) {
+        Ok(abs) => abs.display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+/// Where the runtime configuration was read from.
 #[cfg(not(target_arch = "wasm32"))]
-/// Parses and returns the `first_arg` as JSON.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConfigSource {
+    /// The first command-line argument.
+    CommandLine,
+    /// A file; `from_env` is true when the path came from `MM_CONF_PATH`.
+    File { path: PathBuf, from_env: bool },
+}
+
+/// Where the coins list was read from.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq)]
+pub enum CoinsSource {
+    /// `coins` was present in the configuration; `ignored_env_path` is the `MM_COINS_PATH` value
+    /// when that variable was set but therefore not used.
+    Inline { ignored_env_path: Option<PathBuf> },
+    /// A file; `from_env` is true when the path came from `MM_COINS_PATH`.
+    File { path: PathBuf, from_env: bool },
+}
+
+/// Sources of the configuration and of the coins list (paths and kinds only, never contents).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfigSources {
+    pub conf: ConfigSource,
+    pub coins: CoinsSource,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn path_origin(from_env: bool, env_name: &str) -> String {
+    if from_env {
+        format!("via {env_name}")
+    } else {
+        "default name".to_owned()
+    }
+}
+
+/// Builds the INFO lines reporting which files KDF used at startup. Paths and source kinds only.
+/// `mm_log` is the raw `MM_LOG` value.
+#[cfg(not(target_arch = "wasm32"))]
+fn startup_path_report(sources: Option<&ConfigSources>, mm_log: Option<&str>) -> Vec<String> {
+    use std::path::Path;
+
+    let mut lines = Vec::new();
+    match sources {
+        None => lines.push("Configuration: supplied by the host application (no configuration file read)".to_owned()),
+        Some(sources) => {
+            lines.push(match &sources.conf {
+                ConfigSource::CommandLine => "Configuration: from command-line argument".to_owned(),
+                ConfigSource::File { path, from_env } => format!(
+                    "Configuration: from file {} ({})",
+                    absolute_path_for_log(path),
+                    path_origin(*from_env, "MM_CONF_PATH")
+                ),
+            });
+            lines.push(match &sources.coins {
+                CoinsSource::Inline { ignored_env_path: None } => "Coins: inline in the configuration".to_owned(),
+                CoinsSource::Inline {
+                    ignored_env_path: Some(ignored),
+                } => format!(
+                    "Coins: inline in the configuration (MM_COINS_PATH={} is set but ignored)",
+                    absolute_path_for_log(ignored)
+                ),
+                CoinsSource::File { path, from_env } => format!(
+                    "Coins: from file {} ({})",
+                    absolute_path_for_log(path),
+                    path_origin(*from_env, "MM_COINS_PATH")
+                ),
+            });
+        },
+    }
+    match mm_log {
+        // Mirrors the `.log` suffix rule applied when the log file is opened.
+        Some(path) if path.ends_with(".log") => lines.push(format!(
+            "Log file: {} (via MM_LOG)",
+            absolute_path_for_log(Path::new(path))
+        )),
+        Some(_) => lines.push("Log file: MM_LOG is set but does not end in .log, file logging is disabled".to_owned()),
+        None => {},
+    }
+    lines
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Parses and returns the `first_arg` as JSON, together with the sources the configuration
+/// and the coins list were loaded from.
 /// Attempts to load the config from `MM2.json` file if `first_arg` is None
-pub fn get_mm2config(first_arg: Option<&str>) -> Result<Json, String> {
-    let conf_path = env::var("MM_CONF_PATH").unwrap_or_else(|_| "MM2.json".into());
+pub fn get_mm2config(first_arg: Option<&str>) -> Result<(Json, ConfigSources), String> {
+    let conf_path_env = env::var("MM_CONF_PATH").ok();
+    let conf_path = conf_path_env.clone().unwrap_or_else(|| "MM2.json".into());
     let conf_from_file = slurp(&conf_path);
-    let conf = match first_arg {
-        Some(s) => s,
+    let (conf, conf_source) = match first_arg {
+        Some(s) => (s, ConfigSource::CommandLine),
         None => {
             if conf_from_file.is_empty() {
                 return ERR!(
@@ -491,7 +621,10 @@ pub fn get_mm2config(first_arg: Option<&str>) -> Result<Json, String> {
                     conf_path
                 );
             }
-            try_s!(std::str::from_utf8(&conf_from_file))
+            (try_s!(std::str::from_utf8(&conf_from_file)), ConfigSource::File {
+                path: PathBuf::from(&conf_path),
+                from_env: conf_path_env.is_some(),
+            })
         },
     };
 
@@ -501,8 +634,9 @@ pub fn get_mm2config(first_arg: Option<&str>) -> Result<Json, String> {
         Err(_) => return ERR!("Couldn't parse mm2 config to JSON format!"),
     };
 
-    if conf["coins"].is_null() {
-        let coins_path = env::var("MM_COINS_PATH").unwrap_or_else(|_| "coins".into());
+    let coins_path_env = env::var("MM_COINS_PATH").ok();
+    let coins_source = if conf["coins"].is_null() {
+        let coins_path = coins_path_env.clone().unwrap_or_else(|| "coins".into());
         let coins_from_file = slurp(&coins_path);
         if coins_from_file.is_empty() {
             return ERR!(
@@ -525,11 +659,22 @@ pub fn get_mm2config(first_arg: Option<&str>) -> Result<Json, String> {
         }
 
         conf["coins"] = coins;
+        CoinsSource::File {
+            path: PathBuf::from(&coins_path),
+            from_env: coins_path_env.is_some(),
+        }
     } else if !conf["coins"].is_array() {
         return ERR!("'coins' field must be a JSON array");
-    }
+    } else {
+        CoinsSource::Inline {
+            ignored_env_path: coins_path_env.map(PathBuf::from),
+        }
+    };
 
-    Ok(conf)
+    Ok((conf, ConfigSources {
+        conf: conf_source,
+        coins: coins_source,
+    }))
 }
 
 /// Runs LP_main with result of `get_mm2config()`.
@@ -545,7 +690,7 @@ pub fn run_lp_main(first_arg: Option<&str>, ctx_cb: &dyn Fn(u32)) -> Result<(), 
 /// whose allocator settings are not ours to change (CRD ch.45 R45.6A.1).
 #[cfg(not(target_arch = "wasm32"))]
 fn run_lp_main_impl(first_arg: Option<&str>, ctx_cb: &dyn Fn(u32), native_daemon: bool) -> Result<(), String> {
-    let conf = get_mm2config(first_arg)?;
+    let (conf, sources) = get_mm2config(first_arg)?;
 
     let log_filter = LogLevel::from_env();
     if native_daemon {
@@ -553,7 +698,9 @@ fn run_lp_main_impl(first_arg: Option<&str>, ctx_cb: &dyn Fn(u32), native_daemon
         malloc_arena::apply_at_startup(&conf, log_filter.unwrap_or_default());
     }
 
-    let params = LpMainParams::with_conf(conf).log_filter(log_filter);
+    let params = LpMainParams::with_conf(conf)
+        .log_filter(log_filter)
+        .config_sources(sources);
     try_s!(block_on(lp_main(params, ctx_cb)));
     Ok(())
 }
@@ -605,7 +752,8 @@ fn init_logger(level: LogLevel) -> Result<(), String> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::get_mm2config;
+    use super::{format_version_text, get_mm2config, startup_path_report, version_text, CoinsSource, ConfigSource,
+                ConfigSources, MM_CRATE_VERSION, MM_VERSION};
     use lazy_static::lazy_static;
     use std::env;
     use std::ffi::OsString;
@@ -664,8 +812,13 @@ mod tests {
         let _coins_guard = EnvVarGuard::set("MM_COINS_PATH", coins_path.to_str().expect("valid coins path"));
         let _conf_guard = EnvVarGuard::remove("MM_CONF_PATH");
 
-        let conf = get_mm2config(Some(r#"{"gui":"test","netid":8762,"rpc_password":"StrongPass123*"}"#))
+        let (conf, sources) = get_mm2config(Some(r#"{"gui":"test","netid":8762,"rpc_password":"StrongPass123*"}"#))
             .expect("config should load from runtime JSON and MM_COINS_PATH");
+        assert_eq!(sources.conf, ConfigSource::CommandLine);
+        assert_eq!(sources.coins, CoinsSource::File {
+            path: coins_path.clone(),
+            from_env: true
+        });
 
         assert!(conf["coins"].is_array(), "coins should be loaded from MM_COINS_PATH");
         assert!(
@@ -675,5 +828,163 @@ mod tests {
 
         fs::remove_file(coins_path).expect("unable to remove coins file");
         fs::remove_dir(tmp_dir).expect("unable to remove temp dir");
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = env::temp_dir().join(format!("kdf-mm2config-{}-{}", tag, common::now_ms()));
+        fs::create_dir_all(&dir).expect("unable to create temp dir");
+        dir
+    }
+
+    #[test]
+    fn missing_default_config_file_is_an_error() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _conf_guard = EnvVarGuard::remove("MM_CONF_PATH");
+        let _coins_guard = EnvVarGuard::remove("MM_COINS_PATH");
+        // The default name resolves relative to the CWD, which the test binary does not control;
+        // only assert when the file is absent.
+        if std::path::Path::new("MM2.json").exists() || std::path::Path::new("coins").exists() {
+            return;
+        }
+        assert!(
+            get_mm2config(None).is_err(),
+            "no command line arg and no MM2.json must fail"
+        );
+    }
+
+    /// T45.14: the report states the actual source of the configuration and of the coins.
+    #[test]
+    fn config_from_mm_conf_path_file_with_inline_coins_reports_ignored_coins_env() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let dir = temp_dir("conf-file");
+        let conf_path = dir.join("my.json");
+        fs::write(&conf_path, br#"{"netid":8762,"coins":[{"coin":"DOC"}]}"#).expect("unable to write conf");
+        let _conf_guard = EnvVarGuard::set("MM_CONF_PATH", conf_path.to_str().expect("utf8 path"));
+        let _coins_guard = EnvVarGuard::set("MM_COINS_PATH", "ignored-coins");
+
+        let (_, sources) = get_mm2config(None).expect("config should load from MM_CONF_PATH");
+        assert_eq!(sources.conf, ConfigSource::File {
+            path: conf_path.clone(),
+            from_env: true
+        });
+        assert_eq!(sources.coins, CoinsSource::Inline {
+            ignored_env_path: Some("ignored-coins".into())
+        });
+
+        let lines = startup_path_report(Some(&sources), None);
+        assert_eq!(lines, vec![
+            format!("Configuration: from file {} (via MM_CONF_PATH)", conf_path.display()),
+            format!(
+                "Coins: inline in the configuration (MM_COINS_PATH={} is set but ignored)",
+                std::path::absolute("ignored-coins").expect("absolute").display()
+            ),
+        ]);
+
+        fs::remove_dir_all(dir).expect("unable to remove temp dir");
+    }
+
+    /// T45.14: command-line configuration, inline coins without an ignored `MM_COINS_PATH`.
+    #[test]
+    fn command_line_config_wins_over_conf_file_and_inline_coins_without_env() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _conf_guard = EnvVarGuard::set("MM_CONF_PATH", "/nonexistent/never-read.json");
+        let _coins_guard = EnvVarGuard::remove("MM_COINS_PATH");
+
+        let (_, sources) = get_mm2config(Some(r#"{"coins":[]}"#)).expect("config should parse");
+        assert_eq!(sources.conf, ConfigSource::CommandLine);
+        assert_eq!(sources.coins, CoinsSource::Inline { ignored_env_path: None });
+        assert_eq!(startup_path_report(Some(&sources), None), vec![
+            "Configuration: from command-line argument".to_owned(),
+            "Coins: inline in the configuration".to_owned(),
+        ]);
+    }
+
+    /// T45.14: default-named files, relative paths shown as absolute, no content in the report.
+    #[test]
+    fn report_makes_relative_paths_absolute_and_never_leaks_content() {
+        let sources = ConfigSources {
+            conf: ConfigSource::File {
+                path: "MM2.json".into(),
+                from_env: false,
+            },
+            coins: CoinsSource::File {
+                path: "coins".into(),
+                from_env: false,
+            },
+        };
+        let cwd = env::current_dir().expect("cwd");
+        let lines = startup_path_report(Some(&sources), Some("rel/kdf.log"));
+        assert_eq!(lines, vec![
+            format!(
+                "Configuration: from file {} (default name)",
+                cwd.join("MM2.json").display()
+            ),
+            format!("Coins: from file {} (default name)", cwd.join("coins").display()),
+            format!("Log file: {} (via MM_LOG)", cwd.join("rel/kdf.log").display()),
+        ]);
+    }
+
+    /// T45.14: host-supplied configuration and an unusable `MM_LOG`.
+    #[test]
+    fn report_handles_host_supplied_config_and_bad_mm_log() {
+        let lines = startup_path_report(None, Some("/tmp/not-a-log.txt"));
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("Configuration: supplied by the host application"));
+        assert!(lines[1].contains("does not end in .log"));
+        assert_eq!(startup_path_report(None, None).len(), 1);
+    }
+
+    #[test]
+    fn test_format_version_text_normal() {
+        assert_eq!(
+            format_version_text("0.4.0", "e65d3c4", "2026-11-02T18:30:00+00:00"),
+            "0.4.0 (e65d3c4) DT 2026-11-02T18:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn test_format_version_text_prerelease() {
+        assert_eq!(
+            format_version_text("0.4.0-alpha.1", "e65d3c4", "2026-11-02T18:30:00+00:00"),
+            "0.4.0-alpha.1 (e65d3c4) DT 2026-11-02T18:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn test_format_version_text_unknown_hash() {
+        assert_eq!(
+            format_version_text("0.4.0", "UNKNOWN", "2026-11-02T18:30:00+00:00"),
+            "0.4.0 (UNKNOWN) DT 2026-11-02T18:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn test_format_version_text_empty_datetime() {
+        assert_eq!(format_version_text("0.4.0", "e65d3c4", ""), "0.4.0 (e65d3c4) DT ");
+    }
+
+    #[test]
+    fn test_version_text_contains_crate_version_and_hash() {
+        let text = version_text();
+        assert!(text.starts_with(MM_CRATE_VERSION), "{text}");
+        assert!(text.contains(&format!("({MM_VERSION})")), "{text}");
+    }
+
+    /// `MM_CRATE_VERSION` must follow the `mm2_bin_lib` package version.
+    #[test]
+    fn test_crate_version_matches_bin_lib_manifest() {
+        let manifest = include_str!("../../mm2_bin_lib/Cargo.toml");
+        let package = manifest
+            .split("[package]")
+            .nth(1)
+            .and_then(|rest| rest.split("\n[").next())
+            .expect("mm2_bin_lib manifest has a [package] table");
+        let version = package
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("version"))
+            .and_then(|rest| rest.trim().strip_prefix('='))
+            .map(|value| value.trim().trim_matches('"'))
+            .expect("mm2_bin_lib manifest has a package version");
+        assert_eq!(MM_CRATE_VERSION, version);
     }
 }

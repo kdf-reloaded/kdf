@@ -252,7 +252,9 @@ impl MarketCoinOps for SiaCoin {
 
     fn min_tx_amount(&self) -> BigDecimal { hastings_to_siacoin(1u64.into()) }
 
-    fn min_trading_vol(&self) -> MmNumber { hastings_to_siacoin(1u64.into()).into() }
+    /// Ten times the fixed miner fee (0.0002 SC), see `min_trading_vol_amount`. The minimum transaction amount
+    /// above stays one hasting: Sia has no dust limit.
+    fn min_trading_vol(&self) -> MmNumber { min_trading_vol_amount().into() }
 }
 
 #[cfg(test)]

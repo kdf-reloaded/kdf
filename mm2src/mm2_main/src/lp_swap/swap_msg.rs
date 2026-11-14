@@ -30,6 +30,19 @@ impl SwapMsgStore {
     }
 }
 
+/// The key a V1 swap message is signed with and the peer it is sent from: the swap's per-swap `p2p_privkey`
+/// (from that key's own peer), or else the swap's own node key pair (CRD ch.05 R45 item 3, R47), sent from this
+/// node.
+pub(super) fn signing_identity(
+    p2p_privkey: &Option<KeyPair>,
+    node_key_pair: &KeyPair,
+) -> ([u8; 32], Option<mm2_p2p::PeerId>) {
+    match p2p_privkey {
+        Some(keypair) => (keypair.private_bytes(), Some(keypair.libp2p_peer_id())),
+        None => (node_key_pair.private().secret.take(), None),
+    }
+}
+
 /// The AbortHandle that aborts on drop
 pub struct AbortOnDropHandle(AbortHandle);
 
@@ -38,17 +51,19 @@ impl Drop for AbortOnDropHandle {
 }
 
 /// Spawns the loop that broadcasts message every `interval` seconds returning the AbortOnDropHandle
-/// to stop it
+/// to stop it. `node_key_pair` is the swap's own node key (CRD ch.05 R47), which signs the message when the swap
+/// has no per-swap `p2p_privkey`.
 pub fn broadcast_swap_message_every(
     ctx: MmArc,
     topic: String,
     msg: SwapMsg,
     interval: f64,
     p2p_privkey: Option<KeyPair>,
+    node_key_pair: KeyPair,
 ) -> AbortOnDropHandle {
     let fut = async move {
         loop {
-            broadcast_swap_message(&ctx, topic.clone(), msg.clone(), &p2p_privkey);
+            broadcast_swap_message(&ctx, topic.clone(), msg.clone(), &p2p_privkey, &node_key_pair);
             Timer::sleep(interval).await;
         }
     };
@@ -57,22 +72,28 @@ pub fn broadcast_swap_message_every(
     AbortOnDropHandle(abort_handle)
 }
 
-/// Broadcast the swap message once
-pub fn broadcast_swap_message(ctx: &MmArc, topic: String, msg: SwapMsg, p2p_privkey: &Option<KeyPair>) {
-    let (p2p_private, from) = match p2p_privkey {
-        Some(keypair) => (keypair.private_bytes(), Some(keypair.libp2p_peer_id())),
-        None => (ctx.secp256k1_key_pair().private().secret.take(), None),
-    };
+/// Broadcast the swap message once, signed with `p2p_privkey` or else with the swap's `node_key_pair`
+pub fn broadcast_swap_message(
+    ctx: &MmArc,
+    topic: String,
+    msg: SwapMsg,
+    p2p_privkey: &Option<KeyPair>,
+    node_key_pair: &KeyPair,
+) {
+    let (p2p_private, from) = signing_identity(p2p_privkey, node_key_pair);
     let encoded_msg = encode_and_sign(&msg, &p2p_private).unwrap();
     broadcast_p2p_msg(ctx, vec![topic], encoded_msg, from);
 }
 
-/// Broadcast the tx message once
-pub fn broadcast_p2p_tx_msg(ctx: &MmArc, topic: String, msg: &TransactionEnum, p2p_privkey: &Option<KeyPair>) {
-    let (p2p_private, from) = match p2p_privkey {
-        Some(keypair) => (keypair.private_bytes(), Some(keypair.libp2p_peer_id())),
-        None => (ctx.secp256k1_key_pair().private().secret.take(), None),
-    };
+/// Broadcast the tx message once, signed with `p2p_privkey` or else with the swap's `node_key_pair`
+pub fn broadcast_p2p_tx_msg(
+    ctx: &MmArc,
+    topic: String,
+    msg: &TransactionEnum,
+    p2p_privkey: &Option<KeyPair>,
+    node_key_pair: &KeyPair,
+) {
+    let (p2p_private, from) = signing_identity(p2p_privkey, node_key_pair);
 
     let encoded_msg = encode_and_sign(&msg.tx_hex(), &p2p_private).unwrap();
     broadcast_p2p_msg(ctx, vec![topic], encoded_msg, from);
@@ -86,13 +107,11 @@ pub fn broadcast_signed_msg_every<T: 'static + Serialize + Clone + Send>(
     msg: T,
     interval: f64,
     p2p_privkey: Option<KeyPair>,
+    node_key_pair: KeyPair,
 ) -> AbortOnDropHandle {
     let fut = async move {
         loop {
-            let (p2p_private, from) = match &p2p_privkey {
-                Some(keypair) => (keypair.private_bytes(), Some(keypair.libp2p_peer_id())),
-                None => (ctx.secp256k1_key_pair().private().secret.take(), None),
-            };
+            let (p2p_private, from) = signing_identity(&p2p_privkey, &node_key_pair);
             if let Ok(encoded) = encode_and_sign(&msg, &p2p_private) {
                 broadcast_p2p_msg(&ctx, vec![topic.clone()], encoded, from);
             }
@@ -302,6 +321,46 @@ pub async fn recv_swap_v2_msg<T>(
         let now = now_ms() / 1000;
         if now > wait_until {
             return ERR!("V2 swap msg timeout ({} > {})", now - started, timeout);
+        }
+    }
+}
+
+/// CRD ch.28 R16a, T4a (a): the swap messages the node sends pass the bounds check.
+#[cfg(test)]
+mod t4a_bounded_reading_tests {
+    use super::*;
+    use common::msgpack_bounds::{check_msgpack_bounds, max_nesting_depth, MAX_PEER_NESTING};
+    use mm2_p2p::{decode_signed, encode_and_sign, encode_message};
+
+    #[test]
+    fn t4a_a_swap_messages_nest_within_half_the_bound() {
+        let negotiation = NegotiationDataMsg::V3(NegotiationDataV3 {
+            started_at: 1,
+            payment_locktime: 2,
+            secret_hash: vec![0; 20],
+            maker_coin_swap_contract: vec![1; 20],
+            taker_coin_swap_contract: vec![1; 20],
+            maker_coin_htlc_pub: vec![1; 33],
+            taker_coin_htlc_pub: vec![1; 33],
+        });
+        let messages = [
+            SwapMsg::Negotiation(negotiation.clone()),
+            SwapMsg::NegotiationReply(negotiation),
+            SwapMsg::Negotiated(true),
+            SwapMsg::TakerFee(vec![7; 250]),
+            SwapMsg::MakerPayment(vec![8; 250]),
+            SwapMsg::TakerPayment(vec![9; 250]),
+        ];
+        for (i, message) in messages.iter().enumerate() {
+            let payload = encode_message(message).unwrap();
+            let envelope = encode_and_sign(message, &[3; 32]).unwrap();
+            for (what, encoded) in [("payload", &payload), ("envelope", &envelope)] {
+                assert_eq!(check_msgpack_bounds(encoded), Ok(encoded.len()), "{i} {what}");
+                let depth = max_nesting_depth(encoded);
+                println!("t4a depth SwapMsg {i} {what}: {depth}");
+                assert!(depth <= MAX_PEER_NESTING / 2, "{i} {what}: depth {depth}");
+            }
+            decode_signed::<SwapMsg>(&envelope).unwrap();
         }
     }
 }

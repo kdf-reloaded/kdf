@@ -1,6 +1,6 @@
 # Plan: wire parity of every RPC with the public KDF API reference
 
-**Status:** parked (coin activation shipped in PR #17; the rest not started) — **Last reviewed:** 2026-10-29
+**Status:** parked (coin activation shipped in PR #17; the rest not started) — **Last reviewed:** 2026-11-08
 
 > **Context:** written 2026-10-08 and updated 2026-10-11
 > on `fix/activation-api-parity`, after coin activation was brought to parity on
@@ -154,6 +154,14 @@ fixed before W6 (HTTP status), which in turn comes before request leniency
 | 9 | GUI storage, MetaMask, WalletConnect, Trezor (non-activation) | `gui_storage::*`, `task::connect_metamask::*`, `wc_*`, Trezor helpers | 24, 47, 22, 50 |
 | 10 | Daemon and misc | `version`, `stop`, `metrics`, `get_my_peer_id`, `ban_pubkey`, `list_banned_pubkeys`, `get_directly_connected_peers`, `sign_message`, `verify_message`, ... | 43, 28 |
 
+*Request surfaces of batches 3 and 4 (2026-11-08; CRD ch.43 §43.1A, which passed the KDF Dirty Gate on
+2026-11-08).* Of batch 3, only `orderbook`, `best_orders` and `trade_preimage` have a versioned
+(`mmrpc: "2.0"`) form in the reference. `setprice`, `buy`, `sell`, `update_maker_order`, `cancel_order`,
+`cancel_all_orders`, `my_orders`, `order_status` and `orderbook_depth` are legacy-only there and in KDF
+Reloaded. "Legacy and v2" in row 3 therefore means the two generations of the dual methods, not a
+versioned form of every method. One `error_type` token deviation existed in batch 3 (D43.1A.3); PR #312 renamed it. In batch
+4, `my_recent_swaps` has both forms, with matching members.
+
 Each batch is one branch, one PR, and is merged before the next starts. A batch
 that turns up a deviation in a shared component (the envelope, the legacy error
 body, the response writer) fixes it once in ch.43, and later batches inherit
@@ -298,14 +306,15 @@ Two related, non-divergence notes are also recorded in the governing chapter:
 
 ## Order of execution
 
-1. Land `fix/activation-api-parity` (activation parity, ch.55, and the
-   activation rows that seed the register). Activation work that the branch
+1. Done: `fix/activation-api-parity` landed as PR #17 on 2026-10-11
+   (activation parity, ch.55, and the activation rows that seed the register). Activation work that the branch
    deliberately deferred is tracked in its own plans and is not part of this
    plan's batches: `docs/plans/solana-support.md`,
    `docs/plans/tendermint-activation-features.md`,
    `docs/plans/lightning-activation-features.md`, legacy EVM `enable` under an
    HD wallet (`UPSTREAM-PARITY-GAPS.md`), custom tokens not being wallet-only
-   (kdf-reloaded/kdf#16), the held Z-coin Light-mode Electrum policy (ch.39),
+   (issue #16, closed; fixed by `e18eca319` of 2026-10-12, merged with PR #21 on
+   2026-10-13), the held Z-coin Light-mode Electrum policy (ch.39),
    the per-ticker serialization of concurrent activations (ch.55 R55.1.12,
    implemented in PR #156), and the GLEEC behavior for a Z-coin sync date in
    the future (ch.39 §39.10, Reloaded status item 2, implemented in PR #22).

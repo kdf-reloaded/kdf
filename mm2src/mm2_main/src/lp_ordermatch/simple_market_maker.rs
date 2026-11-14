@@ -1,9 +1,11 @@
 use crate::mm2::lp_dispatcher::{dispatch_lp_event, DispatcherContext};
+use crate::mm2::lp_ordermatch::lp_bot::price_service::{fetch_combined, parse_price_sources, parse_price_url_string,
+                                                       registry_from_table, request_price_table, Notice,
+                                                       PriceServiceContext, PriceSource};
 use crate::mm2::lp_ordermatch::lp_bot::{RunningState, StoppedState, StoppingState, TradingBotStarted,
                                         TradingBotStopped, TradingBotStopping, VolumeSettings};
 use crate::mm2::lp_ordermatch::{cancel_all_orders, CancelBy, TradingBotEvent};
 use crate::mm2::{lp_ordermatch::{cancel_order, create_maker_order,
-                                 lp_bot::TickerInfos,
                                  lp_bot::{Provider, SimpleCoinMarketMakerCfg, SimpleMakerBotRegistry,
                                           TradingBotContext, TradingBotState},
                                  lp_bot::{RateInfos, TickerInfosRegistry},
@@ -19,7 +21,7 @@ use common::{executor::{spawn, Timer},
 use derive_more::Display;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
-use mm2_net::transport::{slurp_url, SlurpError};
+use mm2_net::transport::SlurpError;
 use serde_json::Value as Json;
 use std::{collections::{HashMap, HashSet},
           num::NonZeroUsize,
@@ -27,7 +29,6 @@ use std::{collections::{HashMap, HashSet},
 use uuid::Uuid;
 
 // !< constants
-pub const KMD_PRICE_ENDPOINT: &str = "https://prices.komodo.live:1313/api/v2/tickers";
 pub const BOT_DEFAULT_REFRESH_RATE: f64 = 30.0;
 pub const PRECISION_FOR_NOTIFICATION: u64 = 8;
 
@@ -117,7 +118,11 @@ impl From<std::string::String> for OrderProcessingError {
 #[derive(Deserialize)]
 pub struct StartSimpleMakerBotRequest {
     cfg: SimpleMakerBotRegistry,
+    /// One price source whose URLs, comma-separated, are tried in order.
     price_url: Option<String>,
+    /// Independent price sources, combined: an array whose items are a URL or an array of URLs tried in order.
+    /// Kept as a JSON value so that a malformed one is refused instead of silently ignored.
+    price_urls: Option<Json>,
     bot_refresh_rate: Option<f64>,
 }
 
@@ -127,6 +132,7 @@ impl StartSimpleMakerBotRequest {
         StartSimpleMakerBotRequest {
             cfg: Default::default(),
             price_url: None,
+            price_urls: None,
             bot_refresh_rate: None,
         }
     }
@@ -186,6 +192,10 @@ pub enum StartSimpleMakerBotError {
     Transport(String),
     #[display(fmt = "Cannot start the bot if it's currently stopping")]
     CannotStartFromStopping,
+    #[display(fmt = "The request carries both 'price_url' and 'price_urls'; use only one of them")]
+    BothPriceUrlKeys,
+    #[display(fmt = "The request key '{}' is malformed", _0)]
+    InvalidPriceUrl(String),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
 }
@@ -227,7 +237,9 @@ impl HttpStatusCode for StartSimpleMakerBotError {
         match self {
             StartSimpleMakerBotError::AlreadyStarted
             | StartSimpleMakerBotError::InvalidBotConfiguration
-            | StartSimpleMakerBotError::CannotStartFromStopping => StatusCode::BAD_REQUEST,
+            | StartSimpleMakerBotError::CannotStartFromStopping
+            | StartSimpleMakerBotError::BothPriceUrlKeys
+            | StartSimpleMakerBotError::InvalidPriceUrl(_) => StatusCode::BAD_REQUEST,
             StartSimpleMakerBotError::Transport(_) | StartSimpleMakerBotError::InternalError(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             },
@@ -659,22 +671,32 @@ async fn execute_create_single_order(
 async fn process_bot_logic(ctx: &MmArc) {
     let simple_market_maker_bot_ctx = TradingBotContext::from_ctx(ctx).unwrap();
     let state = simple_market_maker_bot_ctx.trading_bot_states.lock().await;
-    let (cfg, price_url) = if let TradingBotState::Running(running_state) = &*state {
-        let res = (running_state.trading_bot_cfg.clone(), running_state.price_url.clone());
+    let (cfg, price_sources) = if let TradingBotState::Running(running_state) = &*state {
+        let res = (
+            running_state.trading_bot_cfg.clone(),
+            running_state.price_sources.clone(),
+        );
         drop(state);
         res
     } else {
         drop(state);
         return;
     };
-    let rates_registry = match fetch_price_tickers(price_url.as_str()).await {
+    let fetched = fetch_price_tickers(ctx, &price_sources).await;
+    let episode = note_no_source(ctx, fetched.is_err());
+    let rates_registry = match fetched {
         Ok(model) => {
             info!("price successfully fetched");
             model
         },
         Err(err) => {
             let nb_orders = cancel_pending_orders(ctx, &cfg).await;
-            error!("error during fetching price: {:?} - cancel {} orders", err, nb_orders);
+            // Once per episode (CRD ch.62 D62.3): an ERROR when no source starts to answer, DEBUG while it lasts.
+            if episode == Notice::Debug {
+                debug!("error during fetching price: {:?} - cancel {} orders", err, nb_orders);
+            } else {
+                error!("error during fetching price: {:?} - cancel {} orders", err, nb_orders);
+            }
             return;
         },
     };
@@ -765,44 +787,55 @@ pub async fn lp_bot_loop(ctx: MmArc) {
 }
 
 pub async fn process_price_request(price_url: &str) -> Result<TickerInfosRegistry, MmError<PriceServiceRequestError>> {
-    debug!("Fetching price from: {}", price_url);
-    let (status, headers, body) = slurp_url(price_url).await.mm_err(Into::into)?;
-    let (status_code, body, _) = (status, std::str::from_utf8(&body)?.trim().into(), headers);
-    if status_code != StatusCode::OK {
-        return MmError::err(PriceServiceRequestError::HttpProcessError(body));
-    }
-    let model: HashMap<String, TickerInfos> = serde_json::from_str(&body)?;
-    Ok(TickerInfosRegistry(model))
+    let table = request_price_table(price_url).await?;
+    Ok(TickerInfosRegistry(
+        table
+            .into_iter()
+            .map(|(ticker, record)| (ticker, record.infos))
+            .collect(),
+    ))
 }
 
-async fn fetch_price_tickers(price_url: &str) -> Result<TickerInfosRegistry, MmError<PriceServiceRequestError>> {
-    let endpoints: Vec<&str> = price_url
-        .split(',')
-        .map(str::trim)
-        .filter(|endpoint| !endpoint.is_empty())
-        .collect();
+/// Fetches the prices of the bot's cycle from its `sources`, combined (CRD ch.62 D62.2).
+pub(crate) async fn fetch_price_tickers(
+    ctx: &MmArc,
+    sources: &[PriceSource],
+) -> Result<TickerInfosRegistry, MmError<PriceServiceRequestError>> {
+    let price_ctx = PriceServiceContext::from_ctx(ctx).map_to_mm(PriceServiceRequestError::Internal)?;
+    fetch_combined(&price_ctx, sources).await.map(registry_from_table)
+}
 
-    if endpoints.is_empty() {
-        return MmError::err(PriceServiceRequestError::Internal(
-            "price_url has no valid endpoints".to_string(),
-        ));
+/// Records the outcome of the bot's fetch in the node's price service state and returns what the warn-once rule
+/// asks the bot to log (the INFO of the end of an episode is already logged). If the state is unavailable, a failure
+/// is reported as the start of an episode.
+fn note_no_source(ctx: &MmArc, failed: bool) -> Notice {
+    match PriceServiceContext::from_ctx(ctx) {
+        Ok(price_ctx) => price_ctx.note_no_source(failed),
+        Err(_) if failed => Notice::Warn,
+        Err(_) => Notice::Quiet,
     }
+}
 
-    let mut last_error: Option<MmError<PriceServiceRequestError>> = None;
-    for endpoint in endpoints {
-        match process_price_request(endpoint).await {
-            Ok(model) => {
-                debug!("price registry size: {}", model.0.len());
-                return Ok(model);
-            },
-            Err(err) => {
-                warn!("Couldn't fetch price from {}: {:?}", endpoint, err);
-                last_error = Some(err);
-            },
-        }
+/// The price sources of a bot start (CRD ch.62 D62.6): the request's `price_urls` (independent sources, combined) or
+/// `price_url` (one source: the comma-separated URLs are tried in order), else the sources of the node (`MM2.json`
+/// key `price_urls` or the default). A request that carries both keys, or a malformed value, is refused.
+pub(crate) fn resolve_bot_price_sources(
+    price_url: Option<String>,
+    price_urls: Option<Json>,
+    node_sources: &[PriceSource],
+) -> Result<Vec<PriceSource>, MmError<StartSimpleMakerBotError>> {
+    match (price_url, price_urls) {
+        (Some(_), Some(_)) => MmError::err(StartSimpleMakerBotError::BothPriceUrlKeys),
+        (Some(price_url), None) => match parse_price_url_string(&price_url) {
+            Some(source) => Ok(vec![source]),
+            None => MmError::err(StartSimpleMakerBotError::InvalidPriceUrl("price_url".to_string())),
+        },
+        (None, Some(price_urls)) => match parse_price_sources(&price_urls) {
+            Some(sources) => Ok(sources),
+            None => MmError::err(StartSimpleMakerBotError::InvalidPriceUrl("price_urls".to_string())),
+        },
+        (None, None) => Ok(node_sources.to_vec()),
     }
-
-    Err(last_error.expect("endpoints is not empty"))
 }
 
 pub async fn start_simple_market_maker_bot(ctx: MmArc, req: StartSimpleMakerBotRequest) -> StartSimpleMakerBotResult {
@@ -812,6 +845,9 @@ pub async fn start_simple_market_maker_bot(ctx: MmArc, req: StartSimpleMakerBotR
         TradingBotState::Running { .. } => MmError::err(StartSimpleMakerBotError::AlreadyStarted),
         TradingBotState::Stopping(_) => MmError::err(StartSimpleMakerBotError::CannotStartFromStopping),
         TradingBotState::Stopped(_) => {
+            let node_price_ctx =
+                PriceServiceContext::from_ctx(&ctx).map_to_mm(StartSimpleMakerBotError::InternalError)?;
+            let price_sources = resolve_bot_price_sources(req.price_url, req.price_urls, &node_price_ctx.sources)?;
             let dispatcher_ctx = DispatcherContext::from_ctx(&ctx).unwrap();
             let mut dispatcher = dispatcher_ctx.dispatcher.write().await;
             dispatcher.add_listener(simple_market_maker_bot_ctx.clone());
@@ -823,7 +859,7 @@ pub async fn start_simple_market_maker_bot(ctx: MmArc, req: StartSimpleMakerBotR
             *state = RunningState {
                 trading_bot_cfg: req.cfg,
                 bot_refresh_rate: refresh_rate,
-                price_url: req.price_url.unwrap_or_else(|| KMD_PRICE_ENDPOINT.to_string()),
+                price_sources,
             }
             .into();
             drop(state);

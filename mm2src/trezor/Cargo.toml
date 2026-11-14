@@ -12,6 +12,8 @@ trezor-udp = []
 # Integration tests that talk to a live Trezor emulator (native only, off by default).
 # Implies `trezor-udp`.
 trezor-emulator-tests = ["trezor-udp"]
+# A scripted device for tests of the crates above this one (see `scripted_device`). Off by default.
+test-helpers = []
 
 [dependencies]
 async-trait = "0.1"

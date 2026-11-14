@@ -20,6 +20,7 @@
 use coins::register_balance_update_handler;
 use common::executor::{spawn, spawn_boxed, Timer};
 use common::log::{error, info, warn};
+use common::msgpack_bounds::dropped_peer_values;
 use common::now_ms;
 use crypto::{CryptoCtx, CryptoInitError, EncryptedMnemonicData, HwError, HwProcessingError};
 use derive_more::Display;
@@ -49,7 +50,7 @@ use crate::mm2::lp_ordermatch::{broadcast_maker_orders_keep_alive_loop, clean_me
                                 BalanceUpdateOrdermatchHandler, OrdermatchInitError};
 use crate::mm2::lp_swap::{clear_running_swaps, swap_kick_starts};
 use crate::mm2::rpc::spawn_rpc;
-use crate::mm2::{MM_DATETIME, MM_VERSION};
+use crate::mm2::version_text;
 
 cfg_native! {
     use mm2_io::fs::{ensure_dir_is_writable, ensure_file_is_writable};
@@ -274,6 +275,15 @@ fn validate_netid_range(conf: &json::Value) -> MmInitResult<()> {
     Ok(())
 }
 
+/// Refuses the launch when `wc_session_persistence` holds a value the WalletConnect subsystem cannot use (CRD ch.22
+/// §22.5.1): the reserved `encrypted`, an unrecognized string or a non-string value.
+fn validate_wc_session_persistence(conf: &json::Value) -> MmInitResult<()> {
+    kdf_walletconnect::validate_session_persistence(conf).map_to_mm(|e| MmInitError::ErrorDeserializingConfig {
+        field: "wc_session_persistence".to_owned(),
+        error: e.to_string(),
+    })
+}
+
 fn startup_net_config(netid: u16) -> MmInitResult<&'static dyn NetConfig> {
     match net_config_for(netid) {
         Some(cfg) => Ok(cfg),
@@ -448,6 +458,11 @@ fn migration_1(_ctx: &MmArc) {}
 pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        info!(
+            "Database root: {}; identity database directory: {}",
+            crate::mm2::absolute_path_for_log(&ctx.db_root()),
+            crate::mm2::absolute_path_for_log(&ctx.dbdir())
+        );
         fix_directories(&ctx)?;
         ctx.init_sqlite_connection()
             .map_to_mm(MmInitError::ErrorSqliteInitializing)?;
@@ -480,9 +495,17 @@ pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
 #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
 /// * `ctx_cb` - callback used to share the `MmCtx` ID with the call site.
 pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
-    info!("Version: {} DT {}", MM_VERSION, MM_DATETIME);
+    info!("Version: {}", version_text());
+
+    // One resolver for every hostname the node looks up (CRD ch.45 R45.6B.8). The key is read and the resolver installed
+    // before anything below opens a connection by name; an invalid value refuses the launch (R45.6B.2, R45.7.1).
+    #[cfg(not(target_arch = "wasm32"))]
+    install_dns_resolver(&ctx.conf)?;
 
     validate_netid_range(&ctx.conf)?;
+    validate_wc_session_persistence(&ctx.conf)?;
+    // The opt-in full key export is a deliberate security trade-off: say so in the log when it is on (CRD ch.07 R-K1).
+    coins::rpc_command::get_private_keys::warn_if_insecure_key_export(&ctx);
     coins::utxo::utxo_builder::header_layout_fallback_families(&ctx).mm_err(|e| {
         MmInitError::ErrorDeserializingConfig {
             field: "header_layout_fallback_families".to_owned(),
@@ -597,6 +620,23 @@ pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
     Ok(())
 }
 
+/// Reads `dns_resolver` from the configuration and installs the resolver of its mode: the node's start-up marks the node as started first, so
+/// that a lookup before the installation is caught (CRD ch.45 R45.6B.8 item 3). A later start in the same process
+/// installs its own resolver. A browser build leaves every lookup to the browser and ignores the key (R45.6B.1).
+#[cfg(not(target_arch = "wasm32"))]
+fn install_dns_resolver(conf: &json::Value) -> MmInitResult<()> {
+    use common::dns_resolver::{self, DNS_RESOLVER_KEY};
+
+    let mode = dns_resolver::parse_dns_resolver(conf.get(DNS_RESOLVER_KEY)).map_to_mm(|e| {
+        MmInitError::ErrorDeserializingConfig {
+            field: DNS_RESOLVER_KEY.to_owned(),
+            error: e.to_string(),
+        }
+    })?;
+    dns_resolver::mark_node_started();
+    dns_resolver::install(&mode).map_to_mm(MmInitError::Internal)
+}
+
 async fn kick_start(ctx: MmArc) -> MmInitResult<()> {
     let mut coins_needed_for_kick_start = swap_kick_starts(ctx.clone())
         .await
@@ -683,8 +723,47 @@ impl SwarmPollRecorder {
                 queues.max_per_connection as i64
             );
             mm_gauge!(self.ctx.metrics, "p2p.send_queue.dropped.count", queues.dropped as i64);
+            // The dropped share of a recent window and the longest series of counting windows (CRD ch.32 §32.9B
+            // R-MP5, ch.28 §28.9B RQ1 items 6 and 8).
+            mm_gauge!(
+                self.ctx.metrics,
+                "p2p.send_queue.window_share.max",
+                queues.max_window_share_percent as i64
+            );
+            mm_gauge!(
+                self.ctx.metrics,
+                "p2p.send_queue.drop_series.max",
+                i64::from(queues.max_drop_series)
+            );
+            // Peer values dropped as malformed by the decoding bounds (CRD ch.28 R16a).
+            mm_gauge!(
+                self.ctx.metrics,
+                "p2p.payload.malformed",
+                dropped_peer_values().min(i64::MAX as u64) as i64
+            );
+            // The hostname lookups since the resolver was installed (CRD ch.45 R45.6B.10).
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if let Some(dns) = common::dns_resolver::gauges() {
+                    mm_gauge!(self.ctx.metrics, "dns.lookups.count", dns.lookups as i64);
+                    mm_gauge!(self.ctx.metrics, "dns.failures.count", dns.failures as i64);
+                    mm_gauge!(self.ctx.metrics, "dns.stale_served.count", dns.stale_served as i64);
+                    mm_gauge!(
+                        self.ctx.metrics,
+                        "dns.last_known.entries",
+                        dns.last_known_entries as i64
+                    );
+                }
+            }
         }
     }
+}
+
+/// The secret a relay's libp2p identity is made of: the SHA-256 of the node key's private key (CRD ch.28 R19,
+/// ch.05 R45 item 6). Under a global-HD login the node key is the internal key; under an iguana login it is the
+/// hash of the passphrase, and the value is the same as before.
+pub(crate) fn relay_p2p_identity_secret(ctx: &MmArc) -> [u8; 32] {
+    sha256(&*ctx.secp256k1_key_pair().private().secret).take()
 }
 
 async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
@@ -707,8 +786,7 @@ async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
     // Written from the swarm poll, read by the maker outbox (CRD ch.32 §32.9B R-MP2 item 2).
     let relay_queue_signal = Arc::new(RelayQueueSignal::default());
     let force_p2p_key = if i_am_seed {
-        let key = sha256(&*ctx.secp256k1_key_pair().private().secret);
-        Some(key.take())
+        Some(relay_p2p_identity_secret(&ctx))
     } else {
         None
     };
@@ -939,12 +1017,80 @@ fn wss_certs(ctx: &MmArc) -> P2PResult<Option<WssCerts>> {
 #[cfg(test)]
 mod tests {
     use super::{default_seednodes, default_seednodes_from_strings, parse_passphrase_form, resolve_bootstrap_relays,
-                startup_net_config, validate_netid_range, MmInitError, P2PInitError, PassphraseForm};
+                startup_net_config, validate_netid_range, validate_wc_session_persistence, MmInitError, P2PInitError,
+                PassphraseForm};
     #[cfg(not(target_arch = "wasm32"))]
     use crate::mm2::lp_network::lp_network_ports;
     #[cfg(not(target_arch = "wasm32"))] use mm2_p2p::NetworkInfo;
     use mm2_p2p::RelayAddress;
     use serde_json::json;
+
+    /// CRD ch.45 T45.16 at the node's start-up: every invalid `dns_resolver` value refuses the launch with a clean
+    /// configuration error that names the key, and installs nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn invalid_dns_resolver_values_refuse_the_launch_cleanly() {
+        use super::install_dns_resolver;
+        let nine: Vec<String> = (1..=9).map(|n| format!("192.0.2.{}", n)).collect();
+        let invalid = [
+            json!("Google"),
+            json!(""),
+            json!("192.0.2.53"),
+            json!([]),
+            json!([""]),
+            json!(["dns.example.com"]),
+            json!(["192.0.2.53:0"]),
+            json!(["192.0.2.53:65536"]),
+            json!([53]),
+            json!(nine),
+            json!(true),
+            json!(5),
+            json!({}),
+        ];
+        let _guard = common::dns_resolver::lock_resolver_for_test();
+        for value in invalid {
+            let err = install_dns_resolver(&json!({ "dns_resolver": value })).unwrap_err();
+            assert!(
+                matches!(
+                    err.get_inner(),
+                    MmInitError::ErrorDeserializingConfig { field, error } if field == "dns_resolver" && error.contains("dns_resolver")
+                ),
+                "{}: {:?}",
+                value,
+                err
+            );
+            assert!(common::dns_resolver::installed_mode().is_none(), "{}", value);
+        }
+    }
+
+    /// A valid value installs the matching mode, and the start-up line is logged once per installation (R45.6B.7,
+    /// R45.6B.8): a second start in the process replaces the resolver.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_valid_dns_resolver_value_installs_its_mode_and_logs_one_line() {
+        use super::install_dns_resolver;
+        use common::dns_resolver::{installed_mode, startup_lines_logged, DnsMode};
+        let _guard = common::dns_resolver::lock_resolver_for_test();
+        let cases = [
+            (json!({}), DnsMode::Google),
+            (json!({ "dns_resolver": null }), DnsMode::Google),
+            (json!({ "dns_resolver": "google" }), DnsMode::Google),
+            (json!({ "dns_resolver": "system" }), DnsMode::System),
+            (
+                json!({ "dns_resolver": ["192.0.2.53:5353", "[2001:db8::53]"] }),
+                DnsMode::Fixed(vec![
+                    "192.0.2.53:5353".parse().unwrap(),
+                    "[2001:db8::53]:53".parse().unwrap(),
+                ]),
+            ),
+        ];
+        for (conf, mode) in cases {
+            let lines_before = startup_lines_logged();
+            install_dns_resolver(&conf).unwrap();
+            assert_eq!(installed_mode(), Some(mode), "{}", conf);
+            assert_eq!(startup_lines_logged(), lines_before + 1, "{}", conf);
+        }
+    }
 
     #[test]
     fn passphrase_absent_is_absent_form() {
@@ -1011,6 +1157,39 @@ mod tests {
             err.get_inner(),
             MmInitError::ErrorDeserializingConfig { field, .. } if field == "netid"
         ));
+    }
+
+    /// CRD ch.22 §22.5.1: an invalid `wc_session_persistence` refuses the launch with a configuration error that
+    /// names the setting; absent, `null`, `open` and `none` pass.
+    #[test]
+    fn invalid_wc_session_persistence_refuses_the_launch() {
+        for conf in [
+            json!({ "wc_session_persistence": "encrypted" }),
+            json!({ "wc_session_persistence": "bogus" }),
+            json!({ "wc_session_persistence": 7 }),
+        ] {
+            let err = validate_wc_session_persistence(&conf).unwrap_err();
+            assert!(
+                matches!(
+                    err.get_inner(),
+                    MmInitError::ErrorDeserializingConfig { field, error }
+                        if field == "wc_session_persistence" && error.contains("wc_session_persistence")
+                ),
+                "{conf}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_wc_session_persistence_passes() {
+        for conf in [
+            json!({}),
+            json!({ "wc_session_persistence": null }),
+            json!({ "wc_session_persistence": "open" }),
+            json!({ "wc_session_persistence": "none" }),
+        ] {
+            assert!(validate_wc_session_persistence(&conf).is_ok(), "{conf}");
+        }
     }
 
     #[test]

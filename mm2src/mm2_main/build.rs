@@ -109,6 +109,35 @@ fn mm_version() -> String {
     version
 }
 
+/// Returns the `version` of the `[package]` table in the given Cargo manifest text, if there is one.
+fn package_version(manifest: &str) -> Option<String> {
+    let mut in_package = false;
+    let version_re = Regex::new(r#"^version\s*=\s*"([^"]+)""#).unwrap();
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+        } else if in_package {
+            if let Some(caps) = version_re.captures(line) {
+                return Some(caps[1].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Emits `MM_CRATE_VERSION`: the version of the `mm2_bin_lib` crate, which is the one bumped for a release.
+/// Falls back to the version of this crate if the manifest or its version is not available.
+fn mm_crate_version() {
+    let manifest_p = root().join("../mm2_bin_lib/Cargo.toml");
+    println!("cargo:rerun-if-changed=../mm2_bin_lib/Cargo.toml");
+    let version = fs::read_to_string(&manifest_p)
+        .ok()
+        .and_then(|manifest| package_version(&manifest))
+        .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap_or_default());
+    println!("cargo:rustc-env=MM_CRATE_VERSION={}", version);
+}
+
 fn main() {
     let unsafe_wire_dump_feature_enabled = std::env::var("CARGO_FEATURE_UNSAFE_RPC_WIRE_DUMP").is_ok();
     let release_override_enabled = std::env::var("CARGO_FEATURE_UNSAFE_RPC_WIRE_DUMP_RELEASE_OVERRIDE").is_ok();
@@ -127,6 +156,7 @@ fn main() {
         println!("cargo:rerun-if-changed=NON_EXISTING_FILE");
     }
     mm_version();
+    mm_crate_version();
 
     // Compile swap V2 protobuf definitions.
     println!("cargo:rerun-if-changed=src/lp_swap/swap_v2.proto");

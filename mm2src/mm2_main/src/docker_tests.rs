@@ -2521,6 +2521,7 @@ mod docker_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     fn test_get_max_taker_vol_with_kmd() {
         let (_ctx, alice_coin, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 1.into());
         let coins = json! ([
@@ -3787,6 +3788,7 @@ mod docker_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     // https://github.com/KomodoPlatform/atomicDEX-API/issues/1074
     fn test_match_utxo_with_eth_taker_sell() {
         let (_ctx, _, bob_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());
@@ -3868,6 +3870,7 @@ mod docker_tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
     // https://github.com/KomodoPlatform/atomicDEX-API/issues/1074
     fn test_match_utxo_with_eth_taker_buy() {
         let (_ctx, _, bob_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());

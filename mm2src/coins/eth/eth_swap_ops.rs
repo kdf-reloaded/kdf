@@ -325,7 +325,7 @@ impl SwapOps for EthCoin {
             let mut from_block = from_block;
 
             loop {
-                let to_block = current_block.min(from_block + selfi.logs_block_range);
+                let to_block = selfi.log_window_end(from_block, current_block);
 
                 let events = try_s!(
                     selfi
@@ -359,7 +359,7 @@ impl SwapOps for EthCoin {
                         if to_block >= current_block {
                             break Ok(None);
                         }
-                        from_block = to_block;
+                        from_block = to_block + 1;
                     },
                 }
             }
@@ -444,6 +444,35 @@ impl SwapOps for EthCoin {
     }
 
     fn get_htlc_key_pair(&self) -> Option<keys::KeyPair> { None }
+
+    /// An EVM coin with a software signer announces the key its signer signs with, in compressed form (CRD
+    /// ch.05 R41 item 3). The swap start announces and saves it only when it is not the node's persistent key.
+    /// A hardware signer (Trezor) and a key-less signer (MetaMask) have no secret to offer and keep today's
+    /// behavior: the node's persistent key.
+    fn own_signing_key_pair(&self) -> Option<keys::KeyPair> {
+        if self.uses_hardware_signer() {
+            return None;
+        }
+        let secret = self.signer.local_secret()?;
+        crypto::privkey::key_pair_from_secret(secret.as_bytes()).ok()
+    }
+
+    /// An EVM coin pays from its signer (CRD ch.05 R36 item 2, R44). With a software signer the swap key is the
+    /// signer's own key and the two agree by construction; a signer that supplies no key of its own (MetaMask)
+    /// announces the node's persistent key and agrees only when it is the signer. A hardware signer is out of
+    /// the rule's scope.
+    fn swap_key_disagreement(&self, node_pubkey: &keys::Public) -> Option<crate::SwapKeyDisagreement> {
+        if self.uses_hardware_signer() {
+            return None;
+        }
+        let node_bytes: &[u8] = node_pubkey;
+        let swap_key = match self.own_signing_key_pair() {
+            Some(pair) => pair.public().to_vec(),
+            None => node_bytes.to_vec(),
+        };
+        (compressed_secp256k1_public(&self.signer.public())[..] != swap_key[..])
+            .then_some(crate::SwapKeyDisagreement::EvmSigner)
+    }
 }
 
 #[async_trait]

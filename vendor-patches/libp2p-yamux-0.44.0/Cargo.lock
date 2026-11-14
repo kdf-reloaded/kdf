@@ -861,6 +861,7 @@ version = "0.44.0"
 dependencies = [
  "async-std",
  "futures",
+ "futures-timer",
  "libp2p-core",
  "libp2p-muxer-test-harness",
  "thiserror 1.0.69",

@@ -1,6 +1,8 @@
+use super::htlc::HtlcType;
 use super::rpc::*;
+use crate::eth::SwapGasFeePolicy;
 use crate::node_url::host_only;
-use crate::{HistorySyncState, PrivKeyNotAllowed, PrivKeyPolicy, TransactionEnum};
+use crate::{HistorySyncState, PrivKeyNotAllowed, PrivKeyPolicy, TransactionEnum, WithdrawFee};
 use cosmrs::proto::cosmos::tx::v1beta1::TxRaw;
 use cosmrs::proto::prost::{DecodeError, Message};
 use cosmrs::tendermint::chain::Id as ChainId;
@@ -21,6 +23,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::ops::Deref;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use bigdecimal::BigDecimal;
@@ -45,6 +48,11 @@ pub(super) const ABCI_REQUEST_PROVE: bool = false;
 pub(super) const DEFAULT_GAS_PRICE: f64 = 0.25;
 pub(super) const TIMEOUT_HEIGHT_DELTA: u64 = 100;
 pub const GAS_LIMIT_DEFAULT: u64 = 125_000;
+/// Default gas limit of a delegation and of a reward claim: one and a half times [`GAS_LIMIT_DEFAULT`]
+/// (CRD ch.18 R18.6B.3).
+pub(super) const STAKING_GAS_LIMIT_DEFAULT: u64 = 187_500;
+/// Default gas limit of an undelegation: twice [`GAS_LIMIT_DEFAULT`] (CRD ch.18 R18.6B.3).
+pub(super) const UNDELEGATE_GAS_LIMIT_DEFAULT: u64 = 250_000;
 pub const GAS_WANTED_BASE_VALUE: f64 = 50_000.;
 pub(crate) const TX_DEFAULT_MEMO: &str = "";
 
@@ -53,6 +61,32 @@ pub(super) const MAX_TIME_LOCK: i64 = 34560;
 pub(super) const MIN_TIME_LOCK: i64 = 50;
 
 pub(super) const ACCOUNT_SEQUENCE_ERR: &str = "account sequence mismatch";
+
+// ————————————————————————————————————————————————————————————————
+// Fee intent
+// ————————————————————————————————————————————————————————————————
+
+/// What a fee computation is for, which decides where the gas price and the gas limit come from (CRD ch.18
+/// R18.6B.1 and R18.6B.3).
+#[derive(Debug)]
+pub(super) enum FeeIntent {
+    /// A transaction the caller asked for (a withdraw, an IBC transfer, a delegation, an undelegation or a reward
+    /// claim): the request's optional fee descriptor and the operation's default gas limit. The swap fee policy is
+    /// never consulted.
+    Request {
+        fee: Option<WithdrawFee>,
+        default_gas_limit: u64,
+    },
+    /// A swap transaction or a trade-fee simulation: no request descriptor, the price is selected by the coin's swap
+    /// fee policy (CRD ch.18 R18.6B.4) and the gas limit is the swap default.
+    Swap,
+}
+
+impl FeeIntent {
+    pub(super) fn request(fee: Option<WithdrawFee>, default_gas_limit: u64) -> Self {
+        FeeIntent::Request { fee, default_gas_limit }
+    }
+}
 
 // ————————————————————————————————————————————————————————————————
 // Key-pair wrapper
@@ -125,6 +159,12 @@ pub struct TendermintProtocolInfo {
     pub account_prefix: String,
     pub chain_id: ChainId,
     pub(super) gas_price: Option<f64>,
+    /// The chain's published gas prices in base denom per gas unit, in the fixed order low, average, high
+    /// (CRD ch.36 R36.3.5). `null` and an absent member are the same: every named level then selects the default
+    /// gas price. The figures are checked when the platform coin is built (CRD ch.36 T36.17) and held for the
+    /// coin's lifetime. A token has no such member (R36.3.6); it is priced from its platform coin's.
+    #[serde(default)]
+    pub(super) priority_gas_prices: Option<[f64; 3]>,
     /// Configured destination bech32 account-prefix (HRP) -> integer ICS-20
     /// channel number map (R36.3.1). Seeds `ibc_channel_for_prefix`; defaults to
     /// empty when the coin config omits it.
@@ -173,6 +213,14 @@ impl TendermintConf {
             ticker: ticker.to_string(),
             kind: TendermintInitErrorKind::AvgBlockTimeInvalid,
         })?;
+
+        // CRD ch.18 R18.11.1: the block count of a lock is the lock duration divided by `avg_blocktime`.
+        if avg_blocktime == 0 {
+            return MmError::err(TendermintInitError {
+                ticker: ticker.to_string(),
+                kind: TendermintInitErrorKind::AvgBlockTimeZero,
+            });
+        }
 
         let derivation_path =
             serde_json::from_value(conf["derivation_path"].clone()).map_to_mm(|e| TendermintInitError {
@@ -240,6 +288,11 @@ impl TendermintActivationPolicy {
             Self::PrivateKey(private_key) => Some(*private_key.key_pair()?.private_key_secret.as_ref()),
         }
     }
+
+    /// Whether the policy holds a private key this node signs with. A policy without one (the hardware-wallet
+    /// policy) cannot sign the HTLC transactions of a swap, so the coin is wallet-only (see
+    /// [`tendermint_wallet_only`]).
+    pub(crate) fn has_local_key(&self) -> bool { self.activated_key_or_err().is_ok() }
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -270,6 +323,9 @@ pub struct TendermintCoinImpl {
     /// activation time because the platform-with-tokens framework builds the
     /// activation result from `&self` without access to the original request.
     pub(super) get_balances: bool,
+    /// The per-coin swap fee policy (CRD ch.35 R35.6.8); `Legacy` until set. It selects the gas price of swap
+    /// transactions and trade-fee simulations only (CRD ch.18 R18.6B.4).
+    pub(super) swap_gas_fee_policy: Mutex<SwapGasFeePolicy>,
 }
 
 #[derive(Clone)]
@@ -302,6 +358,7 @@ impl TendermintCoinImpl {
             ctx,
             protocol_info,
             get_balances,
+            swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         }
     }
 }
@@ -363,7 +420,21 @@ pub enum TendermintInitErrorKind {
     RpcClientInitError(String),
     AvgBlockTimeMissing,
     AvgBlockTimeInvalid,
+    #[display(fmt = "Tendermint `avg_blocktime` must be at least 1 second, got 0")]
+    AvgBlockTimeZero,
     ErrorDeserializingDerivationPath(String),
+    /// The activation under an HD login needs the coin's `derivation_path` (CRD ch.36 R36.1.4 step 3).
+    #[display(fmt = "The coin configuration has no `derivation_path`, which an HD activation needs")]
+    DerivationPathMissing,
+    #[display(fmt = "Could not derive the key of the activated address: {}", _0)]
+    HdDerivationFailed(String),
+    /// A figure of `priority_gas_prices` is zero, negative or not finite (CRD ch.36 R36.3.5 divergence note,
+    /// T36.17): it would make the fee of CRD ch.18 §18.6B zero or undefined.
+    #[display(
+        fmt = "Tendermint `priority_gas_prices` must hold positive finite numbers, got {:?}",
+        _0
+    )]
+    PriorityGasPriceNotPositive([f64; 3]),
 }
 
 impl std::fmt::Display for TendermintInitError {
@@ -469,6 +540,39 @@ pub(super) enum HtlcMsgError {
 // ————————————————————————————————————————————————————————————————
 // Free functions
 // ————————————————————————————————————————————————————————————————
+
+/// Whether a Tendermint coin or token is wallet-only (CRD ch.18 R18.11.23 and R18.11.23a, ch.36 R36.1.2).
+///
+/// It is while swaps are switched off in this build, while the coins-file entry says so, and always when:
+/// - the chain's account prefix selects no HTLC dialect (only `iaa` and `nuc` have one): such a coin is refused at
+///   order time and not at payment time. A token passes its platform coin's prefix;
+/// - the activation policy holds no local private key (`has_local_key` is `false`). Such a coin cannot sign an
+///   HTLC transaction, and the legacy swap path would otherwise announce this node's own key as the coin's HTLC
+///   public key. A token passes its platform coin's policy;
+/// - the token is a custom one, activated from an inline `protocol` and absent from the coins file, as a custom
+///   EVM token is (`custom_token`; a platform coin passes `false`).
+pub(super) fn tendermint_wallet_only(
+    swaps_available: bool,
+    account_prefix: &str,
+    config_wallet_only: bool,
+    has_local_key: bool,
+    custom_token: bool,
+) -> bool {
+    !swaps_available
+        || HtlcType::from_str(account_prefix).is_err()
+        || config_wallet_only
+        || !has_local_key
+        || custom_token
+}
+
+/// Whether a Tendermint coin accepts the protocol information of a counterparty's order (CRD ch.18 R18.11.25).
+///
+/// Reloaded advertises no protocol information for the family and accepts no IBC-routed swap, so any
+/// non-empty information (where a routing channel would travel) is declined, as is every match while swaps are
+/// switched off in this build.
+pub(super) fn tendermint_protocol_info_supported(swaps_available: bool, info: &Option<Vec<u8>>) -> bool {
+    swaps_available && info.as_ref().is_none_or(|info| info.is_empty())
+}
 
 pub(crate) fn account_id_from_privkey(priv_key: &[u8], prefix: &str) -> MmResult<AccountId, TendermintInitErrorKind> {
     let signing_key = cosmrs::crypto::secp256k1::SigningKey::from_slice(priv_key)

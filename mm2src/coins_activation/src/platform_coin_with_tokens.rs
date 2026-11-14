@@ -438,7 +438,7 @@ where
 
     let (platform_conf, platform_protocol) = coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
 
-    let priv_key = &*ctx.secp256k1_key_pair().private().secret;
+    let priv_key = &*ctx.legacy_passphrase_key_pair().private().secret;
 
     let platform_coin = Platform::enable_platform_coin(
         ctx.clone(),
@@ -474,6 +474,8 @@ impl HDXPubExtractor for NoXPubExtractor {
     ) -> MmResult<crypto::XPub, coins::hd_pubkey::HDExtractPubkeyError> {
         MmError::err(coins::hd_pubkey::HDExtractPubkeyError::HwContextNotInitialized)
     }
+
+    fn hardware_context(&self) -> Option<crypto::HardwareWalletArc> { None }
 }
 
 /// Shared post-build activation tail: enable the inline tokens, enumerate
@@ -562,7 +564,7 @@ where
 
     let (platform_conf, platform_protocol) = coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
 
-    let priv_key = &*ctx.secp256k1_key_pair().private().secret;
+    let priv_key = &*ctx.legacy_passphrase_key_pair().private().secret;
 
     task_handle
         .update_in_progress_status(InitPlatformCoinWithTokensInProgressStatus::ActivatingCoin)

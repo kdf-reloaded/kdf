@@ -715,6 +715,397 @@ the taker's refusal handling produces `NegotiateFailed`, which is in the
 taker's penalty set. Refusal is therefore correct behaviour but not
 cost-free, and MUST NOT be emitted outside R34's seven conditions.
 
+## 51.6A Bound Refusal to Refund After the Maker's Own Spend of the Taker Payment
+
+> **Status (Reloaded-original; decisions DK and DV, 2026-11-07).** These rules
+> record no claim about the reference implementation. R75 item 1 states, as
+> the intended behavior, a refusal that the code already applies; R75 item 2
+> extends it to a spend that is sent but not yet confirmed.
+
+Every terminated maker swap is marked finished (R4) and its log ends in
+`Finished` (R19), a failed swap included. This section concerns the swaps
+whose record holds the maker's own spend of the taker payment (the event
+`TakerPaymentSpent`). Two cases are told apart:
+
+- a *completed swap*: the record also holds the confirmation of that spend
+  (the event `TakerPaymentSpendConfirmed`);
+- a *swap with a sent spend*: the record holds the spend but not its
+  confirmation, because the confirmation did not arrive in time or the node
+  stopped before it did.
+
+Every other terminated swap is a *swap without a spend*.
+
+The spend of the taker payment is recorded only after it was broadcast, and the
+broadcast published the secret. The claim branch of the maker payment's own
+contract has no time lock (for a UTXO coin this is its script), so the taker can
+claim the maker payment with that secret at any time until a refund is mined.
+After the locktime the maker's refund is valid as well, and whichever of the two
+transactions is mined first decides. A maker that refunds then holds both
+payments, which is the outcome R31a closes for the taker. The maker's spend may
+still be mined, or may have been dropped; in either case the secret is public,
+and the maker payment is the taker's side of the trade.
+
+**R75.** *The manual recovery never refunds the maker payment of a swap whose
+record holds the spend of the taker payment.* `recover_funds_of_swap` for a
+maker swap that has the spend in its record MUST NOT build a refund of the
+maker payment, whatever the state of the maker payment on the chain and whether
+or not its refund time has passed:
+
+1. for a completed swap the call MUST refuse before any look at the chain and
+   before any transaction is built, and its text MUST say that the taker payment
+   spend was sent and confirmed;
+2. for a swap with a sent spend the call looks at the chain as for a swap
+   without a spend, and answers:
+   - if the maker payment is *spent* (by the taker, or by a watcher): as for a
+     swap without a spend, including the spend of the taker payment when it
+     is still unspent (the maker then completes the trade it began);
+   - if the maker payment is *refunded*: as for a swap without a spend;
+   - if the maker payment is *unspent*: the call MUST refuse, whether or not its
+     refund time has passed, before the refund time is looked at and before any
+     transaction is built, and its text MUST say that the taker payment spend
+     was sent and that the maker payment belongs to the taker.
+
+The reason is honesty toward the taker: once the maker has spent the taker
+payment, the maker payment belongs to the taker, whatever the technical chance to
+refund it.
+
+> **Status note (2026-11-12, Reloaded-original).** R83 narrows item 2: when the
+> taker payment is shown on its own chain to be refunded by the taker, with a
+> confirmation, the maker payment may be refunded by the manual recovery.
+
+> **Status note (2026-11-13, Reloaded-original).** R84 narrows item 2 further: a
+> record that holds no sent spend because the claim call failed is not covered by
+> item 2, and the manual recovery looks at the taker payment first.
+
+**R76.** *The refusal changes nothing.* A refusal of R75 MUST NOT append an
+event to the log of the swap, change its status or its recoverable flag, or
+write the swap record. The recoverable flag is derived from the events of the
+swap and is not a statement about the chain; it is not consulted by the call.
+
+**R77.** *Nothing refunds a completed swap automatically.* No part of the node
+refunds the maker payment of a completed swap on its own, at start-up or later.
+The guards that precede R75 stay as they are: the swap MUST be finished, and a
+swap whose record already holds the refund of the maker payment is refused as
+not recoverable. The refund that the run loop makes after the confirmation of
+the spend failed is not changed by this section (D8).
+
+> **Status note (2026-11-12, Reloaded-original).** The refund that the run loop
+> makes after the claim step is now bound by R82 (2026-11-12).
+
+**R78.** *Other swaps are unchanged.* A swap without a spend keeps every answer
+of the manual recovery as it is, including the refund of an unspent maker
+payment after its refund time and the spend of the taker payment when the maker
+payment is spent and the taker payment is not.
+
+> **As built.** R75 item 2 is one check at the start of the
+> "maker payment unspent" answer of the maker's `recover_funds`, ahead of the
+> refund-time check, the refund gate and any transaction building: when the
+> record holds the spend of the taker payment, the call returns the refusal of
+> item 2. The guard of item 1, the "spent" and "refunded" answers and the run
+> loop are unchanged; no state is written on the refusal. Tests T32 items 7 to
+> 11: `test_recover_funds_sent_spend_unspent_maker_payment_after_the_lock_is_not_refunded`,
+> `test_recover_funds_sent_spend_unspent_maker_payment_before_the_lock_gets_the_same_refusal`,
+> `test_recover_funds_sent_spend_spent_maker_payment_still_spends_the_unspent_taker_payment`,
+> `test_recover_funds_sent_spend_spent_maker_payment_and_spent_taker_payment_builds_nothing`,
+> `test_recover_funds_sent_spend_refunded_maker_payment_is_refused_as_already_refunded`
+> in `mm2src/mm2_main/src/lp_swap/maker_swap.rs`. Run on 2026-11-07:
+> `cargo test -p mm2_main --lib test_recover_funds` passed, 42 tests of which these five
+> are new, and the formatting check passed.
+
+## 51.6B Bound Warning for a Refund Wait on a Stalled Node
+
+> **Status (Reloaded-original; batch 4, 2026-11-08).** These rules record no
+> claim about the reference implementation. They add a log line only; the
+> events, the resume map (R19, R32) and the persisted log shape of chapter 44
+> are unchanged.
+
+While a maker or taker swap waits to refund its own payment, the wait
+consults the coin only through the refundability check, which answers "wait
+this many seconds" (at most an hour at a time) and never says why the answer
+does not change. When the coin's node stops advancing, the answer stays
+"wait", the swap keeps waiting and the log says nothing that points to the
+node. A wait that outlives a stalled node therefore looks like an ordinary
+wait.
+
+**R79.** *A refund wait observes the coin's tip height, beside the wait.* While a
+swap of this chapter waits for the refund of its own payment, the swap MUST read
+the tip height of the paying coin once every 5 minutes, and MUST NOT read it more
+often (a wait that is cut into shorter steps reads once per 5-minute period, not
+once per step; one second of clock rounding is tolerated). The read runs
+alongside the sleep of the step and is abandoned when that sleep ends, so it is
+never on the path of the wait; a read that fails or does not finish by then is not
+an observation and is skipped. The wait itself (its length, the refund decision,
+the events and the state) MUST NOT change because of the observation.
+
+**R80.** *A tip that does not advance is warned about, at most hourly.* When
+the observed height has not changed for 60 minutes, the swap MUST write one
+warning to the log that names the coin by its ticker, the height and the number
+of whole minutes the height has not changed. While the height stays the same
+the warning MUST NOT be repeated more often than once every 60 minutes. A
+change of height ends the stall, and a later stall counts from the change. The
+warning MUST NOT contain a server address, URL, host or response text; the
+ticker is the only name of the coin's node source. The clock of the stall
+starts at the first observation of the wait; a restart of the node starts it
+again.
+
+**R81.** *What the rule does not cover.* The warning exists for the refund waits
+of the maker and the taker of this chapter. It is not written for the wait for
+the confirmation of a payment, for the swaps of the second protocol version
+or for the watcher. It is not written while the refundability check itself fails (that
+case keeps its existing error line and 30-second retry). It does not name the
+cause (a stopped node, a node that is behind, a chain that has stopped).
+
+> **As built (batch 4, 2026-11-08).** The rule lives in
+> `mm2src/mm2_main/src/lp_swap/stale_tip_watch.rs`: a pure `StaleTipWatch`
+> (`observe(now_secs, height)`, no clock inside) and `sleep_observing_tip`, which
+> cuts the wait into slices of at most 300 s. At the start of a slice, when the
+> height is due, `current_block()` of the paying coin is read alongside the
+> slice's sleep (`sleep_beside_read`: the read raced against the sleep). The slice
+> ends exactly when the sleep ends. A read that finishes first is observed and the
+> sleep is awaited on; a read that fails, or has not finished when the sleep
+> ends, is dropped and skipped, so no read is ever awaited after its sleep and
+> the wait is not lengthened. A read is due only when 300 s (less 1 s of clock
+> rounding) have passed since the previous one, so the short steps of the taker's
+> refund wait read the coin once per 5 minutes, not at every step. The maker's
+> refund wait (`refund_maker_payment_retrying`) uses it in place of its
+> `HaveToWait` sleep; the taker's (`refund_taker_payment_paced`) in place of its
+> step sleep, one watch per refund wait, created before the inner loop. The `Err`
+> arm (30 s retry) is unchanged. Tests: the `t33_*` tests of that module (fake
+> clock, sleeper and reads); two existing taker tests that answer "wait" now mock
+> `current_block`; only the taker's call site runs in a test (through those two
+> tests), the maker's call site is covered by construction. A read is counted as
+> made when it starts, so a maker wait that ends in very short sleeps (a wait of
+> 0 to 2 seconds close to the lock time) whose read takes longer than the sleep
+> has that read dropped and its 5-minute period used up; such a wait may observe
+> rarely, while the taker's steps (5 to 300 seconds by default) and the
+> 300-second slices of the maker's observe as the rule says.
+> Run on 2026-11-08: `cargo test -p mm2_main --lib -- stale_tip_watch` passed (15
+> tests), `-- r31a` passed (10 tests), and the formatting check passed. The warning
+> is verified by these unit tests only: the timing is driven by a fake sleeper
+> and a fake height source, and no real-time observation of it on a stalled
+> node exists. A lab row that observes it on a frozen tip is an optional
+> follow-up, not a condition of this rule.
+
+## 51.6C Bound Automatic Refund After the Claim Step
+
+> **Status (Reloaded-original; 2026-11-12).** This rule records no claim about
+> the reference implementation. It binds the refund that the maker's run loop
+> makes, which R77 and D8 left unchanged. It adds no event; the persisted log
+> shape of chapter 44 and the resume map (R19, R32) are unchanged.
+
+The maker's run loop goes to the refund of the maker payment when the claim of
+the taker payment fails with a built transaction, when the wait for the
+confirmation of the claim fails, and after a restart that finds either failure
+in the log. None of these proves that the claim is not on the chain: the claim
+may be mined while the answer that reached the node was an error or a lagging
+backend. A refund after a mined claim leaves the maker holding both payments.
+
+**R82.** *The refund after the claim step looks at the taker payment first.* When
+the run loop reaches the refund of the maker payment of a swap that reached the
+claim step (the claim was sent, the claim failed with a built transaction, or the
+wait for its confirmation failed; the taker payment is known), the swap MUST
+search the taker coin's chain for the spend of the taker payment, with the
+swap's own keys, before it builds the refund, and decides as follows:
+
+1. A *confirmed* spend of the taker payment by the maker's claim is found: the
+   swap MUST NOT refund. The record completes: `TakerPaymentSpent` (only when the
+   record does not hold the spend yet) and `TakerPaymentSpendConfirmed` are
+   recorded, and the swap finishes. One info line names the swap and the ticker
+   of the taker coin. A spend that is found but has no confirmation (it may be
+   only in a mempool and may drop, after which the taker could refund) records
+   nothing and is handled as item 3: the refund is held and the search is
+   repeated, and at the deadline the failed-refund text says that the claim is
+   found but not confirmed.
+2. The taker's refund of the taker payment is found, or nothing is found: the
+   refund goes on as before (a fair race of the two refund times is what the
+   protocol intends).
+3. The search fails or cannot decide, or a spend is found but not confirmed: the
+   swap MUST NOT refund. It writes one warning naming the swap and the ticker of
+   the taker coin (no server address, URL, host or response text) the first
+   time each of the two situations occurs, logs the repeats at debug level,
+   waits and searches again, until the refund deadline of the swap. At the
+   deadline the swap records `MakerPaymentRefundFailed` with a text that says
+   the state of the taker payment could not be determined on that coin (or that
+   the claim of the taker payment on that coin is found but not confirmed),
+   that the maker payment is not refunded, and that manual recovery applies; the
+   swap then finishes.
+
+No new event is added. A swap that did not reach the claim step (the refund
+follows a failure before it, or the taker payment is not known) refunds as
+before and searches nothing. The restart path is the same code: the claim step
+is derived from the events of the saved log. The reverse case of D8 (the claim
+dropped and the taker refunded) is not part of this rule.
+
+> **As built (2026-11-12).** `MakerSwap::refund_maker_payment_retrying` in
+> `mm2src/mm2_main/src/lp_swap/maker_swap.rs`: after the refund gate answers
+> "refund now" and before the refund is built, a swap whose
+> `taker_payment_spend_attempted` flag is set (set by `apply_event` for
+> `TakerPaymentSpent`, `TakerPaymentSpendFailed` and
+> `TakerPaymentSpendConfirmFailed`, so a restored swap has it) and that holds the
+> taker payment calls `look_at_taker_payment`, which runs
+> `search_for_swap_tx_spend_other` of the taker coin and hands the result to the
+> pure `classify_taker_payment_search`
+> (`TakerPaymentOutcome::{SpentByUs, RefundedByTaker, Unspent, Undetermined}`).
+> A found spend is then checked with `wait_for_confirmations` of the taker coin
+> for one confirmation, for at most the retry wait; a failed check turns it into
+> `TakerPaymentOutcome::SpentUnconfirmed`, which is held like `Undetermined`.
+> The wait between searches is the retry wait the refund stage already takes
+> (30 s in the node). The warning is written once for each of the two held
+> situations (undetermined, found but not confirmed) and the repeats go to the
+> debug log; the search or confirmation error text is logged at debug level only.
+> The deadline check comes before the sleep, so the last search may run up to one
+> retry wait after the refund deadline; if that search answers "unspent" the
+> refund is built just after the deadline, which is harmless on the chain.
+> Tests (`maker_swap_tests` in the same file, 12 new):
+> `a_taker_payment_spend_found_on_the_chain_stops_the_refund_and_completes_the_record`,
+> `a_taker_payment_spend_found_after_the_confirmation_failed_adds_only_the_confirmation`,
+> `a_taker_refund_found_on_the_chain_lets_the_maker_refund`,
+> `an_unspent_taker_payment_lets_the_maker_refund`,
+> `an_unreadable_taker_chain_holds_the_refund_until_the_deadline_and_reports_it`,
+> `an_unreadable_taker_chain_after_the_deadline_reports_at_once`,
+> `a_taker_payment_spend_that_is_found_but_not_confirmed_holds_the_refund_until_the_deadline`,
+> `an_unconfirmed_taker_payment_spend_after_the_deadline_reports_at_once_and_records_nothing`,
+> `a_swap_that_never_reached_the_claim_step_refunds_without_a_search`,
+> `a_swap_without_a_taker_payment_refunds_without_a_search`,
+> `a_restored_swap_after_a_failed_claim_confirmation_does_not_refund_a_spent_taker_payment`
+> (also checks the lock time and key the restored swap passes to the search),
+> `the_taker_payment_search_result_is_classified_into_the_four_outcomes`.
+> Run on 2026-11-12: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 81 tests of which these twelve
+> are new, and the formatting check passed.
+
+## 51.6D Bound Manual Refund After a Lost Claim
+
+> **Status (Reloaded-original; 2026-11-12).** This rule records no claim about
+> the reference implementation. It narrows item 2 of R75 for the manual
+> recovery only. It adds no event and no RPC field; the persisted log shape of
+> chapter 44 and the resume map (R19, R32) are unchanged.
+
+A maker swap can end with the log holding the sent claim of the taker payment
+(`TakerPaymentSpent`) although the claim never reached the chain: the
+transaction was built and logged as broadcast, the confirmation wait failed at
+its deadline, and the search of R82 could not read the backend. The taker then
+refunds the taker payment on its own chain. The record is not confirmed, the
+maker payment is unspent, and R75 item 2 refuses the manual recovery: the maker
+holds neither payment, and the taker, who knows the secret from the broadcast,
+can still claim the maker payment. D8 described this case.
+
+**R83.** *The manual recovery refunds after a lost claim only when the taker's
+refund is shown.* For a swap whose record holds the sent spend of the taker
+payment without its confirmation, and whose maker payment is unspent on its
+chain, `recover_funds_of_swap` MUST look at the taker payment on the taker
+coin's chain before it answers, with the key that rebuilds the taker payment's
+script (the key the recovery's own spend of the taker payment uses), and a spend
+or refund that is found counts only with at least one confirmation. It
+answers:
+
+1. the taker's refund of the taker payment is found with a confirmation: the
+   maker payment MAY be refunded. One info line names the swap and both tickers.
+   The refund time, the refund gate and the refund build are exactly as for a swap
+   without a spend (R78);
+2. the maker's own spend of the taker payment is found with a confirmation: the
+   call MUST refuse with the text of R75 item 2, unchanged;
+3. the maker's spend is found without a confirmation, or the refund is found
+   without a confirmation, or the search fails or cannot decide: the call MUST
+   refuse with a text that says the state of the taker payment on that coin could
+   not be determined (or that the spend is found but not confirmed) and that the
+   maker payment is not refunded, and MUST build no transaction;
+4. nothing spent the taker payment: the call MUST refuse with the text of R75
+   item 2 and MUST add that the taker payment is still unspent on that coin and
+   that the call is to be repeated once the taker has refunded (the claim may
+   still be in a mempool).
+
+R75 item 1 (a completed swap, whose spend is confirmed) is unchanged and refuses
+before any look at a chain. A refusal of this rule changes nothing (R76): no
+event, no status, no recoverable flag and no record write. The run loop is not
+changed by this rule.
+
+> **As built (2026-11-12).** `MakerSwap::recover_funds_tracked` in
+> `mm2src/mm2_main/src/lp_swap/maker_swap.rs`: in the arm of the maker payment
+> search that finds the maker payment unspent, a record that holds the sent spend
+> calls `look_at_taker_payment_for_recovery`, which resolves the recovery key of
+> the taker payment with `resolve_recovery_htlc_key`, records the `SearchSpend`
+> stage of the taker coin, runs `search_for_swap_tx_spend_other` and hands the
+> result to `classify_taker_payment_search`. A found spend or refund is checked
+> with `confirm_found_spend` (`wait_for_confirmations` of the taker coin, one
+> confirmation, for at most the retry wait of the refund stage, which the
+> run loop's look at the taker payment uses too); a found refund that cannot be
+> confirmed is reported as undetermined. The answer to a confirmed refund goes on
+> into the existing refund code (refund time, refund gate, build) unchanged.
+> `TakerPaymentOutcome::RefundedByTaker` now carries the refund transaction.
+> Tests (`maker_swap_tests` in the same file, 8 new, 2 adapted to mock the taker
+> search):
+> `test_recover_funds_lost_claim_taker_refund_confirmed_refunds_the_maker_payment`,
+> `test_recover_funds_lost_claim_taker_refund_unconfirmed_is_refused`,
+> `test_recover_funds_lost_claim_own_confirmed_spend_keeps_the_sent_spend_refusal`,
+> `test_recover_funds_lost_claim_own_unconfirmed_spend_is_refused_naming_the_reason`,
+> `test_recover_funds_lost_claim_unspent_taker_payment_is_refused_with_a_repeat_note`,
+> `test_recover_funds_lost_claim_failed_taker_search_is_refused_as_undetermined`,
+> `test_recover_funds_lost_claim_completed_swap_refuses_without_looking_at_the_chain`,
+> `test_recover_funds_lost_claim_taker_refund_confirmed_before_the_lock_is_too_early`.
+> Run on 2026-11-12: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 89 tests of which these eight
+> are new, and the formatting check passed.
+
+> **Status note (2026-11-13, Reloaded-original).** R84 narrows R83: it covers the
+> record without a sent spend, after a failed claim call.
+
+> **Status (Reloaded-original; 2026-11-13).** This rule records no claim about
+> the reference implementation. It adds no event and no RPC field; the persisted
+> log shape of chapter 44 and the resume map (R19, R32) are unchanged.
+
+**R84.** *The manual recovery looks at the taker payment after a failed claim
+call.* For a swap whose claim step was reached (the log holds
+`TakerPaymentSpent`, `TakerPaymentSpendFailed` or `TakerPaymentSpendConfirmFailed`,
+the same condition R82 uses), whose record holds no sent spend (the claim call
+returned an error, so the claim may still have been mined), whose record holds
+the taker payment, and whose maker payment is unspent on its chain,
+`recover_funds_of_swap` MUST look at the taker payment exactly as R83 does
+(same key, same one-confirmation rule) before it answers:
+
+1. the maker's own spend of the taker payment is found with a confirmation: the
+   call MUST refuse with a text that says the claim of the taker payment on the
+   taker coin is on the chain and that the maker payment on the maker coin belongs
+   to the taker and is not refunded;
+2. the spend is found without a confirmation, or the search fails or cannot
+   decide: the call MUST refuse with the texts of R83 item 3, and MUST build no
+   transaction;
+3. the taker's refund of the taker payment is found with a confirmation, or
+   nothing spent the taker payment: the maker payment MAY be refunded. One info
+   line names the swap and both tickers and says which of the two applies. The
+   refund time, the refund gate and the refund build are exactly as for a swap
+   without a spend (R78). Unlike R83 item 4, an unspent taker payment does not
+   refuse here, because no spend was recorded as sent (the same answer as R82
+   item 2 gives in the run loop).
+
+A swap that did not reach the claim step makes no search and is unchanged. R83
+(a record that holds the sent spend) is unchanged. A refusal of this rule changes
+nothing (R76). The automatic refund of the run loop (R82) is not changed by this
+rule.
+
+> **As built (2026-11-13).** `MakerSwap::recover_funds_tracked` in
+> `mm2src/mm2_main/src/lp_swap/maker_swap.rs`: in the arm of the maker payment
+> search that finds the maker payment unspent, a second branch, taken when the
+> record holds no sent spend, `taker_payment_spend_attempted` is set (the replay of
+> the saved events sets it) and the taker payment is known, calls
+> `look_at_taker_payment_for_recovery` unchanged and answers as above; a refund or
+> an unspent payment goes on into the existing refund code. Tests
+> (`maker_swap_tests` in the same file, 7 new):
+> `test_recover_funds_failed_claim_call_confirmed_own_claim_is_refused`,
+> `test_recover_funds_failed_claim_call_unconfirmed_own_claim_is_refused`,
+> `test_recover_funds_failed_claim_call_failed_taker_search_is_refused_as_undetermined`,
+> `test_recover_funds_failed_claim_call_taker_refund_confirmed_refunds_the_maker_payment`,
+> `test_recover_funds_failed_claim_call_unspent_taker_payment_refunds_the_maker_payment`,
+> `test_recover_funds_failed_claim_call_unspent_taker_payment_before_the_lock_is_too_early`,
+> `test_recover_funds_claim_step_not_reached_makes_no_taker_payment_search`.
+> The six fixtures that reach the claim step are restored from a saved log in which
+> `TakerPaymentSpendFailed` takes the place of `TakerPaymentSpent`; the seventh,
+> `test_recover_funds_claim_step_not_reached_makes_no_taker_payment_search`, from the same log with
+> `TakerPaymentSpent` replaced by `TakerPaymentValidatedAndConfirmed`, so that neither the spend nor
+> its failure is in the log. One existing test (`test_recover_funds_maker_payment_refund_errored`, a
+> restored swap that ended in the failed refund) now mocks the taker search, because its log holds
+> the failed claim call.
+> Run on 2026-11-13: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 96 tests of which these
+> seven are new.
+
 ## 51.7 Bound Message Contract
 
 **R41.** *Six message kinds, one envelope.* The legacy swap message
@@ -967,8 +1358,9 @@ else. Its complete contract:
 > only by statistics stores, the extension breaks no peer, but it should
 > be adopted as a documented Reloaded-original divergence, not silently.
 
-**R50B.** *The transaction-helper topic (Reloaded addition, 2026-10-30,
-Decision BB).* Each side publishes the spend and refund transactions it
+**R50B.** *The transaction-helper topic (2026-10-30, Decision BB; the
+publisher side is parity, the receiver side a Reloaded correction of a
+reference defect -- see the notes below and D6).* Each side publishes the spend and refund transactions it
 builds on the coin's transaction-helper topic (`txhlp/<ticker>`), so that
 other nodes can broadcast them too: after its own broadcast succeeded, and
 also when its own broadcast failed with the transaction at hand. The
@@ -980,8 +1372,44 @@ itself. A message that does not decode or verify is discarded with a
 warning. A broadcast that the network refuses is the usual outcome, since
 the parties have normally broadcast the transaction already (it is in the
 mempool or in a block), and is logged at debug level only. Which nodes act
-on the topic, and what a reference receiver does with the message, are
-open (D6).
+on the topic is open (D6). What a reference receiver does with the message
+was open too; the note below records it (passed the KDF Dirty Gate on
+2026-11-04, PR #232, merged 2026-11-05). *(Pointer added 2026-11-07.)* The reference's publishing side --
+which steps of the maker, the taker, their recovery paths and the watcher
+publish, in which outcomes, for which coin kinds, and with which key -- is
+recorded in [Chapter 09](09-watcher-reward-infrastructure.md) R24, which
+passed the KDF Dirty Gate on 2026-11-07.
+
+> **Reference behavior of the transaction-helper receiver (passed the KDF
+> Dirty Gate on 2026-11-04, measure 0.04; Spec Reader 2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of
+> chapter 02 §2.15A, identical at both).** The reference subscribes a node to
+> a coin's transaction-helper topic only when that coin is activated through
+> the legacy `enable` method in **native** (local daemon) mode; an Electrum
+> or task-route activation subscribes nothing, so such a node never receives
+> the topic's messages, and a relay that is not subscribed does not forward
+> them. A subscribed receiver, relay or not, looks the coin up by the topic's
+> ticker, requires the message to parse as a raw transaction of that coin,
+> and -- only when the coin is in native mode -- broadcasts it through the
+> coin's daemon; a message that fails to parse is logged and dropped
+> **without propagation**, and a message for a coin the receiver has not
+> enabled is propagated without action. The sender, as R50B says, publishes
+> the transaction **inside the signed envelope of R43**.
+>
+> **Code-quality finding (informative; trigger: a contradiction between two
+> things read side by side, the sender and the receiver).** The reference
+> receiver applies the coin's raw-transaction parser to the **whole received
+> message**, not to the transaction inside the envelope: it neither unwraps
+> nor verifies the envelope. An envelope is not a raw transaction of any
+> coin, so at both reference rows every helper message a reference node
+> receives for a coin it has enabled fails to parse, is dropped, and is
+> neither submitted to the chain nor propagated; the topic is inert on the reference side. This is a finding
+> against the reference, **not** a convergence target: R50B's rule -- decode
+> and verify the envelope, broadcast the transaction inside it -- is the
+> correct behavior, and a Coder shall not adopt the reference's. For D6 it
+> settles the open question: a reference receiver does nothing useful with a
+> helper message in native or Electrum mode, so the topic helps only between
+> Reloaded nodes. Chapter 09 R23 records a relay's handling of the watcher
+> topic, which does propagate.
 
 ## 51.8 Bound Reserved-Funds Semantics
 
@@ -1166,6 +1594,26 @@ be made key-length-polymorphic; the 33-byte width is a property of the
 deployed wire format, not of secp256k1. For a shielded coin, the HTLC key
 behind that public key is derived per swap and never stored
 ([chapter 39](39-zcash---z_coin-shielded-coin.md) R39.5.6--R39.5.9).
+
+> **Reloaded status under an HD login (informative, 2026-11-04).** For a
+> secp256k1 coin the machines resolve the coin's own HTLC key where the coin
+> supplies one, and the node's persistent key otherwise. Under an iguana login
+> these are one key. Under a global-HD login
+> ([chapter 45](45-startup-configuration-and-environment-tolerance.md)
+> R45.4.8) they differ. A UTXO coin activated through the HD task route
+> supplies its activated HD key, and its spend and refund outputs go to that
+> key's address; it funds the swap from its first address (account `0`, chain
+> `External`, address `0`), so the two agree only when it was activated there.
+> A coin that supplies no key of its own gets the node's persistent key, which
+> under HD is the hash of the passphrase text. For EVM coins and for coins
+> enabled through legacy `enable` or `electrum` that is not the key the coin
+> pays from. A swap of such a coin under an HD login does not complete as
+> intended. Plan
+> [`hd-key-unification`](../plans/hd-key-unification.md) first refuses those
+> swaps (item H1, chapter 05 §5.12B R36), then gives every coin its own
+> key (item H3, chapter 05 §5.12C R41–R43). R74 states the target: the internal key as
+> the persistent key and the coin's own key as each HTLC key; chapter 05
+> §5.9B tabulates the keys.
 
 **R64.** *Representation of non-secp256k1 keys — the dictated padding
 convention.* A chain whose native key is not a 33-byte secp256k1 point
@@ -1400,6 +1848,100 @@ carry it.
 > instead of a raw parse failure (`SiaCheckIfMyPaymentSentArgsError::
 > WrongSecretHashLength`, `SiaValidatePaymentInputError::
 > WrongSecretHashLength`) rather than something recovery can act on.
+>
+> **EVM leg: closed in code and verified in the lab as of 2026-11-08.** The
+> "plausible in other coin families" remark above held for the EVM legacy
+> swap contract. That contract takes the hash as a `bytes20` argument and
+> verifies a spend with `ripemd160(sha256(secret))`, which is exactly the
+> second case of R72A. Before this change the EVM coin layer put the shared
+> `secret_hash` into that slot unchanged: with the 32-byte alternate the
+> ABI encoder accepted the value, the counterparty decoded only its leading
+> 20 bytes and refused the payment ("secret_hash arg ... is invalid"), and
+> such a payment could not have been spent. Now the EVM layer derives the
+> slot value with one helper, `contract_secret_hash`
+> (`mm2src/coins/eth/secret_hash_value.rs`): 20 bytes unchanged, 32 bytes
+> `RIPEMD160` applied once, any other width an error with the text of the
+> UTXO comparator. The payment build (`send_hash_time_locked_payment`, ETH
+> and ERC20 arms, `eth_impl.rs`) embeds the derived value and fails before
+> building when the width is wrong; the payment validation
+> (`validate_payment`, both arms) compares the decoded slot with the derived
+> value through `check_payment_secret_hash_arg`, and its error names the
+> derived value as the expected one. The swap id (`etomic_swap_id`) is still
+> computed over the shared value on both sides, unchanged. Spend and refund
+> read the payment's own arguments from the payment transaction, which hold
+> the derived value already, and secret extraction reads the revealed secret
+> from the spend call, so they needed no change (R72B holds: the maker and
+> taker stage graphs pass the shared value unchanged). The 20-byte path is
+> byte-for-byte as before. Tests: `eth_secret_hash_tests.rs`, all prefixed
+> `r72a_` (helper, payment build for ETH and ERC20 against literal vectors,
+> swap id, validation). Run on 2026-11-08: `cargo test -p coins --lib -- eth::`
+> passed (425 tests, the new ones included) and the formatting check passed.
+> Lab (2026-11-08, build of PR #290, Siacoin against USDC-MON on Monad, 32-byte
+> secret hash H32, contract value D20 = RIPEMD-160(H32)): cell A (the maker sells
+> SC) and cell A2 (the maker sells USDC-MON) passed, payment and spend, and cell
+> B, the refund case (maker USDC-MON, taker Siacoin), passed. In cell B the
+> maker's real payment carried D20 left-aligned in the hash slot (payment word 4)
+> and the leading 20 bytes of H32 (the value before the fix) appeared in no
+> word; the maker's refund transaction carried D20 in its payment-hash slot
+> (refund word 2); the maker ended
+> MakerPaymentRefunded and Finished with no "secret_hash arg ... is invalid" line
+> in either log; the taker never sent its Siacoin payment and ended cleanly. The
+> maker's USDC-MON balance was exactly back to its starting amount after the refund (the
+> token is not reduced by gas; gas is paid in MON). A run of the build before
+> the fix, for comparison, was not done.
+>
+> The QRC20 legacy swap uses the same contract and the same `bytes20` slot,
+> and has the same defect and the same fix, with the same helpers
+> (`mm2src/coins/qrc20/swap.rs`). `erc20_payment_call_bytes` derives the slot
+> value (a wrong width is an `InvalidParams` error, so no payment is built);
+> both the payment build and the validation's expected call bytes come from
+> it. `validate_payment` also compares the decoded slot with the derived
+> value through `check_payment_secret_hash_arg`, before the call-bytes
+> comparison, so the error names the derived value as expected.
+> `extract_secret_impl` and `search_for_swap_tx_spend` compare the
+> `dhash160` of a revealed secret with the derived value instead of the
+> shared one, which for a 32-byte shared value could never match.
+> Unchanged, with reasons: the swap id (`qrc20_swap_id`, over the shared
+> value on both sides); the refund (`refund_hash_time_locked_payment`,
+> `sender_refund_output`) and `wait_for_tx_spend_impl`, which read the
+> `secret_hash` of the payment transaction, already the derived value; the
+> trade-fee estimate, which uses a 20-byte dummy. The QRC20 path is covered
+> by unit tests only (`r72a_qrc20_*` in `qrc20_tests.rs`; run on 2026-11-08:
+> 9 passed); the live lab row is Siacoin against an EVM token. The v2 EVM
+> swap contracts take 32-byte hashes (`bytes32`) and the TRON V1 path has no
+> secret hash; neither is affected.
+
+**R74.** *Which key each side puts on the wire under a global-HD login.*
+*(Passed the KDF Dirty Gate on 2026-11-04, measure 0.04. Reference fact, Spec Reader 2026-11-04, rows
+`v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both.)*
+Under a global-HD login (chapter 05 R20) the `persistent_pubkey` of R59, the
+own-key field of the start event and the own-key column of the swap
+statistics record (R50A) are the node's **internal key** of chapter 05 R16;
+each per-coin HTLC public key of R63 is the **coin's own key** -- for a
+UTXO-family, QTUM, BCH, SLP, QRC20, EVM or Tendermint coin the key activated
+at the coin's `path_to_address`, for a shielded coin the per-swap derivation
+of chapter 39 R39.5.6, for Sia the padded account key of R64. No key derived
+by hashing the mnemonic string appears anywhere on the swap wire under a
+global-HD login. Because the two HTLC keys then differ from the persistent
+key, the sender emits shape 3 under R60. The reference performs no
+key-consistency check before a swap (chapter 05 R34): the key on the wire is
+the key that signs. Under the legacy single-key login all of these are the
+one key, and shape 2 results.
+
+> **Compatibility (this repository; not corpus-sourced).** Reloaded's v1
+> machines put a hash of the mnemonic string on the wire as the persistent
+> key and, for every coin that supplies no swap key (EVM; UTXO-family coins
+> activated through the legacy route), as the HTLC key too, so the payments
+> that follow are signed by a different key than the one announced. This is
+> recorded in plan [`hd-key-unification`](../plans/hd-key-unification.md)
+> (items H3 and H4) and is a divergence from R74, not a retained parity
+> behavior. Chapter 05 §5.12C (item H3) binds Reloaded to R74's HTLC keys
+> and to the UTXO funding address, and §5.12D (item H4) binds it to R74's
+> persistent key. A swap that recorded the passphrase hash keeps it
+> (chapter 05 R47). Correcting it changes the key Reloaded
+> announces for its own swaps and is therefore visible to peers and to swap
+> statistics at upgrade; a swap in flight must keep the key its start event
+> recorded.
 
 ## 51.10 Bound Reference-Version Split
 
@@ -1454,6 +1996,7 @@ and the 33-byte key width of R62 MUST NOT be relaxed, on either netid.
 | Maker locktime uses the multiplier; taker locktime does not            | R10, R22, R25 |
 | A negative negotiation acknowledgement is transmitted, once, on seven conditions | R33, R34, R35 |
 | A taker in its refund chain claims a taker payment the maker has spent, instead of failing the refund | R31a |
+| A completed maker swap (its record holds a confirmed spend of the taker payment) is never refunded, by the manual recovery or on its own | R75, R76, R77, R78 |
 | Refusal is broadcast before the failure event is persisted             | R36           |
 | No refusal message exists after the negotiation stage                  | R38           |
 | Refusal causes the refused taker to penalise the maker for one hour    | R40           |
@@ -1690,6 +2233,68 @@ transaction's bytes signed as a transaction-helper message yield exactly
 those bytes, which are what is broadcast; a bare transaction and an envelope
 with a changed signed byte are both refused.
 
+**T31.** *HD login keys on the v1 wire (R74).* Under a global-HD login, a v1
+swap of a UTXO coin activated at a non-default `path_to_address` and a v1
+swap of an EVM coin shall each emit a shape-3 negotiation payload whose
+`persistent_pubkey` is the internal key and whose per-coin HTLC key is the
+coin's activated key; the payment, spend and refund transactions of each
+shall verify against that HTLC key; and no field of the payload shall equal
+a key derived by hashing the mnemonic string.
+
+**T32.** *Refusal to refund after the maker's own spend (R75-R78).* A maker
+swap whose log ends in `Finished`:
+
+1. with the record holding `TakerPaymentSpendConfirmed`, the maker payment
+   unspent and the refund time passed, a call refuses, the text says that the
+   taker payment spend was sent and confirmed, and no transaction is built or
+   broadcast;
+2. with the same record and the refund time not passed, a call refuses the same
+   way;
+3. with the same record and the maker payment spent, a call refuses the same way
+   and builds nothing;
+4. after any of these calls the log, the status and the recoverable flag of the
+   swap are unchanged;
+5. a swap that has not terminated is refused by the "must be finished" guard,
+   and a swap whose record holds the refund of the maker payment is refused as
+   not recoverable;
+6. a swap without a spend is answered as before (R78);
+7. with the record holding `TakerPaymentSpent` but not its confirmation, the
+   maker payment unspent and the refund time passed, a call refuses, the text
+   says that the taker payment spend was sent and that the maker payment belongs
+   to the taker, and no refund is built or broadcast;
+8. with the same record and the refund time not passed, a call refuses the same
+   way, with the same text;
+9. with the same record, the maker payment spent and the taker payment unspent,
+   a call spends the taker payment, as for a swap without a spend;
+10. with the same record, the maker payment spent and the taker payment already
+    spent, a call refuses and builds nothing;
+11. with the same record and the maker payment refunded on the chain, a call
+    refuses as for a swap without a spend.
+
+Existing unit tests that cover items 1 to 3 and 5:
+`test_recover_funds_should_not_refund_on_the_successful_swap` (items 1 to 3),
+`test_recover_funds_maker_swap_not_finished` and
+`test_recover_funds_maker_swap_maker_payment_refunded` (item 5).
+
+**T33.** *The stale-tip warning (R79-R81).* With a height source and a clock
+that the test controls:
+
+1. a height that has not changed for 59 minutes of observation gives no
+   warning; at 60 minutes it gives exactly one, naming the ticker, the
+   height and 60 minutes;
+2. while the height stays the same, no second warning before 120 minutes; at
+   120 minutes a second one, naming 120 minutes;
+3. a change of height gives no warning and starts a new stall clock; a stall of
+   59 minutes after the change gives none;
+4. a read that fails, or does not finish before the sleep of its step ends, is skipped: it neither warns nor resets the clock, and the
+   observation after it counts from the last successful read;
+5. the first observation of a wait only records the height;
+6. the text of the warning contains the ticker and no address, URL or host;
+7. in the maker's and the taker's refund wait the sleep is cut into slices of
+   at most 5 minutes, the height is read once per 5-minute period (not once per
+   shorter step), the total sleep and the refund decision are those of the
+   unchanged wait, and the warning is written once the stall reaches 60 minutes.
+
 ## 51.13 Deferred Work
 
 **D1.** *Migration of the legacy machines onto the chapter-14 runtime.*
@@ -1731,6 +2336,48 @@ coins broadcasts through the same kind of servers the parties use. Limiting
 the receiver to native-mode coins, and confirming what a reference node does
 with the message (whether it unwraps the envelope, and whether a relay acts
 on a topic it has not subscribed to), are deferred to a Spec Reader pass.
+
+> *Reference answer (2026-11-04; passed the KDF Dirty Gate on 2026-11-04,
+> measure 0.04; last clause corrected after micro-run 0.4.0-2c, PASS 0.03).*
+> The two questions D6 deferred are answered in the note under R50B: a
+> reference node subscribes only for a native-mode legacy activation, acts
+> only for a native-mode coin, does not unwrap the envelope and in
+> consequence never gets a received helper transaction onto the chain; it
+> forwards a received helper message (when it is a relay) only for a coin it
+> has not enabled, and it does publish helper messages itself after its own
+> spend and refund attempts, exactly as R50B describes for Reloaded. What
+> remains of D6 is this project's own choice of receiver scope.
+
+**D7.** *No automatic refund of a completed maker swap, by decision.*
+Nothing looks at the maker payment of a completed swap again after
+`Finished`, and nothing refunds it (R77). An automatic refund watch was
+considered and rejected on 2026-11-07: the maker payment of a completed swap
+belongs to the taker. A log line at the end of a completed swap about the state
+of the maker payment is not specified.
+
+**D8.** *A refund after a sent spend, under consideration.* R75 item 2 refuses
+the refund of an unspent maker payment whenever the record holds a sent spend.
+A case it gives up on purpose: the spend was dropped, replaced or reorganized
+out of the chain, and the taker refunded the taker payment. The maker then holds
+neither payment, and the taker, who knows the secret from the broadcast, can
+still claim the maker payment and end up holding both. That is the reverse of
+the honesty argument of R75, and it is what makes this item worth deciding. A
+later version may allow the manual recovery to refund in that case only, when the
+taker payment is shown on its own chain to be refunded and no spend of ours is
+waiting in the pool of that chain. That needs a detection per coin family (the
+families differ in how a refund is found), must fail closed on any search error,
+and needs its own rule and tests; it is under consideration and not specified.
+The refund that the run loop makes after the confirmation of the spend failed
+(the confirmation wait ends, the log records the failure, and the refund chain
+follows) makes no look at the taker payment either; it is a separate decision and
+is not changed here.
+
+> **Status note (2026-11-12, Reloaded-original).** The automatic half is
+> decided: see R82. The reverse case (claim dropped, taker refunded) stays under
+> consideration.
+
+> **Status note (2026-11-12, Reloaded-original).** The reverse case is decided
+> for this version: see R83 (manual recovery only; the run loop is unchanged).
 
 ## 51.14 Baseline Verifications
 
@@ -1843,6 +2490,10 @@ reference rows alike.
   project must inter-operate with), R6 (behavioural observation of
   public networks), R7 (independent work).
 - *Sibling-allowlist consultations:* none.
+- *Addition of 2026-11-07 (Reloaded-original, no Spec Reader input):*
+  §51.6A (R75-R78), T32 and D7 rest on the project's own reading of the
+  manual-recovery call and on the project's decision DK; they record no claim
+  about the reference implementation.
 - *Forbidden corpus:* (addition of 2026-10-25: the informative pointer
   after R38 restates chapter 60's corpus-sourced finding that no volume
   check precedes or accompanies negotiation; cleared by the Dirty Gate
@@ -1934,3 +2585,69 @@ reference rows alike.
   internal decomposition, log or error string, or per-method internal
   table was copied; every rule above is stated as an externally
   observable behavioural or cryptographic requirement.
+  (Addition of 2026-11-04, KDF Spec Reader, **KDF Dirty Gate: PASS on 2026-11-04, measure 0.04**:
+  R74, T31, the compatibility note under R74, the reference-behavior note
+  and code-quality finding under R50B, and the answer note under D6 rest on
+  the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at
+  both. The facts taken are: which key is the v1 persistent key and which key
+  each coin family's HTLC public key is under a global-HD login, the
+  consequent negotiation shape, and the absence of any key-consistency check;
+  and, for the transaction-helper topic, who subscribes, what a receiver
+  requires of a message, when it broadcasts, when it propagates, and that the
+  receiver parses the whole message rather than the envelope's content. No
+  private identifier, function body, helper decomposition, log or error
+  literal was reproduced. The compatibility note rests on this repository's
+  own code, as inventoried in plan `hd-key-unification`; T31 is Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.04, no findings. *Extent:* the legacy swap's negotiation keys under a
+  global-HD login and the transaction-helper topic, at `v3.0.0-beta` with
+  `v2.6.0-beta` as cross-check; for the whole batch, 30 source files and one
+  dependency manifest were read at `v3.0.0-beta`, 29 of them checked by hash
+  against the tagged states of both rows. *Method:* side-by-side reading of
+  the compared regions against every added or changed line, plus that hash
+  check; the gate script was not run because the candidate has no code blocks.
+  *Measure:* 0.04, read against the standard that any discretionary finding
+  fails a file; dictated-interop and public-surface tokens were excluded from
+  the measured set.)
+  (Correction of 2026-11-04, KDF Spec Reader micro-run 0.4.0-2c, gated
+  2026-11-04, **KDF Dirty Gate: PASS on 2026-11-04, measure 0.03**: the last
+  clause of the answer note under D6, the last sentence of the code-quality
+  finding under R50B, and the label of R50B. The micro-run re-read the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  only to establish whether the reference publishes transaction-helper
+  messages itself and when a relay forwards a received one: it publishes after
+  its own spend and refund attempts as R50B states, and it forwards only for a
+  coin it has not enabled or for bytes that parse as a raw transaction of an
+  enabled coin. The corrected wording is Reloaded-original. No private
+  identifier, function body, helper decomposition, log or error literal was
+  reproduced. *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04,
+  measure 0.03, no finding in the passages used here. *Extent:* the
+  transaction-helper topic publisher, including its call sites in the legacy
+  maker and taker swaps and the watcher, and the receiver and relay-forwarding
+  handler for that topic, at `v2.6.0-beta` and `v3.0.0-beta`, within a
+  micro-run that read seven source files at each row. *Method:* reading, plus
+  a mechanical diff between the two rows; the gate script was not run because
+  the candidate has no code blocks. *Measure:* 0.03, read against the judgment
+  standard of chapter 01 R35.)
+- *Reloaded-original note (2026-11-04) -- "Reloaded status under an HD
+  login" under R63.* It records which key the machines resolve per coin
+  under a global-HD login and points to plan `hd-key-unification`. Written
+  by a context that never read the forbidden corpus, from this repository's
+  own swap, coin-key and activation code. No reference implementation was
+  consulted, and it needs no Dirty Gate pass. *Pointer added 2026-11-05:*
+  its last sentence now names R74 as the target; it carries no reference
+  content of its own.
+- *Pointer added 2026-11-05 -- the HD status note under R63 and the
+  compatibility note under R74.* Both now name chapter 05 §5.12C (plan item
+  H3). Written by a context that never read the forbidden corpus. It carries
+  no reference content of its own and needs no Dirty Gate pass.
+- *Pointer added 2026-11-05 -- the compatibility note under R74.* It names
+  chapter 05 §5.12D and R47 (plan item H4). Written by a context that never
+  read the forbidden corpus. It carries no reference content of its own and
+  needs no Dirty Gate pass.
+- *Pointer added 2026-11-07 -- the sentence under R50B naming chapter 09 R24.*
+  It carries no reference content of its own; its target passed the KDF Dirty
+  Gate on 2026-11-07, as chapter 09 records. **KDF Dirty Gate: PASS on 2026-11-07, measure 0.00.**
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.00, no findings; the pointer was judged with its target, whose clearance
+  is recorded in chapter 09's provenance footer of the same date.

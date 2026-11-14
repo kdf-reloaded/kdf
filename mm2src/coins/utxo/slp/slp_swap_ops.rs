@@ -316,6 +316,12 @@ impl SwapOps for SlpToken {
     }
 
     fn get_htlc_key_pair(&self) -> Option<KeyPair> { utxo_common::get_htlc_key_pair(&self.platform_coin) }
+
+    fn own_signing_key_pair(&self) -> Option<KeyPair> { utxo_common::own_signing_key_pair(&self.platform_coin) }
+
+    fn swap_key_disagreement(&self, _node_pubkey: &Public) -> Option<crate::SwapKeyDisagreement> {
+        utxo_common::swap_key_disagreement(&self.platform_coin)
+    }
 }
 
 #[async_trait]

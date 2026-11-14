@@ -78,7 +78,7 @@ crates with `workspace = true`, rather than repeated per crate.
 
 | Target | Bound libp2p feature set |
 | ------ | ------------------------ |
-| Native (`cfg(not(target_arch = "wasm32"))`) | `dns`, `identify`, `floodsub`, `gossipsub`, `noise`, `ping`, `request-response`, `secp256k1`, `tcp`, `tokio`, `websocket`, `macros`, `yamux` |
+| Native (`cfg(not(target_arch = "wasm32"))`) | `identify`, `floodsub`, `gossipsub`, `noise`, `ping`, `request-response`, `secp256k1`, `tcp`, `tokio`, `websocket`, `macros`, `yamux` |
 | WASM (`cfg(target_arch = "wasm32")`) | `identify`, `floodsub`, `noise`, `gossipsub`, `ping`, `request-response`, `secp256k1`, `wasm-ext`, `wasm-ext-websocket`, `macros`, `yamux` |
 
 The runtime-transport feature naming follows the fork's 0.52.x scheme
@@ -87,6 +87,11 @@ The runtime-transport feature naming follows the fork's 0.52.x scheme
 families are now supplied by the fork's feature flags (see the §28.1
 divergence note). The `macros` feature is required for the
 `#[derive(NetworkBehaviour)]` used by R6.
+
+*Amended 2026-11-02 (chapter 45 §45.6B).* The native set no longer
+enables `dns`. The node resolves the hostnames in the addresses it dials
+with its own layer (R18), so the fork's DNS crate and the resolver
+library that crate pulls in are not built.
 
 **R0c.** The `identify` feature is enabled at the crate level on both
 targets even though Identify is deliberately absent from the composed
@@ -245,16 +250,19 @@ length-prefixed libp2p request-response frame whose payload is msgpack
 maximum accepted or emitted frame payload is `1024 * 1024 - 100` bytes.
 
 **R8c. Received peer addresses (Reloaded-original, maintainer decision
-2026-10-30; amended 2026-10-31).** A node accepts a peer address it
-received from another peer only in the form `/ip4/<address>/tcp/<port>`.
-That holds for an address in a peer-exchange answer and for one in a
-peers-topic announcement. The address MUST be globally routable (the
-`ip_helpers::is_global` predicate of R24, unless item 8 is set), and the
-port MUST be the network's TCP port. Every other form is not accepted,
-with one exception: a native build looks up a hostname in a
-peer-exchange answer under item 7 and stores the addresses it resolves
-to, unless item 10 turns that off. The node makes no other name lookup
-for a received address.
+2026-10-30; amended 2026-10-31 and 2026-11-02).** A node accepts a peer
+address it received from another peer only when the address's first
+component is `/ip4/<address>` and its second is `/tcp/<port>`. Later
+components, such as a trailing `/p2p/<peer id>`, are not examined
+*(worded by the first two components on 2026-11-02, finding (c) of the
+note after the rationale)*. That holds for an address in a peer-exchange
+answer and for one in a peers-topic announcement. The address MUST be
+globally routable (the `ip_helpers::is_global` predicate of R24, unless
+item 8 is set), and the port MUST be the network's TCP port. Every other
+form is not accepted, with one exception: a native build looks up a
+hostname in a peer-exchange answer under item 7 and stores the addresses
+it resolves to, unless item 10 turns that off. The node makes no other
+name lookup for a received address.
 
 1. **Per address.** The node skips an address it does not accept and
    keeps the other addresses of the same answer or announcement. It
@@ -264,10 +272,15 @@ for a received address.
 3. **Whole answer.** An answer with more than 20 peer entries (R8) is
    rejected as a whole. The node then forgets the peer that sent it and
    asks another peer.
-4. **Logging.** The first time a distinct skipped address is seen, the
-   node logs one INFO line. The line names the address, the peer that
-   sent it and the accepted form. Later sightings log at DEBUG. The set
-   of addresses already reported is bounded.
+4. **Logging** *(amended 2026-11-02, D9, batch 0.4.0 item P2).* The
+   node logs each skipped address at DEBUG, with the address, the peer
+   that sent it and the reason. Once per hour, if anything was skipped,
+   it logs one INFO line with the counts since the previous summary:
+   skipped addresses per form (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`,
+   `/ip6`, an `/ip4` address that is not globally routable, another
+   port, any other form), and the hostnames of item 7 whose lookup
+   failed, timed out or resolved to no accepted address. No skipped
+   address is logged at INFO on its own.
 5. **Own identity** *(added 2026-10-30, maintainer decision BD).* The
    node never stores a peer entry that names its own peer ID, and never
    picks one as a dial candidate. Other peers hand out this node's own
@@ -280,9 +293,9 @@ for a received address.
 7. **Hostnames in answers** *(added 2026-10-31, maintainer decision
    BH; a Reloaded-only extension: the reference rows keep no received
    hostname, see the note after the rationale).* On a native
-   build, an address `/dns/<name>/tcp/<port>` or
-   `/dns4/<name>/tcp/<port>` in a peer-exchange answer, with the
-   network's TCP port, is queued for a lookup under the entry's peer ID
+   build, an address in a peer-exchange answer whose first component is
+   `/dns/<name>` or `/dns4/<name>` and whose second is `/tcp` with the
+   network's TCP port is queued for a lookup under the entry's peer ID
    instead of being skipped. The node still skips `/dns6` and
    `/dnsaddr`, a hostname with another port, and every hostname in a
    peers-topic announcement. A browser build skips every hostname.
@@ -290,15 +303,15 @@ for a received address.
       of an answer before its hostnames. It makes no lookup while it is
       connected to the entry's peer. Otherwise it looks up the same name
       at most once per 30 minutes.
-   2. **How it looks up.** The lookup goes through the operating
-      system's resolver on a blocking worker thread, never on the
-      swarm's own task.
-      - At most one lookup runs at a time. The next one starts only when
-        the previous one has returned, even if its result was given up.
-      - A lookup that has not returned within 5 s stores nothing.
+   2. **How it looks up.** *(Amended 2026-11-02.)* The lookup goes
+      through the node's resolver (chapter 45 §45.6B), as an
+      asynchronous lookup that never runs on the swarm's own task.
+      - At most one lookup runs at a time.
+      - A lookup that has not returned within 5 s is abandoned and
+        stores nothing. The next one may start then.
       - The queue holds at most 64 names. A name that finds it full is
         dropped and logged at DEBUG.
-      - While the queue is empty, no lookup, timer or worker is pending.
+      - While the queue is empty, no lookup or timer is pending.
    3. **Resolve, then check.** Each IPv4 result becomes
       `/ip4/<address>/tcp/<port>` and goes through the same check as a
       received address. The node stores an accepted one under the
@@ -539,6 +552,10 @@ tells that peer more.
 > to a random connected relay. Both rows and this repository pick a
 > random known peer instead (item 6). Proposal: amend the wording of
 > R23 item 3.
+> *Status (clean-side note, added 2026-11-08):* proposals (b) to (d)
+> were adopted (D9, status of 2026-11-02): R24's ranges, R8c's wording
+> and R23 item 3 were amended in PR #203, and the R24 change was built
+> in PR #211, both merged 2026-11-04. (c) and (d) needed no code.
 >
 > *Open question.* The statement that a reference node sends no
 > peers-topic traffic rests on reading at both rows, not on
@@ -724,6 +741,41 @@ exactly two functions for this:
   and returns the payload alongside the verified signature and public
   key.
 
+**R16a.** *Bounded reading of peer payloads.* Before the node decodes a
+MessagePack value received from a peer, it MUST check the value against
+two bounds:
+
+- arrays and maps nest at most 64 levels deep. The outermost array or
+  map is level 1, and an empty array or map counts as a level;
+- every declared length and element count fits in the bytes that
+  remain.
+
+The check covers:
+
+- every envelope of R16 and the payload inside it;
+- every request and answer exchanged with a peer over request-response,
+  in both directions;
+- the peer addresses of the peers topic;
+- values that a message carries and that the node decodes later: an
+  order record of a synchronization answer
+  ([Chapter 32](32-orderbook-p2p-and-trie.md) §32.5) and a coin's
+  protocol information
+  ([Chapter 59](59-legacy-ordermatch-negotiation.md)).
+
+The check walks one complete value from the start, as the decoder reads
+it, and ignores bytes after that value, as the decoder does. It never
+recurses and it reserves no memory from a declared length. A value that
+fails either bound is dropped as malformed: it is not decoded, the
+caller sees the same kind of error as for any value that does not
+decode, and the node counts it. A protocol-information value that fails
+counts as one that does not decode, as it does today. The encoding does
+not change, and every value an honest peer sends passes.
+
+Rationale: a peer's bytes are untrusted. The node bounds the work and
+the memory it spends on one value before it interprets the value, as it
+already bounds the size of a message (R13). The bound lies far above the
+deepest message the node sends (T4a).
+
 **R17.** This application-payload signing surface is bound as *separate*
 from the proxy-signature substrate of Chapter 27. The two operate on
 different key spaces (raw secp256k1 here; libp2p-identity keypairs for
@@ -739,7 +791,7 @@ target:
 
 | Target  | Bound transport                                                                                       |
 | ------- | ----------------------------------------------------------------------------------------------------- |
-| Native  | TCP plus DNS; optional WebSocket / WSS transport when a WSS port and TLS bundle are configured.        |
+| Native  | TCP, with hostnames resolved by the node's own layer (chapter 45 §45.6B, amended 2026-11-02); optional WebSocket / WSS transport when a WSS port and TLS bundle are configured. |
 | WASM    | Browser WebSocket via the libp2p WASM FFI substrate.                                                  |
 | Testing | An in-process memory transport for the substrate's own integration tests.                              |
 
@@ -748,6 +800,31 @@ target:
 transport-level peer identity authenticated by the libp2p handshake
 and is separate from the secp256k1 key material used for the
 application-payload signing surface in §28.7.
+
+> **Reference position on the identity key (passed the KDF Dirty Gate on
+> 2026-11-04, measure 0.02; Spec Reader 2026-11-04, rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A, identical at both).** The reference derives a **relay's** Ed25519
+> identity secret as the SHA-256 of the node's internal secp256k1 signing key
+> (chapter 05 R16), so one passphrase gives one relay peer identifier at every
+> start -- the same derivation this substrate uses, so a relay has the same
+> peer identifier on both lineages for the same passphrase -- and gives every
+> **non-relay** node a fresh random identity at each start. Nothing in the
+> reference pins a relay's peer identifier: its seed-node entries are bare
+> hosts (R21). The identity key types a reference node can decode in the
+> Noise handshake are those compiled into its libp2p build on both targets:
+> Ed25519 and secp256k1; the RSA and ECDSA key types are not compiled in, so
+> a remote presenting one of them fails the handshake. A privacy coin's order
+> and swap messages are published under a per-order secp256k1 key with that
+> key's peer identifier as the gossip author (chapter 16), as here. The
+> reference's composed behavior includes no Identify protocol at either row
+> (R7); only the crate feature is enabled, as R0c records for this substrate.
+>
+> **Reloaded under a global-HD login (2026-11-05).** Under a global-HD login the
+> node's own key is the internal key (chapter 05 R45, plan item H4), so a relay
+> derives its identity as the reference does. A relay built before that took the
+> hash of the passphrase text there. Its peer identifier changes once at
+> upgrade, and peers learn it again through the relay's address (R21; chapter 05
+> R49).
 
 **R20.** The libp2p connection upgrade pipeline is bound to be
 uniform across all targets: multistream-select V1 negotiation,
@@ -787,8 +864,10 @@ not required by the substrate contract.
 2. dial up to `mesh_n` random entries; if the normalised list is
    empty, start the swarm without dialing any relay;
 3. start a 10-second maintenance timer running R11 plus a periodic
-   peers-exchange request to a random connected relay on a bound
-   300-second interval after a bound 20-second initial delay.
+   peers-exchange request to a random known peer, connected or not, on
+   a bound 300-second interval after a bound 20-second initial delay
+   *(corrected 2026-11-02, finding (d) of the note after R8c's
+   rationale; the request was never limited to connected relays)*.
 
 Dial failures for configured seed addresses MUST be diagnosable by
 the attempted address and a failure reason. A failed seed dial MUST
@@ -800,7 +879,13 @@ nodes MUST be deployed at globally-routable addresses, and client
 nodes that sit behind NAT reach the mesh exclusively via at least one
 relay. The substrate MUST NOT advertise non-routable listener
 addresses to peers; the bound `ip_helpers::is_global` predicate is
-applied to listener announcements.
+applied to listener announcements. *(Amended 2026-11-02, finding (b) of
+the note after R8c's rationale.)* The predicate treats all of
+`0.0.0.0/8` as not globally routable. Within `192.0.0.0/24`, which is
+otherwise not globally routable, it treats `192.0.0.9` and `192.0.0.10`
+as globally routable, as the IANA special-purpose registry marks them
+and as the reference does. The same predicate checks received and
+resolved peer addresses (R8c).
 
 **R25.** A client node with no configured or reachable relay peers SHALL
 remain in an empty relay-mesh state until at least one relay connection is
@@ -826,6 +911,226 @@ startup condition merely because no relay mesh has formed yet.
 Peers that remain connected and advertise as relays remain eligible for
 relay-mesh maintenance even when peers-exchange requests to them time
 out, fail, or report unsupported protocol negotiation.
+
+**R27a.** *Redial guards (added 2026-11-02, batch 0.4.0 item P1).* Item
+1 is parity with the reference, whose facts are those of RQ1a items 3
+and 4, except for the bound on its record. Items 2 and 3 are
+Reloaded-original. The start-up dials of R23 item 2 and the 30 s
+relay-connection maintenance of RQ1a item 4 MUST follow these rules:
+
+1. **Dial guard.** The node MUST NOT dial an address that it dialed
+   within the last 5 minutes, at start-up or from maintenance. This
+   holds for both candidate sets of RQ1a item 4: the addresses of
+   known peers and the configured bootstrap addresses. An address is
+   compared as written, before name resolution. The record of dialed
+   addresses forgets an entry after 5 minutes. It holds at most 1,024
+   entries, and when it is full the oldest entry is dropped. As at the
+   reference, a connection that lasted less than 5 minutes delays the
+   redial of its address to the 5-minute mark, except as item 1a allows.
+1a. **Early redial after a cut** *(added 2026-11-08, batch 4 item B4-13;
+   Reloaded-original; maintainer decision EA (a)).* An address MAY be
+   dialed again before the 5-minute mark of item 1 when all of these hold:
+   - this node dialed the address, and the connection that dial made was
+     established and lasted at least **30 seconds**;
+   - that connection ended by a transport error, by a close from the peer,
+     or by this node's ping safeguard (R9);
+   - the node is below its low watermark at a maintenance tick (RQ1a
+     item 4); the earliest early redial is the first such tick after the
+     connection ended;
+   - the address has had fewer than **2** early redials within the last
+     5 minutes.
+
+   An early redial counts as a dial for item 1. Once the cap is reached,
+   or when an early redial fails, item 1 applies unchanged. No early
+   redial follows a connection that ended on the idle timeout, a stuck-peer
+   close (RQ1 item 5), a bounded-close timeout (R27c), a handler error, the
+   clock admission check (RP2) or the relay-count maintenance of R27. A
+   close by the ping safeguard that ends with the close timeout of R27c
+   counts as that timeout. A stuck-peer close is recognized when it ends
+   cleanly or with the close timeout of R27c; one that ends with another
+   transport error counts as a transport error, because the vendored
+   gossipsub closes such a connection without reporting why. The bans of
+   RP3 are keyed by the gossip-signing key and never close or refuse a
+   connection, so they need no rule here. *Why:* the guard of item 1
+   exists to stop dial loops toward addresses that fail or flap; a
+   connection that was established and worked for a while and was then
+   cut does not belong to them. In lab row L-CLOSE variant B, after one of
+   three link cuts with a socket reset, a relay connection came back only
+   after 4 min 9 s, inside the 5-minute guard of item 1 (recorded only;
+   lab row L-RELINK checks whether the guard held it). *Compatibility
+   (informative):* no wire shape changes; the peer sees a dial earlier than
+   the reference would make it. Under `docs/COMPAT_SWITCHES.md`, "The
+   default-side rule", it falls in arm 2: Reloaded's behavior by default,
+   no switch.
+
+   > **As built (2026-11-08, clean-side record; batch 4 item B4-13, PR #303).**
+   > A dial this node makes is recorded under its connection ID with the
+   > address as written. When that connection closes after at least 30 s on a
+   > transport error, a peer close or the ping safeguard, the address is
+   > marked for an early redial. The cause comes from the close event, plus a
+   > mark that this node records where it starts a close itself (the ping
+   > safeguard, in `adex_ping`; the admission check; the relay count).
+   > The idle timeout and the close timeout of R27c are told by their errors;
+   > a stuck-peer close, which gossipsub starts, by its clean end. A handler
+   > error is not exempt. The next maintenance tick below the low watermark
+   > may dial a marked address despite item 1, at most twice within the guard
+   > interval, counted over a sliding window, and that dial counts as a dial
+   > for item 1. Tests: the T15 unit tests in `redial_guard.rs`. There is no
+   > behavior test: the in-memory transport of the test setup does not
+   > release a port when its listener is dropped, so a cut seed cannot listen
+   > on its address again. The end-to-end check is lab row L-RELINK. The case
+   > "not below the low watermark" is covered by construction: the
+   > early-redial check runs only in the below-watermark branch.
+
+   > **Status note (2026-11-10, clean-side record).** The gap the rule text
+   > above records for a stuck-peer close that ends with another transport
+   > error is closed. A stuck-peer close is now recorded when it starts: the
+   > vendored gossipsub marks every connection of the peer before it requests
+   > the close of all of them, the connection-event loop asks for that mark
+   > on every closed connection, and the early-redial guard treats a marked
+   > connection as a close of this node whatever the close event reports, so
+   > a stuck-peer close gives no early redial whether it ended cleanly or
+   > with an error. A relay whose stuck close is held back (RQ1 item 5, guard
+   > for relays) is not marked. The sentence "one that ends with another
+   > transport error counts as a transport error" in the rule text above, and
+   > "a stuck-peer close, which gossipsub starts, by its clean end" in the
+   > as-built note, describe the state before this note. Tests: the T15 cases for the stuck mark in
+   > `redial_guard.rs` and the mark tests in the vendored gossipsub.
+
+2. **Connected seed.** The node MUST NOT dial a configured bootstrap
+   address while the peer that the address belongs to is connected,
+   inbound or outbound. An address belongs to the peer that the last
+   outbound connection established to that address, as written,
+   reached. Before such a connection exists, only the address check of
+   RQ1a item 6 applies.
+   - *Why.* That address check compares only the remote addresses of
+     open connections. An inbound connection carries the dialer's
+     ephemeral port, so a relay that this node holds only through the
+     relay's own dial never matches its bootstrap address. A node below
+     its low watermark then dials that relay again at every tick.
+     Gossipsub writes to one connection per relay, so the second
+     connection idles out after the gossipsub idle timeout of 120 s,
+     and the next tick dials again. The result is one dial and one
+     close every 150 s. A lab run on 2026-11-01 showed it for 13.5
+     hours: the relay's own connection stayed open throughout, and
+     every second connection closed on the idle timeout.
+   - Item 1 alone would only slow that loop to one cycle per 5 minutes.
+   - Maintenance already picks its peer-exchange candidates among peers
+     that are not connected relays, by peer ID, so item 2 concerns the
+     bootstrap list only.
+3. **Short-of-relays line.** When the node is below its low watermark
+   and nothing is left to dial, the WARN line "P2P relays below low
+   watermark" keeps its text. It is logged at most once per 5 minutes
+   while the count of connected relays is unchanged, and at DEBUG in
+   between.
+
+Item 1 ends the difference on the dial guard recorded after RQ1a item 6.
+Item 2 diverges from the dial-side check of RQ1a item 6: by RQ1a items 4
+and 6, a reference node below its low watermark dials such a relay
+again, at most once per 5 minutes. The divergence changes no wire shape
+and nothing a peer relies on; the peer sees one connection fewer. It is
+therefore not a divergence under `docs/COMPAT_SWITCHES.md` and has no
+switch. Item 3 changes logging only.
+
+**R27b.** *Idle close of a relay outside the relay mesh (added
+2026-11-02, batch 0.4.0 item P2; listed in D9).* When the last
+connection to a connected relay closes on the idle timeout and that
+relay was not in this node's relay mesh when it closed, the node logs
+the close at INFO, as an idle connection closing, not as a warning.
+Every other close is logged as chapter 32's note "Consequence for a
+relay's connections" under R-F3b states: a surplus connection's idle
+close at INFO; the idle close of the last connection to a relay-mesh
+member or to a peer that is not a relay at WARN; every other cause at
+WARN. Nothing on the wire changes. *Why.* No topic mesh holds the
+connection to such a relay open, so its idle close is the normal end of
+a connection nothing uses. The lab rows and the public probes of
+2026-10-31 logged it as a warning on every run.
+
+**R27c.** *Bounded close (added 2026-11-07, batch 0.4.0 item P6;
+Reloaded-original; maintainer decisions of 2026-11-02).* Every close of a
+connection that this node starts MUST end within **30 seconds** of its
+start. This covers the close of a stuck peer under RQ1 item 5, the ping
+safeguard of R9, the relay-count maintenance of R27 and RQ1a item 4, the
+peer-clock admission check of RP2, and every other disconnect the node
+requests.
+
+1. **Deadline.** If the multiplexer has not finished closing the
+   connection 30 seconds after the close started, the node abandons the
+   close: it drops the connection and its transport stream, and the
+   connection counts as closed from that moment. Data still queued for
+   the peer is lost, as it is at any close.
+2. **Cause and log.** Such a close is reported with an I/O error as its
+   cause, and that error carries a timeout with the message "close timed
+   out". The node logs it at WARN under the classification of R27b,
+   naming the peer ID and the cause.
+3. **Afterwards.** The peer counts as disconnected. Relay state is updated
+   under R27, and the redial guards of R27a decide when the peer may be
+   dialed again. The operating system may go on retrying the unsent data
+   of the abandoned socket for a while; the node holds no state for it.
+4. **Unchanged.** A connection that fails, or that closes on the idle
+   timeout, is dropped without waiting for the multiplexer's close, as
+   before. A close that the multiplexer finishes in time behaves as
+   before.
+5. **Where it lives.** The deadline is part of the multiplexer's close in
+   the vendored `libp2p-yamux` crate of this repository
+   (`vendor-patches/libp2p-yamux-0.44.0`, recorded in its patch notes).
+   Every transport a native node builds runs that multiplexer (R0b,
+   §28.8), so the deadline holds on native nodes; the browser build
+   SHOULD carry it too.
+6. **Setting.** The 30 seconds are a fixed value of the vendored crate,
+   which tests MAY shorten. They are not an `MM2.json` setting.
+
+*Why.* A close sends the multiplexer's GoAway frame and flushes the
+socket, and the connection counts as open until that has finished.
+Toward a peer that reads nothing, for example a hung process whose
+kernel keeps the TCP session open with a zero receive window, the flush
+cannot complete while the window stays closed, so the close can last as
+long as the peer's kernel keeps the session. For that time the
+connection, its gossip queue up to the cap of RQ1 item 2 and the
+multiplexer's buffers stay held, the peer counts as connected, and the
+maintenance of R27 does not redial it. In the lab row of T14, a build
+without this rule kept such a close open for 13 minutes, and it ended
+after the peer was resumed; with the rule, the close ended after 30
+seconds. A healthy close
+takes milliseconds, and
+flushing a full multiplexer window of 256 KiB at 100 kbit/s takes about
+20 seconds, so 30 seconds leave a slow peer that still reads time to
+finish.
+
+> **Compatibility (informative).** Reloaded-original. No wire shape
+> changes. The peer sees the transport connection end up to 30 seconds
+> after the GoAway frame instead of whenever it reads again. The rule
+> affects only this node's own connections, so under
+> `docs/COMPAT_SWITCHES.md`, "The default-side rule", it falls in arm 2:
+> Reloaded's behavior by default and no switch. It needs no row in the
+> operator-facing compatibility documents. *Parity note:* by RQ1b items 3
+> to 5, the reference's gossip layer detects no slow peer and never
+> closes a connection itself; every close there is application-initiated
+> (R9, R27, RP2). The pinned fork's public swarm crate (MIT), which both
+> reference rows bind (RQ1b), awaits the multiplexer's close without a
+> deadline.
+>
+> **As built (2026-11-07, clean-side record; plan item P6).** The deadline
+> is in `Muxer::poll_close` of `vendor-patches/libp2p-yamux-0.44.0/src/lib.rs`,
+> the second patch in its `PATCH-NOTES.md`. The constant `CLOSE_TIMEOUT` is
+> 30 s. The first `poll_close` of a connection starts a
+> `futures_timer::Delay`; the inner close is polled first, and if it is
+> still pending when the delay fires, `poll_close` returns an `io::Error` of
+> kind `TimedOut` with the message "close timed out" and never polls the
+> inner connection again. The boxed muxer wraps that error in an I/O error
+> of kind `Other`, so the swarm's cause carries both; its debug text, which
+> the WARN line of R27b prints with the peer ID, contains "close timed
+> out". The deadline holds on every target: on `wasm32`, `futures-timer`
+> runs on the browser timer, through a feature that the shared dependency
+> graph enables, not this crate. Only the crate's own tests shorten the
+> deadline, through a private field. Tests:
+> `close_toward_a_peer_that_reads_nothing_times_out_at_the_deadline`,
+> `close_toward_a_peer_that_reads_ends_at_once` and
+> `close_deadline_is_thirty_seconds` in the yamux crate (CI row
+> `bounded-close`); `close_timed_out_is_a_warn_that_carries_the_cause` and
+> the extended
+> `connection_closed_is_classified_by_cause_type_and_remaining_connections`
+> in `mm2_p2p`.
 
 ## 28.9A Required Port — Peer Health-check, Time-sync Admission, Expirable Bans (driving-spec)
 
@@ -1029,7 +1334,9 @@ queue per connection of the RPCs waiting to be written to that peer.
    of Chapter 32. RQ1a states what a reference peer does after the close:
    when it redials, what it sends, and that it holds nothing against the
    closer. The ping safeguard of R9 closes every connection to a peer in
-   the same way.
+   the same way. *(Added 2026-11-07, item P6.)* Each of these closes
+   ends within the deadline of R27c, also toward a peer that reads
+   nothing.
 
    **Guard for relays** *(amended 2026-10-30, maintainer decision AY).*
    A shared cause can make several relay connections stuck at once, for
@@ -1055,7 +1362,12 @@ queue per connection of the RPCs waiting to be written to that peer.
    dropped since the last line. Closing a peer under item 5 logs one
    warning with the peer ID, the criterion that applied (the time at the
    cap, or the share dropped in the last window), and the total dropped.
-   No message content is logged.
+   *(Added 2026-11-02, batch 0.4.0 item P3a.)* When a 60-second window
+   of item 5 ends with at least 10 % of the data RPCs queued in it
+   dropped, the node logs one DEBUG line with the peer ID, the RPCs
+   queued and dropped in that window, the share, and how many
+   consecutive counting windows the series now holds. No message content
+   is logged.
 7. **Settings.** The two limits, the 60-second period, the 3 windows
    and 25 % share of item 5, and the 30-second interval and 2 remaining
    relays of its guard are fixed values of the vendored gossipsub crate. Its configuration builder
@@ -1070,12 +1382,16 @@ queue per connection of the RPCs waiting to be written to that peer.
 
    Each change is reported once. A closed connection counts as cleared.
    The handler also makes available, for metrics, its data-queue length
-   and its count of dropped data RPCs. The application uses the signal
-   for the maker publication budget of
-   [Chapter 32](32-orderbook-p2p-and-trie.md) §32.9B R-MP2 and the counts
-   for R-MP5. R-MP2 item 2 also reads whether the data queue is empty,
-   for its queue signal *(added 2026-10-28)*. The thresholds are fixed values of the vendored crate,
-   which its configuration builder MAY override for tests.
+   and its count of dropped data RPCs, and *(added 2026-11-02, item
+   P3a)* the dropped share of its last completed window of item 5 and
+   the length of its current series. The application uses the signal for
+   the maker publication budget of [Chapter
+   32](32-orderbook-p2p-and-trie.md) §32.9B R-MP2 and the counts for
+   R-MP5. R-MP2 item 2 also reads how long the oldest queued data RPC
+   has waited, for its queue signal *(added 2026-10-28; amended
+   2026-11-02, item P3b)*. The thresholds are fixed values of the
+   vendored crate, which its configuration builder MAY override for
+   tests.
 9. **Priority lane** *(amendment, maintainer decision AO option C,
    2026-10-28).* A published or forwarded message the application marks
    as *priority* is queued in a separate first-in-first-out lane of the
@@ -1143,7 +1459,9 @@ would lose the latest updates and leave the peer with stale orders until
 the keep-alive synchronization.
 
 > **Reloaded divergence (informative).** The reference leaves the
-> per-peer send queue unbounded. The wire is unchanged: no message format
+> per-peer send queue unbounded. It also writes the newest queued RPC first under a
+> backlog, detects no slow peer and never closes a connection from the gossip layer (RQ1b).
+> The wire is unchanged: no message format
 > changes and nothing new is sent. Only a peer that cannot keep up
 > observes a difference: it may miss gossip messages, and after 60
 > seconds at the cap it is disconnected. Under the reference the sending
@@ -1264,7 +1582,113 @@ moved to the other connection, while closing all of them makes X drop R
 and redial under item 4; the consequence of items 4 and 5 is that a
 reference client with one relay is back in at most 30 s once the
 5-minute dial guard has passed, and a reference client with spare relays
-does not come back until it is short of relays.
+does not come back until it is short of relays. *(Amended 2026-11-02:
+R27a item 1 adopts the 5-minute dial guard, which ends the second of
+these differences.)*
+
+**RQ1b. The reference's per-peer send path (reference facts).** *(Authored by the KDF Spec Reader
+2026-11-07 from the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A — identical at both,
+since both bind the same libp2p fork tag of R0a — and from the public gossipsub library of that fork;
+compared with the baseline anchor (R1) and with the fork's own public upstream library.
+**Passed the KDF Dirty Gate on 2026-11-07**, measure 0.01; §28.14. Prompted by maintainer
+decision DC (a): whether the clean side may take the public upstream library's slow-peer behavior as its reference.)* At both rows the reference's gossip layer
+behaves as follows toward a peer that reads slowly or not at all.
+
+1. **The send queue is unbounded.** Each connection keeps one queue of the RPCs waiting to be
+   written to that peer. It has no count limit, no byte limit and no age limit, and the
+   configuration surface offers none. Nothing in the gossip layer ever drops a queued RPC; the
+   queue grows for as long as the peer does not read. The only point at which a non-reading peer
+   stalls the writer is the multiplexer's per-stream flow-control window: one window's worth of
+   data is accepted by the transport, and everything after it accumulates in the queue. Memory
+   held toward one such peer is the encoded size of every queued RPC plus a small per-RPC
+   overhead, and it is held separately for every slow peer.
+2. **Under a backlog, newest first.** When more than one RPC is queued, the RPC queued last is
+   written first. A peer that keeps up never sees this, because at most one RPC waits at a time.
+   A peer that falls behind receives the most recent messages before the older ones and, once it
+   catches up, has processed the stream in reverse order; an older update of an order can
+   therefore overwrite a newer one at that peer until the next keep-alive synchronization of
+   chapter 32. At the baseline anchor the in-tree gossipsub wrote oldest first; the reversal came
+   with the public library version the fork derives from, not with the fork.
+3. **No slow-peer detection.** The reference has no notion of a slow peer at the gossip layer: no
+   event, no per-peer failure count, no queue-length metric, and no signal to the application.
+   The optional peer-scoring extension of the library, which is off at both rows (R14), has no
+   slowness term at this version either. A peer that answers pings but reads no gossip is never
+   detected and never closed by the reference (the third bullet of the RQ1 rationale is a
+   reference fact as well as a fact about Reloaded before RQ1).
+4. **No full-queue behavior exists.** Because the queue has no limit, the reference has no
+   "queue full" branch: it neither drops a message, nor drops the peer, nor applies
+   back-pressure to the publisher. The one indirect limit is the swarm's hand-off channel between
+   the behavior and each connection's task, which holds 32 pending commands per connection; when
+   it is full the whole behavior pauses its outgoing hand-offs until that connection accepts the
+   next one. The connection's task moves commands into the unbounded queue of item 1 whenever it
+   runs, so a peer that merely reads slowly does not fill this channel; it fills only if the
+   connection's task is itself starved. In practice the path is unbounded.
+5. **Mesh membership ignores slowness.** Grafting and pruning in the per-topic mesh follow only the
+   watermarks and the library's eligibility rules: at each 1 s heartbeat a topic mesh below its low
+   watermark is filled with randomly chosen eligible peers up to the middle watermark; a mesh above
+   its high watermark is cut back to the middle watermark by removing randomly chosen peers while
+   keeping at least two outbound-dialed peers; a mesh at or above the low watermark but with fewer
+   than two outbound-dialed peers grafts outbound-dialed peers to make two. Score-based removal and
+   opportunistic grafting exist in the library but need peer scoring, which is off. The relay mesh
+   of R10/R11 is maintained on its own 10 s tick by its watermarks alone. A peer leaves every mesh
+   only when its last connection closes (RQ1a item 1) or by a PRUNE it receives. The gossip layer
+   itself never closes a connection; at both rows every close is initiated by the application:
+   its ping safeguard (R9), its relay-count maintenance (R27) and its peer-clock admission check
+   (RP2), which disconnects a peer whose reported time is outside the tolerance.
+6. **Adjacent facts of the pinned library version** *(informative, for completeness; unchanged
+   from the public library)*: after five failed attempts to negotiate the gossip protocol on one
+   connection, the gossip handler of that connection switches itself off, reports the peer as not
+   supporting gossipsub, and discards every RPC queued to it afterwards; and the gossip handler
+   holds a connection open while the peer is in a topic mesh or a write is pending, and otherwise
+   only for 120 s after the last gossip traffic — other protocols on the same connection may hold
+   it longer. Membership in the relay mesh alone does not hold a connection open at the gossip
+   layer.
+7. **Knobs.** The gossip configuration surface at both rows offers no setting for a queue bound,
+   a queue age, or slow-peer handling. The settings the application sets are those of R12 and R13
+   (relay flag, mesh watermarks, message-id function, permissive validation, manual propagation,
+   maximum transmit size); all swarm-level buffer sizes stay at the library defaults.
+
+*Change since the baseline anchor (V5, V6).* In the areas of this rule the move from the anchor's
+in-tree gossipsub to the pinned fork changed only: the drain order under a backlog (oldest-first
+to newest-first, item 2); the handler's self-disable after repeated negotiation failures and its
+idle keep-alive rule (item 6; the anchor's handler never disabled itself and held the connection
+until the peer closed its stream); and the arrival of the gossipsub v1.1 mesh machinery
+(prune backoff, outbound-peer minimum, optional peer exchange, optional scoring, per-peer IHAVE and
+IWANT caps of R13a). The queue stayed unbounded and slow peers stayed undetected throughout. The
+fork's own additions to the library — the relay mesh of R10–R12, a record of every source of a
+duplicate message, and bookkeeping of topic membership — touch none of this.
+
+*The fork's public upstream (informative; for maintainer decision DC).* The fork derives from the
+public gossipsub library at crate version 0.45.0, the version shipped with the public libp2p
+0.52 line. That version has the same unbounded, newest-first queue and no slow-peer handling; the
+fork did not change the handler at all. The public library first bounded its send queue,
+penalized slow peers and expired stale queued messages in its gossipsub crate version 0.48.0
+(shipped with the libp2p 0.55 line; the change landed in late November 2024) and has
+refined it since; the design as the public library stands today is:
+
+- three lanes per connection, written in this order: an unbounded lane for subscribe and
+  unsubscribe; a lane for GRAFT, PRUNE and IDONTWANT bounded at 20,000 entries; and a lane for
+  published and forwarded messages, IHAVE and IWANT bounded by a configuration value with default
+  **5,000** entries (a count, not a byte size);
+- when a bounded lane is full the **new** RPC is refused, not queued (the oldest stays), and the
+  refusal is counted per peer, separately for the two bounded lanes;
+- each queued message carries a deadline, **5 s** for an own publish and **1 s** for a forward
+  (both configurable); a message taken from the queue after its deadline is not written and is
+  counted as failed for that peer;
+- at each heartbeat the per-peer failure counts are reported to the application as one
+  slow-peer event per peer and then reset; the library itself neither closes nor prunes the peer
+  for it;
+- only if peer scoring is enabled does each failure also add a decaying slow-peer penalty to the
+  peer's score (default weight −0.2 per excess failure, threshold 0, decay factor 0.2 per decay
+  interval), through which the ordinary score-based heartbeat prune can remove the peer; with
+  scoring off, the event is the only consequence.
+
+Reloaded's RQ1 keeps its own design (FIFO, oldest dropped, a count and a byte cap, a stuck-peer
+close, a priority lane) and records in its provenance that this public design was read and not
+adopted. RQ1b adds that neither reference row implements any of it: taking the public upstream's
+behavior as "the reference behavior" would describe a library version no reference peer runs.
+No wire shape differs between any of these designs; a peer observes only which messages arrive
+and in which order.
 
 **RQ1 test items.**
 
@@ -1337,6 +1761,14 @@ does not come back until it is short of relays.
     guard condition holding, is closed on every connection.
   - A stuck peer that is not a relay is closed at once.
   - While a relay is held back, its data queue stays within its cap.
+- **T-RQ1.13** *Window shares (item 6 and R-MP5; added 2026-11-02,
+  item P3a).* The windows are shortened by test configuration.
+  - A window that drops 10 % or more of its queued data RPCs logs one
+    DEBUG line with the queued and dropped counts, the share and the
+    series length. A window below 10 % logs none.
+  - The share and series metrics of chapter 32 R-MP5 show the highest
+    share of a recent window and the longest current series, and fall
+    back to 0 two windows after the drops stop.
 
 ## 28.10 Tests (test invariants)
 
@@ -1369,6 +1801,27 @@ public key derived from `sk`. Any single-byte mutation of the encoded
 bytes MUST cause `decode_signed` to return an error and MUST NOT
 return a parseable but invalid payload.
 
+**T4a.** *Bounded reading of peer payloads (R16a).*
+
+- (a) Every message type the node sends passes the check and decodes as
+  before, and its deepest nesting is at most half of the bound.
+- (b) A value nested one level beyond the bound is dropped, and so is
+  one nested 10,000 levels deep. A value exactly at the bound passes
+  the check.
+- (c) A bin, str or ext header whose declared length exceeds the
+  remaining bytes is dropped, and so is an array or map header whose
+  count exceeds them. Both are tested at the largest 32-bit value.
+- (d) An envelope of R16 that fails the check is dropped before its
+  signature is examined, and the count rises by one.
+- (e) Bytes after the first complete value are ignored, as before.
+- (f) Each decode site of R16a applies the check:
+  - the envelope and its payload;
+  - request-response in both directions;
+  - the peers topic;
+  - an order record of a synchronization answer;
+  - both readers of a coin's protocol information (the coin's own
+    check and the address format the order book reports).
+
 **T5.** *Topic construction.* `pub_sub_topic("orderbook",
 "KMD:BTC")` MUST return exactly `"orderbook/KMD:BTC"`; the substrate
 MUST NOT perform any URL-encoding or canonicalisation of the inputs.
@@ -1390,7 +1843,15 @@ when `num > 20`, the responder MUST omit the response.
   forgotten.
 - A peers-topic announcement with one `/dns/...` address and one
   accepted address keeps the accepted one.
-- A skipped address is reported at INFO once, and at DEBUG after that.
+- *(Amended 2026-11-02, item 4.)* A skipped address is logged at DEBUG
+  only. One INFO summary per hour carries the counts per form and the
+  hostname lookup outcomes, and an hour with nothing skipped logs no
+  summary.
+- *(Added 2026-11-02, R24 and finding (c).)* A received `/ip4` address
+  in `0.0.0.0/8` is skipped as not globally routable. `192.0.0.9` and
+  `192.0.0.10` with the network's port are accepted, and another
+  address in `192.0.0.0/24` is skipped. An accepted address with a
+  trailing `/p2p/<peer id>` is accepted.
 - *(Added 2026-10-30, decision BD.)* An answer or announcement that
   carries this node's own peer ID stores nothing for it, and relay
   maintenance never dials it. A dial of A's address that reaches peer B
@@ -1410,9 +1871,10 @@ when `num > 20`, the responder MUST omit the response.
   - A later lookup that returns a different address adds it and removes
     the address the same name stored before.
   - The queue holds 64 names, and a 65th is dropped.
-  - Lookups run one at a time. A lookup that times out stores nothing,
-    and the next one starts only after it has returned.
-  - With an empty queue, no lookup, timer or worker is pending.
+  - Lookups run one at a time, through the installed resolver. A
+    lookup that times out is abandoned at 5 s and stores nothing, and
+    the next one starts after it. *(Amended 2026-11-02.)*
+  - With an empty queue, no lookup or timer is pending.
   - An entry that names this node's own peer ID causes no lookup.
   - A browser build skips every hostname.
   - An answer this node gives carries no hostname, including for a peer
@@ -1464,6 +1926,97 @@ heartbeat receives IWANT for at most 5000 ids drawn from at most 10 of
 the announcements, and the next heartbeat starts the count afresh. A node
 with no orderbook topic in its mesh emits no IHAVE for such topics and
 ignores IHAVE for them.
+
+**T12.** *Redial guards (R27a; added 2026-11-02).* The 5-minute
+interval and the maintenance tick are shortened by test configuration.
+- A bootstrap address dialed at start-up is not dialed again before the
+  interval has passed, even when every dial to it fails. It is dialed
+  at the first tick after the interval.
+- The same holds for an address of a known peer dialed by maintenance.
+- A bootstrap address whose last outbound connection reached peer P is
+  not dialed while P is connected through an inbound connection only.
+  Once P has no connection, the address is dialed again, subject to
+  item 1.
+- A node below its low watermark that holds a seed only through the
+  seed's own dial opens no second connection to it over 10 ticks.
+- The record of dialed addresses holds at most 1,024 entries.
+- The short-of-relays line is logged at most once per interval while
+  the count of connected relays is unchanged.
+- *Lab item.* A Reloaded relay with a reference relay among its
+  seednodes, below its low watermark, runs for at least 15 minutes. It
+  opens no second connection to that relay while connected, and no
+  dial-and-close cycle appears.
+
+**T13.** *Idle-close logging (R27b; added 2026-11-02).* The
+classification is tested on its inputs:
+- an idle-timeout close of the last connection to a connected relay
+  outside the relay mesh logs at INFO;
+- the same close for a relay-mesh member, or for a peer that is not a
+  relay, logs at WARN;
+- an idle-timeout close with connections remaining logs at INFO;
+- every other cause logs at WARN, and a close without a cause logs at
+  INFO as a clean close.
+
+**T14.** *Bounded close (R27c; added 2026-11-07).* The deadline is
+shortened by test configuration.
+- In the vendored multiplexer crate, a close toward a peer that reads
+  nothing ends with the timed-out cause once the deadline has passed,
+  and not before. A close toward a peer that reads ends at once, without
+  an error.
+- A close with the timed-out cause logs at WARN with the peer ID.
+- *Lab row L-CLOSE (black-box).* A relay R and a peer P. P's data queue
+  at R is filled to the cap, then P's process is stopped (`SIGSTOP` or a
+  container freeze), so that P's kernel keeps the socket with a zero
+  receive window, with the TCP path to P full: R's unsent bytes toward P
+  stay constant. Small TCP buffers on R and P make the path fill. R logs
+  the stuck close (or the ping close), then the closed connection with
+  the timed-out cause within 30 s of it. If R is below its low
+  watermark, it redials P at the first tick R27a allows. After the
+  close, R's memory stops growing, where the control's keeps growing.
+  *Control:* a build without R27c, run the same way, records how long
+  the close lasts without the deadline. *Clarified after the run
+  (2026-11-07):* the memory line first read "R's memory returns to its
+  baseline"; it was written for a quiet peer, and in this run, which
+  flooded R with orders, R's memory rose by about 25 MB in both builds
+  before the close. *Result (2026-11-07):* the close ended 30.0 s after
+  it started on the R27c build; on the control it stayed open 13 min 4 s
+  and ended after P was resumed. R's memory was flat after
+  the close on the R27c build (57 MB, from a 33.5 MB baseline) and grew
+  to 80 MB on the control, still growing when the run ended.
+- *Lab row L-CLOSE, drop-only arm (added 2026-11-08, batch 4 item B4-8;
+  informative for R27a and the repeated-drops review).* The same relay R
+  and peer P, with normal TCP buffers and order traffic; every packet
+  between R and P is dropped for a while, and no socket is reset. *Pass
+  (fixed before the run):* in each of three 10 s drops the connection
+  survives, with no close on either side until 60 s after the restore, and
+  traffic toward P resumes within 30 s. A 30 s and a 60 s drop are recorded
+  only. *Result (2026-11-08, on the R27c build):* the three 10 s drops kept
+  both connections, with the same ports and no close, and traffic resumed
+  2.5 s to 5.5 s after the restore (pass). In the 30 s drop a ping timed out
+  22 s in; after the restore R logged one connection closed cleanly and the
+  other closed with a broken pipe, P dialed again 16 s after the restore,
+  and traffic resumed after 23 s. In the 60 s drop R logged its connections
+  closed 44 s to 51 s in, both came back after the restore, and traffic
+  resumed after 40 s. No "close timed out" line was logged.
+
+**T15.** *Early redial after a cut (R27a item 1a; added 2026-11-08).* The
+guard interval and the tick are shortened by test configuration.
+- An address whose dialed connection was established, lasted at least the
+  threshold and ended by a transport error, a peer close or the ping
+  safeguard is dialable at the next tick while the node is below its low
+  watermark; after two early redials within the interval, item 1 holds it
+  until the interval has passed.
+- No early redial after an idle-timeout close, a stuck-peer close, a
+  bounded-close timeout, an admission close, a relay-count close, or a
+  connection that lasted less than the threshold; nor when the node is not
+  below its low watermark.
+- *Lab row L-RELINK (black-box).* The topology of L-CLOSE variant B. (a) A
+  10 s cut of the link between R and its relay peer P with a socket reset,
+  where R dialed the connection: R dials P again at the first maintenance
+  tick after the restore, and the connection is back within about 30 s,
+  where the build without item 1a waits until the 5-minute mark. (b)
+  *Flapping control:* a peer that accepts R's connection and drops it in
+  less than 30 s: R does not dial it again before the 5-minute mark.
 
 ## 28.11 Deferred Work
 
@@ -1521,6 +2074,11 @@ and a candidate of their own (forward once, on the consumer's report).
 Either is a divergence to record in the
 operator-facing compatibility documents; neither changes a wire shape.
 
+> **Status (2026-11-02).** Adopted in Reloaded: §28.9B RQ1 bounds the queue
+> (2,048 data RPCs or 4 MiB per connection, oldest forwards dropped, a stuck
+> peer disconnected), so "no bound … in Reloaded" above describes the tree
+> before RQ1.
+
 **D8.** *Close every connection of a stuck peer (Reloaded-original;
 added 2026-10-30; the reference facts it rests on are RQ1a).* RQ1 item 5 closes the connection whose data queue is
 stuck. Where a peer holds more than one connection to this node (RQ1a
@@ -1535,6 +2093,9 @@ AY), pre-beta: adopted, together with the repeated-drops criterion of
 RQ1 item 5. A swaplab run gates the merge.* *Amended 2026-10-30 (decision
 AY): a guard holds back the close of a relay when another relay was
 closed within 30 s or fewer than 2 would remain (RQ1 item 5, T-RQ1.12).*
+*Amended 2026-11-07 (batch 0.4.0 item P6): a close that the multiplexer
+cannot finish because the peer reads nothing is abandoned after 30 s
+(R27c).*
 
 **D9.** *Peer-address follow-ups (deferred to after the beta; added
 2026-10-31, maintainer decision BH).*
@@ -1553,6 +2114,16 @@ closed within 30 s or fewer than 2 would remain (RQ1 item 5, T-RQ1.12).*
   - (d) correct the request target in R23 item 3.
 - **Idle-close logging.** An idle close of a relay connection outside
   this node's relay mesh is logged at INFO.
+
+*Status (2026-11-02, batch 0.4.0).* Adopted: the skip logging (R8c
+item 4), findings (b) to (d) (R24, R8c's wording, R23 item 3) and the
+idle-close logging (R27b). The asynchronous lookups are dropped from
+0.4.0; the bounded blocking lookup of R8c item 7 stays. The
+transport-resolver evaluation is done and awaits a maintainer decision.
+*Amended 2026-11-02, maintainer decision:* one resolver now answers
+every hostname the node looks up (chapter 45 §45.6B). That settles the
+transport-resolver item, and R8c item 7's lookups become asynchronous
+through that resolver after all.
 
 ## 28.11A Open Questions
 
@@ -1578,7 +2149,18 @@ residue is **not silently accepted**: it is recorded here and formally
 accepted with per-advisory rationale in `deny.toml` (upstream-blocked —
 awaiting KomodoPlatform fork modernization / Solana SDK bumps), and the
 reloaded-owned roots (`libsqlite3-sys` via rusqlite; `metrics-util`) are
-tracked as scheduled migrations.
+tracked as scheduled migrations. *Amended 2026-11-02:* the `idna` entry
+and the trust-dns part of the residue are cleared. The native feature
+set no longer builds the fork's DNS crate (R0b), and the dependency
+policy bans that crate and its resolver library (chapter 45 R45.6B.11).
+
+> **Status (2026-11-02).** The residue is smaller than listed above.
+> `libp2p-websocket` is vendored on rustls 0.23, so no rustls 0.20 consumer
+> remains, and the `rustls`, `webpki` and `ring` advisories (RUSTSEC-2024-0336,
+> RUSTSEC-2023-0052, RUSTSEC-2025-0009) went with it. `mio` and
+> `remove_dir_all` never came from the fork: crossterm / signal-hook-mio and
+> tempfile 3.3.0 pull them. `deny.toml` holds the current list with its
+> reasons.
 
 ## 28.12 External References
 
@@ -1648,6 +2230,19 @@ consumer's propagate call — a relay's immediate forward on receipt
 (R11a) is post-baseline — and to request every unknown id of every
 IHAVE without per-peer caps (the caps of R13a are post-baseline
 hardening carried by the pinned fork).
+
+**V6.** The baseline in-tree gossipsub MUST be confirmed, against the gossipsub library of the
+libp2p fork the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A bind (R0a), to differ in
+the per-peer send path only as RQ1b records: at the baseline anchor (R1) the per-connection send
+queue is written oldest first, the gossip handler never switches itself off after failed protocol
+negotiations, and it holds the connection open until the peer closes its stream; at both rows the
+queue is written newest first under a backlog, the handler switches itself off after five failed
+negotiations and discards what is queued to it afterwards, and it holds a connection open only
+while the peer is in a topic mesh, a write is pending, or for 120 s after the last gossip traffic.
+Both states MUST be confirmed to leave the queue unbounded, to detect no slow peer, and to let no
+gossip-layer condition close a connection; the arrival of the gossipsub v1.1 mesh machinery between
+the two states (prune backoff, outbound-peer minimum, optional peer exchange, optional scoring, the
+per-peer IHAVE and IWANT caps of R13a) MUST be confirmed to add no rule that reacts to slowness.
 
 ## 28.14 Provenance Footer
 
@@ -1876,3 +2471,123 @@ hardening carried by the pinned fork).
       network on 2026-10-31.
   - The forbidden corpus was not consulted for this amendment, and it
     needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-11-02) -- R27a, T12 and the note after RQ1a
+  item 6.* Reloaded-original, except R27a item 1, which adopts
+  reference facts already stated in RQ1a items 3 and 4. Those were
+  cleared by KDF Dirty Gate passes on 2026-10-30 and 2026-10-31. The
+  amendment states no new reference fact.
+  - *Inputs:*
+    - RQ1a, for every reference fact;
+    - this repository's relay-connection maintenance and the vendored
+      gossipsub behavior's address check;
+    - the logs of Reloaded nodes in lab runs on 2026-10-31 and
+      2026-11-01.
+  - The forbidden corpus was not consulted for this amendment, and it
+    needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-11-02) -- R8c's opening paragraph, items 4
+  and 7, R23 item 3, R24, R27b, T6a's bullets of 2026-11-02, T13 and
+  D9's status.* Reloaded-original, batch 0.4.0 item P2. The reference
+  facts behind the R24, R8c and R23 changes are findings (b) to (d) of
+  the note after R8c's rationale, cleared by a KDF Dirty Gate pass on
+  2026-10-31. The amendment states no new reference fact.
+  - *Inputs:*
+    - that note;
+    - this repository's peer-exchange logging, routability predicate
+      and connection-close logging;
+    - the logs of Reloaded nodes in the lab rows and public probes of
+      2026-10-31.
+  - The forbidden corpus was not consulted for this amendment, and it
+    needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-11-02) -- §28.9B RQ1 items 6 and 8 and
+  T-RQ1.13.* Reloaded-original, batch 0.4.0 items P3a and P3b, together
+  with chapter 32 R-MP2 item 2 and R-MP5. *Inputs:* this repository's
+  vendored send queue and its metrics, and field metrics of a Reloaded
+  seed on 2026-10-31. The forbidden corpus was not consulted for this
+  amendment, and it needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-11-02) -- R0b, R18, R8c item 7 sub-item 2,
+  its T6a bullet, D9's status and OQ2.* Reloaded-original, batch 0.4.0
+  item P5, together with chapter 45 §45.6B. *Inputs:* the maintainer's
+  decisions of 2026-11-02, this repository's transport and peer-exchange
+  code and its dependency tree. The forbidden corpus was not consulted
+  for this amendment, and it needs no Dirty Gate pass of its own.
+- *Scoped addition (2026-11-04) -- the reference-position note under R19.*
+  **KDF Dirty Gate: PASS on 2026-11-04, measure 0.02.** *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+  consulted **only** to establish the relay and non-relay identity-key
+  derivations, the absence of any pinned relay identifier, the identity key
+  types enabled in the reference's libp2p dependency on both targets, the
+  per-order key and author of privacy-coin messages, and the absence of the
+  Identify protocol from the composed behavior. Behavior and public
+  dependency features only; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.02, no findings. *Extent:* the peer-to-peer identity-key derivation, the
+  identity key types of the libp2p build and the protocols of the composed
+  behavior, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole
+  batch, 30 source files and one dependency manifest were read at
+  `v3.0.0-beta`, 29 of them checked by hash against the tagged states of both
+  rows. *Method:* side-by-side reading of the compared regions against every
+  added or changed line, plus that hash check; the gate script was not run
+  because the candidate has no code blocks. *Measure:* 0.02, read against the
+  standard that any discretionary finding fails a file; dictated-interop and
+  public-surface tokens were excluded from the measured set.
+- *Scoped addition (2026-11-04) -- R16a and T4a.* Reloaded-original,
+  maintainer decision CD of 2026-11-04. *Inputs:* this repository's
+  decode paths for bytes received from peers, and the source of the
+  public MessagePack library this repository uses. The forbidden corpus
+  was not consulted for this addition, and it needs no Dirty Gate pass
+  of its own.
+- *Pointer added 2026-11-05 -- the note "Reloaded under a global-HD login"
+  under R19.* It names chapter 05 R45 and R49 (plan item H4). Written by a
+  context that never read the forbidden corpus, from this repository's own
+  relay-identity code. It carries no reference content of its own and needs
+  no Dirty Gate pass.
+- *Scoped addition (2026-11-07) -- §28.9B RQ1b, its sentence in the RQ1
+  divergence note, and §28.13 V6.* **KDF Dirty Gate: PASS on 2026-11-07, measure 0.01.**
+  Prompted by maintainer decision DC (a). *Inputs:* the rows `v2.6.0-beta`
+  and `v3.0.0-beta` of chapter 02 §2.15A (identical at both for this rule);
+  the public gossipsub library of the libp2p fork both rows bind (R0a) and
+  that fork's public upstream library at the version the fork derives from
+  and at its current development state; the baseline anchor (R1) for V5 and
+  V6. Third-party license as recorded in the fork's own package metadata:
+  MIT. Behavior, gossipsub control-message names and public library defaults
+  only; no private identifier, function body, helper decomposition, error,
+  log or comment text was reproduced. V6 restates RQ1b as a baseline
+  verification.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.01, no findings, followed the same day by a light re-gate of the revised
+  lines, PASS, measure 0.01, no findings. *Extent:* in the forbidden corpus,
+  the gossipsub dependency binding and composed-behavior configuration, the
+  absence of any slow-peer or send-queue handling, and the
+  application-initiated connection closes, at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` (two dependency manifests or lockfiles and three source files
+  at each row, with the diff between the rows), plus the baseline anchor's
+  in-tree gossipsub handler and its manifest; as permitted MIT input, the
+  pinned fork's gossipsub and swarm defaults, its upstream base handler and
+  the fork-versus-base diff, and the public upstream's gossipsub files at its
+  development state. *Method:* side-by-side reading of the compared regions
+  against every candidate line, with backticked, identifier-shaped,
+  hexadecimal, numeric and path-shaped tokens extracted mechanically and
+  tested against the corpus rows and the third-party trees; the gate script
+  was not run because the candidate has no code blocks. *Measure:* 0.01, read
+  against the standard that any discretionary finding fails a file;
+  dictated-interop tokens, public library defaults and constants, and
+  Reloaded-original text were excluded from the measured set.
+- *Scoped addition (2026-11-07) -- R27c, T14, the sentence added to RQ1
+  item 5 and the amendment of D8.* Reloaded-original, batch 0.4.0 item
+  P6. *Inputs:* this repository's vendored `libp2p-yamux` crate and the
+  pinned fork's public `libp2p-swarm` crate (MIT) for the close path; a
+  lab run; and, for the parity note, the gated facts of RQ1b items 3 to 5
+  as already recorded in this chapter. Written by a context that never
+  read the forbidden corpus. It needs no Dirty Gate pass of its own.
+- *Scoped addition (2026-11-08) -- R27a item 1a and T15.* Reloaded-original,
+  batch 4 item B4-13, maintainer decision EA (a). *Inputs:* this
+  repository's redial guard (`mm2_p2p/src/redial_guard.rs`), lab rows
+  L-CLOSE B and its drop-only arm, and, for the reference statement, the
+  gated facts of RQ1a items 3 and 4 as already recorded in this chapter.
+  Written by a context that never read the forbidden corpus. It needs no
+  Dirty Gate pass of its own.
+- *Status note added 2026-11-10 -- under R27a item 1a.* Reloaded-original,
+  clean side: it records this repository's stuck-close mark (PR #328) and
+  takes no forbidden-class input, so chapter 01 R38 is not engaged and no
+  gate pass is required.

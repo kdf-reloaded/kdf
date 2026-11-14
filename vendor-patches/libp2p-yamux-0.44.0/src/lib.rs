@@ -28,11 +28,13 @@ use libp2p_core::upgrade::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
 use std::collections::VecDeque;
 use std::io::{IoSlice, IoSliceMut};
 use std::task::Waker;
+use std::time::Duration;
 use std::{
     io, iter,
     pin::Pin,
     task::{Context, Poll},
 };
+use futures_timer::Delay;
 use thiserror::Error;
 
 /// A Yamux connection.
@@ -51,6 +53,28 @@ pub struct Muxer<C> {
     inbound_stream_buffer: VecDeque<Stream>,
     /// Waker to be called when new inbound streams are available.
     inbound_stream_waker: Option<Waker>,
+    /// PATCHED (CRD ch.28 R27c, see PATCH-NOTES.md): how long [`StreamMuxer::poll_close`] may take. Always
+    /// [`CLOSE_TIMEOUT`] outside the tests of this crate.
+    close_timeout: Duration,
+    /// PATCHED (R27c): the deadline of the close. Created by the first [`StreamMuxer::poll_close`].
+    close_deadline: Option<Delay>,
+    /// PATCHED (R27c): the close was abandoned at its deadline. The inner connection is not polled again.
+    close_timed_out: bool,
+}
+
+/// PATCHED (CRD ch.28 R27c, see PATCH-NOTES.md): a close that this node starts must end within this time of its
+/// first [`StreamMuxer::poll_close`], else the close is abandoned with a [`std::io::ErrorKind::TimedOut`] error.
+///
+/// A fixed value of this crate. A healthy close takes milliseconds, and flushing a full yamux window of 256 KiB at
+/// 100 kbit/s takes about 20 seconds.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The error of a close abandoned at its deadline (R27c).
+fn close_timed_out() -> Error {
+    Error(yamux013::ConnectionError::Io(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "close timed out",
+    )))
 }
 
 /// How many streams to buffer before we start resetting them.
@@ -69,6 +93,9 @@ where
             connection,
             inbound_stream_buffer: VecDeque::default(),
             inbound_stream_waker: None,
+            close_timeout: CLOSE_TIMEOUT,
+            close_deadline: None,
+            close_timed_out: false,
         }
     }
 }
@@ -110,7 +137,26 @@ where
 
     #[tracing::instrument(level = "trace", name = "StreamMuxer::poll_close", skip(self, cx))]
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.connection.poll_close(cx).map_err(Error)
+        // PATCHED (CRD ch.28 R27c, see PATCH-NOTES.md): the close is bounded. The deadline starts at the first call.
+        // The inner close is polled first, so a close that finishes in time is never turned into a timeout; once the
+        // deadline has passed and the inner close is still pending, the close is abandoned and the inner connection
+        // is never polled again. The swarm then drops the muxer and its transport stream.
+        let this = &mut *self;
+        if this.close_timed_out {
+            return Poll::Ready(Err(close_timed_out()));
+        }
+        let timeout = this.close_timeout;
+        let deadline = this.close_deadline.get_or_insert_with(|| Delay::new(timeout));
+
+        if let Poll::Ready(result) = this.connection.poll_close(cx) {
+            return Poll::Ready(result.map_err(Error));
+        }
+        if deadline.poll_unpin(cx).is_ready() {
+            this.close_timed_out = true;
+            this.close_deadline = None;
+            return Poll::Ready(Err(close_timed_out()));
+        }
+        Poll::Pending
     }
 
     #[tracing::instrument(level = "trace", name = "StreamMuxer::poll", skip(self, cx))]
@@ -297,6 +343,138 @@ impl From<Error> for io::Error {
 #[cfg(test)]
 mod test {
     use super::*;
+    use futures::executor::block_on;
+    use futures::future::poll_fn;
+    use futures::task::noop_waker;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    /// A transport stream for the close tests. It never has data to read. It counts every write, flush and close
+    /// call, and either takes them at once (`takes_writes`, a peer that reads) or leaves them pending forever (a peer
+    /// that reads nothing: the TCP session is open and its receive window is zero).
+    struct TestIo {
+        takes_writes: bool,
+        write_side_calls: Arc<AtomicUsize>,
+    }
+
+    impl TestIo {
+        fn new(takes_writes: bool) -> (Self, Arc<AtomicUsize>) {
+            let write_side_calls = Arc::new(AtomicUsize::new(0));
+            let io = TestIo {
+                takes_writes,
+                write_side_calls: write_side_calls.clone(),
+            };
+            (io, write_side_calls)
+        }
+    }
+
+    impl AsyncRead for TestIo {
+        fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, _: &mut [u8]) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for TestIo {
+        fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+            self.write_side_calls.fetch_add(1, Ordering::SeqCst);
+            if self.takes_writes {
+                Poll::Ready(Ok(buf.len()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.write_side_calls.fetch_add(1, Ordering::SeqCst);
+            if self.takes_writes {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.write_side_calls.fetch_add(1, Ordering::SeqCst);
+            if self.takes_writes {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    fn test_muxer(takes_writes: bool, close_timeout: Duration) -> (Muxer<TestIo>, Arc<AtomicUsize>) {
+        let (io, write_side_calls) = TestIo::new(takes_writes);
+        let connection = yamux013::Connection::new(io, Config::default().0, yamux013::Mode::Client);
+        let mut muxer = Muxer::new(connection);
+        // The deadline is a fixed 30 s outside the tests; only this module can shorten it.
+        muxer.close_timeout = close_timeout;
+        (muxer, write_side_calls)
+    }
+
+    /// CRD ch.28 T14, crate level (R27c items 1 and 4): a close toward a peer that reads nothing ends with the
+    /// `TimedOut` "close timed out" error once the deadline has passed, and not before; the inner connection is not
+    /// polled again afterwards.
+    #[test]
+    fn close_toward_a_peer_that_reads_nothing_times_out_at_the_deadline() {
+        let timeout = Duration::from_secs(1);
+        let (mut muxer, write_side_calls) = test_muxer(false, timeout);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let started = Instant::now();
+        // Not before the deadline: the first poll is pending, and so is one made well inside the deadline.
+        assert!(Pin::new(&mut muxer).poll_close(&mut cx).is_pending());
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(started.elapsed() < timeout);
+        assert!(Pin::new(&mut muxer).poll_close(&mut cx).is_pending());
+        assert!(write_side_calls.load(Ordering::SeqCst) > 0, "the close must have tried to write");
+
+        // Once the deadline has passed: the timeout error. The timer wakes the task, so `block_on` returns on it.
+        let result = block_on(poll_fn(|cx| Pin::new(&mut muxer).poll_close(cx)));
+        assert!(started.elapsed() >= timeout, "the close ended before its deadline");
+        let error = result.expect_err("a close toward a peer that reads nothing must not succeed");
+        assert!(error.to_string().contains("close timed out"), "{error}");
+        let io_error = io::Error::from(error);
+        assert_eq!(io_error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(io_error.to_string(), "close timed out");
+
+        // The inner connection is never polled again: the same error, and no further call on the stream.
+        let calls_at_timeout = write_side_calls.load(Ordering::SeqCst);
+        match Pin::new(&mut muxer).poll_close(&mut cx) {
+            Poll::Ready(Err(error)) => assert_eq!(io::Error::from(error).kind(), io::ErrorKind::TimedOut),
+            _ => panic!("a close polled after its timeout must stay timed out"),
+        }
+        assert_eq!(write_side_calls.load(Ordering::SeqCst), calls_at_timeout);
+    }
+
+    /// CRD ch.28 T14, crate level (R27c item 4): a close toward a peer that reads ends at once, without an error,
+    /// and a deadline that has not passed changes nothing.
+    #[test]
+    fn close_toward_a_peer_that_reads_ends_at_once() {
+        let (mut muxer, _) = test_muxer(true, Duration::from_secs(60));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let started = Instant::now();
+        match Pin::new(&mut muxer).poll_close(&mut cx) {
+            Poll::Ready(Ok(())) => {},
+            other => panic!("a close toward a peer that reads must end at once with Ok, got {other:?}"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // A second call after a finished close stays Ok.
+        assert!(matches!(Pin::new(&mut muxer).poll_close(&mut cx), Poll::Ready(Ok(()))));
+    }
+
+    /// The deadline is 30 s outside the tests (R27c item 6).
+    #[test]
+    fn close_deadline_is_thirty_seconds() {
+        assert_eq!(CLOSE_TIMEOUT, Duration::from_secs(30));
+        let (io, _) = TestIo::new(true);
+        let connection = yamux013::Connection::new(io, Config::default().0, yamux013::Mode::Server);
+        assert_eq!(Muxer::new(connection).close_timeout, Duration::from_secs(30));
+    }
 
     /// Regression test for GHSA-vxx9-2994-q338.
     ///

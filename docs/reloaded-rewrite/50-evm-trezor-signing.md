@@ -152,13 +152,13 @@ per R49.2; an unresolvable or foreign selector shall fail per R50.19.
 > lives on a **local USB/WebUSB device** driven by the Trezor protocol rather
 > than a browser wallet driven by EIP-1193.
 
-> **Reloaded status (informative).** The activation path deviates from R50.2 /
-> R50.3 as recorded in ch. 35 §35.3: a missing hardware-wallet context answers
-> `Transport` and device/coin failures `PlatformCoinCreationError` (both must be
-> `Internal`), the device-confirmation state uses a non-vocabulary value (must be
-> `FollowHwDeviceInstructions`), the one-shot call answers `Transport` instead of
-> `UnexpectedDeviceActivationPolicy`, and the terminal result is single-address
-> shaped instead of the HD shape of ch. 35 R35.1.3(b).
+> **Reloaded status (informative; corrected 2026-11-04).** The deviations from
+> R50.2 / R50.3 recorded here earlier were closed on 2026-10-11, as ch. 35 §35.3
+> records: the hardware-wallet and device failures map to `Internal`, the
+> device-confirmation state is `FollowHwDeviceInstructions`, the one-shot call
+> answers `UnexpectedDeviceActivationPolicy`, and the terminal result has the HD
+> shape of ch. 35 R35.1.3(b). A real Trezor flow is covered only by the
+> emulator-gated tests.
 
 ---
 
@@ -368,6 +368,14 @@ principle of §47.5 (R47.5.13a).
 > unsupported-withdrawal discriminant; only the **condition** (structured
 > unsupported error, no user action) is bound here.
 
+> **Discriminant (this repository, 2026-11-04; not corpus-sourced).** That
+> discriminant is, since PR #236, the shared arm of chapter 49 R49.27a:
+> `error_type` `UnsupportedError`, HTTP 400, a string `error_data`. It also
+> answers the direct `withdraw` method of an EVM coin under a Trezor key,
+> which steers the client to `task::withdraw` (R50.24). **Parity**, with no
+> switch. Before, Reloaded answered both cases with its own discriminant
+> `UnsupportedUnderTrezor` (historical; also HTTP 400, with the same text).
+
 R50.21. All error surfacing shall be structured. Under the withdrawal **task**
 path a terminal failure is reported as `status: "Error"` with the serialized
 withdrawal error in `details` (R49.20); the RPC call itself remains successful
@@ -573,3 +581,14 @@ outside the signing-behaviour contract bound here.
   R35.3.3), where the public reference is silent or self-contradictory; no
   private implementation expression is normative in this chapter. The
   remainder was not derived from it.
+- *Correction (2026-11-04) -- the "Reloaded status" note under §50.1.* It
+  now matches ch. 35 §35.3, which recorded the implementation of
+  2026-10-11. Reloaded-original. *Inputs:* this repository's own activation
+  code and ch. 35. No reference implementation was consulted for this
+  correction, and it needs no Dirty Gate pass.
+- *Clean-side amendment (2026-11-04) -- the discriminant note on the
+  unsupported withdraw.* A session that never read the corpus added the note
+  on the shared `UnsupportedError` arm (PR #236). It rests on chapter 49
+  R49.27a, which passed the KDF Dirty Gate on 2026-11-04, and on this
+  repository's own code. It takes no forbidden-class input, so it does not
+  engage chapter 01 R38.

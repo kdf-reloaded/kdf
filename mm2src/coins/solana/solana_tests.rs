@@ -25,6 +25,7 @@ fn solana_keypair_from_secp() {
 
 // Research tests
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn solana_prerequisites() {
     // same test as trustwallet
@@ -76,6 +77,7 @@ fn solana_coin_creation() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn solana_my_balance() {
     let passphrase = "federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron".to_string();
@@ -85,6 +87,7 @@ fn solana_my_balance() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn solana_block_height() {
     let passphrase = "federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron".to_string();
@@ -144,6 +147,7 @@ fn test_verify_message() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn solana_transaction_simulations() {
     let passphrase = "federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron".to_string();
@@ -172,6 +176,7 @@ fn solana_transaction_simulations() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn solana_transaction_zero_balance() {
     let passphrase = "fake passphrase".to_string();
@@ -200,6 +205,7 @@ fn solana_transaction_zero_balance() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn solana_transaction_simulations_not_enough_for_fees() {
     let passphrase = "non existent passphrase".to_string();
@@ -233,6 +239,7 @@ fn solana_transaction_simulations_not_enough_for_fees() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn solana_transaction_simulations_max() {
     let passphrase = "federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron".to_string();
@@ -261,6 +268,7 @@ fn solana_transaction_simulations_max() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn solana_test_transactions() {
     let passphrase = "federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron".to_string();

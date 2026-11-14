@@ -429,6 +429,17 @@ v3.0.0-beta; the two values are the ones this project already records
 per netid (§6.1, chapter 16 §16.1.1), and no further key material is
 restated here.
 
+**Sia qualification (Spec Reader round 0.4.0-14, passed the KDF Dirty
+Gate on 2026-11-10; see [Chapter 20](20-siacoin-integration.md) R-S12).**
+The ed25519 flavour of the fee-collection identity is the one exception
+to the paragraph above: it is the same value at `v2.6.0-beta` and at
+v3.0.0-beta, so the Sia fee destination is identical on netid 8762 and
+netid 6133, exactly as §6.1 and R8 already record it. The Sia taker fee
+otherwise follows the global schedule of §6.6A.4 at both designations,
+with no coin-specific rate and no coin-configuration input; the rows of
+the table above therefore apply to Sia unchanged. Chapter 20 R-S12
+records these facts and T-S1 derives the lab row that proves them.
+
 **The first row rests on permitted input, not on forbidden-class
 input.** The baseline tree itself — the chapter-02 anchor, commit
 `c1d46c0c1592faa0860f704008b2b2381bc3840f` of 2022-06-03 — already
@@ -1093,3 +1104,13 @@ V5. The 16-bit width of `netid` is preserved from the
     not a margin to be spent. For orientation only, this repository's
     gate tooling carries an absolute discretionary cap of 0.50, which
     was not reached and was not the operative test here.
+- *Spec Reader round 0.4.0-14 (2026-11-10):* the Sia qualification
+  paragraph under the §6.6A.5 table is a cross-reference to [Chapter
+  20](20-siacoin-integration.md) R-S12 and T-S1, written in the same
+  round from forbidden-class input taken at the designations
+  `v2.6.0-beta` and `v3.0.0-beta` of [Chapter 02](02-baseline-state.md)
+  §2.15A for the Sia fee destination and the Sia taker-fee rate; chapter
+  20's footer carries the scoped record. It changes no cleared sentence
+  of §6.6A and adds no fee parameter. It passed the KDF Dirty Gate on
+  2026-11-10 with the chapter 20 material (measure 0.03, no findings;
+  scope attestation recorded in chapter 20 §20.12).

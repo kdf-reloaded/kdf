@@ -20,11 +20,13 @@
 use crate::mm2::rpc::rate_limiter::RateLimitError;
 #[cfg(feature = "unsafe-rpc-wire-dump")]
 use coins::node_url::redact_urls_in_text;
+use common::log::log_crate::Level;
 #[cfg(feature = "unsafe-rpc-wire-dump")] use common::log::trace;
 #[cfg(not(target_arch = "wasm32"))] use common::log::warn;
 use common::log::{error, info};
 use common::{err_to_rpc_json_string, err_tp_rpc_json, HttpStatusCode};
 use derive_more::Display;
+use dispatcher_legacy::LegacyOutcome;
 use futures::future::join_all;
 use http::header::{HeaderValue, ACCESS_CONTROL_ALLOW_ORIGIN};
 use http::request::Parts;
@@ -268,12 +270,77 @@ async fn process_json_request(ctx: MmArc, req_json: Json, client: SocketAddr) ->
     process_single_request(ctx, req_json, client).await
 }
 
+/// The level an RPC refusal is logged at, by the HTTP status of the answer: a refusal the request caused (4xx) is a
+/// warning, anything else is an error. The log text and the answer are not affected.
+pub(crate) fn rpc_error_log_level(status: StatusCode) -> Level {
+    // 401 and 403 stay errors: a wrong password, a ban or a non-local client is reported like a failure, not like a
+    // mistyped request. So does 408: in this tree it is the status of timeouts, which are not the request's fault.
+    // The status is taken as the handler declares it: a few handler errors map a node-side failure to 400 (for
+    // example `EnableLightningError::RpcError`, `WalletConnectRpcError::InitializationError`) and therefore warn.
+    if status.is_client_error()
+        && status != StatusCode::UNAUTHORIZED
+        && status != StatusCode::FORBIDDEN
+        && status != StatusCode::REQUEST_TIMEOUT
+    {
+        Level::Warn
+    } else {
+        Level::Error
+    }
+}
+
+/// Texts of the legacy surface, which has no status class: every entry is a list of fragments that must all occur in
+/// the error text (the ERRL macros prefix `file:line] ` and handlers nest messages, so the match is a `contains`).
+/// An entry is a refusal the request itself can cause. Authentication, rate-limit, ban and transport texts are not
+/// listed on purpose: they stay errors.
+#[cfg(not(target_arch = "wasm32"))]
+const CLIENT_CAUSED_LEGACY_ERRORS: &[&[&str]] = &[
+    // An unknown or an inactive coin.
+    &["No such coin"],
+    &["coin ", " is not found"],
+    &["is not found or inactive"],
+    &[" is not activated"],
+    &[" are not activated"],
+    // Not enough balance for the requested trade.
+    &["Not enough ", " for swap"],
+    &["IBC routing requires minimum balance"],
+    // A volume or a price below its minimum, or a volume that is not valid.
+    &["Max base vol "],
+    &["Min base vol "],
+    &["Max rel vol "],
+    &["Base amount ", " is too low"],
+    &["Rel amount ", " is too low"],
+    &["Min volume ", " is too low"],
+    &["Price ", " is too low"],
+    &["The volume ", " is too low"],
+    &["is below min base vol"],
+    &["less than minimum transaction amount"],
+    &["New volume ", " should be more than"],
+    // A pair or a coin that cannot trade.
+    &["Rel coin can not be same as base"],
+    &["Base and rel must be different coins"],
+    &["Trading is not supported for coin"],
+    &[" is wallet only"],
+];
+
+/// `true` when the text of a legacy handler error is a refusal the request itself caused, so it is logged as a
+/// warning (see [`CLIENT_CAUSED_LEGACY_ERRORS`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn legacy_error_is_client_caused(text: &str) -> bool {
+    CLIENT_CAUSED_LEGACY_ERRORS
+        .iter()
+        .any(|fragments| fragments.iter().all(|fragment| text.contains(fragment)))
+}
+
 fn response_from_dispatcher_error(
     error: MmError<DispatcherError>,
     version: MmRpcVersion,
     id: Option<usize>,
 ) -> Response<Vec<u8>> {
-    error!("RPC dispatcher error: {}", error);
+    common::log::log_crate::log!(
+        rpc_error_log_level(error.get_inner().status_code()),
+        "RPC dispatcher error: {}",
+        error
+    );
     let response: MmRpcResponse<(), _> = MmRpcBuilder::err(error).version(version).id(id).build();
     response.serialize_http_response()
 }
@@ -310,9 +377,17 @@ pub fn escape_answer<'a, S: Into<Cow<'a, str>>>(input: S) -> Cow<'a, str> {
 async fn process_single_request(ctx: MmArc, req: Json, client: SocketAddr) -> Result<Response<Vec<u8>>, String> {
     let local_only = ctx.conf["rpc_local_only"].as_bool().unwrap_or(true);
     if req["mmrpc"].is_null() {
-        return dispatcher_legacy::process_single_request(ctx, req, client, local_only)
+        let outcome = dispatcher_legacy::process_single_request(ctx.clone(), req, client, local_only)
             .await
-            .map_err(|e| ERRL!("{}", e));
+            .map_err(|e| ERRL!("{}", e))?;
+        return match outcome {
+            LegacyOutcome::Answered(response) => Ok(response),
+            // CRD ch.43 R43.1A.1a: the legacy checks passed and the legacy table has no such method. The request is
+            // retried once on the versioned surface; the versioned surface never falls back to the legacy one.
+            LegacyOutcome::NoLegacyMethod(req) => {
+                Ok(process_legacy_fallback_request(ctx, req, client, local_only).await)
+            },
+        };
     }
 
     let id = req["id"].as_u64().map(|id| id as usize);
@@ -325,13 +400,42 @@ async fn process_single_request(ctx: MmArc, req: Json, client: SocketAddr) -> Re
         },
     };
 
+    Ok(process_versioned_request(ctx, req, client, local_only, version, id).await)
+}
+
+/// Runs a request through the versioned dispatcher and renders a dispatcher failure as the mmrpc error envelope.
+async fn process_versioned_request(
+    ctx: MmArc,
+    req: Json,
+    client: SocketAddr,
+    local_only: bool,
+    version: MmRpcVersion,
+    id: Option<usize>,
+) -> Response<Vec<u8>> {
     match dispatcher::process_single_request(ctx, req, client, local_only).await {
-        Ok(response) => Ok(response),
-        Err(e) => {
-            // return always serialized response
-            Ok(response_from_dispatcher_error(e, version, id))
-        },
+        Ok(response) => response,
+        // return always serialized response
+        Err(e) => response_from_dispatcher_error(e, version, id),
     }
+}
+
+/// CRD ch.43 R43.1A.1b-R43.1A.1c: the legacy-to-versioned fallback. The legacy body is converted by setting its
+/// top-level `mmrpc` key to `"2.0"` and nothing else, then goes through the same versioned path as a request that
+/// carried the key from the start: strict decoding, the versioned local-only, ban and authentication checks, and the
+/// mmrpc 2.0 envelope for every outcome. `id` is echoed when it is a non-negative integer and is `null` otherwise.
+/// This function never goes back to the legacy dispatcher.
+async fn process_legacy_fallback_request(
+    ctx: MmArc,
+    mut req: Json,
+    client: SocketAddr,
+    local_only: bool,
+) -> Response<Vec<u8>> {
+    let id = req["id"].as_u64().map(|id| id as usize);
+    // A body that is not an object stays as it is and is refused by the strict decoding as `InvalidRequest`.
+    if let Json::Object(body) = &mut req {
+        body.insert("mmrpc".to_owned(), Json::String("2.0".to_owned()));
+    }
+    process_versioned_request(ctx, req, client, local_only, MmRpcVersion::V2, id).await
 }
 
 /// Response body of the RPC server: buffered for the JSON-RPC answers, streaming for the SSE endpoint.
@@ -349,8 +453,13 @@ async fn rpc_service(req: Request<Incoming>, ctx_h: u32, client: SocketAddr) -> 
             match $value {
                 Ok(ok) => ok,
                 Err(err) => {
-                    error!("RPC error response: {}", err);
-                    let ebody = err_to_rpc_json_string(&fomat!((err)));
+                    let text = fomat!((err));
+                    if legacy_error_is_client_caused(&text) {
+                        warn!("RPC error response: {}", text);
+                    } else {
+                        error!("RPC error response: {}", text);
+                    }
+                    let ebody = err_to_rpc_json_string(&text);
                     // generate a `Response` with the headers specified in `$header_key` and `$header_val`
                     let response = Response::builder().status(500) $(.header($header_key, $header_val))* .body(full_body(ebody)).unwrap();
                     return response;
@@ -923,6 +1032,282 @@ mod server_tests {
         }
     }
 
+    /// The order-management methods that only the legacy method table knows (CRD ch.43 R43.1A.4).
+    const LEGACY_ONLY_ORDER_METHODS: [&str; 9] = [
+        "setprice",
+        "buy",
+        "sell",
+        "update_maker_order",
+        "cancel_order",
+        "cancel_all_orders",
+        "my_orders",
+        "order_status",
+        "orderbook_depth",
+    ];
+
+    fn assert_http_status(status_line: &str, code: u16) {
+        assert!(
+            status_line.starts_with(&format!("HTTP/1.1 {code}")),
+            "expected HTTP {code}, got {status_line}"
+        );
+    }
+
+    /// Sends a legacy request (no `mmrpc` key, `params` inline next to `method`, the server password) and returns
+    /// the status line and the JSON body, exactly as [`post`] does.
+    fn post_legacy(addr: SocketAddr, method: &str, params: Json) -> (String, Json) {
+        let mut request = json!({ "userpass": "pw", "method": method });
+        for (key, value) in params.as_object().expect("the inline parameters are an object") {
+            request[key.as_str()] = value.clone();
+        }
+        post(addr, &request)
+    }
+
+    /// CRD ch.43 R43.1A.1, R43.1A.3, R43.1A.4: a versioned request for a method that only the legacy table knows is
+    /// answered like any unknown versioned method: the mmrpc error envelope, `NoSuchMethod`, no `error_data`,
+    /// HTTP 400, `mmrpc` and `id` echoed (`id` is `null` when the request has none). There is no versioned alias.
+    #[test]
+    fn versioned_requests_for_legacy_only_order_methods_answer_no_such_method() {
+        let (_ctx, addr) = start_server();
+        for method in LEGACY_ONLY_ORDER_METHODS {
+            for id in [Some(7), None] {
+                let mut request = json!({ "mmrpc": "2.0", "userpass": "pw", "method": method, "params": {} });
+                if let Some(id) = id {
+                    request["id"] = json!(id);
+                }
+                let (status, body) = post(addr, &request);
+                assert_http_status(&status, 400);
+                assert_eq!(body["mmrpc"], "2.0", "{method}: {body}");
+                assert_eq!(body["error_type"], "NoSuchMethod", "{method}: {body}");
+                assert!(body.get("error_data").is_none(), "{method}: {body}");
+                assert_eq!(
+                    body.get("id"),
+                    Some(&id.map_or(Json::Null, |id| json!(id))),
+                    "{method}: {body}"
+                );
+            }
+        }
+    }
+
+    /// CRD ch.43 R43.1A.3: the authentication runs before the method lookup, so an unauthenticated versioned call of
+    /// a legacy-only (hence unknown) protected method answers 403, not 400.
+    #[test]
+    fn versioned_request_for_a_legacy_only_order_method_is_authenticated_before_the_lookup() {
+        let (_ctx, addr) = start_server();
+        let request = json!({ "mmrpc": "2.0", "method": "setprice", "params": {}, "id": 5 });
+        let (status, body) = post(addr, &request);
+        assert_http_status(&status, 403);
+        assert_eq!(body["mmrpc"], "2.0", "{body}");
+        assert_eq!(body["error_type"], "UserpassIsNotSet", "{body}");
+        assert!(body.get("error_data").is_none(), "{body}");
+        assert_eq!(body["id"], 5, "{body}");
+    }
+
+    /// CRD ch.43 R43.1A.2: a legacy-shaped body (parameters inline) with an added `"mmrpc": "2.0"` is not routed to
+    /// the legacy handler: it is undecodable under the versioned envelope and answers `InvalidRequest` (string
+    /// payload, HTTP 400) before any method lookup. One order method and one other method.
+    #[test]
+    fn legacy_shaped_body_with_an_mmrpc_key_answers_invalid_request() {
+        let (_ctx, addr) = start_server();
+        let cases = [
+            (
+                "setprice",
+                json!({ "base": "RIN", "rel": "KMD", "price": 1, "volume": 1 }),
+            ),
+            ("my_balance", json!({ "coin": "RIN" })),
+        ];
+        for (method, inline) in cases {
+            let mut request = json!({ "mmrpc": "2.0", "userpass": "pw", "method": method, "id": 3 });
+            for (key, value) in inline.as_object().unwrap() {
+                request[key.as_str()] = value.clone();
+            }
+            let (status, body) = post(addr, &request);
+            assert_http_status(&status, 400);
+            assert_eq!(body["mmrpc"], "2.0", "{method}: {body}");
+            assert_eq!(body["error_type"], "InvalidRequest", "{method}: {body}");
+            assert!(body["error_data"].is_string(), "{method}: {body}");
+            assert_eq!(body["id"], 3, "{method}: {body}");
+        }
+    }
+
+    /// The answer must be the mmrpc 2.0 error envelope with this `error_type`, HTTP status and `id`.
+    fn assert_mmrpc_error(answer: &(String, Json), code: u16, error_type: &str, id: Json) {
+        let (status, body) = answer;
+        assert_http_status(status, code);
+        assert_eq!(body["mmrpc"], "2.0", "{body}");
+        assert_eq!(body["error_type"], error_type, "{body}");
+        assert_eq!(body.get("id"), Some(&id), "{body}");
+    }
+
+    /// The answer must be the legacy error body: HTTP 500, exactly one member `error`, no mmrpc envelope.
+    fn assert_legacy_error_body(answer: &(String, Json)) {
+        let (status, body) = answer;
+        assert_http_status(status, 500);
+        assert_eq!(body.as_object().map(|object| object.len()), Some(1), "{body}");
+        assert!(body["error"].is_string(), "{body}");
+    }
+
+    /// CRD ch.43 R43.1A.1a-R43.1A.1c: a legacy request (no `mmrpc`) shaped like a versioned one minus the key, for a
+    /// method only the versioned table knows, is answered in the mmrpc 2.0 envelope with the result, HTTP 200 and
+    /// the `id` echoed (`null` when absent).
+    #[test]
+    fn legacy_body_shaped_as_a_versioned_request_is_answered_through_the_fallback() {
+        let (ctx, addr) = start_server();
+        crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "legacy fallback test passphrase")
+            .expect("initialize the crypto context");
+        for (request, id) in [
+            (
+                json!({ "userpass": "pw", "method": "get_public_key", "id": 11 }),
+                json!(11),
+            ),
+            (
+                json!({ "userpass": "pw", "method": "get_public_key", "params": {} }),
+                Json::Null,
+            ),
+        ] {
+            let (status, body) = post(addr, &request);
+            assert_http_status(&status, 200);
+            assert_eq!(body["mmrpc"], "2.0", "{body}");
+            assert!(body["result"]["public_key"].is_string(), "{body}");
+            assert_eq!(body.get("id"), Some(&id), "{body}");
+        }
+    }
+
+    /// CRD ch.43 R43.1A.1b: an inline member next to `method` makes the converted request undecodable: the answer is
+    /// `InvalidRequest` (string payload, HTTP 400) in the mmrpc 2.0 envelope, before any method lookup.
+    #[test]
+    fn legacy_body_with_inline_parameters_for_a_versioned_only_method_answers_invalid_request() {
+        let (_ctx, addr) = start_server();
+        let answer = post_legacy(addr, "get_public_key", json!({ "coin": "RIN", "id": 12 }));
+        assert_mmrpc_error(&answer, 400, "InvalidRequest", json!(12));
+        assert!(answer.1["error_data"].is_string(), "{}", answer.1);
+    }
+
+    /// CRD ch.43 R43.1A.1c: a legacy request for a name neither table knows, with the right password, answers
+    /// `NoSuchMethod` (no `error_data`, HTTP 400) in the mmrpc 2.0 envelope with the `id` echoed or `null`.
+    #[test]
+    fn legacy_request_for_a_name_no_table_knows_answers_no_such_method_in_the_2_0_envelope() {
+        let (_ctx, addr) = start_server();
+        for id in [Some(9), None] {
+            let mut request = json!({ "userpass": "pw", "method": "no_such_method_in_any_table" });
+            if let Some(id) = id {
+                request["id"] = json!(id);
+            }
+            let answer = post(addr, &request);
+            assert_mmrpc_error(&answer, 400, "NoSuchMethod", id.map_or(Json::Null, |id| json!(id)));
+            assert!(answer.1.get("error_data").is_none(), "{}", answer.1);
+        }
+    }
+
+    /// CRD ch.43 (the endpoint never panics the daemon in response to a request), maintainer decision of 2026-11-10:
+    /// without the `sim-panic-rpc` feature (every build that ships) the legacy `sim_panic` method does not exist. An
+    /// authenticated legacy request for it is answered like any unknown name: `NoSuchMethod` in the mmrpc 2.0
+    /// envelope (no `error_data`), HTTP 400. A versioned request for it answers the same.
+    #[cfg(not(feature = "sim-panic-rpc"))]
+    #[test]
+    fn sim_panic_is_not_routed_without_the_sim_panic_rpc_feature() {
+        let (_ctx, addr) = start_server();
+        let legacy = post_legacy(addr, "sim_panic", json!({}));
+        assert_mmrpc_error(&legacy, 400, "NoSuchMethod", Json::Null);
+        assert!(legacy.1.get("error_data").is_none(), "{}", legacy.1);
+
+        let versioned = post(
+            addr,
+            &json!({ "mmrpc": "2.0", "userpass": "pw", "method": "sim_panic", "params": {}, "id": 2 }),
+        );
+        assert_mmrpc_error(&versioned, 400, "NoSuchMethod", json!(2));
+        assert!(versioned.1.get("error_data").is_none(), "{}", versioned.1);
+    }
+
+    /// CRD ch.43, maintainer decision of 2026-11-10: with the test-only `sim-panic-rpc` feature the legacy `sim_panic`
+    /// method is routed. A request without `mode` lists the supported modes. Never send `"mode": "simple"` here: it
+    /// panics the process.
+    #[cfg(feature = "sim-panic-rpc")]
+    #[test]
+    fn sim_panic_without_a_mode_lists_the_modes_with_the_sim_panic_rpc_feature() {
+        let (_ctx, addr) = start_server();
+        let (status, body) = post_legacy(addr, "sim_panic", json!({}));
+        assert_http_status(&status, 200);
+        assert_eq!(body, json!({ "modes": ["simple"] }));
+    }
+
+    /// CRD ch.43 R43.1A.1d: an unknown name is protected at the legacy layer, so without or with a wrong `userpass`
+    /// it is refused with the legacy error body (HTTP 500) before the fallback.
+    #[test]
+    fn legacy_request_for_an_unknown_name_without_a_valid_password_keeps_the_legacy_body() {
+        let (_ctx, addr) = start_server();
+        let without = post(addr, &json!({ "method": "no_such_method_in_any_table", "id": 1 }));
+        assert_legacy_error_body(&without);
+        let wrong = post(
+            addr,
+            &json!({ "userpass": "wrong", "method": "no_such_method_in_any_table", "id": 1 }),
+        );
+        assert_legacy_error_body(&wrong);
+        // The same applies to a name only the versioned table knows.
+        let versioned_only = post(addr, &json!({ "method": "get_public_key", "id": 1 }));
+        assert_legacy_error_body(&versioned_only);
+    }
+
+    /// CRD ch.43 R43.1A.1a, R43.1A.1d: a missing or non-string `method` is public at the legacy layer, reaches the
+    /// fallback without a password and answers `InvalidRequest` (HTTP 400) in the mmrpc 2.0 envelope. A name of the
+    /// public set that neither table serves answers `NoSuchMethod` (HTTP 400) without a password.
+    #[test]
+    fn legacy_request_without_a_usable_method_or_with_a_public_unserved_name_needs_no_password() {
+        let (_ctx, addr) = start_server();
+        let missing = post(addr, &json!({ "id": 4 }));
+        assert_mmrpc_error(&missing, 400, "InvalidRequest", json!(4));
+        assert!(missing.1["error_data"].is_string(), "{}", missing.1);
+        let not_a_string = post(addr, &json!({ "method": 5, "id": 4 }));
+        assert_mmrpc_error(&not_a_string, 400, "InvalidRequest", json!(4));
+        let public_unserved = post(addr, &json!({ "method": "getprice", "id": 4 }));
+        assert_mmrpc_error(&public_unserved, 400, "NoSuchMethod", json!(4));
+        assert!(public_unserved.1.get("error_data").is_none(), "{}", public_unserved.1);
+    }
+
+    /// CRD ch.43 R43.1A.1c: an `id` that is not a non-negative integer is reported as `null`, and the converted
+    /// request is undecodable (`InvalidRequest`, HTTP 400).
+    #[test]
+    fn legacy_request_with_a_string_id_answers_invalid_request_with_a_null_id() {
+        let (_ctx, addr) = start_server();
+        let answer = post(
+            addr,
+            &json!({ "userpass": "pw", "method": "no_such_method_in_any_table", "id": "abc" }),
+        );
+        assert_mmrpc_error(&answer, 400, "InvalidRequest", Json::Null);
+        assert!(answer.1["error_data"].is_string(), "{}", answer.1);
+    }
+
+    /// CRD ch.43 R43.1A.1e: the legacy layer authenticates `userpass` only. A protected unknown name sent with
+    /// `rpc_pass` is refused with the legacy error body before the fallback; the alias is honored only where no
+    /// password is needed (a public name no table serves), where the converted request decodes and answers
+    /// `NoSuchMethod`.
+    #[test]
+    fn legacy_request_with_rpc_pass_is_authenticated_by_userpass_only() {
+        let (_ctx, addr) = start_server();
+        let protected = post(
+            addr,
+            &json!({ "rpc_pass": "pw", "method": "no_such_method_in_any_table", "id": 6 }),
+        );
+        assert_legacy_error_body(&protected);
+        let public = post(addr, &json!({ "rpc_pass": "pw", "method": "getprice", "id": 6 }));
+        assert_mmrpc_error(&public, 400, "NoSuchMethod", json!(6));
+    }
+
+    /// CRD ch.43 R43.1A.1a: a legacy method that the legacy table knows keeps its legacy answer: a success is the
+    /// legacy body, and a failing handler is the legacy error body (HTTP 500); neither is re-dispatched.
+    #[test]
+    fn known_legacy_methods_keep_their_legacy_answers() {
+        let (_ctx, addr) = start_server();
+        let (status, body) = post_legacy(addr, "version", json!({}));
+        assert_http_status(&status, 200);
+        assert!(body["result"].is_string(), "{body}");
+        assert!(body.get("mmrpc").is_none(), "{body}");
+
+        let failure = post_legacy(addr, "my_balance", json!({ "coin": "NO_SUCH_COIN" }));
+        assert_legacy_error_body(&failure);
+        let error = failure.1["error"].as_str().unwrap();
+        assert!(error.contains("No such coin: NO_SUCH_COIN"), "{}", failure.1);
+    }
+
     /// The SSE answer must stay open and deliver events as they happen, not only once the body ends.
     #[test]
     fn sse_endpoint_streams_events_over_an_open_connection() {
@@ -948,5 +1333,304 @@ mod server_tests {
         assert!(received.contains(r#""origin":"HEARTBEAT""#), "{received}");
         assert!(received.contains(r#""payload":{"probe":1}"#), "{received}");
         assert!(received.contains(r#""error":false"#), "{received}");
+    }
+
+    // ----- The level RPC refusals are logged at (client-caused refusals warn, genuine failures stay errors) -----
+
+    /// Every refusal text the legacy surface can send for a request that is itself at fault, as the handlers word it.
+    const CLIENT_CAUSED_TEXTS: &[&str] = &[
+        "No such coin: RIN",
+        "No such coin RIN",
+        "Base coin RIN is not found",
+        "Rel coin LTC-segwit is not found",
+        "Rel coin is not found or inactive",
+        "Base coin is not found or inactive",
+        "Coin KMDCL is not activated",
+        "Base coin RIN and/or rel coin KMD are not activated",
+        "Not enough FLR for swap: available 0, required at least 1, locked by swaps None",
+        "Not enough base coin ETH balance for swap: available 0, required at least 1, locked by swaps None",
+        "IBC routing requires minimum balance on HTLC coin ATOM: required 1, current 0",
+        "Max base vol 0.5 is below min base vol: 1",
+        "Max base vol 0.00000001 is too low, required: 0.0001",
+        "Min base vol 0.00000001 is too low, required: 0.0001",
+        "Max rel vol 0.00000001 is too low, required: 0.0001",
+        "Base amount 0.00000001 is too low, required: 0.0001",
+        "Rel amount 0.00000001 is too low, required: 0.0001",
+        "Min volume 0.00000001 is too low, required: 0.0001",
+        "Price 0.000000001 is too low, required: 0.00000001",
+        "Price is too low, minimum is 0.00000001",
+        "The volume 0.00000001 of the RIN coin is too low, required at least 0.0001: a payment of that size could not be spent or refunded",
+        "The volume 0.00000001 of the RIN coin less than minimum transaction amount 0.0001",
+        "New volume 0 should be more than zero",
+        "New volume 1 should be more than reserved amount for order matches 2",
+        "Rel coin can not be same as base",
+        "Base and rel must be different coins",
+        "Trading is not supported for coin LN",
+        "Base coin RIN is wallet only",
+        "Rel coin RIN is wallet only",
+    ];
+
+    /// Texts of refusals that are not the request's fault, or that no list may soften: they stay errors.
+    const GENUINE_FAILURE_TEXTS: &[&str] = &[
+        "Transport error: all EVM nodes failed: connection refused",
+        "Userpass is invalid!",
+        "Userpass is not set!",
+        "Your ip is banned.",
+        "Internal error: database is locked",
+        "Only POST requests are supported!",
+        "Invalid input",
+        "expected value at line 1 column 1",
+        "Cannot check the RIN coin spend safety: no fee estimate",
+        "Taker payment is not found, swap is not recoverable",
+        "No such mode: simple",
+        "",
+    ];
+
+    /// An error text as the ERRL macros nest it: every layer adds its `file:line] ` prefix.
+    fn nested(text: &str) -> String { format!("lp_ordermatch:2611] lp_commands_legacy:84] {text}") }
+
+    #[test]
+    fn legacy_refusals_the_request_caused_are_classified_as_client_caused() {
+        for text in CLIENT_CAUSED_TEXTS {
+            assert!(legacy_error_is_client_caused(text), "{text}");
+            assert!(
+                legacy_error_is_client_caused(&format!("lp_ordermatch:2611] {text}")),
+                "{text}"
+            );
+            assert!(legacy_error_is_client_caused(&nested(text)), "{text}");
+            assert!(
+                legacy_error_is_client_caused(&format!("{} (retry)", nested(text))),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_failures_of_the_node_are_not_classified_as_client_caused() {
+        for text in GENUINE_FAILURE_TEXTS {
+            assert!(!legacy_error_is_client_caused(text), "{text:?}");
+            assert!(!legacy_error_is_client_caused(&nested(text)), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_fragment_of_a_pair_alone_does_not_classify_a_text() {
+        // Each of these carries only one half of a fragment pair.
+        for text in [
+            "The coin RIN is fine",
+            "Rel amount 5 was accepted",
+            "Min volume 5 was accepted",
+            "Price 5 was accepted",
+            "Not enough peers",
+            "x is too low",
+            "the swap is not recoverable",
+        ] {
+            assert!(!legacy_error_is_client_caused(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn rpc_error_log_level_warns_for_client_errors_and_errors_otherwise() {
+        for code in [400, 404, 409, 422, 429, 499] {
+            let status = StatusCode::from_u16(code).unwrap();
+            assert_eq!(rpc_error_log_level(status), Level::Warn, "{code}");
+        }
+        // Authentication, access and timeout refusals are reported like failures.
+        for code in [401, 403, 408, 500, 501, 502, 503, 504] {
+            let status = StatusCode::from_u16(code).unwrap();
+            assert_eq!(rpc_error_log_level(status), Level::Error, "{code}");
+        }
+        // The dispatcher's own statuses.
+        for error in [
+            DispatcherError::NoSuchMethod,
+            DispatcherError::InvalidRequest("x".to_owned()),
+            DispatcherError::InvalidMmRpcVersion("x".to_owned()),
+        ] {
+            assert_eq!(rpc_error_log_level(error.status_code()), Level::Warn);
+        }
+        for error in [
+            DispatcherError::Banned,
+            DispatcherError::LocalHostOnly,
+            DispatcherError::UserpassIsNotSet,
+        ] {
+            assert_eq!(rpc_error_log_level(error.status_code()), Level::Error);
+        }
+    }
+
+    mod capture {
+        use common::log::log_crate::{set_logger, set_max_level, Level, LevelFilter, Log, Metadata, Record};
+        use std::sync::Mutex;
+
+        static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+        struct Capture;
+
+        impl Log for Capture {
+            fn enabled(&self, metadata: &Metadata) -> bool { metadata.level() <= Level::Warn }
+
+            fn log(&self, record: &Record) {
+                if self.enabled(record.metadata()) {
+                    LINES.lock().unwrap_or_else(|e| e.into_inner()).push(format!(
+                        "{} {}",
+                        record.level(),
+                        record.args()
+                    ));
+                }
+            }
+
+            fn flush(&self) {}
+        }
+
+        static CAPTURE: Capture = Capture;
+
+        /// Installs the capture of the warn and error lines. `false` when another logger already owns the process, in
+        /// which case a test must not assert that a line is present.
+        pub(super) fn installed() -> bool {
+            let installed = set_logger(&CAPTURE).is_ok();
+            if installed {
+                set_max_level(LevelFilter::Warn);
+            }
+            // `set_logger` fails the second time too: the capture is ours when a line can be seen.
+            common::log::log_crate::warn!("rpc log level capture probe");
+            installed
+                || LINES
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .any(|l| l.contains("rpc log level capture probe"))
+        }
+
+        /// The captured lines (`"{level} {text}"`) that contain `needle`.
+        pub(super) fn lines_with(needle: &str) -> Vec<String> {
+            LINES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|l| l.contains(needle))
+                .cloned()
+                .collect()
+        }
+    }
+
+    /// Sends `body` with the request line `method / HTTP/1.1` and returns the status line and the JSON body, as
+    /// [`post`] does for a POST.
+    fn send_with_method(addr: SocketAddr, method: &str, body: &str) -> (String, Json) {
+        let mut stream = connect(addr);
+        write!(
+            stream,
+            "{method} / HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let status = response.lines().next().unwrap_or_default().to_owned();
+        let (_, payload) = response.split_once("\r\n\r\n").expect("a complete response");
+        let payload = serde_json::from_str(payload).unwrap_or_else(|e| panic!("{e}: {response}"));
+        (status, payload)
+    }
+
+    /// A legacy request that the request itself caused to fail (an unknown coin): the answer is unchanged (the legacy
+    /// error body, HTTP 500) and the line is logged at WARN, not at ERROR.
+    #[test]
+    fn legacy_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged() {
+        let capturing = capture::installed();
+        let (_ctx, addr) = start_server();
+        let failure = post_legacy(addr, "my_balance", json!({ "coin": "NO_SUCH_COIN_LOG_LEVEL_A" }));
+        assert_legacy_error_body(&failure);
+        let error = failure.1["error"].as_str().unwrap();
+        assert!(
+            error.contains("No such coin: NO_SUCH_COIN_LOG_LEVEL_A"),
+            "{}",
+            failure.1
+        );
+
+        if !capturing {
+            eprintln!("legacy_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged: another logger owns the process, line assertions skipped");
+            return;
+        }
+        let lines = capture::lines_with("No such coin: NO_SUCH_COIN_LOG_LEVEL_A");
+        assert!(!lines.is_empty(), "the refusal is logged");
+        for line in &lines {
+            assert!(line.starts_with("WARN RPC error response: "), "{line}");
+        }
+    }
+
+    /// A versioned request whose handler answers a 4xx: the mmrpc error is unchanged and the line is logged at WARN.
+    #[test]
+    fn versioned_handler_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged() {
+        let capturing = capture::installed();
+        let (_ctx, addr) = start_server();
+        let request = json!({
+            "mmrpc": "2.0",
+            "userpass": "pw",
+            "method": "min_trading_vol",
+            "params": { "coin": "NO_SUCH_COIN_LOG_LEVEL_B" },
+            "id": 8,
+        });
+        let answer = post(addr, &request);
+        assert_mmrpc_error(&answer, 400, "NoSuchCoin", json!(8));
+        assert_eq!(
+            answer.1["error_data"]["coin"], "NO_SUCH_COIN_LOG_LEVEL_B",
+            "{}",
+            answer.1
+        );
+
+        if !capturing {
+            eprintln!("versioned_handler_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged: another logger owns the process, line assertions skipped");
+            return;
+        }
+        let lines = capture::lines_with("No such coin: NO_SUCH_COIN_LOG_LEVEL_B");
+        assert!(!lines.is_empty(), "the refusal is logged");
+        for line in &lines {
+            assert!(line.starts_with("WARN RPC error response: "), "{line}");
+        }
+    }
+
+    /// A request the dispatcher itself refuses with a 4xx (an unknown method): the mmrpc error is unchanged and the
+    /// line is logged at WARN. Other tests produce the same text, which is also a 400, so every such line is checked.
+    #[test]
+    fn dispatcher_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged() {
+        let capturing = capture::installed();
+        let (_ctx, addr) = start_server();
+        let answer = post(
+            addr,
+            &json!({ "mmrpc": "2.0", "userpass": "pw", "method": "no_such_method_in_any_table", "params": {}, "id": 9 }),
+        );
+        assert_mmrpc_error(&answer, 400, "NoSuchMethod", json!(9));
+        assert!(answer.1.get("error_data").is_none(), "{}", answer.1);
+
+        if !capturing {
+            eprintln!("dispatcher_refusal_the_request_caused_is_logged_at_warn_and_answered_unchanged: another logger owns the process, line assertions skipped");
+            return;
+        }
+        let lines = capture::lines_with("No such method");
+        assert!(!lines.is_empty(), "the refusal is logged");
+        for line in &lines {
+            assert!(line.starts_with("WARN RPC dispatcher error: "), "{line}");
+        }
+    }
+
+    /// A legacy refusal whose text is not listed stays an error: a GET request is answered by the legacy error body
+    /// (HTTP 500) and the line is logged at ERROR, because its text is not in the table. (No cheaper genuine 5xx path
+    /// exists on the stub server.)
+    #[test]
+    fn legacy_failure_that_is_not_client_caused_is_logged_at_error_and_answered_unchanged() {
+        let capturing = capture::installed();
+        let (_ctx, addr) = start_server();
+        let failure = send_with_method(addr, "GET", "{}");
+        assert_legacy_error_body(&failure);
+        let error = failure.1["error"].as_str().unwrap();
+        assert!(error.contains("Only POST requests are supported!"), "{}", failure.1);
+
+        if !capturing {
+            eprintln!("legacy_failure_that_is_not_client_caused_is_logged_at_error_and_answered_unchanged: another logger owns the process, line assertions skipped");
+            return;
+        }
+        let lines = capture::lines_with("Only POST requests are supported!");
+        assert!(!lines.is_empty(), "the failure is logged");
+        for line in &lines {
+            assert!(line.starts_with("ERROR RPC error response: "), "{line}");
+        }
     }
 }

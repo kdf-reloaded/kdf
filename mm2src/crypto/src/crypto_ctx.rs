@@ -290,13 +290,11 @@ impl CryptoCtx {
         let (secp256k1_key_pair, key_pair_policy) = policy_builder.build(passphrase)?;
         let rmd160 = secp256k1_key_pair.public().address_hash();
 
-        // Legacy MmCtx fields read this iguana-style key directly. In `Iguana` mode it equals
-        // `secp256k1_key_pair` above; in `GlobalHDAccount` mode it is a *different* key derived
-        // by hashing the mnemonic bytes (matching the baseline derivation). Code paths
-        // in `lp_swap` and `lp_ordermatch` that fetch the keypair from `MmCtx` rather than
-        // `CryptoCtx` therefore use the iguana key even when the user opted into HD mode.
-        // DEFERRED(hd-dispatch): refactoring lp_swap/lp_ordermatch to consult `CryptoCtx`
-        // is a substantial swap-state-machine change deferred past v0.1.
+        // The node key (CRD ch.05 R45): the context's `secp256k1_key_pair` is pinned to the key `CryptoCtx`
+        // holds, so every consumer of the node key reads one key. Under a global-HD login that is the internal
+        // key of R16 (the key `get_public_key` reports, the source of `rmd160` and of the database paths); under
+        // an iguana login it is the hash of the passphrase. The hash of the passphrase text is kept as the
+        // separate legacy passphrase key (R46, Decision CR), which equals the node key under an iguana login.
         let secp256k1_key_pair_for_legacy = key_pair_from_seed(passphrase).mm_err(Into::into)?;
 
         let crypto_ctx = CryptoCtx {
@@ -310,8 +308,11 @@ impl CryptoCtx {
         *ctx_field = Some(result.clone());
         drop(ctx_field);
 
-        // Initialize legacy MmCtx fields for backward compatibility.
+        // Initialize the MmCtx key fields: the node key and the legacy passphrase key.
         ctx.secp256k1_key_pair
+            .pin(secp256k1_key_pair)
+            .map_to_mm(CryptoInitError::Internal)?;
+        ctx.legacy_passphrase_key_pair
             .pin(secp256k1_key_pair_for_legacy)
             .map_to_mm(CryptoInitError::Internal)?;
         ctx.rmd160.pin(rmd160).map_to_mm(CryptoInitError::Internal)?;

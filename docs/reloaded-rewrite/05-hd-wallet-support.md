@@ -1,6 +1,8 @@
 # Chapter 05 — Hierarchical-Deterministic Wallet Support
 
-**Status:** driving-spec.
+**Status:** driving-spec. §5.10B (R50–R58, T31–T36, D7) and the 2026-11-08
+amendments of R29, R31 and T12 **passed the KDF Dirty Gate on 2026-11-08,
+measure 0.02** (see §5.17 for the extent and method).
 
 A modernised cryptographic-key substrate that binds a complete
 BIP-39 / BIP-32 / SLIP-0010 / SLIP-0021 wallet stack on top of the
@@ -54,7 +56,12 @@ baseline or named after the public specifications the substrate
 expresses. Bound rules R1–R5 cover the crate-level shape; R6–R12
 cover the mnemonic and encryption layer; R13–R19 cover the
 hierarchical-deterministic seed and path machinery; R20–R26 cover
-the central context and the platform-gated extensions.
+the central context and the platform-gated extensions. R36–R40
+(§5.12B) are a Reloaded-original refusal rule for swaps whose keys
+do not agree under a global-HD login. R41–R44 (§5.12C) make every
+coin announce the key it signs with, so that those keys agree. R45–R49
+(§5.12D) make the internal key the node's own key under a global-HD
+login.
 
 ## 5.2 Subsystem Shape
 
@@ -368,8 +375,11 @@ namespacing values. The value MUST be **stable across daemon
 restarts for the same mnemonic** so that stored HD accounts re-bind
 on re-login. When the policy is `Iguana`, no HD wallet-identity is
 available and HD storage MUST remain refused (HD is unsupported in
-Iguana mode); when a hardware-wallet context is active, the
-hardware device's own identity digest is used unchanged (R25).
+Iguana mode); a coin activated under the hardware (`Trezor`) key
+policy is namespaced by the hardware device's own identity digest
+(R25, §5.10B R51/R55), whichever software login holds the context,
+and the mere presence of a hardware context does not change the
+digest of a context-key coin (§5.10B R52).
 Acceptance: in software global-HD mode, an HD UTXO coin's HD
 storage initialises successfully (it MUST NOT be refused on the
 grounds that no hardware HD-wallet identity is present); in Iguana
@@ -415,16 +425,20 @@ and MUST NOT contact a hardware device.
 
 **R31.** *Extended-public-key source selection by key-pair policy.*
 The extended-public-key source consumed by per-coin account
-extraction MUST be chosen by the active key-pair policy, not by a
-fixed assumption of hardware:
+extraction MUST be chosen by the **coin's own key policy, fixed at
+its activation** (§5.10B R52), not by a fixed assumption of hardware
+and not by whether a hardware-wallet context happens to exist:
 
-  - when a hardware-wallet context is active, the source is the
-    hardware device (the device extractor of R25, which requires
-    the coin's `trezor_coin` config and performs the device
-    protocol);
-  - when the policy is `GlobalHDAccount` and no hardware context is
-    active, the source is the **in-context software derivation of
-    R30** (the in-memory master), requiring no `trezor_coin` field.
+  - when the coin was activated under the hardware (`Trezor`) key
+    policy, the source is the hardware device (the device extractor
+    of R25, which requires a hardware-wallet context and the coin's
+    `trezor_coin` config, and performs the device protocol);
+  - when the coin was activated under the context key policy of a
+    `GlobalHDAccount` login, the source is the **in-context software
+    derivation of R30** (the in-memory master), requiring no
+    `trezor_coin` field — whether or not a hardware-wallet context
+    exists at the time (§5.10B R52, T32). *(Amended 2026-11-08;
+    passed the KDF Dirty Gate with §5.10B on 2026-11-08.)*
 
   The per-coin extraction entry point MUST accept "no external
   (hardware) extractor" as a valid case and, in that case, resolve
@@ -436,6 +450,327 @@ fixed assumption of hardware:
   Chapter 5 D1's deferral of per-account activation plumbing is
   partially discharged here for the extended-public-key source and
   fully for software UTXO accounts by Chapter 38 §38.8.)
+
+## 5.9B Key Usage of a Global-HD Login, per Surface (reference behavior)
+
+*(Passed the KDF Dirty Gate on 2026-11-04, measure 0.03. Spec Reader 2026-11-04, rows `v2.6.0-beta` and
+`v3.0.0-beta` of chapter 02 §2.15A, identical at both.)* A global-HD login
+holds two secp256k1 keys of interest: the **internal key** of R16, at
+`m/44'/141'/2147483647/0/0`, and, per activated coin, the **coin key** at the
+coin's configured `derivation_path` extended by the activation's
+`path_to_address` (default account 0, external chain, address 0). This
+section records which of the two the reference uses on each surface, and
+what it never uses: **no surface of the reference uses a hash of the
+mnemonic string under a global-HD login.** That key exists only in the
+legacy single-key (`Iguana`) mode, where it is the one key for everything.
+
+**R32.** *The trading identity is the internal key.* Under a global-HD login
+the reference signs maker orders and keep-alive messages, fills
+`sender_pubkey` in `TakerRequest`, `MakerReserved`, `TakerConnect` and
+`MakerConnected`, marks own orders (`is_mine`), exempts own orders from the
+stale sweep (chapter 59 R59.6.5), and derives a relay's own libp2p identity
+(chapter 28 R19) from the **internal key** -- the same key `get_public_key`
+and `get_public_key_hash` report. Privacy-coin orders keep their per-order
+key (chapter 16). The orderbook's `address` for such an order is derived
+from the same public key, so for a UTXO or EVM coin it is the internal key's
+address and not an address of the coin's HD wallet.
+
+**R33.** *The swap's persistent key is the internal key; the HTLC keys are
+the coin keys.* The legacy (v1) swap's persistent public key -- the
+`persistent_pubkey` of chapter 51 R59, the own-key field of the start event
+and of the swap-statistics record (chapter 51 R50A) -- is the **internal
+key**. Each per-coin HTLC public key (chapter 51 R63) is the coin's own: the
+**coin key** for a UTXO-family, QTUM, BCH, SLP (its platform's), QRC20, EVM
+or Tendermint coin; the per-swap derivation of chapter 39 R39.5.6 for a
+shielded coin, whose base key is the coin key; the padded ed25519 account key
+of chapter 51 R64 for Sia. Because the HTLC keys then differ from the
+persistent key, every HD-login negotiation emits shape 3 of chapter 51 R59
+(R60). Payments are sent from, and spends and refunds paid to, the address of
+the same coin key that signs them.
+
+**R34.** *No up-front key-mismatch refusal exists, and none is needed.* The
+reference has no check that a coin's key "matches" the negotiated one: the
+HTLC key it puts on the wire is always the key the coin will sign with, so
+the question does not arise. An implementation that puts any other key on
+the wire is not at parity and cannot be made so by adding a check; the
+remedy is R33.
+
+**R35.** *Per-surface table.* The following holds at both reference rows.
+
+| Surface (global-HD login) | Key or address | Notes |
+| --- | --- | --- |
+| Order signing, keep-alive, `sender_pubkey`, `is_mine`, stale-sweep exemption | internal key (R32) | per-order key for privacy coins |
+| Orderbook `address` of an own order | address of the internal key | shielded outcome for ZHTLC, Sia and Lightning (chapter 32 R-F6b) |
+| v1 `persistent_pubkey`, start-event own key, swap statistics | internal key (R33) | |
+| v1 HTLC public key: UTXO, QTUM, BCH, SLP, QRC20, EVM, Tendermint | coin key at `path_to_address` | the same key funds the payment, signs, and receives spend and refund |
+| v1 HTLC public key: shielded coin | per-swap key from the coin key (chapter 39 R39.5.6) | |
+| v1 HTLC public key: Sia | ed25519 key at the single fixed Sia path, padded (chapter 51 R64) | |
+| Legacy `enable` / `electrum`: UTXO, QTUM, BCH, QRC20, EVM | coin key at `path_to_address` (default 0 / external / 0); the coin's configured `derivation_path` is required | the coin is built and **registered**, then the response fails at its `address` member, because the single-address accessor is refused under HD; the coin stays enabled (chapter 55 R55.4.10) |
+| Legacy `enable`: Tendermint | not routed | mmrpc route only |
+| `enable_bch_with_tokens`, `enable_tendermint_with_assets` | coin key at `path_to_address` under the coin's `derivation_path` | Tendermint: a coin configuration without `derivation_path` fails activation |
+| `task::enable_sia`, legacy `enable` for Sia | ed25519 key at one fixed single-address path | one address; the reference offers no account or address RPCs for Sia |
+| `withdraw` (legacy) and `task::withdraw::init`: UTXO, QTUM, BCH | `from` **required**; the selected address's derived key signs; change returns to it | absent `from`: structured error, sender address not found (chapter 49 R49.4) |
+| `withdraw`: SLP token | platform coin key; `from` refused as unsupported | |
+| `withdraw`: Sia | the single address; `from` **ignored** | chapter 20 R-W1 |
+| `withdraw`: shielded coin | task route only; `from` and `fee` refused as unsupported | chapter 39 R39.5A.2 |
+| `withdraw`: EVM | activated address, or the `from` selector | chapter 49 R49.5 |
+| `withdraw`: Tendermint | activated key, or the key derived at the `from` selector's path | |
+| Legacy `my_balance`, legacy `get_enabled_coins`: UTXO and EVM | **fail** | both read the single-address accessor, refused under HD; `get_enabled_coins` fails for the whole list once one HD UTXO or EVM coin is enabled |
+| `my_tx_history` (v2): UTXO, QTUM, BCH, SLP | `target` must name an account or an address | account: every **known** external and internal address of that account; address: that one activated address; the `Iguana` target is refused under HD, and the two HD targets are refused under a single-key login |
+| `my_tx_history` (v2): Tendermint | the one account of the activated key; `target` ignored | |
+| `my_tx_history` (v2): EVM | not served by the v2 method | legacy history only, from the activated address |
+| Shielded history | own method, one account | chapter 39 §39.8 |
+
+> **Compatibility (this repository, 2026-11-04; not corpus-sourced; the
+> inventory is plan [`hd-key-unification`](../plans/hd-key-unification.md)).**
+> Until 2026-11-05, Reloaded departed from R32--R33 under a global-HD login in
+> two ways that were **not** parity, although an entry of `RELOADED_VS_GLEEC.md` described the
+> first as retained for parity (plan item H0 corrected it on 2026-11-04): (a) the v1 HTLC key fell back to a hash of the mnemonic string
+> for every coin that supplied no swap key -- every EVM swap, and every
+> UTXO-family coin activated through the legacy route -- and the persistent
+> key was that same hash; (b) order signing and `sender_pubkey` used that hash
+> while keep-alive, `is_mine` and the stale sweep used the internal key, so
+> no keep-alive was ever sent for the key the orders carried. The reference does
+> neither. Plan items H3 (§5.12C, PR #250) and H4 (§5.12D, PR #254), both
+> merged 2026-11-05, closed (a) and (b) (D6). When `from` is absent, Reloaded's UTXO withdraw uses the coin's
+> activated address, the address at `path_to_address`, on the task route and,
+> since plan item H5, on the direct method. The reference fails such a
+> withdrawal (chapter 49 R49.4 note). The maintainer kept that divergence on
+> 2026-11-04 (decision BY) and set the address on 2026-11-06 (decision CU).
+> Reloaded's legacy `enable` under HD binds the internal key where the
+> reference binds the coin key and then fails the response; plan item H7 is to
+> bind the coin key and keep the successful answer behind a switch (decision
+> CB, 2026-11-04; decided, not implemented yet).
+> Plan `hd-key-unification` carries the fixes and records the maintainer's
+> decisions BY to CC on which surfaces stay documented divergences; R32--R35
+> record the reference target for the rest.
+
+**R35a.** *Activation under a global-HD login lists the address at
+`path_to_address` from the first activation on.* *(Spec Reader 2026-11-07,
+rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both;
+**passed the KDF Dirty Gate on 2026-11-07**, measure 0.04.)* At both rows, the HD activation of a UTXO-family, QTUM, BCH
+or EVM coin -- task route and platform-with-tokens route alike -- handles the
+address named by `path_to_address` (default account `0`, chain `External`,
+address `0`) as follows:
+
+1. *Account.* If the wallet's storage holds no account with the path's
+   `account_id`, that account is created at activation, with the path's
+   `account_id` as its index (the limit of R35c item 1 applies), and it is
+   scanned when `scan_policy` is `scan_if_new_wallet` or `scan`; the
+   activation result then reports **that account only**, even when the
+   wallet's storage holds others. When the path's account already exists,
+   every stored account is reported, and each is scanned only under `scan`.
+2. *Known-address count.* For the path's account, the number of known
+   addresses on the path's chain is raised to at least `address_id + 1`,
+   exactly as `min_addresses_number` raises it (chapter 38 R38.8.5); the
+   effective minimum is the larger of the two. Every other account gets
+   `min_addresses_number` alone. The addresses derived to meet the minimum
+   are persisted as known and their balances read, so the address at
+   `path_to_address` is listed -- with its `derivation_path`, `chain` and
+   balance -- in the activation result, and afterwards in `account_balance`
+   and in the account target of `my_tx_history` (R35), from the first
+   activation and after every restart, whether or not `get_new_address` ever
+   handed it out. The wallet's *enabled address* (the swap and consolidation
+   address, R33, R35b) is answered only from the derived set, so this step is
+   also what makes it resolvable.
+3. *No gap-limit bound on the index.* The gap limit governs scanning only.
+   The one bound on `address_id` is the hardened-child limit (2^31
+   addresses per chain): a `path_to_address` at or beyond it fails
+   activation with the address-limit-reached arm of the balance error set.
+4. *Nothing else makes an address known.* A swap uses the enabled address,
+   which item 2 has already listed. A withdraw with `from` requires the
+   selected account to exist and the selected address to be already known
+   (chapter 49 R49.27b); it derives nothing new and lists nothing.
+5. *Hardware wallet.* Items 1--3 hold the same; in addition, once the enabled
+   address is derived, the coin is handed it, and the activation fails if it
+   cannot be resolved.
+
+> **Compatibility (this repository, 2026-11-07; not corpus-sourced; plan
+> [`hd-key-unification`](../plans/hd-key-unification.md) item H5.0).**
+> Until PR #279 (merged 2026-11-07), Reloaded raised the known-address count
+> for `min_addresses_number` only (chapter 38 R38.8.5) and listed only the
+> addresses already handed out, so a swap's funds at a never-requested
+> `path_to_address` stayed unlisted until `get_new_address` reached it
+> (SwapLab row HD5, 2026-11-06). Item 2 is the parity target; it is the option
+> the plan's preparation note recommends. PR #279 built it; the as-built note
+> below records how, and its known gap.
+
+> **As built (2026-11-07, clean-side record; plan item H5.0).**
+> `enable_hd_wallet` takes the activated address beside
+> `min_addresses_number`. A software global-HD activation of a UTXO coin, QTUM
+> or an EVM coin passes the address at `path_to_address`; the Trezor policy of
+> a UTXO coin passes none and behaves as before. When the wallet holds no
+> account at the path's `account_id`, activation creates it (the limit of R35c
+> item 1 applies), scans it under `scan_if_new_wallet` or `scan`, and reports
+> that account only; otherwise every stored account is reported and each is
+> scanned only under `scan`. The path's account gets its chain raised to at
+> least `address_id + 1` (External takes the larger of that and
+> `min_addresses_number`); every other account gets `min_addresses_number`
+> alone. The new addresses are persisted, their balances read, and they are
+> listed in the result and afterwards in `account_balance` and
+> `my_tx_history`. Known gap against item 3: an `address_id` at the hardened
+> limit fails activation with the `Internal` arm, because Reloaded's balance
+> error set has no address-limit arm yet (a follow-up); the account created
+> for the path stays stored after such a failure. An `address_id` of
+> 2^31 − 1 fails the same way, although it is below the limit: the
+> activation must then hold addresses 0 to 2^31 − 1, a count of 2^31, which
+> `ensure_minimum_addresses` refuses before anything is derived or read; so
+> the highest usable index is 2^31 − 2 (*added 2026-11-08, batch 4 item
+> B4-7; test
+> `t14a_the_last_valid_address_id_needs_a_minimum_beyond_the_limit_and_fails_activation`*).
+> An EVM coin has no internal
+> chain, so an Internal-chain path raises nothing there. Tests: the `t14a_*`
+> tests in `coins/src/utxo/utxo_tests.rs` (module
+> `hd_accounts_at_index_tests`) and in `coins_activation`'s
+> `eth_with_tokens_activation` tests (module `hd_accounts_at_index`),
+> `t14a_the_path_raises_its_own_chain`, and `new_account_index_tests`.
+
+**R35b.** *UTXO maintenance commands under a global-HD login.* *(Same
+provenance and gate status as R35a.)* At both rows the two commands below
+serve a UTXO coin of the standard family only; for every other coin type
+(QTUM, BCH, tokens, EVM and the rest included) they answer
+`CoinNotSupported`, HTTP 400.
+
+- `fetch_utxos` (request `{coin}`). Under HD it lists the unspent outputs of
+  **every known address of every account** of the wallet, on both chains;
+  under a single-address login, of the one address. Response: `total_count`
+  and `addresses`, a list of `{address, count, utxos, derivation_path?}` whose
+  `utxos` is a list of `{txid, vout, value}`; `derivation_path` is present for
+  an HD address and absent for the single address. Errors (`error_type`, HTTP): `NoSuchCoin`
+  404, `CoinNotSupported` 400, `InvalidAddress` 400, `Internal` 500.
+- `consolidate_utxos` (request `{coin, merge_conditions?: {merge_at,
+  max_merge_at_once}, broadcast?}`; `merge_at` and `max_merge_at_once`
+  default to 50 each, `broadcast` to `false`). Under HD it merges the unspent
+  outputs of the **enabled address only** into one output paid to **that same
+  address**; it offers no account or address selector and never touches
+  another known address. Fewer than `merge_at` unspent outputs, or fewer than
+  two once the `max_merge_at_once` cut is applied, answer
+  `BadMergeConditions` 400; an enabled address that cannot be resolved
+  (R35a item 2 not yet satisfied -- a hardware wallet before derivation)
+  answers `InvalidAddress` 400; the others are `NoSuchCoin` 404,
+  `CoinNotSupported` 400 and `InternalError` 500. Response: `tx` and
+  `consolidated_utxos` (a list of `{txid, vout, value}`), where `tx` is the
+  transaction-details object with `from` and `to` both the enabled address
+  and `fee_details` of the UTXO fee type; with `broadcast: false` the
+  transaction is built and returned but not sent (chapter 38 R38.5.2).
+- The automatic merge loop configured by `utxo_merge_params` (chapter 55
+  R55.5.10) runs under HD on the enabled address only, with the same
+  destination. If the enabled address cannot be resolved when the loop
+  starts, the loop ends with a logged error and no merge runs for the coin's
+  lifetime.
+
+> **Compatibility (this repository, 2026-11-07; not corpus-sourced).**
+> Until PR #281 (merged 2026-11-08), Reloaded refused both commands and left
+> the automatic merge off under HD (plan `hd-key-unification` item H5.3). The
+> behavior above is the parity target; PR #281 built it (as-built note
+> below).
+
+> **As built (2026-11-07, clean-side record; plan item H5.3).** Reloaded
+> serves both commands and the automatic merge under a software global-HD
+> login. `consolidate_utxos` goes through
+> `utxo_common::merge_utxos_at_enabled_address`: for an HD coin the enabled
+> address comes from `enabled_hd_address_info` (the address at
+> `path_to_address`), and the merge is signed with the key derived at that
+> address's path, through `generate_and_send_tx_from_sender`, or through
+> `active_sender_key_pair` when `broadcast` is `false`. `fetch_utxos` reads
+> every known address of every account on both chains, derives nothing beyond
+> the known counts, and leaves out addresses with no outputs, as for a single
+> address. `merge_utxo_loop` resolves the enabled address on each round and
+> ends with a logged error if it cannot; the loop is shared, so QTUM under HD
+> merges its enabled address too. Under the Trezor policy `consolidate_utxos`
+> answers `InvalidAddress` and the loop ends, so no device is asked to sign;
+> `fetch_utxos` reads such a wallet from its account public keys. Tests: the
+> `t14b_*` and `r35b_*` tests in `rpc_command/utxo_hd_maintenance_tests.rs`.
+
+**R35c.** *`task::create_new_account` under a software global-HD login.*
+*(Same provenance and gate status as R35a.)* At both rows the task is served
+for UTXO-family, QTUM and EVM coins activated in HD mode under a software
+login: no hardware device is sought, and the new account's extended public
+key is derived in software (§5.9A). Under a hardware login the device is
+asked for it, with the progress values of item 3. Any other coin type, or a
+coin not activated in HD mode, answers `CoinIsActivatedNotWithHDWallet`.
+
+1. *Index.* The requested `account_id` when given; otherwise the lowest
+   index not in use, counted from `0` up to the highest existing index, or
+   that index plus one. The limit is 2^31 accounts: an index at or beyond it
+   answers `AccountLimitReached` with `max_accounts_number`. A requested
+   index that already exists is refused only after the key derivation, with
+   the `Internal` arm.
+2. *Scan and result.* The account is persisted first. Then, with `scan`
+   (default `true`), it is scanned for used addresses up to `gap_limit` (the
+   request's value, else the wallet's, default 20; chapter 38 R38.8.4) and
+   the found addresses are listed with their balances; with `scan: false` it
+   is returned with no addresses. The result is the account object of the
+   activation result: `{account_index, derivation_path, total_balance,
+   addresses: [{address, derivation_path, chain, balance}]}`.
+3. *Progress.* In-progress values `Preparing`, `RequestingAccountBalance`,
+   `Finishing`, and, for a hardware wallet, `WaitingForTrezorToConnect` and
+   `FollowHwDeviceInstructions`; awaiting values `EnterTrezorPin` and
+   `EnterTrezorPassphrase`.
+4. *Cancel.* Cancelling after the account was created removes it again if it
+   is the wallet's last account.
+5. *Error set* (`error_type`, HTTP): `HwContextNotInitialized` 400,
+   `NoSuchCoin` 400, `UnexpectedUserAction` 400, `Timeout` 408,
+   `CoinIsActivatedNotWithHDWallet` 400, `InvalidBip44Chain` 400,
+   `AccountLimitReached` 400, `RpcInvalidResponse` 500, `WalletStorageError`
+   500, `HwError` 410, `Transport` 500, `Internal` 500.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort while reading item 1).** A caller that asks for an `account_id`
+> already in use receives the `Internal` arm at the reference, although the
+> condition is a request error: the collision is detected only when the
+> freshly derived account is inserted. Reloaded should answer it with a
+> request-class error (HTTP 400) before deriving anything; the discriminant is
+> a Reloaded choice, since the reference has none for the case.
+
+> **Compatibility (this repository, 2026-11-07; not corpus-sourced).**
+> Until PR #279 (merged 2026-11-07), Reloaded's task asked for a hardware
+> device before anything else, so it failed for every software-keyed coin
+> (chapter 38 §38.8 status note; chapter 20 §20.10 D1 note; plan
+> `hd-key-unification` item H5.4). The behavior above is the parity target;
+> PR #279 built it, with the differences the as-built note below lists.
+
+> **As built (2026-11-07, clean-side record; plan item H5.4).**
+> `task::create_new_account` derives the account key in software under a
+> software global-HD login, for UTXO, QTUM, EVM and Siacoin. The request gained an optional
+> `account_id`. `choose_new_account_id` picks the index once, before any
+> derivation: the requested index, or the lowest unused one; an index at or
+> beyond 2^31 answers `AccountLimitReached`; an index in use answers
+> `AccountAlreadyExists` with `account_id`, an error type that maps to HTTP 400
+> (the code-quality finding above; a documented divergence). Like every error
+> of the task, these are read from `task::create_new_account::status`; `init`
+> answers with a task id. A coin not in HD mode answers
+> `CoinIsActivatedNotWithHDWallet`. `task::create_new_account::cancel` is
+> routed, and the task's cleanup removes the account it created from the
+> wallet and its storage when it is the wallet's last account, the one with
+> the highest number (an account created while a higher-numbered one exists
+> stays); a task dropped
+> between storing the account and recording it can leave the stored row.
+> Differences from items 3 and 5: under a hardware wallet Reloaded reports
+> `WaitingForUserToConfirmPubkey` where item 3 lists
+> `FollowHwDeviceInstructions`; under a software login the task reports
+> `Preparing` and then its result, without `RequestingAccountBalance` or
+> `Finishing`; the error set has no `UnexpectedUserAction` or `HwError`
+> discriminant, and `Timeout` answers HTTP 500. Tests: the `t14c_*` and
+> `r35c_item4_*` tests and `new_account_index_tests`.
+>
+> *Update (2026-11-08, batch 4 item B4-2).* The source of an account's
+> extended public key follows the coin's own key policy, not whether a
+> hardware context exists. `task::init_trezor` is accepted after a software
+> global-HD login and leaves a hardware context beside it; until this update
+> a UTXO or QTUM coin of the software policy that names a `trezor_coin` then
+> took the extended public key of a new account, in `create_new_account` and
+> in activation, from the device, and Siacoin activation failed with
+> `CoinDoesntSupportTrezor`. Now a coin of the software policy (UTXO, QTUM,
+> EVM, Siacoin) derives the key in software and never asks a device; a coin of
+> the Trezor policy asks the device, and without a hardware context it
+> reports `HwContextNotInitialized`. The choice is made in
+> `utxo_common::extract_extended_pubkey` and, for the UTXO activation, by
+> `reads_keys_from_device`; Siacoin ignores an offered device; EVM already
+> chose by its signer. Tests: the `r35c_*` and `r35a_*` tests with a device
+> offered in `coins/src/utxo/utxo_tests.rs` (module
+> `hd_accounts_at_index_tests`), and `r35a_*` in `coins_activation`'s
+> `utxo_activation/tests.rs`.
 
 ## 5.10 Bound Hardware-Wallet Path
 
@@ -532,6 +867,505 @@ reachability probe MAY update volatile connection-state bookkeeping
 so subsequent calls can report `"Unreachable"` without probing a
 handle already known to be unavailable.
 
+## 5.10B Hardware Context next to a Software Login (reference behavior)
+
+> **Clearance (chapter 01 R40) — passed on 2026-11-08.** This section, the 2026-11-08
+> amendments of R29, R31 and T12 that re-key three sentences on the coin's
+> own key policy, the matching sentence of chapter 38 R38.8.1 and the row
+> of chapter 30 §30.3 were added on 2026-11-08 by the KDF Spec Reader under
+> the two-team procedure of chapter 01 §1.4A, from forbidden-class input:
+> the reference lineage at the rows `v2.6.0-beta` and `v3.0.0-beta` of
+> chapter 02 §2.15A (identical for every fact taken), with the row
+> *baseline anchor (R1)* for the anchor comparison. They **passed the KDF
+> Dirty Gate on 2026-11-08**, measure 0.02; the attestation is in §5.17. The
+> clearances of §5.9B, §5.10A and the rest of this chapter are not
+> affected.
+
+*Vocabulary.* This chapter and §5.9B speak of a "hardware login" or a
+"hardware wallet" as a mode. The reference has no such login: a daemon
+always starts from a software login — the legacy passphrase (`Iguana`) or
+the mnemonic-derived global-HD account (`GlobalHDAccount`, R20), chosen by
+`enable_hd` (chapter 45 R45.4.8) — or in no-login mode, and a hardware
+(Trezor) context is an *optional slot* of the central cryptographic context
+that a running daemon fills afterwards (`task::init_trezor`, chapter 55
+§55.11). The device is then used **per coin**, by the coin's own key
+policy, never by the daemon as a whole. Where §5.9B says "under a hardware
+login" or "under a hardware wallet", read "for a coin activated under the
+`Trezor` key policy while a hardware context exists"; where it says "under
+a software login", read "for a coin activated under the context key
+policy", whether or not a hardware context exists. This section binds that
+reading. The hardware wire surfaces themselves — the init task, its
+statuses, errors and the device-identity assertion — stay bound by
+chapter 55 §55.11 and by R28–R28C above.
+
+**R50.** *A hardware context is accepted next to either software login,
+and only there.* `task::init_trezor::init` MUST be accepted while the
+daemon runs under a mnemonic (global-HD) login **and** while it runs under
+a legacy passphrase (`Iguana`) login. The initialisation MUST NOT consult
+the key-pair policy, MUST NOT refuse or warn on account of the login type,
+and MUST NOT switch the daemon's key-pair policy, its trading identity
+(R32) or its wallet identity (R29): after the task completes, every
+software surface behaves exactly as before, and coins already activated
+keep the key source they were activated with (R52). In no-login mode (no
+wallet name and no passphrase; chapter 45 §45.4) there is no
+central cryptographic context to hold the slot, so the task MUST fail at
+status level with `Internal` (string, HTTP 500); the reference offers no
+hardware-only login (D7.d). While a hardware context already exists, a new
+init task MUST replace it (the previous context is dropped once the new
+device has been read); the only concurrency refusal is
+`HwContextInitializingAlready` (HTTP 400) while another init task is still
+running (chapter 55 R55.11.6). A failed or cancelled init MUST leave the
+slot empty, including when it was filled before the attempt.
+*Rationale:* the device is a key source for individual coins, not an
+alternative identity for the node; refusing it under one login type would
+have no behavioural basis in the reference and would break the published
+procedure (connect the device, then activate the coins that need it).
+
+**R51.** *Device identity digest.* The hardware context's identity is the
+20-byte `RIPEMD160(SHA256(pubkey))` digest of the compressed secp256k1
+public key the device returns for the daemon's **internal derivation
+path** (R16, `m/44'/141'/2147483647/0/0`), requested with the device's
+Bitcoin-family public-key message and the secp256k1 curve. It is the value
+`task::init_trezor` reports as `device_pubkey` (chapter 55 R55.11.5), the
+value the optional `device_pubkey` assertion of R28A and R55.11.2 compares
+against, and the storage identity of every coin activated under the
+`Trezor` policy (R55). It is distinct from, and in general unequal to, the
+software identity of R29 (the digest of the login's internal key at the
+same path): the two coincide only when the device holds the same seed as
+the login, in which case every key the two sources derive coincides too.
+
+**R52.** *The key source of a coin is its own activation policy; hardware
+presence never decides.* For every coin family that accepts a key policy
+in its activation request (`priv_key_policy`), the source of the coin's
+keys and of its account extended public keys MUST be fixed **per coin, at
+activation, by that request**: `ContextPrivKey` (the default when the
+member is absent) binds the login's software key — the single key under
+`Iguana`, the seed-derived HD keys under `GlobalHDAccount` (§5.9A, §5.9B);
+`Trezor` binds the device; `WalletConnect` binds the session named in the
+request (chapter 22). The existence of a hardware context MUST NOT change
+the source of a `ContextPrivKey` activation, and a `Trezor` activation
+MUST NOT fall back to the seed when the context is missing. The coins-file
+`trezor_coin` member is a **precondition, not a selector**: it is read
+only when the `Trezor` policy was requested, and its absence refuses that
+activation (`CoinDoesntSupportTrezor` where the family exposes it; the
+EVM task maps it to `Internal`, chapter 35 R35.3.2); its presence on a
+`ContextPrivKey` activation has no effect. Two preconditions apply to a
+`Trezor` activation and to nothing else: a hardware context exists
+(otherwise `HwContextNotInitialized`, reported through the family's
+coin-creation failure class for UTXO coins and as `Internal` for EVM,
+chapter 55 / chapter 35) and the coin configuration carries a usable
+`derivation_path`. A `Trezor`-policy coin and a `ContextPrivKey` coin of
+another ticker MUST be able to coexist in one daemon; the mapping of a
+ticker to a source lasts for the lifetime of its activation, and changing
+it requires deactivation and a fresh activation (an activation of an
+already-active ticker is refused as such, whatever policy it names;
+chapter 55). *Rationale:* a wallet that mixes device-held and seed-held
+coins is the reference's normal shape; keying any decision on "a device is
+plugged in" would silently re-route seed-held coins to the device or the
+other way round.
+
+**R53.** *Per-family key-source rule under a software login with a
+hardware context present.* The following table binds where each family's
+key comes from when both a software login and a hardware context exist.
+"Software" means the login's key as §5.9B describes it.
+
+| Family and method | Source when the request says `Trezor` | Source when the request says nothing or `ContextPrivKey` | Notes |
+| --- | --- | --- | --- |
+| UTXO standard, BCH, QTUM — `task::enable_utxo`, `task::enable_bch`, `task::enable_qtum` | device; HD shape; requires the context, `trezor_coin` and `derivation_path` | software | the policy is honoured only by the task methods |
+| UTXO standard, BCH, QTUM — legacy `enable` / `electrum` | *(not reachable)* | software | the legacy methods have no policy member and never use the device, even with a context present |
+| SLP and Lightning on a `Trezor` BCH / platform | inherit the platform's device source | inherit the platform's software source | tokens take their platform's policy |
+| QRC20 on a `Trezor` QTUM platform | software | software | the token's own activation always binds the login key; a QRC20 token on a device-held QTUM platform therefore signs with the seed while its platform is on the device (a mixed state the reference permits; D7.e) |
+| EVM platform — `task::enable_eth_with_tokens` | device; HD shape; requires the context, `trezor_coin` and `derivation_path` (chapter 35 R35.3.2) | software | |
+| EVM platform — one-shot `enable_eth_with_tokens` | refused: `UnexpectedDeviceActivationPolicy` (chapter 35 R35.1.5) | software | |
+| ERC20 token (task and one-shot) | inherits the platform's source; the task form reads account keys from the device, the one-shot form refuses a device-held platform (chapter 35, the `enable_erc20` divergence note) | inherits the platform's software source | |
+| EVM `get_my_address` (no activation) | n/a — see R57 | device **if a hardware context exists**, else software | the one presence-keyed surface |
+| Tendermint and its tokens — `task::enable_tendermint_with_assets` | the member is accepted and ignored (chapter 36, request table); software | software | a device source is unreachable; a pubkey-only or WalletConnect activation is the family's alternative (chapter 36) |
+| Sia, Solana, ZHTLC (ARRR) | *(not reachable from the request)*; the families refuse a hardware policy with a typed hardware-not-supported error if it is ever presented (chapter 46 R46.1.3, chapter 40, chapter 39) | software | the hardware context is never consulted |
+
+**R54.** *Account creation, new address, scan and listing follow the
+coin's policy.* `task::create_new_account`, `get_new_address`,
+`scan_for_new_addresses` and `account_balance` MUST choose the device or
+the software derivation by the **coin's** key policy (`Trezor` or not),
+never by whether a hardware context exists at call time. For a
+`Trezor`-policy coin the account's extended public key is read from the
+device, a new address is confirmed on the device, and the current hardware
+context is looked up at call time: if the slot is empty the call fails with
+`HwContextNotInitialized` (HTTP 400; `task::create_new_account` and
+`get_new_address` carry the token; the activation tasks report the same
+condition through their failure classes, R52). For a `ContextPrivKey` coin
+the same calls derive in software (§5.9A R30, §5.9B R35c) and MUST NOT
+touch the device even while a context exists. `account_balance` and the
+address lists in activation results read the coin's own account set and
+contact no device under either policy. *Rationale:* the account set a coin
+exposes is the set its key source produced; mixing sources inside one
+coin's account set would store extended public keys that the coin's signer
+cannot spend from.
+
+**R55.** *Storage identity of a hardware-policy coin.* The per-coin HD
+account storage (the HD-account table of the wallet database) MUST namespace a `Trezor`-policy coin by the
+**device digest of R51** and a `ContextPrivKey` global-HD coin by the
+**software digest of R29**, the choice following the coin's policy (R52),
+not the login type and not the presence of a context. Consequences that
+MUST hold: (1) a `Trezor` activation and a later `ContextPrivKey`
+activation of the same ticker under the same login use **different**
+namespaces, so the later software activation MUST NOT load device-derived
+accounts, and a later `Trezor` activation MUST NOT load seed-derived ones;
+(2) two devices with different seeds have different namespaces for the
+same ticker and login; (3) a device holding the login's own seed shares
+the software namespace, which is harmless because its accounts are
+identical. *Dictated on-disk shape (interop):* the reference release rows
+store one account per row with the columns `coin`, `hd_wallet_rmd160`,
+`account_id`, `account_xpub`, `external_addresses_number` and
+`internal_addresses_number`; `hd_wallet_rmd160` is the policy-chosen
+digest above, and the key of a row is (`coin`, `hd_wallet_rmd160`,
+`account_id`). The *baseline anchor (R1)* keyed the same table additionally
+by the login's software digest (`mm2_rmd160`), and at the anchor only the
+device source existed, so the two columns always held different values;
+the reference dropped the software column before `v2.6.0-beta`. Reloaded
+keeps the anchor's three-part key (R29, chapter 38 R38.8.1); under this
+rule its `hd_wallet_rmd160` column MUST hold the policy-chosen digest, so
+that the three-part key separates the cases exactly as the reference's
+two-part key does (D7.b).
+
+**R56.** *Refusals are keyed on the coin's policy, not on hardware
+presence and not on the login type.* In the reference no wallet-level
+method consults the hardware slot: `get_mnemonic`,
+`change_mnemonic_password`, `get_wallet_names` and `delete_wallet` depend
+only on the named wallet and its password (chapter 07 §7.3A); they succeed
+under a mnemonic login while a device is connected, because the mnemonic
+they handle is the login's, which the device neither holds nor protects.
+`get_public_key`, `get_public_key_hash` and `get_shared_db_id` report the
+**software login's** identity (R32) with or without a device. Every
+hardware-related refusal is **per coin**, raised when *that coin* was
+activated under the `Trezor` policy: the legacy private-key display
+(`show_priv_key`) and the bound key-export paths of chapter 07 R-K6 refuse
+a `Trezor`-policy coin and MUST still serve the software coins of the same
+daemon; the single-address public-key accessor answers the `Trezor`
+variant of the unexpected-derivation-method class; swap signing and
+peer-to-script-hash signing on a `Trezor`-policy UTXO coin, swap signing
+and raw-transaction signing on a `Trezor`-policy EVM coin, fail with the
+family's typed error (hardware swaps are unsupported in the reference,
+chapter 35 / chapter 38); and the HD-account calls of R54 need the context
+at call time. *Rationale:* a refusal keyed on "a device is present" would
+deny the operator access to secrets the device has nothing to do with,
+and a refusal keyed on "login type" has no referent, since every login is
+a software login. Reloaded diverges on the two mnemonic methods; see the
+compatibility note and D7.c.
+
+**R57.** *The one presence-keyed surface: the own-address query.*
+`get_my_address` for an EVM-protocol coin that has not been activated
+(chapter 07 T7) MUST, in the reference, derive the reported address from
+the **device** whenever a hardware context exists — requiring the coin's
+`trezor_coin` and `derivation_path` and the device's HD account state —
+and from the login's software key at `path_to_address` otherwise. It is
+the only reference surface where the presence of a hardware context, and
+not a per-coin policy, selects the key. Reloaded's `get_my_address` derives
+from the login's key only (compatibility note below); whether to follow
+the reference here is D7.e.
+
+**R58.** *Reference states.* Everything in R50–R57 is identical at the
+rows `v2.6.0-beta` and `v3.0.0-beta`: the hardware context, the per-coin
+policy selection, the storage namespace and the refusal set did not change
+between them (the only differences in the files read are copyright lines
+and, in the EVM platform task, two refusals of NFT activation on TRON that
+do not touch key selection). Against the *baseline anchor (R1)* the
+reference differs in four points that this chapter already binds
+elsewhere or that R55 records: the task methods are `task::init_trezor::*`
+with `cancel` (the anchor had only the three flat methods, chapter 55
+R55.11.1); re-initialising an already-filled slot is accepted and replaces
+it (the anchor refused it as already initialised); the only software login
+at the anchor was `Iguana`, and the device was the only HD key source
+(§5.9A upstream-divergence note); and the storage key had three parts
+(R55).
+
+> **Compatibility (this repository, 2026-11-08; not corpus-sourced).**
+> Checked against the worktree at the `dev` tip of 2026-11-08:
+>
+> 1. *Selection keyed on presence.* The UTXO standard, BCH and QTUM
+>    activation tasks, the shared platform-with-tokens activation, the Sia
+>    activation and the EVM hardware activation path choose the device
+>    extended-public-key reader whenever the hardware slot is filled, and
+>    the software derivation only when it is empty. Under a mnemonic login
+>    with a connected device this sends a `ContextPrivKey` UTXO or EVM
+>    activation to the device for its account keys while its signer stays
+>    the seed — the mismatch R52 and R54 forbid. R31 and T12, as worded
+>    before this pass, prescribed that behaviour; they are amended with
+>    this section. See the code-quality finding below.
+> 2. *Storage namespace.* Reloaded's HD-account storage initialiser prefers
+>    the software digest of R29 whenever the login is global-HD and falls
+>    back to the device digest only under an `Iguana` login. Under a
+>    mnemonic login with a device, a `Trezor`-policy coin is therefore
+>    stored under the software namespace — the same rows a `ContextPrivKey`
+>    activation of that ticker uses — so the later activation of R55 (1)
+>    *does* load the other source's accounts, and a device swap leaves the
+>    namespace unchanged. See the code-quality finding below.
+> 3. *Mnemonic methods.* Reloaded's `get_mnemonic` and
+>    `change_mnemonic_password` refuse whenever a hardware context exists
+>    (chapter 07 R-K6, "a hardware-wallet session MUST be rejected"). The
+>    reference does not (R56). Under a mnemonic login this blocks the
+>    export or re-encryption of the login's own mnemonic because a device
+>    is connected. Chapter 07 R-K6's per-coin arm (refusing a `Trezor`-policy
+>    coin in key export) matches the reference; its wallet-level arm is a
+>    Reloaded hardening. D7.c decides whether to keep it.
+> 4. *Own-address query.* Reloaded's `get_my_address` derives from the
+>    login's key under both policies and never consults the hardware slot;
+>    the reference's presence keying of R57 is not implemented. D7.e.
+> 5. *Re-initialisation.* Reloaded already replaces a filled slot on a new
+>    init and refuses only a concurrent one, as R50 requires.
+> 6. *No-login mode.* Reloaded's init task reads the central context first
+>    and therefore fails as R50 requires when there is none.
+>
+> *Status (2026-11-08, batch 4 item B4-2, PR #293):* items 1 to 3 are
+> resolved as D7.a–c record (the source of a coin's keys and its storage
+> digest follow its policy; the wallet-level refusals are gone); item 4
+> stays, by D7.e. Every site of item 1 now leaves the choice to the coin's
+> policy: the UTXO and QTUM activation by the activation policy, the
+> account reader by the coin's key policy, Siacoin by ignoring an offered
+> device, EVM by its signer as before. `get_new_address` on a `Trezor`-policy
+> coin now looks the hardware slot up at call time and answers
+> `HwContextNotInitialized` when it is empty (R54, T35). Two points of R54
+> and R53 stay open: a new address of a `Trezor`-policy coin is derived from
+> the stored account key and not confirmed on the device (a follow-up), and
+> the BCH task refuses the `Trezor` policy (chapter 55 R55.9.2). When the
+> accounts of a coin of the software policy are loaded from storage, each
+> stored row's account extended public key is compared with the key the
+> seed derives for that account index below the coin's derivation path; a
+> row that differs (one an earlier build stored for a `Trezor`-policy coin
+> under the software digest) is deleted and not loaded, with one WARN that
+> names the ticker and the removed account ids and carries no key material.
+> A failure of the derivation or of the removal fails the load. R55 (1)
+> therefore holds also for rows written before this change. Tests:
+> `test_r55_*` in `coins/hd_wallet_storage/mod.rs`.
+
+> *Status (2026-11-11, informative): a coin's `derivation_path` changed
+> between sessions under a software HD login.* **KDF Dirty Gate: PASS
+> on 2026-11-11, measure 0.00.** *Reference*,
+> identical at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A: a stored HD account row holds the account-level extended
+> public key, and rows are loaded as stored, each account's path rebuilt
+> from the configured path and its index. After the configured path
+> changes, the old accounts and their addresses stay in use while the
+> reported path is the new one; the reference's own tests record this as
+> a known defect. *Reloaded*, verified: a software-policy coin compares
+> each stored row's account key with the key the seed derives for that
+> index below the currently configured path (the check described above);
+> a row that differs is deleted with one WARN and not loaded, so after a
+> path change the coin starts as a fresh HD wallet at the new path
+> (account 0 created, addresses scanned under the gap limit); restoring
+> the previous path brings the earlier accounts back the same way. A
+> `Trezor`-policy coin skips the comparison and loads rows as stored. No
+> key material is lost in either implementation, since every address is
+> re-derivable from the seed at its path; what differs is which
+> addresses are shown and used. A behavioral divergence without a
+> compatibility switch; catalogue it per `docs/COMPAT_SWITCHES.md`. The
+> WARN's wording ("the wallet's seed did not derive") is inaccurate: the
+> seed did derive the rows, at the previous path.
+
+> **Code-quality finding (informative; this repository, 2026-11-08).**
+> *Trigger:* a contradiction between two things read side by side — the
+> reference's per-coin policy keying (R52) and the presence keying at six
+> Reloaded sites (compatibility items 1 and 2). *Problem:* under a
+> mnemonic login with a connected Trezor, (a) every `ContextPrivKey` HD
+> activation of a UTXO, QTUM, BCH, EVM or Sia coin asks the device for its
+> account extended public keys and stores addresses the seed cannot spend
+> from, and (b) a `Trezor`-policy coin's accounts land in the software
+> namespace shared with the seed-held activation of the same ticker.
+> *Proposed fix:* (a) choose the extended-public-key reader from the coin's
+> own key policy (`Trezor` → device, otherwise software), as the reference
+> does, and drop the "is a device connected" test at those sites; a
+> `Trezor` request with an empty slot keeps failing as today; (b) have the
+> coin builders pass the policy-chosen digest (R55) into the storage
+> initialiser instead of letting the initialiser infer it from the login,
+> keeping the three-part key. Both changes are behaviour-neutral for a
+> daemon without a device and for an `Iguana` login with a device.
+
+> **Code-quality finding (informative; corpus-derived, stated as
+> behaviour).** *Trigger:* apparent with little extra effort while reading
+> R50 and R54 side by side. *Problem:* in the reference a coin activated
+> under the `Trezor` policy keeps no record of the device identity (R51) it
+> was activated with; it looks up whatever hardware context exists at each
+> device operation. Because R50 lets a new init replace the context with a
+> different device, such a coin then confirms addresses, reads new account
+> keys and signs with a device whose keys do not match its stored accounts,
+> and stores the new device's account keys under the old device's
+> namespace (R55). *Proposed fix (Reloaded):* record the device digest in
+> the coin at activation and, before any device operation, compare it with
+> the current context's digest; on mismatch answer the existing
+> `FoundUnexpectedDevice` hardware error class without touching the device
+> or the storage. Nothing in this is a wire change.
+
+**R58a.** *Device identity of a `Trezor`-policy coin (Reloaded-original;
+maintainer decision EC (a), 2026-11-08; batch 4 item B4-14).* When a coin
+is activated under the `Trezor` policy, the node records the device digest
+of R51 of the hardware context the activation used. Before every operation
+of that coin that would use the device or the device's storage namespace —
+reading an account's extended public key (`task::create_new_account` and
+the account an activation creates), deriving a new address, and signing
+(except a swap's signing, R58a.1) — the node compares the recorded digest
+with the digest of the current hardware context. On a mismatch the
+operation fails with `FoundUnexpectedDevice` before the device or the
+storage is touched; an empty slot keeps the answer it had:
+`HwContextNotInitialized` for the account and address calls (R54),
+`NoTrezorDeviceAvailable` for a withdrawal. The coin keeps its recorded
+digest for the lifetime of its activation; using another device needs a
+deactivation and a fresh activation (R52). *Rationale:* the corpus-derived
+finding above. *Compatibility (informative):* no wire shape changes, and
+only this node's own coins are affected: where the reference would use the
+new device's keys against the old device's accounts, Reloaded refuses.
+Under `docs/COMPAT_SWITCHES.md`, "The default-side rule", arm 2: Reloaded's
+behavior by default, no switch.
+
+**R58a.1.** *A swap keeps the coin's device (Reloaded-original;
+2026-11-08, batch 4 item B4-14, review of PR #302).* The swap-v2 signing of
+a UTXO coin is excepted from R58a's comparison with the current hardware
+context. A swap, whether it was already running or starts later, signs
+through the coin's recorded hardware context, whose connection check reads
+the identity of the connected device and refuses any other device with
+`FoundUnexpectedDevice`. The swap therefore signs with the coin's own
+device whenever that device is connected, also after a re-init put another
+device in the slot, and never with another device. *Rationale:* refusing a
+swap's signing would cost the trader a wait for the refund. *Safety:* as
+under R58a, no other device signs and nothing is written to another
+device's storage namespace; unlike R58a, the device is asked before the
+refusal.
+
+> **As built (2026-11-08, clean-side record; batch 4 item B4-14, PR #302).**
+> A coin activated under the `Trezor` policy keeps the hardware context its
+> activation read (`UtxoCoinFields.hw_ctx` for the UTXO family,
+> `EthTrezorSigner.hw_ctx` for EVM and its tokens). The activation reads the
+> context once and uses that one context for the device read, the coin's
+> record and its storage namespace (`HDWalletCoinStorage::init_for_device`).
+> Before reading an account's extended public key (`task::create_new_account`
+> and the account an activation creates), before `get_new_address`, and before
+> signing a withdrawal, the node compares the digest of that context with the
+> current one (`HardwareWalletCtx::ensure_same_device`); a different device
+> fails with `FoundUnexpectedDevice` through the path's existing hardware error
+> class, before the device or the storage is touched. An empty slot keeps the
+> answer it had: `HwContextNotInitialized` for the account and address calls,
+> `NoTrezorDeviceAvailable` for a withdrawal. A scan and `account_balance` ask
+> no device; Reloaded's scans derive from stored keys. The swap-v2 signing of
+> a UTXO coin keeps its own check instead (R58a.1): it signs through the
+> coin's recorded context, whose connection check reads the identity of the
+> connected device and refuses another device with `FoundUnexpectedDevice`.
+> That check asks the device first and follows the connected device, not the
+> current hardware context. Tests: the `r58a_*` tests in `coins`
+> (utxo_tests, eth_tests, hd_wallet_storage); in `crypto`,
+> `ensure_same_device_compares_the_digest`, and over a scripted device
+> `check_trezor_refuses_another_device`,
+> `check_trezor_accepts_the_device_of_the_context` and
+> `trezor_returns_the_connected_client_of_the_context_device`. Covered
+> through their shared check only, since the lab has no Trezor: the wiring of
+> the two withdraw signing paths, EVM's new-address check, and the swap-v2
+> signing's use of the connection check. The reconnect that
+> `HardwareWalletCtx::trezor` makes after a failed check needs a real
+> transport and is not tested. The activation's single read is covered by
+> construction and the storage test.
+
+*Verification notes.*
+
+**T31.** *Init under both logins.* With a Trezor emulator, start one
+daemon under a mnemonic (`enable_hd: true`) login and one under a legacy
+passphrase login; `task::init_trezor::init` → `status` reaches `Ok` on
+both, `get_public_key` and `get_public_key_hash` report the same values
+before and after, and a software coin activated before the init still
+signs a withdrawal from the seed afterwards (R50). In no-login mode the
+task's status is `Error` with `error_type` `Internal` (R50).
+
+**T32.** *Presence does not select.* Under a mnemonic login with the
+emulator initialised, `task::enable_utxo` of a UTXO coin **without**
+`priv_key_policy` completes without any device interaction (no
+`WaitingForTrezorToConnect` or `FollowHwDeviceInstructions` status, no
+device request recorded by the emulator), its `account_xpub` equals the
+software derivation of R30 for the login's mnemonic, and `get_new_address`
+on it contacts no device; the same request with `"priv_key_policy":
+"Trezor"` for another ticker reads its account key from the device and
+confirms a new address there (R52–R54).
+
+**T33.** *Namespaces.* Under one mnemonic login, activate ticker X with
+`Trezor` (emulator seed A), deactivate, activate X with `ContextPrivKey`;
+the second activation reports account `0` with the software `account_xpub`
+and not the device's; re-activating with `Trezor` reports the device's
+again; the stored rows for X exist twice with different `hd_wallet_rmd160`
+values, the device one equal to the `device_pubkey` of the init task (R51,
+R55).
+
+**T34.** *Refusals by coin policy.* With a device connected under a
+mnemonic login, `show_priv_key` of a software coin succeeds and of a
+`Trezor`-policy coin is refused; `get_mnemonic` behaves per the outcome of
+D7.c, and the test pins whichever is chosen; `get_public_key_hash` equals
+the software identity, not `device_pubkey` (R56).
+
+**T35.** *Context lost.* After `task::init_trezor::cancel` or a failed
+re-init emptied the slot, `get_new_address` and `task::create_new_account`
+on a `Trezor`-policy coin answer `HwContextNotInitialized` (HTTP 400 for
+the direct method; status-level for the task), while the same calls on a
+software coin succeed (R54).
+
+**T36.** *Device replaced.* Re-run `task::init_trezor::init` with a second
+emulator seed while a `Trezor`-policy coin from the first is active; the
+test pins the behavior chosen under the corpus-derived finding above
+(refusal with `FoundUnexpectedDevice` before any device or storage
+access). *Adopted as R58a (decision EC (a)).* The lab has no Trezor, so
+the refusal is pinned by unit tests with two device contexts.
+
+**D7.** *Open decisions for the maintainer (2026-11-08).*
+
+- **D7.a** *Refuse `task::init_trezor` under a software login?* The
+  reference accepts it under both logins (R50) and has no other way to
+  obtain a context. Options: (i) parity — accept under both, with the
+  per-coin keying of R52–R55 restored (recommended; the only option that
+  keeps the published connect-then-activate procedure); (ii) accept only
+  under a global-HD login (no reference basis; blocks a legacy-passphrase
+  user who wants a device-held coin); (iii) refuse unless a hardware-only
+  login exists — impossible until D7.d is decided in favour.
+- **D7.b** *Must the storage identifier carry the key source?* In the
+  reference the single digest *is* the source's identity (R55). Reloaded's
+  three-part key separates the cases once `hd_wallet_rmd160` holds the
+  policy-chosen digest; an explicit source column would be a schema change
+  (chapter 44) with no reference counterpart. Options: (i) policy-chosen
+  digest in the existing column (recommended; no migration); (ii) add a
+  source column (migration; clearer audits).
+- **D7.c** *What do refusals key on?* Reference: the coin's policy, nothing
+  at wallet level (R56). Reloaded: additionally hardware presence for
+  `get_mnemonic` / `change_mnemonic_password` (chapter 07 R-K6). Options:
+  (i) parity — drop the wallet-level presence check, keep the per-coin
+  arm; (ii) keep the Reloaded hardening and document it as a divergence in
+  chapter 07; (iii) key the two methods on whether the active wallet holds
+  a software mnemonic (always true today), which is (i) in effect.
+  Login-type keying is not an option: every login is a software login.
+- **D7.d** *A hardware-only login.* Not in the reference. If wanted, it is
+  a new mode with its own identity rules (trading identity, R32; storage,
+  R55) and is out of this section's scope.
+- **D7.e** *Follow the reference's two presence/mixed behaviours?*
+  `get_my_address` keyed on presence (R57), and QRC20 tokens on a
+  device-held QTUM platform signing with the seed (R53). Options: (i)
+  parity; (ii) key `get_my_address` on an explicit request member and
+  refuse the QRC20 mixed case; (iii) keep Reloaded's current software-only
+  `get_my_address` (an existing, documented divergence) and refuse the
+  mixed QRC20 case. Neither affects wire shapes.
+
+> **Resolutions (clean-side record, 2026-11-08; maintainer decision EB (b),
+> batch 4 item B4-2, PR #293).**
+> - *D7.a:* (i). `task::init_trezor` stays accepted under both software
+>   logins, and every coin takes its keys by its own policy (R52–R55).
+> - *D7.b:* (i). The policy-chosen digest goes into the existing
+>   `hd_wallet_rmd160` column; no schema change.
+> - *D7.c:* (i). The wallet-level presence checks of `get_mnemonic`,
+>   `change_mnemonic_password` and `get_private_keys` are dropped; the per-coin
+>   arm stays. In addition, Reloaded's opt-in export superset (chapter 07
+>   R-K4) refuses a requested ticker that is activated under the `Trezor`
+>   policy, so that no form of the export returns a key for a device-held
+>   coin. There is no hardware-only login in this codebase either: every
+>   context has an `Iguana` or `GlobalHDAccount` policy, and the hardware
+>   context sits beside it.
+> - *D7.d:* not pursued (out of scope).
+> - *D7.e:* `get_my_address` keeps Reloaded's software-only derivation, a
+>   divergence from R57; the mixed QRC20-on-`Trezor`-QTUM case of R53 keeps
+>   the reference behaviour for now and is an open follow-up.
+> - The corpus-derived code-quality finding above (no record of the
+>   activating device) is resolved by maintainer decision EC (a): R58a
+>   (batch 4 item B4-14, PR #302).
+
 ## 5.11 Bound WebAssembly-Only MetaMask Path
 
 **R26.** The substrate MUST add two new modules
@@ -556,6 +1390,451 @@ contracts: the double-SHA-256-then-RIPEMD-160 form
 consumers are the version-two atomic-swap state machines bound
 in chapter 14 (chapter 15 for the UTXO path and chapter 17 for
 the EVM path).
+
+## 5.12B Swap-Key Agreement under a Global-HD Login
+
+> **Scope (Reloaded-original, 2026-11-04).** Item H1 of plan
+> [`hd-key-unification`](../plans/hd-key-unification.md), maintainer
+> Decision BL. Under a global-HD login (chapter 45 R45.4.8) the node
+> holds three different secp256k1 keys where an iguana login holds
+> one: the hash of the passphrase text, which the V1 swap machines
+> use as the node's persistent key (chapter 51, the note under R63);
+> the internal key at `m/44'/141'/2147483647/0/0`, which a coin
+> enabled through legacy `enable` or `electrum` uses; and each coin's
+> own HD key. A V1 swap leg whose announced key is not the key its
+> coin pays from cannot complete: the other side rejects the dex fee
+> or the payment. This section refuses such a leg before any
+> negotiation. It is a stop-gap with no counterpart at the reference:
+> there the key on the wire is always the key the coin signs with, so
+> no such check exists or is needed (§5.9B R34). Plan items H3 and H4
+> give every coin its own key and the node the internal key as its
+> trading identity, as §5.9B R32--R33 record for the reference, and the
+> refusals fall away with them (§5.12C for H3, §5.12D for H4). Under an iguana login the three
+> keys are one key and nothing in this section changes.
+
+**R36.** *The agreement rule.* Under a global-HD login, a coin MAY
+take part in a V1 swap only when its **swap key** (the public key the
+V1 machines announce for it: the coin's own HTLC key where the coin
+supplies one, the node's persistent key otherwise) is its **paying
+key**:
+
+1. for a UTXO-family coin (the standard UTXO coin, QTUM, BCH, and the
+   tokens on them), the public key of the address its dex fee and swap
+   payments are funded from: the address of the key at the activation's
+   `path_to_address` when the coin has an HD key policy (R42; until
+   §5.12C it was the first address, account `0`, chain `External`,
+   address `0`), and its single key otherwise *(amended 2026-11-05,
+   §5.12C)*;
+2. for an EVM coin or token, the public key of its signer.
+
+The rule does not apply to a coin activated with the Trezor policy, to
+a coin that derives a fresh key for every swap (chapter 39 R39.5.9), to
+a coin whose native key is not a secp256k1 key (chapter 51 R64), or to
+a coin that cannot trade (chapter 60 R60.6.5) or whose swaps are
+switched off. Under an iguana login the rule always holds.
+
+> *Consequences (informative).* On dev of 2026-11-04 the rule refuses,
+> under a global-HD login: every EVM coin and token (swap key: the
+> passphrase hash; paying key: the HD signer, or the internal key after
+> legacy `enable`); every UTXO-family coin enabled through legacy
+> `enable` or `electrum`, or activated with `priv_key_policy:
+> IguanaPrivKey` (paying key: the internal key); and a UTXO coin
+> activated through the HD task route at a `path_to_address` other than
+> its first address (swap key: the key at `path_to_address`). It accepts
+> a UTXO coin activated through the HD task route at its first address,
+> and a coin whose single key is the passphrase hash (BCH activated
+> together with its tokens). Once §5.12C is built, none of these is
+> refused (R44).
+
+**R37.** *Where it is checked.* R36 MUST be checked for both coins of
+the pair at every place that refuses an untradable coin (chapter 60
+R60.6.5): every order creation (`setprice`, `buy`, `sell`), every
+`update_maker_order`, and `trade_preimage` in both its legacy and its
+mmrpc 2.0 form. It MUST also be checked before the node answers a
+match request with one of its own orders, and before it starts a swap.
+A pair that fails is not negotiated: no reservation and no connect
+message is sent for it. A swap that has already started is never
+stopped by this rule.
+
+**R38.** *Refusal.* A request that fails R36 MUST be refused before any
+balance, fee or volume check of the request, with the text
+
+`<coin> cannot be swapped under this login: <reason>`
+
+where `<coin>` is the ticker and `<reason>` is one of:
+
+1. `an EVM coin under an HD login ("enable_hd") pays from another key
+   than the one its swaps announce; trade it under a login without
+   "enable_hd"`;
+2. `it was enabled with a single key (legacy "enable" or "electrum")
+   under an HD login, so it pays from another key than the one its
+   swaps announce; enable it through its HD activation, or log in
+   without "enable_hd"`;
+3. `it is activated at <path>, but its swaps pay from <first path>;
+   activate it at account 0, external chain, address 0`, with both
+   paths written in full.
+
+The legacy RPCs answer this text as their error. `trade_preimage`
+reports `error_type` `SwapKeyMismatch` with `error_data`
+`{ "coin": <ticker>, "reason": <reason> }` and the same text.
+`SwapKeyMismatch` is Reloaded's own discriminant: the reference has no
+refusal for this case (§5.9B R34).
+
+**R39.** *An order of the node's own that fails the rule.* When the
+check before answering a match request (R37) fails for one of the
+node's own maker orders, for example an order restored from storage
+after an upgrade, the node MUST send no reservation, MUST cancel the
+order as an ordinary cancellation that peers see, and MUST log one WARN
+line: `Maker order <uuid> cancelled: <coin> cannot be swapped under
+this login: <reason>`.
+
+**R40.** *Switch.* The `MM2.json` boolean `swap_key_check`, default
+`true`, enables R36–R39; `false` restores the behavior of earlier
+builds, in which such a swap is negotiated and then fails in the coin
+layer. Under `docs/COMPAT_SWITCHES.md`, "The default-side rule", this
+is arm 2: it has no wire effect, affects only the node's own orders and
+swaps, and improves fund safety. The setting is documented next to
+itself and in `docs/GLEEC_COMPATIBILITY.md`.
+
+> **Compatibility.** GLEEC KDF has no such check and needs none: its
+> swaps announce the key the coin signs with (§5.9B R33--R34), so the
+> pairs refused here trade normally there. Setting `swap_key_check` to
+> `false` does not reach that behavior; it restores the behavior of
+> earlier Reloaded builds, in which such a swap is negotiated and then
+> fails in the coin layer. Item H3 (§5.12C; PR #250, merged 2026-11-05)
+> removed the pairs that this section refuses, and the divergence ended when
+> item H4 landed (§5.12D; PR #254, merged 2026-11-05).
+
+> **As built (2026-11-04, clean-side record; no requirement above changes).**
+> *Coin side.* `SwapOps::swap_key_disagreement` (`coins/lp_coins_traits.rs`) answers
+> `None` when a coin's swap key is its paying key and for a coin the rule does not
+> apply to (the default, which covers ZHTLC, Sia, Tendermint, Solana and Lightning).
+> UTXO-family coins (standard, QTUM, BCH, QRC20, SLP tokens) share
+> `utxo_common::swap_key_disagreement`. *(As built 2026-11-04: a single key was compared
+> with the node's persistent key; a coin with an HD key policy was compared by path, its
+> `path_to_address` against account `0`, `External`, address `0`, the address
+> `active_utxo_sender_address` funded from. Since §5.12C both comparisons are gone, see the
+> note under §5.12C: the coin announces its own key and pays from its address.)* The Trezor
+> policy is out of scope. EVM coins compared the compressed form of
+> the signer's public key with the node's persistent key (`eth_swap_ops.rs`; since §5.12C a
+> software signer announces its own key, and only a key-less signer is still compared with the
+> node's persistent key); a
+> hardware signer is out of scope. *Node side.* `swap_key_mismatch` and
+> `swap_key_check_enabled` (`mm2_main/src/lp_ordermatch/ordermatch_types.rs`, next to
+> `untradable_coin_ticker`) apply the rule under a global-HD login and skip a
+> wallet-only coin. They are asked in `buy`, `sell`, `create_maker_order`,
+> `update_maker_order` (`ordermatch_trading.rs`) and in `maker_swap_trade_preimage`
+> and `taker_swap_trade_preimage`, after the untradable-coin refusal and before any
+> balance check; in `process_taker_request` (R39: `RemovedMakerOrder::take_out`, the
+> ordinary cancellation notice, then deletion with the `Cancelled` reason, and the
+> WARN line built by `swap_key_cancel_line`); in `process_maker_reserved` (a
+> reservation of a failing pair is skipped, no connect message); and at the start of
+> `lp_connect_start_bob` and `lp_connected_alice`, before the swap object is built.
+> The resume path of a saved swap does not ask. `TradePreimageRpcError::SwapKeyMismatch`
+> carries `{ coin, reason }`. The order builders' own `build` methods have no node
+> context and are not changed. A legacy error carries the source location that every
+> other legacy refusal carries. *Tests.* T15: `coins`
+> `eth_tests::swap_key_agreement_tests`,
+> `ordermatch_tests::t05_12b_swap_key_check_tests::{the_refusal_text_is_the_one_of_r38,
+> t15_order_creation_and_update_are_refused}`, `trade_preimage::tests::swap_key_mismatch`;
+> T16: `coins` `utxo_tests::swap_key_agreement_tests`; T17:
+> `t17_an_own_order_that_fails_is_cancelled_at_the_match_check`,
+> `a_connect_message_is_not_sent_for_a_pair_that_fails`,
+> `the_cancel_line_is_the_text_of_r39`; T18: `the_switch_false_disables_the_check`,
+> `an_iguana_login_is_never_refused`, `a_wallet_only_coin_is_exempt`, and the Trezor
+> and single-key cases in `coins`. Not covered by a unit test: the exemption of a
+> ZHTLC and a Sia coin (no override of the default, and no coin of either family can
+> be built without a node) and the refusal at swap start; the SwapLab row HD2 of the
+> plan covers the end-to-end behavior. *(Since §5.12C the T15 and T16 refusal cases of the coin
+> tests are agreements; the tests were rewritten, see the note under §5.12C.)*
+
+## 5.12C One Swap Key per Coin
+
+> **Scope (Reloaded-original, 2026-11-05).** This section is item H3 of plan
+> [`hd-key-unification`](../plans/hd-key-unification.md), under maintainer
+> Decision BL. It brings Reloaded to the HTLC half of §5.9B R33 and
+> chapter 51 R74:
+> - every coin announces on the V1 wire the key it signs its swap
+>   transactions with;
+> - a UTXO-family coin funds its swap, takes its change, and is paid its spend
+>   and refund on that key's address.
+>
+> The node's persistent key, the `persistent_pubkey` of chapter 51 R59, does
+> not change here. It moved to the internal key with item H4 (D6; §5.12D,
+> PR #254, merged 2026-11-05). Until then it stayed the passphrase hash, and a
+> negotiation whose HTLC keys differed from it emitted shape 3 of chapter 51
+> R60.
+> Under an iguana login every key named in this section is the node's one
+> key, and nothing changes: not the wire, and not what a swap saves.
+
+**R41.** *The swap key is the signing key.* For a V1 swap the node MUST
+announce, as each coin's HTLC public key (chapter 51 R63), the public key of
+the key that coin signs its swap transactions with (its **signing key**):
+
+1. a UTXO-family coin (the standard UTXO coin, QTUM, BCH, QRC20, and SLP
+   tokens through their platform coin) with an HD key policy: the key at the
+   activation's `path_to_address` (account, chain, address index; default
+   account `0`, chain `External`, address `0`);
+2. a UTXO-family coin with a single key: that key. This includes a coin
+   enabled through legacy `enable` or `electrum`, or with `priv_key_policy:
+   IguanaPrivKey`, under a global-HD login, where the key is today the
+   internal key; item H7 changes which key such a coin binds, and this rule
+   follows it;
+3. an EVM coin or token with a software signer: the signer's key, in
+   compressed form;
+4. a Tendermint coin or token: its activated key, which under a global-HD
+   login is the coin key at `path_to_address` since PR #319 *(amended
+   2026-11-09)*;
+5. a shielded coin: the per-swap key of chapter 39 R39.5.6 (unchanged). Sia:
+   chapter 51 R64 (unchanged).
+
+A coin activated with the Trezor policy, and an EVM coin whose signer is a
+hardware or external signer, are outside this section and keep their
+present behavior.
+
+**R42.** *One address per UTXO-family swap leg.* A UTXO-family coin with an
+HD key policy MUST meet all of the following for every transaction of a V1
+swap leg that it funds (the dex fee and the payment):
+
+- it spends only outputs of the address of its signing key (R41 item 1);
+- it returns the change to that address;
+- it pays its spend and refund outputs to that address.
+
+The balance a swap checks before it starts MUST use the same address, and so
+MUST the fee estimate of `trade_preimage`. The balance checks are those of
+order creation, `max_taker_vol`, `max_maker_vol`, and the checks at swap
+start.
+
+As built before this section, the balance check and the HTLC key already used
+`path_to_address`, while funding and the fee estimate used the first address
+(account `0`, chain `External`, address `0`). This rule moves funding and the
+estimate. At the default `path_to_address` nothing changes. The V2 swap path
+uses the same address: the "currently enabled HD address" of chapter 15 R36
+is the address at `path_to_address`, for both the V2 HTLC key and the V2
+funding.
+
+**R43.** *What a swap saves, and resumption.*
+- *At swap start.* A coin whose signing key is not the node's persistent key
+  MUST have its key pair saved with the swap, as an HD UTXO coin's is saved
+  today (the maker and taker swaps' saved HTLC key pairs). A coin whose
+  signing key is the persistent key saves nothing, as today.
+- *On resume.* A resumed swap MUST use the key pair saved with it. A swap
+  saved without one, started by an earlier build, MUST keep using the
+  node's persistent key, which is the key its Started event recorded (once
+  §5.12D is built, R47 chooses that key).
+- *Every later use.* The saved pair is the one every later use of the
+  swap's HTLC key takes: the running swap, its resumption after a
+  restart, and the manual recovery of its funds (`recover_funds_of_swap`,
+  with the key candidates of chapter 39 R39.5.4). A later change of the
+  coin's activation or derivation settings does not change it. For an
+  EVM coin this storage and these recovery semantics are the same as for
+  a UTXO coin; only Sia announces its key without saving a pair (chapter
+  51 R64).
+
+No step of the plan changes the key of a swap that has already started.
+
+**R44.** *The agreement rule after this section.* With R41 and R42 built, R36
+holds for every coin it applies to, under every login, and none of R38's
+reasons 1 to 3 occurs any more. §5.12B stays in force unchanged as a guard:
+a refusal under R38 after this section is a defect to report, not an
+expected answer. The switch `swap_key_check` (R40) stays, with its default.
+
+> **Compatibility.** With this section Reloaded's V1 HTLC keys and its
+> UTXO-family funding address match the reference (§5.9B R33, R35; chapter 51
+> R74). Two differences to the reference remained after this section, and
+> both went with item H4 (§5.12D; PR #254, merged 2026-11-05; D6): the
+> persistent key, which until then was still the passphrase hash under a
+> global-HD login, and the trading identity of §5.9B R32. A swap between a Reloaded
+> node built with this section and an earlier Reloaded build negotiates as
+> any shape-3 swap does; the earlier build's own HD swaps still fail as they
+> did.
+
+> **As built (2026-11-05, clean-side record; no requirement above changes).**
+> *R41, key source.* A new `SwapOps::own_signing_key_pair` (`coins/lp_coins_traits.rs`, default
+> `None`) names the key pair a coin with one key of its own signs with: a single-key UTXO coin
+> (`utxo_common::own_signing_key_pair`, used by the standard coin, QTUM, BCH, QRC20 and the SLP
+> token through its platform coin) and an EVM coin with a software signer (`eth_swap_ops.rs`, the
+> signer's secret as a compressed pair; a hardware or key-less signer answers `None`).
+> `SwapOps::get_htlc_key_pair` is unchanged and still answers for an HD key policy, Tendermint and
+> the Trezor policy. *R41 and R43, mechanism.* `start_htlc_key_pair` (`mm2_main/src/lp_swap.rs`)
+> now takes the node's persistent public key. For a coin that does not derive its key it takes
+> `get_htlc_key_pair`, else `own_signing_key_pair` when that pair is not the persistent key, and
+> announces and saves the pair it took in the saved fields `maker_coin_htlc_privkey` and
+> `taker_coin_htlc_privkey`; a coin whose own key is the persistent key (every coin under an
+> iguana login) takes nothing, announces the persistent key and saves nothing, which keeps the
+> wire and the saved swap byte-identical. The maker and taker start paths pass
+> `ctx.secp256k1_key_pair().public()`. Resumption and recovery needed no change: a restored swap
+> holds the saved pair (`restored_htlc_key_pair`), a swap saved without one keeps the
+> persistent key its Started event recorded, and `recover_funds_of_swap` reads the saved pair
+> among its candidates. *R42.* `enabled_hd_address_info` and `try_enabled_hd_address_info`
+> (`utxo_standard_swap_v2.rs`) answer, for a coin with `PrivKeyPolicy::HDWallet`, the address of
+> the activated key with the full derivation path of `path_to_address` (`activated_hd_address_info`);
+> a coin with another policy keeps the first external address of account `0`. Every reader of
+> the helper follows: the V1 and V2 funding and change (`active_utxo_sender_address`,
+> `utxo.rs`), the fee estimate (`trade_preimage_sender_address`, `utxo_common_tx.rs`), the V2
+> spend and refund output (`build_and_broadcast_maker_v2_spend`), and the V2 HTLC key
+> (`get_htlc_pubkey_v2`, `get_htlc_key_pair_v2`, `try_derive_htlc_pubkey_v2`). The V1 spend and
+> refund outputs pay to the address of the swap's own HTLC key and already did. The balance
+> checks read the activated key's address (`my_balance` through `my_public_key`) and the
+> fee estimates the helper, so they agree. *R44.* `utxo_common::swap_key_disagreement` takes the
+> coin's own key as the swap key and, for a coin with an HD wallet, compares its public key
+> with the funding address's: agreement by construction for an HD key policy, a disagreement
+> (`HdAddress` for the HD key policy, else `SingleKey`) only for a coin whose funding address
+> is not its own, or whose funding address cannot be established: the guard fails closed, and
+> the free helper takes no node key any more (the trait method keeps it for the EVM check of a
+> key-less signer). The EVM check takes the signer's own key as the swap key. `swap_key_check`
+> and the node side are unchanged. *Tests.* T19: `eth_tests::swap_key_agreement_tests::
+> t19_an_evm_coin_announces_the_compressed_signer_key`; T20, T21, T22 and T24 (coin side):
+> `utxo_tests::hd_coin_swap_key_tests::{t20_the_funding_address_is_the_one_at_path_to_address,
+> t20_trade_preimage_estimates_from_the_address_at_path_to_address,
+> t20_change_and_spend_outputs_use_the_address_at_path_to_address,
+> t20_the_v2_htlc_key_is_the_key_at_path_to_address, t20_at_the_default_path_the_first_address_is_used,
+> a_coin_without_an_hd_key_policy_keeps_the_first_address_of_its_account,
+> t21_a_single_key_coin_announces_and_funds_from_its_own_key,
+> t22_the_key_sources_are_unchanged_for_the_other_policies, t24_no_coin_of_t16_disagrees}`;
+> T24 guard: `utxo_tests::swap_key_agreement_tests::{a_single_key_other_than_the_node_key_agrees,
+> an_hd_coin_at_another_address_agrees, the_guard_still_refuses_a_constructed_disagreement}` and
+> `eth_tests::swap_key_agreement_tests::an_evm_coin_whose_signer_is_not_the_node_key_agrees`; swap
+> start, resumption and recovery (T19, T21, T22, T23): the module `maker_hd_coin_swap_key_tests`
+> of `mm2_main/src/lp_swap/` (`t22_an_iguana_login_saves_no_pair_and_announces_the_persistent_key`,
+> `t21_a_coin_key_other_than_the_persistent_key_is_announced_and_saved`,
+> `an_hd_key_policy_pair_is_still_saved`,
+> `t23_a_swap_saved_without_a_pair_resumes_with_the_persistent_key`,
+> `t23_a_swap_saved_with_a_pair_resumes_and_recovers_with_that_pair`). The node-side refusals
+> of §5.12B stay covered by their mocked-coin tests (`ordermatch_tests::t05_12b_swap_key_check_tests`,
+> `trade_preimage::tests::swap_key_mismatch`). End-to-end swaps are the SwapLab rows HD3 and HD4. *Update (2026-11-xx, §5.12D).* The persistent key mentioned above is
+> now the node key, which is the internal key under a global-HD login; `start_htlc_key_pair` takes the swap's own
+> node public key, and a swap saved without a pair keeps the node key pair its Started event recorded, chosen by
+> `swap_node_key_pair` (the node key or the legacy passphrase key). Recovery lists both keys among its candidates.
+
+## 5.12D One Trading Identity under a Global-HD Login
+
+> **Scope (Reloaded-original, 2026-11-05).** This section is item H4 of plan
+> [`hd-key-unification`](../plans/hd-key-unification.md), under maintainer
+> Decision BL and decisions CR, CS and CT of 2026-11-05. It brings Reloaded to
+> §5.9B R32 and to the persistent-key half of R33: under a global-HD login the
+> node's own key is the internal key of R16, as at the reference. The
+> passphrase hash stays available only where a record or a family activation
+> still depends on it. Under an iguana login the internal key and the
+> passphrase hash are the node's one key, and nothing changes.
+
+**R45.** *The node key is the internal key.* Under a global-HD login, the
+key the node uses as its own (its **node key**) MUST be the internal key of
+R16, the key `get_public_key` reports. The node key:
+
+1. signs maker orders, keep-alive messages and every ordermatch message sent
+   without a per-order key, and fills `sender_pubkey` (§5.9B R32);
+2. is the `persistent_pubkey` of every V1 swap started from now on: the
+   negotiation, the own-key field of the start event, and the swap-statistics
+   record (chapter 51 R59, R50A);
+3. signs the swap messages and the transaction-helper messages of such a swap
+   when it has no per-swap p2p key (chapter 51 R50B);
+4. is the HTLC key of a coin that supplies none of its own (R43, chapter 51
+   R63);
+5. signs the peer healthcheck probe and its acknowledgment. The receiver checks
+   only that the signature matches the key inside the message, so this has no
+   effect on peers;
+6. on a relay, is the key whose SHA-256 is the relay's libp2p identity secret
+   (chapter 28 R19). An HD relay's peer identifier therefore changes once at
+   upgrade (Decision CS; R49).
+
+**R46.** *The legacy passphrase key.* The hash of the passphrase text, the
+node key of earlier builds under a global-HD login, MUST stay available as
+an explicitly named **legacy key** (Decision CR). It MUST be used only:
+
+1. for a swap that recorded it (R47);
+2. as the seed of the Lightning node, so that a Lightning node keeps its
+   identity (Lightning is not enabled in this release);
+3. by the shared platform-with-tokens activation, which passes it to the
+   platform coin: BCH together with its tokens, until plan item H7 moves it
+   to the coin key (§5.9B R35; decision CB, decided, not implemented yet),
+   and Solana, which is not
+   enabled in this release. The EVM platform ignores it *(amended
+   2026-11-05: Solana named; amended 2026-11-09: under a global-HD login
+   Tendermint takes the coin key at `path_to_address`, PR #319)*.
+
+No other part of the node may use it.
+
+**R47.** *Swaps that recorded the legacy key.* A swap whose Started event
+recorded the legacy key as its own persistent key was started by an earlier
+build. When resumed, it MUST use as its node key the key pair, out of the
+internal key and the legacy key, whose public key equals the recorded one
+(Decision CT). That pair signs the swap's messages and transaction-helper
+messages, serves as the HTLC key of R43 when no pair was saved, and signs its
+spend and refund. Manual recovery (`recover_funds_of_swap`) MUST include the
+legacy key among its key candidates (chapter 39 R39.5.4). A recorded key that
+matches neither key is reported as an error naming the swap, and that swap is
+not resumed.
+
+**R48.** *Ordermatch under a global-HD login.* With R45, the maker's orders
+carry the key that keep-alive, `is_mine` and the stale-order sweep already use.
+- A maker sends one keep-alive per pair every 30 s, and other nodes keep its
+  orders without gaps.
+- Its own `orderbook` marks them `is_mine`.
+- The orderbook `address` of an own order is the internal key's address
+  (§5.9B R32, R35).
+- Orders restored from storage at start are announced under the internal key.
+  The copies other nodes still hold under the legacy key expire after the
+  maker-order timeout.
+
+**R49.** *Operator note at upgrade.* The release that ships this section
+MUST carry an upgrade note for HD logins covering:
+- orders re-announced under the internal key, with the old copies expiring on
+  other nodes after the maker-order timeout;
+- swaps in flight finishing on the key they recorded (R47);
+- swap statistics showing two public keys for the node across the upgrade;
+- an HD relay's new peer identifier (R45 item 6), which peers learn again
+  through the relay's address (chapter 28 R21).
+
+> **Compatibility.** With this section Reloaded's trading identity, persistent
+> key and relay identity under a global-HD login match the reference (§5.9B R32,
+> R33; chapter 28 R19). The legacy key of R46 has no counterpart there: the
+> reference never uses the passphrase hash under a global-HD login. Reloaded
+> keeps it only for its own earlier swap records, the Lightning seed, and the
+> two activations that item H7 is to move (decision CB; decided, not
+> implemented yet).
+
+> **As built (2026-11-xx, clean-side record; no requirement above changes).**
+> *R45, R46, mechanism.* `MmCtx` (`mm2_core/src/mm_ctx.rs`) keeps two key fields. `secp256k1_key_pair` is the
+> node key and `legacy_passphrase_key_pair` the legacy key, read through the accessor
+> `MmCtx::legacy_passphrase_key_pair()` (it answers the node key when no separate legacy key is held, which is
+> an iguana login and a test context). `CryptoCtx::init_crypto_ctx_with_policy_builder`
+> (`crypto/src/crypto_ctx.rs`) now pins `secp256k1_key_pair` to the key `CryptoCtx` holds (the internal key under
+> a global-HD login, the passphrase hash under an iguana login) and `legacy_passphrase_key_pair` to the hash of
+> the passphrase text; the `DEFERRED(hd-dispatch)` comment is gone. `ctx.rmd160` and the database paths already
+> derived from the internal key and are untouched. The legacy accessor is read at exactly three places: the
+> Lightning seed (`coins/lightning/ln_utils.rs`, `init_keys_manager`) and the two family activations
+> (`coins_activation/src/platform_coin_with_tokens.rs`, the BCH-with-tokens and Tendermint paths, and the Solana path, which is not enabled; the EVM path ignores the key). Every other
+> reader of the context key (ordermatch signing and `sender_pubkey`, the swap start, swap messages, the
+> healthcheck, `public_id`) is unchanged code and follows the pin. *R45 item 6.* `relay_p2p_identity_secret`
+> (`mm2_main/src/lp_native_dex.rs`) is the relay's identity secret, the SHA-256 of the node key's secret.
+> *R47, mechanism.* A V1 swap holds its own `node_key_pair` (`MakerSwap`, `TakerSwap`; the constructors take the
+> pair instead of the persistent public key, which is derived from it). A swap started now gets the node key
+> from the order-matching code. A restored swap gets it from `lp_swap::swap_node_key_pair`, which compares the
+> `my_persistent_pub` of its Started event with the node key and then the legacy key and returns the matching
+> pair, or an error naming the swap and the recorded key ("the swap is not resumed"); `load_from_saved` returns
+> that error, so both the resume and `recover_funds` refuse such a swap. The swap's pair is the default HTLC
+> key pair of a coin that saved none (R43), the key for `start_htlc_key_pair` and `derive_htlc_pubkeys` (which
+> now takes the node public key instead of the context), the spend and refund key through the HTLC pair, and
+> the signing key of the swap messages: `broadcast_swap_message(_every)`, `broadcast_p2p_tx_msg` and
+> `broadcast_signed_msg_every` take the pair and sign with it when the swap has no per-swap p2p key
+> (`swap_msg::signing_identity`). Recovery (`resolve_recovery_htlc_key`) adds the legacy key as a last candidate
+> (`RecoveryHtlcKeyKind::LegacyPassphrase`) when it differs from the node key. *R48.* No ordermatch code
+> changed: orders restored by `orders_kick_start` are announced through the same signing path, which now reads
+> the internal key, and the keep-alive, `is_mine` and the stale sweep already used it. *Tests.* T13 and T25:
+> `ordermatch_tests::hd_trading_identity_tests::{t13_t25_the_node_key_is_the_internal_key,
+> t13_rmd160_and_database_path_derive_from_the_internal_key}`; T26: `...::t26_the_relay_identity_comes_from_the_node_key`;
+> T27: `maker_hd_coin_swap_key_tests::{t27_a_swap_that_recorded_the_legacy_key_resumes_and_refunds_with_it,
+> t27_a_swap_that_recorded_the_internal_key_and_a_new_swap_use_it,
+> t27_a_recorded_key_that_matches_neither_key_is_reported, t27_swap_messages_are_signed_with_the_swaps_node_key}` and
+> `taker_derived_htlc_key_tests::t27_a_taker_swap_resumes_with_the_key_it_recorded`; T28:
+> `maker_hd_coin_swap_key_tests::t28_recovery_recovers_a_payment_built_with_the_legacy_key`; T29:
+> `ordermatch_tests::hd_trading_identity_tests::t29_the_legacy_key_is_the_passphrase_hash` and
+> `eth_with_tokens_activation::tests::t29_an_hd_daemon_keeps_the_passphrase_hash_for_the_family_activations`;
+> T30: `ordermatch_tests::hd_trading_identity_tests::t30_an_iguana_login_is_unchanged` and
+> `maker_hd_coin_swap_key_tests::t30_under_an_iguana_login_the_legacy_key_is_the_node_key`. Existing tests that
+> restored a saved swap now record the persistent key of their context in the fixture, because a restored swap
+> whose recorded key matches neither key is refused.
 
 ## 5.13 Tests
 
@@ -672,9 +1951,145 @@ refused.
 **T12.** *Source selection by policy.* With a `GlobalHDAccount`
 policy and no hardware context, per-coin account extraction is
 invoked with no external extractor and the test asserts it resolves
-the account xpub via the software derivation of R30; with a
-hardware context active, the same extraction is asserted to route
-to the device source (R25).
+the account xpub via the software derivation of R30; for a coin
+activated under the hardware key policy, the same extraction is
+asserted to route to the device source (R25); for a context-key coin
+it is asserted to stay in software while a hardware-wallet context
+exists (§5.10B R52, T32). *(Amended 2026-11-08; passed the KDF Dirty
+Gate with §5.10B on 2026-11-08.)*
+
+**T13.** *HD trading identity (R32, R33).* Under a global-HD login, a
+posted maker order's public key, the keep-alive's public key, the
+`sender_pubkey` of a taker request and the v1 swap's persistent public key
+shall all equal the internal key of R16, and none shall equal a key derived
+by hashing the mnemonic string.
+
+**T14.** *HD HTLC key is the coin key (R33).* Under a global-HD login with a
+non-default `path_to_address`, a UTXO and an EVM v1 swap shall each put the
+coin key at that path on the wire as the HTLC public key, fund the payment
+from that key's address, and pay the spend or refund to it.
+
+**T14a.** *The enabled address is listed from activation (R35a).*
+*(Reloaded-original; passed the KDF Dirty Gate together with R35a on 2026-11-07.)* A
+fresh HD wallet activates a UTXO coin with the default `path_to_address`,
+and again with `account_id: 1, chain: External, address_id: 3` and no
+`min_addresses_number`: in the first case address `0` of account `0`, in the
+second account `1` with its external addresses `0` to `3`, appear in the
+activation result and in `account_balance` without any `get_new_address`;
+a restart keeps them listed; an `address_id` of 2^31 fails activation with
+the address-limit arm; an iguana login is unchanged.
+
+**T14b.** *UTXO maintenance commands under HD (R35b).* *(Reloaded-original;
+same gate status.)* Under an HD login with two known addresses holding
+outputs, `fetch_utxos` lists both with their derivation paths and the right
+`total_count`; `consolidate_utxos` with `merge_at: 2` and `broadcast: false`
+spends only the enabled address's outputs to itself and returns the
+transaction unsent; a QTUM coin answers `CoinNotSupported` 400; fewer
+outputs than `merge_at` answer `BadMergeConditions` 400.
+
+**T14c.** *Account creation under a software HD login (R35c).*
+*(Reloaded-original; same gate status.)* Under a software HD login,
+`task::create_new_account` for a UTXO, a QTUM and an EVM coin each completes
+without a hardware device: the first call creates account `1`, a call with
+`account_id: 3` creates account `3`, the next call without an index creates
+account `2`; `scan: false` returns no addresses; an index at 2^31 answers
+`AccountLimitReached` 400; a repeated `account_id` is refused with a
+request-class error before any derivation (the finding under R35c).
+
+**T15.** *EVM under a global-HD login.* With an EVM coin activated
+through `enable_eth_with_tokens`, and again through legacy `enable`,
+`setprice`, `buy`, `sell`, `update_maker_order` and `trade_preimage`
+(both forms) for a pair with that coin are refused with reason 1 of
+R38 before any balance check, and `trade_preimage` carries
+`SwapKeyMismatch`. The same requests under an iguana login pass this
+check.
+
+**T16.** *UTXO under a global-HD login.* RIN enabled through legacy
+`electrum` is refused with reason 2. RIN activated through
+`task::enable_utxo` at its first address passes this check. RIN
+activated with `path_to_address` at account `0`, chain `External`,
+address `1` is refused with reason 3, which names both full paths.
+
+**T17.** *Own order that fails the rule.* A maker order for a pair that
+fails R36, present in storage at start-up: a matching request gets no
+reservation, the order is cancelled once with the WARN line of R39, and
+no swap starts. A swap of such a pair that started before the restart is
+resumed and not stopped.
+
+**T18.** *Switch and exemptions.* With `swap_key_check` set to `false`
+the requests of T15 and T16 pass this check. With the default, a ZHTLC
+coin, a Sia coin, a coin activated with the Trezor policy, and BCH
+activated together with its tokens are not refused by it.
+
+
+**T19.** *EVM signing key on the wire (R41 item 3).* Under a global-HD login,
+an EVM coin activated with a software HD signer at a non-default
+`path_to_address` announces the compressed public key of its signer as its V1
+HTLC public key. The swap saves that key pair, and R36 holds for the coin.
+
+**T20.** *One address for an HD UTXO leg (R41 item 1, R42).* RIN is activated
+through `task::enable_utxo` at account `0`, chain `External`, address `1`.
+- Its V1 HTLC public key is the key of that address.
+- The dex fee and the payment spend only outputs of that address and return
+  their change to it.
+- Its spend and refund outputs pay to that address.
+- `trade_preimage` estimates the fee from that address's outputs.
+- The V2 HTLC public key is the key of the same address.
+
+At the default `path_to_address`, every one of these is the first address,
+as before.
+
+**T21.** *Single-key UTXO coin under a global-HD login (R41 item 2).* RIN
+enabled through legacy `electrum` under a global-HD login:
+- it announces its own key as the V1 HTLC public key;
+- it funds from that key's address;
+- it pays its spend and refund to that address;
+- the swap saves the key pair.
+
+**T22.** *Iguana login unchanged (R41, R43).* Under an iguana login, RIN and
+an EVM coin announce the node's persistent key, and a swap saves no HTLC key
+pair for either. The negotiation message and the saved swap are the same as
+those of the previous build.
+
+**T23.** *Resumption (R43).*
+- A swap saved by the previous build without an HTLC key pair resumes with
+  the node's persistent key, which is the key in its Started event.
+- A swap saved with a pair resumes with that pair.
+- In both cases the refund of the node's own payment uses the key that the
+  Started event recorded.
+
+**T24.** *The guard after §5.12C (R44).* Under a global-HD login with the
+default `swap_key_check`, none of the requests of T15 and T16 is refused.
+`trade_preimage` answers for them without `SwapKeyMismatch`.
+
+
+**T25.** *Node key under a global-HD login (R45, R48).* T13 holds. In
+addition:
+- the maker's own `orderbook` marks its order `is_mine`;
+- one keep-alive per pair leaves every 30 s, signed with the internal key;
+- the orderbook `address` of the order is the internal key's address.
+
+**T26.** *Relay identity (R45 item 6).* A relay under a global-HD login has
+the peer identifier derived from the internal key. Under an iguana login the
+peer identifier is the same as before.
+
+**T27.** *Legacy key for a recorded swap (R47).* A swap saved by the
+previous build under a global-HD login, with the legacy key recorded and no
+saved pair, resumes with the legacy key: its swap messages are signed with
+it and its refund uses it. A swap started after the upgrade uses the
+internal key. A recorded key that matches neither is reported, and that swap
+is not resumed.
+
+**T28.** *Recovery candidates (R47).* `recover_funds_of_swap` recovers a
+payment of a swap that recorded the legacy key and saved no pair.
+
+**T29.** *What keeps the legacy key (R46).* Under a global-HD login, the
+Lightning seed, and the keys of BCH activated with its tokens and of
+Tendermint, are the same as before. No other use of the legacy key remains.
+
+**T30.** *Iguana login unchanged (R45–R48).* Under an iguana login the node
+key, the relay peer identifier, the wire keys and every saved swap are the
+same as those of the previous build.
 
 ## 5.14 Deferred Work
 
@@ -727,6 +2142,20 @@ applies only to the wider bulk/offline/HD/ZHTLC export superset
 chapter's mnemonic module and encryption envelope (§5.4–§5.5) but
 are themselves bound, gated and tested entirely within Chapter 7; no
 further coordinated change to this chapter is required.
+
+**D6.** *(Resolved 2026-11-05 by §5.12D.)* One trading identity under a
+global-HD login (plan [`hd-key-unification`](../plans/hd-key-unification.md),
+item H4). R45–R49 move the trading identity and the swap's persistent key to
+the internal key, and R46–R47 keep the passphrase-hash key for the swaps that
+recorded it.
+
+**D7.** *(Open, 2026-11-08; stated in §5.10B.)* Hardware context next to a
+software login: whether to refuse `task::init_trezor` under a software login
+(D7.a), whether the storage identifier must carry the key source (D7.b), what
+refusals key on (D7.c), a hardware-only login (D7.d), and the two
+presence-keyed or mixed reference behaviours (D7.e). *Resolved on 2026-11-08
+(maintainer decision EB (b)); see the resolutions after D7 in §5.10B. The
+device-identity finding there is resolved by decision EC (a), as R58a.*
 
 ## 5.15 Baseline Verifications
 
@@ -811,3 +2240,174 @@ surface.
   concurrent session ownership, and non-mutating reachability
   probes governed by the underlying transport/device-call
   behaviour); no protected expression crossed.
+- *Scoped addition (2026-11-04) -- §5.9B (R32--R35), T13, T14 and the
+  compatibility note under R35.* **KDF Dirty Gate: PASS on 2026-11-04, measure 0.03.** Prompted by the
+  HD-gaps inventory of the 0.4.0 cycle. *Inputs:* the forbidden corpus at the
+  rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at
+  both, consulted **only** to establish which key a global-HD login uses on
+  each surface of the table: the trading identity and the orderbook address;
+  the v1 persistent key and each family's HTLC key; what the legacy
+  activation methods bind and how their response ends; the keys of the two
+  platform-with-tokens activations and of Sia; the sender rules of the
+  withdraw routes per family; the failure of the two legacy address-reading
+  methods; and the history method's `target` handling per family. What
+  crosses is behavior, public RPC names and dictated request members
+  (`path_to_address`, `from`, `target`, `derivation_path`); no private
+  identifier, function body, helper decomposition, error, log or comment text
+  was reproduced. The compatibility note rests on this repository's own code
+  and inventory; the T-items are Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-04, measure
+  0.03, no findings. *Extent:* the HD key policy under a global-HD login and
+  its trading, swap, legacy-activation, withdraw and history surfaces, at
+  `v3.0.0-beta` with `v2.6.0-beta` as cross-check; for the whole batch, 30
+  source files and one dependency manifest were read at `v3.0.0-beta`, 29 of
+  them checked by hash against the tagged states of both rows. *Method:*
+  side-by-side reading of the compared regions against every added or changed line,
+  plus that hash check; the gate script was not run because the candidate has
+  no code blocks. *Measure:* 0.03, read against the standard that any
+  discretionary finding fails a file; dictated-interop and public-surface
+  tokens were excluded from the measured set.
+- *Reloaded-original addition (2026-11-04) -- §5.12B (R36–R40), T15–T18,
+  D6 and the last sentence of §5.1.* Written by a context that never
+  read the forbidden corpus, from maintainer Decision BL and this
+  repository's own swap, ordermatch, coin-key and activation code. The
+  sentences that describe the reference restate §5.9B R32--R34, which
+  passed the KDF Dirty Gate on 2026-11-04; the addition carries no
+  reference content of its own and needs no Dirty Gate pass of its
+  own. *(Renumbered on 2026-11-04 from R32–R36 and
+  T13–T16, which §5.9B took.)*
+- *Clean-side amendment (2026-11-05) -- the compatibility note under R35.*
+  Its last sentences now record the maintainer's decisions BY and CB of
+  2026-11-04 (plan `hd-key-unification`), and that plan item H0 corrected the
+  parity claim. Written by a session that never read the corpus, from those
+  decisions and this repository's own code. The reference facts of §5.9B are
+  unchanged. It takes no forbidden-class input and needs no Dirty Gate pass.
+- *Reloaded-original addition (2026-11-05) -- §5.12C (R41–R44), T19–T24,
+  D6 as rewritten, the amendment of R36 item 1, and the pointers in §5.1
+  and §5.12B.* Written by a context that never read the forbidden corpus.
+  It rests on maintainer Decision BL and on this repository's own swap
+  key, UTXO funding, balance, trade-preimage and activation code. The
+  sentences that describe the reference restate §5.9B R33 and R35 and
+  chapter 51 R74, which passed the KDF Dirty Gate on 2026-11-04. The
+  addition carries no reference content of its own and needs no Dirty
+  Gate pass of its own.
+- *Reloaded-original addition (2026-11-05) -- §5.12D (R45–R49), T25–T30, D6
+  as resolved, and the pointers in §5.1 and R43.* Written by a context that
+  never read the forbidden corpus. It rests on maintainer Decision BL, on
+  decisions CR, CS and CT of 2026-11-05, and on this repository's own key,
+  ordermatch, swap-message, recovery, relay-identity and healthcheck code. The
+  sentences that describe the reference restate §5.9B R32, R33 and R35 and
+  chapter 28 R19, which passed the KDF Dirty Gate on 2026-11-04. The addition
+  carries no reference content of its own and needs no Dirty Gate pass of its
+  own.
+- *Scoped addition (2026-11-07) -- §5.9B R35a--R35c, T14a--T14c, the
+  compatibility notes and the code-quality finding under them.* **KDF Dirty
+  Gate: PASS on 2026-11-07, measure 0.04.**
+  *Inputs:* the forbidden corpus at the rows `v2.6.0-beta` and `v3.0.0-beta`
+  of chapter 02 §2.15A, identical at both for every fact taken, consulted
+  **only** to establish: how HD activation treats the account and address of
+  `path_to_address` (creation, scanning, the raised known-address count, the
+  bound on the index, what the result reports); that no swap or withdraw
+  makes an address known; which coin types the two UTXO maintenance commands
+  serve under HD, over which addresses, to which destination, with which
+  request and response members and error discriminants, and how the
+  automatic merge behaves; and how the account-creation task chooses an
+  index, scans, reports progress, cancels and fails under a software HD
+  login. What crosses is behavior, public method names and dictated request,
+  response and error members; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced. The compatibility
+  notes rest on this repository's own code and on plan `hd-key-unification`
+  and its preparation note; T14a--T14c are Reloaded-original. The finding is
+  stated as a behavioral fact.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.04, no findings. *Extent:* HD activation's handling of `path_to_address`
+  (account and address, scan policy, known-address minimum, index bound), the
+  two UTXO maintenance commands and the automatic merge, and the
+  account-creation task, at `v3.0.0-beta` with `v2.6.0-beta` as cross-check;
+  for the whole batch, about 24 source files were read in full or in the
+  relevant regions at the `dev (as of 2026-03-27)` row, whose source tree is
+  identical to `v3.0.0-beta`, and the same modules were diffed against
+  `v2.6.0-beta`. *Method:* reading, with mechanical cross-checks (diffs
+  between the tabled states; pattern searches of the added lines for paths,
+  identifiers and markers); the gate script was not run because the candidate
+  has no code blocks. *Measure:* 0.04, read against the standard that any
+  discretionary finding fails a chapter; dictated-interop and public-surface
+  tokens were excluded from the measured set.
+- *Clean-side amendment (2026-11-05) -- R46 item 3 and the as-built note
+  under §5.12D.* They now name the Solana path of the shared
+  platform-with-tokens activation, which also reads the legacy key, and say
+  that the EVM path ignores it. Found in a second-session review of the H4
+  code. Written by a context that never read the corpus, from this
+  repository's activation code. It takes no forbidden-class input and needs
+  no Dirty Gate pass.
+- *Clean-side amendment (2026-11-06) -- one sentence of the compatibility
+  note under R35.* It records decision CU of 2026-11-06 (the default sender
+  of a UTXO withdraw without `from` is the coin's activated address) and
+  that plan item H5 serves the direct method. Written by a session that
+  never read the corpus, from that decision and this repository's own code.
+  The reference facts of §5.9B are unchanged. It takes no forbidden-class
+  input and needs no Dirty Gate pass.
+- *Scoped addition (2026-11-08) -- §5.10B (R50--R58, T31--T36, D7), the
+  re-keying amendments of R29, R31 and T12, and the D7 pointer in §5.14.*
+  **KDF Dirty Gate: PASS on 2026-11-08, measure 0.02, no leaks**; the
+  attestation follows this item. *Inputs:* the forbidden
+  corpus at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+  identical at both for every fact taken, with the row *baseline anchor (R1)*
+  for the anchor comparison, consulted **only** to establish: whether the
+  hardware-wallet init task consults the login type or the key-pair policy,
+  what it does in no-login mode, on re-initialisation and on failure; which
+  request member, configuration member or context state selects a coin's key
+  source per family, and which families cannot reach a device source; which
+  identity digest namespaces a hardware-policy coin's stored accounts, the
+  columns of that table, and how the anchor keyed it; which wallet-level and
+  coin-level methods refuse on a hardware condition and what the condition
+  is; and the behaviour of the own-address query when a hardware context
+  exists. What crosses is behaviour, public method names, dictated request,
+  response, error and schema members; no private identifier, function body,
+  helper decomposition, error, log or comment text was reproduced. The
+  compatibility note and the first code-quality finding rest on this
+  repository's own code; the second finding is corpus-derived and stated as
+  behaviour. T31--T36 are Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-08, measure
+  0.02, no leaks. The pass covered this addition together with the
+  re-keyed sentence of chapter 38 R38.8.1 and the chapter 05 row of
+  chapter 30 §30.3. *Extent:* the hardware-wallet context and its init
+  task, the per-coin key-policy selection for every coin family, the HD
+  storage identity and its schema, the HD account and address methods, the
+  wallet-level mnemonic and identity methods, the legacy key display and
+  the own-address query; compared at `v2.6.0-beta` (49 files read or
+  searched), at `v3.0.0-beta` (compared against `v2.6.0-beta`, the relevant
+  differences read) and at the *baseline anchor (R1)* (4 files, plus token
+  checks). *Method:* reading, with a mechanical comparison of every
+  backticked token of the candidate (64 tokens) against the corpus and
+  against this repository's tree, each match classified under the
+  forced-versus-free test; the gate script was not run because there are no
+  code blocks. *Measure:* 0.02 on the discretionary-expression basis.
+- *Scoped addition (2026-11-11) -- the dated status note of 2026-11-11 in
+  §5.10B (a coin's `derivation_path` changed between sessions under a
+  software HD login).* **KDF Dirty Gate: PASS on 2026-11-11, measure 0.00,
+  no leaks**; the attestation follows this item. *Inputs:* the forbidden
+  corpus at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+  the `v3.0.0-beta` row checked against the `staging (as of 2026-03-27)` row
+  it merges, which it equals for the HD wallet; the *baseline anchor (R1)*
+  was not consulted. Consulted **only** to establish: how stored HD account
+  rows are shaped and loaded; how an account is rebuilt from a stored row
+  under the coin's configured path; what happens to accounts and addresses
+  after the configured derivation path changes between sessions; and whether
+  the reference's own tests record that behavior as a known defect. What
+  crosses is behavior; no private identifier, function body, error, log or
+  comment text was reproduced. The Reloaded half of the note and the WARN
+  text it quotes rest on this repository's own code; that text does not
+  occur in the corpus.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-11, measure
+  0.00, no leaks. The pass covered this note only. *Extent:* the HD account
+  storage layer (row shape, the loading of all accounts, the rebuilding of
+  an account from a stored row), the UTXO HD account loading, and the
+  reference's tests of HD behavior across a derivation-path change; 16 HD
+  wallet source files compared for identity across the two rows, 4 of them
+  and 1 test file read in depth, and the two-row difference of the UTXO
+  builder (2 files) inspected; the one HD file that differs between the two
+  rows does not touch the described behavior. *Method:* reading, with a
+  mechanical identity comparison between the rows and a corpus-wide text
+  search for the quoted WARN text; the gate script was not run because there
+  are no code blocks. *Measure:* 0.00 on the discretionary-expression basis.

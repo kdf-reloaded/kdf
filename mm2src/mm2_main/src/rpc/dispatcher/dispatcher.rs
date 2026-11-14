@@ -34,6 +34,7 @@ use coins::nft::rpc::{clear_nft_db, get_nft_list, get_nft_metadata, get_nft_tran
 // native-only.
 use coins::rpc_command::account_balance::account_balance;
 use coins::rpc_command::consolidate_utxos::consolidate_utxos_rpc;
+use coins::rpc_command::electrum_servers::electrum_servers_rpc;
 use coins::rpc_command::fetch_utxos::fetch_utxos_rpc;
 use coins::rpc_command::get_current_mtp::get_current_mtp_rpc;
 use coins::rpc_command::get_enabled_coins::get_enabled_coins_rpc;
@@ -41,14 +42,14 @@ use coins::rpc_command::get_my_address::get_my_address_rpc;
 use coins::rpc_command::get_private_keys::get_private_keys;
 use coins::rpc_command::get_token_info::get_token_info;
 use coins::rpc_command::init_account_balance::{init_account_balance, init_account_balance_status};
-use coins::rpc_command::init_create_account::{init_create_new_account, init_create_new_account_status,
-                                              init_create_new_account_user_action};
+use coins::rpc_command::init_create_account::{init_create_new_account, init_create_new_account_cancel,
+                                              init_create_new_account_status, init_create_new_account_user_action};
 use coins::rpc_command::init_scan_for_new_addresses::{init_scan_for_new_addresses, init_scan_for_new_addresses_status};
 use coins::rpc_command::init_withdraw::{init_withdraw, withdraw_cancel, withdraw_status, withdraw_user_action};
 use coins::rpc_command::swap_gas_fee_policy::{get_swap_gas_fee_policy, set_swap_gas_fee_policy};
 use coins::rpc_command::token_allowance::{approve_token, get_token_allowance};
 use coins::siacoin::SiaCoin;
-use coins::tendermint::{TendermintCoin, TendermintToken};
+use coins::tendermint::TendermintCoin;
 use coins::utxo::bch::BchCoin;
 use coins::utxo::qtum::QtumCoin;
 use coins::utxo::slp::SlpToken;
@@ -62,9 +63,9 @@ use coins_activation::{cancel_init_platform_coin_with_tokens, cancel_init_token,
                        init_platform_coin_with_tokens_user_action, init_token, init_token_status,
                        init_token_user_action};
 use coins_activation::{cancel_init_standalone_coin, cancel_l2_activation, enable_l2, enable_platform_coin_with_tokens,
-                       enable_token, init_l2, init_l2_status, init_l2_user_action, init_standalone_coin,
-                       init_standalone_coin_status, init_standalone_coin_user_action};
-use common::log::{debug, error, warn};
+                       enable_tendermint_token, enable_token, init_l2, init_l2_status, init_l2_user_action,
+                       init_standalone_coin, init_standalone_coin_status, init_standalone_coin_user_action};
+use common::log::{debug, warn};
 use common::HttpStatusCode;
 use futures::Future as Future03;
 use http::Response;
@@ -149,7 +150,11 @@ where
     let params = json::from_value(params_value)?;
     let result = handler(ctx, params).await;
     if let Err(ref e) = result {
-        error!("RPC error response: {}", e);
+        common::log::log_crate::log!(
+            crate::mm2::rpc::rpc_error_log_level(e.get_inner().status_code()),
+            "RPC error response: {}",
+            e
+        );
     }
 
     let response = MmRpcBuilder::from_result(result)
@@ -229,6 +234,7 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "approve_token" => handle_mmrpc(ctx, request, approve_token).await,
         "best_orders" => handle_mmrpc(ctx, request, best_orders_rpc_v2).await,
         "consolidate_utxos" => handle_mmrpc(ctx, request, consolidate_utxos_rpc).await,
+        "electrum_servers" => handle_mmrpc(ctx, request, electrum_servers_rpc).await,
         "enable_bch_with_tokens" => handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<BchCoin>).await,
         // `enable_erc20` and its alias `enable_nft` share one single-token handler (CRD ch. 35 R35.2.4).
         "enable_erc20" => handle_mmrpc(ctx, request, enable_evm_token).await,
@@ -236,7 +242,7 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "enable_nft" => handle_mmrpc(ctx, request, enable_evm_token).await,
         "enable_sia" => handle_mmrpc(ctx, request, init_standalone_coin::<SiaCoin>).await,
         "enable_slp" => handle_mmrpc(ctx, request, enable_token::<SlpToken>).await,
-        "enable_tendermint_token" => handle_mmrpc(ctx, request, enable_token::<TendermintToken>).await,
+        "enable_tendermint_token" => handle_mmrpc(ctx, request, enable_tendermint_token).await,
         "enable_tendermint_with_assets" => {
             handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<TendermintCoin>).await
         },
@@ -514,6 +520,7 @@ async fn task_dispatcher(request: MmRpcRequest, ctx: MmArc, task_method: &str) -
         "create_new_account::init" => handle_mmrpc(ctx, request, init_create_new_account).await,
         "create_new_account::status" => handle_mmrpc(ctx, request, init_create_new_account_status).await,
         "create_new_account::user_action" => handle_mmrpc(ctx, request, init_create_new_account_user_action).await,
+        "create_new_account::cancel" => handle_mmrpc(ctx, request, init_create_new_account_cancel).await,
         "scan_for_new_addresses::init" => handle_mmrpc(ctx, request, init_scan_for_new_addresses).await,
         "scan_for_new_addresses::status" => handle_mmrpc(ctx, request, init_scan_for_new_addresses_status).await,
         "withdraw::init" => handle_mmrpc(ctx, request, init_withdraw).await,

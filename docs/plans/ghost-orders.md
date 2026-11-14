@@ -1,0 +1,203 @@
+# Plan: cancelled orders that other nodes keep showing ("ghost orders")
+
+**Status:** parked (B1 to B5 with B2a and B4a shipped in PRs #205 to #259; the B2 cap check from field logs and the repeated-cancel refresh are open) — **Last reviewed:** 2026-11-08
+
+> **Context.** On the public network on 2026-10-31, a maker re-priced its orders with `setprice` and
+> `cancel_previous`, yet other nodes, Reloaded seeds among them, kept showing five of its orders on one
+> pair where only two were valid. The extra entries left only when the maker restarted and posted
+> again. They could not be matched or traded. CRD ch.32 §32.9C records how such an entry arises and
+> what removes it. A node that missed a cancel keeps the entry until one of four things happens:
+> - a later cancel reaches it;
+> - a sync answer for that pair replaces the entry;
+> - the maker goes offline for the liveness window;
+> - a local order-book request refills the pair.
+>
+> A sync answer carries the responding node's own view, so a relay that missed the cancel passes the
+> stale entry on, and a pair the maker has emptied is never advertised again. Reloaded behaves like
+> the reference release rows here. The 0.3.0-beta.1 release lists the behavior as a known
+> limitation (Decision BK, 2026-11-01, CRD ch.32 D12). This plan is the work after the beta, in the
+> order D12 records, with the parking limits first because they are small and relieve busy seeds at
+> once.
+
+## Work packages
+
+| ID | What | CRD | Size | State |
+|---|---|---|---|---|
+| B5 | Higher, configurable limits for sync requests a relay holds while its own sync is in flight: 32 per asking peer and 2,048 in all by default (were 8 and 256), with ceilings of 64 and 8,192. | ch.32 R-Q5b item 4 | S | Merged 2026-11-03 (PR #205) |
+| B1 | After the forwarding relay's sync request fails, or its answer leaves a pair out of step with the maker's advertised root, ask one other connected relay once. The pair is never emptied. Switch `sync_request_alternate_relay`. | ch.32 R-Q5d (D12 item 1) | M | Merged 2026-11-03 and 2026-11-04 (CRD PR #207, code PR #208) |
+| B2 | A cancel this node received keeps the order out of every later order message and answer for an hour by default (`cancel_final_window_secs`, at least 120 s, at most one day), so a stale relay cannot bring it back. Memory-capped: the cancels of the last 120 s, as on Komodo and GLEEC KDF, plus at most `cancel_final_max_entries` older ones (100,000 by default, about 20 MB); past the cap the oldest fall back to 120 s. Decided 2026-11-03 (Decision 29). | ch.32 R-K1b (D12 item 2) | M | Merged 2026-11-04 (CRD PR #223, code PR #224) |
+| B2a | Restore guard. At start, a maker skips and deletes a stored active order whose removal its order history already records, and it retries a failed deletion of a removed order's record (three tries, 200 ms apart, each failure logged once). Switch `maker_restore_skips_cancelled`, default on; off restores every record as Komodo and GLEEC KDF do. Limits: an order created with `save_in_history: false`, or one whose history write failed together with the deletion, still comes back; taker orders are not covered. Decided 2026-11-03 (Decision 29). | ch.12 R7c (D12 item 2) | S | Merged 2026-11-04 (CRD PR #223, code PR #224) |
+| B3 | Per-pair liveness on the receiver's clock: a pair the maker stops advertising is dropped after the liveness window (`maker_order_timeout`, 90 s) while the maker's other pairs live on. A keep-alive naming the pair refreshes it whatever root it advertises. Switch `pair_liveness`, default on. | ch.32 §32.9C.2 R-GH14 (D12 item 3) | M | Merged 2026-11-05 (CRD PR #243, code PR #251) |
+| B4 | During start-up and re-post bursts, a relay holds a sync request for a pair named by a keep-alive it is still handling, before it has created the placeholder and sent its own request, instead of answering "no data" or "missing pair" at once. Same bound and limits as the existing parking; the keep-alives being handled are bounded by the same two limits, and one that finds a limit full is handled as today. Switch `sync_answer_deferral_before_placeholder`, default on. | ch.32 R-Q5b item 6 (D12 item 4) | M | Merged 2026-11-06 (CRD PR #258, code PR #259) |
+| B4a | Order-book answer under a lagging worker: when an order-book request lists a maker that has no trie record yet, the relay waits briefly (at most the bound a keep-alive already waits, CRD ch.32 R-T3b) for its trie worker and answers then; it fails as today only if the worker is still behind. Own switch, default on; off is the immediate error of Komodo and GLEEC KDF (CRD ch.32 R-GH12). Decided 2026-11-03 (Decision 28). | ch.32 R-GH12a (D12 item 4) | S | Merged 2026-11-06 (CRD PR #258, code PR #259) |
+| L1 | Lab: a live trigger of the second request after a quick failure (CRD ch.32 R-Q5c) on a chain with 200 ms latency, with the setting on and off. | — | S | Passed 2026-11-05 (release tests 0.4.0-beta.1, row 13 L1: nodes complete 1 s after the first request, against 29 s before the change) |
+| L2 | Lab: a chain with one heavily loaded reference relay, as the reproduction of the field case for B1; before and after on the same binary. | — | M | run 2026-11-06: B1's effect shown in part; the extra-request cost was measured and the check kept (Decision DA; PRs #269, #274) |
+
+Each package changes no wire shape and has its own switch, so that a lab can run "before" and
+"after" on one binary. Each one is recorded in `RELOADED_VS_GLEEC.md` and
+`docs/GLEEC_COMPATIBILITY.md` when it lands.
+
+## Verification
+
+- **B5:** a burst case (a maker with 40 or more pairs restarts behind one Reloaded relay with three
+  nodes behind it). Count the requests answered at once because the limits were full, and the
+  relay's peak number of held requests and its memory, at the old and the new limits. Both are set
+  through configuration.
+- **B1:** a chain in which a relay and the node behind it both miss a cancel on a pair the maker still
+  advertises. Before: the node clears the entry only after its relay has healed, one keep-alive
+  interval later or more. After: it asks another relay and clears it in the first interval. Also a
+  timeout case and an error case. A fault-free run with a busy maker passes when the extra requests
+  are at most 5 % of all sync requests. *(Lab control on 0.4.0-alpha.1, 2026-11-03: in a fault-free
+  chain a pair the maker still advertises heals hop by hop, one interval per hop, as CRD ch.32 R-GH4
+  says, so the entry did not persist. It persists only when the forwarding relay's sync answers keep
+  failing, as in the field; that case is the loaded-relay lab L2.)* *(Lab on H 66011cdcb, 2026-11-05: the case of a relay that
+  missed a cancel could not be created with connection-level faults. After a connection reset the
+  relays reconnected to the maker's seed only after 47 s and 119 s, so the maker's whole record
+  expired on the node after 90 s without a keep-alive, as the liveness window says. With two healthy
+  relays, the stale one never delivered the keep-alive first. No defect was seen. The rule is covered
+  in-process by CRD ch.32 T-K8 (b).)* *(Loaded-relay lab L2 on H 66011cdcb, 2026-11-06: the forwarding
+  relay was throttled to 64 kbit/s while the maker repriced 32 pairs every 10 s, and the other relay
+  was 3 s away. In 2 of 4 cycles the node cleared the cancelled order one keep-alive interval
+  earlier than without B1: 33 s from the restore, against at least 57 s. With the other relay 6 s
+  away it could not answer within the request's 10 s. No cancelled order stayed visible. The cost
+  of the extra requests is an open point below.)* *(Fault-free run on dev 86e1cb358, 2026-11-07: with
+  the maker repricing 32 pairs every 10 s and 50 ms on every link, no node sent a sync request in
+  30 minutes, so B1 added none. The run is void by its floor of 200 first requests, so it gives no
+  ratio. The extra requests were measured behind a loaded forwarding relay, in L2.)*
+- **B3:** the emptied-pair case leaves every Reloaded node within the liveness window plus one sweep.
+  A run with a lossy link counts pairs dropped and refilled and the longest gap an order-book poll
+  sees. The "before" baseline is a lab run on 0.4.0-alpha.1 in which the maker cancels its only
+  order on a pair while one relay is cut off. B1 does not act on this case, because no keep-alive
+  names an emptied pair. *(Baseline, 2026-11-03, on 0.4.0-alpha.1: the stale entry stayed
+  for the whole 15 minutes on all three nodes that missed the cancel. It cleared only after the
+  maker posted on that pair again. No sync request was sent in those 15 minutes, and no valid order
+  was lost.)*
+- **B2:** a chain of a maker, a relay that misses a cancel, and a node that receives it. More than
+  120 s after the cancel, the node gets the pair from the stale relay (a sync answer or an order-book
+  request). Before: the cancelled order comes back on the node. After: it stays out for the window,
+  with the setting at its default and at `120`. A cancel-rate count on a busy seed checks the cap. *(Lab on H 66011cdcb, 2026-11-05: not constructible with
+  connection-level faults. A node that received the cancel asks a relay only when a keep-alive
+  shows a root other than its own, and its `orderbook` call requests the pair once per
+  subscription. A relay that missed the cancel cannot stay stale for more than 120 s while staying
+  alive: without the maker's keep-alives it drops the maker after 90 s, and with them it heals at the
+  first one. The rule is covered in-process by CRD ch.32 T-K8 (a) and (b).)*
+- **B2a:** unit tests (CRD ch.12 T9); no lab run.
+- **B4:** the burst case of B5 (a maker with 40 or more pairs restarts behind one Reloaded relay
+  with three nodes behind it), with the switch on and off on one binary. Count the relay's
+  synchronization answers given at once as "no data", "missing pair" or the placeholder error, the
+  requests parked before the placeholder existed and how they ended, and the keep-alives handled
+  without a registration because a limit was full (all from the relay's 60 s synchronization
+  summary). Passes when the answers given at once fall with the switch on and no parked request
+  outlasts the bound. Unit tests: CRD ch.32 T-Q5b6. *(Lab on dev 86e1cb358, 2026-11-07: not
+  constructible black-box, no defect. When makers restart and post, their order messages reach the
+  relay and the nodes behind it before the first keep-alive, so no node asks. In a relay restart
+  with four makers of 31 pairs left running, the nodes behind the relay sent 372 sync requests per
+  run, and the relay answered every one: it had always created the placeholder first, so the
+  existing hold answered after at most 91 ms, with the setting off. The case needs a relay whose
+  trie worker lags while it handles a keep-alive, which the lab load did not produce, even with the
+  relay pinned to two cores. The field check is the seeds' 60 s summary: the answers given at once,
+  against up to 1,386 a minute on one seed on 2026-10-31, and the new `pre_placeholder` part.)*
+- **B4a:** unit tests (CRD ch.32 T-GH12a). A lab cannot hold the trie worker back on purpose; the
+  burst run of B4 counts any order-book request that still fails.
+
+## Open points
+
+- **B2's reference fact (recorded 2026-11-03, CRD ch.32 R-GH11):** whether a maker can make an
+  order live again under the same identifier after its cancel, and with which message. At the
+  reference release rows no path does so on purpose, and a new order never reuses a cancelled
+  order's identifier. A cancelled order comes back in two ways:
+  - An order update that runs into the cancel publishes an "updated" message for it. That message
+    refreshes the entry at any node that missed the cancel, and changes nothing at a node that
+    already dropped the order.
+  - Its stored record, when it outlives the cancel, is restored at the maker's next start, which
+    publishes an ordinary "created" message for it. The record outlives the cancel when its deletion
+    fails, or when an order update or the match-pruning step writes it back after the cancel.
+
+  KDF Reloaded never writes the record back (CRD ch.12 R7b). A failed deletion is logged and not
+  retried, as on the reference; B2a adds the retry and the restore guard. Since no path revives a
+  cancelled order on purpose, the one-hour window of B2 is safe and needs no message that lifts it.
+- **B2, the cap is provisional.** The default of 100,000 older entries is to be checked against the
+  rate of cancel messages on a busy seed, from 0.4.0-alpha logs.
+- **B2a, what the restore guard cannot see.** It reads the order history, so an order created with
+  `save_in_history: false`, or one whose history write failed together with the deletion, is still
+  restored. The deletion retry narrows that case. Taker orders have the same restore path and are
+  not covered; a stale taker record lives only until the taker order's timeout.
+- **B3:** the window assumes that an online maker advertises every non-empty pair at every tick
+  (CRD ch.32 R-K2a). Confirmed for the reference release rows on 2026-11-03 (CRD ch.32 R-GH13
+  item 1): no pair with a non-empty root is skipped. A Reloaded maker does the same, except that it
+  skips a round while its trie worker lags (CRD ch.32 R-T3b item 2); the window of three rounds
+  absorbs two such skips. Any other exception would prune a live pair, which the next keep-alive
+  refills with one sync request.
+- **After 0.4.0, low priority: refresh the guard entry on a repeated cancel from the same
+  publisher.** The reference restarts its window on such a repeat; Reloaded keeps the first cancel's
+  expiry. It matters only with `cancel_final_window_secs: 120`; at the one-hour default the case
+  hardly arises.
+- **B1, an extra request after a skipped second request.** When a node's first sync request fails
+  quickly and the pairs leave the placeholder before the second request (an order message filled
+  them), no second request is sent, yet the request to another relay still follows, as CRD ch.32
+  R-Q5d reads. It costs one redundant request. It stays as it is unless the lab or field counts show
+  it matters.
+- **B1, a second waiting task per sync.** After each applied sync answer, B1 starts a task that waits
+  for the trie worker before it compares roots, next to the task that already waits to end the
+  record of R-Q5b. Under a resync burst with a lagging worker, this doubles that polling of the trie
+  store. If the large batch-1 run shows the cost (the latency rows or the B1 cost case), a follow-up
+  merges the two into one task.
+- **B1, extra requests behind a loaded forwarding relay.** In lab L2 (2026-11-06) a request to another
+  relay followed 86 % of the node's first sync requests with the other relay 3 s away, and 42 %
+  with it 6 s away, far above the 5 % the verification allows for a fault-free run. No cancelled
+  order stayed visible.
+  - The check compares the root a pair reaches with the root of the keep-alive that started the
+    request. A lab run on 2026-11-07 (L2's setup at 3 s with a second repricing maker added; the
+    first maker repricing every 10 s, repricing once and finishing before its keep-alive, or not
+    repricing) showed, for that setup, when they occurred:
+    - with repricing every 10 s, 188 of 188 such requests followed an order message of the maker
+      for the pair that the node handled after the keep-alive;
+    - with the repricing finished before the keep-alive, 35 of 273 first requests were followed by
+      such a request, none after a later change of the maker and none in the cycles in which the
+      relay 3 s away answered first;
+    - without repricing, none followed at all.
+
+    The 35 came in two cycles of the lab's link cuts, after a relay had re-established its link;
+    their cause is not established. In that run, unlike L2, the relay 3 s away answered most first
+    requests, so it does not trace L2's own counts.
+  - Candidate rules:
+    - (a) compare with the maker's latest advertised root;
+    - (b) skip the request when an order message for the pair arrived after the keep-alive;
+    - (d) skip it when the node held the advertised root at some moment after the keep-alive;
+    - (e) compare no root after an answer at all, as Komodo and GLEEC KDF do, keeping the request
+      only after a failure.
+
+    Rule (b) would also stop B1 on the pairs a maker keeps repricing, which is where the field case
+    arose.
+  - Decided 2026-11-07 (Decision DA): measure first, with no change in behavior. There are two
+    measurements:
+    - a fault-free run judged against the 5 % rule;
+    - a debug line that counts, per such request, which candidate rule would have skipped it
+      (PR #269).
+
+    Then:
+    - At or below 5 %: keep the check, and record the cost in CRD ch.32 R-Q5d's divergence note.
+      (e) stays the alternative if parity is preferred later.
+    - Above 5 %: (a) and (d) first; if they cut too little, (e). Neither (b) nor (b) with (a).
+  - Measured 2026-11-07: the fault-free run sent no sync request at all, so B1 added none. Per
+    Decision DA the check stays as it is, and the cost is recorded in CRD ch.32 R-Q5d's divergence
+    note (PR #274).
+- **B1, the timeout of the request to another relay.** The request has the 10 s timeout of every sync
+  request, not the 5 s bound of R-Q5b. An answer after the bound no longer reaches the requests parked
+  behind the node's own request, which were answered at their bound, but it still heals the node and
+  serves later requests. In L2 with the other relay 3 s away, the answers most likely took longer
+  than 5 s, so a 5 s limit would probably have removed the earlier clearing seen there. Decided
+  2026-11-07 (Decision DA): keep 10 s; CRD ch.32 R-Q5d item 6 now says so (PR #269).
+- **The known-limitations line** ("other nodes can keep showing a cancelled order for a while") was
+  to stay until B1 and B3 had landed. B1 shortens the case of a pair the maker still advertises; B3
+  removes the case of an emptied pair. B1 and B3 have landed (PRs #208, #251), and the line now
+  covers only a pair the maker still advertises (CHANGELOG, Known limitations).
+
+## Not in scope
+
+- Clearing a pair whose root does not match after an answer. D12 rejects this, because it would drop
+  the maker's valid orders together with the stale ones.
+- Ordering keep-alives by the sender's timestamp. D12 rejects this, because a maker with a wrong
+  clock would lose all its keep-alives.
+- Makers advertising an emptied pair, and receivers treating such an advertisement as "clear this
+  pair" (D12 (c) and (d)). These come only if B3 is rejected.

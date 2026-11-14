@@ -178,14 +178,15 @@ impl Config {
         self.send_queue.priority_max
     }
 
-    /// How long the data queue toward a connection must hold something before the queue signal is
-    /// raised (default is 2 seconds).
+    /// How long the oldest queued data RPC toward a connection must have waited for the queue signal
+    /// to be raised (default is 2 seconds; CRD ch.32 §32.9B R-MP2 item 2).
     pub fn send_queue_signal_raise_after(&self) -> Duration {
         self.send_queue.signal_raise_after
     }
 
-    /// How long the data queue must stay empty before the queue signal is cleared (default is 5
-    /// seconds).
+    /// How long after the last such wait ended (or after the raise, for a signal raised by the
+    /// pressure level alone) the queue signal is cleared, with the pressure level cleared (default is
+    /// 5 seconds; CRD ch.32 §32.9B R-MP2 item 2).
     pub fn send_queue_signal_clear_after(&self) -> Duration {
         self.send_queue.signal_clear_after
     }
@@ -759,15 +760,16 @@ impl ConfigBuilder {
         self
     }
 
-    /// How long the data queue must hold something before the queue signal is raised (default is
-    /// 2 seconds).
+    /// How long the oldest queued data RPC must have waited for the queue signal to be raised
+    /// (default is 2 seconds; CRD ch.32 §32.9B R-MP2 item 2).
     pub fn send_queue_signal_raise_after(&mut self, after: Duration) -> &mut Self {
         self.config.send_queue.signal_raise_after = after;
         self
     }
 
-    /// How long the data queue must stay empty before the queue signal is cleared (default is 5
-    /// seconds).
+    /// How long after the last such wait ended (or after the raise, for a signal raised by the
+    /// pressure level alone) the queue signal is cleared, with the pressure level cleared (default is
+    /// 5 seconds; CRD ch.32 §32.9B R-MP2 item 2).
     pub fn send_queue_signal_clear_after(&mut self, after: Duration) -> &mut Self {
         self.config.send_queue.signal_clear_after = after;
         self

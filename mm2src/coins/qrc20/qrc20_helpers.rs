@@ -69,7 +69,8 @@ impl<'a> UtxoCoinBuilderCommonOps for Qrc20CoinBuilder<'a> {
             _ => {
                 let is_asset_chain = false;
                 let platform = self.platform.to_lowercase();
-                let data_dir = coin_daemon_data_dir(&platform, is_asset_chain);
+                let data_dir =
+                    coin_daemon_data_dir(&platform, is_asset_chain).map_to_mm(UtxoCoinBuildError::CantDetectDataDir)?;
 
                 let confname = format!("{}.conf", platform);
                 return Ok(data_dir.join(&confname[..]));

@@ -1,6 +1,6 @@
 # Plan: bound the per-peer gossip send queue
 
-**Status:** done (PRs #121, #122; compatibility row added 2026-10-29) — **Last reviewed:** 2026-10-29
+**Status:** done (PRs #121, #122; compatibility row added 2026-10-29) — **Last reviewed:** 2026-11-08
 
 > **Context.** The seed-node memory incident of 2026-10-28 prompted a survey of
 > the queues in our gossip layer. Toward a single peer, our node queues every
@@ -160,7 +160,10 @@ All of this sits in the gossipsub connection handler we already vendor
 - **Retained state, the incident's main suspect:** the trie store, the delta
   history and per-message tasks are tracked with the seed-growth work.
 
-## Follow-ups (Decision AO, pending)
+## Follow-ups (Decision AO, decided 2026-10-28)
+
+*The decision was taken on 2026-10-28 and shipped opt-in through plan `maker-gossip-rate-control`:
+CRD PR #129, code PRs #148, #159, #160 and #166. The analysis below is kept as the record.*
 
 **Problem.** A lab run on 2026-10-28 put our maker at more than 90 order
 updates/s on a CPU-saturated host. The traffic from the maker to the seed

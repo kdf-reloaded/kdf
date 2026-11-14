@@ -762,6 +762,14 @@ mod tests {
                 gas_limit: 1,
                 gas_price: 1,
             },
+            WithdrawFee::CosmosGas {
+                gas_limit: 125_000,
+                gas_price: 0.03,
+            },
+            WithdrawFee::CosmosGasPriority {
+                gas_limit: 125_000,
+                gas_price_option: crate::CosmosGasPriceOption::High,
+            },
         ];
         for fee in &others {
             let msg = expect_invalid_policy(resolve_fee_source(TICKER, Some(fee)).unwrap_err());

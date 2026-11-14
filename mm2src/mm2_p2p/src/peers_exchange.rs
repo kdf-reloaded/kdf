@@ -40,28 +40,159 @@ const DEFAULT_PEERS_NUM: usize = 20;
 const REQUEST_PEERS_INITIAL_DELAY: u64 = 20;
 const REQUEST_PEERS_INTERVAL: u64 = 300;
 const MAX_PEERS: usize = 100;
-/// How many distinct skipped addresses are remembered as already reported (CRD ch.28 R8c item 4).
-/// When the set is full it is cleared, so the memory used by it stays bounded.
-const MAX_REPORTED_SKIPPED_ADDRESSES: usize = 64;
+/// The least time between two summaries of the skipped addresses (CRD ch.28 R8c item 4). The summary is checked on
+/// the peer-exchange request tick, so it comes up to `REQUEST_PEERS_INTERVAL` seconds after the hour.
+const SKIPPED_SUMMARY_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-/// The set of skipped peer addresses that were already reported at INFO level (CRD ch.28 R8c item 4).
-#[derive(Debug, Default)]
-struct SkippedAddressReports {
-    reported: HashSet<Multiaddr>,
+/// The form of a received address that was skipped (CRD ch.28 R8c item 4). The form is named by the address's first
+/// component, except for an `/ip4` address, which is told apart by routability and port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkippedForm {
+    Dns,
+    Dns4,
+    Dns6,
+    Dnsaddr,
+    Ip6,
+    /// An `/ip4` address that is not globally routable.
+    Ip4NotGlobal,
+    /// An `/ip4/<global address>/tcp/<port>` address with a port other than the network's TCP port.
+    OtherPort,
+    /// Any other form.
+    Other,
 }
 
-impl SkippedAddressReports {
-    /// Records one sighting of a skipped `address` and returns the level the sighting is logged at: INFO the
-    /// first time the address is seen, DEBUG after that. The set is cleared when it is full.
-    fn record(&mut self, address: &Multiaddr) -> log::Level {
-        if self.reported.contains(address) {
-            return log::Level::Debug;
+impl SkippedForm {
+    /// The reason a skipped address is logged with.
+    fn reason(self) -> &'static str {
+        match self {
+            SkippedForm::Dns => "a /dns hostname that is not looked up",
+            SkippedForm::Dns4 => "a /dns4 hostname that is not looked up",
+            SkippedForm::Dns6 => "a /dns6 hostname",
+            SkippedForm::Dnsaddr => "a /dnsaddr hostname",
+            SkippedForm::Ip6 => "an /ip6 address",
+            SkippedForm::Ip4NotGlobal => "an /ip4 address that is not globally routable",
+            SkippedForm::OtherPort => "an /ip4 address with another TCP port",
+            SkippedForm::Other => "an address of another form",
         }
-        if self.reported.len() >= MAX_REPORTED_SKIPPED_ADDRESSES {
-            self.reported.clear();
+    }
+}
+
+/// The outcome of the lookup of a hostname that was not stored (CRD ch.28 R8c items 4 and 7.6).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LookupOutcome {
+    Failed,
+    TimedOut,
+    NoAcceptedAddress,
+}
+
+/// The counts of the skipped addresses and of the hostnames not stored, since the last summary (CRD ch.28 R8c item
+/// 4).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SkippedAddressCounts {
+    dns: u64,
+    dns4: u64,
+    dns6: u64,
+    dnsaddr: u64,
+    ip6: u64,
+    ip4_not_global: u64,
+    other_port: u64,
+    other: u64,
+    lookup_failed: u64,
+    lookup_timed_out: u64,
+    lookup_no_accepted_address: u64,
+}
+
+impl SkippedAddressCounts {
+    fn add_form(&mut self, form: SkippedForm) {
+        let count = match form {
+            SkippedForm::Dns => &mut self.dns,
+            SkippedForm::Dns4 => &mut self.dns4,
+            SkippedForm::Dns6 => &mut self.dns6,
+            SkippedForm::Dnsaddr => &mut self.dnsaddr,
+            SkippedForm::Ip6 => &mut self.ip6,
+            SkippedForm::Ip4NotGlobal => &mut self.ip4_not_global,
+            SkippedForm::OtherPort => &mut self.other_port,
+            SkippedForm::Other => &mut self.other,
+        };
+        *count = count.saturating_add(1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn add_lookup_outcome(&mut self, outcome: LookupOutcome) {
+        let count = match outcome {
+            LookupOutcome::Failed => &mut self.lookup_failed,
+            LookupOutcome::TimedOut => &mut self.lookup_timed_out,
+            LookupOutcome::NoAcceptedAddress => &mut self.lookup_no_accepted_address,
+        };
+        *count = count.saturating_add(1);
+    }
+
+    fn is_empty(&self) -> bool { *self == SkippedAddressCounts::default() }
+
+    /// The text of the INFO summary line: the non-zero counts per form, then the non-zero lookup outcomes.
+    fn summary(&self) -> String {
+        let join = |counts: &[(&str, u64)]| {
+            counts
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(name, count)| format!("{} {}", name, count))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let forms = join(&[
+            ("/dns", self.dns),
+            ("/dns4", self.dns4),
+            ("/dns6", self.dns6),
+            ("/dnsaddr", self.dnsaddr),
+            ("/ip6", self.ip6),
+            ("/ip4 not globally routable", self.ip4_not_global),
+            ("another port", self.other_port),
+            ("other forms", self.other),
+        ]);
+        let lookups = join(&[
+            ("failed", self.lookup_failed),
+            ("timed out", self.lookup_timed_out),
+            ("no accepted address", self.lookup_no_accepted_address),
+        ]);
+        let mut parts = Vec::new();
+        if !forms.is_empty() {
+            parts.push(format!("skipped addresses: {}", forms));
         }
-        self.reported.insert(address.clone());
-        log::Level::Info
+        if !lookups.is_empty() {
+            parts.push(format!("hostnames not stored after a lookup: {}", lookups));
+        }
+        format!("Peer exchange: since the previous summary, {}", parts.join("; "))
+    }
+}
+
+/// The counts of CRD ch.28 R8c item 4 and the time of the last summary. Each skipped address is logged at DEBUG on
+/// its own; this holds what the hourly INFO summary reports.
+#[derive(Debug)]
+struct SkippedAddressSummary {
+    counts: SkippedAddressCounts,
+    last_summary: Instant,
+    /// `SKIPPED_SUMMARY_INTERVAL`; a test shortens it.
+    interval: Duration,
+}
+
+impl SkippedAddressSummary {
+    fn new(now: Instant) -> Self {
+        SkippedAddressSummary {
+            counts: SkippedAddressCounts::default(),
+            last_summary: now,
+            interval: SKIPPED_SUMMARY_INTERVAL,
+        }
+    }
+
+    /// Returns the counts and starts a new period when at least `interval` has passed since the last summary and a
+    /// count is non-zero. A period with nothing skipped gives no summary.
+    fn take_due(&mut self, now: Instant) -> Option<SkippedAddressCounts> {
+        if self.counts.is_empty() || now.duration_since(self.last_summary) < self.interval {
+            return None;
+        }
+        self.last_summary = now;
+        Some(std::mem::take(&mut self.counts))
     }
 }
 
@@ -108,16 +239,19 @@ pub enum PeersExchangeResponse {
 /// Lookups of the hostnames in peer-exchange answers (CRD ch.28 R8c item 7, maintainer decision BH). Native builds
 /// only: a browser build skips every hostname.
 ///
-/// A name goes through a bounded queue, and one lookup at a time runs on a blocking worker thread. While nothing is
-/// queued and nothing runs, no timer, worker or task handle exists.
+/// A name goes through a bounded queue, and one lookup at a time runs as an asynchronous task on the swarm's runtime,
+/// through the node's resolver (CRD ch.45 R45.6B.9 item 2). It never runs on the swarm's own task. While nothing is
+/// queued and nothing runs, no timer or task handle exists.
 #[cfg(not(target_arch = "wasm32"))]
 mod hostname_lookup {
     use super::PeerAddresses;
+    use async_trait::async_trait;
+    use common::dns_resolver::{self, DnsFamily};
     use futures::FutureExt;
     use libp2p::{multiaddr::Multiaddr, PeerId};
     use std::collections::VecDeque;
     use std::io;
-    use std::net::{SocketAddr, ToSocketAddrs};
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::task::{Context, Poll};
     use std::time::Duration;
@@ -130,20 +264,23 @@ mod hostname_lookup {
     pub(super) const MAX_NAME_RECORDS: usize = 64;
     /// The least time between two lookups of the same name (item 7.1).
     const RELOOKUP_INTERVAL: Duration = Duration::from_secs(30 * 60);
-    /// A lookup that has not returned after this time stores nothing (item 7.2).
+    /// A lookup that has not returned after this time is abandoned and stores nothing (item 7.2).
     const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-    /// The blocking name lookup. It is a trait so that a test can drive the results and their timing.
+    /// The name lookup. It is a trait so that a test can drive the results and their timing.
+    #[async_trait]
     pub(super) trait HostResolver: Send + Sync + 'static {
-        fn lookup(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>>;
+        async fn lookup(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>>;
     }
 
-    /// The operating system's resolver.
-    struct SystemResolver;
+    /// The node's resolver (`dns_resolver`, CRD ch.45 §45.6B).
+    struct NodeResolver;
 
-    impl HostResolver for SystemResolver {
-        fn lookup(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
-            (name, port).to_socket_addrs().map(|addresses| addresses.collect())
+    #[async_trait]
+    impl HostResolver for NodeResolver {
+        async fn lookup(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+            // Only IPv4 results are kept (item 7.3), so only IPv4 is asked for.
+            dns_resolver::lookup(name, port, DnsFamily::V4).await
         }
     }
 
@@ -196,8 +333,8 @@ mod hostname_lookup {
     struct RunningLookup {
         job: LookupJob,
         handle: JoinHandle<io::Result<Vec<SocketAddr>>>,
-        /// `None` once the 5 s have passed: the result is given up, but the worker thread may still be busy.
-        timeout: Option<Delay>,
+        /// When it fires the lookup is abandoned: its task is dropped, so the next one may start.
+        timeout: Delay,
     }
 
     pub(super) struct HostnameLookups {
@@ -213,7 +350,7 @@ mod hostname_lookup {
     impl Default for HostnameLookups {
         fn default() -> Self {
             HostnameLookups {
-                resolver: Arc::new(SystemResolver),
+                resolver: Arc::new(NodeResolver),
                 timeout: LOOKUP_TIMEOUT,
                 relookup_interval: RELOOKUP_INTERVAL,
                 queue: VecDeque::new(),
@@ -224,7 +361,7 @@ mod hostname_lookup {
     }
 
     impl HostnameLookups {
-        /// Whether no lookup is queued or running, so that no timer, worker or task handle is pending.
+        /// Whether no lookup is queued or running, so that no timer or task handle is pending.
         #[cfg(test)]
         pub(super) fn is_idle(&self) -> bool { self.queue.is_empty() && self.running.is_none() }
 
@@ -282,36 +419,35 @@ mod hostname_lookup {
             }
         }
 
-        /// Drives the running lookup and starts the next queued one when the previous one has returned, even if its
-        /// result was given up. At most one worker thread exists at any time. Returns the lookups that finished.
+        /// Drives the running lookup and starts the next queued one when the previous one has returned or was
+        /// abandoned at the timeout. At most one lookup task exists at any time. Returns the lookups that finished.
         pub(super) fn poll(&mut self, cx: &mut Context, is_connected: impl Fn(&PeerId) -> bool) -> Vec<FinishedLookup> {
             let mut finished = Vec::new();
             loop {
                 if let Some(running) = self.running.as_mut() {
                     if let Poll::Ready(joined) = running.handle.poll_unpin(cx) {
                         let running = self.running.take().expect("the lookup is running");
-                        // A result that was given up at the timeout was reported then.
-                        if running.timeout.is_some() {
-                            let result = match joined {
-                                Ok(Ok(addresses)) => LookupResult::Resolved(addresses),
-                                Ok(Err(error)) => LookupResult::Failed(error.to_string()),
-                                Err(error) => LookupResult::Failed(format!("the lookup task failed: {}", error)),
-                            };
-                            finished.push(FinishedLookup {
-                                job: running.job,
-                                result,
-                            });
-                        }
+                        let result = match joined {
+                            Ok(Ok(addresses)) => LookupResult::Resolved(addresses),
+                            Ok(Err(error)) => LookupResult::Failed(error.to_string()),
+                            Err(error) => LookupResult::Failed(format!("the lookup task failed: {}", error)),
+                        };
+                        finished.push(FinishedLookup {
+                            job: running.job,
+                            result,
+                        });
                         continue;
                     }
-                    if let Some(timeout) = running.timeout.as_mut() {
-                        if timeout.poll_unpin(cx).is_ready() {
-                            running.timeout = None;
-                            finished.push(FinishedLookup {
-                                job: running.job.clone(),
-                                result: LookupResult::TimedOut,
-                            });
-                        }
+                    if running.timeout.poll_unpin(cx).is_ready() {
+                        // The lookup is abandoned and stores nothing: dropping its task drops the future, and the
+                        // next lookup may start now (item 7.2).
+                        let running = self.running.take().expect("the lookup is running");
+                        running.handle.abort();
+                        finished.push(FinishedLookup {
+                            job: running.job,
+                            result: LookupResult::TimedOut,
+                        });
+                        continue;
                     }
                     return finished;
                 }
@@ -329,10 +465,9 @@ mod hostname_lookup {
                 let (name, port) = (job.name.clone(), job.port);
                 self.running = Some(RunningLookup {
                     job,
-                    // The system resolver blocks, so it runs on a blocking worker thread of the swarm's runtime and
-                    // never on the swarm's own task.
-                    handle: tokio::task::spawn_blocking(move || resolver.lookup(&name, port)),
-                    timeout: Some(Delay::new(self.timeout)),
+                    // An asynchronous task of the swarm's runtime, never polled on the swarm's own task.
+                    handle: tokio::spawn(async move { resolver.lookup(&name, port).await }),
+                    timeout: Delay::new(self.timeout),
                 });
             }
         }
@@ -347,7 +482,8 @@ pub struct PeersExchange {
     events: VecDeque<ToSwarm<(), THandlerInEvent<Self>>>,
     maintain_peers_interval: Interval,
     network_info: NetworkInfo,
-    skipped_addresses: SkippedAddressReports,
+    /// The counts of the hourly summary of the skipped addresses (CRD ch.28 R8c item 4).
+    skipped_addresses: SkippedAddressSummary,
     /// The peer ID of this node. No entry is ever stored for it (CRD ch.28 R8c item 5).
     local_peer_id: PeerId,
     /// `p2p_resolve_peer_hostnames` (CRD ch.28 R8c item 10, decision BH): look up the hostnames of an answer (item 7)
@@ -377,7 +513,7 @@ impl PeersExchange {
                 Duration::from_secs(REQUEST_PEERS_INTERVAL),
             ),
             network_info,
-            skipped_addresses: SkippedAddressReports::default(),
+            skipped_addresses: SkippedAddressSummary::new(Instant::now()),
             local_peer_id,
             resolve_hostnames: true,
             allow_private_addresses: false,
@@ -482,8 +618,8 @@ impl PeersExchange {
         }
     }
 
-    /// Returns the addresses `validate_global_multiaddr` accepts and reports each skipped one (CRD ch.28 R8c
-    /// item 4): INFO the first time the address is seen, DEBUG after that.
+    /// Returns the addresses `validate_global_multiaddr` accepts. Each skipped one is logged at DEBUG with its sender
+    /// and reason, and counted for the hourly summary (CRD ch.28 R8c item 4).
     fn accepted_addresses(&mut self, sender: &PeerId, addresses: PeerAddresses) -> PeerAddresses {
         let mut accepted = PeerAddresses::with_capacity(addresses.len());
         for address in addresses {
@@ -491,16 +627,47 @@ impl PeersExchange {
                 accepted.insert(address);
                 continue;
             }
-            let level = self.skipped_addresses.record(&address);
-            log::log!(
-                level,
-                "Peer exchange: skipped address {} from peer {}: only /ip4/<public address>/tcp/{} addresses are accepted",
+            let form = self.skipped_form(&address);
+            self.skipped_addresses.counts.add_form(form);
+            debug!(
+                "Peer exchange: skipped address {} from peer {}: {}; only /ip4/<public address>/tcp/{} addresses are accepted",
                 address,
                 sender,
+                form.reason(),
                 self.tcp_port()
             );
         }
         accepted
+    }
+
+    /// The form of an address that `validate_global_multiaddr` does not accept (CRD ch.28 R8c item 4).
+    fn skipped_form(&self, address: &Multiaddr) -> SkippedForm {
+        let mut components = address.iter();
+        match components.next() {
+            Some(Protocol::Dns(_)) => SkippedForm::Dns,
+            Some(Protocol::Dns4(_)) => SkippedForm::Dns4,
+            Some(Protocol::Dns6(_)) => SkippedForm::Dns6,
+            Some(Protocol::Dnsaddr(_)) => SkippedForm::Dnsaddr,
+            Some(Protocol::Ip6(_)) => SkippedForm::Ip6,
+            Some(Protocol::Ip4(ip)) => {
+                if !self.allow_private_addresses && !crate::ip_helpers::ipv4_is_global(&ip) {
+                    SkippedForm::Ip4NotGlobal
+                } else if matches!(components.next(), Some(Protocol::Tcp(_))) {
+                    SkippedForm::OtherPort
+                } else {
+                    SkippedForm::Other
+                }
+            },
+            _ => SkippedForm::Other,
+        }
+    }
+
+    /// Logs the summary of the skipped addresses at INFO when it is due (CRD ch.28 R8c item 4). Called on the
+    /// peer-exchange request tick.
+    fn log_skipped_summary(&mut self, now: Instant) {
+        if let Some(counts) = self.skipped_addresses.take_due(now) {
+            info!("{}", counts.summary());
+        }
     }
 
     /// The TCP port of the network, the only port a received address may carry.
@@ -534,6 +701,7 @@ impl PeersExchange {
     }
 
     fn maintain_known_peers(&mut self) {
+        self.log_skipped_summary(Instant::now());
         if self.known_peers.len() > MAX_PEERS {
             let mut rng = rand::thread_rng();
             let to_remove_num = self.known_peers.len() - MAX_PEERS;
@@ -722,10 +890,16 @@ impl PeersExchange {
 
         let hostname_lookup::FinishedLookup { job, result } = finished;
         let reason = match result {
-            LookupResult::Failed(error) => Some(format!("the lookup of the name failed: {}", error)),
-            LookupResult::TimedOut => Some(format!(
-                "the lookup of the name did not return within {:?}",
-                self.lookups.timeout
+            LookupResult::Failed(error) => Some((
+                LookupOutcome::Failed,
+                format!("the lookup of the name failed: {}", error),
+            )),
+            LookupResult::TimedOut => Some((
+                LookupOutcome::TimedOut,
+                format!(
+                    "the lookup of the name did not return within {:?}",
+                    self.lookups.timeout
+                ),
             )),
             LookupResult::Resolved(results) => {
                 let mut accepted = PeerAddresses::new();
@@ -745,29 +919,32 @@ impl PeersExchange {
                 let reason = if !accepted.is_empty() {
                     None
                 } else if rejected.is_empty() {
-                    Some("the name has no IPv4 address".to_owned())
+                    Some((
+                        LookupOutcome::NoAcceptedAddress,
+                        "the name has no IPv4 address".to_owned(),
+                    ))
                 } else {
                     let rejected = rejected.iter().map(|ip| ip.to_string()).collect::<Vec<_>>();
-                    Some(format!(
-                        "the name resolves only to addresses that are not globally routable: {}",
-                        rejected.join(", ")
+                    Some((
+                        LookupOutcome::NoAcceptedAddress,
+                        format!(
+                            "the name resolves only to addresses that are not globally routable: {}",
+                            rejected.join(", ")
+                        ),
                     ))
                 };
                 self.store_resolved_addresses(&job, accepted);
                 reason
             },
         };
-        if let Some(reason) = &reason {
-            let level = self.skipped_addresses.record(&job.address);
-            log::log!(
-                level,
+        reason.map(|(outcome, reason)| {
+            self.skipped_addresses.counts.add_lookup_outcome(outcome);
+            debug!(
                 "Peer exchange: skipped address {} from peer {}: {}",
-                job.address,
-                job.sender,
-                reason
+                job.address, job.sender, reason
             );
-        }
-        reason
+            reason
+        })
     }
 
     /// Stores the checked results of a lookup under the entry's peer and updates the per-name record (CRD ch.28 R8c
@@ -1001,6 +1178,8 @@ mod tests {
     use libp2p::core::Multiaddr;
     use std::collections::{HashMap, HashSet};
     use std::iter::FromIterator;
+    use std::time::Duration;
+    use wasm_timer::Instant;
 
     #[test]
     fn test_peer_id_serde() {
@@ -1148,52 +1327,196 @@ mod tests {
         assert!(!behaviour.is_known_peer(&other));
     }
 
-    /// CRD ch.28 T6a: the first sighting of a skipped address is reported at INFO, later ones at DEBUG, and the set
-    /// of reported addresses is bounded.
+    /// CRD ch.28 T6a (2026-11-02 bullets): the skipped addresses of both receive paths are counted per form, and a
+    /// repeated address is counted every time (there is no set of reported addresses any more).
     #[test]
-    fn test_skipped_address_reports_are_bounded() {
-        use super::{SkippedAddressReports, MAX_REPORTED_SKIPPED_ADDRESSES};
-        use log::Level;
+    fn test_skipped_addresses_are_counted_per_form() {
+        use super::SkippedAddressCounts;
 
-        let mut reports = SkippedAddressReports::default();
-        let first: Multiaddr = "/dns/a.example.com/tcp/3000".parse().unwrap();
-        assert_eq!(reports.record(&first), Level::Info);
-        assert_eq!(reports.record(&first), Level::Debug);
-        assert_eq!(reports.record(&first), Level::Debug);
+        // Without lookups, a hostname in an answer is skipped like one in an announcement.
+        let mut behaviour = distributed_behaviour().with_address_settings(false, false);
+        let sender = PeerId::random();
 
-        // Fill the set; the first address is still remembered while there is room.
-        for i in 1..MAX_REPORTED_SKIPPED_ADDRESSES {
-            let address: Multiaddr = format!("/dns/{}.example.com/tcp/3000", i).parse().unwrap();
-            assert_eq!(reports.record(&address), Level::Info);
-        }
-        assert_eq!(reports.reported.len(), MAX_REPORTED_SKIPPED_ADDRESSES);
-        assert_eq!(reports.record(&first), Level::Debug);
+        behaviour.add_peer_addresses_to_known_peers(
+            &sender,
+            addresses_of(&[
+                "/dns/a.example.com/tcp/3000",
+                "/dns4/a.example.com/tcp/3000",
+                "/dns6/a.example.com/tcp/3000",
+                "/dnsaddr/a.example.com",
+                "/ip6/2001:db8::1/tcp/3000",
+                "/ip4/10.0.0.1/tcp/3000",
+                "/ip4/0.1.2.3/tcp/3000",
+                "/ip4/216.58.210.142/tcp/3001",
+                "/ip4/216.58.210.142",
+                "/ip4/216.58.210.142/udp/3000",
+                "/memory/1",
+            ]),
+        );
+        let counts = &behaviour.skipped_addresses.counts;
+        assert_eq!(counts, &SkippedAddressCounts {
+            dns: 1,
+            dns4: 1,
+            dns6: 1,
+            dnsaddr: 1,
+            ip6: 1,
+            ip4_not_global: 2,
+            other_port: 1,
+            other: 3,
+            ..Default::default()
+        });
 
-        // One more distinct address clears the full set, so the memory stays bounded.
-        let overflow: Multiaddr = "/dns/overflow.example.com/tcp/3000".parse().unwrap();
-        assert_eq!(reports.record(&overflow), Level::Info);
-        assert_eq!(reports.reported.len(), 1);
-        assert_eq!(reports.record(&overflow), Level::Debug);
-        assert_eq!(reports.record(&first), Level::Info);
+        // The same address in an answer is counted again.
+        let response = HashMap::from_iter(vec![(
+            PeerIdSerde(PeerId::random()),
+            addresses_of(&["/dns/a.example.com/tcp/3000"]),
+        )]);
+        assert!(behaviour.process_known_peers_response(&sender, response));
+        assert_eq!(behaviour.skipped_addresses.counts.dns, 2);
     }
 
-    /// Both receive paths share one reported-address set.
+    /// CRD ch.28 T6a (2026-11-02 bullets): one summary after the interval, with the counts per form and the lookup
+    /// outcomes; none for a period with nothing skipped; and the counts start again after it. The hour is shortened
+    /// through `SkippedAddressSummary::interval`, and the time is an input.
     #[test]
-    fn test_announcement_and_answer_share_reported_set() {
+    fn test_skipped_summary_is_due_once_per_period_and_only_with_counts() {
+        use super::{LookupOutcome, SkippedForm};
+
+        let start = Instant::now();
+        let mut behaviour = distributed_behaviour();
+        behaviour.skipped_addresses = super::SkippedAddressSummary::new(start);
+        let hour = behaviour.skipped_addresses.interval;
+        assert_eq!(hour, Duration::from_secs(3600));
+        behaviour.skipped_addresses.interval = Duration::from_secs(60);
+
+        // A period with nothing skipped gives no summary, however long it is.
+        assert!(behaviour
+            .skipped_addresses
+            .take_due(start + Duration::from_secs(61))
+            .is_none());
+        assert!(behaviour
+            .skipped_addresses
+            .take_due(start + Duration::from_secs(7200))
+            .is_none());
+
+        let counts = &mut behaviour.skipped_addresses.counts;
+        counts.add_form(SkippedForm::Dns);
+        counts.add_form(SkippedForm::Dns);
+        counts.add_form(SkippedForm::Ip4NotGlobal);
+        counts.add_lookup_outcome(LookupOutcome::Failed);
+        counts.add_lookup_outcome(LookupOutcome::TimedOut);
+        counts.add_lookup_outcome(LookupOutcome::NoAcceptedAddress);
+
+        // The summary of a counted period is due once the interval has passed since the last summary.
+        let now = start + Duration::from_secs(7200);
+        let due = behaviour.skipped_addresses.take_due(now).expect("the summary is due");
+        assert_eq!(due.dns, 2);
+        assert_eq!(due.ip4_not_global, 1);
+        assert_eq!(
+            due.lookup_failed + due.lookup_timed_out + due.lookup_no_accepted_address,
+            3
+        );
+        assert_eq!(
+            due.summary(),
+            "Peer exchange: since the previous summary, skipped addresses: /dns 2, /ip4 not globally routable 1; \
+             hostnames not stored after a lookup: failed 1, timed out 1, no accepted address 1"
+        );
+
+        // The counts are reset, and the next summary is a full interval later.
+        assert!(behaviour.skipped_addresses.counts.is_empty());
+        behaviour.skipped_addresses.counts.add_form(SkippedForm::Ip6);
+        assert!(behaviour
+            .skipped_addresses
+            .take_due(now + Duration::from_secs(59))
+            .is_none());
+        let due = behaviour
+            .skipped_addresses
+            .take_due(now + Duration::from_secs(60))
+            .expect("the next summary is due");
+        assert_eq!(
+            due.summary(),
+            "Peer exchange: since the previous summary, skipped addresses: /ip6 1"
+        );
+        assert!(behaviour
+            .skipped_addresses
+            .take_due(now + Duration::from_secs(600))
+            .is_none());
+
+        // `log_skipped_summary`, which the request tick calls, takes the same decision.
+        behaviour.skipped_addresses.counts.add_form(SkippedForm::Other);
+        behaviour.log_skipped_summary(now + Duration::from_secs(660));
+        assert!(behaviour.skipped_addresses.counts.is_empty());
+    }
+
+    /// CRD ch.28 T6a (2026-11-02 bullets): an accepted address with a trailing `/p2p/<peer id>` is accepted, with
+    /// the trailing component kept, and counts as nothing skipped.
+    #[test]
+    fn test_accepted_address_with_trailing_p2p_component() {
+        let mut behaviour = distributed_behaviour();
+        let entry = PeerId::random();
+        let with_p2p: Multiaddr = format!("/ip4/216.58.210.142/tcp/3000/p2p/{}", entry).parse().unwrap();
+
+        behaviour.add_peer_addresses_to_known_peers(&entry, HashSet::from_iter(vec![with_p2p.clone()]));
+        assert!(behaviour.is_known_peer(&entry));
+        assert_eq!(behaviour.request_response.addresses_of_peer(&entry), vec![with_p2p]);
+        assert!(behaviour.skipped_addresses.counts.is_empty());
+    }
+
+    /// CRD ch.28 T6a (2026-11-02 bullets, R24): `0.0.0.0/8` is skipped, `192.0.0.9` and `192.0.0.10` with the
+    /// network's port are accepted, and the rest of `192.0.0.0/24` is skipped.
+    #[test]
+    fn test_routability_ranges_of_received_ip4_addresses() {
         let mut behaviour = distributed_behaviour();
         let sender = PeerId::random();
-        let dns: Multiaddr = "/dns/seed.example.com/tcp/3000".parse().unwrap();
+
+        let skipped = PeerId::random();
+        behaviour.add_peer_addresses_to_known_peers(
+            &skipped,
+            addresses_of(&[
+                "/ip4/0.0.0.1/tcp/3000",
+                "/ip4/0.200.0.1/tcp/3000",
+                "/ip4/192.0.0.8/tcp/3000",
+            ]),
+        );
+        assert!(!behaviour.is_known_peer(&skipped));
+        assert_eq!(behaviour.skipped_addresses.counts.ip4_not_global, 3);
+
+        let accepted: Vec<Multiaddr> = ["/ip4/192.0.0.9/tcp/3000", "/ip4/192.0.0.10/tcp/3000"]
+            .iter()
+            .map(|a| a.parse().unwrap())
+            .collect();
+        let response = HashMap::from_iter(vec![
+            (PeerIdSerde(sender), addresses_of(&["/ip4/192.0.0.9/tcp/3000"])),
+            (PeerIdSerde(skipped), addresses_of(&["/ip4/192.0.0.10/tcp/3000"])),
+        ]);
+        assert!(behaviour.process_known_peers_response(&PeerId::random(), response));
+        assert!(behaviour
+            .request_response
+            .addresses_of_peer(&sender)
+            .contains(&accepted[0]));
+        assert!(behaviour
+            .request_response
+            .addresses_of_peer(&skipped)
+            .contains(&accepted[1]));
+        assert_eq!(behaviour.skipped_addresses.counts.ip4_not_global, 3);
+    }
+
+    /// Both receive paths share one set of counts.
+    #[test]
+    fn test_announcement_and_answer_share_the_counts() {
+        // Without lookups, a hostname in an answer is skipped like one in an announcement.
+        let mut behaviour = distributed_behaviour().with_address_settings(false, false);
+        let sender = PeerId::random();
 
         behaviour.add_peer_addresses_to_known_peers(&sender, addresses_of(&["/dns/seed.example.com/tcp/3000"]));
-        assert_eq!(behaviour.skipped_addresses.reported.len(), 1);
-        assert_eq!(behaviour.skipped_addresses.record(&dns), log::Level::Debug);
+        assert_eq!(behaviour.skipped_addresses.counts.dns, 1);
 
         let response = HashMap::from_iter(vec![(
             PeerIdSerde(PeerId::random()),
             addresses_of(&["/dns/seed.example.com/tcp/3000"]),
         )]);
         assert!(behaviour.process_known_peers_response(&sender, response));
-        assert_eq!(behaviour.skipped_addresses.reported.len(), 1);
+        assert_eq!(behaviour.skipped_addresses.counts.dns, 2);
     }
 
     /// CRD ch.28 T6a: an answer and an announcement that carry the local peer ID store nothing for it, and it is
@@ -1314,29 +1637,38 @@ mod hostname_tests {
     use super::hostname_lookup::{Enqueued, HostResolver, LookupJob, MAX_NAME_RECORDS, MAX_QUEUED_NAMES};
     use super::{PeerAddresses, PeerIdSerde, PeersExchange};
     use crate::{NetworkInfo, NetworkPorts, PeerId};
-    use futures::task::{waker, ArcWake};
+    use async_trait::async_trait;
+    use futures::task::{waker, ArcWake, AtomicWaker};
     use libp2p::core::Multiaddr;
     use std::collections::{HashMap, HashSet};
     use std::io;
     use std::net::{IpAddr, SocketAddr};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Condvar, Mutex};
-    use std::task::Context;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
     use std::time::Duration;
     use wasm_timer::Instant;
 
     const PORT: u16 = 3000;
 
     /// A resolver that answers from a table, records its calls, and can hold the lookup of chosen names until
-    /// `release` is called.
+    /// `release` is called. The held lookup is a future that stays pending, so abandoning it drops it.
     #[derive(Default)]
     struct ScriptedResolver {
         answers: Mutex<HashMap<String, Vec<IpAddr>>>,
         blocked: Mutex<HashSet<String>>,
-        released: (Mutex<bool>, Condvar),
+        released: AtomicBool,
+        release_waker: AtomicWaker,
         calls: Mutex<Vec<String>>,
         active: AtomicUsize,
         max_active: AtomicUsize,
+    }
+
+    /// Counts a running lookup, and stops counting it when its future finishes or is dropped.
+    struct ActiveLookup<'a>(&'a ScriptedResolver);
+
+    impl Drop for ActiveLookup<'_> {
+        fn drop(&mut self) { self.0.active.fetch_sub(1, Ordering::SeqCst); }
     }
 
     impl ScriptedResolver {
@@ -1348,25 +1680,37 @@ mod hostname_tests {
         fn block(&self, name: &str) { self.blocked.lock().unwrap().insert(name.to_owned()); }
 
         fn release(&self) {
-            *self.released.0.lock().unwrap() = true;
-            self.released.1.notify_all();
+            self.released.store(true, Ordering::SeqCst);
+            self.release_waker.wake();
         }
 
         fn calls(&self) -> Vec<String> { self.calls.lock().unwrap().clone() }
+
+        /// Pending until `release` is called.
+        async fn until_released(&self) {
+            futures::future::poll_fn(|cx| {
+                self.release_waker.register(cx.waker());
+                if self.released.load(Ordering::SeqCst) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await
+        }
     }
 
+    #[async_trait]
     impl HostResolver for ScriptedResolver {
-        fn lookup(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        async fn lookup(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
             self.calls.lock().unwrap().push(name.to_owned());
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
-            if self.blocked.lock().unwrap().contains(name) {
-                let (lock, condvar) = &self.released;
-                let _released = condvar
-                    .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(20), |released| !*released)
-                    .unwrap();
+            let _active = ActiveLookup(self);
+            let blocked = self.blocked.lock().unwrap().contains(name);
+            if blocked {
+                self.until_released().await;
             }
-            self.active.fetch_sub(1, Ordering::SeqCst);
             match self.answers.lock().unwrap().get(name) {
                 Some(ips) => Ok(ips.iter().map(|ip| SocketAddr::new(*ip, port)).collect()),
                 None => Err(io::Error::new(io::ErrorKind::NotFound, "no such host")),
@@ -1474,7 +1818,7 @@ mod hostname_tests {
         assert_eq!(behaviour.request_response.addresses_of_peer(&entry), vec![ip4(
             "216.58.210.142"
         )]);
-        assert!(behaviour.skipped_addresses.reported.is_empty());
+        assert!(behaviour.skipped_addresses.counts.is_empty());
         assert_eq!(
             behaviour.lookups.record("seed.example.com").unwrap().stored,
             addresses_of(&["/ip4/216.58.210.142/tcp/3000"])
@@ -1552,8 +1896,9 @@ mod hostname_tests {
             assert!(!strict.is_known_peer(peer));
             assert!(strict.request_response.addresses_of_peer(peer).is_empty());
         }
-        // Every name is reported under the item 4 deduplication.
-        assert_eq!(strict.skipped_addresses.reported.len(), 4);
+        // Every name is counted under item 4 as a hostname with no accepted address.
+        assert_eq!(strict.skipped_addresses.counts.lookup_no_accepted_address, 4);
+        assert_eq!(strict.skipped_addresses.counts.lookup_failed, 0);
 
         // With the switch the same names are stored, and so is a received private address. The port check stays.
         let mut permissive = behaviour_with(&resolver, true, true);
@@ -1598,7 +1943,7 @@ mod hostname_tests {
             reason
         );
         assert!(!behaviour.is_known_peer(&entry));
-        assert_eq!(behaviour.skipped_addresses.reported.len(), 1);
+        assert_eq!(behaviour.skipped_addresses.counts.lookup_failed, 1);
         assert!(idle_without_pending_work(&behaviour));
     }
 
@@ -1624,8 +1969,9 @@ mod hostname_tests {
         ])]);
         assert!(idle_without_pending_work(&behaviour));
         assert!(!behaviour.is_known_peer(&entry));
-        // Each one is skipped and reported as before.
-        assert_eq!(behaviour.skipped_addresses.reported.len(), 5);
+        // Each one is skipped and counted by its form.
+        let counts = &behaviour.skipped_addresses.counts;
+        assert_eq!((counts.dns6, counts.dnsaddr, counts.dns, counts.dns4), (1, 1, 2, 1));
 
         // A hostname in a peers-topic announcement is skipped under every setting.
         let announcer = PeerId::random();
@@ -1879,8 +2225,8 @@ mod hostname_tests {
         wait_for(|| resolver.calls().len() == 1);
         assert_eq!(resolver.calls(), vec!["slow.example.com".to_owned()]);
 
-        // After the timeout the result is given up and reported, but the worker is still busy: the next lookup
-        // does not start.
+        // After the timeout the lookup is abandoned and reported (its future is dropped, nothing is stored), and the
+        // next lookup may start right away.
         let mut finished = Vec::new();
         wait_for(|| {
             finished.extend(poll_once(&mut behaviour));
@@ -1888,22 +2234,17 @@ mod hostname_tests {
         });
         assert_eq!(finished.len(), 1);
         assert!(finished[0].1.as_ref().unwrap().contains("did not return within"));
-        assert!(!behaviour.lookups.is_idle());
-        for _ in 0..5 {
-            assert!(poll_once(&mut behaviour).is_empty());
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(resolver.calls(), vec!["slow.example.com".to_owned()]);
-        assert!(!behaviour.is_known_peer(&slow));
-
-        // The worker returns. Its late result is not stored, and only then does the next lookup start.
-        resolver.release();
         let finished = drain(&mut behaviour);
         assert_eq!(finished, vec![("next.example.com".to_owned(), None)]);
         assert_eq!(resolver.calls(), vec![
             "slow.example.com".to_owned(),
             "next.example.com".to_owned()
         ]);
+        // The abandoned lookup was dropped with its future: it is no longer running, and it never stores anything,
+        // not even when the table could have answered later.
+        wait_for(|| resolver.active.load(Ordering::SeqCst) == 0);
+        resolver.release();
+        std::thread::sleep(Duration::from_millis(50));
         assert!(!behaviour.is_known_peer(&slow));
         assert!(behaviour.request_response.addresses_of_peer(&slow).is_empty());
         assert!(behaviour.is_known_peer(&next));
@@ -1927,7 +2268,7 @@ mod hostname_tests {
         )])]);
         assert!(!behaviour.lookups.is_idle());
         drain(&mut behaviour);
-        // The lookup, its timer and its worker handle are gone with the last name.
+        // The lookup, its timer and its task handle are gone with the last name.
         assert!(behaviour.lookups.is_idle());
         assert!(poll_once(&mut behaviour).is_empty());
         assert!(behaviour.lookups.is_idle());
@@ -1940,7 +2281,7 @@ mod hostname_tests {
     }
 
     /// `PeersExchange::poll_hostname_lookups` starts a name queued by the same poll, and the waker it registered is
-    /// woken when the worker returns.
+    /// woken when the lookup returns.
     #[test]
     fn test_name_queued_in_a_poll_starts_in_that_poll_and_wakes_the_task() {
         let rt = runtime();
@@ -2073,7 +2414,8 @@ mod hostname_tests {
             "216.58.210.1"
         )]);
         assert!(!behaviour.is_known_peer(&other));
-        assert_eq!(behaviour.skipped_addresses.reported.len(), 2);
+        assert_eq!(behaviour.skipped_addresses.counts.dns, 2);
+        assert_eq!(behaviour.skipped_addresses.counts.ip4_not_global, 1);
     }
 }
 

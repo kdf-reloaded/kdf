@@ -19,6 +19,7 @@ categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 futures = "0.3.28"
+futures-timer = "3.0"
 libp2p-core = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
 thiserror = "1.0"
 yamux013 = { version = "0.13.1", package = "yamux" }

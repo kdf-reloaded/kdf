@@ -1,6 +1,7 @@
 use super::check_balance::CheckBalanceError;
 use super::{maker_swap_trade_preimage, taker_swap_trade_preimage, MakerTradePreimage, TakerTradePreimage};
-use crate::mm2::lp_ordermatch::{MakerOrderBuildError, SpendSafetyError, TakerAction, TakerOrderBuildError};
+use crate::mm2::lp_ordermatch::{MakerOrderBuildError, SpendSafetyError, SwapKeyMismatch, TakerAction,
+                                TakerOrderBuildError};
 use coins::request_fee_scope::with_request_fee_scope;
 use coins::{is_wallet_only_ticker, lp_coinfind_or_err, BalanceError, CoinFindError, FeeCapBelowBaseFee, TradeFee,
             TradePreimageError};
@@ -237,6 +238,9 @@ pub enum TradePreimageRpcError {
     BaseEqualRel,
     #[display(fmt = "Trading is not supported for coin {}", coin)]
     TradingNotSupported { coin: String },
+    /// The coin's swap key is not the key it pays from under a global-HD login (CRD ch.05 R36, R38).
+    #[display(fmt = "{} cannot be swapped under this login: {}", coin, reason)]
+    SwapKeyMismatch { coin: String, reason: String },
     #[display(fmt = "Incorrect use of the '{}' parameter: {}", param, reason)]
     InvalidParam { param: String, reason: String },
     #[display(fmt = "Price {} is too low, required at least {}", price, threshold)]
@@ -260,12 +264,22 @@ impl HttpStatusCode for TradePreimageRpcError {
             | TradePreimageRpcError::CoinIsWalletOnly { .. }
             | TradePreimageRpcError::BaseEqualRel
             | TradePreimageRpcError::TradingNotSupported { .. }
+            | TradePreimageRpcError::SwapKeyMismatch { .. }
             | TradePreimageRpcError::InvalidParam { .. }
             | TradePreimageRpcError::PriceTooLow { .. } => StatusCode::BAD_REQUEST,
             // Like `Transport`: a node's verdict on a fee the daemon chose, not a fault of the request.
             TradePreimageRpcError::Transport(_)
             | TradePreimageRpcError::FeeCapBelowBaseFee(_)
             | TradePreimageRpcError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl From<SwapKeyMismatch> for TradePreimageRpcError {
+    fn from(mismatch: SwapKeyMismatch) -> Self {
+        TradePreimageRpcError::SwapKeyMismatch {
+            coin: mismatch.coin,
+            reason: mismatch.reason,
         }
     }
 }
@@ -510,5 +524,111 @@ mod tests {
         );
         assert!(matches!(&rpc, TradePreimageRpcError::TradingNotSupported { coin } if coin == "SOL"));
         assert_eq!(rpc.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    /// CRD ch.05 §5.12B T15: `trade_preimage` reports a pair whose swap key is not the key its coin pays from. What
+    /// each coin family reports is pinned in the `coins` crate; here `TestCoin` reports it.
+    mod swap_key_mismatch {
+        use super::*;
+        use coins::{CoinsContext, MarketCoinOps, MmCoinEnum, SwapKeyDisagreement, SwapOps, TestCoin};
+        use common::block_on;
+        use crypto::CryptoCtx;
+        use mm2_core::mm_ctx::MmCtxBuilder;
+        use mocktopus::mocking::*;
+        use serde_json::json;
+
+        const EVM_REASON: &str = r#"an EVM coin under an HD login ("enable_hd") pays from another key than the one its swaps announce; trade it under a login without "enable_hd""#;
+
+        fn mock_coins() {
+            TestCoin::swap_key_disagreement.mock_safe(|coin, _node_pubkey| {
+                MockResult::Return(match coin.ticker() {
+                    "ETH" => Some(SwapKeyDisagreement::EvmSigner),
+                    "RINX" => Some(SwapKeyDisagreement::HdAddress {
+                        activated_path: "m/44'/141'/0'/0/1".to_owned(),
+                        paying_path: "m/44'/141'/0'/0/0".to_owned(),
+                    }),
+                    _ => None,
+                })
+            });
+            TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(MmNumber::from("0.00000001")));
+        }
+
+        fn ctx_with(conf: serde_json::Value, hd: bool, tickers: &[&str]) -> MmArc {
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            if hd {
+                CryptoCtx::init_with_global_hd_account(
+                    ctx.clone(),
+                    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                )
+                .unwrap();
+            } else {
+                CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "an iguana passphrase of the test").unwrap();
+            }
+            let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+            for ticker in tickers {
+                block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+            }
+            ctx
+        }
+
+        fn request(base: &str, rel: &str, method: &str) -> TradePreimageRequest {
+            serde_json::from_value(json!({
+                "base": base, "rel": rel, "swap_method": method, "price": "1", "volume": "1"
+            }))
+            .unwrap()
+        }
+
+        /// `SwapKeyMismatch` with the coin and the reason as its data and the same text as its message, for the
+        /// maker and for both taker forms; reason 3 writes both full paths.
+        #[test]
+        fn t15_trade_preimage_answers_swap_key_mismatch() {
+            mock_coins();
+            let ctx = ctx_with(json!({}), true, &["ETH", "KMD", "RINX"]);
+            for method in ["setprice", "buy", "sell"] {
+                let err = match block_on(trade_preimage_rpc(ctx.clone(), request("ETH", "KMD", method))) {
+                    Err(e) => e.into_inner(),
+                    Ok(_) => panic!("{method} must be refused"),
+                };
+                assert!(
+                    matches!(&err, TradePreimageRpcError::SwapKeyMismatch { coin, reason } if coin == "ETH" && reason == EVM_REASON),
+                    "{method}: {err}"
+                );
+                assert_eq!(
+                    err.to_string(),
+                    format!("ETH cannot be swapped under this login: {EVM_REASON}")
+                );
+                assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+                let wire = serde_json::to_value(&err).unwrap();
+                assert_eq!(wire["error_type"], "SwapKeyMismatch");
+                assert_eq!(wire["error_data"], json!({ "coin": "ETH", "reason": EVM_REASON }));
+            }
+
+            let err = match block_on(trade_preimage_rpc(ctx, request("RINX", "KMD", "setprice"))) {
+                Err(e) => e.into_inner(),
+                Ok(_) => panic!("the pair must be refused"),
+            };
+            assert!(err
+                .to_string()
+                .contains("it is activated at m/44'/141'/0'/0/1, but its swaps pay from m/44'/141'/0'/0/0;"));
+        }
+
+        /// T15: under an iguana login the request does not meet the refusal, and neither does one with the
+        /// check switched off (it stops later, at the first thing `TestCoin` cannot answer).
+        #[test]
+        fn t15_an_iguana_login_and_the_switch_pass_the_check() {
+            mock_coins();
+            for (conf, hd) in [(json!({}), false), (json!({ "swap_key_check": false }), true)] {
+                let ctx = ctx_with(conf, hd, &["ETH", "KMD"]);
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    block_on(trade_preimage_rpc(ctx.clone(), request("ETH", "KMD", "setprice")))
+                }));
+                if let Ok(Err(err)) = outcome {
+                    assert!(!matches!(
+                        err.into_inner(),
+                        TradePreimageRpcError::SwapKeyMismatch { .. }
+                    ));
+                }
+            }
+        }
     }
 }

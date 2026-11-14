@@ -5,6 +5,7 @@ use super::*;
 // LP-17: bring alloy `Provider` trait into scope so `RootProvider`'s
 // inherent + trait methods (`client()`, `get_block_number()`, etc.) are
 // callable from the helpers below.
+use crate::eth::eth_logs_window::REORG_MARGIN_BLOCKS;
 use crate::hd_wallet::{HDAccountOps, HDWalletCoinOps, HDWalletOps};
 use crate::node_url::{host_only, scrub_node_url};
 use crate::{CoinWithDerivationMethod, CryptoCtx, KeyPairPolicy};
@@ -100,6 +101,16 @@ impl EthCoinImpl {
         matches!(self.derivation_method, DerivationMethod::HDWallet(_))
             && !self.uses_hardware_signer()
             && self.hardware_derivation_path().is_none()
+    }
+
+    /// The hardware context a hardware-wallet coin was activated with (CRD ch.05 R58a); `None` for a coin that
+    /// does not sign with a hardware wallet.
+    pub fn activation_hardware_context(&self) -> Option<crypto::HardwareWalletArc> {
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+        if let EthSigner::Trezor(signer) = &self.signer {
+            return Some(signer.hw_ctx.clone());
+        }
+        None
     }
 
     /// The derivation path of the enabled address of a hardware-wallet coin.
@@ -425,24 +436,16 @@ impl EthCoinImpl {
         from_block: u64,
         to_block: u64,
     ) -> Box<dyn Future<Item = Vec<Log>, Error = String> + Send> {
-        let contract_event = try_fus!(SWAP_CONTRACT.event("ReceiverSpent"));
-        let filter = FilterBuilder::default()
-            .topics(Some(vec![contract_event.signature()]), None, None, None)
-            .from_block(BlockNumber::Number(from_block))
-            .to_block(BlockNumber::Number(to_block))
-            .address(vec![swap_contract_address])
-            .build();
+        let topic = try_fus!(SWAP_CONTRACT.event("ReceiverSpent")).signature();
 
-        // LP-17: route eth_getLogs through alloy's RpcClient while
-        // keeping the returned `Vec<web3::types::Log>` shape.
-        let provider = self.alloy_provider();
-        let fut = async move {
-            use crate::eth::alloy_compat::assert_send_future;
-            assert_send_future(provider.client().request::<_, Vec<Log>>("eth_getLogs", (filter,)))
-                .await
-                .map_err(|e| ERRL!("{}", e))
-        };
-        Box::new(fut.boxed().compat())
+        // CRD ch.17 R17.8.1: the range is searched in windows of at most `W` blocks.
+        let querier = self.logs_querier();
+        Box::new(
+            querier
+                .get_logs(topic, swap_contract_address, from_block, to_block)
+                .boxed()
+                .compat(),
+        )
     }
 
     /// Gets `SenderRefunded` events from etomic swap smart contract since `from_block`
@@ -452,24 +455,16 @@ impl EthCoinImpl {
         from_block: u64,
         to_block: u64,
     ) -> Box<dyn Future<Item = Vec<Log>, Error = String> + Send> {
-        let contract_event = try_fus!(SWAP_CONTRACT.event("SenderRefunded"));
-        let filter = FilterBuilder::default()
-            .topics(Some(vec![contract_event.signature()]), None, None, None)
-            .from_block(BlockNumber::Number(from_block))
-            .to_block(BlockNumber::Number(to_block))
-            .address(vec![swap_contract_address])
-            .build();
+        let topic = try_fus!(SWAP_CONTRACT.event("SenderRefunded")).signature();
 
-        // LP-17: route eth_getLogs through alloy's RpcClient while
-        // keeping the returned `Vec<web3::types::Log>` shape.
-        let provider = self.alloy_provider();
-        let fut = async move {
-            use crate::eth::alloy_compat::assert_send_future;
-            assert_send_future(provider.client().request::<_, Vec<Log>>("eth_getLogs", (filter,)))
-                .await
-                .map_err(|e| ERRL!("{}", e))
-        };
-        Box::new(fut.boxed().compat())
+        // CRD ch.17 R17.8.1: the range is searched in windows of at most `W` blocks.
+        let querier = self.logs_querier();
+        Box::new(
+            querier
+                .get_logs(topic, swap_contract_address, from_block, to_block)
+                .boxed()
+                .compat(),
+        )
     }
 
     /// Try to parse address from string.
@@ -919,8 +914,10 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
         // defensive early rejection rather than a reachable runtime path.)
         #[cfg(target_arch = "wasm32")]
         if matches!(coin.signer, EthSigner::Metamask(_)) {
-            return MmError::err(WithdrawError::UnsupportedUnderMetamask(
-                "TRON withdraw is not supported under the MetaMask signing policy".to_owned(),
+            return MmError::err(WithdrawError::UnsupportedError(
+                "Unsupported under the MetaMask signing policy: TRON withdraw is not supported under the MetaMask \
+                 signing policy"
+                    .to_owned(),
             ));
         }
         let _ = ctx;
@@ -1630,16 +1627,24 @@ impl EthCoin {
                 )))
             },
         };
+        let gas_limit = gas_limit.unwrap_or_else(|| self.gas_limit.clone());
+        let gas_limit_v2 = gas_limit_v2.unwrap_or_else(|| self.gas_limit_v2.clone());
+        // CRD R57.5.5: the gas limits in effect, once the blocks have been accepted. A block the token lacks is
+        // the platform coin's effective one, so its source is named from the platform coin's entry.
+        log_gas_limits(
+            &ticker,
+            &[&conf, &crate::coin_conf(&ctx, &self.ticker)],
+            &gas_limit,
+            &gas_limit_v2,
+            estimate_gas_mult,
+        );
         Ok(self.erc20_token_from_decimals(
             ticker,
             token_addr,
             required_confirmations,
             decimals,
             custom_token,
-            (
-                gas_limit.unwrap_or_else(|| self.gas_limit.clone()),
-                gas_limit_v2.unwrap_or_else(|| self.gas_limit_v2.clone()),
-            ),
+            (gas_limit, gas_limit_v2),
             estimate_gas_mult,
         ))
     }
@@ -1676,11 +1681,13 @@ impl EthCoin {
             required_confirmations: required_confirmations.into(),
             chain_id: self.chain_id,
             logs_block_range: self.logs_block_range,
+            logs_window: self.logs_window.clone(),
             derivation_method: DerivationMethod::Iguana(self.my_address),
             swap_v2_contracts: self.swap_v2_contracts,
             gas_limit,
             gas_limit_v2,
             estimate_gas_mult,
+            taker_fee_quote_at_limit: self.taker_fee_quote_at_limit,
             tron_api: None,
             nft_swap_v2_contract: self.nft_swap_v2_contract,
             swap_gas_fee_policy: Mutex::new(self.swap_gas_fee_policy()),
@@ -2566,13 +2573,21 @@ impl EthCoin {
         receiver_addr: Address,
         swap_contract_address: Address,
     ) -> EthTxFut {
+        // CRD ch.51 R72A: the contract's `bytes20` slot carries the value derived from the shared `secret_hash`.
+        // `id` is the swap id, computed by the caller over the shared value itself and left as it is.
+        let contract_hash = match contract_secret_hash(secret_hash) {
+            Ok(hash) => hash,
+            Err(e) => {
+                return Box::new(futures01::future::err(TransactionErr::Plain(ERRL!("{}", e))));
+            },
+        };
         match &self.coin_type {
             EthCoinType::Eth => {
                 let function = try_tx_fus!(SWAP_CONTRACT.function("ethPayment"));
                 let data = try_tx_fus!(function.encode_input(&[
                     Token::FixedBytes(id),
                     Token::Address(receiver_addr),
-                    Token::FixedBytes(secret_hash.to_vec()),
+                    Token::FixedBytes(contract_hash.to_vec()),
                     Token::Uint(U256::from(time_lock))
                 ]));
                 self.sign_and_send_transaction(
@@ -2596,7 +2611,7 @@ impl EthCoin {
                     Token::Uint(value),
                     Token::Address(*token_addr),
                     Token::Address(receiver_addr),
-                    Token::FixedBytes(secret_hash.to_vec()),
+                    Token::FixedBytes(contract_hash.to_vec()),
                     Token::Uint(U256::from(time_lock))
                 ]));
 
@@ -2840,11 +2855,10 @@ impl EthCoin {
                         },
                     }
                 },
-                // TRON balance is fetched via the dedicated TRON HTTP API,
-                // not via web3. Activation gating prevents this branch. P10.2.5.
-                EthCoinType::Tron | EthCoinType::Trc20 { .. } => MmError::err(BalanceError::Internal(
-                    "TRON balance lookup not yet wired (pending P10.2.5)".to_owned(),
-                )),
+                // TRON balance is fetched via the dedicated TRON HTTP API, not via web3.
+                EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
+                    crate::eth::tron::balance::coin_balance_units(&coin).await
+                },
             }
         };
         Box::new(fut.boxed().compat())
@@ -3037,24 +3051,16 @@ impl EthCoin {
         from_block: u64,
         to_block: u64,
     ) -> Box<dyn Future<Item = Vec<Log>, Error = String> + Send> {
-        let contract_event = try_fus!(SWAP_CONTRACT.event("PaymentSent"));
-        let filter = FilterBuilder::default()
-            .topics(Some(vec![contract_event.signature()]), None, None, None)
-            .from_block(BlockNumber::Number(from_block))
-            .to_block(BlockNumber::Number(to_block))
-            .address(vec![swap_contract_address])
-            .build();
+        let topic = try_fus!(SWAP_CONTRACT.event("PaymentSent")).signature();
 
-        // LP-17: route eth_getLogs through alloy's RpcClient while
-        // keeping the returned `Vec<web3::types::Log>` shape.
-        let provider = self.alloy_provider();
-        let fut = async move {
-            use crate::eth::alloy_compat::assert_send_future;
-            assert_send_future(provider.client().request::<_, Vec<Log>>("eth_getLogs", (filter,)))
-                .await
-                .map_err(|e| ERRL!("{}", e))
-        };
-        Box::new(fut.boxed().compat())
+        // CRD ch.17 R17.8.1: the range is searched in windows of at most `W` blocks.
+        let querier = self.logs_querier();
+        Box::new(
+            querier
+                .get_logs(topic, swap_contract_address, from_block, to_block)
+                .boxed()
+                .compat(),
+        )
     }
 
     /// Returns events from `from_block` to `to_block` (or latest if None) for a given contract and event.
@@ -3066,21 +3072,21 @@ impl EthCoin {
         to_block: Option<u64>,
         swap_contract: &Contract,
     ) -> MmResult<Vec<Log>, FindPaymentSpendError> {
-        let contract_event = swap_contract.event(event_name)?;
-        let mut filter_builder = FilterBuilder::default()
-            .topics(Some(vec![contract_event.signature()]), None, None, None)
-            .from_block(BlockNumber::Number(from_block))
-            .address(vec![swap_contract_address]);
-        if let Some(block) = to_block {
-            filter_builder = filter_builder.to_block(BlockNumber::Number(block));
-        }
-        let filter = filter_builder.build();
-        // LP-17: alloy raw RPC for eth_getLogs; web3 Log shape kept.
-        use crate::eth::alloy_compat::assert_send_future;
-        let provider = self.alloy_provider();
-        let events_logs = assert_send_future(provider.client().request::<_, Vec<Log>>("eth_getLogs", (filter,)))
+        let topic = swap_contract.event(event_name)?.signature();
+        let to_block = match to_block {
+            Some(block) => block,
+            None => self
+                .current_block()
+                .compat()
+                .await
+                .map_err(FindPaymentSpendError::Transport)?,
+        };
+        // CRD ch.17 R17.8.1: the range is searched in windows of at most `W` blocks.
+        let events_logs = self
+            .logs_querier()
+            .get_logs(topic, swap_contract_address, from_block, to_block)
             .await
-            .map_err(|e| FindPaymentSpendError::Transport(e.to_string()))?;
+            .map_err(FindPaymentSpendError::Transport)?;
         Ok(events_logs)
     }
 
@@ -3135,6 +3141,7 @@ impl EthCoin {
         let selfi = self.clone();
         let secret_hash = secret_hash.to_vec();
         let fut = async move {
+            // The swap id is computed over the shared value, as the sender computed it (ch.51 R72A).
             let swap_id = selfi.etomic_swap_id(time_lock, &secret_hash);
             let status = try_s!(
                 selfi
@@ -3214,13 +3221,8 @@ impl EthCoin {
                         );
                     }
 
-                    if decoded[2] != Token::FixedBytes(secret_hash.to_vec()) {
-                        return ERR!(
-                            "Payment tx secret_hash arg {:?} is invalid, expected {:?}",
-                            decoded[2],
-                            Token::FixedBytes(secret_hash.to_vec())
-                        );
-                    }
+                    // CRD ch.51 R72A: compared against the value derived from the shared `secret_hash`.
+                    check_payment_secret_hash_arg(&decoded[2], &secret_hash)?;
 
                     if decoded[3] != Token::Uint(U256::from(time_lock)) {
                         return ERR!(
@@ -3272,13 +3274,8 @@ impl EthCoin {
                         );
                     }
 
-                    if decoded[4] != Token::FixedBytes(secret_hash.to_vec()) {
-                        return ERR!(
-                            "Payment tx secret_hash arg {:?} is invalid, expected {:?}",
-                            decoded[4],
-                            Token::FixedBytes(secret_hash.to_vec())
-                        );
-                    }
+                    // CRD ch.51 R72A: compared against the value derived from the shared `secret_hash`.
+                    check_payment_secret_hash_arg(&decoded[4], &secret_hash)?;
 
                     if decoded[5] != Token::Uint(U256::from(time_lock)) {
                         return ERR!(
@@ -3357,20 +3354,45 @@ impl EthCoin {
         use crate::eth::alloy_compat::assert_send_future;
         use alloy::providers::Provider;
 
+        // CRD ch.17 R17.8.3a: the blocks scanned for this payment are remembered for the session, and a call scans
+        // the unscanned blocks from the tip downwards, so a late spend or refund near the tip is found within the
+        // first few windows and a call cut short by its caller's budget loses no progress.
+        let key: PaymentKey = (swap_contract_address, id);
         let mut current_block = try_s!(assert_send_future(self.current_block().compat()).await);
-        if current_block < search_from_block {
-            current_block = search_from_block;
+        let payment_block = match self.logs_window.receipt_block(&key) {
+            Some(block) => Some(block),
+            None => {
+                // The spend cannot precede the payment: the search ends at the payment's block when it is known.
+                let block = self.payment_receipt_block(&tx).await;
+                if let Some(block) = block {
+                    self.logs_window.set_receipt_block(&key, block);
+                }
+                block
+            },
+        };
+        // The low end is 12 blocks below the receipt block: a reorganization that moves the payment into an earlier
+        // block cannot put the spend below it.
+        let lowest_block = payment_block.map_or(search_from_block, |block| {
+            search_from_block.max(block.saturating_sub(REORG_MARGIN_BLOCKS))
+        });
+        if current_block < lowest_block {
+            current_block = lowest_block;
         }
 
-        let mut from_block = search_from_block;
-
-        loop {
-            let to_block = current_block.min(from_block + self.logs_block_range);
+        let mut window_top = current_block;
+        while let Some((unscanned_from, unscanned_to)) =
+            self.logs_window.highest_unscanned(&key, lowest_block, window_top)
+        {
+            // The window is the newest `W` blocks of the unscanned run; `W` is read afresh for every window.
+            let to_block = unscanned_to;
+            let from_block = unscanned_from.max(to_block.saturating_add(1).saturating_sub(self.logs_window()));
 
             let spend_events = try_s!(
                 assert_send_future(self.spend_events(swap_contract_address, from_block, to_block).compat()).await
             );
-            let found = spend_events.iter().find(|event| &event.data.0[..32] == id.as_slice());
+            let found = spend_events
+                .iter()
+                .find(|event| &event.data.0[..32] == key.1.as_slice());
 
             if let Some(event) = found {
                 match event.transaction_hash {
@@ -3407,7 +3429,9 @@ impl EthCoin {
             let refund_events = try_s!(
                 assert_send_future(self.refund_events(swap_contract_address, from_block, to_block).compat()).await
             );
-            let found = refund_events.iter().find(|event| &event.data.0[..32] == id.as_slice());
+            let found = refund_events
+                .iter()
+                .find(|event| &event.data.0[..32] == key.1.as_slice());
 
             if let Some(event) = found {
                 match event.transaction_hash {
@@ -3433,12 +3457,20 @@ impl EthCoin {
                 }
             }
 
-            if to_block >= current_block {
-                break;
+            // Recorded only now, after both queries answered and found nothing: a window whose event was found
+            // is scanned again by the next call, so that a failure to fetch the transaction loses nothing. The
+            // record is done window by window, so a future dropped by the caller's budget keeps its progress.
+            self.logs_window.mark_scanned(&key, from_block, to_block, current_block);
+            match from_block.checked_sub(1) {
+                Some(below) => window_top = below,
+                None => break,
             }
-            from_block = to_block;
         }
 
+        // The whole range down to the low end is scanned and holds no spend or refund. A node that lagged behind
+        // the tip may have answered a window above its head as empty (the tip and the logs can come from
+        // different nodes), so the record is dropped: the next call scans the range again, newest first.
+        self.logs_window.forget_scanned(&key);
         Ok(None)
     }
 
@@ -3616,6 +3648,16 @@ pub fn addr_from_raw_pubkey(pubkey: &[u8]) -> Result<Address, String> {
     let pubkey = try_s!(PublicKey::from_slice(pubkey).map_err(|e| ERRL!("{:?}", e)));
     let eth_public = Public::from_slice(&pubkey.serialize_uncompressed()[1..65]);
     Ok(public_to_address(&eth_public))
+}
+
+/// The compressed SEC1 form of an EVM signer's `X || Y` public key: the parity of `Y` selects the prefix. The
+/// legacy swap wire carries a secp256k1 key in this form (CRD ch.51 R63).
+pub(crate) fn compressed_secp256k1_public(public: &Public) -> [u8; 33] {
+    let xy: &[u8] = public.as_ref();
+    let mut compressed = [0u8; 33];
+    compressed[0] = 0x02 | (xy[63] & 1);
+    compressed[1..].copy_from_slice(&xy[..32]);
+    compressed
 }
 
 pub fn addr_from_pubkey_str(pubkey: &str) -> Result<String, String> {
@@ -3985,6 +4027,41 @@ pub(crate) struct PendingNonce {
     pub(crate) nodes: Vec<Web3Instance>,
 }
 
+/// How many rounds `pending_nonce_from_nodes` makes before the request fails: the first one and five repeats.
+const NONCE_ROUNDS: u32 = 6;
+
+/// The level and the text of the log line of a node that failed the pending-nonce request `e` for `addr` in round
+/// `round` (1-based, of `NONCE_ROUNDS`) (CRD ch.35 R35.1.12). `node_line(before, after)` builds the node's R35.1.16
+/// line around the two texts, or gives `None` when the node cannot be named. A failure that costs the send nothing
+/// is a warning: either another node answered in the round, or no node did and the round will be repeated. Only a
+/// failure in the last round, when no node answered and the request fails, is an error.
+pub(crate) fn nonce_failure_log(
+    e: &str,
+    addr: Address,
+    round_answered: bool,
+    round: u32,
+    node_line: impl Fn(&str, &str) -> Option<String>,
+) -> (common::log::log_crate::Level, String) {
+    use common::log::log_crate::Level;
+    let warn_with = |suffix: String| {
+        let before = format!("Nonce request for addr {addr:?} failed ({e}) on node ");
+        let line = node_line(&before, &suffix)
+            .unwrap_or_else(|| format!("Nonce request for addr {addr:?} failed ({e}){suffix}"));
+        (Level::Warn, line)
+    };
+    if round_answered {
+        warn_with("; another node answered".to_owned())
+    } else if round < NONCE_ROUNDS {
+        warn_with(format!(
+            "; no node answered, retrying (round {round} of {NONCE_ROUNDS})"
+        ))
+    } else {
+        let before = format!("Error {e} when getting nonce for addr {addr:?} from node ");
+        let line = node_line(&before, "").unwrap_or_else(|| format!("Error {e} when getting nonce for addr {addr:?}"));
+        (Level::Error, line)
+    }
+}
+
 /// Requests the pending nonce of `addr` from every node concurrently and returns the highest one together with
 /// the nodes that reported it (CRD ch.35 R35.1.12 step 1). A node that fails is logged and ignored. When no
 /// node answers, the round is repeated after `round_interval_s`, up to five more times, before the request
@@ -3994,6 +4071,7 @@ pub(crate) async fn pending_nonce_from_nodes(
     web3s: &[Web3Instance],
     round_interval_s: f64,
 ) -> Result<PendingNonce, String> {
+    // The rounds in which no node answered so far; the round being made is the next one.
     let mut errors: u32 = 0;
     loop {
         let futures: Vec<_> = web3s
@@ -4022,6 +4100,8 @@ pub(crate) async fn pending_nonce_from_nodes(
             .collect();
 
         let mut best: Option<PendingNonce> = None;
+        // The failing nodes are logged after the round, when it is known whether another node answered.
+        let mut failed: Vec<(&Web3Instance, String)> = Vec::new();
         for (web3, answer) in web3s.iter().zip(join_all(futures).await) {
             match answer {
                 Ok(n) => match best.as_mut() {
@@ -4034,18 +4114,17 @@ pub(crate) async fn pending_nonce_from_nodes(
                         })
                     },
                 },
-                Err(e) => {
-                    // R35.1.16: the failing node is named, with the coin's ticker and the node's list position.
-                    let node_line = crate::eth::alloy_compat::provider::direct_node_line(
-                        &web3.web3,
-                        &format!("Error {e} when getting nonce for addr {addr:?} from node "),
-                        "",
-                    );
-                    match node_line {
-                        Some(line) => log!((line)),
-                        None => log!("Error " (e) " when getting nonce for addr " [addr]),
-                    }
-                },
+                Err(e) => failed.push((web3, e)),
+            }
+        }
+        for (web3, e) in failed {
+            // R35.1.16: the failing node is named, with the coin's ticker and the node's list position.
+            let (level, text) = nonce_failure_log(&e, addr, best.is_some(), errors + 1, |before, after| {
+                crate::eth::alloy_compat::provider::direct_node_line(&web3.web3, before, after)
+            });
+            match level {
+                common::log::log_crate::Level::Warn => common::log::warn!("{text}"),
+                _ => error!("{text}"),
             }
         }
         if let Some(best) = best {
@@ -4053,7 +4132,7 @@ pub(crate) async fn pending_nonce_from_nodes(
         }
         // all requests errored
         errors += 1;
-        if errors > 5 {
+        if errors >= NONCE_ROUNDS {
             return ERR!("Couldn't get nonce after 5 errored attempts, aborting");
         }
         Timer::sleep(round_interval_s).await

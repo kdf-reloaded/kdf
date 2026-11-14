@@ -174,6 +174,23 @@ reference version at all. A malformed value in any of these five fields shall
 **not** fail activation; the field is then treated as absent. When well-formed,
 `tx_history` and the gas-station fields shall have the documented effect.
 
+> **TRON platform in the `ticker` row (pointer added 2026-11-07).** That the
+> reference serves a TRX platform and its TRC20 tokens through this method and
+> the `task::enable_eth::*` family, and refuses them on the legacy methods, is
+> recorded in [Chapter 21](21-tron-integration.md) §21.4's reference-behavior
+> note, which passed the KDF Dirty Gate on 2026-11-07. In this repository the row is a
+> target: Reloaded's implementation of this method does not accept the TRON
+> platform protocol today, and TRX/TRC20 are reachable only through the legacy
+> methods, behind the availability constant
+> ([Chapter 55](55-coin-activation-wire-contract.md) D55.5).
+
+> **GasFree provider binding (pointer, 2026-11-08).** The optional
+> `tron_gasless_provider` object on this request and its task form,
+> and the optional `gasless` object on the TRC20 token-activation
+> requests -- valid for TRON platforms only and rejected elsewhere --
+> are bound by [Chapter 63](63-tron-gasfree-fee-delegation.md)
+> §63.3.1–§63.3.2 (passed the KDF Dirty Gate on 2026-11-08).
+
 ### 35.1.B Activation flow and failure precedence
 
 R35.1.2 Activation shall proceed through the following phases, and when a
@@ -524,6 +541,14 @@ next node:
 A request whose first node answers is not retried anywhere else; a subset of
 failing nodes is not an error (R35.1.2 last paragraph).
 
+*(Added 2026-11-08.)* *Reloaded divergence (D35.11):* a node whose cutoff
+elapses is still listened to after the request has moved on; see the note
+after R35.1.10.
+
+*(Added 2026-11-02.)* The hostname of a node URL is resolved through the
+node's resolver (chapter 45 §45.6B). A failed lookup is a node failure of the
+first kind above.
+
 R35.1.9 **Sticky last-good node (G, both rows).** When a node answers, the
 list shall be **rotated** so that the answering node becomes first: the nodes
 that failed before it in this request move to the tail in their previous
@@ -551,6 +576,35 @@ to about *N* × 10 s before R35.1.11 applies (item (d)).
 > snapshot, the last store winning; the stored order is therefore always a
 > complete permutation of the nodes, and a node reaches the front only by
 > answering. No lock guarding the order is held while a node is being asked.
+
+> **Reloaded divergence (D35.11, maintainer decision 2026-11-08): a node that
+> hits the cutoff is kept listening.** In Reloaded the 10-second cutoff is the
+> point at which the request *moves on* to the next node, as R35.1.8 says; it
+> is not the point at which the exchange is given up. The exchange of a node
+> that has not answered by then keeps running until **30 seconds from its own
+> start** (the lower-layer bound named in R35.1.10), and the request keeps it.
+> While the request waits for the node it asked last, and after it has asked
+> the last node, the first decodable, successful answer from **any** node it
+> has already asked ends the request. That node is the answering node of
+> R35.1.9: the nodes before it in the walk move to the tail in their previous
+> relative order, the nodes after it keep their order behind it, stored with
+> the last-store-wins rule of the Informative note above. After the last node
+> the request waits for the exchanges that are left, until each has answered,
+> failed or reached its 30-second bound. **Nothing is sent twice:** no node is
+> asked again and no new request is created; the request only stops throwing
+> away an answer it has already asked for, so the load on a rate-limited host
+> does not grow. The all-failed error of R35.1.11 keeps its form, with each
+> node counted by its final outcome: a failure a kept exchange returns late is
+> that node's failure, a kept exchange that reaches its bound counts as a
+> cutoff, the nodes are taken in the order they were asked, and a request on
+> which every node ran out keeps the "nodes unreachable" text. The worst case
+> of a request over *N* nodes becomes about (*N* − 1) × 10 s + 30 s instead of
+> *N* × 10 s (two nodes: 40 s instead of 20 s). A transport that talks to one
+> node, with or without failover (R35.1.12 steps 1 and 2 and a one-node
+> `nodes` list), has no later node to move on to and is unchanged: its
+> exchange ends at its own bound. The change is not peer-visible: it changes
+> only which RPC node's answer is used and how long a request may take, so it
+> carries no switch. D35.11 records the decision and the options not taken.
 
 R35.1.11 **All nodes failed (G, both rows).** When every node fails the caller
 shall receive a single error that is:
@@ -608,6 +662,30 @@ coin signs itself (swap payments, spends, refunds, approvals, `withdraw`) is
 3. **Wait.** After acceptance the sender polls step 1 every second until the
    reported pending nonce exceeds the one it used; this wait has no bound in
    the reference (a `Code-quality finding` is recorded below).
+
+> **As built (Reloaded; 2026-11-07; updated 2026-11-08).** The log level and the
+> wording of a failing node's line in step 1 are decided after the round, from
+> whether a node answered and, if none did, from the number of the round. The
+> failures of a round are collected during the round and logged after it. There
+> are three forms, each in the R35.1.16 form (ticker, host, "(node *i* of *n*)")
+> and each, for a node that cannot be named, without the node part:
+>
+> - another node answered in the round: a **warn** line, `[<ticker>] Nonce
+>   request for addr <address> failed (<failure>) on node <host> (node <i> of
+>   <n>); another node answered`, which does not read as an error, whatever the
+>   round;
+> - no node answered and the round will be repeated (it is one of the first
+>   five of the six rounds): a **warn** line, `[<ticker>] Nonce request for addr
+>   <address> failed (<failure>) on node <host> (node <i> of <n>); no node
+>   answered, retrying (round <k> of 6)`, because a later round can still
+>   succeed and the send then goes through;
+> - no node answered in the last round, so the request fails: an **error**
+>   line, `[<ticker>] Error <failure> when getting nonce for addr <address> from
+>   node <host> (node <i> of <n>)`.
+>
+> The retries, the number of rounds, the pause between them and the choice of
+> the nonce do not change. A log line is not peer-visible, so nothing here is
+> bound against the reference.
 
 A caller-supplied raw transaction submitted through the `send_raw_transaction`
 RPC is **not** a signed-by-the-coin send: it is broadcast through R35.1.8, so a
@@ -677,6 +755,16 @@ URL carries a provider API key just as a node URL does (Reloaded;
 clean-room original; maintainer decision 2026-10-26; no switch, for the same
 reason). This sentence binds only Reloaded's own texts and states nothing
 about the reference's.
+
+> **As built (Reloaded; 2026-11-07): one node.** The all-failed error of
+> R35.1.11 for a transport with exactly one node -- a node reached on its own
+> (R35.1.12) or a failover transport configured with a single node -- names
+> that node's transport-class failure as `<host>: <failure>`, for example
+> `https://rpc.example.org: HTTP 429 Too Many Requests`, without the "all EVM
+> nodes failed:" prefix, because one node is not "all". With two or more nodes
+> the text is unchanged. The JSON-RPC error form of R35.1.15 and the text of a
+> request on which every node hit the cutoff keep their wording. The host-only
+> naming and the scrubbing of this rule apply as before.
 
 > **Pointer (2026-10-28).** The maintainer decision of 2026-10-26 extends
 > host-only naming to every node family. The host-only form defined above is
@@ -828,8 +916,10 @@ weaken security. It is recorded in `docs/GLEEC_COMPATIBILITY.md` with
 > its own time bound was reached, an answer arrived and was discarded, or it
 > failed. A failure is named only by its kind, never by its error text,
 > because the transport's error text carries the full URL. The line used to
-> name nothing. This is the usual trace of an EVM node that hit the failover
+> name nothing. This was the usual trace of an EVM node that hit the failover
 > cutoff, since the transport's own line for that attempt is at debug level.
+> Since D35.11 the line appears for such a node only when the request ended,
+> or was dropped, while the node's exchange was still being kept.
 > The `mm2_net` tests check the line for a URL carrying userinfo, a key in the
 > path and a token in the query.
 >
@@ -844,6 +934,21 @@ weaken security. It is recorded in `docs/GLEEC_COMPATIBILITY.md` with
 > notifier's URL carries its bot token, though no caller shows its errors
 > today. The tests use a URL carrying userinfo, a key in the path and a token
 > in the query, plus a Telegram-shaped URL.
+>
+> *Other spellings of the URL (2026-11-03, PR #218).* A lower layer may repeat
+> the request URL in another spelling than the configured one; a browser does.
+> Such copies are now covered as well. The userinfo and the path-and-query are
+> also removed in their percent-encoded spelling, in either hex case and in any
+> mix of encoded and literal characters. Every `http`, `https`, `ws` or `wss`
+> URL in the text whose host equals the node's host, in any letter case, is
+> replaced by its own host-only form: the scheme, host and port as the lower
+> layer wrote them. A default port added or dropped and a trailing slash are
+> therefore covered too. If such a URL has no usable host-only form, the node's
+> configured one is used. Sentence punctuation after the URL (`.`, `:`, `!`,
+> `?`) stays in the text, and a URL of another host is kept. `mm2_net` now also
+> builds on its own for `wasm32-unknown-unknown`; it lacked five `web-sys`
+> features. The `mm2_net` tests cover each spelling. The wasm-target test
+> compiles but has not run, because the build host has no browser driver.
 
 ---
 
@@ -1289,7 +1394,8 @@ The same enum is accepted as the optional `swap_gas_fee_policy` field of
 
 R35.6.4 These RPCs apply only to EVM-family coins (coins whose swaps price gas via
 the EIP-1559 / legacy gas model). A request for a coin that does not support the
-policy shall be rejected.
+policy shall be rejected. *(Extended to Tendermint platform coins by R35.6.8, gated
+text, passed the KDF Dirty Gate on 2026-11-08.)*
 
 R35.6.5 `error_type` discriminants and HTTP status shall include at least:
 
@@ -1372,6 +1478,116 @@ parameter exists on the legacy route too; its wire placement there is
 > establishing §35.6A -- a stored policy with no reader in the path the rule
 > says it governs. Finding is in this repository's own code, not in any
 > reference material.)*
+
+### 35.6.1 Tendermint extension of the fee-policy RPCs (gated text; passed the KDF Dirty Gate on 2026-11-08)
+
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-08, measure 0.03**
+> (chapter 01 R40; attestation in the Provenance Footer). This subsection was
+> written by the dirty-side specification author on 2026-11-08 (Spec Reader
+> round 0.4.0-11) from the reference state `tendermint-priority-fee (as of
+> 2025-07-24)` compared against its base `dev (as of 2025-07-18)`, with the
+> released rows `v2.6.0-beta` and `v3.0.0-beta` read for the method names and
+> the accepted coin families only (all rows of chapter 02 §2.15A), and from
+> this repository's own tree. The reference state is an unmerged,
+> never-approved draft that no released designation carries; the maintainer
+> decided on 2026-11-08 (decision FN (a)) to include the feature.
+
+> **Name history (behavior fact, for the parity decision).** At the draft
+> row and its base the reference exposed this RPC pair under the method
+> strings `get_swap_transaction_fee_policy` and
+> `set_swap_transaction_fee_policy`, with the set-request member
+> `swap_tx_fee_policy` and a **five**-value policy enum — `Unsupported`,
+> `Internal`, `Low`, `Medium`, `High` — of which the draft maps `Low`,
+> `Medium` and `High` to the low, average and high levels of a Tendermint
+> coin and both `Unsupported` and `Internal` to its default price, with
+> `Internal` as a Tendermint coin's initial value. At both released rows the
+> pair carries the names and the four-value enum this section already binds
+> (R35.6.1–R35.6.3) and accepts EVM platform coins **only**. No released
+> reference therefore ever exposed a Tendermint arm under either naming, so
+> Reloaded keeps the naming of R35.6.1–R35.6.3 and the only parity question
+> is the mapping of R35.6.8 (D35.12).
+
+R35.6.8 *Tendermint platform coins are accepted.* `get_swap_gas_fee_policy`
+and `set_swap_gas_fee_policy` shall also accept a **Tendermint platform
+coin** (`TENDERMINT` protocol, [Chapter 36](36-tendermint-v2-activation-rpcs.md)).
+The policy value is the enum of R35.6.3, held per activated platform coin
+in the same way as for an EVM coin, echoed by `set` and returned by `get`.
+For a Tendermint coin the values mean, in the terms of chapter 36 R36.3.5
+and [Chapter 18](18-tendermint-ibc-htlc.md) R18.6B.1 item 3:
+
+| Policy value | Selected gas price for swap transactions |
+| --- | --- |
+| `Legacy` | the coin's default gas price (`gas_price` of `protocol_data`, else the built-in default) — the initial policy of every Tendermint coin |
+| `Low` | position 0 (low) of `priority_gas_prices` |
+| `Medium` | position 1 (average) of `priority_gas_prices` |
+| `High` | position 2 (high) of `priority_gas_prices` |
+
+A coin without `priority_gas_prices` selects its default gas price under
+every value (chapter 36 R36.3.5 item 3) — see R35.6.9 item 2 for what the
+RPCs then do. The initial policy is `Legacy`: no activation parameter and no
+coin-configuration key sets a Tendermint coin's initial policy at the draft
+row (unlike the EVM precedence of R35.6.7), and this section binds none
+(D35.12 item (iii)). The policy governs the swap transactions and trade-fee
+simulations listed in chapter 18 R18.6B.4 and **never** a withdraw, IBC or
+staking transaction (chapter 18 R18.6B.1 items 1, 2 and 4). A Tendermint
+**token** has no policy of its own: its swap transactions are priced by its
+platform coin's policy (chapter 18 R18.6B.1, last sentence).
+
+R35.6.9 *Error cases and non-cases.* Beyond R35.6.5:
+
+1. a Tendermint **token** ticker on either RPC is `NotSupported` (HTTP 400),
+   as at the draft row; the caller addresses the platform coin;
+2. a Tendermint platform coin **without** `priority_gas_prices`: at the
+   draft row both RPCs succeed and the stored policy has no observable
+   effect. Reloaded's behavior is D35.12 item (i); until it is decided,
+   `get` returns the stored value and `set` of a non-`Legacy` value shall be
+   refused with `NotSupported` (HTTP 400), so that a caller is told the
+   coin cannot honor a level rather than silently priced at the default —
+   the recommended option;
+3. an unknown coin is `NoSuchCoin` (400) and a policy string outside the
+   four values is the request-parse failure of R35.1.1 (`InvalidRequest`),
+   both as for an EVM coin;
+4. every other coin family remains `NotSupported` (R35.6.4).
+
+*Reloaded status (2026-11-09):* by the maintainer's decision of 2026-11-09
+(D35.12 item (i), option (c)) Reloaded accepts `set` of any value on a
+Tendermint platform coin without `priority_gas_prices`, stores it, returns it
+from `get`, logs one warning that the coin cannot honor the level, and prices
+at the default; the interim sentence of item 2 records the state before that
+decision.
+
+> **Reloaded status (informative; this repository's tree, 2026-11-08).**
+> Reloaded's two RPCs resolve the ticker to an EVM coin and answer
+> `NotSupported` for everything else, including a Tendermint platform coin;
+> the Tendermint coin holds no policy and its swap transactions are priced
+> at the default gas price (chapter 18 §18.6B, *Our side*). Implementing
+> R35.6.8 adds a Tendermint arm to both RPCs and a per-coin policy slot;
+> chapter 18 R18.6B.1 item 3 is the consumer.
+
+T35.38 *Tendermint fee-policy round trip (R35.6.8, R35.6.9).* On an
+activated Tendermint platform coin with `priority_gas_prices`:
+`get_swap_gas_fee_policy` returns `Legacy`; `set_swap_gas_fee_policy` with
+`High` returns `High` and `get` then returns `High`; a simulated dex-fee send
+and create-HTLC in that state are priced at position 2 of the array
+(chapter 18 T18.6B.1); a withdraw in the same state is priced at the default
+price. On a Tendermint token ticker both RPCs answer HTTP 400
+`NotSupported`. On a Tendermint platform coin without the array, `set` with
+`Medium` answers HTTP 400 `NotSupported` and `get` returns `Legacy`
+(R35.6.9 item 2, until D35.12 decides otherwise). *(Reloaded-original test
+written to the gated rules.)*
+
+*Reloaded status (2026-11-09):* by the maintainer's decision of 2026-11-09
+(D35.12 item (i), option (c)) the last case is built as: `set` with `Medium`
+returns `Medium`, `get` then returns `Medium`, one warning is logged, and a
+simulated dex-fee send is priced at the default price; the sentence above
+records the state before that decision.
+
+> **As built (2026-11-09; R35.6.8, R35.6.9, T35.38).** A Tendermint platform coin
+> holds a policy slot (`Legacy` at construction; no activation parameter or coins-file key sets it). Both RPCs
+> resolve an EVM coin or a Tendermint platform coin; a Tendermint token ticker is `NotSupported`. The setter
+> stores any of the four values; on a coin without `priority_gas_prices` it logs one warning for every value,
+> `Legacy` included, and the coin prices at the default. The
+> policy feeds only the swap branch of chapter 18 R18.6B.1 item 3.
 
 ---
 
@@ -1942,8 +2158,9 @@ decomposition is the implementer's choice.
   (§35.6A).
 - Node access follows §35.1.F: a node that answers HTTP 200 with a JSON-RPC
   error object is failed over like a dead node (R35.1.8), the answering node
-  is tried first next time (R35.1.9), no node holds a request longer than 10 s
-  (R35.1.10), the all-failed error is the last non-cutoff failure or a generic
+  is tried first next time (R35.1.9), the request moves on from a node after
+  10 s (R35.1.10) and Reloaded keeps that node's exchange for up to 30 s from
+  its start (D35.11), the all-failed error is the last non-cutoff failure or a generic
   unreachable error (R35.1.11), signed transactions are broadcast to the
   highest-nonce nodes concurrently (R35.1.12), and no emitted text names a
   node by more than scheme, host and port (R35.1.14, R35.1.15).
@@ -2093,6 +2310,33 @@ that only checks an internal variant does not satisfy these rules.
   parts; the same holds for the display form of every error the activation
   and a failing request return. A node entry or request that carries no
   secret renders as before. Applies to the TRON client too (ch. 21 §21.9).
+- **T35.37** *A cut-off exchange is kept; the first answer wins (the note
+  after R35.1.10, D35.11).* With stub nodes and a scaled cutoff (the exchange
+  bound is three times it):
+  1. Node one answers 12 s into the request and node two answers HTTP 429 at
+     once: the caller gets node one's answer, and node one is first in the
+     order of the next request. With three nodes where the middle one is slow
+     and the others fail at once, the stored order is the slow node, the node
+     after it, the node before it.
+  2. Node one answers at 15 s, node two (asked at the cutoff) would answer at
+     18 s into the request: node one's answer is used.
+  3. Node one answers at 12 s, node two hangs: the third node is never asked.
+  4. Node one fails at 12 s while node two is being waited for: the wait for
+     node two goes on and its answer is used.
+  5. Every node fails at once: the error text and the timing are as before
+     (no wait for any cutoff), for transport failures and for JSON-RPC errors.
+  6. Every node hangs: the error is the unchanged "nodes unreachable" text and
+     the request ends at (*N* − 1) cutoffs plus the exchange bound; each
+     exchange was given the exchange bound.
+  7. A kept exchange fails late (a transport failure, or a JSON-RPC error)
+     while the last node fails or hangs: the error lists the late failure for
+     that node, not a cutoff, and a late JSON-RPC error is the last non-cutoff
+     failure.
+  8. A transport with one node is unchanged: it gives up at the cutoff and its
+     exchange bound equals the cutoff; an answer after it is not used.
+  9. In every case above each node is asked at most once per request. The
+     cutoff line and the late-answer line name the node in the host-only
+     form of R35.1.14 and R35.1.16 and carry no path, query or credential.
 
 ## 35.8B Foreign-transaction decoding tests (binding)
 
@@ -2277,7 +2521,7 @@ is peer-visible, so none carries a switch.
   object, or which does not decode, is one node failure for the whole batch
   (R35.1.8, item (a)).
 - (iii) **Requests on one coin instance run concurrently**, with the
-  last-store-wins order of the note after R35.1.10. The maintainer approved
+  last-store-wins order of the *Informative* note after R35.1.10. The maintainer approved
   this on a written scenario analysis covering racing requests, flapping
   nodes, lock discipline, connection growth, slow or malicious nodes and the
   signed broadcast. The analysis found no blocked state and no new attack
@@ -2316,6 +2560,56 @@ URL's path is removed even though it is often harmless, because hosted
 providers put the API key there and the dump cannot tell the two apart. The
 change is to the dump's own redaction, not to R35.1.14 or R35.1.17. T35.35
 tests it.
+
+**D35.11** *(Resolved 2026-11-08, maintainer decision.)* *A node that hits the
+cutoff is kept listening.* A request over two nodes failed as "all failed"
+although the first node answered a little after the 10-second cutoff: the
+second node, asked at the cutoff, had answered HTTP 429 at once, and the
+first node's answer then arrived and was thrown away. R35.1.8 and R35.1.10
+(both marked G) bind one node at a time and no deadline beyond about *N* ×
+10 s, so keeping the exchange is a Reloaded divergence. The maintainer chose
+option (A):
+
+- **(A) Keep listening (chosen).** The request moves on at the cutoff, keeps
+  the cut-off exchange for up to 30 s from its start, and accepts the first
+  decodable success from any node already asked; after the last node it waits
+  for the exchanges that are left. Nothing is sent twice. Worst case about
+  (*N* − 1) × 10 s + 30 s. The rule is the note after R35.1.10.
+- **(B) Wait only at the end (not taken).** An earlier node's answer is used
+  only after the last node has failed. It has the same worst case and the same
+  divergence, but is slower whenever the earlier node answers during a later
+  attempt, and is no simpler to build.
+- **(C) No change (not taken).** R35.1.8 and R35.1.10 stay as the reference
+  has them; the field case stays a failed request, and the advice would be to
+  put the less rate-limited node first.
+
+The divergence is not peer-visible, so it has no switch, for the reason given
+in D35.8. Two consequences are accepted. A request that ends while it still
+holds kept exchanges (an earlier node answered, or the caller dropped the
+request) drops them; the native HTTP task of such an exchange ends at its own
+bound, 1 s past the 30 s, so a node that never answers holds a connection for
+up to 31 s per request instead of 11 s. On the WASM target the browser fetch
+cannot be aborted here, and the timer alone ends the wait at the bound (not
+tested in a browser build: the WASM target is compile-checked only, and T35.37
+runs on the native target). T35.37 tests the rule.
+
+**D35.12** *(Resolved: the maintainer's decision of 2026-11-09 — item (i),
+option (c), accept and log a warning; items (ii) and (iii) as written (`Legacy`
+kept, no initial-policy key); to be reassessed after field use. Gated text of
+§35.6.1, passed the KDF Dirty Gate on 2026-11-08.)* *Tendermint fee policy: three choices.* (i) A
+Tendermint platform coin **without** `priority_gas_prices`: (a) accept `set`
+of any value and price at the default, as the reference draft does; (b) refuse
+`set` of a non-`Legacy` value with `NotSupported` (R35.6.9 item 2, the interim
+rule; recommended, in line with the maintainer's preference on the EVM fee
+path to fail rather than substitute silently); (c) accept and log a warning.
+(ii) Whether `Legacy` is the right name for "the coin's default gas price" on
+a Tendermint coin, or the enum gains a fifth value for that meaning — the
+four-value enum is kept here because R35.6.3's values are a published surface
+and a Tendermint coin needs no fifth meaning. (iii) Whether a Tendermint
+coin's initial policy may be set by a coin- configuration key or an activation
+parameter as an EVM coin's is (R35.6.7); the draft has neither, and R35.6.8
+binds `Legacy` as the initial value. Chapter 36 D36.4 (field and level names)
+is decided together with this item.
 
 ## 35.9 Provenance Footer
 
@@ -2457,3 +2751,70 @@ tests it.
   name the host of an abandoned request, from this repository's own code, so
   chapter 01 R38 is not engaged. The same holds for the *Errors of the shared
   HTTP layer* paragraph, which applies R35.1.17 to the errors of that layer.
+- *Clean-context addition (2026-11-02, forbidden corpus not consulted):* the
+  paragraph on resolving a node's hostname after R35.1.8 is Reloaded-original.
+  It points to chapter 45 §45.6B, from the maintainer's decision of 2026-11-02
+  and this repository's own code, so chapter 01 R38 is not engaged.
+- *Clean-context addition (2026-11-08, forbidden corpus not consulted):* the
+  note after R35.1.10, the pointer after R35.1.8, the clarified reference in
+  D35.8 (iii), the closing sentence added to the log remark of R35.1.17's
+  status note, the acceptance wording in §35.8, T35.37 and D35.11 are
+  Reloaded-original. They rest on the maintainer decision of 2026-11-08 and
+  this repository's own code; they take no forbidden-class input, so chapter
+  01 R38 is not engaged and no gate pass is required.
+- *Pointer added 2026-11-07 -- the note under the R35.1.1 table on the TRON
+  platform protocol.* It restates chapter 21 §21.4's reference-behavior note
+  in one clause and records this repository's as-built state from chapter 55
+  D55.5; its reference clause passed the KDF Dirty Gate with its target in
+  chapter 21. **KDF Dirty Gate: PASS on 2026-11-07, measure 0.00.**
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
+  0.00, no findings; the pointer was judged with its target, whose clearance
+  is recorded in chapter 21's provenance footer of the same date.
+- *Scoped addition (2026-11-08) -- §35.6.1 (the name-history note, R35.6.8,
+  R35.6.9, the Reloaded status note, T35.38), the parenthetical added to
+  R35.6.4, and D35.12.* **KDF Dirty Gate: PASS on 2026-11-08, measure 0.03, no
+  findings** (chapter 01 R40; the attestation at the end of this item closes
+  it). *Inputs:* the forbidden corpus at the rows `tendermint-priority-fee (as
+  of 2025-07-24)` and `dev (as of 2025-07-18)` of chapter 02 §2.15A, consulted
+  **only** to establish that the fee-policy RPC pair accepts a Tendermint
+  platform coin and not a token at the draft row, how each policy value maps
+  to a level or to the default price, the initial value, that a coin without
+  the level array is accepted with no effect, and the method strings, request
+  member and policy values the pair carried at that row and its base; the rows
+  `v2.6.0-beta` and `v3.0.0-beta` were consulted **only** to confirm the
+  method strings, request member and policy values this section already binds
+  and that the pair accepts EVM platform coins only at both. Behavior and
+  dictated method strings, request members and policy values only; no private
+  identifier, function body, helper decomposition, error, log, comment or test
+  text was reproduced. The Reloaded status note, the interim rule of R35.6.9
+  item 2, T35.38 and D35.12 rest on this repository's own tree and documents
+  and are Reloaded-original. *Dirty Gate clearance (chapter 01 T1, R40):*
+  PASS, 2026-11-08. Extent: the Tendermint fee-computation and fee-descriptor
+  surface — the Cosmos withdraw, staking and IBC fee descriptors, the swap
+  fee-policy RPC pair and its policy enum, and the Tendermint protocol
+  descriptor's gas-price members — compared at the row tendermint-priority-fee
+  (as of 2025-07-24) against its base row dev (as of 2025-07-18) over the
+  complete difference between those two states (nine source files, two of them
+  test files), together with the public description, two review comments and
+  three discussion comments of the draft pull request those rows record; and
+  at the rows v2.6.0-beta and v3.0.0-beta for the released fee-policy method
+  strings, request member and enum values, the explicit Cosmos fee descriptor,
+  the handling of a foreign fee form on a Cosmos request, and the staking and
+  IBC gas-limit defaults. Method: reading of the full inter-state difference
+  and of the release-state passages, combined with mechanical text search of
+  the candidate's added lines against identifier, numeric-constant,
+  string-literal, name and number lists drawn from the compared states; no
+  code-block tool run was needed (the candidate embeds only two one-line JSON
+  wire examples). Measure: discretionary-similarity 0.03, read against the
+  per-token forced-vs-free standard of chapter 01 R35/R39 (dictated wire,
+  config, error-discriminant and contract-constant tokens excluded; FAIL on
+  any private identifier, body or control-flow transcription, error/log
+  wording, internal module tree or internal test name) — below threshold,
+  PASS.
+- *Clean-context addition (2026-11-09, forbidden corpus not consulted):* the
+  recorded resolution of D35.12, the dated status notes after R35.6.9 and
+  T35.38 (the decided behavior; the cleared interim text above them is
+  unchanged), and the as-built note under §35.6.1 describe the maintainer's
+  decision of 2026-11-09 and this repository's code. They take no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+  is required.

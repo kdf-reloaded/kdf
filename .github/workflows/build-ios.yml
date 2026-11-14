@@ -7,7 +7,10 @@ name: Build iOS
 # host Swift/Obj-C app links against. Requires a macOS runner and the iOS
 # target toolchain.
 #
-# Manually dispatched until a runner is provisioned.
+# Called from release.yml (signed releases) and dev-build.yml / staging-build.yml
+# (unsigned snapshots); also runnable manually. Deployment target iOS 14.0;
+# device (aarch64-apple-ios) and simulator slices (aarch64-apple-ios-sim,
+# x86_64-apple-ios) are separate libraries.
 
 on:
   workflow_dispatch:
@@ -49,9 +52,9 @@ jobs:
       matrix:
         target:
           - aarch64-apple-ios
-          # Simulator target is intentionally left out; add on demand:
-          # - aarch64-apple-ios-sim
-          # - x86_64-apple-ios
+          # Simulator slices, one static library each (no XCFramework).
+          - aarch64-apple-ios-sim
+          - x86_64-apple-ios
 
     steps:
       - uses: actions/checkout@v7

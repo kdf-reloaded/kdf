@@ -30,6 +30,17 @@ use crate::{WatcherValidatePaymentInput, WatcherValidateTakerFeeInput};
 //   default) -- see the doc comment immediately above where it would go,
 //   below.
 
+/// The fixed miner fee every Sia swap transaction pays (`Currency::DEFAULT_FEE`, 0.00002 SC) as a `TradeFee`.
+/// `paid_from_trading_vol` is `true` only where the fee is deducted from the HTLC value (the receiver's spend
+/// or refund) and `false` where it is funded from wallet inputs on top of the amount sent.
+fn miner_fee_trade_fee(ticker: &str, paid_from_trading_vol: bool) -> TradeFee {
+    TradeFee {
+        coin: ticker.to_string(),
+        amount: hastings_to_siacoin(Currency::DEFAULT_FEE).into(),
+        paid_from_trading_vol,
+    }
+}
+
 /// Read the funding transaction's own recorded HTLC output (fixed at
 /// `HTLC_VOUT_INDEX`, R-H1) directly off its bytes. A watcher-side caller is
 /// only ever given the funding tx itself -- reading the address straight off
@@ -441,24 +452,20 @@ impl MmCoin for SiaCoin {
 
     fn history_sync_status(&self) -> HistorySyncState { self.history_sync_state.lock().unwrap().clone() }
 
+    /// The fixed miner fee of one Sia swap transaction (`Currency::DEFAULT_FEE`), paid from wallet funds: this
+    /// is the figure of a payment or a dex-fee transaction, which fund their fee from wallet inputs.
     fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send> {
-        Box::new(futures01::future::ok(TradeFee {
-            coin: self.ticker().to_string(),
-            amount: MmNumber::from("0.00001"),
-            paid_from_trading_vol: false,
-        }))
+        Box::new(futures01::future::ok(miner_fee_trade_fee(self.ticker(), false)))
     }
 
+    /// The sender's fee: the fixed miner fee of the payment transaction, which `fund_tx_single_source` takes on
+    /// top of the payment amount from wallet inputs, so it is not part of the trading volume.
     async fn get_sender_trade_fee(
         &self,
         _value: TradePreimageValue,
         _stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
-        Ok(TradeFee {
-            coin: self.ticker().to_string(),
-            amount: MmNumber::from("0.00001"),
-            paid_from_trading_vol: false,
-        })
+        Ok(miner_fee_trade_fee(self.ticker(), false))
     }
 
     /// CRD ch.60 R60.6.7 item 2: the fixed HTLC miner fee plus one hasting.
@@ -466,24 +473,22 @@ impl MmCoin for SiaCoin {
         Ok(Some(htlc_safe_amount().into()))
     }
 
+    /// The receiver's fee: the fixed miner fee of the HTLC spend (or refund). It is deducted from the HTLC
+    /// output itself (`htlc_value_after_miner_fee`) and the receiver spends no wallet funds, so it is paid from
+    /// the trading volume. Reporting it as `true` keeps the balance check from demanding SC from a wallet that
+    /// only receives SC.
     fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {
-        Box::new(futures01::future::ok(TradeFee {
-            coin: self.ticker().to_string(),
-            amount: MmNumber::from("0.00001"),
-            paid_from_trading_vol: false,
-        }))
+        Box::new(futures01::future::ok(miner_fee_trade_fee(self.ticker(), true)))
     }
 
+    /// The fee of the dex-fee transaction: the fixed miner fee, funded from wallet inputs on top of the dex
+    /// fee amount.
     async fn get_fee_to_send_taker_fee(
         &self,
         _dex_fee_amount: BigDecimal,
         _stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
-        Ok(TradeFee {
-            coin: self.ticker().to_string(),
-            amount: MmNumber::from("0.00001"),
-            paid_from_trading_vol: false,
-        })
+        Ok(miner_fee_trade_fee(self.ticker(), false))
     }
 
     fn required_confirmations(&self) -> u64 { self.required_confirmations.load(AtomicOrdering::Relaxed) }
@@ -622,5 +627,32 @@ mod watcher_ops_tests {
             Currency(500)
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod trade_fee_tests {
+    //! The reported Sia miner-fee figures and the receiver's fee flag. No mock walletd client exists to build a
+    //! full `SiaCoin`, so these exercise `miner_fee_trade_fee`, the single function all four fee methods use.
+
+    use super::*;
+
+    #[test]
+    fn the_reported_miner_fee_is_the_fixed_fee_in_siacoin() {
+        let fee = miner_fee_trade_fee("SC", false);
+        assert_eq!(fee.coin, "SC");
+        assert_eq!(fee.amount, MmNumber::from("0.00002"));
+        assert_eq!(BigDecimal::from(fee.amount), hastings_to_siacoin(Currency::DEFAULT_FEE));
+    }
+
+    #[test]
+    fn only_the_receiver_fee_is_paid_from_the_trading_volume() {
+        assert!(miner_fee_trade_fee("SC", true).paid_from_trading_vol);
+        assert!(!miner_fee_trade_fee("SC", false).paid_from_trading_vol);
+        // Same amount either way.
+        assert_eq!(
+            miner_fee_trade_fee("SC", true).amount,
+            miner_fee_trade_fee("SC", false).amount
+        );
     }
 }

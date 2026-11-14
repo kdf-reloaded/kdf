@@ -504,7 +504,9 @@ key-pair policy:
   returns its compressed public key;
 - hierarchical-deterministic mode uses the currently enabled HD
   address recorded by the active HD wallet state and returns that
-  address's compressed public key;
+  address's compressed public key. That address is the one at the
+  activation's `path_to_address`, and it also funds the V2 swap
+  (chapter 05 R42, added 2026-11-05);
 - Trezor/hardware-wallet mode uses the currently enabled
   hardware-wallet HD address recorded by the active HD wallet
   state and returns that address's compressed public key.
@@ -966,3 +968,9 @@ non-participation noted in chapter 16 R23.
 - *Restricted corpus output policy:* no source text, private
   helper decomposition, private identifiers, or implementation
   bodies are carried into this chapter.
+- *Clean-side amendment (2026-11-05) -- the HD bullet of R36.* It now
+  names the address at `path_to_address` as the currently enabled HD
+  address, which also funds the V2 swap (chapter 05 R42, plan
+  `hd-key-unification` item H3). Written by a context that never read the
+  forbidden corpus, from this repository's own V2 key and funding code. It
+  takes no forbidden-class input and needs no Dirty Gate pass.

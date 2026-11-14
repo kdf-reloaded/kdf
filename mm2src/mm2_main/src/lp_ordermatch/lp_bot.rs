@@ -15,14 +15,16 @@ use std::any::TypeId;
 use std::ops::Deref;
 use std::{collections::HashMap, sync::Arc};
 
+#[path = "price_service.rs"] pub mod price_service;
 #[path = "simple_market_maker.rs"] mod simple_market_maker_bot;
 use crate::mm2::lp_dispatcher::{LpEvents, StopCtxEvent};
 use crate::mm2::lp_message_service::{MessageServiceContext, MAKER_BOT_ROOM_ID};
+use crate::mm2::lp_ordermatch::lp_bot::price_service::PriceSource;
 use crate::mm2::lp_ordermatch::lp_bot::simple_market_maker_bot::{tear_down_bot, BOT_DEFAULT_REFRESH_RATE,
                                                                  PRECISION_FOR_NOTIFICATION};
 use crate::mm2::lp_swap::MakerSwapStatusChanged;
 #[cfg(test)]
-pub use simple_market_maker_bot::{process_price_request, StartSimpleMakerBotRequest, KMD_PRICE_ENDPOINT};
+pub use simple_market_maker_bot::{process_price_request, StartSimpleMakerBotRequest};
 pub use simple_market_maker_bot::{start_simple_market_maker_bot, stop_simple_market_maker_bot};
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -94,7 +96,7 @@ impl From<TradingBotStarted> for TradingBotEvent {
 pub struct RunningState {
     trading_bot_cfg: SimpleMakerBotRegistry,
     bot_refresh_rate: f64,
-    price_url: String,
+    price_sources: Vec<PriceSource>,
 }
 
 pub struct StoppingState {
@@ -192,6 +194,12 @@ pub enum Provider {
     Forex,
     #[serde(rename = "coinmarketcap")]
     Coinmarketcap,
+    #[serde(rename = "livecoinwatch")]
+    Livecoinwatch,
+    /// A provider the operator named in the `price_providers` key of `MM2.json` that has no variant of its own
+    /// (CRD ch.62 D62.4). Never read from a feed: the price service sets it on a record it recognized.
+    #[serde(skip_deserializing)]
+    Configured,
     #[serde(rename = "unknown", other)]
     #[default]
     Unknown,
@@ -331,13 +339,7 @@ impl RateInfos {
 
 impl TickerInfosRegistry {
     fn get_infos(&self, ticker: &str) -> Option<&TickerInfos> {
-        let mut ticker_infos = self.0.get(ticker);
-        let limit = ticker.len() - 1;
-        let pos = ticker.find('-').unwrap_or(limit);
-        if ticker_infos.is_none() && pos < limit {
-            ticker_infos = self.0.get(&ticker[0..pos])
-        }
-        ticker_infos
+        price_service::ticker_key(&self.0, ticker).and_then(|key| self.0.get(key))
     }
 
     fn get_infos_pair(&self, base: &str, rel: &str) -> Option<(&TickerInfos, &TickerInfos)> {
@@ -352,6 +354,8 @@ impl TickerInfosRegistry {
                     || rel_price_infos.price_provider == Provider::Unknown
                     || base_price_infos.last_updated_timestamp == 0
                     || rel_price_infos.last_updated_timestamp == 0
+                    // The division below is undefined for a zero rel price (CRD ch.62 R62.5.1 d).
+                    || rel_price_infos.last_price.is_zero()
                 {
                     return None;
                 }

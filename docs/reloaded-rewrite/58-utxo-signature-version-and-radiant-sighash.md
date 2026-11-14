@@ -175,6 +175,13 @@ transaction-version override, no Zcash-style overwintered flags, no
 segwit, and no fee-policy special case. The shipped Radiant entry is an
 ordinary UTXO entry plus the two keys of R58.2.1 and R58.2.5.
 
+> **Pointer (2026-11-05).** The four values of R58.2.1 are not the whole of a
+> coin's signature-digest configuration. A coin entry may also name a
+> sighash suffix, appended after the sighash type in the digest of
+> every version above except the Radiant dialect; it is a separate pair of keys
+> and does not change this section's value set. See
+> [chapter 61](61-utxo-sighash-suffix.md).
+
 ## 58.3 Bound Radiant sighash algorithm (dictated by Radiant)
 
 > **Binding scope.** Everything in this section is the Radiant chain's
@@ -824,6 +831,50 @@ what the reference lineage *reports* about Radiant on the legacy swap
 path, and why that report — reported, not verified by this project —
 does not close this item.
 
+*Evidence recorded 2026-11-09 (lab, mainnet, two KDF Reloaded nodes,
+RXD against RIN, the coins entry of the shared registry with
+`fork_id_rxd`, a transaction fee of 0.1 RXD per kilobyte and two
+confirmations; the build is the `dev` head 4c476883e).* The five items
+above, one by one:
+
+- *HTLC script acceptance:* the payment and the spend transactions of two
+  swaps (RXD as the maker's coin and as the taker's coin) and the refund
+  transactions of a maker and of a taker were accepted by Radiant and
+  mined. Both swaps finished with no failure event.
+- *Relay-fee floor against the configured fee:* a plain withdrawal paid
+  0.0374 RXD for 374 bytes, the configured 0.1 RXD per kilobyte, and no
+  transaction of these tests was rejected for its fee. The configured fee
+  is the network's minimum, not a margin above it. A withdrawal of 226
+  bytes that paid 0.00000226 RXD (0.00001 RXD per kilobyte) was refused at
+  broadcast with "min relay fee not met", although the Electrum servers
+  answer `blockchain.relayfee` with 0.000001 RXD per kilobyte, which is
+  not what the node enforces. The public source of Radiant Core
+  (`src/policy/policy.h`; §58.9) sets its
+  minimum relay fee to 0.1 RXD per kilobyte since release 2.0 (0.01 RXD
+  per kilobyte before). The `txfee` of the coins entry therefore stays at
+  10000000 satoshis per kilobyte.
+- *Lock time against 300-second blocks:* the maker's refund was broadcast
+  27 minutes after the lock time recorded in the payment transaction (that
+  lock time was 4 h 25 min after the payment), the taker's 18 minutes after
+  its own (that lock time was 2 h 19 min after the payment); neither refund
+  was rejected. Only these
+  two timings were measured; no cause is claimed. The maker's payment took
+  842 seconds to reach two confirmations.
+- *Block-header family and Electrum server behavior:* the rows used the
+  servers and the header handling of the coins entry, and no header or
+  server error appeared in any of them. They were not tested separately.
+
+*GLEEC KDF.* RXD swaps between a KDF Reloaded node and GLEEC KDF 3.0.0-beta
+(build d56a7bc50, a release binary run as a black box) completed in both
+directions on a private test mesh, RXD against RIN, with no failure event
+(871 and 1531 seconds); the GLEEC node activated RXD from the same coins
+entry and no refusal text appeared in either direction.
+
+Not covered: an RXD swap with Komodo DeFi Framework 2.6.0-beta (that build
+has no Radiant dialect, R58.4A; it did not complete in the 0.3.0 tests). This
+item is **closed for swaps between two KDF Reloaded nodes and with GLEEC
+KDF 3.0.0-beta** and stays open for Komodo DeFi Framework.
+
 **D3.** *Reference-bearing outputs.* **Partly corroborated on chain,
 2026-10-25; open for two details.** R58.4.2 left the non-zero-reference
 form corroborated only by Radiant-Core. T3's second vector — a mainnet
@@ -919,6 +970,10 @@ signing RPC. No funds-safety consequence hinges on it — the tolerant walk
 can never produce a signature that the network accepts over a different
 preimage — so it does not gate the beta.
 
+*Decided 2026-11-09 (the maintainer's decision).* The signing stays
+tolerant for 0.4.0. The fatal form described above becomes a separate
+post-beta change (size M); this item stays open until then.
+
 ## 58.8 Baseline Verifications
 
 **V1.** *Three signature versions at baseline.*
@@ -959,7 +1014,8 @@ preimage — so it does not gate the beta.
   Radiant project documentation (`https://radiantblockchain.org`): the
   authority for §58.3 — the inserted output-summaries field, the summary
   layout, the reference opcodes and their 36-byte operands, and the
-  reference-set de-duplication and ordering. The file classes read for
+  reference-set de-duplication and ordering; for D2, the minimum relay fee
+  of its policy header. The file classes read for
   the 2026-10-25 correction of R58.3.3: the script library (the
   reference-collecting walk and the opcode table), the transaction
   primitive header (the per-output summary writer and the

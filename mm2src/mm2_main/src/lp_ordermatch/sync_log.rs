@@ -5,7 +5,9 @@
 //! * the responder, where the answer to a `SyncPubkeyOrderbookState` request is decided
 //!   (`sync_answer_response`): one [`AnswerClass`] per answer, with the [`AnswerPath`] that led to it;
 //! * the requester, where this node's own keep-alive-driven request ends (`ask_for_sync_state`): one
-//!   [`RequestClass`] per request, with its attempt (1 is the request, 2 the re-ask of R-Q5c).
+//!   [`RequestClass`] per request, with its [`Attempt`] (1 is the request, 2 the re-ask of R-Q5c, `alt` the
+//!   request to one other relay of R-Q5d, with the reason that led to it). The steps of R-Q5d around that
+//!   request are counted as [`AltEvent`]s.
 //!
 //! Every event is one DEBUG line. The events are also counted per node, and once a window of
 //! [`SUMMARY_WINDOW_MS`] has passed the counters are reported in one INFO line and reset, but only when a
@@ -19,6 +21,7 @@ use crate::mm2::lp_network::{P2PRequestError, P2PRequestResult};
 use common::log::log_crate::{log_enabled, Level};
 use mm2_p2p::request_response::LocalFailure;
 use mm2_p2p::PeerId;
+use std::fmt;
 
 /// The length of the window of one summary line.
 const SUMMARY_WINDOW_MS: u64 = 60_000;
@@ -79,6 +82,11 @@ pub(crate) enum AnswerPath {
     ParkedWoken,
     /// Parked, and answered at the bound.
     ParkedBound,
+    /// Parked before the placeholder existed (CRD ch.32 R-Q5b item 6), and answered before or at the end of
+    /// the wait.
+    PreParkedWoken,
+    /// Parked before the placeholder existed (R-Q5b item 6), and answered at the bound.
+    PreParkedBound,
 }
 
 impl AnswerPath {
@@ -90,6 +98,8 @@ impl AnswerPath {
             AnswerPath::AtOnce(AtOnce::DeferralOff) => "at_once:deferral_off",
             AnswerPath::ParkedWoken => "parked:woken",
             AnswerPath::ParkedBound => "parked:bound",
+            AnswerPath::PreParkedWoken => "parked_pre:woken",
+            AnswerPath::PreParkedBound => "parked_pre:bound",
         }
     }
 }
@@ -152,6 +162,75 @@ pub(crate) fn classify_sync_request<T>(result: &P2PRequestResult<Option<T>>) -> 
     }
 }
 
+/// Why the request to one other relay (CRD ch.32 R-Q5d) was made.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AltReason {
+    /// Trigger (a): the request to the forwarding peer ended without an answer.
+    Failure,
+    /// Trigger (b): the answer of the forwarding peer left a pair at a root other than the advertised one.
+    Mismatch,
+}
+
+impl fmt::Display for AltReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            AltReason::Failure => "failure",
+            AltReason::Mismatch => "mismatch",
+        })
+    }
+}
+
+/// Which request of one keep-alive a [`RequestEvent`] is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Attempt {
+    /// The request to the forwarding peer.
+    First,
+    /// The re-ask of R-Q5c.
+    Second,
+    /// The request to one other relay (R-Q5d).
+    Alternate(AltReason),
+}
+
+impl fmt::Display for Attempt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Attempt::First => "1",
+            Attempt::Second => "2",
+            Attempt::Alternate(_) => "alt",
+        })
+    }
+}
+
+/// A step of the request to one other relay (CRD ch.32 R-Q5d) that is counted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AltEvent {
+    /// Trigger (a) fired.
+    Failure,
+    /// Trigger (b) fired.
+    Mismatch,
+    /// No other relay was connected.
+    NoRelay,
+    /// The trie worker had not applied the answer within the wait, so no request followed.
+    WorkerLate,
+    /// The request was sent.
+    Sent,
+    /// The request was answered and the answer applied.
+    Ok,
+}
+
+impl AltEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            AltEvent::Failure => "failure",
+            AltEvent::Mismatch => "mismatch",
+            AltEvent::NoRelay => "no_relay",
+            AltEvent::WorkerLate => "worker_late",
+            AltEvent::Sent => "sent",
+            AltEvent::Ok => "ok",
+        }
+    }
+}
+
 /// The counters of one window.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SyncCounters {
@@ -164,17 +243,29 @@ pub(crate) struct SyncCounters {
     pub(crate) placeholder_at_once: u32,
     pub(crate) placeholder_own_not_in_flight: u32,
     pub(crate) placeholder_caps: u32,
+    /// Placeholder answers by the parked paths, of R-Q5b item 1 and of item 6 together.
     pub(crate) placeholder_parked_woken: u32,
     pub(crate) placeholder_parked_bound: u32,
     pub(crate) answers_trie_error: u32,
-    /// Answers of every class that went through the parked path.
+    /// Answers of every class that went through a parked path, of item 1 and of item 6.
     pub(crate) answers_parked: u32,
+    /// Answers of every class to requests parked before the placeholder existed (item 6 (f)), by how they ended.
+    pub(crate) pre_parked_woken: u32,
+    pub(crate) pre_parked_bound: u32,
+    /// Keep-alives handled without a registration because a limit was full (item 6 (c), (f)).
+    pub(crate) registrations_capped: u32,
     pub(crate) requests_ok: u32,
     pub(crate) requests_no_data: u32,
     pub(crate) requests_peer_error: u32,
     pub(crate) requests_timeout: u32,
     pub(crate) requests_transport: u32,
     pub(crate) requests_decode: u32,
+    pub(crate) alt_failure: u32,
+    pub(crate) alt_mismatch: u32,
+    pub(crate) alt_no_relay: u32,
+    pub(crate) alt_worker_late: u32,
+    pub(crate) alt_sent: u32,
+    pub(crate) alt_ok: u32,
 }
 
 impl SyncCounters {
@@ -192,14 +283,23 @@ impl SyncCounters {
                     },
                     AnswerPath::AtOnce(AtOnce::OwnRequestNotInFlight) => self.placeholder_own_not_in_flight += 1,
                     AnswerPath::AtOnce(AtOnce::CapsFull) => self.placeholder_caps += 1,
-                    AnswerPath::ParkedWoken => self.placeholder_parked_woken += 1,
-                    AnswerPath::ParkedBound => self.placeholder_parked_bound += 1,
+                    AnswerPath::ParkedWoken | AnswerPath::PreParkedWoken => self.placeholder_parked_woken += 1,
+                    AnswerPath::ParkedBound | AnswerPath::PreParkedBound => self.placeholder_parked_bound += 1,
                 }
             },
             AnswerClass::TrieError => self.answers_trie_error += 1,
         }
-        if matches!(path, AnswerPath::ParkedWoken | AnswerPath::ParkedBound) {
-            self.answers_parked += 1;
+        match path {
+            AnswerPath::AtOnce(_) => (),
+            AnswerPath::ParkedWoken | AnswerPath::ParkedBound => self.answers_parked += 1,
+            AnswerPath::PreParkedWoken => {
+                self.answers_parked += 1;
+                self.pre_parked_woken += 1;
+            },
+            AnswerPath::PreParkedBound => {
+                self.answers_parked += 1;
+                self.pre_parked_bound += 1;
+            },
         }
     }
 
@@ -214,6 +314,17 @@ impl SyncCounters {
         }
     }
 
+    fn count_alt(&mut self, event: AltEvent) {
+        match event {
+            AltEvent::Failure => self.alt_failure += 1,
+            AltEvent::Mismatch => self.alt_mismatch += 1,
+            AltEvent::NoRelay => self.alt_no_relay += 1,
+            AltEvent::WorkerLate => self.alt_worker_late += 1,
+            AltEvent::Sent => self.alt_sent += 1,
+            AltEvent::Ok => self.alt_ok += 1,
+        }
+    }
+
     fn has_failure(&self) -> bool {
         self.answers_no_data
             + self.answers_missing_pair
@@ -224,6 +335,9 @@ impl SyncCounters {
             + self.requests_timeout
             + self.requests_transport
             + self.requests_decode
+            + self.alt_failure
+            + self.alt_mismatch
+            + self.registrations_capped
             > 0
     }
 
@@ -235,7 +349,8 @@ impl SyncCounters {
         Some(format!(
             "sync summary 60s: answers ok={} no_data={} missing_pair={} placeholder={}(at_once={} \
              own_not_in_flight={} caps={} parked_woken={} parked_bound={}) trie_error={} parked={}; requests ok={} \
-             no_data={} peer_error={} timeout={} transport={} decode={}",
+             no_data={} peer_error={} timeout={} transport={} decode={}; alt failure={} mismatch={} no_relay={} \
+             worker_late={} sent={} ok={}; pre_placeholder parked_woken={} parked_bound={} registrations_capped={}",
             self.answers_ok_delta + self.answers_ok_full,
             self.answers_no_data,
             self.answers_missing_pair,
@@ -253,6 +368,15 @@ impl SyncCounters {
             self.requests_timeout,
             self.requests_transport,
             self.requests_decode,
+            self.alt_failure,
+            self.alt_mismatch,
+            self.alt_no_relay,
+            self.alt_worker_late,
+            self.alt_sent,
+            self.alt_ok,
+            self.pre_parked_woken,
+            self.pre_parked_bound,
+            self.registrations_capped,
         ))
     }
 }
@@ -264,10 +388,13 @@ struct Window {
     counters: SyncCounters,
     /// The requests recorded so far, with their attempts (tests only).
     #[cfg(test)]
-    requests: Vec<(u8, RequestClass)>,
+    requests: Vec<(Attempt, RequestClass)>,
     /// The answers recorded so far (tests only).
     #[cfg(test)]
     answers: Vec<(AnswerClass, AnswerPath)>,
+    /// The skip counts of the mismatch lines recorded so far (tests only).
+    #[cfg(test)]
+    skips: Vec<SkipCounts>,
 }
 
 /// The counters of one node (a field of [`OrdermatchContext`]).
@@ -294,8 +421,7 @@ pub(crate) struct RequestEvent<'a> {
     pub(crate) pubkey: &'a str,
     /// The label of the requested pairs ([`pairs_label`]); empty when DEBUG is off.
     pub(crate) pairs: &'a str,
-    /// 1 for the request, 2 for the re-ask.
-    pub(crate) attempt: u8,
+    pub(crate) attempt: Attempt,
     pub(crate) class: RequestClass,
     pub(crate) elapsed_ms: u64,
     /// The peer's error text, for [`RequestClass::PeerError`].
@@ -322,6 +448,40 @@ pub(crate) fn pairs_label<'a>(pairs: impl Iterator<Item = &'a String>) -> String
 }
 
 fn cut_error(error: &str) -> String { error.chars().take(MAX_ERROR_CHARS).collect() }
+
+/// The DEBUG line of one step of the request to one other relay: `sync alternate relay: pubkey=<P> event=<event>`
+/// and, for `event=mismatch` with `skips`, the tail of the candidate rules that would have skipped the diverged
+/// pairs (`pairs=<n> skip_a=<k> skip_b=<k> skip_d=<k> skip_ad=<k> skip_ab=<k> since_keep_alive_ms=<ms>`).
+struct AltLine<'a> {
+    event: AltEvent,
+    pubkey: &'a str,
+    skips: Option<&'a SkipCounts>,
+}
+
+impl fmt::Display for AltLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "sync alternate relay: pubkey={} event={}",
+            self.pubkey,
+            self.event.as_str()
+        )?;
+        match (self.event, self.skips) {
+            (AltEvent::Mismatch, Some(skips)) => write!(
+                f,
+                " pairs={} skip_a={} skip_b={} skip_d={} skip_ad={} skip_ab={} since_keep_alive_ms={}",
+                skips.pairs,
+                skips.skip_a,
+                skips.skip_b,
+                skips.skip_d,
+                skips.skip_ad,
+                skips.skip_ab,
+                skips.since_keep_alive_ms
+            ),
+            _ => Ok(()),
+        }
+    }
+}
 
 impl SyncLog {
     /// Records one answer: its DEBUG line, its count and, when the window has ended, the summary.
@@ -352,17 +512,52 @@ impl SyncLog {
             .error
             .map(|error| format!(" error={}", cut_error(error)))
             .unwrap_or_default();
+        let reason = match event.attempt {
+            Attempt::Alternate(reason) => format!(" reason={}", reason),
+            Attempt::First | Attempt::Second => String::new(),
+        };
         log::debug!(
-            "sync request: peer={} pubkey={} pairs={} attempt={} class={} elapsed_ms={}{}",
+            "sync request: peer={} pubkey={} pairs={} attempt={}{} class={} elapsed_ms={}{}",
             event.peer,
             event.pubkey,
             event.pairs,
             event.attempt,
+            reason,
             event.class.as_str(),
             event.elapsed_ms,
             error
         );
         if let Some(summary) = self.record_request(event.attempt, event.class, now_ms) {
+            log::info!("{}", summary);
+        }
+    }
+
+    /// Records one step of the request to one other relay: its DEBUG line, its count and, when the window has
+    /// ended, the summary. `pubkey` is the keep-alive's.
+    pub(crate) fn alt(&self, event: AltEvent, pubkey: &str, now_ms: u64) {
+        self.alt_with_skips(event, pubkey, None, now_ms)
+    }
+
+    /// Like [`SyncLog::alt`]; for [`AltEvent::Mismatch`] the DEBUG line carries the `skips` of the diverged pairs
+    /// when there are any. The counters and the summary are those of `alt`.
+    pub(crate) fn alt_with_skips(&self, event: AltEvent, pubkey: &str, skips: Option<&SkipCounts>, now_ms: u64) {
+        log::debug!("{}", AltLine { event, pubkey, skips });
+        #[cfg(test)]
+        {
+            if let (AltEvent::Mismatch, Some(skips)) = (event, skips) {
+                self.0.lock().skips.push(skips.clone());
+            }
+        }
+        if let Some(summary) = self.record_alt(event, now_ms) {
+            log::info!("{}", summary);
+        }
+    }
+
+    /// Records a keep-alive handled without a registration because a limit of CRD ch.32 R-Q5b item 6 (c) was
+    /// full: its DEBUG line, its count and, when the window has ended, the summary.
+    pub(crate) fn registration_capped(&self, forwarding_peer: &str, pubkey: &str, now_ms: u64) {
+        log::debug!("sync registration capped: peer={} pubkey={}", forwarding_peer, pubkey);
+        if let Some(summary) = self.count(now_ms, |counters| counters.registrations_capped += 1) {
             log::info!("{}", summary);
         }
     }
@@ -380,8 +575,12 @@ impl SyncLog {
         self.count(now_ms, |counters| counters.count_answer(class, path))
     }
 
+    fn record_alt(&self, event: AltEvent, now_ms: u64) -> Option<String> {
+        self.count(now_ms, |counters| counters.count_alt(event))
+    }
+
     #[cfg_attr(not(test), allow(unused_variables))]
-    fn record_request(&self, attempt: u8, class: RequestClass, now_ms: u64) -> Option<String> {
+    fn record_request(&self, attempt: Attempt, class: RequestClass, now_ms: u64) -> Option<String> {
         #[cfg(test)]
         self.0.lock().requests.push((attempt, class));
         self.count(now_ms, |counters| counters.count_request(class))
@@ -407,7 +606,10 @@ impl SyncLog {
     pub(crate) fn answers(&self) -> Vec<(AnswerClass, AnswerPath)> { self.0.lock().answers.clone() }
 
     #[cfg(test)]
-    pub(crate) fn requests(&self) -> Vec<(u8, RequestClass)> { self.0.lock().requests.clone() }
+    pub(crate) fn requests(&self) -> Vec<(Attempt, RequestClass)> { self.0.lock().requests.clone() }
+
+    #[cfg(test)]
+    pub(crate) fn skips(&self) -> Vec<SkipCounts> { self.0.lock().skips.clone() }
 }
 
 #[cfg(test)]
@@ -444,13 +646,16 @@ mod tests {
             log.record_answer(AnswerClass::Placeholder, AnswerPath::AtOnce(AtOnce::CapsFull), t0),
             None
         );
-        assert_eq!(log.record_request(1, RequestClass::Timeout, t0 + 30_000), None);
+        assert_eq!(
+            log.record_request(Attempt::First, RequestClass::Timeout, t0 + 30_000),
+            None
+        );
         assert_eq!(log.snapshot().placeholder_caps, 1);
         assert_eq!(log.snapshot().requests_timeout, 1);
 
         // The event that finds the window ended is counted into it, and then the counters are reset.
         let summary = log
-            .record_request(2, RequestClass::Transport, t0 + SUMMARY_WINDOW_MS)
+            .record_request(Attempt::Second, RequestClass::Transport, t0 + SUMMARY_WINDOW_MS)
             .expect("a failure was counted");
         assert!(summary.starts_with("sync summary 60s: answers ok=0 no_data=0 missing_pair=0 placeholder=1("));
         assert!(summary.contains("caps=1"), "{}", summary);
@@ -458,7 +663,10 @@ mod tests {
         assert_eq!(log.snapshot(), SyncCounters::default());
 
         // The next window starts from zero: its own failure is the only one reported.
-        assert_eq!(log.record_request(1, RequestClass::NoData, t0 + 70_000), None);
+        assert_eq!(
+            log.record_request(Attempt::First, RequestClass::NoData, t0 + 70_000),
+            None
+        );
         let summary = log
             .record_answer(
                 AnswerClass::OkDelta,
@@ -482,7 +690,7 @@ mod tests {
             log.record_answer(AnswerClass::OkFull, AnswerPath::ParkedWoken, t0),
             None
         );
-        assert_eq!(log.record_request(1, RequestClass::Ok, t0 + 10), None);
+        assert_eq!(log.record_request(Attempt::First, RequestClass::Ok, t0 + 10), None);
         assert_eq!(
             log.record_answer(
                 AnswerClass::OkDelta,
@@ -531,13 +739,171 @@ mod tests {
             requests_timeout: 15,
             requests_transport: 16,
             requests_decode: 17,
+            alt_failure: 18,
+            alt_mismatch: 19,
+            alt_no_relay: 20,
+            alt_worker_late: 21,
+            alt_sent: 22,
+            alt_ok: 23,
+            pre_parked_woken: 24,
+            pre_parked_bound: 25,
+            registrations_capped: 26,
         };
         assert_eq!(
             counters.summary_line().unwrap(),
             "sync summary 60s: answers ok=3 no_data=3 missing_pair=4 placeholder=15(at_once=5 own_not_in_flight=6 \
              caps=7 parked_woken=8 parked_bound=9) trie_error=10 parked=11; requests ok=12 no_data=13 peer_error=14 \
-             timeout=15 transport=16 decode=17"
+             timeout=15 transport=16 decode=17; alt failure=18 mismatch=19 no_relay=20 worker_late=21 sent=22 ok=23; \
+             pre_placeholder parked_woken=24 parked_bound=25 registrations_capped=26"
         );
+    }
+
+    /// A window with a trigger of R-Q5d is printed; the steps after a trigger alone are not a failure.
+    #[test]
+    fn a_window_with_an_alternate_relay_trigger_prints_its_line() {
+        for trigger in [AltEvent::Failure, AltEvent::Mismatch] {
+            let log = SyncLog::default();
+            let t0 = 3_000;
+            assert_eq!(log.record_alt(trigger, t0), None);
+            assert_eq!(log.record_alt(AltEvent::Sent, t0 + 1), None);
+            assert_eq!(log.record_alt(AltEvent::Ok, t0 + 2), None);
+            let summary = log
+                .count(t0 + SUMMARY_WINDOW_MS, |_| ())
+                .expect("a trigger was counted");
+            assert!(
+                summary.contains("; alt failure=1 mismatch=0 no_relay=0 worker_late=0 sent=1 ok=1;")
+                    || summary.contains("; alt failure=0 mismatch=1 no_relay=0 worker_late=0 sent=1 ok=1;"),
+                "{}",
+                summary
+            );
+        }
+    }
+
+    #[test]
+    fn the_steps_after_a_trigger_are_counted_one_by_one() {
+        let log = SyncLog::default();
+        for event in [
+            AltEvent::Failure,
+            AltEvent::Mismatch,
+            AltEvent::Mismatch,
+            AltEvent::NoRelay,
+            AltEvent::WorkerLate,
+            AltEvent::Sent,
+            AltEvent::Sent,
+            AltEvent::Sent,
+            AltEvent::Ok,
+        ] {
+            assert_eq!(log.record_alt(event, 1_000), None);
+        }
+        let counters = log.snapshot();
+        assert_eq!(
+            (
+                counters.alt_failure,
+                counters.alt_mismatch,
+                counters.alt_no_relay,
+                counters.alt_worker_late,
+                counters.alt_sent,
+                counters.alt_ok
+            ),
+            (1, 2, 1, 1, 3, 1)
+        );
+        // No trigger, no line: the later steps alone are not a failure.
+        let log = SyncLog::default();
+        assert_eq!(log.record_alt(AltEvent::NoRelay, 1_000), None);
+        assert_eq!(log.record_alt(AltEvent::WorkerLate, 1_001), None);
+        assert_eq!(log.count(1_000 + SUMMARY_WINDOW_MS, |_| ()), None);
+    }
+
+    /// Hex constants only: no value derived from a key pair reaches a logging call.
+    const PUBKEY: &str = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn the_mismatch_line_carries_the_skip_counts_in_the_documented_order() {
+        let skips = SkipCounts {
+            pairs: 5,
+            skip_a: 1,
+            skip_b: 2,
+            skip_d: 3,
+            skip_ad: 4,
+            skip_ab: 3,
+            since_keep_alive_ms: 1234,
+        };
+        assert_eq!(
+            AltLine {
+                event: AltEvent::Mismatch,
+                pubkey: PUBKEY,
+                skips: Some(&skips)
+            }
+            .to_string(),
+            format!(
+                "sync alternate relay: pubkey={} event=mismatch pairs=5 skip_a=1 skip_b=2 skip_d=3 skip_ad=4 \
+                 skip_ab=3 since_keep_alive_ms=1234",
+                PUBKEY
+            )
+        );
+    }
+
+    #[test]
+    fn the_alternate_relay_line_without_counts_is_unchanged() {
+        for event in [
+            AltEvent::Failure,
+            AltEvent::Mismatch,
+            AltEvent::NoRelay,
+            AltEvent::WorkerLate,
+            AltEvent::Sent,
+            AltEvent::Ok,
+        ] {
+            assert_eq!(
+                AltLine {
+                    event,
+                    pubkey: PUBKEY,
+                    skips: None
+                }
+                .to_string(),
+                format!("sync alternate relay: pubkey={} event={}", PUBKEY, event.as_str())
+            );
+        }
+        // The tail belongs to the mismatch line alone.
+        let skips = SkipCounts::default();
+        assert_eq!(
+            AltLine {
+                event: AltEvent::Sent,
+                pubkey: PUBKEY,
+                skips: Some(&skips)
+            }
+            .to_string(),
+            format!("sync alternate relay: pubkey={} event=sent", PUBKEY)
+        );
+        assert_eq!(
+            AltLine {
+                event: AltEvent::Mismatch,
+                pubkey: PUBKEY,
+                skips: None
+            }
+            .to_string(),
+            format!("sync alternate relay: pubkey={} event=mismatch", PUBKEY)
+        );
+    }
+
+    #[test]
+    fn the_skip_counts_do_not_change_the_counters() {
+        let with = SyncLog::default();
+        let without = SyncLog::default();
+        with.alt_with_skips(AltEvent::Mismatch, PUBKEY, Some(&SkipCounts::default()), 1_000);
+        without.alt(AltEvent::Mismatch, PUBKEY, 1_000);
+        assert_eq!(with.snapshot(), without.snapshot());
+        assert_eq!(with.skips(), vec![SkipCounts::default()]);
+        assert!(without.skips().is_empty());
+    }
+
+    #[test]
+    fn the_attempt_is_a_label_and_the_reason_names_the_alternate_request() {
+        assert_eq!(Attempt::First.to_string(), "1");
+        assert_eq!(Attempt::Second.to_string(), "2");
+        assert_eq!(Attempt::Alternate(AltReason::Failure).to_string(), "alt");
+        assert_eq!(Attempt::Alternate(AltReason::Mismatch).to_string(), "alt");
+        assert_eq!(AltReason::Failure.to_string(), "failure");
+        assert_eq!(AltReason::Mismatch.to_string(), "mismatch");
     }
 
     fn classify(result: P2PRequestResult<Option<u8>>) -> (RequestClass, Option<String>) {

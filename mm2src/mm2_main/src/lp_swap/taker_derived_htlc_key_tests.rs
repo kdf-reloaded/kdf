@@ -57,10 +57,10 @@ fn restore(saved_pubkey: &[u8], privkey: Option<KeyPair>, base: &KeyPair) -> Tak
         )
         .into_mm_arc();
     let (swap, _) = TakerSwap::load_from_saved(
-        ctx,
+        ctx.clone(),
         MmCoinEnum::Test(TestCoin::default()),
         MmCoinEnum::Test(TestCoin::default()),
-        saved,
+        crate::mm2::lp_swap::recorded_by_taker(saved, &ctx),
     )
     .unwrap();
     swap
@@ -138,4 +138,54 @@ fn another_base_key_is_not_resumed_and_a_saved_pair_is_kept() {
     assert_eq!(key.kind, super::super::RecoveryHtlcKeyKind::PerSwap);
     assert_eq!(key.keypair.private().secret, saved_pair.private().secret);
     assert_eq!(*TRIED.lock().unwrap(), vec![vector_taker_arrr_pub(), saved_pub]);
+}
+
+/// CRD ch.05 §5.12D (R47, T27), taker side: a swap that recorded the legacy passphrase key resumes with it, as
+/// its node key and as the HTLC key of a coin that saved no pair; a recorded key that is neither the node key
+/// nor the legacy key is reported, naming the swap, and the swap is not resumed.
+#[test]
+fn t27_a_taker_swap_resumes_with_the_key_it_recorded() {
+    TestCoin::ticker.mock_safe(|_| MockResult::Return("KMD"));
+    TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
+    TestCoin::derives_swap_htlc_key.mock_safe(|_| MockResult::Return(false));
+    let node =
+        key_pair_from_seed("spice describe gravity federal blast come thank unfair canal monkey style afraid").unwrap();
+    let legacy = key_pair_from_seed("the hash of the passphrase text of an HD login").unwrap();
+    let ctx = || {
+        MmCtxBuilder::default()
+            .with_conf(json!({"netid": 8762}))
+            .with_secp256k1_key_pair(node)
+            .with_legacy_passphrase_key_pair(legacy)
+            .into_mm_arc()
+    };
+    let saved_recording = |recorded: &[u8]| {
+        let mut saved: TakerSavedSwap = json::from_str(SAVED).unwrap();
+        match saved.events[0].event {
+            TakerSwapEvent::Started(ref mut data) => {
+                data.maker_coin_htlc_pubkey = None;
+                data.maker_coin_htlc_privkey = None;
+                data.my_persistent_pub = H264::from(recorded).into();
+            },
+            _ => unreachable!(),
+        }
+        saved
+    };
+    let coin = || MmCoinEnum::Test(TestCoin::default());
+
+    let (swap, _) = TakerSwap::load_from_saved(ctx(), coin(), coin(), saved_recording(legacy.public())).unwrap();
+    assert_eq!(swap.node_key_pair.public(), legacy.public());
+    assert_eq!(swap.r().my_maker_coin_htlc_keypair.public(), legacy.public());
+    assert_eq!(swap.r().my_taker_coin_htlc_pub.to_vec(), legacy.public().to_vec());
+
+    let (swap, _) = TakerSwap::load_from_saved(ctx(), coin(), coin(), saved_recording(node.public())).unwrap();
+    assert_eq!(swap.node_key_pair.public(), node.public());
+
+    let foreign = KeyPair::random_compressed();
+    let saved = saved_recording(foreign.public());
+    let uuid = saved.uuid;
+    let err = match TakerSwap::load_from_saved(ctx(), coin(), coin(), saved) {
+        Ok(_) => panic!("a swap that recorded an unknown key must not resume"),
+        Err(e) => e,
+    };
+    assert!(err.contains(&uuid.to_string()) && err.contains("not resumed"), "{err}");
 }

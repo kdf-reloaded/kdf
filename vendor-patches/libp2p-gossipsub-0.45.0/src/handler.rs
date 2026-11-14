@@ -231,6 +231,15 @@ impl EnabledHandler {
     fn push_to_send_queue(&mut self, rpc: proto::RPC) {
         let log = self.send_queue.push(rpc, Instant::now());
         self.log_drop(log);
+        self.log_window();
+    }
+
+    /// Logs the window of the repeated-drops criterion that has just closed with at least 10 % of its data RPCs
+    /// dropped, if any (CRD ch.28 §28.9B RQ1 item 6). No message content is logged.
+    fn log_window(&mut self) {
+        if let Some(window) = self.send_queue.take_window_report() {
+            log::debug!("Gossip send queue toward peer {}: {window}", self.peer_id);
+        }
     }
 
     fn log_drop(&self, log: Option<DropLog>) {
@@ -274,6 +283,7 @@ impl EnabledHandler {
             None => {},
         }
         self.log_drop(drop_log);
+        self.log_window();
     }
 
     /// The pressure level change of the send queue, if any.
@@ -297,7 +307,9 @@ impl EnabledHandler {
     fn poll_send_queue_stuck(&mut self, cx: &mut Context<'_>) -> Option<HandlerEvent> {
         let now = Instant::now();
         self.send_queue.update_signal(now);
-        if let Some(report) = self.send_queue.take_stuck(now) {
+        let stuck = self.send_queue.take_stuck(now);
+        self.log_window();
+        if let Some(report) = stuck {
             self.stuck_timer = None;
             return Some(HandlerEvent::SendQueueStuck(report));
         }
@@ -469,7 +481,9 @@ impl EnabledHandler {
             ) {
                 // outbound idle state
                 Some(OutboundSubstreamState::WaitingOutput(substream)) => {
-                    if let Some(message) = self.send_queue.pop() {
+                    let next = self.send_queue.pop();
+                    self.log_window();
+                    if let Some(message) = next {
                         self.outbound_substream =
                             Some(OutboundSubstreamState::PendingSend(substream, message));
                         continue;
@@ -1016,31 +1030,72 @@ mod tests {
         assert_eq!(tags, vec![10, 11, 12, 1, 2, 13, 14]);
     }
 
+    fn signal_changes(events: &[HandlerEvent]) -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|ev| match ev {
+                HandlerEvent::SendQueueSignal { raised } => Some(*raised),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn queue_signal_is_reported_after_the_raise_time_and_cleared_after_the_clear_time() {
+    fn queue_signal_is_reported_when_an_rpc_has_waited_the_raise_time_and_cleared_after_the_clear_time() {
         let mut h = handler_with(SendQueueConfig {
             signal_raise_after: Duration::from_millis(100),
             signal_clear_after: Duration::from_millis(150),
             ..SendQueueConfig::default()
         });
-        let signals = |events: &[HandlerEvent]| {
-            events
-                .iter()
-                .filter_map(|ev| match ev {
-                    HandlerEvent::SendQueueSignal { raised } => Some(*raised),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
         h.on_behaviour_event(HandlerIn::Message(data_rpc(1)));
-        assert_eq!(signals(&poll_all(&mut h)), Vec::<bool>::new());
+        assert_eq!(signal_changes(&poll_all(&mut h)), Vec::<bool>::new());
         std::thread::sleep(Duration::from_millis(150));
-        assert_eq!(signals(&poll_all(&mut h)), vec![true]);
-        assert_eq!(signals(&poll_all(&mut h)), Vec::<bool>::new());
-        // The queue is emptied; the clear time has to pass.
+        assert_eq!(signal_changes(&poll_all(&mut h)), vec![true]);
+        assert_eq!(signal_changes(&poll_all(&mut h)), Vec::<bool>::new());
+        // The RPC is written; the clear time runs from the end of the backlog.
         while enabled(&mut h).send_queue.pop().is_some() {}
-        assert_eq!(signals(&poll_all(&mut h)), Vec::<bool>::new());
+        assert_eq!(signal_changes(&poll_all(&mut h)), Vec::<bool>::new());
         std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(signals(&poll_all(&mut h)), vec![false]);
+        assert_eq!(signal_changes(&poll_all(&mut h)), vec![false]);
+    }
+
+    #[test]
+    fn queue_signal_stays_quiet_while_each_rpc_is_written_within_the_raise_time() {
+        let mut h = handler_with(SendQueueConfig {
+            signal_raise_after: Duration::from_secs(1),
+            ..SendQueueConfig::default()
+        });
+        // The queue is never empty, but every RPC leaves a few tens of milliseconds after it arrived.
+        h.on_behaviour_event(HandlerIn::Message(data_rpc(0)));
+        for tag in 1..=10u8 {
+            h.on_behaviour_event(HandlerIn::Message(data_rpc(tag)));
+            std::thread::sleep(Duration::from_millis(20));
+            enabled(&mut h).send_queue.pop();
+            assert_eq!(signal_changes(&poll_all(&mut h)), Vec::<bool>::new());
+        }
+        assert_eq!(enabled(&mut h).send_queue.data_count(), 1);
+    }
+
+    #[test]
+    fn a_window_with_drops_is_taken_by_the_handler_and_published_in_the_stats() {
+        let mut h = handler_with(SendQueueConfig {
+            max_messages: 2,
+            drop_window: Duration::from_millis(100),
+            ..SendQueueConfig::default()
+        });
+        // Five data RPCs into a queue of two: three of the five are dropped in the window.
+        for tag in 0..5u8 {
+            h.on_behaviour_event(HandlerIn::Message(data_rpc(tag)));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        // The push after the window found it ended; the handler took the report to log it.
+        h.on_behaviour_event(HandlerIn::Message(data_rpc(5)));
+        let stats = h.send_queue_stats().unwrap();
+        assert_eq!(enabled(&mut h).send_queue.take_window_report(), None);
+        assert_eq!(
+            stats.recent_window_share_percent(Instant::now(), Duration::from_secs(60)),
+            60
+        );
+        assert_eq!(stats.recent_drop_series(Instant::now(), Duration::from_secs(60)), 1);
     }
 }

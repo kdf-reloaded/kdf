@@ -1,8 +1,10 @@
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
-use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError};
+use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError, HDWalletStorageKeyPolicy};
 use crate::rpc_command::get_my_address::PathToAddress;
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
-use crate::utxo::rpc_clients::electrum_pool::{electrum_block_interval, electrum_server_order, electrum_spread_reads};
+use crate::utxo::rpc_clients::electrum_pool::{electrum_block_interval, electrum_server_order,
+                                              electrum_spread_near_factor, electrum_spread_near_offset_ms,
+                                              electrum_spread_reads, electrum_tip_checks};
 use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumPoolOptions, ElectrumPoolTimings,
                                ElectrumRpcRequest, EstimateFeeMethod, UtxoRpcClientEnum};
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
@@ -82,6 +84,10 @@ pub enum UtxoCoinBuildError {
     /// with its failure (CRD ch.38 R38.6.4k-R item 5, R38.6.4i).
     #[display(fmt = "{}", _0)]
     FailedToConnectToElectrums(String),
+    /// The Electrum servers disagree about the chain; the text names every server with a height (CRD ch.38
+    /// R38.6.4o item 12).
+    #[display(fmt = "{}", _0)]
+    ElectrumServersDisagree(String),
     #[display(
         fmt = "No usable Electrum servers for {}: none are configured, or every configured server was rejected as \
                unusable by this build (native builds cannot use 'ws'/'wss' servers).",
@@ -108,6 +114,8 @@ pub enum UtxoCoinBuildError {
     },
     #[display(fmt = "Can not detect the user home directory")]
     CantDetectUserHome,
+    #[display(fmt = "Can not detect the default data directory: {}", _0)]
+    CantDetectDataDir(String),
     #[display(fmt = "Unexpected derivation method: {}", _0)]
     UnexpectedDerivationMethod(String),
     #[display(fmt = "Hardware Wallet context is not initialized")]
@@ -317,12 +325,20 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
         let priv_key_policy = PrivKeyPolicy::HDWallet {
             activated_key: key_pair,
             bip39_secp_priv_key: global_hd_ctx.root_priv_key().clone(),
+            path_to_address,
         };
 
         // Build the HD wallet structure for multi-account support.
-        let hd_wallet_storage = HDWalletCoinStorage::init(self.ctx(), ticker).await.mm_err(Into::into)?;
+        // The software global-HD coin: its accounts belong to the software wallet identity (CRD ch.05 R29).
+        let hd_wallet_storage = HDWalletCoinStorage::init(self.ctx(), ticker, HDWalletStorageKeyPolicy::Software)
+            .await
+            .mm_err(Into::into)?;
         let accounts = self
-            .load_hd_wallet_accounts(&hd_wallet_storage, &derivation_path)
+            .load_hd_wallet_accounts(
+                &hd_wallet_storage,
+                &derivation_path,
+                Some(global_hd_ctx.root_priv_key()),
+            )
             .await?;
         let gap_limit = self.gap_limit();
         let hd_wallet = UtxoHDWallet {
@@ -389,10 +405,15 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         let address_format = self.address_format()?;
         let derivation_path = self.derivation_path().mm_err(Into::into)?;
 
-        let hd_wallet_storage = HDWalletCoinStorage::init(self.ctx(), ticker).await.mm_err(Into::into)?;
+        // The Trezor-policy coin: its accounts belong to the device identity, also when a software global-HD
+        // login runs beside the hardware context (CRD ch.05 R29). The storage is opened for the very context the
+        // coin records below, so that both name one device (CRD ch.05 R58a).
+        let hd_wallet_storage = HDWalletCoinStorage::init_for_device(self.ctx(), ticker, &hw_ctx)
+            .await
+            .mm_err(Into::into)?;
 
         let accounts = self
-            .load_hd_wallet_accounts(&hd_wallet_storage, &derivation_path)
+            .load_hd_wallet_accounts(&hd_wallet_storage, &derivation_path, None)
             .await?;
         let gap_limit = self.gap_limit();
         let hd_wallet = UtxoHDWallet {
@@ -437,8 +458,9 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         &self,
         hd_wallet_storage: &HDWalletCoinStorage,
         derivation_path: &HDPathToCoin,
+        software_master: Option<&bip32::ExtendedPrivateKey<secp256k1::SecretKey>>,
     ) -> UtxoCoinBuildResult<HDAccountsMap<UtxoHDAccount>> {
-        utxo_common::load_hd_accounts_from_storage(hd_wallet_storage, derivation_path)
+        utxo_common::load_hd_accounts_from_storage(hd_wallet_storage, derivation_path, software_master)
             .await
             .mm_err(UtxoCoinBuildError::from)
     }
@@ -511,7 +533,10 @@ pub(crate) async fn build_electrum_client(
         timings: ElectrumPoolTimings::default(),
         order: electrum_server_order(ctx),
         spread_reads: electrum_spread_reads(ctx),
+        near_factor: electrum_spread_near_factor(ctx),
+        near_offset_ms: electrum_spread_near_offset_ms(ctx),
         block_interval: electrum_block_interval(coin_conf),
+        tip_checks: electrum_tip_checks(ctx),
     });
     for (server, e) in client.add_servers(&servers) {
         // A server is named as `host:port` or by a placeholder, never by its configured string (CRD ch.38
@@ -531,6 +556,11 @@ pub(crate) async fn build_electrum_client(
         .activation_probe()
         .await
         .map_to_mm(UtxoCoinBuildError::FailedToConnectToElectrums)?;
+    // The servers must agree about the chain before the coin is registered (R38.6.4o item 12).
+    client
+        .judge_activation()
+        .await
+        .map_to_mm(UtxoCoinBuildError::ElectrumServersDisagree)?;
     client.start_pool(args.spawn_ping);
 
     Ok(ElectrumClient(client))
@@ -774,7 +804,8 @@ pub trait UtxoCoinBuilderCommonOps {
                         },
                     }
                 };
-                let data_dir = coin_daemon_data_dir(name, is_asset_chain);
+                let data_dir =
+                    coin_daemon_data_dir(name, is_asset_chain).map_to_mm(UtxoCoinBuildError::CantDetectDataDir)?;
                 let confname = format!("{}.conf", name);
 
                 return Ok(data_dir.join(&confname[..]));

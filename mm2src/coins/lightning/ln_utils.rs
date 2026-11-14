@@ -102,7 +102,7 @@ pub async fn init_persister(
 
 pub fn init_keys_manager(ctx: &MmArc) -> EnableLightningResult<Arc<KeysManager>> {
     // The current time is used to derive random numbers from the seed where required, to ensure all random generation is unique across restarts.
-    let seed: [u8; 32] = ctx.secp256k1_key_pair().private().secret.into();
+    let seed: [u8; 32] = ctx.legacy_passphrase_key_pair().private().secret.into();
     let cur = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_to_mm(|e| EnableLightningError::SystemTimeError(e.to_string()))?;

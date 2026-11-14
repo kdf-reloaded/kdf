@@ -5,6 +5,10 @@ license = "GPL-2.0-only"
 edition = "2021"
 
 [features]
+# Runs the unit tests that need public servers (Electrum, Solana and BCHD nodes). Off by default: such a test
+# fails whenever a server is down or has changed, so without this feature it is marked `ignore`. See
+# docs/UNIT_TESTS.md ("Tests that need public servers").
+live-network-tests = []
 zhtlc-native-tests = []
 zhtlc = []
 # UDP transport for the Trezor emulator (native only, off by default). Lets
@@ -144,6 +148,8 @@ zcash_transparent = { version = "=0.10.0", features = ["transparent-inputs"] }
 zip32 = "=0.2.1"
 
 [dev-dependencies]
+# The get_private_keys tests install a hardware context beside a software login (`init_trezor_ctx_for_tests`).
+crypto = { path = "../crypto", features = ["test-helpers"] }
 # Used only by z_coin/z_v6_construction_tests.rs, to implement Sapling provers that must never be called
 # (a transparent-only transaction has no Sapling bundle); versions are those already locked.
 bls12_381 = "0.8"
@@ -154,6 +160,9 @@ rand_core = "0.6"
 # Test certificates for the Electrum TLS handshake tests. Default features are ring-based in 0.13; the
 # aws-lc-rs backend must not enter the graph.
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+# Also a normal dependency below (CRD ch.39 R39.6.5a). Here it adds the `circuit` feature the Halo2 verifying key
+# and the batch validator of z_coin/z_ironwood_read_tests.rs (T39.6.5a, T39.6.5c) need.
+orchard = { version = "=0.15.5", default-features = false, features = ["circuit"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { version = "0.3.27" }
@@ -216,6 +225,13 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 tonic = { version = "0.14", default-features = false, features = ["transport", "channel", "codegen", "tls-ring", "tls-webpki-roots"] }
 tonic-prost = "0.14"
 webpki-roots = { version = "1.0" }
+# CRD ch.39 R39.6.5a--R39.6.5e: the Pirate1 (Ironwood) payment address type and the empty-tree Ironwood anchor
+# of a withdrawal. Already in the tree (same version) through zcash_primitives, whose transaction builder takes
+# this crate's `Address` and `Anchor`. Native only: a WASM build refuses to activate a shielded coin.
+orchard = { version = "=0.15.5", default-features = false }
+# Classic Bech32 (BIP 173) for the Pirate1 address; the Bech32m checksum is refused (R39.6.5a). Already in
+# the tree at this version.
+bech32 = "0.11"
 # 0.24 makes `orchard` a default feature; Ironwood actions live behind it and
 # we neither read nor build that bundle, so default features stay off.
 zcash_client_backend = { version = "=0.24.0", default-features = false, features = ["transparent-inputs", "zcash_proofs"] }

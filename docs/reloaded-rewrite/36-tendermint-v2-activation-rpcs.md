@@ -130,7 +130,7 @@ R36.1.2 **Request fields.**
 | `nodes[].api_url`, `nodes[].grpc_url`, `nodes[].ws_url` | string | optional | Accepted (they appear in the public-docs examples) and **ignored**. |
 | `tokens_params` | array of token requests | **required** (may be empty) | Tendermint tokens to activate alongside the platform. |
 | `tokens_params[].ticker` | string | **required** | Token ticker. |
-| `tokens_params[].protocol` | object (coin-protocol form) | optional | Custom-token activation: when present, the token is activated from this protocol object instead of the coins configuration (R36.1.4 step 4). Any other member of a token request (e.g. `required_confirmations`) is accepted and ignored. |
+| `tokens_params[].protocol` | object (coin-protocol form) | optional | Custom-token activation: when present, the token is activated from this protocol object instead of the coins configuration (R36.1.4 step 4). A custom token is wallet-only (Reloaded; as a custom EVM token is, ch. 35 R35.2.7). Any other member of a token request (e.g. `required_confirmations`) is accepted and ignored. |
 | `tx_history` | boolean | optional, default `false` | When `true`, background transaction-history fetching is started for the platform coin after successful activation. |
 | `get_balances` | boolean | optional, default `true` | Selects the balance view or the ticker view of the result (R36.1.5). |
 | `path_to_address` | object `{account_id: integer, chain: "External"\|"Internal", address_id: integer}` | optional, default `{0, "External", 0}` | In HD-wallet mode selects which derived address is activated (under the coin's configured derivation path); without HD mode it has no effect. |
@@ -144,6 +144,31 @@ R36.1.2 **Request fields.**
 > three for Tendermint. Because the docs do not state what observable effect the
 > fields have, the reference behaviour is bound. The docs mark `nodes`,
 > `ticker` and `tokens_params` required, which the reference also enforces.
+
+> **As built (Reloaded; PR #319; informative).** `path_to_address` and
+> `tokens_params[].protocol` are implemented as follows.
+>
+> - **`path_to_address`.** The activation reads the login's key policy. Under an
+>   HD login the coin's key is derived from the seed at the coin's
+>   `derivation_path` extended by `path_to_address` (account hardened, then the
+>   chain, then the address index), with the same derivation the UTXO coins use
+>   for their activated address; the account id is derived from that key and the
+>   coin's public key is derived from the same private key, never taken from the
+>   wallet's root key. A coin configuration without `derivation_path`, a
+>   `path_to_address` that does not parse, and a path that cannot be derived
+>   each fail with `PlatformCoinCreationError`; the request member is parsed
+>   under an HD login only, and under an iguana login it is ignored whatever it
+>   holds, as before. The task variant (§36.6) uses the same build.
+> - **`tokens_params[].protocol`.** An entry with a `protocol` is built from it;
+>   an entry without one is built from the coins configuration. A `protocol`
+>   for a ticker that has a coins-configuration entry fails with
+>   `CustomTokenError`; the check precedes the one on the protocol's type. All
+>   entries are resolved, then checked against the platform
+>   (`PlatformCoinMismatch`), then built, so a failure leaves nothing registered.
+>   A malformed `protocol` object is a request-parse failure (ch. 55 §55.1).
+> - **A custom token is wallet-only,** as a custom EVM token is (ch.35 R35.2.7):
+>   it is refused when an order is placed, whatever the coins file and the build
+>   switch say.
 
 R36.1.3 **`activation_params` forms.** When present, `activation_params` shall
 be accepted in each of the following forms:
@@ -276,7 +301,7 @@ R36.2.1 **Request fields.**
 | --- | --- | --- | --- |
 | `ticker` | string | **required** | Token ticker. |
 | `activation_params` | object | **required** (may be `{}`) | Present for forward compatibility; its members (e.g. the docs' `required_confirmations`) are accepted and ignored. A request without it is a request-parse failure (`InvalidRequest`, ch. 55 §55.1). |
-| `protocol` | object (coin-protocol form) | optional | Custom-token activation from the supplied `TENDERMINTTOKEN` protocol instead of the coins configuration. |
+| `protocol` | object (coin-protocol form) | optional | Custom-token activation from the supplied `TENDERMINTTOKEN` protocol instead of the coins configuration. The token is wallet-only (Reloaded; ch. 35 R35.2.7). |
 
 R36.2.2 The token's platform binding, decimals, and on-chain denomination are
 taken from its `TENDERMINTTOKEN` `protocol_data` (§36.3.2). Activation shall,
@@ -317,6 +342,16 @@ produce them.
 **Unresponsive nodes.** When the platform's nodes are all unreachable or
 failing, `enable_tendermint_token` shall return `CouldNotFetchBalance` (string)
 with HTTP **500**.
+
+> **As built (Reloaded; PR #319; informative).** `enable_tendermint_token` has its
+> own handler with a request type that carries the optional `protocol` beside
+> `ticker` and `activation_params`. The steps are those of the generic
+> single-token activation, with the protocol resolved as in the as-built note
+> under R36.1.2: the inline `protocol` when present (a `CustomTokenError`,
+> HTTP 400, when the ticker is in the coins configuration; an
+> `UnexpectedTokenProtocol` when it is not `TENDERMINTTOKEN`), else the coins
+> configuration. The token built from an inline `protocol` is marked custom and
+> is wallet-only.
 
 ---
 
@@ -369,6 +404,103 @@ fail activation with `CoinProtocolParseError`; one whose `decimals` exceeds 18
 shall fail with `PlatformCoinCreationError` (R36.1.6). Neither partially
 activates the coin.
 
+### 36.3.1A Priority gas prices in the `TENDERMINT` `protocol_data` (gated text; passed the KDF Dirty Gate on 2026-11-08)
+
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-08, measure
+> 0.03** (chapter 01 R40; attestation in the Provenance Footer). This
+> subsection was written by the dirty-side specification author on
+> 2026-11-08 (Spec Reader round 0.4.0-11) from the reference state
+> `tendermint-priority-fee (as of 2025-07-24)` compared against its base
+> `dev (as of 2025-07-18)` (both rows of chapter 02 §2.15A), from the public
+> Cosmos chain-registry schema, and from this repository's own tree. The
+> reference state is an **unmerged draft**: neither `v2.6.0-beta` nor
+> `v3.0.0-beta` carries any of it (§36.0.1 is unaffected), it was never
+> approved, it was in conflict with the reference's development branch when
+> the record was archived, and no later state of it exists. The maintainer
+> decided on 2026-11-08 (decision FN (a)) to include the feature in
+> Reloaded; whether the *field names* below are kept for parity with that
+> draft is open (D36.4).
+
+A Cosmos chain publishes three gas-price levels for each fee token in the
+public Cosmos chain registry (`fees.fee_tokens[].low_gas_price`,
+`average_gas_price`, `high_gas_price`, in base denom per gas unit). The
+reference draft lets a coins-file entry carry those three figures so that a
+caller may pick a level by name instead of a number.
+
+R36.3.5 *The `priority_gas_prices` member.* The `TENDERMINT` `protocol_data`
+object MAY carry one further optional member:
+
+| `protocol_data` key | JSON type | Required? | Functional role |
+| --- | --- | --- | --- |
+| `priority_gas_prices` | array of exactly three numbers | optional | The chain's published gas prices in base denom per gas unit, in the fixed order **low, average, high** (positions 0, 1, 2). A named level in a withdraw, staking or IBC fee descriptor (chapter 49 R49.29) or a swap fee policy (chapter 35 R35.6.8) selects the figure at the matching position; the selected figure then enters the fee formula of chapter 18 §18.6B in place of the default gas price. |
+
+Shape and validation at the reference state:
+
+1. the value is an array of **exactly three** JSON numbers (integers are
+   accepted as numbers); an array of any other length, a non-array value or
+   a non-numeric element fails parsing of the coin's protocol descriptor,
+   which is the same failure class as a missing required field of R36.3.1
+   (`CoinProtocolParseError`, R36.3.2); a JSON `null` is treated as absent;
+2. the figures are **not** otherwise validated: no positivity check, no
+   ordering check (low ≤ average ≤ high is not enforced), no relation to
+   `gas_price` is checked;
+3. when the member is absent, every named level resolves to the coin's
+   default gas price (the `gas_price` member of R36.3.1, or the built-in
+   default 0.25 when that is absent too); activation and every operation
+   succeed exactly as before, so absence is **benign**;
+4. the member is read at platform activation and held for the coin's
+   lifetime; it is not re-read, and no RPC changes it.
+
+R36.3.6 *Tokens have no priority prices of their own.* The `TENDERMINTTOKEN`
+`protocol_data` carries no such member. A token's transactions are priced
+with its platform coin's `priority_gas_prices`, as they are priced with the
+platform coin's `gas_price` today (R36.3.3, `gas_price` row). A
+`priority_gas_prices` member on a token entry, if present, is an unknown
+member and is ignored under the extra-config-keys note of §36.3.1.
+
+> **Reloaded status (informative; this repository's tree, 2026-11-08).**
+> Reloaded's Tendermint protocol descriptor has no `priority_gas_prices`
+> member; because the descriptor tolerates unknown members (§36.3.3), a
+> coins file that already carries the array activates today with the array
+> silently dropped, and every level resolves to the default price. The
+> coins file this repository ships carries the member on no entry as of
+> this writing.
+
+> **Upstream divergence (informative).** The draft validates neither the
+> count semantics beyond the fixed length nor the sign of the figures. A
+> Reloaded implementation SHOULD refuse, at platform-coin construction
+> (`PlatformCoinCreationError`, the class R36.3.2 uses for `decimals`),
+> an array containing a non-positive or non-finite figure, because such a
+> figure makes the fee of chapter 18 §18.6B zero or undefined; whether to
+> also require the non-decreasing order is left to D36.4.
+
+T36.16 *`priority_gas_prices` shape (R36.3.5).* A `TENDERMINT` entry with
+`priority_gas_prices: [0.015, 0.025, 0.04]` activates and the three levels
+resolve to 0.015, 0.025 and 0.04 (observable through the fee amount of a withdraw
+carrying the priority fee descriptor of chapter 49 R49.29); an entry with a
+two-element array, with a four-element array, with a string element and with
+an object in place of the array each fails activation with
+`CoinProtocolParseError` and registers no coin; an entry without the member,
+and one with `priority_gas_prices: null`, activate and every level resolves
+to the default price. A `TENDERMINTTOKEN` entry carrying the member
+activates with the member ignored (R36.3.6).
+
+T36.17 *Non-positive figure (divergence note).* An entry with
+`priority_gas_prices: [0, 0.025, 0.04]` fails activation with
+`PlatformCoinCreationError` and registers no coin. *(Reloaded-original; the
+reference draft accepts it.)*
+
+> **As built (2026-11-09; R36.3.5, R36.3.6, T36.16, T36.17).**
+> The `TENDERMINT` arm of the coin protocol carries `priority_gas_prices` as an optional array of exactly
+> three `f64` (`null` and absent are `None`; it is not serialized when absent), so every shape of R36.3.5 item 1
+> fails `CoinProtocolParseError` through the existing protocol parse. The platform builder reads the same
+> member into its protocol info once and refuses a figure that is zero, negative or not finite with
+> `PlatformCoinCreationError` (the init-error kind `PriorityGasPriceNotPositive`) before the account is
+> derived; the order of the figures is not checked (D36.4). A `TENDERMINTTOKEN` entry is parsed without the
+> member, which is ignored as an unknown key (R36.3.6). Tests: T36.16 and T36.17 in
+> `lp_coins_context.rs`, `tendermint_with_tokens_activation/wire_tests.rs` and
+> `tendermint_swap_flow_tests/priority_fee_tests.rs`.
+
 ### 36.3.2 `TENDERMINTTOKEN` token `protocol_data`
 
 R36.3.3 The `TENDERMINTTOKEN` `protocol_data` object shall carry the following
@@ -394,7 +526,11 @@ from anywhere other than its own `protocol_data`.
 > `account_prefix` and `chain_id`; the `TENDERMINTTOKEN` arm captures
 > `platform`, `decimals`, and `denom`. Benign fields (`gas_price`,
 > `chain_registry_name`) are silently dropped; the enum tolerates unknown
-> `protocol_data` keys so surplus config does not fail activation.
+> `protocol_data` keys so surplus config does not fail activation. The
+> `priority_gas_prices` member of §36.3.1A (gated text) is not yet parsed
+> and is dropped the same way.
+>
+> *As built 2026-11-09 (clean-side note): implemented; see the As-built note of §36.3.1A.*
 
 > **Reloaded status (informative).** Reloaded enforces the `decimals <= 18`
 > bound while *parsing* the coin protocol, so a value above 18 currently fails
@@ -579,10 +715,14 @@ a hardware-policy request (Tendermint has none), so
 ## 36.7 Reloaded status (informative)
 
 > **Maintainer decision (binding, 2026-10-11).** This branch implements the
-> wire contract of this chapter: items 1-4, 7 and 10-15 below. Items 5, 6, 8 and
-> 9 are features (signing policies via `activation_params` in all three forms of
-> R36.1.3, HD `path_to_address`, custom tokens, transaction history) and are
-> deferred to `docs/plans/tendermint-activation-features.md`.
+> wire contract of this chapter: items 1-4, 7 and 10-15 below. Items 5 and 9
+> are features (signing policies via `activation_params` in all three forms of
+> R36.1.3, transaction history) and are deferred to
+> `docs/plans/tendermint-activation-features.md`. Two further features, HD
+> `path_to_address` and custom tokens, were deferred the same way and have been
+> delivered since (PR #319); their items are removed from the list and the
+> as-built notes under R36.1.2 and R36.2.4 describe them. The source numbers of
+> the other items are unchanged.
 >
 > **Deliberate divergence (binding, interim).** Until R36.1.3 is implemented, a
 > request that carries a non-null `activation_params` shall be rejected with
@@ -595,8 +735,8 @@ a hardware-policy request (Tendermint has none), so
 > `activation_params` only, and is removed when the plan's item 1 lands.
 
 > **Implemented on `fix/activation-api-parity`:** items 1-4, 7 and 10-15 below
-> and the interim rejection of `activation_params`. Remaining: items 5, 6, 8 and
-> 9 (deferred to the Tendermint plan). The list is kept as the record of what
+> and the interim rejection of `activation_params`. Remaining: items 5 and 9
+> (deferred to the Tendermint plan). The list is kept as the record of what
 > changed.
 
 Current reloaded behaviour that deviates from the bound contract (behavioural
@@ -616,18 +756,9 @@ terms; the clean implementer works from this list):
    public-key or WalletConnect request silently activates with the local
    context key. Bound: the three forms of R36.1.3 with their effects; malformed
    input is `InvalidRequest`.
-6. **`path_to_address` / HD mode.** Reloaded ignores `path_to_address` and
-   always activates the context key's address. Bound: in HD-wallet mode the
-   address at `path_to_address` under the coin's derivation path; missing
-   derivation config or an invalid path is `PlatformCoinCreationError`.
 7. **Token platform check.** Reloaded does not check that an inline token's
    `platform` equals the activated platform. Bound: `PlatformCoinMismatch`
    (unit, HTTP 400).
-8. **Custom tokens.** Reloaded accepts no `protocol` member on
-   `tokens_params[]` or on `enable_tendermint_token`. Bound: custom-token
-   activation and `CustomTokenError` (R36.1.6, R36.2.4). When custom Tendermint
-   tokens are implemented, each shall be wallet-only, as a custom EVM token is
-   (ch. 35 R35.2.7); see `docs/plans/tendermint-activation-features.md` item 3.
 9. **`tx_history`.** Reloaded accepts `true` but starts no history fetching.
    Bound: background history fetching starts after activation.
 10. **`protocol` member of `UnexpectedPlatformProtocol` /
@@ -679,6 +810,12 @@ terms; the clean implementer works from this list):
 > queries) is then inconsistent with the activated address. Proposed fix for
 > Reloaded: derive the public key from the activated private key; verify with an
 > HD-mode signing test before relying on HD Tendermint swaps.
+>
+> **As built (Reloaded; PR #319).** Done. Reloaded derives the public key of an
+> HD-activated coin from the activated private key, and a test signs a
+> withdrawal at a non-default path and verifies the signature against that
+> path's public key and against neither the default path's key nor the wallet's
+> root key.
 
 ---
 
@@ -755,6 +892,24 @@ verbose level, a request whose answer carries a marker string succeeds, and
 no captured line contains the marker. A line that reports the answer may
 carry its size.
 
+T36.16 *Custom tokens.* An inline `TENDERMINTTOKEN` `protocol` in `tokens_params`
+activates beside the platform and on `enable_tendermint_token`; the token is
+marked custom and is wallet-only; a configured token activated in the same call
+is unchanged. A `protocol` for a configured ticker is the `CustomTokenError` of
+T36.6, a `protocol` that names another platform is `PlatformCoinMismatch`, and a
+`protocol` of another type is `UnexpectedTokenProtocol`.
+
+T36.17 *HD key.* Under an HD login the address of the activated coin equals the
+BIP-44 address at the coin's `derivation_path` and `path_to_address`, computed
+independently of the wallet code from the test mnemonic (`m/44'/118'/0'/0/0` by
+default, another path for another `path_to_address`); the coin's public key is
+that of the activated private key; a withdrawal signed at a non-default path
+verifies against that path's public key and against neither the default path's
+key nor the wallet's root key. Under an iguana login the address is that of the
+single key, whatever `path_to_address` holds. A coin configuration without
+`derivation_path`, and an unparseable or underivable `path_to_address`, fail
+under an HD login with `PlatformCoinCreationError`.
+
 ## 36.9 Deferred Work
 
 D36.1 Hardware-wallet (Trezor/Ledger-native) Tendermint activation is not part
@@ -775,6 +930,25 @@ decided on 2026-10-29 that it does, for error texts as well as log lines: the
 native UTXO daemon's errors carry the daemon's error code and message and the
 body's size only (chapter 38 R38.6.9b item 4), and so do the Sia wallet
 daemon's (chapter 20 R-N3).
+
+D36.4 *(Resolved: the maintainer's decision of 2026-11-09, option (a), the
+draft's names and shapes, with the three figures accepted in any order (no
+non-decreasing requirement); to be reassessed after field use. Previously open -- maintainer decision; gated text of §36.3.1A, passed the KDF
+Dirty Gate on 2026-11-08.)* *Field-name parity for the priority gas prices.*
+The member name `priority_gas_prices`, its fixed three-element array shape and
+the level names used by the fee descriptor of chapter 49 R49.29 (`Low`,
+`Average`, `High`, `Default`) are those of the unmerged reference draft named
+in §36.3.1A. No released designation carries them, so there is no deployed
+coins file or client to be compatible with. Options: (a) keep the draft's
+names and shapes so that a coins file written for the draft works unchanged;
+(b) choose Reloaded's own names (for example an object `{"low": …, "average":
+…, "high": …}` mirroring the chain-registry keys, and `Medium` in place of
+`Average` to match the swap fee policy of chapter 35 R35.6.3), documented in
+`docs/COMPAT_SWITCHES.md` as a Reloaded-only surface; (c) accept both. The
+rules of §36.3.1A, chapter 49 §49.2A and chapter 35 R35.6.8 are written in the
+draft's names under option (a) and are to be renamed consistently if (b) or
+(c) is chosen. The same decision settles whether the non-decreasing order of
+the three figures is required (the divergence note of §36.3.1A).
 
 ## 36.10 Baseline Verifications
 
@@ -849,3 +1023,56 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required. The resolution of D36.3's second question (2026-10-29, decision
   AU) was added on the same terms.
+- *Clean-context addition (2026-11-09, forbidden corpus not consulted):* the
+  as-built notes under R36.1.2 and R36.2.4, the as-built note under the HD
+  code-quality finding of §36.7, the wallet-only sentences of the
+  `tokens_params[].protocol` and `protocol` rows, and the removal of the former
+  items 6 and 8 of §36.7 describe this repository's code. They take no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.
+- *Scoped addition (2026-11-08) -- §36.3.1A (R36.3.5, R36.3.6, the two
+  informative notes, T36.16), the sentence added to the §36.3.3 status note,
+  and D36.4.* **KDF Dirty Gate: PASS on 2026-11-08, measure 0.03, no
+  findings** (chapter 01 R40; the attestation at the end of this item closes
+  it). *Inputs:* the forbidden corpus at the rows `tendermint-priority-fee
+  (as of 2025-07-24)` and `dev (as of 2025-07-18)` of chapter 02 §2.15A,
+  consulted **only** to establish the name, JSON shape, validation and
+  absent-value behavior of the optional priority-gas-price member of the
+  `TENDERMINT` protocol descriptor, that a token descriptor has no such
+  member, and the draft's review state as a fact (unmerged, never approved,
+  in conflict at archive time, no later state); the released designations
+  `v2.6.0-beta` and `v3.0.0-beta` were checked only for the absence of the
+  member. The three-level model and the level names rest on the public
+  Cosmos chain-registry schema (chapter 01 R3/R6). Behavior and dictated
+  coins-file member names only; no private identifier, function body, helper
+  decomposition, error, log, comment, test body or review text was
+  reproduced. The Reloaded status note and T36.17 rest on this repository's
+  own tree and are Reloaded-original. *Dirty Gate clearance (chapter 01 T1,
+  R40):* PASS, 2026-11-08. Extent: the Tendermint fee-computation and
+  fee-descriptor surface — the Cosmos withdraw, staking and IBC fee
+  descriptors, the swap fee-policy RPC pair and its policy enum, and the
+  Tendermint protocol descriptor's gas-price members — compared at the row
+  tendermint-priority-fee (as of 2025-07-24) against its base row dev (as of
+  2025-07-18) over the complete difference between those two states (nine
+  source files, two of them test files), together with the public
+  description, two review comments and three discussion comments of the
+  draft pull request those rows record; and at the rows v2.6.0-beta and
+  v3.0.0-beta for the released fee-policy method strings, request member and
+  enum values, the explicit Cosmos fee descriptor, the handling of a foreign
+  fee form on a Cosmos request, and the staking and IBC gas-limit defaults.
+  Method: reading of the full inter-state difference and of the
+  release-state passages, combined with mechanical text search of the
+  candidate's added lines against identifier, numeric-constant,
+  string-literal, name and number lists drawn from the compared states; no
+  code-block tool run was needed (the candidate embeds only two one-line
+  JSON wire examples). Measure: discretionary-similarity 0.03, read against
+  the per-token forced-vs-free standard of chapter 01 R35/R39 (dictated
+  wire, config, error-discriminant and contract-constant tokens excluded;
+  FAIL on any private identifier, body or control-flow transcription,
+  error/log wording, internal module tree or internal test name) — below
+  threshold, PASS.
+- *Clean-context addition (2026-11-09, forbidden corpus not consulted):* the
+  recorded resolution of D36.4, the as-built note under §36.3.1A and the
+  clean-side note closing the §36.3.3 status note describe the maintainer's
+  decision of 2026-11-09 and this repository's code. They take no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is required.

@@ -215,7 +215,22 @@ where
     /// dropped on the way, and an element that trails the refreshed expire time of its entry is
     /// queued again at the true one, so the entry returned is the one with the earliest true expire
     /// time. `None` when the cache is empty.
-    pub fn pop_oldest(&mut self) -> Option<(Key, Value)> {
+    pub fn pop_oldest(&mut self) -> Option<(Key, Value)> { self.pop_oldest_if(|_| true) }
+
+    /// Like [`TimeCache::pop_oldest`], but removes the oldest entry only when it was inserted at least
+    /// `min_age` ago. When the oldest entry is younger, nothing is removed (and no other entry is looked
+    /// at, as every other entry is younger still), so a loop that stops at the first `None` visits only
+    /// what it removes.
+    pub fn pop_oldest_at_least(&mut self, min_age: Duration) -> Option<(Key, Value)> {
+        // An entry inserted `age` ago expires at `inserted + ttl`, so its age is at least `min_age`
+        // exactly when `expires + min_age <= now + ttl`.
+        let (now, ttl) = (Instant::now(), self.ttl);
+        self.pop_oldest_if(|expires| expires + min_age <= now + ttl)
+    }
+
+    /// Removes and returns the oldest entry when `eligible` accepts its expire time; the shared body of
+    /// [`TimeCache::pop_oldest`] and [`TimeCache::pop_oldest_at_least`].
+    fn pop_oldest_if<F: Fn(Instant) -> bool>(&mut self, eligible: F) -> Option<(Key, Value)> {
         while let Some(queued) = self.list.pop_front() {
             if let Occupied(entry) = self.map.entry(queued.key.clone()) {
                 if entry.get().serial != queued.serial {
@@ -232,11 +247,42 @@ where
                     });
                     continue;
                 }
+                if !eligible(expires) {
+                    self.list.push_front(queued);
+                    return None;
+                }
                 let (key, element) = entry.remove_entry();
                 return Some((key, element.element));
             }
         }
         None
+    }
+
+    /// Inserts an entry as if it had been inserted `age` ago (an `age` of `ttl` or more makes it
+    /// expired at once). The entry keeps its place in the expiry order. For tests of callers that must
+    /// not wait; nothing in production uses it. `false` when the key was already present.
+    #[doc(hidden)]
+    pub fn insert_aged(&mut self, key: Key, value: Value, age: Duration) -> bool {
+        let now = Instant::now();
+        self.remove_expired_keys(now);
+        if self.map.contains_key(&key) {
+            return false;
+        }
+        let expires = now + self.ttl.saturating_sub(age);
+        let serial = self.next_serial;
+        self.next_serial += 1;
+        let at = self.list.partition_point(|other| other.expires <= expires);
+        self.list.insert(at, QueuedKey {
+            key: key.clone(),
+            expires,
+            serial,
+        });
+        self.map.insert(key, ExpiringElement {
+            element: value,
+            expires,
+            serial,
+        });
+        true
     }
 
     /// Gives memory back when the map or the list holds far more room than it needs, which they
@@ -574,6 +620,39 @@ mod test {
         cache.remove_expired_keys(t0 + Duration::from_secs(11));
         assert!(cache.is_empty());
         assert_eq!(cache.queued_len(), 0);
+    }
+
+    #[test]
+    fn pop_oldest_at_least_stops_at_an_entry_younger_than_the_minimum_age() {
+        let mut cache = TimeCache::new(Duration::from_secs(3600));
+        assert_eq!(cache.pop_oldest_at_least(Duration::from_secs(120)), None);
+        assert!(cache.insert_aged("old1", 1, Duration::from_secs(500)));
+        assert!(cache.insert_aged("old2", 2, Duration::from_secs(300)));
+        assert!(cache.insert_aged("young", 3, Duration::from_secs(60)));
+        assert!(cache.insert("fresh", 4));
+        assert!(!cache.insert_aged("old1", 9, Duration::from_secs(10)));
+
+        assert_eq!(cache.pop_oldest_at_least(Duration::from_secs(120)), Some(("old1", 1)));
+        assert_eq!(cache.pop_oldest_at_least(Duration::from_secs(120)), Some(("old2", 2)));
+        // The oldest left is 60 s old: nothing more is removed, and nothing is lost.
+        assert_eq!(cache.pop_oldest_at_least(Duration::from_secs(120)), None);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get_unexpired(&"young"), Some(&3));
+        assert_eq!(cache.get_unexpired(&"fresh"), Some(&4));
+        // The plain removal still takes the oldest.
+        assert_eq!(cache.pop_oldest(), Some(("young", 3)));
+    }
+
+    #[test]
+    fn insert_aged_entries_expire_with_their_age() {
+        let mut cache = TimeCache::new(Duration::from_secs(3600));
+        assert!(cache.insert_aged("a", 1, Duration::from_secs(3599)));
+        assert!(cache.insert_aged("b", 2, Duration::from_secs(3601)));
+        assert_eq!(cache.get_unexpired(&"a"), Some(&1));
+        assert_eq!(cache.get_unexpired(&"b"), None);
+        // The expired one is reclaimed by the next write.
+        assert!(cache.insert("c", 3));
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]
