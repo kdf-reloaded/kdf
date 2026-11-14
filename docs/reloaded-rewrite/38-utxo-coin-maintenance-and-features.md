@@ -1378,6 +1378,14 @@ maintainer decision 2026-10-28; amends R38.6.4b item 1 for Reloaded).**
    the fallback of item 1 applies to every other value. R38.6.4l does not
    change the default, which stays `random`.
 
+   *Status note (2026-11-14, maintainer decision).* The default is `mixed`
+   since 2026-11-14: an absent switch, and every value items 1 and 3 do not
+   recognize, now mean `mixed`, and the warning of item 1 names `mixed`.
+   `random` stays a recognized value and gives the order that was the default
+   before; `listed` keeps the listed order of R38.6.4b item 1. The sentences
+   above that name `random` as the default record the rule as it stood before
+   that date.
+
 *Rationale.* Every wallet ships the same coins file, so ranking by list
 position sends every user to the same first server and leaves the later
 servers almost unused. A one-time draw spreads users across the listed
@@ -1776,6 +1784,10 @@ item 3).**
    (R38.6.4b-R item 1) until a field run on RIN with `mixed` has passed;
    `mixed`, the intended default, then becomes the default in a separate
    change (D38.6.4l.1).
+
+   *Status note (2026-11-14, maintainer decision).* `mixed` is the default
+   since 2026-11-14 (R38.6.4b-R, status note after item 3); that is the
+   separate change of D38.6.4l.1.
 2. *Measurements.* The header request below is the Electrum protocol method
    `blockchain.headers.subscribe`. Its answer is the server's tip header with
    its `height`, and the session then receives a header notification for
@@ -1931,6 +1943,9 @@ public servers where it was.
 > a node uses. By the second arm of the default-side rule of
 > `docs/COMPAT_SWITCHES.md`, a Reloaded variant is the default; until the
 > field run of D38.6.4l.1 has passed, that variant is `random`.
+>
+> *Status note (2026-11-14, maintainer decision):* since 2026-11-14 that
+> variant is `mixed` (R38.6.4b-R, status note after item 3).
 >
 > **Compatibility:** for behavior matching GLEEC KDF, set
 > `electrum_server_order` to `listed`.
@@ -2458,6 +2473,10 @@ from turning every node into a periodic prober of the public servers.
 > above the agreed tip of D38.6.4o.9. The default flip of D38.6.4o.6 is not part
 > of it: `electrum_server_order` stays `random`.
 >
+> *Status note (2026-11-14).* The default flip is made on 2026-11-14 by a
+> separate change: an absent `electrum_server_order` now means `mixed`
+> (R38.6.4b-R, status note after item 3).
+>
 > *Pure decisions*, in `electrum_measure.rs`, so that the tests are
 > deterministic: `tolerance_blocks` (item 1), `agreed_tip`, `lag`, `lead`,
 > `signed_lag` and `is_beyond_tolerance` / `is_outside_tolerance` (item 2),
@@ -2676,6 +2695,11 @@ Each of these settings shall parse as stated:
 - `mixed` and `measured` parse as T38.6.4l.1 states;
 - any other value, including a different letter case or a non-string, means
   `random` with one warning.
+
+*Status note (2026-11-14).* Since the default is `mixed` (R38.6.4b-R, status
+note after item 3), an absent switch means `mixed`, and every other value,
+including a different letter case or a non-string, means `mixed` with one
+warning; `random` still means `random`. The test asserts these.
 
 T38.6.4.14 *A dead and a refusing server at activation.* With three stubs,
 one that never accepts a connection, one that refuses every connection at
@@ -3063,6 +3087,10 @@ few coins, RIN first. The maintainer chose the field run. The default stays
 `random` until a field run on RIN with `mixed` has passed; the switch to
 `mixed` is then a separate change.
 
+*Status note (2026-11-14, maintainer decision).* The maintainer made `mixed`
+the default on 2026-11-14, for the release 0.4.0-beta.1, in a separate change
+(R38.6.4b-R, status note after item 3).
+
 D38.6.4l.2 *(Resolved 2026-10-29, maintainer decision: kept as written.)* *The rank during the probe.* The probe offers servers to the set as
 they connect (R38.6.4k-R item 3), before the activation round's measurements
 are complete. This rule keeps the uniform draw until the probe ends, so the
@@ -3224,6 +3252,10 @@ replacement has a logged reason, no server is marked behind or stuck while it
 was within *T* of the agreed tip within 60 s of the mark, loop and swap times
 stay within 10 % of `random`, and no read reaches the far-behind server after
 activation. The default changes in a separate commit after the run passes.
+
+*Status note (2026-11-14, maintainer decision).* The maintainer decided on
+2026-11-14 to make `mixed` the default for the release 0.4.0-beta.1; the
+change is made in a separate commit (R38.6.4b-R, status note after item 3).
 
 D38.6.4o.7 *(Decided 2026-11-09, maintainer.)* *The stuck period.* The larger of
 3 × `avg_blocktime` and 10 minutes, the figure of the lone-connection rule of
@@ -4714,3 +4746,11 @@ R38.8.6 **Tests (two-direction, observable).**
   DOGE Electrum servers, and the maintainer's decision of 2026-11-10. They take
   no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
   is required.
+- *Reloaded-original amendment (2026-11-14, maintainer decision), clean side --
+  dated status notes after R38.6.4b-R item 3, R38.6.4l item 1 and its
+  divergence note, T38.6.4.13-R, the as-built note of R38.6.4o, D38.6.4l.1 and
+  D38.6.4o.6: the default of
+  `electrum_server_order` is `mixed`.* Written by a session that never read the
+  forbidden corpus. The input is the maintainer's decision of 2026-11-14. It
+  takes no forbidden-class input, so chapter 01 R38 is not engaged and no gate
+  pass is required.

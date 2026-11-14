@@ -1,16 +1,16 @@
 # Plan: measured Electrum server order
 
-**Status:** parked (shipped in PR #144; the default stays random until the decision on making `mixed` the default) — **Last reviewed:** 2026-11-08
+**Status:** done (shipped in PR #144; `mixed` is the default since 2026-11-14, PR #349) — **Last reviewed:** 2026-11-14
 
 **CRD:** ch.38 R38.6.4l (Reloaded-original), with T38.6.4l.1–T38.6.4l.15 and
 the decision items D38.6.4l.1–D38.6.4l.9, all resolved by 2026-10-29.
 
 > **Context.** The Electrum connection pool (CRD ch.38 §38.6.4) ranks a coin's
 > servers by an order drawn once at activation: R38.6.4b-R, with
-> `electrum_server_order` set to `random`, the default. This plan adds two
+> `electrum_server_order` set to `random`, the default until 2026-11-14. This plan adds two
 > further values of that switch:
-> - `mixed`: measured quality and chance, 50:50. It is intended to become the
->   default.
+> - `mixed`: measured quality and chance, 50:50. It is the default since
+>   2026-11-14.
 > - `measured`: measured quality only, opt-in.
 >
 > Everything here is a Reloaded-original design with no wire effect: it
@@ -29,8 +29,8 @@ the decision items D38.6.4l.1–D38.6.4l.9, all resolved by 2026-10-29.
 | Value | Order | Status |
 |---|---|---|
 | `listed` | The order of the activation request, as GLEEC KDF. | in the pool PR |
-| `random` | A uniform random draw once at activation (R38.6.4b-R). | in the pool PR, current default |
-| `mixed` | A weighted draw among eligible servers: 50 % by measured quality, 50 % by chance (below). | this plan; intended default |
+| `random` | A uniform random draw once at activation (R38.6.4b-R). | in the pool PR; the default until 2026-11-14 |
+| `mixed` | A weighted draw among eligible servers: 50 % by measured quality, 50 % by chance (below). | this plan; the default since 2026-11-14 |
 | `measured` | Eligible servers ordered by measured quality alone; the random draw only breaks ties. | this plan; opt-in |
 
 An absent switch, or an unrecognized value, means the default and logs one
@@ -177,8 +177,9 @@ A maintained connection is **poor** when one of these holds:
 - **Block interval per coin.** Check what the UTXO coin configurations carry;
   a coin without one uses the 10-minute fallback for P1.
 - **When `mixed` becomes the default.** Decided 2026-10-28: after a field run
-  on RIN with `mixed`, as a separate change (CRD D38.6.4l.1). The default is
-  still `random`. *Lab input, 2026-11-06 (release tests 0.4.0-beta.1, rows 7
+  on RIN with `mixed`, as a separate change (CRD D38.6.4l.1). *Decided
+  2026-11-14, maintainer:* `mixed` is the default since 2026-11-14, for the
+  release 0.4.0-beta.1 (PR #349). *Lab input, 2026-11-06 (release tests 0.4.0-beta.1, rows 7
   and 8, N4 and N5):* RIN loops of 200 rounds with `mixed` and with `measured`
   took 20.1 s and 20.4 s, the same time as the default order; the rows are
   informative, without a pass rule. Whether they stand for the field run is
