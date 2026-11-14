@@ -17851,6 +17851,133 @@ mod t05_12b_swap_key_check_tests {
         assert_eq!(crate::mm2::lp_swap::running_swaps_num(&ctx), 0);
     }
 
+    /// Puts the node's clock check into the refusal of a failed run-time check (CRD ch.45 R45.6C.7) and returns its text.
+    fn begin_clock_refusal(ctx: &MmArc) -> String {
+        use crate::mm2::lp_clock_check::{clock_refusal, CheckResult, ClockCheckCtx};
+        ClockCheckCtx::from_ctx(ctx).unwrap().apply_runtime_result(
+            &CheckResult::Failed {
+                offset: 12.5,
+                answers: 3,
+            },
+            false,
+            std::time::Instant::now(),
+        );
+        clock_refusal(ctx).unwrap()
+    }
+
+    /// Ends the refusal by a passing check.
+    fn pass_the_clock_check(ctx: &MmArc) {
+        use crate::mm2::lp_clock_check::{CheckResult, ClockCheckCtx};
+        ClockCheckCtx::from_ctx(ctx).unwrap().apply_runtime_result(
+            &CheckResult::Passed {
+                offset: 0.5,
+                answers: 3,
+            },
+            false,
+            std::time::Instant::now(),
+        );
+    }
+
+    /// T45.29 (CRD ch.45 R45.6C.8): while the clock check refuses, a new order (`setprice`, `buy`, `sell`) is refused
+    /// with the error of the rule, which states the measured offset and the limit; after a passing check the same
+    /// requests are no longer refused by it.
+    #[test]
+    fn t45_29_a_clock_refusal_refuses_a_new_order_until_a_check_passes() {
+        mock_coins();
+        let ctx = ctx_with(json!({}), false, &["ETH", "KMD"]);
+        let refusal = begin_clock_refusal(&ctx);
+        assert!(
+            refusal.contains("12.5 s") && refusal.contains("limit is 10 s"),
+            "{refusal}"
+        );
+        let set_price = || -> SetPriceReq {
+            json::from_value(json!({ "base": "ETH", "rel": "KMD", "price": "1", "volume": "1" })).unwrap()
+        };
+        let err = block_on(create_maker_order(&ctx, set_price())).err().unwrap();
+        assert!(err.ends_with(&refusal), "{err}");
+        for method in ["buy", "sell"] {
+            let body = json!({ "base": "ETH", "rel": "KMD", "price": "1", "volume": "1", "method": method });
+            let err = match method {
+                "buy" => block_on(buy(ctx.clone(), body)),
+                _ => block_on(sell(ctx.clone(), body)),
+            }
+            .err()
+            .unwrap();
+            assert!(err.ends_with(&refusal), "{method}: {err}");
+        }
+
+        // A later passing check lifts the refusal: the same requests go past this check (they stop later, at the
+        // first thing `TestCoin` cannot answer).
+        pass_the_clock_check(&ctx);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on(create_maker_order(&ctx, set_price()))
+        }));
+        if let Ok(Err(err)) = outcome {
+            assert!(!err.contains(&refusal), "{err}");
+        }
+        for method in ["buy", "sell"] {
+            let body = json!({ "base": "ETH", "rel": "KMD", "price": "1", "volume": "1", "method": method });
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match method {
+                "buy" => block_on(buy(ctx.clone(), body.clone())),
+                _ => block_on(sell(ctx.clone(), body.clone())),
+            }));
+            if let Ok(Err(err)) = outcome {
+                assert!(!err.contains(&refusal), "{method}: {err}");
+            }
+        }
+    }
+
+    /// T45.29: the maker start of a matched order asks the clock gate and starts no swap while it refuses.
+    #[test]
+    fn t45_29_a_clock_refusal_starts_no_new_maker_swap() {
+        use crate::mm2::lp_clock_check::clock_refusal;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static ASKED: AtomicBool = AtomicBool::new(false);
+        mock_coins();
+        clock_refusal.mock_safe(|_| {
+            ASKED.store(true, Ordering::SeqCst);
+            MockResult::Return(Some("the clock is off".to_owned()))
+        });
+        let ctx = ctx_with(json!({}), false, &["ETH", "JST"]);
+        let maker_order: MakerOrder = json::from_str(MATCHED_ORDER_JSON).unwrap();
+        let maker_match = maker_order.matches.values().next().cloned().unwrap();
+        block_on(maker_swap_start(ctx.clone(), maker_match, maker_order));
+        assert!(ASKED.load(Ordering::SeqCst), "the start did not ask the clock gate");
+        assert_eq!(crate::mm2::lp_swap::running_swaps_num(&ctx), 0);
+    }
+
+    /// T45.29: the taker start of a matched order asks the clock gate and starts no swap while it refuses.
+    #[test]
+    fn t45_29_a_clock_refusal_starts_no_new_taker_swap() {
+        use crate::mm2::lp_clock_check::clock_refusal;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static ASKED: AtomicBool = AtomicBool::new(false);
+        mock_coins();
+        clock_refusal.mock_safe(|_| {
+            ASKED.store(true, Ordering::SeqCst);
+            MockResult::Return(Some("the clock is off".to_owned()))
+        });
+        let ctx = ctx_with(json!({}), false, &["ETH", "JST"]);
+        let maker_order: MakerOrder = json::from_str(MATCHED_ORDER_JSON).unwrap();
+        let maker_match = maker_order.matches.values().next().cloned().unwrap();
+        let (base, rel) = pair("ETH", "JST");
+        let taker_order = TakerOrderBuilder::new(&base, &rel).build_unchecked();
+        let taker_match = TakerMatch {
+            reserved: maker_match.reserved,
+            connect: TakerConnect {
+                sender_pubkey: H256Json::default(),
+                dest_pub_key: H256Json::default(),
+                maker_order_uuid: Uuid::new_v4(),
+                taker_order_uuid: Uuid::new_v4(),
+            },
+            connected: None,
+            last_updated: now_ms(),
+        };
+        block_on(taker_swap_start(ctx.clone(), taker_order, taker_match));
+        assert!(ASKED.load(Ordering::SeqCst), "the start did not ask the clock gate");
+        assert_eq!(crate::mm2::lp_swap::running_swaps_num(&ctx), 0);
+    }
+
     /// The order of the tests above: one match, already connected.
     const MATCHED_ORDER_JSON: &str = r#"{"max_base_vol":"1","max_base_vol_rat":[[1,[1]],[1,[1]]],"min_base_vol":"0","min_base_vol_rat":[[0,[]],[1,[1]]],"price":"1","price_rat":[[1,[1]],[1,[1]]],"created_at":1589265312093,"updated_at":1589265312093,"base":"ETH","rel":"JST","matches":{"2f9afe84-7a89-4194-8947-45fba563118f":{"request":{"base":"ETH","rel":"JST","base_amount":"0.1","base_amount_rat":[[1,[1]],[1,[10]]],"rel_amount":"0.2","rel_amount_rat":[[1,[1]],[1,[5]]],"action":"Buy","uuid":"2f9afe84-7a89-4194-8947-45fba563118f","method":"request","sender_pubkey":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3","dest_pub_key":"0000000000000000000000000000000000000000000000000000000000000000","match_by":{"type":"Any"}},"reserved":{"base":"ETH","rel":"JST","base_amount":"0.1","base_amount_rat":[[1,[1]],[1,[10]]],"rel_amount":"0.1","rel_amount_rat":[[1,[1]],[1,[10]]],"taker_order_uuid":"2f9afe84-7a89-4194-8947-45fba563118f","maker_order_uuid":"5f6516ea-ccaa-453a-9e37-e1c2c0d527e3","method":"reserved","sender_pubkey":"c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed","dest_pub_key":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3"},"connect":{"taker_order_uuid":"2f9afe84-7a89-4194-8947-45fba563118f","maker_order_uuid":"5f6516ea-ccaa-453a-9e37-e1c2c0d527e3","method":"connect","sender_pubkey":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3","dest_pub_key":"c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed"},"connected":{"taker_order_uuid":"2f9afe84-7a89-4194-8947-45fba563118f","maker_order_uuid":"5f6516ea-ccaa-453a-9e37-e1c2c0d527e3","method":"connected","sender_pubkey":"c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed","dest_pub_key":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3"},"last_updated":1589265314408}},"started_swaps":["2f9afe84-7a89-4194-8947-45fba563118f"],"uuid":"5f6516ea-ccaa-453a-9e37-e1c2c0d527e3"}"#;
 

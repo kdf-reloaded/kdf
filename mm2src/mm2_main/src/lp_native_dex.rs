@@ -170,6 +170,9 @@ pub enum MmInitError {
     },
     #[display(fmt = "Wallet error: {}", _0)]
     WalletError(String),
+    /// The clock check at start failed (CRD ch.45 R45.6C.6 item 2, variant (a)): the launch is refused.
+    #[display(fmt = "Clock check failed: {}", _0)]
+    ClockCheckFailed(String),
 }
 
 impl From<P2PInitError> for MmInitError {
@@ -489,6 +492,12 @@ pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
     spawn(maker_outbox_loop(ctx.clone()));
 
     spawn(clean_memory_loop(ctx.weak()));
+    // The run-time clock check ends with the node (CRD ch.45 R45.6C.7, R45.6C.11). A browser build has no check.
+    #[cfg(not(target_arch = "wasm32"))]
+    spawn(crate::mm2::lp_clock_check::clock_check_loop(
+        ctx.weak(),
+        Arc::new(crate::mm2::lp_clock_check::UdpTimeSource),
+    ));
     Ok(())
 }
 
@@ -512,6 +521,8 @@ pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
             error: e.to_string(),
         }
     })?;
+    // The clock check keys (CRD ch.45 R45.6C.2, R45.6C.3): an invalid value refuses the launch.
+    let clock_conf = crate::mm2::lp_clock_check::read_clock_conf(&ctx.conf)?;
 
     // Validate netid against compiled network configurations ("deny except config exists").
     let netid = ctx.netid();
@@ -538,6 +549,10 @@ pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
         },
     };
     info!("Network: {} (netid {})", net_cfg.network_name(), netid);
+
+    // The clock check runs after the resolver is installed and before the wallet is opened, so before the peer-to-peer
+    // layer and the resumption of running swaps (CRD ch.45 R45.6C.6 item 1).
+    crate::mm2::lp_clock_check::startup_clock_check(&ctx, &clock_conf).await?;
 
     // Recognise the three forms of the configured `passphrase` field (R26):
     // absent/null, an encrypted envelope object, or a plaintext mnemonic string.
