@@ -247,8 +247,9 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
 - **A clock check against NTP time servers.** At start, every hour and after the computer slept
   or its clock was set, the node takes the median clock offset from NTP time servers
   (`0.pool.ntp.org` to `3.pool.ntp.org` by default, or the servers in `ntp_servers`). A clock more
-  than 10 seconds off stops the node at start; while it runs, new orders and swap starts are refused
-  until the clock is right again. Running swaps and withdrawals are never affected. When no server
+  than 10 seconds off stops the node at start, so swaps in progress wait until it starts with a
+  correct clock; while it runs, new orders and swap starts are refused until the clock is right
+  again, and running swaps and withdrawals go on. When no server
   answers the node warns and goes on, unless `ntp_required` is `true`. `"ntp_servers": []` turns
   the check off. Nothing changes on the wire. Contract:
   [CRD ch.45 §45.6C](docs/reloaded-rewrite/45-startup-configuration-and-environment-tolerance.md).

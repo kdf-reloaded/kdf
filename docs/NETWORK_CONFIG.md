@@ -264,8 +264,10 @@ up through the resolver `dns_resolver` chooses.
 
 **The limit is 10 seconds.** It is fixed, not a setting.
 - *At start,* a clock more than 10 seconds off stops the node with an error that says by how much
-  the clock is ahead or behind. Set the computer's clock right, for example by turning on its
-  automatic time synchronization, and start the node again.
+  the clock is ahead or behind. Swaps that were in progress are not resumed until the node starts
+  with a correct clock, and their deadlines keep running, so this is urgent: set the computer's
+  clock right, for example by turning on its automatic time synchronization, and start the node
+  again.
 - *While the node runs,* it checks again every hour, and at once after the computer slept or its
   clock was set. A clock more than 10 seconds off logs an error and refuses new orders (`buy`,
   `sell`, `setprice`, the market-maker bot) and the start of new swaps until the clock is right
@@ -275,12 +277,12 @@ up through the resolver `dns_resolver` chooses.
 
 **When no server answers** (a firewall that blocks UDP port 123, no network at start), the node
 logs a warning and goes on without a checked clock. With `"ntp_required": true` it treats that like
-a clock that is off: it does not start, and while running it refuses new orders and swaps until a
-server answers again.
+a clock that is off: it does not start (and swaps in progress wait), and while running it refuses new
+orders and swaps until a server answers again.
 
 **What the check tells the servers.** Each check sends one small UDP packet to each server. With
-the default list, the public NTP pool learns your node's IP address and that it is running, about
-once an hour.
+the default list, the public NTP pool learns your node's IP address and that it is running: at start,
+about once an hour, after each pause or clock jump, and every 5 minutes while new swaps are refused.
 
 **Browser builds** cannot send these queries, so the check is off there whatever the settings say.
 

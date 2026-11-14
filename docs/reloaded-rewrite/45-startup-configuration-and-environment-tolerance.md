@@ -614,8 +614,9 @@ key. Seeds were already resolved through Google Public DNS before this section.
 > **Reloaded-original (2026-11-14, maintainer decision).** This section binds a
 > check of the computer's clock against public time servers: at start, and
 > repeated while the node runs. Like §45.6B it binds run-time behavior as well
-> as the start. It changes no wire shape and never touches a running swap. The
-> plan is [`docs/plans/startup-clock-check.md`](../plans/startup-clock-check.md).
+> as the start. It changes no wire shape. A clock found wrong at start keeps
+> the node, and so its running swaps, from starting (R45.6C.6); while the node
+> runs, it never touches a running swap. The plan is [`docs/plans/startup-clock-check.md`](../plans/startup-clock-check.md).
 
 **Why.** Swaps depend on the computer's clock: lock times, the deadlines of
 each swap step and the started-at comparison of the version-2 swaps are
@@ -632,7 +633,7 @@ R45.6C.2 **The key `ntp_servers`.** Its value selects the time servers:
 
 | Value | Servers |
 |---|---|
-| absent or `null` | The default list: `0.pool.ntp.org`, `1.pool.ntp.org`, `2.pool.ntp.org` and `3.pool.ntp.org`, port 123. **Decision pending (2026-11-14):** the maintainer chooses between this list and an empty default (the check off unless configured); the list is one constant in the implementation. |
+| absent or `null` | The default list: `0.pool.ntp.org`, `1.pool.ntp.org`, `2.pool.ntp.org` and `3.pool.ntp.org`, port 123. *Decided 2026-11-14, maintainer:* this list is the default, so the check is on unless configured off; the list is one constant in the implementation. |
 | `[]` | None: the check is off (R45.6C.9). |
 | a non-empty array of at most 8 strings | The listed servers. Each string is `"<host>"`, `"<host>:<port>"`, `"<IPv4>"`, `"<IPv4>:<port>"`, `"<IPv6>"`, `"[<IPv6>]"` or `"[<IPv6>]:<port>"`; the port defaults to 123 and must be 1 to 65535. |
 
@@ -680,24 +681,20 @@ R45.6C.6 **At start.**
 1. *Moment.* The node's start-up reads both keys and runs one check after it
    installs the resolver (R45.6B.8) and before it opens the wallet, starts the
    peer-to-peer layer and resumes running swaps.
-2. *A failed check.* **Decision pending (2026-11-14):** the maintainer chooses
-   one of two outcomes, and this item binds the chosen one when the decision is
-   recorded here. Until then the implementation carries both behind one
-   decision point and selects variant (a).
-   - *(a) Stop.* The launch is refused with a clean error and an orderly
-     non-zero exit (R45.7.1). A node whose clock is that far off does not resume
-     its running swaps until the clock is right.
-   - *(b) Restricted start.* The start goes on, with the refusal of R45.6C.7
-     item 2 in force from the start: running swaps are resumed as usual, and
-     new orders and swap starts are refused (R45.6C.8) until a check passes.
-
-   In both variants the error states the measured offset, whether the clock is
-   ahead or behind, the limit, how many servers answered, and that the
-   computer's clock must be set right.
+2. *A failed check* refuses the launch with a clean error and an orderly
+   non-zero exit (R45.7.1). A node whose clock is that far off therefore does
+   not resume its running swaps until the clock is right: with a clock known
+   to be wrong, the node takes no swap decision at all. The error states the
+   measured offset, whether the clock is ahead or behind, the limit and how
+   many servers answered, and it says plainly that swaps in progress wait
+   until the node starts with a correct clock and that setting the clock right
+   is urgent, because the deadlines of those swaps keep running. *Decided
+   2026-11-14, maintainer;* a start that resumes running swaps and refuses only
+   new ones was considered and not chosen.
 3. *No answer* with `ntp_required` `false`: one WARN line says that no time
    server answered, so the clock was not checked, and names both keys; the start
-   goes on. With `ntp_required` `true`: the outcome of item 2 applies, with an
-   error that says no time server answered.
+   goes on. With `ntp_required` `true`: the launch is refused as in item 2, with
+   an error that says no time server answered.
 4. *A passing check* logs one INFO line with the median offset and the number of
    answers.
 
@@ -744,6 +741,38 @@ R45.6C.11 **One state per node.** The result and the refusal belong to the
 node, not the process: a later node start in the same process (the
 embedded-library path) runs its own start-up check and its own loop, and the
 loop of a stopped node ends with it.
+
+> **As built (2026-11-14; R45.6C.1 – R45.6C.11, T45.23 – T45.31; PR #348).**
+> - *Code.* `mm2_main/src/lp_clock_check.rs`: the two keys, the SNTP request
+>   and answer, the median, the start decision, the per-node state in the
+>   node's context, the gate and the run-time loop. The start-up reads the
+>   keys and runs the check in `lp_native_dex.rs` (`lp_init`) after the
+>   resolver is installed and before the wallet; the loop is spawned at the end
+>   of the start-up and holds a weak reference to the node.
+> - *Decision constants.* The limit is `CLOCK_LIMIT_SECS` (10 s) and the default
+>   list is `DEFAULT_NTP_HOSTS`. The outcome of R45.6C.6 item 2 has no switch.
+> - *Gate.* The refusal is consulted in `ordermatch_trading.rs` at the six
+>   places of the Electrum disagreement gate: `buy`, `sell`, the automatic
+>   order of the market-maker bot (`lp_auto_buy`), the maker-order creation,
+>   and the maker and taker swap starts. A refusal at a swap start is logged as
+>   a WARN line with the swap's identifier; the ERROR line is logged once, when
+>   the refusal begins. If the state cannot be read, the gate refuses.
+> - *By construction, not by a test.* No withdrawal, recovery, refund or
+>   cancellation path consults the gate, so none is refused (R45.6C.8); no test
+>   runs a withdrawal for it. A running swap resumed at start goes through the
+>   swap kick-start, which does not consult the gate either.
+> - *Answers.* An answer from another address, or one that is not valid, is
+>   ignored and the query waits for a valid one until its 5 s are over. A
+>   receive error (for example a port-unreachable report on Windows) ends the
+>   query for that server as no answer.
+> - *Logging.* The no-answer WARN line of the start counts for the 24 hours of
+>   R45.6C.7 item 3.
+> - *Tests.* `lp_clock_check_tests.rs`: `t45_23_*` to `t45_31_*`, among them the
+>   loopback server tests `t45_31_the_udp_source_talks_to_a_loopback_server` and
+>   `t45_31_a_silent_loopback_server_gives_no_answer`. `ordermatch_tests.rs`:
+>   `t45_29_a_clock_refusal_refuses_a_new_order_until_a_check_passes`,
+>   `t45_29_a_clock_refusal_starts_no_new_maker_swap` and
+>   `t45_29_a_clock_refusal_starts_no_new_taker_swap`.
 
 ## 45.7 No-Panic-On-Launch Obligation (security/robustness)
 
@@ -934,15 +963,13 @@ its own offset.
 
 T45.26 *Start within and above the limit (R45.6C.5, R45.6C.6).* With a stub
 time source in place of the servers: offsets of 3 s, −3 s and exactly 10 s pass
-and the start goes on with the INFO line; 10.5 s and −10.5 s give the outcome of
-R45.6C.6 item 2, with an error that names the offset, the direction and the
-limit: under variant (a) the start is refused; under variant (b) the start goes
-on with new orders and swap starts refused and running swaps resumed. Both
-variants are tested while the decision is pending.
+and the start goes on with the INFO line; 10.5 s and −10.5 s refuse the start
+with an error that names the offset, the direction and the limit, and says that
+swaps in progress wait and that setting the clock right is urgent.
 
 T45.27 *Start with no answer (R45.6C.6 item 3).* With a stub that never
 answers: `ntp_required` `false` logs the WARN line once and the start goes on;
-`true` gives the outcome of R45.6C.6 item 2.
+`true` refuses the start with the same statement about swaps in progress.
 
 T45.28 *Check off (R45.6C.9).* With `ntp_servers` `[]`, the stub receives no
 query, at start or later, and the INFO line appears once; with `ntp_required`

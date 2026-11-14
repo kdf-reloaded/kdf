@@ -17,17 +17,19 @@ the new [Unreleased].
   and after the computer slept or its clock was set, the node asks NTP time servers for the time
   and takes the median of their answers. Swaps rely on the clock for their lock times and
   deadlines. A clock more than 10 seconds off stops the node at start with an error that says by
-  how much the clock is off and that it must be set right. While the node runs, it refuses new
-  orders and new swaps until the clock is right again. Running swaps and withdrawals are never
-  affected. By default the node asks `0.pool.ntp.org` to `3.pool.ntp.org`; `ntp_servers` in
-  `MM2.json` lists other servers, and `[]` turns the check off. When no server answers, the node
-  logs a warning and goes on, unless `ntp_required` is `true`. Browser builds cannot send the
-  queries and skip the check. Detail: PR #348; CRD ch.45 §45.6C.
+  how much the clock is off; swaps that were in progress then wait until the node starts with a
+  correct clock, so setting the clock right is urgent. While the node runs, it refuses new orders
+  and new swaps until the clock is right again; running swaps and withdrawals go on. By default
+  the node asks `0.pool.ntp.org` to `3.pool.ntp.org`; `ntp_servers` in `MM2.json` lists other
+  servers, and `[]` turns the check off. When no server answers, the node logs a warning and goes
+  on, unless `ntp_required` is `true`. Browser builds cannot send the queries and skip the check.
+  Detail: PR #348; CRD ch.45 §45.6C.
 
 ### Plans touched
 
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
-  NTP time servers, ordered on 2026-11-14 for after the beta.
+  NTP time servers, ordered on 2026-11-14 for after the beta and implemented in draft PR #348, not
+  merged; the run-time open point O9 stays open.
 
 ## [Unreleased]
 
