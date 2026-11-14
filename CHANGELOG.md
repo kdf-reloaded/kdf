@@ -484,6 +484,17 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
 
 #### UTXO coins and Electrum
 
+- **`mixed` is now the default Electrum server order.** When `electrum_server_order` is not set in
+  `MM2.json`, or is set to a value the node does not recognize, the node now ranks a coin's Electrum
+  servers by what it measures instead of drawing one random order at activation: it times each
+  server's answer to a small header request and checks that the server is up to date with the chain,
+  then draws the order with a weight that favors the faster up-to-date servers, half of each weight
+  staying uniform so that nodes do not all pick the same server. A maintained server that falls
+  behind or turns slow is replaced by another listed server, at most once per 5 minutes, and the
+  node logs why. To keep the previous behavior, set `electrum_server_order` to `random`; for the
+  behavior of GLEEC KDF, which keeps the listed order, set it to `listed`. Detail: PR #TBD; CRD
+  ch.38 R38.6.4b-R, R38.6.4l.
+
 - **A coin whose Electrum servers disagree about the chain now fails to activate, and later refuses
   new trades.** A server that is far ahead of the rest is not simply wrong: it can be the one that
   followed a network upgrade while the others stopped. The node cannot tell which side is right, so
@@ -526,10 +537,9 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   minutes, so a halted chain does not make every node probe the public servers every five minutes,
   and a search for a replacement connects at most four servers at a time. For the old behavior, set
   the `MM2.json` boolean `electrum_tip_checks` to `false` (and `electrum_server_order` to `listed`
-  and `electrum_spread_reads` to `false` to match GLEEC KDF). **`mixed` does not become the default
-  yet.** The change is in two stages: this release brings the checks; the default order changes from
-  `random` to `mixed` in a later release, after a field run on RIN, DGB and a coin with 600-second
-  blocks has shown no false marks. Detail: PR #324; CRD ch.38 R38.6.4o.
+  and `electrum_spread_reads` to `false` to match GLEEC KDF). The default server order is now
+  `mixed`; see the entry "`mixed` is now the default Electrum server order" below. Detail: PR #324;
+  CRD ch.38 R38.6.4o.
 - **`fetch_utxos`, `consolidate_utxos` and the automatic merge (`utxo_merge_params`) now work
   under an HD login**, as they do in GLEEC KDF. Until now the two commands were refused and the
   automatic merge stayed off.
@@ -1385,9 +1395,12 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`crate-versioning`](docs/plans/crate-versioning.md) — new, planning: the start-up banner now shows
   the version of the release package (PR #210); where that version should live, and whether the
   `version` call and swap records should carry it, are listed as open questions for the next round.
-- [`electrum-measured-server-order`](docs/plans/electrum-measured-server-order.md) — parked: shipped in PR #144; the lab rows
-  of 2026-11-06 that ran `mixed` and `measured` on RIN are recorded as input; the default stays
-  `random` until the decision on `mixed`.
+- [`electrum-measured-server-order`](docs/plans/electrum-measured-server-order.md) — done: shipped in PR #144; the lab rows
+  of 2026-11-06 that ran `mixed` and `measured` on RIN are recorded as input; `mixed` is the default
+  since 2026-11-14 (PR #TBD).
+- [`electrum-server-staleness`](docs/plans/electrum-server-staleness.md) — new, done: the Electrum
+  staleness checks and the activation-stall fix shipped in PR #324, the fixes of the chain comparison
+  in PR #339, and step 6, the `mixed` default, in PR #TBD.
 - [`electrum-tls-server-authentication`](docs/plans/electrum-tls-server-authentication.md) — new,
   parked: what an `SSL` Electrum server must present, with and without `disable_cert_verification`,
   is now written down (PR #240). So are a warning at activation when the flag is set and an optional

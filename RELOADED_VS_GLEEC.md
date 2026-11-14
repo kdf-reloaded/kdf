@@ -795,7 +795,8 @@ behavior, except for `swap_key_check`; the row of each switch in
   trip (with spreading on, reads always take turns among at least the two fastest connected
   servers when two or more are connected), then have no effect.
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
-  listed instead of by a random draw.
+  listed instead of by measurement (`mixed`, the default since 2026-11-14; `random` gives the
+  earlier default, a random draw).
 - `electrum_tip_checks: false` — the node does not compare the block heights of a coin's Electrum
   servers, does not fail an activation or refuse trades when they disagree about the chain: a server
   that is behind the chain or stopped following it keeps its place in reads, broadcasts and a swap's
