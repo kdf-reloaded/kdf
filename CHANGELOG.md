@@ -4,6 +4,33 @@ All notable changes to KDF Reloaded are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Pre-1.0 releases use the `0.MAJOR.MINOR-PRERELEASE.N` convention; expect breaking changes between alpha and beta.
 
+## [Unreleased — after 0.4.0-beta.1]
+
+Changes that come after the 0.4.0-beta.1 release. When that release is cut, this section becomes
+the new [Unreleased].
+
+### Added
+
+#### Start-up and configuration
+
+- **The node checks the computer's clock against time servers.** At start, and again every hour
+  and after the computer slept or its clock was set, the node asks NTP time servers for the time
+  and takes the median of their answers. Swaps rely on the clock for their lock times and
+  deadlines. A clock more than 10 seconds off stops the node at start with an error that says by
+  how much the clock is off; swaps that were in progress then wait until the node starts with a
+  correct clock, so setting the clock right is urgent. While the node runs, it refuses new orders
+  and new swaps until the clock is right again; running swaps and withdrawals go on. By default
+  the node asks `0.pool.ntp.org` to `3.pool.ntp.org`; `ntp_servers` in `MM2.json` lists other
+  servers, and `[]` turns the check off. When no server answers, the node logs a warning and goes
+  on, unless `ntp_required` is `true`. Browser builds cannot send the queries and skip the check.
+  Detail: PR #348; CRD ch.45 §45.6C.
+
+### Plans touched
+
+- [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
+  NTP time servers, ordered on 2026-11-14 for after the beta and implemented in draft PR #348, not
+  merged; the run-time open point O9 stays open.
+
 ## [Unreleased]
 
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
