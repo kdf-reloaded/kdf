@@ -244,6 +244,15 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   without it the BC2 network rejects BC2 withdrawals and swaps. See
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
   [`docs/plans/bc2-replay-protection.md`](docs/plans/bc2-replay-protection.md).
+- **A clock check against NTP time servers.** At start, every hour and after the computer slept
+  or its clock was set, the node takes the median clock offset from NTP time servers
+  (`0.pool.ntp.org` to `3.pool.ntp.org` by default, or the servers in `ntp_servers`). A clock more
+  than 10 seconds off stops the node at start; while it runs, new orders and swap starts are refused
+  until the clock is right again. Running swaps and withdrawals are never affected. When no server
+  answers the node warns and goes on, unless `ntp_required` is `true`. `"ntp_servers": []` turns
+  the check off. Nothing changes on the wire. Contract:
+  [CRD ch.45 §45.6C](docs/reloaded-rewrite/45-startup-configuration-and-environment-tolerance.md).
+  Plan: [`docs/plans/startup-clock-check.md`](docs/plans/startup-clock-check.md).
 
 ### Behavioural divergences without a compatibility switch
 
@@ -851,6 +860,9 @@ node with `netid` unset or `0` refuses to start; set `8762` or `6133`.
 `dns_resolver` has no GLEEC-compatible value: the default matches GLEEC KDF for seeds and
 `"system"` matches it for coin servers; see its row in
 [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+
+`ntp_servers` set to `[]` turns off the clock check against NTP time servers, a KDF Reloaded
+addition; see its row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
 
 ## Detail sections
 

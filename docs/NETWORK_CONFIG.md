@@ -235,6 +235,58 @@ method still use your computer's resolver, whatever `dns_resolver` says.
 > `"system"` does. No single value reproduces that mix. See
 > [GLEEC compatibility](GLEEC_COMPATIBILITY.md).
 
+### Clock Check
+
+Swaps rely on your computer's clock for their lock times and deadlines. The node therefore asks
+NTP time servers for the time, at start and while it runs, and takes the median of their answers,
+so one wrong server is outvoted.
+
+| `ntp_servers` | The node asks |
+|---|---|
+| absent or `null` (the default) | `0.pool.ntp.org`, `1.pool.ntp.org`, `2.pool.ntp.org` and `3.pool.ntp.org` |
+| `[]` | no server: the clock check is off |
+| an array of up to 8 servers | only those servers, all at once |
+
+A server is a hostname or an IP address, with an optional port (123 by default); an IPv6 address
+with a port goes in brackets:
+
+```json
+{
+  "ntp_servers": ["time.example.com", "192.0.2.123:123", "[2001:db8::123]:123"],
+  "ntp_required": false,
+  ...
+}
+```
+
+Any other value (a single string instead of an array, an empty entry, a port outside 1 to 65535,
+more than 8 entries) stops the node at start with an error naming the key. Hostnames are looked
+up through the resolver `dns_resolver` chooses.
+
+**The limit is 10 seconds.** It is fixed, not a setting.
+- *At start,* a clock more than 10 seconds off stops the node with an error that says by how much
+  the clock is ahead or behind. Set the computer's clock right, for example by turning on its
+  automatic time synchronization, and start the node again.
+- *While the node runs,* it checks again every hour, and at once after the computer slept or its
+  clock was set. A clock more than 10 seconds off logs an error and refuses new orders (`buy`,
+  `sell`, `setprice`, the market-maker bot) and the start of new swaps until the clock is right
+  again; it then checks every 5 minutes. Swaps that are already running, refunds, withdrawals
+  and order cancellation always go on. Maker orders stay on the book, but a match is not started
+  while new swaps are refused.
+
+**When no server answers** (a firewall that blocks UDP port 123, no network at start), the node
+logs a warning and goes on without a checked clock. With `"ntp_required": true` it treats that like
+a clock that is off: it does not start, and while running it refuses new orders and swaps until a
+server answers again.
+
+**What the check tells the servers.** Each check sends one small UDP packet to each server. With
+the default list, the public NTP pool learns your node's IP address and that it is running, about
+once an hour.
+
+**Browser builds** cannot send these queries, so the check is off there whatever the settings say.
+
+> **Compatibility:** a KDF Reloaded addition. Nothing changes on the wire. `"ntp_servers": []`
+> turns it off. See [GLEEC compatibility](GLEEC_COMPATIBILITY.md).
+
 ### Price Service
 
 On a native build, when a swap of the node ends successfully, the node stores the USD prices of its two coins

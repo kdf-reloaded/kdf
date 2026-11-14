@@ -609,6 +609,142 @@ servers included, until `dns_resolver` is set to `"system"` or to a reachable
 server. The startup line (R45.6B.7) and the failure line (R45.6B.6) name the
 key. Seeds were already resolved through Google Public DNS before this section.
 
+## 45.6C Clock Check Against Time Servers (Reloaded-original)
+
+> **Reloaded-original (2026-11-14, maintainer decision).** This section binds a
+> check of the computer's clock against public time servers: at start, and
+> repeated while the node runs. Like §45.6B it binds run-time behavior as well
+> as the start. It changes no wire shape and never touches a running swap. The
+> plan is [`docs/plans/startup-clock-check.md`](../plans/startup-clock-check.md).
+
+**Why.** Swaps depend on the computer's clock: lock times, the deadlines of
+each swap step and the started-at comparison of the version-2 swaps are
+wall-clock times. Peers check each other's clocks (chapter 28 RP2), but that
+check needs peers, and a disconnect does not tell the operator that the fault
+is on this computer. This section measures the node's own clock against time
+servers and stops the node, or its new swaps, while the clock is wrong.
+
+R45.6C.1 **Platform.** This section applies to the native daemon, including
+the embedded-library launch path. A browser build cannot send UDP: it behaves
+as if the list of R45.6C.2 were empty, and ignores both keys.
+
+R45.6C.2 **The key `ntp_servers`.** Its value selects the time servers:
+
+| Value | Servers |
+|---|---|
+| absent or `null` | The default list: `0.pool.ntp.org`, `1.pool.ntp.org`, `2.pool.ntp.org` and `3.pool.ntp.org`, port 123. **Decision pending (2026-11-14):** the maintainer chooses between this list and an empty default (the check off unless configured); the list is one constant in the implementation. |
+| `[]` | None: the check is off (R45.6C.9). |
+| a non-empty array of at most 8 strings | The listed servers. Each string is `"<host>"`, `"<host>:<port>"`, `"<IPv4>"`, `"<IPv4>:<port>"`, `"<IPv6>"`, `"[<IPv6>]"` or `"[<IPv6>]:<port>"`; the port defaults to 123 and must be 1 to 65535. |
+
+Any other value refuses the launch with a clean configuration error that names
+the key, repeats the value and lists the accepted forms: a string that is not
+an array, an array with more than 8 entries, an entry that is empty, not a
+string or has a port outside 1 to 65535, a number, a boolean and an object.
+This is an unrecoverable launch input in the sense of R45.7.1. A mistyped list
+would silently check against servers the operator did not choose, or not at
+all, so it is refused, never replaced by the default.
+
+R45.6C.3 **The key `ntp_required`.** A boolean, `false` when absent or `null`.
+It decides what happens when no server answers a check (R45.6C.6, R45.6C.7).
+Any other value refuses the launch with a clean configuration error that names
+the key (R45.7.1). With the check off it has no effect.
+
+R45.6C.4 **One check.**
+1. *Queries.* The node asks every listed server at once, with one query each in
+   the client mode of NTP version 4 (RFC 5905), as SNTP (RFC 4330) uses it, over
+   UDP. A host name is looked up through the node's resolver (R45.6B), and the
+   query goes to the first address the lookup returns. For each server, the
+   lookup and the answer together get at most 5 s; a check therefore takes at
+   most about 5 s.
+2. *A valid answer.* An answer counts only when it comes from the address the
+   query was sent to, is at least 48 bytes long, is in the server mode, carries
+   in its originate field exactly the transmit time the query carried, has a
+   non-zero transmit time, a stratum from 1 to 15 and a leap indicator other
+   than "not synchronized". Anything else is no answer from that server.
+3. *Offset.* From the query's send time and the answer's receive time on the
+   local clock, and the server's receive and transmit times in the answer, the
+   offset of the local clock is computed as in RFC 5905: half the sum of the
+   two one-way differences. A positive offset means the local clock is behind.
+4. *Median.* The check's offset is the median of the offsets of the valid
+   answers; with an even number of answers, the mean of the two middle ones.
+   One valid answer is enough.
+5. *Result.* The check *passes* when the absolute median offset is at most the
+   limit of R45.6C.5, *fails* when it is above it, and has *no answer* when no
+   server gave a valid answer.
+
+R45.6C.5 **The limit.** 10 seconds, a named constant, not a setting. It is
+tighter than the peer-clock bound of chapter 28 RP2 and the started-at
+comparison of the version-2 swaps, so a node that passes it also meets those.
+
+R45.6C.6 **At start.**
+1. *Moment.* The node's start-up reads both keys and runs one check after it
+   installs the resolver (R45.6B.8) and before it opens the wallet, starts the
+   peer-to-peer layer and resumes running swaps.
+2. *A failed check.* **Decision pending (2026-11-14):** the maintainer chooses
+   one of two outcomes, and this item binds the chosen one when the decision is
+   recorded here. Until then the implementation carries both behind one
+   decision point and selects variant (a).
+   - *(a) Stop.* The launch is refused with a clean error and an orderly
+     non-zero exit (R45.7.1). A node whose clock is that far off does not resume
+     its running swaps until the clock is right.
+   - *(b) Restricted start.* The start goes on, with the refusal of R45.6C.7
+     item 2 in force from the start: running swaps are resumed as usual, and
+     new orders and swap starts are refused (R45.6C.8) until a check passes.
+
+   In both variants the error states the measured offset, whether the clock is
+   ahead or behind, the limit, how many servers answered, and that the
+   computer's clock must be set right.
+3. *No answer* with `ntp_required` `false`: one WARN line says that no time
+   server answered, so the clock was not checked, and names both keys; the start
+   goes on. With `ntp_required` `true`: the outcome of item 2 applies, with an
+   error that says no time server answered.
+4. *A passing check* logs one INFO line with the median offset and the number of
+   answers.
+
+R45.6C.7 **While the node runs.**
+1. *When.* The node checks again one hour after the last check. A tick every
+   60 s compares how far the wall clock and the monotonic clock moved since the
+   previous tick; when they differ by more than the limit (the clock was set,
+   or the computer slept), or the tick came more than 60 s late (the process was
+   paused), the node checks at once. While new swaps are refused (item 2), it
+   checks every 5 minutes instead of every hour. One check runs at a time.
+2. *Refusal.* A failed check, or no answer with `ntp_required` `true`, starts
+   the refusal: one ERROR line with the content of R45.6C.6 item 2, or the
+   no-answer statement, and from then on new orders and swap starts are refused
+   (R45.6C.8). A check during the refusal that fails again logs nothing new.
+3. *No answer* with `ntp_required` `false` does not change the state: at most
+   one WARN line per 24 hours says that no time server answered.
+4. *End.* The first passing check ends the refusal and logs one INFO line that
+   new orders and swaps are allowed again, with the median offset.
+
+R45.6C.8 **What the refusal covers.** While the refusal of R45.6C.7 lasts, the
+node refuses, with an error that states the measured offset and the limit, or
+that no time server answered:
+1. a new order through `buy`, `sell` or `setprice`, and through every path that
+   creates an order the same way (the market-maker bot);
+2. the start of a matched swap, on the maker side and on the taker side, before
+   anything is sent or paid.
+
+These are the places of the Electrum disagreement state (chapter 38 R38.6.4o
+item 12). Running swaps, their recovery and refunds, withdrawals, balance and
+history queries and order cancellation are never affected. A maker order that
+stood on the book before the refusal stays there; a match against it is not
+started while the refusal lasts.
+
+R45.6C.9 **The check off.** With `ntp_servers` set to `[]`, and in a browser
+build, the node sends no time query, the refusal of R45.6C.7 never begins, and
+the start logs one INFO line that the clock check is off.
+
+R45.6C.10 **Logs and privacy.** Servers are named by host and port only.
+Each check sends one UDP packet to each listed server; with the default list
+the NTP pool learns the node's address and that it runs, at most about once an
+hour and once per pause.
+
+R45.6C.11 **One state per node.** The result and the refusal belong to the
+node, not the process: a later node start in the same process (the
+embedded-library path) runs its own start-up check and its own loop, and the
+loop of a stopped node ends with it.
+
 ## 45.7 No-Panic-On-Launch Obligation (security/robustness)
 
 R45.7.1 No combination of unset, empty, or unexpected-type configuration fields
@@ -774,6 +910,60 @@ one lightwalletd host, none of them in the hosts file:
 7. activation in mode 3 of a UTXO coin over Electrum, an EVM coin, a
    Tendermint coin, a shielded coin over lightwalletd and Solana.
 
+T45.23 *Clock-check keys (R45.6C.2, R45.6C.3).* A table-driven test of the
+parsing MUST cover at least: `ntp_servers` absent and `null` → the four default
+hosts on port 123; `[]` → off; `["time.example.com"]`,
+`["time.example.com:1123"]`, `["192.0.2.1"]`, `["2001:db8::1"]`,
+`["[2001:db8::1]"]` and `["[2001:db8::1]:1123"]` → the right hosts and ports, in
+the given order. Each of `"pool.ntp.org"` (a string, not an array), `[""]`,
+`["time.example.com:0"]`, `["time.example.com:65536"]`, `[123]`, nine entries,
+`true`, `5` and `{}` MUST refuse the launch with a clean configuration error
+naming the key, and MUST NOT panic. `ntp_required` absent and `null` → `false`;
+`true` and `false` as given; `"true"`, `1` and `{}` refuse the launch.
+
+T45.24 *Answer validation and offset (R45.6C.4 items 2 and 3).* On byte
+buffers, with no network: an answer built from fixed times gives the offset of
+RFC 5905, positive when the local clock is behind; an answer shorter than 48
+bytes, in another mode, with a stratum of 0 or 16, with the leap indicator "not
+synchronized", with a zero transmit time, or with an originate field that is
+not the query's transmit time is not an answer.
+
+T45.25 *Median (R45.6C.4 item 4).* Offsets `[0.1, 0.2, 100]` give 0.2 (one
+outlier is outvoted); `[0.1, 0.2, 0.3, 100]` give 0.25; a single answer gives
+its own offset.
+
+T45.26 *Start within and above the limit (R45.6C.5, R45.6C.6).* With a stub
+time source in place of the servers: offsets of 3 s, −3 s and exactly 10 s pass
+and the start goes on with the INFO line; 10.5 s and −10.5 s give the outcome of
+R45.6C.6 item 2, with an error that names the offset, the direction and the
+limit: under variant (a) the start is refused; under variant (b) the start goes
+on with new orders and swap starts refused and running swaps resumed. Both
+variants are tested while the decision is pending.
+
+T45.27 *Start with no answer (R45.6C.6 item 3).* With a stub that never
+answers: `ntp_required` `false` logs the WARN line once and the start goes on;
+`true` gives the outcome of R45.6C.6 item 2.
+
+T45.28 *Check off (R45.6C.9).* With `ntp_servers` `[]`, the stub receives no
+query, at start or later, and the INFO line appears once; with `ntp_required`
+`true` as well, the start still goes on.
+
+T45.29 *Refusal while running (R45.6C.7, R45.6C.8).* After a run-time check
+fails: `buy`, `sell` and `setprice` are refused with the error of R45.6C.8, and
+the maker and taker swap starts are not started; a withdrawal is not refused.
+After a later check passes, the same requests are accepted again and the INFO
+line appears once. The same holds for no answer with `ntp_required` `true`; with
+`false`, no answer refuses nothing.
+
+T45.30 *When the node checks (R45.6C.7 item 1).* With a stub wall clock and
+monotonic clock: a tick at which the two moved by the same amount does not
+check; a wall-clock jump of 11 s, or a tick that came 61 s late, checks at once;
+an hour after the last check, a check runs; during a refusal, checks run every
+5 minutes.
+
+T45.31 *No real network.* Every test of this section uses the stub time source
+or byte buffers; none sends a packet to a real time server.
+
 ## 45.9 Deferred Work
 
 D45.1 A consolidated, typed startup-configuration schema (replacing ad-hoc
@@ -913,6 +1103,13 @@ crate is deferred until it drops that dependency.
   Gate. The statement that the reference resolves other names through the
   operating system restates this repository's own source as inherited at the
   anchor; later reference releases were not examined for it.
+- *Section 45.6C (clock check against time servers):* Reloaded-original,
+  written on 2026-11-14 from the maintainer's order of that day, this
+  repository's own source (chapter 28 RP2 and the version-2 swap started-at
+  comparison as implemented here, and the refusal places of chapter 38 R38.6.4o
+  item 12), and the public NTP and SNTP specifications (RFC 5905, RFC 4330); no
+  reference material was consulted for it, and it makes no statement about the
+  reference.
 - *Author of this chapter:* clean-room driving-spec working set.
 - *Forbidden corpus:* consulted only to recover the externally observable
   startup tolerance contract (which unset/empty/unexpected inputs start the
