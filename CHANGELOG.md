@@ -22,7 +22,7 @@ the new [Unreleased].
   affected. By default the node asks `0.pool.ntp.org` to `3.pool.ntp.org`; `ntp_servers` in
   `MM2.json` lists other servers, and `[]` turns the check off. When no server answers, the node
   logs a warning and goes on, unless `ntp_required` is `true`. Browser builds cannot send the
-  queries and skip the check. Detail: PR #TBD; CRD ch.45 §45.6C.
+  queries and skip the check. Detail: PR #348; CRD ch.45 §45.6C.
 
 ### Plans touched
 
