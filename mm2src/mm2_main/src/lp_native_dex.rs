@@ -170,7 +170,7 @@ pub enum MmInitError {
     },
     #[display(fmt = "Wallet error: {}", _0)]
     WalletError(String),
-    /// The clock check at start failed (CRD ch.45 R45.6C.6 item 2, variant (a)): the launch is refused.
+    /// The clock check at start failed (CRD ch.45 R45.6C.6 item 2): the launch is refused.
     #[display(fmt = "Clock check failed: {}", _0)]
     ClockCheckFailed(String),
 }

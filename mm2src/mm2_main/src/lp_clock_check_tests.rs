@@ -258,37 +258,44 @@ fn t45_25_the_median_outvotes_one_outlier() {
 
 // ---- T45.26 ----------------------------------------------------------------------------------------------------
 
+/// What the start error says about swaps in progress (R45.6C.6 item 2).
+fn assert_swaps_in_progress_statement(text: &str) {
+    assert!(
+        text.contains("swaps in progress are not resumed until it starts with a correct clock"),
+        "swaps in progress wait: {text}"
+    );
+    assert!(text.contains("their deadlines keep running"), "the deadlines: {text}");
+    assert!(text.contains("is urgent"), "the urgency: {text}");
+}
+
 #[test]
 fn t45_26_a_start_within_the_limit_goes_on_with_the_info_line() {
     for offset in [3.0, -3.0, 10.0, -10.0, 0.0] {
-        for variant in [StartFailureOutcome::Stop, StartFailureOutcome::RestrictedStart] {
-            let ctx = new_ctx();
-            let source = StubSource::new(&[("a.example", offset)]);
-            let lines = block_on(start_check(&ctx, &conf_of(&["a.example"], false), &source, variant)).unwrap();
-            assert_eq!(lines.len(), 1, "{offset} {variant:?}");
-            assert_eq!(lines[0].level, LineLevel::Info);
-            assert!(lines[0].text.contains("passed"), "{}", lines[0].text);
-            assert_eq!(clock_refusal(&ctx), None, "{offset} {variant:?}");
-        }
+        let ctx = new_ctx();
+        let source = StubSource::new(&[("a.example", offset)]);
+        let lines = block_on(start_check(&ctx, &conf_of(&["a.example"], false), &source)).unwrap();
+        assert_eq!(lines.len(), 1, "{offset}");
+        assert_eq!(lines[0].level, LineLevel::Info);
+        assert!(lines[0].text.contains("passed"), "{}", lines[0].text);
+        assert_eq!(clock_refusal(&ctx), None, "{offset}");
     }
 }
 
 #[test]
-fn t45_26_a_start_above_the_limit_stops_under_variant_a() {
+fn t45_26_a_start_above_the_limit_stops() {
     for (offset, direction) in [(10.5, "behind"), (-10.5, "ahead of")] {
         let ctx = new_ctx();
         let source = StubSource::new(&[("a.example", offset), ("b.example", offset)]);
         let conf = conf_of(&["a.example", "b.example", "c.example"], false);
-        let error = block_on(start_check(&ctx, &conf, &source, StartFailureOutcome::Stop))
-            .unwrap_err()
-            .into_inner();
+        let error = block_on(start_check(&ctx, &conf, &source)).unwrap_err().into_inner();
         match error {
             MmInitError::ClockCheckFailed(text) => {
-                assert!(text.contains("10.5 s"), "the offset: {text}");
+                assert!(text.contains("10.50 s"), "the offset: {text}");
                 assert!(text.contains(direction), "the direction: {text}");
                 assert!(text.contains("limit is 10 s"), "the limit: {text}");
                 assert!(text.contains("2 answer(s)"), "the number of answers: {text}");
                 assert!(text.contains("must be set right"), "{text}");
+                assert_swaps_in_progress_statement(&text);
             },
             other => panic!("{other:?}"),
         }
@@ -298,83 +305,104 @@ fn t45_26_a_start_above_the_limit_stops_under_variant_a() {
 }
 
 #[test]
-fn t45_26_a_start_above_the_limit_goes_on_restricted_under_variant_b() {
-    for (offset, direction) in [(10.5, "behind"), (-10.5, "ahead of")] {
-        let ctx = new_ctx();
-        let source = StubSource::new(&[("a.example", offset)]);
-        let lines = block_on(start_check(
-            &ctx,
-            &conf_of(&["a.example"], false),
-            &source,
-            StartFailureOutcome::RestrictedStart,
-        ))
-        .unwrap();
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].level, LineLevel::Error);
-        let refusal = clock_refusal(&ctx).unwrap();
-        assert!(refusal.contains("10.5 s") && refusal.contains(direction), "{refusal}");
-        assert!(lines[0].text.contains(&refusal), "{}", lines[0].text);
-        // The run-time loop then checks every 5 minutes, because the refusal is in force.
-        let state = ClockCheckCtx::from_ctx(&ctx).unwrap();
-        let (refused, last_check) = state.refused_and_last_check();
-        assert!(refused && last_check.is_some());
+fn t45_26_the_run_time_refusal_text_does_not_say_swaps_wait() {
+    let state = ClockCheckCtx::from_ctx(&new_ctx()).unwrap();
+    let failed = CheckResult::Failed {
+        offset: 10.5,
+        answers: 2,
+    };
+    let lines = state.apply_runtime_result(&failed, false, Instant::now());
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].level, LineLevel::Error);
+    let gate = state.refusal().unwrap();
+    for text in [lines[0].text.as_str(), gate.as_str()] {
+        assert!(text.contains("10.50 s"), "{text}");
+        assert!(!text.contains("swaps in progress"), "{text}");
+        assert!(!text.contains("not resumed"), "{text}");
+        assert!(!text.contains("urgent"), "{text}");
     }
-}
-
-#[test]
-fn t45_26_the_production_variant_is_stop_until_decision_d1() {
-    assert_eq!(START_FAILURE_OUTCOME, StartFailureOutcome::Stop);
+    // The same holds for no answer with `ntp_required` true.
+    let state = ClockCheckCtx::from_ctx(&new_ctx()).unwrap();
+    let lines = state.apply_runtime_result(&CheckResult::NoAnswer, true, Instant::now());
+    let gate = state.refusal().unwrap();
+    for text in [lines[0].text.as_str(), gate.as_str()] {
+        assert!(text.contains("No time server answered"), "{text}");
+        assert!(!text.contains("swaps in progress"), "{text}");
+        assert!(!text.contains("urgent"), "{text}");
+    }
 }
 
 // ---- T45.27 ----------------------------------------------------------------------------------------------------
 
 #[test]
 fn t45_27_no_answer_with_ntp_required_false_warns_and_goes_on() {
-    for variant in [StartFailureOutcome::Stop, StartFailureOutcome::RestrictedStart] {
-        let ctx = new_ctx();
-        let source = StubSource::silent();
-        let lines = block_on(start_check(
-            &ctx,
-            &conf_of(&["a.example", "b.example"], false),
-            &source,
-            variant,
-        ))
-        .unwrap();
-        assert_eq!(lines.len(), 1, "one WARN line");
-        assert_eq!(lines[0].level, LineLevel::Warn);
-        assert!(lines[0].text.contains("No time server answered"), "{}", lines[0].text);
-        assert!(lines[0].text.contains("ntp_servers") && lines[0].text.contains("ntp_required"));
-        assert_eq!(clock_refusal(&ctx), None);
-    }
+    let ctx = new_ctx();
+    let source = StubSource::silent();
+    let lines = block_on(start_check(&ctx, &conf_of(&["a.example", "b.example"], false), &source)).unwrap();
+    assert_eq!(lines.len(), 1, "one WARN line");
+    assert_eq!(lines[0].level, LineLevel::Warn);
+    assert!(lines[0].text.contains("No time server answered"), "{}", lines[0].text);
+    assert!(lines[0].text.contains("ntp_servers") && lines[0].text.contains("ntp_required"));
+    assert!(
+        !lines[0].text.contains("swaps in progress"),
+        "the WARN line is not the start error: {}",
+        lines[0].text
+    );
+    assert_eq!(clock_refusal(&ctx), None);
 }
 
 #[test]
-fn t45_27_no_answer_with_ntp_required_true_gives_the_outcome_of_a_failed_check() {
-    let conf = conf_of(&["a.example"], true);
+fn t45_27_no_answer_with_ntp_required_true_stops_the_start() {
     let ctx = new_ctx();
-    let error = block_on(start_check(
-        &ctx,
-        &conf,
-        &StubSource::silent(),
-        StartFailureOutcome::Stop,
-    ))
-    .unwrap_err()
-    .into_inner();
+    let error = block_on(start_check(&ctx, &conf_of(&["a.example"], true), &StubSource::silent()))
+        .unwrap_err()
+        .into_inner();
     match error {
-        MmInitError::ClockCheckFailed(text) => assert!(text.contains("No time server answered"), "{text}"),
+        MmInitError::ClockCheckFailed(text) => {
+            assert!(text.contains("No time server answered"), "{text}");
+            assert_swaps_in_progress_statement(&text);
+            assert!(
+                text.contains("must be set right, or the time servers must be reachable"),
+                "{text}"
+            );
+        },
         other => panic!("{other:?}"),
     }
+    assert_eq!(clock_refusal(&ctx), None, "a stopped launch leaves no refusal behind");
+}
+
+#[test]
+fn t45_26_an_offset_just_above_the_limit_does_not_print_as_the_limit() {
+    let text = failure_text(10.04, 2);
+    assert!(text.contains("10.04 s") && text.contains("limit is 10 s"), "{text}");
+}
+
+#[test]
+fn t45_27_the_start_no_answer_warning_counts_for_the_run_time_24_hours() {
     let ctx = new_ctx();
     let lines = block_on(start_check(
         &ctx,
-        &conf,
+        &conf_of(&["a.example"], false),
         &StubSource::silent(),
-        StartFailureOutcome::RestrictedStart,
     ))
     .unwrap();
     assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0].level, LineLevel::Error);
-    assert!(clock_refusal(&ctx).unwrap().contains("No time server answered"));
+    assert_eq!(lines[0].level, LineLevel::Warn);
+    let state = ClockCheckCtx::from_ctx(&ctx).unwrap();
+    let now = Instant::now();
+    assert!(
+        state
+            .apply_runtime_result(&CheckResult::NoAnswer, false, now + Duration::from_secs(3600))
+            .is_empty(),
+        "no second WARN line within 24 hours of the start one"
+    );
+    assert_eq!(
+        state
+            .apply_runtime_result(&CheckResult::NoAnswer, false, now + Duration::from_secs(24 * 3600 + 60))
+            .len(),
+        1,
+        "after 24 hours the WARN line is due again"
+    );
 }
 
 // ---- T45.28 ----------------------------------------------------------------------------------------------------
@@ -382,27 +410,25 @@ fn t45_27_no_answer_with_ntp_required_true_gives_the_outcome_of_a_failed_check()
 #[test]
 fn t45_28_with_the_check_off_no_query_is_sent() {
     for required in [false, true] {
-        for variant in [StartFailureOutcome::Stop, StartFailureOutcome::RestrictedStart] {
-            let ctx = new_ctx();
-            let source = StubSource::new(&[("a.example", 500.0)]);
-            let conf = ClockConf {
-                servers: Vec::new(),
-                required,
-            };
-            let lines = block_on(start_check(&ctx, &conf, &source, variant)).unwrap();
-            assert_eq!(lines.len(), 1, "the INFO line appears once");
-            assert_eq!(lines[0].level, LineLevel::Info);
-            assert!(lines[0].text.contains("clock check is off"), "{}", lines[0].text);
-            assert_eq!(source.queries(), 0, "no query at start");
-            assert_eq!(clock_refusal(&ctx), None);
+        let ctx = new_ctx();
+        let source = StubSource::new(&[("a.example", 500.0)]);
+        let conf = ClockConf {
+            servers: Vec::new(),
+            required,
+        };
+        let lines = block_on(start_check(&ctx, &conf, &source)).unwrap();
+        assert_eq!(lines.len(), 1, "the INFO line appears once");
+        assert_eq!(lines[0].level, LineLevel::Info);
+        assert!(lines[0].text.contains("clock check is off"), "{}", lines[0].text);
+        assert_eq!(source.queries(), 0, "no query at start");
+        assert_eq!(clock_refusal(&ctx), None);
 
-            // Nor later: the run-time loop ends at once.
-            block_on(clock_check_loop(
-                ctx.weak(),
-                Arc::new(StubSource::new(&[("a.example", 500.0)])),
-            ));
-            assert_eq!(clock_refusal(&ctx), None);
-        }
+        // Nor later: the run-time loop ends at once.
+        block_on(clock_check_loop(
+            ctx.weak(),
+            Arc::new(StubSource::new(&[("a.example", 500.0)])),
+        ));
+        assert_eq!(clock_refusal(&ctx), None);
     }
     // `[]` in the configuration is the off state, and with it `ntp_required` has no effect.
     let conf = read_clock_conf(&json!({ "ntp_servers": [], "ntp_required": true })).unwrap();
@@ -440,7 +466,7 @@ fn t45_29_a_failed_check_starts_the_refusal_once_and_a_passing_check_ends_it_onc
     assert_eq!(lines[0].level, LineLevel::Error);
     let refusal = clock_refusal(&ctx).unwrap();
     assert!(
-        refusal.contains("12.0 s") && refusal.contains("limit is 10 s"),
+        refusal.contains("12.00 s") && refusal.contains("limit is 10 s"),
         "{refusal}"
     );
 
@@ -449,7 +475,7 @@ fn t45_29_a_failed_check_starts_the_refusal_once_and_a_passing_check_ends_it_onc
         "a check during the refusal that fails again logs nothing new"
     );
     assert!(
-        clock_refusal(&ctx).unwrap().contains("13.0 s"),
+        clock_refusal(&ctx).unwrap().contains("13.00 s"),
         "the refusal names the latest offset"
     );
 

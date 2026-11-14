@@ -37,7 +37,8 @@ pub const NTP_REQUIRED_KEY: &str = "ntp_required";
 pub const MAX_NTP_SERVERS: usize = 8;
 /// The port of a server entry that names none (R45.6C.2).
 pub const NTP_PORT: u16 = 123;
-/// Decision D2 (R45.6C.2): the default list, one constant. An empty list here would make the check off by default.
+/// The default list of R45.6C.2 (decision D2, decided 2026-11-14: the check is on by default), one constant. An empty
+/// list here would make the check off by default.
 pub const DEFAULT_NTP_HOSTS: [&str; 4] = ["0.pool.ntp.org", "1.pool.ntp.org", "2.pool.ntp.org", "3.pool.ntp.org"];
 
 /// The limit of R45.6C.5: a median offset above it fails the check. A constant, not a setting.
@@ -54,18 +55,6 @@ pub const CHECK_INTERVAL_SECS: f64 = 3600.0;
 pub const REFUSED_CHECK_INTERVAL_SECS: f64 = 300.0;
 /// The no-answer WARN line of the run-time loop appears at most this often (R45.6C.7 item 3).
 const NO_ANSWER_WARN_INTERVAL: Duration = Duration::from_secs(24 * 3600);
-
-/// What a failed check at start does (R45.6C.6 item 2). **Decision D1 is pending**: this is the one decision point.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StartFailureOutcome {
-    /// Variant (a): the launch is refused with a clean error.
-    Stop,
-    /// Variant (b): the start goes on with the refusal of R45.6C.7 item 2 in force.
-    RestrictedStart,
-}
-
-/// The variant the production start uses until D1 is decided.
-pub const START_FAILURE_OUTCOME: StartFailureOutcome = StartFailureOutcome::Stop;
 
 // ---------------------------------------------------------------------------------------------------------------
 // Configuration (R45.6C.2, R45.6C.3)
@@ -431,7 +420,7 @@ pub async fn run_check(source: &dyn TimeSource, servers: &[NtpServer]) -> CheckR
 fn failure_text(offset: f64, answers: usize) -> String {
     let direction = if offset > 0.0 { "behind" } else { "ahead of" };
     format!(
-        "The computer's clock is {:.1} s {} the time servers; the limit is {} s (median of {} answer(s)). The \
+        "The computer's clock is {:.2} s {} the time servers; the limit is {} s (median of {} answer(s)). The \
          computer's clock must be set right",
         offset.abs(),
         direction,
@@ -443,7 +432,7 @@ fn failure_text(offset: f64, answers: usize) -> String {
 fn no_answer_text() -> String {
     format!(
         "No time server answered, so the computer's clock could not be checked, and \"{}\" is true. The computer's \
-         clock must be set right or the time servers be reachable (configuration keys \"{}\" and \"{}\")",
+         clock must be set right, or the time servers must be reachable (configuration keys \"{}\" and \"{}\")",
         NTP_REQUIRED_KEY, NTP_SERVERS_KEY, NTP_REQUIRED_KEY
     )
 }
@@ -493,9 +482,7 @@ fn emit_all(lines: &[LogLine]) { lines.iter().for_each(LogLine::emit); }
 pub enum StartDecision {
     /// The start goes on.
     Go,
-    /// The start goes on with the refusal in force (variant (b)).
-    GoRestricted { refusal: String },
-    /// The launch is refused with this error (variant (a)).
+    /// The launch is refused with this error (R45.6C.6 items 2 and 3).
     Refuse { error: String },
 }
 
@@ -506,17 +493,13 @@ pub struct StartReport {
     pub lines: Vec<LogLine>,
 }
 
-/// R45.6C.6 items 2 to 4, with the outcome of a failed check chosen by `variant` (decision D1).
-pub fn decide_start(result: &CheckResult, required: bool, variant: StartFailureOutcome) -> StartReport {
-    let refuse = |reason: String| match variant {
-        StartFailureOutcome::Stop => StartReport {
-            decision: StartDecision::Refuse { error: reason },
-            lines: Vec::new(),
+/// R45.6C.6 items 2 to 4: a failed check, or no answer with `ntp_required` true, refuses the launch.
+pub fn decide_start(result: &CheckResult, required: bool) -> StartReport {
+    let refuse = |reason: String| StartReport {
+        decision: StartDecision::Refuse {
+            error: start_error_text(&reason),
         },
-        StartFailureOutcome::RestrictedStart => StartReport {
-            lines: vec![LogLine::new(LineLevel::Error, entering_refusal_text(&reason))],
-            decision: StartDecision::GoRestricted { refusal: reason },
-        },
+        lines: Vec::new(),
     };
     let go = |line: LogLine| StartReport {
         decision: StartDecision::Go,
@@ -536,6 +519,17 @@ pub fn decide_start(result: &CheckResult, required: bool, variant: StartFailureO
     }
 }
 
+/// The error that refuses the launch (R45.6C.6 item 2): the reason, and what the refusal means for swaps in progress.
+/// Only the start uses it; at run time swaps in progress continue, so [`entering_refusal_text`] says nothing of the kind.
+fn start_error_text(reason: &str) -> String {
+    format!(
+        "{}. The node does not start: swaps in progress are not resumed until it starts with a correct clock, and \
+         their deadlines keep running, so setting the computer's clock right is urgent",
+        reason
+    )
+}
+
+/// The ERROR line on entering the refusal at run time (R45.6C.7 item 2).
 fn entering_refusal_text(reason: &str) -> String {
     format!(
         "{}. New orders and swap starts are refused until a check passes",
@@ -555,27 +549,23 @@ fn off_line() -> LogLine {
 
 /// The start check (R45.6C.6): with the check off, returns the INFO line and sends no query; otherwise asks the servers
 /// of `conf`, records the outcome in the node's state and returns the lines to log per R45.6C.6. Returns the error that
-/// refuses the launch under variant (a).
-pub(crate) async fn start_check(
-    ctx: &MmArc,
-    conf: &ClockConf,
-    source: &dyn TimeSource,
-    variant: StartFailureOutcome,
-) -> MmInitResult<Vec<LogLine>> {
+/// refuses the launch after a failed check, or with no answer and `ntp_required` true.
+pub(crate) async fn start_check(ctx: &MmArc, conf: &ClockConf, source: &dyn TimeSource) -> MmInitResult<Vec<LogLine>> {
     let state = ClockCheckCtx::from_ctx(ctx).map_to_mm(MmInitError::Internal)?;
     state.configure(conf);
     if conf.is_off() {
         return Ok(vec![off_line()]);
     }
     let result = run_check(source, &conf.servers).await;
-    let report = decide_start(&result, conf.required, variant);
+    let report = decide_start(&result, conf.required);
     match report.decision {
         StartDecision::Go => {
-            state.record_check(Instant::now());
-            Ok(report.lines)
-        },
-        StartDecision::GoRestricted { refusal } => {
-            state.begin_refusal(refusal, Instant::now());
+            let now = Instant::now();
+            state.record_check(now);
+            if result == CheckResult::NoAnswer {
+                // The start WARN line counts as the one of the 24 hours (R45.6C.7 item 3).
+                state.record_no_answer_warning(now);
+            }
             Ok(report.lines)
         },
         StartDecision::Refuse { error } => MmError::err(MmInitError::ClockCheckFailed(error)),
@@ -584,7 +574,7 @@ pub(crate) async fn start_check(
 
 /// The check `lp_init` runs after the resolver is installed and before the wallet is opened (R45.6C.6 item 1).
 pub(crate) async fn startup_clock_check(ctx: &MmArc, conf: &ClockConf) -> MmInitResult<()> {
-    let lines = start_check(ctx, conf, &default_time_source(), START_FAILURE_OUTCOME).await?;
+    let lines = start_check(ctx, conf, &default_time_source()).await?;
     emit_all(&lines);
     Ok(())
 }
@@ -628,11 +618,7 @@ impl ClockCheckCtx {
 
     fn record_check(&self, now: Instant) { self.state.lock().last_check = Some(now); }
 
-    fn begin_refusal(&self, refusal: String, now: Instant) {
-        let mut state = self.state.lock();
-        state.refusal = Some(refusal);
-        state.last_check = Some(now);
-    }
+    fn record_no_answer_warning(&self, now: Instant) { self.state.lock().last_no_answer_warning = Some(now); }
 
     /// The refusal text while new orders and swap starts are refused.
     pub fn refusal(&self) -> Option<String> { self.state.lock().refusal.clone() }
@@ -826,6 +812,8 @@ async fn query_udp(server: &NtpServer) -> Option<f64> {
     socket.send_to(&build_request(sent), target).await.ok()?;
     let mut buffer = [0u8; 512];
     loop {
+        // A receive error (for example an ICMP port-unreachable that Windows reports here) ends the query for this server
+        // as "no answer".
         let (len, from) = socket.recv_from(&mut buffer).await.ok()?;
         let received = NtpTimestamp::now()?;
         // An answer counts only from the address the query went to; anything else is ignored until the time is up.

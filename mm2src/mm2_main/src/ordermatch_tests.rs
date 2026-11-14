@@ -17887,7 +17887,7 @@ mod t05_12b_swap_key_check_tests {
         let ctx = ctx_with(json!({}), false, &["ETH", "KMD"]);
         let refusal = begin_clock_refusal(&ctx);
         assert!(
-            refusal.contains("12.5 s") && refusal.contains("limit is 10 s"),
+            refusal.contains("12.50 s") && refusal.contains("limit is 10 s"),
             "{refusal}"
         );
         let set_price = || -> SetPriceReq {
