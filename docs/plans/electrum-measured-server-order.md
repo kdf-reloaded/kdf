@@ -1,6 +1,6 @@
 # Plan: measured Electrum server order
 
-**Status:** done (shipped in PR #144; `mixed` is the default since 2026-11-14, PR #TBD) — **Last reviewed:** 2026-11-14
+**Status:** done (shipped in PR #144; `mixed` is the default since 2026-11-14, PR #349) — **Last reviewed:** 2026-11-14
 
 **CRD:** ch.38 R38.6.4l (Reloaded-original), with T38.6.4l.1–T38.6.4l.15 and
 the decision items D38.6.4l.1–D38.6.4l.9, all resolved by 2026-10-29.
@@ -179,7 +179,7 @@ A maintained connection is **poor** when one of these holds:
 - **When `mixed` becomes the default.** Decided 2026-10-28: after a field run
   on RIN with `mixed`, as a separate change (CRD D38.6.4l.1). *Decided
   2026-11-14, maintainer:* `mixed` is the default since 2026-11-14, for the
-  release 0.4.0-beta.1 (PR #TBD). *Lab input, 2026-11-06 (release tests 0.4.0-beta.1, rows 7
+  release 0.4.0-beta.1 (PR #349). *Lab input, 2026-11-06 (release tests 0.4.0-beta.1, rows 7
   and 8, N4 and N5):* RIN loops of 200 rounds with `mixed` and with `measured`
   took 20.1 s and 20.4 s, the same time as the default order; the rows are
   informative, without a pass rule. Whether they stand for the field run is

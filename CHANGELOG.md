@@ -492,7 +492,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   staying uniform so that nodes do not all pick the same server. A maintained server that falls
   behind or turns slow is replaced by another listed server, at most once per 5 minutes, and the
   node logs why. To keep the previous behavior, set `electrum_server_order` to `random`; for the
-  behavior of GLEEC KDF, which keeps the listed order, set it to `listed`. Detail: PR #TBD; CRD
+  behavior of GLEEC KDF, which keeps the listed order, set it to `listed`. Detail: PR #349; CRD
   ch.38 R38.6.4b-R, R38.6.4l.
 
 - **A coin whose Electrum servers disagree about the chain now fails to activate, and later refuses
@@ -1397,10 +1397,10 @@ file carries the detail. "New" means the plan was created in this cycle.
   `version` call and swap records should carry it, are listed as open questions for the next round.
 - [`electrum-measured-server-order`](docs/plans/electrum-measured-server-order.md) — done: shipped in PR #144; the lab rows
   of 2026-11-06 that ran `mixed` and `measured` on RIN are recorded as input; `mixed` is the default
-  since 2026-11-14 (PR #TBD).
+  since 2026-11-14 (PR #349).
 - [`electrum-server-staleness`](docs/plans/electrum-server-staleness.md) — new, done: the Electrum
   staleness checks and the activation-stall fix shipped in PR #324, the fixes of the chain comparison
-  in PR #339, and step 6, the `mixed` default, in PR #TBD.
+  in PR #339, and step 6, the `mixed` default, in PR #349.
 - [`electrum-tls-server-authentication`](docs/plans/electrum-tls-server-authentication.md) — new,
   parked: what an `SSL` Electrum server must present, with and without `disable_cert_verification`,
   is now written down (PR #240). So are a warning at activation when the flag is set and an optional

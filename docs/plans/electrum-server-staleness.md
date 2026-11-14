@@ -1,6 +1,6 @@
 # Plan: Electrum resilience against stale and bad servers
 
-**Status:** done (steps 0–10 shipped in PR #324; step 6, the `mixed` default, in PR #TBD) — **Last reviewed:** 2026-11-14
+**Status:** done (steps 0–10 shipped in PR #324; step 6, the `mixed` default, in PR #349) — **Last reviewed:** 2026-11-14
 
 **CRD:** ch.38 R38.6.4o items 1–13 with T38.6.4o.1–T38.6.4o.16 and D38.6.4o.1–D38.6.4o.13 (new), amending
 R38.6.4a items 6 and 7, R38.6.4f items 2 and 4, R38.6.4j items 2 and 4 and R38.6.4l items 1, 4, 6
@@ -201,7 +201,7 @@ wrong balance; an operator sees which server to fix or to drop from the coins fi
 
 ### 6. `mixed` becomes the default (stability)
 
-*Implemented 2026-11-14 (PR #TBD): the maintainer made `mixed` the default for the release 0.4.0-beta.1 (CRD ch.38, status notes of 2026-11-14 after R38.6.4b-R item 3 and D38.6.4o.6).*
+*Implemented 2026-11-14 (PR #349): the maintainer made `mixed` the default for the release 0.4.0-beta.1 (CRD ch.38, status notes of 2026-11-14 after R38.6.4b-R item 3 and D38.6.4o.6).*
 
 Lab rows N4/N5 (2026-11-06) were informative only. Pass rule: 72 h with steps 1, 3, 4 and 5
 in, on RIN, on DGB (natural spread, 4 or more servers) and on one 600 s chain, plus an E1
