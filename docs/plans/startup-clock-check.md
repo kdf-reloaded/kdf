@@ -54,7 +54,7 @@
 | O5 | Browser builds | Off, as if the list were empty; see rule 8. |
 | O6 | An invalid list entry | Stops the start with a configuration error, as for `dns_resolver`. |
 | O7 | Check cadence | Hourly; at once after a pause or a clock jump; every 5 minutes while refused. |
-| O8 | What the default list discloses | The configuration documentation says that the NTP pool learns the node's address about once an hour. |
+| O8 | What the default list discloses | The configuration documentation says that the NTP pool learns the node's address at start, about once an hour, after each pause or clock jump, and every 5 minutes while new swaps are refused (R45.6C.7, R45.6C.10). |
 
 ## Decisions (the maintainer's, 2026-11-14)
 
