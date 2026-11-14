@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
 
+## [0.4.0-beta.1] — 2026-11-14
+
 Within each heading, entries are grouped by area. Each entry ends with the pull request that made
 it and, where one exists, the CRD rule, for readers who want more.
 
@@ -51,6 +53,10 @@ The most important changes of this release in short. Each item points to the det
   PRs #268, #271, #277, #288.
 - **SLP withdrawals no longer give BCH to the miner (unit tests), and BCA HTLC spends and refunds can
   be built.** PRs #220, #221, #236.
+- **A maker whose claim of the taker payment was mined no longer refunds its own payment, and a
+  maker whose claim was lost can recover its payment once the taker has refunded.** PRs #344, #345,
+  #347.
+- **ARRR activates on Windows when the user profile path has non-ASCII characters.** PR #346.
 
 #### Warnings and gaps
 
@@ -258,8 +264,8 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   with an error naming the key, a hardware wallet
   refuses to sign for such a coin, and a BC2 entry without the key logs one warning that the network
   will refuse its transactions. The optional key `sighash_suffix_height` is checked but not used yet.
-  The shared coins list still has to carry the key on the `BC2` and `BC2-segwit` entries (see Known
-  limitations). Detail: PRs #261, #264; CRD ch.61.
+  The shared coins repository carries the key on the `BC2` and `BC2-segwit` entries since 2026-11-14
+  (see Known limitations). Detail: PRs #261, #264; CRD ch.61.
 - **A swap of a coin with a sighash suffix now starts only with a counterparty that signs with it.**
   **BC2 trading in KDF Reloaded is incompatible with other Komodo DeFi Framework implementations:**
   they cannot spend BC2 since block 57,750, and KDF Reloaded declines a BC2 swap with them before it
@@ -868,7 +874,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   accepted. The node used to discard the answer and log only the identifier it computed from the
   bytes. It now logs both in one `info` line, and writes a `warning` when they differ. The identifier
   the node returns to the caller is still the locally computed one. The lines name no server.
-  Detail: CRD ch.39, status note of 2026-11-12 after R39.11.30.
+  Detail: PR #345; CRD ch.39, status note of 2026-11-12 after R39.11.30.
 
 - **The node no longer sends a shielded transaction again that is already mined.** Before a
   light-mode broadcast it looks the transaction id up in the wallet database. A transaction the
@@ -1078,7 +1084,7 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   refund is held and the search repeated until the refund deadline; the swap then ends with a failed
   refund whose text says the state of the taker payment could not be determined on that coin (or
   that the claim is found but not confirmed), and manual recovery applies. Swaps that never reached
-  the claim are unchanged. Detail: CRD ch.51 R82.
+  the claim are unchanged. Detail: PR #344; CRD ch.51 R82.
 - **A maker whose claim of the taker payment was lost, and whose taker then refunded, can now
   recover its own payment with `recover_funds_of_swap`.** Before, the call refused, because the
   record holds the sent claim and the maker payment was taken to belong to the taker, although the
@@ -1089,14 +1095,14 @@ A login without `enable_hd` is not affected. Detail: PR #319; CRD ch.36 R36.1.2,
   not confirmed, or the chain cannot be read, or a found refund has no confirmation, it refuses and
   says so. When nothing spent the taker payment yet, it refuses and says to repeat the call once
   the taker has refunded. A refusal builds nothing and writes nothing. A completed swap is refused
-  as before. The automatic refund of the run loop is unchanged. Detail: CRD ch.51 R83.
+  as before. The automatic refund of the run loop is unchanged. Detail: PR #345; CRD ch.51 R83.
 - **Manual recovery of a maker swap whose claim call failed now looks at the taker payment first.**
   Before, `recover_funds_of_swap` refunded the maker payment after the refund time without looking at
   the taker coin's chain, although the claim may have been mined. Now a claim that is found on the
   chain and confirmed refuses the refund. A claim that is found but not confirmed, or a chain that
   cannot be read, refuses and says so. When the taker's refund is found, or nothing spent the taker
   payment, the refund goes on as before. A refusal builds nothing and writes nothing. The automatic
-  refund of the run loop is unchanged. Detail: CRD ch.51 R84.
+  refund of the run loop is unchanged. Detail: PR #347; CRD ch.51 R84.
 
 #### UTXO coins and Electrum
 
@@ -1370,7 +1376,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   live chain a withdrawal and a swap between two KDF Reloaded nodes passed, and the decline of a
   counterparty that does not sign with the suffix was checked (release tests, "BC2 confirmation" and
   "BC2 swap check"). The KDF Reloaded coins file carries the `BC2` and `BC2-segwit` entries since
-  2026-11-10; the shared coins list and the P2PKH live check are open.
+  2026-11-10, and the shared coins repository carries the key on both since 2026-11-14; the P2PKH
+  live check is open.
 - [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md) — planning: its target now reads "after the 0.4.0 beta".
 - [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — done: the field tests of 2026-10-26 to
   2026-10-29 are recorded, and the two open items of the earlier deadline are closed as history.
@@ -1490,6 +1497,10 @@ file carries the detail. "New" means the plan was created in this cycle.
   transaction sent (PR #239; see Known limitations).
 - [`solana-support`](docs/plans/solana-support.md) — parked: Solana stays switched off; the release it returns in is not
   set.
+- [`swap-transaction-path-hardening`](docs/plans/swap-transaction-path-hardening.md) — planning,
+  after the 0.4.0 beta: the stub now also names five areas of the legacy swap process for all coin
+  families: refund and recovery decisions, the follow-up of sent transactions, the durability of
+  swap records, the recognition of the counterparty's transactions and of the secret, and admission.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — parked: Tendermint swaps were added to the
   0.4.0 scope on 2026-11-08 and put aside again on 2026-11-10 by the maintainer's decision; the
   coins stay wallet-only. Accepting both forms of the activation parameters is decided and not
@@ -1726,17 +1737,16 @@ lives.
   §39.6.5.
 - **The Komodo DeFi Framework and GLEEC KDF builds available in November 2026 cannot spend BC2
   (Bitcoin II).** Since block 57,750 the BC2 network rejects every spend signed without the chain's
-  sighash suffix, and those builds do not sign with it, so they can neither withdraw BC2 nor complete
-  a BC2 swap with any counterparty. KDF Reloaded declines a BC2 swap with such a node before it
-  starts, and signs with the suffix (PR #264), but only for a coin entry that carries
-  `"sighash_suffix": "0x01324342"`; until the shared coins list has the key on the `BC2` and
-  `BC2-segwit` entries, a BC2 withdrawal or swap payment is refused at broadcast ("Signature must be
-  zero for failed CHECK(MULTI)SIG operation"), and the node logs a warning when BC2 activates
-  without the key. A hardware wallet cannot sign this digest, so BC2 cannot
-  be used with one. The optional key `sighash_suffix_height` is checked but not used yet. The global
-  coins repository may not carry the key yet: add `sighash_suffix` (`"0x01324342"` on `BC2` and
-  `BC2-segwit`) to your coins file or use the KDF Reloaded coins file. Detail: PRs #261, #264; CRD
-  ch.61; issue #252.
+  sighash suffix, and those builds do not sign with it, so they can neither withdraw BC2 nor
+  complete a BC2 swap with any counterparty. KDF Reloaded declines a BC2 swap with such a node
+  before it starts, and signs with the suffix (PR #264), but only for a coin entry that carries
+  `"sighash_suffix": "0x01324342"`; for an entry without the key, a BC2 withdrawal or swap payment
+  is refused at broadcast ("Signature must be zero for failed CHECK(MULTI)SIG operation"), and the
+  node logs a warning when BC2 activates without the key. A hardware wallet cannot sign this digest,
+  so BC2 cannot be used with one. The optional key `sighash_suffix_height` is checked but not used
+  yet. The shared coins repository carries the key on `BC2` and `BC2-segwit` since 2026-11-14; a
+  coins file from before that date needs `sighash_suffix` (`"0x01324342"`) added to both entries, or
+  use the KDF Reloaded coins file. Detail: PRs #261, #264; CRD ch.61; issue #252.
 - **A browser (WASM) build cannot pin an Electrum server's key.** It removes a server entry that
   carries `spki_sha256` and uses the coin's other servers. Wallets and the shared coins file may not
   pass `spki_sha256` through to activation yet. Detail: PRs #240, #273; CRD ch.38 R38.6.4n,
@@ -1828,12 +1838,12 @@ lives.
   wait loop (taker-payment validation, the spend) fails the swap into its refund path. For an EVM
   coin used for making orders, configure at least one node with its own request allowance. Detail:
   CRD ch.35 R35.1.8, R35.1.11.
-- **A maker payment is not refunded after the spend of the taker payment was sent, even if that spend
-  never confirms.** If the node's spend of the taker payment was broadcast but dropped from the chain,
-  and the other side refunded its payment, `recover_funds_of_swap` refuses to refund the maker payment:
-  the other side knows the secret from the broadcast and can still claim it. A refund in that case only,
-  when the other side's refund is shown on its own chain, is under consideration. Detail: PRs #276,
-  #284; CRD ch.51 R75, D8.
+- **A maker payment is not refunded after the spend of the taker payment was sent, until the other
+  side's refund is shown.** If the node's spend of the taker payment was broadcast but dropped from
+  the chain, `recover_funds_of_swap` refuses to refund the maker payment while the other side's
+  payment is not refunded: the other side knows the secret from the broadcast and can still claim it.
+  Once the other side's refund is on its own chain with a confirmation, the call refunds the maker
+  payment (Fixed). Detail: PRs #276, #284, #345; CRD ch.51 R75, R83, D8.
 
 ## [0.3.0-beta.1] — 2026-11-01
 
