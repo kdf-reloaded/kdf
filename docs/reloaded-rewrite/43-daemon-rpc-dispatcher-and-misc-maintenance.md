@@ -405,14 +405,13 @@ of R43.1A.6; recommended, since no client contract depends on the Reloaded
 spelling. *Resolved 2026-11-08 by the maintainer's decision: renamed, PR
 #312.*
 
-## 43.1B Documented API forms of the legacy-only methods (Spec Reader round 0.4.0-13; pending the KDF Dirty Gate)
+## 43.1B Documented API forms of the legacy-only methods (reference documentation)
 
-> **Provenance status: pending the KDF Dirty Gate.** This section is a
-> candidate under chapter 01 R40: until the gate clears it and this marker is
-> replaced by the clearance record, it MUST NOT be relied on as a statement of
-> required behavior and MUST NOT be implemented from. It was written by the
-> dirty-side specification author on 2026-11-10 (Spec Reader round 0.4.0-13)
-> from three inputs: the published reference API documentation at
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-10,
+> measure 0.01 (attestation in §43.7).**
+> This section was written on 2026-11-10 by the KDF Spec Reader (Spec Reader
+> round 0.4.0-13) under the two-team procedure of chapter 01 §1.4A, from three
+> inputs: the published reference API documentation at
 > `https://gleec.com/komodo/docs/komodo-defi-framework/api/` (the method
 > index, the v2.0 protocol overview page, the site map, and the legacy page of
 > every name below; fetched 2026-11-10; a reference-side input that only the
@@ -420,7 +419,6 @@ spelling. *Resolved 2026-11-08 by the maintainer's decision: renamed, PR
 > reference lineage at the rows `v2.6.0-beta`, `v3.0.0-beta`, `dev (as of
 > 2026-03-27)` and `main (as of 2026-10-07)` of chapter 02 §2.15A (read
 > read-only; no untabled state was read); and this repository's own tree.
-> Every passage below is marked *(pending gate)* until cleared.
 
 *Scope.* §43.1A binds what the reference **implementation** does with the
 order-management methods on the two request surfaces. This section records
@@ -437,7 +435,7 @@ versioned request for a legacy-only name answers. Member names are the API
 contract itself and are listed; the documentation's descriptive text is not
 reproduced. The semantics of the methods stay where they are bound (chapters
 11, 12, 59 for orders; 51, 52 for swaps; 55 §55.4 for `electrum` and `enable`;
-28 and 32 for the peer and gossip queries). *(pending gate)*
+28 and 32 for the peer and gossip queries).
 
 **R43.1B.1** *Documentation surface.* The reference documentation indexes
 every method in a three-column table — legacy, v2.0 (release), v2.0 (dev) —
@@ -449,7 +447,6 @@ any of the 44 names, and no request example on any of their pages carries an
 `mmrpc` member. The documentation therefore defines **no versioned request
 shape, no typed error form and no versioned success shape** for any of the
 44 names: for every name the documented form is the legacy one of R43.1.1.
-*(pending gate)*
 
 **R43.1B.2** *Documented legacy request form.* For 41 of the 42 documented
 names the request is the legacy top-level shape: `userpass`, `method` and the
@@ -459,7 +456,7 @@ argument `uuid` is documented **inside a `params` object** of a legacy request
 (no `mmrpc` member). That nesting is what the reference implementation reads at
 both release rows, and what Reloaded reads (compatibility note below); it is
 the only legacy-only name whose documented legacy body already has the member
-placement of a versioned request. *(pending gate)*
+placement of a versioned request.
 
 **R43.1B.3** *Documented error form.* Where a page documents a failure at all,
 it is the legacy error body of chapter 55 R55.1.10 — a top-level `error`
@@ -469,7 +466,7 @@ any of the 44 names. Two pages document additional top-level members next to
 active swap blocks the deactivation and `orders` (object with `matching` and
 `cancelled` lists) when a matching order does; `import_swaps` reports
 per-record failures inside its **success** body (R43.1B.4), not as an error.
-Most pages document no failure case. *(pending gate)*
+Most pages document no failure case.
 
 **R43.1B.4** *Documented success form.* Every documented success body is a
 legacy body (no `mmrpc` member, no `id` echo). Two layouts occur, and the
@@ -484,7 +481,7 @@ show it (`update_maker_order`, `buy`, `sell`, `cancel_all_orders`,
 `set_requires_notarization`, `unban_pubkeys`); the examples are taken as the
 documented shape. Numbers are documented in the legacy encodings — a decimal
 string with `_rat` and, where present, `_fraction` companion members — never
-as the multi-representation object of R43.1A.8. *(pending gate)*
+as the multi-representation object of R43.1A.8.
 
 **R43.1B.5** *What the documentation says a versioned request to a legacy-only
 name answers.* Nothing. The documentation describes the versioned protocol
@@ -500,7 +497,7 @@ appear nowhere in it as dispatcher answers — and gives no HTTP status for
 any envelope. The implementation facts of R43.1A.2–R43.1A.3 (`NoSuchMethod`,
 no `error_data`, HTTP 400, `mmrpc` and `id` echoed) are therefore
 **undocumented but not contradicted**; the documented envelope members match
-those rules. *(pending gate)*
+those rules.
 
 **R43.1B.6** *Reference states and agreement with R43.1A.9.* The versioned
 method table of the reference lineage carries none of the 44 names at any of
@@ -510,7 +507,7 @@ thereby extended from the order methods it names to all 44: the reference
 never offered any of them under the versioned envelope. Documentation and
 implementation **agree** on this for every name; the documentation's two
 undocumented names (`stats_swap_status`, `sim_panic`) and its unindexed page
-(`help`) are documentation gaps, not disagreements. *(pending gate)*
+(`help`) are documentation gaps, not disagreements.
 
 **R43.1B.7** *Consequence for Reloaded.* Because no versioned form is
 documented for any of the 44 names, there is no documented versioned contract
@@ -520,14 +517,13 @@ divergence under plan `rpc-api-reference-wire-parity` §2.2. What the
 documentation **does** dictate is the legacy request members (the names,
 optionality and value forms of the table below), which that plan's §1.2 moves
 into `params` unchanged, and the legacy success payloads it places under
-`result`; the table below is the documented inventory for both. *(pending
-gate)*
+`result`; the table below is the documented inventory for both.
 
 *Documented forms of the 44 names.* "legacy only" means the documented request
 is the legacy shape of R43.1.1 with the listed members inline; `?` marks a
 member the documentation calls optional; "none" in the error column means the
 page documents no failure case; "agrees" refers to R43.1A.9 as extended by
-R43.1B.6. *(pending gate)*
+R43.1B.6.
 
 | Method or group | Documented request form (members) | Documented error form | Documented success form | Agrees with R43.1A.9 |
 | --- | --- | --- | --- | --- |
@@ -587,7 +583,7 @@ deprecated in favor of versioned methods that already exist
 alias of either is wanted (D43.1B.1). The response-table-versus-example
 inconsistencies of R43.1B.4 are internal to the documentation; this round did
 not verify the affected success layouts against the implementation beyond
-what §43.1A already binds. *(pending gate)*
+what §43.1A already binds.
 
 > **Compatibility (this repository, 2026-11-10; not corpus-sourced).**
 > Reloaded's legacy `recover_funds_of_swap` reads its `uuid` from a `params`
@@ -610,7 +606,7 @@ deprecates `get_trade_fee` (for `trade_preimage`) and `show_priv_key` (for
 on the same ground, and D43.1B.1 asks the same of `get_trade_fee`. (e) Nothing
 in the documentation binds the typed error tokens of the new forms; the plan's
 §1.2 step 3 (reuse a versioned sibling's token where one exists, else
-`Internal`) is unconstrained by it. *(pending gate)*
+`Internal`) is unconstrained by it.
 
 **D43.1B.1** *Keep `get_trade_fee` legacy-only?* The documentation marks it
 deprecated in favor of the versioned `trade_preimage` (R43.1B.1 table), which
@@ -620,7 +616,7 @@ plan's §1.4 "legacy-only for good" list, as `show_priv_key` already is, so no
 second versioned fee method is added (recommended: it mirrors the ground on
 which the plan keeps `show_priv_key` legacy-only); (ii) keep it in group B and
 add a versioned form anyway, for clients that call the simpler single-coin
-query. *(pending gate)*
+query.
 
 ## 43.2 Public vs protected method classification
 
@@ -879,10 +875,8 @@ shall be wound down as part of shutdown rather than abandoned.
 - *Scoped addition (2026-11-10, Spec Reader round 0.4.0-13) -- §43.1B
   (R43.1B.1--R43.1B.7, the table of documented forms, the finding paragraph,
   the compatibility note, the plan-input note and D43.1B.1); no other file
-  was changed.* **KDF Dirty Gate: pending** (chapter 01 R40; the section carries the pending-clearance marker
-  at the point at which it appears, and every passage in it is marked
-  *(pending gate)*; this item is replaced by the clearance record with the R39
-  scope attestation when the gate clears it). *Inputs:* (1) the published
+  was changed.* **KDF Dirty Gate: PASS on 2026-11-10, measure 0.01, no findings** (chapter
+  01 R40; the attestation closes this item). *Inputs:* (1) the published
   reference API documentation at
   `https://gleec.com/komodo/docs/komodo-defi-framework/api/`, fetched
   2026-11-10 — the method index page, the v2.0 protocol overview page, the
@@ -911,3 +905,22 @@ shall be wound down as part of shutdown rather than abandoned.
   documentation is not a state of the historical record and takes no row
   (§2.15A R13 tables commits, tags and branch states only), so it is named
   here by URL and fetch date instead.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-10, measure 0.01
+  on the R35 basis (dictated-interop and public-surface tokens excluded), no
+  findings. Reference states (chapter 02 R13): exactly four states are named —
+  `v2.6.0-beta`, `v3.0.0-beta`, `dev (as of 2026-03-27)` and `main (as of
+  2026-10-07)` — all rows of §2.15A, each read at its full identifier; the
+  documentation URL is a public site and takes no row. Extent: (a) the daemon
+  RPC dispatcher's versioned method table and legacy method table at the four
+  rows, 8 files compared (2 per row), plus the legacy handler of the one
+  params-nested legacy-only method at the two release rows (2 files); (b) the
+  published reference API documentation fetched 2026-11-10: the method index
+  page, the v2.0 protocol overview page and 13 legacy method pages (the
+  params-nested method's page and a sample of 12 further pages whose table
+  rows carry prose qualifiers); the remaining legacy pages were not fetched, a
+  gap left visible and bounded to pages whose table cells carry member names
+  only; (c) the relicensed base's own legacy handler of the same method, for
+  the compatibility note. Method: reading of the candidate and of the files at
+  the tabled identifiers; mechanical extraction and set comparison of the
+  method-name tables; mechanical text probes of the fetched documentation; no
+  code blocks in the gated lines.
