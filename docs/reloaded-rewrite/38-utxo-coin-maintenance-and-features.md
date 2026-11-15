@@ -2326,8 +2326,12 @@ holds under every value of `electrum_server_order` unless it says otherwise.
      coin without a valid `avg_blocktime` it is 10 minutes.
    - The pool keeps, per coin instance, the moment each height was first
      reported by a maintained connection, through a header notification or
-     the answer to a header request. It drops the heights at or below the
-     lowest height of its maintained connections.
+     the answer to a header request. It keeps only the heights within *T* of
+     the running agreed tip, above the agreed tip minus *T* and up to the
+     agreed tip plus *T*, and above the lowest height of its maintained
+     connections. A connection further behind is behind, which wins over
+     stuck; higher heights do not count (below); and a height every
+     connection has reached is no longer awaited.
    - A connection that keeps sending notifications without reaching the
      reported height is stuck too. Under the earlier own-silence condition it
      was not.
@@ -2345,7 +2349,10 @@ holds under every value of `electrum_server_order` unless it says otherwise.
      first with a new block whenever the time between two blocks exceeded the
      period, and the mark cleared about a second later when its own
      notification came. In a 72-hour field run of this project (2026-11-10 to
-     2026-11-13, four nodes), 405 of 411 such marks cleared within 1 s. The
+     2026-11-13, four nodes), 405 of 411 such marks cleared within 1 s; one
+     cleared within 30 s, and the other 5 were each followed by a second mark
+     of the same server and cleared with it in the same second. No mark stayed
+     uncleared. The
      marks also made the connection poor (R38.6.4l items 6 and 7) and made a
      re-measure round due.
    - *Known limit.* The lone-connection rule of R38.6.4l item 6 has no other

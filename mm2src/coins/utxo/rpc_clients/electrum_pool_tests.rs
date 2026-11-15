@@ -4022,6 +4022,63 @@ fn t38_6_4o_stuck_3_notifying_without_advancing_is_stuck_and_behind_wins() {
     });
 }
 
+/// T38.6.4o.stuck.4 (amended 2026-11-15, item 4): a server that stays far behind (behind wins over stuck and stays
+/// maintained) does not blind the stuck rule once the chain has moved on by more heights than the record may hold.
+/// Three stubs, one frozen 500 blocks back; the other two follow 300 new heights, then one reports a block the other
+/// does not reach. That one is stuck after the period, the frozen one is behind, and the record stays within 2T + 1.
+#[test]
+fn t38_6_4o_stuck_4_a_frozen_server_does_not_hide_a_stalled_one() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let (frozen, a, b) = (stub_at(5, H - 500).await, stub_at(5, H).await, stub_at(5, H).await);
+        let client = checked_pool(
+            &[&frozen, &a, &b],
+            PoolSetup {
+                block_interval: Some(Duration::from_secs(60)),
+                ..PoolSetup::new("STKF")
+            },
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&frozen, &a, &b]).await;
+        for step in 1..=300u64 {
+            a.set_tip(H + step);
+            b.set_tip(H + step);
+            wait_until("both live connections to follow", || {
+                snap_of(&client, &a).height == Some(H + step) && snap_of(&client, &b).height == Some(H + step)
+            })
+            .await;
+            assert!(client.pool.first_reports_for_test().len() <= 7);
+        }
+        a.set_tip(H + 301);
+        let t0 = first_report_of(&client, H + 301).await;
+        assert!(client.pool.first_reports_for_test().len() <= 7);
+        // The period of a 60 s coin under the quiet timings is 120 s.
+        let judged = |at: f64| client.pool.out_of_date_at_for_test(at);
+        let count = |states: &[Option<OutOfDate>], matcher: fn(&Option<OutOfDate>) -> bool| {
+            states.iter().filter(|state| matcher(state)).count()
+        };
+        let is_stuck = |state: &Option<OutOfDate>| matches!(state, Some(OutOfDate::Stuck { .. }));
+        let is_behind = |state: &Option<OutOfDate>| matches!(state, Some(OutOfDate::Behind { .. }));
+        let before = judged(t0 + 119.);
+        assert_eq!(
+            (count(&before, is_stuck), count(&before, is_behind)),
+            (0, 1),
+            "{before:?}"
+        );
+        let after = judged(t0 + 121.);
+        assert_eq!((count(&after, is_stuck), count(&after, is_behind)), (1, 1), "{after:?}");
+        assert!(
+            after
+                .iter()
+                .any(|state| matches!(state, Some(OutOfDate::Stuck { height, .. }) if *height == H + 301)),
+            "{after:?}"
+        );
+        // A check is due by the moment the stalled one turns stuck (the frozen one may add earlier, harmless, wake-ups).
+        assert!(client.pool.next_stale_check(t0 + 1.).is_some_and(|at| at <= t0 + 120.));
+    });
+}
+
 /// T38.6.4o.6 (a liar does not steer): under `measured`, with three stubs at H + 1,000,000, H and H, the two at H are
 /// eligible and rank before the liar, which is not eligible; no connection at H is out of date. With the three
 /// maintained under `random` the liar is out of date as ahead, takes no reads and is named in one WARN line; a stub at

@@ -39,9 +39,9 @@ const STALE_BLOCK_INTERVALS: u32 = 3;
 /// The stuck period of a connection among several is this many block intervals, at least the floor (R38.6.4o item 4,
 /// amendment of 2026-11-15).
 const STUCK_BLOCK_INTERVALS: u32 = 2;
-/// The most heights the record of first reports holds (R38.6.4o item 4, amendment of 2026-11-15). The highest are
-/// dropped first.
-pub(super) const MAX_FIRST_REPORTS: usize = 256;
+/// The most heights the record of first reports holds (R38.6.4o item 4, amendment of 2026-11-15): a safety net above
+/// the bound of `2 * tolerance + 1` (at most 41) that the pruning keeps. The lowest are dropped first.
+pub(super) const MAX_FIRST_REPORTS: usize = 64;
 /// P2: the smoothed latency is slow above this many times the connection's own reference latency ...
 const SLOW_OWN_FACTOR: f64 = 4.;
 /// ... and above this many times the best latency of the activation round (item 6).
@@ -180,22 +180,27 @@ pub(super) fn stuck_period(block_interval: Option<Duration>, floor: Duration, no
 }
 
 /// Records the moment each height was first reported by a maintained connection (R38.6.4o item 4, amendment of
-/// 2026-11-15). `heights` are the current heights of the maintained connections, `reports` the record: a height above
-/// the lowest of them that the record lacks is entered with `now`; the heights at or below the lowest are dropped; at
-/// most [`MAX_FIRST_REPORTS`] heights are kept, the highest dropped first (a server may report any height).
-pub(super) fn note_first_reports(reports: &mut BTreeMap<u64, f64>, heights: &[u64], now: f64) {
-    let Some(lowest) = heights.iter().copied().min() else {
+/// 2026-11-15). `heights` are the current heights of the maintained connections, `reports` the record. Only the
+/// heights within `tolerance` of the running agreed tip of `heights` are kept: above the agreed tip minus `tolerance`
+/// and up to the agreed tip plus `tolerance`. A connection further behind is behind, which wins over stuck, and higher
+/// heights do not count. So the record holds at most `2 * tolerance + 1` heights, however long a connection stays
+/// behind or whatever a server reports. A height above the lowest of `heights` that the record lacks is entered with
+/// `now`; the heights at or below the lowest are dropped. Nothing changes when fewer than two connections have a
+/// height (there is no agreed tip). [`MAX_FIRST_REPORTS`] is a safety net only; it drops the lowest heights.
+pub(super) fn note_first_reports(reports: &mut BTreeMap<u64, f64>, heights: &[u64], tolerance: u64, now: f64) {
+    let Some(agreed) = agreed_tip(heights) else {
         return;
     };
-    for height in heights.iter().filter(|height| **height > lowest) {
+    let lowest = heights.iter().copied().min().unwrap_or(agreed);
+    // Kept: `above` < height <= `up_to`.
+    let above = agreed.saturating_sub(tolerance).max(lowest);
+    let up_to = agreed.saturating_add(tolerance);
+    for height in heights.iter().filter(|height| **height > above && **height <= up_to) {
         reports.entry(*height).or_insert(now);
     }
-    *reports = match lowest.checked_add(1) {
-        Some(first_kept) => reports.split_off(&first_kept),
-        None => BTreeMap::new(),
-    };
+    reports.retain(|height, _| *height > above && *height <= up_to);
     while reports.len() > MAX_FIRST_REPORTS {
-        reports.pop_last();
+        reports.pop_first();
     }
 }
 
@@ -985,10 +990,10 @@ mod tests {
     fn a_connection_that_notifies_without_advancing_is_stuck() {
         let mut record = BTreeMap::new();
         let t0 = 100.;
-        note_first_reports(&mut record, &[H + 1, H], t0);
+        note_first_reports(&mut record, &[H + 1, H], 3, t0);
         // B notifies H again and again.
         for repeat in 1..=5 {
-            note_first_reports(&mut record, &[H + 1, H], t0 + 40. * repeat as f64);
+            note_first_reports(&mut record, &[H + 1, H], 3, t0 + 40. * repeat as f64);
         }
         assert_eq!(record, reports(&[(H + 1, t0)]));
         assert_eq!(
@@ -1084,32 +1089,124 @@ mod tests {
     #[test]
     fn the_record_of_first_reports_is_pruned_and_bounded() {
         let mut record = BTreeMap::new();
-        note_first_reports(&mut record, &[H + 1, H, H], 10.);
+        note_first_reports(&mut record, &[H + 1, H, H], 3, 10.);
         assert_eq!(record, reports(&[(H + 1, 10.)]));
         // The second connection reaches H + 1: the first moment stays while one is still below.
-        note_first_reports(&mut record, &[H + 1, H + 1, H], 20.);
+        note_first_reports(&mut record, &[H + 1, H + 1, H], 3, 20.);
         assert_eq!(record, reports(&[(H + 1, 10.)]));
         // Every connection at H + 1: nothing at or below H + 1 is kept.
-        note_first_reports(&mut record, &[H + 1, H + 1, H + 1], 30.);
+        note_first_reports(&mut record, &[H + 1, H + 1, H + 1], 3, 30.);
         assert!(record.is_empty(), "{record:?}");
         // The next block is entered at its first report, and a later report of it does not move it.
-        note_first_reports(&mut record, &[H + 2, H + 1, H + 1], 40.);
-        note_first_reports(&mut record, &[H + 2, H + 2, H + 1], 50.);
+        note_first_reports(&mut record, &[H + 2, H + 1, H + 1], 3, 40.);
+        note_first_reports(&mut record, &[H + 2, H + 2, H + 1], 3, 50.);
         assert_eq!(record, reports(&[(H + 2, 40.)]));
         // No connection has a height: nothing changes.
-        note_first_reports(&mut record, &[], 60.);
+        note_first_reports(&mut record, &[], 3, 60.);
         assert_eq!(record, reports(&[(H + 2, 40.)]));
-        // A server reporting a new height every time cannot grow the record beyond the bound; the lowest are kept.
-        let mut flood = BTreeMap::new();
-        for step in 1..=(MAX_FIRST_REPORTS as u64 * 2) {
-            note_first_reports(&mut flood, &[H + step, H], step as f64);
+        // A single connection with a height has no agreed tip: nothing changes.
+        note_first_reports(&mut record, &[H + 9], 3, 70.);
+        assert_eq!(record, reports(&[(H + 2, 40.)]));
+        // The record keeps the heights above the agreed tip minus T and up to the agreed tip plus T: here the agreed
+        // tip is H + 10 and T = 3, so H + 7 and H + 14 are dropped and H + 8 to H + 13 stay; the lowest height bounds it too.
+        let mut window = reports(&[(H + 7, 1.), (H + 8, 2.), (H + 9, 3.), (H + 13, 4.), (H + 14, 5.)]);
+        note_first_reports(&mut window, &[H + 10, H + 10, H + 5], 3, 80.);
+        assert_eq!(
+            window,
+            reports(&[(H + 8, 2.), (H + 9, 3.), (H + 10, 80.), (H + 13, 4.)])
+        );
+        let mut window = reports(&[(H + 1, 1.), (H + 2, 2.), (H + 7, 3.)]);
+        note_first_reports(&mut window, &[H + 10, H + 10, H + 5, H + 8], 3, 80.);
+        assert_eq!(window, reports(&[(H + 8, 80.), (H + 10, 80.)]));
+        // A server reporting a new height every time cannot grow the record beyond 2T + 1, for any T up to the
+        // maximum, and one that stays far behind does not change that.
+        for tolerance in [0, 3, TOLERANCE_MAX_BLOCKS] {
+            let mut flood = BTreeMap::new();
+            for step in 1..=(MAX_FIRST_REPORTS as u64 * 4) {
+                note_first_reports(&mut flood, &[H + step, H + step - 1, H - 1_000], tolerance, step as f64);
+                assert!(
+                    flood.len() as u64 <= 2 * tolerance + 1,
+                    "T = {tolerance}: {}",
+                    flood.len()
+                );
+            }
         }
-        assert_eq!(flood.len(), MAX_FIRST_REPORTS);
-        assert_eq!(flood.keys().next().copied(), Some(H + 1));
+        // The safety net: with a tolerance beyond any real one the cap drops the LOWEST heights.
+        let mut capped = BTreeMap::new();
+        let steps = MAX_FIRST_REPORTS as u64 * 2;
+        for step in 1..=steps {
+            note_first_reports(&mut capped, &[H + step, H + step - 1, 1], 1_000, step as f64);
+        }
+        assert_eq!(capped.len(), MAX_FIRST_REPORTS);
+        assert_eq!(capped.keys().next_back().copied(), Some(H + steps));
+        assert_eq!(
+            capped.keys().next().copied(),
+            Some(H + steps - MAX_FIRST_REPORTS as u64 + 1)
+        );
         // The highest height there is does not overflow the pruning.
         let mut extreme = BTreeMap::new();
-        note_first_reports(&mut extreme, &[u64::MAX, u64::MAX], 1.);
+        note_first_reports(&mut extreme, &[u64::MAX, u64::MAX], 3, 1.);
         assert!(extreme.is_empty());
+        note_first_reports(&mut extreme, &[u64::MAX, u64::MAX - 1], u64::MAX, 1.);
+        assert_eq!(extreme, reports(&[(u64::MAX, 1.)]));
+        // Near zero the window does not underflow.
+        let mut low = BTreeMap::new();
+        note_first_reports(&mut low, &[2, 1], 3, 1.);
+        assert_eq!(low, reports(&[(2, 1.)]));
+    }
+
+    /// T38.6.4o item 4 (amended 2026-11-15), the record under a frozen server: one connection stays far behind (more
+    /// than the record bound and more than T blocks), the chain moves on by 300 heights, and then a faster peer
+    /// reports a block that another connection does not reach. The frozen one is behind and stays so; the stalled one
+    /// is stuck just after the period counted from that first report, and not before.
+    #[test]
+    fn a_frozen_server_far_behind_does_not_hide_a_stalled_one() {
+        let frozen = H - 500;
+        let period = secs(120);
+        let mut record = BTreeMap::new();
+        // The chain advances: the two live connections move together, the third is frozen. Every update goes through
+        // the record as the pool does.
+        for step in 1..=300u64 {
+            note_first_reports(&mut record, &[frozen, H + step, H + step], 3, step as f64);
+            assert!(record.len() <= 7, "{record:?}");
+        }
+        let stalled = H + 300;
+        // A faster peer reports the next block at t0; the stalled connection does not.
+        let t0 = 1_000.;
+        for repeat in 0..5 {
+            note_first_reports(
+                &mut record,
+                &[frozen, stalled, stalled + 1],
+                3,
+                t0 + 10. * repeat as f64,
+            );
+        }
+        assert_eq!(record.get(&(stalled + 1)), Some(&t0));
+        let states = |now: f64| {
+            out_of_date_states(
+                &[Some(frozen), Some(stalled), Some(stalled + 1)],
+                &record,
+                3,
+                period,
+                now,
+            )
+        };
+        let behind = Some(OutOfDate::Behind { lag: 800, tip: stalled });
+        assert_eq!(states(t0 + 1.), vec![behind, None, None]);
+        assert_eq!(states(t0 + 119.), vec![behind, None, None]);
+        assert_eq!(states(t0 + 120.), vec![behind, None, None]);
+        assert_eq!(states(t0 + 121.), vec![
+            behind,
+            Some(OutOfDate::Stuck {
+                height: stalled + 1,
+                reported_secs: 121.
+            }),
+            None
+        ]);
+        // The record still holds the heights the stalled one waits for, so the next check is computed from it.
+        let reported = first_reports_above(&[Some(frozen), Some(stalled), Some(stalled + 1)], &record, 3);
+        assert_eq!(reported[1], Some((stalled + 1, t0)));
+        assert_eq!(reported[2], None);
     }
 
     /// T38.6.4o item 4 (amended 2026-11-15): a server above the agreed tip by more than the tolerance (D38.6.4o.9) does

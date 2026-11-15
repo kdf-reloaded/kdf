@@ -842,8 +842,9 @@ pub(super) struct PoolShared {
     tolerance: u64,
     /// R38.6.4o item 11.
     tip_checks: bool,
-    /// The moment each height above the lowest height of the maintained connections was first reported by one of them
-    /// (R38.6.4o item 4, amendment of 2026-11-15); see [`note_first_reports`] for how it is pruned and bounded.
+    /// The moment each height within the tolerance of the running agreed tip (and above the lowest height) of the
+    /// maintained connections was first reported by one of them (R38.6.4o item 4, amendment of 2026-11-15); at most
+    /// `2 * tolerance + 1` heights, see [`note_first_reports`].
     first_reports: StdMutex<BTreeMap<u64, f64>>,
     /// The activation probe has ended, its measured rank applied.
     probe_ended: AtomicBool,
@@ -2363,7 +2364,7 @@ impl PoolShared {
             .filter_map(|slot| Self::tip_height(slot))
             .collect();
         let mut reports = self.first_reports.lock().unwrap_or_else(|p| p.into_inner());
-        note_first_reports(&mut reports, &heights, now);
+        note_first_reports(&mut reports, &heights, self.tolerance, now);
     }
 
     /// Tests: the record of first reports.

@@ -83,7 +83,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   block this one has not, for longer than two block intervals and at least 180 seconds (10 minutes
   for a coin without a block time in its coins entry). A server that keeps sending notifications
   without reaching that block now counts as stuck too. A coin with a single connected server keeps
-  the old rule. Detail: PR #N; CRD ch.38 R38.6.4o item 4.
+  the old rule. Detail: PR #378; CRD ch.38 R38.6.4o item 4.
 
 #### QTUM and QRC20
 
