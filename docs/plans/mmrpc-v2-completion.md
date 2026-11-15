@@ -1,6 +1,6 @@
 # Plan: finish mmrpc 2.0 support for the legacy-only RPC methods
 
-**Status:** in progress (0.5.0; phase 1, order management, PR #359; phase 2, trading, PR #TBD; phases 3–5 open) — **Last reviewed:** 2026-11-15
+**Status:** in progress (0.5.0; phase 1, order management, PR #359; phase 2, trading, PR #372; phases 3–5 open) — **Last reviewed:** 2026-11-15
 
 > **Context:** written 2026-11-09, after CRD ch.43 §43.1A (PR #312) bound which methods exist on
 > which request surface. This plan proposes a Reloaded extension: versioned (`mmrpc: "2.0"`) forms of
