@@ -132,8 +132,9 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   `decimals`, `mint_address` and `program_id`), Reloaded reads its own older
   forms: `{"type": "SOLANA"}` without `protocol_data`, and `SPLTOKEN` with
   `platform`, `decimals` and `token_contract_address`, which means the SPL
-  Token program. The extra forms are additive and need no switch. Solana
-  stays switched off in this beta (see
+  Token program. The extra forms are additive and need no switch. Native
+  builds read all of these; browser (WASM) builds do not read Solana entries
+  yet. Solana stays switched off in this beta (see
   [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
   R40.1.2, R40.1.3; PR #361.
 

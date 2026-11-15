@@ -28,7 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 #### Solana coins
 
 - **Solana entries of a coins file in the form GLEEC KDF uses can be read.** Besides its own
-  forms, KDF Reloaded now reads a Solana platform entry with `"protocol_data": {}` and an SPL token
+  forms, KDF Reloaded now reads, in native builds, a Solana platform entry with `"protocol_data": {}` and an SPL token
   entry of type `SOLANATOKEN` with `platform`, `decimals`, `mint_address` and `program_id`. A
   `mint_address` or `program_id` that is not a valid public key makes the entry unreadable, and the
   activation reports a protocol parse error. Solana stays switched off in this build, so no Solana

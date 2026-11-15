@@ -113,6 +113,8 @@ protocol unparsable (`TokenProtocolParseError`).
 > **Reloaded status (clean side, 2026-11-15).** Implemented in PR #361, on
 > native targets; WASM follows with the WASM package of
 > `docs/plans/solana-support.md`. Both forms of R40.1.2 and R40.1.3 are read.
+> Any object given as the platform's `protocol_data` is accepted and its
+> members are ignored, as `{}` is.
 > Reloaded also keeps reading its own forms: `{"type": "SOLANA"}` without
 > `protocol_data` (and with `protocol_data: null`), and `SPLTOKEN` with
 > `token_contract_address`, which means the SPL Token program. A Solana
@@ -326,7 +328,8 @@ refuses every request; see the availability note at the top of this chapter):
 > rest of item 6 holds. The shipped code has four further gaps; none of them can
 > be reached while Solana is switched off:
 >
-> - *Token-2022.* Reloaded's token configuration carries no `program_id`. The
+> - *Token-2022.* Reloaded's token configuration carries the `program_id`
+>   (PR #361, status note after R40.1.3), but nothing uses it yet: the
 >   token's account, its balance, the transfer instruction and the creation of
 >   the receiver's token account all use the SPL Token program. A Token-2022
 >   mint therefore fails in every one of these operations, not only in the

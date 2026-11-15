@@ -54,9 +54,9 @@ the code on 2026-11-15:
    failures map to `Internal`. Nodes are reached through a failover pool (in
    order, a failed node set aside for a while), but no `getHealth` request
    selects them as R40.1.5 binds.
-6. Token-2022: Reloaded's token configuration has no `program_id`, and the
-   token's account, balance, transfer and receiver-account creation all use the
-   SPL Token program. All four must use the token's `program_id` (the ch. 40
+6. Token-2022: Reloaded's token configuration carries the `program_id` (PR
+   #361), but nothing uses it yet: the token's account, balance, transfer and
+   receiver-account creation all use the SPL Token program. All four must use the token's `program_id` (the ch. 40
    code-quality finding names the balance; the reference has that defect,
    Reloaded must not copy it).
 7. HD-wallet, hardware-wallet and WalletConnect policies (D40.2). Today the
@@ -86,8 +86,8 @@ specifications unless a reference question below changes them.
 
 | # | Package | State |
 | --- | --- | --- |
-| S0 | Correct this plan, ch. 40 §40.6 and `docs/DISABLED_TESTS.md` group 6 against the code of 2026-11-15 | in this pull request |
-| S2 | Accept both coin-configuration forms: the reference's `SOLANA` with `protocol_data: {}` and `SOLANATOKEN` with `platform`, `decimals`, `mint_address` and `program_id`, besides Reloaded's own forms; each token keeps its `program_id` (the `SPLTOKEN` form means the SPL Token program); a test per form | in this pull request |
+| S0 | Correct this plan, ch. 40 §40.6 and `docs/DISABLED_TESTS.md` group 6 against the code of 2026-11-15 | done, PR #361 |
+| S2 | Accept both coin-configuration forms: the reference's `SOLANA` with `protocol_data: {}` and `SOLANATOKEN` with `platform`, `decimals`, `mint_address` and `program_id`, besides Reloaded's own forms; each token keeps its `program_id` (the `SPLTOKEN` form means the SPL Token program); a test per form | done on native builds, PR #361 (WASM with S8) |
 | S1 | Bind the primary surface (`enable_solana_with_tokens`, `enable_spl`) in ch. 40: request fields, results and a per-method error table, as the wire-parity plan (`docs/plans/rpc-api-reference-wire-parity.md`, R43.8.4) requires; failures map as on the compatibility surface (§40.2-§40.3), as typed errors | next |
 | S3 | Every operation an ordinary RPC reaches on a Solana coin answers a typed "not supported for this coin" error instead of ending the request; operations only a swap reaches stay behind the trading refusal. The minimum transaction amount becomes one lamport for SOL and one smallest unit of its own decimals for each SPL token (section "Trading floors") | open |
 | S4 | Keys under each login: under a global-HD login an ed25519 key derived from the wallet seed at the coin's `derivation_path` and `path_to_address`; a typed refusal for hardware-wallet and WalletConnect requests; the single-key rule of R40.1.4 unchanged; the legacy passphrase key never used for Solana; ch. 05 R46 and ch. 40 R40.1.4 reconciled by status notes | open; the path layout follows the reference question on key handling |
