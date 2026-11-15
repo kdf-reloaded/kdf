@@ -3,7 +3,7 @@
 //! The pool is built with millisecond timings, so no test waits real seconds. The production figures are
 //! pinned in `electrum_pool::budget_tests`; the 12-hour suspension cap is tested there with a clock stub.
 
-use super::electrum_measure::NEAR_OFFSET_DEFAULT_MS;
+use super::electrum_measure::{OutOfDate, NEAR_OFFSET_DEFAULT_MS};
 use super::electrum_pool::{parse_server_order, ElectrumPoolOptions, ElectrumPoolTimings, OpenedByCall, ServerOrder,
                            ServerStateSnapshot};
 use super::electrum_stub_server::{StubBehavior, StubServer};
@@ -42,6 +42,7 @@ fn test_timings() -> ElectrumPoolTimings {
         confirm_floor: ms(200),
         poor_demotion: ms(900),
         stale_floor: ms(300),
+        stuck_floor: ms(300),
         latency_floor: ms(300),
         slow_floor: ms(60),
     }
@@ -2795,6 +2796,7 @@ fn methods_received(server: &StubServer) -> Vec<String> {
 fn quiet_timings() -> ElectrumPoolTimings {
     ElectrumPoolTimings {
         stale_floor: ms(60_000),
+        stuck_floor: ms(60_000),
         ..test_timings()
     }
 }
@@ -3740,8 +3742,9 @@ fn t38_6_4o_4_two_servers_one_far_behind() {
 }
 
 /// T38.6.4o.5: with three maintained stubs and the stuck period shortened, two stubs notifying new tips and one
-/// silent, the silent one becomes out of date as stuck after the period and not before, and leaves the read turn. With
-/// every stub silent for longer than the period none is stuck. With a single maintained stub item 4 does not apply.
+/// silent, the silent one becomes out of date as stuck after the period and not before, and leaves the read turn; when
+/// it reaches the tip it is up to date again. With every stub silent for longer than the period none is stuck. With a
+/// single maintained stub item 4 does not apply.
 #[test]
 fn t38_6_4o_5_a_silent_connection_is_stuck_while_another_one_hears_news() {
     let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
@@ -3749,10 +3752,11 @@ fn t38_6_4o_5_a_silent_connection_is_stuck_while_another_one_hears_news() {
         let ticker = "OOD5";
         let period = ms(600);
         // A block interval of 100 ms: the tolerance is the cap of 20 blocks, so the silent stub never lags that far
-        // behind in the time of the test, and the stuck period is the larger of 3 intervals and the floor: 600 ms.
+        // behind in the time of the test, and the stuck period is the larger of 2 intervals and the floor: 600 ms.
         let block_interval = Some(ms(100));
         let timings = ElectrumPoolTimings {
             stale_floor: period,
+            stuck_floor: period,
             ..quiet_timings()
         };
         let (a, b, c) = (
@@ -3799,10 +3803,29 @@ fn t38_6_4o_5_a_silent_connection_is_stuck_while_another_one_hears_news() {
             assert_eq!(lines.len(), 1, "{lines:?}");
             assert!(
                 lines[0].starts_with(&format!(
-                    "WARN {ticker}: Electrum server {} has sent no new block for ",
+                    "WARN {ticker}: Electrum server {} has not reported block ",
                     c.addr()
-                )) && lines[0].ends_with(" s while another server did"),
+                )) && lines[0].contains(", which another server reported ")
+                    && lines[0].ends_with(" s ago"),
                 "{lines:?}"
+            );
+        }
+
+        // It reaches the tip: up to date again, one more line.
+        height += 1;
+        a.set_tip(height);
+        b.set_tip(height);
+        c.set_tip(height);
+        wait_until("the silent stub to be up to date again", || {
+            view_of(&client, &c).out_of_date.is_none()
+        })
+        .await;
+        if capturing {
+            let lines = warn_lines(ticker);
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert_eq!(
+                lines[1],
+                format!("WARN {ticker}: Electrum server {} is up to date again", c.addr())
             );
         }
 
@@ -3846,6 +3869,156 @@ fn t38_6_4o_5_a_silent_connection_is_stuck_while_another_one_hears_news() {
         Timer::sleep(0.9).await;
         answered_by(&client, 2).await;
         assert_eq!(view_of(&client, &lone).out_of_date, None);
+    });
+}
+
+/// The stuck period of a coin with the given `avg_blocktime` under [`quiet_timings`] (R38.6.4o item 4, amendment of
+/// 2026-11-15): the larger of 2 intervals and the floor, the fallback without an interval. The floors of the quiet
+/// timings are a minute, so the figures are the larger of 2 intervals and 60 s, and a minute without an interval.
+fn stuck_secs(interval_secs: Option<u64>) -> f64 { interval_secs.map_or(60., |secs| (2 * secs).max(60) as f64) }
+
+/// Two maintained stubs at `H`, over a coin with the given block interval, ready for the stuck tests.
+async fn two_stubs_at(
+    ticker: &'static str,
+    interval_secs: Option<u64>,
+) -> (Arc<ElectrumClientImpl>, StubServer, StubServer) {
+    let (a, b) = (stub_at(5, 1_000).await, stub_at(5, 1_000).await);
+    let client = checked_pool(
+        &[&a, &b],
+        PoolSetup {
+            block_interval: interval_secs.map(Duration::from_secs),
+            ..PoolSetup::new(ticker)
+        },
+        quiet_timings(),
+        script_draw(&[], 0.5),
+    );
+    join_with_heights(&client, &[&a, &b]).await;
+    (client, a, b)
+}
+
+/// The moment the pool first saw `height` reported, once it has.
+async fn first_report_of(client: &ElectrumClientImpl, height: u64) -> f64 {
+    wait_until("the height to be reported", || {
+        client.pool.first_reports_for_test().contains_key(&height)
+    })
+    .await;
+    client.pool.first_reports_for_test()[&height]
+}
+
+/// T38.6.4o.stuck.1 (amended 2026-11-15, item 4): a connection that does not reach a height another one reported is stuck
+/// after the period counted from that first report, not before; the poor mark follows; the next check is at that
+/// moment. Under every `avg_blocktime`: 600 s gives 1200 s, 60 s and 15 s the floor, none the fallback.
+#[test]
+fn t38_6_4o_stuck_1_a_server_that_never_delivers_is_stuck_after_the_period() {
+    block_on(async {
+        const H: u64 = 1_000;
+        for (ticker, interval) in [
+            ("STK600", Some(600)),
+            ("STK60", Some(60)),
+            ("STK15", Some(15)),
+            ("STKNO", None),
+        ] {
+            let period = stuck_secs(interval);
+            let (client, a, b) = two_stubs_at(ticker, interval).await;
+            // Nobody has advanced: nobody is stuck, however late the time, and no check is due.
+            assert_eq!(client.pool.out_of_date_at_for_test(now_float() + 3_600.), vec![
+                None, None
+            ]);
+            assert_eq!(client.pool.next_stale_check(now_float()), None);
+
+            a.set_tip(H + 1);
+            let t0 = first_report_of(&client, H + 1).await;
+            let judged = |at: f64| client.pool.out_of_date_at_for_test(at);
+            assert_eq!(judged(t0 + period - 1.), vec![None, None], "{ticker}");
+            assert_eq!(judged(t0 + period + 1.)[0], None, "{ticker}");
+            assert!(
+                matches!(judged(t0 + period + 1.)[1], Some(OutOfDate::Stuck { height, .. }) if height == H + 1),
+                "{ticker}: {:?}",
+                judged(t0 + period + 1.)
+            );
+            // The poor mark follows: not before the period, on B after it.
+            assert!(!client.pool.mark_poor_connections(t0 + period - 1.), "{ticker}");
+            assert_eq!(snap_of(&client, &b).poor_until, 0.);
+            assert!(client.pool.mark_poor_connections(t0 + period + 1.), "{ticker}");
+            assert!(snap_of(&client, &b).poor_until > 0., "{ticker}");
+            assert_eq!(snap_of(&client, &a).poor_until, 0., "{ticker}");
+            // The next check is the moment B turns stuck.
+            assert_eq!(client.pool.next_stale_check(t0 + 1.), Some(t0 + period), "{ticker}");
+            assert_eq!(client.pool.next_stale_check(t0 + period + 1.), None, "{ticker}");
+
+            // B reaches the height: nothing is stuck, the record holds nothing at or below it.
+            b.set_tip(H + 1);
+            wait_until("B to reach the height", || snap_of(&client, &b).height == Some(H + 1)).await;
+            wait_until("the record to be pruned", || {
+                client.pool.first_reports_for_test().is_empty()
+            })
+            .await;
+            assert_eq!(judged(t0 + 3_600.), vec![None, None], "{ticker}");
+            assert_eq!(client.pool.next_stale_check(t0 + 1.), None, "{ticker}");
+        }
+    });
+}
+
+/// T38.6.4o.stuck.2 (amended 2026-11-15, item 4), the field case: the second server reports a new block seconds after the
+/// first, after a long silence. It is never stuck, not before its report and not after it, and never marked poor,
+/// with an `avg_blocktime` of 600 s and with one of 60 s whose blocks really come every 15 minutes.
+#[test]
+fn t38_6_4o_stuck_2_a_slow_block_does_not_make_the_second_server_stuck() {
+    block_on(async {
+        const H: u64 = 1_000;
+        for (ticker, interval) in [("SLOW600", Some(600)), ("SLOW60", Some(60))] {
+            let (client, a, b) = two_stubs_at(ticker, interval).await;
+            a.set_tip(H + 1);
+            let t0 = first_report_of(&client, H + 1).await;
+            // B is 3 s, then 5 s late: before its report it is not stuck, and nothing is marked.
+            for late in [3., 5.] {
+                assert_eq!(
+                    client.pool.out_of_date_at_for_test(t0 + late),
+                    vec![None, None],
+                    "{ticker}"
+                );
+                assert!(!client.pool.mark_poor_connections(t0 + late), "{ticker}");
+            }
+            b.set_tip(H + 1);
+            wait_until("B to reach the height", || snap_of(&client, &b).height == Some(H + 1)).await;
+            // After its report, at any time: not stuck, not marked, no check due.
+            for at in [t0 + 5., t0 + 60., t0 + 900.] {
+                assert_eq!(client.pool.out_of_date_at_for_test(at), vec![None, None], "{ticker}");
+                assert!(!client.pool.mark_poor_connections(at), "{ticker}");
+            }
+            assert_eq!(snap_of(&client, &a).poor_until + snap_of(&client, &b).poor_until, 0.);
+            assert_eq!(client.pool.next_stale_check(t0 + 1.), None, "{ticker}");
+        }
+    });
+}
+
+/// T38.6.4o.stuck.3 (amended 2026-11-15, item 4): a connection that keeps notifying its own height without reaching the
+/// reported one is stuck after the period, counted from the first report; and behind still wins over stuck.
+#[test]
+fn t38_6_4o_stuck_3_notifying_without_advancing_is_stuck_and_behind_wins() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let (client, a, b) = two_stubs_at("STKN", Some(60)).await;
+        a.set_tip(H + 1);
+        let t0 = first_report_of(&client, H + 1).await;
+        for _ in 0..3 {
+            b.set_tip(H);
+            Timer::sleep(0.05).await;
+        }
+        assert_eq!(client.pool.first_reports_for_test().get(&(H + 1)), Some(&t0));
+        // The period of a 60 s coin under the quiet timings is 120 s.
+        assert_eq!(client.pool.out_of_date_at_for_test(t0 + 119.), vec![None, None]);
+        assert!(client.pool.out_of_date_at_for_test(t0 + 121.)[1].is_some());
+
+        // Behind (T = 3 for a 60 s coin) wins over stuck.
+        let (client, a, b) = two_stubs_at("STKB", Some(60)).await;
+        a.set_tip(H + 4);
+        let t0 = first_report_of(&client, H + 4).await;
+        assert_eq!(client.pool.out_of_date_at_for_test(t0 + 1_000.), vec![
+            None,
+            Some(OutOfDate::Behind { lag: 4, tip: H + 4 })
+        ]);
+        let _ = b;
     });
 }
 

@@ -2314,6 +2314,44 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    moment; a connection is up to date again as soon as neither condition
    holds. Being out of date is not a suspension and not a demotion: the
    connection stays maintained, keeps its rank and keeps answering pings.
+
+   *Amended 2026-11-15 (clean side; Reloaded-original; maintainer decision of
+   2026-11-15; replaces the stuck condition above and amends D38.6.4o.7).*
+   - *stuck:* there are two or more maintained connections with a height, and
+     another maintained connection has reported a height above this
+     connection's height for longer than *P*. The time is counted from the
+     moment the first maintained connection reported the lowest height above
+     this connection's height, not from this connection's own last
+     notification. *P* is the larger of 2 × `avg_blocktime` and 180 s; for a
+     coin without a valid `avg_blocktime` it is 10 minutes.
+   - The pool keeps, per coin instance, the moment each height was first
+     reported by a maintained connection, through a header notification or
+     the answer to a header request. It drops the heights at or below the
+     lowest height of its maintained connections.
+   - A connection that keeps sending notifications without reaching the
+     reported height is stuck too. Under the earlier own-silence condition it
+     was not.
+   - When no other connection has reported a higher height, none is stuck,
+     however long the silence: the chain itself may have stopped, or a block
+     may be slow.
+   - Only heights up to the running agreed tip plus *T* count as reported
+     above. A height more than *T* above the agreed tip does not start the
+     stuck period; it is judged by the ahead condition and the disagreement of
+     item 12.
+   - The behind and ahead conditions are unchanged and still win over stuck.
+     The minimum of 180 s is the time *T* covers (item 1): a connection is
+     never called stuck sooner than a lag the behind condition still accepts.
+   - *Reason.* The own-silence condition marked every connection that was not
+     first with a new block whenever the time between two blocks exceeded the
+     period, and the mark cleared about a second later when its own
+     notification came. In a 72-hour field run of this project (2026-11-10 to
+     2026-11-13, four nodes), 405 of 411 such marks cleared within 1 s. The
+     marks also made the connection poor (R38.6.4l items 6 and 7) and made a
+     re-measure round due.
+   - *Known limit.* The lone-connection rule of R38.6.4l item 6 has no other
+     connection to count from. It keeps its limit (the larger of 3 ×
+     `avg_blocktime` and 10 minutes) and still marks a lone connection after
+     a block gap longer than that limit.
 5. *Reads and broadcasts avoid out-of-date connections.*
    - *Reads (amends R38.6.4a item 6).* An out-of-date connection is not near.
      The near sessions, and the floor of two near sessions, are chosen among
@@ -3343,6 +3381,12 @@ D38.6.4o.7 *(Decided 2026-11-09, maintainer.)* *The stuck period.* The larger of
 R38.6.4l item 6. Judging staleness by the tip header's timestamp was
 considered and not chosen: it needs per-family header parsing, says little on
 proof-of-stake chains, and trusts the local clock.
+
+*Status note (2026-11-15, clean side; maintainer decision).* For the stuck
+condition of item 4 this decision is replaced by the amendment of 2026-11-15
+under item 4: the larger of 2 × `avg_blocktime` and 180 s, counted from another
+connection's first report of a higher height. The lone-connection rule of
+R38.6.4l item 6 keeps the figure above.
 
 D38.6.4o.8 *(Decided 2026-11-09, maintainer.)* *Header agreement.* Applied in
 measurement rounds only, at the agreed tip height only, and only with two
@@ -5537,3 +5581,10 @@ R38.8.6 **Tests (two-direction, observable).**
   inputs are this repository's code and the cleared §38.6.4Q (R38.6.4Q.1,
   R38.6.4Q.7 and its note 2 on existing text). It takes no forbidden-class input, so chapter 01 R38
   is not engaged and no gate pass is required.
+- *Reloaded-original amendment (2026-11-15), clean side -- under R38.6.4o item 4
+  and a status note after D38.6.4o.7: a stuck connection is judged from another
+  connection's first report of a higher height, with the period of the larger of
+  2 × `avg_blocktime` and 180 s.* Written by a session that never read the
+  forbidden corpus, on a maintainer decision. The inputs are this repository's
+  code and this project's own field-run counts. It takes no forbidden-class
+  input, so chapter 01 R38 is not engaged and no gate pass is required.

@@ -16,13 +16,14 @@
 //! tests build the pool with millisecond values.
 
 use super::electrum_measure::{agreed_tip, block_interval_from_conf, common_height, eligible_servers,
-                              header_differences, is_beyond_tolerance, is_far_ahead, is_slow, lag, lead,
-                              near_sessions, next_round_at, out_of_date_states, pick_replacement, rank_after_round,
-                              rank_with_replacement, remeasure_gap, round_agreed_tip, same_block, shuffle, signed_lag,
-                              stale_limit, tolerance_blocks, Draw, Measurement, Measuring, OutOfDate, PoorReason,
-                              RoundServer, ServerQuality, TipFigure, NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
-use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, ServerSpec, Session, SessionEnded,
-                                 TlsNotice};
+                              first_reports_above, header_differences, is_beyond_tolerance, is_far_ahead, is_slow,
+                              lag, lead, near_sessions, next_round_at, note_first_reports, out_of_date_states,
+                              pick_replacement, rank_after_round, rank_with_replacement, remeasure_gap,
+                              round_agreed_tip, same_block, shuffle, signed_lag, stale_limit, stuck_period,
+                              tolerance_blocks, Draw, Measurement, Measuring, OutOfDate, PoorReason, RoundServer,
+                              ServerQuality, NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
+use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, HeaderSource, ServerSpec, Session,
+                                 SessionEnded, TlsNotice};
 use super::*;
 use crate::endpoint_suspension::{Suspension, SUSPENSION_BASE, SUSPENSION_CAP};
 use common::log::{debug, warn};
@@ -33,6 +34,7 @@ use mm2_core::mm_ctx::MmArc;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Mutex as StdMutex, RwLock, Weak};
@@ -81,6 +83,9 @@ pub struct ElectrumPoolTimings {
     pub poor_demotion: Duration,
     /// The least time without a header notification that makes a lone connection stale (R38.6.4l item 6).
     pub stale_floor: Duration,
+    /// The least time another connection's higher height may stand unreached before a connection among several is
+    /// stuck (R38.6.4o item 4).
+    pub stuck_floor: Duration,
     /// The floor of the latency limit of an eligible server (R38.6.4l item 4).
     pub latency_floor: Duration,
     /// The latency below which a smoothed latency is never slow (R38.6.4l item 6, P2).
@@ -108,6 +113,7 @@ impl Default for ElectrumPoolTimings {
             confirm_floor: Duration::from_secs(60),
             poor_demotion: Duration::from_secs(15 * 60),
             stale_floor: Duration::from_secs(10 * 60),
+            stuck_floor: Duration::from_secs(180),
             latency_floor: Duration::from_millis(300),
             slow_floor: Duration::from_secs(1),
         }
@@ -836,6 +842,9 @@ pub(super) struct PoolShared {
     tolerance: u64,
     /// R38.6.4o item 11.
     tip_checks: bool,
+    /// The moment each height above the lowest height of the maintained connections was first reported by one of them
+    /// (R38.6.4o item 4, amendment of 2026-11-15); see [`note_first_reports`] for how it is pruned and bounded.
+    first_reports: StdMutex<BTreeMap<u64, f64>>,
     /// The activation probe has ended, its measured rank applied.
     probe_ended: AtomicBool,
     disagreement: StdMutex<DisagreementState>,
@@ -887,6 +896,7 @@ impl PoolShared {
             block_interval: options.block_interval,
             tolerance: tolerance_blocks(options.block_interval),
             tip_checks: options.tip_checks,
+            first_reports: StdMutex::new(BTreeMap::new()),
             probe_ended: AtomicBool::new(false),
             disagreement: StdMutex::new(DisagreementState::default()),
             comparing: AtomicUsize::new(0),
@@ -1090,9 +1100,9 @@ impl PoolShared {
                 }
             }
         });
-        let on_header: HeaderNotified = Arc::new(move |height| {
+        let on_header: HeaderNotified = Arc::new(move |height, source| {
             if let Some(pool) = weak.upgrade() {
-                pool.header_notified(id, session_id, height)
+                pool.header_notified(id, session_id, height, source)
             }
         });
         let attempt = async {
@@ -1370,6 +1380,10 @@ impl PoolShared {
                 joined = true;
             }
             state.maintained = true;
+        }
+        if joined {
+            // The height it carries already is a report of a maintained connection from now on.
+            self.record_first_reports(now_float());
         }
         self.signal_measure();
         if was_empty {
@@ -2281,8 +2295,18 @@ impl PoolShared {
     /// A header notification of the height `height` arrived over the connection `session_id` of server `id`
     /// (R38.6.4l items 2 and 6, R38.6.4o item 4): under a measured order the count of P1 with several maintained
     /// connections moves, and the maintained connections are judged again for being out of date.
-    fn header_notified(&self, id: usize, session_id: u64, height: u64) {
+    fn header_notified(&self, id: usize, session_id: u64, height: u64, source: HeaderSource) {
         let Some(slot) = self.slot_by_id(id) else { return };
+        self.record_first_reports(now_float());
+        if source == HeaderSource::Answer {
+            // A header answer moves the connection's height and nothing else (R38.6.4o item 4): the connections are
+            // judged again.
+            self.refresh_out_of_date();
+            if self.tip_checks {
+                self.signal_measure();
+            }
+            return;
+        }
         self.note_same_height_differences();
         let mut wake = false;
         if self.measuring().is_some() {
@@ -2313,24 +2337,45 @@ impl PoolShared {
         }
     }
 
-    /// The time without a header notification that makes a lone connection stale (R38.6.4l item 6), and the stuck
-    /// period of a connection among several (R38.6.4o item 4, D38.6.4o.7): the larger of 3 block intervals and 10
-    /// minutes.
+    /// The time without a header notification that makes a lone connection stale (R38.6.4l item 6): the larger of 3
+    /// block intervals and 10 minutes.
     fn stale_limit(&self) -> Duration { stale_limit(self.block_interval, self.timings.stale_floor) }
 
-    /// What the out-of-date judgment needs to know of the connection of `slot`: its height and the times of its
-    /// header answer and last notification. `None` for a connection without a height.
-    fn tip_figure(slot: &ServerSlot) -> Option<TipFigure> {
-        let state = slot.state();
-        let headers = state.session.as_ref()?.headers();
-        let height = headers.tip()?;
-        let answered_at = headers.answered_at()?;
-        let notified_at = headers.notified_at();
-        Some(TipFigure {
-            height,
-            since: notified_at.map_or(answered_at, |at| at.max(answered_at)),
-            notified_at,
-        })
+    /// The time another connection's higher height may stand unreached before a connection among several is stuck
+    /// (R38.6.4o item 4, amendment of 2026-11-15): the larger of 2 block intervals and 180 s, 10 minutes without a
+    /// block interval.
+    fn stuck_period(&self) -> Duration {
+        stuck_period(self.block_interval, self.timings.stuck_floor, self.timings.stale_floor)
+    }
+
+    /// The height the connection of `slot` reports, if it has one.
+    fn tip_height(slot: &ServerSlot) -> Option<u64> { slot.state().session.as_ref()?.headers().tip() }
+
+    /// Takes the heights the maintained connections report at `now` into the record of first reports (R38.6.4o item
+    /// 4, amendment of 2026-11-15). Called whenever a header answer or notification arrives and a connection joins.
+    fn record_first_reports(&self, now: f64) {
+        if !self.tip_checks {
+            return;
+        }
+        let heights: Vec<u64> = self
+            .maintained_slots()
+            .iter()
+            .filter_map(|slot| Self::tip_height(slot))
+            .collect();
+        let mut reports = self.first_reports.lock().unwrap_or_else(|p| p.into_inner());
+        note_first_reports(&mut reports, &heights, now);
+    }
+
+    /// Tests: the record of first reports.
+    #[cfg(test)]
+    pub(super) fn first_reports_for_test(&self) -> BTreeMap<u64, f64> {
+        self.first_reports.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Tests: the out-of-date state of each maintained connection, in priority order, at `now`.
+    #[cfg(test)]
+    pub(super) fn out_of_date_at_for_test(&self, now: f64) -> Vec<Option<OutOfDate>> {
+        self.judge_out_of_date(&self.maintained_slots(), now)
     }
 
     /// The out-of-date state of each of `maintained` at `now` (R38.6.4o item 4), from the figures at that moment.
@@ -2339,8 +2384,9 @@ impl PoolShared {
         if !self.tip_checks {
             return vec![None; maintained.len()];
         }
-        let figures: Vec<Option<TipFigure>> = maintained.iter().map(|slot| Self::tip_figure(slot)).collect();
-        out_of_date_states(&figures, self.tolerance, self.stale_limit(), now)
+        let heights: Vec<Option<u64>> = maintained.iter().map(|slot| Self::tip_height(slot)).collect();
+        let reports = self.first_reports.lock().unwrap_or_else(|p| p.into_inner());
+        out_of_date_states(&heights, &reports, self.tolerance, self.stuck_period(), now)
     }
 
     /// Judges the maintained connections anew and logs each change of state once (R38.6.4o items 4 and 9): on
@@ -2369,11 +2415,12 @@ impl PoolShared {
                     "{}: Electrum server {} is {} blocks ahead of the other servers (tip {})",
                     self.ticker, slot.label, lead, tip
                 ),
-                Some(OutOfDate::Stuck { silent_secs }) => warn!(
-                    "{}: Electrum server {} has sent no new block for {} s while another server did",
+                Some(OutOfDate::Stuck { height, reported_secs }) => warn!(
+                    "{}: Electrum server {} has not reported block {}, which another server reported {} s ago",
                     self.ticker,
                     slot.label,
-                    silent_secs.round() as u64
+                    height,
+                    reported_secs.round() as u64
                 ),
                 None => warn!("{}: Electrum server {} is up to date again", self.ticker, slot.label),
             }
@@ -2437,9 +2484,9 @@ impl PoolShared {
     }
 
     /// When the next connection may turn stale, if one will (R38.6.4l item 6, R38.6.4o item 4): the moment to look
-    /// again. That is when a lone connection's silence passes the limit, and when the silence of a connection passes
-    /// the stuck period.
-    fn next_stale_check(&self, now: f64) -> Option<f64> {
+    /// again. That is when a lone connection's silence passes the limit, and when the oldest height above its own that
+    /// another connection reported passes the stuck period, for the connection that waits for it the longest.
+    pub(super) fn next_stale_check(&self, now: f64) -> Option<f64> {
         let limit = self.stale_limit().as_secs_f64();
         let maintained = self.maintained_slots();
         let notifying: Vec<_> = maintained
@@ -2456,10 +2503,13 @@ impl PoolShared {
             _ => None,
         };
         let stuck = if self.tip_checks {
-            maintained
-                .iter()
-                .filter_map(|slot| Self::tip_figure(slot))
-                .map(|figure| figure.since + limit)
+            let heights: Vec<Option<u64>> = maintained.iter().map(|slot| Self::tip_height(slot)).collect();
+            let reports = self.first_reports.lock().unwrap_or_else(|p| p.into_inner());
+            let period = self.stuck_period().as_secs_f64();
+            first_reports_above(&heights, &reports, self.tolerance)
+                .into_iter()
+                .flatten()
+                .map(|(_, at)| at + period)
                 .filter(|at| *at > now)
                 .reduce(f64::min)
         } else {
@@ -2791,10 +2841,7 @@ impl PoolShared {
         let now = now_float();
         let maintained = self.maintained_slots();
         let states = self.judge_out_of_date(&maintained, now);
-        let heights: Vec<u64> = maintained
-            .iter()
-            .filter_map(|slot| Self::tip_figure(slot).map(|figure| figure.height))
-            .collect();
+        let heights: Vec<u64> = maintained.iter().filter_map(|slot| Self::tip_height(slot)).collect();
         let agreed = agreed_tip(&heights);
         // The near decision runs over the up-to-date connections; when none is up to date, over all of them
         // (R38.6.4o item 5).
@@ -3367,6 +3414,7 @@ mod budget_tests {
         assert_eq!(t.confirm_floor, secs(60));
         assert_eq!(t.poor_demotion, secs(900));
         assert_eq!(t.stale_floor, secs(600));
+        assert_eq!(t.stuck_floor, secs(180));
         assert_eq!(t.latency_floor, Duration::from_millis(300));
         assert_eq!(t.slow_floor, secs(1));
         let options = ElectrumPoolOptions::default();
