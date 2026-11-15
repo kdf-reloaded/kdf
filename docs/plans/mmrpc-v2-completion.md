@@ -85,6 +85,11 @@ The legacy-only names, grouped as in the parity plan's batches:
 
 The phase that takes a group first reconciles its list with Reloaded's dispatchers of that day.
 
+What the reference documentation says about each of these names (whether a versioned request, a
+typed error or a versioned success shape is documented, and the documented members) is recorded in
+CRD ch.43 §43.1B, which passed the KDF Dirty Gate on 2026-11-10; a phase designs each group's
+versioned form against it.
+
 ### 1.2 Shape of a versioned form
 
 1. **Request.** The members the legacy form takes inline move into `params`, with the same names,

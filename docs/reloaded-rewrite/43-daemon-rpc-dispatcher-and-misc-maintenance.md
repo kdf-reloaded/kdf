@@ -405,6 +405,219 @@ of R43.1A.6; recommended, since no client contract depends on the Reloaded
 spelling. *Resolved 2026-11-08 by the maintainer's decision: renamed, PR
 #312.*
 
+## 43.1B Documented API forms of the legacy-only methods (reference documentation)
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-10,
+> measure 0.01 (attestation in §43.7).**
+> This section was written on 2026-11-10 by the KDF Spec Reader (Spec Reader
+> round 0.4.0-13) under the two-team procedure of chapter 01 §1.4A, from three
+> inputs: the published reference API documentation at
+> `https://gleec.com/komodo/docs/komodo-defi-framework/api/` (the method
+> index, the v2.0 protocol overview page, the site map, and the legacy page of
+> every name below; fetched 2026-11-10; a reference-side input that only the
+> two roles of chapter 01 R37 read); the versioned method tables of the
+> reference lineage at the rows `v2.6.0-beta`, `v3.0.0-beta`, `dev (as of
+> 2026-03-27)` and `main (as of 2026-10-07)` of chapter 02 §2.15A (read
+> read-only; no untabled state was read); and this repository's own tree.
+
+*Scope.* §43.1A binds what the reference **implementation** does with the
+order-management methods on the two request surfaces. This section records
+what the reference **documentation** says about the 44 wire names that
+Reloaded's legacy table routes and its versioned table does not — the
+inventory of plan `mmrpc-v2-completion` §1.1, groups A–E plus the five names
+that plan keeps legacy-only — so that a versioned form Reloaded adds for any of
+them (that plan's subject) is designed against the documented client contract
+and not against a guess. For each name it answers: whether a versioned
+(`mmrpc: "2.0"`) request shape is documented, whether a typed error form is
+documented, whether a versioned success shape is documented, whether the
+documentation agrees with R43.1A.9, and what the documentation says a
+versioned request for a legacy-only name answers. Member names are the API
+contract itself and are listed; the documentation's descriptive text is not
+reproduced. The semantics of the methods stay where they are bound (chapters
+11, 12, 59 for orders; 51, 52 for swaps; 55 §55.4 for `electrum` and `enable`;
+28 and 32 for the peer and gossip queries).
+
+**R43.1B.1** *Documentation surface.* The reference documentation indexes
+every method in a three-column table — legacy, v2.0 (release), v2.0 (dev) —
+and documents each v2.0 method on its own page under a v2.0 path. Of the 44
+names, 41 appear in the legacy column and **none** appears in either v2.0
+column; `help` has a legacy page but no index row; `stats_swap_status` and
+`sim_panic` have neither a row nor a page. No page under a v2.0 path documents
+any of the 44 names, and no request example on any of their pages carries an
+`mmrpc` member. The documentation therefore defines **no versioned request
+shape, no typed error form and no versioned success shape** for any of the
+44 names: for every name the documented form is the legacy one of R43.1.1.
+
+**R43.1B.2** *Documented legacy request form.* For 41 of the 42 documented
+names the request is the legacy top-level shape: `userpass`, `method` and the
+method's parameters **inline** next to them (the table below lists the
+members). The one documented exception is `recover_funds_of_swap`, whose single
+argument `uuid` is documented **inside a `params` object** of a legacy request
+(no `mmrpc` member). That nesting is what the reference implementation reads at
+both release rows, and what Reloaded reads (compatibility note below); it is
+the only legacy-only name whose documented legacy body already has the member
+placement of a versioned request.
+
+**R43.1B.3** *Documented error form.* Where a page documents a failure at all,
+it is the legacy error body of chapter 55 R55.1.10 — a top-level `error`
+string — with no `error_type`, no `error_data` and no HTTP status stated for
+any of the 44 names. Two pages document additional top-level members next to
+`error`: `disable_coin` answers `swaps` (list of swap identifiers) when an
+active swap blocks the deactivation and `orders` (object with `matching` and
+`cancelled` lists) when a matching order does; `import_swaps` reports
+per-record failures inside its **success** body (R43.1B.4), not as an error.
+Most pages document no failure case.
+
+**R43.1B.4** *Documented success form.* Every documented success body is a
+legacy body (no `mmrpc` member, no `id` echo). Two layouts occur, and the
+table below records which applies to each name: a `result` wrapper holding the
+payload, or a **bare** body whose top-level members are the payload itself
+(`my_balance`, `send_raw_transaction`, `order_status`, `metrics`,
+`show_priv_key`, `electrum`, `enable`). The documentation's per-method
+response tables omit the `result` wrapper for several names whose examples
+show it (`update_maker_order`, `buy`, `sell`, `cancel_all_orders`,
+`get_trade_fee`, `orders_history_by_filter`, `all_swaps_uuids_by_filter`,
+`recover_funds_of_swap`, `set_required_confirmations`,
+`set_requires_notarization`, `unban_pubkeys`); the examples are taken as the
+documented shape. Numbers are documented in the legacy encodings — a decimal
+string with `_rat` and, where present, `_fraction` companion members — never
+as the multi-representation object of R43.1A.8.
+
+**R43.1B.5** *What the documentation says a versioned request to a legacy-only
+name answers.* Nothing. The documentation describes the versioned protocol
+once, on its overview page: a request carries `mmrpc` (exactly `"2.0"`),
+`userpass` (optional for public methods), `method`, `params` (optional) and
+`id` (optional, echoed when present and non-null); a success carries `mmrpc`,
+`result` and `id`; an error carries `mmrpc`, `error`, `error_path`,
+`error_trace`, `error_type`, `error_data` and `id`. It states that legacy
+methods are being migrated to the versioned protocol and remain backward
+compatible, and that only some methods support it. It names no dispatcher
+error token — `NoSuchMethod`, `InvalidRequest` and `InvalidMmRpcVersion`
+appear nowhere in it as dispatcher answers — and gives no HTTP status for
+any envelope. The implementation facts of R43.1A.2–R43.1A.3 (`NoSuchMethod`,
+no `error_data`, HTTP 400, `mmrpc` and `id` echoed) are therefore
+**undocumented but not contradicted**; the documented envelope members match
+those rules.
+
+**R43.1B.6** *Reference states and agreement with R43.1A.9.* The versioned
+method table of the reference lineage carries none of the 44 names at any of
+the rows `v2.6.0-beta`, `v3.0.0-beta`, `dev (as of 2026-03-27)` and `main
+(as of 2026-10-07)` (the same 184-name set at all four rows). R43.1A.9 is
+thereby extended from the order methods it names to all 44: the reference
+never offered any of them under the versioned envelope. Documentation and
+implementation **agree** on this for every name; the documentation's two
+undocumented names (`stats_swap_status`, `sim_panic`) and its unindexed page
+(`help`) are documentation gaps, not disagreements.
+
+**R43.1B.7** *Consequence for Reloaded.* Because no versioned form is
+documented for any of the 44 names, there is no documented versioned contract
+Reloaded must keep for them: every versioned form Reloaded adds under plan
+`mmrpc-v2-completion` is Reloaded's own design, to be recorded as a deliberate
+divergence under plan `rpc-api-reference-wire-parity` §2.2. What the
+documentation **does** dictate is the legacy request members (the names,
+optionality and value forms of the table below), which that plan's §1.2 moves
+into `params` unchanged, and the legacy success payloads it places under
+`result`; the table below is the documented inventory for both.
+
+*Documented forms of the 44 names.* "legacy only" means the documented request
+is the legacy shape of R43.1.1 with the listed members inline; `?` marks a
+member the documentation calls optional; "none" in the error column means the
+page documents no failure case; "agrees" refers to R43.1A.9 as extended by
+R43.1B.6.
+
+| Method or group | Documented request form (members) | Documented error form | Documented success form | Agrees with R43.1A.9 |
+| --- | --- | --- | --- | --- |
+| `setprice` | legacy only: `base`, `rel`, `price`, `volume` (ignored when `max` is true), `min_volume`?, `max`?, `cancel_previous`? (default true), `base_confs`?, `base_nota`?, `rel_confs`?, `rel_nota`?, `save_in_history`? (default true); `price`, `volume`, `min_volume` as decimal string, rational or fraction object | legacy `error` string | `result` = order object: `base`, `rel`, `price`, `price_rat`, `max_base_vol`, `max_base_vol_rat`, `min_base_vol`, `min_base_vol_rat`, `created_at`, `updated_at`, `matches`, `started_swaps`, `uuid`, `conf_settings`, `base_orderbook_ticker`, `rel_orderbook_ticker` | agrees |
+| `update_maker_order` | legacy only: `uuid`, `new_price`?, `volume_delta`?, `min_volume`?, `max`?, `base_confs`?, `base_nota`?, `rel_confs`?, `rel_nota`? | legacy `error` string | `result` = order object as for `setprice` without the two orderbook-ticker members | agrees |
+| `cancel_order` | legacy only: `uuid` | legacy `error` string | `result` string | agrees |
+| `cancel_all_orders` | legacy only: `cancel_by` (object; its variants are documented on the shared order-structures page) | none | `result` with `cancelled` and `currently_matching` (lists of order identifiers) | agrees |
+| `my_orders` | legacy only: no parameters | none | `result` with `maker_orders` and `taker_orders` (objects keyed by order identifier) | agrees |
+| `order_status` | legacy only: `uuid` | legacy `error` string | bare: `type`, `order`, `base_orderbook_ticker`, `rel_orderbook_ticker`; a cancelled order's example adds `cancellation_reason` | agrees |
+| `buy`, `sell` | legacy only: `base`, `rel`, `price`, `volume`, `min_volume`?, `match_by`?, `order_type`?, `base_confs`?, `base_nota`?, `rel_confs`?, `rel_nota`?, `save_in_history`? (default true) | legacy `error` string | `result` = taker request object: `action`, `base`, `base_amount`, `base_amount_rat`, `rel`, `rel_amount`, `rel_amount_rat`, `method`, `dest_pub_key`, `sender_pubkey`, `uuid`, `match_by`, `conf_settings`, `base_orderbook_ticker`, `rel_orderbook_ticker` | agrees |
+| `orderbook_depth` | legacy only: `pairs` (list of two-string pairs) | none | `result` = list of `{pair, depth: {asks, bids}}`; order of pairs not guaranteed | agrees |
+| `max_taker_vol` | legacy only: `coin` | none | `result` = fraction object (`numer`, `denom`) | agrees |
+| `min_trading_vol` | legacy only: `coin` | none | `result` with `coin`, `min_trading_vol`, `min_trading_vol_rat`, `min_trading_vol_fraction` | agrees |
+| `get_trade_fee` | legacy only: `coin`; the page marks the method deprecated in favor of the versioned `trade_preimage` | none | `result` with `coin`, `amount`, `amount_rat`, `amount_fraction` | agrees |
+| `orders_history_by_filter` | legacy only, every filter optional: `order_type`, `initial_action`, `base`, `rel`, `from_price`, `to_price`, `from_volume`, `to_volume`, `from_timestamp`, `to_timestamp`, `was_taker`, `status`, `include_details` (default false) | none | `result` with `orders`, `details` (empty unless `include_details`), `found_records`, `warnings` (items `uuid`, `warning`) | agrees |
+| `all_swaps_uuids_by_filter` | legacy only, every filter optional: `my_coin`, `other_coin`, `from_timestamp`, `to_timestamp` (seconds) | none | `result` with `uuids`, `my_coin`, `other_coin`, `from_timestamp`, `to_timestamp`, `records_found` | agrees |
+| `import_swaps` | legacy only: `swaps` (list of swap records) | none as an error body | `result` with `imported` (list of identifiers) and `skipped` (object: identifier → failure text) | agrees |
+| `recover_funds_of_swap` | legacy only, but `uuid` documented **inside `params`** (R43.1B.2) | legacy `error` string | `result` with `action` (`SpentOtherPayment` or `RefundedMyPayment`), `coin`, `tx_hash`, `tx_hex` | agrees |
+| `stats_swap_status` | not documented | — | — | agrees (absent from the versioned table) |
+| `my_balance` | legacy only: `coin` | none | bare: `address`, `balance`, `unspendable_balance`, `coin` | agrees |
+| `disable_coin` | legacy only: `coin` | legacy `error` string, plus `swaps` or `orders` (`matching`, `cancelled`) in the two blocked cases (R43.1B.3) | `result` with `coin`, `cancelled_orders` | agrees |
+| `send_raw_transaction` | legacy only: `coin`, `tx_hex` | none | bare: `tx_hash` | agrees |
+| `validateaddress` | legacy only: `coin`, `address` | none | `result` with `is_valid` and, when invalid, `reason` | agrees |
+| `convertaddress` | legacy only: `coin`, `from`, `to_address_format` (object; variants on the shared structures page) | none | `result` with `address` | agrees |
+| `convert_utxo_address` | legacy only: `address`, `to_coin` | legacy `error` string | `result` string | agrees |
+| `kmd_rewards_info` | legacy only: no parameters | none | `result` = list of `{tx_hash, height?, output_index, amount, locktime, accrued_rewards, accrue_start_at?, accrue_stop_at?}`, `accrued_rewards` being either `Accrued` (decimal string) or `NotAccruedReason` (string) | agrees |
+| `coins_needed_for_kick_start` | legacy only: no parameters | none | `result` = list of tickers | agrees |
+| `set_required_confirmations` | legacy only: `coin`, `confirmations` | none | `result` with `coin`, `confirmations` | agrees |
+| `set_requires_notarization` | legacy only: `coin`, `requires_notarization` | none | `result` with `coin`, `requires_notarization` | agrees |
+| `version` | legacy only: no parameters | none | `result` string | agrees |
+| `stop` | legacy only: no parameters | none | no response body documented | agrees |
+| `metrics` | legacy only: no parameters; documented as callable without the password (consistent with R43.2.1) | none | bare: `metrics` = list of `{type, key, labels, value \| count, min, max}` | agrees |
+| `get_my_peer_id` | legacy only: no parameters | none | `result` string (peer identifier) | agrees |
+| `get_directly_connected_peers` | legacy only: no parameters | none | `result` = object: peer identifier → list of multiaddresses | agrees |
+| `get_gossip_mesh`, `get_gossip_peer_topics`, `get_gossip_topic_peers`, `get_relay_mesh` | legacy only: no parameters | none | `result` = the topic/peer map or list the example shows (the response tables name the content only loosely) | agrees |
+| `ban_pubkey` | legacy only: `pubkey`, `reason`?, `duration_min`? (minutes; absent = until restart) | legacy `error` string | `result` string | agrees |
+| `list_banned_pubkeys` | legacy only: no parameters | none | `result` = object: public key (hex) → `{type, caused_by_swap?, caused_by_event?, reason?}`, `type` being `Manual` or `FailedSwap` | agrees |
+| `unban_pubkeys` | legacy only: `unban_by` (object: `type` = `All` or `Few`, `data` = list of public keys when `Few`) | none | `result` with `still_banned`, `unbanned`, `were_not_banned` | agrees |
+| `electrum`, `enable` | legacy only, on a combined coin-activation page; members bound by [Chapter 55](55-coin-activation-wire-contract.md) §55.4 | legacy `error` string | bare body (`result`, `address`, `balance`, `coin`, confirmation members; chapter 55) | agrees |
+| `help` | legacy only: no parameters; example without `userpass`; page present, no index row | none | free text | agrees |
+| `show_priv_key` | legacy only: `coin`; the page marks the method deprecated in favor of the versioned `get_private_keys` | none | bare: `coin`, `priv_key` | agrees |
+| `sim_panic` | not documented | — | — | agrees (absent from the versioned table) |
+
+*Finding (documentation versus implementation).* On the question this section
+asks — does a versioned form exist — the documentation and the implementation
+**disagree nowhere**: 42 names are documented in legacy form only, 2 are not
+documented, and the versioned method table carries none of the 44 at any
+tabled row (R43.1B.1, R43.1B.6). Three observations fall short of a
+disagreement and are recorded for the plan: (1) the documentation is silent on
+the dispatcher's answer to a versioned request for a legacy-only name
+(R43.1B.5), so clients learn `NoSuchMethod`/HTTP 400 only from behavior;
+(2) `recover_funds_of_swap` is documented, implemented and matched by Reloaded
+with its argument under `params` (R43.1B.2), unlike every other legacy-only
+name; (3) the documentation marks `get_trade_fee` and `show_priv_key`
+deprecated in favor of versioned methods that already exist
+(`trade_preimage`, `get_private_keys`), which bears on whether a versioned
+alias of either is wanted (D43.1B.1). The response-table-versus-example
+inconsistencies of R43.1B.4 are internal to the documentation; this round did
+not verify the affected success layouts against the implementation beyond
+what §43.1A already binds.
+
+> **Compatibility (this repository, 2026-11-10; not corpus-sourced).**
+> Reloaded's legacy `recover_funds_of_swap` reads its `uuid` from a `params`
+> object, as the documentation shows and the reference does (R43.1B.2).
+> **Parity.** Reloaded's legacy table routes `help` and `metrics`; whether
+> they sit in its public set is bound by R43.2.1 and was not re-checked here.
+> No other Reloaded behavior was checked in this round; the legacy table's
+> routing of all 44 names is the premise of plan `mmrpc-v2-completion` §1.1
+> and was not re-verified here.
+
+*Input for plan `mmrpc-v2-completion`.* (a) **No** name of the 44 has a
+documented versioned contract; every versioned form is Reloaded's own design
+(R43.1B.7), to be recorded under plan `rpc-api-reference-wire-parity` §2.2.
+(b) The documented legacy request members of the table are the inventory that
+plan's §1.2 step 1 carries into `params`; `recover_funds_of_swap` already has
+them there. (c) The documented legacy success layouts of the table (wrapped or
+bare) are the inventory for that plan's §1.2 step 2. (d) The documentation
+deprecates `get_trade_fee` (for `trade_preimage`) and `show_priv_key` (for
+`get_private_keys`); the plan's §1.4 already keeps `show_priv_key` legacy-only
+on the same ground, and D43.1B.1 asks the same of `get_trade_fee`. (e) Nothing
+in the documentation binds the typed error tokens of the new forms; the plan's
+§1.2 step 3 (reuse a versioned sibling's token where one exists, else
+`Internal`) is unconstrained by it.
+
+**D43.1B.1** *Keep `get_trade_fee` legacy-only?* The documentation marks it
+deprecated in favor of the versioned `trade_preimage` (R43.1B.1 table), which
+already answers the fee question on the versioned surface with a bound
+contract (chapter 08). Options: (i) move `get_trade_fee` from group B to the
+plan's §1.4 "legacy-only for good" list, as `show_priv_key` already is, so no
+second versioned fee method is added (recommended: it mirrors the ground on
+which the plan keeps `show_priv_key` legacy-only); (ii) keep it in group B and
+add a versioned form anyway, for clients that call the simpler single-coin
+query.
+
 ## 43.2 Public vs protected method classification
 
 R43.2.1 A fixed set of **public** methods shall be callable without
@@ -659,3 +872,55 @@ shall be wound down as part of shutdown rather than abandoned.
   helper behind a Cargo feature (the maintainer's decision of 2026-11-10) and takes no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required.
+- *Scoped addition (2026-11-10, Spec Reader round 0.4.0-13) -- §43.1B
+  (R43.1B.1--R43.1B.7, the table of documented forms, the finding paragraph,
+  the compatibility note, the plan-input note and D43.1B.1); no other file
+  was changed.* **KDF Dirty Gate: PASS on 2026-11-10, measure 0.01, no findings** (chapter
+  01 R40; the attestation closes this item). *Inputs:* (1) the published
+  reference API documentation at
+  `https://gleec.com/komodo/docs/komodo-defi-framework/api/`, fetched
+  2026-11-10 — the method index page, the v2.0 protocol overview page, the
+  site map, and the legacy page of each of the 42 documented names (the
+  combined coin-activation page for `electrum` and `enable`) — consulted
+  **only** to establish, per name: whether a versioned request shape, a typed
+  error form or a versioned success shape is documented; the documented
+  request members with their optionality and value forms; the documented
+  error-body and success-body layouts; the documented statements on
+  authentication and deprecation; and what, if anything, the documentation
+  says a versioned request to a legacy-only name answers. Member names cross
+  as the API contract; no descriptive sentence, example value or error text of
+  the documentation was reproduced. (2) The forbidden corpus at the rows
+  `v2.6.0-beta`, `v3.0.0-beta`, `dev (as of 2026-03-27)` and `main (as of
+  2026-10-07)` of chapter 02 §2.15A, consulted **only** to establish the set
+  of wire method strings the versioned table routes at each row (to extend
+  R43.1A.9 to all 44 names) and, at the row `v3.0.0-beta`, at which nesting
+  the legacy `recover_funds_of_swap` request reads its argument. What crosses
+  is the absence of 44 public wire names from a public method table and one
+  dictated member placement; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced. (3) This
+  repository's dev branch as of 2026-11-10, for the compatibility note. No
+  row was added to chapter 02 §2.15A: every state read already had one, and
+  each row's identifier was re-confirmed present by read-only inspection of
+  the historical record's reference metadata before it was named; the
+  documentation is not a state of the historical record and takes no row
+  (§2.15A R13 tables commits, tags and branch states only), so it is named
+  here by URL and fetch date instead.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-10, measure 0.01
+  on the R35 basis (dictated-interop and public-surface tokens excluded), no
+  findings. Reference states (chapter 02 R13): exactly four states are named —
+  `v2.6.0-beta`, `v3.0.0-beta`, `dev (as of 2026-03-27)` and `main (as of
+  2026-10-07)` — all rows of §2.15A, each read at its full identifier; the
+  documentation URL is a public site and takes no row. Extent: (a) the daemon
+  RPC dispatcher's versioned method table and legacy method table at the four
+  rows, 8 files compared (2 per row), plus the legacy handler of the one
+  params-nested legacy-only method at the two release rows (2 files); (b) the
+  published reference API documentation fetched 2026-11-10: the method index
+  page, the v2.0 protocol overview page and 13 legacy method pages (the
+  params-nested method's page and a sample of 12 further pages whose table
+  rows carry prose qualifiers); the remaining legacy pages were not fetched, a
+  gap left visible and bounded to pages whose table cells carry member names
+  only; (c) the relicensed base's own legacy handler of the same method, for
+  the compatibility note. Method: reading of the candidate and of the files at
+  the tabled identifiers; mechanical extraction and set comparison of the
+  method-name tables; mechanical text probes of the fetched documentation; no
+  code blocks in the gated lines.
