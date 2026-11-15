@@ -715,6 +715,13 @@ enters nothing. The entry records the inputs the transaction consumed and
 those of its outputs that pay to the coin's own address script; outputs to
 any other script are not recorded.
 
+*Clarification (2026-11-15, clean side).* "Only by" stays true, but not every
+send the swap engine orders is entered. A QRC20 token's swap payment, spend,
+refund and fee transfer neither hold the token's record lock through the
+broadcast nor enter anything, in this tree as in the reference (R38.6.4Q.7
+items 3 and 6). For the QTUM family the record therefore shields only a QTUM
+swap send that follows a QTUM swap send. The options are in D38.6.4Q.4.
+
 R38.5B.2 **Withdraw neither writes nor broadcasts.** (Reference-bound at both
 rows; also the baseline's behaviour.) The user withdraw path -- the direct
 `withdraw` method and the `task::withdraw::*` family of
@@ -1597,6 +1604,14 @@ the outcome, not the mechanism.) A message from a server that carries a
 request. The Qtum contract-event subscription
 (`blockchain.contract.event.subscribe`) is outside this rule; Reloaded does not
 place it again after a disconnect, as before.
+
+*Clarification (2026-11-15, clean side).* The contract-event subscription of
+the last sentence is this project's own: this tree places it when a client
+enables the balance stream for a QRC20 token (§38.6.5 decision 2). The
+reference places no contract-event subscription at all (R38.6.4Q.5), so "as
+before" refers to this tree, and placing the subscription again after a
+disconnect would restore nothing the reference does. Whether this tree places
+it again is open as D38.6.4Q.3.
 
 R38.6.4i **Failure reporting.** A request that failed on every server it was
 tried on shall report a failure naming the coin and, for each server tried,
@@ -3663,6 +3678,12 @@ it.) Each of the following spends QTUM outputs of the one shared address.
 > a delegation is added and when one is removed. No peer observes the
 > difference.
 
+*Status note (2026-11-15, clean side; this repository).* The finding above
+describes dev before PR #354. Since that PR both delegation builds, adding and
+removing, wait for the process-wide build lock and hold it from the listing
+through signing (the status note after R38.5B.5). Item 5 still describes the
+reference.
+
 R38.6.4Q.8 **Wire methods of the QTUM family.** (The method names, the
 parameter order and the answer members are the server's dictated interface:
 for the event, receipt and token-information methods, the Qtum ElectrumX
@@ -4029,6 +4050,8 @@ watched address produces a streamed balance event.
 >    is contract storage and need not change the holder's UTXOs, so each token wakes on
 >    its per-token `blockchain.contract.event.subscribe` notification, not on the QTUM
 >    script-hash notification. After a disconnect it is not placed again (R38.6.4h).
+>    *Clarification (2026-11-15, clean side):* this subscription is Reloaded's own;
+>    the reference places none (R38.6.4Q.5; see the clarification after R38.6.4h).
 > 3. **The history loop wakes on the same signal.** The UTXO transaction-history loop
 >    waits for its interval or for a script-hash notification, whichever comes first,
 >    and still re-reads balance and history itself.
@@ -4062,6 +4085,10 @@ watched address produces a streamed balance event.
 >      The BCH and SLP history state machine keeps its own retry lines and cooldown.
 >    - **Tests:** the throttle and the delays are unit-tested; the loop's use of them
 >      is covered by construction.
+>    - *Clarification (2026-11-15, clean side):* this backoff, and the QRC20 loop's
+>      history backoff, are Reloaded's. The reference repeats a failed QRC20 history
+>      request after a fixed 10 s (R38.6.4Q.6 item 4); a failed QRC20 balance read is
+>      repeated after 10 s in both. No peer observes the difference.
 
 ### 38.6.6 Fee policy, the whole-kilobyte fixed-fee option, and the UTXO trading floors
 
@@ -4911,6 +4938,14 @@ R38.8.6 **Tests (two-direction, observable).**
   transaction with `16: bad-txns-in-belowout`, and electrum's `interest`
   field reported a much lower allowance (permitted-input class R6),
   <https://github.com/kdf-reloaded/kdf/issues/11>.
+- Qtum ElectrumX server, *QRC20 integration* (`docs/qrc20-integration.md`):
+  the server's definition of the QRC20 methods, their parameters and their
+  answer members named in R38.6.4Q.8 (permitted-input class R3/R4), fetched
+  2026-11-15,
+  <https://github.com/qtumproject/qtum-electrumx-server/blob/master/docs/qrc20-integration.md>.
+- Qtum Core public source: the `gettransactionreceipt` RPC, whose receipt form
+  R38.6.4Q.8 item 3 refers to, defined in `src/rpc/blockchain.cpp`,
+  <https://github.com/qtumproject/qtum> (permitted-input class R3/R4).
 
 ## 38.9 Provenance Footer
 
@@ -5489,6 +5524,13 @@ R38.8.6 **Tests (two-direction, observable).**
   clean-room gate tool was not applicable. Limit: the verdict covers the two
   added ranges only and clears expression and reference states, not factual
   accuracy.
+- *Reloaded-original clarifications (2026-11-15), clean side -- after R38.6.4h,
+  after §38.6.5 decision 2 and item 8, after R38.5B.1, a status note after the
+  delegation finding under R38.6.4Q.7, and two §38.10 references.* Written by a
+  session that never read the forbidden corpus. The inputs are this repository's
+  code, the cleared §38.6.4Q (its notes 1, 3 and 6 on existing text), PR #354,
+  and the two public sources now listed in §38.10. It takes no forbidden-class
+  input, so chapter 01 R38 is not engaged and no gate pass is required.
 - *Reloaded-original amendment (2026-11-15), clean side -- after the as-built notes
   of R38.6.4a: the QTUM family's unspent lists are not spread, and they and its
   broadcasts take the listed order (interim until D38.6.4Q.1 and D38.6.4Q.4).* Written by a session that never read the forbidden corpus. The

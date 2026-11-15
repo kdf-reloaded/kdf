@@ -365,6 +365,14 @@ milliseconds.
 > R38.6.5). A notification ends the wait early and leads to the same balance read
 > as the timer branch; the timer stays the floor, and the emit-on-change rule is
 > unchanged. Code: `mm2_main/src/rpc/streaming_activations/balance.rs`.
+>
+> **Note (2026-11-15, clean side).** This project's balance stream accepts every
+> activated coin, a QRC20 token included. The reference refuses a QRC20 token as
+> an unsupported coin (`CoinNotSupported`, HTTP 501; chapter 38 R38.6.4Q.5 item
+> 2), so a client that enables the stream for a token gets a stream here and a
+> refusal there. Whether the token's contract-event subscription stays, is
+> placed again after a reconnect, or gives way to polling is open as chapter 38
+> D38.6.4Q.3.
 
 **R26.** The non-balance streamers MUST follow the shared activation
 contract of R22 and the lifecycle contract of R8-R12, mapping activation
@@ -956,3 +964,9 @@ activated the streamer again before that signal is handled.
 - *Forbidden corpus:* consulted only by the spec-reader role for C8
   clean-channel behaviour extraction; no protected expression is bound
   by this chapter.
+- *Reloaded-original note (2026-11-15), clean side -- after the 2026-11-02
+  amendment of R25: the balance stream accepts a QRC20 token, the reference
+  refuses it.* Written by a session that never read the forbidden corpus. The
+  inputs are this repository's code and the cleared chapter 38 §38.6.4Q. It
+  takes no forbidden-class input, so chapter 01 R38 is not engaged and no gate
+  pass is required.
