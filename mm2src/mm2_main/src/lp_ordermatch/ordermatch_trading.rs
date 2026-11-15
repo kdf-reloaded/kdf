@@ -1,4 +1,5 @@
 use super::*;
+use crate::mm2::rpc::legacy_adapter::{legacy_bare, legacy_bare_body, legacy_error, legacy_error_body, legacy_result};
 use coins::request_fee_scope::with_request_fee_scope;
 
 #[cfg(feature = "ibc-routing-for-swaps")]
@@ -57,7 +58,7 @@ async fn ensure_ibc_routing_min_balance(
     ctx: &MmArc,
     base_coin: &MmCoinEnum,
     rel_coin: &MmCoinEnum,
-) -> Result<(), String> {
+) -> Result<(), SetPriceError> {
     let Some(base_chain_id) = tendermint_chain_id(ctx, base_coin) else {
         return Ok(());
     };
@@ -74,15 +75,14 @@ async fn ensure_ibc_routing_min_balance(
         .my_spendable_balance()
         .compat()
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| SetPriceError::from(e.into_inner()))?
         .into();
     if current_balance < required_min_balance {
-        return ERR!(
-            "IBC routing requires minimum balance on HTLC coin {}: required {}, current {}",
-            base_coin.ticker(),
-            required_min_balance.to_decimal(),
-            current_balance.to_decimal()
-        );
+        return Err(SetPriceError::IbcRoutingMinBalance {
+            coin: base_coin.ticker().to_owned(),
+            required: required_min_balance.to_decimal(),
+            current: current_balance.to_decimal(),
+        });
     }
 
     Ok(())
@@ -2594,79 +2594,113 @@ pub(crate) async fn cancel_orders_on_error<T, E>(ctx: &MmArc, req: &SetPriceReq,
     Err(error)
 }
 
-pub(crate) async fn get_max_volume(
+pub(crate) async fn get_max_volume<E: MakerVolumeError>(
     ctx: &MmArc,
     my_coin: &MmCoinEnum,
     other_coin: &MmCoinEnum,
-) -> Result<MmNumber, String> {
-    get_max_volume_and_balance(ctx, my_coin, other_coin)
+) -> Result<MmNumber, MmError<E>> {
+    get_max_volume_and_balance::<E>(ctx, my_coin, other_coin)
         .await
         .map(|(volume, _balance)| volume)
 }
 
 /// The maximum maker volume together with the spendable balance of `my_coin` that it was computed from.
-async fn get_max_volume_and_balance(
+async fn get_max_volume_and_balance<E: MakerVolumeError>(
     ctx: &MmArc,
     my_coin: &MmCoinEnum,
     other_coin: &MmCoinEnum,
-) -> Result<(MmNumber, BigDecimal), String> {
-    let my_balance = try_s!(my_coin.my_spendable_balance().compat().await);
+) -> Result<(MmNumber, BigDecimal), MmError<E>> {
+    let my_balance = my_coin.my_spendable_balance().compat().await.mm_err(E::from)?;
     // first check if `rel_coin` balance is sufficient
-    let other_coin_trade_fee = try_s!(
-        other_coin
-            .get_receiver_trade_fee(FeeApproxStage::OrderIssue)
-            .compat()
-            .await
-    );
-    try_s!(check_other_coin_balance_for_swap(ctx, other_coin, None, other_coin_trade_fee).await);
+    let other_coin_trade_fee = other_coin
+        .get_receiver_trade_fee(FeeApproxStage::OrderIssue)
+        .compat()
+        .await
+        .mm_err(|e| E::from_receiver_fee_error(e, other_coin.ticker()))?;
+    check_other_coin_balance_for_swap(ctx, other_coin, None, other_coin_trade_fee)
+        .await
+        .mm_err(E::from)?;
     // calculate max maker volume
     // note the `calc_max_maker_vol` returns [`CheckBalanceError::NotSufficientBalance`] error if the balance of `base_coin` is not sufficient
-    let info = try_s!(calc_max_maker_vol(ctx, my_coin, &my_balance, FeeApproxStage::OrderIssue).await);
+    let info = calc_max_maker_vol(ctx, my_coin, &my_balance, FeeApproxStage::OrderIssue)
+        .await
+        .mm_err(E::from)?;
     Ok((info.volume, my_balance))
 }
 
+/// Places a maker order, failing with the legacy text of the failure. Callers that need the class of a failure use
+/// [`set_price_core`].
 pub async fn create_maker_order(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
-    with_request_fee_scope(ctx, create_maker_order_impl(ctx, req)).await
+    with_request_fee_scope(ctx, create_maker_order_impl(ctx, req))
+        .await
+        .map_err(|e| legacy_error(e))
 }
 
-async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
-    let base_coin: MmCoinEnum = match try_s!(lp_coinfind(ctx, &req.base).await) {
+/// The `result` of `setprice` and `update_maker_order`: the order as the RPC renders it.
+pub struct MakerOrderResponse(pub(crate) MakerOrder);
+
+impl serde::Serialize for MakerOrderResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&MakerOrderForRpc::from(&self.0), serializer)
+    }
+}
+
+/// The typed core of `setprice`: places a maker order for the pair and returns it. The legacy surface renders its
+/// answer as `{"result": <order>}` ([`set_price`]).
+///
+/// # Errors
+///
+/// A [`SetPriceError`]: the first check the request fails, or a node or storage failure.
+pub async fn set_price_core(ctx: MmArc, req: SetPriceReq) -> Result<MakerOrderResponse, MmError<SetPriceError>> {
+    with_request_fee_scope(&ctx, create_maker_order_impl(&ctx, req))
+        .await
+        .map(MakerOrderResponse)
+}
+
+async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, MmError<SetPriceError>> {
+    let base_coin: MmCoinEnum = match lp_coinfind(ctx, &req.base)
+        .await
+        .map_to_mm(SetPriceError::InternalError)?
+    {
         Some(coin) => coin,
-        None => return ERR!("Base coin {} is not found", req.base),
+        None => return MmError::err(SetPriceError::NoSuchBaseCoin { coin: req.base }),
     };
 
-    let rel_coin: MmCoinEnum = match try_s!(lp_coinfind(ctx, &req.rel).await) {
+    let rel_coin: MmCoinEnum = match lp_coinfind(ctx, &req.rel)
+        .await
+        .map_to_mm(SetPriceError::InternalError)?
+    {
         Some(coin) => coin,
-        None => return ERR!("Rel coin {} is not found", req.rel),
+        None => return MmError::err(SetPriceError::NoSuchRelCoin { coin: req.rel }),
     };
 
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
-        return ERR!("Trading is not supported for coin {}", coin);
+        return MmError::err(SetPriceError::TradingNotSupported { coin });
     }
     // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
     if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
-        return ERR!("{}", mismatch);
+        return MmError::err(SetPriceError::from(mismatch));
     }
     // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain.
     if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
-        return ERR!("{}", error);
+        return MmError::err(SetPriceError::ChainDisagreement(error));
     }
     // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
     // balance check.
     if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(ctx) {
-        return ERR!("{}", error);
+        return MmError::err(SetPriceError::ClockOutOfRange(error));
     }
     if base_coin.wallet_only(ctx) {
-        return ERR!("Base coin {} is wallet only", req.base);
+        return MmError::err(SetPriceError::BaseCoinIsWalletOnly { coin: req.base });
     }
     if rel_coin.wallet_only(ctx) {
-        return ERR!("Rel coin {} is wallet only", req.rel);
+        return MmError::err(SetPriceError::RelCoinIsWalletOnly { coin: req.rel });
     }
     // CRD ch.60 R60.6.8: an order with no operator-set minimum volume gets the raised default. The pre-trade check
     // below then sees that default, capped at the maximum volume where it is already known (`max` false), and a
     // `max` order is checked again once its volume is computed.
     let raised_default_term = if req.min_volume.is_none() {
-        try_s!(raised_default_min_volume_term(ctx, &base_coin, &rel_coin, &req.price).await)
+        raised_default_min_volume_term(ctx, &base_coin, &rel_coin, &req.price).await?
     } else {
         None
     };
@@ -2682,39 +2716,34 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
         })
     });
     // CRD ch.60 R60.6.7 item 3: the smallest trade the order can produce must be spendable on both legs.
-    try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_checked, &req.price).await);
+    check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_checked, &req.price).await?;
 
     #[cfg(feature = "ibc-routing-for-swaps")]
     {
-        try_s!(
-            ensure_ibc_routing_min_balance(ctx, &base_coin, &rel_coin)
-                .or_else(|e| cancel_orders_on_error(ctx, &req, e))
-                .await
-        );
+        ensure_ibc_routing_min_balance(ctx, &base_coin, &rel_coin)
+            .or_else(|e| cancel_orders_on_error(ctx, &req, e))
+            .await?;
     }
 
     // The spendable balance of the base coin that the checks above read seeds the balance watch (CRD ch.60
     // R60.4.6 item 3); it is the quantity the watch polls.
     let (volume, base_balance_read) = if req.max {
-        try_s!(
-            get_max_volume_and_balance(ctx, &base_coin, &rel_coin)
-                .or_else(|e| cancel_orders_on_error(ctx, &req, e))
-                .await
-        )
-    } else {
-        let base_balance = try_s!(
-            check_balance_for_maker_swap(
-                ctx,
-                &base_coin,
-                &rel_coin,
-                req.volume.clone(),
-                None,
-                None,
-                FeeApproxStage::OrderIssue
-            )
+        get_max_volume_and_balance::<SetPriceError>(ctx, &base_coin, &rel_coin)
             .or_else(|e| cancel_orders_on_error(ctx, &req, e))
-            .await
-        );
+            .await?
+    } else {
+        let base_balance = check_balance_for_maker_swap(
+            ctx,
+            &base_coin,
+            &rel_coin,
+            req.volume.clone(),
+            None,
+            None,
+            FeeApproxStage::OrderIssue,
+        )
+        .or_else(|e| cancel_orders_on_error(ctx, &req, e))
+        .await
+        .mm_err(SetPriceError::from)?;
         (req.volume.clone(), base_balance)
     };
 
@@ -2723,10 +2752,10 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     // above for a plain default, which the capped default is not below.
     if let (true, Some(term)) = (req.max, raised_default_term.as_ref()) {
         let capped = raised_default_for_check(&base_coin, &rel_coin, &req.price, term, Some(&volume));
-        try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, capped, &req.price).await);
+        check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, capped, &req.price).await?;
     }
 
-    let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
+    let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).map_to_mm(SetPriceError::InternalError)?;
 
     // CRD ch.32 R-GH8a: with `setprice_replace_after_checks` on, every check above has passed and the order is
     // built and saved below before the previous orders are cancelled; off (the default), they are cancelled here
@@ -2753,24 +2782,25 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
         .with_rel_orderbook_ticker(ordermatch_ctx.orderbook_ticker(rel_coin.ticker()))
         .with_timeout(req.timeout_in_minutes);
 
-    let new_order = try_s!(builder.build());
+    let new_order = builder
+        .build()
+        .map_to_mm(|e| SetPriceError::from_maker_order_build_error(e, &req.base, &req.rel))?;
 
     let request_orderbook = false;
-    try_s!(
-        subscribe_to_orderbook_topic(
-            ctx,
-            new_order.base_orderbook_ticker(),
-            new_order.rel_orderbook_ticker(),
-            request_orderbook
-        )
-        .await
-    );
+    subscribe_to_orderbook_topic(
+        ctx,
+        new_order.base_orderbook_ticker(),
+        new_order.rel_orderbook_ticker(),
+        request_orderbook,
+    )
+    .await
+    .map_to_mm(SetPriceError::InternalError)?;
     // With `setprice_replace_after_checks` on, the steps that can fail all precede the cancel below: the checks, the
     // build, the subscription and this save (R-GH8a item 2). After the cancel only the local insert and the
     // publication remain, and neither returns an error. At the default, the previous orders went before the build.
     save_my_new_maker_order(ctx.clone(), &new_order)
         .await
-        .map_err(|e| ERRL!("{}", e))?;
+        .mm_err(|e| SetPriceError::DbError(e.to_string()))?;
     if replace_after_checks {
         cancel_previous_maker_orders(ctx, &ordermatch_ctx, &req.base, &req.rel).await;
     }
@@ -2789,12 +2819,10 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     Ok(new_order)
 }
 
+/// The legacy `setprice`: decodes the inline body, calls [`set_price_core`] and answers `{"result": <order>}`.
 pub async fn set_price(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let req: SetPriceReq = try_s!(json::from_value(req));
-    let maker_order = create_maker_order(&ctx, req).await?;
-    let rpc_result = MakerOrderForRpc::from(&maker_order);
-    let res = try_s!(json::to_vec(&json!({ "result": rpc_result })));
-    Ok(try_s!(Response::builder().body(res)))
+    legacy_result(set_price_core(ctx, req).await)
 }
 
 /// Removes the previous orders if there're some to allow multiple setprice call per pair.
@@ -2834,33 +2862,63 @@ pub(crate) async fn cancel_previous_maker_orders(
     }
 }
 
+/// Updates a maker order, failing with the legacy text of the failure. Callers that need the class of a failure use
+/// [`update_maker_order_core`].
 pub async fn update_maker_order(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result<MakerOrder, String> {
-    with_request_fee_scope(ctx, update_maker_order_impl(ctx, req)).await
+    with_request_fee_scope(ctx, update_maker_order_impl(ctx, req))
+        .await
+        .map_err(|e| legacy_error(e))
 }
 
-async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result<MakerOrder, String> {
-    let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
+/// The typed core of `update_maker_order`: applies the update to the maker order and returns it as it is after the
+/// update. The legacy surface renders its answer as `{"result": <order>}` ([`update_maker_order_rpc`]).
+///
+/// # Errors
+///
+/// An [`UpdateMakerOrderError`]: the first check the update fails, a node or storage failure, or a concurrent change
+/// of the order.
+pub async fn update_maker_order_core(
+    ctx: MmArc,
+    req: MakerOrderUpdateReq,
+) -> Result<MakerOrderResponse, MmError<UpdateMakerOrderError>> {
+    with_request_fee_scope(&ctx, update_maker_order_impl(&ctx, req))
+        .await
+        .map(MakerOrderResponse)
+}
+
+async fn update_maker_order_impl(
+    ctx: &MmArc,
+    req: MakerOrderUpdateReq,
+) -> Result<MakerOrder, MmError<UpdateMakerOrderError>> {
+    let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).map_to_mm(UpdateMakerOrderError::InternalError)?;
     let order_mutex = {
         match ordermatch_ctx.maker_orders_ctx.lock().get_order(&req.uuid) {
             Some(order) => order,
-            None => return ERR!("There is no order with UUID {}", req.uuid),
+            None => return MmError::err(UpdateMakerOrderError::UUIDNotFound { uuid: req.uuid }),
         }
     };
 
     let order_before_update = order_mutex.lock().await.clone();
     if order_before_update.has_ongoing_matches() {
-        return ERR!("Can't update an order that has ongoing matches");
+        return MmError::err(UpdateMakerOrderError::OrderBeingMatched { uuid: req.uuid });
     }
 
     let base = order_before_update.base.as_str();
     let rel = order_before_update.rel.as_str();
+    // A failed lookup of the pair (the coins context is unavailable) gets the text of a coin that is not activated,
+    // as before: the legacy text never carried the cause.
     let (base_coin, rel_coin) = match find_pair(ctx, base, rel).await {
         Ok(Some(c)) => c,
-        _ => return ERR!("Base coin {} and/or rel coin {} are not activated", base, rel),
+        _ => {
+            return MmError::err(UpdateMakerOrderError::CoinsNotActivated {
+                base: base.to_owned(),
+                rel: rel.to_owned(),
+            })
+        },
     };
     // CRD ch.05 R37: an update of an order whose swap key is not the key it pays from is refused before any other check.
     if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
-        return ERR!("{}", mismatch);
+        return MmError::err(UpdateMakerOrderError::from(mismatch));
     }
 
     let original_conf_settings = order_before_update.conf_settings.unwrap();
@@ -2880,7 +2938,8 @@ async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Resul
     // Validate and Add new_price to update_msg if new_price is found in the request
     let new_price = match req.new_price {
         Some(new_price) => {
-            try_s!(validate_price(new_price.clone()));
+            validate_price(new_price.clone())
+                .map_to_mm(|e| UpdateMakerOrderError::from_maker_order_build_error(e, base, rel))?;
             update_msg.with_new_price(new_price.clone().into());
             new_price
         },
@@ -2893,12 +2952,13 @@ async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Resul
     // Add min_volume to update_msg if min_volume is found in the request
     if let Some(min_volume) = req.min_volume.clone() {
         // Validate and Calculate Minimum Volume
-        let actual_min_vol = try_s!(validate_and_get_min_vol(
+        let actual_min_vol = validate_and_get_min_vol(
             min_base_amount.clone(),
             min_rel_amount.clone(),
             Some(min_volume),
-            new_price.clone()
-        ));
+            new_price.clone(),
+        )
+        .map_to_mm(|e| UpdateMakerOrderError::from_maker_order_build_error(e, base, rel))?;
         update_msg.with_new_min_volume(actual_min_vol.into());
     }
 
@@ -2910,30 +2970,32 @@ async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Resul
         .min_volume
         .clone()
         .or_else(|| Some(order_before_update.min_base_vol.clone()));
-    try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await);
+    check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await?;
 
     // Calculate order volume and add to update_msg if new_volume is found in the request
     let new_volume = if req.max.unwrap_or(false) {
-        let max_volume = try_s!(get_max_volume(ctx, &base_coin, &rel_coin).await) + reserved_amount.clone();
+        let max_volume =
+            get_max_volume::<UpdateMakerOrderError>(ctx, &base_coin, &rel_coin).await? + reserved_amount.clone();
         update_msg.with_new_max_volume(max_volume.clone().into());
         max_volume
     } else if Option::is_some(&req.volume_delta) {
         let volume = original_volume + req.volume_delta.unwrap();
         if volume <= MmNumber::from("0") {
-            return ERR!("New volume {} should be more than zero", volume);
+            return MmError::err(UpdateMakerOrderError::NewVolumeNotPositive {
+                volume: volume.to_decimal(),
+            });
         }
-        try_s!(
-            check_balance_for_maker_swap(
-                ctx,
-                &base_coin,
-                &rel_coin,
-                volume.clone(),
-                None,
-                None,
-                FeeApproxStage::OrderIssue
-            )
-            .await
-        );
+        check_balance_for_maker_swap(
+            ctx,
+            &base_coin,
+            &rel_coin,
+            volume.clone(),
+            None,
+            None,
+            FeeApproxStage::OrderIssue,
+        )
+        .await
+        .mm_err(UpdateMakerOrderError::from)?;
         update_msg.with_new_max_volume(volume.clone().into());
         volume
     } else {
@@ -2941,26 +3003,26 @@ async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Resul
     };
 
     if new_volume <= reserved_amount {
-        return ERR!(
-            "New volume {} should be more than reserved amount for order matches {}",
-            new_volume,
-            reserved_amount
-        );
+        return MmError::err(UpdateMakerOrderError::NewVolumeBelowReserved {
+            volume: new_volume.to_decimal(),
+            reserved: reserved_amount.to_decimal(),
+        });
     }
 
     // Validate Order Volume
-    try_s!(validate_max_vol(
+    validate_max_vol(
         min_base_amount.clone(),
         min_rel_amount.clone(),
         new_volume.clone() - reserved_amount.clone(),
         req.min_volume.clone(),
-        new_price
-    ));
+        new_price,
+    )
+    .map_to_mm(|e| UpdateMakerOrderError::from_maker_order_build_error(e, base, rel))?;
 
     let order_mutex = {
         match ordermatch_ctx.maker_orders_ctx.lock().get_order(&req.uuid) {
             Some(order) => order,
-            None => return ERR!("Order with UUID: {} has been deleted", req.uuid),
+            None => return MmError::err(UpdateMakerOrderError::OrderDeleted { uuid: req.uuid }),
         }
     };
 
@@ -2969,17 +3031,17 @@ async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Resul
     let (applied, published, broadcast) = {
         let mut order = order_mutex.lock().await;
         if *order != order_before_update {
-            return ERR!("Order state has changed after price/volume/balance checks. Please try to update the order again if it's still needed.");
+            return MmError::err(UpdateMakerOrderError::OrderStateChanged);
         }
         if !ordermatch_ctx.maker_orders_ctx.lock().contains_key(&req.uuid) {
-            return ERR!("Order with UUID: {} has been deleted", req.uuid);
+            return MmError::err(UpdateMakerOrderError::OrderDeleted { uuid: req.uuid });
         }
         order.apply_updated(&update_msg);
         let broadcast =
             !suppress_unchanged_order_updates(ctx) || maker_order_update_changes_order(&order_before_update, &order);
         let published = match PublishedState::publish(&ordermatch_ctx, &order, true) {
             Some(published) => published,
-            None => return ERR!("Order with UUID: {} has been deleted", req.uuid),
+            None => return MmError::err(UpdateMakerOrderError::OrderDeleted { uuid: req.uuid }),
         };
         (order.clone(), published, broadcast)
     };
@@ -2990,7 +3052,10 @@ async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Resul
         if *order == applied && ordermatch_ctx.maker_orders_ctx.lock().contains_key(&req.uuid) {
             *order = order_before_update;
         }
-        return ERR!("Error on saving updated order state to database:{}", e);
+        return MmError::err(UpdateMakerOrderError::DbError(format!(
+            "Error on saving updated order state to database:{}",
+            e
+        )));
     }
 
     // Saved. The announcement goes out under the order's lock, so it takes its place among the announcements of
@@ -3026,17 +3091,15 @@ pub(crate) fn maker_order_update_changes_order(before: &MakerOrder, after: &Make
         || before.conf_settings != after.conf_settings
 }
 
+/// The legacy `update_maker_order`: decodes the inline body, calls [`update_maker_order_core`] and answers
+/// `{"result": <order>}`.
 pub async fn update_maker_order_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let req: MakerOrderUpdateReq = try_s!(json::from_value(req));
-    let order = try_s!(update_maker_order(&ctx, req).await);
-    let rpc_result = MakerOrderForRpc::from(&order);
-    let res = try_s!(json::to_vec(&json!({ "result": rpc_result })));
-
-    Ok(try_s!(Response::builder().body(res)))
+    legacy_result(update_maker_order_core(ctx, req).await)
 }
 
 #[derive(Deserialize)]
-pub(crate) struct OrderStatusReq {
+pub struct OrderStatusReq {
     pub(crate) uuid: Uuid,
 }
 
@@ -3047,45 +3110,98 @@ pub(crate) struct OrderForRpcWithCancellationReason<'a> {
     pub(crate) cancellation_reason: &'a str,
 }
 
-pub async fn order_status(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let req: OrderStatusReq = try_s!(json::from_value(req));
+/// The answer of `order_status`: the order as the RPC renders it, with its `type`. The legacy surface answers it as a
+/// bare object (`{"type": ..., "order": ...}`, and for a finished order also `"cancellation_reason"`).
+pub enum OrderStatusResponse {
+    /// An active maker order of this node, in the shape of a `my_orders` entry.
+    Maker(MakerOrder),
+    /// An active taker order of this node.
+    Taker(TakerOrder),
+    /// An order that is not active any more, read from the order history, with the reason it left.
+    History { order: Order, cancellation_reason: String },
+}
 
-    let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(&ctx));
+impl serde::Serialize for OrderStatusResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        /// The bare object of an active order: its type, then the order. The member order is the wire order.
+        #[derive(Serialize)]
+        struct ActiveOrder<'a, T> {
+            #[serde(rename = "type")]
+            order_type: &'a str,
+            order: T,
+        }
+
+        match self {
+            OrderStatusResponse::Maker(order) => serde::Serialize::serialize(
+                &ActiveOrder {
+                    order_type: "Maker",
+                    order: MakerOrderForMyOrdersRpc::from(order),
+                },
+                serializer,
+            ),
+            OrderStatusResponse::Taker(order) => serde::Serialize::serialize(
+                &ActiveOrder {
+                    order_type: "Taker",
+                    order: TakerOrderForRpc::from(order),
+                },
+                serializer,
+            ),
+            OrderStatusResponse::History {
+                order,
+                cancellation_reason,
+            } => serde::Serialize::serialize(
+                &OrderForRpcWithCancellationReason {
+                    order: OrderForRpc::from(order),
+                    cancellation_reason,
+                },
+                serializer,
+            ),
+        }
+    }
+}
+
+/// The typed core of `order_status`: looks the order up among the active maker orders, the active taker orders and
+/// the order history, in that order. The legacy surface renders its answer as the bare object ([`order_status`]).
+///
+/// # Errors
+///
+/// An [`OrderStatusError`]: the UUID is unknown to all three, or the history cannot be read.
+pub async fn order_status_core(
+    ctx: MmArc,
+    req: OrderStatusReq,
+) -> Result<OrderStatusResponse, MmError<OrderStatusError>> {
+    let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).map_to_mm(OrderStatusError::InternalError)?;
     let storage = MyOrdersStorage::new(ctx.clone());
 
     let maybe_order_mutex = ordermatch_ctx.maker_orders_ctx.lock().get_order(&req.uuid);
     if let Some(order_mutex) = maybe_order_mutex {
         let order = order_mutex.lock().await.clone();
-        let res = json!({
-            "type": "Maker",
-            "order": MakerOrderForMyOrdersRpc::from(&order),
-        });
-        return Response::builder()
-            .body(json::to_vec(&res).expect("Serialization failed"))
-            .map_err(|e| ERRL!("{}", e));
+        return Ok(OrderStatusResponse::Maker(order));
     }
 
     let taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
     if let Some(order) = taker_orders.get(&req.uuid) {
-        let res = json!({
-            "type": "Taker",
-            "order": TakerOrderForRpc::from(order),
-        });
-        return Response::builder()
-            .body(json::to_vec(&res).expect("Serialization failed"))
-            .map_err(|e| ERRL!("{}", e));
+        return Ok(OrderStatusResponse::Taker(order.clone()));
     }
 
-    let order = try_s!(storage.load_order_from_history(req.uuid).await);
-    let cancellation_reason = &try_s!(storage.select_order_status(req.uuid).await);
-
-    let res = json!(OrderForRpcWithCancellationReason {
-        order: OrderForRpc::from(&order),
+    let order = storage
+        .load_order_from_history(req.uuid)
+        .await
+        .mm_err(OrderStatusError::from)?;
+    let cancellation_reason = storage
+        .select_order_status(req.uuid)
+        .await
+        .mm_err(OrderStatusError::from)?;
+    Ok(OrderStatusResponse::History {
+        order,
         cancellation_reason,
-    });
-    Response::builder()
-        .body(json::to_vec(&res).expect("Serialization failed"))
-        .map_err(|e| ERRL!("{}", e))
+    })
+}
+
+/// The legacy `order_status`: decodes the inline body, calls [`order_status_core`] and answers the bare object.
+pub async fn order_status(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    let req: OrderStatusReq = try_s!(json::from_value(req));
+    legacy_bare(order_status_core(ctx, req).await)
 }
 
 #[derive(Display)]
@@ -3250,6 +3366,8 @@ pub struct CancelOrderReq {
     pub(crate) uuid: Uuid,
 }
 
+/// The failures of `cancel_order`. The `Display` text of `UUIDNotFound` is the text the legacy surface answers
+/// ([`cancel_order_rpc`]).
 #[derive(Debug, Deserialize, Serialize, SerializeErrorType, Display)]
 #[serde(tag = "error_type", content = "error_data")]
 pub enum CancelOrderError {
@@ -3257,8 +3375,19 @@ pub enum CancelOrderError {
     CannotRetrieveOrderMatchContext,
     #[display(fmt = "Order {} is being matched now, can't cancel", uuid)]
     OrderBeingMatched { uuid: Uuid },
-    #[display(fmt = "Order {} not found", uuid)]
+    #[display(fmt = "Order with uuid {} is not found", uuid)]
     UUIDNotFound { uuid: Uuid },
+}
+
+impl HttpStatusCode for CancelOrderError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            CancelOrderError::CannotRetrieveOrderMatchContext => StatusCode::INTERNAL_SERVER_ERROR,
+            CancelOrderError::OrderBeingMatched { .. } | CancelOrderError::UUIDNotFound { .. } => {
+                StatusCode::BAD_REQUEST
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3297,7 +3426,7 @@ pub async fn cancel_order(ctx: MmArc, req: CancelOrderReq) -> Result<CancelOrder
     match taker_orders.entry(req.uuid) {
         Entry::Occupied(order) => {
             if !order.get().is_cancellable() {
-                return MmError::err(CancelOrderError::UUIDNotFound { uuid: req.uuid });
+                return MmError::err(CancelOrderError::OrderBeingMatched { uuid: req.uuid });
             }
             let order = order.remove();
             delete_my_taker_order(ctx, order, TakerOrderCancellationReason::Cancelled)
@@ -3314,64 +3443,25 @@ pub async fn cancel_order(ctx: MmArc, req: CancelOrderReq) -> Result<CancelOrder
     MmError::err(CancelOrderError::UUIDNotFound { uuid: req.uuid })
 }
 
+/// The typed core of `cancel_order` for the versioned surface: [`cancel_order`] with the success reduced to its content,
+/// the string `"success"` (the legacy surface answers it as `{"result": "success"}` through [`CancelOrderResponse`]).
+pub async fn cancel_order_core(ctx: MmArc, req: CancelOrderReq) -> Result<String, MmError<CancelOrderError>> {
+    cancel_order(ctx, req).await.map(|response| response.result)
+}
+
+/// The legacy `cancel_order`: decodes the inline body, calls [`cancel_order`] and answers `{"result": "success"}`.
+/// An unknown UUID answers HTTP 404 with the body `{"error": "Order with uuid <uuid> is not found"}`.
 pub async fn cancel_order_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let req: CancelOrderReq = try_s!(json::from_value(req));
-
-    let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(&ctx));
-    let maybe_order_mutex = ordermatch_ctx.maker_orders_ctx.lock().get_order(&req.uuid);
-    if let Some(order_mutex) = maybe_order_mutex {
-        let cancelled = {
-            let order = order_mutex.lock().await;
-            if !order.is_cancellable() {
-                return ERR!("Order {} is being matched now, can't cancel", req.uuid);
-            }
-            // This checks that the order hasn't been removed by another process
-            let cancelled = RemovedMakerOrder::take_out(&ordermatch_ctx, &order);
-            if cancelled.is_some() {
-                maker_order_cancelled_p2p_notify(ctx.clone(), &order);
-            }
-            cancelled
-        };
-        if let Some(cancelled) = cancelled {
-            cancelled.delete(&ctx, MakerOrderCancellationReason::Cancelled).await;
-        }
-        let res = json!({
-            "result": "success"
-        });
-        return Response::builder()
-            .body(json::to_vec(&res).expect("Serialization failed"))
-            .map_err(|e| ERRL!("{}", e));
-    }
-
-    let mut taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
-    match taker_orders.entry(req.uuid) {
-        Entry::Occupied(order) => {
-            if !order.get().is_cancellable() {
-                return ERR!("Order {} is being matched now, can't cancel", req.uuid);
-            }
-            let order = order.remove();
-            delete_my_taker_order(ctx, order, TakerOrderCancellationReason::Cancelled)
-                .compat()
-                .await
-                .ok();
-            let res = json!({
-                "result": "success"
-            });
-            return Response::builder()
-                .body(json::to_vec(&res).expect("Serialization failed"))
-                .map_err(|e| ERRL!("{}", e));
+    match cancel_order(ctx, req).await {
+        Ok(response) => legacy_bare_body(&response),
+        Err(error) => match error.get_inner() {
+            CancelOrderError::UUIDNotFound { .. } => legacy_error_body(404, error.get_inner()),
+            CancelOrderError::CannotRetrieveOrderMatchContext | CancelOrderError::OrderBeingMatched { .. } => {
+                Err(legacy_error(error))
+            },
         },
-        // error is returned
-        Entry::Vacant(_) => (),
     }
-
-    let res = json!({
-        "error": format!("Order with uuid {} is not found", req.uuid),
-    });
-    Response::builder()
-        .status(404)
-        .body(json::to_vec(&res).expect("Serialization failed"))
-        .map_err(|e| ERRL!("{}", e))
 }
 
 #[derive(Serialize)]
@@ -3449,45 +3539,72 @@ pub(crate) enum OrderForRpc<'a> {
     Taker(TakerOrderForRpc<'a>),
 }
 
-/// The `my_orders` answer. Field order is the wire order: `result`, then `maker_orders` and `taker_orders`.
-#[derive(Serialize)]
-struct MyOrdersResponse<'a> {
-    result: MyOrdersResult<'a>,
+/// The answer of `my_orders`: the active maker and taker orders of this node, by UUID. The legacy surface answers it
+/// as `{"result": {"maker_orders": ..., "taker_orders": ...}}` ([`my_orders`]).
+pub struct MyOrdersRpcResponse {
+    pub(crate) maker_orders: HashMap<Uuid, MakerOrder>,
+    pub(crate) taker_orders: HashMap<Uuid, TakerOrder>,
 }
 
-#[derive(Serialize)]
-struct MyOrdersResult<'a> {
-    maker_orders: HashMap<&'a Uuid, MakerOrderForMyOrdersRpc<'a>>,
-    taker_orders: HashMap<&'a Uuid, TakerOrderForRpc<'a>>,
+impl serde::Serialize for MyOrdersRpcResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        /// The members are in the wire order: `maker_orders`, then `taker_orders`.
+        #[derive(Serialize)]
+        struct MyOrders<'a> {
+            maker_orders: HashMap<&'a Uuid, MakerOrderForMyOrdersRpc<'a>>,
+            taker_orders: HashMap<&'a Uuid, TakerOrderForRpc<'a>>,
+        }
+
+        serde::Serialize::serialize(
+            &MyOrders {
+                maker_orders: self
+                    .maker_orders
+                    .iter()
+                    .map(|(uuid, order)| (uuid, MakerOrderForMyOrdersRpc::from(order)))
+                    .collect(),
+                taker_orders: self
+                    .taker_orders
+                    .iter()
+                    .map(|(uuid, order)| (uuid, TakerOrderForRpc::from(order)))
+                    .collect(),
+            },
+            serializer,
+        )
+    }
 }
 
-pub async fn my_orders(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
-    let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(&ctx));
+/// The request of `my_orders`: it takes no members. Any object (members are ignored) and, through the versioned
+/// dispatcher, an absent or `null` `params` decode to it.
+#[derive(Deserialize)]
+pub struct MyOrdersRequest {}
+
+/// The typed core of `my_orders`: the active maker and taker orders of this node. The request has no members.
+///
+/// # Errors
+///
+/// A [`MyOrdersRpcError`] when the node's order-matching context cannot be obtained.
+pub async fn my_orders_core(
+    ctx: MmArc,
+    _req: MyOrdersRequest,
+) -> Result<MyOrdersRpcResponse, MmError<MyOrdersRpcError>> {
+    let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).map_to_mm(MyOrdersRpcError::InternalError)?;
     let my_maker_orders = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
-    let mut maker_orders_map = HashMap::with_capacity(my_maker_orders.len());
+    let mut maker_orders = HashMap::with_capacity(my_maker_orders.len());
     for (uuid, order_mutex) in my_maker_orders.iter() {
         let order = order_mutex.lock().await.clone();
-        maker_orders_map.insert(uuid, order);
+        maker_orders.insert(*uuid, order);
     }
-    let maker_orders_for_rpc: HashMap<_, _> = maker_orders_map
-        .iter()
-        .map(|(uuid, order)| (*uuid, MakerOrderForMyOrdersRpc::from(order)))
-        .collect();
+    let taker_orders = ordermatch_ctx.my_taker_orders.lock().await.clone();
+    Ok(MyOrdersRpcResponse {
+        maker_orders,
+        taker_orders,
+    })
+}
 
-    let taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
-    let taker_orders_for_rpc: HashMap<_, _> = taker_orders
-        .iter()
-        .map(|(uuid, order)| (uuid, TakerOrderForRpc::from(order)))
-        .collect();
-    let res = MyOrdersResponse {
-        result: MyOrdersResult {
-            maker_orders: maker_orders_for_rpc,
-            taker_orders: taker_orders_for_rpc,
-        },
-    };
-    Response::builder()
-        .body(try_s!(json::to_vec(&res)))
-        .map_err(|e| ERRL!("{}", e))
+/// The legacy `my_orders`: calls [`my_orders_core`] and answers `{"result": {"maker_orders": ..., "taker_orders":
+/// ...}}`.
+pub async fn my_orders(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+    legacy_result(my_orders_core(ctx, MyOrdersRequest {}).await)
 }
 
 pub fn my_maker_orders_dir(ctx: &MmArc) -> PathBuf { ctx.dbdir().join("ORDERS").join("MY").join("MAKER") }
@@ -3729,23 +3846,22 @@ pub async fn cancel_all_orders(
             cancelled,
             currently_matching,
         })
-        .map_to_mm(CancelAllOrdersError::LegacyError)
+        .map_to_mm(CancelAllOrdersError::InternalError)
 }
 
+/// The typed core of `cancel_all_orders` for the versioned surface: [`cancel_all_orders`] with the request struct.
+pub async fn cancel_all_orders_core(
+    ctx: MmArc,
+    req: CancelAllOrdersReq,
+) -> Result<CancelAllOrdersResponse, MmError<CancelAllOrdersError>> {
+    cancel_all_orders(ctx, req.cancel_by).await
+}
+
+/// The legacy `cancel_all_orders`: decodes `cancel_by` from the inline body, calls [`cancel_all_orders`] and answers
+/// `{"result": {"cancelled": [...], "currently_matching": [...]}}`.
 pub async fn cancel_all_orders_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let cancel_by: CancelBy = try_s!(json::from_value(req["cancel_by"].clone()));
-
-    let (cancelled, currently_matching) = try_s!(cancel_orders_by(&ctx, cancel_by).await);
-
-    let res = json!({
-        "result": {
-            "cancelled": cancelled,
-            "currently_matching": currently_matching,
-        }
-    });
-    Response::builder()
-        .body(json::to_vec(&res).expect("Serialization failed"))
-        .map_err(|e| ERRL!("{}", e))
+    legacy_result(cancel_all_orders(ctx, cancel_by).await)
 }
 
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]

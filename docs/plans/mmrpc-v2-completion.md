@@ -1,11 +1,12 @@
 # Plan: finish mmrpc 2.0 support for the legacy-only RPC methods
 
-**Status:** planning (candidate for the next version; not scheduled) — **Last reviewed:** 2026-11-09
+**Status:** in progress (0.5.0; phase 1, order management, built in PR #359; phases 2–5 open) — **Last reviewed:** 2026-11-15
 
 > **Context:** written 2026-11-09, after CRD ch.43 §43.1A (PR #312) bound which methods exist on
 > which request surface. This plan proposes a Reloaded extension: versioned (`mmrpc: "2.0"`) forms of
 > methods that are legacy-only in KDF Reloaded and in the reference. It reverses no decision of
-> v0.4.0. Nothing here is executed yet.
+> v0.4.0. *(Amended 2026-11-15: the topic was postponed past the 0.4.0 beta on 2026-11-10 and returned
+> for 0.5.0 with the decisions recorded in Part 2.)*
 
 ## Why
 
@@ -77,11 +78,11 @@ The legacy-only names, grouped as in the parity plan's batches:
 | Group | Methods |
 | --- | --- |
 | A. Order management | `setprice`, `update_maker_order`, `cancel_order`, `cancel_all_orders`, `my_orders`, `order_status` |
-| B. Trading | `buy`, `sell`, `orderbook_depth`, `max_taker_vol`, `min_trading_vol`, `get_trade_fee`, `orders_history_by_filter` |
-| C. Swaps | `all_swaps_uuids_by_filter`, `import_swaps`, `recover_funds_of_swap`, `stats_swap_status` |
+| B. Trading | `buy`, `sell`, `orderbook_depth`, `orders_history_by_filter` *(corrected 2026-11-15: `max_taker_vol` and `min_trading_vol` are on both surfaces already; `get_trade_fee` moved to the legacy-only list, D8)* |
+| C. Swaps | `all_swaps_uuids_by_filter`, `import_swaps`, `recover_funds_of_swap` *(the versioned `recover_funds_of_swap` waits for the swap architecture decisions; `stats_swap_status` moved to the legacy-only list on 2026-11-15)* |
 | D. Wallet and coins | `my_balance`, `disable_coin`, `send_raw_transaction`, `validateaddress`, `convertaddress`, `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`, `set_required_confirmations`, `set_requires_notarization` |
 | E. Daemon and network | `version`, `stop`, `metrics`, `get_my_peer_id`, `get_directly_connected_peers`, `get_gossip_mesh`, `get_gossip_peer_topics`, `get_gossip_topic_peers`, `get_relay_mesh`, `ban_pubkey`, `list_banned_pubkeys`, `unban_pubkeys` |
-| Legacy-only for good (§1.4) | `electrum`, `enable`, `help`, `show_priv_key`, `sim_panic` |
+| Legacy-only for good (§1.4) | `electrum`, `enable`, `help`, `show_priv_key`, `sim_panic`, `stats_swap_status`, `get_trade_fee` |
 
 The phase that takes a group first reconciles its list with Reloaded's dispatchers of that day.
 
@@ -93,8 +94,13 @@ versioned form against it.
 ### 1.2 Shape of a versioned form
 
 1. **Request.** The members the legacy form takes inline move into `params`, with the same names,
-   types and defaults (D2 decides the alternative). A versioned request whose `params` carries an
-   unknown member answers `InvalidRequest`, as every versioned method does today.
+   types, optionality and defaults (D2, decided 2026-11-15; a member is redesigned only if a versioned
+   form later gains a capability the legacy form lacks, and none is planned). An unknown member inside
+   `params` is **accepted and ignored**, as the legacy form accepts it; only the envelope keys stay strict
+   (R43.1A.2). *(Corrected 2026-11-15: the earlier text said an unknown member answers `InvalidRequest`.
+   The maintainer decided otherwise so that a client built against a later form keeps working against an
+   older node; the rule and its reason are recorded in the governing chapter note of each phase so a later
+   reference documentation can state it.)*
 2. **Success.**
    - The legacy success content goes under `result`. For a legacy body of the form
      `{"result": X}`, `result` is `X`. For a legacy body that is a bare object, `result` is that
@@ -124,7 +130,7 @@ node's own API. It touches no wire format between nodes. Under `docs/COMPAT_SWIT
 default-side rule", it is the second arm, Reloaded's behavior by default.
 
 - **Recommended: no switch.** A client written for the reference never sends these requests, so
-  nothing it relies on changes.
+  nothing it relies on changes. *(Decided 2026-11-10: no switch.)*
 - **Alternative: a switch.** One `MM2.json` boolean (for example `mmrpc_v2_legacy_methods`, default
   `true`) for an operator who wants a node that answers exactly as the reference. It costs one more
   setting and a test per phase.
@@ -141,6 +147,11 @@ default-side rule", it is the second arm, Reloaded's behavior by default.
 - **`sim_panic`.** A test helper that makes the process panic; it is not part of any client's
   surface, and no versioned form is wanted. *(Amended 2026-11-10: it is compiled only with the
   test-only Cargo feature `sim-panic-rpc` and is absent from shipped builds.)*
+- **`stats_swap_status`.** The legacy handler is a stub that ignores its input and answers a fixed body. A
+  versioned form of a stub binds a contract nobody uses. *(Decided 2026-11-15.)*
+- **`get_trade_fee`.** The reference documentation marks it deprecated in favor of `trade_preimage`, which
+  already has a versioned form with a bound contract (chapter 08; CRD ch.43 R43.1B table and D43.1B.1). A
+  versioned `get_trade_fee` would be a second versioned fee method. *(Decided 2026-11-15.)*
 
 Each of these is recorded in the governing chapter as "legacy-only by decision", so a later phase
 does not reopen it by accident.
@@ -171,7 +182,7 @@ change to a shared piece (the alias registration, the success wrapper, the error
    - each bound `error_type` has its token, its `error_data` kind and its HTTP status asserted
      (parity plan R43.8.6);
    - the legacy form of each method still answers its legacy shape;
-   - an unknown `params` member answers `InvalidRequest`.
+   - an unknown `params` member is ignored and the request succeeds (D2, 2026-11-15).
 3. **Lab row (one per phase).** On a release build, one lab node calls each method of the group in
    both envelopes and compares the answers member by member. A comparison node runs the previous
    dev build, where the versioned call answers `NoSuchMethod`. For phase 1, the row also places, lists
@@ -179,11 +190,14 @@ change to a shared piece (the alias registration, the success wrapper, the error
 4. **Docs.**
    - The governing chapter: a `Deliberate divergence (binding)` note per method, with its W1–W7
      tables.
-   - Ch.43: the R43.1A.4 surface table gains a Reloaded column. D43.1A.1 gets a pointer to this plan
-     for the next version.
+   - Ch.43: the gated R43.1A.4 table stays as it is; a dated Reloaded status note after D43.1A.1 records
+     the Reloaded surface per phase and points to this plan. *(Amended 2026-11-15: cleared chapter text is
+     never edited in place, so the "Reloaded column" is a status note.)*
    - `RELOADED_VS_GLEEC.md`: one catalog entry per phase.
-   - `docs/GLEEC_COMPATIBILITY.md`: one row per phase, with "none — no switch exists" or the switch.
-     `docs/COMPAT_SWITCHES.md` changes only if D1 chooses a switch.
+   - `docs/GLEEC_COMPATIBILITY.md` and `docs/COMPAT_SWITCHES.md`: unchanged. That table lists settings, and
+     D1 chose no switch. *(Amended 2026-11-15.)* The parity register file named in
+     `rpc-api-reference-wire-parity.md` §2.2 does not exist; the chapter note, the catalog entry and the
+     deviations table are the record until it does.
    - `docs/API_REFERENCE_DEVIATIONS.md`: one table per group.
    - CHANGELOG: an Added entry per phase.
 
@@ -204,16 +218,24 @@ change to a shared piece (the alias registration, the success wrapper, the error
 
 | # | Question | Options |
 | --- | --- | --- |
-| D1 | A switch for the extension? | none (recommended, §1.3); one boolean, default on |
-| D2 | `params` shape | the legacy members unchanged inside `params` (recommended: one documented shape, easy for SDKs); a redesigned shape per method, for example the versioned number forms |
-| D3 | Error depth per phase | the failure classes the handler already distinguishes, the rest `Internal` (recommended); a full classification before each phase ships |
-| D4 | Phase order | as §1.5 (recommended); Stashi-first methods only, then stop |
+| D1 | A switch for the extension? | none (recommended, §1.3); one boolean, default on. **Decided 2026-11-10: none.** |
+| D2 | `params` shape | the legacy members unchanged inside `params` (recommended: one documented shape, easy for SDKs); a redesigned shape per method, for example the versioned number forms. **Decided 2026-11-15: the legacy members unchanged inside `params`; unknown members inside `params` are accepted and ignored; only the envelope is strict.** |
+| D3 | Error depth per phase | the failure classes the handler already distinguishes, the rest `Internal` (recommended); a full classification before each phase ships. **Decided 2026-11-15: full classification. Every failure a handler can produce gets a typed class before its phase ships; `Internal` is reserved for failures that have no class in principle.** |
+| D4 | Phase order | as §1.5 (recommended); Stashi-first methods only, then stop. **Decided 2026-11-10 and confirmed 2026-11-15: all five groups, as §1.5.** |
+| D5 | `order_status` success body | `result` is the bare legacy `{"type", "order"}` object; or a redesigned tagged shape. **Decided 2026-11-15: the legacy object unchanged under `result` (`type`, `order`, and `cancellation_reason` for a history order).** |
+| D6 | Where the divergence is recorded | **Decided 2026-11-15:** governing chapter note, `RELOADED_VS_GLEEC.md`, `docs/API_REFERENCE_DEVIATIONS.md`, CHANGELOG; no register file and no `GLEEC_COMPATIBILITY.md` row (§1.6). |
+| D7 | `stats_swap_status` | **Decided 2026-11-15:** legacy-only by decision (§1.4). |
+| D9 | Number encoding of the new answers (CRD ch.43 D43.1C.3) | **Decided 2026-11-15:** each legacy encoding as it stands. |
+| D10 | Token spelling, payload kind and status (CRD ch.43 D43.1C.4) | **Decided 2026-11-15:** each new form follows its nearest documented sibling set (`trade_preimage` for the order and trading forms); statuses 400 for caller-side refusals including state conflicts and an unknown order identifier, 500 for node failures, 503 for the clock refusal. A surface-wide error redesign is `docs/plans/rpc-error-redesign.md` (later version). |
+| D8 | `get_trade_fee` (CRD ch.43 D43.1B.1) | **Decided 2026-11-15:** legacy-only by decision (§1.4); group B is four names and the extension covers 40 methods. |
 
 ## Order of execution
 
-1. The maintainer decides D1–D4 and schedules the plan for a version.
-2. The client request shapes are read (§ "Sources", step 5) and recorded for D2.
-3. Phase 1 lands, including the shared machinery and the ch.43 surface-table column.
+1. The maintainer decides D1–D4 and schedules the plan for a version. *(Done: 0.5.0; D1–D7 decided by 2026-11-15; number forms and error-token details follow the gated conventions passage of ch.43.)*
+2. The client request shapes are read (§ "Sources", step 5) and recorded for D2. *(Read 2026-11-08; the
+   conventions of the documented versioned methods follow through the clean-room workflow before D2 closes.)*
+3. Phase 1 lands, including the shared machinery and the ch.43 status note. Its typed cores and error
+   classes are built first; the versioned registration follows the decided shapes.
 4. Phases 2–5 land in the order of §1.5, one PR each.
 
 ## Out of scope

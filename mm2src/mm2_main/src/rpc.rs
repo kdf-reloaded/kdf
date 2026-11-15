@@ -51,6 +51,7 @@ pub mod connect_metamask;
 #[path = "rpc/dispatcher/dispatcher.rs"] mod dispatcher;
 #[path = "rpc/dispatcher/dispatcher_legacy.rs"]
 mod dispatcher_legacy;
+#[path = "rpc/legacy_adapter.rs"] pub(crate) mod legacy_adapter;
 #[path = "rpc/lp_commands/lp_commands.rs"] pub mod lp_commands;
 #[path = "rpc/lp_commands/lp_commands_legacy.rs"]
 pub mod lp_commands_legacy;
@@ -1032,18 +1033,11 @@ mod server_tests {
         }
     }
 
-    /// The order-management methods that only the legacy method table knows (CRD ch.43 R43.1A.4).
-    const LEGACY_ONLY_ORDER_METHODS: [&str; 9] = [
-        "setprice",
-        "buy",
-        "sell",
-        "update_maker_order",
-        "cancel_order",
-        "cancel_all_orders",
-        "my_orders",
-        "order_status",
-        "orderbook_depth",
-    ];
+    /// The order-management methods that only the legacy method table knows (CRD ch.43 R43.1A.4). `setprice`,
+    /// `update_maker_order`, `cancel_order`, `cancel_all_orders`, `my_orders` and `order_status` are not among them:
+    /// since 0.5.0 they also have a versioned form, a Reloaded extension that the reference does not have
+    /// (`docs/plans/mmrpc-v2-completion.md`, phase 1; tested in `versioned_order_methods_*` below).
+    const LEGACY_ONLY_ORDER_METHODS: [&str; 3] = ["buy", "sell", "orderbook_depth"];
 
     fn assert_http_status(status_line: &str, code: u16) {
         assert!(
@@ -1093,7 +1087,7 @@ mod server_tests {
     #[test]
     fn versioned_request_for_a_legacy_only_order_method_is_authenticated_before_the_lookup() {
         let (_ctx, addr) = start_server();
-        let request = json!({ "mmrpc": "2.0", "method": "setprice", "params": {}, "id": 5 });
+        let request = json!({ "mmrpc": "2.0", "method": "buy", "params": {}, "id": 5 });
         let (status, body) = post(addr, &request);
         assert_http_status(&status, 403);
         assert_eq!(body["mmrpc"], "2.0", "{body}");
@@ -1108,11 +1102,17 @@ mod server_tests {
     #[test]
     fn legacy_shaped_body_with_an_mmrpc_key_answers_invalid_request() {
         let (_ctx, addr) = start_server();
+        let uuid = "2f9afe84-7a89-4194-8947-45fba563118f";
         let cases = [
             (
                 "setprice",
                 json!({ "base": "RIN", "rel": "KMD", "price": 1, "volume": 1 }),
             ),
+            ("update_maker_order", json!({ "uuid": uuid })),
+            ("cancel_order", json!({ "uuid": uuid })),
+            ("cancel_all_orders", json!({ "cancel_by": { "type": "All" } })),
+            ("order_status", json!({ "uuid": uuid })),
+            ("my_orders", json!({ "unknown": 1 })),
             ("my_balance", json!({ "coin": "RIN" })),
         ];
         for (method, inline) in cases {
@@ -1133,17 +1133,22 @@ mod server_tests {
     fn assert_mmrpc_error(answer: &(String, Json), code: u16, error_type: &str, id: Json) {
         let (status, body) = answer;
         assert_http_status(status, code);
-        assert_eq!(body["mmrpc"], "2.0", "{body}");
-        assert_eq!(body["error_type"], error_type, "{body}");
-        assert_eq!(body.get("id"), Some(&id), "{body}");
+        // No message below carries the body: it is an error payload.
+        assert_eq!(body["mmrpc"], "2.0", "{error_type}: mmrpc version");
+        assert_eq!(body["error_type"], error_type, "{error_type}: error_type");
+        assert_eq!(body.get("id"), Some(&id), "{error_type}: id");
     }
 
     /// The answer must be the legacy error body: HTTP 500, exactly one member `error`, no mmrpc envelope.
     fn assert_legacy_error_body(answer: &(String, Json)) {
         let (status, body) = answer;
         assert_http_status(status, 500);
-        assert_eq!(body.as_object().map(|object| object.len()), Some(1), "{body}");
-        assert!(body["error"].is_string(), "{body}");
+        assert_eq!(
+            body.as_object().map(|object| object.len()),
+            Some(1),
+            "the legacy error body has one member"
+        );
+        assert!(body["error"].is_string(), "the legacy error member is a string");
     }
 
     /// CRD ch.43 R43.1A.1a-R43.1A.1c: a legacy request (no `mmrpc`) shaped like a versioned one minus the key, for a
@@ -1306,6 +1311,400 @@ mod server_tests {
         assert_legacy_error_body(&failure);
         let error = failure.1["error"].as_str().unwrap();
         assert!(error.contains("No such coin: NO_SUCH_COIN"), "{}", failure.1);
+    }
+
+    /// The error text of a legacy handler answer without the `file:line] ` tokens in front of it. `ERR!` and `try_s!` put
+    /// one there at the handler and at every layer above it (the dispatcher, the server), and the line numbers change
+    /// with every edit of the source; one of the tokens must name the order-matching handler file.
+    fn legacy_error_text_without_location(answer: &(String, Json)) -> String {
+        assert_legacy_error_body(answer);
+        let error = answer.1["error"].as_str().unwrap();
+        let leading = Regex::new(r"^(?:[A-Za-z0-9_]+:\d+\] )+").unwrap();
+        let prefix = leading.find(error).map(|found| found.as_str()).unwrap_or_default();
+        assert!(
+            prefix.contains("ordermatch_trading:"),
+            "the text keeps the prefix of its handler file"
+        );
+        error[prefix.len()..].to_owned()
+    }
+
+    /// The six order-management methods that moved onto typed cores (plan `mmrpc-v2-completion`, phase 1) answer on the
+    /// legacy surface exactly as the handlers of dev did, on a node with no orders: each body is the one the dev
+    /// handler built (`my_orders`: `MyOrdersResponse`; `cancel_all_orders_rpc`: `json!({"result": ..})`;
+    /// `cancel_order_rpc`: HTTP 404 and `json!({"error": ..})`), and each refusal is the text of its `ERR!`/`try_s!`
+    /// site, as the legacy error body (HTTP 500, one member `error`).
+    #[test]
+    fn legacy_order_methods_keep_their_answers_on_a_node_without_orders() {
+        let (_ctx, addr) = start_server();
+        let uuid = "2f9afe84-7a89-4194-8947-45fba563118f";
+
+        let (status, body) = post_legacy(addr, "my_orders", json!({}));
+        assert_http_status(&status, 200);
+        assert_eq!(body.to_string(), r#"{"result":{"maker_orders":{},"taker_orders":{}}}"#);
+
+        let (status, body) = post_legacy(addr, "cancel_all_orders", json!({ "cancel_by": { "type": "All" } }));
+        assert_http_status(&status, 200);
+        assert_eq!(
+            body.to_string(),
+            r#"{"result":{"cancelled":[],"currently_matching":[]}}"#
+        );
+
+        let (status, body) = post_legacy(addr, "cancel_order", json!({ "uuid": uuid }));
+        assert_http_status(&status, 404);
+        assert_eq!(
+            body.to_string(),
+            format!(r#"{{"error":"Order with uuid {uuid} is not found"}}"#)
+        );
+
+        let answer = post_legacy(addr, "order_status", json!({ "uuid": uuid }));
+        assert_eq!(
+            legacy_error_text_without_location(&answer),
+            format!("Order with uuid {uuid} is not found")
+        );
+
+        let answer = post_legacy(addr, "update_maker_order", json!({ "uuid": uuid }));
+        assert_eq!(
+            legacy_error_text_without_location(&answer),
+            format!("There is no order with UUID {uuid}")
+        );
+
+        let answer = post_legacy(
+            addr,
+            "setprice",
+            json!({ "base": "RIN", "rel": "KMD", "price": 1, "volume": 1 }),
+        );
+        assert_eq!(
+            legacy_error_text_without_location(&answer),
+            "Base coin RIN is not found"
+        );
+
+        // A body that does not decode keeps the text of the decoder, one prefix in front.
+        let answer = post_legacy(addr, "setprice", json!({ "base": "RIN" }));
+        assert_eq!(legacy_error_text_without_location(&answer), "missing field `rel`");
+    }
+
+    // ----- The group-A order methods on the versioned surface (plan `mmrpc-v2-completion`, phase 1) -----
+    //
+    // A Reloaded extension since 0.5.0: the reference has no versioned form of these six methods. `params` carries the
+    // legacy members unchanged, unknown members of `params` are ignored (the envelope stays strict), `result` is the
+    // content of the legacy `result` (the bare object for `order_status`) and the errors are the typed enums of the
+    // cores.
+
+    /// POSTs a versioned request over HTTP. `params` is left out when `None`.
+    fn post_v2(addr: SocketAddr, method: &str, params: Option<Json>, id: usize) -> (String, Json) {
+        let mut request = json!({ "mmrpc": "2.0", "userpass": "pw", "method": method, "id": id });
+        if let Some(params) = params {
+            request["params"] = params;
+        }
+        post(addr, &request)
+    }
+
+    /// The status code of an HTTP status line.
+    fn code_of(status_line: &str) -> u16 { status_line.split_whitespace().nth(1).unwrap().parse().unwrap() }
+
+    /// Runs `request` through the whole server path (the legacy table, the fallback, the versioned dispatcher) on the
+    /// test thread, so that the coin mocks of the test apply, and returns the HTTP status and the JSON body.
+    fn call(ctx: &MmArc, request: Json) -> (u16, Json) {
+        let client = SocketAddr::from(([127, 0, 0, 1], 4242));
+        let response = common::block_on(process_single_request(ctx.clone(), request, client)).expect("an answer");
+        let body = json::from_slice(response.body()).unwrap_or_else(|_| panic!("the answer is JSON"));
+        (response.status().as_u16(), body)
+    }
+
+    fn call_v2(ctx: &MmArc, method: &str, params: Json, id: usize) -> (u16, Json) {
+        call(
+            ctx,
+            json!({ "mmrpc": "2.0", "userpass": "pw", "method": method, "params": params, "id": id }),
+        )
+    }
+
+    fn call_legacy(ctx: &MmArc, method: &str, params: Json) -> (u16, Json) {
+        let mut request = json!({ "userpass": "pw", "method": method });
+        for (key, value) in params.as_object().expect("the inline parameters are an object") {
+            request[key.as_str()] = value.clone();
+        }
+        call(ctx, request)
+    }
+
+    /// A versioned success: HTTP 200, the 2.0 envelope with the `id` echoed and no error member. Returns `result`.
+    fn versioned_result(answer: (u16, Json), id: usize) -> Json {
+        let (status, body) = answer;
+        // No message below carries the body: a refused request would put an error payload into it.
+        assert_eq!(status, 200, "versioned success: status");
+        assert_eq!(body["mmrpc"], "2.0", "versioned success: mmrpc version");
+        assert_eq!(body["id"], id, "versioned success: id");
+        assert!(
+            body.get("error").is_none() && body.get("error_type").is_none(),
+            "versioned success: no error member"
+        );
+        body["result"].clone()
+    }
+
+    /// `actual` and `expected` are objects with the same members and the same value for each, member by member.
+    fn assert_same_members(actual: &Json, expected: &Json, what: &str) {
+        let object = |value: &Json| {
+            value
+                .as_object()
+                .unwrap_or_else(|| panic!("{what}: not an object"))
+                .clone()
+        };
+        let (actual, expected) = (object(actual), object(expected));
+        let keys = |object: &serde_json::Map<String, Json>| {
+            let mut keys: Vec<String> = object.keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(keys(&actual), keys(&expected), "{what}: the members differ");
+        for (key, value) in &expected {
+            assert_eq!(&actual[key], value, "{what}: member {key}");
+        }
+    }
+
+    /// The typed refusal: HTTP status, `error_type` token, the JSON type of `error_data` (`None`: the key is absent) and
+    /// the echoed `id`, in the mmrpc 2.0 error envelope.
+    fn assert_typed_refusal(answer: &(String, Json), status: u16, token: &str, data: Option<&str>, id: usize) {
+        assert_mmrpc_error(answer, status, token, json!(id));
+        let body = &answer.1;
+        match data {
+            Some("object") => assert!(body["error_data"].is_object(), "{token}: error_data kind"),
+            Some("string") => assert!(body["error_data"].is_string(), "{token}: error_data kind"),
+            Some(other) => panic!("unknown kind of error_data: {other}"),
+            None => assert!(body.get("error_data").is_none(), "{token}: error_data kind"),
+        }
+        assert!(
+            body["error"].is_string() && body.get("result").is_none(),
+            "{token}: error envelope"
+        );
+    }
+
+    /// Each of the six methods answers a versioned success in the 2.0 envelope with `id` echoed, and `result` has the
+    /// members of the content that the legacy body carries under `result` (for `order_status`: of the legacy body).
+    /// Every request carries an unknown member inside `params`, which is ignored. The maker order is compared with the
+    /// object the dev handler rendered, `MakerOrderForRpc` of the order in the container.
+    #[test]
+    fn versioned_order_methods_answer_the_legacy_result_in_the_2_0_envelope() {
+        use crate::mm2::lp_ordermatch::order_rpc_tests::Node;
+        use crate::mm2::lp_ordermatch::MakerOrderForRpc;
+
+        let node = Node::new();
+        let ctx = &node.ctx;
+        let rendered =
+            |order: &crate::mm2::lp_ordermatch::MakerOrder| json::to_value(MakerOrderForRpc::from(order)).unwrap();
+
+        // `setprice`: the maker order object (the dev `set_price` answered `{"result": MakerOrderForRpc}`).
+        let result = versioned_result(
+            call_v2(
+                ctx,
+                "setprice",
+                json!({ "base": "DYN", "rel": "KMD", "price": "1", "volume": "1", "min_volume": "0.1",
+                        "save_in_history": false, "unknown_member": true }),
+                11,
+            ),
+            11,
+        );
+        let uuid: uuid::Uuid = result["uuid"].as_str().unwrap().parse().unwrap();
+        assert_same_members(&result, &rendered(&node.order(uuid)), "setprice");
+        // Out of the way of the `cancel_all_orders` check below.
+        assert_eq!(call_legacy(ctx, "cancel_order", json!({ "uuid": uuid })).0, 200);
+
+        // `update_maker_order`: the updated maker order object.
+        let order = node.add_order(true, true);
+        let result = versioned_result(
+            call_v2(
+                ctx,
+                "update_maker_order",
+                json!({ "uuid": order.uuid, "new_price": "0.6", "unknown_member": 1 }),
+                12,
+            ),
+            12,
+        );
+        assert_same_members(&result, &rendered(&node.order(order.uuid)), "update_maker_order");
+        assert_eq!(result["price"], "0.6");
+
+        // `order_status`: the legacy object unchanged under `result`, for an active order and for a history order.
+        let result = versioned_result(
+            call_v2(
+                ctx,
+                "order_status",
+                json!({ "uuid": order.uuid, "unknown_member": 1 }),
+                13,
+            ),
+            13,
+        );
+        let legacy = call_legacy(ctx, "order_status", json!({ "uuid": order.uuid }));
+        assert_eq!(legacy.0, 200);
+        assert_same_members(&result, &legacy.1, "order_status (active)");
+        assert_eq!(result["type"], "Maker");
+
+        // `cancel_order`: the string "success" (the legacy body is `{"result": "success"}`).
+        let result = versioned_result(
+            call_v2(
+                ctx,
+                "cancel_order",
+                json!({ "uuid": order.uuid, "unknown_member": 1 }),
+                14,
+            ),
+            14,
+        );
+        assert_eq!(result, json!("success"));
+        let other = node.add_order(true, true);
+        let legacy = call_legacy(ctx, "cancel_order", json!({ "uuid": other.uuid }));
+        assert_eq!(legacy.1["result"], result);
+
+        let result = versioned_result(call_v2(ctx, "order_status", json!({ "uuid": order.uuid }), 15), 15);
+        let legacy = call_legacy(ctx, "order_status", json!({ "uuid": order.uuid }));
+        assert_same_members(&result, &legacy.1, "order_status (history)");
+        assert_eq!(result["cancellation_reason"], "Cancelled");
+
+        // `cancel_all_orders`: `{cancelled, currently_matching}`, as the legacy `result` carries it.
+        let first = node.add_order(true, true);
+        let result = versioned_result(
+            call_v2(
+                ctx,
+                "cancel_all_orders",
+                json!({ "cancel_by": { "type": "All" }, "unknown_member": 1 }),
+                16,
+            ),
+            16,
+        );
+        assert_same_members(
+            &result,
+            &json!({ "cancelled": [first.uuid], "currently_matching": [] }),
+            "cancel_all_orders",
+        );
+        let second = node.add_order(true, true);
+        let legacy = call_legacy(ctx, "cancel_all_orders", json!({ "cancel_by": { "type": "All" } }));
+        assert_same_members(
+            &legacy.1["result"],
+            &json!({ "cancelled": [second.uuid], "currently_matching": [] }),
+            "cancel_all_orders (legacy)",
+        );
+
+        // `my_orders`: `{maker_orders, taker_orders}`; `params` absent, `null`, `{}` and an object with members.
+        let order = node.add_order(false, false);
+        let legacy = call_legacy(ctx, "my_orders", json!({}));
+        for (id, params) in [
+            (17, None),
+            (18, Some(Json::Null)),
+            (19, Some(json!({}))),
+            (20, Some(json!({ "unknown_member": 1 }))),
+        ] {
+            let mut request = json!({ "mmrpc": "2.0", "userpass": "pw", "method": "my_orders", "id": id });
+            if let Some(params) = params {
+                request["params"] = params;
+            }
+            let result = versioned_result(call(ctx, request), id);
+            assert_same_members(&result, &legacy.1["result"], "my_orders");
+            assert!(result["maker_orders"][order.uuid.to_string()].is_object(), "{result}");
+        }
+    }
+
+    /// The typed refusals a node without coins and orders reaches through the dispatcher: the token, the `error_data`
+    /// kind, the HTTP status and the `id` of each. An unknown member inside `params` is ignored here too: the request
+    /// is decoded and refused for its content. `my_orders` succeeds on an empty node with every spelling of "no
+    /// members". Variants that need a live coin are covered by the unit tests of the cores.
+    #[test]
+    fn versioned_order_methods_answer_their_typed_refusals_on_a_node_without_coins() {
+        let (_ctx, addr) = start_server();
+        let uuid = "2f9afe84-7a89-4194-8947-45fba563118f";
+
+        for (id, method) in [(21, "cancel_order"), (22, "order_status"), (23, "update_maker_order")] {
+            let answer = post_v2(addr, method, Some(json!({ "uuid": uuid, "unknown_member": 1 })), id);
+            assert_typed_refusal(&answer, 400, "UUIDNotFound", Some("object"), id);
+            assert_eq!(answer.1["error_data"]["uuid"], uuid, "{method}: error_data uuid");
+        }
+
+        let answer = post_v2(
+            addr,
+            "setprice",
+            Some(json!({ "base": "RIN", "rel": "KMD", "price": 1, "volume": 1, "unknown_member": 1 })),
+            24,
+        );
+        assert_typed_refusal(&answer, 400, "NoSuchCoin", Some("object"), 24);
+        assert_eq!(answer.1["error_data"]["coin"], "RIN", "setprice: error_data coin");
+
+        // Params that do not decode answer `InvalidRequest` (string payload, HTTP 400), as for every versioned method.
+        let answer = post_v2(addr, "setprice", Some(json!({ "base": "RIN" })), 25);
+        assert_typed_refusal(&answer, 400, "InvalidRequest", Some("string"), 25);
+        let answer = post_v2(addr, "cancel_all_orders", Some(json!({})), 26);
+        assert_typed_refusal(&answer, 400, "InvalidRequest", Some("string"), 26);
+        let answer = post_v2(addr, "cancel_order", None, 27);
+        assert_typed_refusal(&answer, 400, "InvalidRequest", Some("string"), 27);
+
+        // `my_orders` and `cancel_all_orders` succeed on a node with no orders.
+        for (id, params) in [
+            (28, None),
+            (29, Some(Json::Null)),
+            (30, Some(json!({}))),
+            (31, Some(json!({ "unknown_member": 1 }))),
+        ] {
+            let (status, body) = post_v2(addr, "my_orders", params, id);
+            let result = versioned_result((code_of(&status), body), id);
+            assert_eq!(result, json!({ "maker_orders": {}, "taker_orders": {} }));
+        }
+        let (status, body) = post_v2(
+            addr,
+            "cancel_all_orders",
+            Some(json!({ "cancel_by": { "type": "All" }, "unknown_member": 1 })),
+            32,
+        );
+        let result = versioned_result((code_of(&status), body), 32);
+        assert_eq!(result, json!({ "cancelled": [], "currently_matching": [] }));
+    }
+
+    /// The refusal of the rel coin needs a registered base coin, so it runs on a node with coins.
+    #[test]
+    fn versioned_setprice_refuses_an_unknown_rel_coin() {
+        use crate::mm2::lp_ordermatch::order_rpc_tests::Node;
+
+        let node = Node::new();
+        let (status, body) = call_v2(
+            &node.ctx,
+            "setprice",
+            json!({ "base": "DYN", "rel": "NOPE", "price": 1, "volume": 1 }),
+            33,
+        );
+        assert_typed_refusal(
+            &(format!("HTTP/1.1 {status}"), body.clone()),
+            400,
+            "NoSuchCoin",
+            Some("object"),
+            33,
+        );
+        assert_eq!(body["error_data"]["coin"], "NOPE", "setprice: error_data coin");
+    }
+
+    /// The legacy form of each of the six methods keeps answering its legacy body next to the versioned one (the
+    /// recorded bodies are those of `legacy_order_methods_keep_their_answers_on_a_node_without_orders`).
+    #[test]
+    fn legacy_order_methods_still_answer_their_legacy_bodies_beside_the_versioned_forms() {
+        let (_ctx, addr) = start_server();
+        let (status, body) = post_legacy(addr, "my_orders", json!({}));
+        assert_http_status(&status, 200);
+        assert_eq!(body.to_string(), r#"{"result":{"maker_orders":{},"taker_orders":{}}}"#);
+        let (status, body) = post_legacy(addr, "cancel_all_orders", json!({ "cancel_by": { "type": "All" } }));
+        assert_http_status(&status, 200);
+        assert_eq!(
+            body.to_string(),
+            r#"{"result":{"cancelled":[],"currently_matching":[]}}"#
+        );
+        let uuid = "2f9afe84-7a89-4194-8947-45fba563118f";
+        let (status, body) = post_legacy(addr, "cancel_order", json!({ "uuid": uuid }));
+        assert_http_status(&status, 404);
+        assert_eq!(
+            body.to_string(),
+            format!(r#"{{"error":"Order with uuid {uuid} is not found"}}"#)
+        );
+        for (method, params) in [
+            ("order_status", json!({ "uuid": uuid })),
+            ("update_maker_order", json!({ "uuid": uuid })),
+            (
+                "setprice",
+                json!({ "base": "RIN", "rel": "KMD", "price": 1, "volume": 1 }),
+            ),
+        ] {
+            assert_legacy_error_body(&post_legacy(addr, method, params));
+        }
     }
 
     /// The SSE answer must stay open and deliver events as they happen, not only once the body ends.
