@@ -29,6 +29,9 @@ use std::{fmt::{Debug, Formatter, Result as FmtResult},
           str::FromStr,
           sync::Arc};
 
+/// The SPL Token program id, the token program of a `SPLTOKEN` configuration.
+pub const SPL_TOKEN_PROGRAM_ID: Pubkey = spl_token::ID;
+
 #[derive(Debug)]
 pub enum SplTokenCreationError {
     InvalidPubkey(String),
@@ -39,11 +42,15 @@ pub struct SplTokenConf {
     pub decimals: u8,
     pub ticker: String,
     pub token_contract_address: Pubkey,
+    /// The token program that owns the mint (SPL Token or Token-2022). Stored only; the token's account, balance
+    /// and transfer computations do not use it yet.
+    pub program_id: Pubkey,
 }
 
 #[derive(Clone, Debug)]
 pub struct SplTokenInfo {
     pub token_contract_address: Pubkey,
+    pub program_id: Pubkey,
     pub decimals: u8,
 }
 
@@ -52,6 +59,8 @@ pub struct SplProtocolConf {
     pub platform_coin_ticker: String,
     pub decimals: u8,
     pub token_contract_address: String,
+    /// The token program id: the one the configuration names for `SOLANATOKEN`, the SPL Token program for `SPLTOKEN`.
+    pub program_id: Pubkey,
 }
 
 #[derive(Clone)]
@@ -69,6 +78,7 @@ impl SplToken {
         decimals: u8,
         ticker: String,
         token_address: String,
+        program_id: Pubkey,
         platform_coin: SolanaCoin,
     ) -> Result<SplToken, MmError<SplTokenCreationError>> {
         let token_contract_address = Pubkey::from_str(&token_address)
@@ -77,6 +87,7 @@ impl SplToken {
             decimals,
             ticker,
             token_contract_address,
+            program_id,
         });
         Ok(SplToken { conf, platform_coin })
     }
@@ -84,6 +95,7 @@ impl SplToken {
     pub fn get_info(&self) -> SplTokenInfo {
         SplTokenInfo {
             token_contract_address: self.conf.token_contract_address,
+            program_id: self.conf.program_id,
             decimals: self.decimals(),
         }
     }
@@ -203,6 +215,7 @@ impl SplToken {
             coin.platform_coin
                 .my_balance_spl(&SplTokenInfo {
                     token_contract_address: coin.conf.token_contract_address,
+                    program_id: coin.conf.program_id,
                     decimals: coin.conf.decimals,
                 })
                 .await

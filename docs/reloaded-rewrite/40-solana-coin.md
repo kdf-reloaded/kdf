@@ -110,6 +110,16 @@ R40.1.3 **SPL token configuration.** An SPL token's `protocol` is
 A `mint_address` / `program_id` that is not a valid base58 public key makes the
 protocol unparsable (`TokenProtocolParseError`).
 
+> **Reloaded status (clean side, 2026-11-15).** Implemented in PR #N, on
+> native targets; WASM follows with the WASM package of
+> `docs/plans/solana-support.md`. Both forms of R40.1.2 and R40.1.3 are read.
+> Reloaded also keeps reading its own forms: `{"type": "SOLANA"}` without
+> `protocol_data` (and with `protocol_data: null`), and `SPLTOKEN` with
+> `token_contract_address`, which means the SPL Token program. A Solana
+> platform protocol is always written back as `{"type": "SOLANA"}`, the form
+> of ch. 36 R36.0.3. Each token keeps its `program_id`, but the token's
+> account, balance and transfers use it only from the Token-2022 package on.
+
 R40.1.4 **Keys and addresses.** The Solana keypair shall be the ed25519 keypair
 whose 32-byte seed is the wallet's single-key (Iguana) secp256k1 private-key
 secret; the platform address is the base58 encoding of its public key. Only the
@@ -505,5 +515,5 @@ with the shapes listed in §40.6 items 3-5.
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required.
 - *Clean-context addition (2026-11-15, forbidden corpus not consulted):* the
-  Reloaded status note after §40.6 item 7 records the state of this
-  repository's own code. It takes no forbidden-class input.
+  Reloaded status notes after R40.1.3 and after §40.6 item 7 record the state
+  of this repository's own code. They take no forbidden-class input.

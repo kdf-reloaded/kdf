@@ -52,7 +52,9 @@ fn unavailable_protocol_message(protocol: &CoinProtocol) -> Option<&'static str>
     match protocol {
         CoinProtocol::TRX { .. } | CoinProtocol::TRC20 { .. } if !TRON_ACTIVATION_AVAILABLE => Some(TRON_NOT_AVAILABLE),
         #[cfg(not(target_arch = "wasm32"))]
-        CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } if !SOLANA_ACTIVATION_AVAILABLE => {
+        CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } | CoinProtocol::SOLANATOKEN { .. }
+            if !SOLANA_ACTIVATION_AVAILABLE =>
+        {
             Some(SOLANA_NOT_AVAILABLE)
         },
         _ => None,
@@ -162,7 +164,7 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
             return ERR!("Solana protocol is not supported by lp_coininit - use enable_solana_with_tokens instead")
         },
         #[cfg(not(target_arch = "wasm32"))]
-        CoinProtocol::SPLTOKEN { .. } => {
+        CoinProtocol::SPLTOKEN { .. } | CoinProtocol::SOLANATOKEN { .. } => {
             return ERR!("SplToken protocol is not supported by lp_coininit - use enable_spl instead")
         },
         // The legacy `enable` method activates a Sia-protocol coin synchronously: the Sia members sit at
@@ -1063,6 +1065,18 @@ mod postponed_family_switch_tests {
             Some(SOLANA_NOT_AVAILABLE)
         );
         assert_eq!(unavailable_protocol_message(&spl), Some(SOLANA_NOT_AVAILABLE));
+        let solana_token = CoinProtocol::from_conf_json(serde_json::json!({
+            "type": "SOLANATOKEN",
+            "protocol_data": {
+                "platform": "SOL",
+                "decimals": 6,
+                "mint_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "program_id": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            }
+        }))
+        .unwrap();
+        assert!(matches!(solana_token, CoinProtocol::SOLANATOKEN { .. }));
+        assert_eq!(unavailable_protocol_message(&solana_token), Some(SOLANA_NOT_AVAILABLE));
     }
 
     #[test]

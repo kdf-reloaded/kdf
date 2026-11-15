@@ -3522,7 +3522,7 @@ pub(crate) fn orderbook_address(
             }
         },
         #[cfg(not(target_arch = "wasm32"))]
-        CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } => {
+        CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } | CoinProtocol::SOLANATOKEN { .. } => {
             MmError::err(OrderbookAddrErr::CoinIsNotSupported(coin.to_owned()))
         },
         // Sia's receiving address is derived from a per-coin ed25519 key, not

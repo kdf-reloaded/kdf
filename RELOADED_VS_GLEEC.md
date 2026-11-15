@@ -127,6 +127,16 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   names are additive and need no switch. See
   `docs/reloaded-rewrite/rpc-method-census.md`.
 
+- **Additional Solana coin-configuration forms.** Besides the forms GLEEC KDF
+  uses (`SOLANA` with `protocol_data: {}`, and `SOLANATOKEN` with `platform`,
+  `decimals`, `mint_address` and `program_id`), Reloaded reads its own older
+  forms: `{"type": "SOLANA"}` without `protocol_data`, and `SPLTOKEN` with
+  `platform`, `decimals` and `token_contract_address`, which means the SPL
+  Token program. The extra forms are additive and need no switch. Solana
+  stays switched off in this beta (see
+  [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
+  R40.1.2, R40.1.3; PR #N.
+
 - **Opt-in: an absent `max_eth_tx_type` read as unrestricted.** By default
   Reloaded reads a coin configuration with no `max_eth_tx_type` key as GLEEC KDF
   does: the coin may send untyped (legacy) transactions only, and an EIP-1559
