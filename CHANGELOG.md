@@ -18,7 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   a time but did not wait for it, so the lock was never held, and removing one
   (`remove_delegation`) did not ask for it at all. A delegation and a withdraw started together
   could therefore pick the same coins. Both delegation calls now wait for the lock, as a withdraw
-  does. Detail: PR #TBD; CRD ch.38 R38.5B.5.
+  does. Detail: PR #354; CRD ch.38 R38.5B.5.
 
 ## [0.4.0-beta.1] — 2026-11-14
 
