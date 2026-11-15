@@ -1347,6 +1347,32 @@ every maintained session.
 >   number; using 2` or `electrum_spread_near_offset_ms <value> is not a non-negative
 >   number; using 20`; the figure is the default constant.
 
+*Amendment (2026-11-15, clean side; Reloaded-original; interim until
+D38.6.4Q.4 is implemented). The QTUM family's unspent lists are not spread.*
+1. For a coin instance whose coins-file `protocol.type` is `QTUM` or `QRC20`,
+   an unspent-list request (`blockchain.scripthash.listunspent`), and an
+   R38.6.3a batch that carries one, does not take a turn under item 1. It
+   tries the up-to-date maintained sessions in priority order and then the
+   out-of-date ones, exactly as every read does with `electrum_spread_reads`
+   `false` (R38.6.4o item 5). It does not advance the turn counter.
+2. Every other read-only query of those instances still spreads, and every
+   other coin is unchanged. `electrum_spread_reads` `false` still turns all
+   spreading off.
+3. *Reason.* Item 4 relies on the recently-spent record. For the QTUM family
+   that record does not cover a QRC20 token's broadcasts, and the listings of
+   QTUM and of its tokens do not consult one shared record (R38.6.4Q.7 item 6;
+   §38.6.4Q, note 2 on existing text). A listing sent in turn to a session that
+   has not yet seen this node's last broadcast could therefore offer an input
+   that the broadcast already spent. With priority order the listing goes to
+   the session that a broadcast tries first (item 2; R38.6.4o item 5), as
+   happens in the reference, where reads are not spread.
+4. *Limit.* This narrows the exposure and does not close it: the session that
+   took a broadcast can still answer a listing before it has indexed it, and
+   a broadcast that failed over to another session leaves the gap open. The
+   shared record of D38.6.4Q.4 closes it, and this amendment then lapses.
+5. No peer observes it. A user sees no change, except that the QTUM family's
+   unspent lists no longer take turns among the near servers.
+
 R38.6.4b **Pool composition and bounds.** (Reference-bound at the rows
 `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, which agree.)
 1. The servers listed in the activation request ([chapter 55](55-coin-activation-wire-contract.md)
@@ -5444,3 +5470,9 @@ R38.8.6 **Tests (two-direction, observable).**
   clean-room gate tool was not applicable. Limit: the verdict covers the two
   added ranges only and clears expression and reference states, not factual
   accuracy.
+- *Reloaded-original amendment (2026-11-15), clean side -- after the as-built notes
+  of R38.6.4a: the QTUM family's unspent lists are not spread (interim until
+  D38.6.4Q.4).* Written by a session that never read the forbidden corpus. The
+  inputs are this repository's code and the cleared §38.6.4Q (R38.6.4Q.7 and its
+  note 2 on existing text). It takes no forbidden-class input, so chapter 01 R38
+  is not engaged and no gate pass is required.
