@@ -3379,6 +3379,611 @@ evaluated.
 > `CoinIsNotElectrum` and an inactive ticker for `NoSuchCoin`; its routing in the
 > dispatcher has no test of its own.
 
+### 38.6.4Q QTUM and QRC20 over Electrum: clients, methods and shared wallet state (Spec Reader round 0.5.0-1; pending the KDF Dirty Gate)
+
+> **Provenance status: pending the KDF Dirty Gate.** This subsection is a
+> candidate under chapter 01 R40: until the gate clears it and this marker is
+> replaced by the clearance record, it MUST NOT be relied on as a statement of
+> required behavior and MUST NOT be implemented from. It was written by the
+> dirty-side specification author on 2026-11-15 (Spec Reader round 0.5.0-1)
+> from four inputs: the reference lineage at the rows `v2.6.0-beta` and
+> `v3.0.0-beta` of chapter 02 §2.15A (read read-only; no untabled state was
+> read); the row *baseline anchor (R1)*; this repository's own tree (dev as
+> of 2026-11-15); and the public Qtum ElectrumX document that defines the
+> server's QRC20 methods (named in R38.6.4Q.8). Every passage below is marked
+> *(pending gate)* until cleared.
+
+*Scope.* R38.6.4b–R38.6.4k bind the Electrum client of one coin. This
+subsection states how the reference uses that client for the QTUM family:
+the QTUM coin, its QRC20 tokens and QTUM delegation. It covers how many
+clients and sessions there are, what follows when a server answers a QTUM
+contract method with an error, whether contract events are subscribed, how
+spends of the family's shared QTUM outputs are ordered and remembered, what
+disabling a token stops, and which wire methods a server has to answer. It
+describes the reference. Where the reference behavior is a defect or a waste
+that Reloaded should not copy, a D-item gives options and a recommendation;
+nothing here chooses for Reloaded. Row identity, order and persistence of
+token history stay in R38.5A.8, the spent-output record of a standard UTXO
+coin in §38.5B, and the legacy activation contract in
+[Chapter 55](55-coin-activation-wire-contract.md) §55.4. Native (coin
+daemon) mode is out of scope. *(pending gate)*
+
+*The two rows.* On every point of this subsection the rows `v2.6.0-beta`
+and `v3.0.0-beta` give the same answer; no difference between them was found
+for any rule below. Where a rule also says *baseline*, the behavior is that
+of the row *baseline anchor (R1)* as well, and of this tree unless a note
+says otherwise. *(pending gate)*
+
+R38.6.4Q.1 **One Electrum client per activated instance.** (Reference-bound
+at both rows, which agree. That each instance has a client of its own is
+also the baseline's behaviour.)
+1. QTUM and each QRC20 token are separate coin instances. Each builds its
+   own Electrum client from the `servers`, `min_connected` and
+   `max_connected` of its own activation request (chapter 55 R55.4.3). A
+   QRC20 token is activated by the legacy methods of chapter 55 §55.4 only
+   (`electrum` for Electrum servers); neither row has a task activation or a
+   platform-with-tokens activation for it.
+2. A token does not use, look up or require the QTUM instance. It activates
+   while QTUM is not active, keeps working after QTUM is disabled
+   (R38.6.4Q.10 item 2), and may name other servers than QTUM does.
+3. Each client is a complete pool of R38.6.4b–R38.6.4i, with its own
+   maintained set, version negotiation, ping, maintenance passes and
+   suspensions. A request of one instance never travels over a session of
+   another.
+4. *Count.* The node's sessions are the sum of the maintained sets of the
+   active instances. With QTUM and two tokens active and the same single
+   server in each request, the node keeps **three** sessions to that server.
+   With the same *S* servers in each request and the default bounds it keeps
+   up to three sessions to each server, 3 × *S* in all. With the same list
+   and `max_connected` 1 in each request it keeps three, all to the first
+   reachable server of the list.
+
+*(pending gate)*
+
+R38.6.4Q.2 **What the instances share.** (Reference-bound at both rows; also
+the baseline's behaviour.)
+1. *Shared.* With one wallet key behind them, QTUM and its tokens have one
+   QTUM address: the QTUM outputs of that address pay the miner fee and the
+   gas of every token transaction and of delegation, as well as QTUM's own
+   sends. One process-wide build lock (R38.5B.5), which is the lock of
+   every UTXO-family coin in the process, not of the QTUM family alone. On
+   a native build, the on-disk cache of verbose transactions: a token keys
+   it by its platform coin's ticker, so QTUM and its tokens read and write
+   one cache.
+2. *Not shared.* The Electrum client and its sessions (R38.6.4Q.1). The
+   recently-spent record of §38.5B: one per instance, empty at activation.
+   The history collector, the stored history and the history state. The
+   background work of an instance, which ends with that instance
+   (R38.6.4Q.10).
+
+*(pending gate)*
+
+R38.6.4Q.3 **An error answer ends the request.** (Reference-bound at both
+rows; the general rule is R38.6.4f item 1.) The QTUM-specific requests
+(R38.6.4Q.8) are ordinary requests of R38.6.4f: they are tried over the
+instance's maintained sessions one at a time in priority order, and the
+first session that returns an answer ends the request.
+1. A JSON-RPC error answer is an answer. So is a result that cannot be read
+   as the expected shape. No other server is asked for that request, the
+   session stays open and maintained, and the caller gets the failure.
+2. Only a transport failure or the per-request bound of R38.6.4e item 2
+   moves a request on to the next session and then to the retry over all
+   servers (R38.6.4f item 2). In that retry, too, the first answer to arrive
+   ends the request, an error answer included.
+3. Because routing follows priority, the next request starts at the same
+   server. A server that answers a contract method with an error therefore
+   fails that method for as long as it is the highest-ranked maintained
+   session, however many servers of the list would answer it correctly.
+4. While the instance has no maintained session yet -- usual for the first
+   requests of an activation, which does not wait for the pool (R38.6.4k) --
+   a request goes straight to the retry of item 2. There the server whose
+   answer arrives first decides, whatever its rank.
+
+*(pending gate)*
+
+R38.6.4Q.4 **What a failed contract request does to activation and
+balance.** (Reference-bound at both rows.)
+1. *Activation, decimals.* When the token's coins-file entry has no
+   `decimals`, building the token reads the value from the contract with one
+   `blockchain.contract.call`. If that request fails, the build fails and
+   nothing is registered. Nothing is repeated.
+2. *Activation, balance.* The balance read that the `electrum` response
+   needs (chapter 55 R55.4.6) is, for a token, one `blockchain.contract.call`.
+   If it fails or exceeds the 20 s bound, the token is deregistered again
+   and the request fails with the legacy error body (chapter 55 R55.1.10).
+   Nothing is repeated inside the activation. An activation therefore
+   fails whenever the answer that ends one of these two requests is an
+   error answer (R38.6.4Q.3 items 1 and 4), although other listed servers
+   would answer correctly.
+3. *Balance.* Every balance read of a token sends one fresh
+   `blockchain.contract.call`; the token balance is not kept between reads.
+   A failed read is returned to its caller as a failure (`my_balance`
+   answers an error), and neither an earlier balance nor a zero is put in
+   its place. The token stays active, and the next read asks again.
+4. *History.* R38.6.4Q.6 item 4.
+
+*(pending gate)*
+
+R38.6.4Q.5 **No contract-event subscription.** (Reference-bound at both
+rows. Item 1 is also the baseline's behaviour.)
+1. The reference never sends `blockchain.contract.event.subscribe`: not at
+   activation, not when a stream is enabled, and not after a session is
+   re-established. After a reconnect there is no contract-event subscription
+   to place again.
+2. A token's balance and history are refreshed by polling alone: on request,
+   and by the collector of R38.6.4Q.6 when it runs. The balance stream is
+   not available for a token: `stream::balance::enable` refuses a QRC20
+   token as an unsupported coin (`CoinNotSupported`, HTTP 501).
+3. The one subscription the reference places again when a session ends is
+   the script-hash subscription of R38.6.4h. It serves QTUM itself, as it
+   serves any Electrum-backed UTXO coin.
+
+*(pending gate)*
+
+R38.6.4Q.6 **The token history collector's requests.** (Reference-bound at
+both rows; also the baseline's behaviour.) The collector runs only for a
+token activated with `tx_history` `true`. What a row is, the order and the
+persistence are R38.5A.8; this rule binds what the collector asks the
+servers, and when.
+1. *Start of a pass.* One balance read (`blockchain.contract.call`). If the
+   balance equals the one the last completed pass saw, and no stored row
+   lacks its timestamp or its block height, the pass ends there and the next
+   begins 30 s later. The first pass after activation always continues.
+2. *History request.* One `blockchain.contract.event.get_history` for the
+   wallet's address, the token contract and the ERC-20 `Transfer` topic.
+   From the answer the collector takes the distinct pairs of `tx_hash` and
+   `height`. A stored transaction that the answer no longer lists is
+   dropped.
+3. *Details.* For a listed transaction that is not stored: one
+   `blochchain.transaction.get_receipt`, then the verbose
+   `blockchain.transaction.get` of the transaction and of every distinct
+   transaction whose outputs it spends (the miner fee needs them). For a
+   stored transaction nothing is asked, except one verbose
+   `blockchain.transaction.get` when a row lacks its timestamp; a missing
+   block height is filled from the answer of item 2.
+4. *Failures.* A failed balance read is repeated after 10 s, without limit.
+   A failed history request is repeated after 10 s, without limit, with one
+   exception: an error answer whose error object is exactly
+   `{"code": 1, "message": "history too large"}` ends the collector for the
+   rest of the instance's life and sets the token's history state to an
+   error with code `-1`, which `my_tx_history` reports as `sync_status`. A
+   failure while reading the details of one transaction leaves that
+   transaction out, and the pass goes on.
+5. *After a pass that asked for the history* the next pass begins at once,
+   and item 1 decides whether it continues.
+
+*(pending gate)*
+
+> **Code-quality finding (informative; trigger 1 -- apparent when items 1
+> and 4 are read together; it holds for the reference at both rows and for
+> this repository's own collector).** A transaction left out under item 4 is
+> not stored, and item 1 looks only at the balance and at the stored rows.
+> The collector therefore does not ask for the history again until the
+> balance changes or the token is activated anew, and a transfer whose
+> details one server failed to deliver stays out of `my_tx_history` for that
+> long. Proposed fix: a pass that left a listed transaction out counts as
+> incomplete, and the next pass asks for the history again after the retry
+> delay, whatever the balance. *(pending gate)*
+
+R38.6.4Q.7 **Ordering and remembering spends of the shared QTUM outputs.**
+(Reference-bound at both rows; also the baseline's behaviour. §38.5B binds
+the standard UTXO path; this rule states how the QTUM family differs from
+it.) Each of the following spends QTUM outputs of the one shared address.
+1. *A QTUM send that the swap engine orders* follows R38.5B.1 and R38.5B.5.
+   It holds the lock of QTUM's own record from its listing through the
+   broadcast and the entry, enters QTUM's record, and does not take the
+   process-wide build lock.
+2. *A QTUM withdraw* follows R38.5B.2 and R38.5B.5: the process-wide build
+   lock from the listing through signing, no broadcast, no entry.
+3. *A token's own broadcast* -- a swap payment, spend or refund, or a fee
+   transfer -- holds the process-wide build lock from before its listing
+   until its broadcast has been answered. Its listing passes through the
+   token's own record, whose lock is released as soon as the listing
+   returns. After the broadcast nothing is entered in any record: not in the
+   token's, and not in QTUM's.
+4. *A token withdraw* holds the process-wide build lock from before its
+   token balance read through signing. It does not broadcast and enters
+   nothing.
+5. *Delegation.* Adding a delegation asks for the process-wide build lock
+   but does not wait for it, so the lock is never held. Removing a
+   delegation does not ask for it. Both build from a listing filtered by
+   QTUM's record, return the signed transaction without broadcasting it, and
+   enter nothing.
+6. *Consequences.*
+   - A token's record never receives an entry; it stays empty for the
+     instance's life.
+   - No record knows what a token's broadcast spent, and a token's listing
+     does not know what QTUM's sends spent. Whether a second spend avoids
+     the inputs of a first one therefore rests on the backend's own listing
+     alone in every pairing except a QTUM swap send after a QTUM swap send:
+     QTUM after a token, a token after QTUM, a token after a token (the same
+     one or another), and anything after the broadcast of a withdraw or a
+     delegation.
+   - The process-wide lock puts token broadcasts, token withdraws and
+     withdraw builds one after another. It does not supply the missing
+     record.
+   - A token's broadcast and a QTUM swap send hold different locks and can
+     list at the same time.
+   - While a token waits for the answer to its broadcast, no UTXO-family
+     coin in the process can build a withdraw.
+
+*(pending gate)*
+
+> **Code-quality finding (informative; trigger 2 -- a comment states the
+> problem; the comment is in this repository's own source, carried from the
+> baseline, and the reference keeps the behaviour at both rows).** At the
+> token's broadcast the source says that this path ought to be reworked to
+> use the recently-spent record, and that the tokens and their platform
+> coin ought to work from one such record. Item 6 is the effect, and the
+> options are in D38.6.4Q.4. *(pending gate)*
+
+> **Code-quality finding (informative; trigger 1 -- apparent; it holds for
+> the reference at both rows, for the baseline and for this repository on
+> dev).** Item 5: the request for the lock when a delegation is added has no
+> effect, because the build does not wait until the lock is granted. A
+> delegation can thus be built while a withdraw or a token broadcast is
+> building from the same address, and can select the same inputs. Proposed
+> fix: wait for the lock and hold it from the listing through signing, when
+> a delegation is added and when one is removed. No peer observes the
+> difference. *(pending gate)*
+
+R38.6.4Q.8 **Wire methods of the QTUM family.** (The method names, the
+parameter order and the answer members are the server's dictated interface:
+for the event, receipt and token-information methods, the Qtum ElectrumX
+server's public document `docs/qrc20-integration.md` of
+`qtumproject/qtum-electrumx-server`, fetched 2026-11-15; for
+`blockchain.contract.call`, the baseline's client. Which of them the
+reference sends, and when, is reference-bound at both rows and is also the
+baseline's behaviour.) Addresses, call data, topics and transaction hashes
+travel as hex strings without a `0x` prefix.
+1. `blockchain.contract.call`. Parameters in order: contract address, call
+   data, sender. The reference always sends an empty string as the sender.
+   Of the answer it reads `executionResult.output` only, and decodes it as
+   the return value of the called function. It is sent for `decimals()`
+   (R38.6.4Q.4 item 1), for `balanceOf(address)` (every token balance read),
+   and in swaps for `allowance(address,address)` on the token and for the
+   payment-state query of the swap contract.
+2. `blockchain.contract.event.get_history`. Parameters in order: the 20-byte
+   hash of an address, a contract address, a topic. The answer is a list of
+   objects with `tx_hash`, `height` and `log_index`. It is sent by the token
+   history collector (R38.6.4Q.6 item 2), by a token's swap searches with
+   the `Transfer` topic, and by the QTUM delegation status check, which
+   sends it twice for the wallet's address and the delegation contract: once
+   with the topic of an added delegation and once with that of a removed
+   one.
+3. `blochchain.transaction.get_receipt`. The first segment is spelled
+   `blochchain`; that is the server's own spelling and the only name the
+   reference sends. One parameter, the transaction hash. The answer is a
+   list of receipts in the form of Qtum Core's `gettransactionreceipt`. In
+   every receipt the reference needs `blockHash`, `blockNumber`,
+   `transactionHash`, `transactionIndex`, `outputIndex`, `from`,
+   `cumulativeGasUsed`, `gasUsed` and `log` (each entry with `address`,
+   `topics` and `data`); `to`, `contractAddress`, `excepted` and
+   `exceptedMessage` may be absent. A receipt without a needed member makes
+   the whole answer unreadable (R38.6.4Q.3 item 1). It is sent by the
+   collector (R38.6.4Q.6 item 3), by a token's swap validation and swap
+   searches, and by the delegation status check when more delegations were
+   added than removed.
+4. *Never sent, at either row:* `blockchain.contract.event.subscribe`
+   (R38.6.4Q.5) and `blockchain.token.get_info`.
+5. *Standard methods over a token's own client.* `server.version` and
+   `server.ping` (R38.6.4e); the verbose `blockchain.transaction.get`
+   (R38.6.4Q.6 item 3, and for the maturity of the outputs a spend lists);
+   `blockchain.scripthash.get_balance` and
+   `blockchain.scripthash.listunspent` for the QTUM of the shared address;
+   `blockchain.transaction.broadcast` for the token's own broadcasts; and
+   the block-count query of R38.6.4 (`blockchain.headers.subscribe`), which
+   `my_tx_history`, confirmation waits and the maturity check use. A
+   token's servers therefore have to answer the standard methods as well as
+   the three QTUM ones.
+
+*(pending gate)*
+
+R38.6.4Q.9 **Request order at a token's activation.** (Reference-bound at
+both rows.) For a token activated through `electrum`:
+1. the client is created, and its sessions are established in the
+   background as R38.6.4c and R38.6.4k bind, each with its own
+   `server.version`; steps 2 and 4 do not wait for them (R38.6.4Q.3
+   item 4);
+2. if the coins-file entry has no `decimals`, one `blockchain.contract.call`
+   for `decimals()`;
+3. the token is registered; with `tx_history` `true` the collector starts
+   and runs beside step 4, and its first request is a balance read of its
+   own;
+4. one `blockchain.contract.call` for `balanceOf(address)`, bounded to 20 s,
+   for the response.
+
+The activation asks for nothing else: no block height, no history, no token
+information, no subscription. *(pending gate)*
+
+R38.6.4Q.10 **Disabling and re-enabling a token.** (Reference-bound at both
+rows. The baseline and this tree differ in item 1; see the note.)
+1. Disabling a token removes it from the registry and ends its background
+   work at once. The history collector stops wherever it is -- in a wait, in
+   a request or in the middle of a pass -- and the token's Electrum client
+   stops with it, so its sessions close. Nothing waits for the pass to
+   finish, and what the pass had not yet saved is dropped. The collector
+   also checks at the start of each pass whether its ticker is still
+   registered and ends if it is not; at the two rows that check is a second
+   line only.
+2. Disabling QTUM does not disable its QRC20 tokens and is not held back by
+   them. A token activated through the legacy methods is not registered as
+   depending on QTUM, and it has its own client (R38.6.4Q.1).
+3. Enabling the token again builds a new instance: a new Electrum client
+   with new sessions, an empty record, and, with `tx_history` `true`, a new
+   collector. That collector loads the stored history and makes a first
+   pass that continues (R38.6.4Q.6 item 1): one history request, and detail
+   requests only for transactions that are not stored or lack a timestamp.
+   However short the time between the two requests, exactly one collector
+   and one client serve the token afterwards.
+4. The `disable_coin` request itself -- when it is refused, its response
+   members, and its rule for a platform coin with dependent tokens -- is not
+   bound here.
+
+*(pending gate)*
+
+> **Note (this repository on dev, 2026-11-15; its own code, not the
+> reference).** In this tree, as at the baseline, disabling a token removes
+> its ticker from the registry and stops nothing. The collector is not tied
+> to the token instance's lifetime, so it runs on until its next registry
+> check, which comes after its current wait: 30 s when idle, longer while it
+> backs off (§38.6.5 item 8). Until then it keeps its Electrum client and
+> that client's sessions. When the token is enabled again before that
+> check, the check finds the ticker registered and the old collector goes on
+> beside the new one: two collectors and two clients for one token, both
+> writing the same stored history. The options are in D38.6.4Q.5.
+> *(pending gate)*
+
+> **Notes on existing text of this chapter (informative).**
+> 1. *R38.6.4h, last sentence, and §38.6.5 decision 2.* The contract-event
+>    subscription they speak of is this project's own. The reference has
+>    none (R38.6.4Q.5), so "as before" in R38.6.4h refers to this tree and
+>    not to a reference behavior, and placing the subscription again after a
+>    disconnect would restore nothing the reference has.
+> 2. *R38.6.4a item 4.* The item relies on the recently-spent record to
+>    shield a read that follows this node's own broadcast when another
+>    session answers it. For a token's broadcast nothing is recorded, and a
+>    token's listing does not consult QTUM's record (R38.6.4Q.7 item 6). The
+>    shield therefore does not exist for the QTUM family except between two
+>    QTUM swap sends. In the reference the listing normally goes to the
+>    session that took the broadcast; with `electrum_spread_reads` it may go
+>    to another one, which makes the gap wider in this tree than in the
+>    reference.
+> 3. *§38.5B scope, R38.5B.1 and R38.5B.5.* They describe the standard path.
+>    A QRC20 token has a record like every instance, but its swap-ordered
+>    sends neither hold that record's lock through the broadcast nor enter
+>    anything (R38.6.4Q.7 item 3). R38.5B.1's "only by" stays true; a reader
+>    should not infer that every swap-ordered send is recorded.
+> 4. *As-built note of 2026-11-09 (items 12 and 13 of R38.6.4o).* Its
+>    sentence that QRC20 and Qtum "do the same" as an SLP token can be read
+>    as saying that a token answers from QTUM's client. In this tree, as in
+>    the reference, a QRC20 token has a client of its own and answers from
+>    that one.
+> 5. *R38.1.1.* The process-wide build lock couples the QTUM family to
+>    every other UTXO-family coin (R38.6.4Q.7 item 6, last point), which is
+>    the kind of interference R38.1.1 means to exclude.
+> 6. *§38.6.5 item 8.* The backoff of the QRC20 history loop it mentions is
+>    this project's own. The reference repeats after a fixed 10 s
+>    (R38.6.4Q.6 item 4).
+> 7. *Chapter 10 R25 (another chapter, noted here because it bears on
+>    R38.6.4Q.5).* This project's balance stream accepts every activated
+>    coin, a QRC20 token included. The reference refuses a token
+>    (R38.6.4Q.5 item 2). Chapter 10 does not record that difference.
+>
+> *(pending gate)*
+
+D38.6.4Q.1 *(Open, 2026-11-15.)* **Sessions of the QTUM family.** The
+reference keeps one client per instance (R38.6.4Q.1), so each server holds one
+session per active instance, each with its own negotiation, ping and
+maintenance. That is a waste on the node and on public servers. This tree does
+the same; under R38.6.4b-R each of its instances also orders the server list
+on its own. Options: (a) parity, one client per instance; (b) instances of one
+platform whose activation requests name the same servers use one client, which
+lives as long as any of them is active; (c) a token uses the QTUM instance's
+client while QTUM is active and builds its own otherwise. Whatever is chosen,
+what R38.6.4Q.1 and R38.6.4Q.10 make observable has to hold: a token activates
+without QTUM; a token keeps working after QTUM is disabled; disabling one
+instance or failing one activation closes no session another instance uses;
+and the servers a token's request names are either honored or the difference
+is documented. R38.6.4b-R item 2 already binds the server order of a reused
+client. *Recommendation:* (b). No peer and no server contract observes the
+number of sessions, so this falls under the second arm of the default-side
+rule of `docs/COMPAT_SWITCHES.md`. *(pending gate)*
+
+D38.6.4Q.2 *(Open, 2026-11-15.)* **An error answer to a QTUM contract read.**
+In the reference it is final (R38.6.4Q.3), and one server's error fails an
+activation, deregisters the token or fails a balance read although other
+listed servers answer correctly (R38.6.4Q.4). That is a defect for every list
+with more than one server. Options: (a) parity; (b) for the three read methods
+of R38.6.4Q.8 items 1–3 only, an error answer or an unreadable answer sends
+the request on to the next server, and the failure is reported as R38.6.4i
+binds only when every server tried has failed, within the budget of R38.6.4j;
+(c) as (b), but only for an error answer that says the server does not know
+the method. Under (b) and (c) the `history too large` answer of R38.6.4Q.6
+item 4 stays final, and a refused broadcast stays as bound in R38.5B.6. The
+observable requirement: a token activates, reads its balance and collects its
+history as long as one listed server answers the contract methods correctly.
+*Recommendation:* (b). It departs, for three methods, from item 1 of R38.6.4f,
+and no peer observes it; because that item is reference-bound text, the
+departure needs a maintainer decision. *(pending gate)*
+
+D38.6.4Q.3 *(Open, 2026-11-15.)* **The contract-event subscription after a
+reconnect.** Parity asks for nothing here, because the reference has no such
+subscription (R38.6.4Q.5). This tree places it when a client enables the
+balance stream for a token (§38.6.5 decision 2; chapter 10 R25, amendment) and
+does not place it again after a disconnect (R38.6.4h). Options: (a) keep that,
+the token then falls back to polling (§38.6.5 decision 4); (b) place it again
+on a maintained session after a disconnect, with the outcome R38.6.4h binds
+for a script-hash subscription; (c) remove the subscription and poll, as the
+reference does. Under every option an error answer, or no answer, to the
+subscription leaves the token active and polling, and a server that does not
+know the method fails neither activation nor balance nor history.
+*Recommendation:* (b). *(pending gate)*
+
+D38.6.4Q.4 *(Open, 2026-11-15.)* **One record and one ordering for the shared
+QTUM outputs.** The reference keeps a record per instance, records nothing for
+a token's broadcast, and does not hold the lock for a delegation (R38.6.4Q.7);
+the source itself names the missing shared record. This tree does the same,
+and read spreading widens the gap (note 2 above). Options: (a) parity; (b) one
+recently-spent record per platform address, used by QTUM and all its tokens,
+into which every broadcast that this node made and the backend accepted is
+entered when it spends QTUM outputs of that address -- QTUM sends, token
+broadcasts, and the withdraws and delegations promoted as in R38.5B.9 --
+together with one lock per platform address held from the listing through the
+broadcast and the entry, in place of the process-wide lock for this family;
+(c) the smallest step: a token's broadcast enters the token's own record,
+which covers two sends of the same token and nothing else. The observable
+requirement: once the backend has accepted a transaction this node built, no
+later transaction this node builds from the same QTUM address selects one of
+its inputs, and its change is offered, whichever of QTUM, a token or
+delegation built either one and whichever session answers the listing.
+*Recommendation:* (b). No peer observes it. *(pending gate)*
+
+D38.6.4Q.5 *(Open, 2026-11-15.)* **Ending a token's background work when it
+is disabled.** The reference ends it at once (R38.6.4Q.10 item 1); this tree
+does not, and a quick disable and enable leaves two collectors (the note
+under R38.6.4Q.10). Options: (a) the reference behavior: disabling ends the
+token's collector and client at once; (b) keep the registry check, but let it
+tell the instance apart and not only the ticker (the Reloaded status note
+after chapter 55 R55.4.9 records that the registry has no instance identity
+today); (c) both. The observable requirement: once `disable_coin` has
+answered, the token sends no further request to any server, and after a
+disable and an enable exactly one collector and one client serve it.
+*Recommendation:* (a), with (b) wherever work cannot be ended at once.
+*(pending gate)*
+
+*Acceptance rows for a mock Electrum server.* Each row names what the mock
+has to answer and what the node does. *Parity* is the reference behavior
+bound above; where a D-item would change the expected result, the row says
+so. For this tree the mock also answers the requests that three rules add
+to a client: R38.6.4k-R, R38.6.4l and R38.6.4o. *(pending gate)*
+
+T38.6.4Q.1 *Sessions per family.* With one mock server, a test shall activate
+QTUM and two tokens, each naming that server. Parity: the mock holds three
+sessions, each with its own `server.version` and its own `server.ping` every
+30 s, and disabling one token closes exactly one of them. Under D38.6.4Q.1 (b)
+or (c) the mock holds one session, and disabling a token closes none while
+another instance is active (R38.6.4Q.1). *(pending gate)*
+
+T38.6.4Q.2 *Methods at activation.* A mock that answers `server.version`,
+`server.ping` and `blockchain.contract.call` shall be enough to activate a
+token whose coins-file entry has `decimals`, with `tx_history` `false`. The
+test shall assert that exactly one `blockchain.contract.call` arrives, with
+the token contract, the `balanceOf` call for the wallet's address and an empty
+sender, and that the response carries the balance decoded from
+`executionResult.output`. With `decimals` removed from the entry, a
+`decimals()` call shall arrive before it. In both runs the mock shall receive
+neither `blockchain.token.get_info` nor `blockchain.contract.event.subscribe`
+(R38.6.4Q.8, R38.6.4Q.9). *(pending gate)*
+
+T38.6.4Q.3 *An error answer at activation.* (a) With one mock server that
+answers `blockchain.contract.call` with a JSON-RPC error, a test shall call
+`electrum` for a token. The request fails with HTTP 500 and the legacy error
+body; the mock's session is still open; the token is not active; and a
+second `electrum` call is accepted and fails the same way, not as already
+active. Without `decimals` in the entry the request fails at the build and
+nothing is registered. (b) With two mock servers, the first answering the
+call with an error at once and the second answering correctly after a delay,
+parity is the same failure, because the first answer to arrive ends the
+request. Under D38.6.4Q.2 (b) the activation of (b) succeeds from the second
+mock (see R38.6.4Q.3 and its companion R38.6.4Q.4). *(pending gate)*
+
+T38.6.4Q.4 *An error answer to a balance read.* With a token active on two
+mock servers and both sessions maintained, the higher-ranked mock shall start
+answering `blockchain.contract.call` with an error. The test shall assert that
+`my_balance` fails, that the other mock received no `blockchain.contract.call`
+for it, that the erring mock's session stays open, that the token is still
+listed as enabled, and, once the mock answers correctly again, that the next
+`my_balance` sends a new request and returns the balance. No earlier value
+shall be served in between. Under D38.6.4Q.2 (b) the other mock is asked and
+`my_balance` succeeds throughout (R38.6.4Q.3 item 3 and R38.6.4Q.4 item 3).
+*(pending gate)*
+
+T38.6.4Q.5 *A collector pass.* With `tx_history` `true`, the mock shall
+answer the balance read, a history list of two transactions of which one
+carries two transfers, the receipts, and the verbose transactions of both and
+of the transactions they spend from. The test shall assert that the receipt
+request is spelled `blochchain.transaction.get_receipt`; that for each
+transaction the receipt is asked before the verbose transaction; that each
+spent-from transaction is asked once per transaction; that the stored rows
+are those of R38.5A.8; and that the next pass, with the balance unchanged,
+sends one `blockchain.contract.call` and nothing else, about 30 s later
+(R38.6.4Q.6 items 1–3). *(pending gate)*
+
+T38.6.4Q.6 *History failures.* (a) The mock answers
+`blockchain.contract.event.get_history` with an error other than the one of
+(b): the collector asks again after about 10 s (in this tree, after its own
+backoff), the history state is not an error, and the history is stored once
+the mock answers. (b) The mock answers with the error object
+`{"code": 1, "message": "history too large"}`: no further history request
+arrives for that instance, `my_tx_history` reports `sync_status` as an error
+with code `-1`, and `my_balance` still answers. (c) The mock answers the
+receipt request of one of two listed transactions with an error: the rows of
+the other are stored and the failed one is absent. At parity it stays absent
+while the balance is unchanged; with the fix proposed in the finding that
+follows R38.6.4Q.6 it appears after a later pass (item 4 of that rule).
+*(pending gate)*
+
+T38.6.4Q.7 *No subscription to restore.* The mock records every method name.
+Parity: activating QTUM and a token, dropping every session and letting the
+clients reconnect produces no `blockchain.contract.event.subscribe` at any
+time. In this tree the method arrives only after a client has enabled the
+balance stream for the token; a mock that answers it with an error, or not at
+all, shall leave activation, balance and history working; and what arrives
+after a reconnect follows the decision of D38.6.4Q.3 (R38.6.4Q.5).
+*(pending gate)*
+
+T38.6.4Q.8 *Spends of the shared outputs.* The mock accepts every broadcast
+and keeps listing the spent output in `blockchain.scripthash.listunspent`, as
+a server that has not indexed the transaction does. The test shall run these
+pairs from one address: a token broadcast then a QTUM swap send; a QTUM swap
+send then a token broadcast; a broadcast of token A then one of token B; two
+broadcasts of the same token. Parity: in each pair the second transaction
+selects the input the first one spent; only two QTUM swap sends in a row avoid
+it (T38.5B.1). Under option (b) of D38.6.4Q.4 the second transaction of every
+pair avoids the input and may spend the change (R38.6.4Q.7). *(pending gate)*
+
+T38.6.4Q.9 *Delegation.* (a) The delegation status check shall succeed against
+a mock that answers `blockchain.contract.event.get_history` twice and, when
+more delegations were added than removed,
+`blochchain.transaction.get_receipt`; an error answer to any of the three
+fails the request. (b) With a mock that delays its answer to
+`blockchain.scripthash.listunspent`, a test shall start adding a delegation
+and a withdraw from the same address together. Parity: both list at the same
+time and can select the same input. With the fix proposed in the second
+finding under R38.6.4Q.7 the second build lists only after the first has
+signed (item 5 of that rule; R38.6.4Q.8). *(pending gate)*
+
+T38.6.4Q.10 *Disable stops the token's requests.* With a token active,
+`tx_history` `true` and its collector in the 30 s wait, a test shall call
+`disable_coin`. Reference behavior: the token's sessions close and the mock
+receives no further request from them. The test shall then call `electrum` for
+the token inside what would have been that wait and assert that afterwards the
+mock holds the sessions of one client for the token and receives one balance
+read per idle interval, not two. A second test shall disable QTUM while a
+token is active and assert that the token's `my_balance` still answers
+(R38.6.4Q.10). *(pending gate)*
+
+T38.6.4Q.11 *The process-wide lock.* With a mock that delays its answer to a
+token's `blockchain.transaction.broadcast`, a test shall request a withdraw of
+another UTXO coin, served by a second mock, while the token's broadcast is
+pending. Parity: the withdraw does not return before the token's broadcast has
+been answered. Under D38.6.4Q.4 (b) it returns without waiting (R38.6.4Q.7
+item 6). *(pending gate)*
+
+*Not established.* (1) The session count of R38.6.4Q.1 item 4 follows from
+how the reference builds its clients; it was not measured against a running
+reference binary and a live server in this pass. (2) Which error answers
+real Qtum servers give to the three QTUM methods, under which conditions
+and with which codes, is a property of those servers and was not examined;
+the reference treats every error answer alike except the one of R38.6.4Q.6
+item 4. (3) Whether real servers accept the empty sender of R38.6.4Q.8
+item 1 in every version was not checked; the reference sends nothing else.
+(4) The finding under R38.6.4Q.6 was read, not reproduced in a run. (5) A
+token's swap paths were read only for the set of methods they send
+(R38.6.4Q.8), not request by request. (6) The `disable_coin` contract
+(R38.6.4Q.10 item 4) and native mode were not examined. *(pending gate)*
+
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change
 events over the streaming infrastructure, registering the addresses to be watched
@@ -4791,3 +5396,44 @@ R38.8.6 **Tests (two-direction, observable).**
   session that never read the forbidden corpus. The input is this repository's
   code. It takes no forbidden-class input, so chapter 01 R38 is not engaged and
   no gate pass is required.
+- *QTUM and QRC20 over Electrum (§38.6.4Q, 2026-11-15) -- pending the KDF
+  Dirty Gate.* R38.6.4Q.1–R38.6.4Q.10, the findings and notes under them,
+  D38.6.4Q.1–D38.6.4Q.5, T38.6.4Q.1–T38.6.4Q.11 and the closing *Not
+  established* paragraph were written by the Spec Reader under the two-team
+  workflow (chapter 01 §1.4A) in Spec Reader round 0.5.0-1. They are a
+  candidate under chapter 01 R40, and every passage carries the marker
+  *(pending gate)*; this item is replaced by the clearance record, with the
+  R39 scope attestation, when the gate clears it. *Inputs:* (1) The forbidden
+  corpus at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+  consulted **only** to establish, at each row: that every activated
+  instance builds its own Electrum client, and that a QRC20 token has no
+  activation path besides the legacy one; that an error answer ends a
+  request; which QTUM-specific wire methods are sent, by which flows and in
+  which order, and which are never sent; the request order, the waits and
+  the failure handling of the token history collector; which spends take
+  the process-wide build lock or a record's lock, and which enter a record;
+  that disabling an instance ends its background work at once, and that a
+  token is not registered as depending on QTUM; that the balance stream
+  refuses a token; and that the two rows agree on all of it. Between the
+  rows, the token history collector, the QTUM-specific request surface, the
+  delegation path, the withdraw path, the connection pool, the shared
+  JSON-RPC layer, the background-task mechanism, the legacy activation and
+  deactivation requests and the balance-stream activation are identical;
+  the token and QTUM coin types, the shared UTXO helpers, the coin registry
+  and the activation builder differ only in areas this subsection does not
+  touch. What crosses is behavior and dictated interface; no private
+  identifier, function body, helper decomposition, error, log or comment
+  text was reproduced. The one literal, the `history too large` error
+  object, is the server's own wire answer and is in the baseline. (2) The
+  row *baseline anchor (R1)* and this repository's dev branch as of
+  2026-11-15, for every fact marked *baseline*, the findings and notes that
+  name this repository or this tree, the notes on existing text, and the
+  method and member names of the QTUM client surface. (3) The public
+  document `docs/qrc20-integration.md` of
+  `qtumproject/qtum-electrumx-server`, fetched 2026-11-15, for the names,
+  the parameter order and the answer members of the server's QRC20 methods
+  (chapter 01 R3 and R15). No row was added to chapter 02 §2.15A: every
+  state read already had one, and both rows' identifiers were confirmed by
+  read-only inspection of the historical record's reference metadata before
+  they were named. The same pass edited no other chapter and no existing
+  sentence of this one.
