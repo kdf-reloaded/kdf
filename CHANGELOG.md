@@ -61,6 +61,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+#### Browser (WASM) build
+
+- **A cancelled storage request no longer aborts other writes of the same transaction.** In the
+  browser build, if the task waiting for a storage request was cancelled before the request finished,
+  the browser later called a handler that no longer existed, which made the browser abort the whole
+  storage transaction, including other writes in it. The waiting code now withdraws its handlers when it
+  finishes or is cancelled, and a finished transaction withdraws its own. Detail: PR #N; CRD ch.26 R9A.
+
 #### QTUM and QRC20
 
 - **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation

@@ -225,6 +225,17 @@ brought in only so downstream crates need not
 carry their own conditional-compilation-guarded
 import.
 
+**R9A.** *Event handlers are withdrawn when a request or a transaction ends.* (Added 2026-11-15, status note;
+the observation behind it is chapter 39 F39.6.6.1.) A future of the `mm2_db` IndexedDB driver that waits for
+an IndexedDB request (an object-store request, a cursor request or the database-open request) installs its
+`onsuccess` and `onerror` handlers (and, for the open request, `onupgradeneeded`) as closures that the future
+owns. The driver MUST clear exactly the handlers it installed when the future completes and when it is dropped
+before the request completes, and MUST do so before the closures are freed, so that a late event never calls a
+freed closure. The IndexedDB specification aborts a transaction when an event handler throws, so a freed
+closure that is called would abort the transaction and every other write of it. A transaction handle MUST
+withdraw its `oncomplete` and `onabort` handlers once it has delivered its outcome. The rule changes no
+signature of the driver or of the layers above it.
+
 ## 26.7 Bound Dual Asynchronous-Runtime Substrate
 
 **R10.** The asynchronous-runtime substrate
@@ -612,6 +623,13 @@ every merge against the default
 branch and that either failing fails the
 build.
 
+**T5.** *Dropped request future.* (Added 2026-11-15, status note.) Test id
+`mm2_db::indexed_db::db_driver::object_store::tests::test_dropped_request_future_does_not_abort_transaction`
+(`wasm_bindgen_test`, in a browser). In a read-write transaction, an `add_item` future is polled once and dropped
+before its request completes; a second `add_item` of the same transaction MUST then succeed, the transaction MUST
+commit, and both items MUST be readable afterwards. Without the handler withdrawal of R9A the second write fails
+because the transaction is aborted.
+
 ## 26.14 Deferred Work
 
 **D1.** Chapter-bound automated cross-target test execution: the
@@ -772,3 +790,7 @@ not under chapter 02 R5.
   browser-future-adaptor crate; the abort-handle
   crate.
 - *Forbidden corpus:* not consulted.
+- *Scoped addition (2026-11-15) -- R9A and T5.* *Inputs:* this repository's `mm2_db` IndexedDB driver as read;
+  chapter 39 F39.6.6.1 (a finding already cleared); the World-Wide-Web-Consortium Indexed-Database-API
+  specification (a handler that throws aborts the transaction). *Forbidden corpus:* not consulted for this
+  addition. *Code:* the PR that adds the handler-withdrawal guard to `mm2_db`.

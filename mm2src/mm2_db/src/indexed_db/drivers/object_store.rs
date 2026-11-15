@@ -1,4 +1,5 @@
-use super::{construct_event_closure, DbTransactionError, DbTransactionResult, InternalItem, ItemId};
+use super::{construct_event_closure, DbTransactionError, DbTransactionResult, InternalItem, ItemId,
+            RequestHandlersGuard};
 use crate::indexed_db::db_driver::cursor::IdbCursorBuilder;
 use common::{deserialize_from_js, serialize_to_js, stringify_js_error};
 use futures::channel::mpsc;
@@ -219,6 +220,8 @@ impl IdbObjectStoreImpl {
 
         request.set_onsuccess(Some(onsuccess_closure.as_ref().unchecked_ref()));
         request.set_onerror(Some(onerror_closure.as_ref().unchecked_ref()));
+        // Declared after the closures, so the handlers are withdrawn before the closures are freed.
+        let _handlers_guard = RequestHandlersGuard::new(request);
 
         rx.next().await.expect("The request event channel must not be closed")
     }
@@ -268,5 +271,60 @@ impl IdbObjectStoreImpl {
             Ok(Some(exception)) => format!("{:?}", exception),
             _ => "Unknown".to_owned(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{IdbDatabaseBuilder, OnUpgradeNeededCb};
+    use futures::FutureExt;
+    use serde_json::json;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    /// Dropping the future that waits for a request must not abort the transaction the request belongs to.
+    #[wasm_bindgen_test]
+    async fn test_dropped_request_future_does_not_abort_transaction() {
+        // A unique name, so a repeated run in the same browser profile starts from an empty database.
+        let db_name = format!("TEST_DROPPED_REQUEST_FUTURE_{}", js_sys::Date::now() as u64);
+        let on_upgrade_needed: OnUpgradeNeededCb = Box::new(|upgrader, _old_version, _new_version| {
+            let table_upgrader = upgrader.create_table("items")?;
+            table_upgrader.create_index("key", false)
+        });
+
+        let db = IdbDatabaseBuilder::new(&db_name)
+            .with_version(1)
+            .with_tables([("items".to_owned(), on_upgrade_needed)])
+            .build()
+            .await
+            .expect("!IdbDatabaseBuilder::build");
+
+        let transaction = db.transaction().expect("!IdbDatabaseImpl::transaction");
+        let table = transaction.open_table("items").expect("!open_table");
+
+        // Poll the request future once, so the request is issued and its handlers are installed, then drop it
+        // before the request completes.
+        let dropped_item = json!({ "key": "dropped" });
+        assert!(table.add_item(&dropped_item).now_or_never().is_none());
+
+        // The second write of the same transaction must still succeed.
+        let kept_item = json!({ "key": "kept" });
+        let kept_id = table
+            .add_item(&kept_item)
+            .await
+            .expect("!add_item after a dropped request future");
+        drop(table);
+
+        transaction
+            .wait_for_complete()
+            .await
+            .expect("The transaction must commit");
+
+        let transaction = db.transaction().expect("!IdbDatabaseImpl::transaction");
+        let table = transaction.open_table("items").expect("!open_table");
+        let items = table.get_all_items().await.expect("!get_all_items");
+        assert_eq!(items.len(), 2);
+        assert!(items.contains(&(kept_id, kept_item)));
     }
 }
