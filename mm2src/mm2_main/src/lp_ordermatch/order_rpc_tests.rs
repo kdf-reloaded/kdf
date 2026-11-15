@@ -2,14 +2,16 @@
 //! `mmrpc-v2-completion`, Part 1 §1.2 items 2-3): `setprice`, `update_maker_order`, `cancel_order`,
 //! `cancel_all_orders`, `my_orders` and `order_status`.
 //!
-//! * The legacy arms keep their answers. Every expected legacy body below is the body that the handler of the dev
-//!   branch (`d4928e1fb`) produced, derived from its code and marked with the handler that produced it; the
-//!   expected error texts are those of its `ERR!`/`try_s!`/`ERRL!` sites. The `file:line] ` tokens in front of a
+//! * The legacy arms keep their answers. Every expected legacy body below is the body that the handler produced as it
+//!   stood on dev at `d4928e1fb`, derived from its code and marked with the handler that produced it; the expected
+//!   error texts are those of its `ERR!`/`try_s!`/`ERRL!` sites. The `file:line] ` tokens in front of a
 //!   legacy error text change with every edit of the source, so they are split off, checked to be present and to name
-//!   `ordermatch_trading.rs`, and the text behind them is compared whole ([`assert_legacy_error`]).
+//!   `ordermatch_trading` (the file name without its extension), and the text behind them is compared whole ([`assert_legacy_error`]).
 //! * Every variant of every error enum has its serialized `error_type` token, its `error_data` JSON type, its HTTP
 //!   status and its `Display` text checked (CRD ch.43 R43.8.6, the form of the tests of PR #312).
-//! * Nothing here touches the versioned envelope: no method is registered on it yet.
+//! * The six methods are registered on the versioned surface. The envelope tests (`id` echo, strict top-level keys,
+//!   `params` handling, typed refusals through the dispatcher) live in the `server_tests` of `rpc.rs`; this module
+//!   tests the cores, the wire forms of the error enums and the legacy adapters.
 
 use super::*;
 use crate::mm2::database::my_orders::CREATE_MY_ORDERS_TABLE;

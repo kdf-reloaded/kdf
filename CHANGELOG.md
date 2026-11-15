@@ -32,8 +32,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   members unchanged inside `params`, gets the legacy result under `result` with the request's `id` echoed,
   and a typed `error_type` with an HTTP status instead of the legacy error string: a request the client
   got wrong (unknown coin, unknown order, a volume or price below the minimum, not enough balance) answers
-  400, a failure of the node 500. An unknown member inside `params` is ignored. The legacy forms of the six
-  methods and their answers are unchanged. This is a KDF Reloaded extension; the reference answers
+  400, a failure of the node 500, and a refusal while the computer's clock is off 503. An unknown member
+  inside `params` is ignored. The legacy forms of the six methods and their answers are unchanged, except
+  that a legacy error text no longer carries the inner `file:line]` trace tokens. This is a KDF Reloaded extension; the reference answers
   `NoSuchMethod` for these names under `mmrpc: "2.0"`. The remaining legacy-only methods follow in later
   releases (plan `docs/plans/mmrpc-v2-completion.md`). Detail: PR #359; CRD ch.43 D43.1A.1 status note.
 

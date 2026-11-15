@@ -669,8 +669,11 @@ cleared; such a change is recorded here as a dated amendment.*
 
 **R43.1R.1** *Surface.* `setprice`, `update_maker_order`, `cancel_order`,
 `cancel_all_orders`, `my_orders` and `order_status` are routed on the
-versioned table as well as the legacy table. The legacy forms, their bodies
-and their error strings are unchanged (tested against recorded bodies). The
+versioned table as well as the legacy table. The legacy forms and their
+success bodies are unchanged; a legacy error keeps its text behind one
+`file:line]` token of the handler (the inner trace tokens of chained errors
+are no longer printed; the text is not part of the contract). Tested against
+bodies and texts derived from the handlers of dev d4928e1fb. The
 versioned forms run under the envelope, local-only, ban and authentication
 checks of every versioned method (R43.1A.2, R43.1A.3); none is public.
 
@@ -702,7 +705,9 @@ table row `order_status`).
 
 **R43.1R.4** *Errors (W3–W6).* The mmrpc error envelope of chapter 55
 R55.1.2. A request the client got wrong answers 400, a failure of the node
-500, a state of the node that refuses the request until it clears 503. One token may cover several legacy texts; the text is not part of the
+500; a refusal while the node's own clock is off (`ClockOutOfRange`) 503. A
+refusal while a coin's Electrum servers disagree answers 400, as `withdraw`
+does (chapter 38). One token may cover several legacy texts; the text is not part of the
 contract.
 
 | `error_type` | `error_data` | Status | Failure class | Methods |
