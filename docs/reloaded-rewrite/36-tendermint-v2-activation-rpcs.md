@@ -1590,7 +1590,7 @@ is the persistent-data compatibility the project keeps by default.
 > reference. The identifier and the stored form are each computed in one
 > function (`history_internal_id`, `stored_form` and `served_form` of
 > `mm2src/coins/tendermint/tendermint_tx_history.rs`). The address index of the
-> store is written so that the reference lists our rows (provisional, from
+> store is written so that the reference lists our rows (checked on 2026-11-15 against a reference release build: from a fresh store written by this build the reference listed the same 4 rows as this build, with equal (internal_id, address) index sets of 10 entries; a store written by the previous head of this change, after the backfill, was listed the same way) (provisional, from
 > observation of 2026-11-15; pending §36.14.7). Built in PR #363; test
 > T36.37.
 
@@ -1710,9 +1710,11 @@ clients.
 > transaction that inserts the row (`write_address_index`), deleted with the row
 > (`delete_address_index`, also by `clear_history`) and filled for stored rows
 > that lack entries when the fetcher starts (`backfill_address_index`), so that
-> stores written by earlier builds of this change are listed by the reference.
+> stores written by earlier builds of this change are listed by the reference
+> (checked on 2026-11-15 against a reference release build: from a fresh store written by this build the reference listed the same 4 rows as this build, with equal (internal_id, address) index sets of 10 entries; a store written by the previous head of this change, after the backfill, was listed the same way).
 > The index is kept for Tendermint only for now: the table is created, and the
-> entries are written and deleted, only for a coin whose fetcher has enabled it
+> entries are written and deleted, only for a coin whose table exists: created by
+> the Tendermint fetcher, or already present in a store written elsewhere
 > (`backfill_address_index`), so the stores of other families stay as they were
 > until §36.14.7 says the table is generic.
 > Our own serving still filters on the `from` and `to` lists.
