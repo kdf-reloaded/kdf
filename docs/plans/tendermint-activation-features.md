@@ -92,7 +92,10 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    is refused before any network access with a typed Tendermint init error,
    answered as `PlatformCoinCreationError` like the interim rejection of
    `activation_params`. A deliberate divergence from the reference until
-   hardware signing exists (ch. 36 §36.7, status note of 2026-11-15). Building
+   hardware signing exists (ch. 36 §36.7, status note of 2026-11-15). Any
+   other value of the member, such as the WalletConnect form, fails request
+   parsing (`InvalidRequest`, HTTP 400) until item 1 builds its activation.
+   Building
    Trezor signing for Cosmos coins is a future package, item 7.
 6. **Task-managed single token family** `task::enable_tendermint_token::*`
    (D36.2). *Not in 0.5.0 (decision 2026-11-15).*
@@ -181,7 +184,7 @@ guarantee: `PrivKeyPolicy` does have a key-less variant, `Trezor`, whose
 `Unsupported` error. The guarantee is the construction site --
 `tendermint_coin_from_conf_and_request` is the only place in the tree that
 builds a Tendermint activation policy, and it always builds
-`PrivKeyPolicy::KeyPair` from a concrete private key
+`PrivKeyPolicy::KeyPair` or `HDWallet`, both from a concrete private key
 (`mm2src/coins/tendermint/tendermint_coin.rs:174` and `192`). Nothing can hand
 Tendermint `PrivKeyPolicy::Trezor` today. The hazard goes live the moment item 1
 or item 5 adds a second policy variant or a second construction site.

@@ -17,8 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   names the `Trezor` key policy used to activate the coin with the local key without a word; it now
   fails before any node is contacted, with a `PlatformCoinCreationError` that says the hardware key
   policy is not supported for Tendermint coins and to activate with the local key. An absent
-  `priv_key_policy` and `ContextPrivKey` activate as before. (CRD ch.36 §36.7, status note of
-  2026-11-15)
+  `priv_key_policy`, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
+  as the WalletConnect form, fails request parsing with `InvalidRequest` (HTTP 400) instead of
+  activating with the local key. Detail: PR #358; CRD ch.36 §36.7, status note of 2026-11-15
 
 ### Tests
 

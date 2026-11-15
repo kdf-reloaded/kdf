@@ -318,6 +318,17 @@ fn an_absent_or_software_priv_key_policy_is_not_refused() {
     }
 }
 
+/// Any other `priv_key_policy` value fails request parsing, so the dispatcher answers `InvalidRequest` (400) and
+/// nothing is activated (CRD ch.36 §36.7, status note of 2026-11-15).
+#[test]
+fn an_unknown_priv_key_policy_fails_request_parsing() {
+    for policy in [json!({ "type": "WalletConnect", "data": "x" }), json!("Metamask")] {
+        let mut value = request_json(json!({}));
+        value["priv_key_policy"] = policy;
+        assert!(serde_json::from_value::<Req>(value).is_err());
+    }
+}
+
 #[test]
 fn the_hardware_refusal_is_a_typed_init_error_with_the_policy_named() {
     let err = reject_hardware_policy(PLATFORM, &Some(PrivKeyActivationPolicy::Trezor)).unwrap_err();

@@ -805,7 +805,12 @@ terms; the clean implementer works from this list):
 > policy Trezor is not supported for Tendermint coins in this version; activate
 > with the local key". It is not `UnexpectedDeviceActivationPolicy`. This is a
 > deliberate divergence from the reference, which ignores the member, until
-> hardware signing for Tendermint coins exists.
+> hardware signing for Tendermint coins exists. Any other value of the member
+> (for example the WalletConnect form `{"type": "WalletConnect", "data": ...}`
+> sent top-level, or an unknown name) fails request parsing before the
+> activation starts, answered as `InvalidRequest` (string, HTTP 400) instead of
+> activating with the local key; the WalletConnect form is accepted only once
+> its activation (plan item 1) is built.
 
 > **Code-quality finding (informative; trigger: apparent with little extra
 > effort).** In the reference, a malformed `WithPubkey` key (a `value` that is
