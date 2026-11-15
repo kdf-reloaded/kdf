@@ -1734,6 +1734,9 @@ fn test_withdraw_segwit() {
             "coins": coins,
             "rpc_password": "password",
             "i_am_seed": true,
+            // These tests check withdraw behavior, not server agreement. Public testnet servers can briefly
+            // disagree (for example during a reorganization), which fails the activation by design (R38.6.4o item 12).
+            "electrum_tip_checks": false,
         }),
         "password".into(),
         match var("LOCAL_THREAD_MM") {
