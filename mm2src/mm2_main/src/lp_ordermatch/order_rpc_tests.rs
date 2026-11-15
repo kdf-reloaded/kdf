@@ -36,16 +36,17 @@ fn assert_wire<E>(error: &E, token: &str, data: Option<&str>, status: u16, text:
 where
     E: serde::Serialize + HttpStatusCode + std::fmt::Display,
 {
+    // No assertion message below carries the error, its payload or its text: only the token.
     let wire = json::to_value(error).unwrap();
-    assert_eq!(wire["error_type"], token, "{text}: {wire}");
+    assert_eq!(wire["error_type"], token, "{token}: error_type");
     match data {
-        Some("object") => assert!(wire["error_data"].is_object(), "{text}: {wire}"),
-        Some("string") => assert!(wire["error_data"].is_string(), "{text}: {wire}"),
+        Some("object") => assert!(wire["error_data"].is_object(), "{token}: error_data kind"),
+        Some("string") => assert!(wire["error_data"].is_string(), "{token}: error_data kind"),
         Some(other) => panic!("unknown kind of error_data: {other}"),
-        None => assert!(wire.get("error_data").is_none(), "{text}: {wire}"),
+        None => assert!(wire.get("error_data").is_none(), "{token}: error_data kind"),
     }
-    assert_eq!(error.status_code().as_u16(), status, "{text}");
-    assert_eq!(error.to_string(), text);
+    assert_eq!(error.status_code().as_u16(), status, "{token}: status");
+    assert!(error.to_string() == text, "{token}: Display text");
 }
 
 fn token_of<E: serde::Serialize>(error: &E) -> String {
@@ -70,8 +71,11 @@ fn split_location(error: &str) -> (Vec<String>, String) {
 /// A legacy error: one `file:line] ` token that names `ordermatch_trading` (`gstuff::filename` drops the extension), then exactly `text`.
 fn assert_legacy_error(error: &str, text: &str) {
     let (files, rest) = split_location(error);
-    assert_eq!(files, vec!["ordermatch_trading".to_owned()], "{error}");
-    assert_eq!(rest, text, "{error}");
+    assert!(
+        files == vec!["ordermatch_trading".to_owned()],
+        "the legacy error carries one location token naming the handler file"
+    );
+    assert!(rest == text, "the legacy error text");
 }
 
 fn body_text(answer: Response<Vec<u8>>) -> String { String::from_utf8(answer.into_body()).unwrap() }
@@ -1111,18 +1115,21 @@ fn set_price_core_fails_with_the_class_of_the_failure() {
     let error = core(set_price_body(json!({ "base": "NOPE" }))).err().unwrap();
     assert!(
         matches!(error.get_inner(), SetPriceError::NoSuchBaseCoin { coin } if coin == "NOPE"),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
     let error = core(set_price_body(json!({ "rel": "NOPE" }))).err().unwrap();
     assert!(
         matches!(error.get_inner(), SetPriceError::NoSuchRelCoin { coin } if coin == "NOPE"),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
 
     let error = core(set_price_body(json!({ "price": "0.000000001" }))).err().unwrap();
     assert!(
         matches!(error.get_inner(), SetPriceError::PriceTooLow { .. }),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
     assert_eq!(error.get_inner().status_code().as_u16(), 400);
 
@@ -1130,7 +1137,8 @@ fn set_price_core_fails_with_the_class_of_the_failure() {
     let error = core(set_price_body(json!({ "volume": "0.00001" }))).err().unwrap();
     assert!(
         matches!(error.get_inner(), SetPriceError::MaxBaseVolTooLow { coin, .. } if coin == "DYN"),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
 
     // A minimum volume above the maximum volume.
@@ -1139,7 +1147,8 @@ fn set_price_core_fails_with_the_class_of_the_failure() {
         .unwrap();
     assert!(
         matches!(error.get_inner(), SetPriceError::MaxBaseVolBelowMinBaseVol { .. }),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
 
     // A refused order is not placed.
@@ -1162,7 +1171,7 @@ fn set_price_core_refuses_a_wallet_only_coin_with_its_side() {
                 tx_history: false,
             },
         ))
-        .unwrap_or_else(|e| panic!("cannot register {ticker}: {e}"));
+        .unwrap_or_else(|_| panic!("cannot register {ticker}"));
     }
     let req = |base: &str, rel: &str| -> SetPriceReq {
         json::from_value(json!({ "base": base, "rel": rel, "price": 1, "volume": 1 })).unwrap()
@@ -1172,7 +1181,8 @@ fn set_price_core_refuses_a_wallet_only_coin_with_its_side() {
         .unwrap();
     assert!(
         matches!(error.get_inner(), SetPriceError::BaseCoinIsWalletOnly { coin } if coin == "WALLET"),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
     assert_eq!(token_of(error.get_inner()), "CoinIsWalletOnly");
     let error = block_on(set_price_core(ctx.clone(), req("TRADE", "WALLET")))
@@ -1180,7 +1190,8 @@ fn set_price_core_refuses_a_wallet_only_coin_with_its_side() {
         .unwrap();
     assert!(
         matches!(error.get_inner(), SetPriceError::RelCoinIsWalletOnly { coin } if coin == "WALLET"),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
 
     // dev `create_maker_order_impl`: `ERR!("Base coin {} is wallet only", req.base)` and the rel twin.
@@ -1220,7 +1231,8 @@ fn set_price_is_refused_while_the_clock_check_refuses() {
     let error = block_on(set_price_core(node.ctx.clone(), req)).err().unwrap();
     assert!(
         matches!(error.get_inner(), SetPriceError::ClockOutOfRange(text) if *text == refusal),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
     assert_eq!(error.get_inner().status_code().as_u16(), 503);
 
@@ -1295,28 +1307,32 @@ fn update_maker_order_core_fails_with_the_class_of_the_failure() {
     let error = core(json!({ "uuid": unknown })).err().unwrap();
     assert!(
         matches!(error.get_inner(), UpdateMakerOrderError::UUIDNotFound { uuid } if *uuid == unknown),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
 
     let matching = node.add_order_with_an_ongoing_match();
     let error = core(json!({ "uuid": matching.uuid })).err().unwrap();
     assert!(
         matches!(error.get_inner(), UpdateMakerOrderError::OrderBeingMatched { uuid } if *uuid == matching.uuid),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
 
     let order = node.add_order(true, true);
     let error = core(json!({ "uuid": order.uuid, "new_price": 0 })).err().unwrap();
     assert!(
         matches!(error.get_inner(), UpdateMakerOrderError::PriceTooLow { .. }),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
     let error = core(json!({ "uuid": order.uuid, "volume_delta": "-10" }))
         .err()
         .unwrap();
     assert!(
         matches!(error.get_inner(), UpdateMakerOrderError::NewVolumeNotPositive { volume } if *volume == bd("0")),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
     // A minimum volume above the maximum volume of the order.
     let error = core(json!({ "uuid": order.uuid, "min_volume": "20" })).err().unwrap();
@@ -1325,7 +1341,8 @@ fn update_maker_order_core_fails_with_the_class_of_the_failure() {
             error.get_inner(),
             UpdateMakerOrderError::MaxBaseVolBelowMinBaseVol { .. }
         ),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
 
     // An update that fails changes nothing, and the one that succeeds answers the updated order.
@@ -1379,7 +1396,8 @@ fn cancel_order_core_keeps_its_variants() {
         .unwrap();
     assert!(
         matches!(error.get_inner(), CancelOrderError::UUIDNotFound { uuid } if *uuid == unknown),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
     let matching = node.add_order_with_an_ongoing_match();
     let error = block_on(cancel_order(node.ctx.clone(), CancelOrderReq { uuid: matching.uuid }))
@@ -1387,7 +1405,8 @@ fn cancel_order_core_keeps_its_variants() {
         .unwrap();
     assert!(
         matches!(error.get_inner(), CancelOrderError::OrderBeingMatched { uuid } if *uuid == matching.uuid),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
     let order = node.add_order(true, true);
     let response = block_on(cancel_order(node.ctx.clone(), CancelOrderReq { uuid: order.uuid })).unwrap();
@@ -1498,7 +1517,7 @@ fn order_status_legacy_answers_the_bare_object() {
     block_on(cancel_order_rpc(node.ctx.clone(), json!({ "uuid": order.uuid }))).unwrap();
     let stored = match block_on(MyOrdersStorage::new(node.ctx.clone()).load_order_from_history(order.uuid)) {
         Ok(stored) => stored,
-        Err(e) => panic!("the cancelled order is in the history: {e}"),
+        Err(_) => panic!("the cancelled order is in the history"),
     };
     let answer = block_on(order_status(node.ctx.clone(), json!({ "uuid": order.uuid }))).unwrap();
     let expected = json::to_string(&json!(OrderForRpcWithCancellationReason {
@@ -1532,6 +1551,7 @@ fn order_status_core_answers_by_where_the_order_is() {
         .unwrap();
     assert!(
         matches!(error.get_inner(), OrderStatusError::UUIDNotFound { uuid } if *uuid == unknown),
-        "{error}"
+        "unexpected error_type: {}",
+        token_of(error.get_inner())
     );
 }

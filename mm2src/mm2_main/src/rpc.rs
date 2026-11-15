@@ -1133,17 +1133,22 @@ mod server_tests {
     fn assert_mmrpc_error(answer: &(String, Json), code: u16, error_type: &str, id: Json) {
         let (status, body) = answer;
         assert_http_status(status, code);
-        assert_eq!(body["mmrpc"], "2.0", "{body}");
-        assert_eq!(body["error_type"], error_type, "{body}");
-        assert_eq!(body.get("id"), Some(&id), "{body}");
+        // No message below carries the body: it is an error payload.
+        assert_eq!(body["mmrpc"], "2.0", "{error_type}: mmrpc version");
+        assert_eq!(body["error_type"], error_type, "{error_type}: error_type");
+        assert_eq!(body.get("id"), Some(&id), "{error_type}: id");
     }
 
     /// The answer must be the legacy error body: HTTP 500, exactly one member `error`, no mmrpc envelope.
     fn assert_legacy_error_body(answer: &(String, Json)) {
         let (status, body) = answer;
         assert_http_status(status, 500);
-        assert_eq!(body.as_object().map(|object| object.len()), Some(1), "{body}");
-        assert!(body["error"].is_string(), "{body}");
+        assert_eq!(
+            body.as_object().map(|object| object.len()),
+            Some(1),
+            "the legacy error body has one member"
+        );
+        assert!(body["error"].is_string(), "the legacy error member is a string");
     }
 
     /// CRD ch.43 R43.1A.1a-R43.1A.1c: a legacy request (no `mmrpc`) shaped like a versioned one minus the key, for a
@@ -1318,7 +1323,7 @@ mod server_tests {
         let prefix = leading.find(error).map(|found| found.as_str()).unwrap_or_default();
         assert!(
             prefix.contains("ordermatch_trading:"),
-            "the text keeps the prefix of its handler file: {error}"
+            "the text keeps the prefix of its handler file"
         );
         error[prefix.len()..].to_owned()
     }
@@ -1402,7 +1407,7 @@ mod server_tests {
     fn call(ctx: &MmArc, request: Json) -> (u16, Json) {
         let client = SocketAddr::from(([127, 0, 0, 1], 4242));
         let response = common::block_on(process_single_request(ctx.clone(), request, client)).expect("an answer");
-        let body = json::from_slice(response.body()).unwrap_or_else(|e| panic!("{e}: {:?}", response.body()));
+        let body = json::from_slice(response.body()).unwrap_or_else(|_| panic!("the answer is JSON"));
         (response.status().as_u16(), body)
     }
 
@@ -1424,12 +1429,13 @@ mod server_tests {
     /// A versioned success: HTTP 200, the 2.0 envelope with the `id` echoed and no error member. Returns `result`.
     fn versioned_result(answer: (u16, Json), id: usize) -> Json {
         let (status, body) = answer;
-        assert_eq!(status, 200, "{body}");
-        assert_eq!(body["mmrpc"], "2.0", "{body}");
-        assert_eq!(body["id"], id, "{body}");
+        // No message below carries the body: a refused request would put an error payload into it.
+        assert_eq!(status, 200, "versioned success: status");
+        assert_eq!(body["mmrpc"], "2.0", "versioned success: mmrpc version");
+        assert_eq!(body["id"], id, "versioned success: id");
         assert!(
             body.get("error").is_none() && body.get("error_type").is_none(),
-            "{body}"
+            "versioned success: no error member"
         );
         body["result"].clone()
     }
@@ -1439,7 +1445,7 @@ mod server_tests {
         let object = |value: &Json| {
             value
                 .as_object()
-                .unwrap_or_else(|| panic!("{what}: not an object: {value}"))
+                .unwrap_or_else(|| panic!("{what}: not an object"))
                 .clone()
         };
         let (actual, expected) = (object(actual), object(expected));
@@ -1460,12 +1466,15 @@ mod server_tests {
         assert_mmrpc_error(answer, status, token, json!(id));
         let body = &answer.1;
         match data {
-            Some("object") => assert!(body["error_data"].is_object(), "{body}"),
-            Some("string") => assert!(body["error_data"].is_string(), "{body}"),
+            Some("object") => assert!(body["error_data"].is_object(), "{token}: error_data kind"),
+            Some("string") => assert!(body["error_data"].is_string(), "{token}: error_data kind"),
             Some(other) => panic!("unknown kind of error_data: {other}"),
-            None => assert!(body.get("error_data").is_none(), "{body}"),
+            None => assert!(body.get("error_data").is_none(), "{token}: error_data kind"),
         }
-        assert!(body["error"].is_string() && body.get("result").is_none(), "{body}");
+        assert!(
+            body["error"].is_string() && body.get("result").is_none(),
+            "{token}: error envelope"
+        );
     }
 
     /// Each of the six methods answers a versioned success in the 2.0 envelope with `id` echoed, and `result` has the
@@ -1602,7 +1611,7 @@ mod server_tests {
         for (id, method) in [(21, "cancel_order"), (22, "order_status"), (23, "update_maker_order")] {
             let answer = post_v2(addr, method, Some(json!({ "uuid": uuid, "unknown_member": 1 })), id);
             assert_typed_refusal(&answer, 400, "UUIDNotFound", Some("object"), id);
-            assert_eq!(answer.1["error_data"]["uuid"], uuid, "{method}: {}", answer.1);
+            assert_eq!(answer.1["error_data"]["uuid"], uuid, "{method}: error_data uuid");
         }
 
         let answer = post_v2(
@@ -1612,7 +1621,7 @@ mod server_tests {
             24,
         );
         assert_typed_refusal(&answer, 400, "NoSuchCoin", Some("object"), 24);
-        assert_eq!(answer.1["error_data"]["coin"], "RIN", "{}", answer.1);
+        assert_eq!(answer.1["error_data"]["coin"], "RIN", "setprice: error_data coin");
 
         // Params that do not decode answer `InvalidRequest` (string payload, HTTP 400), as for every versioned method.
         let answer = post_v2(addr, "setprice", Some(json!({ "base": "RIN" })), 25);
@@ -1662,7 +1671,7 @@ mod server_tests {
             Some("object"),
             33,
         );
-        assert_eq!(body["error_data"]["coin"], "NOPE", "{body}");
+        assert_eq!(body["error_data"]["coin"], "NOPE", "setprice: error_data coin");
     }
 
     /// The legacy form of each of the six methods keeps answering its legacy body next to the versioned one (the
