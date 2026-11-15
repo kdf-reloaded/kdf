@@ -9,11 +9,91 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
 
+### Added
+
+#### Start-up and configuration
+
+- **The node checks the computer's clock against time servers.** At start, and again every hour
+  and after the computer slept or its clock was set, the node asks NTP time servers for the time
+  and takes the median of their answers. Swaps rely on the clock for their lock times and
+  deadlines. A clock more than 10 seconds off stops the node at start with an error that says by
+  how much the clock is off; swaps that were in progress then wait until the node starts with a
+  correct clock, so setting the clock right is urgent. While the node runs, it refuses new orders
+  and new swaps until the clock is right again; running swaps and withdrawals go on. By default
+  the node asks `0.pool.ntp.org` to `3.pool.ntp.org`; `ntp_servers` in `MM2.json` lists other
+  servers, and `[]` turns the check off. When no server answers, the node logs a warning and goes
+  on, unless `ntp_required` is `true`. Browser builds cannot send the queries and skip the check.
+  Detail: PR #348; CRD ch.45 §45.6C.
+
+#### RPC interface
+
+- **The order-management methods `setprice`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
+  `my_orders` and `order_status` accept `mmrpc: "2.0"` requests.** A versioned request carries the legacy
+  members unchanged inside `params`, gets the legacy result under `result` with the request's `id` echoed,
+  and a typed `error_type` with an HTTP status instead of the legacy error string: a request the client
+  got wrong (unknown coin, unknown order, a volume or price below the minimum, not enough balance) answers
+  400, a failure of the node 500, and a refusal while the computer's clock is off 503. An unknown member
+  inside `params` is ignored. The legacy forms of the six methods and their answers are unchanged, except
+  that a legacy error text no longer carries the inner `file:line]` trace tokens. This is a KDF Reloaded extension; the reference answers
+  `NoSuchMethod` for these names under `mmrpc: "2.0"`. The remaining legacy-only methods follow in later
+  releases (plan `docs/plans/mmrpc-v2-completion.md`). Detail: PR #359; CRD ch.43 §43.1R, D43.1A.1 status note.
+
+#### Solana coins
+
+- **Solana entries of a coins file in the form GLEEC KDF uses can be read.** Besides its own
+  forms, KDF Reloaded now reads, in native builds, a Solana platform entry with
+  `"protocol_data": {}` and an SPL token entry of type `SOLANATOKEN` with `platform`, `decimals`, `mint_address` and `program_id`. A
+  `mint_address` or `program_id` that is not a valid public key makes the entry unreadable, and the
+  activation reports a protocol parse error. Solana stays switched off in this build, so no Solana
+  coin can be activated yet. Detail: PR #361; CRD ch.40 R40.1.2, R40.1.3.
+
+### Changed
+
+#### Tendermint (Cosmos) coins
+
+- **Tendermint activation refuses a hardware key policy instead of ignoring it.** A request that
+  names the `Trezor` key policy used to activate the coin with the local key without a word; it now
+  fails before any node is contacted, with a `PlatformCoinCreationError` that says the hardware key
+  policy is not supported for Tendermint coins and to activate with the local key. An absent
+  `priv_key_policy`, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
+  as the WalletConnect form, fails request parsing with `InvalidRequest` (HTTP 400) instead of
+  activating with the local key. Detail: PR #358; CRD ch.36 §36.7, status note of 2026-11-15
+
+### Fixed
+
+#### QTUM and QRC20
+
+- **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation
+  (`add_delegation`) asked for the lock that lets only one transaction from the wallet be built at
+  a time but did not wait for it, so the lock was never held, and removing one
+  (`remove_delegation`) did not ask for it at all. A delegation and a withdraw started together
+  could therefore be built at the same time. Both delegation calls now wait for the lock, as a
+  withdraw does, so the builds no longer overlap; as with two withdraws, a transaction that is built
+  but not yet broadcast does not keep a later build from choosing the same coins. Detail: PR #354; CRD ch.38 R38.5B.5.
+
+### Tests
+
+- **The Tendermint unit tests of `coins` now run in CI.** A new CI job runs the Tendermint swap-flow,
+  priority-fee and WalletConnect signer tests and the postponed-family switch tests; the loopback
+  tests of the native RPC server join the maker-outbox job.
+
 ### Plans touched
 
+- [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
+  management) implemented in PR #359; decisions D1–D10 recorded; phases 2–5 open.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress (was parked):
   checked against the code on 2026-11-15: phases A–F not started; the state found and the order of the work packages are in its
   new section "State check (2026-11-15)".
+- [`rpc-error-redesign`](docs/plans/rpc-error-redesign.md) — new, planning, no schedule: one error vocabulary
+  (token spelling, payload kind, HTTP status) for the whole versioned RPC surface, with a compatibility period;
+  ordered 2026-11-15, written in PR #359.
+- [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
+  pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
+- [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
+  corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
+  packages S0 and S2 done in PR #361.
+- [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
+  NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 
 ## [0.4.0-beta.1] — 2026-11-14
 

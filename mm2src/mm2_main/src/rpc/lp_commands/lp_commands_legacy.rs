@@ -832,6 +832,21 @@ mod tests {
                     "decimals": 6 } }),
                 SOLANA_NOT_AVAILABLE,
             ));
+            // The reference configuration forms (CRD ch.40 R40.1.2, R40.1.3) are refused the same way.
+            coins.push((
+                "SOL-REF",
+                json!({ "type": "SOLANA", "protocol_data": {} }),
+                SOLANA_NOT_AVAILABLE,
+            ));
+            coins.push((
+                "USDC-SOL-REF",
+                json!({ "type": "SOLANATOKEN", "protocol_data": {
+                    "platform": "SOL-REF",
+                    "decimals": 6,
+                    "mint_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "program_id": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" } }),
+                SOLANA_NOT_AVAILABLE,
+            ));
         }
         let conf_coins: Vec<Json> = coins
             .iter()

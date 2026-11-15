@@ -1,7 +1,8 @@
 use super::{DispatcherError, DispatcherResult, PUBLIC_METHODS};
 use crate::mm2::lp_native_dex::init_hw::{init_trezor, init_trezor_cancel, init_trezor_status, init_trezor_user_action};
-use crate::mm2::lp_ordermatch::{best_orders_rpc_v2, orderbook_rpc_v2, start_simple_market_maker_bot, start_swap_rpc,
-                                stop_simple_market_maker_bot};
+use crate::mm2::lp_ordermatch::{best_orders_rpc_v2, cancel_all_orders_core, cancel_order_core, my_orders_core,
+                                order_status_core, orderbook_rpc_v2, set_price_core, start_simple_market_maker_bot,
+                                start_swap_rpc, stop_simple_market_maker_bot, update_maker_order_core};
 #[cfg(target_arch = "wasm32")]
 use crate::mm2::rpc::connect_metamask::{connect_metamask_cancel, connect_metamask_init, connect_metamask_status};
 use crate::mm2::rpc::one_inch::{classic_swap_contract, classic_swap_create, classic_swap_liquidity_sources,
@@ -233,6 +234,8 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "add_node_to_version_stat" => handle_mmrpc(ctx, request, add_node_to_version_stat).await,
         "approve_token" => handle_mmrpc(ctx, request, approve_token).await,
         "best_orders" => handle_mmrpc(ctx, request, best_orders_rpc_v2).await,
+        "cancel_all_orders" => handle_mmrpc(ctx, request, cancel_all_orders_core).await,
+        "cancel_order" => handle_mmrpc(ctx, request, cancel_order_core).await,
         "consolidate_utxos" => handle_mmrpc(ctx, request, consolidate_utxos_rpc).await,
         "electrum_servers" => handle_mmrpc(ctx, request, electrum_servers_rpc).await,
         "enable_bch_with_tokens" => handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<BchCoin>).await,
@@ -287,10 +290,12 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "init_withdraw" => handle_mmrpc(ctx, request, init_withdraw).await,
         "max_taker_vol" => handle_mmrpc(ctx, request, max_taker_vol_v2).await,
         "max_maker_vol" => handle_mmrpc(ctx, request, max_maker_vol).await,
+        "my_orders" => handle_mmrpc(ctx, request, my_orders_core).await,
         "my_recent_swaps" => handle_mmrpc(ctx, request, my_recent_swaps_rpc_v2).await,
         "my_swap_status" => handle_mmrpc(ctx, request, my_swap_status_rpc).await,
         "min_trading_vol" => handle_mmrpc(ctx, request, min_trading_vol_v2).await,
         "my_tx_history" => handle_mmrpc(ctx, request, my_tx_history_v2_rpc).await,
+        "order_status" => handle_mmrpc(ctx, request, order_status_core).await,
         "orderbook" => handle_mmrpc(ctx, request, orderbook_rpc_v2).await,
         "peer_connection_healthcheck" => handle_mmrpc(ctx, request, peer_connection_healthcheck).await,
         "recreate_swap_data" => handle_mmrpc(ctx, request, recreate_swap_data).await,
@@ -298,6 +303,7 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "remove_node_from_version_stat" => handle_mmrpc(ctx, request, remove_node_from_version_stat).await,
         "send_asked_data" => handle_mmrpc(ctx, request, send_asked_data).await,
         "set_swap_gas_fee_policy" => handle_mmrpc(ctx, request, set_swap_gas_fee_policy).await,
+        "setprice" => handle_mmrpc(ctx, request, set_price_core).await,
         "sign_message" => handle_mmrpc(ctx, request, sign_message).await,
         "start_simple_market_maker_bot" => handle_mmrpc(ctx, request, start_simple_market_maker_bot).await,
         "start_version_stat_collection" => handle_mmrpc(ctx, request, start_version_stat_collection).await,
@@ -305,6 +311,7 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "stop_version_stat_collection" => handle_mmrpc(ctx, request, stop_version_stat_collection).await,
         "start_swap" => handle_mmrpc(ctx, request, start_swap_rpc).await,
         "trade_preimage" => handle_mmrpc(ctx, request, trade_preimage_rpc).await,
+        "update_maker_order" => handle_mmrpc(ctx, request, update_maker_order_core).await,
         "update_version_stat_collection" => handle_mmrpc(ctx, request, update_version_stat_collection).await,
         "verify_message" => handle_mmrpc(ctx, request, verify_message).await,
         "wc_delete_session" => handle_mmrpc(ctx, request, wc_delete_session).await,
@@ -758,6 +765,26 @@ mod tests {
         }
     }
 
+    /// CRD ch. 36 §36.7, status note of 2026-11-15: a `priv_key_policy` other than the three known values, such as
+    /// the WalletConnect form or an unknown name, fails request parsing (`InvalidRequest`, string, 400) before the
+    /// activation starts, so nothing is registered and no node is contacted.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn tendermint_activation_unknown_priv_key_policy_is_invalid_request() {
+        let valid = json!({
+            "ticker": "ATOM",
+            "nodes": [{ "url": "http://127.0.0.1:1" }],
+            "tokens_params": [],
+        });
+        for method in ["enable_tendermint_with_assets", "task::enable_tendermint::init"] {
+            for policy in [json!({ "type": "WalletConnect", "data": "x" }), json!("Metamask")] {
+                let mut params = valid.clone();
+                params["priv_key_policy"] = policy;
+                assert_invalid_request(evm_request_failure(method, params));
+            }
+        }
+    }
+
     /// CRD ch. 35 §35.3A: the token task family is routed under its own namespace and an unknown sub-method of it
     /// resolves to the standard no-such-method error.
     #[test]
@@ -809,6 +836,12 @@ mod tests {
                     "platform": "SOL",
                     "token_contract_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
                     "decimals": 6 } } },
+                { "coin": "SOL-REF", "mm2": 1, "protocol": { "type": "SOLANA", "protocol_data": {} } },
+                { "coin": "USDC-SOL-REF", "mm2": 1, "protocol": { "type": "SOLANATOKEN", "protocol_data": {
+                    "platform": "SOL-REF",
+                    "decimals": 6,
+                    "mint_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "program_id": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" } } },
             ] }))
             .into_mm_arc();
 
@@ -841,7 +874,35 @@ mod tests {
         assert_eq!(body["error_data"], SOLANA_NOT_AVAILABLE);
         assert!(body["error"].as_str().unwrap().contains(SOLANA_NOT_AVAILABLE), "{body}");
 
-        for ticker in ["SOL", "USDC-SOL"] {
+        // The same requests against the reference configuration forms get the identical answers.
+        let (status, body) = answer_of(
+            &ctx,
+            "enable_solana_with_tokens",
+            json!({
+                "ticker": "SOL-REF",
+                "confirmation_commitment": "finalized",
+                "client_url": "http://127.0.0.1:1",
+                "tx_history": false,
+                "spl_tokens_requests": [{ "ticker": "USDC-SOL-REF" }],
+            }),
+        );
+        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error_type"], "PlatformCoinCreationError", "{body}");
+        assert_eq!(body["error_data"]["ticker"], "SOL-REF");
+        assert_eq!(body["error_data"]["error"], SOLANA_NOT_AVAILABLE);
+        assert!(body["error"].as_str().unwrap().contains(SOLANA_NOT_AVAILABLE), "{body}");
+
+        let (status, body) = answer_of(
+            &ctx,
+            "enable_spl",
+            json!({ "ticker": "USDC-SOL-REF", "activation_params": {} }),
+        );
+        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error_type"], "Internal", "{body}");
+        assert_eq!(body["error_data"], SOLANA_NOT_AVAILABLE);
+        assert!(body["error"].as_str().unwrap().contains(SOLANA_NOT_AVAILABLE), "{body}");
+
+        for ticker in ["SOL", "USDC-SOL", "SOL-REF", "USDC-SOL-REF"] {
             assert!(
                 block_on(lp_coinfind(&ctx, ticker)).unwrap().is_none(),
                 "{ticker} registered"

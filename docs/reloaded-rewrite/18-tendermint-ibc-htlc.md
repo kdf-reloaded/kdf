@@ -841,6 +841,97 @@ The chapter relies on one baseline-state claim:
   test-coverage sentence describe the maintainer's decision of 2026-11-09 and
   this repository's code. They take no forbidden-class input, so chapter 01
   R38 is not engaged and no gate pass is required.
+- *Scoped addition (2026-11-10, Spec Reader round 0.4.0-12) -- §18.11.12
+  (R18.11.29 -- R18.11.34, the Chapter 59 R59.4A.4 input note, the
+  upstream-divergence note, D18.11.4, T18.11.1 -- T18.11.3).* **KDF Dirty
+  Gate: PASS on 2026-11-10, measure 0.03, no findings** (chapter 01 R40;
+  the attestation closes this item). *Inputs:* the forbidden corpus at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, read read-only and consulted
+  **only** to establish, for the Tendermint coin and token, the bytes
+  sent as protocol information, the answer of the acceptance check to an
+  absent, empty and non-empty counterparty value with and without the IBC
+  swap-routing feature compiled in, where the routing channel identifier
+  is kept and whether it is transmitted, which readers derive anything
+  from the value (orderbook presentation, swap destination, swap layer),
+  and the designations' agreement on these points (a read-only difference
+  between the two rows over the Tendermint coin and token files and the
+  order-match file). Behavior and public wire shape only; no private
+  identifier, function body, helper decomposition, error, log, comment or
+  test text was reproduced. The *Our side* rule R18.11.34, D18.11.4 and
+  the three test rows rest on this repository's own tree and on Chapter
+  59 §59.4A; T18.11.3 is a public-network observation of permitted-input
+  class R6 to be made against release binaries run as black boxes.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-10, measure 0.03
+  on the discretionary-expression basis, no findings. Reference states
+  (chapter 02 R13): the subsection names exactly two states, `v2.6.0-beta` and
+  `v3.0.0-beta`, both rows of chapter 02 §2.15A; no untabled state was named
+  or compared. Extent: the Tendermint coin and Tendermint token
+  protocol-information hooks (own value and acceptance check); the order-match
+  layer's production, transport, storage and consumption of the per-coin
+  protocol-information bytes in the order announcement and both match messages
+  (including wire-shape definitions and orderbook and best-orders address
+  derivation); the IBC swap-routing feature's per-order channel storage and
+  build-feature defaults; and the swap layer's absence of readers — compared
+  at the rows `v2.6.0-beta` and `v3.0.0-beta`; 7 source files and 2 manifest
+  files read per row, plus a row-to-row difference over the Tendermint coin
+  and token files and the order-match files. Method: reading and mechanical
+  text search at both tabled states; the candidate embeds no code blocks, so
+  the repository's clean-room gate tool was not applicable.
+- *Scoped addition (2026-11-15, Spec Reader round 0.5.0-3) -- §18.11.20
+  (R18.11.50 -- R18.11.58, the informative notes, D18.11.10 -- D18.11.12,
+  T18.11.10 -- T18.11.16).* **KDF Dirty Gate: PASS on 2026-11-15, measure 0.04, no findings**
+  (chapter 01 R40; the attestation closes this item). *Inputs:* the forbidden corpus at
+  the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, read
+  read-only and consulted **only** to establish, for the Tendermint coin
+  and token: whether a coin activated without a local key is refused at
+  order time, which public key it announces as its HTLC key, and how its
+  swap transactions are signed (the wallet method, and the external-data
+  request with its event type and answer member); what the readers of the
+  HTLC query take from the node's answer, and which outcomes of the
+  own-payment check count as "not sent" and which as an error; which fee
+  descriptor a Tendermint taker fee is validated against, the checks of
+  the burn form, what the validation does not read, the retry figures and
+  the single outcome; what record an automatic HTLC refund leaves; and the
+  two rows' agreement on these points (a read-only difference between the
+  two rows over the Tendermint coin and token files, the maker and taker
+  swap files, the WalletConnect layer and the external-data request).
+  Behavior and public wire shape only; no private identifier, function
+  body, helper decomposition, error, log, comment or test text was
+  reproduced. The query-code figures of R18.11.53 and the duplicate-id and
+  input-sum rules are public Cosmos SDK and irismod module facts, named as
+  such and owed a check against the published sources (T18.11.16). The
+  *Our side* notes, the options of the D-items and the test rows rest on
+  this repository's own tree, on `docs/plans/tendermint-activation-features.md`
+  and on Chapters 16, 31, 36 and 51.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-15, measure
+  0.04 on the discretionary-expression basis of chapter 01 R35 and R39,
+  judged per token, no findings (the round as a whole: PASS, measure 0.05);
+  the subsection passed two full passes, the second after three passages of
+  the round were reworded. Reference states (chapter 02 R13): exactly two
+  states are named, `v2.6.0-beta` and `v3.0.0-beta`, both rows of §2.15A,
+  compared at the rows' full identifiers; no untabled state was named or
+  compared. Extent: the Tendermint coin's and token's swap-side behavior for
+  a coin without a local key (the wallet-only decision, the announced HTLC
+  public key, the send path through WalletConnect and through the
+  external-data request with its event type and answer member); the readers
+  of the HTLC query answer and the own-payment check's outcomes; the
+  taker-fee validation in its standard and burn forms with the maker's retry
+  figures and outcome event; the family's burn-policy answer — 9 source
+  files read in the relevant parts at `v2.6.0-beta`, `v3.0.0-beta` by a
+  row-to-row difference over the Tendermint coin and token files, the maker
+  and taker swap files, the WalletConnect layer and the external-data
+  request; the refund and manual-recovery paths, the order-time check and
+  the taker swap file covered by the mechanical lists only. Second pass: the
+  full added ranges read again and compared at both rows (mechanical search
+  over 160 source-file instances across the two rows; six files read at
+  `v2.6.0-beta`, row-to-row difference for `v3.0.0-beta`). Method: reading
+  at the tabled states; mechanical comparison against a compound-identifier
+  list and a word 4-gram list of comment and string-literal text from the
+  compared files at both rows; search for every backticked token, each match
+  judged forced or free; scan for identifier-shaped words outside backticks;
+  row-to-row difference; the additions embed no code blocks, so the
+  repository's clean-room gate tool was not applicable. The comparison
+  concerns expression; it does not attest the accuracy of the statements.
 
 ---
 
@@ -1324,3 +1415,447 @@ swaps return:
   (`nyancat-9`) refunds in about four minutes; the module returns state
   `Refunded` with no transaction, which is what R18.11.16/R18.11.17 rely
   on.
+
+### 18.11.12 Protocol information of the Tendermint family
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-10,
+> measure 0.03 (attestation in §18.10).**
+> This subsection was written on 2026-11-10 by the KDF Spec Reader (Spec
+> Reader round 0.4.0-12) under the two-team procedure of chapter 01 §1.4A,
+> from the reference designations `v2.6.0-beta` and `v3.0.0-beta` (both rows
+> of chapter 02 §2.15A, read read-only; no untabled state was read) and from
+> this repository's own tree. It answers, for the protocol-information bytes
+> that every order and both match messages carry per coin ([Chapter
+> 59](59-legacy-ordermatch-negotiation.md) R59.4.7 and §59.4A), what the
+> reference Tendermint coin and token send, how they judge a counterparty's
+> value, who reads the value, and what a value longer than the reference
+> expects does. The two designations agree on every rule of this subsection,
+> with and without the IBC swap-routing feature of §18.7.5 compiled in
+> (R18.11.27 continues to hold).
+
+- **R18.11.29.** *Own protocol information (both designations, both
+  builds).* A reference Tendermint coin sends an **empty** byte string as
+  its protocol information in every message that carries one (the order
+  announcement, `TakerRequest`, `MakerReserved`), in both roles, whatever
+  amount the order-match layer passes to it. A Tendermint token sends
+  exactly what its platform coin sends, so also an empty string. The value
+  is fixed; nothing about it is derived from the coin's configuration,
+  denomination, account prefix, chain, or IBC channels. Compiling the IBC
+  swap-routing feature in does not change the value.
+- **R18.11.30.** *Acceptance check (both designations, both builds).* The
+  reference Tendermint coin's and token's acceptance check, the hook the
+  order-match layer calls on a `TakerRequest` (R59.4.3) and on a
+  `MakerReserved` (R59.3.2), **accepts every counterparty value**: an
+  absent value, an empty value, and a non-empty value of any length and
+  any content, in both roles. It does **not** decode the bytes, so there
+  is no decoding target and no failure arm for undecodable bytes; the
+  amount, lock-duration and maker-role inputs of R59.4.5 do not enter
+  the answer. The token's check is its platform coin's check. The IBC
+  swap-routing feature changes neither hook: with the feature compiled
+  in, the check is the same unconditional acceptance.
+- **R18.11.31.** *Where the routing channel is, and is not.* With the
+  IBC swap-routing feature compiled in, the channel identifier that the
+  order-time check of §18.7.5 selects for a chain without an HTLC module
+  is kept in a separate per-order metadata member of the node's **own**
+  order record, and only there. It is not written into the protocol
+  information, and the wire shapes of the order announcement,
+  `TakerRequest` and `MakerReserved` carry no member for it: a request or
+  reservation received from a peer is given an empty metadata set. The
+  channel identifier therefore never reaches a counterparty at either
+  designation, and a counterparty's protocol information can never carry
+  one. The premise recorded in the as-built note under R18.11.25, that a
+  routing channel would travel in non-empty protocol information, does
+  not hold at the reference; the note's *behavior* (Reloaded advertises
+  empty and declines non-empty) is unaffected and stands as this
+  repository's own choice (R18.11.34).
+- **R18.11.32.** *No reader derives anything from it (both
+  designations).* No reader at the reference derives the displayed
+  address, the swap destination or anything else from a Tendermint coin's
+  or token's protocol information:
+  1. the `orderbook` and `best_orders` responses derive a Tendermint
+     entry's `address` as the bech32 account of the order's public key
+     under the coin's configured account prefix (a token under its
+     platform coin's prefix); the address-format descriptor that the
+     generic presentation step decodes from the protocol information
+     (R59.4.7 item 5) is passed along but is not used by this family's
+     derivation, so the bytes have no effect on the shown address;
+  2. the swap destination, the `to` account of a create-HTLC message
+     (R18.11.4), is derived from the counterparty's HTLC public key
+     exchanged in the negotiation of Chapter 51, never from protocol
+     information;
+  3. the swap layer has no reader of protocol information at all; the
+     order-match layer carries the bytes unchanged in the three messages
+     and in the synchronization side channel (Chapter 32 R-W2a) and
+     stores them with the order (R59.4A.5, R59.4A.7).
+- **R18.11.33.** *Longer bytes are ignored, not rejected and not
+  misread.* A reference node at either designation that receives, for a
+  Tendermint coin or token, a protocol-information value longer than the
+  empty string it expects, in particular a first value followed by an
+  additional capability word of Chapter 59 R59.4A.1 or a word standing
+  alone, **ignores** it: the acceptance check accepts without reading
+  (R18.11.30), the match proceeds, and the order is shown under the
+  address derived from the public key (R18.11.32). Nothing in the value
+  is interpreted, so nothing can be misread. The only effect of the value
+  at the reference is that it is stored and re-sent with the order.
+
+> **Input for Chapter 59 R59.4A.4 (Tendermint row; this note does not
+> edit Chapter 59).** The answer R59.4A.4 requires before a further coin
+> family opts in is given by R18.11.30 and R18.11.33: at both reference
+> release rows a Tendermint coin's and token's longer bytes are accepted
+> without being read and have no effect on matching or presentation, so
+> the Tendermint family may opt in through this chapter. The row for the
+> table of R59.4A.4 has the shape `| <key> | Tendermint coin and token
+> (Chapter 18) | This node builds the Tendermint maker payment with the
+> multiplied maker lock and requires at least that lock from a capable
+> counterparty (D18.11.2, decided 2026-11-09). | Chapter 18 R18.11.x |`,
+> where `<key>` and `R18.11.x` are fixed by the rule that implements
+> D18.11.2 (that rule lands with its change, as D18.11.2 records). One
+> point needs a decision before that rule can be written, because this
+> family's first value is empty (R18.11.29): see D18.11.4.
+
+> **Upstream divergence (informative).** At the reference the
+> protocol-information surface of this family is inert in both directions:
+> empty on the way out, unread on the way in. Reloaded's decline of a
+> non-empty value (as-built note under R18.11.25) and its decline of
+> every match while Tendermint swaps are switched off in the build are
+> Reloaded-original; neither has a counterpart at the reference, and the
+> reference performs no order-time or negotiation-time check for this
+> family at all (R18.11.23).
+
+- **R18.11.34.** *Our side (binding for the swaps-on work).* Reloaded
+  sends an empty value for a Tendermint coin and token (same as
+  R18.11.29). Its acceptance check declines a non-empty value and, while
+  the build's Tendermint swap switch is off, declines every value. Since
+  the reference never sends a non-empty value for this family
+  (R18.11.29), the decline of non-empty bytes can only ever reject
+  another Reloaded node that sends a capability word; it rejects no
+  reference counterparty. When the capability word of D18.11.2 is
+  introduced, this check SHALL be replaced by the reading of R59.4A.2 (the
+  word is read, unknown keys are ignored, a malformed word declares
+  nothing) so that a capable Reloaded counterparty is not declined for
+  being capable; until then the present decline stays.
+- **D18.11.4 (maintainer decision).** *Layout of a capability word on an
+  empty first value.* R59.4A.1 puts the word immediately after the coin's
+  first value, and R59.4A.2 reads it by skipping exactly one MessagePack
+  value first. For this family the first value is empty (R18.11.29), so a
+  word sent under R59.4A.1 would itself be the first MessagePack value
+  and R59.4A.2's reader would skip it. The reference accepts any bytes
+  (R18.11.33), so interoperability constrains none of the options:
+  (a) when a Tendermint coin sends a word, it sends one MessagePack nil
+  as its first value, followed by the word; the generic reader of
+  R59.4A.2 then applies unchanged, and the first value still decodes as
+  nothing a presentation step uses (R18.11.32); (b) a family-specific
+  reader that, when the coin's own first value is empty, reads the word
+  at the start of the value; (c) a Chapter 59 amendment that lets
+  R59.4A.2 treat a value consisting of a single map with string keys as
+  the word when the coin's first value is empty. Option (a) keeps the
+  Chapter 59 rule single-shaped and is recommended; it requires a
+  one-sentence addition to R59.4A.1 naming the empty-first-value case.
+  The key name goes into the R59.4A.4 table with the rule that implements
+  D18.11.2.
+
+Tests (derivable from the rules above; T18.11.n is new numbering for
+this section):
+
+- **T18.11.1.** *Empty value in every form.* For a Tendermint coin and for
+  a token on it, the protocol information produced for an order, for a
+  `TakerRequest` and for a `MakerReserved`, with and without an amount
+  argument, in both roles, is the empty byte string (R18.11.29, until the
+  rule implementing D18.11.2 changes it for the word).
+- **T18.11.2.** *Presentation ignores the bytes.* An orderbook entry for a
+  Tendermint coin or token whose stored protocol information is (i)
+  empty, (ii) a well-formed capability word, (iii) arbitrary non-empty
+  bytes shows, in `orderbook` and `best_orders`, the same `address`: the
+  bech32 account of the order's public key under the coin's account
+  prefix (R18.11.32).
+- **T18.11.3.** *Lab row against a reference release binary (R6
+  observation, black box).* A Reloaded maker order whose Tendermint-side
+  protocol information carries a capability word is matched by a
+  reference taker (`v2.6.0-beta` on netid 8762 and `v3.0.0-beta` on netid
+  6133): the reference sends `TakerConnect`, and its `orderbook` shows the
+  order under the Reloaded maker's bech32 account; mirrored for a
+  Reloaded taker whose `TakerRequest` carries the word, where the
+  reference maker sends `MakerReserved` (R18.11.33). The row needs the
+  Tendermint swap switch on and is a swaps-on lab item.
+
+### 18.11.20 Key-less coins in swaps, the own-payment query, burn-form fee validation and the automatic refund in wallet records
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
+> measure 0.04 (attestation in §18.10).**
+> This subsection was written on 2026-11-15 by the KDF Spec Reader (Spec
+> Reader round 0.5.0-3) under the two-team procedure of chapter 01 §1.4A,
+> from the reference designations `v2.6.0-beta` and `v3.0.0-beta` (both rows
+> of chapter 02 §2.15A, read read-only; no untabled state was read), from
+> the public Cosmos SDK, irismod and CometBFT interface definitions, and
+> from this repository's own tree. The two designations agree on every rule
+> of this subsection (R18.11.27 continues to hold). **Numbering:** the
+> subsection number 18.11.20, the rules R18.11.50 -- R18.11.58, the
+> decisions D18.11.10 -- D18.11.12 and the tests T18.11.10 -- T18.11.16 are
+> set well apart from those of §18.11.12 (R18.11.29 -- R18.11.34, D18.11.4,
+> T18.11.1 -- T18.11.3) and from the numbers directly after them, which work
+> in preparation may take. The subsection **completes** R18.11.9, R18.11.15
+> -- R18.11.17, R18.11.20 -- R18.11.22, R18.11.23a and R18.11.28; it adds
+> one precision to R18.11.21 (the table of R18.11.56) and restates none of
+> the others; the activation side of a coin without a local key, and
+> transaction history, are in [Chapter
+> 36](36-tendermint-v2-activation-rpcs.md) §36.14.
+
+**Coins without a local key (completes R18.11.9 and R18.11.23a).**
+
+- **R18.11.50.** *Order time and the HTLC key at the reference.* At both
+  designations a Tendermint coin activated by public key or through
+  WalletConnect (Chapter 36 §36.14.2, §36.14.3) is **not** refused at
+  order time for lacking a key. It is wallet-only for the reasons any
+  coin is, plus one: the Ledger flag of Chapter 36 R36.14.18. A token is
+  wallet-only exactly when its platform coin is; the token's own
+  coins-file flag is not read. In the negotiation of
+  [Chapter 51](51-legacy-v1-swap-state-machine.md) such a coin announces,
+  as its HTLC public key, **the account public key it was activated
+  with**: the wallet's key for WalletConnect, the supplied key for the
+  public-key form. A counterparty's payment is therefore locked to the
+  account the external wallet controls (R18.11.4). No key of the node
+  takes part. Watchers stay off for the family (R18.11.26).
+- **R18.11.51.** *WalletConnect in a swap at the reference.* Every swap
+  transaction of such a coin (the fee send, the HTLC creation, the claim)
+  is signed by one `cosmos_signDirect` request to the wallet (Chapter 36
+  R36.14.15) and broadcast by the node. A broadcast that a node refuses
+  for an account-sequence mismatch is signed again with the corrected
+  sequence, which asks the wallet again. The whole send, the wallet's
+  approval included, must finish within the deadline the swap machine
+  gives the step, less five seconds (the finding at the end of §18.11.9
+  on that subtraction applies). The fee is that of R18.11.9. A refusal,
+  a missing answer or a lost session fails the send, and the machine
+  records the failure event of that step (Chapter 51). A Ledger-backed
+  session never gets here: it is wallet-only, and the Amino form it
+  would need exists for the bank send only.
+- **R18.11.52.** *The public-key form in a swap at the reference.*
+  Without the Ledger flag, a coin activated by public key sends each swap
+  transaction through the external-data request of
+  [Chapter 31](31-central-application-context.md) R19. The node publishes
+  a data-needed event of type `TX_HASH:<platform ticker>` (stream category
+  `DATA_NEEDED:TX_HASH:<platform ticker>`) whose `data` is the unsigned
+  document of Chapter 36 R36.14.17 and whose `timeout_secs` is the step's
+  time bound. The client has its own wallet sign and broadcast the
+  transaction and answers `send_asked_data` with `{"hash": <transaction
+  hash>}`. The node then reads that transaction from a node, once, and
+  requires its encoded body to equal the body it asked for. A missing
+  answer, a transaction the node cannot find yet, and a body that differs
+  each fail the send.
+
+> **Note on R18.11.23a, and our side (informative).** R18.11.23a refuses
+> an order for a coin without a local key and says the reference has no
+> such rule; R18.11.50 confirms that. Its sentence about a fallback to
+> the node's own persistent public key describes **this repository's**
+> legacy swap path (`docs/plans/tendermint-activation-features.md`, the
+> section on the latent hazard), not the reference: the reference
+> announces the account public key and never the node's. The refusal
+> itself is unaffected and stays in force for both key-less forms that
+> the 0.5.0 cycle builds.
+
+- **D18.11.10 (maintainer decision).** *Swaps for a coin without a local
+  key.* (a) Keep R18.11.23a for both key-less forms; they are wallet
+  coins. (b) Later, let a WalletConnect coin that is not Ledger-backed
+  swap as the reference does, with the account public key as the HTLC
+  key (never a key of the node) and signing per R18.11.51; preconditions
+  are the body comparison proposed in Chapter 36 §36.14.2 (finding 3)
+  and a lab row with a real wallet, because every swap step then waits
+  for a person to approve it inside the step's deadline. (c) Also the
+  public-key form through R18.11.52, which additionally needs a client
+  that implements the exchange. Recommended: (a) for 0.5.0, (b) as a
+  plan item of its own, (c) not planned.
+
+**The own-payment check and the query answer (completes R18.11.22).**
+
+- **R18.11.53.** *The code of the query answer is not read.* At both
+  designations every reader of the HTLC query (the own-payment check of
+  R18.11.22, the spend search of R18.11.16 and the payment validation of
+  R18.11.5) takes only the **value bytes** of the node's `abci_query`
+  answer and decodes them as the dialect's query response. The answer's
+  `code`, `codespace` and `log` are never read. An answer without value
+  bytes decodes to "no HTLC record". The reference therefore does **not**
+  tell the module's not-found answer from any other non-zero answer:
+  every answer without value bytes reads as "no record", whatever its
+  code. In the public Cosmos SDK a
+  query handler's not-found status surfaces as code 22 of codespace
+  `sdk`, an invalid request as code 18 and an unserved path as code 6;
+  these figures are public SDK facts, owed a check against the published
+  source and a live node (T18.11.16), and are not taken from the
+  reference, which reads none of them.
+- **R18.11.54.** *What counts as "not sent" and what as an error.* For
+  the own-payment check at the reference:
+
+  | Observation | Result |
+  | --- | --- |
+  | the answer holds no HTLC record, whatever its code (R18.11.53) | **not sent** |
+  | a record in state `Open`, `Completed` or `Refunded`, and the creation search of R18.11.22 returns no transaction | **not sent** |
+  | a record in one of those states, a creation transaction with result code zero, and its hash lock differs from the recorded one | **not sent** |
+  | the same, and the hash locks are equal | sent; that transaction is returned |
+  | a creation transaction is found and its result code is not zero | error |
+  | a record in any other state | error |
+  | no usable node, a failed call to the node, or an answer or a creation transaction that does not decode | error |
+
+  An answer with a non-zero code and no value therefore counts as **not
+  sent**; only a failure to get or decode an answer is an error. What
+  the swap machine does with either result is bound by Chapter 51 R17.
+  For the spend
+  search an answer without a record means "no spend yet"; for the payment
+  validation it is a validation failure.
+
+> **Code-quality finding (informative; trigger: apparent with little
+> extra effort) and our side.** At the reference a "not sent" result
+> does not establish that the module holds no HTLC under the id
+> (R18.11.53, R18.11.54). Proposed remedy: D18.11.11.
+> This repository's check (PR #299, as built under R18.11.22)
+> already answers an error, not "not sent", when the record exists and
+> the creation transaction is not found or does not match; like the
+> reference it does not read the query answer's code.
+
+- **D18.11.11 (maintainer decision).** *Non-zero query answers in the
+  own-payment check.* (a) The reference's reading: every answer without
+  a record is "not sent". (b) "Not sent" only for an answer with code
+  zero and no record or with the module's not-found code; any other
+  non-zero code is a node-side failure, retried against the node set
+  within the stage's time budget, and an error if it persists. (c) As
+  (b) without the retry. Recommended: (b). It changes no message a peer
+  sees. The same reading would then serve the spend search, where an
+  error answer is today "no spend yet", and the payment validation.
+
+**Taker fee with a burn part (completes R18.11.20, R18.11.21 and R18.11.28).**
+
+- **R18.11.55.** *The burn form is not reached by a swap at either
+  designation.* The maker validates the fee transaction against a
+  descriptor it computes itself (Chapter 51 R13) from the taker coin's
+  burn policy, and the taker builds its fee from the same policy. A
+  Tendermint coin and token report no burning at both designations
+  (R18.11.28; [Chapter 16](16-swap-v2-pre-burn-output.md) R3), so the
+  descriptor of a Tendermint taker fee is the standard form or the
+  no-fee form, never the burn form. The burn-form validation of
+  R18.11.21 exists at both designations and no swap reaches it
+  (R18.11.28's remark that the family can validate a burn form it
+  receives names a capability that no swap exercises). Two
+  consequences: no reference peer sends or expects a `MsgMultiSend` fee
+  for this family, so a taker that sent one would fail a reference
+  maker's standard-form validation and a maker that expected one would
+  refuse every reference taker; and interoperability binds the standard
+  form only, the burn form being this project's own contract for the day
+  both peers of a swap have agreed on it.
+- **R18.11.56.** *The checks of the burn form and their one outcome.* The
+  reference's burn-form validation makes these checks, and no others
+  (R18.11.57):
+
+  | Check | What is compared |
+  | --- | --- |
+  | message | the transaction body holds exactly one message |
+  | outputs | the message has exactly two outputs |
+  | fee output | the first output's address is the fee address (R18.11.20); it holds exactly one coin; the coin's denomination is the payment denom, exactly, and its amount is the descriptor's fee amount in base units |
+  | burn output | the second output's address is the burn address; it holds exactly one coin, of the same denomination, whose amount is the descriptor's burn amount in base units |
+  | input | the message has exactly one input, and its address is the taker's account derived from the taker's HTLC public key |
+  | memo | the transaction memo equals the swap uuid in its hyphenated text form |
+  | node copy | the transaction a node returns for the hash of the supplied bytes equals those bytes |
+
+  The payment denom is the platform denom for the platform coin and the
+  token's denom for a token; both amounts are converted to base units
+  with that coin's or token's decimals, as payment amounts are, and are
+  compared as coins (denomination and decimal amount text). Every failed
+  check, and a failure to obtain the node's copy, has the **same**
+  wire-visible outcome. The validation is attempted up to seven times,
+  ten seconds apart, whatever the failure (Chapter 51 R15; this
+  repository's as-built figure under R18.11.21 is four). Then the maker
+  records `TakerFeeValidateFailed`, sends no payment and finishes
+  (Chapter 51 R13), the taker's key is penalized for an hour (Chapter 51
+  R40), and the taker's swap ends through its own wait for the maker
+  payment. Which check failed is visible only in the event's error text,
+  which is not bound; no typed distinction reaches the wire. The standard
+  form has the same single outcome.
+- **R18.11.57.** *What the fee validation does not read.* At both
+  designations, for both forms: the coins of the burn form's input (the
+  public bank module itself requires inputs and outputs to balance); the
+  message's type URL (the first message is decoded as the expected bank
+  message whatever its type; this repository checks the type, as-built
+  note under R18.11.21); the **execution result code** and the height of
+  the node's copy; the start-block figure the swap machine passes along;
+  and the transaction's gas, fee and timeout height.
+
+> **Code-quality finding (informative; trigger: contradiction between two
+> things read side by side).** The own-payment check refuses a creation
+> transaction whose result code is not zero (R18.11.22) and the
+> confirmation wait treats such a transaction as failed (R18.11.18), but
+> the fee validation accepts the node's copy of the fee transaction
+> without reading its result code (R18.11.57). Proposed remedy: D18.11.12.
+
+- **D18.11.12 (maintainer decision).** *The execution result of the fee
+  transaction.* (a) The reference's validation, which does not read it.
+  (b) The maker also requires result code zero of the node's copy, which
+  the same query answer carries. Recommended: (b). It refuses no fee
+  transaction whose execution succeeded, so interoperability is unchanged.
+
+**The automatic refund in wallet records (completes R18.11.15 -- R18.11.17).**
+
+- **R18.11.58.** *What a reference node shows after the chain has
+  refunded an HTLC.* At both designations an automatic refund leaves
+  these traces at the node that created the HTLC, and no others:
+  1. the account's balance grows by the HTLC amount at the expiry height
+     (R18.11.1);
+  2. **no history row and no other wallet record** is written (Chapter 36
+     D36.14): the refund is not a transaction, the history source returns
+     transactions only, and the reference synthesizes nothing; the HTLC
+     creation stays in the history as spent;
+  3. the swap's own record carries the refund-failed event of R18.11.15,
+     although the funds have returned;
+  4. manual recovery answers that the payment is already refunded, with
+     the empty placeholder of R18.11.16.
+
+  No transaction hash for the refund exists anywhere, because the module
+  creates none. Whether the node's balance stream reports the change
+  could not be established by reading (Chapter 36 T36.44). For Reloaded,
+  R18.11.17 and D18.11.3 (decided: the synthetic marker in the swap
+  event) govern the swap record, and by the maintainer's decision of
+  2026-11-15 no history row is written in 0.5.0; Chapter 36 D36.14
+  holds the options for the plan.
+
+Tests (derivable from the rules above; the numbering continues apart
+from T18.11.1 -- T18.11.3):
+
+- **T18.11.10.** *A coin without a local key places no order (R18.11.23a;
+  D18.11.10 (a)).* A coin activated by public key, with and without the
+  Ledger flag, a coin activated through WalletConnect, and a token on
+  each are refused by `setprice`, `buy` and `sell` as wallet-only, with
+  the build's swap switch on.
+- **T18.11.11.** *HTLC key of a WalletConnect coin (R18.11.50; only if
+  D18.11.10 (b) is taken).* The HTLC public key the coin announces equals
+  the account public key read at activation, and the `to` account a
+  counterparty derives from it (R18.11.4) is the coin's own address.
+- **T18.11.12.** *Own-payment check against a mocked node (R18.11.54;
+  D18.11.11).* (i) A record in state `Open` and a matching creation
+  transaction: the transaction is returned. (ii) An answer with the
+  not-found code and no value: not sent. (iii) An answer with another
+  non-zero code and no value: not sent under D18.11.11 (a); retried, then
+  an error, under (b). (iv) No node reachable: an error. (v) A record and
+  an empty creation search: not sent at the reference; an error in this
+  repository as built. (vi) A creation transaction with a non-zero
+  result code: an error.
+- **T18.11.13.** *Burn-form validation, one deviation at a time
+  (R18.11.56; a unit row, since no swap reaches the form).* A fee
+  transaction that satisfies every check passes. Each of these fails:
+  two messages; one output; three outputs; the outputs in the opposite
+  order; a fee output with two coins; a fee amount one base unit off; a
+  burn amount one base unit off; a burn output in another denomination;
+  two inputs; an input from another account; an empty memo; a memo of
+  another swap; a node copy that differs.
+- **T18.11.14.** *The standard form stays the wire form (R18.11.55; lab
+  row, swap switch on).* The fee of a Reloaded Tendermint taker is one
+  bank send to the fee address with the swap uuid as memo, and a
+  reference maker at `v2.6.0-beta` (netid 8762) and at `v3.0.0-beta`
+  (netid 6133) validates it.
+- **T18.11.15.** *Result code of the fee transaction (D18.11.12 (b)).* A
+  fee transaction whose node copy carries a non-zero result code fails
+  validation with `TakerFeeValidateFailed`; the same transaction with
+  result code zero passes.
+- **T18.11.16.** *Lab rows on a public test network (permitted-input
+  class R6).* (i) An HTLC query for an id that does not exist, on an
+  Iris and on a Nucleus node: record `code`, `codespace` and that the
+  value is empty (R18.11.53). (ii) A second HTLC creation with the id of
+  an existing one is refused by the module (D18.11.11).
+  (iii) After a 50-block HTLC has been refunded by the chain: the module
+  state is `Refunded`, `tx_search` returns no transaction for the refund,
+  and the creator's balance has grown by the amount (R18.11.58).
