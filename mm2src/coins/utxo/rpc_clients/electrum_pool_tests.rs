@@ -124,6 +124,7 @@ fn pool_client_spreading(
         timings,
         order,
         spread_reads,
+        listed_order_for_spends: false,
         near_factor,
         near_offset_ms,
         block_interval: None,
@@ -1807,6 +1808,357 @@ fn t38_6_4_14_the_switch_in_mm2_json_defaults_to_on_and_false_turns_it_off() {
     assert!(ElectrumPoolOptions::default().spread_reads);
 }
 
+// ---- CRD ch.38 R38.6.4a, amendment of 2026-11-15: the QTUM family's unspent lists are not spread -------------------
+
+const LIST_UNSPENT: &str = "blockchain.scripthash.listunspent";
+
+/// Three answering servers ranked by `order`, all maintained, spreading on and the unspent lists and broadcasts taking
+/// the listed order or not as `listed_order_for_spends` says (`true` is the QTUM family's setting). The servers are
+/// returned in the listed order. The tip checks are off.
+async fn three_maintained_listing_ranked(
+    listed_order_for_spends: bool,
+    order: ServerOrder,
+) -> ([StubServer; 3], Arc<ElectrumClientImpl>) {
+    let servers = three_answering().await;
+    let refs: Vec<&StubServer> = servers.iter().collect();
+    let client = checked_pool(
+        &refs,
+        PoolSetup {
+            listed_order_for_spends,
+            order,
+            tip_checks: false,
+            ..PoolSetup::new("QGUARD")
+        },
+        test_timings(),
+        script_draw(&[], 0.5),
+    );
+    client.pool.run_pass().await;
+    assert_eq!(maintained(&client), vec![0, 1, 2]);
+    (servers, client)
+}
+
+/// [`three_maintained_listing_ranked`] with the listed order as the rank.
+async fn three_maintained_listing(listed_order_for_spends: bool) -> ([StubServer; 3], Arc<ElectrumClientImpl>) {
+    three_maintained_listing_ranked(listed_order_for_spends, ServerOrder::Listed).await
+}
+
+/// T38.6.4a.10 (1): with the guard on, unspent lists in a row all start at the first-ranked session and do not move
+/// the turn: the other reads still take turns, and the first of them after the lists is the first session's.
+#[test]
+fn t38_6_4a_10_guarded_unspent_lists_start_at_the_first_session_and_do_not_move_the_turn() {
+    block_on(async {
+        let (servers, client) = three_maintained_listing(true).await;
+        for _ in 0..6 {
+            assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), servers[0].addr());
+        }
+        assert_eq!(servers[0].requests(LIST_UNSPENT), 6);
+        // The turn is untouched: balance reads start at the first session, then the second and the third.
+        let mut answered = Vec::new();
+        for _ in 0..4 {
+            answered.push(ask(&client, "blockchain.scripthash.get_balance").await.unwrap());
+        }
+        let addr = |i: usize| servers[i].addr();
+        assert_eq!(answered, vec![addr(0), addr(1), addr(2), addr(0)]);
+        // Lists between the reads neither take a turn nor give one.
+        assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), addr(0));
+        assert_eq!(
+            ask(&client, "blockchain.scripthash.get_balance").await.unwrap(),
+            addr(1)
+        );
+        assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), addr(0));
+        assert_eq!(
+            ask(&client, "blockchain.scripthash.get_balance").await.unwrap(),
+            addr(2)
+        );
+        // The other read methods of the closed list still spread.
+        assert_eq!(ask(&client, "blockchain.block.header").await.unwrap(), addr(0));
+        assert_eq!(ask(&client, "blockchain.transaction.get").await.unwrap(), addr(1));
+    });
+}
+
+/// T38.6.4a.10 (2): with the guard on, a batch that carries an unspent list keeps the priority order, whatever else
+/// is in it; a batch of other reads spreads; the batch does not move the turn.
+#[test]
+fn t38_6_4a_10_a_guarded_batch_with_an_unspent_list_keeps_the_priority_order() {
+    block_on(async {
+        let (servers, client) = three_maintained_listing(true).await;
+        let with_list = ["blockchain.scripthash.get_balance", LIST_UNSPENT];
+        for _ in 0..4 {
+            assert_eq!(
+                route_to(&client, batch_of(&with_list)).await.unwrap(),
+                servers[0].addr()
+            );
+        }
+        assert_eq!(
+            route_to(&client, batch_of(&[LIST_UNSPENT])).await.unwrap(),
+            servers[0].addr()
+        );
+        // A batch of reads that carries no list spreads, from the untouched turn.
+        let others = ["blockchain.scripthash.get_balance", "blockchain.scripthash.get_history"];
+        let mut answered = Vec::new();
+        for _ in 0..3 {
+            answered.push(route_to(&client, batch_of(&others)).await.unwrap());
+        }
+        assert_eq!(answered, servers.iter().map(StubServer::addr).collect::<Vec<_>>());
+    });
+}
+
+/// T38.6.4a.10 (3): with the guard on and an out-of-date session ranked first, the list starts at the first
+/// up-to-date session and the out-of-date one comes last (R38.6.4o item 5): it answers only when the others fail.
+/// The other reads still take turns over the up-to-date sessions.
+#[test]
+fn t38_6_4a_10_a_guarded_unspent_list_skips_an_out_of_date_session_and_keeps_it_as_the_last_resort() {
+    block_on(async {
+        const H: u64 = 2_000;
+        let (stale, good_a, good_b) = (stub_at(5, H - 1_000).await, stub_at(5, H).await, stub_at(5, H).await);
+        let client = checked_pool(
+            &[&stale, &good_a, &good_b],
+            PoolSetup {
+                listed_order_for_spends: true,
+                block_interval: Some(Duration::from_secs(60)),
+                ..PoolSetup::new("QGUARDOOD")
+            },
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&stale, &good_a, &good_b]).await;
+        assert_eq!(view_of(&client, &stale).out_of_date, Some("behind"));
+        for _ in 0..5 {
+            assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), good_a.addr());
+        }
+        assert_eq!(stale.requests(LIST_UNSPENT), 0);
+        // The other reads spread over the two up-to-date sessions, the stale one taking none.
+        let answered = answered_by(&client, 6).await;
+        assert!(
+            answered.contains(&good_a.addr()) && answered.contains(&good_b.addr()),
+            "{answered:?}"
+        );
+        assert!(answered.iter().all(|addr| *addr != stale.addr()), "{answered:?}");
+        // The up-to-date sessions failing, the stale one is the last resort for the list.
+        good_a.set_behavior(StubBehavior::Down).await;
+        good_b.set_behavior(StubBehavior::Down).await;
+        assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), stale.addr());
+    });
+}
+
+/// T38.6.4a.10 (4): with the guard off (the default, every coin but the QTUM family), unspent lists take turns; the
+/// existing `t38_6_4_14_the_other_read_methods_spread_too` covers it too, and this pins it with the option named.
+#[test]
+fn t38_6_4a_10_unguarded_unspent_lists_take_turns() {
+    assert!(!ElectrumPoolOptions::default().listed_order_for_spends);
+    block_on(async {
+        let (servers, client) = three_maintained_listing(false).await;
+        let mut answered = Vec::new();
+        for _ in 0..4 {
+            answered.push(ask(&client, LIST_UNSPENT).await.unwrap());
+        }
+        let addr = |i: usize| servers[i].addr();
+        assert_eq!(answered, vec![addr(0), addr(1), addr(2), addr(0)]);
+        let mut batches = Vec::new();
+        for _ in 0..3 {
+            batches.push(route_to(&client, batch_of(&[LIST_UNSPENT])).await.unwrap());
+        }
+        assert_eq!(batches, vec![addr(1), addr(2), addr(0)]);
+    });
+}
+
+/// T38.6.4a.10 (5): the coins-file `protocol.type` decides: `QTUM` and `QRC20` turn the listed order for unspent lists
+/// and broadcasts on, every other coin keeps its routing.
+#[test]
+fn t38_6_4a_10_the_coins_file_protocol_type_decides_the_guard() {
+    use super::electrum_pool::electrum_listed_order_for_spends;
+    assert!(electrum_listed_order_for_spends(
+        &json!({"coin": "QTUM", "protocol": {"type": "QTUM"}})
+    ));
+    assert!(electrum_listed_order_for_spends(&json!({
+        "coin": "QTUM-USDT",
+        "protocol": {"type": "QRC20", "protocol_data": {"platform": "QTUM", "contract_address": "0x00"}}
+    })));
+    assert!(!electrum_listed_order_for_spends(
+        &json!({"coin": "RIN", "protocol": {"type": "UTXO"}})
+    ));
+    assert!(!electrum_listed_order_for_spends(&json!({"coin": "RIN"})));
+    assert!(!electrum_listed_order_for_spends(
+        &json!({"coin": "BCH", "protocol": {"type": "BCH"}})
+    ));
+    assert!(!electrum_listed_order_for_spends(
+        &json!({"coin": "ETH", "protocol": {"type": "ETH"}})
+    ));
+    // The type is read as written: a lower-case spelling is not the QTUM family's.
+    assert!(!electrum_listed_order_for_spends(
+        &json!({"protocol": {"type": "qtum"}})
+    ));
+}
+
+/// T38.6.4a.10 (5, wiring): the builder that every Electrum coin activation goes through sets the option from the coin's
+/// `protocol.type`: a QTUM and a QRC20 instance start their unspent lists at the first session every time, an ordinary
+/// UTXO instance spreads them over the sessions in turn.
+#[test]
+fn t38_6_4a_10_the_builder_sets_the_guard_from_the_coin_conf() {
+    use crate::utxo::utxo_builder::build_electrum_client;
+    use crate::utxo::ElectrumBuilderArgs;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    block_on(async {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        let confs = [
+            (json!({"coin": "QTUM", "protocol": {"type": "QTUM"}}), false),
+            (
+                json!({"coin": "QTUM-USDT", "protocol": {"type": "QRC20", "protocol_data": {"platform": "QTUM"}}}),
+                false,
+            ),
+            (json!({"coin": "RIN", "protocol": {"type": "UTXO"}}), true),
+            (json!({"coin": "RIN2"}), true),
+        ];
+        for (conf, spread) in confs {
+            let servers = [good_stub().await, good_stub().await];
+            let args = ElectrumBuilderArgs {
+                spawn_ping: false,
+                negotiate_version: true,
+                collect_metrics: false,
+            };
+            let requests = servers.iter().map(StubServer::request).collect();
+            let client = build_electrum_client(
+                &ctx,
+                conf["coin"].as_str().unwrap(),
+                &conf,
+                args,
+                requests,
+                Some(2),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut answered = Vec::new();
+            for _ in 0..4 {
+                answered.push(ask(&client.0, LIST_UNSPENT).await.unwrap());
+            }
+            let distinct: std::collections::HashSet<&String> = answered.iter().collect();
+            assert_eq!(distinct.len() > 1, spread, "{conf}: {answered:?}");
+        }
+    });
+}
+
+const BROADCAST: &str = "blockchain.transaction.broadcast";
+
+/// T38.6.4a.10 (6): a QTUM-family pool whose rank (2, 0, 1) differs from the list order starts every unspent list (alone
+/// or in a batch) and every broadcast at the first listed session, and does not move the turn; the other reads keep
+/// taking turns over the ranked sessions.
+#[test]
+fn t38_6_4a_10_a_listed_order_pool_starts_listings_and_broadcasts_at_the_first_listed_session() {
+    block_on(async {
+        let (servers, client) = three_maintained_listing_ranked(true, drawn()).await;
+        // Rank 0 is the listed server 2: the pool's priority differs from the list.
+        assert_eq!(ranked_addrs(&client)[0], servers[2].addr());
+        let first = servers[0].addr();
+        for _ in 0..3 {
+            assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), first);
+            assert_eq!(ask(&client, BROADCAST).await.unwrap(), first);
+            assert_eq!(
+                route_to(&client, batch_of(&["blockchain.scripthash.get_balance", LIST_UNSPENT]))
+                    .await
+                    .unwrap(),
+                first
+            );
+        }
+        assert_eq!(servers[0].requests(LIST_UNSPENT), 6);
+        assert_eq!(servers[0].requests(BROADCAST), 3);
+        assert_eq!(servers[2].requests(LIST_UNSPENT) + servers[2].requests(BROADCAST), 0);
+        // The turn is untouched; the other reads start at the first-ranked session (listed 2) and take turns.
+        let mut answered = Vec::new();
+        for _ in 0..3 {
+            answered.push(ask(&client, "blockchain.scripthash.get_balance").await.unwrap());
+        }
+        assert_eq!(answered, vec![servers[2].addr(), servers[0].addr(), servers[1].addr()]);
+    });
+}
+
+/// T38.6.4a.10 (7): the same pool with the first listed session out of date: listings and broadcasts start at the first
+/// up-to-date session in the list order and the out-of-date one is the last resort (R38.6.4o item 5).
+#[test]
+fn t38_6_4a_10_a_listed_order_pool_with_the_first_listed_session_out_of_date_starts_at_the_next_listed_one() {
+    block_on(async {
+        const H: u64 = 2_000;
+        let (stale, good_a, good_b) = (stub_at(5, H - 1_000).await, stub_at(5, H).await, stub_at(5, H).await);
+        // Rank 0 is the listed server 2 (`good_b`), rank 1 the stale listed server 0, rank 2 `good_a`.
+        let client = checked_pool(
+            &[&stale, &good_a, &good_b],
+            PoolSetup {
+                listed_order_for_spends: true,
+                order: drawn(),
+                block_interval: Some(Duration::from_secs(60)),
+                ..PoolSetup::new("QGUARDLIST")
+            },
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&stale, &good_a, &good_b]).await;
+        assert_eq!(view_of(&client, &stale).out_of_date, Some("behind"));
+        for _ in 0..3 {
+            assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), good_a.addr());
+            assert_eq!(ask(&client, BROADCAST).await.unwrap(), good_a.addr());
+        }
+        assert_eq!(stale.requests(LIST_UNSPENT) + stale.requests(BROADCAST), 0);
+        // The first listed up-to-date session failing, the second listed one answers; the stale one is last.
+        good_a.set_behavior(StubBehavior::Down).await;
+        assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), good_b.addr());
+        assert_eq!(ask(&client, BROADCAST).await.unwrap(), good_b.addr());
+        good_b.set_behavior(StubBehavior::Down).await;
+        assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), stale.addr());
+        assert_eq!(ask(&client, BROADCAST).await.unwrap(), stale.addr());
+    });
+}
+
+/// T38.6.4a.10 (8): two QTUM-family pools over the same servers with different ranks (stand-ins for QTUM and a token):
+/// the first session a listing tries in one is the first session a broadcast tries in the other.
+#[test]
+fn t38_6_4a_10_two_listed_order_pools_with_different_ranks_start_a_listing_and_a_broadcast_at_the_same_server() {
+    block_on(async {
+        let servers = three_answering().await;
+        let refs: Vec<&StubServer> = servers.iter().collect();
+        let pool = |ticker: &'static str, order: ServerOrder| {
+            checked_pool(
+                &refs,
+                PoolSetup {
+                    listed_order_for_spends: true,
+                    order,
+                    tip_checks: false,
+                    ..PoolSetup::new(ticker)
+                },
+                test_timings(),
+                script_draw(&[], 0.5),
+            )
+        };
+        let platform = pool("QTUMP", ServerOrder::Fixed(vec![2, 0, 1]));
+        let token = pool("QTOKEN", ServerOrder::Fixed(vec![1, 2, 0]));
+        platform.pool.run_pass().await;
+        token.pool.run_pass().await;
+        assert_ne!(ranked_addrs(&platform), ranked_addrs(&token));
+        let sent = ask(&token, BROADCAST).await.unwrap();
+        assert_eq!(ask(&platform, LIST_UNSPENT).await.unwrap(), sent);
+        let sent = ask(&platform, BROADCAST).await.unwrap();
+        assert_eq!(ask(&token, LIST_UNSPENT).await.unwrap(), sent);
+        assert_eq!(sent, servers[0].addr());
+    });
+}
+
+/// T38.6.4a.10 (9): a coin outside the QTUM family whose rank differs from the list order keeps its routing: a broadcast
+/// goes to the first-ranked session and unspent lists take turns from it.
+#[test]
+fn t38_6_4a_10_a_pool_without_the_option_follows_its_rank_for_listings_and_broadcasts() {
+    block_on(async {
+        let (servers, client) = three_maintained_listing_ranked(false, drawn()).await;
+        for _ in 0..3 {
+            assert_eq!(ask(&client, BROADCAST).await.unwrap(), servers[2].addr());
+        }
+        let mut answered = Vec::new();
+        for _ in 0..4 {
+            answered.push(ask(&client, LIST_UNSPENT).await.unwrap());
+        }
+        let addr = |i: usize| servers[i].addr();
+        assert_eq!(answered, vec![addr(2), addr(0), addr(1), addr(2)]);
+    });
+}
+
 // ---- CRD ch.38 R38.6.4a items 6-8: reads over the near sessions ------------------------------------------------------
 
 /// The factor the pool tests of the near sessions set, as the chapter's cases state it. It is set on purpose and is
@@ -2356,6 +2708,9 @@ struct PoolSetup {
     order: ServerOrder,
     /// Whether read-only queries are spread (R38.6.4a item 5).
     spread_reads: bool,
+    /// Whether unspent lists and broadcasts take the listed order (R38.6.4a, amendment of 2026-11-15); `true` is the
+    /// QTUM family's.
+    listed_order_for_spends: bool,
     near_factor: f64,
     block_interval: Option<Duration>,
     /// The `electrum_tip_checks` switch (R38.6.4o item 11).
@@ -2370,6 +2725,7 @@ impl PoolSetup {
             max_connected: None,
             order: ServerOrder::Listed,
             spread_reads: true,
+            listed_order_for_spends: false,
             near_factor: 0.,
             block_interval: None,
             tip_checks: true,
@@ -2392,6 +2748,7 @@ fn checked_pool(
         timings,
         order: setup.order,
         spread_reads: setup.spread_reads,
+        listed_order_for_spends: setup.listed_order_for_spends,
         near_factor: setup.near_factor,
         near_offset_ms: NEAR_OFFSET_DEFAULT_MS,
         block_interval: setup.block_interval,

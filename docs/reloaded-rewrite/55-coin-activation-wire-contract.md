@@ -506,6 +506,15 @@ other row the public reference is silent and the reference release decides.
 > Solana is switched off and every Solana request ends at the refusal rows
 > above instead.
 >
+> **Reloaded status (clean side, 2026-11-15).** The remaining Solana
+> deviation is resolved for Reloaded's own methods (`enable_solana_with_tokens`,
+> `enable_spl`): a failed block-height or balance read is
+> `PlatformCoinCreationError` (`{ticker, error}`, HTTP 500) and a node failure in
+> `enable_spl` is `Transport` (HTTP 500), as the Solana rows above state; an
+> invalid token address is `TokenProtocolParseError`. Initialising inline
+> tokens contacts no node on that surface yet, so the `Transport` row with
+> HTTP 502 is not reached there. Chapter 40 §40.3A binds the surface. PR #371.
+>
 > **Error texts (pointer, 2026-10-28).** The `error` text of these rows stays
 > unbound, but what it may say about a node is bound by the owning chapters:
 > nodes and servers are named in host-only form and no credential appears

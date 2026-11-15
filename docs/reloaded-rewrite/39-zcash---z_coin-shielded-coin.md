@@ -1657,6 +1657,639 @@ change counts as non-spendable balance.
 > for the post-Ironwood chain (R39.6.4a, its compatibility note), so refusing the address
 > would restore nothing that works. The row is in `docs/GLEEC_COMPATIBILITY.md`.
 
+### 39.6.6 Reference behavior: Sapling parameter provisioning and shielded coins in the browser build
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
+> measure 0.01 (attestation in §39.9).**
+> This subsection was written on 2026-11-15 by the KDF Spec Reader (Spec
+> Reader round 0.5.0-5) under the two-team procedure of chapter 01 §1.4A,
+> from five inputs: (1) the reference lineage at the rows `v2.6.0-beta` and
+> `v3.0.0-beta` of chapter 02 §2.15A, with the row `main (as of 2026-10-07)`
+> compared against `v3.0.0-beta`; (2) the published source of two public
+> libraries, for the parameter-loading contract only: the Zcash library fork
+> the reference pins, at the row `librustzcash k-1.4.2` of chapter 02
+> §2.15A, and the Zcash proofs library release this repository pins
+> (`zcash_proofs` 0.30.0, as published on crates.io); (3) the public coins
+> repository (`GLEECBTC/coins`): its generated wallet configuration and its
+> lightwalletd and Electrum lists for ARRR, read as public data on
+> 2026-11-15 and cited by commit in §39.9; (4) observations of public
+> network endpoints made on 2026-11-15 (chapter 01 R6), each named where it
+> is used; (5) this repository's own tree. The row `librustzcash k-1.4.2`
+> was added to chapter 02 §2.15A in this round and passed the gate with this
+> subsection.
+
+*Scope.* This subsection records how the reference obtains the two Sapling
+parameter files on a native build (§39.6.6.2) and in its browser (WASM)
+build (§39.6.6.3), and what its browser build does for a shielded coin: its
+stores and scan (§39.6.6.4), its lightwalletd transport and transparent side
+(§39.6.6.5), proving and swaps (§39.6.6.6), other differences (§39.6.6.7)
+and the newer Pirate transaction version (§39.6.6.8). It prescribes no design
+for this project. Where the reference ends a task abnormally, repeats work
+without need or leaves a risk open, the subsection says so, declares the
+behavior no parity target (R39.6.6.26) and raises a decision (§39.6.6.10).
+Method names, request and response members, `error_type` values, in-progress
+values, public URLs, public file names and the public gRPC-web header names
+are the interface and are quoted; nothing else of the reference is. Cleared
+text is not restated: §39.6.6.9 lists, rule by rule, what each addition
+completes or contradicts.
+
+#### 39.6.6.1 States read, and two terms
+
+**F39.6.6.1** *The rows agree.* Every statement of this subsection holds at
+both `v2.6.0-beta` and `v3.0.0-beta` unless it names a row. The parameter
+handling, the shielded coin's browser stores, its lightwalletd client and
+browser transport, its sync loop and its activation task are the same at both
+rows (compared mechanically). One difference between the rows touches the
+subject: at `v3.0.0-beta` the shared browser-store layer withdraws its event
+handlers when a pending store request or store transaction is discarded; at
+`v2.6.0-beta` it does not. This repository's browser-store layer does not
+either; withdrawing them is the remedy. `main (as of 2026-10-07)`, the
+newest tabled state of the v3 line, differs from `v3.0.0-beta` in its read-me
+only, so it differs in nothing material here.
+
+**F39.6.6.2** *Two terms.* The **browser build** is the reference built for
+the WebAssembly target and run by a web page. A task or request **ends
+abnormally** when execution stops at the point reached in place of an error
+being returned: no task error and no error response is produced for it. In
+the browser build what the page then sees, and whether the module can serve
+later requests, was not established.
+
+**F39.6.6.3** *Read, not run.* No build of the reference was run for this
+subsection, native or browser. Everything said about the browser build rests
+on the two rows as read, on the public libraries named above, and on the
+public-network observations of F39.6.6.5 and F39.6.6.6.
+
+#### 39.6.6.2 Sapling parameters on a native build
+
+**R39.6.6.1** *A directory, never a download.* A release build of the
+reference obtains the two parameter files only from a directory of the local
+file system. It downloads nothing, at node start, at activation or at a
+spend; it bundles nothing; and no configuration key, environment variable,
+coins-file key or RPC names a download host. The directory is the activation
+request's `zcash_params_path` when given, used as written, and otherwise the
+default of the public Zcash proofs library: `ZcashParams` under the
+platform's application-data directory on Windows and macOS, `.zcash-params`
+under the home directory elsewhere. The files must already be there under the
+public names `sapling-spend.params` and `sapling-output.params`; the
+reference's developer documentation points to the public parameter-fetch
+scripts of the Komodo node repository for that. (The reference's test
+configuration fetches missing files itself, from the host of R39.6.6.4; no
+release build does.)
+
+**R39.6.6.2** *Checked at every activation.* The files are read during coin
+construction of every `task::enable_z_coin::init` task, not at node start and
+not lazily at the first spend. Each file is hashed in full with SHA-256 and
+compared with a digest compiled into the binary (F39.6.6.4); both must match
+before the prover is built. The prover lives as long as that activated coin;
+a later activation reads and hashes the files again. Nothing about the check
+is cached between activations, and no setting switches it off.
+
+**R39.6.6.3** *What activation answers.* `init` does not look at the
+parameters: it returns a task id, and the outcome arrives through `status`.
+
+| Condition | `status` |
+| --- | --- |
+| the default directory cannot be determined; the directory does not exist; either file is absent | `Error`, `CoinCreationError`, `error_data.error` = `ZCashParamsNotFound` (R39.10.12) |
+| a file exists and cannot be read | `Error`, `CoinCreationError`, `error_data.error` free text |
+| either digest differs | `Error`, `CoinCreationError`, `error_data.error` free text, not the token above; the files are left as they are, nothing is deleted or fetched |
+| the files are being read and hashed | `InProgress`, `ActivatingCoin` |
+
+No in-progress value, event or other RPC reports on the parameters, and since
+nothing is downloaded there is no download to report. A retry is a new
+`init`.
+
+**F39.6.6.4** *The two public files.* Sizes and digests computed for this
+subsection on 2026-11-15 from the files the host of R39.6.6.4 served. They
+equal the values the Zcash project publishes for its Sapling parameters, and
+the digests the reference compiles in: SHA-256 on native (R39.6.6.2),
+BLAKE2b-512 in the browser build (R39.6.6.5).
+
+| File | Bytes | SHA-256 | BLAKE2b-512 |
+| --- | --- | --- | --- |
+| `sapling-spend.params` | 47,958,396 | `8e48ffd23abb3a5fd9c5589204f32d9c31285a04b78096ba40a79b75677efc13` | `8270785a1a0d0bc77196f000ee6d221c9c9894f55307bd9357c3f0105d31ca63991ab91324160d8f53e2bbd3c2633a6eb8bdf5205d822e7f3f73edac51b2b70c` |
+| `sapling-output.params` | 3,592,860 | `2f0ebbcbb9bb0bcffe95a397e7eba89c29eb4dde6191c339db88570e3f3fb0e4` | `657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028` |
+
+Together the files are 51,551,256 bytes.
+
+#### 39.6.6.3 Sapling parameters in the browser build
+
+**R39.6.6.4** *Downloaded by the node, from one fixed host.* In the browser
+build the node itself fetches the two files, the spend file first, with two
+browser `fetch` GET requests in cross-origin mode to
+`https://komodoplatform.com/downloads/sapling-spend.params` and
+`https://komodoplatform.com/downloads/sapling-output.params`. The host is
+compiled in. No request member, configuration key or coins-file key changes
+it; `zcash_params_path` is ignored (R39.10.4); there is no second host, no
+retry within a task and no resumption of a partial transfer. The embedding
+page cannot hand the bytes to the node, and the module does not bundle them.
+A transport failure, or any HTTP status other than 200, fails the task.
+
+**R39.6.6.5** *Verified before use and before storage.* Each file is
+received whole into memory, hashed with BLAKE2b-512 and compared with a
+compiled-in digest (F39.6.6.4). On a mismatch the task fails and nothing is
+stored. Integrity therefore rests on the compiled-in digests and not on the
+host; availability rests on that one host.
+
+**R39.6.6.6** *Kept in the browser's IndexedDB, per wallet.* Once both
+files have passed the check, the node saves them in an IndexedDB database
+of their own, separate from the wallet database and the block cache.
+
+- *Scope.* The database is namespaced by the wallet's identity, like the
+  node's other per-wallet browser stores. All shielded coins of one wallet
+  share it. Two wallets in one browser profile do not: the second downloads
+  and stores its own copy.
+- *Form.* The parameter bytes are held as several records, not as one
+  value per file. Every record is saved in a store transaction of its own,
+  so a save that fails part-way leaves the records saved until then in
+  place.
+- *Names.* The database and record names are not carried into this chapter;
+  no interoperation depends on them.
+
+
+**R39.6.6.7** *Reuse, and what is not checked.* A complete stored set is
+reused at every later activation and nothing is downloaded; an incomplete
+set is deleted and the files are downloaded again (R39.6.6.4). Whether a
+set is complete is decided by how many records the store holds and by
+nothing else, and the reference computes no digest over the bytes it loads
+back from the store before it hands them on. The public proofs
+library does, with BLAKE2b-512, while it builds a prover from bytes, and on
+a mismatch or on unparsable input that library ends abnormally (F39.6.6.2)
+instead of returning an error.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort; a finding against the reference, not a convergence target).** The
+> reference has no repair for a stored set that is complete by count and
+> wrong in content. Proposed remedy: compute the digest of the loaded bytes
+> before a prover is built from them; where it differs, delete the records,
+> obtain the files once more, and report an activation error if that fails
+> too (R39.6.6.26, D39.6.6.c).
+
+
+**R39.6.6.8** *Refused storage and exceeded quota.* By reading, not by a
+run:
+
+- The page is refused IndexedDB altogether: the parameter store cannot be
+  opened and the task fails with `CoinCreationError` (free text) before
+  anything is downloaded.
+- A write is refused, for example because the quota is exceeded: the task
+  fails with `CoinCreationError` (free text) although both files were
+  downloaded and verified. They are not used from memory for that session.
+  Pieces written before the failure stay; the next activation finds the set
+  incomplete, deletes it and downloads everything again.
+
+The reference neither tests that the store accepts writes nor asks the
+browser for the available quota before it downloads (D39.6.6.d).
+
+**R39.6.6.9** *Needed at activation, not only for spending.* Coin
+construction obtains the parameters and builds the prover before any
+shielded store is opened and before the first lightwalletd request. A wallet
+that only wants to receive or to read a balance still pays the download at
+its first activation, and loads and parses both files at every activation.
+`status` shows `ActivatingCoin` throughout: there is no separate in-progress
+value, no byte count and no event. A failure is `CoinCreationError` with
+free text; the token `ZCashParamsNotFound` is never produced by the browser
+build.
+
+**F39.6.6.5** *Observation of the host (2026-11-15).* Both URLs of R39.6.6.4
+answered HTTP 200 with the sizes of F39.6.6.4 and with
+`access-control-allow-origin: *`; the bodies have the digests of F39.6.6.4.
+One observation on one day; nothing is claimed about the host's future.
+
+#### 39.6.6.4 The shielded stores and the scan in the browser build
+
+**R39.6.6.10** *Four stores, per wallet.* For shielded coins the browser
+build keeps four IndexedDB databases, each namespaced by the wallet's
+identity: the parameter store (R39.6.6.6), a compact-block cache, the wallet
+database, and the store of in-flight notes (§39.8.0.7). Records of the block
+cache and of the wallet database carry the coin's ticker, so several
+shielded coins of one wallet share each database; no database is shared
+between wallets. At both rows each has one schema version and no migration.
+
+**R39.6.6.11** *Wallet database: the model of R39.8.0j, and what that rule
+lacks.* The reference's browser wallet database holds exactly the six
+categories R39.8.0j names. It adds, beyond that rule:
+
+- every record carries the coin's ticker, and uniqueness (of a transaction
+  id, a block height, a note) is per ticker;
+- the per-transaction integer identifier is the record number the browser
+  store assigns, in one sequence across all shielded coins of the wallet:
+  stable, but not contiguous per coin;
+- the pruning, expiry and rewind behavior of the public wallet library's
+  SQLite store is reproduced: witnesses more than 100 blocks below the
+  scanned height are dropped as each block is applied, an unmined own
+  transaction past its expiry height releases the notes it spent, and a
+  rewind removes blocks and witnesses above a height and returns the
+  transactions above it to unmined.
+
+
+**R39.6.6.12** *Block cache.* One record per compact block: the coin's
+ticker, the height, and the block's serialized bytes as lightwalletd sent
+them; unique per ticker and height, and a height already present is left as
+it is. Each block is written in a store transaction of its own. The
+operations are those of R39.8.0k. The reference does not delete scanned
+blocks from the cache; only a rewind does, so the cache grows with the
+scanned span.
+
+**R39.6.6.13** *Block download.* The browser build cuts the span from the
+first missing height to the tip into consecutive ranges of at most 20,000
+blocks and issues all range requests (`GetBlockRange`) at once, to the one
+endpoint that answered the tip probe. Each response is received whole before
+it is decoded (R39.6.6.18), and the node waits for all of them before it
+stores the first block. Three consequences:
+
+- the compact blocks of the whole span are held in memory together, and
+  the build sets no bound on that amount (D39.6.6.h);
+- `UpdatingBlocksCache` does not advance while the responses arrive, and
+  then advances once per stored block;
+- a failure of any one range discards all that was received; the task
+  reports `TemporaryError` and retries after a pause (R39.10.14).
+
+A native build sends one streamed request for the whole span and stores each
+block as it arrives.
+
+**R39.6.6.14** *How the scan is driven.* The loop is the native one:
+validate the cached chain against the wallet database, then scan in batches
+of `scan_blocks_per_iteration` blocks (default 1000) with a pause of
+`scan_interval_ms` (default 0) between batches, reporting `BuildingWalletDb`
+before each batch. What is particular to the browser build:
+
+- everything runs on the one thread that hosts the module; the reference
+  starts no worker and no thread pool for a shielded coin;
+- there is no explicit yield. The loop gives way to the browser's event loop
+  only where it waits for a store operation, a network response or the
+  configured pause; the trial decryption of one block runs to completion
+  once started;
+- the validation pass reads every cached block above the wallet's scanned
+  height into memory at once;
+- the wallet state a block is scanned against (keys, tree, witnesses,
+  nullifiers) is read from the store anew for every block instead of being
+  carried from one block to the next, and each block's results are written
+  back in several store transactions (R39.6.6.15).
+
+
+**R39.6.6.15** *One block, several store transactions.* In the browser
+build the wallet database records one scanned block through several store
+transactions; the reference does not group them into one.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort; a finding against the reference, not a convergence target).** The
+> browser store is not asked to record a scanned block whole or not at all.
+> Proposed remedy: apply one block in one store transaction, or detect and
+> rewind a part-recorded block when the store is opened (R39.6.6.26).
+
+
+**R39.6.6.16** *`z_coin_tx_history` in the browser build.* The method is
+served from the browser wallet database. Its order is recorded in the
+platform-difference note under R39.8.9h; two further facts:
+
+- `total`, and the position a `FromId` request starts from, are computed
+  from the count of transaction records of **all** shielded coins of the
+  wallet, not of the requested coin. With one shielded coin active the
+  answer is right; with two it is not.
+- each page reads all of the coin's received notes and all of its scanned
+  block records into memory to compute amounts and times.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort; a finding against the reference, not a convergence target).**
+> `total` and `FromId` paging should count the requested coin's
+> transactions only, as the native path does (R39.6.6.26).
+
+
+**R39.6.6.17** *Gaps the reference records itself.* Three records, stated
+without a judgment on which holds today:
+
+- the reference's own browser check of the lightwalletd transport against a
+  public endpoint is switched off at both rows and marked as failing;
+- its own browser checks of building a shielded send are switched off at
+  both rows; the reference attributes this to the time a shielded
+  transaction takes to build in a browser;
+- its release notes state that shielded wallet and exchange operations work
+  in the browser, from a release earlier than both rows.
+
+
+#### 39.6.6.5 lightwalletd and the transparent side in the browser build
+
+**R39.6.6.18** *Transport: gRPC-web over `fetch`.* Every lightwalletd call,
+unary or server-streaming, is an HTTP POST by the browser's `fetch` to the
+endpoint URL followed by the method path of the published service
+definition, with `content-type` and `accept` set to
+`application/grpc-web+proto` and the header `x-grpc-web: 1`. The binary
+framing is used, not the text one; gzip-compressed messages are accepted;
+the response body is received whole and then decoded frame by frame, the
+trailers being read from the body. There is no WebSocket transport for
+lightwalletd and no plain gRPC from a browser. The request layer works in a
+window and in a worker scope alike.
+
+**R39.6.6.19** *Endpoints: the same request member.* The browser endpoints
+are whatever the caller puts into `mode.rpc_data.light_wallet_d_servers`.
+The node reads no coins-file key for them and has no browser-specific
+member. The public coins repository's generated wallet configuration carries
+for ARRR, next to `light_wallet_d_servers`, a second list
+`light_wallet_d_servers_wss` (on 2026-11-15:
+`https://electrum1.cipig.net:19447` and `https://electrum2.cipig.net:19447`).
+Passing that list to a browser build is the embedding wallet's act, not the
+node's. Its name notwithstanding, the list holds HTTPS gRPC-web endpoints,
+not WebSocket ones. ARRR is the only `ZHTLC` entry of that configuration.
+
+**R39.6.6.20** *Only non-browser endpoints configured.* The browser build
+opens no connection when it creates its clients (§39.11.5), and accepts
+every listed string unparsed. The first tip read probes the endpoints in
+order. One that does not answer gRPC-web fails its probe exactly like an
+unreachable one. When none answers, the task fails with `CoinCreationError`
+(the initial chain-tip class of R39.10.11); the text does not say that the
+endpoints lack gRPC-web. There is no fallback to another transport, and
+`electrum_servers` is never used for shielded data. In a mixed list the
+endpoints that do not answer are tried and passed over until the answering
+one has moved to the front.
+
+**R39.6.6.21** *Transparent side: Electrum over WS/WSS.* In the reference's
+browser build the shielded coin's transparent side (broadcast, the
+`current_block` of the result, the swap-path queries of §39.11.5) runs over
+the shared Electrum client, which in a browser speaks `WS` and `WSS` only
+(the `protocol` member of chapter 55 R55.5.10, whose browser default is
+`WSS`); a `TCP` or `SSL` entry cannot be used there. The
+reference's browser build therefore needs both kinds of endpoint, gRPC-web
+lightwalletd and WebSocket Electrum. The public coins repository lists WSS
+Electrum servers for ARRR (`arrr.electrum1.cipig.net:30008`,
+`arrr.electrum2.cipig.net:30008`). This project serves the transparent side
+from lightwalletd (§39.11), so a Reloaded browser build would carry it on
+the gRPC-web endpoints, and only the fallback of R39.11.25 would need a
+WebSocket Electrum entry.
+
+**F39.6.6.6** *Observation of the public endpoints (2026-11-15).* Both
+endpoints of the `light_wallet_d_servers_wss` list answered a gRPC-web
+`GetLatestBlock` and a gRPC-web `GetLightdInfo` request with HTTP 200 and
+`application/grpc-web+proto`, reported the same tip, and granted
+cross-origin access to the requesting origin, on the request and on its
+preflight. Two endpoints of the plain list
+(`https://lightwalletd1.cryptoforge.cc:443`,
+`https://electrum1.cipig.net:9447`) did not answer the same request (HTTP
+502, and a protocol error). The public configuration thus offers two browser
+endpoints, both under one domain; what the admission rule of R39.11.7a makes
+of a list of two is part of D39.6.6.i.
+
+#### 39.6.6.6 Proving and swaps in the browser build
+
+**R39.6.6.22** *Proved inside the module, on its one thread.* Every shielded
+transaction (a withdrawal, an HTLC payment, a fee payment, an HTLC spend, a
+refund) is built and proved inside the WASM module, with the prover of
+R39.6.6.9. The proofs library is built single-threaded for the browser; its
+multi-core option is a native-only build setting. The build runs as a task
+on the module's thread, and no worker is used. A build runs to its end
+without handing control back to the event loop (D39.6.6.g).
+
+**R39.6.6.23** *Limits.* The browser build sets no limit of its own: no cap
+on the number of notes spent (one spend proof per selected note, notes taken
+oldest first until the amount is covered), no timeout on a build and no
+progress report. How long a build takes in a browser, and how much memory it
+needs, was not measured (F39.6.6.3); the reference's own record is
+R39.6.6.17.
+
+**R39.6.6.24** *Swaps.* The coin is not wallet-only by build. No swap
+operation of the shielded coin is compiled out or refused in the browser
+build: the maker and taker paths, the fee, the payment, its spend and
+refund, the validations and the searches are the same on both targets and
+differ only in where a proof is computed (R39.6.6.22) and in the transports
+(R39.6.6.18, R39.6.6.21). Whether the coin is wallet-only is the coins-file
+`wallet_only` key, as for any coin; the public configuration has it false
+for ARRR. Whether a swap with a shielded coin completes from a browser
+within the swap's time limits was not established.
+
+#### 39.6.6.7 Other differences between the browser and the native build
+
+**R39.6.6.25** *Item by item.*
+
+| Item | Browser build of the reference |
+| --- | --- |
+| `sync_params` (`height`, `date`, `earliest`), `skip_sync_params` | as native; no refusal. An early start meets R39.6.6.13 |
+| `z_coin_tx_history` | served; R39.6.6.16 and the note under R39.8.9h |
+| memo on a withdrawal | as native: the request has no memo member on either target (R39.5A.3) |
+| key policies | as native: the single-key and the HD policy; hardware wallet and WalletConnect refused (R39.10.11). A hardware wallet is refused on both targets, so the browser adds no refusal |
+| `"rpc": "Native"` | absent; the request does not parse (R39.10.4) |
+| `zcash_params_path` | ignored (R39.10.4, R39.6.6.4) |
+| in-flight note exclusion (§39.8.0.7) | as native, on its own browser store (R39.6.6.10) |
+| balance and history event streams | as native |
+
+Nothing else was found that the browser build refuses or leaves out for a
+shielded coin.
+
+#### 39.6.6.8 The newer Pirate transaction version and pool (Ironwood)
+
+**F39.6.6.7** *Absent at every state, on both targets.* The reference has no
+handling of the transaction version and pool this chapter calls Ironwood, at
+either row or at any other state. A search of the whole history of every
+branch and tag of the historical record's local clone, which on 2026-11-15
+held every branch and tag tip the live remote listed, finds no state that
+ever contained the pool's name or the Pirate1 address form. At both rows and on
+both targets every shielded transaction is built under the Sapling consensus
+branch with the pinned public library fork, which has no later transaction
+version and no other pool. There is therefore nothing that could differ
+between native and browser. This agrees with R39.5A.1 (an address with the
+`pirate` prefix is answered as invalid) and with this chapter's notes that
+the reference cannot build for the post-Ironwood chain (§39.6.4, §39.6.5).
+
+#### 39.6.6.9 What this subsection completes or contradicts
+
+- **R39.4.1** (parameters loaded from the local parameter location):
+  completed by R39.6.6.1 for native; for the browser build there is no local
+  location, and R39.6.6.4 to R39.6.6.9 state what the reference does
+  instead.
+- **R39.6.2**, the `zcash_params_path` paragraph: completed by R39.6.6.1
+  (the default directory, and that nothing else names a source).
+- **R39.6.3** (integrity; "if a downloader is provided, re-fetched"):
+  completed. On native the reference provides no downloader and its digest
+  is SHA-256, where this repository checks BLAKE2b-512; both identify the
+  same two files (F39.6.6.4), so no outcome differs. In the browser build
+  the reference provides a downloader, verifies the download (R39.6.6.5) and
+  re-fetches only an incomplete store, not a wrong one (R39.6.6.7).
+- **R39.10.11** and **R39.10.12**: completed by R39.6.6.3 (the digest and
+  read failures on native) and R39.6.6.9 (the token is native-only at the
+  reference).
+- **R39.10.4**: its `zcash_params_path` and `"Native"` rows are confirmed
+  for the browser build.
+- **R39.8.0e** and **R39.8.0j**: completed by R39.6.6.10 and R39.6.6.11.
+  Nothing in them is contradicted.
+- **R39.6.1, first status note** (*contradiction, recorded as a note; the
+  sentence is not edited*): it gives as the reason that shielded transaction
+  building stays native-only that the local prover and its parameter files
+  are unavailable in WASM. At both rows the reference builds that prover in
+  the browser from bytes (R39.6.6.7, R39.6.6.22), and the public proofs
+  library release this repository pins offers the same construction from
+  bytes. The limitation is this repository's present build configuration and
+  missing parameter source, not the platform or the library. The 2026-10-29
+  status note and D39.6.a remain accurate about what this project does.
+- **Chapter 26**, the native-only table's Z-coin row (*contradiction,
+  recorded here only; that chapter is not edited in this round*): at both
+  rows the reference's Sapling stack compiles for and runs on the browser
+  target.
+- **D39.6.a**: its three needs (a browser wallet database, a prover that
+  runs there, a source for the parameter files) are each answered for the
+  reference: §39.6.6.4, §39.6.6.6 and §39.6.6.3.
+
+
+#### 39.6.6.10 Not parity targets, and decisions
+
+**R39.6.6.26** *Not parity targets.* The following behaviors of the
+reference are recorded, not required, and shall not be copied as they stand:
+an abnormal end in place of a reported error (R39.6.6.7); a parameter store
+that is never repaired (R39.6.6.7); a download repeated on every attempt
+when the store refuses writes (R39.6.6.8); a block download whose memory
+grows with the span (R39.6.6.13); a scanned block recorded in part
+(R39.6.6.15); a history `total` counted across coins (R39.6.6.16). What
+takes their place in this project is left to the decisions D39.6.6.a to
+D39.6.6.i.
+
+**D39.6.6.a** *Where a browser build gets the parameter bytes.* Options:
+(1) one fixed public host, as the reference; (2) a list of hosts from the
+node's configuration, tried in order; (3) the embedding page supplies them,
+as a URL on its own origin or as bytes; (4) bundled into the module, at the
+cost of 51.6 MB. *Recommendation:* (3), with (2) as the fallback, the
+digests compiled in under every option, and each source tried written to the
+log. (1) makes every browser wallet depend on one third-party host.
+
+**D39.6.6.b** *Scope of the browser parameter store.* Options: (1) per
+wallet, as the reference; (2) one store per browser origin, shared by all
+wallets. *Recommendation:* (2): the files are public constants, and (1)
+stores and downloads them once per wallet.
+
+**D39.6.6.c** *Stored bytes that fail the check.* Options: (1) as the
+reference (R39.6.6.7); (2) hash on every load, and on a mismatch delete,
+obtain once more, then report an activation error. *Recommendation:* (2).
+
+**D39.6.6.d** *Refused storage or exceeded quota.* Options: (1) as the
+reference (R39.6.6.8); (2) establish before any download that the store
+accepts writes of the needed size, and otherwise fail at once with a
+reported error that names storage; (3) use the bytes from memory for the
+session. *Recommendation:* (2). (3) gains little, because the wallet
+database needs the same store.
+
+**D39.6.6.e** *When a browser build obtains the parameters, and what
+`status` shows.* Options: (1) during activation, shown as `ActivatingCoin`,
+as the reference; (2) during activation with an in-progress value of its
+own, which is an addition to the wire of R39.10.7 that existing callers do
+not know; (3) in the background after activation, with spending and swap
+entry refused until the prover is ready; (4) at the first spend.
+*Recommendation:* not (4), because a swap step would then wait for a 51.6 MB
+download; between (1), (2) and (3) the choice turns on whether a wire
+addition is wanted.
+
+**D39.6.6.f** *Native: directory only, or a download as well.* Options:
+(1) directory only, as the reference and as this project today; (2) an
+explicit, opt-in download into that directory, digest-verified and visible
+in `status`. *Recommendation:* (1) as the default. If (2) is added it is
+never silent and never unverified.
+
+**D39.6.6.g** *Where a browser build computes proofs.* Options: (1) on the
+module's thread, as the reference (R39.6.6.22); (2) in a worker.
+*Recommendation:* measure first (T39.6.6.h) and record the numbers; choose
+(2) if a build holds the module longer than its peer connections and RPC
+callers tolerate.
+
+**D39.6.6.h** *Bounding the block download in a browser.* Options: (1) as
+the reference (R39.6.6.13); (2) ranges requested one after another, each
+stored as it arrives, with a stated memory bound and progress per range.
+*Recommendation:* (2).
+
+**D39.6.6.i** *Browser endpoints.* Options: (1) the caller passes gRPC-web
+endpoints in `light_wallet_d_servers`, as the reference; (2) in a browser
+build the node also reads `light_wallet_d_servers_wss` from the coin's
+entry when the request lists none. Under either, an endpoint that does not
+answer gRPC-web can be reported as such, which the reference does not do
+(R39.6.6.20). *Recommendation:* (1) with that distinct report. To settle
+with it: what the admission and majority rules of R39.11.7a do with the two
+public browser endpoints of F39.6.6.6, and whether this project wants more
+than those two.
+
+#### Tests (§39.6.6)
+
+The rows below are for a Coder once this subsection is cleared and the
+decisions they name are taken. None prescribes a design; where a row depends
+on a decision it says so.
+
+**T39.6.6.a** *Native digest failure is a reported error.* With a parameter
+directory whose spend file has one byte changed, activation ends with
+`status` `Error`, `CoinCreationError`, an `error_data.error` other than
+`ZCashParamsNotFound`; the files are untouched; the process keeps serving
+requests. Same for the output file.
+
+**T39.6.6.b** *Bytes that fail their digest are never used or stored.* For
+each parameter source the build supports, a source that serves a file of the
+right size and wrong content ends activation with a reported error; no
+prover is built; a later read of the store finds nothing from that attempt.
+
+**T39.6.6.c** *A wrong store is repaired or reported, never an abnormal
+end.* (Browser; D39.6.6.c.) With a complete parameter store in which one
+stored piece is altered, activation either succeeds after obtaining the
+files again or ends with a reported `CoinCreationError`; the module answers
+a following request; a second activation does not meet the altered piece
+again.
+
+**T39.6.6.d** *An incomplete store is completed.* (Browser.) With a store
+holding fewer pieces than a full set, activation obtains the files and
+succeeds, and the store then holds exactly one full set.
+
+**T39.6.6.e** *Refused storage.* (Browser; D39.6.6.d.) With a store that
+rejects writes, activation ends with a reported `CoinCreationError` that
+names storage, and a second attempt transfers no parameter bytes before it
+fails the same way.
+
+**T39.6.6.f** *`status` answers while parameters are obtained.* (Browser;
+D39.6.6.e.) With a parameter source that delays its response, `status`
+polled meanwhile returns `InProgress` with the value the decision selects,
+and `cancel` ends the task.
+
+**T39.6.6.g** *An endpoint without gRPC-web.* (Browser; D39.6.6.i.) With
+`light_wallet_d_servers` holding only an endpoint that answers plain gRPC,
+activation ends with `CoinCreationError` whose text says the endpoint does
+not serve gRPC-web. With that endpoint first and a gRPC-web endpoint second,
+activation succeeds.
+
+**T39.6.6.h** *Proof time and memory are measured.* (Browser; D39.6.6.g.) A
+browser run builds a shielded send with one and with five spent notes and
+records the wall time and the peak memory of each; if a worker is chosen, an
+RPC issued during the build is answered before the build ends.
+
+**T39.6.6.i** *Bounded block download.* (Browser; D39.6.6.h.) With a
+lightwalletd stub serving a span several times the chosen range size, the
+number of compact blocks held in memory never exceeds the stated bound,
+`UpdatingBlocksCache` advances during the download, and a failure in a late
+range keeps the blocks of the earlier ranges.
+
+**T39.6.6.j** *One block is recorded whole or not at all.* (Browser.) With
+the store failing at each write position inside one block's application in
+turn, reopening the wallet database finds that block either fully recorded
+or absent, and the next scan resumes without a duplicate or a missing note.
+
+**T39.6.6.k** *History counts per coin.* (Browser.) With two shielded coins
+active in one wallet, `z_coin_tx_history` for one coin returns a `total`
+equal to that coin's transactions, and a `FromId` page starts after the
+named transaction of that coin.
+
+**T39.6.6.l** *Two wallets, one profile.* (Browser; D39.6.6.b.) After wallet
+A has activated a shielded coin, wallet B in the same browser profile
+activates one; under option (2) no parameter bytes are transferred for B.
+
+#### Not established (§39.6.6)
+
+- Nothing was run (F39.6.6.3). In particular: whether the reference's
+  browser build activates, scans, sends or swaps a shielded coin today; how
+  long a proof takes there and how much memory it needs; what a page sees
+  after an abnormal end.
+- How browsers of different makes answer the writes of R39.6.6.6 and the
+  quota case of R39.6.6.8; both are by reading only.
+- Whether `cancel` stops a running parameter download or only discards its
+  result.
+- Which endpoint list the public wallets pass to a browser build, and
+  whether they host the module in a window or in a worker; no wallet's
+  source was read.
+- The tracker entries the reference's switched-off browser checks point to
+  (R39.6.6.17) were not read; why the transport check fails is not known.
+- Since when, and for how long, the host of R39.6.6.4 and the endpoints of
+  F39.6.6.6 serve what was observed on 2026-11-15.
+- How the shielded coin behaves in the browser build under a browser-wallet
+  (MetaMask) key context.
+
+
 #### Deferred Work (§39.6)
 
 D39.6.a **Shielded coins in WASM -- after the beta.** *(Recorded 2026-10-29.)* A WASM
@@ -7407,3 +8040,90 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   against the standard that any discretionary finding fails a chapter;
   dictated-interop and public-surface tokens were excluded from the measured
   set.
+- *Scoped addition (2026-11-15) -- §39.6.6 (F39.6.6.1 -- F39.6.6.7,
+  R39.6.6.1 -- R39.6.6.26, D39.6.6.a -- D39.6.6.i, T39.6.6.a -- T39.6.6.l,
+  the three code-quality findings and the list of what was not
+  established).* **KDF Dirty Gate: PASS on 2026-11-15, measure 0.01, no findings**
+  (chapter 01 R40; Spec Reader round 0.5.0-5; the attestation closes this
+  item). *Inputs:* the
+  forbidden corpus, through the two-team procedure of chapter 01 §1.4A, at
+  the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, with the row
+  `main (as of 2026-10-07)` compared against `v3.0.0-beta` (it differs in
+  its read-me only). It was consulted **only** to establish: where a native
+  and a browser build take the two Sapling parameter files from, when, how
+  they are verified and stored, and what activation answers meanwhile and on
+  failure; the browser build's shielded stores and their scope, its block
+  download and scan drive, and its history paging; its lightwalletd
+  transport, the request member that supplies endpoints, and the transport
+  of the transparent side; where a shielded transaction is proved and
+  whether any swap operation is withheld in the browser build; the gaps the
+  reference records about its own browser build; and that no state of the
+  historical record handles the Ironwood transaction version or pool. What
+  crosses is behavior, public method, member, in-progress and error names,
+  public URLs and file names, the public gRPC-web header names, and sizes
+  and digests of two public files; no private identifier, function body,
+  helper decomposition, store or record name, test name, error, log or
+  comment text was reproduced, and the reference's own notes are restated
+  as facts, not quoted. *Other inputs:* the published source of two public
+  libraries, for the parameter-loading contract: the Zcash library fork the
+  reference pins, at the row `librustzcash k-1.4.2` of chapter 02 §2.15A
+  (its proofs library is version 0.5.0 there), and the Zcash proofs library
+  release this repository pins, `zcash_proofs` 0.30.0 as published on
+  crates.io; the public coins repository (`GLEECBTC/coins`), read on
+  2026-11-15 at its commit `4311e220718ef35c3bd99e931be57220d9c87e03`, for
+  its generated wallet configuration and its ARRR lightwalletd and Electrum
+  lists. Under chapter 01 R14 the ARRR browser-endpoint list, in the
+  two-host form R39.6.6.19 cites, first appears at that repository's commit
+  `ea86c441845337c64f044567bc920e08da410d25`; the earliest commits that
+  hold the other cited entries (the ARRR entry of the generated
+  configuration and the WSS Electrum entries) were not determined, and
+  that gap is flagged here. Further inputs:
+  public-network observations of 2026-11-15 (the two
+  parameter URLs: status, size, cross-origin header and digests of the
+  bodies; one gRPC-web tip request and one server-information request to
+  each of the two listed browser endpoints, and one tip request to each of
+  two plain endpoints); the reference metadata of the historical record,
+  compared with the live remote on 2026-11-15; and this repository's own
+  tree, for the contradiction notes of §39.6.6.9 and every statement about
+  what this project does today. *Original to this subsection:* R39.6.6.26,
+  the decisions D39.6.6.a -- D39.6.6.i with their recommendations, and the
+  tests T39.6.6.a -- T39.6.6.l. *Sibling consultations for this
+  subsection:* the two libraries and the coins repository named above; the
+  footer item "Sibling-allowlist consultations" earlier in §39.9 predates
+  this subsection and is left as written. *Scope of the edit:* additions
+  only; no sentence of this chapter that the Dirty Gate cleared is edited.
+  One row, `librustzcash k-1.4.2`, was added to chapter 02 §2.15A in this
+  round and passed the gate with this subsection; no other chapter is edited.
+  The contradiction with chapter 26's native-only table is recorded in
+  §39.6.6.9 and left for a later pass.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-15, measure
+  0.01 on chapter 01 R35's discretionary-expression basis (chapter 39: 0.01;
+  chapter 02: 0.00), no findings; the subsection passed a second full pass
+  after the passages named by the first pass were re-established and the row
+  `librustzcash k-1.4.2` was added: the fork is named only by its row, no
+  piece count or per-piece figure is given, and no statement says which
+  record holds what or how records are keyed. Reference states (chapter 02
+  R13): every state name is tabled (`v2.6.0-beta`, `v3.0.0-beta`, `main (as
+  of 2026-10-07)`, `librustzcash k-1.4.2`), each row matches the state
+  compared, and the new row is well-formed; the two coins-repository
+  identifiers above are admissible as chapter 01 R14 citations without a
+  row. Extent: Sapling parameter provisioning on native and browser builds;
+  the shielded coin's browser stores, block download, scan drive and history
+  paging; the gRPC-web lightwalletd transport and the transparent-side
+  transport; proving and swaps in the browser build; the shared
+  browser-store layer; the absence of the newer Pirate transaction version —
+  at the rows `v2.6.0-beta` and `v3.0.0-beta`, with `main (as of
+  2026-10-07)` compared against `v3.0.0-beta` by tree diff (one file
+  differs), and the sibling row `librustzcash k-1.4.2` for the
+  parameter-loading contract; about a dozen files of the subsystem read
+  closely at `v2.6.0-beta`, the seven files that differ between the two
+  release rows read as a diff, mechanical comparison over the text files of
+  the whole tree at both release rows (1,107 and 1,158 tracked files), two
+  source files and nine package manifests of the sibling; for the absence
+  statement of F39.6.6.7, a two-term search of the full history reachable
+  from all references of the historical record's clone. Method: reading;
+  intersection of identifier-shaped tokens with the compared material, each
+  match judged forced or free; 4-, 5- and 6-word overlap against the whole
+  tree at both release rows; diffs between the tabled states; pattern
+  searches for numerals and store-layout wording; the additions embed no
+  code blocks, so the repository's clean-room gate tool was not run.

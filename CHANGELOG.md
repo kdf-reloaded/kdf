@@ -37,6 +37,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that a legacy error text no longer carries the inner `file:line]` trace tokens. This is a KDF Reloaded extension; the reference answers
   `NoSuchMethod` for these names under `mmrpc: "2.0"`. The remaining legacy-only methods follow in later
   releases (plan `docs/plans/mmrpc-v2-completion.md`). Detail: PR #359; CRD ch.43 §43.1R, D43.1A.1 status note.
+- **The trading methods `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter` accept `mmrpc: "2.0"`
+  requests**, in the same way as the order-management methods above: legacy members inside `params`, legacy
+  result under `result` with `id` echoed, typed `error_type` with an HTTP status (400 for a request the client
+  got wrong, 500 for a node failure, 503 while the computer's clock is off), unknown `params` members ignored,
+  legacy forms and success bodies unchanged, legacy error texts as for the order-management methods (no inner
+  trace tokens). `get_trade_fee` stays legacy-only: the reference documentation marks it
+  deprecated in favor of the versioned `trade_preimage`. Detail: PR #372; CRD ch.43 §43.1R.
 
 #### Solana coins
 
@@ -74,6 +81,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   as the WalletConnect form, fails request parsing with `InvalidRequest` (HTTP 400) instead of
   activating with the local key. Detail: PR #358; CRD ch.36 §36.7, status note of 2026-11-15
 
+#### Solana coins
+
+- **Solana activation errors follow the shapes GLEEC KDF uses, and a token address is checked when
+  its coins entry is parsed.** On `enable_solana_with_tokens` a failed block-height or balance read
+  is now `PlatformCoinCreationError` with the platform ticker instead of `Internal`, and on
+  `enable_spl` a node failure stays `Transport`. An SPL token entry whose `token_contract_address`
+  is not a valid public key is now `TokenProtocolParseError` instead of `Internal`. The Solana
+  platform always counts 9 decimals; a `decimals` value in its coins entry is ignored, and a token
+  takes its decimals from `protocol_data` only. Solana stays switched off in this build. Detail:
+  PR #371; CRD ch.40 §40.3A, R40.6B.2.
+
 ### Fixed
 
 #### Transaction history
@@ -93,6 +111,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   could therefore be built at the same time. Both delegation calls now wait for the lock, as a
   withdraw does, so the builds no longer overlap; as with two withdraws, a transaction that is built
   but not yet broadcast does not keep a later build from choosing the same coins. Detail: PR #354; CRD ch.38 R38.5B.5.
+- **QTUM and QRC20 unspent lists and sends now go to the same first Electrum server.** With read
+  spreading on (the default), a list of the wallet's unspent QTUM coins could be answered by a server
+  that had not yet seen a transaction this node had just sent from a QRC20 token, and the node keeps
+  no record of what such a transaction spent. The next send could then choose a coin that is already
+  spent and be rejected. QTUM and each token also rank the servers separately. For QTUM and its
+  tokens, the unspent list no longer takes turns, and the list and every send now go to the servers
+  in the order of the coin's server list (servers that are behind come last), whatever
+  `electrum_server_order` says, so they start at the same server. Their other reads still take turns,
+  and other coins are unchanged. This narrows the gap and does not close it: a server can still
+  answer before it has seen the send, and a token that lists other servers than QTUM does not share
+  its first server. A shared connection and a shared record of spent coins for QTUM and its tokens
+  are planned. Detail: PR #368; CRD ch.38 R38.6.4a.
 
 ### Tests
 
@@ -102,16 +132,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Plans touched
 
+- [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)
+  build outside the shielded coins — versioned history, wallet management, event delivery to the page and
+  smaller items — in order of cost, and the limits a browser has by nature, also listed in
+  `docs/WASM_BUILD.md`.
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
-  management) implemented in PR #359; decisions D1–D10 recorded; phases 2–5 open.
+  management) implemented in PR #359, phase 2 (trading) in PR #372; decisions D1–D10 recorded; phases 3–5 open.
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress (was parked):
+  checked against the code on 2026-11-15: phases A–F not started; the state found and the order of the work packages are in its
+  new section "State check (2026-11-15)".
 - [`rpc-error-redesign`](docs/plans/rpc-error-redesign.md) — new, planning, no schedule: one error vocabulary
   (token spelling, payload kind, HTTP status) for the whole versioned RPC surface, with a compatibility period;
   ordered 2026-11-15, written in PR #359.
+- [`shielded-coins-in-browser`](docs/plans/shielded-coins-in-browser.md) — new, planning: work packages to
+  activate shielded coins (ARRR) in the browser build — the wallet database on the SQLite route, one
+  parameter source for both targets, the gRPC-web transport, Worker hosting of wallet and prover, swaps
+  last — with the decisions of CRD ch.39 D39.6.6.a–i as proposals.
 - [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361.
+  packages S0 and S2 done in PR #361, S1 in PR #371.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the

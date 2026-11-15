@@ -334,6 +334,14 @@ pub(crate) fn electrum_spread_near_offset_ms(ctx: &MmArc) -> f64 {
 /// (CRD ch.38 R38.6.4l item 6). `None` when the coin has none or it is not a positive number.
 pub(crate) fn electrum_block_interval(coin_conf: &Json) -> Option<Duration> { block_interval_from_conf(coin_conf) }
 
+/// Whether the unspent lists and the transaction broadcasts of the coin instance described by `coin_conf` take the
+/// listed order of the servers: `true` for a coin whose coins-file `protocol.type` is `QTUM` or `QRC20`, `false` for
+/// every other coin (CRD ch.38 R38.6.4a, amendment of 2026-11-15, items 1 and 2). The coins-file protocol type is
+/// the binding criterion; a QRC20 token's instance and its platform coin are told apart by nothing else here.
+pub(crate) fn electrum_listed_order_for_spends(coin_conf: &Json) -> bool {
+    matches!(coin_conf["protocol"]["type"].as_str(), Some("QTUM") | Some("QRC20"))
+}
+
 thread_local! {
     /// The budget a caller has given the calls it makes on this thread, while it polls them (see [`with_call_budget`]).
     static CALL_BUDGET: Cell<Option<Duration>> = const { Cell::new(None) };
@@ -407,6 +415,17 @@ pub(super) fn is_read_only(request: &JsonRpcRequestEnum) -> bool {
     }
 }
 
+/// The Electrum method of an unspent-list request (R38.6.4a item 1 and its amendment of 2026-11-15).
+const LIST_UNSPENT_METHOD: &str = "blockchain.scripthash.listunspent";
+
+/// Whether `request` is an unspent-list request or an R38.6.3a batch that carries one.
+fn carries_unspent_list(request: &JsonRpcRequestEnum) -> bool {
+    match request {
+        JsonRpcRequestEnum::Single(single) => single.method == LIST_UNSPENT_METHOD,
+        JsonRpcRequestEnum::Batch(batch) => batch.methods().any(|method| method == LIST_UNSPENT_METHOD),
+    }
+}
+
 /// The Electrum method of a transaction broadcast (R38.6.4a item 2, R38.6.4o item 5).
 const BROADCAST_METHOD: &str = "blockchain.transaction.broadcast";
 
@@ -430,6 +449,14 @@ pub struct ElectrumPoolOptions {
     /// Whether read-only queries start on the maintained connections in turn (R38.6.4a); `false` keeps the
     /// priority order for every query.
     pub spread_reads: bool,
+    /// Whether an unspent-list request (`blockchain.scripthash.listunspent`, alone or in a batch) and a transaction
+    /// broadcast (`blockchain.transaction.broadcast`) take the listed order of the servers. `true` for the QTUM
+    /// family (a coin whose coins-file `protocol.type` is `QTUM` or `QRC20`), `false` by default: such a request
+    /// then tries the up-to-date maintained sessions first and the out-of-date ones after them (R38.6.4o item 5),
+    /// each group in the order of the activation request's server list (R38.6.4b item 1), whatever `order` says,
+    /// and does not advance the turn counter of the spreading (CRD ch.38 R38.6.4a, amendment of 2026-11-15, items 1
+    /// and 2). Every other request keeps its routing. The unspent list stays a read for R38.6.4o item 5.
+    pub listed_order_for_spends: bool,
     /// The near factor of R38.6.4a item 8; `0` makes every maintained session near.
     pub near_factor: f64,
     /// The near offset *A* of R38.6.4a item 6, in milliseconds.
@@ -451,6 +478,7 @@ impl Default for ElectrumPoolOptions {
             timings: ElectrumPoolTimings::default(),
             order: ServerOrder::default(),
             spread_reads: true,
+            listed_order_for_spends: false,
             near_factor: NEAR_FACTOR_DEFAULT,
             near_offset_ms: NEAR_OFFSET_DEFAULT_MS,
             block_interval: None,
@@ -527,6 +555,8 @@ struct SlotState {
 /// under the measured orders, changes only by [`PoolShared::apply_rank`].
 pub(super) struct ServerSlot {
     id: usize,
+    /// The server's place in the activation request's list (R38.6.4b item 1); never changes.
+    listed_position: usize,
     rank: AtomicUsize,
     addr: String,
     /// The only form in which texts name the server: `host:port`, or a placeholder with the server's position
@@ -548,6 +578,7 @@ impl ServerSlot {
             electrum_server_name(&req.url).unwrap_or_else(|| format!("{UNNAMED_SERVER} #{}", listed_position + 1));
         ServerSlot {
             id,
+            listed_position,
             rank: AtomicUsize::new(id),
             addr: req.url.clone(),
             label,
@@ -791,6 +822,8 @@ pub(super) struct PoolShared {
     order: ServerOrder,
     /// R38.6.4a item 5.
     spread_reads: bool,
+    /// R38.6.4a, amendment of 2026-11-15: `false` keeps the unspent lists out of the spreading.
+    listed_order_for_spends: bool,
     /// R38.6.4a item 8.
     near_factor: f64,
     near_offset_ms: f64,
@@ -847,6 +880,7 @@ impl PoolShared {
             client_name: options.client_name,
             order: options.order,
             spread_reads: options.spread_reads,
+            listed_order_for_spends: options.listed_order_for_spends,
             near_factor: options.near_factor,
             near_offset_ms: options.near_offset_ms,
             read_cursor: AtomicUsize::new(0),
@@ -2901,13 +2935,24 @@ impl PoolShared {
     /// themselves (R38.6.4o item 5; when none is up to date, all count as up to date). Among the up-to-date
     /// connections, a read-only query with `electrum_spread_reads` on tries the near ones first (R38.6.4a item 6),
     /// starting at the one whose turn it is and going round them, and then the others in priority order (items 1,
-    /// 3 and 5). Everything else, and a set of one, keeps the priority order.
+    /// 3 and 5). Everything else, and a set of one, keeps the priority order. With `listed_order_for_spends` on, an
+    /// unspent list (alone or in a batch) and a transaction broadcast keep the two groups but take the listed order
+    /// within each, whatever the pool's priority order is, and leave the turn counter alone.
     fn in_turn_for(&self, request: &JsonRpcRequestEnum, maintained: Vec<Arc<ServerSlot>>) -> Vec<Arc<ServerSlot>> {
         let read = is_read_only(request);
-        if !(read || is_broadcast(request)) {
+        let broadcast = is_broadcast(request);
+        if !(read || broadcast) {
             return maintained;
         }
-        let (up_to_date, out_of_date) = self.split_by_state(maintained);
+        let (mut up_to_date, mut out_of_date) = self.split_by_state(maintained);
+        // CRD ch.38 R38.6.4a, amendment of 2026-11-15: with `listed_order_for_spends` on (the QTUM family), an
+        // unspent list, alone or in a batch, and a broadcast try each group in the listed order and leave the turn
+        // counter alone.
+        if self.listed_order_for_spends && (broadcast || carries_unspent_list(request)) {
+            up_to_date.sort_by_key(|slot| slot.listed_position);
+            out_of_date.sort_by_key(|slot| slot.listed_position);
+            return up_to_date.into_iter().chain(out_of_date).collect();
+        }
         if !(self.spread_reads && read) {
             return up_to_date.into_iter().chain(out_of_date).collect();
         }

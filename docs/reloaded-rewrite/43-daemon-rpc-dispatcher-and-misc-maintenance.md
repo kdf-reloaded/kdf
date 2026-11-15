@@ -425,6 +425,11 @@ added.*
 > `order_status` are routed on both surfaces. Their legacy answers are
 > unchanged. Per-method shapes and error tables: §43.1R below
 > (Reloaded-original, clean side).
+>
+> *Phase 2 (trading; this repository, 2026-11):* `buy`, `sell`,
+> `orderbook_depth` and `orders_history_by_filter` are routed on both surfaces;
+> `get_trade_fee` stays legacy-only (D43.1B.1). Per-method shapes and error
+> tables: §43.1R (dated amendment).
 
 **D43.1A.2** *Implement the reference's legacy-to-versioned fallback
 (R43.1A.1)?* Options: (i) parity — a legacy request for an unknown legacy
@@ -1092,7 +1097,7 @@ not.
 > listed in plan `mmrpc-v2-completion` §1.4 with this reason; group B of that
 > plan is `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter`.
 
-## 43.1R Reloaded versioned forms of the legacy-only order methods (Reloaded-original, clean side)
+## 43.1R Reloaded versioned forms of the legacy-only order and trading methods (Reloaded-original, clean side)
 
 *Added 2026-11-15. This section binds a KDF Reloaded extension (D43.1A.1 status
 note of 2026-11-15; plan `docs/plans/mmrpc-v2-completion.md`). §43.1B records
@@ -1109,8 +1114,15 @@ shared with existing sets the set of the nearest versioned sibling,
 record with `coin`, caller-side refusals 400, R43.1C.8). A later alignment is
 recorded here as a dated amendment.*
 
+*Amended 2026-11-15 (phase 2):* the trading methods `buy`, `sell`,
+`orderbook_depth` and `orders_history_by_filter` are added to every rule and
+table below; `orderbook_depth` follows the error set of its nearest documented
+sibling, the versioned `orderbook` (R43.1A.6), the other three that of
+`trade_preimage`.
+
 **R43.1R.1** *Surface.* `setprice`, `update_maker_order`, `cancel_order`,
-`cancel_all_orders`, `my_orders` and `order_status` are routed on the
+`cancel_all_orders`, `my_orders`, `order_status`, `buy`, `sell`,
+`orderbook_depth` and `orders_history_by_filter` are routed on the
 versioned table as well as the legacy table. The legacy forms and their
 success bodies are unchanged; a legacy error keeps its text behind one
 `file:line]` token of the handler (the inner trace tokens of chained errors
@@ -1131,6 +1143,9 @@ answer `InvalidRequest` (string, 400).
 | `cancel_all_orders` | `cancel_by` object `{"type": "All" | "Pair" | "Coin", "data": ...}` as on the legacy surface |
 | `my_orders` | none; `params` absent, `null`, `{}` or any object |
 | `order_status` | `uuid` string |
+| `buy`, `sell` | `base` string; `rel` string; `price` number; `volume` number; optional: `min_volume` number, `timeout` integer, `base_confs` integer, `base_nota` bool, `rel_confs` integer, `rel_nota` bool; `match_by` object (default any), `order_type` object (default good-till-cancelled), `save_in_history` bool (default `true`) |
+| `orderbook_depth` | `pairs` list of `[base, rel]` string pairs |
+| `orders_history_by_filter` | all optional: `order_type`, `initial_action`, `base`, `rel`, `from_price`, `to_price`, `from_volume`, `to_volume`, `from_timestamp`, `to_timestamp`, `was_taker`, `status`, `include_details` (default `false`) |
 
 Numbers accept the forms the legacy member accepts (decimal string, number,
 or the rational forms of chapter 08).
@@ -1140,7 +1155,10 @@ or the rational forms of chapter 08).
 number encoding: `setprice`, `update_maker_order` the maker-order object;
 `cancel_order` the string `"success"`; `cancel_all_orders`
 `{"cancelled": [uuid...], "currently_matching": [uuid...]}`; `my_orders`
-`{"maker_orders": {...}, "taker_orders": {...}}`; `order_status` the legacy
+`{"maker_orders": {...}, "taker_orders": {...}}`; `buy`, `sell` the taker
+request object; `orderbook_depth` the list of `{pair, depth: {asks, bids}}`;
+`orders_history_by_filter` `{orders, details, found_records, warnings}`;
+`order_status` the legacy
 bare object unchanged (`type`, `order`, the orderbook-ticker members where the
 legacy body has them, and `cancellation_reason` for a history order; R43.1B
 table row `order_status`).
@@ -1154,18 +1172,19 @@ contract.
 
 | `error_type` | `error_data` | Status | Failure class | Methods |
 | --- | --- | --- | --- | --- |
-| `NoSuchCoin` | object `{coin}` | 400 | base or rel coin not found | setprice |
-| `CoinIsWalletOnly` | object `{coin}` | 400 | base or rel coin is wallet-only | setprice |
-| `TradingNotSupported` | object `{coin}` | 400 | coin cannot trade | setprice |
-| `SwapKeyMismatch` | object `{coin, reason}` | 400 | coin cannot be swapped under this login | setprice, update_maker_order |
-| `ChainDisagreement` | string | 400 | Electrum servers disagree about the chain (chapter 38) | setprice |
-| `BaseEqualRel` | none | 400 | same coin on both sides | setprice |
+| `NoSuchCoin` | object `{coin}` | 400 | base or rel coin not found or inactive | setprice, buy, sell |
+| `CoinIsWalletOnly` | object `{coin}` | 400 | base or rel coin is wallet-only | setprice, buy, sell |
+| `CoinIsWalletOnly` | string | 400 | a requested pair has a wallet-only coin (the `orderbook` set, R43.1A.6) | orderbook_depth |
+| `TradingNotSupported` | object `{coin}` | 400 | coin cannot trade | setprice, buy, sell |
+| `SwapKeyMismatch` | object `{coin, reason}` | 400 | coin cannot be swapped under this login | setprice, update_maker_order, buy, sell |
+| `ChainDisagreement` | string | 400 | Electrum servers disagree about the chain (chapter 38) | setprice, buy, sell |
+| `BaseEqualRel` | none | 400 | same coin on both sides | setprice, buy, sell |
 | `CoinsNotActivated` | object `{base, rel}` | 400 | order's coins not activated | update_maker_order |
-| `VolumeTooLow` | object (volume, threshold; coin where known) | 400 | max, min, rel or spend-safety volume below floor; amount below minimum | setprice, update_maker_order |
-| `PriceTooLow` | object `{price, threshold}` | 400 | price below floor | setprice, update_maker_order |
-| `MaxBaseVolBelowMinBaseVol` | object `{min, max}` | 400 | max volume below min volume | setprice, update_maker_order |
-| `NotSufficientBalance` | object (coin, available, required; locked where known) | 400 | not enough balance for the swap or its fee preimage | setprice, update_maker_order |
-| `NotSufficientBaseCoinBalance` | object | 400 | not enough platform-coin balance | setprice, update_maker_order |
+| `VolumeTooLow` | object (volume, threshold; coin where known) | 400 | max, min, rel, base or spend-safety volume below floor; amount below minimum | setprice, update_maker_order, buy, sell |
+| `PriceTooLow` | object `{price, threshold}` | 400 | price below floor | setprice, update_maker_order, buy, sell |
+| `MaxBaseVolBelowMinBaseVol` | object `{min, max}` | 400 | max volume below min volume | setprice, update_maker_order, buy, sell |
+| `NotSufficientBalance` | object (coin, available, required; locked where known) | 400 | not enough balance for the swap or its fee preimage | setprice, update_maker_order, buy, sell |
+| `NotSufficientBaseCoinBalance` | object | 400 | not enough platform-coin balance | setprice, update_maker_order, buy, sell |
 | `IbcRoutingMinBalance` | object `{coin, required, current}` | 400 | IBC routing minimum (feature-gated) | setprice |
 | `NewVolumeNotPositive` | object `{volume}` | 400 | new volume not above zero | update_maker_order |
 | `NewVolumeBelowReserved` | object `{volume, reserved}` | 400 | new volume below the amount reserved by matches | update_maker_order |
@@ -1173,12 +1192,14 @@ contract.
 | `OrderBeingMatched` | object `{uuid}` | 400 | order has ongoing matches | update_maker_order, cancel_order |
 | `OrderDeleted` | object `{uuid}` | 400 | order removed while the update ran | update_maker_order |
 | `OrderStateChanged` | none | 400 | order changed after the checks; retry | update_maker_order |
-| `ClockOutOfRange` | string | 503 | the computer's clock is off by more than the limit (chapter 45 R45.6C.8); retry when it is right | setprice |
-| `FeeCapBelowBaseFee` | as chapter 35 | 500 | EVM fee estimate below base fee | setprice, update_maker_order |
-| `Transport` | string | 500 | node or server unreachable or invalid answer | setprice, update_maker_order |
-| `DbError` | string | 500 | order storage failure | setprice, update_maker_order, order_status |
+| `ClockOutOfRange` | string | 503 | the computer's clock is off by more than the limit (chapter 45 R45.6C.8); retry when it is right | setprice, buy, sell |
+| `FeeCapBelowBaseFee` | as chapter 35 | 500 | EVM fee estimate below base fee | setprice, update_maker_order, buy, sell |
+| `Transport` | string | 500 | node or server unreachable or invalid answer | setprice, update_maker_order, buy, sell |
+| `P2PSubscribeError` | string | 500 | order-book relay request or subscription failed (the `orderbook` set) | orderbook_depth |
+| `DbError` | string | 500 | order storage failure | setprice, update_maker_order, order_status, buy, sell, orders_history_by_filter |
 | `CannotRetrieveOrderMatchContext` | none | 500 | ordermatch context unavailable | cancel_order |
-| `InternalError` | string | 500 | any other failure of the node | all six |
+| `Internal` | string | 500 | any other failure of the node (the `orderbook` set) | orderbook_depth |
+| `InternalError` | string | 500 | any other failure of the node | all others |
 
 **T43.1R** *Tests.* Each versioned form: success in the 2.0 envelope with `id`
 echoed and `result` equal to the legacy content member by member; an unknown
@@ -1637,6 +1658,10 @@ shall be wound down as part of shutdown rather than abandoned.
   versioned-form extension for v0.5.0 and points to its plan; it takes no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required.
+- *Section 43.1R amended 2026-11-15 (phase 2) and D43.1A.1 status note extended.*
+  Reloaded-original, clean side: the four trading methods join the tables from
+  this repository's own legacy shapes and failure classes; no forbidden-class
+  input, chapter 01 R38 not engaged.
 - *Status notes added 2026-11-15 -- after D43.1C.1 to D43.1C.5 (§43.1C).*
   Reloaded-original, clean side: they record the maintainer's 2026-11-15
   resolutions of the five decisions; they take no forbidden-class
