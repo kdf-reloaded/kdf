@@ -14,7 +14,7 @@ import init, {
     Mm2MainErr,
     MainStatus,
     Mm2RpcErr
-} from "./deps/pkg/mm2.js";
+} from "./deps/pkg/kdflib.js";
 
 const LOG_LEVEL = LogLevel.Debug;
 
