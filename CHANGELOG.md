@@ -25,10 +25,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   on, unless `ntp_required` is `true`. Browser builds cannot send the queries and skip the check.
   Detail: PR #348; CRD ch.45 §45.6C.
 
+#### RPC interface
+
+- **The order-management methods `setprice`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
+  `my_orders` and `order_status` accept `mmrpc: "2.0"` requests.** A versioned request carries the legacy
+  members unchanged inside `params`, gets the legacy result under `result` with the request's `id` echoed,
+  and a typed `error_type` with an HTTP status instead of the legacy error string: a request the client
+  got wrong (unknown coin, unknown order, a volume or price below the minimum, not enough balance) answers
+  400, a failure of the node 500. An unknown member inside `params` is ignored. The legacy forms of the six
+  methods and their answers are unchanged. This is a KDF Reloaded extension; the reference answers
+  `NoSuchMethod` for these names under `mmrpc: "2.0"`. The remaining legacy-only methods follow in later
+  releases (plan `docs/plans/mmrpc-v2-completion.md`). Detail: PR #TBD; CRD ch.43 D43.1A.1 status note.
+
 ### Plans touched
 
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
+- [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — planning, scheduled for 0.5.0: phase 1 (order
+  management) implemented in PR #TBD; decisions D1–D7 recorded; the Status value is left to the maintainer.
 
 ## [0.4.0-beta.1] — 2026-11-14
 

@@ -390,6 +390,42 @@ envelope's strictness (R43.1A.2) and typed errors (R43.1A.3) unreliable.
 legacy-only order methods stay legacy-only, and no versioned aliases are
 added.*
 
+> *Reloaded status (clean side, 2026-11-15):* the resolution above describes
+> KDF Reloaded v0.4.0. For v0.5.0 the maintainer scheduled the documented
+> extension of `docs/plans/mmrpc-v2-completion.md`: every method that only the
+> legacy table knows, except `electrum`, `enable`, `help`, `show_priv_key`,
+> `sim_panic` and `stats_swap_status`, gains a versioned form under the same
+> wire name, built in five phases (order management; trading; wallet and
+> coins; swaps; daemon and network). The table of R43.1A.4 keeps the
+> reference's surfaces; the Reloaded surface of each phase is recorded here
+> as the phase merges, as a deliberate divergence under the plan's §1.6 and
+> `rpc-api-reference-wire-parity.md` §2.2, with no compatibility switch. The
+> legacy forms, the fallback of R43.1A.1a–R43.1A.1e and the rejection of
+> option (iii) are unchanged.
+>
+> *Shape rules of the extension (the maintainer's decisions of 2026-11-15):*
+> (1) a versioned form takes the legacy members unchanged inside `params`,
+> with the same names, types, optionality and defaults; a member is redesigned
+> only if a versioned form later gains a capability the legacy form lacks.
+> (2) The legacy result goes under `result` unchanged; for `order_status`
+> that is the object with `type`, `order` and, for a history order,
+> `cancellation_reason`. (3) An unknown member inside `params` is accepted and
+> ignored, as the legacy form accepts it; only the envelope keys of R43.1A.2
+> stay strict. Reason: a client built against a later form of a method keeps
+> working against an older node, and the envelope check already refuses a
+> malformed request before the method is reached. This rule is meant to be
+> stated in a later reference documentation of the versioned forms.
+> (4) Failures are typed: each failure class a handler can produce has an
+> `error_type` with an HTTP status, 4xx for a request the client got wrong
+> and 5xx for a failure of the node; the per-method tables live in the
+> chapters that govern the methods.
+>
+> *Phase 1 (order management; this repository, 2026-11):* `setprice`,
+> `update_maker_order`, `cancel_order`, `cancel_all_orders`, `my_orders` and
+> `order_status` are routed on both surfaces. Their legacy answers are
+> unchanged. Per-method shapes and error tables: §43.1R below
+> (Reloaded-original, clean side).
+
 **D43.1A.2** *Implement the reference's legacy-to-versioned fallback
 (R43.1A.1)?* Options: (i) parity — a legacy request for an unknown legacy
 name is retried on the versioned table and its answer rendered in the mmrpc
@@ -617,6 +653,92 @@ second versioned fee method is added (recommended: it mirrors the ground on
 which the plan keeps `show_priv_key` legacy-only); (ii) keep it in group B and
 add a versioned form anyway, for clients that call the simpler single-coin
 query.
+
+## 43.1R Reloaded versioned forms of the legacy-only order methods (Reloaded-original, clean side)
+
+*Added 2026-11-15. This section binds a KDF Reloaded extension (D43.1A.1 status
+note of 2026-11-15; plan `docs/plans/mmrpc-v2-completion.md`). §43.1B records
+that the reference documentation defines no versioned form for these names
+(R43.1B.1, R43.1B.7), so the shapes here are Reloaded's own design, built from
+the documented legacy members (R43.1B table). It takes no
+forbidden-class input: every shape below is this repository's legacy shape
+moved into the versioned envelope, and every failure class is one this
+repository's handlers produce. Token spellings and statuses may be aligned to
+the conventions of the documented versioned surface once that passage is
+cleared; such a change is recorded here as a dated amendment.*
+
+**R43.1R.1** *Surface.* `setprice`, `update_maker_order`, `cancel_order`,
+`cancel_all_orders`, `my_orders` and `order_status` are routed on the
+versioned table as well as the legacy table. The legacy forms, their bodies
+and their error strings are unchanged (tested against recorded bodies). The
+versioned forms run under the envelope, local-only, ban and authentication
+checks of every versioned method (R43.1A.2, R43.1A.3); none is public.
+
+**R43.1R.2** *Request (W1).* `params` carries the legacy members unchanged.
+An unknown member inside `params` is ignored; `params` that do not decode
+answer `InvalidRequest` (string, 400).
+
+| Method | `params` members (type; required unless noted) |
+| --- | --- |
+| `setprice` | `base` string; `rel` string; `price` number; `max` bool (default `false`); `volume` number (default 0); `min_volume` number (optional); `cancel_previous` bool (default `true`); `base_confs` integer, `base_nota` bool, `rel_confs` integer, `rel_nota` bool (optional); `save_in_history` bool (default `true`); `timeout_in_minutes` integer (optional) |
+| `update_maker_order` | `uuid` string; all optional: `new_price` number, `max` bool, `volume_delta` number, `min_volume` number, `base_confs` integer, `base_nota` bool, `rel_confs` integer, `rel_nota` bool |
+| `cancel_order` | `uuid` string |
+| `cancel_all_orders` | `cancel_by` object `{"type": "All" | "Pair" | "Coin", "data": ...}` as on the legacy surface |
+| `my_orders` | none; `params` absent, `null`, `{}` or any object |
+| `order_status` | `uuid` string |
+
+Numbers accept the forms the legacy member accepts (decimal string, number,
+or the rational forms of chapter 08).
+
+**R43.1R.3** *Success (W2, W7).* HTTP 200, `mmrpc: "2.0"`, `id` echoed,
+`result` = the content the legacy body carries under `result`, with the legacy
+number encoding: `setprice`, `update_maker_order` the maker-order object;
+`cancel_order` the string `"success"`; `cancel_all_orders`
+`{"cancelled": [uuid...], "currently_matching": [uuid...]}`; `my_orders`
+`{"maker_orders": {...}, "taker_orders": {...}}`; `order_status` the legacy
+bare object unchanged (`type`, `order`, the orderbook-ticker members where the
+legacy body has them, and `cancellation_reason` for a history order; R43.1B
+table row `order_status`).
+
+**R43.1R.4** *Errors (W3–W6).* The mmrpc error envelope of chapter 55
+R55.1.2. A request the client got wrong answers 400, a failure of the node
+500, a state of the node that refuses the request until it clears 503. One token may cover several legacy texts; the text is not part of the
+contract.
+
+| `error_type` | `error_data` | Status | Failure class | Methods |
+| --- | --- | --- | --- | --- |
+| `NoSuchCoin` | object `{coin}` | 400 | base or rel coin not found | setprice |
+| `CoinIsWalletOnly` | object `{coin}` | 400 | base or rel coin is wallet-only | setprice |
+| `TradingNotSupported` | object `{coin}` | 400 | coin cannot trade | setprice |
+| `SwapKeyMismatch` | object `{coin, reason}` | 400 | coin cannot be swapped under this login | setprice, update_maker_order |
+| `ChainDisagreement` | string | 400 | Electrum servers disagree about the chain (chapter 38) | setprice |
+| `BaseEqualRel` | none | 400 | same coin on both sides | setprice |
+| `CoinsNotActivated` | object `{base, rel}` | 400 | order's coins not activated | update_maker_order |
+| `VolumeTooLow` | object (volume, threshold; coin where known) | 400 | max, min, rel or spend-safety volume below floor; amount below minimum | setprice, update_maker_order |
+| `PriceTooLow` | object `{price, threshold}` | 400 | price below floor | setprice, update_maker_order |
+| `MaxBaseVolBelowMinBaseVol` | object `{min, max}` | 400 | max volume below min volume | setprice, update_maker_order |
+| `NotSufficientBalance` | object (coin, available, required; locked where known) | 400 | not enough balance for the swap or its fee preimage | setprice, update_maker_order |
+| `NotSufficientBaseCoinBalance` | object | 400 | not enough platform-coin balance | setprice, update_maker_order |
+| `IbcRoutingMinBalance` | object `{coin, required, current}` | 400 | IBC routing minimum (feature-gated) | setprice |
+| `NewVolumeNotPositive` | object `{volume}` | 400 | new volume not above zero | update_maker_order |
+| `NewVolumeBelowReserved` | object `{volume, reserved}` | 400 | new volume below the amount reserved by matches | update_maker_order |
+| `UUIDNotFound` | object `{uuid}` | 400 | no order with this uuid | update_maker_order, cancel_order, order_status |
+| `OrderBeingMatched` | object `{uuid}` | 400 | order has ongoing matches | update_maker_order, cancel_order |
+| `OrderDeleted` | object `{uuid}` | 400 | order removed while the update ran | update_maker_order |
+| `OrderStateChanged` | none | 400 | order changed after the checks; retry | update_maker_order |
+| `ClockOutOfRange` | string | 503 | the computer's clock is off by more than the limit (chapter 45 R45.6C.8); retry when it is right | setprice |
+| `FeeCapBelowBaseFee` | as chapter 35 | 500 | EVM fee estimate below base fee | setprice, update_maker_order |
+| `Transport` | string | 500 | node or server unreachable or invalid answer | setprice, update_maker_order |
+| `DbError` | string | 500 | order storage failure | setprice, update_maker_order, order_status |
+| `CannotRetrieveOrderMatchContext` | none | 500 | ordermatch context unavailable | cancel_order |
+| `InternalError` | string | 500 | any other failure of the node | all six |
+
+**T43.1R** *Tests.* Each versioned form: success in the 2.0 envelope with `id`
+echoed and `result` equal to the legacy content member by member; an unknown
+member inside `params` ignored; a legacy-shaped body with `"mmrpc": "2.0"`
+answers `InvalidRequest`; every token above has a wire-form test (token,
+`error_data` JSON type, status); the legacy bodies of the six methods are
+unchanged against recorded bodies.
 
 ## 43.2 Public vs protected method classification
 
@@ -867,6 +989,16 @@ shall be wound down as part of shutdown rather than abandoned.
   or serialized interface and no function body, control-flow transcription,
   private non-wire identifier, discretionary error or log wording, internal
   module tree or test name is present; none was found.
+- *Section 43.1R added 2026-11-15.* Reloaded-original, clean side: it binds
+  this repository's versioned forms of six legacy-only order methods from the
+  repository's own legacy shapes and failure classes; it takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.
+- *Status note added 2026-11-15 -- after D43.1A.1 (§43.1A).* Reloaded-original,
+  clean side: it records the maintainer's 2026-11-15 scheduling of the
+  versioned-form extension for v0.5.0 and points to its plan; it takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.
 - *Status note added 2026-11-10 -- under R43.4.1 (§43.4).* Reloaded-original,
   clean side: it records this repository's gating of the `sim_panic` test
   helper behind a Cargo feature (the maintainer's decision of 2026-11-10) and takes no
