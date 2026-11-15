@@ -72,6 +72,7 @@ impl TokenInitializer for SplTokenInitializer {
                     param.protocol.decimals,
                     param.ticker,
                     param.protocol.token_contract_address,
+                    param.protocol.program_id,
                     self.platform_coin.clone(),
                 )
             })

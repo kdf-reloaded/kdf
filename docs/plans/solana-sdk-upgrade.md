@@ -1,6 +1,6 @@
 # Plan: Solana SDK ed25519-dalek 1.x → 2.x
 
-**Status:** parked (deferred by choice 2026-08-06; upstream-pinned, would need a fork) — **Last reviewed:** 2026-10-18
+**Status:** parked (deferred by choice 2026-08-06; upstream-pinned, would need a fork) — **Last reviewed:** 2026-11-15
 
 > **Context: scoped, deferred by choice — 2026-08-06.** Checked reloaded's
 > actual Solana signing code (see "Confirmed root cause" below): the
@@ -11,6 +11,20 @@
 > this isn't worth the permanent maintenance ownership it would take on
 > right now. Not queued as next work. The options/plan below are preserved
 > in case that changes.
+
+> **State (2026-11-15): the upstream pin is gone.** On crates.io,
+> `solana-keypair` 3.x and `solana-signature` 3.x depend on `ed25519-dalek`
+> `^2.1.1` (newest at this date: `solana-keypair` 4.0.1, `solana-signature`
+> 3.6.0, `solana-pubkey` 4.4.0, `spl-token` 9.0.0 on the 3.x program crates).
+> The event option A waited for has happened: the advisories can be cleared
+> without a fork by moving the Solana crates from the 2.x line to the 3.x line.
+> That is a major-version step for every `solana-*` crate the coin uses, and
+> `spl-associated-token-account-client` 2.0.0 still depends on `solana-pubkey`
+> 2, so the associated-token-account address would come from its successor
+> crate or from the public program-derived-address rule. The byte-identical
+> address and signature checks under "Required verification" apply unchanged.
+> Whether the move happens in the 0.5.0 cycle is an open maintainer decision;
+> `solana-support.md` lists it as package S5.
 
 ## Goal
 
