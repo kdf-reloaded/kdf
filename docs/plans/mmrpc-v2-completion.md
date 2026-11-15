@@ -225,6 +225,8 @@ change to a shared piece (the alias registration, the success wrapper, the error
 | D5 | `order_status` success body | `result` is the bare legacy `{"type", "order"}` object; or a redesigned tagged shape. **Decided 2026-11-15: the legacy object unchanged under `result` (`type`, `order`, and `cancellation_reason` for a history order).** |
 | D6 | Where the divergence is recorded | **Decided 2026-11-15:** governing chapter note, `RELOADED_VS_GLEEC.md`, `docs/API_REFERENCE_DEVIATIONS.md`, CHANGELOG; no register file and no `GLEEC_COMPATIBILITY.md` row (§1.6). |
 | D7 | `stats_swap_status` | **Decided 2026-11-15:** legacy-only by decision (§1.4). |
+| D9 | Number encoding of the new answers (CRD ch.43 D43.1C.3) | **Decided 2026-11-15:** each legacy encoding as it stands. |
+| D10 | Token spelling, payload kind and status (CRD ch.43 D43.1C.4) | **Decided 2026-11-15:** each new form follows its nearest documented sibling set (`trade_preimage` for the order and trading forms); statuses 400 for caller-side refusals including state conflicts and an unknown order identifier, 500 for node failures, 503 for the clock refusal. A surface-wide error redesign is `docs/plans/rpc-error-redesign.md` (later version). |
 | D8 | `get_trade_fee` (CRD ch.43 D43.1B.1) | **Decided 2026-11-15:** legacy-only by decision (§1.4); group B is four names and the extension covers 40 methods. |
 
 ## Order of execution

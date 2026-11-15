@@ -56,7 +56,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — planning, scheduled for 0.5.0: phase 1 (order
-  management) implemented in PR #359; decisions D1–D7 recorded; the Status value is left to the maintainer.
+  management) implemented in PR #359; decisions D1–D10 recorded; the Status value is left to the maintainer.
+- [`rpc-error-redesign`](docs/plans/rpc-error-redesign.md) — new, planning, no schedule: one error vocabulary
+  (token spelling, payload kind, HTTP status) for the whole versioned RPC surface, with a compatibility period;
+  ordered 2026-11-15, written in PR #359.
 
 ## [0.4.0-beta.1] — 2026-11-14
 

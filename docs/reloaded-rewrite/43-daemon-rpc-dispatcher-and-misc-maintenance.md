@@ -1043,6 +1043,10 @@ companion members under one common member name — what Reloaded's two own
 forms do. A mixed outcome is itself what the documented surface shows
 (R43.1C.5).
 
+> *Reloaded status (clean side, 2026-11-15):* resolved by the maintainer's
+> decision as option (i): each legacy number encoding as it stands. Applied in
+> §43.1R (R43.1R.3).
+
 **D43.1C.4** *Token spelling, payload kind and status for failures that the
 new forms share with existing sets.* The documented sets disagree on the
 internal-failure token and give one token two payload kinds (R43.1C.8), and
@@ -1052,6 +1056,17 @@ spelling, one payload kind and one status per token across all new forms
 some sibling sets differ; (ii) each new form follows the set of its nearest
 versioned sibling, so that a trade-related form would use `InternalError`
 and `NoSuchCoin` as a record with status 400, as `trade_preimage` does.
+
+> *Reloaded status (clean side, 2026-11-15):* resolved by the maintainer's
+> decision as option (ii): each new form follows the set of its nearest
+> documented sibling; for the order and trading forms that is `trade_preimage`
+> (`InternalError`, `NoSuchCoin` as a record with `coin`, caller-side refusals
+> 400). The statuses of §43.1R stay as built: 400 for every caller-side
+> refusal, including the three state conflicts and an unknown order
+> identifier, 500 for a failure of the node, 503 for the clock refusal. A
+> redesign of the error answers of the whole versioned surface (one spelling
+> and one payload kind per failure, HTTP statuses where HTTP has a fitting
+> one) is a plan for a later version: `docs/plans/rpc-error-redesign.md`.
 
 **D43.1C.5** *Unknown members of `params` in the new forms.* The reference
 and Reloaded ignore them in every existing form of the shared names
@@ -1622,7 +1637,7 @@ shall be wound down as part of shutdown rather than abandoned.
   versioned-form extension for v0.5.0 and points to its plan; it takes no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required.
-- *Status notes added 2026-11-15 -- after D43.1C.1, D43.1C.2 and D43.1C.5
-  (§43.1C).* Reloaded-original, clean side: they record the maintainer's
-  2026-11-15 resolutions of the three decisions; they take no forbidden-class
+- *Status notes added 2026-11-15 -- after D43.1C.1 to D43.1C.5 (§43.1C).*
+  Reloaded-original, clean side: they record the maintainer's 2026-11-15
+  resolutions of the five decisions; they take no forbidden-class
   input, so chapter 01 R38 is not engaged and no gate pass is required.
