@@ -110,7 +110,7 @@ R40.1.3 **SPL token configuration.** An SPL token's `protocol` is
 A `mint_address` / `program_id` that is not a valid base58 public key makes the
 protocol unparsable (`TokenProtocolParseError`).
 
-> **Reloaded status (clean side, 2026-11-15).** Implemented in PR #N, on
+> **Reloaded status (clean side, 2026-11-15).** Implemented in PR #361, on
 > native targets; WASM follows with the WASM package of
 > `docs/plans/solana-support.md`. Both forms of R40.1.2 and R40.1.3 are read.
 > Reloaded also keeps reading its own forms: `{"type": "SOLANA"}` without

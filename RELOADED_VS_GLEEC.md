@@ -135,7 +135,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   Token program. The extra forms are additive and need no switch. Solana
   stays switched off in this beta (see
   [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
-  R40.1.2, R40.1.3; PR #N.
+  R40.1.2, R40.1.3; PR #361.
 
 - **Opt-in: an absent `max_eth_tx_type` read as unrestricted.** By default
   Reloaded reads a coin configuration with no `max_eth_tx_type` key as GLEEC KDF

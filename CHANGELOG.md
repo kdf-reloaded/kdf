@@ -32,7 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   entry of type `SOLANATOKEN` with `platform`, `decimals`, `mint_address` and `program_id`. A
   `mint_address` or `program_id` that is not a valid public key makes the entry unreadable, and the
   activation reports a protocol parse error. Solana stays switched off in this build, so no Solana
-  coin can be activated yet. Detail: PR #N; CRD ch.40 R40.1.2, R40.1.3.
+  coin can be activated yet. Detail: PR #361; CRD ch.40 R40.1.2, R40.1.3.
 
 ### Fixed
 
@@ -50,7 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - [`solana-support`](docs/plans/solana-support.md) — parked: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #N.
+  packages S0 and S2 done in PR #361.
 - [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
