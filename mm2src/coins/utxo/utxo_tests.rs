@@ -13366,3 +13366,93 @@ pub(crate) mod hd_accounts_at_index_tests {
         assert!(matches!(error, WithdrawError::NoTrezorDeviceAvailable), "{:?}", error);
     }
 }
+
+/// A Qtum coin with a stub Electrum client that was never connected: nothing here reaches a network.
+#[cfg(not(target_arch = "wasm32"))]
+fn qtum_coin_without_network_for_test() -> QtumCoin {
+    let client = ElectrumClient(Arc::new(ElectrumClientImpl::new("tQTUM".to_owned(), vec![])));
+    let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, false);
+    QtumCoin::from(UtxoArc::new(fields))
+}
+
+/// Runs `build` (a delegation build) while this test holds the process-wide build lock, and checks that the build
+/// does not list the unspents (CRD ch.38 R38.5B.5: the lock is held from the listing through signing) until the
+/// lock is released, and that it does after.
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_delegation_build_waits_for_the_build_lock<F>(build: impl FnOnce(&QtumCoin) -> F)
+where
+    F: futures::Future<
+        Output = Result<crate::TransactionDetails, mm2_err_handle::prelude::MmError<crate::DelegationError>>,
+    >,
+{
+    use crate::utxo::rpc_clients::UtxoRpcError;
+    use futures::task::noop_waker_ref;
+    use std::future::Future;
+    use std::task::{Context, Poll};
+
+    let listings = Arc::new(AtomicUsize::new(0));
+    let listings_in_mock = listings.clone();
+    QtumCoin::get_unspent_ordered_list.mock_safe(move |_, _| {
+        listings_in_mock.fetch_add(1, Ordering::SeqCst);
+        MockResult::Return(Box::pin(futures::future::err(MmError::new(UtxoRpcError::Internal(
+            "no network in this test".to_owned(),
+        )))))
+    });
+    // `am_i_currently_staking` (the add path) asks the Electrum server for the add and the remove history.
+    crate::qrc20::rpc_clients::Qrc20ElectrumOps::blockchain_contract_event_get_history
+        .mock_safe(|_: &ElectrumClient, _, _, _| MockResult::Return(Box::new(futures01::future::ok(Vec::new()))));
+
+    let coin = qtum_coin_without_network_for_test();
+
+    // The test holds the build lock, as a concurrent withdraw would.
+    let held = block_on(UTXO_LOCK.lock());
+    let mut build = Box::pin(build(&coin));
+    let first_poll = build.as_mut().poll(&mut Context::from_waker(noop_waker_ref()));
+    assert!(
+        matches!(first_poll, Poll::Pending),
+        "the build must wait for the build lock, got {:?}",
+        first_poll.map(|result| result.map(|_| ()))
+    );
+    assert_eq!(
+        listings.load(Ordering::SeqCst),
+        0,
+        "the unspents must not be listed before the build lock is held"
+    );
+
+    drop(held);
+    let result = block_on(build);
+    assert_eq!(
+        listings.load(Ordering::SeqCst),
+        1,
+        "the build lists the unspents once it holds the lock"
+    );
+    assert!(
+        result.is_err(),
+        "the mocked listing fails the build: {:?}",
+        result.map(|_| ())
+    );
+}
+
+/// The add-delegation build takes the build lock before it lists the unspents.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn qtum_delegation_build_waits_for_the_build_lock() {
+    use futures::compat::Future01CompatExt;
+
+    assert_delegation_build_waits_for_the_build_lock(|coin| {
+        let request = QtumDelegationRequest {
+            address: "qcyBHeSct7Wr4mAw18iuQ1zW5mMFYmtmBE".to_owned(),
+            fee: Some(10),
+        };
+        coin.add_delegation(request).compat()
+    });
+}
+
+/// The remove-delegation build takes the build lock before it lists the unspents.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn qtum_remove_delegation_build_waits_for_the_build_lock() {
+    use futures::compat::Future01CompatExt;
+
+    assert_delegation_build_waits_for_the_build_lock(|coin| coin.remove_delegation().compat());
+}

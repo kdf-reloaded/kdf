@@ -349,6 +349,7 @@ impl Qrc20NativeOps for NativeClient {
     }
 }
 
+#[cfg_attr(test, mockable)]
 impl Qrc20ElectrumOps for ElectrumClient {
     fn blockchain_token_get_info(&self, token_addr: &H160Json) -> RpcRes<TokenInfo> {
         rpc_func!(self, "blockchain.token.get_info", token_addr)
