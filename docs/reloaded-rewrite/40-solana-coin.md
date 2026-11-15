@@ -110,6 +110,18 @@ R40.1.3 **SPL token configuration.** An SPL token's `protocol` is
 A `mint_address` / `program_id` that is not a valid base58 public key makes the
 protocol unparsable (`TokenProtocolParseError`).
 
+> **Reloaded status (clean side, 2026-11-15).** Implemented in PR #361, on
+> native targets; WASM follows with the WASM package of
+> `docs/plans/solana-support.md`. Both forms of R40.1.2 and R40.1.3 are read.
+> Any object given as the platform's `protocol_data` is accepted and its
+> members are ignored, as `{}` is.
+> Reloaded also keeps reading its own forms: `{"type": "SOLANA"}` without
+> `protocol_data` (and with `protocol_data: null`), and `SPLTOKEN` with
+> `token_contract_address`, which means the SPL Token program. A Solana
+> platform protocol is always written back as `{"type": "SOLANA"}`, the form
+> of ch. 36 R36.0.3. Each token keeps its `program_id`, but the token's
+> account, balance and transfers use it only from the Token-2022 package on.
+
 R40.1.4 **Keys and addresses.** The Solana keypair shall be the ed25519 keypair
 whose 32-byte seed is the wallet's single-key (Iguana) secp256k1 private-key
 secret; the platform address is the base58 encoding of its public key. Only the
@@ -307,6 +319,33 @@ refuses every request; see the availability note at the top of this chapter):
    to `Internal`; bound: R40.2.4 / R40.3.4.
 7. **Keys.** Reloaded's keypair derivation produces the same ed25519 key as
    R40.1.4 for the same 32-byte secret; no change needed.
+
+> **Reloaded status (clean side, 2026-11-15).** The list above was checked
+> against the code of this date. Item 6 is partly out of date: the platform
+> reaches its nodes through a failover pool that tries them in the configured
+> order and sets a node aside for a while after a transport failure. The pool
+> sends no `getHealth` request, so it is not the node selection of R40.1.5. The
+> rest of item 6 holds. The shipped code has four further gaps; none of them can
+> be reached while Solana is switched off:
+>
+> - *Token-2022.* Reloaded's token configuration carries the `program_id`
+>   (PR #361, status note after R40.1.3), but nothing uses it yet: the
+>   token's account, its balance, the transfer instruction and the creation of
+>   the receiver's token account all use the SPL Token program. A Token-2022
+>   mint therefore fails in every one of these operations, not only in the
+>   balance read the code-quality finding below names.
+> - *SPL `withdraw` with `max: true`* transfers the requested amount, not the
+>   balance the answer reports.
+> - *Rent.* An SPL `withdraw` that creates the receiver's associated token
+>   account also pays that account's rent deposit. The balance check and
+>   `fee_details` do not count it.
+> - *Unimplemented operations.* Several coin operations that ordinary RPCs reach,
+>   such as transaction history, address conversion, the raw-transaction query
+>   and the confirmation settings, are unimplemented and end the request
+>   abnormally.
+>
+> `docs/plans/solana-support.md` schedules each of them before Solana is
+> switched back on.
 
 > **Decision recorded (informative).** The baseline-inherited
 > `enable_solana_with_tokens` / `enable_spl` methods stay routed as the primary
@@ -1440,3 +1479,6 @@ with the shapes listed in §40.6 items 3-5.
   2026-11-15 on Solana under a global-HD login and on the swap program; they
   take no forbidden-class input, so chapter 01 R38 is not engaged and no
   gate pass is required.
+- *Clean-context addition (2026-11-15, forbidden corpus not consulted):* the
+  Reloaded status notes after R40.1.3 and after §40.6 item 7 record the state
+  of this repository's own code. They take no forbidden-class input.

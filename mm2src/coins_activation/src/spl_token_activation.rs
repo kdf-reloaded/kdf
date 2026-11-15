@@ -1,7 +1,7 @@
 use crate::prelude::{TryFromCoinProtocol, TryPlatformCoinFromMmCoinEnum};
 use crate::token::{enable_token, EnableTokenError, EnableTokenRequest, TokenActivationOps, TokenProtocolParams};
 use async_trait::async_trait;
-use coins::solana::spl::{SplProtocolConf, SplTokenCreationError};
+use coins::solana::spl::{SplProtocolConf, SplTokenCreationError, SPL_TOKEN_PROGRAM_ID};
 use coins::{BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, MmCoinEnum, SolanaCoin, SplToken,
             SOLANA_ACTIVATION_AVAILABLE, SOLANA_NOT_AVAILABLE};
 use common::Future01CompatExt;
@@ -54,6 +54,18 @@ impl TryFromCoinProtocol for SplProtocolConf {
                 platform_coin_ticker: platform,
                 decimals,
                 token_contract_address,
+                program_id: SPL_TOKEN_PROGRAM_ID,
+            }),
+            CoinProtocol::SOLANATOKEN {
+                platform,
+                decimals,
+                mint_address,
+                program_id,
+            } => Ok(SplProtocolConf {
+                platform_coin_ticker: platform,
+                decimals,
+                token_contract_address: mint_address.to_string(),
+                program_id,
             }),
             proto => MmError::err(proto),
         }
@@ -112,6 +124,7 @@ impl TokenActivationOps for SplToken {
             protocol_conf.decimals,
             ticker,
             protocol_conf.token_contract_address,
+            protocol_conf.program_id,
             platform_coin,
         )
         .mm_err(Into::into)?;

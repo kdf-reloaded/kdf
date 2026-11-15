@@ -25,6 +25,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   on, unless `ntp_required` is `true`. Browser builds cannot send the queries and skip the check.
   Detail: PR #348; CRD ch.45 §45.6C.
 
+#### Solana coins
+
+- **Solana entries of a coins file in the form GLEEC KDF uses can be read.** Besides its own
+  forms, KDF Reloaded now reads, in native builds, a Solana platform entry with
+  `"protocol_data": {}` and an SPL token entry of type `SOLANATOKEN` with `platform`, `decimals`, `mint_address` and `program_id`. A
+  `mint_address` or `program_id` that is not a valid public key makes the entry unreadable, and the
+  activation reports a protocol parse error. Solana stays switched off in this build, so no Solana
+  coin can be activated yet. Detail: PR #361; CRD ch.40 R40.1.2, R40.1.3.
+
 ### Changed
 
 #### Tendermint (Cosmos) coins
@@ -57,6 +66,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Plans touched
 
+- [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
+  corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
+  packages S0 and S2 done in PR #361.
+- [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
+  pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 
