@@ -49,6 +49,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+#### Shielded coins
+
+- **The shielded coin's library stack now also builds with Orchard scanning enabled; no behavior
+  change.** The way the transaction builder is asked for an output-only Ironwood bundle no longer
+  changes a public type that the Zcash wallet library constructs itself, which kept that library from
+  compiling with its Orchard feature on. Transactions are built exactly as before.
+  Detail: PR #N; CRD ch.39 status note of 2026-11-15, ch.34 ledger entry of 2026-11-15.
+
 #### Tendermint (Cosmos) coins
 
 - **Tendermint activation refuses a hardware key policy instead of ignoring it.** A request that
