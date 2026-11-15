@@ -1348,30 +1348,49 @@ every maintained session.
 >   number; using 20`; the figure is the default constant.
 
 *Amendment (2026-11-15, clean side; Reloaded-original; interim until
-D38.6.4Q.4 is implemented). The QTUM family's unspent lists are not spread.*
+D38.6.4Q.1 and D38.6.4Q.4 are implemented). The QTUM family's unspent lists
+are not spread, and they and its broadcasts take the listed order.*
 1. For a coin instance whose coins-file `protocol.type` is `QTUM` or `QRC20`,
    an unspent-list request (`blockchain.scripthash.listunspent`), and an
    R38.6.3a batch that carries one, does not take a turn under item 1. It
-   tries the up-to-date maintained sessions in priority order and then the
-   out-of-date ones, exactly as every read does with `electrum_spread_reads`
-   `false` (R38.6.4o item 5). It does not advance the turn counter.
-2. Every other read-only query of those instances still spreads, and every
-   other coin is unchanged. `electrum_spread_reads` `false` still turns all
-   spreading off.
+   does not advance the turn counter.
+2. For such an instance, an unspent-list request (item 1) and a transaction
+   broadcast (`blockchain.transaction.broadcast`) try the up-to-date
+   maintained sessions first and then the out-of-date ones (R38.6.4o item 5),
+   and within each group in the order of the activation request's server list
+   (R38.6.4b item 1), whatever `electrum_server_order` says. These two request
+   kinds of this one family therefore do not follow the configured order
+   (R38.6.4b-R, R38.6.4l) until the shared client of D38.6.4Q.1 and the shared
+   record of D38.6.4Q.4 land. Every other request of those instances, and
+   every request of every other coin, keeps its routing; every other read of
+   those instances still spreads. `electrum_spread_reads` `false` still turns
+   all spreading off.
 3. *Reason.* Item 4 relies on the recently-spent record. For the QTUM family
    that record does not cover a QRC20 token's broadcasts, and the listings of
    QTUM and of its tokens do not consult one shared record (R38.6.4Q.7 item 6;
-   §38.6.4Q, note 2 on existing text). A listing sent in turn to a session that
-   has not yet seen this node's last broadcast could therefore offer an input
-   that the broadcast already spent. With priority order the listing goes to
-   the session that a broadcast tries first (item 2; R38.6.4o item 5), as
-   happens in the reference, where reads are not spread.
-4. *Limit.* This narrows the exposure and does not close it: the session that
-   took a broadcast can still answer a listing before it has indexed it, and
-   a broadcast that failed over to another session leaves the gap open. The
-   shared record of D38.6.4Q.4 closes it, and this amendment then lapses.
-5. No peer observes it. A user sees no change, except that the QTUM family's
-   unspent lists no longer take turns among the near servers.
+   §38.6.4Q, note 2 on existing text). QTUM and each token also have pools of
+   their own (R38.6.4Q.1), and under `random`, `mixed` and `measured` each pool
+   draws its own order. A listing sent in turn, or in a pool's own order, to a
+   session that has not yet seen this node's last broadcast from another
+   instance of the family could therefore offer an input that broadcast
+   already spent. With items 1 and 2, every instance of the family that names
+   the same servers tries the same first session for its listings and its
+   broadcasts, as at the reference, where every pool ranks by list position
+   and reads are not spread.
+4. *Limits.* This narrows the exposure and does not close it:
+   - a session can answer a listing before it has indexed a broadcast it took;
+   - a broadcast that failed over to another session leaves the gap open;
+   - instances whose activation requests name different servers, or list them
+     in a different order, do not share a first session;
+   - a session can be out of date in one instance's pool and up to date in
+     another's;
+   - with `max_connected` below the number of listed servers, two pools can
+     maintain different subsets.
+   The shared client of D38.6.4Q.1 and the shared record of D38.6.4Q.4 close
+   the gap, and this amendment then lapses.
+5. No peer observes it. A user sees no change in amounts or timing, only that
+   the QTUM family's unspent lists and broadcasts go to the servers in list
+   order instead of taking turns or following the measured order.
 
 R38.6.4b **Pool composition and bounds.** (Reference-bound at the rows
 `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, which agree.)
@@ -5471,8 +5490,8 @@ R38.8.6 **Tests (two-direction, observable).**
   added ranges only and clears expression and reference states, not factual
   accuracy.
 - *Reloaded-original amendment (2026-11-15), clean side -- after the as-built notes
-  of R38.6.4a: the QTUM family's unspent lists are not spread (interim until
-  D38.6.4Q.4).* Written by a session that never read the forbidden corpus. The
-  inputs are this repository's code and the cleared §38.6.4Q (R38.6.4Q.7 and its
-  note 2 on existing text). It takes no forbidden-class input, so chapter 01 R38
+  of R38.6.4a: the QTUM family's unspent lists are not spread, and they and its
+  broadcasts take the listed order (interim until D38.6.4Q.1 and D38.6.4Q.4).* Written by a session that never read the forbidden corpus. The
+  inputs are this repository's code and the cleared §38.6.4Q (R38.6.4Q.1,
+  R38.6.4Q.7 and its note 2 on existing text). It takes no forbidden-class input, so chapter 01 R38
   is not engaged and no gate pass is required.
