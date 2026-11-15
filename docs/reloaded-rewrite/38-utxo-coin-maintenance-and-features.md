@@ -4041,9 +4041,9 @@ watched address produces a streamed balance event.
 >    - **Tests:** the throttle and the delays are unit-tested; the loop's use of them
 >      is covered by construction.
 >    - *Clarification (2026-11-15, clean side):* this backoff, and the QRC20 loop's
->      own, are Reloaded's. The reference repeats a failed QRC20 balance read or
->      history request after a fixed 10 s (R38.6.4Q.6 item 4). No peer observes the
->      difference.
+>      history backoff, are Reloaded's. The reference repeats a failed QRC20 history
+>      request after a fixed 10 s (R38.6.4Q.6 item 4); a failed QRC20 balance read is
+>      repeated after 10 s in both. No peer observes the difference.
 
 ### 38.6.6 Fee policy, the whole-kilobyte fixed-fee option, and the UTXO trading floors
 
