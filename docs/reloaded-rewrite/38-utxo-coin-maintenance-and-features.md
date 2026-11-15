@@ -1723,8 +1723,9 @@ failure, naming each server, from the activation itself.
 >   *Correction (2026-11-15, clean side).* A QRC20 token does not answer from its platform coin's client: it is
 >   built with Electrum client fields of its own (the token builder builds them from the token's entry), and its
 >   `chain_disagreement` reads that client (`qrc20_mm_coin.rs`). Its disagreement state is therefore the state of
->   its own pool, not of the QTUM pool, and a QTUM coin and its tokens can be in different states. The SLP and
->   ZCoin parts of the sentence above are unchanged. Whether a token should share its platform's pool is open in
+>   its own pool, not of the QTUM pool, and a QTUM coin and its tokens can be in different states. A Qtum coin
+>   answers from its own client, as every platform coin does. The SLP and ZCoin parts of the sentence above are
+>   unchanged. Whether a token should share its platform's pool is open in
 >   the plan `qtum-qrc20-stabilization`.
 > - *Tests.* `t38_6_4o_6_a_far_ahead_server_fails_the_activation`,
 >   `t38_6_4o_8_different_headers_fail_the_activation_only_below_the_tip`, `t38_6_4o_12_two_servers_stale_or_diverged`,
@@ -3803,7 +3804,9 @@ minimum relay fee follows the same lifetimes.
 > entry, so its own `fee_estimate_cache_secs` is validated at activation, and it
 > reads its fee through its own Electrum client under its own ticker
 > (`utxo_common::get_tx_fee` on the token's fields), not through the platform
-> coin's client.
+> coin's client. The lifetime of that reading follows the token's own
+> `fee_estimate_cache_secs`, else the QTUM entry's, else the node's setting or
+> the adaptive default (R38.6.6k items 1 to 3; `request_fee_scope::fee_estimate_lifetime`).
 
 R38.6.6l *Explicit withdraw fee descriptors: the reference's arithmetic
 (reference-bound; authored by the KDF Spec Reader 2026-11-03 from the rows

@@ -11,8 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Plans touched
 
-- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — checked against the code on
-  2026-11-15: phases A–F not started; the state found and the order of the work packages are in its
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress (was parked):
+  checked against the code on 2026-11-15: phases A–F not started; the state found and the order of the work packages are in its
   new section "State check (2026-11-15)".
 
 ## [0.4.0-beta.1] — 2026-11-14
