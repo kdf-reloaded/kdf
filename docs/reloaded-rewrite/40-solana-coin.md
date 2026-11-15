@@ -358,28 +358,25 @@ finding F6).
 > `solana-support` chooses Solana's floors when Solana trading is
 > designed. The cleared rule text above is unchanged.
 
-## 40.6B Reference behavior beyond activation: keys, withdraw, per-method answers, history and swaps (Spec Reader round 0.5.0-4; pending the KDF Dirty Gate)
+## 40.6B Reference behavior beyond activation: keys, withdraw, per-method answers, history and swaps
 
-> **Provenance status: pending the KDF Dirty Gate.** This section is a
-> candidate under chapter 01 R40: until the gate clears it and this marker is
-> replaced by the clearance record, it MUST NOT be relied on as a statement of
-> required behavior and MUST NOT be implemented from. It was written by the
-> dirty-side specification author on 2026-11-15 (Spec Reader round 0.5.0-4)
-> from five inputs: (1) the reference lineage at the rows `v3.0.0-beta`,
-> `v2.6.0-beta` and `main (as of 2026-10-07)` of chapter 02 §2.15A, and at
-> the row `v2.1.0-beta` for the single question of §40.6B.7 whether a Solana
-> swap ever existed at a release; (2) the sibling coins-registry row
-> `coins solana-integration (as of 2026-11-08)`: its four Solana entries, its
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
+> measure 0.01 (attestation in §40.12).**
+> This section was written on 2026-11-15 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-4) under the two-team procedure of chapter 01 §1.4A, from five
+> inputs: (1) the reference lineage at the rows `v3.0.0-beta`, `v2.6.0-beta`
+> and `main (as of 2026-10-07)` of chapter 02 §2.15A, and at the row
+> `v2.1.0-beta` for the single question of §40.6B.7 whether a Solana swap
+> ever existed at a release; (2) the sibling coins-registry row `coins
+> solana-integration (as of 2026-11-08)`: its four Solana entries, its
 > integration document, its registry tooling and its generated fixtures,
 > read as reference-side material that only the two roles of chapter 01 R37
-> read; (3) the sibling swap-program rows
-> `satomic-swap dev (as of 2024-06-18)` and
-> `satomic-swap fix/htlc-correctness (as of 2026-10-28)`; (4) observations
-> of the public Solana devnet and mainnet JSON-RPC endpoints made on
-> 2026-11-15 (chapter 01 R6); (5) this repository's own tree. The three
-> sibling rows were added to chapter 02 §2.15A in this round and are pending
-> with this section. Every passage below is marked *(pending gate)* until
-> cleared.
+> read; (3) the sibling swap-program rows `satomic-swap dev (as of
+> 2024-06-18)` and `satomic-swap fix/htlc-correctness (as of 2026-10-28)`;
+> (4) observations of the public Solana devnet and mainnet JSON-RPC
+> endpoints made on 2026-11-15 (chapter 01 R6); (5) this repository's own
+> tree. The three sibling rows were added to chapter 02 §2.15A in this round
+> and passed the gate with this section.
 
 *Scope.* §40.1-§40.3 bind the reference's two activation methods and
 §40.4-§40.5 state in two sentences each that balances are read and that
@@ -395,7 +392,6 @@ no design. Method names, request and response member names, `error_type`
 values, public program addresses and public JSON-RPC method names are the
 interface and are quoted; nothing else of the reference is. It does not
 restate §40.1-§40.3; each rule names the cleared rule it completes.
-*(pending gate)*
 
 ### 40.6B.1 States read, and one term
 
@@ -409,7 +405,7 @@ unless it names a row. The reference metadata of the historical record
 remote on 2026-11-15: no branch or tag is newer than
 `main (as of 2026-10-07)`, so no row for a newer state of the v3 line was
 needed or added. R40.0.1's statement that the two release rows agree is
-confirmed and extends to everything below. *(pending gate)*
+confirmed and extends to everything below.
 
 **F40.6B.2** *Abnormal end.* Many operations of the reference's Solana coin
 and SPL token are placeholders that state their own incompleteness. A
@@ -421,7 +417,7 @@ process goes on serving other requests. This is what R40.2.5's note calls
 abnormally. It was established by
 reading the request service, not by running the reference; the outcome on
 the WASM target was not established. An abnormal end is never a parity
-target (R40.6B.14). *(pending gate)*
+target (R40.6B.14).
 
 ### 40.6B.2 Activation: what §40.1-§40.3 leave open
 
@@ -429,7 +425,7 @@ target (R40.6B.14). *(pending gate)*
 results, `error_type` values, `error_data` shapes and HTTP statuses of
 §40.1-§40.3 are what the reference does at all three rows. Nothing in
 §40.1-§40.3 needs correction; R40.6B.2-R40.6B.6 add cases those rules do
-not state. *(pending gate)*
+not state.
 
 **R40.6B.2** *Configuration keys.* Of a Solana platform entry and of an SPL
 token entry, the reference's activation reads one top-level key, `protocol`
@@ -445,7 +441,7 @@ the balance, the result or the error of either activation method:
 | `wallet_only` | not read by the coin; read from the configuration by the order-book methods (R40.6B.6) |
 | any other key | not read by activation |
 
-This completes R40.1.2-R40.1.3. *(pending gate)*
+This completes R40.1.2-R40.1.3.
 
 **R40.6B.3** *Protocol parsing, completing R40.1.2-R40.1.3.*
 
@@ -467,8 +463,6 @@ This completes R40.1.2-R40.1.3. *(pending gate)*
    the mint is owned by another program).
 4. `decimals` is an integer from 0 to 255; anything else is unparsable.
 5. Unknown members inside a token's `protocol_data` are ignored.
-
-*(pending gate)*
 
 **R40.6B.4** *A token the wallet holds no account for.* The reference reads
 a token balance in two node calls: `getTokenAccountsByOwner` filtered by the
@@ -499,8 +493,6 @@ holds an account for it, or against a node that does not know the mint.
 > no account for the mint. Reloaded must not copy the failure
 > (D40.6B.2).
 
-*(pending gate)*
-
 **R40.6B.5** *A Token-2022 `program_id` at activation.* Such an entry
 parses (R40.6B.3 item 3) and passes the mint-owner check when the mint is
 owned by the Token-2022 program; the token's address is the associated
@@ -517,8 +509,6 @@ therefore unusable, not merely misreported.
 > "can be wrong (typically zero)". By R40.6B.4 the typical outcome for a
 > mint that exists is a failed activation, not a zero balance. The proposed
 > fix of that finding stands.
-
-*(pending gate)*
 
 **R40.6B.6** *`wallet_only`.* The key is honored where the configuration is
 consulted and has no effect on the coin itself:
@@ -538,7 +528,7 @@ No value of `wallet_only` makes a Solana coin tradable at the three rows;
 for the methods that test the configuration, `wallet_only: false` only
 moves the failure from an orderly refusal to an abnormal end. This
 repository already refuses a Solana pair with an error
-naming the coin (the as-built note of §40.6A). *(pending gate)*
+naming the coin (the as-built note of §40.6A).
 
 ### 40.6B.3 Keys
 
@@ -565,7 +555,7 @@ is no path layout, no ed25519 derivation scheme and no HD seed input to
 report, and no address under a global-HD login can be given for any
 mnemonic. The key-export method `get_private_keys` answers an error for a
 Solana ticker in both of its modes, and `show_priv_key` ends abnormally, so
-the Solana secret cannot be exported through any method. *(pending gate)*
+the Solana secret cannot be exported through any method.
 
 **R40.6B.8** *Single-key test vector.* Under a passphrase login whose
 passphrase is the public twelve-word BIP-39 test mnemonic (eleven times
@@ -581,7 +571,7 @@ The vector was computed in this round from R40.1.4, the baseline's
 passphrase rule as this repository carries it (`crypto/src/privkey.rs`) and
 RFC 8032 key generation, and cross-checked with two independent ed25519
 implementations. It was not obtained by running the reference and is not
-taken from any reference test. *(pending gate)*
+taken from any reference test.
 
 > **Consistency note (two cleared rules disagree; neither is edited).**
 > R40.1.4 and T40.8 have a global-HD login refused on the compatibility
@@ -589,7 +579,7 @@ taken from any reference test. *(pending gate)*
 > repository's shared platform-with-tokens activation hand the legacy
 > passphrase key to Solana under a global-HD login, which activates with
 > the address of R40.6B.8's rule instead of refusing. Both cannot hold for
-> one activation path. D40.6B.7 puts the choice. *(pending gate)*
+> one activation path. D40.6B.7 puts the choice.
 
 ### 40.6B.4 Withdraw and broadcast
 
@@ -599,7 +589,7 @@ and its versioned form answer alike) and for `send_raw_transaction`. Node
 access is as in R40.1.5: every operation first selects a node by
 `getHealth`, more than once within one withdraw. No request carries a
 commitment level, so the node's default applies. Any node failure during a
-withdraw answers `Transport` (HTTP 502, string). *(pending gate)*
+withdraw answers `Transport` (HTTP 502, string).
 
 **R40.6B.9** *SOL withdraw.*
 
@@ -632,8 +622,6 @@ withdraw answers `Transport` (HTTP 502, string). *(pending gate)*
   `timestamp` is the local clock; `internal_id` is the hex of the
   characters of `tx_hash`; `transaction_type` is `StandardTransfer`;
   `memo` is null; `fee_details` is R40.6B.12.
-
-*(pending gate)*
 
 **R40.6B.10** *SPL withdraw.*
 
@@ -699,15 +687,13 @@ withdraw answers `Transport` (HTTP 502, string). *(pending gate)*
 > `getMinimumBalanceForRentExemption` and answer a structured error at
 > withdraw time.
 
-*(pending gate)*
-
 **R40.6B.11** *Token-2022 withdraw.* For a token whose `program_id` is not
 the classic Token program the transfer cannot be built, and the answer is
 `InternalError` (HTTP 500, string). The request gets that far only if the
 balance read succeeded, which R40.6B.5 makes unlikely. The rent quote of
 R40.6B.10 assumes the classic account size and would understate the rent
 of a Token-2022 account that carries extensions. The registry branch
-publishes no Token-2022 entry (§40.6B.8). *(pending gate)*
+publishes no Token-2022 entry (§40.6B.8).
 
 **R40.6B.12** *`fee_details`.* For both Solana kinds the member is an
 object of four members:
@@ -722,14 +708,14 @@ object of four members:
 It has no member naming the coin the fee is paid in, although for a token
 that coin is the platform, not the token. This repository's tree answers a
 different object for the same tag: `type` and a single `amount`
-(D40.6B.5). *(pending gate)*
+(D40.6B.5).
 
 **R40.6B.13** *`send_raw_transaction`.* `tx_hex` is hex-decoded and read as
 one transaction in Solana's wire serialization, no longer than one network
 packet's payload (1232 bytes); it is submitted with `sendTransaction` and
 the answer is `{tx_hash}`, the base58 signature the node returns. The
 method does not wait for confirmation. A token ticker takes the platform's
-path unchanged. *(pending gate)*
+path unchanged.
 
 ### 40.6B.5 Per-method answers on an active Solana coin
 
@@ -738,12 +724,12 @@ coin or an SPL token shall end abnormally in this project; where the table
 below says "abnormal end" for the reference, Reloaded shall give a JSON
 answer, a success or a structured error. This extends R40.2.5 and chapter
 60 R60.6.5 from activation and trading to the wallet surface. Which answer
-each method gives is D40.6B.1. *(pending gate)*
+each method gives is D40.6B.1.
 
 "Both" in the table means the platform coin and an SPL token alike. The
 last column is this repository's tree as read on 2026-11-15, with Solana
 switched off, so none of it can be observed in a build today; "not
-examined" means this round did not read it. *(pending gate)*
+examined" means this round did not read it.
 
 | Method | Reference at the three rows | This repository's tree |
 | --- | --- | --- |
@@ -764,7 +750,7 @@ examined" means this round did not read it. *(pending gate)*
 Outside the list asked for, the same reading found these to end abnormally
 for both kinds: `show_priv_key`, `get_trade_fee`, `sign_raw_transaction`
 and `min_trading_vol` (chapter 60 finding F6). The reading was not
-exhaustive (§40.6B.11). *(pending gate)*
+exhaustive (§40.6B.11).
 
 > **Code-quality finding (informative; this repository's own code;
 > trigger: apparent with little extra effort).** *Address validation is too
@@ -775,7 +761,7 @@ exhaustive (§40.6B.11). *(pending gate)*
 > address is off the curve by construction. Both withdraws run this check
 > on `to`. Proposed fix: accept any base58 text that decodes to exactly 32
 > bytes, and decide separately whether an off-curve recipient needs a
-> warning. *(pending gate)*
+> warning.
 
 > **Code-quality finding (informative; this repository's own code;
 > trigger: apparent with little extra effort).** *This repository's SPL
@@ -786,7 +772,7 @@ exhaustive (§40.6B.11). *(pending gate)*
 > classic Token program only, and answers a short SOL balance with
 > `NotSufficientBalance` naming the platform coin where the reference
 > answers `NotSufficientPlatformBalanceForFee`. D40.6B.3 and T40.6B.9
-> cover both. *(pending gate)*
+> cover both.
 
 ### 40.6B.6 Transaction history
 
@@ -798,7 +784,7 @@ abnormally with nothing registered (R40.2.5's note); the legacy
 `my_tx_history` ends abnormally and the versioned one answers
 `NotSupportedFor` (§40.6B.5). The older implementation at the row
 `v2.1.0-beta` had no history either. The registry branch records no check
-of history (§40.6B.8). *(pending gate)*
+of history (§40.6B.8).
 
 ### 40.6B.7 Swaps
 
@@ -815,7 +801,7 @@ address-seed scheme, no expression of secret hash, lock time, claim or
 refund, no dex-fee form, no swap version (neither the legacy protocol nor
 the version-two one) that uses Solana, no swap message field and no watcher
 support. An order cannot be placed (R40.6B.6). R40.6A.1's trading floors
-are unchanged and are all there is. *(pending gate)*
+are unchanged and are all there is.
 
 **F40.6B.4** *One earlier release carried a partial proof of concept.* At
 the row `v2.1.0-beta` an older Solana implementation, the lineage this
@@ -836,7 +822,7 @@ It could not complete a swap. The whole implementation is gone at the row
 coin at all, and the reintroduced implementation of §40.0.1 is first
 present, among the tabled release rows, at `v2.5.2-bebdc9a` (established by
 file listing; that row was not read). Nothing of the proof of concept binds
-Reloaded. *(pending gate)*
+Reloaded.
 
 **F40.6B.5** *A public swap program exists; a public swap client does
 not.* The sibling swap-program repository carries, at
@@ -860,12 +846,10 @@ and its coin-configuration keys cannot be read anywhere public.
 **Answer to the swap question.** Solana swaps are implemented at no row
 read. There is no reference counterparty a Reloaded Solana swap could be
 tested against, and no released behavior to be wire-compatible with.
-*(pending gate)*
 
 **R40.6B.16** *No compatibility claim.* Reloaded MUST NOT state or imply
 wire compatibility of Solana or SPL swaps with `v2.6.0-beta`,
 `v3.0.0-beta` or `main (as of 2026-10-07)`; all three lack the capability.
-*(pending gate)*
 
 **The public swap program's interface (dictated interop, conditional).**
 The following is the interop surface of the program of F40.6B.5, read from
@@ -874,7 +858,7 @@ that talks to that program must conform to it (R29/R31). It binds Reloaded
 **only if** D40.6B.8 selects this program; until then it is information.
 The symbols are quoted under chapter 01 R11's inter-operability class.
 Whether the devnet deployment is the build this description belongs to was
-not established (§40.6B.11). *(pending gate)*
+not established (§40.6B.11).
 
 | Instruction | Arguments, in order | Accounts, in order (s = signer, w = writable) | Discriminator (hex) |
 | --- | --- | --- | --- |
@@ -932,8 +916,6 @@ What a client depends on:
 - **Not in the program:** a dex fee, a swap identifier other than the
   payment address, and any record of the secret hash after settlement.
 
-*(pending gate)*
-
 ### 40.6B.8 What the registry branch adds
 
 **F40.6B.6** *Content.* The row
@@ -945,7 +927,7 @@ generated fixtures: a four-entry wallet set and a "swap" set made of the
 two devnet entries and one UTXO test coin. The branch holds no reference
 implementation code. Its "swap fixtures" are coin lists only: they contain
 no program address, no transaction, no message and no swap result, and so
-add nothing to §40.6B.7. *(pending gate)*
+add nothing to §40.6B.7.
 
 **F40.6B.7** *What it establishes, against the three rows.*
 
@@ -966,7 +948,7 @@ add nothing to §40.6B.7. *(pending gate)*
 **Nothing in the document or the fixtures contradicts the behavior of the
 three rows.** Two of their features (tradable devnet entries, a derivation
 path) look ahead to capabilities that no public state has, which is
-consistent with F40.6B.5. *(pending gate)*
+consistent with F40.6B.5.
 
 > **Code-quality finding (informative; trigger: apparent with little extra
 > effort).** Nothing in the reference ties a coin entry to a cluster.
@@ -975,12 +957,11 @@ consistent with F40.6B.5. *(pending gate)*
 > not name the cluster. Proposed fix: let an entry or a
 > request state the expected genesis hash and compare it with
 > `getGenesisHash` at activation; with nothing stated, behave as today.
-> *(pending gate)*
 
 ### 40.6B.9 Decisions
 
 Each item states the observable requirement, the options and a
-recommendation. None is decided here. *(pending gate)*
+recommendation. None is decided here.
 
 **D40.6B.1** *Answers for the placeholder methods (R40.6B.14).*
 Requirement: a JSON answer for every method of §40.6B.5 on both Solana
@@ -1050,6 +1031,12 @@ address under either login and the plan runs both surfaces over one
 activation path; (d) only as a separate, later decision. Whichever is
 chosen, chapter 05 R46 and T40.8 must be made to say the same thing.
 
+> *Reloaded status (clean side, 2026-11-15):* by the maintainer's decision
+> of 2026-11-15, Solana under a global-HD login is built with HD derivation
+> now: the coin uses an ed25519 key at the coin's derivation path, and a
+> hardware wallet or a WalletConnect session gets a typed refusal. The path
+> layout is still to be decided.
+
 **D40.6B.8** *The swap program (F40.6B.5).* Options: (a) target the public
 program of F40.6B.5 when Solana swaps are designed; (b) design or deploy
 another; (c) decide nothing now. *Recommendation:* (c). The lane is
@@ -1058,13 +1045,15 @@ program is by its own record unaudited and absent from mainnet. Revisit
 when a reference client is public or the program is on mainnet.
 R40.6B.16 holds meanwhile.
 
-*(pending gate)*
+> *Reloaded status (clean side, 2026-11-15):* by the maintainer's decision
+> of 2026-11-15, nothing is decided on the swap program; the Solana lane is
+> wallet-only first.
 
 ### 40.6B.10 Acceptance tests
 
 These rows are for the implementer once the section is cleared and the
 decisions are taken; a row that depends on a decision names it. "Answers"
-means a JSON answer, never an abnormal end. *(pending gate)*
+means a JSON answer, never an abnormal end.
 
 *Activation forms.*
 
@@ -1248,17 +1237,15 @@ as-built note of §40.6A, restated for the configuration value).
   §2.15A). No other state of the historical record was read for this
   section.
 - *Cross-chapter check.* Read against this section: chapter 02 §2.15A
-  (three rows added, pending with this section); chapter 05 (R46 item 3
+  (three rows added, cleared with this section); chapter 05 (R46 item 3
   and the hardware-source table: the consistency note of §40.6B.3);
   chapter 49 (the fee-policy note: agrees with R40.6B.9); chapter 55
   (§55.3 Solana rows and D55.6: agree); chapter 60 (row P1, R60.6.5,
   finding F6: agree, extended by R40.6B.14); chapter 21 §21.11B (the form
   followed for a sibling swap program). No cleared sentence of any chapter
   was edited.
-- *Clearance:* **pending the KDF Dirty Gate** (chapter 01 R37-R41). No
-  attestation is recorded yet.
-
-*(pending gate)*
+- *Clearance:* passed the KDF Dirty Gate on 2026-11-15, measure 0.01, no
+  findings (chapter 01 R37-R41); the attestation is in §40.12.
 
 ## 40.7 Tests
 
@@ -1381,8 +1368,9 @@ with the shapes listed in §40.6 items 3-5.
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required.
 - *Dirty-side addition of 2026-11-15 (§40.6B; Spec Reader round 0.5.0-4;
-  **pending the KDF Dirty Gate**):* §40.6B and this entry are a candidate
-  under chapter 01 R40 and are not cleared. *Forbidden corpus:* consulted
+  **KDF Dirty Gate: PASS on 2026-11-15, measure 0.01, no findings**):*
+  §40.6B and this entry passed the gate under chapter 01 R40; the
+  attestation below closes this item. *Forbidden corpus:* consulted
   under the chapter-01 two-team clean-room workflow at the rows
   `v3.0.0-beta`, `v2.6.0-beta` and `main (as of 2026-10-07)` of chapter 02
   §2.15A, for the observable behavior of an active Solana coin and SPL
@@ -1408,6 +1396,45 @@ with the shapes listed in §40.6 items 3-5.
   this repository's code, and the test vector of R40.6B.8, which was
   computed, not read. No source text, private identifier, internal
   decomposition, error or log string literal, test name or test constant
-  was carried into §40.6B; findings are restated as behavior. The scope
-  attestation's extent, method and measure are **not recorded**, because no
-  gate verdict exists yet.
+  was carried into §40.6B; findings are restated as behavior.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-15, measure
+  0.01 on chapter 01 R35's discretionary-expression basis, judged per token,
+  no findings (chapter 40: 0.01; chapter 02: 0.00; 0.00 against the
+  historical record); the section passed two full passes, the second after
+  five passages were reworded. Reference states (chapter 02 R13): no
+  finding; every state name used has a row, each row's identifier is the
+  state compared, and the three new rows are well-formed. Extent: the Solana
+  coin and SPL token subsystem of the historical record (coin, token, node
+  client, both activation paths, test file: 7 files) read in full at
+  `v3.0.0-beta`; the same files at `v2.6.0-beta` and `main (as of
+  2026-10-07)` by difference; the earlier Solana and SPL implementation at
+  `v2.1.0-beta` (10 files: swap operations read, the remainder compared
+  mechanically); the request dispatcher's method names and the
+  coin-deactivation handler by targeted reading; every text file of those
+  four trees mechanically; file listings at `v2.2.0-beta`, `v2.3.0-beta`,
+  `v2.4.0-beta`, `v2.5.0-beta`, `v2.5.1-beta`, `v2.5.2-beta` and
+  `v2.5.2-bebdc9a`; the sibling rows `coins solana-integration (as of
+  2026-11-08)` (18 files changed by the branch; integration document read in
+  full), `satomic-swap dev (as of 2024-06-18)` (16 files) and `satomic-swap
+  fix/htlc-correctness (as of 2026-10-28)` (19 files; read-me read in full,
+  program crate and interface description compared in full). Treatment of
+  the siblings: the registry branch and the older swap-program state carry
+  no license and were treated as protected expression; of the newer
+  swap-program state the checked-in interface description is published
+  interface, the program crate is MIT-declared expression admissible with
+  the R14 citation the section carries, and the read-me, deployment
+  document, tests and scripts were held to the protected-expression
+  standard. Method: reading; mechanical comparison of shared word runs
+  (three, four and five words) between the gated lines and each state;
+  per-token forced-versus-free classification of every quoted token;
+  recomputation of the six instruction discriminators and of the test
+  vector; comparison of string literals and comments; the section embeds no
+  code blocks, so the repository's clean-room gate tool was not run. Not
+  covered: the accuracy of the behavioral statements, the public-network
+  observations, and whether each R14 identifier is the earliest commit. The
+  test vector's values occur nowhere in the compared material.
+- *Status notes added 2026-11-15 -- after D40.6B.7 and D40.6B.8 (§40.6B).*
+  Reloaded-original, clean side: they record the maintainer's decisions of
+  2026-11-15 on Solana under a global-HD login and on the swap program; they
+  take no forbidden-class input, so chapter 01 R38 is not engaged and no
+  gate pass is required.
