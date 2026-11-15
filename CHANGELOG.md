@@ -53,8 +53,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Plans touched
 
-- [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — planning, scheduled for 0.5.0: phase 1 (order
-  management) implemented in PR #359; decisions D1–D10 recorded; the Status value is left to the maintainer.
+- [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
+  management) implemented in PR #359; decisions D1–D10 recorded; phases 2–5 open.
 - [`rpc-error-redesign`](docs/plans/rpc-error-redesign.md) — new, planning, no schedule: one error vocabulary
   (token spelling, payload kind, HTTP status) for the whole versioned RPC surface, with a compatibility period;
   ordered 2026-11-15, written in PR #359.
