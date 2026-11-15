@@ -81,3 +81,6 @@ __pycache__/
 
 # Developer notes never tracked
 /local/
+
+# WASM demo page build output
+/wasm_build/deps/

@@ -37,6 +37,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that a legacy error text no longer carries the inner `file:line]` trace tokens. This is a KDF Reloaded extension; the reference answers
   `NoSuchMethod` for these names under `mmrpc: "2.0"`. The remaining legacy-only methods follow in later
   releases (plan `docs/plans/mmrpc-v2-completion.md`). Detail: PR #359; CRD ch.43 §43.1R, D43.1A.1 status note.
+- **The trading methods `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter` accept `mmrpc: "2.0"`
+  requests**, in the same way as the order-management methods above: legacy members inside `params`, legacy
+  result under `result` with `id` echoed, typed `error_type` with an HTTP status (400 for a request the client
+  got wrong, 500 for a node failure, 503 while the computer's clock is off), unknown `params` members ignored,
+  legacy forms and success bodies unchanged, legacy error texts as for the order-management methods (no inner
+  trace tokens). `get_trade_fee` stays legacy-only: the reference documentation marks it
+  deprecated in favor of the versioned `trade_preimage`. Detail: PR #372; CRD ch.43 §43.1R.
 
 #### Solana coins
 
@@ -71,6 +78,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   PR #371; CRD ch.40 §40.3A, R40.6B.2.
 
 ### Fixed
+
+#### Browser (WASM) build
+
+- **The browser demo page loads the current WASM build again.** The page `wasm_build/index.html`
+  imported a module file name (`mm2.js`) that the build no longer produces, so it could not start;
+  it now imports `kdflib.js`. The build guide and the page's README name the files the build writes,
+  and the build output directory `wasm_build/deps/` is ignored by git. Detail: PR #374; CRD ch.2 directory table (lists `wasm_build/`).
 
 #### Electrum servers
 
@@ -109,20 +123,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Tests
 
+- **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
+  runs the tests of the browser build again; before, the test runner found none ("no tests to run!"),
+  because the locked test library was far older than the locked `wasm-bindgen`. The test library is
+  updated to the matching release and the runner name in `.cargo/config.toml` is the standard one. This also
+  updates `wasm-bindgen-futures`, which the browser build uses at run time, to 0.4.67. No CI job runs the
+  browser tests yet. Detail: PR #373.
 - **The Tendermint unit tests of `coins` now run in CI.** A new CI job runs the Tendermint swap-flow,
   priority-fee and WalletConnect signer tests and the postponed-family switch tests; the loopback
   tests of the native RPC server join the maker-outbox job.
 
 ### Plans touched
 
+- [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)
+  build outside the shielded coins — versioned history, wallet management, event delivery to the page and
+  smaller items — in order of cost, and the limits a browser has by nature, also listed in
+  `docs/WASM_BUILD.md`.
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
-  management) implemented in PR #359; decisions D1–D10 recorded; phases 2–5 open.
+  management) implemented in PR #359, phase 2 (trading) in PR #372; decisions D1–D10 recorded; phases 3–5 open.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress (was parked):
   checked against the code on 2026-11-15: phases A–F not started; the state found and the order of the work packages are in its
   new section "State check (2026-11-15)".
 - [`rpc-error-redesign`](docs/plans/rpc-error-redesign.md) — new, planning, no schedule: one error vocabulary
   (token spelling, payload kind, HTTP status) for the whole versioned RPC surface, with a compatibility period;
   ordered 2026-11-15, written in PR #359.
+- [`shielded-coins-in-browser`](docs/plans/shielded-coins-in-browser.md) — new, planning: work packages to
+  activate shielded coins (ARRR) in the browser build — the wallet database on the SQLite route, one
+  parameter source for both targets, the gRPC-web transport, Worker hosting of wallet and prover, swaps
+  last — with the decisions of CRD ch.39 D39.6.6.a–i as proposals.
 - [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps

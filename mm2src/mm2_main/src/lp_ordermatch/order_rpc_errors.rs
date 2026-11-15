@@ -1,6 +1,7 @@
 //! The typed failures of the order-management RPC cores (CRD ch.43 §43.1A; plan `mmrpc-v2-completion` D3).
 //!
-//! `setprice`, `update_maker_order`, `my_orders` and `order_status` used to fail with a string. Each now fails with
+//! `setprice`, `update_maker_order`, `my_orders`, `order_status`, `buy`, `sell`, `orderbook_depth` and
+//! `orders_history_by_filter` used to fail with a string. Each now fails with
 //! an error enum in the adjacently tagged form of the versioned methods (`error_type`, `error_data`), a status
 //! (`HttpStatusCode`) and a `Display` text. The `Display` text of a variant is the text the legacy handler produced
 //! for that failure, without its `file:line] ` prefix, so the legacy surface renders the same answer from it (see
@@ -30,8 +31,9 @@ pub(crate) trait MakerVolumeError: From<BalanceError> + From<CheckBalanceError> 
     fn from_receiver_fee_error(error: TradePreimageError, coin: &str) -> Self;
 }
 
-/// The conversions of the failures that `setprice` and `update_maker_order` have in common. Both enums name these
-/// variants alike (see the module documentation for the renamed ones).
+/// The conversions of the failures that the order-creating and order-changing methods have in common (`setprice`,
+/// `update_maker_order`, `buy` and `sell`). The enums name these variants alike (see the module documentation for
+/// the renamed ones).
 macro_rules! impl_common_order_error_conversions {
     ($error:ident) => {
         impl From<SwapKeyMismatch> for $error {
@@ -115,7 +117,13 @@ macro_rules! impl_common_order_error_conversions {
                 }
             }
         }
+    };
+}
 
+/// The receiver-fee conversion of the maker-order enums ([`MakerVolumeError`]); the taker enum does not read a
+/// receiver fee on its own.
+macro_rules! impl_maker_volume_error {
+    ($error:ident) => {
         impl MakerVolumeError for $error {
             fn from_receiver_fee_error(error: TradePreimageError, coin: &str) -> Self {
                 match error {
@@ -314,6 +322,7 @@ pub enum SetPriceError {
 }
 
 impl_common_order_error_conversions!(SetPriceError);
+impl_maker_volume_error!(SetPriceError);
 
 impl SetPriceError {
     /// Classifies the refusal of the order builder. `base` and `rel` name the coins whose volume limits it reports.
@@ -539,6 +548,7 @@ pub enum UpdateMakerOrderError {
 }
 
 impl_common_order_error_conversions!(UpdateMakerOrderError);
+impl_maker_volume_error!(UpdateMakerOrderError);
 
 impl UpdateMakerOrderError {
     /// Classifies the refusal of an order validator. `base` and `rel` name the coins whose volume limits it reports.
@@ -655,6 +665,270 @@ impl HttpStatusCode for OrderStatusError {
         match self {
             OrderStatusError::UUIDNotFound { .. } => StatusCode::BAD_REQUEST,
             OrderStatusError::DbError(_) | OrderStatusError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+/// The failures of `buy` and `sell` (and of [`lp_auto_buy`], which keeps its string error for its callers). Both
+/// methods fail alike; the one difference is the order of the two coin lookups (see [`buy_core`], [`sell_core`]).
+///
+/// The classification follows the order of the checks of the taker-order core; every distinct legacy text has its own
+/// variant (see the module documentation).
+#[derive(Debug, Display, Serialize, SerializeErrorType)]
+#[serde(tag = "error_type", content = "error_data")]
+pub enum TakerOrderError {
+    /// Base and rel are the same coin (the check of the request).
+    #[display(fmt = "Base and rel must be different coins")]
+    BaseEqualRel,
+    /// The base coin is not activated. The legacy text does not name the coin.
+    #[display(fmt = "Base coin is not found or inactive")]
+    #[serde(rename = "NoSuchCoin")]
+    NoSuchBaseCoin { coin: String },
+    /// The rel coin is not activated. The legacy text does not name the coin.
+    #[display(fmt = "Rel coin is not found or inactive")]
+    #[serde(rename = "NoSuchCoin")]
+    NoSuchRelCoin { coin: String },
+    /// The pair holds a coin that cannot trade (Lightning, Solana).
+    #[display(fmt = "Trading is not supported for coin {}", coin)]
+    TradingNotSupported { coin: String },
+    /// The coin's swap key is not the key it pays from under a global-HD login (CRD ch.05 R36, R38).
+    #[display(fmt = "{} cannot be swapped under this login: {}", coin, reason)]
+    SwapKeyMismatch { coin: String, reason: String },
+    /// The Electrum servers of a coin disagree about the chain (CRD ch.38 R38.6.4o item 12). The payload is the text.
+    #[display(fmt = "{}", _0)]
+    ChainDisagreement(String),
+    /// The computer's clock is off by more than the limit (CRD ch.45 R45.6C.8). The payload is the refusal text as the
+    /// clock check renders it.
+    #[display(fmt = "{}", _0)]
+    ClockOutOfRange(String),
+    /// The base coin is wallet only.
+    #[display(fmt = "Base coin {} is wallet only", coin)]
+    #[serde(rename = "CoinIsWalletOnly")]
+    BaseCoinIsWalletOnly { coin: String },
+    /// The rel coin is wallet only.
+    #[display(fmt = "Rel coin {} is wallet only", coin)]
+    #[serde(rename = "CoinIsWalletOnly")]
+    RelCoinIsWalletOnly { coin: String },
+    #[display(
+        fmt = "Not enough {} for swap: available {}, required at least {}, locked by swaps {:?}",
+        coin,
+        available,
+        required,
+        locked_by_swaps
+    )]
+    NotSufficientBalance {
+        coin: String,
+        available: BigDecimal,
+        required: BigDecimal,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        locked_by_swaps: Option<BigDecimal>,
+    },
+    #[display(
+        fmt = "Not enough base coin {} balance for swap: available {}, required at least {}, locked by swaps {:?}",
+        coin,
+        available,
+        required,
+        locked_by_swaps
+    )]
+    NotSufficientBaseCoinBalance {
+        coin: String,
+        available: BigDecimal,
+        required: BigDecimal,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        locked_by_swaps: Option<BigDecimal>,
+    },
+    /// The fee preimage of a swap leg is below the minimum transaction amount.
+    #[display(
+        fmt = "The volume {} of the {} coin less than minimum transaction amount {}",
+        volume,
+        coin,
+        threshold
+    )]
+    VolumeTooLow {
+        coin: String,
+        volume: BigDecimal,
+        threshold: BigDecimal,
+    },
+    /// The pre-trade spend-safety check refused a leg of the smallest trade (CRD ch.60 R60.6.7).
+    #[display(
+        fmt = "The volume {} of the {} coin is too low, required at least {}: a payment of that size could not be spent or refunded",
+        volume,
+        coin,
+        threshold
+    )]
+    #[serde(rename = "VolumeTooLow")]
+    SpendUnsafeVolume {
+        coin: String,
+        volume: BigDecimal,
+        threshold: BigDecimal,
+    },
+    /// The price is below the lowest a taker order accepts. The text carries the fixed minimum, which is also the
+    /// `threshold`.
+    #[display(fmt = "Price is too low, minimum is 0.00000001")]
+    PriceTooLow { price: BigDecimal, threshold: BigDecimal },
+    /// The order builder found the same ticker on both sides although the request named two coins.
+    #[display(fmt = "Rel coin can not be same as base")]
+    #[serde(rename = "BaseEqualRel")]
+    RelCoinSameAsBase,
+    /// The base amount of the order is below the minimum trading volume of the base coin.
+    #[display(fmt = "Base amount {} is too low, required: {}", volume, threshold)]
+    #[serde(rename = "VolumeTooLow")]
+    BaseAmountTooLow {
+        coin: String,
+        volume: BigDecimal,
+        threshold: BigDecimal,
+    },
+    /// The rel amount of the order (the base amount times the price) is below the minimum trading volume of the rel
+    /// coin.
+    #[display(fmt = "Rel amount {} is too low, required: {}", volume, threshold)]
+    #[serde(rename = "VolumeTooLow")]
+    RelAmountTooLow {
+        coin: String,
+        volume: BigDecimal,
+        threshold: BigDecimal,
+    },
+    /// The requested minimum volume is below the lowest the pair allows.
+    #[display(fmt = "Min volume {} is too low, required: {}", volume, threshold)]
+    #[serde(rename = "VolumeTooLow")]
+    MinVolumeTooLow {
+        coin: String,
+        volume: BigDecimal,
+        threshold: BigDecimal,
+    },
+    /// The volume of the order is below its minimum volume.
+    #[display(fmt = "Max base vol {} is below min base vol: {}", max, min)]
+    MaxBaseVolBelowMinBaseVol { min: BigDecimal, max: BigDecimal },
+    /// A node, balance or fee-estimate request failed. The payload is the whole text.
+    #[display(fmt = "{}", _0)]
+    Transport(String),
+    /// An EVM node rejected an estimation for a fee cap below the block base fee (CRD ch.56 R5).
+    #[display(fmt = "{}", _0)]
+    FeeCapBelowBaseFee(FeeCapBelowBaseFee),
+    /// A storage failure: the wallet storage, or the order history that the new order is saved in. The payload is the
+    /// whole text.
+    #[display(fmt = "{}", _0)]
+    DbError(String),
+    /// Anything else: a node context that cannot be had, or a state that no request can cause. The payload is the
+    /// whole text.
+    #[display(fmt = "{}", _0)]
+    InternalError(String),
+}
+
+impl_common_order_error_conversions!(TakerOrderError);
+
+impl TakerOrderError {
+    /// Classifies the refusal of the taker-order builder. `base` and `rel` name the coins whose amounts it reports.
+    pub(crate) fn from_taker_order_build_error(error: TakerOrderBuildError, base: &str, rel: &str) -> Self {
+        match error {
+            TakerOrderBuildError::BaseEqualRel => TakerOrderError::RelCoinSameAsBase,
+            TakerOrderBuildError::TradingNotSupported { coin } => TakerOrderError::TradingNotSupported { coin },
+            TakerOrderBuildError::BaseAmountTooLow { actual, threshold } => TakerOrderError::BaseAmountTooLow {
+                coin: base.to_owned(),
+                volume: actual.to_decimal(),
+                threshold: threshold.to_decimal(),
+            },
+            TakerOrderBuildError::RelAmountTooLow { actual, threshold } => TakerOrderError::RelAmountTooLow {
+                coin: rel.to_owned(),
+                volume: actual.to_decimal(),
+                threshold: threshold.to_decimal(),
+            },
+            TakerOrderBuildError::MinVolumeTooLow { actual, threshold } => TakerOrderError::MinVolumeTooLow {
+                coin: base.to_owned(),
+                volume: actual.to_decimal(),
+                threshold: threshold.to_decimal(),
+            },
+            TakerOrderBuildError::MaxBaseVolBelowMinBaseVol { min, max } => {
+                TakerOrderError::MaxBaseVolBelowMinBaseVol {
+                    min: min.to_decimal(),
+                    max: max.to_decimal(),
+                }
+            },
+            // The sender key is the node's own and the confirmation settings are set before the builder runs: no
+            // request can cause either.
+            error @ (TakerOrderBuildError::SenderPubkeyIsZero | TakerOrderBuildError::ConfsSettingsNotSet) => {
+                TakerOrderError::InternalError(error.to_string())
+            },
+        }
+    }
+}
+
+impl HttpStatusCode for TakerOrderError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            TakerOrderError::BaseEqualRel
+            | TakerOrderError::NoSuchBaseCoin { .. }
+            | TakerOrderError::NoSuchRelCoin { .. }
+            | TakerOrderError::TradingNotSupported { .. }
+            | TakerOrderError::SwapKeyMismatch { .. }
+            | TakerOrderError::ChainDisagreement(_)
+            | TakerOrderError::BaseCoinIsWalletOnly { .. }
+            | TakerOrderError::RelCoinIsWalletOnly { .. }
+            | TakerOrderError::NotSufficientBalance { .. }
+            | TakerOrderError::NotSufficientBaseCoinBalance { .. }
+            | TakerOrderError::VolumeTooLow { .. }
+            | TakerOrderError::SpendUnsafeVolume { .. }
+            | TakerOrderError::PriceTooLow { .. }
+            | TakerOrderError::RelCoinSameAsBase
+            | TakerOrderError::BaseAmountTooLow { .. }
+            | TakerOrderError::RelAmountTooLow { .. }
+            | TakerOrderError::MinVolumeTooLow { .. }
+            | TakerOrderError::MaxBaseVolBelowMinBaseVol { .. } => StatusCode::BAD_REQUEST,
+            // The node's own clock is off: not a fault of the request, and it ends by itself once a check passes.
+            TakerOrderError::ClockOutOfRange(_) => StatusCode::SERVICE_UNAVAILABLE,
+            // Like `Transport`: a node's verdict on a fee the daemon chose, not a fault of the request.
+            TakerOrderError::Transport(_)
+            | TakerOrderError::FeeCapBelowBaseFee(_)
+            | TakerOrderError::DbError(_)
+            | TakerOrderError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+/// The failures of `orderbook_depth`. The tokens and payload kinds are those of the nearest versioned sibling,
+/// `orderbook` (`OrderbookRpcError`): every payload is the whole legacy text.
+#[derive(Debug, Display, Serialize, SerializeErrorType)]
+#[serde(tag = "error_type", content = "error_data")]
+pub enum OrderbookDepthError {
+    /// A requested pair holds a wallet-only coin. The payload is the legacy text, which lists every such pair as the
+    /// request spelled it.
+    #[display(fmt = "{}", _0)]
+    CoinIsWalletOnly(String),
+    /// The request to a relay for the depth of the pairs the node holds no orderbook for failed. The payload is the
+    /// whole text.
+    #[display(fmt = "{}", _0)]
+    P2PSubscribeError(String),
+    /// The order-matching context of the node could not be obtained. The payload is the whole text.
+    #[display(fmt = "{}", _0)]
+    Internal(String),
+}
+
+impl HttpStatusCode for OrderbookDepthError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            OrderbookDepthError::CoinIsWalletOnly(_) => StatusCode::BAD_REQUEST,
+            OrderbookDepthError::P2PSubscribeError(_) | OrderbookDepthError::Internal(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
+        }
+    }
+}
+
+/// The failures of `orders_history_by_filter`.
+#[derive(Debug, Display, Serialize, SerializeErrorType)]
+#[serde(tag = "error_type", content = "error_data")]
+pub enum OrdersHistoryError {
+    /// The order history could not be read. The payload is the whole text.
+    #[display(fmt = "{}", _0)]
+    DbError(String),
+    /// The order-matching context of the node could not be obtained. The payload is the whole text.
+    #[display(fmt = "{}", _0)]
+    InternalError(String),
+}
+
+impl HttpStatusCode for OrdersHistoryError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            OrdersHistoryError::DbError(_) | OrdersHistoryError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

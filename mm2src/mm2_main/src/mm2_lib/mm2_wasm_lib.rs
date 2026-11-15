@@ -59,7 +59,7 @@ impl From<MainParams> for LpMainParams {
 /// # Usage
 ///
 /// ```javascript
-/// import init, {mm2_main, LogLevel, Mm2MainErr} from "./path/to/mm2.js";
+/// import init, {mm2_main, LogLevel, Mm2MainErr} from "./path/to/kdflib.js";
 ///
 /// const params = {
 ///     conf: { "gui":"WASMTEST", mm2:1, "passphrase":"YOUR_PASSPHRASE_HERE", "rpc_password":"test123", "coins":[{"coin":"ETH","protocol":{"type":"ETH"}}] },
@@ -165,7 +165,7 @@ pub enum Mm2RpcErr {
 /// # Usage
 ///
 /// ```javascript
-/// import init, {mm2_rpc, Mm2RpcErr} from "./path/to/mm2.js";
+/// import init, {mm2_rpc, Mm2RpcErr} from "./path/to/kdflib.js";
 ///
 /// async function version () {
 ///     try {
@@ -228,7 +228,7 @@ pub async fn mm2_rpc(payload: JsValue) -> Result<JsValue, JsValue> {
 /// The function can be used before mm2 runs.
 ///
 /// ```javascript
-/// import init, {mm2_version} from "./path/to/mm2.js";
+/// import init, {mm2_version} from "./path/to/kdflib.js";
 ///
 /// function print_version () {
 ///     const response = mm2_version();
