@@ -865,6 +865,12 @@ pub(crate) async fn maker_swap_start(ctx: MmArc, maker_match: MakerMatch, maker_
         log::error!("Swap {} not started: {}", maker_match.request.uuid, error);
         return;
     }
+    // CRD ch.45 R45.6C.8: no new swap while the computer's clock is off by more than the limit. Nothing has
+    // moved yet.
+    if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(&ctx) {
+        log::warn!("Swap {} not started: {}", maker_match.request.uuid, error);
+        return;
+    }
     let alice = bits256::from(maker_match.request.sender_pubkey.0);
     let maker_amount = maker_match.reserved.get_base_amount().to_decimal();
     let taker_amount = maker_match.reserved.get_rel_amount().to_decimal();
@@ -921,103 +927,111 @@ pub(crate) async fn maker_swap_start(ctx: MmArc, maker_match: MakerMatch, maker_
 }
 
 pub(crate) fn lp_connected_alice(ctx: MmArc, taker_order: TakerOrder, taker_match: TakerMatch) {
-    spawn(async move {
-        // aka "taker_loop"
-        let maker = bits256::from(taker_match.reserved.sender_pubkey.0);
-        let taker_coin_ticker = taker_order.taker_coin_ticker();
-        let taker_coin = match lp_coinfind(&ctx, taker_coin_ticker).await {
-            Ok(Some(c)) => c,
-            Ok(None) => {
-                log::error!("Coin {} is not found/enabled", taker_coin_ticker);
-                return;
-            },
-            Err(e) => {
-                log::error!("!lp_coinfind({}): {}", taker_coin_ticker, e);
-                return;
-            },
-        };
+    spawn(taker_swap_start(ctx, taker_order, taker_match));
+}
 
-        let maker_coin_ticker = taker_order.maker_coin_ticker();
-        let maker_coin = match lp_coinfind(&ctx, maker_coin_ticker).await {
-            Ok(Some(c)) => c,
-            Ok(None) => {
-                log::error!("Coin {} is not found/enabled", maker_coin_ticker);
-                return;
-            },
-            Err(e) => {
-                log::error!("!lp_coinfind({}): {}", maker_coin_ticker, e);
-                return;
-            },
-        };
+/// The taker side of a matched order: checks the pair and starts the swap (aka "taker_loop").
+pub(crate) async fn taker_swap_start(ctx: MmArc, taker_order: TakerOrder, taker_match: TakerMatch) {
+    let maker = bits256::from(taker_match.reserved.sender_pubkey.0);
+    let taker_coin_ticker = taker_order.taker_coin_ticker();
+    let taker_coin = match lp_coinfind(&ctx, taker_coin_ticker).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            log::error!("Coin {} is not found/enabled", taker_coin_ticker);
+            return;
+        },
+        Err(e) => {
+            log::error!("!lp_coinfind({}): {}", taker_coin_ticker, e);
+            return;
+        },
+    };
 
-        // CRD ch.05 R37: the swap is not started for a pair whose swap key is not the key it pays from.
-        if let Some(mismatch) = swap_key_mismatch(&ctx, &maker_coin, &taker_coin) {
-            log::warn!(
-                "Swap {} not started: {}",
-                taker_match.reserved.taker_order_uuid,
-                mismatch
+    let maker_coin_ticker = taker_order.maker_coin_ticker();
+    let maker_coin = match lp_coinfind(&ctx, maker_coin_ticker).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            log::error!("Coin {} is not found/enabled", maker_coin_ticker);
+            return;
+        },
+        Err(e) => {
+            log::error!("!lp_coinfind({}): {}", maker_coin_ticker, e);
+            return;
+        },
+    };
+
+    // CRD ch.05 R37: the swap is not started for a pair whose swap key is not the key it pays from.
+    if let Some(mismatch) = swap_key_mismatch(&ctx, &maker_coin, &taker_coin) {
+        log::warn!(
+            "Swap {} not started: {}",
+            taker_match.reserved.taker_order_uuid,
+            mismatch
+        );
+        return;
+    }
+    // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain. Nothing has
+    // moved yet.
+    if let Some(error) = chain_disagreement(&maker_coin, &taker_coin) {
+        log::error!("Swap {} not started: {}", taker_match.reserved.taker_order_uuid, error);
+        return;
+    }
+    // CRD ch.45 R45.6C.8: no new swap while the computer's clock is off by more than the limit. Nothing has
+    // moved yet.
+    if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(&ctx) {
+        log::warn!("Swap {} not started: {}", taker_match.reserved.taker_order_uuid, error);
+        return;
+    }
+    // CRD ch.05 R45: a swap started now runs with the node key, whose public key is its persistent key.
+    let node_key_pair = *ctx.secp256k1_key_pair();
+    let maker_amount = taker_match.reserved.get_base_amount().clone();
+    let taker_amount = taker_match.reserved.get_rel_amount().clone();
+    let uuid = taker_match.reserved.taker_order_uuid;
+
+    let my_conf_settings =
+        choose_taker_confs_and_notas(&taker_order.request, &taker_match.reserved, &maker_coin, &taker_coin);
+    // detect atomic lock time version implicitly by conf_settings existence in maker reserved
+    let atomic_locktime_v = match taker_match.reserved.conf_settings {
+        Some(_) => {
+            let other_conf_settings = choose_maker_confs_and_notas(
+                taker_match.reserved.conf_settings,
+                &taker_order.request,
+                &maker_coin,
+                &taker_coin,
             );
-            return;
-        }
-        // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain. Nothing has
-        // moved yet.
-        if let Some(error) = chain_disagreement(&maker_coin, &taker_coin) {
-            log::error!("Swap {} not started: {}", taker_match.reserved.taker_order_uuid, error);
-            return;
-        }
-        // CRD ch.05 R45: a swap started now runs with the node key, whose public key is its persistent key.
-        let node_key_pair = *ctx.secp256k1_key_pair();
-        let maker_amount = taker_match.reserved.get_base_amount().clone();
-        let taker_amount = taker_match.reserved.get_rel_amount().clone();
-        let uuid = taker_match.reserved.taker_order_uuid;
-
-        let my_conf_settings =
-            choose_taker_confs_and_notas(&taker_order.request, &taker_match.reserved, &maker_coin, &taker_coin);
-        // detect atomic lock time version implicitly by conf_settings existence in maker reserved
-        let atomic_locktime_v = match taker_match.reserved.conf_settings {
-            Some(_) => {
-                let other_conf_settings = choose_maker_confs_and_notas(
-                    taker_match.reserved.conf_settings,
-                    &taker_order.request,
-                    &maker_coin,
-                    &taker_coin,
-                );
-                AtomicLocktimeVersion::V2 {
-                    my_conf_settings,
-                    other_conf_settings,
-                }
-            },
-            None => AtomicLocktimeVersion::V1,
-        };
-        let locktime = lp_atomic_locktime(maker_coin.ticker(), taker_coin.ticker(), atomic_locktime_v);
-        log_tag!(
-            ctx,
-            "";
-            fmt = "Entering the taker_swap_loop {}/{} with uuid: {}",
-            maker_coin.ticker(),
-            taker_coin.ticker(),
-            uuid
-        );
-        let now = now_ms() / 1000;
-        if let Err(e) = insert_new_swap_to_db(ctx.clone(), taker_coin.ticker(), maker_coin.ticker(), uuid, now).await {
-            error!("Error {} on new swap insertion", e);
-        }
-        let taker_swap = TakerSwap::new(
-            ctx.clone(),
-            maker,
-            maker_amount,
-            taker_amount,
-            node_key_pair,
-            uuid,
-            Some(uuid),
-            my_conf_settings,
-            maker_coin,
-            taker_coin,
-            locktime,
-            taker_order.p2p_privkey.map(SerializableSecp256k1Keypair::into_inner),
-        );
-        run_taker_swap(RunTakerSwapInput::StartNew(taker_swap), ctx).await
-    });
+            AtomicLocktimeVersion::V2 {
+                my_conf_settings,
+                other_conf_settings,
+            }
+        },
+        None => AtomicLocktimeVersion::V1,
+    };
+    let locktime = lp_atomic_locktime(maker_coin.ticker(), taker_coin.ticker(), atomic_locktime_v);
+    log_tag!(
+        ctx,
+        "";
+        fmt = "Entering the taker_swap_loop {}/{} with uuid: {}",
+        maker_coin.ticker(),
+        taker_coin.ticker(),
+        uuid
+    );
+    let now = now_ms() / 1000;
+    if let Err(e) = insert_new_swap_to_db(ctx.clone(), taker_coin.ticker(), maker_coin.ticker(), uuid, now).await {
+        error!("Error {} on new swap insertion", e);
+    }
+    let taker_swap = TakerSwap::new(
+        ctx.clone(),
+        maker,
+        maker_amount,
+        taker_amount,
+        node_key_pair,
+        uuid,
+        Some(uuid),
+        my_conf_settings,
+        maker_coin,
+        taker_coin,
+        locktime,
+        taker_order.p2p_privkey.map(SerializableSecp256k1Keypair::into_inner),
+    );
+    run_taker_swap(RunTakerSwapInput::StartNew(taker_swap), ctx).await
 }
 
 /// Selects the tracked public keys whose state the maintenance sweep must evict (CRD ch.59 R59.6.4),
@@ -2136,6 +2150,11 @@ async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
         return ERR!("{}", error);
     }
+    // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
+    // balance check.
+    if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(&ctx) {
+        return ERR!("{}", error);
+    }
     if base_coin.wallet_only(&ctx) {
         return ERR!("Base coin {} is wallet only", input.base);
     }
@@ -2183,6 +2202,11 @@ async fn sell_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain, before any
     // balance check.
     if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
+        return ERR!("{}", error);
+    }
+    // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
+    // balance check.
+    if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(&ctx) {
         return ERR!("{}", error);
     }
     if base_coin.wallet_only(&ctx) {
@@ -2294,6 +2318,11 @@ pub async fn lp_auto_buy(
     };
     // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain.
     if let Some(error) = chain_disagreement(base_coin, rel_coin) {
+        return ERR!("{}", error);
+    }
+    // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
+    // balance check.
+    if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(ctx) {
         return ERR!("{}", error);
     }
     // CRD ch.60 R60.6.7 item 3: the smallest trade the order can produce must be spendable on both legs.
@@ -2620,6 +2649,11 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     }
     // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain.
     if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
+        return ERR!("{}", error);
+    }
+    // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
+    // balance check.
+    if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(ctx) {
         return ERR!("{}", error);
     }
     if base_coin.wallet_only(ctx) {
