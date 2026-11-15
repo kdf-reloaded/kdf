@@ -1,6 +1,9 @@
-//! Tests of the typed cores of the group-A order-management RPC methods (CRD ch.43 §43.1A; plan
+//! Tests of the typed cores of the group-A and group-B order RPC methods (CRD ch.43 §43.1A; plan
 //! `mmrpc-v2-completion`, Part 1 §1.2 items 2-3): `setprice`, `update_maker_order`, `cancel_order`,
-//! `cancel_all_orders`, `my_orders` and `order_status`.
+//! `cancel_all_orders`, `my_orders` and `order_status` (group A), `buy`, `sell`, `orderbook_depth` and
+//! `orders_history_by_filter` (group B, phase 2). The expected legacy bodies and texts of group B are those of the
+//! handlers as they stood on dev at `0f309c779`, derived from their code and marked with the handler that produced
+//! them; 1c re-checks them against a dev build.
 //!
 //! * The legacy arms keep their answers. Every expected legacy body below is the body that the handler produced as it
 //!   stood on dev at `d4928e1fb`, derived from its code and marked with the handler that produced it; the expected
@@ -13,6 +16,7 @@
 //!   `params` handling, typed refusals through the dispatcher) live in the `server_tests` of `rpc.rs`; this module
 //!   tests the cores, the wire forms of the error enums and the legacy adapters.
 
+use super::orderbook_depth::OrderbookDepthReq;
 use super::*;
 use crate::mm2::database::my_orders::CREATE_MY_ORDERS_TABLE;
 use crate::mm2::lp_network::P2PContext;
@@ -69,13 +73,21 @@ fn split_location(error: &str) -> (Vec<String>, String) {
 }
 
 /// A legacy error: one `file:line] ` token that names `ordermatch_trading` (`gstuff::filename` drops the extension), then exactly `text`.
-fn assert_legacy_error(error: &str, text: &str) {
+fn assert_legacy_error(error: &str, text: &str) { assert_legacy_error_in("ordermatch_trading", error, text); }
+
+/// A legacy error: one `file:line] ` token that names `handler_file`, then exactly `text`.
+fn assert_legacy_error_in(handler_file: &str, error: &str, text: &str) {
     let (files, rest) = split_location(error);
     assert!(
-        files == vec!["ordermatch_trading".to_owned()],
+        files == vec![handler_file.to_owned()],
         "the legacy error carries one location token naming the handler file"
     );
     assert!(rest == text, "the legacy error text");
+}
+
+/// The text `actual` is the text `expected`; the message names `what` only (the text is a body).
+fn assert_same_text(actual: &str, expected: &str, what: &str) {
+    assert!(actual == expected, "{what}: the text differs");
 }
 
 fn body_text(answer: Response<Vec<u8>>) -> String { String::from_utf8(answer.into_body()).unwrap() }
@@ -941,6 +953,15 @@ fn mock_coins() {
         };
         MockResult::Return(Box::new(futures01::future::ok(fee)))
     });
+    // The fee of sending the dex fee, which a taker order's balance check reads.
+    TestCoin::get_fee_to_send_taker_fee.mock_safe(|coin, _dex_fee_amount, _stage| {
+        let fee = TradeFee {
+            coin: coin.ticker().to_owned(),
+            amount: MmNumber::from(0),
+            paid_from_trading_vol: false,
+        };
+        MockResult::Return(Box::pin(async move { Ok(fee) }))
+    });
 }
 
 /// A node with the coins `DYN` and `KMD`, real order files in a temporary directory, an in-memory history database and
@@ -956,10 +977,17 @@ impl Drop for Node {
 }
 
 impl Node {
-    pub(crate) fn new() -> Node {
+    pub(crate) fn new() -> Node { Node::with_conf(json!({})) }
+
+    /// Like [`Node::new`], with the members of the object `extra` added to the node's configuration (a `netid`, for the
+    /// paths that compute the dex fee of a taker order).
+    pub(crate) fn with_conf(extra: Json) -> Node {
         mock_coins();
         let dbdir = std::env::temp_dir().join(format!("kdf-order-rpc-cores-{}", Uuid::new_v4()));
-        let conf = json!({ "dbdir": dbdir.to_string_lossy(), "rpc_password": "pw" });
+        let mut conf = json!({ "dbdir": dbdir.to_string_lossy(), "rpc_password": "pw" });
+        for (key, value) in extra.as_object().expect("the extra configuration is an object") {
+            conf[key.as_str()] = value.clone();
+        }
         let ctx = MmCtxBuilder::new()
             .with_conf(conf)
             .with_secp256k1_key_pair(key_pair_from_seed("passphrase").unwrap())
@@ -969,6 +997,7 @@ impl Node {
             block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
         }
         std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+        std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
         std::fs::create_dir_all(my_orders_history_dir(&ctx)).unwrap();
         let connection = Connection::open_in_memory().unwrap();
         connection.execute(CREATE_MY_ORDERS_TABLE, []).unwrap();
@@ -1032,6 +1061,32 @@ impl Node {
 
     pub(crate) fn in_container(&self, uuid: &Uuid) -> bool {
         self.ordermatch_ctx().maker_orders_ctx.lock().contains_key(uuid)
+    }
+
+    /// Records the subscription to the orderbook topic of the pair, as a request for its orderbook leaves it, so that
+    /// `orderbook_depth` answers for the pair from the node's own orderbook and asks no relay.
+    pub(crate) fn subscribe_to_orderbook(&self, base: &str, rel: &str) {
+        let ordermatch_ctx = self.ordermatch_ctx();
+        let bypass = ordermatch_ctx.orderbook_pair_bypass(&(base.to_owned(), rel.to_owned()));
+        let topic = orderbook_topic_from_base_rel(&bypass.0, &bypass.1);
+        ordermatch_ctx
+            .orderbook_subscriptions
+            .write()
+            .insert(topic, OrderbookRequestingState::Requested);
+    }
+
+    /// The own taker order with this UUID, as it is now.
+    pub(crate) fn taker_order(&self, uuid: Uuid) -> TakerOrder {
+        let ordermatch_ctx = self.ordermatch_ctx();
+        let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
+        taker_orders.get(&uuid).unwrap().clone()
+    }
+
+    /// How many taker orders the node holds.
+    pub(crate) fn taker_orders_count(&self) -> usize {
+        let ordermatch_ctx = self.ordermatch_ctx();
+        let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
+        taker_orders.len()
     }
 }
 
@@ -1553,5 +1608,907 @@ fn order_status_core_answers_by_where_the_order_is() {
         matches!(error.get_inner(), OrderStatusError::UUIDNotFound { uuid } if *uuid == unknown),
         "unexpected error_type: {}",
         token_of(error.get_inner())
+    );
+}
+
+// ===== Group B (plan `mmrpc-v2-completion`, phase 2): `buy`, `sell`, `orderbook_depth`, `orders_history_by_filter` =====
+
+#[test]
+fn taker_order_error_wire_forms() {
+    let rejection = FeeCapBelowBaseFee {
+        max_fee_per_gas: None,
+        base_fee: None,
+        node: None,
+    };
+    let rejection_text = rejection.to_string();
+    let cases: Vec<(TakerOrderError, &str, Option<&str>, u16, String)> = vec![
+        (
+            TakerOrderError::BaseEqualRel,
+            "BaseEqualRel",
+            None,
+            400,
+            "Base and rel must be different coins".into(),
+        ),
+        (
+            TakerOrderError::NoSuchBaseCoin { coin: "BTC".into() },
+            "NoSuchCoin",
+            Some("object"),
+            400,
+            "Base coin is not found or inactive".into(),
+        ),
+        (
+            TakerOrderError::NoSuchRelCoin { coin: "BTC".into() },
+            "NoSuchCoin",
+            Some("object"),
+            400,
+            "Rel coin is not found or inactive".into(),
+        ),
+        (
+            TakerOrderError::TradingNotSupported {
+                coin: "tBTC-lightning".into(),
+            },
+            "TradingNotSupported",
+            Some("object"),
+            400,
+            "Trading is not supported for coin tBTC-lightning".into(),
+        ),
+        (
+            TakerOrderError::SwapKeyMismatch {
+                coin: "ETH".into(),
+                reason: "a reason".into(),
+            },
+            "SwapKeyMismatch",
+            Some("object"),
+            400,
+            "ETH cannot be swapped under this login: a reason".into(),
+        ),
+        (
+            TakerOrderError::ChainDisagreement("ETH: the Electrum servers disagree".into()),
+            "ChainDisagreement",
+            Some("string"),
+            400,
+            "ETH: the Electrum servers disagree".into(),
+        ),
+        (
+            TakerOrderError::ClockOutOfRange("The computer's clock is off by 12.50 s".into()),
+            "ClockOutOfRange",
+            Some("string"),
+            503,
+            "The computer's clock is off by 12.50 s".into(),
+        ),
+        (
+            TakerOrderError::BaseCoinIsWalletOnly { coin: "ETH".into() },
+            "CoinIsWalletOnly",
+            Some("object"),
+            400,
+            "Base coin ETH is wallet only".into(),
+        ),
+        (
+            TakerOrderError::RelCoinIsWalletOnly { coin: "ETH".into() },
+            "CoinIsWalletOnly",
+            Some("object"),
+            400,
+            "Rel coin ETH is wallet only".into(),
+        ),
+        (
+            TakerOrderError::NotSufficientBalance {
+                coin: "KMD".into(),
+                available: bd("1"),
+                required: bd("2"),
+                locked_by_swaps: None,
+            },
+            "NotSufficientBalance",
+            Some("object"),
+            400,
+            "Not enough KMD for swap: available 1, required at least 2, locked by swaps None".into(),
+        ),
+        (
+            TakerOrderError::NotSufficientBaseCoinBalance {
+                coin: "KMD".into(),
+                available: bd("1"),
+                required: bd("2"),
+                locked_by_swaps: None,
+            },
+            "NotSufficientBaseCoinBalance",
+            Some("object"),
+            400,
+            "Not enough base coin KMD balance for swap: available 1, required at least 2, locked by swaps None".into(),
+        ),
+        (
+            TakerOrderError::VolumeTooLow {
+                coin: "KMD".into(),
+                volume: bd("1"),
+                threshold: bd("2"),
+            },
+            "VolumeTooLow",
+            Some("object"),
+            400,
+            "The volume 1 of the KMD coin less than minimum transaction amount 2".into(),
+        ),
+        (
+            TakerOrderError::SpendUnsafeVolume {
+                coin: "KMD".into(),
+                volume: bd("1"),
+                threshold: bd("2"),
+            },
+            "VolumeTooLow",
+            Some("object"),
+            400,
+            "The volume 1 of the KMD coin is too low, required at least 2: a payment of that size could not be spent or refunded".into(),
+        ),
+        (
+            TakerOrderError::PriceTooLow {
+                price: bd("0.000000001"),
+                threshold: bd("0.00000001"),
+            },
+            "PriceTooLow",
+            Some("object"),
+            400,
+            "Price is too low, minimum is 0.00000001".into(),
+        ),
+        (
+            TakerOrderError::RelCoinSameAsBase,
+            "BaseEqualRel",
+            None,
+            400,
+            "Rel coin can not be same as base".into(),
+        ),
+        (
+            TakerOrderError::BaseAmountTooLow {
+                coin: "DYN".into(),
+                volume: bd("1"),
+                threshold: bd("2"),
+            },
+            "VolumeTooLow",
+            Some("object"),
+            400,
+            "Base amount 1 is too low, required: 2".into(),
+        ),
+        (
+            TakerOrderError::RelAmountTooLow {
+                coin: "KMD".into(),
+                volume: bd("1"),
+                threshold: bd("2"),
+            },
+            "VolumeTooLow",
+            Some("object"),
+            400,
+            "Rel amount 1 is too low, required: 2".into(),
+        ),
+        (
+            TakerOrderError::MinVolumeTooLow {
+                coin: "DYN".into(),
+                volume: bd("1"),
+                threshold: bd("2"),
+            },
+            "VolumeTooLow",
+            Some("object"),
+            400,
+            "Min volume 1 is too low, required: 2".into(),
+        ),
+        (
+            TakerOrderError::MaxBaseVolBelowMinBaseVol {
+                min: bd("2"),
+                max: bd("1"),
+            },
+            "MaxBaseVolBelowMinBaseVol",
+            Some("object"),
+            400,
+            "Max base vol 1 is below min base vol: 2".into(),
+        ),
+        (
+            TakerOrderError::Transport("Transport: no route".into()),
+            "Transport",
+            Some("string"),
+            500,
+            "Transport: no route".into(),
+        ),
+        (
+            TakerOrderError::FeeCapBelowBaseFee(rejection),
+            "FeeCapBelowBaseFee",
+            Some("object"),
+            500,
+            rejection_text,
+        ),
+        (
+            TakerOrderError::DbError("Error saving an order: disk full".into()),
+            "DbError",
+            Some("string"),
+            500,
+            "Error saving an order: disk full".into(),
+        ),
+        (
+            TakerOrderError::InternalError("lp_coins_ops.rs:1] no context".into()),
+            "InternalError",
+            Some("string"),
+            500,
+            "lp_coins_ops.rs:1] no context".into(),
+        ),
+    ];
+    for (error, token, data, status, text) in cases {
+        assert_wire(&error, token, data, status, &text);
+    }
+}
+
+#[test]
+fn orderbook_depth_and_orders_history_error_wire_forms() {
+    assert_wire(
+        &OrderbookDepthError::CoinIsWalletOnly(r#"Pairs [("ETH", "KMD")] have wallet only coins"#.into()),
+        "CoinIsWalletOnly",
+        Some("string"),
+        400,
+        r#"Pairs [("ETH", "KMD")] have wallet only coins"#,
+    );
+    assert_wire(
+        &OrderbookDepthError::P2PSubscribeError("no relay answered".into()),
+        "P2PSubscribeError",
+        Some("string"),
+        500,
+        "no relay answered",
+    );
+    assert_wire(
+        &OrderbookDepthError::Internal("no context".into()),
+        "Internal",
+        Some("string"),
+        500,
+        "no context",
+    );
+    assert_wire(
+        &OrdersHistoryError::DbError("Error loading an order: no table".into()),
+        "DbError",
+        Some("string"),
+        500,
+        "Error loading an order: no table",
+    );
+    assert_wire(
+        &OrdersHistoryError::InternalError("no context".into()),
+        "InternalError",
+        Some("string"),
+        500,
+        "no context",
+    );
+}
+
+#[test]
+fn taker_order_conversions_keep_their_text_and_are_classified() {
+    /// Converts `source` and checks that the typed error has the text of the source and the token.
+    fn classify<S: std::fmt::Display>(source: S, convert: impl FnOnce(S) -> TakerOrderError, token: &str) {
+        let text = source.to_string();
+        let error = convert(source);
+        assert!(error.to_string() == text, "{token}: the text of the source");
+        assert!(token_of(&error) == token, "{token}: the token");
+    }
+    let rejection = || FeeCapBelowBaseFee {
+        max_fee_per_gas: None,
+        base_fee: None,
+        node: None,
+    };
+
+    classify(
+        CheckBalanceError::NotSufficientBalance {
+            coin: "KMD".into(),
+            available: bd("1"),
+            required: bd("2"),
+            locked_by_swaps: Some(bd("0.5")),
+        },
+        TakerOrderError::from,
+        "NotSufficientBalance",
+    );
+    classify(
+        CheckBalanceError::NotSufficientBaseCoinBalance {
+            coin: "KMD".into(),
+            available: bd("1"),
+            required: bd("2"),
+            locked_by_swaps: None,
+        },
+        TakerOrderError::from,
+        "NotSufficientBaseCoinBalance",
+    );
+    classify(
+        CheckBalanceError::VolumeTooLow {
+            coin: "KMD".into(),
+            volume: bd("1"),
+            threshold: bd("2"),
+        },
+        TakerOrderError::from,
+        "VolumeTooLow",
+    );
+    classify(
+        CheckBalanceError::Transport("x".into()),
+        TakerOrderError::from,
+        "Transport",
+    );
+    classify(
+        CheckBalanceError::InternalError("x".into()),
+        TakerOrderError::from,
+        "InternalError",
+    );
+    classify(
+        CheckBalanceError::FeeCapBelowBaseFee(rejection()),
+        TakerOrderError::from,
+        "FeeCapBelowBaseFee",
+    );
+    classify(
+        SpendSafetyError::VolumeTooLow {
+            coin: "KMD".into(),
+            volume: bd("1"),
+            threshold: bd("2"),
+        },
+        TakerOrderError::from,
+        "VolumeTooLow",
+    );
+    classify(
+        SpendSafetyError::EstimateUnavailable {
+            coin: "KMD".into(),
+            error: "no estimate".into(),
+        },
+        TakerOrderError::from,
+        "Transport",
+    );
+    classify(
+        SwapKeyMismatch {
+            coin: "ETH".into(),
+            reason: "a reason".into(),
+        },
+        TakerOrderError::from,
+        "SwapKeyMismatch",
+    );
+}
+
+#[test]
+fn taker_order_classifies_the_order_builder_refusals() {
+    let classify = |error: TakerOrderBuildError| {
+        let text = error.to_string();
+        let typed = TakerOrderError::from_taker_order_build_error(error, "DYN", "KMD");
+        assert!(typed.to_string() == text, "the text of the builder refusal");
+        (token_of(&typed), json::to_value(&typed).unwrap())
+    };
+    assert_eq!(classify(TakerOrderBuildError::BaseEqualRel).0, "BaseEqualRel");
+    assert_eq!(
+        classify(TakerOrderBuildError::TradingNotSupported { coin: "X".into() }).0,
+        "TradingNotSupported"
+    );
+    // The coin of an amount refusal is the base coin for the base amount and the minimum volume, the rel coin for the
+    // rel amount.
+    let (token, wire) = classify(TakerOrderBuildError::BaseAmountTooLow {
+        actual: 1.into(),
+        threshold: 2.into(),
+    });
+    assert_eq!(
+        (token.as_str(), wire["error_data"]["coin"].as_str()),
+        ("VolumeTooLow", Some("DYN"))
+    );
+    let (token, wire) = classify(TakerOrderBuildError::RelAmountTooLow {
+        actual: 1.into(),
+        threshold: 2.into(),
+    });
+    assert_eq!(
+        (token.as_str(), wire["error_data"]["coin"].as_str()),
+        ("VolumeTooLow", Some("KMD"))
+    );
+    let (token, wire) = classify(TakerOrderBuildError::MinVolumeTooLow {
+        actual: 1.into(),
+        threshold: 2.into(),
+    });
+    assert_eq!(
+        (token.as_str(), wire["error_data"]["coin"].as_str()),
+        ("VolumeTooLow", Some("DYN"))
+    );
+    assert_eq!(
+        classify(TakerOrderBuildError::MaxBaseVolBelowMinBaseVol {
+            min: 2.into(),
+            max: 1.into()
+        })
+        .0,
+        "MaxBaseVolBelowMinBaseVol"
+    );
+    // The sender key is the node's own and the confirmation settings are set before the builder runs.
+    assert_eq!(classify(TakerOrderBuildError::SenderPubkeyIsZero).0, "InternalError");
+    assert_eq!(classify(TakerOrderBuildError::ConfsSettingsNotSet).0, "InternalError");
+}
+
+// ----- `buy` and `sell` -----
+
+/// A node whose configuration names a supported `netid`, which the dex fee of a taker order's balance check needs.
+fn taker_node() -> Node { Node::with_conf(json!({ "netid": mm2_net_config::SUPPORTED_NETIDS[0] })) }
+
+/// The body of a taker order for 1 DYN at the price 1 KMD; the members of `extra` replace or add to it.
+fn taker_body(extra: Json) -> Json {
+    let mut body = json!({ "base": "DYN", "rel": "KMD", "price": "1", "volume": "1", "save_in_history": false });
+    for (key, value) in extra.as_object().unwrap() {
+        body[key.as_str()] = value.clone();
+    }
+    body
+}
+
+fn taker_req(extra: Json) -> TakerOrderReq { json::from_value(taker_body(extra)).unwrap() }
+
+fn taker_action(method: &str) -> TakerAction {
+    match method {
+        "buy" => TakerAction::Buy,
+        "sell" => TakerAction::Sell,
+        _ => unreachable!("a taker method"),
+    }
+}
+
+/// The legacy handler of `method` ("buy" or "sell") called with `body` plus its `method` member, as the legacy
+/// dispatcher calls it.
+fn legacy_taker(ctx: &MmArc, method: &str, mut body: Json) -> Result<Response<Vec<u8>>, String> {
+    body["method"] = json!(method);
+    match method {
+        "buy" => block_on(buy(ctx.clone(), body)),
+        "sell" => block_on(sell(ctx.clone(), body)),
+        _ => unreachable!("a taker method"),
+    }
+}
+
+/// The typed core of `method` ("buy" or "sell").
+fn taker_core(ctx: &MmArc, method: &str, req: TakerOrderReq) -> Result<TakerOrderResponse, MmError<TakerOrderError>> {
+    match method {
+        "buy" => block_on(buy_core(ctx.clone(), req)),
+        "sell" => block_on(sell_core(ctx.clone(), req)),
+        _ => unreachable!("a taker method"),
+    }
+}
+
+/// The typed error of a refused taker order.
+fn taker_error(result: Result<TakerOrderResponse, MmError<TakerOrderError>>) -> TakerOrderError {
+    result.err().unwrap().into_inner()
+}
+
+/// The typed error is of the class `pattern`; the message names the token only.
+macro_rules! assert_class {
+    ($error:ident, $($pattern:tt)+) => {
+        assert!(
+            matches!(&$error, $($pattern)+),
+            "unexpected error_type: {}",
+            token_of(&$error)
+        )
+    };
+}
+
+/// The content of `result` that the dev handlers `buy_impl` and `sell_impl` answered: `lp_auto_buy` rendered a
+/// `LpautobuyResult` from the order it kept.
+pub(crate) fn dev_taker_order_result(order: &TakerOrder) -> Json {
+    let result = LpautobuyResult {
+        request: (&order.request).into(),
+        order_type: &order.order_type,
+        min_volume: order.min_volume.clone().into(),
+        base_orderbook_ticker: &order.base_orderbook_ticker,
+        rel_orderbook_ticker: &order.rel_orderbook_ticker,
+    };
+    json::to_value(&result).unwrap()
+}
+
+/// The body the dev handlers answered: `json!({ "result": <the content above> }).to_string()`.
+fn dev_taker_order_result_body(order: &TakerOrder) -> String {
+    json::to_string(&json!({ "result": dev_taker_order_result(order) })).unwrap()
+}
+
+#[test]
+fn buy_and_sell_legacy_answer_the_order_under_result() {
+    let node = taker_node();
+    for method in ["buy", "sell"] {
+        let answer = legacy_taker(&node.ctx, method, taker_body(json!({ "min_volume": "0.1" }))).unwrap();
+        assert_eq!(answer.status(), 200);
+        let body = body_text(answer);
+        let uuid: Uuid = json::from_str::<Json>(&body).unwrap()["result"]["uuid"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let order = node.taker_order(uuid);
+        assert_same_text(&body, &dev_taker_order_result_body(&order), method);
+        assert!(
+            order.request.action == taker_action(method),
+            "{method}: the action of the order"
+        );
+    }
+    assert_eq!(node.taker_orders_count(), 2);
+}
+
+#[test]
+fn buy_and_sell_legacy_refusals_keep_their_text() {
+    let node = Node::new();
+    let refuse = |method: &str, extra: Json| legacy_taker(&node.ctx, method, taker_body(extra)).unwrap_err();
+
+    // dev `buy_impl` and `sell_impl`: `ERR!("Base and rel must be different coins")`.
+    for method in ["buy", "sell"] {
+        assert_legacy_error(
+            &refuse(method, json!({ "rel": "DYN" })),
+            "Base and rel must be different coins",
+        );
+    }
+    // dev `buy_impl` looks the rel coin up first, `sell_impl` the base coin: `ERR!("Rel coin is not found or inactive")`
+    // and its base twin.
+    let unknown = json!({ "base": "NOPE", "rel": "NOPE2" });
+    assert_legacy_error(&refuse("buy", unknown.clone()), "Rel coin is not found or inactive");
+    assert_legacy_error(&refuse("sell", unknown), "Base coin is not found or inactive");
+    assert_legacy_error(
+        &refuse("buy", json!({ "base": "NOPE" })),
+        "Base coin is not found or inactive",
+    );
+    assert_legacy_error(
+        &refuse("sell", json!({ "rel": "NOPE" })),
+        "Rel coin is not found or inactive",
+    );
+
+    // dev `buy` and `sell`: a body that does not decode keeps the text of `json::from_value`.
+    for method in ["buy", "sell"] {
+        let undecodable = legacy_taker(&node.ctx, method, json!({ "base": "DYN" })).unwrap_err();
+        assert_legacy_error(&undecodable, "missing field `rel`");
+    }
+    assert_eq!(node.taker_orders_count(), 0);
+}
+
+#[test]
+fn buy_and_sell_legacy_refusals_of_the_order_keep_their_text() {
+    let node = taker_node();
+    let refuse = |method: &str, extra: Json| legacy_taker(&node.ctx, method, taker_body(extra)).unwrap_err();
+    for method in ["buy", "sell"] {
+        // dev `lp_auto_buy`: `ERR!("Price is too low, minimum is 0.00000001")`.
+        assert_legacy_error(
+            &refuse(method, json!({ "price": "0.000000001" })),
+            "Price is too low, minimum is 0.00000001",
+        );
+        // dev `lp_auto_buy`: `try_s!(order_builder.build())`, the text of `TakerOrderBuildError::MaxBaseVolBelowMinBaseVol`.
+        assert_legacy_error(
+            &refuse(method, json!({ "min_volume": "2" })),
+            "Max base vol 1 is below min base vol: 2",
+        );
+    }
+    assert_eq!(node.taker_orders_count(), 0);
+}
+
+#[test]
+fn buy_and_sell_cores_fail_with_the_class_of_the_failure() {
+    let node = taker_node();
+    for method in ["buy", "sell"] {
+        let refuse = |extra: Json| taker_error(taker_core(&node.ctx, method, taker_req(extra)));
+
+        let error = refuse(json!({ "rel": "DYN" }));
+        assert_class!(error, TakerOrderError::BaseEqualRel);
+        assert_eq!(error.status_code().as_u16(), 400);
+
+        // `buy` looks the rel coin up first and `sell` the base coin: a request with two unknown coins is refused for
+        // the coin the method names first.
+        let error = refuse(json!({ "base": "NOPE", "rel": "NOPE2" }));
+        if method == "buy" {
+            assert_class!(error, TakerOrderError::NoSuchRelCoin { coin } if coin == "NOPE2");
+        } else {
+            assert_class!(error, TakerOrderError::NoSuchBaseCoin { coin } if coin == "NOPE");
+        }
+        assert_eq!(error.status_code().as_u16(), 400);
+
+        let error = refuse(json!({ "price": "0.000000001" }));
+        assert_class!(error, TakerOrderError::PriceTooLow { threshold, .. } if *threshold == bd("0.00000001"));
+        assert_eq!(error.status_code().as_u16(), 400);
+
+        // A volume below the minimum trading volume of the base coin, and a rel amount below that of the rel coin.
+        let error = refuse(json!({ "volume": "0.00001" }));
+        assert_class!(error, TakerOrderError::BaseAmountTooLow { coin, .. } if coin == "DYN");
+        let error = refuse(json!({ "price": "0.00001" }));
+        assert_class!(error, TakerOrderError::RelAmountTooLow { coin, .. } if coin == "KMD");
+
+        // A minimum volume below the lowest the pair allows, and one above the volume.
+        let error = refuse(json!({ "min_volume": "0.00001" }));
+        assert_class!(error, TakerOrderError::MinVolumeTooLow { coin, .. } if coin == "DYN");
+        let error = refuse(json!({ "min_volume": "2" }));
+        assert_class!(error, TakerOrderError::MaxBaseVolBelowMinBaseVol { .. });
+
+        // The coin that pays is the rel coin of a `buy` and the base coin of a `sell`.
+        let error = refuse(json!({ "volume": "1000" }));
+        if method == "buy" {
+            assert_class!(error, TakerOrderError::NotSufficientBalance { coin, .. } if coin == "KMD");
+        } else {
+            assert_class!(error, TakerOrderError::NotSufficientBalance { coin, .. } if coin == "DYN");
+        }
+        assert_eq!(error.status_code().as_u16(), 400);
+    }
+
+    // A refused order is not placed.
+    assert_eq!(node.taker_orders_count(), 0);
+}
+
+#[test]
+fn buy_and_sell_cores_place_the_order() {
+    let node = taker_node();
+    for method in ["buy", "sell"] {
+        let response = taker_core(&node.ctx, method, taker_req(json!({ "min_volume": "0.1" })))
+            .unwrap_or_else(|_| panic!("the order is placed"));
+        let order = &response.0;
+        assert!(
+            order.request.action == taker_action(method),
+            "{method}: the action of the order"
+        );
+        assert!(order.request.base == "DYN", "{method}: the base coin of the order");
+        assert!(order.request.rel == "KMD", "{method}: the rel coin of the order");
+        // The order the node keeps is the order the answer carries.
+        let stored = TakerOrderResponse(node.taker_order(order.request.uuid));
+        assert_same_text(
+            &json::to_string(&stored).unwrap(),
+            &json::to_string(&response).unwrap(),
+            method,
+        );
+    }
+    assert_eq!(node.taker_orders_count(), 2);
+}
+
+/// CRD ch.45 R45.6C.8: while the clock check refuses, `buy` and `sell` fail with `ClockOutOfRange` (HTTP 503, the
+/// refusal text as the payload), and the legacy arms answer the text they answered before the typed cores (the dev
+/// handlers: `ERR!("{}", error)`).
+#[test]
+fn buy_and_sell_are_refused_while_the_clock_check_refuses() {
+    use crate::mm2::lp_clock_check::{clock_refusal, CheckResult, ClockCheckCtx};
+
+    let node = Node::new();
+    ClockCheckCtx::from_ctx(&node.ctx).unwrap().apply_runtime_result(
+        &CheckResult::Failed {
+            offset: 12.5,
+            answers: 3,
+        },
+        false,
+        std::time::Instant::now(),
+    );
+    let refusal = clock_refusal(&node.ctx).unwrap();
+
+    for method in ["buy", "sell"] {
+        let error = taker_error(taker_core(&node.ctx, method, taker_req(json!({}))));
+        assert_class!(error, TakerOrderError::ClockOutOfRange(text) if *text == refusal);
+        assert_eq!(error.status_code().as_u16(), 503);
+
+        let legacy = legacy_taker(&node.ctx, method, taker_body(json!({}))).unwrap_err();
+        assert_legacy_error(&legacy, &refusal);
+    }
+    assert_eq!(node.taker_orders_count(), 0);
+}
+
+#[test]
+fn buy_and_sell_refuse_a_wallet_only_coin_with_its_side() {
+    use coins::{lp_register_coin, RegisterCoinParams};
+
+    let ctx = MmCtxBuilder::new()
+        .with_conf(json!({ "coins": [{ "coin": "WALLET", "wallet_only": true }, { "coin": "TRADE" }] }))
+        .into_mm_arc();
+    for ticker in ["WALLET", "TRADE"] {
+        block_on(lp_register_coin(
+            &ctx,
+            TestCoin::new(ticker).into(),
+            RegisterCoinParams {
+                ticker: ticker.to_owned(),
+                tx_history: false,
+            },
+        ))
+        .unwrap_or_else(|_| panic!("cannot register {ticker}"));
+    }
+    let req = |base: &str, rel: &str| -> TakerOrderReq {
+        json::from_value(json!({ "base": base, "rel": rel, "price": 1, "volume": 1 })).unwrap()
+    };
+    for method in ["buy", "sell"] {
+        let error = taker_error(taker_core(&ctx, method, req("WALLET", "TRADE")));
+        assert_class!(error, TakerOrderError::BaseCoinIsWalletOnly { coin } if coin == "WALLET");
+        assert_eq!(token_of(&error), "CoinIsWalletOnly");
+        let error = taker_error(taker_core(&ctx, method, req("TRADE", "WALLET")));
+        assert_class!(error, TakerOrderError::RelCoinIsWalletOnly { coin } if coin == "WALLET");
+
+        // dev `buy_impl` and `sell_impl`: `ERR!("Base coin {} is wallet only", input.base)` and the rel twin.
+        let body = |base: &str, rel: &str| json!({ "base": base, "rel": rel, "price": 1, "volume": 1 });
+        let answer = legacy_taker(&ctx, method, body("WALLET", "TRADE")).unwrap_err();
+        assert_legacy_error(&answer, "Base coin WALLET is wallet only");
+        let answer = legacy_taker(&ctx, method, body("TRADE", "WALLET")).unwrap_err();
+        assert_legacy_error(&answer, "Rel coin WALLET is wallet only");
+    }
+}
+
+// ----- `orderbook_depth` -----
+
+/// A node that is subscribed to the topic of DYN/KMD, so that `orderbook_depth` answers from its own orderbook and asks
+/// no relay.
+fn node_subscribed_to_dyn_kmd() -> Node {
+    let node = Node::new();
+    node.subscribe_to_orderbook("DYN", "KMD");
+    node
+}
+
+#[test]
+fn orderbook_depth_legacy_answers_the_list_under_result() {
+    let node = node_subscribed_to_dyn_kmd();
+
+    // dev `orderbook_depth_rpc`: `json!({ "result": result })` with `result` the list of `PairWithDepth`.
+    let answer = block_on(orderbook_depth_rpc(
+        node.ctx.clone(),
+        json!({ "pairs": [["DYN", "KMD"]] }),
+    ))
+    .unwrap();
+    assert_eq!(answer.status(), 200);
+    assert_same_text(
+        &body_text(answer),
+        r#"{"result":[{"pair":["DYN","KMD"],"depth":{"asks":0,"bids":0}}]}"#,
+        "orderbook_depth",
+    );
+
+    // dev `orderbook_depth_rpc`: a body that does not decode keeps the text of `json::from_value`.
+    let error = block_on(orderbook_depth_rpc(node.ctx.clone(), json!({}))).unwrap_err();
+    assert_legacy_error_in("orderbook_depth", &error, "missing field `pairs`");
+}
+
+#[test]
+fn orderbook_depth_core_answers_the_depth_of_the_pairs() {
+    let node = node_subscribed_to_dyn_kmd();
+    let req: OrderbookDepthReq = json::from_value(json!({ "pairs": [["DYN", "KMD"]] })).unwrap();
+    let depth =
+        block_on(orderbook_depth_core(node.ctx.clone(), req)).unwrap_or_else(|_| panic!("the depth is answered"));
+    assert_eq!(
+        json::to_value(&depth).unwrap(),
+        json!([{ "pair": ["DYN", "KMD"], "depth": { "asks": 0, "bids": 0 } }])
+    );
+
+    // No pairs, no depth, and no relay is asked.
+    let req: OrderbookDepthReq = json::from_value(json!({ "pairs": [] })).unwrap();
+    let depth =
+        block_on(orderbook_depth_core(node.ctx.clone(), req)).unwrap_or_else(|_| panic!("the depth is answered"));
+    assert!(depth.is_empty());
+}
+
+#[test]
+fn orderbook_depth_refuses_a_pair_with_a_wallet_only_coin() {
+    let node = Node::with_conf(json!({ "coins": [{ "coin": "WALLET", "wallet_only": true }, { "coin": "KMD" }] }));
+    let req: OrderbookDepthReq =
+        json::from_value(json!({ "pairs": [["WALLET", "KMD"], ["KMD", "WALLET"], ["KMD", "DYN"]] })).unwrap();
+    let error = block_on(orderbook_depth_core(node.ctx.clone(), req))
+        .err()
+        .unwrap()
+        .into_inner();
+    // Every pair with a wallet-only coin is listed, as the request spelled it.
+    assert!(
+        matches!(&error, OrderbookDepthError::CoinIsWalletOnly(text)
+            if text == r#"Pairs [("WALLET", "KMD"), ("KMD", "WALLET")] have wallet only coins"#),
+        "unexpected error_type: {}",
+        token_of(&error)
+    );
+    assert_eq!(error.status_code().as_u16(), 400);
+
+    // dev `orderbook_depth_rpc`: `ERR!("Pairs {:?} have wallet only coins", wallet_only_pairs)`.
+    let answer = block_on(orderbook_depth_rpc(
+        node.ctx.clone(),
+        json!({ "pairs": [["WALLET", "KMD"], ["KMD", "DYN"]] }),
+    ))
+    .unwrap_err();
+    assert_legacy_error_in(
+        "orderbook_depth",
+        &answer,
+        r#"Pairs [("WALLET", "KMD")] have wallet only coins"#,
+    );
+}
+
+// ----- `orders_history_by_filter` -----
+
+/// The body the dev handler `orders_history_by_filter` answered for the orders of `filter` in the history of the node:
+/// `json!({ "result": { "orders": .., "details": .., "found_records": .., "warnings": .. } })`, with `details` the
+/// given list.
+fn dev_orders_history_body(node: &Node, filter: &MyOrdersFilter, details: Json) -> String {
+    let db_result = match block_on(MyOrdersStorage::new(node.ctx.clone()).select_orders_by_filter(filter, None)) {
+        Ok(db_result) => db_result,
+        Err(_) => panic!("the history is readable"),
+    };
+    json::to_string(&json!({
+        "result": {
+            "orders": db_result.orders,
+            "details": details,
+            "found_records": db_result.total_count,
+            "warnings": [],
+        }
+    }))
+    .unwrap()
+}
+
+#[test]
+fn orders_history_by_filter_legacy_answers_the_records_under_result() {
+    let node = Node::new();
+
+    // dev `orders_history_by_filter` on an empty history.
+    let answer = block_on(orders_history_by_filter(node.ctx.clone(), json!({}))).unwrap();
+    assert_eq!(answer.status(), 200);
+    assert_same_text(
+        &body_text(answer),
+        r#"{"result":{"orders":[],"details":[],"found_records":0,"warnings":[]}}"#,
+        "an empty history",
+    );
+
+    // An order that is kept in the history: without and with its details. An order that is not in the history files
+    // is read from the container, as the dev handler did.
+    let order = node.add_order(true, true);
+    let filter: MyOrdersFilter = json::from_value(json!({})).unwrap();
+    let answer = block_on(orders_history_by_filter(node.ctx.clone(), json!({}))).unwrap();
+    assert_same_text(
+        &body_text(answer),
+        &dev_orders_history_body(&node, &filter, json!([])),
+        "without details",
+    );
+    let detailed = Order::Maker(node.order(order.uuid));
+    let answer = block_on(orders_history_by_filter(
+        node.ctx.clone(),
+        json!({ "include_details": true }),
+    ))
+    .unwrap();
+    assert_same_text(
+        &body_text(answer),
+        &dev_orders_history_body(&node, &filter, json!([OrderForRpc::from(&detailed)])),
+        "with details",
+    );
+
+    // A filter that matches nothing.
+    let answer = block_on(orders_history_by_filter(node.ctx.clone(), json!({ "base": "NOPE" }))).unwrap();
+    assert_same_text(
+        &body_text(answer),
+        r#"{"result":{"orders":[],"details":[],"found_records":0,"warnings":[]}}"#,
+        "a filter that matches nothing",
+    );
+
+    // dev `orders_history_by_filter`: a body that does not decode keeps the text of `json::from_value`; the member
+    // that is wrong is a number.
+    let error = block_on(orders_history_by_filter(
+        node.ctx.clone(),
+        json!({ "from_timestamp": "yesterday" }),
+    ))
+    .unwrap_err();
+    let (files, _) = split_location(&error);
+    assert!(
+        files == vec!["ordermatch_trading".to_owned()],
+        "the legacy error carries one location token naming the handler file"
+    );
+}
+
+#[test]
+fn orders_history_by_filter_core_answers_the_matching_records() {
+    let node = Node::new();
+    let order = node.add_order(true, true);
+
+    let filter: MyOrdersFilter = json::from_value(json!({ "base": "DYN", "include_details": true })).unwrap();
+    let response = block_on(orders_history_by_filter_core(node.ctx.clone(), filter))
+        .unwrap_or_else(|_| panic!("the history is read"));
+    assert_eq!(response.found_records, 1);
+    assert_eq!(response.orders.len(), 1);
+    assert_eq!(response.orders[0].uuid, order.uuid.to_string());
+    assert!(response.warnings.is_empty());
+    assert!(
+        matches!(response.details.as_slice(), [Order::Maker(maker)] if maker.uuid == order.uuid),
+        "one maker order in the details"
+    );
+
+    // Without `include_details` the details are empty.
+    let filter: MyOrdersFilter = json::from_value(json!({ "base": "DYN" })).unwrap();
+    let response = block_on(orders_history_by_filter_core(node.ctx.clone(), filter))
+        .unwrap_or_else(|_| panic!("the history is read"));
+    assert_eq!(response.found_records, 1);
+    assert!(response.details.is_empty());
+}
+
+#[test]
+fn orders_history_by_filter_fails_with_a_db_error_when_the_history_cannot_be_read() {
+    let node = Node::new();
+    node.ctx
+        .sqlite_connection()
+        .execute("DROP TABLE my_orders", [])
+        .expect("the table is dropped");
+
+    let filter: MyOrdersFilter = json::from_value(json!({})).unwrap();
+    let error = block_on(orders_history_by_filter_core(node.ctx.clone(), filter))
+        .err()
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(&error, OrdersHistoryError::DbError(_)),
+        "unexpected error_type: {}",
+        token_of(&error)
+    );
+    assert_eq!(error.status_code().as_u16(), 500);
+
+    // The legacy arm answers a legacy error, as the dev handler did for a failing read.
+    let error = block_on(orders_history_by_filter(node.ctx.clone(), json!({}))).unwrap_err();
+    let (files, _) = split_location(&error);
+    assert!(
+        files == vec!["ordermatch_trading".to_owned()],
+        "the legacy error carries one location token naming the handler file"
     );
 }

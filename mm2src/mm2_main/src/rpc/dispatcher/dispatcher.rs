@@ -1,8 +1,10 @@
 use super::{DispatcherError, DispatcherResult, PUBLIC_METHODS};
 use crate::mm2::lp_native_dex::init_hw::{init_trezor, init_trezor_cancel, init_trezor_status, init_trezor_user_action};
-use crate::mm2::lp_ordermatch::{best_orders_rpc_v2, cancel_all_orders_core, cancel_order_core, my_orders_core,
-                                order_status_core, orderbook_rpc_v2, set_price_core, start_simple_market_maker_bot,
-                                start_swap_rpc, stop_simple_market_maker_bot, update_maker_order_core};
+use crate::mm2::lp_ordermatch::{best_orders_rpc_v2, buy_core, cancel_all_orders_core, cancel_order_core,
+                                my_orders_core, order_status_core, orderbook_depth_core, orderbook_rpc_v2,
+                                orders_history_by_filter_core, sell_core, set_price_core,
+                                start_simple_market_maker_bot, start_swap_rpc, stop_simple_market_maker_bot,
+                                update_maker_order_core};
 #[cfg(target_arch = "wasm32")]
 use crate::mm2::rpc::connect_metamask::{connect_metamask_cancel, connect_metamask_init, connect_metamask_status};
 use crate::mm2::rpc::one_inch::{classic_swap_contract, classic_swap_create, classic_swap_liquidity_sources,
@@ -234,6 +236,7 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "add_node_to_version_stat" => handle_mmrpc(ctx, request, add_node_to_version_stat).await,
         "approve_token" => handle_mmrpc(ctx, request, approve_token).await,
         "best_orders" => handle_mmrpc(ctx, request, best_orders_rpc_v2).await,
+        "buy" => handle_mmrpc(ctx, request, buy_core).await,
         "cancel_all_orders" => handle_mmrpc(ctx, request, cancel_all_orders_core).await,
         "cancel_order" => handle_mmrpc(ctx, request, cancel_order_core).await,
         "consolidate_utxos" => handle_mmrpc(ctx, request, consolidate_utxos_rpc).await,
@@ -297,10 +300,13 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "my_tx_history" => handle_mmrpc(ctx, request, my_tx_history_v2_rpc).await,
         "order_status" => handle_mmrpc(ctx, request, order_status_core).await,
         "orderbook" => handle_mmrpc(ctx, request, orderbook_rpc_v2).await,
+        "orderbook_depth" => handle_mmrpc(ctx, request, orderbook_depth_core).await,
+        "orders_history_by_filter" => handle_mmrpc(ctx, request, orders_history_by_filter_core).await,
         "peer_connection_healthcheck" => handle_mmrpc(ctx, request, peer_connection_healthcheck).await,
         "recreate_swap_data" => handle_mmrpc(ctx, request, recreate_swap_data).await,
         "remove_delegation" => handle_mmrpc(ctx, request, remove_delegation).await,
         "remove_node_from_version_stat" => handle_mmrpc(ctx, request, remove_node_from_version_stat).await,
+        "sell" => handle_mmrpc(ctx, request, sell_core).await,
         "send_asked_data" => handle_mmrpc(ctx, request, send_asked_data).await,
         "set_swap_gas_fee_policy" => handle_mmrpc(ctx, request, set_swap_gas_fee_policy).await,
         "setprice" => handle_mmrpc(ctx, request, set_price_core).await,

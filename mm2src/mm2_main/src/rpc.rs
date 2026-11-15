@@ -1033,11 +1033,14 @@ mod server_tests {
         }
     }
 
-    /// The order-management methods that only the legacy method table knows (CRD ch.43 R43.1A.4). `setprice`,
-    /// `update_maker_order`, `cancel_order`, `cancel_all_orders`, `my_orders` and `order_status` are not among them:
-    /// since 0.5.0 they also have a versioned form, a Reloaded extension that the reference does not have
-    /// (`docs/plans/mmrpc-v2-completion.md`, phase 1; tested in `versioned_order_methods_*` below).
-    const LEGACY_ONLY_ORDER_METHODS: [&str; 3] = ["buy", "sell", "orderbook_depth"];
+    /// Methods that only the legacy method table knows (CRD ch.43 R43.1A.4): `get_trade_fee`, which stays legacy-only
+    /// by decision (D8 of `docs/plans/mmrpc-v2-completion.md`), and `import_swaps`, a method of a later group of that
+    /// plan. The order methods are not among them: since 0.5.0 `setprice`, `update_maker_order`, `cancel_order`,
+    /// `cancel_all_orders`, `my_orders` and `order_status` (phase 1) and `buy`, `sell`, `orderbook_depth` and
+    /// `orders_history_by_filter` (phase 2) also have a versioned form, a Reloaded extension that the reference does
+    /// not have (tested in `versioned_order_methods_*` and `versioned_trading_methods_*` below). A method that gets a
+    /// versioned form leaves this list.
+    const LEGACY_ONLY_METHODS: [&str; 2] = ["get_trade_fee", "import_swaps"];
 
     fn assert_http_status(status_line: &str, code: u16) {
         assert!(
@@ -1060,9 +1063,9 @@ mod server_tests {
     /// answered like any unknown versioned method: the mmrpc error envelope, `NoSuchMethod`, no `error_data`,
     /// HTTP 400, `mmrpc` and `id` echoed (`id` is `null` when the request has none). There is no versioned alias.
     #[test]
-    fn versioned_requests_for_legacy_only_order_methods_answer_no_such_method() {
+    fn versioned_requests_for_legacy_only_methods_answer_no_such_method() {
         let (_ctx, addr) = start_server();
-        for method in LEGACY_ONLY_ORDER_METHODS {
+        for method in LEGACY_ONLY_METHODS {
             for id in [Some(7), None] {
                 let mut request = json!({ "mmrpc": "2.0", "userpass": "pw", "method": method, "params": {} });
                 if let Some(id) = id {
@@ -1085,9 +1088,9 @@ mod server_tests {
     /// CRD ch.43 R43.1A.3: the authentication runs before the method lookup, so an unauthenticated versioned call of
     /// a legacy-only (hence unknown) protected method answers 403, not 400.
     #[test]
-    fn versioned_request_for_a_legacy_only_order_method_is_authenticated_before_the_lookup() {
+    fn versioned_request_for_a_legacy_only_method_is_authenticated_before_the_lookup() {
         let (_ctx, addr) = start_server();
-        let request = json!({ "mmrpc": "2.0", "method": "buy", "params": {}, "id": 5 });
+        let request = json!({ "mmrpc": "2.0", "method": "import_swaps", "params": {}, "id": 5 });
         let (status, body) = post(addr, &request);
         assert_http_status(&status, 403);
         assert_eq!(body["mmrpc"], "2.0", "{body}");
@@ -1113,6 +1116,10 @@ mod server_tests {
             ("cancel_all_orders", json!({ "cancel_by": { "type": "All" } })),
             ("order_status", json!({ "uuid": uuid })),
             ("my_orders", json!({ "unknown": 1 })),
+            ("buy", json!({ "base": "RIN", "rel": "KMD", "price": 1, "volume": 1 })),
+            ("sell", json!({ "base": "RIN", "rel": "KMD", "price": 1, "volume": 1 })),
+            ("orderbook_depth", json!({ "pairs": [["RIN", "KMD"]] })),
+            ("orders_history_by_filter", json!({ "include_details": true })),
             ("my_balance", json!({ "coin": "RIN" })),
         ];
         for (method, inline) in cases {
@@ -1317,12 +1324,17 @@ mod server_tests {
     /// one there at the handler and at every layer above it (the dispatcher, the server), and the line numbers change
     /// with every edit of the source; one of the tokens must name the order-matching handler file.
     fn legacy_error_text_without_location(answer: &(String, Json)) -> String {
+        legacy_error_text_without_location_of(answer, "ordermatch_trading")
+    }
+
+    /// Like [`legacy_error_text_without_location`] for a handler in the file `handler_file` (without its extension).
+    fn legacy_error_text_without_location_of(answer: &(String, Json), handler_file: &str) -> String {
         assert_legacy_error_body(answer);
         let error = answer.1["error"].as_str().unwrap();
         let leading = Regex::new(r"^(?:[A-Za-z0-9_]+:\d+\] )+").unwrap();
         let prefix = leading.find(error).map(|found| found.as_str()).unwrap_or_default();
         assert!(
-            prefix.contains("ordermatch_trading:"),
+            prefix.contains(&format!("{handler_file}:")),
             "the text keeps the prefix of its handler file"
         );
         error[prefix.len()..].to_owned()
@@ -1705,6 +1717,217 @@ mod server_tests {
         ] {
             assert_legacy_error_body(&post_legacy(addr, method, params));
         }
+    }
+
+    // ----- The group-B trading methods (plan `mmrpc-v2-completion`, phase 2) -----
+    //
+    // `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter` follow the rules of group A: a Reloaded extension
+    // since 0.5.0, `params` carries the legacy members unchanged, unknown members of `params` are ignored (the envelope
+    // stays strict), `result` is the content of the legacy `result`, and the errors are the typed enums of the cores.
+    // The legacy bodies recorded below are those the handlers of dev (`0f309c779`) answered.
+
+    /// The group-B methods answer on the legacy surface as the dev handlers did, on a node without coins: each refusal
+    /// is the text of its `ERR!`/`try_s!` site, as the legacy error body (HTTP 500, one member `error`). The messages
+    /// of the assertions name the method only: the texts are error payloads.
+    #[test]
+    fn legacy_trading_methods_keep_their_answers_on_a_node_without_coins() {
+        let (_ctx, addr) = start_server_with_coins(json!([{ "coin": "WALLET", "wallet_only": true }]));
+        let refusal = |answer: &(String, Json), handler_file: &str, text: &str, method: &str| {
+            assert!(
+                legacy_error_text_without_location_of(answer, handler_file) == text,
+                "{method}: the text of the refusal"
+            );
+        };
+        let pair = json!({ "base": "RIN", "rel": "KMD", "price": 1, "volume": 1 });
+
+        // dev `buy_impl` looks the rel coin up first, `sell_impl` the base coin.
+        let answer = post_legacy(addr, "buy", pair.clone());
+        refusal(
+            &answer,
+            "ordermatch_trading",
+            "Rel coin is not found or inactive",
+            "buy",
+        );
+        let answer = post_legacy(addr, "sell", pair);
+        refusal(
+            &answer,
+            "ordermatch_trading",
+            "Base coin is not found or inactive",
+            "sell",
+        );
+        for method in ["buy", "sell"] {
+            let same = json!({ "base": "RIN", "rel": "RIN", "price": 1, "volume": 1 });
+            let answer = post_legacy(addr, method, same);
+            refusal(
+                &answer,
+                "ordermatch_trading",
+                "Base and rel must be different coins",
+                method,
+            );
+            // A body that does not decode keeps the text of the decoder, one prefix in front.
+            let answer = post_legacy(addr, method, json!({ "base": "RIN" }));
+            refusal(&answer, "ordermatch_trading", "missing field `rel`", method);
+        }
+
+        // dev `orderbook_depth_rpc`: `ERR!("Pairs {:?} have wallet only coins", ..)` and the decoder's text.
+        let answer = post_legacy(
+            addr,
+            "orderbook_depth",
+            json!({ "pairs": [["WALLET", "KMD"], ["KMD", "RIN"]] }),
+        );
+        refusal(
+            &answer,
+            "orderbook_depth",
+            r#"Pairs [("WALLET", "KMD")] have wallet only coins"#,
+            "orderbook_depth",
+        );
+        let answer = post_legacy(addr, "orderbook_depth", json!({}));
+        refusal(&answer, "orderbook_depth", "missing field `pairs`", "orderbook_depth");
+
+        // dev `orders_history_by_filter`: a filter that does not decode keeps the text of the decoder.
+        let answer = post_legacy(
+            addr,
+            "orders_history_by_filter",
+            json!({ "from_timestamp": "yesterday" }),
+        );
+        assert!(
+            legacy_error_text_without_location(&answer).starts_with("invalid type"),
+            "orders_history_by_filter: the text of the decoder"
+        );
+    }
+
+    /// Each of the four methods answers a versioned success in the 2.0 envelope with `id` echoed, and `result` has the
+    /// members of the content that the legacy body carries under `result`. Every request carries an unknown member inside
+    /// `params`, which is ignored. The taker order is compared with the object the dev handler rendered, a
+    /// `LpautobuyResult` of the order the node keeps; the legacy form answers next to it.
+    #[test]
+    fn versioned_trading_methods_answer_the_legacy_result_in_the_2_0_envelope() {
+        use crate::mm2::lp_ordermatch::order_rpc_tests::{dev_taker_order_result, Node};
+
+        let node = Node::with_conf(json!({ "netid": mm2_net_config::SUPPORTED_NETIDS[0] }));
+        let ctx = &node.ctx;
+
+        // `buy` and `sell`: the taker order object (the dev handlers answered `{"result": LpautobuyResult}`).
+        for (id, method) in [(41, "buy"), (42, "sell")] {
+            let result = versioned_result(
+                call_v2(
+                    ctx,
+                    method,
+                    json!({ "base": "DYN", "rel": "KMD", "price": "1", "volume": "1", "min_volume": "0.1",
+                            "save_in_history": false, "unknown_member": true }),
+                    id,
+                ),
+                id,
+            );
+            let uuid: uuid::Uuid = result["uuid"].as_str().unwrap().parse().unwrap();
+            assert_same_members(&result, &dev_taker_order_result(&node.taker_order(uuid)), method);
+
+            let legacy = call_legacy(
+                ctx,
+                method,
+                json!({ "base": "DYN", "rel": "KMD", "price": "1", "volume": "1", "min_volume": "0.1",
+                        "save_in_history": false }),
+            );
+            assert_eq!(legacy.0, 200);
+            let legacy_uuid: uuid::Uuid = legacy.1["result"]["uuid"].as_str().unwrap().parse().unwrap();
+            assert_same_members(
+                &legacy.1["result"],
+                &dev_taker_order_result(&node.taker_order(legacy_uuid)),
+                method,
+            );
+        }
+
+        // `orderbook_depth`: the list of pairs with their depth, as the legacy `result` carries it.
+        node.subscribe_to_orderbook("DYN", "KMD");
+        let result = versioned_result(
+            call_v2(
+                ctx,
+                "orderbook_depth",
+                json!({ "pairs": [["DYN", "KMD"]], "unknown_member": 1 }),
+                43,
+            ),
+            43,
+        );
+        let legacy = call_legacy(ctx, "orderbook_depth", json!({ "pairs": [["DYN", "KMD"]] }));
+        assert_eq!(legacy.0, 200);
+        assert_eq!(result, legacy.1["result"]);
+        assert_eq!(
+            result,
+            json!([{ "pair": ["DYN", "KMD"], "depth": { "asks": 0, "bids": 0 } }])
+        );
+
+        // `orders_history_by_filter`: `{orders, details, found_records, warnings}`, as the legacy `result` carries it.
+        let order = node.add_order(true, true);
+        for (id, params) in [
+            (44, json!({})),
+            (45, json!({ "include_details": true, "unknown_member": 1 })),
+            (46, json!({ "base": "DYN", "unknown_member": 1 })),
+            (47, json!({ "base": "NOPE" })),
+        ] {
+            let result = versioned_result(call_v2(ctx, "orders_history_by_filter", params.clone(), id), id);
+            let legacy = call_legacy(ctx, "orders_history_by_filter", params.clone());
+            assert_eq!(legacy.0, 200);
+            assert_same_members(&result, &legacy.1["result"], "orders_history_by_filter");
+            let found = if params["base"] == "NOPE" { 0 } else { 1 };
+            assert_eq!(result["found_records"], found);
+            if found == 1 {
+                assert_eq!(result["orders"][0]["uuid"], order.uuid.to_string());
+            }
+            let details = if params["include_details"] == true { 1 } else { 0 };
+            assert_eq!(result["details"].as_array().map(|details| details.len()), Some(details));
+        }
+    }
+
+    /// The typed refusals a node without coins and orders reaches through the dispatcher: the token, the `error_data`
+    /// kind, the HTTP status and the `id` of each. An unknown member inside `params` is ignored here too: the request
+    /// is decoded and refused for its content. Variants that need a live coin or a storage are covered by the unit tests
+    /// of the cores.
+    #[test]
+    fn versioned_trading_methods_answer_their_typed_refusals_on_a_node_without_coins() {
+        let (_ctx, addr) = start_server_with_coins(json!([{ "coin": "WALLET", "wallet_only": true }]));
+
+        // `buy` looks the rel coin up first, `sell` the base coin.
+        let params = json!({ "base": "RIN", "rel": "KMD", "price": 1, "volume": 1, "unknown_member": 1 });
+        let answer = post_v2(addr, "buy", Some(params.clone()), 51);
+        assert_typed_refusal(&answer, 400, "NoSuchCoin", Some("object"), 51);
+        assert!(answer.1["error_data"]["coin"] == "KMD", "buy: error_data coin");
+        let answer = post_v2(addr, "sell", Some(params), 52);
+        assert_typed_refusal(&answer, 400, "NoSuchCoin", Some("object"), 52);
+        assert!(answer.1["error_data"]["coin"] == "RIN", "sell: error_data coin");
+
+        for (id, method) in [(53, "buy"), (54, "sell")] {
+            let same = json!({ "base": "RIN", "rel": "RIN", "price": 1, "volume": 1, "unknown_member": 1 });
+            let answer = post_v2(addr, method, Some(same), id);
+            assert_typed_refusal(&answer, 400, "BaseEqualRel", None, id);
+            // Params that do not decode answer `InvalidRequest` (string payload, HTTP 400), as for every versioned method.
+            let answer = post_v2(addr, method, Some(json!({ "base": "RIN" })), id + 10);
+            assert_typed_refusal(&answer, 400, "InvalidRequest", Some("string"), id + 10);
+            let answer = post_v2(addr, method, None, id + 20);
+            assert_typed_refusal(&answer, 400, "InvalidRequest", Some("string"), id + 20);
+        }
+
+        let answer = post_v2(
+            addr,
+            "orderbook_depth",
+            Some(json!({ "pairs": [["WALLET", "KMD"], ["KMD", "RIN"]], "unknown_member": 1 })),
+            55,
+        );
+        assert_typed_refusal(&answer, 400, "CoinIsWalletOnly", Some("string"), 55);
+        assert!(
+            answer.1["error_data"] == r#"Pairs [("WALLET", "KMD")] have wallet only coins"#,
+            "orderbook_depth: error_data text"
+        );
+        let answer = post_v2(addr, "orderbook_depth", Some(json!({})), 56);
+        assert_typed_refusal(&answer, 400, "InvalidRequest", Some("string"), 56);
+
+        // A filter that does not decode answers `InvalidRequest` before the history is read.
+        let answer = post_v2(
+            addr,
+            "orders_history_by_filter",
+            Some(json!({ "from_timestamp": "yesterday" })),
+            57,
+        );
+        assert_typed_refusal(&answer, 400, "InvalidRequest", Some("string"), 57);
     }
 
     /// The SSE answer must stay open and deliver events as they happen, not only once the body ends.

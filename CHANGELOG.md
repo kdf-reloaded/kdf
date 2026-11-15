@@ -37,6 +37,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that a legacy error text no longer carries the inner `file:line]` trace tokens. This is a KDF Reloaded extension; the reference answers
   `NoSuchMethod` for these names under `mmrpc: "2.0"`. The remaining legacy-only methods follow in later
   releases (plan `docs/plans/mmrpc-v2-completion.md`). Detail: PR #359; CRD ch.43 §43.1R, D43.1A.1 status note.
+- **The trading methods `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter` accept `mmrpc: "2.0"`
+  requests**, in the same way as the order-management methods above: legacy members inside `params`, legacy
+  result under `result` with `id` echoed, typed `error_type` with an HTTP status (400 for a request the client
+  got wrong, 500 for a node failure, 503 while the computer's clock is off), unknown `params` members ignored,
+  legacy forms and answers unchanged. `get_trade_fee` stays legacy-only: the reference documentation marks it
+  deprecated in favor of the versioned `trade_preimage`. Detail: PR #TBD; CRD ch.43 §43.1R.
 
 #### Solana coins
 
@@ -80,7 +86,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Plans touched
 
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
-  management) implemented in PR #359; decisions D1–D10 recorded; phases 2–5 open.
+  management) implemented in PR #359, phase 2 (trading) in PR #TBD; decisions D1–D10 recorded; phases 3–5 open.
 - [`rpc-error-redesign`](docs/plans/rpc-error-redesign.md) — new, planning, no schedule: one error vocabulary
   (token spelling, payload kind, HTTP status) for the whole versioned RPC surface, with a compatibility period;
   ordered 2026-11-15, written in PR #359.
