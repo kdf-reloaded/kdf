@@ -108,10 +108,13 @@ fn t40_2_platform_activation_accepts_the_reference_platform_form() {
     let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req)).unwrap_err();
     match err.get_inner() {
         EnablePlatformCoinWithTokensError::PlatformCoinCreationError { ticker, error } => {
-            assert_eq!(ticker, "SOL");
-            assert!(error.contains("at least one RPC endpoint"), "{error}");
+            assert!(ticker.as_str() == "SOL", "unexpected ticker");
+            assert!(
+                error.contains("at least one RPC endpoint"),
+                "unexpected no-node error text"
+            );
         },
-        other => panic!("expected PlatformCoinCreationError, got {other:?}"),
+        _ => panic!("expected PlatformCoinCreationError"),
     }
 }
 
@@ -171,7 +174,7 @@ fn keys(names: &[&str]) -> BTreeSet<String> { names.iter().map(|name| (*name).to
 
 fn assert_no_node_secrets(text: &str) {
     for secret in ["PATH-SECRET", "QUERY-SECRET", "/v1/", "token="] {
-        assert!(!text.contains(secret), "the text carries `{secret}`: {text}");
+        assert!(!text.contains(secret), "the error text leaked a part of the node URL");
     }
 }
 
@@ -232,8 +235,14 @@ fn t40_6b_4_derivation_path_does_not_change_the_platform_address() {
     malformed["derivation_path"] = json!("this is not a path");
     let malformed = platform_with_closed_node(&ctx, &malformed);
     let expected = absent.my_address().expect("an address");
-    assert_eq!(present.my_address().expect("an address"), expected);
-    assert_eq!(malformed.my_address().expect("an address"), expected);
+    assert!(
+        present.my_address().expect("an address") == expected,
+        "a derivation_path changed the address"
+    );
+    assert!(
+        malformed.my_address().expect("an address") == expected,
+        "a malformed derivation_path changed the address"
+    );
 }
 
 /// T40.6B.5 / R40.6B.8: the plain passphrase of the twelve-word test mnemonic gives the fixed secret and address.
@@ -242,9 +251,9 @@ fn t40_6b_5_single_key_vector_of_the_test_mnemonic() {
     let passphrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     let key_pair = crypto::privkey::key_pair_from_seed(passphrase).expect("a key pair");
     let secret = &*key_pair.private().secret;
-    assert_eq!(
-        hex::encode(secret),
-        "c057eec878dfd852ba3f88087c4f350f09c55537ab5e549c3cd14320ec3cef78"
+    assert!(
+        hex::encode(secret) == "c057eec878dfd852ba3f88087c4f350f09c55537ab5e549c3cd14320ec3cef78",
+        "the secret of the test passphrase differs from the vector"
     );
     let params: SolanaActivationParams = serde_json::from_value(json!({
         "confirmation_commitment": "finalized",
@@ -258,9 +267,9 @@ fn t40_6b_5_single_key_vector_of_the_test_mnemonic() {
         secret,
     ))
     .expect("the platform coin is built");
-    assert_eq!(
-        coin.my_address().expect("an address"),
-        "7zuqksARN8uXHz2yvrkiZZDPeALBSjzK12nkMPNzKSCJ"
+    assert!(
+        coin.my_address().expect("an address") == "7zuqksARN8uXHz2yvrkiZZDPeALBSjzK12nkMPNzKSCJ",
+        "the address of the test passphrase differs from the vector"
     );
 }
 
@@ -283,10 +292,19 @@ fn t40_6b_1_platform_method_reports_unparsable_solanatoken_forms() {
         let req = platform_request(Some(CLOSED_NODE), &[ticker], json!({}));
         let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req)).unwrap_err();
         let (wire, status) = platform_wire(err.get_inner());
-        assert_eq!(wire["error_type"], "TokenProtocolParseError", "{ticker}: {wire}");
-        assert_eq!(wire["error_data"]["ticker"], ticker);
-        assert_eq!(data_keys(&wire), keys(&["ticker", "error"]));
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            wire["error_type"] == "TokenProtocolParseError",
+            "unexpected error wire shape"
+        );
+        assert!(wire["error_data"]["ticker"] == ticker, "unexpected error wire shape");
+        assert!(
+            data_keys(&wire) == keys(&["ticker", "error"]),
+            "unexpected error wire shape"
+        );
+        assert!(
+            status == StatusCode::INTERNAL_SERVER_ERROR,
+            "unexpected error wire shape"
+        );
     }
 }
 
@@ -304,9 +322,18 @@ fn t40_6b_1_token_method_reports_unparsable_solanatoken_forms() {
         let ctx = ctx_with(vec![json!({ "coin": ticker, "mm2": 1, "protocol": protocol })]);
         let err = block_on(enable_token::<SplToken>(ctx, token_request(ticker))).unwrap_err();
         let (wire, status) = token_wire(err.get_inner());
-        assert_eq!(wire["error_type"], "TokenProtocolParseError", "{ticker}: {wire}");
-        assert_eq!(data_keys(&wire), keys(&["ticker", "error"]));
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            wire["error_type"] == "TokenProtocolParseError",
+            "unexpected error wire shape"
+        );
+        assert!(
+            data_keys(&wire) == keys(&["ticker", "error"]),
+            "unexpected error wire shape"
+        );
+        assert!(
+            status == StatusCode::INTERNAL_SERVER_ERROR,
+            "unexpected error wire shape"
+        );
     }
 }
 
@@ -319,10 +346,19 @@ fn spltoken_invalid_contract_address_is_a_protocol_parse_error_on_the_token_meth
     ]);
     let err = block_on(enable_token::<SplToken>(ctx, token_request("BAD-SPL"))).unwrap_err();
     let (wire, status) = token_wire(err.get_inner());
-    assert_eq!(wire["error_type"], "TokenProtocolParseError", "{wire}");
-    assert_eq!(wire["error_data"]["ticker"], "BAD-SPL");
-    assert_eq!(data_keys(&wire), keys(&["ticker", "error"]));
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        wire["error_type"] == "TokenProtocolParseError",
+        "unexpected error wire shape"
+    );
+    assert!(wire["error_data"]["ticker"] == "BAD-SPL", "unexpected error wire shape");
+    assert!(
+        data_keys(&wire) == keys(&["ticker", "error"]),
+        "unexpected error wire shape"
+    );
+    assert!(
+        status == StatusCode::INTERNAL_SERVER_ERROR,
+        "unexpected error wire shape"
+    );
 }
 
 /// The same entry on the platform method.
@@ -335,10 +371,19 @@ fn spltoken_invalid_contract_address_is_a_protocol_parse_error_on_the_platform_m
     let req = platform_request(Some(CLOSED_NODE), &["BAD-SPL"], json!({}));
     let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req)).unwrap_err();
     let (wire, status) = platform_wire(err.get_inner());
-    assert_eq!(wire["error_type"], "TokenProtocolParseError", "{wire}");
-    assert_eq!(wire["error_data"]["ticker"], "BAD-SPL");
-    assert_eq!(data_keys(&wire), keys(&["ticker", "error"]));
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        wire["error_type"] == "TokenProtocolParseError",
+        "unexpected error wire shape"
+    );
+    assert!(wire["error_data"]["ticker"] == "BAD-SPL", "unexpected error wire shape");
+    assert!(
+        data_keys(&wire) == keys(&["ticker", "error"]),
+        "unexpected error wire shape"
+    );
+    assert!(
+        status == StatusCode::INTERNAL_SERVER_ERROR,
+        "unexpected error wire shape"
+    );
 }
 
 /// A valid `SPLTOKEN` address keeps its base58 form through the JSON round trip.
@@ -357,10 +402,19 @@ fn platform_method_node_failure_is_a_platform_coin_creation_error() {
     let req = platform_request(Some(CLOSED_NODE), &[], json!({}));
     let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req)).unwrap_err();
     let (wire, status) = platform_wire(err.get_inner());
-    assert_eq!(wire["error_type"], "PlatformCoinCreationError", "{wire}");
-    assert_eq!(wire["error_data"]["ticker"], "SOL");
-    assert_eq!(data_keys(&wire), keys(&["ticker", "error"]));
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        wire["error_type"] == "PlatformCoinCreationError",
+        "unexpected error wire shape"
+    );
+    assert!(wire["error_data"]["ticker"] == "SOL", "unexpected error wire shape");
+    assert!(
+        data_keys(&wire) == keys(&["ticker", "error"]),
+        "unexpected error wire shape"
+    );
+    assert!(
+        status == StatusCode::INTERNAL_SERVER_ERROR,
+        "unexpected error wire shape"
+    );
     assert_no_node_secrets(&wire.to_string());
 }
 
@@ -371,10 +425,19 @@ fn platform_method_without_a_node_has_the_platform_coin_creation_error_wire_shap
     let req = platform_request(None, &[], json!({}));
     let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req)).unwrap_err();
     let (wire, status) = platform_wire(err.get_inner());
-    assert_eq!(wire["error_type"], "PlatformCoinCreationError", "{wire}");
-    assert_eq!(wire["error_data"]["ticker"], "SOL");
-    assert_eq!(data_keys(&wire), keys(&["ticker", "error"]));
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        wire["error_type"] == "PlatformCoinCreationError",
+        "unexpected error wire shape"
+    );
+    assert!(wire["error_data"]["ticker"] == "SOL", "unexpected error wire shape");
+    assert!(
+        data_keys(&wire) == keys(&["ticker", "error"]),
+        "unexpected error wire shape"
+    );
+    assert!(
+        status == StatusCode::INTERNAL_SERVER_ERROR,
+        "unexpected error wire shape"
+    );
 }
 
 /// §40.2.4: a node failure while reading a token balance (inline token, node refuses) is also a
@@ -388,9 +451,15 @@ fn platform_method_token_balance_failure_is_a_platform_coin_creation_error() {
     let req = platform_request(Some(CLOSED_NODE), &["OK-SOL"], json!({}));
     let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req)).unwrap_err();
     let (wire, status) = platform_wire(err.get_inner());
-    assert_eq!(wire["error_type"], "PlatformCoinCreationError", "{wire}");
-    assert_eq!(wire["error_data"]["ticker"], "SOL");
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        wire["error_type"] == "PlatformCoinCreationError",
+        "unexpected error wire shape"
+    );
+    assert!(wire["error_data"]["ticker"] == "SOL", "unexpected error wire shape");
+    assert!(
+        status == StatusCode::INTERNAL_SERVER_ERROR,
+        "unexpected error wire shape"
+    );
     assert_no_node_secrets(&wire.to_string());
 }
 
@@ -414,9 +483,12 @@ fn token_method_node_failure_is_a_transport_error() {
     .expect("the platform coin is registered");
     let err = block_on(enable_token::<SplToken>(ctx, token_request("OK-SOL"))).unwrap_err();
     let (wire, status) = token_wire(err.get_inner());
-    assert_eq!(wire["error_type"], "Transport", "{wire}");
-    assert!(wire["error_data"].is_string(), "{wire}");
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(wire["error_type"] == "Transport", "unexpected error wire shape");
+    assert!(wire["error_data"].is_string(), "unexpected error wire shape");
+    assert!(
+        status == StatusCode::INTERNAL_SERVER_ERROR,
+        "unexpected error wire shape"
+    );
     assert_no_node_secrets(&wire.to_string());
 }
 
@@ -429,9 +501,12 @@ fn t40_6b_21_tx_history_true_is_ignored_on_the_platform_method() {
     let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req)).unwrap_err();
     match err.get_inner() {
         EnablePlatformCoinWithTokensError::PlatformCoinCreationError { ticker, error } => {
-            assert_eq!(ticker, "SOL");
-            assert!(error.contains("at least one RPC endpoint"), "{error}");
+            assert!(ticker.as_str() == "SOL", "unexpected ticker");
+            assert!(
+                error.contains("at least one RPC endpoint"),
+                "unexpected no-node error text"
+            );
         },
-        other => panic!("expected PlatformCoinCreationError, got {other:?}"),
+        _ => panic!("expected PlatformCoinCreationError"),
     }
 }
