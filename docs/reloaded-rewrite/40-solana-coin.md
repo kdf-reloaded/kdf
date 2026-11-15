@@ -1032,10 +1032,12 @@ activation path; (d) only as a separate, later decision. Whichever is
 chosen, chapter 05 R46 and T40.8 must be made to say the same thing.
 
 > *Reloaded status (clean side, 2026-11-15):* by the maintainer's decision
-> of 2026-11-15, Solana under a global-HD login is built with HD derivation
-> now: the coin uses an ed25519 key at the coin's derivation path, and a
-> hardware wallet or a WalletConnect session gets a typed refusal. The path
-> layout is still to be decided.
+> of 2026-11-15, Solana under a global-HD login is to be built with HD
+> derivation in this cycle: the coin is to use an ed25519 key at its
+> derivation path, with a typed refusal for a hardware wallet or a
+> WalletConnect session. The path layout is still to be decided; chapter 05
+> R46 and T40.8 are aligned in the change that implements it. Nothing of it
+> is built yet.
 
 **D40.6B.8** *The swap program (F40.6B.5).* Options: (a) target the public
 program of F40.6B.5 when Solana swaps are designed; (b) design or deploy
