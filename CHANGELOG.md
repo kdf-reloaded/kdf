@@ -66,7 +66,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **The browser demo page loads the current WASM build again.** The page `wasm_build/index.html`
   imported a module file name (`mm2.js`) that the build no longer produces, so it could not start;
   it now imports `kdflib.js`. The build guide and the page's README name the files the build writes,
-  and the build output directory `wasm_build/deps/` is ignored by git. Detail: PR #N; CRD ch.2 directory table (lists `wasm_build/`).
+  and the build output directory `wasm_build/deps/` is ignored by git. Detail: PR #374; CRD ch.2 directory table (lists `wasm_build/`).
 
 #### QTUM and QRC20
 
