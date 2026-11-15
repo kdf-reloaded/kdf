@@ -841,6 +841,42 @@ The chapter relies on one baseline-state claim:
   test-coverage sentence describe the maintainer's decision of 2026-11-09 and
   this repository's code. They take no forbidden-class input, so chapter 01
   R38 is not engaged and no gate pass is required.
+- *Scoped addition (2026-11-10, Spec Reader round 0.4.0-12) -- §18.11.12
+  (R18.11.29 -- R18.11.34, the Chapter 59 R59.4A.4 input note, the
+  upstream-divergence note, D18.11.4, T18.11.1 -- T18.11.3).* **KDF Dirty
+  Gate: PASS on 2026-11-10, measure 0.03, no findings** (chapter 01 R40;
+  the attestation closes this item). *Inputs:* the forbidden corpus at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, read read-only and consulted
+  **only** to establish, for the Tendermint coin and token, the bytes
+  sent as protocol information, the answer of the acceptance check to an
+  absent, empty and non-empty counterparty value with and without the IBC
+  swap-routing feature compiled in, where the routing channel identifier
+  is kept and whether it is transmitted, which readers derive anything
+  from the value (orderbook presentation, swap destination, swap layer),
+  and the designations' agreement on these points (a read-only difference
+  between the two rows over the Tendermint coin and token files and the
+  order-match file). Behavior and public wire shape only; no private
+  identifier, function body, helper decomposition, error, log, comment or
+  test text was reproduced. The *Our side* rule R18.11.34, D18.11.4 and
+  the three test rows rest on this repository's own tree and on Chapter
+  59 §59.4A; T18.11.3 is a public-network observation of permitted-input
+  class R6 to be made against release binaries run as black boxes.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-10, measure 0.03
+  on the discretionary-expression basis, no findings. Reference states
+  (chapter 02 R13): the subsection names exactly two states, `v2.6.0-beta` and
+  `v3.0.0-beta`, both rows of chapter 02 §2.15A; no untabled state was named
+  or compared. Extent: the Tendermint coin and Tendermint token
+  protocol-information hooks (own value and acceptance check); the order-match
+  layer's production, transport, storage and consumption of the per-coin
+  protocol-information bytes in the order announcement and both match messages
+  (including wire-shape definitions and orderbook and best-orders address
+  derivation); the IBC swap-routing feature's per-order channel storage and
+  build-feature defaults; and the swap layer's absence of readers — compared
+  at the rows `v2.6.0-beta` and `v3.0.0-beta`; 7 source files and 2 manifest
+  files read per row, plus a row-to-row difference over the Tendermint coin
+  and token files and the order-match files. Method: reading and mechanical
+  text search at both tabled states; the candidate embeds no code blocks, so
+  the repository's clean-room gate tool was not applicable.
 
 ---
 
@@ -1324,3 +1360,165 @@ swaps return:
   (`nyancat-9`) refunds in about four minutes; the module returns state
   `Refunded` with no transaction, which is what R18.11.16/R18.11.17 rely
   on.
+
+### 18.11.12 Protocol information of the Tendermint family
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-10,
+> measure 0.03 (attestation in §18.10).**
+> This subsection was written on 2026-11-10 by the KDF Spec Reader (Spec
+> Reader round 0.4.0-12) under the two-team procedure of chapter 01 §1.4A,
+> from the reference designations `v2.6.0-beta` and `v3.0.0-beta` (both rows
+> of chapter 02 §2.15A, read read-only; no untabled state was read) and from
+> this repository's own tree. It answers, for the protocol-information bytes
+> that every order and both match messages carry per coin ([Chapter
+> 59](59-legacy-ordermatch-negotiation.md) R59.4.7 and §59.4A), what the
+> reference Tendermint coin and token send, how they judge a counterparty's
+> value, who reads the value, and what a value longer than the reference
+> expects does. The two designations agree on every rule of this subsection,
+> with and without the IBC swap-routing feature of §18.7.5 compiled in
+> (R18.11.27 continues to hold).
+
+- **R18.11.29.** *Own protocol information (both designations, both
+  builds).* A reference Tendermint coin sends an **empty** byte string as
+  its protocol information in every message that carries one (the order
+  announcement, `TakerRequest`, `MakerReserved`), in both roles, whatever
+  amount the order-match layer passes to it. A Tendermint token sends
+  exactly what its platform coin sends, so also an empty string. The value
+  is fixed; nothing about it is derived from the coin's configuration,
+  denomination, account prefix, chain, or IBC channels. Compiling the IBC
+  swap-routing feature in does not change the value.
+- **R18.11.30.** *Acceptance check (both designations, both builds).* The
+  reference Tendermint coin's and token's acceptance check, the hook the
+  order-match layer calls on a `TakerRequest` (R59.4.3) and on a
+  `MakerReserved` (R59.3.2), **accepts every counterparty value**: an
+  absent value, an empty value, and a non-empty value of any length and
+  any content, in both roles. It does **not** decode the bytes, so there
+  is no decoding target and no failure arm for undecodable bytes; the
+  amount, lock-duration and maker-role inputs of R59.4.5 do not enter
+  the answer. The token's check is its platform coin's check. The IBC
+  swap-routing feature changes neither hook: with the feature compiled
+  in, the check is the same unconditional acceptance.
+- **R18.11.31.** *Where the routing channel is, and is not.* With the
+  IBC swap-routing feature compiled in, the channel identifier that the
+  order-time check of §18.7.5 selects for a chain without an HTLC module
+  is kept in a separate per-order metadata member of the node's **own**
+  order record, and only there. It is not written into the protocol
+  information, and the wire shapes of the order announcement,
+  `TakerRequest` and `MakerReserved` carry no member for it: a request or
+  reservation received from a peer is given an empty metadata set. The
+  channel identifier therefore never reaches a counterparty at either
+  designation, and a counterparty's protocol information can never carry
+  one. The premise recorded in the as-built note under R18.11.25, that a
+  routing channel would travel in non-empty protocol information, does
+  not hold at the reference; the note's *behavior* (Reloaded advertises
+  empty and declines non-empty) is unaffected and stands as this
+  repository's own choice (R18.11.34).
+- **R18.11.32.** *No reader derives anything from it (both
+  designations).* No reader at the reference derives the displayed
+  address, the swap destination or anything else from a Tendermint coin's
+  or token's protocol information:
+  1. the `orderbook` and `best_orders` responses derive a Tendermint
+     entry's `address` as the bech32 account of the order's public key
+     under the coin's configured account prefix (a token under its
+     platform coin's prefix); the address-format descriptor that the
+     generic presentation step decodes from the protocol information
+     (R59.4.7 item 5) is passed along but is not used by this family's
+     derivation, so the bytes have no effect on the shown address;
+  2. the swap destination, the `to` account of a create-HTLC message
+     (R18.11.4), is derived from the counterparty's HTLC public key
+     exchanged in the negotiation of Chapter 51, never from protocol
+     information;
+  3. the swap layer has no reader of protocol information at all; the
+     order-match layer carries the bytes unchanged in the three messages
+     and in the synchronization side channel (Chapter 32 R-W2a) and
+     stores them with the order (R59.4A.5, R59.4A.7).
+- **R18.11.33.** *Longer bytes are ignored, not rejected and not
+  misread.* A reference node at either designation that receives, for a
+  Tendermint coin or token, a protocol-information value longer than the
+  empty string it expects, in particular a first value followed by an
+  additional capability word of Chapter 59 R59.4A.1 or a word standing
+  alone, **ignores** it: the acceptance check accepts without reading
+  (R18.11.30), the match proceeds, and the order is shown under the
+  address derived from the public key (R18.11.32). Nothing in the value
+  is interpreted, so nothing can be misread. The only effect of the value
+  at the reference is that it is stored and re-sent with the order.
+
+> **Input for Chapter 59 R59.4A.4 (Tendermint row; this note does not
+> edit Chapter 59).** The answer R59.4A.4 requires before a further coin
+> family opts in is given by R18.11.30 and R18.11.33: at both reference
+> release rows a Tendermint coin's and token's longer bytes are accepted
+> without being read and have no effect on matching or presentation, so
+> the Tendermint family may opt in through this chapter. The row for the
+> table of R59.4A.4 has the shape `| <key> | Tendermint coin and token
+> (Chapter 18) | This node builds the Tendermint maker payment with the
+> multiplied maker lock and requires at least that lock from a capable
+> counterparty (D18.11.2, decided 2026-11-09). | Chapter 18 R18.11.x |`,
+> where `<key>` and `R18.11.x` are fixed by the rule that implements
+> D18.11.2 (that rule lands with its change, as D18.11.2 records). One
+> point needs a decision before that rule can be written, because this
+> family's first value is empty (R18.11.29): see D18.11.4.
+
+> **Upstream divergence (informative).** At the reference the
+> protocol-information surface of this family is inert in both directions:
+> empty on the way out, unread on the way in. Reloaded's decline of a
+> non-empty value (as-built note under R18.11.25) and its decline of
+> every match while Tendermint swaps are switched off in the build are
+> Reloaded-original; neither has a counterpart at the reference, and the
+> reference performs no order-time or negotiation-time check for this
+> family at all (R18.11.23).
+
+- **R18.11.34.** *Our side (binding for the swaps-on work).* Reloaded
+  sends an empty value for a Tendermint coin and token (same as
+  R18.11.29). Its acceptance check declines a non-empty value and, while
+  the build's Tendermint swap switch is off, declines every value. Since
+  the reference never sends a non-empty value for this family
+  (R18.11.29), the decline of non-empty bytes can only ever reject
+  another Reloaded node that sends a capability word; it rejects no
+  reference counterparty. When the capability word of D18.11.2 is
+  introduced, this check SHALL be replaced by the reading of R59.4A.2 (the
+  word is read, unknown keys are ignored, a malformed word declares
+  nothing) so that a capable Reloaded counterparty is not declined for
+  being capable; until then the present decline stays.
+- **D18.11.4 (maintainer decision).** *Layout of a capability word on an
+  empty first value.* R59.4A.1 puts the word immediately after the coin's
+  first value, and R59.4A.2 reads it by skipping exactly one MessagePack
+  value first. For this family the first value is empty (R18.11.29), so a
+  word sent under R59.4A.1 would itself be the first MessagePack value
+  and R59.4A.2's reader would skip it. The reference accepts any bytes
+  (R18.11.33), so interoperability constrains none of the options:
+  (a) when a Tendermint coin sends a word, it sends one MessagePack nil
+  as its first value, followed by the word; the generic reader of
+  R59.4A.2 then applies unchanged, and the first value still decodes as
+  nothing a presentation step uses (R18.11.32); (b) a family-specific
+  reader that, when the coin's own first value is empty, reads the word
+  at the start of the value; (c) a Chapter 59 amendment that lets
+  R59.4A.2 treat a value consisting of a single map with string keys as
+  the word when the coin's first value is empty. Option (a) keeps the
+  Chapter 59 rule single-shaped and is recommended; it requires a
+  one-sentence addition to R59.4A.1 naming the empty-first-value case.
+  The key name goes into the R59.4A.4 table with the rule that implements
+  D18.11.2.
+
+Tests (derivable from the rules above; T18.11.n is new numbering for
+this section):
+
+- **T18.11.1.** *Empty value in every form.* For a Tendermint coin and for
+  a token on it, the protocol information produced for an order, for a
+  `TakerRequest` and for a `MakerReserved`, with and without an amount
+  argument, in both roles, is the empty byte string (R18.11.29, until the
+  rule implementing D18.11.2 changes it for the word).
+- **T18.11.2.** *Presentation ignores the bytes.* An orderbook entry for a
+  Tendermint coin or token whose stored protocol information is (i)
+  empty, (ii) a well-formed capability word, (iii) arbitrary non-empty
+  bytes shows, in `orderbook` and `best_orders`, the same `address`: the
+  bech32 account of the order's public key under the coin's account
+  prefix (R18.11.32).
+- **T18.11.3.** *Lab row against a reference release binary (R6
+  observation, black box).* A Reloaded maker order whose Tendermint-side
+  protocol information carries a capability word is matched by a
+  reference taker (`v2.6.0-beta` on netid 8762 and `v3.0.0-beta` on netid
+  6133): the reference sends `TakerConnect`, and its `orderbook` shows the
+  order under the Reloaded maker's bech32 account; mirrored for a
+  Reloaded taker whose `TakerRequest` carries the word, where the
+  reference maker sends `MakerReserved` (R18.11.33). The row needs the
+  Tendermint swap switch on and is a swaps-on lab item.

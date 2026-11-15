@@ -9,6 +9,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
 
+### Added
+
+#### Start-up and configuration
+
+- **The node checks the computer's clock against time servers.** At start, and again every hour
+  and after the computer slept or its clock was set, the node asks NTP time servers for the time
+  and takes the median of their answers. Swaps rely on the clock for their lock times and
+  deadlines. A clock more than 10 seconds off stops the node at start with an error that says by
+  how much the clock is off; swaps that were in progress then wait until the node starts with a
+  correct clock, so setting the clock right is urgent. While the node runs, it refuses new orders
+  and new swaps until the clock is right again; running swaps and withdrawals go on. By default
+  the node asks `0.pool.ntp.org` to `3.pool.ntp.org`; `ntp_servers` in `MM2.json` lists other
+  servers, and `[]` turns the check off. When no server answers, the node logs a warning and goes
+  on, unless `ntp_required` is `true`. Browser builds cannot send the queries and skip the check.
+  Detail: PR #348; CRD ch.45 §45.6C.
+
 ### Changed
 
 #### Tendermint (Cosmos) coins
@@ -21,11 +37,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   as the WalletConnect form, fails request parsing with `InvalidRequest` (HTTP 400) instead of
   activating with the local key. Detail: PR #358; CRD ch.36 §36.7, status note of 2026-11-15
 
+### Fixed
+
+#### QTUM and QRC20
+
+- **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation
+  (`add_delegation`) asked for the lock that lets only one transaction from the wallet be built at
+  a time but did not wait for it, so the lock was never held, and removing one
+  (`remove_delegation`) did not ask for it at all. A delegation and a withdraw started together
+  could therefore be built at the same time. Both delegation calls now wait for the lock, as a
+  withdraw does, so the builds no longer overlap; as with two withdraws, a transaction that is built
+  but not yet broadcast does not keep a later build from choosing the same coins. Detail: PR #354; CRD ch.38 R38.5B.5.
+
 ### Tests
 
 - **The Tendermint unit tests of `coins` now run in CI.** A new CI job runs the Tendermint swap-flow,
   priority-fee and WalletConnect signer tests and the postponed-family switch tests; the loopback
   tests of the native RPC server join the maker-outbox job.
+
+### Plans touched
+
+- [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
+  NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 
 ## [0.4.0-beta.1] — 2026-11-14
 

@@ -60,6 +60,7 @@ use mm2_err_handle::prelude::*;
 #[path = "database.rs"]
 pub mod database;
 
+#[path = "lp_clock_check.rs"] mod lp_clock_check;
 #[path = "lp_dispatcher.rs"] pub mod lp_dispatcher;
 #[path = "lp_message_service.rs"] pub mod lp_message_service;
 #[path = "lp_network.rs"] pub mod lp_network;
