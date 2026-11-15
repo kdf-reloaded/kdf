@@ -70,6 +70,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   could therefore be built at the same time. Both delegation calls now wait for the lock, as a
   withdraw does, so the builds no longer overlap; as with two withdraws, a transaction that is built
   but not yet broadcast does not keep a later build from choosing the same coins. Detail: PR #354; CRD ch.38 R38.5B.5.
+- **QTUM and QRC20 unspent lists and sends now go to the same first Electrum server.** With read
+  spreading on (the default), a list of the wallet's unspent QTUM coins could be answered by a server
+  that had not yet seen a transaction this node had just sent from a QRC20 token, and the node keeps
+  no record of what such a transaction spent. The next send could then choose a coin that is already
+  spent and be rejected. QTUM and each token also rank the servers separately. For QTUM and its
+  tokens, the unspent list no longer takes turns, and the list and every send now go to the servers
+  in the order of the coin's server list (servers that are behind come last), whatever
+  `electrum_server_order` says, so they start at the same server. Their other reads still take turns,
+  and other coins are unchanged. This narrows the gap and does not close it: a server can still
+  answer before it has seen the send, and a token that lists other servers than QTUM does not share
+  its first server. A shared connection and a shared record of spent coins for QTUM and its tokens
+  are planned. Detail: PR #368; CRD ch.38 R38.6.4a.
 
 ### Tests
 
