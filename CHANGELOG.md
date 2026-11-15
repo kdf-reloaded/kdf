@@ -28,11 +28,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 #### Solana coins
 
 - **Solana entries of a coins file in the form GLEEC KDF uses can be read.** Besides its own
-  forms, KDF Reloaded now reads, in native builds, a Solana platform entry with `"protocol_data": {}` and an SPL token
-  entry of type `SOLANATOKEN` with `platform`, `decimals`, `mint_address` and `program_id`. A
+  forms, KDF Reloaded now reads, in native builds, a Solana platform entry with
+  `"protocol_data": {}` and an SPL token entry of type `SOLANATOKEN` with `platform`, `decimals`, `mint_address` and `program_id`. A
   `mint_address` or `program_id` that is not a valid public key makes the entry unreadable, and the
   activation reports a protocol parse error. Solana stays switched off in this build, so no Solana
   coin can be activated yet. Detail: PR #361; CRD ch.40 R40.1.2, R40.1.3.
+
+### Changed
+
+#### Tendermint (Cosmos) coins
+
+- **Tendermint activation refuses a hardware key policy instead of ignoring it.** A request that
+  names the `Trezor` key policy used to activate the coin with the local key without a word; it now
+  fails before any node is contacted, with a `PlatformCoinCreationError` that says the hardware key
+  policy is not supported for Tendermint coins and to activate with the local key. An absent
+  `priv_key_policy`, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
+  as the WalletConnect form, fails request parsing with `InvalidRequest` (HTTP 400) instead of
+  activating with the local key. Detail: PR #358; CRD ch.36 §36.7, status note of 2026-11-15
 
 ### Fixed
 
@@ -45,6 +57,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   could therefore be built at the same time. Both delegation calls now wait for the lock, as a
   withdraw does, so the builds no longer overlap; as with two withdraws, a transaction that is built
   but not yet broadcast does not keep a later build from choosing the same coins. Detail: PR #354; CRD ch.38 R38.5B.5.
+
+### Tests
+
+- **The Tendermint unit tests of `coins` now run in CI.** A new CI job runs the Tendermint swap-flow,
+  priority-fee and WalletConnect signer tests and the postponed-family switch tests; the loopback
+  tests of the native RPC server join the maker-outbox job.
 
 ### Plans touched
 

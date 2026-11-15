@@ -622,6 +622,12 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   `enable_eth_with_tokens` and the `task::enable_eth::*` family, and refuses
   them on the legacy methods, so a client written for GLEEC never sends such a
   request (CRD ch.21 §21.4, ch.55 D55.5).
+- **A Tendermint activation refuses a hardware key policy.** A request that names the `Trezor` `priv_key_policy`
+  fails before any node is contacted, with a `PlatformCoinCreationError` (HTTP 500) that says the hardware key policy
+  is not supported for Tendermint coins and to activate with the local key; GLEEC KDF ignores the member and activates
+  with the local key. An absent value, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
+  as the WalletConnect form (not built yet), fails request parsing with `InvalidRequest` (HTTP 400). No switch exists.
+  CRD ch.36 §36.7. PR #358.
 - **Tendermint (Cosmos) coins and tokens are wallet-only in this beta.**
   Activation, balances and `withdraw` work; `setprice`, `buy`, `sell` and
   `start_swap` refuse the coin with the usual "… is wallet only" answer, and an
