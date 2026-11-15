@@ -1,6 +1,6 @@
 # Plan: QTUM/QRC20 activation, transport, history, and swap stabilization
 
-**Status:** in progress (state check 2026-11-15; P1 in PR #354, P0 in PR #TBD; P2 and P3 next) — **Last reviewed:** 2026-11-15
+**Status:** in progress (state check 2026-11-15; P1 in PR #354, P0 in PR #356; P2 and P3 next) — **Last reviewed:** 2026-11-15
 
 > **Context:** this plan was created after the 2026-08-05 wallet-log maintenance pass.
 > That run showed long-lived QRC20 history failures and separate QTUM and QRC20
