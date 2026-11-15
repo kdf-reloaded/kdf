@@ -53,6 +53,11 @@ Reloaded ships some of it and lacks the rest, so the chapter is split:
   connection pool of §38.6.4 is partly built (its as-built note of 2026-10-27
   lists what remains), and P2PK (R38.6.3) and
   the Verus-family script label (R38.6.8) are built on dev (see their notes).
+  *Status note (2026-11-15, clean side):* the label "NOT yet in reloaded"
+  records the state at the audit. By the 0.4.0-beta.1 release the Electrum
+  connection pool of §38.6.4 is built, with the staleness checks of R38.6.4o
+  and the measured order of R38.6.4l; each rule of §38.6 carries its own
+  as-built or status note, and those notes, not this label, give the state.
 - **§38.8 (T-PORT, required, built on dev; status corrected 2026-11-04):**
   software (non-hardware) global-HD UTXO accounts -- storage availability,
   account-`0` bootstrap at activation, `get_new_address` advance, and gap/scan
@@ -1722,6 +1727,14 @@ failure, naming each server, from the activation itself.
 >   platform coin's client; QRC20 and Qtum do the same; a ZCoin has no override, since its Electrum client is only a
 >   fallback for swap-path reads. `electrum_servers` has the field `chain_disagreement`. With `electrum_tip_checks` `false` nothing of this
 >   runs.
+>
+>   *Correction (2026-11-15, clean side).* A QRC20 token does not answer from its platform coin's client: it is
+>   built with Electrum client fields of its own (the token builder builds them from the token's entry), and its
+>   `chain_disagreement` reads that client (`qrc20_mm_coin.rs`). Its disagreement state is therefore the state of
+>   its own pool, not of the QTUM pool, and a QTUM coin and its tokens can be in different states. A Qtum coin
+>   answers from its own client, as every platform coin does. The SLP and ZCoin parts of the sentence above are
+>   unchanged. Whether a token should share its platform's pool is open in
+>   the plan `qtum-qrc20-stabilization`.
 > - *Tests.* `t38_6_4o_6_a_far_ahead_server_fails_the_activation`,
 >   `t38_6_4o_8_different_headers_fail_the_activation_only_below_the_tip`, `t38_6_4o_12_two_servers_stale_or_diverged`,
 >   `t38_6_4o_13_the_activation_window_does_not_wait_for_a_silent_server`,
@@ -3793,6 +3806,15 @@ minimum relay fee follows the same lifetimes.
 > own entry is neither validated nor consulted. An invalid value found when a
 > lifetime is asked for after activation (it cannot normally happen) is logged and
 > the coin reads afresh.
+>
+> *Correction (2026-11-15, clean side).* The sentence above holds for SLP, not for
+> QRC20. A QRC20 token is built by the UTXO configuration builder from its own
+> entry, so its own `fee_estimate_cache_secs` is validated at activation, and it
+> reads its fee through its own Electrum client under its own ticker
+> (`utxo_common::get_tx_fee` on the token's fields), not through the platform
+> coin's client. The lifetime of that reading follows the token's own
+> `fee_estimate_cache_secs`, else the QTUM entry's, else the node's setting or
+> the adaptive default (R38.6.6k items 1 to 3; `request_fee_scope::fee_estimate_lifetime`).
 
 R38.6.6l *Explicit withdraw fee descriptors: the reference's arithmetic
 (reference-bound; authored by the KDF Spec Reader 2026-11-03 from the rows
@@ -4762,3 +4784,10 @@ R38.8.6 **Tests (two-direction, observable).**
   forbidden corpus. The input is the maintainer's decision of 2026-11-14. It
   takes no forbidden-class input, so chapter 01 R38 is not engaged and no gate
   pass is required.
+- *Reloaded-original corrections (2026-11-15), clean side -- dated notes after the
+  §38.6 bullet of §38.0, after the R38.6.4o as-built note's sentence on which
+  client a token answers from, and after the per-coin fee-lifetime passage of
+  R38.6.6k: QRC20 tokens use Electrum client fields of their own.* Written by a
+  session that never read the forbidden corpus. The input is this repository's
+  code. It takes no forbidden-class input, so chapter 01 R38 is not engaged and
+  no gate pass is required.
