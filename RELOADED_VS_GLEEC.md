@@ -619,15 +619,18 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   CRD ch.36 §36.7. PR #358.
 - **A Tendermint coin's transaction history differs from GLEEC KDF in three ways.** (1) While the first read of the
   chain runs, the history state is `InProgress` (with `{"transactions_left": n}`); GLEEC KDF reports `NotStarted`
-  until the first read ends, and a failed first balance read ends its fetcher silently where KDF Reloaded retries it.
+  until the first read ends (§36.14.1 R36.14.11), and a failed first balance read ends its fetcher silently where KDF
+  Reloaded retries it (§36.14.1 finding 4).
   (2) A fee-only transaction counts its fee once (GLEEC KDF counts it twice), a reward claim counts the fee it cost
   (GLEEC KDF leaves it out), a transaction that touches several validators gets one row per validator (GLEEC KDF one
-  row), and `tx_hex` holds the signed transaction (GLEEC KDF the first message, which cannot be broadcast). (3) A
+  row) (all three: §36.14.1 finding 5), and `tx_hex` holds the signed transaction (GLEEC KDF the first message, which
+  cannot be broadcast; D36.12). (3) Provisional, suspended pending the §36.14.6 precision round: a
   denomination gets a row when it is the platform's, a token activated on this platform (a custom token included) or a
   coins-file token whose `platform` is this coin; GLEEC KDF takes the first coins-file entry with that denomination,
-  whatever its platform, and never lists a custom token. The row identifier and the stored form are the same as
-  GLEEC KDF's, so a data directory can move between the two. No switch exists. Native builds only. CRD ch.36
-  §36.14.1 (D36.10, D36.11, D36.12, D36.13). PR #N.
+  whatever its platform, and never lists a custom token (§36.14.1 finding 7). The row identifier and the stored form
+  are meant to be the same as GLEEC KDF's (one case pending a precision round), so a data directory can move between
+  the two (§36.14.1 findings 1 and 2). No switch exists. Native builds only. CRD ch.36
+  §36.14.1 (D36.10, D36.11, D36.12, D36.13). PR #363.
 - **Tendermint (Cosmos) coins and tokens are wallet-only in this beta.**
   Activation, balances and `withdraw` work; `setprice`, `buy`, `sell` and
   `start_swap` refuse the coin with the usual "… is wallet only" answer, and an

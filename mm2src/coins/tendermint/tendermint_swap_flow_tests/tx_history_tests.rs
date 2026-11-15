@@ -572,6 +572,40 @@ fn the_store_serves_by_height_then_identifier_for_the_account_only() {
     assert_eq!(token_page.transactions[0].internal_id.0[0], 9);
 }
 
+#[test]
+fn a_memo_equal_to_the_address_does_not_put_a_row_in_the_account_scope() {
+    // R36.14.2: the account scope binds the `from` and `to` lists, not any text of the row.
+    let storage = SqliteTxHistoryStorage::in_memory();
+    common::block_on(storage.init("IRIS")).unwrap();
+    let mut memo_row = details(1, 10, "iaa1stranger", None);
+    memo_row.memo = Some(ME.to_owned());
+    let mut to_row = details(2, 9, "iaa1stranger", None);
+    to_row.to = vec![ME.to_owned()];
+    let own_row = details(3, 8, ME, None);
+    common::block_on(storage.add_transactions_to_history("IRIS", vec![memo_row, to_row, own_row])).unwrap();
+
+    let scope = || HistoryCoinType::AccountCoin {
+        ticker: "IRIS".to_owned(),
+        address: ME.to_owned(),
+    };
+    let page = common::block_on(storage.get_history(scope(), PagingOptionsEnum::default(), 10)).unwrap();
+    let ids: Vec<u8> = page.transactions.iter().map(|d| d.internal_id.0[0]).collect();
+    assert_eq!(ids, vec![2, 3]);
+    assert_eq!(page.total, 2);
+
+    // Paging counts the filtered set: the second page of one row holds the second row.
+    let second = common::block_on(storage.get_history(
+        scope(),
+        PagingOptionsEnum::PageNumber(std::num::NonZeroUsize::new(2).unwrap()),
+        1,
+    ))
+    .unwrap();
+    assert_eq!(second.transactions.len(), 1);
+    assert_eq!(second.transactions[0].internal_id.0[0], 3);
+    assert_eq!(second.skipped, 1);
+    assert_eq!(second.total, 2);
+}
+
 // ---------------------------------------------------------------------------
 // The fetcher against the scripted node (R36.14.3, R36.14.4, R36.14.11)
 // ---------------------------------------------------------------------------

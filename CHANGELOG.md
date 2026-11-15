@@ -36,7 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   left; it is `Finished` afterwards. A fee-only transaction counts its fee once, a reward claim
   counts the fee it cost, a transaction touching several validators gets one row per validator, and
   `tx_hex` is the signed transaction. The history of a refunded HTLC or a completed undelegation has
-  no row, because the chain records no transaction for them. Native only in 0.5.0: the browser build has no versioned history store for any coin family. Detail: PR #N;
+  no row, because the chain records no transaction for them. Native only in 0.5.0: the browser build has no versioned history store for any coin family. Detail: PR #363;
   CRD ch.36 §36.14.1.
 
 ### Changed
@@ -72,7 +72,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Plans touched
 
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
-  Tendermint transaction history, is built in PR #N.
+  Tendermint transaction history, is built in PR #363.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 

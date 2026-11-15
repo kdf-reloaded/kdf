@@ -1,6 +1,6 @@
 # Plan: Tendermint activation features
 
-**Status:** in progress (items 2, 3 and 5's refusal are done; item 4, transaction history, is built in PR #N (0.5.0); open: the WalletConnect form and the public-key form (item 1), item 6 (not in 0.5.0), the hardware signing package (item 7), the per-swap lock choice and the chain-refund path (CRD ch.18 D18.11.1–D18.11.3), and turning Tendermint swaps on again; deferred by maintainer decision 2026-10-11, custom tokens and the HD `path_to_address` shipped in PR #319, the swap-path fixes and the priority fees in PRs #299 and #323) — **Last reviewed:** 2026-11-15
+**Status:** in progress (items 2, 3 and 5's refusal are done; item 4, transaction history, is built in PR #363 (0.5.0); open: the WalletConnect form and the public-key form (item 1), item 6 (not in 0.5.0), the hardware signing package (item 7), the per-swap lock choice and the chain-refund path (CRD ch.18 D18.11.1–D18.11.3), and turning Tendermint swaps on again; deferred by maintainer decision 2026-10-11, custom tokens and the HD `path_to_address` shipped in PR #319, the swap-path fixes and the priority fees in PRs #299 and #323) — **Last reviewed:** 2026-11-15
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity`. That branch brings Tendermint activation to wire
@@ -83,12 +83,15 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    token is marked custom and is wallet-only.
 4. **`tx_history: true`** starts background transaction-history fetching
    (Reloaded accepts the flag and does nothing).
-   *Built in PR #N (0.5.0).* `tx_history: true` on the platform coin starts the
+   *Built in PR #363 (0.5.0).* `tx_history: true` on the platform coin starts the
    fetcher of CRD ch.36 R36.14.3; `my_tx_history` serves the platform coin and
    its tokens from the platform's store (R36.14.1, R36.14.2). Decided
    2026-11-15: the history state is `InProgress` during the first pass
-   (D36.10 (b)); the store is byte-compatible with the reference (D36.11 (a));
-   amounts follow D36.12 (b); denominations resolve by D36.13 (b); no row for a
+   (D36.10 (b)); the store is meant to be byte-compatible with the reference as R36.14.10
+   states it (D36.11 (a); unit-tested against the chapter's wording, not yet
+   checked against a store written by GLEEC KDF; one case pending a precision
+   round); amounts follow D36.12 (b); denominations resolve as D36.13 (b) in
+   isolation (provisional, suspended pending §36.14.6); no row for a
    chain-side HTLC refund or a completed undelegation (D36.14), which stays a
    planning question. Native builds only.
 5. **Hardware `priv_key_policy`.** The reference ignores `priv_key_policy` for
@@ -113,7 +116,7 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
 
 ## Order
 
-Items 2 and 3 are done, and item 4 is built (PR #N). The remaining order:
+Items 2 and 3 are done, and item 4 is built (PR #363). The remaining order:
 WalletConnect (item 1a) and the public-key form (item 1b), then item 5's future
 package (item 7). Item 6 is not in 0.5.0.
 

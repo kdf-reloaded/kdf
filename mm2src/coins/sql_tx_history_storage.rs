@@ -198,6 +198,56 @@ fn quoted_address_pattern(address: &str) -> String {
     pattern
 }
 
+/// The rows of an account-scoped read (CRD ch.36 R36.14.2). The `LIKE` pattern only pre-selects: it also matches a
+/// row whose memo (or any other text) equals the address, and R36.14.2 binds the `from` and `to` lists. So the
+/// selected rows are read in the served order and kept only when `from` or `to` holds the address; the total, the
+/// page offset and the `FromId` position are counted on that kept set.
+fn account_history(
+    conn: &Connection,
+    mut sql_builder: SqlBuilder,
+    params: &[String],
+    address: &str,
+    paging: PagingOptionsEnum<BytesJson>,
+    limit: usize,
+) -> Result<GetHistoryResult, SqlError> {
+    sql_builder.field("details_json");
+    sql_builder.order_asc("confirmation_status");
+    sql_builder.order_desc("block_height");
+    sql_builder.order_asc("internal_id");
+    let sql = sql_builder
+        .sql()
+        .map_err(|e| SqlError::InvalidParameterName(e.to_string()))?;
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query(params_from_iter(params.iter()))?;
+    let mut kept = Vec::new();
+    for details in rows.mapped(tx_details_from_row) {
+        let details = details?;
+        if details.from.iter().chain(details.to.iter()).any(|a| a == address) {
+            kept.push(details);
+        }
+    }
+    let total = kept.len();
+    let offset = match paging {
+        PagingOptionsEnum::PageNumber(page) => (page.get() - 1) * limit,
+        PagingOptionsEnum::FromId(id) => match kept.iter().position(|d| d.internal_id == id) {
+            Some(position) => position + 1,
+            None => {
+                return Ok(GetHistoryResult {
+                    transactions: vec![],
+                    skipped: 0,
+                    total,
+                })
+            },
+        },
+    };
+    let transactions = kept.into_iter().skip(offset).take(limit).collect();
+    Ok(GetHistoryResult {
+        transactions,
+        skipped: offset,
+        total,
+    })
+}
+
 #[derive(Clone)]
 pub struct SqliteTxHistoryStorage(pub Arc<Mutex<Connection>>);
 
@@ -468,6 +518,12 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
             let conn = selfi.0.lock().unwrap();
             // `params` are the leading numbered parameters of every statement below: the token id, and for an
             // account-scoped read the pattern of the account's quoted address (CRD ch.36 R36.14.2).
+            let account_address = match &coin_type {
+                HistoryCoinType::AccountCoin { address, .. } | HistoryCoinType::AccountToken { address, .. } => {
+                    Some(address.clone())
+                },
+                _ => None,
+            };
             let (mut sql_builder, params) = match coin_type {
                 HistoryCoinType::Coin(ticker) => (get_history_builder_preimage(&ticker)?, vec!["".to_owned()]),
                 HistoryCoinType::Token { platform, token_id } => {
@@ -495,6 +551,10 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
                 },
                 HistoryCoinType::L2 { .. } => unreachable!("L2 history is rejected before entering async_blocking"),
             };
+
+            if let Some(address) = account_address {
+                return Ok(account_history(&conn, sql_builder, &params, &address, paging, limit)?);
+            }
 
             let mut total_builder = sql_builder.clone();
             total_builder.count("id");

@@ -761,7 +761,7 @@ terms; the clean implementer works from this list):
    (unit, HTTP 400).
 9. **`tx_history`.** Reloaded accepts `true` but starts no history fetching.
    Bound: background history fetching starts after activation.
-   *Status note (2026-11-15, Reloaded-original).* Closed by PR #N: `tx_history:
+   *Status note (2026-11-15, Reloaded-original).* Closed by PR #363: `tx_history:
    true` starts the fetcher of R36.14.3 and the divergence recorded here no
    longer exists (§36.14.1).
 10. **`protocol` member of `UnexpectedPlatformProtocol` /
@@ -1510,7 +1510,7 @@ count, so a remaining-transactions figure is available).
 > it is `Error` with `additional_info` `{"message": <text>}` only when the
 > fetcher has stopped for good or the history store cannot be prepared or
 > written. A failed first balance read is retried after the 30-second pause,
-> not silent. Built in PR #N; tests T36.38.
+> not silent. Built in PR #363; tests T36.38.
 
 D36.11 *(maintainer decision.)* *Interchange with a store written by the
 reference.* A user who moves a data directory between the reference and
@@ -1531,13 +1531,15 @@ is the persistent-data compatibility the project keeps by default.
 > identifier (R36.14.10, from the transfer position and the upper-case hash)
 > and the stored form (base-unit amounts scaled when served, the fee row in
 > display units, a zero stored balance change) are byte-compatible with the
-> reference, and each write first deletes the rows under the two earlier
+> reference as R36.14.10 states it (unit-tested against the chapter's wording;
+> not yet checked against a store written by GLEEC KDF; the position count of a
+> transfer without a row is provisional, see the as-built note), and each write first deletes the rows under the two earlier
 > 32-byte identifier forms (finding 2). Finding 1's remedy applies: a stored
 > amount that is not a non-negative integer is answered as `StorageError`,
 > never an abort. The identifier depends on the build's word size, as at the
 > reference. The identifier and the stored form are each computed in one
 > function (`history_internal_id`, `stored_form` and `served_form` of
-> `mm2src/coins/tendermint/tendermint_tx_history.rs`). Built in PR #N; test
+> `mm2src/coins/tendermint/tendermint_tx_history.rs`). Built in PR #363; test
 > T36.37.
 
 D36.12 *(maintainer decision.)* *Amounts of fee-only transactions and
@@ -1560,7 +1562,7 @@ decision; recommended: yes.
 > its fee in `spent_by_me` and `total_amount`; `tx_hex` is the raw signed
 > transaction; a transaction that delegates to, undelegates from or claims from
 > several validators gets one row per validator, the first of them bearing the
-> fee. Built in PR #N; test T36.34.
+> fee. Built in PR #363; test T36.34.
 
 D36.13 *(maintainer decision.)* *Which denominations get rows, and under
 which ticker.* Options: (a) the reference's lookup (finding 7); (b) a
@@ -1571,14 +1573,16 @@ row. Recommended: (b). Under (b) a token activated after the transfers
 happened still shows them only when the fetcher reads those transactions
 again, which D36.11 and finding 3 bear on.
 
-> **Status note (2026-11-15, Reloaded-original).** Decided: (b). A
+> **Status note (2026-11-15, Reloaded-original).** Provisional: the decision
+> is suspended pending the §36.14.6 precision round; the code resolves
+> denominations as (b) in isolation. A
 > denomination resolves, in this order, to the platform coin, to a token
 > activated on this platform (a custom token included), and to a
 > coins-configuration entry of type `TENDERMINTTOKEN` whose `platform` is this
 > coin; the row's `coin` and decimals are those of the match. Anything else
 > gets no row. The fetcher resolves again for every page, so a token activated
 > later is recognized from the next page on; a transfer read before that
-> shows only when its transaction is read again. Built in PR #N; tests T36.31,
+> shows only when its transaction is read again. Built in PR #363; tests T36.31,
 > T36.35.
 
 D36.14 *(decided for 0.5.0 by the maintainer's decision of 2026-11-15: no
@@ -1609,7 +1613,7 @@ clients.
 > `docs/plans/tendermint-activation-features.md`.
 
 > **As-built note (2026-11-15, Reloaded-original).** R36.14.1 -- R36.14.12 are
-> built in PR #N in `mm2src/coins/tendermint/tendermint_tx_history.rs`.
+> built in PR #363 in `mm2src/coins/tendermint/tendermint_tx_history.rs`.
 > `rows_for_tx` classifies one transaction from its result events (R36.14.5 --
 > R36.14.9); `history_internal_id`, `fee_row_internal_id`,
 > `obsolete_internal_ids`, `stored_form` and `served_form` hold R36.14.10 and
