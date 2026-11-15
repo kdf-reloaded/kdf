@@ -47,8 +47,9 @@ A page has no raw sockets, accepts no inbound connections, sends no UDP, and the
 therefore refuses or ignores the following; use a native build where you need them:
 
 - **Lightning**: its peers need raw TCP (only possible behind a WebSocket-to-TCP proxy).
-- **Electrum over TCP or SSL**: use the coin's WS/WSS servers. Server key pinning (`spki_sha256`) and
-  `disable_cert_verification` have no effect, because the browser checks certificates itself.
+- **Electrum over TCP or SSL**: use the coin's WS/WSS servers. A server entry that carries `spki_sha256` is
+  refused (a browser cannot check a pin) and the coin's other servers are used; `disable_cert_verification`
+  has no effect, because the browser checks certificates itself.
 - **Native-daemon (coin daemon) mode** for UTXO coins.
 - **Seed and relay node roles**: a browser node is a light node and uses WSS relays only.
 - **DNS resolver settings**: the browser resolves names.

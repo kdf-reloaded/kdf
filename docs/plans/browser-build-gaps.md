@@ -39,8 +39,8 @@ family; the whole RPC is a stub there. The native RPC has two routes, and neithe
 ### G2 — Wallet management and the encrypted-passphrase start (small–medium)
 
 A browser user has no wallet-management RPCs: `create_wallet`, `delete_wallet`, `get_wallet_names`,
-`get_mnemonic` and `change_mnemonic_password` answer `NoSuchMethod`, and a start with an encrypted passphrase or a
-wallet name is refused. The work is an IndexedDB-backed wallet store and the start path that reads it.
+`get_mnemonic` and `change_mnemonic_password` answer `NoSuchMethod`; a start with an encrypted passphrase is
+refused, and the `wallet_name` and `wallet_password` settings are ignored. The work is an IndexedDB-backed wallet store and the start path that reads it.
 
 ### G3 — Event delivery to the page (small)
 
@@ -86,7 +86,8 @@ browser build; [`docs/WASM_BUILD.md`](../WASM_BUILD.md) lists them for users.
 - **Electrum over TCP or SSL, key pinning (`spki_sha256`) and `disable_cert_verification`.** A page reaches
   Electrum servers over WS/WSS only, and the browser owns TLS, so a pin cannot be checked and certificate
   verification cannot be switched off.
-- **Native-daemon (coin daemon) mode.** Needs the daemon's configuration on disk and a CORS-free RPC.
+- **Native-daemon (coin daemon) mode.** Needs the daemon's configuration file on disk, and an RPC that answers
+  cross-origin requests from the page, which coin daemons do not do.
 - **Node roles.** No inbound connections: a browser node is a light node; seed and relay roles are refused
   unless the P2P layer runs in memory. P2P uses WSS relays only.
 - **DNS resolver settings.** Ignored; the browser resolves names.
@@ -112,9 +113,9 @@ Three small fixes found by the probe are handled outside this plan and the shiel
   today's tree (whether it matched the tree of its day was not checked). The released section is not edited;
   this note records the source. Moving Lightning to the browser would bring the second copy back; moving the
   shielded stack would not.
-- **`wasm-opt`.** The `wasm-opt` bundled with `wasm-pack` rejects the module today's compiler emits (bulk-memory
-  instructions). The daemon's release profile already turns `wasm-opt` off; turning it on for size needs a newer
-  `wasm-opt` or `--enable-bulk-memory`.
+- **`wasm-opt`.** The `wasm-opt` bundled with `wasm-pack` rejected the probe's modules (bulk-memory
+  instructions). The daemon's bundle does not meet this, because its release profile turns `wasm-opt` off;
+  turning it on for size needs a newer `wasm-opt` or `--enable-bulk-memory`.
 - **Random source.** `getrandom` 0.2 and 0.3 are wired for the browser through the workspace; a crate that pulls
   `getrandom` 0.4 would need its own wiring.
 
