@@ -9,6 +9,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
 
+### Fixed
+
+#### QTUM and QRC20
+
+- **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation
+  (`add_delegation`) asked for the lock that lets only one transaction from the wallet be built at
+  a time but did not wait for it, so the lock was never held, and removing one
+  (`remove_delegation`) did not ask for it at all. A delegation and a withdraw started together
+  could therefore pick the same coins. Both delegation calls now wait for the lock, as a withdraw
+  does. Detail: PR #TBD; CRD ch.38 R38.5B.5.
+
 ## [0.4.0-beta.1] — 2026-11-14
 
 Within each heading, entries are grouped by area. Each entry ends with the pull request that made

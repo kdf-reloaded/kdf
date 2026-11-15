@@ -805,6 +805,14 @@ is returned. Two withdraws are therefore serialized against each other during
 building, but nothing orders a withdraw's result against a later listing once
 it has returned.
 
+*Status note (2026-11-15, clean side; defect fix).* In this tree the QTUM
+delegation builds, adding and removing a delegation, hold the same
+process-wide build lock from their listing through signing. Before this fix
+the adding build asked for the lock without waiting for it, so the lock was
+never held, and the removing build did not ask for it; either could be built
+at the same time as a withdraw from the same address and select the same
+inputs.
+
 R38.5B.6 **Rejection shape on the legacy broadcast path.** (Reference-bound
 at both rows; also the baseline's behaviour.) When the backend refuses a
 `send_raw_transaction` broadcast -- a mempool conflict (the transaction spends
