@@ -291,7 +291,7 @@ preimage/conversion flows.
   parsed yet, Solana is native-only, and the primary surface's wire shapes are
   not yet bound in the CRD. Work package: `docs/plans/solana-support.md`.
   *Status 2026-11-15:* the configuration forms are read (PR #361) and the
-  primary surface is bound in ch. 40 §40.3A (PR #N); the `experimental::`
+  primary surface is bound in ch. 40 §40.3A (PR #371); the `experimental::`
   methods and WASM remain.
 - [ ] For the next beta, run a clean-room CRD pass before implementation.
 - [ ] Before Solana is switched back on, mark the unsupported RPC/swap paths

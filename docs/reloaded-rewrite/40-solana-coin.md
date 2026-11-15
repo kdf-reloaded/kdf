@@ -438,7 +438,7 @@ refuses every request; see the availability note at the top of this chapter):
 
 > **Reloaded status (clean side, 2026-11-15).** Re-evaluated: by the
 > maintainer's decision of 2026-11-15 the primary surface maps its failures
-> as the compatibility surface does; §40.3A binds it. PR #N.
+> as the compatibility surface does; §40.3A binds it. PR #371.
 
 > **Code-quality finding (informative; trigger: a code comment states the
 > problem).** The reference's Solana key-policy handling is acknowledged in the
@@ -567,7 +567,7 @@ This completes R40.1.2-R40.1.3.
 
 > **Reloaded status (clean side, 2026-11-15).** Reloaded fixes the
 > platform's decimals at 9 and reads a token's decimals from
-> `protocol_data` only (R40.3A.5, PR #N); before, it read a platform
+> `protocol_data` only (R40.3A.5, PR #371); before, it read a platform
 > entry's top-level `decimals`. `derivation_path` is not read under a
 > single-key login.
 
@@ -1429,7 +1429,7 @@ session; see `docs/plans/solana-support.md`.
 
 > **Reloaded status (clean side, 2026-11-15).** The configuration forms are
 > read since PR #361 (status note after R40.1.3); the primary surface's wire
-> shapes are bound in §40.3A (PR #N). The `experimental::` methods remain.
+> shapes are bound in §40.3A (PR #371). The `experimental::` methods remain.
 
 D40.4 Switching Solana back on (planned for the next beta; maintainer decision
 2026-10-26): set `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable the Solana

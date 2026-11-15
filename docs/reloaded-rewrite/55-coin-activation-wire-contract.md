@@ -513,7 +513,7 @@ other row the public reference is silent and the reference release decides.
 > `enable_spl` is `Transport` (HTTP 500), as the Solana rows above state; an
 > invalid token address is `TokenProtocolParseError`. Initialising inline
 > tokens contacts no node on that surface yet, so the `Transport` row with
-> HTTP 502 is not reached there. Chapter 40 §40.3A binds the surface. PR #N.
+> HTTP 502 is not reached there. Chapter 40 §40.3A binds the surface. PR #371.
 >
 > **Error texts (pointer, 2026-10-28).** The `error` text of these rows stays
 > unbound, but what it may say about a node is bound by the owning chapters:
