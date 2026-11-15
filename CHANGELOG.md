@@ -41,7 +41,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   requests**, in the same way as the order-management methods above: legacy members inside `params`, legacy
   result under `result` with `id` echoed, typed `error_type` with an HTTP status (400 for a request the client
   got wrong, 500 for a node failure, 503 while the computer's clock is off), unknown `params` members ignored,
-  legacy forms and answers unchanged. `get_trade_fee` stays legacy-only: the reference documentation marks it
+  legacy forms and success bodies unchanged, legacy error texts as for the order-management methods (no inner
+  trace tokens). `get_trade_fee` stays legacy-only: the reference documentation marks it
   deprecated in favor of the versioned `trade_preimage`. Detail: PR #372; CRD ch.43 §43.1R.
 
 #### Solana coins
