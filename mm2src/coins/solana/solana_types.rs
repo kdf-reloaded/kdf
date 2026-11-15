@@ -154,7 +154,7 @@ fn generate_keypair_from_slice(priv_key: &[u8]) -> Result<Keypair, MmError<KeyPa
 
 pub async fn solana_coin_from_conf_and_params(
     ticker: &str,
-    conf: &Json,
+    _conf: &Json,
     params: SolanaActivationParams,
     priv_key: &[u8],
 ) -> Result<SolanaCoin, String> {
@@ -166,7 +166,8 @@ pub async fn solana_coin_from_conf_and_params(
         commitment: params.confirmation_commitment,
     })
     .ok_or_else(|| "Solana RPC pool initialisation returned no clients".to_owned())?;
-    let decimals = conf["decimals"].as_u64().unwrap_or(SOLANA_DEFAULT_DECIMALS) as u8;
+    // The platform has 9 decimals whatever the entry says (CRD ch.40 R40.6B.2); no top-level key is read.
+    let decimals = SOLANA_DEFAULT_DECIMALS as u8;
     let key_pair = try_s!(generate_keypair_from_slice(priv_key));
     let my_address = key_pair.pubkey().to_string();
     let spl_tokens_infos = Arc::new(Mutex::new(HashMap::new()));

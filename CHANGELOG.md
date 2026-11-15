@@ -59,6 +59,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   as the WalletConnect form, fails request parsing with `InvalidRequest` (HTTP 400) instead of
   activating with the local key. Detail: PR #358; CRD ch.36 §36.7, status note of 2026-11-15
 
+#### Solana coins
+
+- **Solana activation errors follow the shapes GLEEC KDF uses, and a token address is checked when
+  the coins file is read.** On `enable_solana_with_tokens` a failed block-height or balance read
+  is now `PlatformCoinCreationError` with the platform ticker instead of `Internal`, and on
+  `enable_spl` a node failure stays `Transport`. An SPL token entry whose `token_contract_address`
+  is not a valid public key is now `TokenProtocolParseError` instead of `Internal`. The Solana
+  platform always counts 9 decimals; a `decimals` value in its coins entry is ignored, and a token
+  takes its decimals from `protocol_data` only. Solana stays switched off in this build. Detail:
+  PR #N; CRD ch.40 §40.3A, R40.6B.2.
+
 ### Fixed
 
 #### QTUM and QRC20
@@ -91,7 +102,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361.
+  packages S0 and S2 done in PR #361, S1 in PR #N.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 

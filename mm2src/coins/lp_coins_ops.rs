@@ -1057,7 +1057,7 @@ mod postponed_family_switch_tests {
     fn solana_protocols_are_refused_while_the_switch_is_off() {
         let spl = CoinProtocol::SPLTOKEN {
             platform: "SOL".to_owned(),
-            token_contract_address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_owned(),
+            token_contract_address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".parse().unwrap(),
             decimals: 6,
         };
         assert_eq!(
