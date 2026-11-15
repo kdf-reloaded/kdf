@@ -765,6 +765,26 @@ mod tests {
         }
     }
 
+    /// CRD ch. 36 §36.7, status note of 2026-11-15: a `priv_key_policy` other than the three known values, such as
+    /// the WalletConnect form or an unknown name, fails request parsing (`InvalidRequest`, string, 400) before the
+    /// activation starts, so nothing is registered and no node is contacted.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn tendermint_activation_unknown_priv_key_policy_is_invalid_request() {
+        let valid = json!({
+            "ticker": "ATOM",
+            "nodes": [{ "url": "http://127.0.0.1:1" }],
+            "tokens_params": [],
+        });
+        for method in ["enable_tendermint_with_assets", "task::enable_tendermint::init"] {
+            for policy in [json!({ "type": "WalletConnect", "data": "x" }), json!("Metamask")] {
+                let mut params = valid.clone();
+                params["priv_key_policy"] = policy;
+                assert_invalid_request(evm_request_failure(method, params));
+            }
+        }
+    }
+
     /// CRD ch. 35 §35.3A: the token task family is routed under its own namespace and an unknown sub-method of it
     /// resolves to the standard no-such-method error.
     #[test]

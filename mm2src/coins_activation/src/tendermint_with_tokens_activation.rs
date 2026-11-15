@@ -22,8 +22,9 @@ use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 use coins::rpc_command::get_my_address::PathToAddress;
 use coins::tendermint::{tendermint_coin_from_conf_and_request, tendermint_coin_from_conf_and_request_with_global_hd,
-                        RpcNode, TendermintCoin, TendermintInitError, TendermintToken, TendermintTokenInitError};
-use coins::{CoinBalance, MarketCoinOps, MmCoinEnum};
+                        RpcNode, TendermintCoin, TendermintInitError, TendermintInitErrorKind, TendermintToken,
+                        TendermintTokenInitError};
+use coins::{CoinBalance, MarketCoinOps, MmCoinEnum, PrivKeyActivationPolicy};
 use common::mm_number::BigDecimal;
 use common::Future01CompatExt;
 use crypto::{CryptoCtx, KeyPairPolicy};
@@ -48,8 +49,10 @@ fn default_get_balances() -> bool { true }
 /// [`reject_unsupported_activation_params`].
 ///
 /// The public docs list `required_confirmations` (default 3), `requires_notarization` and `priv_key_policy` for
-/// this method. The reference ignores all three for Tendermint, since the docs do not state an observable effect,
-/// Reloaded does the same: they are not declared here and so are ignored (CRD ch.36 R36.1.2).
+/// this method. The reference ignores all three for Tendermint, since the docs do not state an observable effect.
+/// Reloaded does the same for the first two: they are not declared here and so are ignored (CRD ch.36 R36.1.2).
+/// `priv_key_policy` is declared: an absent value or `ContextPrivKey` activates as before, a hardware value is
+/// refused, see [`reject_hardware_policy`] (CRD ch.36 §36.7, status note of 2026-11-15).
 #[derive(Clone, Deserialize)]
 pub struct TendermintActivationParams {
     nodes: Vec<RpcNode>,
@@ -65,6 +68,27 @@ pub struct TendermintActivationParams {
     path_to_address: Option<Json>,
     #[serde(default)]
     activation_params: Option<Json>,
+    #[serde(default)]
+    priv_key_policy: Option<PrivKeyActivationPolicy>,
+}
+
+/// Refuses a hardware `priv_key_policy` before any network access: no Tendermint signing path serves a hardware
+/// key yet, and activating with the local key instead would hand a caller a hot-key coin they did not ask for.
+/// An absent value, `ContextPrivKey` and `IguanaPrivKey` are not refused (CRD ch.36 §36.7, status note of
+/// 2026-11-15).
+fn reject_hardware_policy(
+    ticker: &str,
+    priv_key_policy: &Option<PrivKeyActivationPolicy>,
+) -> Result<(), MmError<TendermintInitError>> {
+    match priv_key_policy {
+        Some(policy @ PrivKeyActivationPolicy::Trezor) => MmError::err(TendermintInitError {
+            ticker: ticker.to_owned(),
+            kind: TendermintInitErrorKind::HardwarePolicyNotSupported {
+                policy: format!("{policy:?}"),
+            },
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Rejects a request that asks for a signing policy this build does not provide (CRD ch.36 §36.7, interim
@@ -309,6 +333,7 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
         _protocol_conf: Self::PlatformProtocolInfo,
         priv_key: &[u8],
     ) -> Result<Self, MmError<Self::ActivationError>> {
+        reject_hardware_policy(&ticker, &activation_request.priv_key_policy).mm_err(TendermintActivationError::from)?;
         reject_unsupported_activation_params(&ticker, &activation_request.activation_params)?;
 
         let crypto_ctx = CryptoCtx::from_ctx(&ctx).mm_err(|e| TendermintActivationError::Internal(e.to_string()))?;

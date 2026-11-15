@@ -38,6 +38,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `NoSuchMethod` for these names under `mmrpc: "2.0"`. The remaining legacy-only methods follow in later
   releases (plan `docs/plans/mmrpc-v2-completion.md`). Detail: PR #359; CRD ch.43 §43.1R, D43.1A.1 status note.
 
+### Changed
+
+#### Tendermint (Cosmos) coins
+
+- **Tendermint activation refuses a hardware key policy instead of ignoring it.** A request that
+  names the `Trezor` key policy used to activate the coin with the local key without a word; it now
+  fails before any node is contacted, with a `PlatformCoinCreationError` that says the hardware key
+  policy is not supported for Tendermint coins and to activate with the local key. An absent
+  `priv_key_policy`, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
+  as the WalletConnect form, fails request parsing with `InvalidRequest` (HTTP 400) instead of
+  activating with the local key. Detail: PR #358; CRD ch.36 §36.7, status note of 2026-11-15
+
 ### Fixed
 
 #### QTUM and QRC20
@@ -50,6 +62,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   withdraw does, so the builds no longer overlap; as with two withdraws, a transaction that is built
   but not yet broadcast does not keep a later build from choosing the same coins. Detail: PR #354; CRD ch.38 R38.5B.5.
 
+### Tests
+
+- **The Tendermint unit tests of `coins` now run in CI.** A new CI job runs the Tendermint swap-flow,
+  priority-fee and WalletConnect signer tests and the postponed-family switch tests; the loopback
+  tests of the native RPC server join the maker-outbox job.
 
 ### Plans touched
 
