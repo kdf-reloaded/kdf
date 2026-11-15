@@ -1697,27 +1697,6 @@ clients.
 > limitation shared by every history family and not a Tendermint one. Tests: T36.30 -- T36.39 in
 > `mm2src/coins/tendermint/tendermint_swap_flow_tests/tx_history_tests.rs`.
 
-> **Status note (2026-11-15, Reloaded-original; belongs under §36.14.6 once the
-> branch carries it).** Built of R36.14.19 -- R36.14.22 in `rows_for_tx` and
-> the functions it calls in `tendermint_tx_history.rs`: the repeated-event
-> comparison per event type (`drop_repeated_events`); the transfer list read
-> from the last `transfer` event to the first, a coin counted only with an
-> `amount`, its party attributes, a u64 integer and a denomination that
-> resolves, module correction before merging (`transfers_of`, `push_merged`);
-> the identifier bytes of item 7, including the 32-bit form
-> (`history_internal_id_for_word`); the pairing of R36.14.20 by order, which is
-> D36.22 (a), isolated in `module_event_queue` and `apply_module_event`; the
-> staking events without `delegator`, `validator` or a counted amount giving no
-> row, `unbond` included; a first fee entry above u64 leaving the transaction
-> out; the fee attributed once to the first written entry this account sent
-> (a fee row when that entry is in a token denomination). Tests T36.45 --
-> T36.48 (the reference's values) are in `tx_history_tests.rs`. Waiting for
-> D36.19 -- D36.22 and D36.13: `fee_payment_text` (D36.19), `resolve_denom` and
-> `counted_coins` (D36.13, D36.21), and no row for a transaction with an empty
-> fee list or a staking event without `delegator` (D36.20), which T36.48 (iv)
-> and T36.47 (i) record as not written; the empty-fee-list case has no unit test
-> yet.
-
 ### 36.14.2 WalletConnect activation
 
 R36.14.13 **Accepted form.** At both rows the reference accepts exactly
@@ -2442,3 +2421,24 @@ power 64: no row. (iv) An empty fee list: no row in any history and
 nothing on the history stream, on the first pass and on a second one.
 Under D36.20 (b): one row with `total_amount` 1 and `fee_details`
 `amount` 0.
+
+> **Status note (2026-11-15, Reloaded-original).** Built of R36.14.19 -- R36.14.22 in `rows_for_tx` and
+> the functions it calls in `tendermint_tx_history.rs`: the repeated-event
+> comparison per event type (`drop_repeated_events`); the transfer list read
+> from the last `transfer` event to the first, a coin counted only with an
+> `amount`, its party attributes, a u64 integer and a denomination that
+> resolves, module correction before merging (`transfers_of`, `push_merged`);
+> the identifier bytes of item 7, including the 32-bit form
+> (`history_internal_id_for_word`); the pairing of R36.14.20 by order, which is
+> D36.22 (a), isolated in `module_event_queue` and `apply_module_event`; the
+> staking events without `delegator`, `validator` or a counted amount giving no
+> row, `unbond` included; a first fee entry above u64 leaving the transaction
+> out; the fee attributed once to the first written entry this account sent
+> (a fee row when that entry is in a token denomination). Tests T36.45 --
+> T36.48 (the reference's values) are in `tx_history_tests.rs`. Waiting for
+> D36.19 -- D36.22 and D36.13: `fee_payment_text` (D36.19), `resolve_denom` and
+> `counted_coins` (D36.13, D36.21), and no row for a transaction with an empty
+> fee list or a staking event without `delegator` (D36.20), which T36.48 (iv)
+> and T36.47 (i) record as not written. The empty-fee-list case is checked on the
+> first pass by `transactions_without_a_row_do_not_stop_the_pass`; a second pass
+> and that nothing is offered to the history stream are not asserted yet.
