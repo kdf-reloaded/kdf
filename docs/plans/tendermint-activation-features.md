@@ -1,6 +1,6 @@
 # Plan: Tendermint activation features
 
-**Status:** parked (deferred by maintainer decision 2026-10-11; custom tokens and the HD `path_to_address` shipped in PR #319; the swap-path fixes and the priority fees in PRs #299 and #323; Tendermint swaps added to the 0.4.0 scope on 2026-11-08 and put aside again on 2026-11-10; the per-swap lock choice and the chain-refund path (CRD ch.18 D18.11.1–D18.11.3) not built) — **Last reviewed:** 2026-11-10
+**Status:** parked (deferred by maintainer decision 2026-10-11; custom tokens and the HD `path_to_address` shipped in PR #319; the swap-path fixes and the priority fees in PRs #299 and #323; Tendermint swaps added to the 0.4.0 scope on 2026-11-08 and put aside again on 2026-11-10; the per-swap lock choice and the chain-refund path (CRD ch.18 D18.11.1–D18.11.3) not built) — **Last reviewed:** 2026-11-15
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity`. That branch brings Tendermint activation to wire
@@ -55,6 +55,12 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    - Malformed input is the dispatcher's `InvalidRequest`, never a crash (the
      reference panics on some malformed keys; Reloaded must not).
    - When this lands, drop the interim rejection above.
+   - *State of the parts (2026-11-15).* The coin-side WalletConnect signer exists
+     (`mm2src/coins/tendermint/wc_integration.rs`, `WcCoinSigner`, with unit tests).
+     What does not exist is the activation side: no activation policy variant
+     holds it and no construction site builds a coin with it, so a request cannot
+     reach it. The WalletConnect form (item 1a) and the public-key form (item 1b)
+     are the two remaining pieces of this item.
 2. **HD-wallet mode**: honor `path_to_address` under the coin's derivation path
    (R36.1.2, R36.1.4 step 3). The ch. 36 code-quality finding applies: derive
    the public key from the activated private key, not the wallet's root public
@@ -79,17 +85,26 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    (Reloaded accepts the flag and does nothing).
 5. **Hardware `priv_key_policy`.** The reference ignores `priv_key_policy` for
    Tendermint, so `"Trezor"` silently activates with the context key (ch. 36
-   code-quality finding). Ch. 36 currently binds the reference behavior. Decide
-   whether Reloaded refuses it with `UnexpectedDeviceActivationPolicy` as a
-   deliberate deviation; the same safety argument as the interim rejection of
-   `activation_params` applies.
+   code-quality finding).
+   *Decision (2026-11-15).* An explicit typed refusal of a hardware policy is
+   built (the change that adds this note): the request member is declared, an
+   absent value or `ContextPrivKey` activates as before, and a hardware value
+   is refused before any network access with a typed Tendermint init error,
+   answered as `PlatformCoinCreationError` like the interim rejection of
+   `activation_params`. A deliberate divergence from the reference until
+   hardware signing exists (ch. 36 §36.7, status note of 2026-11-15). Building
+   Trezor signing for Cosmos coins is a future package, item 7.
 6. **Task-managed single token family** `task::enable_tendermint_token::*`
-   (D36.2), if wanted.
+   (D36.2). *Not in 0.5.0 (decision 2026-11-15).*
+7. **Trezor signing for Cosmos coins** (future package, not scheduled). A
+   device-backed signer for Tendermint activations; it would replace the
+   refusal of item 5 for the policies it serves.
 
 ## Order
 
-1 (it removes the interim rejection), then 2, 3, 4. Items 5 and 6 need a
-maintainer decision first.
+Items 2 and 3 are done. The remaining order: history (item 4) first, then
+WalletConnect (item 1a) and the public-key form (item 1b), then item 5's future
+package (item 7). Item 6 is not in 0.5.0.
 
 ## Lab rows owed before swaps are switched on
 
@@ -103,6 +118,20 @@ becomes `true`, in the change that switches swaps on:
   unit tests only.
   *2026-11-10: PASSED on a local single-validator chain with the HTLC module: all four
   policy values gave fees in the ratio of the selected gas prices.*
+- **Activation-feature rows (PR #319).**
+  *2026-11-09: PASSED on the PR #319 build:* the activation and balance of a custom IBC
+  token; the refusal of a duplicate ticker; the refusal of a wallet-only order; HD
+  addresses equal to an independent BIP-44 derivation for the default path and for
+  `address_id` 1; the iguana address identical to that of a control build.
+- **Trade-fee estimate under each swap-fee-policy level (PR #323).**
+  *2026-11-10: PASSED on a local single-validator chain: all four policy values gave
+  fees in the ratio of the gas prices.*
+
+### What the WalletConnect lab row needs on the maintainer's side
+
+A WalletConnect-capable Cosmos wallet (mobile or extension) holding a small ATOM
+balance, the pairing performed against a lab node, and about two hours of
+availability for the row.
 
 ## Latent hazard: a key-less policy on the legacy HTLC path
 
@@ -114,13 +143,13 @@ WalletConnect -- any key-less policy triggers it.
 
 **The path.** `TendermintCoin::get_htlc_key_pair` resolves the activation
 policy's local key and returns `Option<KeyPair>`
-(`mm2src/coins/tendermint/tendermint_swap_ops.rs:711`, via
+(`mm2src/coins/tendermint/tendermint_swap_ops.rs:892`, via
 `TendermintActivationPolicy::activated_key_or_err`); a policy with no local key
 yields `None`. The legacy (v1) maker and taker state machines call it at swap
-start (`mm2src/mm2_main/src/lp_swap/maker_swap.rs:492`,
-`mm2src/mm2_main/src/lp_swap/taker_swap.rs:1006`) and pass the result to
-`derive_htlc_pubkeys` (`mm2src/mm2_main/src/lp_swap.rs:970`), which resolves it
-as `map_or(&node_pubkey, |k| k.public())` (lines 979 and 982): a coin that
+start (`mm2src/mm2_main/src/lp_swap/maker_swap.rs:616`,
+`mm2src/mm2_main/src/lp_swap/taker_swap.rs:1113`) and pass the result to
+`derive_htlc_pubkeys` (`mm2src/mm2_main/src/lp_swap.rs:1027`), which resolves it
+as `map_or(node_pubkey, |k| k.public())` (lines 1035 and 1038): a coin that
 returns no key pair does not fail the swap -- it **silently substitutes this
 node's own persistent secp256k1 public key**. Tendermint does not override
 `SwapOps::derive_htlc_pubkey`, so the default (the secp256k1 case of ch. 51 R64)
@@ -130,11 +159,11 @@ carries that key unchanged into the negotiation as the coin's HTLC pubkey.
 
 - The counterparty derives the HTLC recipient account from it --
   `send_htlc_for_denom` builds `AccountId::new(prefix, dhash160(other_pub))`
-  (`tendermint_swap_ops.rs:162`) -- so the counterparty's payment is locked to
+  (`tendermint_swap_ops.rs:173`) -- so the counterparty's payment is locked to
   an account derived from our node's internal key, not to the account the
   paired external wallet controls.
 - Our own leg then fails late rather than early: every broadcast signs with
-  `activated_key_or_err` (`mm2src/coins/tendermint/tendermint_helpers.rs:533`),
+  `activated_key_or_err` (`mm2src/coins/tendermint/tendermint_helpers.rs:595`),
   which errors for a key-less policy, so the swap aborts mid-flight with a
   transaction error.
 
@@ -145,15 +174,15 @@ funds to the wrong account.
 
 **Latent today, not live.** `TendermintActivationPolicy` has exactly one
 variant, `PrivateKey(PrivKeyPolicy<TendermintKeyPair>)`
-(`mm2src/coins/tendermint/tendermint_types.rs:182`). That alone is not the
+(`mm2src/coins/tendermint/tendermint_types.rs:242`). That alone is not the
 guarantee: `PrivKeyPolicy` does have a key-less variant, `Trezor`, whose
-`key_pair()` returns `None` (`mm2src/coins/lp_coins_context.rs:251`, `269`), and
+`key_pair()` returns `None` (`mm2src/coins/lp_coins_context.rs:305`, `325`), and
 `TendermintActivationPolicy::public_key` already handles it with an
 `Unsupported` error. The guarantee is the construction site --
 `tendermint_coin_from_conf_and_request` is the only place in the tree that
 builds a Tendermint activation policy, and it always builds
 `PrivKeyPolicy::KeyPair` from a concrete private key
-(`mm2src/coins/tendermint/tendermint_coin.rs:95`-`99`). Nothing can hand
+(`mm2src/coins/tendermint/tendermint_coin.rs:174` and `192`). Nothing can hand
 Tendermint `PrivKeyPolicy::Trezor` today. The hazard goes live the moment item 1
 or item 5 adds a second policy variant or a second construction site.
 
@@ -182,6 +211,13 @@ The construction site now builds two policies, `PrivKeyPolicy::KeyPair` (iguana 
 
 **The gate must cover tokens as well as the platform coin.**
 `TendermintToken::get_htlc_key_pair` delegates straight to the platform coin
-(`mm2src/coins/tendermint/tendermint_token.rs:331`), so every IBC/CW20-style
+(`mm2src/coins/tendermint/tendermint_token.rs:401`), so every IBC/CW20-style
 token on a key-less platform coin inherits the hazard unchanged. A fix or a
 regression test written only against the platform coin would miss them.
+
+## Future package: show an HTLC auto-refund in the coin history
+
+*Not in 0.5.0 (decision 2026-11-15).* An HTLC that expires and refunds itself on
+the chain would appear in the coin's transaction history. It needs the history
+fetch of item 4 first, and a check with the wallet applications before a new
+transaction type is added to the history output.

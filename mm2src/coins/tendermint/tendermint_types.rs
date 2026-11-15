@@ -435,6 +435,15 @@ pub enum TendermintInitErrorKind {
         _0
     )]
     PriorityGasPriceNotPositive([f64; 3]),
+    /// The request asks for a hardware key policy, which no Tendermint signing path serves yet (CRD ch.36 §36.7,
+    /// status note of 2026-11-15).
+    #[display(
+        fmt = "the hardware key policy {} is not supported for Tendermint coins in this version; activate with the local key",
+        policy
+    )]
+    HardwarePolicyNotSupported {
+        policy: String,
+    },
 }
 
 impl std::fmt::Display for TendermintInitError {

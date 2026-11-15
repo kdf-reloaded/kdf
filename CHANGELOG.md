@@ -9,6 +9,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
 
+### Changed
+
+#### Tendermint (Cosmos) coins
+
+- **Tendermint activation refuses a hardware key policy instead of ignoring it.** A request that
+  names the `Trezor` key policy used to activate the coin with the local key without a word; it now
+  fails before any node is contacted, with a `PlatformCoinCreationError` that says the hardware key
+  policy is not supported for Tendermint coins and to activate with the local key. An absent
+  `priv_key_policy` and `ContextPrivKey` activate as before. (CRD ch.36 §36.7, status note of
+  2026-11-15)
+
+### Tests
+
+- **The Tendermint unit tests of `coins` now run in CI.** A new CI job runs the Tendermint swap-flow,
+  priority-fee and WalletConnect signer tests and the postponed-family switch tests; the loopback
+  tests of the native RPC server join the maker-outbox job.
+
 ## [0.4.0-beta.1] — 2026-11-14
 
 Within each heading, entries are grouped by area. Each entry ends with the pull request that made

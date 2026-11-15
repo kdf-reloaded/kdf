@@ -281,6 +281,57 @@ fn an_absent_or_null_activation_params_is_not_refused() {
         .contains("activation_params"));
 }
 
+const HARDWARE_REFUSAL: &str = "the hardware key policy Trezor is not supported for Tendermint coins in this version; \
+                                activate with the local key";
+
+/// CRD ch.36 §36.7, status note of 2026-11-15: a hardware `priv_key_policy` is refused with the typed error before
+/// any node is contacted (the exact text, not a node failure), in both accepted spellings of the policy.
+#[test]
+fn a_hardware_priv_key_policy_is_refused_before_any_node_is_contacted() {
+    let ctx = ctx();
+    for policy in [json!("Trezor"), json!({ "type": "Trezor" })] {
+        let wire = failure(&ctx, request(json!({ "priv_key_policy": policy })));
+        assert_creation_error(&wire, PLATFORM);
+        assert_eq!(wire.0["error_data"]["error"], HARDWARE_REFUSAL, "{:?}", wire.0);
+    }
+    // The task form shares the refusal: the activation runs the same code.
+    assert_nothing_registered(&ctx, &[PLATFORM]);
+}
+
+#[test]
+fn an_absent_or_software_priv_key_policy_is_not_refused() {
+    let ctx = ctx();
+    for policy in [
+        json!(null),
+        json!("ContextPrivKey"),
+        json!({ "type": "ContextPrivKey" }),
+        json!("IguanaPrivKey"),
+    ] {
+        // End to end the request proceeds to the nodes, so the error is the node failure, not the policy refusal.
+        let wire = failure(&ctx, request(json!({ "priv_key_policy": policy })));
+        assert_creation_error(&wire, PLATFORM);
+        assert!(
+            !wire.0["error_data"]["error"].as_str().unwrap().contains("hardware"),
+            "{:?}",
+            wire.0
+        );
+    }
+}
+
+#[test]
+fn the_hardware_refusal_is_a_typed_init_error_with_the_policy_named() {
+    let err = reject_hardware_policy(PLATFORM, &Some(PrivKeyActivationPolicy::Trezor)).unwrap_err();
+    let inner = err.get_inner();
+    assert_eq!(inner.ticker, PLATFORM);
+    assert!(matches!(
+        &inner.kind,
+        TendermintInitErrorKind::HardwarePolicyNotSupported { policy } if policy == "Trezor"
+    ));
+    assert_eq!(inner.kind.to_string(), HARDWARE_REFUSAL);
+    assert!(reject_hardware_policy(PLATFORM, &None).is_ok());
+    assert!(reject_hardware_policy(PLATFORM, &Some(PrivKeyActivationPolicy::ContextPrivKey)).is_ok());
+}
+
 // ---------------------------------------------------------------------------
 // T36.16, T36.17: `priority_gas_prices` in the platform's protocol data (R36.3.5)
 // ---------------------------------------------------------------------------

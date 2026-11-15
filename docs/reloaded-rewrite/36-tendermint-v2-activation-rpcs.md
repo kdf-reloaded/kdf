@@ -793,6 +793,19 @@ terms; the clean implementer works from this list):
 > proposed hardening for both lineages: refuse a hardware `priv_key_policy` on
 > Tendermint with `UnexpectedDeviceActivationPolicy` once the maintainer accepts
 > that deviation.
+>
+> **Status note (2026-11-15, Reloaded-original).** Reloaded now declares the
+> `priv_key_policy` request member of `enable_tendermint_with_assets` and of
+> `task::enable_tendermint::init`. An absent value, `ContextPrivKey` and
+> `IguanaPrivKey` activate as before; a hardware value (`Trezor`, bare string or
+> `{"type": "Trezor"}`) is refused before any network access with the typed
+> Tendermint init error `HardwarePolicyNotSupported`, answered as
+> `PlatformCoinCreationError` (`{ticker, error}`, HTTP 500, the same placement as
+> the interim rejection of `activation_params`) with the text "the hardware key
+> policy Trezor is not supported for Tendermint coins in this version; activate
+> with the local key". It is not `UnexpectedDeviceActivationPolicy`. This is a
+> deliberate divergence from the reference, which ignores the member, until
+> hardware signing for Tendermint coins exists.
 
 > **Code-quality finding (informative; trigger: apparent with little extra
 > effort).** In the reference, a malformed `WithPubkey` key (a `value` that is
