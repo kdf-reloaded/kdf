@@ -48,7 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Plans touched
 
-- [`solana-support`](docs/plans/solana-support.md) — parked: checked against the code, gaps
+- [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361.
 - [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
