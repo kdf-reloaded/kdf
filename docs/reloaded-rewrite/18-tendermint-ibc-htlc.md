@@ -879,11 +879,8 @@ The chapter relies on one baseline-state claim:
   the repository's clean-room gate tool was not applicable.
 - *Scoped addition (2026-11-15, Spec Reader round 0.5.0-3) -- §18.11.20
   (R18.11.50 -- R18.11.58, the informative notes, D18.11.10 -- D18.11.12,
-  T18.11.10 -- T18.11.16).* **KDF Dirty Gate: pending** (chapter 01 R40;
-  the subsection carries the pending-clearance marker at the point at
-  which it appears, and every passage in it is marked *(pending gate)*;
-  this item is replaced by the clearance record with the R39 scope
-  attestation when the gate clears it). *Inputs:* the forbidden corpus at
+  T18.11.10 -- T18.11.16).* **KDF Dirty Gate: PASS on 2026-11-15, measure 0.04, no findings**
+  (chapter 01 R40; the attestation closes this item). *Inputs:* the forbidden corpus at
   the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, read
   read-only and consulted **only** to establish, for the Tendermint coin
   and token: whether a coin activated without a local key is refused at
@@ -906,6 +903,35 @@ The chapter relies on one baseline-state claim:
   *Our side* notes, the options of the D-items and the test rows rest on
   this repository's own tree, on `docs/plans/tendermint-activation-features.md`
   and on Chapters 16, 31, 36 and 51.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-15, measure
+  0.04 on the discretionary-expression basis of chapter 01 R35 and R39,
+  judged per token, no findings (the round as a whole: PASS, measure 0.05);
+  the subsection passed two full passes, the second after three passages of
+  the round were reworded. Reference states (chapter 02 R13): exactly two
+  states are named, `v2.6.0-beta` and `v3.0.0-beta`, both rows of §2.15A,
+  compared at the rows' full identifiers; no untabled state was named or
+  compared. Extent: the Tendermint coin's and token's swap-side behavior for
+  a coin without a local key (the wallet-only decision, the announced HTLC
+  public key, the send path through WalletConnect and through the
+  external-data request with its event type and answer member); the readers
+  of the HTLC query answer and the own-payment check's outcomes; the
+  taker-fee validation in its standard and burn forms with the maker's retry
+  figures and outcome event; the family's burn-policy answer — 9 source
+  files read in the relevant parts at `v2.6.0-beta`, `v3.0.0-beta` by a
+  row-to-row difference over the Tendermint coin and token files, the maker
+  and taker swap files, the WalletConnect layer and the external-data
+  request; the refund and manual-recovery paths, the order-time check and
+  the taker swap file covered by the mechanical lists only. Second pass: the
+  full added ranges read again and compared at both rows (mechanical search
+  over 160 source-file instances across the two rows; six files read at
+  `v2.6.0-beta`, row-to-row difference for `v3.0.0-beta`). Method: reading
+  at the tabled states; mechanical comparison against a compound-identifier
+  list and a word 4-gram list of comment and string-literal text from the
+  compared files at both rows; search for every backticked token, each match
+  judged forced or free; scan for identifier-shaped words outside backticks;
+  row-to-row difference; the additions embed no code blocks, so the
+  repository's clean-room gate tool was not applicable. The comparison
+  concerns expression; it does not attest the accuracy of the statements.
 
 ---
 
@@ -1552,29 +1578,27 @@ this section):
   reference maker sends `MakerReserved` (R18.11.33). The row needs the
   Tendermint swap switch on and is a swaps-on lab item.
 
-### 18.11.20 Key-less coins in swaps, the own-payment query, burn-form fee validation and the automatic refund in wallet records (Spec Reader round 0.5.0-3; pending the KDF Dirty Gate)
+### 18.11.20 Key-less coins in swaps, the own-payment query, burn-form fee validation and the automatic refund in wallet records
 
-> **Provenance status: pending the KDF Dirty Gate.** This subsection is a
-> candidate under chapter 01 R40: until the gate clears it and this
-> marker is replaced by the clearance record, it MUST NOT be relied on as
-> a statement of required behavior and MUST NOT be implemented from. It
-> was written by the dirty-side specification author on 2026-11-15 (Spec
-> Reader round 0.5.0-3) from the reference designations `v2.6.0-beta` and
-> `v3.0.0-beta` (both rows of chapter 02 §2.15A, read read-only; no
-> untabled state was read), from the public Cosmos SDK, irismod and
-> CometBFT interface definitions, and from this repository's own tree.
-> The two designations agree on every rule of this subsection (R18.11.27
-> continues to hold). Every passage below is marked *(pending gate)*
-> until cleared. **Numbering:** the subsection number 18.11.20, the rules
-> R18.11.50 -- R18.11.58, the decisions D18.11.10 -- D18.11.12 and the
-> tests T18.11.10 -- T18.11.16 are set well apart from those of §18.11.12
-> (R18.11.29 -- R18.11.34, D18.11.4, T18.11.1 -- T18.11.3) and from the
-> numbers directly after them, which work in preparation may take. The
-> subsection **completes** R18.11.9, R18.11.15 -- R18.11.17, R18.11.20 --
-> R18.11.22, R18.11.23a and R18.11.28; it adds one precision to R18.11.21
-> (the table of R18.11.56) and restates none of the others; the
-> activation side of a coin without a local key, and transaction history,
-> are in [Chapter 36](36-tendermint-v2-activation-rpcs.md) §36.14.
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
+> measure 0.04 (attestation in §18.10).**
+> This subsection was written on 2026-11-15 by the KDF Spec Reader (Spec
+> Reader round 0.5.0-3) under the two-team procedure of chapter 01 §1.4A,
+> from the reference designations `v2.6.0-beta` and `v3.0.0-beta` (both rows
+> of chapter 02 §2.15A, read read-only; no untabled state was read), from
+> the public Cosmos SDK, irismod and CometBFT interface definitions, and
+> from this repository's own tree. The two designations agree on every rule
+> of this subsection (R18.11.27 continues to hold). **Numbering:** the
+> subsection number 18.11.20, the rules R18.11.50 -- R18.11.58, the
+> decisions D18.11.10 -- D18.11.12 and the tests T18.11.10 -- T18.11.16 are
+> set well apart from those of §18.11.12 (R18.11.29 -- R18.11.34, D18.11.4,
+> T18.11.1 -- T18.11.3) and from the numbers directly after them, which work
+> in preparation may take. The subsection **completes** R18.11.9, R18.11.15
+> -- R18.11.17, R18.11.20 -- R18.11.22, R18.11.23a and R18.11.28; it adds
+> one precision to R18.11.21 (the table of R18.11.56) and restates none of
+> the others; the activation side of a coin without a local key, and
+> transaction history, are in [Chapter
+> 36](36-tendermint-v2-activation-rpcs.md) §36.14.
 
 **Coins without a local key (completes R18.11.9 and R18.11.23a).**
 
@@ -1590,8 +1614,7 @@ this section):
   with**: the wallet's key for WalletConnect, the supplied key for the
   public-key form. A counterparty's payment is therefore locked to the
   account the external wallet controls (R18.11.4). No key of the node
-  takes part. Watchers stay off for the family (R18.11.26). *(pending
-  gate)*
+  takes part. Watchers stay off for the family (R18.11.26).
 - **R18.11.51.** *WalletConnect in a swap at the reference.* Every swap
   transaction of such a coin (the fee send, the HTLC creation, the claim)
   is signed by one `cosmos_signDirect` request to the wallet (Chapter 36
@@ -1604,7 +1627,7 @@ this section):
   a missing answer or a lost session fails the send, and the machine
   records the failure event of that step (Chapter 51). A Ledger-backed
   session never gets here: it is wallet-only, and the Amino form it
-  would need exists for the bank send only. *(pending gate)*
+  would need exists for the bank send only.
 - **R18.11.52.** *The public-key form in a swap at the reference.*
   Without the Ledger flag, a coin activated by public key sends each swap
   transaction through the external-data request of
@@ -1617,7 +1640,7 @@ this section):
   hash>}`. The node then reads that transaction from a node, once, and
   requires its encoded body to equal the body it asked for. A missing
   answer, a transaction the node cannot find yet, and a body that differs
-  each fail the send. *(pending gate)*
+  each fail the send.
 
 > **Note on R18.11.23a, and our side (informative).** R18.11.23a refuses
 > an order for a coin without a local key and says the reference has no
@@ -1627,7 +1650,7 @@ this section):
 > section on the latent hazard), not the reference: the reference
 > announces the account public key and never the node's. The refusal
 > itself is unaffected and stays in force for both key-less forms that
-> the 0.5.0 cycle builds. *(pending gate)*
+> the 0.5.0 cycle builds.
 
 - **D18.11.10 (maintainer decision).** *Swaps for a coin without a local
   key.* (a) Keep R18.11.23a for both key-less forms; they are wallet
@@ -1639,7 +1662,7 @@ this section):
   for a person to approve it inside the step's deadline. (c) Also the
   public-key form through R18.11.52, which additionally needs a client
   that implements the exchange. Recommended: (a) for 0.5.0, (b) as a
-  plan item of its own, (c) not planned. *(pending gate)*
+  plan item of its own, (c) not planned.
 
 **The own-payment check and the query answer (completes R18.11.22).**
 
@@ -1657,7 +1680,7 @@ this section):
   `sdk`, an invalid request as code 18 and an unserved path as code 6;
   these figures are public SDK facts, owed a check against the published
   source and a live node (T18.11.16), and are not taken from the
-  reference, which reads none of them. *(pending gate)*
+  reference, which reads none of them.
 - **R18.11.54.** *What counts as "not sent" and what as an error.* For
   the own-payment check at the reference:
 
@@ -1676,7 +1699,7 @@ this section):
   the swap machine does with either result is bound by Chapter 51 R17.
   For the spend
   search an answer without a record means "no spend yet"; for the payment
-  validation it is a validation failure. *(pending gate)*
+  validation it is a validation failure.
 
 > **Code-quality finding (informative; trigger: apparent with little
 > extra effort) and our side.** At the reference a "not sent" result
@@ -1685,7 +1708,7 @@ this section):
 > This repository's check (PR #299, as built under R18.11.22)
 > already answers an error, not "not sent", when the record exists and
 > the creation transaction is not found or does not match; like the
-> reference it does not read the query answer's code. *(pending gate)*
+> reference it does not read the query answer's code.
 
 - **D18.11.11 (maintainer decision).** *Non-zero query answers in the
   own-payment check.* (a) The reference's reading: every answer without
@@ -1696,7 +1719,6 @@ this section):
   (b) without the retry. Recommended: (b). It changes no message a peer
   sees. The same reading would then serve the spend search, where an
   error answer is today "no spend yet", and the payment validation.
-  *(pending gate)*
 
 **Taker fee with a burn part (completes R18.11.20, R18.11.21 and R18.11.28).**
 
@@ -1716,7 +1738,7 @@ this section):
   maker's standard-form validation and a maker that expected one would
   refuse every reference taker; and interoperability binds the standard
   form only, the burn form being this project's own contract for the day
-  both peers of a swap have agreed on it. *(pending gate)*
+  both peers of a swap have agreed on it.
 - **R18.11.56.** *The checks of the burn form and their one outcome.* The
   reference's burn-form validation makes these checks, and no others
   (R18.11.57):
@@ -1744,7 +1766,7 @@ this section):
   R40), and the taker's swap ends through its own wait for the maker
   payment. Which check failed is visible only in the event's error text,
   which is not bound; no typed distinction reaches the wire. The standard
-  form has the same single outcome. *(pending gate)*
+  form has the same single outcome.
 - **R18.11.57.** *What the fee validation does not read.* At both
   designations, for both forms: the coins of the burn form's input (the
   public bank module itself requires inputs and outputs to balance); the
@@ -1752,7 +1774,7 @@ this section):
   message whatever its type; this repository checks the type, as-built
   note under R18.11.21); the **execution result code** and the height of
   the node's copy; the start-block figure the swap machine passes along;
-  and the transaction's gas, fee and timeout height. *(pending gate)*
+  and the transaction's gas, fee and timeout height.
 
 > **Code-quality finding (informative; trigger: contradiction between two
 > things read side by side).** The own-payment check refuses a creation
@@ -1760,14 +1782,12 @@ this section):
 > confirmation wait treats such a transaction as failed (R18.11.18), but
 > the fee validation accepts the node's copy of the fee transaction
 > without reading its result code (R18.11.57). Proposed remedy: D18.11.12.
-> *(pending gate)*
 
 - **D18.11.12 (maintainer decision).** *The execution result of the fee
   transaction.* (a) The reference's validation, which does not read it.
   (b) The maker also requires result code zero of the node's copy, which
   the same query answer carries. Recommended: (b). It refuses no fee
   transaction whose execution succeeded, so interoperability is unchanged.
-  *(pending gate)*
 
 **The automatic refund in wallet records (completes R18.11.15 -- R18.11.17).**
 
@@ -1791,7 +1811,7 @@ this section):
   R18.11.17 and D18.11.3 (decided: the synthetic marker in the swap
   event) govern the swap record, and by the maintainer's decision of
   2026-11-15 no history row is written in 0.5.0; Chapter 36 D36.14
-  holds the options for the plan. *(pending gate)*
+  holds the options for the plan.
 
 Tests (derivable from the rules above; the numbering continues apart
 from T18.11.1 -- T18.11.3):
@@ -1800,12 +1820,11 @@ from T18.11.1 -- T18.11.3):
   D18.11.10 (a)).* A coin activated by public key, with and without the
   Ledger flag, a coin activated through WalletConnect, and a token on
   each are refused by `setprice`, `buy` and `sell` as wallet-only, with
-  the build's swap switch on. *(pending gate)*
+  the build's swap switch on.
 - **T18.11.11.** *HTLC key of a WalletConnect coin (R18.11.50; only if
   D18.11.10 (b) is taken).* The HTLC public key the coin announces equals
   the account public key read at activation, and the `to` account a
   counterparty derives from it (R18.11.4) is the coin's own address.
-  *(pending gate)*
 - **T18.11.12.** *Own-payment check against a mocked node (R18.11.54;
   D18.11.11).* (i) A record in state `Open` and a matching creation
   transaction: the transaction is returned. (ii) An answer with the
@@ -1814,7 +1833,7 @@ from T18.11.1 -- T18.11.3):
   an error, under (b). (iv) No node reachable: an error. (v) A record and
   an empty creation search: not sent at the reference; an error in this
   repository as built. (vi) A creation transaction with a non-zero
-  result code: an error. *(pending gate)*
+  result code: an error.
 - **T18.11.13.** *Burn-form validation, one deviation at a time
   (R18.11.56; a unit row, since no swap reaches the form).* A fee
   transaction that satisfies every check passes. Each of these fails:
@@ -1822,16 +1841,16 @@ from T18.11.1 -- T18.11.3):
   order; a fee output with two coins; a fee amount one base unit off; a
   burn amount one base unit off; a burn output in another denomination;
   two inputs; an input from another account; an empty memo; a memo of
-  another swap; a node copy that differs. *(pending gate)*
+  another swap; a node copy that differs.
 - **T18.11.14.** *The standard form stays the wire form (R18.11.55; lab
   row, swap switch on).* The fee of a Reloaded Tendermint taker is one
   bank send to the fee address with the swap uuid as memo, and a
   reference maker at `v2.6.0-beta` (netid 8762) and at `v3.0.0-beta`
-  (netid 6133) validates it. *(pending gate)*
+  (netid 6133) validates it.
 - **T18.11.15.** *Result code of the fee transaction (D18.11.12 (b)).* A
   fee transaction whose node copy carries a non-zero result code fails
   validation with `TakerFeeValidateFailed`; the same transaction with
-  result code zero passes. *(pending gate)*
+  result code zero passes.
 - **T18.11.16.** *Lab rows on a public test network (permitted-input
   class R6).* (i) An HTLC query for an id that does not exist, on an
   Iris and on a Nucleus node: record `code`, `codespace` and that the
@@ -1840,4 +1859,3 @@ from T18.11.1 -- T18.11.3):
   (iii) After a 50-block HTLC has been refunded by the chain: the module
   state is `Refunded`, `tx_search` returns no transaction for the refund,
   and the creator's balance has grown by the amount (R18.11.58).
-  *(pending gate)*

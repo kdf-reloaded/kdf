@@ -1078,11 +1078,8 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is required.
 - *Scoped addition (2026-11-15, Spec Reader round 0.5.0-3) -- §36.14
   (R36.14.1 -- R36.14.18, the informative notes, D36.10 -- D36.18,
-  T36.30 -- T36.44).* **KDF Dirty Gate: pending** (chapter 01 R40; the
-  section carries the pending-clearance marker at the point at which it
-  appears, and every passage in it is marked *(pending gate)*; this item is
-  replaced by the clearance record with the R39 scope attestation when the
-  gate clears it). *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`
+  T36.30 -- T36.44).* **KDF Dirty Gate: PASS on 2026-11-15, measure 0.05, no findings**
+  (chapter 01 R40; the attestation closes this item). *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`
   and `v3.0.0-beta` of chapter 02 §2.15A, read read-only and consulted
   **only** to establish, for the Tendermint coin and token: which
   transactions the background history fetcher turns into rows, the members
@@ -1109,34 +1106,66 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   options of the D-items and the test rows rest on this repository's own
   tree and on Chapters 05, 10, 18, 22, 51, 53 and 60; the test figures are
   computed from the rules, not taken from any test.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-15, measure
+  0.05 on the discretionary-expression basis of chapter 01 R35 and R39,
+  judged per token, no findings (the round as a whole: PASS, measure 0.05;
+  chapter 18 §18.11.20: 0.04); the section passed two full passes, the
+  second after three passages were reworded. Reference states (chapter 02
+  R13): exactly two states are named, `v2.6.0-beta` and `v3.0.0-beta`, both
+  rows of §2.15A, compared at the rows' full identifiers; no untabled state
+  was named or compared. Extent: the Tendermint transaction-history surface
+  (the background fetcher's node queries, paging, waiting and retry; the
+  derivation of rows from execution-result events; amounts; fee attribution;
+  the row identifier and stored form; the history-state values); the
+  mmrpc-2.0 and legacy history methods and the indexed history store as they
+  serve this family, and the history stream's payload; the serialized
+  transaction-type, HTLC-message-type and history-state value sets; the
+  Tendermint activation request forms; the WalletConnect and public-key
+  activation paths (session, chain and account checks, the key-record and
+  enumeration sources, key decoding, address derivation, the Ledger flag);
+  the WalletConnect signing path and its failure mapping; the
+  unsigned-document forms of withdraw and staking, the wallet-only decision,
+  and the withdraw fee and identifier — 16 source files and 2 test files
+  read in whole or in the relevant parts at `v2.6.0-beta`, `v3.0.0-beta`
+  covered by a row-to-row difference over the same areas, read in full
+  wherever the rows differ; 28 source files per row fed the mechanical
+  lists; the staking request handlers, the balance stream and the browser
+  history store covered by the mechanical lists only. Second pass: the full
+  added ranges read again and compared at both rows (mechanical search over
+  160 source-file instances across the two rows; six files read at
+  `v2.6.0-beta`, row-to-row difference for `v3.0.0-beta`). Method: reading
+  at the tabled states; mechanical comparison against a compound-identifier
+  list and a word 4-gram list of comment and string-literal text from the
+  compared files at both rows; search for every backticked token, each match
+  judged forced or free; scan for identifier-shaped words outside backticks;
+  row-to-row difference; the additions embed no code blocks, so the
+  repository's clean-room gate tool was not applicable. The comparison
+  concerns expression; it does not attest the accuracy of the statements.
 
 ---
 
-## 36.14 Transaction history and key-less activation at the reference (Spec Reader round 0.5.0-3; pending the KDF Dirty Gate)
+## 36.14 Transaction history and key-less activation at the reference
 
-> **Provenance status: pending the KDF Dirty Gate.** This section is a
-> candidate under chapter 01 R40: until the gate clears it and this marker
-> is replaced by the clearance record, it MUST NOT be relied on as a
-> statement of required behavior and MUST NOT be implemented from. It was
-> written by the dirty-side specification author on 2026-11-15 (Spec Reader
-> round 0.5.0-3) from the reference rows `v2.6.0-beta` and `v3.0.0-beta` of
-> chapter 02 §2.15A (read read-only; no untabled state was read), from the
-> public interface definitions of the Cosmos SDK bank, staking and
-> distribution modules, the ibc-go transfer module, the irismod HTLC module
-> and the CometBFT RPC, from the public WalletConnect Cosmos method
-> reference, and from this repository's own tree. **The two rows agree on
-> everything in this section**: the parts of the reference it describes do
-> not differ between them, so nothing here is network- or
-> reference-version-dependent (R36.0.1 continues to hold). Every passage
-> below is marked *(pending gate)* until cleared. Numbering: rules
-> R36.14.1 -- R36.14.18, decisions D36.10 -- D36.18 and tests T36.30 --
-> T36.44, chosen apart from the chapter's existing numbers (T36.16 and
-> T36.17 are each already used twice). The section **completes** R36.1.2
-> (the `tx_history` row), R36.1.3 (forms 1 and 2), R36.1.4 (steps 3 and 6)
-> and §36.7 (items 5 and 9) and does not restate them; where it finds one
-> of them imprecise, the note of §36.14.4 says so. The swap side of a coin
-> activated without a local key is in
-> [Chapter 18](18-tendermint-ibc-htlc.md) §18.11.20.
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
+> measure 0.05 (attestation in §36.13).**
+> This section was written on 2026-11-15 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-3) under the two-team procedure of chapter 01 §1.4A, from the
+> reference rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A (read
+> read-only; no untabled state was read), from the public interface
+> definitions of the Cosmos SDK bank, staking and distribution modules, the
+> ibc-go transfer module, the irismod HTLC module and the CometBFT RPC, from
+> the public WalletConnect Cosmos method reference, and from this
+> repository's own tree. **The two rows agree on everything in this
+> section**: the parts of the reference it describes do not differ between
+> them, so nothing here is network- or reference-version-dependent (R36.0.1
+> continues to hold). Numbering: rules R36.14.1 -- R36.14.18, decisions
+> D36.10 -- D36.18 and tests T36.30 -- T36.44, chosen apart from the
+> chapter's existing numbers (T36.16 and T36.17 are each already used
+> twice). The section **completes** R36.1.2 (the `tx_history` row), R36.1.3
+> (forms 1 and 2), R36.1.4 (steps 3 and 6) and §36.7 (items 5 and 9) and
+> does not restate them; where it finds one of them imprecise, the note of
+> §36.14.4 says so. The swap side of a coin activated without a local key is
+> in [Chapter 18](18-tendermint-ibc-htlc.md) §18.11.20.
 
 Scope of the 0.5.0 cycle, by the maintainer's decisions of 2026-11-15, which
 this section serves and does not itself decide: transaction history is built
@@ -1144,9 +1173,9 @@ first; both key-less activation forms are built (WalletConnect, and the
 public-key form as a watch-only coin); a hardware `priv_key_policy` gets a
 typed refusal (§36.14.4); and no history row is written in 0.5.0 for an
 HTLC that the chain refunds on its own, while showing it is to be planned
-(D36.14). *(pending gate)*
+(D36.14).
 
-### 36.14.1 Transaction history (pending gate)
+### 36.14.1 Transaction history
 
 R36.14.1 **Surface and store.** A Tendermint platform coin and a Tendermint
 token are served by the mmrpc-2.0 `my_tx_history` method, with the shared
@@ -1161,8 +1190,7 @@ Rows are written only by the platform coin's background fetcher, which
 `enable_tendermint_token` nor a `tokens_params` entry has a history switch.
 The legacy flat `my_tx_history` method reads a different store, which this
 family never writes: for a Tendermint coin or token it answers an empty
-`transactions` list with `total` 0, whatever `tx_history` was. *(pending
-gate)*
+`transactions` list with `total` 0, whatever `tx_history` was.
 
 R36.14.2 **What a coin's and a token's history holds.** A row belongs to a
 token when it carries that token's id, and to the platform coin when it
@@ -1180,7 +1208,6 @@ activated account address are served. So:
 - a token's history holds its plain transfers, its IBC transfers and the
   HTLC creations and claims in its denom, and never a fee.
 
-*(pending gate)*
 
 R36.14.3 **Source, paging and order of the fetch.** The fetcher reads the
 account's transactions from a node with the CometBFT `tx_search` method,
@@ -1198,13 +1225,13 @@ starts another pass, which continues each query at the page where the
 previous pass ended (reading that page again when it was not full). A node
 failure during a pass or during the balance read is followed by a pause of
 30 seconds and a retry that resumes at the page that failed; it does not
-show in the history state (R36.14.11). *(pending gate)*
+show in the history state (R36.14.11).
 
 R36.14.4 **Transactions that yield no row.** A transaction is left out
 entirely when its execution result code is not zero; when the node's block
 answer carries no time for its height; when it cannot be decoded, has no
 message, or has an empty fee list; and when none of its events yields a
-transfer under R36.14.5. *(pending gate)*
+transfer under R36.14.5.
 
 R36.14.5 **The transfers of a transaction.** Rows are derived from the
 events of the transaction's execution result, not from its messages. An
@@ -1244,7 +1271,7 @@ is kept only when its denomination is the platform `denom` or the `denom`
 of a `protocol_data` in the coins configuration; the row's `coin` is the
 platform ticker or that entry's ticker. An attribute key may arrive
 base64-encoded (older nodes), in which case its value is base64-decoded;
-both forms are read. *(pending gate)*
+both forms are read.
 
 R36.14.6 **Rows and their `transaction_type`.** Each transfer becomes one
 row. "This account" is the activated address; a transfer is *sent by this
@@ -1270,7 +1297,6 @@ key. `token_id` is `null` for the platform denom and the token id of
 R36.14.2 otherwise; the three staking values carry no token id whatever
 the denomination. `msg_type` has exactly the three values shown. An HTLC
 row never names the counterparty: its `to` is empty in every case.
-*(pending gate)*
 
 R36.14.7 **Amounts.** With `a` the transfer's amount:
 
@@ -1288,7 +1314,7 @@ All four are decimal numbers in display units, scaled with the decimals of
 the coin or token the request names. An HTLC claim that this account sends
 for its own HTLC therefore shows `received_by_me` = `a`, `spent_by_me` =
 the fee and `total_amount` = `a` plus the fee when the denom is the
-platform's. *(pending gate)*
+platform's.
 
 R36.14.8 **Fee attribution between a token row and the platform coin.**
 
@@ -1311,7 +1337,6 @@ R36.14.8 **Fee attribution between a token row and the platform coin.**
    delivered by a relayer) enters no amount; it is visible in `fee_details`
    only.
 
-*(pending gate)*
 
 R36.14.9 **The other members of a row.** `tx_hash` is the node's hash of
 the transaction in upper-case hex; `block_height` its height; `timestamp`
@@ -1319,7 +1344,7 @@ the block time in seconds; `memo` the transaction's memo, always present
 and possibly empty; `kmd_rewards` is absent. `confirmations` is computed
 when the row is served: the current height minus the row's height plus
 one, or zero when the row's height is above the current height. For
-`tx_hex` see D36.12. *(pending gate)*
+`tx_hex` see D36.12.
 
 R36.14.10 **Identifier, stored form and order.** `internal_id` is 33 bytes
 (66 hex characters), built from the position of the transfer among the
@@ -1338,7 +1363,7 @@ and served as stored. Answers list rows by descending block height and,
 within a height, by ascending identifier. Paging by page number or by
 `FromId` follows the shared contract; a `FromId` that matches no row
 yields an empty `transactions` list with `skipped` 0 and the true `total`,
-not an error. *(pending gate)*
+not an error.
 
 R36.14.11 **`sync_status`.** The history state of a platform coin is
 reported by `my_tx_history` (both methods) as `sync_status`; a token
@@ -1351,7 +1376,7 @@ reports its platform coin's state.
 | `{"state": "Finished"}` | from the end of the first complete pass, for the rest of the coin's life: later passes, the waits between them and the pauses after a node failure all report `Finished` |
 | `{"state": "Error", "additional_info": {"message": <text>}}` | the fetcher has stopped for good because the history store could not be prepared or written; the text is not bound |
 
-The reference never reports `InProgress` for this family. *(pending gate)*
+The reference never reports `InProgress` for this family.
 
 R36.14.12 **`tx_history` false versus true in the answers.**
 
@@ -1365,7 +1390,7 @@ With `tx_history: true` the store is prepared by the fetcher's first step,
 after the activation has answered, so a request in that short interval can
 still get `StorageIsNotInitialized`. The other errors are the shared ones:
 `CoinIsNotActive` (HTTP 404), `RpcError` (HTTP 500) when the current height
-cannot be read from a node, `StorageError` (HTTP 500). *(pending gate)*
+cannot be read from a node, `StorageError` (HTTP 500).
 
 > **Code-quality findings (informative; reference behavior that Reloaded
 > should not copy as it stands; each names its trigger and a proposed
@@ -1432,7 +1457,6 @@ cannot be read from a node, `StorageError` (HTTP 500). *(pending gate)*
 >     batch), a module event is applied to whichever transfer is read
 >     first, not to the transfer it belongs to.
 >
-> *(pending gate)*
 
 D36.10 *(maintainer decision.)* *History state while fetching.* Options:
 (a) the reference's values exactly (R36.14.11): `NotStarted` through the
@@ -1443,7 +1467,7 @@ a failed start retried (finding 4); (c) as (b), and `InProgress` during
 later passes too. Clients already handle `InProgress` for the UTXO family.
 Recommended: (b); the content of `additional_info` for `InProgress` is
 then Reloaded's own (the node's `tx_search` answer carries the total
-count, so a remaining-transactions figure is available). *(pending gate)*
+count, so a remaining-transactions figure is available).
 
 D36.11 *(maintainer decision.)* *Interchange with a store written by the
 reference.* A user who moves a data directory between the reference and
@@ -1459,7 +1483,6 @@ one it did not write (the history is always re-creatable from the chain,
 R36.14.3), accepting that the reference would show duplicates if the
 directory were moved back. Recommended: (a), with finding 1's remedy; it
 is the persistent-data compatibility the project keeps by default.
-*(pending gate)*
 
 D36.12 *(maintainer decision.)* *Amounts of fee-only transactions and
 reward claims, and the content of `tx_hex`.* At the reference a row's
@@ -1473,7 +1496,7 @@ Recommended: (b). Under D36.11 (a) a row is written by whichever program
 sees the transaction first and is not rewritten, so the two programs can
 show different amounts for these kinds only. Whether a multi-validator
 staking transaction gets one row per validator is part of the same
-decision; recommended: yes. *(pending gate)*
+decision; recommended: yes.
 
 D36.13 *(maintainer decision.)* *Which denominations get rows, and under
 which ticker.* Options: (a) the reference's lookup (finding 7); (b) a
@@ -1482,7 +1505,7 @@ activated on this platform (custom tokens included), and to a coins
 configuration entry whose `platform` is this coin; anything else gets no
 row. Recommended: (b). Under (b) a token activated after the transfers
 happened still shows them only when the fetcher reads those transactions
-again, which D36.11 and finding 3 bear on. *(pending gate)*
+again, which D36.11 and finding 3 bear on.
 
 D36.14 *(decided for 0.5.0 by the maintainer's decision of 2026-11-15: no
 row; the planning question is open.)* *Balance changes that have no
@@ -1503,9 +1526,9 @@ HTLC id and the closing height), covering only swaps this node ran;
 account, on nodes that index block events; (c) none. A row of either kind
 needs an identifier that is not a transaction hash and a
 `transaction_type` value; a value outside R36.14.6 is unknown to existing
-clients. *(pending gate)*
+clients.
 
-### 36.14.2 WalletConnect activation (pending gate)
+### 36.14.2 WalletConnect activation
 
 R36.14.13 **Accepted form.** At both rows the reference accepts exactly
 form 2 of R36.1.3, `{"type": "WalletConnect", "params": {"session_topic":
@@ -1514,7 +1537,7 @@ form 2 of R36.1.3, `{"type": "WalletConnect", "params": {"session_topic":
 request is parsed, and a topic that names no live session fails in step 3
 of R36.1.4 as R36.14.14 describes. When `activation_params` is present,
 the node's own login takes no part in the activation: neither the context
-signing policy nor `path_to_address` is read. *(pending gate)*
+signing policy nor `path_to_address` is read.
 
 R36.14.14 **What is read from the session.** The activation reads the
 following, in this observable order; the first failure ends it with
@@ -1550,7 +1573,7 @@ following, in this observable order; the first failure ends it with
    session carries no key records.
 
 Nothing else is taken from the session at activation. The activation
-result is the ordinary R36.1.5 result. *(pending gate)*
+result is the ordinary R36.1.5 result.
 
 R36.14.15 **Signing.** A coin activated this way has every transaction
 signed by the wallet and broadcasts it itself. The wallet method is chosen
@@ -1570,7 +1593,7 @@ the time-to-live, or the session is gone or no longer grants the chain,
 the request fails with its **internal-error type**: `InternalError` for
 `withdraw` (string data, HTTP 500; the text is not bound), and the
 internal-error type of the staking requests likewise. The reference has no
-distinct error type for these cases. *(pending gate)*
+distinct error type for these cases.
 
 > **Upstream divergence and code-quality findings (informative).**
 >
@@ -1602,7 +1625,6 @@ distinct error type for these cases. *(pending gate)*
 >    reading; T36.44 is the lab row. Reloaded follows Chapter 22 §22.8.1.2
 >    for the Amino answer and its broadcast assembly.
 >
-> *(pending gate)*
 
 D36.15 *(maintainer decision.)* *Error type for a wallet refusal or a lost
 session.* Options: (a) the reference's `InternalError`, which a client
@@ -1613,7 +1635,7 @@ withdraw error set that the reference does not use for this family and
 that Reloaded's set does not have yet, or a new type; its HTTP status is
 part of the decision; the same for the staking requests. Recommended: (b);
 no client written against the reference can depend on a type the
-reference never sent for this case. *(pending gate)*
+reference never sent for this case.
 
 D36.16 *(maintainer decision.)* *Which key record, and the address
 check.* Options: (a) the reference: the first key record, no comparison
@@ -1621,16 +1643,16 @@ with the session's account (R36.14.14 items 4, 6 and 7); (b) the key
 record whose chain id is the coin's, falling back to `cosmos_getAccounts`
 when there is none, and a refusal with `PlatformCoinCreationError` when
 the address derived from the key differs from the session's account for
-that chain. Recommended: (b). *(pending gate)*
+that chain. Recommended: (b).
 
-### 36.14.3 Public-key activation, the `WithPubkey` form (pending gate)
+### 36.14.3 Public-key activation, the `WithPubkey` form
 
 R36.14.16 **Account.** The activated address is the bech32 account of the
 supplied key bytes under `account_prefix`, computed by the secp256k1 rule
 of Chapter 18 §18.2.2 for **both** key types. No node, wallet or session
 is contacted for the key, and the node's own login takes no part
 (R36.14.13). `is_ledger_connection` only sets the Ledger flag of
-R36.14.18. *(pending gate)*
+R36.14.18.
 
 R36.14.17 **What such a coin can do at the reference.** The same holds
 for a token on such a platform coin.
@@ -1648,7 +1670,7 @@ The unsigned result is otherwise an ordinary withdraw result (amounts,
 `fee_details`, `from`, `to`, `transaction_type`, `memo`); nothing is
 signed or broadcast by the node, and the caller's own wallet signs and
 broadcasts the document. The `from` selector is ignored and the fee comes
-from the fixed assumed gas (Chapter 18 R18.11.9). *(pending gate)*
+from the fixed assumed gas (Chapter 18 R18.11.9).
 
 R36.14.18 **What the Ledger flag changes.** The flag is set by
 `is_ledger_connection: true` or by a Ledger-backed WalletConnect session
@@ -1663,7 +1685,6 @@ R36.14.18 **What the Ledger flag changes.** The flag is set by
    fails when it is built;
 4. the fee amount of a `withdraw` is three times the computed amount.
 
-*(pending gate)*
 
 D36.17 *(maintainer decision.)* *An `ed25519` key in the public-key
 form.* R36.1.3 binds both key types. At the reference an `ed25519` key
@@ -1675,7 +1696,7 @@ reference's derivation; (b) refuse `ed25519` as a request-parse failure,
 which amends R36.1.3 and T36.8; (c) accept it and derive the address by
 the public SDK rule for that key type, the coin being watch-only.
 Recommended: (c), or (b) if (c) is not wanted; not (a), which shows an
-account that is not the key's. *(pending gate)*
+account that is not the key's.
 
 D36.18 *(maintainer decision.)* *What a watch-only coin's `withdraw`
 answers in Reloaded.* The public-key form is built in 0.5.0 as a
@@ -1684,9 +1705,9 @@ Options for `withdraw` and the staking requests: (a) the reference's
 unsigned results of R36.14.17, in both forms, which involve no key and
 are what lets a client's own wallet sign; (b) a typed refusal. Recommended:
 (a). The external-signing channel of Chapter 18 R18.11.52 is not needed
-for (a) and stays unbuilt while R18.11.23a stands. *(pending gate)*
+for (a) and stays unbuilt while R18.11.23a stands.
 
-### 36.14.4 Notes on existing rules, and our side (pending gate)
+### 36.14.4 Notes on existing rules, and our side
 
 > **Notes on existing rules (this section edits none of them).**
 >
@@ -1718,7 +1739,6 @@ for (a) and stays unbuilt while R18.11.23a stands. *(pending gate)*
 >    transfers, relayed IBC packets and claims by another account visible.
 > 6. *[Chapter 10](10-sse-streaming.md) R43.* See finding 8 of §36.14.1.
 >
-> *(pending gate)*
 
 > **Our side (informative; this repository's tree, 2026-11-15).**
 > `tx_history: true` is accepted and starts nothing (§36.7 item 9); a
@@ -1730,9 +1750,9 @@ for (a) and stays unbuilt while R18.11.23a stands. *(pending gate)*
 > R36.14.8 item 1 exist. A non-null `activation_params` is rejected (the
 > interim rule of §36.7), the activation policy has the local-key form
 > only, and the Cosmos request builders of Chapter 22 exist without an
-> activation path that reaches them. *(pending gate)*
+> activation path that reaches them.
 
-### 36.14.5 Tests (pending gate)
+### 36.14.5 Tests
 
 Rows T36.30 -- T36.39 run against a mocked node; the platform coin has 6
 decimals, the token 6 decimals, and every fee is 5,000 base units of the
@@ -1746,7 +1766,6 @@ and 2; a send of 300,000 to the account itself yields 0.305, 0.305, 0.3
 and -0.005. Each row's `fee_details` is `{"type": "Tendermint", "coin":
 <platform ticker>, "amount": "0.005", "gas_limit": <the transaction's>}`
 and its `confirmations` is the current height minus its height plus one.
-*(pending gate)*
 
 T36.31 *Token transfer and its fee row (R36.14.2, R36.14.8).* An outgoing
 token send of 2,500,000 base units yields, in the token's history, one
@@ -1754,7 +1773,7 @@ row `{"TokenTransfer": <token id>}` with 2.5, 2.5, 0 and -2.5 and `coin`
 the token ticker; and in the platform coin's history one row
 `"FeeForTokenTx"` with the same `tx_hash`, `to` empty, 0.005, 0.005, 0
 and -0.005. The token id is the SHA-256 of the lower-cased denom. An
-incoming token send yields the token row only. *(pending gate)*
+incoming token send yields the token row only.
 
 T36.32 *HTLC rows (R36.14.6, R36.14.7).* A creation of 1,000,000 in the
 platform denom by this account yields `{"CustomTendermintMsg":
@@ -1764,15 +1783,14 @@ sends for an HTLC paying it yields `"SignClaimHtlc"` with 1.005, 0.005, 1
 and 0.995. A claim sent by another account that pays this account yields
 `"ClaimHtlcAmount"` with 1, 0, 1 and 1. A creation in the token denom
 yields the token row (with the token id) and one `"FeeForTokenTx"` row.
-A creation by another account yields no row. *(pending gate)*
+A creation by another account yields no row.
 
 T36.33 *IBC rows (R36.14.5, R36.14.6).* An outgoing IBC transfer yields
 `{"TendermintIBCTransfer": {"token_id": null}}` with `from` this account
 and `to` the receiver's address on the other chain; an incoming one, in a
 transaction a relayer paid for, yields `from` the sender's address on the
 other chain, `to` this account, 0 spent, and the relayer's fee in
-`fee_details` only. The token variants carry the token id. *(pending
-gate)*
+`fee_details` only. The token variants carry the token id.
 
 T36.34 *Staking rows (R36.14.5, R36.14.6; D36.12).* A delegation of
 1,000,000 yields `"StakingDelegation"`, `from` the delegator, `to` the
@@ -1783,18 +1801,18 @@ validator, with 1.005, 1.005, 0. An undelegation yields
 D36.12 (a) `spent_by_me` is 0 and `total_amount` 0.012345, under (b)
 0.005 and 0.017345. A fee-only transaction yields, under D36.12 (a), a
 `"StandardTransfer"` to the fee-collector account with `total_amount`
-0.01; under (b) 0.005. *(pending gate)*
+0.01; under (b) 0.005.
 
 T36.35 *Left out (R36.14.4, R36.14.5).* A transaction with a non-zero
 result code, one with an empty fee list, one whose block has no time, and
 a transfer in a denomination that R36.14.5 (or D36.13) does not resolve
-each add no row and do not stop the pass. *(pending gate)*
+each add no row and do not stop the pass.
 
 T36.36 *No duplicates (R36.14.3, R36.14.10).* A transaction returned by
 both queries, a second pass after a balance change, and a restart of the
 node with the same database each leave the row count unchanged. A node
 failure in the middle of a page is followed by a retry after which the
-rows of that page are present exactly once. *(pending gate)*
+rows of that page are present exactly once.
 
 T36.37 *Identifier and order (R36.14.10; D36.11 (a)).* For a transaction
 with hash `H` (64 upper-case hex characters) on a 64-bit native build,
@@ -1805,21 +1823,21 @@ instead; the fee row of a token transaction has the bytes of its token
 row in the opposite order. Rows at heights 10, 12 and 12 are served as
 the two rows of height 12 in ascending identifier order, then the row of
 height 10. A `FromId` that matches no row yields an empty list and the
-true `total`. *(pending gate)*
+true `total`.
 
 T36.38 *History state (R36.14.11; D36.10).* Without `tx_history` the
 state is `NotEnabled` before and after any number of requests. With it,
 under D36.10 (a), the state is `NotStarted` until the first pass ends and
 `Finished` from then on, including during a later pass and during a node
 outage; under (b) it is `InProgress` during the first pass. A store that
-cannot be written yields `Error` with a `message`. *(pending gate)*
+cannot be written yields `Error` with a `message`.
 
 T36.39 *`tx_history` false and true (R36.14.12).* A coin activated
 without `tx_history` on a fresh database answers the mmrpc-2.0 method
 with `StorageIsNotInitialized` (HTTP 500), for the coin and for a token on
 it; the same coin on a database that holds an earlier history answers
 with those rows and `NotEnabled`; the legacy method answers an empty
-list in both cases and with `tx_history: true`. *(pending gate)*
+list in both cases and with `tx_history: true`.
 
 T36.40 *WalletConnect activation (R36.14.14; D36.16).* With a session
 whose properties carry a key record for the coin's chain, activation
@@ -1831,7 +1849,7 @@ an account for the chain, an `algo` other than the two of R36.14.14 item
 5, and a wallet that refuses the enumeration each yield
 `PlatformCoinCreationError` and register no coin. Under D36.16 (b), a key
 record of another chain placed first is not used, and a key whose address
-differs from the session's account is refused. *(pending gate)*
+differs from the session's account is refused.
 
 T36.41 *WalletConnect signing (R36.14.15; D36.15).* A `withdraw` on a
 session that is not Ledger-backed sends one `cosmos_signDirect` request
@@ -1839,7 +1857,7 @@ and answers with `tx_hex` and `tx_hash`; nothing is broadcast. A wallet
 refusal, an unanswered request and a deleted session each fail the
 `withdraw` with the type D36.15 selects. On a Ledger-backed session a
 same-chain `withdraw` sends `cosmos_signAmino` and an IBC `withdraw`
-fails without sending a request. *(pending gate)*
+fails without sending a request.
 
 T36.42 *Public-key activation (R36.14.16, R36.14.17; D36.18 (a)).* With a
 33-byte secp256k1 key and `is_ledger_connection: false` the coin
@@ -1847,14 +1865,13 @@ activates at the bech32 account of that key without contacting a wallet;
 `withdraw` answers without `tx_hex` and `tx_hash` and with a `sign_doc`
 whose `chain_id` is the coin's and whose `body_bytes` decode to a
 transaction body holding the one bank-send message; a delegation answers
-in the same form; the private-key display fails. *(pending gate)*
+in the same form; the private-key display fails.
 
 T36.43 *Ledger flag (R36.14.18).* With `is_ledger_connection: true` a
 same-chain `withdraw` answers with `legacy_amino_json` and
 `original_tx_type_url` and a fee three times that of the same request
 without the flag; an IBC `withdraw` and a delegation fail; `setprice`,
 `buy` and `sell` refuse the coin and a token on it as wallet-only.
-*(pending gate)*
 
 T36.44 *Lab rows against reference release binaries (permitted-input
 class R6, black box).* (i) For one funded account with transfers, a token
@@ -1865,4 +1882,4 @@ Ledger-backed WalletConnect `withdraw` at the reference: whether it
 completes (finding 4 of §36.14.2). (iii) Whether a reference node's
 balance stream reports the balance change of an automatic HTLC refund;
 this could not be established by reading, because it depends on which
-block-level events the node delivers to a subscription. *(pending gate)*
+block-level events the node delivers to a subscription.
