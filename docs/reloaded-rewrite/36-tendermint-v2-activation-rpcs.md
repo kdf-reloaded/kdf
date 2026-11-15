@@ -1623,17 +1623,21 @@ row. Recommended: (b). Under (b) a token activated after the transfers
 happened still shows them only when the fetcher reads those transactions
 again, which D36.11 and finding 3 bear on.
 
-> **Status note (2026-11-15, Reloaded-original).** Provisional: the decision
-> is suspended pending the §36.14.6 precision round; the code resolves
-> denominations as (b) in isolation. A
-> denomination resolves, in this order, to the platform coin, to a token
-> activated on this platform (a custom token included), and to a
-> coins-configuration entry of type `TENDERMINTTOKEN` whose `platform` is this
-> coin; the row's `coin` and decimals are those of the match. Anything else
-> gets no row. The fetcher resolves again for every page, so a token activated
-> later is recognized from the next page on; a transfer read before that
-> shows only when its transaction is read again. Built in PR #363; tests T36.31,
-> T36.35.
+> **Status note (2026-11-15, Reloaded-original).** Decided: (a'), the
+> reference's lookup (finding 7, R36.14.19 item 4), for the counting and for the
+> rows. A denomination resolves to the platform coin when it equals the platform
+> `denom` exactly; otherwise to the first coins-configuration entry, in the order
+> of the file and of whatever platform, whose `protocol_data` `denom` equals it
+> without regard to letter case, and the transfer takes that entry's ticker and
+> decimals. The row's `coin` is the ticker of the activated token when an
+> activated token matches that entry, else the entry's ticker. A custom token
+> that is absent from the coins file resolves to nothing: it takes no position
+> and gets no row (documented limitation: the history of custom tokens is absent
+> in 0.5.0). A coins-file token of another platform is counted and shown under
+> its entry's ticker, in the history store of this platform coin. The lookup is
+> read once at the start of a pass (`resolution_map`, `resolve_denom`); a change
+> of what it resolves rebuilds the store (D36.21). Built in PR #363; tests
+> T36.31, T36.35, T36.45 (ii).
 
 D36.14 *(decided for 0.5.0 by the maintainer's decision of 2026-11-15: no
 row; the planning question is open.)* *Balance changes that have no
@@ -1687,11 +1691,10 @@ clients.
 > event's transfers in the list, so no position that R36.14.19 item 2 computes
 > moves. The position, the pairing of module events, the staking events
 > without their attributes and the fee forms follow R36.14.19 -- R36.14.22
-> (see the status note below). What is still provisional: the set of
-> denominations that resolve (D36.13, D36.21), the fee list and the fee
-> payment text (D36.19), the rows for a transaction without a fee or a staking
-> event without `delegator` (D36.20); the unit test `what_yields_no_row` is
-> marked for the first of them. The block time is read with the SDK's `GetBlockByHeight` query. The fetcher and the method
+> (see the status note below). Provisional: none open after the decisions
+> of 2026-11-15 (D36.13, D36.19 -- D36.22). Reading kept as built: the coins-file lookup of D36.13 (a') takes
+> "the first entry" among the entries whose `protocol_data` names a `denom` and a
+> numeric `decimals`; an entry without either is skipped. The block time is read with the SDK's `GetBlockByHeight` query. The fetcher and the method
 > exist on native builds only (native only in 0.5.0): the browser build has no
 > versioned history store for any coin family (`NotSupportedInWasm`), a
 > limitation shared by every history family and not a Tendermint one. Tests: T36.30 -- T36.39 in
@@ -2285,6 +2288,18 @@ both programs have written can show different amounts for these
 transactions, as under D36.12, and the reference adds its own rows for
 the fee payment when it reads such a transaction. Recommended: (b).
 
+> **Status note (2026-11-15, Reloaded-original).** Decided: (b). The fee
+> payment is recognized by the text of the whole fee list (`fee_payment_text`),
+> so it is left out for several coins as for one. The fee entry in the platform
+> `denom` is read wherever it stands in the list and gives `fee_details` and the
+> fee of R36.14.8 items 2 and 3. A list without a platform entry enters no
+> amount and causes no fee row; `fee_details` then names the ticker the first
+> entry's denomination resolves to, scaled with that coin's decimals, or is
+> `null` when it resolves to none. A fee entry that is read (the first entry, and
+> the platform entry) and does not fit an unsigned 64-bit integer leaves the
+> transaction out. Amounts can differ from the reference's for these
+> transactions, as under D36.12. Built in PR #363; tests T36.48 (i) -- (iii).
+
 D36.20 *(maintainer decision.)* *Transactions the reference leaves out
 for want of a fee or of a `delegator` attribute.* Options: (a) no row, as
 at the reference (R36.14.21, R36.14.22 item 6); (b) Reloaded writes the
@@ -2297,6 +2312,17 @@ The identifier rule is unchanged. The reference never writes a row for
 these transactions, so no identifier can collide and no row is doubled;
 a store moved back to the reference keeps and serves the rows.
 Recommended: (b).
+
+> **Status note (2026-11-15, Reloaded-original).** Decided: (b). A
+> transaction with an empty fee list gets the rows of R36.14.5 -- R36.14.7 with a
+> fee of zero (`fee_details` the platform ticker, amount 0) and no fee row; an
+> empty fee list has no fee payment to recognize. A `delegate`, `unbond` or
+> `withdraw_rewards` event without `delegator` takes the `delegator_address` of
+> the transaction's staking message of the same kind (`MsgDelegate`,
+> `MsgUndelegate`, `MsgWithdrawDelegatorReward`) when the transaction has exactly
+> one such message; with none or several it gives no row, as before. The
+> identifier rule is unchanged. The reference writes no row for these
+> transactions. Built in PR #363; tests T36.47 (i), T36.48 (iv).
 
 D36.21 *(maintainer decision.)* *Positions when the resolvable
 denominations change.* Options: (a) the reference as it stands (the
@@ -2316,6 +2342,21 @@ every transaction with transfers in more than one denomination, whatever
 D36.13 decides about the ticker a row carries. Recommended: (b), with
 the counting of R36.14.19 item 4.
 
+> **Status note (2026-11-15, Reloaded-original).** Decided: (b), with the
+> counting of R36.14.19 item 4. Beside the platform coin's store the fetcher
+> keeps a record of what every denomination of its lookup resolved to when the
+> rows were written (the ticker, the decimals and whether it is the platform
+> coin or a token; `get_resolved_denoms`, `set_resolved_denoms` of the history
+> storage, one row in `<TICKER>_tx_resolved_denoms`). At the start of a pass the
+> lookup is compared with the record. When it differs, the store of the platform
+> coin (its rows and those of its tokens) is cleared, the fetcher starts again at
+> the first page and the history state is `InProgress`, so the store becomes what
+> the reference writes into an empty store under the same configuration; the
+> new record is written. A store with no record gets the record without a
+> rebuild. Any change of the lookup, not only one that concerns this account,
+> triggers one rebuild. Built in PR #363; tests for the record, the rebuild and
+> the unchanged case.
+
 D36.22 *(maintainer decision.)* *Pairing of module events.* Options: (a)
 the reference's pairing by order (R36.14.20), with the wrong parties it
 gives when transfers and module events are unequal in number; (b)
@@ -2325,6 +2366,11 @@ transactions where this changes which transfers merge, the positions and
 with them the identifiers differ from the reference's. Recommended: (a);
 the cases are batches of other parties' packets, and a row of this
 account in them is still recoverable from the chain.
+
+> **Status note (2026-11-15, Reloaded-original).** Decided: (a), the pairing
+> by order of R36.14.20, as built (`module_event_queue`, `apply_module_event`);
+> a row of this account in a batch of other parties' packets stays recoverable
+> from the chain. Tests T36.46 (v) and (vi) are as built.
 
 **Tests.** Rows T36.45 -- T36.48 run against a mocked node on a 64-bit
 native build unless a row says otherwise, with the conventions of
@@ -2435,10 +2481,12 @@ Under D36.20 (b): one row with `total_amount` 1 and `fee_details`
 > row, `unbond` included; a first fee entry above u64 leaving the transaction
 > out; the fee attributed once to the first written entry this account sent
 > (a fee row when that entry is in a token denomination). Tests T36.45 --
-> T36.48 (the reference's values) are in `tx_history_tests.rs`. Waiting for
-> D36.19 -- D36.22 and D36.13: `fee_payment_text` (D36.19), `resolve_denom` and
-> `counted_coins` (D36.13, D36.21), and no row for a transaction with an empty
-> fee list or a staking event without `delegator` (D36.20), which T36.48 (iv)
-> and T36.47 (i) record as not written. The empty-fee-list case is checked on the
-> first pass by `transactions_without_a_row_do_not_stop_the_pass`; a second pass
-> and that nothing is offered to the history stream are not asserted yet.
+> T36.48 are in `tx_history_tests.rs`, the reference's values where the
+> decisions left them. Decisions D36.19 -- D36.22 and D36.13 are taken (the status notes
+> at each); nothing of R36.14.19 -- R36.14.22 is provisional any more. The
+> comparison of repeated events (item 1) is made on the attributes in the form
+> the node delivered them, key, value and index flag in order (`HistoryEvent`
+> keeps them beside the decoded pairs), so two events that differ only in the
+> index flag, or in the encoding of a key, are both counted. T36.48 (iv) and
+> T36.47 (i) run in their (b) forms; an empty fee list is checked on a first and
+> a second pass by `transactions_without_a_row_do_not_stop_the_pass`.

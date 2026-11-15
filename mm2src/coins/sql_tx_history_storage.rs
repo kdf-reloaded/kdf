@@ -37,6 +37,40 @@ fn create_tx_history_table_sql(for_coin: &str) -> Result<String, MmError<SqlErro
     Ok(sql)
 }
 
+fn tx_resolved_denoms_table(ticker: &str) -> String { ticker.to_owned() + "_tx_resolved_denoms" }
+
+/// The record of the denominations that were resolvable when the rows of a coin were written (CRD ch.36 D36.21
+/// (b)): one row.
+fn create_tx_resolved_denoms_table_sql(for_coin: &str) -> Result<String, MmError<SqlError>> {
+    let table_name = tx_resolved_denoms_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    Ok(format!(
+        "CREATE TABLE IF NOT EXISTS {} (
+            id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+            denoms TEXT NOT NULL
+        );",
+        table_name
+    ))
+}
+
+fn select_resolved_denoms_sql(for_coin: &str) -> Result<String, MmError<SqlError>> {
+    let table_name = tx_resolved_denoms_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    Ok(format!("SELECT denoms FROM {} WHERE id = 1;", table_name))
+}
+
+fn replace_resolved_denoms_sql(for_coin: &str) -> Result<String, MmError<SqlError>> {
+    let table_name = tx_resolved_denoms_table(for_coin);
+    validate_table_name(&table_name)?;
+
+    Ok(format!(
+        "INSERT OR REPLACE INTO {} (id, denoms) VALUES (1, ?1);",
+        table_name
+    ))
+}
+
 fn create_tx_cache_table_sql(for_coin: &str) -> Result<String, MmError<SqlError>> {
     let table_name = tx_cache_table(for_coin);
     validate_table_name(&table_name)?;
@@ -496,6 +530,52 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
             let tx_bytes =
                 hex::decode(&tx_hex).map_err(|e| SqlError::FromSqlConversionFailure(0, Type::Text, Box::new(e)))?;
             Ok(Some(tx_bytes.into()))
+        })
+        .await
+    }
+
+    async fn clear_history(&self, for_coin: &str) -> Result<(), MmError<Self::Error>> {
+        let history_table = tx_history_table(for_coin);
+        validate_table_name(&history_table)?;
+        let cache_table = tx_cache_table(for_coin);
+        validate_table_name(&cache_table)?;
+        let selfi = self.clone();
+
+        async_blocking(move || {
+            let mut conn = selfi.0.lock().unwrap();
+            let sql_transaction = conn.transaction()?;
+            sql_transaction.execute(&format!("DELETE FROM {};", history_table), [])?;
+            sql_transaction.execute(&format!("DELETE FROM {};", cache_table), [])?;
+            sql_transaction.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get_resolved_denoms(&self, for_coin: &str) -> Result<Option<String>, MmError<Self::Error>> {
+        let create = create_tx_resolved_denoms_table_sql(for_coin)?;
+        let select = select_resolved_denoms_sql(for_coin)?;
+        let selfi = self.clone();
+
+        async_blocking(move || {
+            let conn = selfi.0.lock().unwrap();
+            conn.execute(&create, [])?;
+            query_single_row(&conn, &select, [] as [String; 0], string_from_row).map_to_mm(SqlError::from)
+        })
+        .await
+    }
+
+    async fn set_resolved_denoms(&self, for_coin: &str, record: &str) -> Result<(), MmError<Self::Error>> {
+        let create = create_tx_resolved_denoms_table_sql(for_coin)?;
+        let replace = replace_resolved_denoms_sql(for_coin)?;
+        let record = record.to_owned();
+        let selfi = self.clone();
+
+        async_blocking(move || {
+            let conn = selfi.0.lock().unwrap();
+            conn.execute(&create, [])?;
+            conn.execute(&replace, [record])?;
+            Ok(())
         })
         .await
     }

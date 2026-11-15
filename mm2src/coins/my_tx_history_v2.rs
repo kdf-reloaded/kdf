@@ -100,6 +100,16 @@ pub trait TxHistoryStorage: Send + Sync + 'static {
         paging: PagingOptionsEnum<BytesJson>,
         limit: usize,
     ) -> Result<GetHistoryResult, MmError<Self::Error>>;
+
+    /// Removes every row of the selected coin's history and its transaction cache. The tables stay.
+    async fn clear_history(&self, for_coin: &str) -> Result<(), MmError<Self::Error>>;
+
+    /// The record kept beside the selected coin's history of the denominations that were resolvable when its rows
+    /// were written (CRD ch.36 D36.21 (b)); `None` when none was recorded.
+    async fn get_resolved_denoms(&self, for_coin: &str) -> Result<Option<String>, MmError<Self::Error>>;
+
+    /// Replaces the record of [`TxHistoryStorage::get_resolved_denoms`].
+    async fn set_resolved_denoms(&self, for_coin: &str, record: &str) -> Result<(), MmError<Self::Error>>;
 }
 
 pub trait DisplayAddress {
@@ -404,6 +414,41 @@ fn build_response_from_history(
     }
 }
 
+/// The response for a page the history store has already cut: the rows are served as they are, with the store's
+/// `skipped` and `total`.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_response_from_stored_page(
+    request: MyTxHistoryRequestV2,
+    sync_status: HistorySyncState,
+    current_block: u64,
+    page: Vec<TransactionDetails>,
+    skipped: usize,
+    total: usize,
+) -> MyTxHistoryResponseV2 {
+    let transactions = page
+        .into_iter()
+        .map(|details| {
+            let confirmations = if details.block_height == 0 || details.block_height > current_block {
+                0
+            } else {
+                current_block + 1 - details.block_height
+            };
+            MyTxHistoryDetails { confirmations, details }
+        })
+        .collect();
+    MyTxHistoryResponseV2 {
+        coin: request.coin,
+        current_block,
+        transactions,
+        sync_status,
+        limit: request.limit,
+        skipped,
+        total,
+        total_pages: calc_total_pages(total, request.limit),
+        paging_options: request.paging_options,
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 async fn build_response_from_runtime_history(
     ctx: MmArc,
@@ -482,6 +527,7 @@ pub async fn my_tx_history_v2_rpc(
         .await
         .mm_err(Into::into)?;
 
+    let (skipped, total) = (history.skipped, history.total);
     let mut served = Vec::with_capacity(history.transactions.len());
     for mut details in history.transactions {
         // it can be the platform ticker instead of the token ticker for a pre-saved record
@@ -496,14 +542,17 @@ pub async fn my_tx_history_v2_rpc(
         }
         served.push(details);
     }
-    let history = served;
     let sync_status = coin.history_sync_status();
 
-    Ok(build_response_from_history(
+    // The store has already applied the paging: `skipped` and `total` are its own (the total of the whole scope, the
+    // offset of the page or of the `FromId`), so the page is not paged a second time here.
+    Ok(build_response_from_stored_page(
         request,
         sync_status,
         current_block,
-        history,
+        served,
+        skipped,
+        total,
     ))
 }
 

@@ -9,8 +9,8 @@
 use super::super::htlc::CustomTendermintMsgType;
 use super::super::tendermint_tx_history::{fee_row_internal_id, history_internal_id, history_internal_id_for_word,
                                           obsolete_internal_ids, rows_for_tx, served_form, stored_form,
-                                          token_id_of_denom, ClassifyContext, DenomInfo, HistoryEvent, HistoryFetcher,
-                                          MessagePayment, RowDraft, TxFacts};
+                                          token_id_of_denom, ClassifyContext, DenomInfo, FeeEntry, HistoryEvent,
+                                          HistoryFetcher, MessagePayment, RowDraft, StakingMessages, TxFacts};
 use super::*;
 use crate::my_tx_history_v2::{my_tx_history_v2_rpc, HistoryCoinType, MyTxHistoryErrorV2, TxHistoryStorage};
 use crate::sql_tx_history_storage::SqliteTxHistoryStorage;
@@ -80,6 +80,20 @@ fn rows_with_fee(
     fee_amount: u128,
     fee_denom: &str,
 ) -> Vec<RowDraft> {
+    rows_with_fee_list(events, payments, &[(fee_amount, fee_denom)])
+}
+
+/// A transaction with the given fee list (empty for a transaction without a fee).
+fn rows_with_fee_list(events: Vec<HistoryEvent>, payments: Vec<MessagePayment>, fee: &[(u128, &str)]) -> Vec<RowDraft> {
+    rows_of(events, payments, fee, StakingMessages::default())
+}
+
+fn rows_of(
+    events: Vec<HistoryEvent>,
+    payments: Vec<MessagePayment>,
+    fee: &[(u128, &str)],
+    staking: StakingMessages,
+) -> Vec<RowDraft> {
     let denoms = denoms();
     let ctx = ClassifyContext {
         me: ME,
@@ -93,12 +107,18 @@ fn rows_with_fee(
         height: 10,
         timestamp: BLOCK_TIME,
         memo: "a memo".to_owned(),
-        fee_amount,
-        fee_denom: fee_denom.to_owned(),
+        fee: fee
+            .iter()
+            .map(|(amount, denom)| FeeEntry {
+                amount: *amount,
+                denom: (*denom).to_owned(),
+            })
+            .collect(),
         gas_limit: 125_000,
         events,
         raw_tx: vec![1, 2, 3],
         payments,
+        staking,
     };
     rows_for_tx(&facts, &ctx)
 }
@@ -387,7 +407,6 @@ fn a_send_of_exactly_the_fee_amount_is_not_taken_for_the_fee_payment() {
     ]);
 }
 
-// provisional: which denominations resolve is open (D36.13, D36.21)
 #[test]
 fn what_yields_no_row() {
     // T36.35: a denomination that does not resolve; a transaction without a transfer.
@@ -439,6 +458,44 @@ fn attribute_keys_may_be_base64() {
     let row = one(vec![fee_from(ME), encoded]);
     assert_amounts(&row, ["1.005", "1.005", "0", "-1.005"]);
     assert_eq!(row.details.to, vec![PEER.to_owned()]);
+}
+
+#[test]
+fn events_are_compared_in_the_form_the_node_delivered_them() {
+    // R36.14.19 item 1: two same-type events that differ only in the index flag, or only in the encoding of a key
+    // and value, are not repeats: both are counted (and then merged, so the amount shows it).
+    let attributes = |index: bool| {
+        vec![
+            ("sender".to_owned(), ME.to_owned(), index),
+            ("recipient".to_owned(), PEER.to_owned(), true),
+            ("amount".to_owned(), "1000000uiris".to_owned(), true),
+        ]
+    };
+    let make = |index: bool| HistoryEvent::from_raw_indexed("transfer".to_owned(), attributes(index));
+    let identical = one(vec![fee_from(ME), make(true), make(true)]);
+    assert_amounts(&identical, ["1.005", "1.005", "0", "-1.005"]);
+    let index_differs = one(vec![fee_from(ME), make(true), make(false)]);
+    assert_amounts(&index_differs, ["2.005", "2.005", "0", "-2.005"]);
+
+    let b64 = |text: &str| base64::encode(text.as_bytes());
+    let encoded = HistoryEvent::from_raw_indexed("transfer".to_owned(), vec![
+        (b64("sender"), b64(ME), true),
+        (b64("recipient"), b64(PEER), true),
+        (b64("amount"), b64("1000000uiris"), true),
+    ]);
+    let encoding_differs = one(vec![fee_from(ME), make(true), encoded]);
+    assert_amounts(&encoding_differs, ["2.005", "2.005", "0", "-2.005"]);
+}
+
+#[test]
+fn a_denomination_resolves_without_regard_to_letter_case() {
+    // D36.13 (a'): the platform denom exactly, any other denom case-insensitively.
+    let rows = rows(vec![fee_from(ME), transfer(ME, PEER, "1000000UToken")]);
+    assert_eq!(
+        rows[0].details.transaction_type,
+        TransactionType::TokenTransfer(token_id_of_denom("utoken"))
+    );
+    assert_eq!(rows[0].details.coin, "TOK");
 }
 
 // ---------------------------------------------------------------------------
@@ -747,6 +804,83 @@ fn staking_events_without_what_they_need_give_no_row() {
 }
 
 #[test]
+fn a_staking_event_without_a_delegator_takes_the_one_message_delegator() {
+    // T36.47 (i) under D36.20 (b): the delegator of the transaction's one staking message of the kind.
+    let delegate = || event("delegate", &[("validator", VALIDATOR), ("amount", "1000000uiris")]);
+    let with =
+        |messages: StakingMessages, event: HistoryEvent| rows_of(vec![event], vec![], &[(5_000, "uiris")], messages);
+    let me = || vec![ME.to_owned()];
+
+    let rows = with(
+        StakingMessages {
+            delegate: me(),
+            ..StakingMessages::default()
+        },
+        delegate(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].details.transaction_type, TransactionType::StakingDelegation);
+    assert_eq!(rows[0].details.from, me());
+    assert_amounts(&rows[0], ["1.005", "1.005", "0", "-1.005"]);
+
+    // Two messages of the kind, or only messages of another kind: no row.
+    let two = StakingMessages {
+        delegate: vec![ME.to_owned(), PEER.to_owned()],
+        ..StakingMessages::default()
+    };
+    assert!(with(two, delegate()).is_empty());
+    let other_kind = StakingMessages {
+        unbond: me(),
+        ..StakingMessages::default()
+    };
+    assert!(with(other_kind, delegate()).is_empty());
+
+    // `unbond` and `withdraw_rewards` follow the same rule.
+    let unbond = with(
+        StakingMessages {
+            unbond: me(),
+            ..StakingMessages::default()
+        },
+        event("unbond", &[("validator", VALIDATOR), ("amount", "1000000uiris")]),
+    );
+    assert_eq!(unbond.len(), 1);
+    assert_eq!(unbond[0].details.transaction_type, TransactionType::RemoveDelegation);
+    let claim = with(
+        StakingMessages {
+            withdraw_rewards: me(),
+            ..StakingMessages::default()
+        },
+        event("withdraw_rewards", &[
+            ("validator", VALIDATOR),
+            ("amount", "12345uiris"),
+        ]),
+    );
+    assert_eq!(claim.len(), 1);
+    assert_eq!(
+        claim[0].details.transaction_type,
+        TransactionType::ClaimDelegationRewards
+    );
+    assert_eq!(claim[0].details.to, me());
+
+    // A `delegator` attribute on the event wins over the message; a missing `validator` still gives no row.
+    let own = event("delegate", &[
+        ("delegator", ME),
+        ("validator", VALIDATOR),
+        ("amount", "1000000uiris"),
+    ]);
+    let elsewhere = StakingMessages {
+        delegate: vec![PEER.to_owned()],
+        ..StakingMessages::default()
+    };
+    assert_eq!(with(elsewhere, own)[0].details.from, me());
+    let no_validator = StakingMessages {
+        delegate: me(),
+        ..StakingMessages::default()
+    };
+    assert!(with(no_validator, event("delegate", &[("amount", "1000000uiris")])).is_empty());
+}
+
+#[test]
 fn a_reward_claim_of_two_denominations_gives_two_rows() {
     // T36.47 (v).
     let claim = staking("withdraw_rewards", &[
@@ -761,10 +895,17 @@ fn a_reward_claim_of_two_denominations_gives_two_rows() {
     }
 }
 
+fn fee_details_of_row(row: &RowDraft) -> (String, BigDecimal) {
+    match row.details.fee_details.clone() {
+        Some(TxFeeDetails::Tendermint(fee)) => (fee.coin, fee.amount),
+        other => panic!("fee details: {other:?}"),
+    }
+}
+
 #[test]
-fn the_fee_follows_the_first_fee_entry_in_platform_units() {
-    // T36.48 (i), the reference's values: the first fee entry is read as platform base units whatever its
-    // denomination.
+fn the_fee_is_read_in_the_platform_denom_wherever_it_stands() {
+    // T36.48 (i) under D36.19 (b): a fee of one entry in a token denom enters no amount and causes no fee row;
+    // `fee_details` names the token, scaled with its decimals. The fee payment is recognized by the whole text.
     let send = || {
         vec![
             transfer(ME, COLLECTOR, "7000utoken"),
@@ -773,47 +914,74 @@ fn the_fee_follows_the_first_fee_entry_in_platform_units() {
     };
     let rows = rows_with_fee(send(), vec![], 7_000, "utoken");
     assert_eq!(rows.len(), 1);
-    assert_amounts(&rows[0], ["1.007", "1.007", "0", "-1.007"]);
-    match rows[0].details.fee_details.clone() {
-        Some(TxFeeDetails::Tendermint(fee)) => {
-            assert_eq!(fee.coin, "IRIS");
-            assert_eq!(fee.amount, dec("0.007"));
-        },
-        other => panic!("fee details: {other:?}"),
-    }
+    assert_amounts(&rows[0], ["1", "1", "0", "-1"]);
+    assert_eq!(fee_details_of_row(&rows[0]), ("TOK".to_owned(), dec("0.007")));
 
-    // (ii) A fee of two entries: the event that pays both is not the fee payment, so its coins are transfers read
-    // last and take the highest positions.
-    let two = rows_with_fee(
+    // A fee in a denomination that resolves to nothing: `fee_details` is null.
+    let unknown = rows_with_fee(
+        vec![transfer(ME, COLLECTOR, "7000ufoo"), transfer(ME, PEER, "1000000uiris")],
+        vec![],
+        7_000,
+        "ufoo",
+    );
+    assert_eq!(unknown.len(), 1);
+    assert_amounts(&unknown[0], ["1", "1", "0", "-1"]);
+    assert!(unknown[0].details.fee_details.is_none());
+
+    // (ii) A fee of two entries, the token first: the platform entry is read wherever it stands, and the one event
+    // that pays both is the fee payment (its text equals the whole list), so it is left out.
+    let two = rows_with_fee_list(
         vec![
             transfer(ME, COLLECTOR, "300utoken,5000uiris"),
             transfer(ME, PEER, "1000000uiris"),
         ],
         vec![],
-        300,
-        "utoken",
+        &[(300, "utoken"), (5_000, "uiris")],
     );
-    assert_eq!(two.len(), 3);
+    assert_eq!(two.len(), 1);
     assert!(at_position(&two[0], 0));
-    assert_amounts(&two[0], ["1.0003", "1.0003", "0", "-1.0003"]);
+    assert_amounts(&two[0], ["1.005", "1.005", "0", "-1.005"]);
+    assert_eq!(fee_details_of_row(&two[0]), ("IRIS".to_owned(), dec("0.005")));
+
+    // A token transfer with the fee in the platform denom still has its fee row; a fee with no platform entry has
+    // none.
+    let token_send = |fee: &[(u128, &str)], fee_text: &str| {
+        rows_with_fee_list(
+            vec![transfer(ME, COLLECTOR, fee_text), transfer(ME, PEER, "2000000utoken")],
+            vec![],
+            fee,
+        )
+    };
+    assert_eq!(token_send(&[(5_000, "uiris")], "5000uiris").len(), 2);
+    assert_eq!(token_send(&[(7_000, "utoken")], "7000utoken").len(), 1);
+
+    // (iii) A first fee entry of 2^64, or a platform entry of 2^64, leaves the transaction out.
+    assert!(rows_with_fee(send(), vec![], 1u128 << 64, "uiris").is_empty());
+    assert!(rows_with_fee_list(send(), vec![], &[(1, "utoken"), (1u128 << 64, "uiris")]).is_empty());
+}
+
+#[test]
+fn an_empty_fee_list_gives_rows_with_a_fee_of_zero_and_no_fee_row() {
+    // T36.48 (iv) under D36.20 (b): the rows of R36.14.5 -- R36.14.7 with a fee of zero.
+    let sent = rows_with_fee_list(vec![transfer(ME, PEER, "1000000uiris")], vec![], &[]);
+    assert_eq!(sent.len(), 1);
+    assert_amounts(&sent[0], ["1", "1", "0", "-1"]);
+    assert_eq!(fee_details_of_row(&sent[0]), ("IRIS".to_owned(), dec("0")));
+
+    // A token transfer has no fee row, and an empty `amount` is not taken for a fee payment.
+    let token = rows_with_fee_list(
+        vec![
+            event("transfer", &[("sender", ME), ("recipient", PEER), ("amount", "")]),
+            transfer(ME, PEER, "2000000utoken"),
+        ],
+        vec![],
+        &[],
+    );
+    assert_eq!(token.len(), 1);
     assert_eq!(
-        two[1].details.transaction_type,
+        token[0].details.transaction_type,
         TransactionType::TokenTransfer(token_id_of_denom("utoken"))
     );
-    assert_amounts(&two[1], ["0.0003", "0.0003", "0", "-0.0003"]);
-    assert!(at_position(&two[1], 1));
-    assert_eq!(two[2].details.transaction_type, TransactionType::StandardTransfer);
-    assert_amounts(&two[2], ["0.005", "0.005", "0", "-0.005"]);
-    assert!(at_position(&two[2], 2));
-    for row in &two {
-        match row.details.fee_details.clone() {
-            Some(TxFeeDetails::Tendermint(fee)) => assert_eq!(fee.amount, dec("0.0003")),
-            other => panic!("fee details: {other:?}"),
-        }
-    }
-
-    // (iii) A first fee entry of 2^64 leaves the transaction out.
-    assert!(rows_with_fee(send(), vec![], 1u128 << 64, "uiris").is_empty());
 }
 
 #[test]
@@ -1149,13 +1317,23 @@ fn script_history(fx: &Fixture) -> SharedState {
     state
 }
 
-/// A coin with the token `TOK` activated and the coins file naming one more token of this platform.
+/// A coin with the token `TOK` activated (its denom is in the coins file under another ticker), a coins file that
+/// names more tokens of this platform and one of another platform, and the denom `unew` in the file with no token
+/// activated for it.
 fn history_fixture() -> Fixture {
     let node = FakeNode::start();
     let ctx = MmCtxBuilder::new()
         .with_conf(json!({
             "netid": mm2_net_config::SUPPORTED_NETIDS[0],
             "coins": [{
+                "coin": "TOK-CFG",
+                "protocol": { "type": "TENDERMINTTOKEN", "protocol_data": {
+                    "platform": "IRIS", "decimals": 6, "denom": "utoken" } }
+            }, {
+                "coin": "NEW-CFG",
+                "protocol": { "type": "TENDERMINTTOKEN", "protocol_data": {
+                    "platform": "IRIS", "decimals": 6, "denom": "unew" } }
+            }, {
                 "coin": "IRIS-CFG",
                 "protocol": { "type": "TENDERMINTTOKEN", "protocol_data": {
                     "platform": "IRIS", "decimals": 6, "denom": "uconfigured" } }
@@ -1352,9 +1530,26 @@ fn transactions_without_a_row_do_not_stop_the_pass() {
     let storage = storage_with_init();
     let mut fetcher = HistoryFetcher::for_test(fx.coin.clone(), storage.clone());
     common::block_on(fetcher.pass()).expect("a pass");
+    // D36.20 (b): the transaction with the empty fee list has its row, with a fee of zero and no fee row.
     let rows = platform_history(&fx, &storage);
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].memo.as_deref(), Some("good"));
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|row| row.memo.as_deref() == Some("good")));
+    let no_fee_row = rows
+        .iter()
+        .find(|row| row.memo.as_deref() == Some("no fee"))
+        .expect("the row of the transaction without a fee");
+    assert_eq!(no_fee_row.total_amount.to_string(), "1000000");
+    match no_fee_row.fee_details.clone() {
+        Some(TxFeeDetails::Tendermint(fee)) => {
+            assert_eq!(fee.coin, "IRIS");
+            assert_eq!(fee.amount, dec("0"));
+        },
+        other => panic!("fee details: {other:?}"),
+    }
+
+    // T36.48 (iv): a second pass does not write it again.
+    common::block_on(fetcher.pass()).expect("a second pass");
+    assert_eq!(platform_history(&fx, &storage).len(), 2);
 }
 
 #[test]
@@ -1384,8 +1579,9 @@ fn a_node_failure_in_a_page_is_retried_and_the_rows_are_present_once() {
 
 #[test]
 fn token_rows_and_the_fee_row_are_split_by_scope() {
-    // T36.31, R36.14.2, D36.13 (b): an activated token and a configured token of this platform resolve; a
-    // configured token of another platform does not.
+    // T36.31, R36.14.2, D36.13 (a'): a coins-file denom counts whatever its platform: the activated token's row
+    // carries the activated ticker, a configured token's row the entry's ticker, also for a token of another
+    // platform.
     let fx = history_fixture();
     let state = script_history(&fx);
     let (me, peer) = (me(&fx), peer(&fx));
@@ -1407,11 +1603,7 @@ fn token_rows_and_the_fee_row_are_split_by_scope() {
     common::block_on(fetcher.pass()).expect("a pass");
 
     let platform = platform_history(&fx, &storage);
-    assert_eq!(
-        platform.len(),
-        2,
-        "two fee rows, no token row, no row of the other platform's token"
-    );
+    assert_eq!(platform.len(), 3, "three fee rows and no token row");
     assert!(platform
         .iter()
         .all(|row| row.transaction_type == TransactionType::FeeForTokenTx));
@@ -1431,7 +1623,7 @@ fn token_rows_and_the_fee_row_are_split_by_scope() {
         HistoryCoinType::AccountToken {
             platform: "IRIS".to_owned(),
             token_id: token_id_of_denom("uconfigured"),
-            address: me,
+            address: me.clone(),
         },
         PagingOptionsEnum::default(),
         10,
@@ -1439,6 +1631,149 @@ fn token_rows_and_the_fee_row_are_split_by_scope() {
     .unwrap();
     assert_eq!(configured_page.total, 1);
     assert_eq!(configured_page.transactions[0].coin, "IRIS-CFG");
+    let other_page = common::block_on(storage.get_history(
+        HistoryCoinType::AccountToken {
+            platform: "IRIS".to_owned(),
+            token_id: token_id_of_denom("uother"),
+            address: me,
+        },
+        PagingOptionsEnum::default(),
+        10,
+    ))
+    .unwrap();
+    assert_eq!(other_page.total, 1);
+    assert_eq!(other_page.transactions[0].coin, "OTHER-CFG");
+}
+
+fn ids_of(rows: &[crate::TransactionDetails]) -> Vec<BytesJson> {
+    let mut ids: Vec<BytesJson> = rows.iter().map(|row| row.internal_id.clone()).collect();
+    ids.sort_by(|a, b| a.0.cmp(&b.0));
+    ids
+}
+
+/// Every row of the platform coin's store in the account scope: the platform coin's and the given token's.
+fn all_rows(fx: &Fixture, storage: &SqliteTxHistoryStorage, denoms: &[&str]) -> Vec<crate::TransactionDetails> {
+    let mut rows = platform_history(fx, storage);
+    for denom in denoms {
+        let page = common::block_on(storage.get_history(
+            HistoryCoinType::AccountToken {
+                platform: "IRIS".to_owned(),
+                token_id: token_id_of_denom(denom),
+                address: me(fx),
+            },
+            PagingOptionsEnum::default(),
+            100,
+        ))
+        .unwrap();
+        rows.extend(page.transactions);
+    }
+    rows
+}
+
+#[test]
+fn a_custom_token_absent_from_the_coins_file_takes_no_position_and_gets_no_row() {
+    // T36.45 (ii) with a custom token, D36.13 (a'): the activated token `CUSTOM` is not in the coins file, so its
+    // transfer is not counted and the two other rows keep the identifiers of T36.45 (i).
+    let fx = history_fixture();
+    fx.coin
+        .add_activated_token_info("CUSTOM".to_owned(), 6, "ucustom".parse().expect("a denom"));
+    let state = script_history(&fx);
+    let (me, peer) = (me(&fx), peer(&fx));
+    let tx = entry(&tx_bytes(&fx, "custom"), 10, 0, vec![
+        transfer_json(&me, COLLECTOR, "5000uiris"),
+        transfer_json(&me, &peer, "1000000uiris"),
+        transfer_json(&me, &peer, "7000000ucustom"),
+        transfer_json(&me, STRANGER, "2000000uiris"),
+    ]);
+    let hash = tx["hash"].as_str().expect("a hash").to_owned();
+    state.lock().unwrap().spender = vec![tx];
+    let storage = storage_with_init();
+    let mut fetcher = HistoryFetcher::for_test(fx.coin.clone(), storage.clone());
+    common::block_on(fetcher.pass()).expect("a pass");
+
+    let rows = all_rows(&fx, &storage, &["ucustom"]);
+    assert_eq!(rows.len(), 2, "no row for the custom token");
+    assert!(rows
+        .iter()
+        .all(|row| row.transaction_type == TransactionType::StandardTransfer));
+    let ids = ids_of(&rows);
+    let mut expected = vec![history_internal_id(0, &hash), history_internal_id(1, &hash)];
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(ids, expected);
+}
+
+fn sentinel_survives(fx: &Fixture, storage: &SqliteTxHistoryStorage) -> bool {
+    platform_history(fx, storage)
+        .iter()
+        .any(|row| row.internal_id == BytesJson::from(vec![200u8]))
+}
+
+#[test]
+fn the_resolved_denominations_are_recorded_and_an_unchanged_set_does_not_rebuild() {
+    // D36.21 (b).
+    let fx = history_fixture();
+    let state = script_history(&fx);
+    state.lock().unwrap().spender = vec![outgoing(&fx, "a", 10)];
+    let storage = storage_with_init();
+    assert_eq!(common::block_on(storage.get_resolved_denoms("IRIS")).unwrap(), None);
+    let mut fetcher = HistoryFetcher::for_test(fx.coin.clone(), storage.clone());
+    common::block_on(fetcher.pass()).expect("a pass");
+    let record = common::block_on(storage.get_resolved_denoms("IRIS"))
+        .unwrap()
+        .expect("a record after the first pass");
+    for denom in ["uiris", "utoken", "uconfigured", "uother", "unew"] {
+        assert!(record.contains(denom), "{denom} in {record}");
+    }
+
+    // A row the walk cannot produce stays through the next passes and a restart: nothing is rebuilt.
+    common::block_on(storage.add_transactions_to_history("IRIS", vec![details(200, 5, &me(&fx), None)])).unwrap();
+    common::block_on(fetcher.pass()).expect("a second pass");
+    let mut restarted = HistoryFetcher::for_test(fx.coin.clone(), storage.clone());
+    common::block_on(restarted.pass()).expect("a pass after a restart");
+    assert!(sentinel_survives(&fx, &storage));
+    assert_eq!(platform_history(&fx, &storage).len(), 2);
+}
+
+#[test]
+fn a_changed_resolution_rebuilds_the_store_once_to_what_an_empty_store_gets() {
+    // D36.21 (b): a token activated for a denom the coins file names changes the ticker of its rows, so the store
+    // is rebuilt from the chain, once.
+    let fx = history_fixture();
+    let state = script_history(&fx);
+    let (me_address, peer_address) = (me(&fx), peer(&fx));
+    let token_tx = entry(&tx_bytes(&fx, "new token"), 10, 0, vec![
+        transfer_json(&me_address, COLLECTOR, "5000uiris"),
+        transfer_json(&me_address, &peer_address, "3000000unew"),
+    ]);
+    state.lock().unwrap().spender = vec![outgoing(&fx, "plain", 11), token_tx];
+    let storage = storage_with_init();
+    let mut fetcher = HistoryFetcher::for_test(fx.coin.clone(), storage.clone());
+    common::block_on(fetcher.pass()).expect("a pass");
+    let before = all_rows(&fx, &storage, &["unew"]);
+    assert_eq!(before.len(), 3, "the plain row, the token row and its fee row");
+    assert!(before.iter().any(|row| row.coin == "NEW-CFG"));
+
+    // The token is activated: the same denom now resolves to another ticker.
+    common::block_on(storage.add_transactions_to_history("IRIS", vec![details(200, 5, &me_address, None)])).unwrap();
+    fx.coin
+        .add_activated_token_info("NEW".to_owned(), 6, "unew".parse().expect("a denom"));
+    common::block_on(fetcher.pass()).expect("a pass after the activation");
+    assert!(!sentinel_survives(&fx, &storage), "the store was rebuilt");
+    let after = all_rows(&fx, &storage, &["unew"]);
+    assert_eq!(after.len(), 3, "each row is present once");
+    assert!(after.iter().any(|row| row.coin == "NEW"));
+    assert!(after.iter().all(|row| row.coin != "NEW-CFG"));
+
+    // The rebuilt store equals what a fresh fetcher writes into an empty store under the same configuration.
+    let fresh = storage_with_init();
+    common::block_on(HistoryFetcher::for_test(fx.coin.clone(), fresh.clone()).pass()).expect("a fresh pass");
+    assert_eq!(ids_of(&after), ids_of(&all_rows(&fx, &fresh, &["unew"])));
+
+    // No further change: no further rebuild.
+    common::block_on(storage.add_transactions_to_history("IRIS", vec![details(200, 5, &me_address, None)])).unwrap();
+    common::block_on(fetcher.pass()).expect("a pass without a change");
+    assert!(sentinel_survives(&fx, &storage));
+    assert_eq!(state_name(&fx.coin), "Finished");
 }
 
 #[test]
@@ -1631,4 +1966,62 @@ fn the_new_transaction_types_have_the_bound_wire_shapes() {
     );
     assert_eq!(token_id.0.len(), 32);
     assert_eq!(hex::encode(&token_id.0).len(), 64);
+}
+
+#[test]
+fn the_history_method_pages_through_the_store_with_exact_totals() {
+    // R36.14.1, ch.53 paging, through the method itself: the store cuts the page, the method does not cut it again.
+    let fx = history_fixture();
+    let _state = script_history(&fx);
+    let coins_ctx = crate::CoinsContext::from_ctx(&fx.ctx).expect("the coins context");
+    common::block_on(coins_ctx.add_coin(fx.coin.clone().into())).expect("register the platform");
+    let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().expect("a database");
+    fx.ctx
+        .sqlite_connection
+        .pin(Arc::new(Mutex::new(connection)))
+        .expect("pin the database");
+    let storage = SqliteTxHistoryStorage(fx.ctx.sqlite_connection.as_option().expect("pinned").clone());
+    common::block_on(storage.init("IRIS")).unwrap();
+    let me = me(&fx);
+    // Heights 10 to 13, served newest first: ids 4, 3, 2, 1.
+    let rows: Vec<_> = (1u8..=4).map(|id| details(id, 9 + u64::from(id), &me, None)).collect();
+    common::block_on(storage.add_transactions_to_history("IRIS", rows)).unwrap();
+
+    let ask = |paging: Json| {
+        let request =
+            serde_json::from_value(json!({ "coin": "IRIS", "limit": 2, "paging_options": paging })).expect("a request");
+        let answer = common::block_on(my_tx_history_v2_rpc(fx.ctx.clone(), request))
+            .ok()
+            .expect("an answer");
+        serde_json::to_value(&answer).unwrap()
+    };
+    let ids = |answer: &Json| -> Vec<String> {
+        answer["transactions"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| row["internal_id"].as_str().expect("an id").to_owned())
+            .collect()
+    };
+
+    let first = ask(json!({ "PageNumber": 1 }));
+    assert_eq!(first["total"], 4);
+    assert_eq!(first["skipped"], 0);
+    assert_eq!(first["total_pages"], 2);
+    assert_eq!(ids(&first), vec!["04", "03"]);
+
+    let second = ask(json!({ "PageNumber": 2 }));
+    assert_eq!(second["total"], 4);
+    assert_eq!(second["skipped"], 2);
+    assert_eq!(ids(&second), vec!["02", "01"]);
+
+    let from_id = ask(json!({ "FromId": "03" }));
+    assert_eq!(from_id["total"], 4);
+    assert_eq!(from_id["skipped"], 2);
+    assert_eq!(ids(&from_id), vec!["02", "01"]);
+
+    let unknown = ask(json!({ "FromId": "63" }));
+    assert_eq!(unknown["total"], 4);
+    assert_eq!(unknown["skipped"], 0);
+    assert!(ids(&unknown).is_empty());
 }

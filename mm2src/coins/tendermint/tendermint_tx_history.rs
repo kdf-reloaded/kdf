@@ -17,7 +17,6 @@ use super::rpc::*;
 use super::tendermint_helpers::TendermintCommons;
 use super::tendermint_types::{TendermintCoin, TendermintFeeDetails, ABCI_GET_BLOCK_BY_HEIGHT_PATH,
                               ABCI_REQUEST_HEIGHT, ABCI_REQUEST_PROVE};
-use super::TENDERMINT_ASSET_PROTOCOL_TYPE;
 use crate::my_tx_history_v2::{HistoryCoinType, TxHistoryStorage};
 use crate::node_url::scrub_urls_in_text;
 use crate::tx_history_streaming::{publish_tx_history_error, publish_tx_history_records};
@@ -169,19 +168,28 @@ pub(super) struct DenomInfo {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct HistoryEvent {
     pub(super) kind: String,
+    /// The attributes as read (decoded, R36.14.5).
     pub(super) attributes: Vec<(String, String)>,
+    /// The attributes in the form the node delivered them: key, value and index flag, in order. The comparison of
+    /// repeated events uses this form (R36.14.19 item 1).
+    raw: Vec<(String, String, bool)>,
 }
 
 impl HistoryEvent {
-    /// An event from the raw attribute pairs of a node. An attribute key may arrive base64-encoded (older
-    /// nodes), in which case its value is base64-decoded; both forms are read (R36.14.5).
+    /// An event from the raw attribute pairs of a node, each with the index flag `true`. An attribute key may
+    /// arrive base64-encoded (older nodes), in which case its value is base64-decoded; both forms are read
+    /// (R36.14.5).
     pub(super) fn from_raw(kind: String, raw: impl IntoIterator<Item = (String, String)>) -> Self {
+        HistoryEvent::from_raw_indexed(kind, raw.into_iter().map(|(key, value)| (key, value, true)))
+    }
+
+    /// An event from the attributes of a node as delivered: key, value and index flag.
+    pub(super) fn from_raw_indexed(kind: String, raw: impl IntoIterator<Item = (String, String, bool)>) -> Self {
+        let raw: Vec<(String, String, bool)> = raw.into_iter().collect();
         HistoryEvent {
             kind,
-            attributes: raw
-                .into_iter()
-                .map(|(key, value)| decode_attribute(&key, &value))
-                .collect(),
+            attributes: raw.iter().map(|(key, value, _)| decode_attribute(key, value)).collect(),
+            raw,
         }
     }
 
@@ -217,9 +225,9 @@ pub(super) struct TxFacts {
     /// The block time in seconds.
     pub(super) timestamp: u64,
     pub(super) memo: String,
-    /// The first coin of the transaction's fee, in base units, and its denomination.
-    pub(super) fee_amount: u128,
-    pub(super) fee_denom: String,
+    /// The entries of the transaction's fee list, in the order the transaction encodes them (R36.14.22; D36.19 (b),
+    /// D36.20 (b)).
+    pub(super) fee: Vec<FeeEntry>,
     pub(super) gas_limit: u64,
     pub(super) events: Vec<HistoryEvent>,
     /// The raw signed transaction (D36.12 (b)).
@@ -227,6 +235,65 @@ pub(super) struct TxFacts {
     /// What the decoded messages of the transaction pay, so that a genuine send of exactly the fee amount is not
     /// taken for the fee payment.
     pub(super) payments: Vec<MessagePayment>,
+    /// The delegators of the transaction's staking messages by kind (D36.20 (b)).
+    pub(super) staking: StakingMessages,
+}
+
+/// One coin of a fee list: base units and the denomination text.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct FeeEntry {
+    pub(super) amount: u128,
+    pub(super) denom: String,
+}
+
+/// The `delegator_address` of each staking message of a transaction, by the kind of event the message causes
+/// (D36.20 (b)): `MsgDelegate` -- `delegate`, `MsgUndelegate` -- `unbond`, `MsgWithdrawDelegatorReward` --
+/// `withdraw_rewards`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct StakingMessages {
+    pub(super) delegate: Vec<String>,
+    pub(super) unbond: Vec<String>,
+    pub(super) withdraw_rewards: Vec<String>,
+}
+
+impl StakingMessages {
+    /// The delegator of the one message of a kind, when the transaction has exactly one (D36.20 (b)).
+    fn only(addresses: &[String]) -> Option<&str> {
+        match addresses {
+            [only] => Some(only.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// The staking messages of a decoded transaction.
+pub(super) fn staking_messages(messages: &[cosmrs::Any]) -> StakingMessages {
+    use cosmrs::proto::cosmos::distribution::v1beta1::MsgWithdrawDelegatorReward;
+    use cosmrs::proto::cosmos::staking::v1beta1::{MsgDelegate, MsgUndelegate};
+
+    let mut found = StakingMessages::default();
+    for message in messages {
+        let value = message.value.as_slice();
+        match message.type_url.as_str() {
+            "/cosmos.staking.v1beta1.MsgDelegate" => {
+                if let Ok(decoded) = MsgDelegate::decode(value) {
+                    found.delegate.push(decoded.delegator_address);
+                }
+            },
+            "/cosmos.staking.v1beta1.MsgUndelegate" => {
+                if let Ok(decoded) = MsgUndelegate::decode(value) {
+                    found.unbond.push(decoded.delegator_address);
+                }
+            },
+            "/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward" => {
+                if let Ok(decoded) = MsgWithdrawDelegatorReward::decode(value) {
+                    found.withdraw_rewards.push(decoded.delegator_address);
+                }
+            },
+            _ => {},
+        }
+    }
+    found
 }
 
 /// A decoded message that moves coins.
@@ -336,9 +403,87 @@ fn parse_coins(text: &str) -> Vec<(BigDecimal, String)> {
     text.split(',').filter_map(|part| parse_coin(part.trim())).collect()
 }
 
-/// What a denomination resolves to. **Isolated for D36.13 / D36.21**: the set of denominations that resolve decides
-/// which coins take a position (R36.14.19 item 4) and which rows are written; today it is the set the fetcher built.
-fn resolve_denom<'a>(denoms: &'a HashMap<String, DenomInfo>, denom: &str) -> Option<&'a DenomInfo> { denoms.get(denom) }
+/// What a denomination resolves to (D36.13 (a'), the lookup of R36.14.19 item 4): the platform denom compared
+/// exactly, else the first coins-configuration entry whose denom equals it without regard to letter case. The map
+/// holds the platform denom under its exact text and the entries under their lower-cased denom
+/// ([`resolution_map`]), so the lookup is the exact key, then the lower-cased one. The set of denominations that
+/// resolve decides which coins take a position and which rows are written.
+fn resolve_denom<'a>(denoms: &'a HashMap<String, DenomInfo>, denom: &str) -> Option<&'a DenomInfo> {
+    denoms.get(denom).or_else(|| denoms.get(&denom.to_lowercase()))
+}
+
+/// What the denominations of a platform coin resolve to now (D36.13 (a')): the platform denom under its exact text;
+/// every coins-configuration entry that names a denom, of whatever platform, under its lower-cased denom, the first
+/// entry of the file winning; the ticker of an entry is that of the activated token matching it, when there is one.
+/// A denom that is neither (a custom token absent from the coins file) is not in the map and resolves to nothing.
+fn resolution_map(coin: &TendermintCoin) -> HashMap<String, DenomInfo> {
+    let platform = DenomInfo {
+        ticker: coin.ticker.clone(),
+        decimals: coin.decimals(),
+        token_id: None,
+    };
+    let mut map: HashMap<String, DenomInfo> = HashMap::new();
+    if let Some(ctx) = MmArc::from_weak(&coin.ctx) {
+        for (denom, ticker, decimals) in coins_file_denoms(&ctx) {
+            let info = if ticker == coin.ticker {
+                platform.clone()
+            } else {
+                DenomInfo {
+                    token_id: Some(token_id_of_denom(&denom)),
+                    ticker,
+                    decimals,
+                }
+            };
+            map.entry(denom.to_lowercase()).or_insert(info);
+        }
+    }
+    for token in coin.tokens_info.lock().values() {
+        if let Some(info) = map.get_mut(&token.denom.to_string().to_lowercase()) {
+            if info.token_id.is_some() {
+                info.ticker = token.ticker.clone();
+                info.decimals = token.decimals;
+            }
+        }
+    }
+    map.insert(coin.platform_denom().to_string(), platform);
+    map
+}
+
+/// The lookup over the loaded coins configuration (D36.13 (a')): `(denom, ticker, decimals)` of every entry whose
+/// `protocol_data` names a `denom` and `decimals`, in the order of the file.
+fn coins_file_denoms(ctx: &MmArc) -> Vec<(String, String, u8)> {
+    ctx.conf["coins"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let data = &entry["protocol"]["protocol_data"];
+                    let decimals = u8::try_from(data["decimals"].as_u64()?).ok()?;
+                    Some((
+                        data["denom"].as_str()?.to_owned(),
+                        entry["coin"].as_str()?.to_owned(),
+                        decimals,
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The record kept beside the store (D36.21 (b)): what every denomination of the map resolves to, sorted, as a JSON
+/// array of texts. A change of it changes which transfers count or which ticker a row carries.
+fn resolution_record(denoms: &HashMap<String, DenomInfo>) -> String {
+    let mut lines: Vec<String> = denoms
+        .iter()
+        .map(|(denom, info)| {
+            let kind = if info.token_id.is_some() { "token" } else { "platform" };
+            format!("{denom}|{}|{}|{kind}", info.ticker, info.decimals)
+        })
+        .collect();
+    lines.sort();
+    json!(lines).to_string()
+}
 
 /// The coins of an amount text that meet the conditions of R36.14.19 item 4 on the amount: a u64 integer and a
 /// denomination that resolves. The party attributes are checked by the caller.
@@ -349,12 +494,16 @@ fn counted_coins(text: &str, denoms: &HashMap<String, DenomInfo>) -> Vec<(BigDec
         .collect()
 }
 
-/// R36.14.19 item 1: an event is dropped when it is identical to the event of the same type emitted just before it.
+/// R36.14.19 item 1: an event is dropped when it is identical to the event of the same type emitted just before it,
+/// compared in the form the node delivered the events: the attributes' key, value and index flag, in order.
 fn drop_repeated_events(events: &[HistoryEvent]) -> Vec<HistoryEvent> {
     let mut last: HashMap<&str, &HistoryEvent> = HashMap::new();
     let mut kept = Vec::new();
     for event in events {
-        if last.get(event.kind.as_str()) == Some(&event) {
+        if last
+            .get(event.kind.as_str())
+            .is_some_and(|previous| previous.raw == event.raw)
+        {
             continue;
         }
         last.insert(event.kind.as_str(), event);
@@ -379,12 +528,30 @@ fn push_merged(list: &mut Vec<Transfer>, candidate: Transfer) {
     }
 }
 
-/// The text of the fee payment's `transfer` event (R36.14.5). **Isolated for D36.19**: today the text of the first
-/// fee entry (R36.14.22 items 1 and 5); under D36.19 (b) it would be the text of the whole fee list.
-fn fee_payment_text(facts: &TxFacts) -> String { format!("{}{}", facts.fee_amount, facts.fee_denom) }
+/// The text of the fee payment's `transfer` event (R36.14.5; D36.19 (b)): the text of the whole fee list, the coins
+/// separated by commas. `None` for an empty fee list, which has no fee payment.
+fn fee_payment_text(facts: &TxFacts) -> Option<String> {
+    if facts.fee.is_empty() {
+        return None;
+    }
+    Some(
+        facts
+            .fee
+            .iter()
+            .map(|entry| format!("{}{}", entry.amount, entry.denom))
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
 
-fn delegation_transfers(event: &HistoryEvent, denoms: &HashMap<String, DenomInfo>) -> Vec<Transfer> {
-    let (delegator, validator) = match (event.attr("delegator"), event.attr("validator")) {
+/// The staking events without a `delegator` attribute take the `delegator_address` of the transaction's one staking
+/// message of the kind when there is exactly one (D36.20 (b)); `fallback` is that address.
+fn delegation_transfers(
+    event: &HistoryEvent,
+    denoms: &HashMap<String, DenomInfo>,
+    fallback: Option<&str>,
+) -> Vec<Transfer> {
+    let (delegator, validator) = match (event.attr("delegator").or(fallback), event.attr("validator")) {
         (Some(delegator), Some(validator)) => (delegator, validator),
         _ => return Vec::new(),
     };
@@ -402,8 +569,12 @@ fn delegation_transfers(event: &HistoryEvent, denoms: &HashMap<String, DenomInfo
     list
 }
 
-fn reward_claim_transfers(event: &HistoryEvent, denoms: &HashMap<String, DenomInfo>) -> Vec<Transfer> {
-    let (delegator, validator) = match (event.attr("delegator"), event.attr("validator")) {
+fn reward_claim_transfers(
+    event: &HistoryEvent,
+    denoms: &HashMap<String, DenomInfo>,
+    fallback: Option<&str>,
+) -> Vec<Transfer> {
+    let (delegator, validator) = match (event.attr("delegator").or(fallback), event.attr("validator")) {
         (Some(delegator), Some(validator)) => (delegator, validator),
         _ => return Vec::new(),
     };
@@ -421,14 +592,16 @@ fn reward_claim_transfers(event: &HistoryEvent, denoms: &HashMap<String, DenomIn
     list
 }
 
-/// R36.14.21: an `unbond` event needs `delegator` and an amount with at least one coin that counts, although the
-/// row's amount is zero whatever the text says; the row is in the platform denomination.
+/// R36.14.21: an `unbond` event needs `delegator` (or the fallback of D36.20 (b)) and an amount with at least one
+/// coin that counts, although the row's amount is zero whatever the text says; the row is in the platform
+/// denomination.
 fn undelegation_transfers(
     event: &HistoryEvent,
     platform_denom: &str,
     denoms: &HashMap<String, DenomInfo>,
+    fallback: Option<&str>,
 ) -> Vec<Transfer> {
-    let delegator = match event.attr("delegator") {
+    let delegator = match event.attr("delegator").or(fallback) {
         Some(delegator) => delegator,
         None => return Vec::new(),
     };
@@ -496,9 +669,10 @@ fn apply_module_event(transfer: &mut Transfer, event: &HistoryEvent) {
 /// transfers in the list. They come after every position the reference computes, so no reference identifier moves.
 fn transfers_of(
     events: &[HistoryEvent],
-    fee_text: &str,
+    fee_text: Option<&str>,
     platform_denom: &str,
     denoms: &HashMap<String, DenomInfo>,
+    staking: &StakingMessages,
 ) -> Vec<Transfer> {
     let of_kind = |kind: &str| -> Vec<&HistoryEvent> { events.iter().filter(|event| event.kind == kind).collect() };
 
@@ -506,21 +680,23 @@ fn transfers_of(
     if !delegations.is_empty() {
         return delegations
             .into_iter()
-            .flat_map(|event| delegation_transfers(event, denoms))
+            .flat_map(|event| delegation_transfers(event, denoms, StakingMessages::only(&staking.delegate)))
             .collect();
     }
     let undelegations = of_kind("unbond");
     if !undelegations.is_empty() {
         return undelegations
             .into_iter()
-            .flat_map(|event| undelegation_transfers(event, platform_denom, denoms))
+            .flat_map(|event| {
+                undelegation_transfers(event, platform_denom, denoms, StakingMessages::only(&staking.unbond))
+            })
             .collect();
     }
     let claims = of_kind("withdraw_rewards");
     if !claims.is_empty() {
         return claims
             .into_iter()
-            .flat_map(|event| reward_claim_transfers(event, denoms))
+            .flat_map(|event| reward_claim_transfers(event, denoms, StakingMessages::only(&staking.withdraw_rewards)))
             .collect();
     }
 
@@ -533,7 +709,7 @@ fn transfers_of(
     let fee_payment_index = if transfer_events.len() > 1 {
         transfer_events
             .iter()
-            .position(|event| has_parties(event) && event.attr("amount") == Some(fee_text))
+            .position(|event| has_parties(event) && fee_text.is_some() && event.attr("amount") == fee_text)
     } else {
         None
     };
@@ -550,7 +726,7 @@ fn transfers_of(
                 (Some(sender), Some(recipient), Some(amount)) => (sender, recipient, amount),
                 _ => continue,
             };
-        let is_fee_text = amount_text == fee_text;
+        let is_fee_text = Some(amount_text) == fee_text;
         for (amount, denom) in counted_coins(amount_text, denoms) {
             let mut candidate = Transfer {
                 sender: sender.to_owned(),
@@ -569,37 +745,80 @@ fn transfers_of(
     transfers
 }
 
-/// The rows of one transaction (R36.14.5 -- R36.14.9, D36.12 (b), D36.13 (b)); none when no transfer yields a row.
+/// An integer of base units as a decimal in display units, `None` only when the decimal text does not parse (it
+/// always does).
+fn display_amount(amount: u128, decimals: u8) -> Option<BigDecimal> {
+    Some(BigDecimal::from_str(&amount.to_string()).ok()? / power_of_ten(decimals))
+}
+
+fn fee_details_of(coin: &str, amount: u128, display: BigDecimal, gas_limit: u64) -> TxFeeDetails {
+    TxFeeDetails::Tendermint(TendermintFeeDetails {
+        coin: coin.to_owned(),
+        amount: display,
+        // Not serialized and never read from a history row; the saturated value is only the in-memory form.
+        uamount: u64::try_from(amount).unwrap_or(u64::MAX),
+        gas_limit,
+    })
+}
+
+/// The rows of one transaction (R36.14.5 -- R36.14.9, D36.12 (b), D36.13 (a'), D36.19 (b), D36.20 (b)); none when
+/// no transfer yields a row.
 ///
 /// The position that goes into the identifier is the place in the transfer list of R36.14.19, which counts a transfer
 /// whether or not a row is written for it (an HTLC creation by another account, a transfer already stored); a coin
 /// that does not resolve is not in the list.
 pub(super) fn rows_for_tx(facts: &TxFacts, ctx: &ClassifyContext<'_>) -> Vec<RowDraft> {
-    // R36.14.22 item 3: a first fee entry that does not fit an unsigned 64-bit integer leaves the transaction out.
-    if facts.fee_amount > u128::from(u64::MAX) {
+    // R36.14.22 item 3: a fee entry that is read and does not fit an unsigned 64-bit integer leaves the transaction
+    // out. The entries read are the first one and, under D36.19 (b), the one in the platform denom.
+    let platform_entry = facts.fee.iter().find(|entry| entry.denom == ctx.platform_denom);
+    if facts
+        .fee
+        .first()
+        .into_iter()
+        .chain(platform_entry)
+        .any(|entry| entry.amount > u128::from(u64::MAX))
+    {
         return Vec::new();
     }
     // An event repeated identically in direct succession counts once, per event type (R36.14.19 item 1).
     let events = drop_repeated_events(&facts.events);
 
     let fee_text = fee_payment_text(facts);
-    let transfers = transfers_of(&events, &fee_text, ctx.platform_denom, ctx.denoms);
+    let transfers = transfers_of(
+        &events,
+        fee_text.as_deref(),
+        ctx.platform_denom,
+        ctx.denoms,
+        &facts.staking,
+    );
 
-    // The decimal text of an integer always parses; a transaction whose fee could not be read would be left out.
-    let fee_base = match BigDecimal::from_str(&facts.fee_amount.to_string()) {
-        Ok(fee_base) => fee_base,
-        Err(_) => return Vec::new(),
-    };
-    let fee_display = &fee_base / &power_of_ten(ctx.platform_decimals);
-    let fee_details = TxFeeDetails::Tendermint(TendermintFeeDetails {
-        coin: ctx.platform_ticker.to_owned(),
-        amount: fee_display.clone(),
-        // Not serialized and never read from a history row; the saturated value is only the in-memory form.
-        uamount: u64::try_from(facts.fee_amount).unwrap_or(u64::MAX),
-        gas_limit: facts.gas_limit,
-    });
-
+    // The fee as it enters amounts (D36.19 (b), D36.20 (b)): the platform entry wherever it stands in the list; an
+    // empty list is a fee of zero and has no fee row; a list without a platform entry enters no amount and has no
+    // fee row, and `fee_details` names the coin of the first entry when it resolves.
     let zero = BigDecimal::from(0);
+    let (fee_display, fee_row_allowed, fee_details) = match (platform_entry, facts.fee.first()) {
+        (Some(entry), _) => {
+            let display = match display_amount(entry.amount, ctx.platform_decimals) {
+                Some(display) => display,
+                None => return Vec::new(),
+            };
+            let details = fee_details_of(ctx.platform_ticker, entry.amount, display.clone(), facts.gas_limit);
+            (Some(display), true, Some(details))
+        },
+        (None, None) => (
+            Some(zero.clone()),
+            false,
+            Some(fee_details_of(ctx.platform_ticker, 0, zero.clone(), facts.gas_limit)),
+        ),
+        (None, Some(first)) => {
+            let details = resolve_denom(ctx.denoms, &first.denom).and_then(|info| {
+                let display = display_amount(first.amount, info.decimals)?;
+                Some(fee_details_of(&info.ticker, first.amount, display, facts.gas_limit))
+            });
+            (None, false, details)
+        },
+    };
+
     let mut rows: Vec<RowDraft> = Vec::new();
     let mut fee_taken = false;
     let mut fee_row_for: Option<usize> = None;
@@ -691,21 +910,24 @@ pub(super) fn rows_for_tx(facts: &TxFacts, ctx: &ClassifyContext<'_>) -> Vec<Row
         // claim) bears the fee once, in its own amounts when it is in the platform denom and as a fee row when it is
         // in a token denom; the fee payment itself already is the fee.
         let is_platform = info.token_id.is_none();
-        if !fee_taken && (sent_by_me || transfer.kind == TransferKind::RewardClaim) {
-            fee_taken = true;
-            if is_platform {
-                // Fee-only: the transfer is the fee payment and no message of the transaction pays it.
-                let is_fee_payment = transfer.is_fee_payment
-                    && !facts
-                        .payments
-                        .iter()
-                        .any(|payment| payment.explains(transfer.recipient.as_deref(), &fee_text));
-                if !is_fee_payment {
-                    spent_by_me += &fee_display;
-                    total_amount += &fee_display;
+        if let Some(fee_display) = &fee_display {
+            if !fee_taken && (sent_by_me || transfer.kind == TransferKind::RewardClaim) {
+                fee_taken = true;
+                if is_platform {
+                    // Fee-only: the transfer is the fee payment and no message of the transaction pays it.
+                    let is_fee_payment = transfer.is_fee_payment
+                        && !facts.payments.iter().any(|payment| {
+                            fee_text
+                                .as_deref()
+                                .is_some_and(|text| payment.explains(transfer.recipient.as_deref(), text))
+                        });
+                    if !is_fee_payment {
+                        spent_by_me += fee_display;
+                        total_amount += fee_display;
+                    }
+                } else if fee_row_allowed {
+                    fee_row_for = Some(rows.len());
                 }
-            } else {
-                fee_row_for = Some(rows.len());
             }
         }
 
@@ -721,7 +943,7 @@ pub(super) fn rows_for_tx(facts: &TxFacts, ctx: &ClassifyContext<'_>) -> Vec<Row
             received_by_me,
             block_height: facts.height,
             timestamp: facts.timestamp,
-            fee_details: Some(fee_details.clone()),
+            fee_details: fee_details.clone(),
             coin: info.ticker.clone(),
             internal_id: history_internal_id(position, &facts.hash),
             kmd_rewards: None,
@@ -736,7 +958,7 @@ pub(super) fn rows_for_tx(facts: &TxFacts, ctx: &ClassifyContext<'_>) -> Vec<Row
     }
 
     // R36.14.8 item 3.
-    if let Some(index) = fee_row_for {
+    if let (Some(index), Some(fee_display)) = (fee_row_for, &fee_display) {
         let token_row = &rows[index].details;
         let fee_row = TransactionDetails {
             tx_hex: token_row.tx_hex.clone(),
@@ -747,7 +969,7 @@ pub(super) fn rows_for_tx(facts: &TxFacts, ctx: &ClassifyContext<'_>) -> Vec<Row
             total_amount: fee_display.clone(),
             spent_by_me: fee_display.clone(),
             received_by_me: zero.clone(),
-            my_balance_change: &zero - &fee_display,
+            my_balance_change: &zero - fee_display,
             block_height: token_row.block_height,
             timestamp: token_row.timestamp,
             fee_details: token_row.fee_details.clone(),
@@ -835,6 +1057,9 @@ pub(super) struct HistoryFetcher<S: TxHistoryStorage> {
     /// For each of the two queries, the page the next pass starts at (R36.14.3).
     cursors: [u32; 2],
     first_pass_done: bool,
+    /// What the denominations resolve to in the current pass (D36.13 (a'), D36.21 (b)); read once at the start of a
+    /// pass, so that one pass counts with one lookup.
+    denoms: HashMap<String, DenomInfo>,
 }
 
 impl<S: TxHistoryStorage> HistoryFetcher<S> {
@@ -846,7 +1071,33 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
             pause,
             cursors: [1, 1],
             first_pass_done: false,
+            denoms: HashMap::new(),
         }
+    }
+
+    /// D36.21 (b): the record of the denominations the lookup resolves is kept beside the store. When this pass
+    /// resolves a different set than the one the rows were written under, the platform coin's store (the rows of the
+    /// platform and of its tokens) is cleared, the fetcher starts again at the first page and the history state is
+    /// `InProgress`, so the store becomes what the reference writes into an empty store under the same configuration.
+    async fn rebuild_when_resolution_changed(&mut self) -> Result<(), String> {
+        let ticker = self.coin.ticker.clone();
+        let store_error = |e: mm2_err_handle::prelude::MmError<S::Error>| format!("{:?}", e.into_inner());
+        let record = resolution_record(&self.denoms);
+        let stored = self.storage.get_resolved_denoms(&ticker).await.map_err(store_error)?;
+        if stored.as_deref() == Some(record.as_str()) {
+            return Ok(());
+        }
+        if stored.is_some() {
+            self.storage.clear_history(&ticker).await.map_err(store_error)?;
+            self.cursors = [1, 1];
+            self.first_pass_done = false;
+            self.coin
+                .set_history_sync_state(HistorySyncState::InProgress(json!({ "transactions_left": null })));
+        }
+        self.storage
+            .set_resolved_denoms(&ticker, &record)
+            .await
+            .map_err(store_error)
     }
 
     /// The two event queries, walked in turn (R36.14.3).
@@ -911,6 +1162,8 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
     /// page; only a store failure ends the pass with an error. The history state becomes `Finished` when the
     /// first pass completes.
     pub(super) async fn pass(&mut self) -> Result<(), String> {
+        self.denoms = resolution_map(&self.coin);
+        self.rebuild_when_resolution_changed().await?;
         let queries = self.queries();
         for (index, query) in queries.iter().enumerate() {
             loop {
@@ -950,52 +1203,7 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
         Ok(u64::from(response.total_count))
     }
 
-    /// The denominations that get rows, by D36.13 (b): the platform coin, then a token activated on this platform
-    /// (custom tokens included), then a coins-configuration entry whose platform is this coin.
-    fn denom_map(&self) -> HashMap<String, DenomInfo> {
-        let mut map = HashMap::new();
-        if let Some(ctx) = MmArc::from_weak(&self.coin.ctx) {
-            if let Some(entries) = ctx.conf["coins"].as_array() {
-                for entry in entries {
-                    let protocol = &entry["protocol"];
-                    let data = &protocol["protocol_data"];
-                    if protocol["type"].as_str() != Some(TENDERMINT_ASSET_PROTOCOL_TYPE)
-                        || data["platform"].as_str() != Some(self.coin.ticker.as_str())
-                    {
-                        continue;
-                    }
-                    let decimals = data["decimals"].as_u64().and_then(|d| u8::try_from(d).ok());
-                    if let (Some(denom), Some(decimals), Some(ticker)) =
-                        (data["denom"].as_str(), decimals, entry["coin"].as_str())
-                    {
-                        map.insert(denom.to_owned(), DenomInfo {
-                            ticker: ticker.to_owned(),
-                            decimals,
-                            token_id: Some(token_id_of_denom(denom)),
-                        });
-                    }
-                }
-            }
-        }
-        for info in self.coin.tokens_info.lock().values() {
-            let denom = info.denom.to_string();
-            map.insert(denom.clone(), DenomInfo {
-                ticker: info.ticker.clone(),
-                decimals: info.decimals,
-                token_id: Some(token_id_of_denom(&denom)),
-            });
-        }
-        let platform_denom = self.coin.platform_denom().to_string();
-        map.insert(platform_denom, DenomInfo {
-            ticker: self.coin.ticker.clone(),
-            decimals: self.coin.decimals(),
-            token_id: None,
-        });
-        map
-    }
-
     async fn drafts_of(&self, response: &TxSearchResponse) -> Result<Vec<RowDraft>, PageError> {
-        let denoms = self.denom_map();
         let me = self.coin.account_id.to_string();
         let platform_denom = self.coin.platform_denom().to_string();
         let ctx = ClassifyContext {
@@ -1003,7 +1211,7 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
             platform_ticker: &self.coin.ticker,
             platform_denom: &platform_denom,
             platform_decimals: self.coin.decimals(),
-            denoms: &denoms,
+            denoms: &self.denoms,
         };
         let mut block_times: HashMap<u64, Option<u64>> = HashMap::new();
         let mut drafts = Vec::new();
@@ -1019,10 +1227,6 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
             if tx.body.messages.is_empty() {
                 continue;
             }
-            let fee_coin = match tx.auth_info.fee.amount.first() {
-                Some(coin) => coin,
-                None => continue,
-            };
             let height = entry.height.value();
             let timestamp = match block_times.get(&height) {
                 Some(time) => *time,
@@ -1041,12 +1245,12 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
                 .events
                 .iter()
                 .map(|event| {
-                    HistoryEvent::from_raw(
+                    HistoryEvent::from_raw_indexed(
                         event.kind.clone(),
                         event
                             .attributes
                             .iter()
-                            .map(|attribute| (attribute.key.clone(), attribute.value.clone())),
+                            .map(|attribute| (attribute.key.clone(), attribute.value.clone(), attribute.index)),
                     )
                 })
                 .collect();
@@ -1055,12 +1259,21 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
                 height,
                 timestamp,
                 memo: tx.body.memo.clone(),
-                fee_amount: fee_coin.amount,
-                fee_denom: fee_coin.denom.to_string(),
+                fee: tx
+                    .auth_info
+                    .fee
+                    .amount
+                    .iter()
+                    .map(|coin| FeeEntry {
+                        amount: coin.amount,
+                        denom: coin.denom.to_string(),
+                    })
+                    .collect(),
                 gas_limit: tx.auth_info.fee.gas_limit,
                 events,
                 raw_tx: entry.tx.clone(),
                 payments: message_payments(&tx.body.messages),
+                staking: staking_messages(&tx.body.messages),
             };
             drafts.extend(rows_for_tx(&facts, &ctx));
         }

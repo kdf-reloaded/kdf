@@ -90,10 +90,16 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    (D36.10 (b)); the store is meant to be byte-compatible with the reference as R36.14.10
    states it (D36.11 (a); unit-tested against the chapter's wording, not yet
    checked against a store written by GLEEC KDF; the position counting follows
-   the cleared §36.14.6); amounts follow D36.12 (b); denominations resolve as D36.13 (b) in
-   isolation (provisional, suspended pending §36.14.6); no row for a
+   the cleared §36.14.6); amounts follow D36.12 (b); denominations resolve as at the
+   reference (D36.13 (a'): the platform `denom`, else the first coins-file entry
+   of any platform), and the store is read again from the chain when that lookup
+   changes (D36.21 (b)); the fee, the empty fee list and the staking events
+   without a delegator follow D36.19 (b) and D36.20 (b); no row for a
    chain-side HTLC refund or a completed undelegation (D36.14), which stays a
-   planning question. Native builds only.
+   planning question. Native builds only. Limitation: the history of a custom
+   token that is absent from the coins file does not exist in 0.5.0. A later
+   package, not scheduled: a Reloaded-side identifier scheme for transfers the
+   reference does not count (such custom-token transfers).
 5. **Hardware `priv_key_policy`.** The reference ignores `priv_key_policy` for
    Tendermint, so `"Trezor"` silently activates with the context key (ch. 36
    code-quality finding).

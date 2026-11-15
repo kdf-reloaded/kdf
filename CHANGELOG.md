@@ -58,7 +58,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   left; it is `Finished` afterwards. A fee-only transaction counts its fee once, a reward claim
   counts the fee it cost, a transaction touching several validators gets one row per validator, and
   `tx_hex` is the signed transaction. The history of a refunded HTLC or a completed undelegation has
-  no row, because the chain records no transaction for them. Native only in 0.5.0: the browser build has no versioned history store for any coin family. Detail: PR #363;
+  no row, because the chain records no transaction for them. The history of a custom token that is
+  not in the coins file is absent in 0.5.0. Native only in 0.5.0: the browser build has no versioned history store for any coin family. Detail: PR #363;
   CRD ch.36 §36.14.1.
 
 ### Changed
@@ -74,6 +75,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   activating with the local key. Detail: PR #358; CRD ch.36 §36.7, status note of 2026-11-15
 
 ### Fixed
+
+#### Transaction history
+
+- **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is
+  served from the store (BCH and SLP tokens, and now Tendermint coins), the versioned method
+  reported the page size as `total`, and a request with `from_id` could return an empty page; it now
+  returns the store's total, the right `skipped` count and `total_pages`. Detail: PR #363; CRD ch.53
+  R53.2.4, R53.2.8.
 
 #### QTUM and QRC20
 
