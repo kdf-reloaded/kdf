@@ -112,6 +112,9 @@ fn test_withdraw_cashaddresses() {
             "coins": coins,
             "i_am_seed": true,
             "rpc_password": "pass",
+            // These tests check withdraw behavior, not server agreement. Public testnet servers can briefly
+            // disagree (for example during a reorganization), which fails the activation by design (R38.6.4o item 12).
+            "electrum_tip_checks": false,
         }),
         "pass".into(),
         local_start!("bob"),
@@ -215,6 +218,9 @@ fn test_withdraw_to_different_cashaddress_network_should_fail() {
             "coins": coins,
             "i_am_seed": true,
             "rpc_password": "pass",
+            // These tests check withdraw behavior, not server agreement. Public testnet servers can briefly
+            // disagree (for example during a reorganization), which fails the activation by design (R38.6.4o item 12).
+            "electrum_tip_checks": false,
         }),
         "pass".into(),
         local_start!("bob"),
