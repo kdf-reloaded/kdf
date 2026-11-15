@@ -240,6 +240,85 @@ R40.3.4 **Errors** (all mmrpc-level):
 method maps `Transport` to 500, the platform method of R40.2.4 to 502; both are
 bound as the reference does.)
 
+## 40.3A Reloaded's primary surface (Reloaded-original)
+
+This section binds the request, result and error shapes of Reloaded's own
+activation methods, `enable_solana_with_tokens` and `enable_spl`, which stay
+the primary contract (maintainer decision of 2026-10-11 at the top of this
+chapter). Their failures map as on the compatibility surface (§40.2.4,
+§40.3.4; maintainer decision of 2026-11-15), so that a client that handles
+one surface handles both. While `SOLANA_ACTIVATION_AVAILABLE` is `false`
+both methods answer the refusal of T40.9 before anything below applies.
+
+**R40.3A.1** *`enable_solana_with_tokens`, request.* Members flat in
+`params`; members not listed are ignored, `tx_history` included (T40.6B.21):
+
+| Member | JSON type | Required / default | Effect |
+| --- | --- | --- | --- |
+| `ticker` | string | **required** | platform ticker (`SOLANA` protocol) |
+| `confirmation_commitment` | string: `processed`, `confirmed` or `finalized` | **required** | the commitment level sent with node requests |
+| `client_url` | string | optional | one node, tried first |
+| `client_urls` | array of strings | optional, default `[]` | further nodes, in order after `client_url` |
+| `spl_tokens_requests` | array of `{ticker}` | **required**, may be empty | SPL tokens activated inline, each from its configuration entry |
+
+At least one node must be given in `client_url` or `client_urls`. A token
+request has no `protocol` member: a token is activated from its
+configuration only. A request that does not parse (a required member
+missing, an unknown commitment level) is `InvalidRequest` (HTTP 400, chapter
+55 §55.1).
+
+**R40.3A.2** *`enable_solana_with_tokens`, result* (HTTP 200):
+
+| Member | JSON type | Content |
+| --- | --- | --- |
+| `current_block` | integer | the chain's block height (`getBlockHeight`) |
+| `solana_addresses_infos` | object | one entry keyed by the platform address: `{derivation_method, pubkey, balances: {spendable, unspendable}}` |
+| `spl_addresses_infos` | object | one entry keyed by the platform address: `{derivation_method, pubkey, balances}`, `balances` mapping each token ticker activated in this call to `{spendable, unspendable}` |
+
+`derivation_method` is `{"type": "Iguana"}` under a single-key login;
+`pubkey` is the base58 platform address. Balances are decimal strings and
+`unspendable` is `"0"`.
+
+**R40.3A.3** *`enable_solana_with_tokens`, errors.* As R40.2.4, with these
+cases of this surface:
+
+| `error_type` | Returned when | `error_data` | HTTP |
+| --- | --- | --- | --- |
+| `PlatformCoinCreationError` | neither `client_url` nor `client_urls` names a node; key derivation failure; failure to read the block height, the SOL balance or a token balance | `{ticker, error}` (`ticker` = platform ticker) | 500 |
+| `TokenProtocolParseError` | a token's configuration protocol does not parse, an invalid `token_contract_address` or `mint_address` included | `{ticker, error}` | 500 |
+| `Internal` | the platform address cannot be rendered | string | 500 |
+
+The other rows of R40.2.4 apply unchanged. Node names in every error text
+are host-only (R40.5A.1). Initialising the inline tokens contacts no node
+on this surface today, so its `Transport` row (HTTP 502) is not reached; it
+is reached once the mint-owner check of R40.2.2 is built (plan
+`solana-support`, the compatibility-methods package).
+
+**R40.3A.4** *`enable_spl`.* Request: `ticker` (string, **required**) and
+`activation_params` (object, **required**, may be `{}`; members ignored);
+there is no `protocol` member. Result (HTTP 200): `{balances,
+token_contract_address, platform_coin}`, `balances` holding one entry
+keyed by the wallet's platform address with `{spendable, unspendable}`,
+`token_contract_address` the base58 mint and `platform_coin` the platform
+ticker. Errors: as R40.3.4. A node failure while the balance is read is
+`Transport` (string, HTTP 500); an invalid `token_contract_address` or
+`mint_address` is `TokenProtocolParseError` (`{ticker, error}`, HTTP 500).
+
+**R40.3A.5** *Decimals.* The platform's decimals are 9 whatever the
+configuration entry says; a token's decimals are its
+`protocol_data.decimals` (R40.6B.2).
+
+**T40.3A.1** Each error row of R40.3A.3 and R40.3A.4 that can be produced
+without a node, serialized as the RPC layer does: the exact `error_type`,
+the exact `error_data` members and the HTTP status.
+
+**T40.3A.2** A node that refuses the connection, with no inline token:
+`PlatformCoinCreationError`, the platform ticker, HTTP 500; the text names
+the node host-only. The same node behind an active platform with
+`enable_spl`: `Transport`, HTTP 500.
+
+**T40.3A.3** R40.3A.5: T40.6B.3.
+
 ## 40.4 Balances & chain state (R31 dictated by Solana JSON-RPC)
 
 R40.4.1 SOL balances shall be read with `getBalance` and converted from lamports
@@ -356,6 +435,10 @@ refuses every request; see the availability note at the top of this chapter):
 > as defects of the primary surface; item 6's error-mapping differences apply
 > to the compatibility surface and are re-evaluated for the primary surface in
 > the Solana plan. Release scope is tracked in `UPSTREAM-PARITY-GAPS.md`.
+
+> **Reloaded status (clean side, 2026-11-15).** Re-evaluated: by the
+> maintainer's decision of 2026-11-15 the primary surface maps its failures
+> as the compatibility surface does; §40.3A binds it. PR #371.
 
 > **Code-quality finding (informative; trigger: a code comment states the
 > problem).** The reference's Solana key-policy handling is acknowledged in the
@@ -481,6 +564,12 @@ the balance, the result or the error of either activation method:
 | any other key | not read by activation |
 
 This completes R40.1.2-R40.1.3.
+
+> **Reloaded status (clean side, 2026-11-15).** Reloaded fixes the
+> platform's decimals at 9 and reads a token's decimals from
+> `protocol_data` only (R40.3A.5, PR #371); before, it read a platform
+> entry's top-level `decimals`. `derivation_path` is not read under a
+> single-key login.
 
 **R40.6B.3** *Protocol parsing, completing R40.1.2-R40.1.3.*
 
@@ -1338,6 +1427,10 @@ coin-configuration forms) alongside reloaded's primary surface, and bind the
 primary surface's own wire shapes in this chapter. Deferred to a dedicated
 session; see `docs/plans/solana-support.md`.
 
+> **Reloaded status (clean side, 2026-11-15).** The configuration forms are
+> read since PR #361 (status note after R40.1.3); the primary surface's wire
+> shapes are bound in §40.3A (PR #371). The `experimental::` methods remain.
+
 D40.4 Switching Solana back on (planned for the next beta; maintainer decision
 2026-10-26): set `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable the Solana
 docker tests listed in `docs/DISABLED_TESTS.md` (group 6) and retire T40.9.
@@ -1482,3 +1575,9 @@ with the shapes listed in §40.6 items 3-5.
 - *Clean-context addition (2026-11-15, forbidden corpus not consulted):* the
   Reloaded status notes after R40.1.3 and after §40.6 item 7 record the state
   of this repository's own code. They take no forbidden-class input.
+- *Clean-context addition (2026-11-15, forbidden corpus not consulted):*
+  §40.3A (R40.3A.1-R40.3A.5, T40.3A.1-T40.3A.3) and the status notes after
+  §40.6's decision paragraph, after R40.6B.2 and after D40.3 bind Reloaded's
+  own activation methods from this repository's code and the maintainer's
+  decision of 2026-11-15 to map their failures as §40.2-§40.3 do. They take
+  no forbidden-class input beyond the cleared rules they cite.

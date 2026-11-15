@@ -88,11 +88,12 @@ specifications unless a reference question below changes them.
 | --- | --- | --- |
 | S0 | Correct this plan, ch. 40 §40.6 and `docs/DISABLED_TESTS.md` group 6 against the code of 2026-11-15 | done, PR #361 |
 | S2 | Accept both coin-configuration forms: the reference's `SOLANA` with `protocol_data: {}` and `SOLANATOKEN` with `platform`, `decimals`, `mint_address` and `program_id`, besides Reloaded's own forms; each token keeps its `program_id` (the `SPLTOKEN` form means the SPL Token program); a test per form | done on native builds, PR #361 (WASM with S8) |
-| S1 | Bind the primary surface (`enable_solana_with_tokens`, `enable_spl`) in ch. 40: request fields, results and a per-method error table, as the wire-parity plan (`docs/plans/rpc-api-reference-wire-parity.md`, R43.8.4) requires; failures map as on the compatibility surface (§40.2-§40.3), as typed errors | next |
-| S3 | Every operation an ordinary RPC reaches on a Solana coin answers a typed "not supported for this coin" error instead of ending the request; operations only a swap reaches stay behind the trading refusal. The minimum transaction amount becomes one lamport for SOL and one smallest unit of its own decimals for each SPL token (section "Trading floors") | open |
+| S1 | Bind the primary surface (`enable_solana_with_tokens`, `enable_spl`) in ch. 40: request fields, results and a per-method error table, as the wire-parity plan (`docs/plans/rpc-api-reference-wire-parity.md`, R43.8.4) requires; failures map as on the compatibility surface (§40.2-§40.3), as typed errors; the platform's decimals fixed at 9 (R40.6B.2) | done, PR #371 (ch. 40 §40.3A) |
+| S3 | Every operation an ordinary RPC reaches on a Solana coin answers a typed "not supported for this coin" error instead of ending the request; operations only a swap reaches stay behind the trading refusal. The minimum transaction amount becomes one lamport for SOL and one smallest unit of its own decimals for each SPL token (section "Trading floors"); `show_priv_key` answers the 64-byte keypair in base58 (maintainer decision of 2026-11-15) | open |
 | S4 | Keys under each login: under a global-HD login an ed25519 key derived from the wallet seed at the coin's `derivation_path` and `path_to_address`; a typed refusal for hardware-wallet and WalletConnect requests; the single-key rule of R40.1.4 unchanged; the legacy passphrase key never used for Solana; ch. 05 R46 and ch. 40 R40.1.4 reconciled by status notes | open; the path layout follows the reference question on key handling |
 | S5 | Move the Solana crates to the 3.x line, which no longer pins `ed25519-dalek` 1 (see `solana-sdk-upgrade.md`), with address and signature regression vectors; before S6 and S8 | open (in this cycle by maintainer decision, 2026-11-15) |
-| S6 | Token-2022 and withdraw fixes: the token's `program_id` for the account, balance, transfer and account creation; the mint-owner check of R40.2.2; SPL `max`; rent counted and shown | after S2 |
+| S6 | Withdraw fixes for classic SPL tokens: the account and balance derived with the token's `program_id` (a wallet without an account reads zero), the whole amount for SPL `max`, rent counted and shown, the four-member `fee_details`, owner addresses only as recipients, the mint-owner check of R40.2.2; a token whose `program_id` is the Token-2022 program is refused at activation with a structured error (maintainer decision of 2026-11-15, ch. 40 D40.6B.4 (a)) | after S2 |
+| S6b | Full Token-2022 support: balance, source account and transfer under the token's own program, rent for the real account size, a stated rule for mints with a transfer fee (ch. 40 D40.6B.4 (b)) | after S9 |
 | S7 | Compatibility methods `experimental::enable_solana_with_assets` and `experimental::enable_solana_token` over the same activation code, with the §40.2-§40.3 shapes, `getHealth` node selection and the §40.7 tests | after S2 and S6 |
 | S8 | WASM routing for both surfaces; a build probe early in the cycle decides how it is built (for example a node client on the target-neutral HTTP layer) | open; probe after S2 |
 | S9 | Switch Solana back on (CRD ch. 40 D40.4): set `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable `docs/DISABLED_TESTS.md` group 6, retire the refusal tests and the beta notes in ch. 40, ch. 55, `RELOADED_VS_GLEEC.md`, `docs/GLEEC_COMPATIBILITY.md` and the README; devnet lab rows before it is marked ready | after S1 to S8 (maintainer decision, 2026-11-15) |
@@ -112,6 +113,11 @@ specifications unless a reference question below changes them.
   switch-on). The path layout matches the reference if the reference derives
   HD Solana keys; otherwise it follows the layout common Solana wallets use,
   under a named public standard, with vectors from a public test mnemonic.
+- **Maintainer decisions (2026-11-15), later the same day:** the HD path offers
+  both layouts, `m/44'/501'/N'/0'` by default and `m/44'/501'/N'` through a
+  request parameter whose design is under review (S4); a Token-2022 token is
+  refused at activation until full support lands after the switch-on (S6,
+  S6b); `show_priv_key` answers the 64-byte keypair in base58 (S3).
 - **Chosen for planning (2026-11-15):** the primary surface's failures map as on
   the compatibility surface (S1); a one-window build probe decides how WASM is
   built (S8); Solana returns wallet-only, and swaps follow only after the

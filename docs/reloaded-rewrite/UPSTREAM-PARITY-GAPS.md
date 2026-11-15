@@ -290,6 +290,9 @@ preimage/conversion flows.
   `SOLANATOKEN` coin-configuration forms (ch. 40 §40.1-§40.3) are not routed or
   parsed yet, Solana is native-only, and the primary surface's wire shapes are
   not yet bound in the CRD. Work package: `docs/plans/solana-support.md`.
+  *Status 2026-11-15:* the configuration forms are read (PR #361) and the
+  primary surface is bound in ch. 40 §40.3A (PR #371); the `experimental::`
+  methods and WASM remain.
 - [ ] For the next beta, run a clean-room CRD pass before implementation.
 - [ ] Before Solana is switched back on, mark the unsupported RPC/swap paths
   explicitly and return structured errors instead of panics.

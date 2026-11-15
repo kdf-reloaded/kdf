@@ -33,11 +33,6 @@ use std::{fmt::{Debug, Formatter, Result as FmtResult},
 pub const SPL_TOKEN_PROGRAM_ID: Pubkey = spl_token::ID;
 
 #[derive(Debug)]
-pub enum SplTokenCreationError {
-    InvalidPubkey(String),
-}
-
-#[derive(Debug)]
 pub struct SplTokenConf {
     pub decimals: u8,
     pub ticker: String,
@@ -58,7 +53,7 @@ pub struct SplTokenInfo {
 pub struct SplProtocolConf {
     pub platform_coin_ticker: String,
     pub decimals: u8,
-    pub token_contract_address: String,
+    pub token_contract_address: Pubkey,
     /// The token program id: the one the configuration names for `SOLANATOKEN`, the SPL Token program for `SPLTOKEN`.
     pub program_id: Pubkey,
 }
@@ -77,19 +72,17 @@ impl SplToken {
     pub fn new(
         decimals: u8,
         ticker: String,
-        token_address: String,
+        token_contract_address: Pubkey,
         program_id: Pubkey,
         platform_coin: SolanaCoin,
-    ) -> Result<SplToken, MmError<SplTokenCreationError>> {
-        let token_contract_address = Pubkey::from_str(&token_address)
-            .map_err(|e| MmError::new(SplTokenCreationError::InvalidPubkey(format!("{:?}", e))))?;
+    ) -> SplToken {
         let conf = Arc::new(SplTokenConf {
             decimals,
             ticker,
             token_contract_address,
             program_id,
         });
-        Ok(SplToken { conf, platform_coin })
+        SplToken { conf, platform_coin }
     }
 
     pub fn get_info(&self) -> SplTokenInfo {
