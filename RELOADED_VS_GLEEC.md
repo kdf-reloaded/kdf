@@ -617,6 +617,17 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   with the local key. An absent value, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
   as the WalletConnect form (not built yet), fails request parsing with `InvalidRequest` (HTTP 400). No switch exists.
   CRD ch.36 §36.7. PR #358.
+- **A Tendermint coin's transaction history differs from GLEEC KDF in three ways.** (1) While the first read of the
+  chain runs, the history state is `InProgress` (with `{"transactions_left": n}`); GLEEC KDF reports `NotStarted`
+  until the first read ends, and a failed first balance read ends its fetcher silently where KDF Reloaded retries it.
+  (2) A fee-only transaction counts its fee once (GLEEC KDF counts it twice), a reward claim counts the fee it cost
+  (GLEEC KDF leaves it out), a transaction that touches several validators gets one row per validator (GLEEC KDF one
+  row), and `tx_hex` holds the signed transaction (GLEEC KDF the first message, which cannot be broadcast). (3) A
+  denomination gets a row when it is the platform's, a token activated on this platform (a custom token included) or a
+  coins-file token whose `platform` is this coin; GLEEC KDF takes the first coins-file entry with that denomination,
+  whatever its platform, and never lists a custom token. The row identifier and the stored form are the same as
+  GLEEC KDF's, so a data directory can move between the two. No switch exists. Native builds only. CRD ch.36
+  §36.14.1 (D36.10, D36.11, D36.12, D36.13). PR #N.
 - **Tendermint (Cosmos) coins and tokens are wallet-only in this beta.**
   Activation, balances and `withdraw` work; `setprice`, `buy`, `sell` and
   `start_swap` refuse the coin with the usual "… is wallet only" answer, and an

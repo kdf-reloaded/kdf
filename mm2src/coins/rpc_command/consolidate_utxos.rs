@@ -114,6 +114,7 @@ pub async fn consolidate_utxos_rpc(
                 timestamp: now_ms() / 1000,
                 kmd_rewards: None,
                 transaction_type: Default::default(),
+                memo: None,
             };
 
             Ok(ConsolidateUtxoResponse {

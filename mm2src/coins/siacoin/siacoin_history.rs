@@ -190,6 +190,7 @@ pub(crate) fn tx_details_from_event(
         internal_id: BytesJson(event.id.0.to_vec()),
         kmd_rewards: None,
         transaction_type,
+        memo: None,
     }))
 }
 

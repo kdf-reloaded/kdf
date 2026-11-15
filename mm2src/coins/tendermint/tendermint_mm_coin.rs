@@ -363,6 +363,7 @@ impl MmCoin for TendermintCoin {
                 internal_id,
                 kmd_rewards: None,
                 transaction_type: TransactionType::StandardTransfer,
+                memo: None,
             };
             coin.publish_tx_history_record(coin.ticker(), &tx_details);
             Ok(tx_details)

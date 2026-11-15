@@ -198,7 +198,10 @@ impl<'a, Addr: Clone + DisplayAddress + Eq + std::hash::Hash, Tx: Transaction> T
             | TransactionType::StandardTransfer
             | TransactionType::SiaV1Transaction
             | TransactionType::SiaV2Transaction
-            | TransactionType::SiaMinerPayout => tx_hash.clone(),
+            | TransactionType::SiaMinerPayout
+            | TransactionType::FeeForTokenTx
+            | TransactionType::CustomTendermintMsg { .. }
+            | TransactionType::TendermintIBCTransfer { .. } => tx_hash.clone(),
         };
 
         TransactionDetails {
@@ -218,6 +221,7 @@ impl<'a, Addr: Clone + DisplayAddress + Eq + std::hash::Hash, Tx: Transaction> T
             internal_id,
             kmd_rewards: None,
             transaction_type: self.transaction_type,
+            memo: None,
         }
     }
 }
@@ -295,16 +299,36 @@ impl<T: TxHistoryStorageError> From<T> for MyTxHistoryErrorV2 {
 
 pub enum HistoryCoinType {
     Coin(String),
-    Token { platform: String, token_id: BytesJson },
+    Token {
+        platform: String,
+        token_id: BytesJson,
+    },
+    /// A platform coin's rows (those without a token id) that name `address` in their `from` or `to` list (CRD
+    /// ch.36 R36.14.2).
+    AccountCoin {
+        ticker: String,
+        address: String,
+    },
+    /// A token's rows (those with its token id) that name `address` in their `from` or `to` list (CRD ch.36
+    /// R36.14.2).
+    AccountToken {
+        platform: String,
+        token_id: BytesJson,
+        address: String,
+    },
     // TODO extend with the L2 required info
-    L2 { platform: String },
+    L2 {
+        platform: String,
+    },
 }
 
 impl HistoryCoinType {
     fn storage_ticker(&self) -> &str {
         match self {
-            HistoryCoinType::Coin(ticker) => ticker,
-            HistoryCoinType::Token { platform, .. } | HistoryCoinType::L2 { platform } => platform,
+            HistoryCoinType::Coin(ticker) | HistoryCoinType::AccountCoin { ticker, .. } => ticker,
+            HistoryCoinType::Token { platform, .. }
+            | HistoryCoinType::AccountToken { platform, .. }
+            | HistoryCoinType::L2 { platform } => platform,
         }
     }
 }
@@ -423,9 +447,14 @@ pub async fn my_tx_history_v2_rpc(
         return build_response_from_runtime_history(ctx, request, coin).await;
     }
 
-    let history_coin_type = match coin.get_history_coin_type() {
-        Some(t) => t,
-        None => return MmError::err(MyTxHistoryErrorV2::NotSupportedFor(coin.ticker().to_owned())),
+    // A Tendermint coin or token is served from the platform's store, scoped to the activated address, with the
+    // stored amounts scaled by the decimals of the coin the request names (CRD ch.36 R36.14.1, R36.14.2).
+    let (history_coin_type, served_decimals) = match crate::tendermint::history_scope(&coin) {
+        Some((history_coin_type, decimals)) => (history_coin_type, Some(decimals)),
+        None => match coin.get_history_coin_type() {
+            Some(t) => (t, None),
+            None => return MmError::err(MyTxHistoryErrorV2::NotSupportedFor(coin.ticker().to_owned())),
+        },
     };
     let tx_history_storage = SqliteTxHistoryStorage(
         ctx.sqlite_connection
@@ -453,17 +482,21 @@ pub async fn my_tx_history_v2_rpc(
         .await
         .mm_err(Into::into)?;
 
-    let history = history
-        .transactions
-        .into_iter()
-        .map(|mut details| {
-            // it can be the platform ticker instead of the token ticker for a pre-saved record
-            if details.coin != request.coin {
-                details.coin = request.coin.clone();
-            }
-            details
-        })
-        .collect();
+    let mut served = Vec::with_capacity(history.transactions.len());
+    for mut details in history.transactions {
+        // it can be the platform ticker instead of the token ticker for a pre-saved record
+        if details.coin != request.coin {
+            details.coin = request.coin.clone();
+        }
+        if let Some(decimals) = served_decimals {
+            // A stored amount that cannot be scaled is a storage error, never an abort (CRD ch.36 finding 1 of
+            // §36.14.1).
+            details = crate::tendermint::served_row(details, decimals)
+                .map_err(|e| MmError::new(MyTxHistoryErrorV2::StorageError(e)))?;
+        }
+        served.push(details);
+    }
+    let history = served;
     let sync_status = coin.history_sync_status();
 
     Ok(build_response_from_history(
@@ -621,6 +654,7 @@ mod z_coin_tx_history_tests {
             internal_id: vec![id].into(),
             kmd_rewards: None,
             transaction_type: TransactionType::StandardTransfer,
+            memo: None,
         }
     }
 

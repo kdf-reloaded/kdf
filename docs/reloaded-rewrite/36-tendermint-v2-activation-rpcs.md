@@ -761,6 +761,9 @@ terms; the clean implementer works from this list):
    (unit, HTTP 400).
 9. **`tx_history`.** Reloaded accepts `true` but starts no history fetching.
    Bound: background history fetching starts after activation.
+   *Status note (2026-11-15, Reloaded-original).* Closed by PR #N: `tx_history:
+   true` starts the fetcher of R36.14.3 and the divergence recorded here no
+   longer exists (§36.14.1).
 10. **`protocol` member of `UnexpectedPlatformProtocol` /
     `UnexpectedTokenProtocol`.** Reloaded serializes its own internal protocol
     representation; bound: the canonical coin-configuration form (R36.0.3). A
@@ -999,6 +1002,18 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   `enable_tendermint_token`, `task::enable_tendermint`, common structures
   (activation, wallet), error-type catalogue.
 - Cosmos SDK / Tendermint RPC, ICS-20 IBC transfer, BIP-173 bech32.
+- §36.14.1 (transaction history): the CometBFT RPC specification (`tx_search`
+  with its event query language, paging and ordering, `abci_info`); the Cosmos
+  SDK module documentation for the bank events (`coin_spent`, `coin_received`,
+  `transfer`), the staking events (`delegate`, `unbond`) and the distribution
+  event (`withdraw_rewards`); the ibc-go transfer module documentation
+  (`ibc_transfer`, `fungible_token_packet`, `non_fungible_token_packet`); the
+  irismod HTLC module documentation (`create_htlc`, `claim_htlc`); the Cosmos
+  SDK protobuf definitions `cosmos.tx.v1beta1.Tx` (body memo, auth info, fee)
+  and `cosmos.base.tendermint.v1beta1.Service` (`GetBlockByHeight`).
+- §36.14.2 and §36.14.3 (key-less activation): the public WalletConnect
+  Cosmos method reference (`cosmos_getAccounts`, `cosmos_signDirect`,
+  `cosmos_signAmino`).
 
 ## 36.13 Provenance Footer
 
@@ -1487,6 +1502,16 @@ Recommended: (b); the content of `additional_info` for `InProgress` is
 then Reloaded's own (the node's `tx_search` answer carries the total
 count, so a remaining-transactions figure is available).
 
+> **Status note (2026-11-15, Reloaded-original).** Decided: (b). The history
+> state is `InProgress` during the first pass, with `additional_info`
+> `{"transactions_left": <n>}` where `n` is what remains of the current query's
+> `tx_search` total (`null` until the first answer arrives); it is `Finished`
+> after the first complete pass and through every later pass, wait and pause;
+> it is `Error` with `additional_info` `{"message": <text>}` only when the
+> fetcher has stopped for good or the history store cannot be prepared or
+> written. A failed first balance read is retried after the 30-second pause,
+> not silent. Built in PR #N; tests T36.38.
+
 D36.11 *(maintainer decision.)* *Interchange with a store written by the
 reference.* A user who moves a data directory between the reference and
 Reloaded brings Tendermint history rows along. Options: (a) Reloaded
@@ -1502,6 +1527,19 @@ R36.14.3), accepting that the reference would show duplicates if the
 directory were moved back. Recommended: (a), with finding 1's remedy; it
 is the persistent-data compatibility the project keeps by default.
 
+> **Status note (2026-11-15, Reloaded-original).** Decided: (a). The
+> identifier (R36.14.10, from the transfer position and the upper-case hash)
+> and the stored form (base-unit amounts scaled when served, the fee row in
+> display units, a zero stored balance change) are byte-compatible with the
+> reference, and each write first deletes the rows under the two earlier
+> 32-byte identifier forms (finding 2). Finding 1's remedy applies: a stored
+> amount that is not a non-negative integer is answered as `StorageError`,
+> never an abort. The identifier depends on the build's word size, as at the
+> reference. The identifier and the stored form are each computed in one
+> function (`history_internal_id`, `stored_form` and `served_form` of
+> `mm2src/coins/tendermint/tendermint_tx_history.rs`). Built in PR #N; test
+> T36.37.
+
 D36.12 *(maintainer decision.)* *Amounts of fee-only transactions and
 reward claims, and the content of `tx_hex`.* At the reference a row's
 `tx_hex` is the encoded value of the transaction's **first message**, not
@@ -1516,6 +1554,14 @@ show different amounts for these kinds only. Whether a multi-validator
 staking transaction gets one row per validator is part of the same
 decision; recommended: yes.
 
+> **Status note (2026-11-15, Reloaded-original).** Decided: (b). A row of a
+> fee-only transaction counts the fee once (the transfer that is the fee
+> payment is the row, and the fee is not added again); a reward claim counts
+> its fee in `spent_by_me` and `total_amount`; `tx_hex` is the raw signed
+> transaction; a transaction that delegates to, undelegates from or claims from
+> several validators gets one row per validator, the first of them bearing the
+> fee. Built in PR #N; test T36.34.
+
 D36.13 *(maintainer decision.)* *Which denominations get rows, and under
 which ticker.* Options: (a) the reference's lookup (finding 7); (b) a
 denomination is resolved, in this order, to the platform coin, to a token
@@ -1524,6 +1570,16 @@ configuration entry whose `platform` is this coin; anything else gets no
 row. Recommended: (b). Under (b) a token activated after the transfers
 happened still shows them only when the fetcher reads those transactions
 again, which D36.11 and finding 3 bear on.
+
+> **Status note (2026-11-15, Reloaded-original).** Decided: (b). A
+> denomination resolves, in this order, to the platform coin, to a token
+> activated on this platform (a custom token included), and to a
+> coins-configuration entry of type `TENDERMINTTOKEN` whose `platform` is this
+> coin; the row's `coin` and decimals are those of the match. Anything else
+> gets no row. The fetcher resolves again for every page, so a token activated
+> later is recognized from the next page on; a transfer read before that
+> shows only when its transaction is read again. Built in PR #N; tests T36.31,
+> T36.35.
 
 D36.14 *(decided for 0.5.0 by the maintainer's decision of 2026-11-15: no
 row; the planning question is open.)* *Balance changes that have no
@@ -1545,6 +1601,53 @@ account, on nodes that index block events; (c) none. A row of either kind
 needs an identifier that is not a transaction hash and a
 `transaction_type` value; a value outside R36.14.6 is unknown to existing
 clients.
+
+> **Status note (2026-11-15, Reloaded-original).** Decided for 0.5.0: no
+> row. Nothing is synthesized for a chain-side HTLC refund or a completed
+> undelegation; the balance read of R36.14.3 notices the change and the pass it
+> starts finds no new transaction. The planning question stays open in
+> `docs/plans/tendermint-activation-features.md`.
+
+> **As-built note (2026-11-15, Reloaded-original).** R36.14.1 -- R36.14.12 are
+> built in PR #N in `mm2src/coins/tendermint/tendermint_tx_history.rs`.
+> `rows_for_tx` classifies one transaction from its result events (R36.14.5 --
+> R36.14.9); `history_internal_id`, `fee_row_internal_id`,
+> `obsolete_internal_ids`, `stored_form` and `served_form` hold R36.14.10 and
+> D36.11 (a); `start_tendermint_history` runs the fetcher (R36.14.3, R36.14.4,
+> R36.14.11, D36.10); `history_scope` and `served_row` serve `my_tx_history`
+> (`mm2src/coins/my_tx_history_v2.rs`), whose store read takes the new
+> `HistoryCoinType::AccountCoin` and `AccountToken` scopes so that only the rows
+> naming the activated address are served (R36.14.2). The transaction-type set
+> gained `FeeForTokenTx`, `CustomTendermintMsg` and `TendermintIBCTransfer`;
+> `TransactionDetails` gained the optional `memo`, which a history row always
+> carries (R36.14.9). Readings the chapter leaves open, each kept as built:
+> (1) the fee payment of R36.14.5 item 4 is looked for when the result has
+> more than one `transfer` event, and only the first such event is left out;
+> (2) a transfer is the fee payment itself (D36.12 (b), counted once) only when
+> it is the sole `transfer` event, moves exactly the fee text, and no decoded
+> message of the transaction (a bank send to that recipient of that amount, an
+> IBC transfer or an HTLC creation) pays it, so a genuine send of exactly the
+> fee amount stays a transfer; (3) a module event corrects the first transfer
+> not corrected yet; (4) an event without the `delegator` attribute yields no
+> transfer; (5) the first fee coin is read in platform units whatever its
+> denomination; (6) a reward claim bears the fee although its sender is the
+> validator (D36.12 (b)). **Open point for a Spec Reader follow-up:**
+> R36.14.10 defines the position as "the position of the transfer among the
+> transfers of its transaction (counted from zero in the order R36.14.5
+> yields them)"; it does not say whether a transfer that yields no row (a
+> denomination that does not resolve, an HTLC creation by another account)
+> counts. The code counts every transfer R36.14.5 yields before those
+> filters, so such a transfer leaves a gap in the positions; if the reference
+> counts only the transfers that yield a row, identifiers differ in that
+> case. Provisional pending a Spec Reader precision round of §36.14.6 and
+> R36.14.10: the position counted for the identifier (above), the transfer a
+> module event corrects (reading 3), a staking event without `delegator`
+> (reading 4) and the fee coin read in platform units (reading 5); the unit
+> tests that pin them are marked "provisional reading". The block time is read with the SDK's `GetBlockByHeight` query. The fetcher and the method
+> exist on native builds only (native only in 0.5.0): the browser build has no
+> versioned history store for any coin family (`NotSupportedInWasm`), a
+> limitation shared by every history family and not a Tendermint one. Tests: T36.30 -- T36.39 in
+> `mm2src/coins/tendermint/tendermint_swap_flow_tests/tx_history_tests.rs`.
 
 ### 36.14.2 WalletConnect activation
 

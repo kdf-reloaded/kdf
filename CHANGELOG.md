@@ -25,6 +25,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   on, unless `ntp_required` is `true`. Browser builds cannot send the queries and skip the check.
   Detail: PR #348; CRD ch.45 §45.6C.
 
+#### Tendermint (Cosmos) coins
+
+- **A Tendermint coin now has a transaction history.** `tx_history: true` on a Tendermint platform
+  coin starts reading the account's transactions from a node in the background, and `my_tx_history`
+  (the mmrpc-2.0 method) lists them for the coin and for its tokens: plain sends, token sends,
+  IBC transfers, HTLC creations and claims, delegations, undelegations and reward claims, each with
+  its amounts, fee and memo, and the fee of a token send as a row of the platform coin. While the
+  first read of the chain runs, the history state is `InProgress` with the number of transactions
+  left; it is `Finished` afterwards. A fee-only transaction counts its fee once, a reward claim
+  counts the fee it cost, a transaction touching several validators gets one row per validator, and
+  `tx_hex` is the signed transaction. The history of a refunded HTLC or a completed undelegation has
+  no row, because the chain records no transaction for them. Native only in 0.5.0: the browser build has no versioned history store for any coin family. Detail: PR #N;
+  CRD ch.36 §36.14.1.
+
 ### Changed
 
 #### Tendermint (Cosmos) coins
@@ -57,6 +71,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Plans touched
 
+- [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
+  Tendermint transaction history, is built in PR #N.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 

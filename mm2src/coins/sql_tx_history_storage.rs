@@ -1,10 +1,10 @@
 use crate::my_tx_history_v2::{GetHistoryResult, HistoryCoinType, RemoveTxResult, TxHistoryStorage,
                               TxHistoryStorageError};
-use crate::{TransactionDetails, TransactionType};
+use crate::TransactionDetails;
 use async_trait::async_trait;
 use common::{async_blocking, PagingOptionsEnum};
 use db_common::sqlite::rusqlite::types::Type;
-use db_common::sqlite::rusqlite::{Connection, Error as SqlError, Row};
+use db_common::sqlite::rusqlite::{params_from_iter, Connection, Error as SqlError, Row};
 use db_common::sqlite::sql_builder::SqlBuilder;
 use db_common::sqlite::{offset_by_id, query_single_row, string_from_row, validate_table_name, CHECK_TABLE_EXISTS_SQL};
 use mm2_err_handle::prelude::*;
@@ -184,6 +184,20 @@ fn finalize_get_history_sql_builder(sql_builder: &mut SqlBuilder, offset: usize,
     sql_builder.order_asc("internal_id");
 }
 
+/// The `LIKE` pattern that matches a stored row naming `address` in its `from` or `to` list: the address in
+/// JSON quotes, with the `LIKE` wildcards and the escape character of the address escaped.
+fn quoted_address_pattern(address: &str) -> String {
+    let mut pattern = String::from("%\"");
+    for c in address.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(c);
+    }
+    pattern.push_str("\"%");
+    pattern
+}
+
 #[derive(Clone)]
 pub struct SqliteTxHistoryStorage(pub Arc<Mutex<Connection>>);
 
@@ -258,10 +272,9 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
                 let tx_hash = tx.tx_hash.clone();
                 let internal_id = format!("{:02x}", tx.internal_id);
                 let confirmation_status = if tx.block_height > 0 { 1 } else { 0 };
-                let token_id = if let TransactionType::TokenTransfer(token_id) = &tx.transaction_type {
-                    format!("{:02x}", token_id)
-                } else {
-                    "".to_owned()
+                let token_id = match tx.transaction_type.history_token_id() {
+                    Some(token_id) => format!("{:02x}", token_id),
+                    None => "".to_owned(),
                 };
                 let tx_json = json::to_string(&tx).expect("serialization should not fail");
 
@@ -453,10 +466,32 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
 
         async_blocking(move || {
             let conn = selfi.0.lock().unwrap();
-            let (mut sql_builder, token_id) = match coin_type {
-                HistoryCoinType::Coin(ticker) => (get_history_builder_preimage(&ticker)?, "".to_owned()),
+            // `params` are the leading numbered parameters of every statement below: the token id, and for an
+            // account-scoped read the pattern of the account's quoted address (CRD ch.36 R36.14.2).
+            let (mut sql_builder, params) = match coin_type {
+                HistoryCoinType::Coin(ticker) => (get_history_builder_preimage(&ticker)?, vec!["".to_owned()]),
                 HistoryCoinType::Token { platform, token_id } => {
-                    (get_history_builder_preimage(&platform)?, format!("{:02x}", token_id))
+                    (get_history_builder_preimage(&platform)?, vec![format!(
+                        "{:02x}",
+                        token_id
+                    )])
+                },
+                HistoryCoinType::AccountCoin { ticker, address } => {
+                    let mut builder = get_history_builder_preimage(&ticker)?;
+                    builder.and_where("details_json LIKE ?2 ESCAPE '\\'");
+                    (builder, vec!["".to_owned(), quoted_address_pattern(&address)])
+                },
+                HistoryCoinType::AccountToken {
+                    platform,
+                    token_id,
+                    address,
+                } => {
+                    let mut builder = get_history_builder_preimage(&platform)?;
+                    builder.and_where("details_json LIKE ?2 ESCAPE '\\'");
+                    (builder, vec![
+                        format!("{:02x}", token_id),
+                        quoted_address_pattern(&address),
+                    ])
                 },
                 HistoryCoinType::L2 { .. } => unreachable!("L2 history is rejected before entering async_blocking"),
             };
@@ -464,21 +499,23 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
             let mut total_builder = sql_builder.clone();
             total_builder.count("id");
             let total_sql = total_builder.sql().expect("valid sql");
-            let total: isize = conn.query_row(&total_sql, [&token_id], |row| row.get(0))?;
+            let total: isize = conn.query_row(&total_sql, params_from_iter(params.iter()), |row| row.get(0))?;
             let total = total.try_into().expect("count should be always above zero");
 
             let offset = match paging {
                 PagingOptionsEnum::PageNumber(page) => (page.get() - 1) * limit,
                 PagingOptionsEnum::FromId(id) => {
                     let id_str = format!("{:02x}", id);
-                    let params = [&token_id, &id_str];
+                    let where_id = format!("internal_id = ?{}", params.len() + 1);
+                    let mut id_params = params.clone();
+                    id_params.push(id_str);
                     let maybe_offset = offset_by_id(
                         &conn,
                         &sql_builder,
-                        params,
+                        id_params,
                         "internal_id",
                         "confirmation_status ASC, block_height DESC, internal_id ASC",
-                        "internal_id = ?2",
+                        &where_id,
                     )?;
                     match maybe_offset {
                         Some(offset) => offset,
@@ -494,11 +531,10 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
             };
 
             finalize_get_history_sql_builder(&mut sql_builder, offset, limit);
-            let params = [token_id];
 
             let sql = sql_builder.sql().expect("valid sql");
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query(params)?;
+            let rows = stmt.query(params_from_iter(params.iter()))?;
             let transactions = rows.mapped(tx_details_from_row).collect::<Result<_, _>>()?;
             let result = GetHistoryResult {
                 transactions,
@@ -514,6 +550,7 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
 #[cfg(test)]
 mod sql_tx_history_storage_tests {
     use super::*;
+    use crate::TransactionType;
     use common::block_on;
     use std::num::NonZeroUsize;
 

@@ -898,6 +898,7 @@ pub(crate) fn build_evm_withdraw_details(
         timestamp: now_ms() / 1000,
         kmd_rewards: None,
         transaction_type: Default::default(),
+        memo: None,
     })
 }
 
@@ -2060,6 +2061,7 @@ impl EthCoin {
                     timestamp: block_ts,
                     kmd_rewards: None,
                     transaction_type: Default::default(),
+                    memo: None,
                 };
 
                 existing_history.push(details);
@@ -2455,6 +2457,7 @@ impl EthCoin {
                     timestamp: block_ts,
                     kmd_rewards: None,
                     transaction_type: Default::default(),
+                    memo: None,
                 };
 
                 existing_history.push(details);
