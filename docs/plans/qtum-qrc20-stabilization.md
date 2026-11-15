@@ -1,6 +1,6 @@
 # Plan: QTUM/QRC20 activation, transport, history, and swap stabilization
 
-**Status:** parked (analysis and plan only; untouched since 2026-08-05) — **Last reviewed:** 2026-10-18
+**Status:** in progress (state check 2026-11-15; P1 in PR #354, P0 in PR #356; P2 and P3 next) — **Last reviewed:** 2026-11-15
 
 > **Context:** this plan was created after the 2026-08-05 wallet-log maintenance pass.
 > That run showed long-lived QRC20 history failures and separate QTUM and QRC20
@@ -66,6 +66,42 @@ needed for an externally observable behavior not already covered by the CRD or
 public API, obtain operator approval for the Spec Reader and Dirty Gate
 workflow. Internal resource sharing that leaves all observable behavior
 unchanged does not by itself require forbidden-corpus research.
+
+## State check (2026-11-15)
+
+A check of this plan against the code at the 0.4.0-beta.1 release found phases A–F not started. Two pieces came from
+other work: the QRC20 history retry backs off and resets after a success, and activations of one ticker are serialized
+(CRD ch.55 R55.1.12). The five gaps of the checkpoint above are still gaps. What the code does today:
+
+- **One Electrum pool per ticker.** A QRC20 token builds Electrum client fields of its own. QTUM with *n* tokens is
+  *n* + 1 pools against the same servers, each with its own probe, version negotiation, maintenance, ping and
+  measure loops, ranking and disagreement state.
+- **No failover after an error answer.** A server that answers a QRC20 contract method with an error is not replaced
+  for that request (CRD ch.38 R38.6.4f item 1). The contract methods are not on the read-only list (R38.6.4a).
+- **Spent inputs.** QRC20 sends record no spent QTUM inputs, and QTUM's record is per instance.
+- **Delegation and the build lock.** The delegation builds did not hold the build lock; fixed in PR #354.
+- **Disable lifetime.** A history loop checks only that its ticker exists, and the balance streamer outlives a
+  disable (the streamer for every coin).
+- **Tests.** The offline QRC20 unit tests run in no CI cell; the QTUM docker image is not pinned.
+- **CRD.** Two ch.38 passages said that a QRC20 token answers its disagreement state and reads its fee through the
+  platform coin's client; it uses its own. They carry dated corrections since 2026-11-15.
+
+Work packages, in order, each one PR with its docs:
+1. P1, the delegation build lock (PR #354);
+2. P0, these CRD corrections;
+3. P2, CI coverage and a pinned docker image;
+4. P3, the Phase A harness and its measurements (the gate of Phase A);
+5. P4, the sharing design (Phase B);
+6. P5, the shared pool (Phase C);
+7. P6, history reliability (Phase D);
+8. P7, spent inputs across QTUM and its tokens;
+9. P8, the balance streamer after a disable;
+10. P9, the lab rows and rollout (Phase F).
+
+Decided 2026-11-15: the ch.38 passages are corrected now, by dated notes; P7 corrects a transaction path and does not
+change what a swap pays; P8 stays in this plan. Waiting for the measurements of P3: whether tokens share their
+platform's pool, how a server's error answer to a contract method is handled, and whether the contract-event
+subscription is placed again after a reconnect. P3 to P6 use regtest; funds for P9 are decided when P9 is near.
 
 ## Non-goals and compatibility guardrails
 
