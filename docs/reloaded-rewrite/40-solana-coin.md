@@ -358,6 +358,897 @@ finding F6).
 > `solana-support` chooses Solana's floors when Solana trading is
 > designed. The cleared rule text above is unchanged.
 
+## 40.6B Reference behavior beyond activation: keys, withdraw, per-method answers, history and swaps
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
+> measure 0.01 (attestation in §40.12).**
+> This section was written on 2026-11-15 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-4) under the two-team procedure of chapter 01 §1.4A, from five
+> inputs: (1) the reference lineage at the rows `v3.0.0-beta`, `v2.6.0-beta`
+> and `main (as of 2026-10-07)` of chapter 02 §2.15A, and at the row
+> `v2.1.0-beta` for the single question of §40.6B.7 whether a Solana swap
+> ever existed at a release; (2) the sibling coins-registry row `coins
+> solana-integration (as of 2026-11-08)`: its four Solana entries, its
+> integration document, its registry tooling and its generated fixtures,
+> read as reference-side material that only the two roles of chapter 01 R37
+> read; (3) the sibling swap-program rows `satomic-swap dev (as of
+> 2024-06-18)` and `satomic-swap fix/htlc-correctness (as of 2026-10-28)`;
+> (4) observations of the public Solana devnet and mainnet JSON-RPC
+> endpoints made on 2026-11-15 (chapter 01 R6); (5) this repository's own
+> tree. The three sibling rows were added to chapter 02 §2.15A in this round
+> and passed the gate with this section.
+
+*Scope.* §40.1-§40.3 bind the reference's two activation methods and
+§40.4-§40.5 state in two sentences each that balances are read and that
+transfers can be built. This section records what the reference does on the
+rest of the surface a wallet touches once a Solana coin is active: which
+configuration keys count (§40.6B.2), where the key comes from (§40.6B.3),
+what a withdraw answers (§40.6B.4), what each of a list of wallet methods
+answers (§40.6B.5), transaction history (§40.6B.6), swaps (§40.6B.7) and
+what the sibling registry branch adds (§40.6B.8). Where the reference ends
+a request abnormally or produces a wrong result, the section says so and
+raises a decision (§40.6B.9) instead of binding the behavior. It prescribes
+no design. Method names, request and response member names, `error_type`
+values, public program addresses and public JSON-RPC method names are the
+interface and are quoted; nothing else of the reference is. It does not
+restate §40.1-§40.3; each rule names the cleared rule it completes.
+
+### 40.6B.1 States read, and one term
+
+**F40.6B.1** *The three states agree.* The Solana coin, both activation
+methods and every shared request handler this section names behave the same
+at `v2.6.0-beta` and at `v3.0.0-beta`; `main (as of 2026-10-07)` differs
+from `v3.0.0-beta` in its read-me only. "The reference" below therefore
+means all three rows, and no statement of this section differs by state
+unless it names a row. The reference metadata of the historical record
+(branch and tag names, identifiers, dates) was compared with the live
+remote on 2026-11-15: no branch or tag is newer than
+`main (as of 2026-10-07)`, so no row for a newer state of the v3 line was
+needed or added. R40.0.1's statement that the two release rows agree is
+confirmed and extends to everything below.
+
+**F40.6B.2** *Abnormal end.* Many operations of the reference's Solana coin
+and SPL token are placeholders that state their own incompleteness. A
+request that reaches one **ends abnormally**: on a native target the caller
+receives HTTP 500 with a short plain-text body in place of a JSON answer,
+handling of that one request stops at the point it had reached, and the
+process goes on serving other requests. This is what R40.2.5's note calls
+"no normal response" and what chapter 60 finding F6 calls terminating
+abnormally. It was established by
+reading the request service, not by running the reference; the outcome on
+the WASM target was not established. An abnormal end is never a parity
+target (R40.6B.14).
+
+### 40.6B.2 Activation: what §40.1-§40.3 leave open
+
+**R40.6B.1** *No drift.* The method names, targets, request members,
+results, `error_type` values, `error_data` shapes and HTTP statuses of
+§40.1-§40.3 are what the reference does at all three rows. Nothing in
+§40.1-§40.3 needs correction; R40.6B.2-R40.6B.6 add cases those rules do
+not state.
+
+**R40.6B.2** *Configuration keys.* Of a Solana platform entry and of an SPL
+token entry, the reference's activation reads one top-level key, `protocol`
+(R40.1.2, R40.1.3). No other top-level key of the entry changes the address,
+the balance, the result or the error of either activation method:
+
+| Top-level key | Effect on a Solana coin at the three rows |
+| --- | --- |
+| `protocol` | read; R40.1.2, R40.1.3 and R40.6B.3 |
+| `derivation_path` | never read by any Solana path. Present, absent or malformed, it changes nothing; no key is derived from it (R40.6B.7) |
+| `decimals` | never read. The platform's decimals are 9 whatever the entry says; a token's decimals are `protocol_data.decimals` only. Where a token entry carries `decimals` both at the top level and inside `protocol_data`, the top-level value is ignored, also when the two disagree |
+| `required_confirmations`, `requires_notarization` | never read; the coin has no confirmation setting (§40.6B.5) |
+| `wallet_only` | not read by the coin; read from the configuration by the order-book methods (R40.6B.6) |
+| any other key | not read by activation |
+
+This completes R40.1.2-R40.1.3.
+
+**R40.6B.3** *Protocol parsing, completing R40.1.2-R40.1.3.*
+
+1. A platform entry needs `protocol_data` to be present and to be an
+   object; an entry with `"type": "SOLANA"` and no `protocol_data` is
+   unparsable (`CoinProtocolParseError`, HTTP 500, `{ticker, error}`).
+   Members inside the object are ignored. That bare form is this
+   repository's own platform form (§40.6 item 5), so once both forms are
+   accepted (plan `solana-support`, work package 2) Reloaded accepts an
+   entry the reference refuses; that is a difference to record, not a
+   refusal to copy.
+2. All four members of a token's `protocol_data` are required and none has
+   a default. A `SOLANATOKEN` entry **without `program_id`** is unparsable:
+   `TokenProtocolParseError` (HTTP 500, `{ticker, error}`) from either
+   method. The reference does not fall back to the classic Token program.
+3. `program_id` may be **any** valid base58 public key; parsing does not
+   restrict it to the SPL Token and Token-2022 programs. Whether it fits is
+   decided on chain by the mint-owner check of R40.2.2 (`Transport` when
+   the mint is owned by another program).
+4. `decimals` is an integer from 0 to 255; anything else is unparsable.
+5. Unknown members inside a token's `protocol_data` are ignored.
+
+**R40.6B.4** *A token the wallet holds no account for.* The reference reads
+a token balance in two node calls: `getTokenAccountsByOwner` filtered by the
+mint, of which only failure matters, and `getTokenAccountBalance` for the
+associated token account derived for the classic Token program. Two cases
+follow that R40.2.3 and R40.4.1 do not state:
+
+- The node answers that it does not know the mint: balance `"0"` (this is
+  R40.2.3's case).
+- The mint exists and the wallet has no such token account, which is the
+  normal state of a wallet that never received the token: the node answers
+  `getTokenAccountBalance` with a JSON-RPC error (observed on the public
+  devnet on 2026-11-15 for an address with no account), and the reference
+  does **not** turn that into zero. The balance read fails. Inline in the
+  platform method this is `PlatformCoinCreationError` (HTTP 500,
+  `{ticker, error}`, R40.2.4's "failure to read ... a token balance"); in
+  the token method it is `Transport` (HTTP 500, R40.3.4). Nothing is
+  registered. A token whose account is closed after activation fails
+  `my_balance` the same way.
+
+So at the three rows a token can be activated only by a wallet that already
+holds an account for it, or against a node that does not know the mint.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort).** A wallet cannot activate a token it has not yet received. A
+> missing token account is an ordinary zero balance, not a node fault. This
+> repository's own balance read already answers zero when the owner holds
+> no account for the mint. Reloaded must not copy the failure
+> (D40.6B.2).
+
+**R40.6B.5** *A Token-2022 `program_id` at activation.* Such an entry
+parses (R40.6B.3 item 3) and passes the mint-owner check when the mint is
+owned by the Token-2022 program; the token's address is the associated
+token account derived with that program (R40.1.4). The balance, however, is
+read from the account derived for the classic program (the second
+code-quality finding of §40.6). For an existing Token-2022 mint that
+account normally does not exist, so by R40.6B.4 the activation **fails**;
+it reports zero only where the node does not know the mint. Withdraw is
+refused as well (R40.6B.11). At the three rows a Token-2022 token is
+therefore unusable, not merely misreported.
+
+> **Note (refines a cleared finding; no cleared sentence is edited).** The
+> second code-quality finding of §40.6 says the reported Token-2022 balance
+> "can be wrong (typically zero)". By R40.6B.4 the typical outcome for a
+> mint that exists is a failed activation, not a zero balance. The proposed
+> fix of that finding stands.
+
+**R40.6B.6** *`wallet_only`.* The key is honored where the configuration is
+consulted and has no effect on the coin itself:
+
+- The order-book and trade-preview methods that test the configuration
+  refuse or skip a ticker whose entry has `wallet_only: true`, as for every
+  coin family. A token activated with a request-supplied `protocol` (a
+  custom token) has no configuration entry and is treated by those methods
+  as wallet-only.
+- The coin's own answer to "may this coin trade" is a placeholder for both
+  Solana kinds, and so are its minimum trading volume (R40.6A.1) and its
+  trade-fee estimates. Placing an order with a Solana coin (`setprice`,
+  `buy`, `sell`) ends abnormally whatever the key says, and no order-book
+  address form exists for the two protocols.
+
+No value of `wallet_only` makes a Solana coin tradable at the three rows;
+for the methods that test the configuration, `wallet_only: false` only
+moves the failure from an orderly refusal to an abnormal end. This
+repository already refuses a Solana pair with an error
+naming the coin (the as-built note of §40.6A).
+
+### 40.6B.3 Keys
+
+**R40.6B.7** *Key source, completing R40.1.4.* Neither activation request
+has a key-policy member, and unknown request members are ignored, so
+nothing in a request can select a hardware wallet or WalletConnect. The key
+follows the login alone:
+
+| Login | Outcome at the three rows |
+| --- | --- |
+| passphrase (single-key) login | the key of R40.1.4; activation proceeds |
+| global-HD login | refused: `PlatformCoinCreationError` (HTTP 500, `{ticker, error}`), before any node is contacted; the token method then answers `PlatformCoinIsNotActivated` |
+| a hardware wallet initialized beside the login | never consulted; the outcome is the one of the login's row above |
+| an open WalletConnect session | never consulted; the outcome is the one of the login's row above |
+
+R40.1.4 says an "HD-wallet, hardware-wallet or WalletConnect context fails
+platform activation". The first holds as stated. The other two are
+refusals the reference provides for but that no request can reach; this
+agrees with chapter 05's hardware-source table, which lists Solana as not
+reachable from the request.
+
+**No derivation exists.** No row derives a Solana key from an HD seed. There
+is no path layout, no ed25519 derivation scheme and no HD seed input to
+report, and no address under a global-HD login can be given for any
+mnemonic. The key-export method `get_private_keys` answers an error for a
+Solana ticker in both of its modes, and `show_priv_key` ends abnormally, so
+the Solana secret cannot be exported through any method.
+
+**R40.6B.8** *Single-key test vector.* Under a passphrase login whose
+passphrase is the public twelve-word BIP-39 test mnemonic (eleven times
+`abandon`, then `about`), used as a plain passphrase:
+
+- 32-byte secret (the baseline's passphrase rule: SHA-256 of the passphrase
+  text with the baseline's three bit adjustments):
+  `c057eec878dfd852ba3f88087c4f350f09c55537ab5e549c3cd14320ec3cef78`;
+- Solana address (the ed25519 public key for that 32-byte seed, base58):
+  `7zuqksARN8uXHz2yvrkiZZDPeALBSjzK12nkMPNzKSCJ`.
+
+The vector was computed in this round from R40.1.4, the baseline's
+passphrase rule as this repository carries it (`crypto/src/privkey.rs`) and
+RFC 8032 key generation, and cross-checked with two independent ed25519
+implementations. It was not obtained by running the reference and is not
+taken from any reference test.
+
+> **Consistency note (two cleared rules disagree; neither is edited).**
+> R40.1.4 and T40.8 have a global-HD login refused on the compatibility
+> surface. [Chapter 05](05-hd-wallet-support.md) R46 item 3 has this
+> repository's shared platform-with-tokens activation hand the legacy
+> passphrase key to Solana under a global-HD login, which activates with
+> the address of R40.6B.8's rule instead of refusing. Both cannot hold for
+> one activation path. D40.6B.7 puts the choice.
+
+### 40.6B.4 Withdraw and broadcast
+
+R40.5.2 says transfers can be built, signed and broadcast. The rules below
+give the reference's contract for the `withdraw` method (both its legacy
+and its versioned form answer alike) and for `send_raw_transaction`. Node
+access is as in R40.1.5: every operation first selects a node by
+`getHealth`, more than once within one withdraw. No request carries a
+commitment level, so the node's default applies. Any node failure during a
+withdraw answers `Transport` (HTTP 502, string).
+
+**R40.6B.9** *SOL withdraw.*
+
+- *Request.* `coin`, `to`, `amount` and `max` are honored. `fee`, `memo`,
+  `from`, `broadcast` and every other member are accepted and ignored
+  (chapter 49's fee-policy note agrees for `fee`).
+- *Recipient.* Any base58 text that decodes to 32 bytes is accepted; any
+  other text answers `InvalidAddress` (HTTP 400, string). The reference
+  does not test whether the address is on the curve or whether the account
+  exists.
+- *Fee.* The node's quote (`getFeeForMessage`) for a plain one-signature
+  transfer on a fresh `getLatestBlockhash`. No priority fee and no
+  compute-budget instruction are added.
+- *Amount.* Given in SOL; digits beyond the ninth decimal are dropped, not
+  rounded and not refused. A resulting amount below one lamport answers
+  `AmountTooLow` (HTTP 400, `{amount, threshold}`, the threshold being one
+  lamport). With `max`, the amount is the balance less the fee; when that
+  is nothing, the answer is `AmountTooLow` as well.
+- *Balance.* When amount plus fee exceeds the balance:
+  `NotSufficientBalance` (HTTP 400, `{coin, available, required}`,
+  `required` being amount plus fee).
+- *Transaction.* One system-program transfer, the sender as fee payer, the
+  legacy (unversioned) message form, signed with the wallet key.
+- *Answer.* `tx_hex` is the hex of the signed transaction in Solana's wire
+  serialization; `tx_hash` is the base58 form of its first signature;
+  `from` holds the wallet address and `to` the recipient; `total_amount`
+  is the amount; `spent_by_me` is amount plus fee; `received_by_me` is the
+  amount when the recipient is the wallet itself and zero otherwise;
+  `my_balance_change` is received less spent; `block_height` is 0;
+  `timestamp` is the local clock; `internal_id` is the hex of the
+  characters of `tx_hash`; `transaction_type` is `StandardTransfer`;
+  `memo` is null; `fee_details` is R40.6B.12.
+
+**R40.6B.10** *SPL withdraw.*
+
+- *Recipient.* `to` is validated as in R40.6B.9 and is **always** read as
+  a wallet (owner) address: the destination is the associated token
+  account of `to` for the token's mint and `program_id`.
+- *Amount.* Given in token units and scaled by `protocol_data.decimals`;
+  surplus digits are dropped. A resulting zero answers `AmountTooLow`,
+  whose threshold is one lamport in SOL terms whatever the token's
+  decimals (R40.6A.1). A token balance below the amount answers
+  `NotSufficientBalance` with the token's ticker. A failed token-balance
+  read answers `Transport` (HTTP 502), which by R40.6B.4 includes a wallet
+  that holds no account for the token.
+- *`max`.* See the finding below; the reference does not send the whole
+  balance.
+- *Creating the recipient's account.* When `getAccountInfo` finds no
+  destination account, the transaction first creates it with the
+  idempotent creation instruction of the associated-token-account program,
+  paid by the sender, and then transfers. The rent is what
+  `getMinimumBalanceForRentExemption` quotes for the size of a classic
+  token account (165 bytes) and is reported as `rent_amount`; it is zero
+  when the account exists.
+- *Transfer.* The checked transfer of the token program (amount, decimals
+  and mint are all stated), from the wallet's own token account to the
+  destination, authorized and paid by the wallet key; legacy message form.
+- *Fee and the SOL check.* The fee is the node's quote for the message
+  actually built. When fee plus rent exceeds the wallet's SOL balance, the
+  answer is **`NotSufficientPlatformBalanceForFee`** (HTTP 400,
+  `{coin, available, required}`, where `coin` is the *platform* ticker and
+  `required` is fee plus rent).
+- *Answer.* Amounts are in token units: `total_amount` and `spent_by_me`
+  are the amount; `received_by_me` is the amount when `to` is the wallet's
+  own address and zero otherwise; `my_balance_change` is received less the
+  amount (the fee, being SOL, is not in it). `from` holds the wallet
+  address, not the token account; `to` holds the recipient's wallet
+  address. `transaction_type` is the `TokenTransfer` form carrying 32
+  bytes, the SHA-256 of the mint's public-key bytes. `tx_hex`, `tx_hash`,
+  `internal_id`, `block_height`, `timestamp` and `memo` are as in
+  R40.6B.9.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort).** *The SPL "max" withdraw sends the wrong amount.* With `max`
+> the reference takes the whole-number part of the displayed token balance
+> and uses that number as a count of the token's smallest units. A wallet
+> holding 12.5 units of a six-decimal token sends 0.000012; a wallet
+> holding less than one whole unit is answered `AmountTooLow`. Reloaded
+> must send the token account's full amount (D40.6B.3).
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort).** *A recipient given as a token-account address.* The reference
+> accepts either kind of address in `to` but treats both as an owner. When
+> `to` is itself a token account, the destination of the transfer is a new
+> token account whose owner is the account named in `to`, not the account
+> named in `to` itself. Reloaded must not build that transfer; the choice
+> of answer is D40.6B.6.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort).** *No rent guard on SOL.* Neither withdraw checks Solana's
+> rent-exempt minimum: a SOL withdraw that would leave the sender's account
+> between zero and that minimum, or that sends less than the minimum to an
+> address with no account, is built and answered normally and is then
+> refused by the node at broadcast. Proposed fix: test both against
+> `getMinimumBalanceForRentExemption` and answer a structured error at
+> withdraw time.
+
+**R40.6B.11** *Token-2022 withdraw.* For a token whose `program_id` is not
+the classic Token program the transfer cannot be built, and the answer is
+`InternalError` (HTTP 500, string). The request gets that far only if the
+balance read succeeded, which R40.6B.5 makes unlikely. The rent quote of
+R40.6B.10 assumes the classic account size and would understate the rent
+of a Token-2022 account that carries extensions. The registry branch
+publishes no Token-2022 entry (§40.6B.8).
+
+**R40.6B.12** *`fee_details`.* For both Solana kinds the member is an
+object of four members:
+
+| Member | JSON type | Content |
+| --- | --- | --- |
+| `type` | string | `Solana` |
+| `fee_amount` | decimal string | the network fee, in SOL |
+| `rent_amount` | decimal string | the rent for a created recipient token account, in SOL; `"0"` for a SOL withdraw and when no account is created |
+| `total_amount` | decimal string | `fee_amount` plus `rent_amount` |
+
+It has no member naming the coin the fee is paid in, although for a token
+that coin is the platform, not the token. This repository's tree answers a
+different object for the same tag: `type` and a single `amount`
+(D40.6B.5).
+
+**R40.6B.13** *`send_raw_transaction`.* `tx_hex` is hex-decoded and read as
+one transaction in Solana's wire serialization, no longer than one network
+packet's payload (1232 bytes); it is submitted with `sendTransaction` and
+the answer is `{tx_hash}`, the base58 signature the node returns. The
+method does not wait for confirmation. A token ticker takes the platform's
+path unchanged.
+
+### 40.6B.5 Per-method answers on an active Solana coin
+
+**R40.6B.14** *No abnormal end (requirement).* No request naming a Solana
+coin or an SPL token shall end abnormally in this project; where the table
+below says "abnormal end" for the reference, Reloaded shall give a JSON
+answer, a success or a structured error. This extends R40.2.5 and chapter
+60 R60.6.5 from activation and trading to the wallet surface. Which answer
+each method gives is D40.6B.1.
+
+"Both" in the table means the platform coin and an SPL token alike. The
+last column is this repository's tree as read on 2026-11-15, with Solana
+switched off, so none of it can be observed in a build today; "not
+examined" means this round did not read it.
+
+| Method | Reference at the three rows | This repository's tree |
+| --- | --- | --- |
+| `sign_message` | Both: abnormal end. No prefix and no signature encoding exist to report. A request that carries an `address` member under a passphrase login is refused with `InvalidRequest` before the coin is consulted, as for every family | signs the UTF-8 bytes of the message as they are, with no prefix and no pre-hash, and answers the 64-byte ed25519 signature in base58 |
+| `verify_message` | Both: abnormal end; the address check that comes first is itself a placeholder | verifies such a signature against the base58 address taken as the public key and answers `is_valid` |
+| `get_public_key` | Not a per-coin method: it takes no coin and answers `{public_key}`, the node's secp256k1 public key, whatever is active. The Solana ed25519 public key is exposed by no method other than as the address | not Solana-specific |
+| `get_public_key_hash` | Likewise: `{public_key_hash}`, the 20-byte hash of that node key | not Solana-specific |
+| `validateaddress` | Both: abnormal end | answers `{is_valid, reason?}`; see the finding below |
+| `convertaddress` | Both: abnormal end | a placeholder as well |
+| `get_raw_transaction` | Both: abnormal end (an inactive ticker answers `NoSuchCoin` first) | a placeholder as well |
+| `my_balance` | SOL: `{coin, balance, unspendable_balance, address}` with `unspendable_balance` `"0"` and the wallet address. Token: the same members, `address` being the token's associated token account. A failed read, R40.6B.4's case included, answers the legacy error body | not examined |
+| `my_tx_history` (legacy form) | Both: abnormal end | a placeholder as well |
+| `my_tx_history` (versioned form) | Both: `NotSupportedFor` (HTTP 400, string: the ticker) | not examined |
+| `set_required_confirmations` | Both: abnormal end; the coin has no confirmation setting to change or to report, and `set_requires_notarization` ends the same way | a placeholder as well |
+| `get_enabled_coins` | Legacy form: an item `{ticker, address}` per active coin, the address as in `my_balance`. Versioned form: `{coins: [{ticker}]}` | not examined |
+| `disable_coin` | A platform with active tokens, without `force_disable`: a normal answer `{coin, cancelled_orders, passivized: true}`; platform and tokens stay registered and the platform can be activated again (chapter 55 D55.6). **A token: abnormal end**, and the token stays listed. **A platform without tokens, or with `force_disable`: abnormal end**, after part of the removal has already happened | not examined |
+
+Outside the list asked for, the same reading found these to end abnormally
+for both kinds: `show_priv_key`, `get_trade_fee`, `sign_raw_transaction`
+and `min_trading_vol` (chapter 60 finding F6). The reading was not
+exhaustive (§40.6B.11).
+
+> **Code-quality finding (informative; this repository's own code;
+> trigger: apparent with little extra effort).** *Address validation is too
+> narrow.* This repository's Solana address check accepts only text of
+> exactly 44 characters that decodes to a point on the curve. A 32-byte
+> public key encodes to between 32 and 44 base58 characters, so valid
+> shorter addresses are refused; and an owner that is a program-derived
+> address is off the curve by construction. Both withdraws run this check
+> on `to`. Proposed fix: accept any base58 text that decodes to exactly 32
+> bytes, and decide separately whether an off-curve recipient needs a
+> warning.
+
+> **Code-quality finding (informative; this repository's own code;
+> trigger: apparent with little extra effort).** *This repository's SPL
+> "max" withdraw is also wrong, differently.* It reports the full token
+> balance in the answer but builds the transfer from the request's `amount`
+> member; with `max` set and no amount given, the transaction moves nothing
+> while the answer says the whole balance left. It also supports the
+> classic Token program only, and answers a short SOL balance with
+> `NotSufficientBalance` naming the platform coin where the reference
+> answers `NotSufficientPlatformBalanceForFee`. D40.6B.3 and T40.6B.9
+> cover both.
+
+### 40.6B.6 Transaction history
+
+**R40.6B.15** *Not implemented at any row read.* D40.1 stands. No row has a
+Solana or SPL history: there is no history entry shape to report for SOL
+or for SPL, and the reference reads no JSON-RPC method for history. What a
+caller sees is: `tx_history: true` at activation ends the request
+abnormally with nothing registered (R40.2.5's note); the legacy
+`my_tx_history` ends abnormally and the versioned one answers
+`NotSupportedFor` (§40.6B.5). The older implementation at the row
+`v2.1.0-beta` had no history either. The registry branch records no check
+of history (§40.6B.8).
+
+### 40.6B.7 Swaps
+
+**F40.6B.3** *The three rows carry no Solana swap.* For the platform coin
+and for the SPL token alike, every swap operation is a placeholder: sending
+and validating the dex fee; sending, validating, spending and refunding
+either payment; finding a payment or its spend; extracting the secret;
+deriving the swap key pair; negotiating a swap-contract address; waiting
+for confirmations; the trade-fee estimates; the protocol information
+exchanged while orders are matched; and the minimum trading volume
+(R40.6A.1). Consequently there is, at these rows, no on-chain payment form,
+no program address for any cluster, no instruction set, no account or
+address-seed scheme, no expression of secret hash, lock time, claim or
+refund, no dex-fee form, no swap version (neither the legacy protocol nor
+the version-two one) that uses Solana, no swap message field and no watcher
+support. An order cannot be placed (R40.6B.6). R40.6A.1's trading floors
+are unchanged and are all there is.
+
+**F40.6B.4** *One earlier release carried a partial proof of concept.* At
+the row `v2.1.0-beta` an older Solana implementation, the lineage this
+repository's own surface descends from, could build three transactions for
+SOL only: lock a payment, claim it with the secret, and refund it. Each was
+a single instruction to an on-chain program of the sibling swap-program
+repository at its state `satomic-swap dev (as of 2024-06-18)`, naming a
+32-byte SHA-256 secret hash, a lock time, an amount in lamports and the
+counterparty; the two accounts a payment used had addresses that followed
+from the lock time and the secret hash alone. The program's address was to
+arrive through the generic swap-contract argument, yet the coin's own
+swap-contract answer and its negotiation were placeholders, and no program
+address was configured anywhere outside test material. The dex fee,
+payment validation, the spend search, secret extraction and the
+confirmation wait were placeholders, and so was every SPL swap operation.
+It could not complete a swap. The whole implementation is gone at the row
+`v2.2.0-beta`; the release rows from there to `v2.5.2-beta` carry no Solana
+coin at all, and the reintroduced implementation of §40.0.1 is first
+present, among the tabled release rows, at `v2.5.2-bebdc9a` (established by
+file listing; that row was not read). Nothing of the proof of concept binds
+Reloaded.
+
+**F40.6B.5** *A public swap program exists; a public swap client does
+not.* The sibling swap-program repository carries, at
+`satomic-swap fix/htlc-correctness (as of 2026-10-28)`, a rewritten
+hash-time-locked payment program with a checked-in interface description,
+a read-me and a deployment document. By its own record it is unaudited,
+deployed on devnet only, and not deployed on mainnet, where the same
+program address is merely intended.
+
+| Cluster | Program address | Verified |
+| --- | --- | --- |
+| devnet | `54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx` | Public-network observation on 2026-11-15 (chapter 01 R6): `getAccountInfo` returns an executable account owned by the upgradeable program loader |
+| mainnet | none | Public-network observation on 2026-11-15: no account exists at that address |
+
+The branch is a program-side artifact. Its documents speak of a framework
+client that builds the program's instructions itself and of swaps without
+watchers; **no state of the historical record contains such a client**, so
+its messages, its dex-fee form, its swap versions, its confirmation rule
+and its coin-configuration keys cannot be read anywhere public.
+
+**Answer to the swap question.** Solana swaps are implemented at no row
+read. There is no reference counterparty a Reloaded Solana swap could be
+tested against, and no released behavior to be wire-compatible with.
+
+**R40.6B.16** *No compatibility claim.* Reloaded MUST NOT state or imply
+wire compatibility of Solana or SPL swaps with `v2.6.0-beta`,
+`v3.0.0-beta` or `main (as of 2026-10-07)`; all three lack the capability.
+
+**The public swap program's interface (dictated interop, conditional).**
+The following is the interop surface of the program of F40.6B.5, read from
+its published interface description. It is recorded because any client
+that talks to that program must conform to it (R29/R31). It binds Reloaded
+**only if** D40.6B.8 selects this program; until then it is information.
+The symbols are quoted under chapter 01 R11's inter-operability class.
+Whether the devnet deployment is the build this description belongs to was
+not established (§40.6B.11).
+
+| Instruction | Arguments, in order | Accounts, in order (s = signer, w = writable) | Discriminator (hex) |
+| --- | --- | --- | --- |
+| `lamports_payment` | `secret_hash` (32 bytes), `lock_time` (u64), `amount` (u64) | `sender` (s, w), `receiver`, `payment` (w), the system program | `9f43536c629db085` |
+| `receiver_spend_lamports` | `secret` (32 bytes), `secret_hash`, `lock_time`, `amount` | `receiver` (s, w), `sender` (w), `payment` (w) | `3d53e089b4be6cf9` |
+| `sender_refund_lamports` | `secret_hash`, `lock_time`, `amount` | `sender` (s, w), `receiver`, `payment` (w) | `0f4143dd6c3304d4` |
+| `spl_payment` | `secret_hash`, `lock_time`, `amount` | `sender` (s, w), `receiver`, `mint`, `sender_token_account` (w), `payment` (w), `vault` (w), `token_program`, the associated-token-account program, the system program | `3c9f1eedb6f565aa` |
+| `receiver_spend_spl` | `secret`, `secret_hash`, `lock_time`, `amount` | `receiver` (s, w), `sender` (w), `mint`, `receiver_token_account` (w), `payment` (w), `vault` (w), `token_program` | `7aea0623eae4b43e` |
+| `sender_refund_spl` | `secret_hash`, `lock_time`, `amount` | `sender` (s, w), `receiver`, `mint`, `sender_token_account` (w), `payment` (w), `vault` (w), `token_program` | `cc9051672484978c` |
+
+What a client depends on:
+
+- **Instruction data.** The eight-byte discriminator, then the arguments in
+  order at fixed width, integers little-endian. The discriminators are the ones
+  the Anchor framework's public convention yields for these names (the
+  first eight bytes of SHA-256 over `global:` followed by the name); this
+  round recomputed all six.
+- **The payment address is the commitment.** `payment` is a
+  program-derived address of the swap program. Its seeds for SOL are the
+  text `payment`, the sender key, the receiver key, the secret hash, the
+  lock time and the amount; for a token they are the text `payment_spl`,
+  the sender key, the receiver key, the mint key, the secret hash, the
+  lock time and the amount. Lock time and amount enter as eight
+  little-endian bytes each. `vault` is the associated token account of the
+  `payment` address for the mint under `token_program`. A client finds or
+  checks a payment by deriving this address from the terms it agreed.
+- **Hash lock.** SHA-256 over the 32-byte secret; the hash is 32 bytes and
+  is not narrowed to 20.
+- **Time lock.** The program takes `lock_time` as whole seconds counted
+  from the Unix epoch and tests it against the time the cluster itself
+  reports. It gates the refund only: the receiver may claim at any
+  time, the sender may refund once the clock has reached it. A value that
+  does not fit a signed 64-bit integer is refused.
+- **Who may act.** Only the receiver can claim and only the sender can
+  refund; each must sign. No third party can do either, so the program has
+  no watcher role.
+- **Settlement leaves no account.** A claim or a refund closes the payment
+  account and returns its rent to the sender; for a token it first moves
+  everything the vault holds. A missing payment account therefore does not
+  mean "never paid"; the transaction list of the payment address
+  (`getSignaturesForAddress`) tells the two apart.
+- **Where the secret is.** In the data of the claim instruction, the 32
+  bytes after the discriminator, also when the claim is an inner instruction of
+  another program's transaction. The program emits events (`PaymentSent`,
+  `PaymentSpent`, `PaymentRefunded`), but they travel in the transaction
+  log, which the node may truncate; a client must not rely on them for the
+  secret.
+- **Tokens accepted.** Classic Token mints always. A Token-2022 mint only
+  when every extension it carries is one the program allows; a transfer
+  fee is refused.
+- **Errors**, numbered from 6000 in this order: `ZeroAmount`,
+  `InvalidReceiver`, `InvalidSecret`, `LockTimeNotExpired`,
+  `InvalidLockTime`, `InsufficientVaultBalance`, `LamportOverflow`,
+  `TransferFeeNotSupported`, `MintExtensionNotSupported`.
+- **Not in the program:** a dex fee, a swap identifier other than the
+  payment address, and any record of the secret hash after settlement.
+
+### 40.6B.8 What the registry branch adds
+
+**F40.6B.6** *Content.* The row
+`coins solana-integration (as of 2026-11-08)` adds four registry entries: a
+native entry and a classic-program dollar-stablecoin token entry for
+mainnet, and the same pair for devnet. It also adds a node list per
+cluster, an integration document, registry tooling with its tests, and
+generated fixtures: a four-entry wallet set and a "swap" set made of the
+two devnet entries and one UTXO test coin. The branch holds no reference
+implementation code. Its "swap fixtures" are coin lists only: they contain
+no program address, no transaction, no message and no swap result, and so
+add nothing to §40.6B.7.
+
+**F40.6B.7** *What it establishes, against the three rows.*
+
+| The registry branch | The three rows | Verdict |
+| --- | --- | --- |
+| Entries use `protocol` of type `SOLANA` with an empty `protocol_data`, and `SOLANATOKEN` with `platform`, `decimals`, `mint_address`, `program_id` | R40.1.2, R40.1.3 | agrees |
+| Activation nodes are objects with `url` only | R40.2.1 | agrees |
+| All four registry entries carry `wallet_only: true` | no Solana coin can trade (F40.6B.3) | agrees |
+| The swap set carries the two devnet entries with `wallet_only: false` | changing the key makes nothing tradable (R40.6B.6) | **not supported by any public state**: the fixture presupposes a swap-capable build that is not in the historical record |
+| Every entry carries `derivation_path`, a two-level hardened prefix under purpose 44 and SLIP-0044's Solana coin type | the key is never read and a global-HD login is refused (R40.6B.2, R40.6B.7) | **not supported by any public state**; harmless to the three rows |
+| Native entries carry top-level `decimals` of 9, and the tooling requires it; the generated application form also copies a token's decimals to the top level | top-level `decimals` is never read (R40.6B.2) | no conflict; the key is for consumers other than the reference daemon |
+| Entries carry `required_confirmations` and `avg_blocktime` | never read; the coin has no confirmation setting (R40.6B.2) | no conflict |
+| The tooling admits two token programs only, the classic one and Token-2022, and none of the four entries is a Token-2022 token | any public key parses as `program_id` (R40.6B.3); Token-2022 fails at activation and at withdraw (R40.6B.5, R40.6B.11) | agrees on substance |
+| The tooling identifies a cluster by `getGenesisHash` before trusting a node | activation never asks a node which cluster it serves; only `getHealth` (R40.1.5) | no conflict; see the finding below |
+| What the branch verified against live nodes is limited to which cluster a node serves and whether the node reports itself healthy; sending, looking up past transactions and trading were not exercised | no history and no swap (R40.6B.15, F40.6B.3) | agrees |
+| The tooling refuses a ticker with more than one hyphen | this repository's swap-statistics store, baseline behavior, splits a ticker at hyphens into a coin part and a platform part and ignores a third part | agrees with the baseline |
+
+**Nothing in the document or the fixtures contradicts the behavior of the
+three rows.** Two of their features (tradable devnet entries, a derivation
+path) look ahead to capabilities that no public state has, which is
+consistent with F40.6B.5.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort).** Nothing in the reference ties a coin entry to a cluster.
+> Activation does not ask the node which cluster it serves, and an entry
+> activates the same way against a node of either cluster; the answer does
+> not name the cluster. Proposed fix: let an entry or a
+> request state the expected genesis hash and compare it with
+> `getGenesisHash` at activation; with nothing stated, behave as today.
+
+### 40.6B.9 Decisions
+
+Each item states the observable requirement, the options and a
+recommendation. None is decided here.
+
+**D40.6B.1** *Answers for the placeholder methods (R40.6B.14).*
+Requirement: a JSON answer for every method of §40.6B.5 on both Solana
+kinds. Options: (a) refuse every operation that is a placeholder today
+with one structured not-supported error; (b) answer where the answer is
+plain and the code exists in this repository (`sign_message`,
+`verify_message`, `validateaddress` with the finding of §40.6B.5 fixed),
+make `disable_coin` and `set_required_confirmations` work, and refuse the
+rest (`convertaddress`, `get_raw_transaction`, the legacy `my_tx_history`
+until D40.1 is done) with a structured error. *Recommendation:* (b).
+`disable_coin` has to succeed under either option, for a token and for a
+platform; a wallet must be able to switch a coin off. The message-signing
+form is Reloaded's own under either option, because the reference has none
+to match.
+
+**D40.6B.2** *Balance of a token the wallet holds no account for
+(R40.6B.4).* Options: (a) answer zero, reading the associated token
+account derived with the token's `program_id`, which is also the address
+R40.1.4 reports and the account a withdraw spends from; (b) copy the
+reference's failure. *Recommendation:* (a). It also settles the Token-2022
+balance finding of §40.6.
+
+**D40.6B.3** *The SPL "max" withdraw (R40.6B.10 and both findings).*
+Requirement: with `max`, the transaction moves the token account's whole
+amount and the answer reports the amount the transaction moves. Options:
+(a) that; (b) copy the reference. *Recommendation:* (a).
+
+**D40.6B.4** *Token-2022 (R40.6B.5, R40.6B.11).* Options: (a) until it is
+supported, refuse a token whose `program_id` is the Token-2022 program at
+activation with a structured error that says so; (b) support it: balance
+and source account under the token's own program, the transfer through
+that program, rent quoted for the real account size, and a stated rule for
+mints with a transfer fee; (c) copy the reference (a node error at
+activation, `InternalError` at withdraw). *Recommendation:* (a) for the
+return of Solana, (b) as its own work package. The registry branch
+publishes no Token-2022 entry, so (a) costs no coverage today.
+
+**D40.6B.5** *The `fee_details` object (R40.6B.12).* This repository
+answers `{type, amount}`, the reference
+`{type, fee_amount, rent_amount, total_amount}`, under the same `type`
+value. Options: (a) the reference's four members for both Solana kinds;
+(b) keep `amount`; (c) both sets of members in one object.
+*Recommendation:* (a), because clients written for the reference read
+those members and no Solana history has ever been stored in the other
+shape. Choose (c) only if a client is found that reads `amount`, and then
+check the stored-form reader, which tells the families' fee objects apart
+by their members, not by `type`.
+
+**D40.6B.6** *A recipient that is a token account (second finding of
+R40.6B.10).* Requirement: tokens must not land in an account owned by a
+token account. Options: (a) accept owner addresses only, and refuse a `to`
+that is an existing account owned by a token program with
+`InvalidAddress`; (b) as (a), except that a `to` which is a token account
+of the same mint is paid directly; (c) copy the reference.
+*Recommendation:* (a) for the return of Solana; (b) can follow.
+
+**D40.6B.7** *Solana under a global-HD login (the consistency note of
+§40.6B.3; continues D40.2).* Options: (a) follow chapter 05 R46 item 3 on
+both activation surfaces: the legacy passphrase key, hence the address of
+R40.6B.8's rule, and T40.8 is retired; (b) refuse on the compatibility
+surface (T40.8) and activate on the primary one; (c) refuse on both, as
+the reference does; (d) derive from the HD seed by SLIP-0010 under
+SLIP-0044's Solana coin type, which gives new addresses, has no reference
+to match at any public state, and needs its own design pass.
+*Recommendation:* (a) now, since one passphrase then has one Solana
+address under either login and the plan runs both surfaces over one
+activation path; (d) only as a separate, later decision. Whichever is
+chosen, chapter 05 R46 and T40.8 must be made to say the same thing.
+
+> *Reloaded status (clean side, 2026-11-15):* by the maintainer's decision
+> of 2026-11-15, Solana under a global-HD login is to be built with HD
+> derivation in this cycle: the coin is to use an ed25519 key at its
+> derivation path, with a typed refusal for a hardware wallet or a
+> WalletConnect session. The path layout is still to be decided; chapter 05
+> R46 and T40.8 are aligned in the change that implements it. Nothing of it
+> is built yet.
+
+**D40.6B.8** *The swap program (F40.6B.5).* Options: (a) target the public
+program of F40.6B.5 when Solana swaps are designed; (b) design or deploy
+another; (c) decide nothing now. *Recommendation:* (c). The lane is
+wallet-first, no reference client exists to interoperate with, and the
+program is by its own record unaudited and absent from mainnet. Revisit
+when a reference client is public or the program is on mainnet.
+R40.6B.16 holds meanwhile.
+
+> *Reloaded status (clean side, 2026-11-15):* by the maintainer's decision
+> of 2026-11-15, nothing is decided on the swap program; the Solana lane is
+> wallet-only first.
+
+### 40.6B.10 Acceptance tests
+
+These rows are for the implementer once the section is cleared and the
+decisions are taken; a row that depends on a decision names it. "Answers"
+means a JSON answer, never an abnormal end.
+
+*Activation forms.*
+
+T40.6B.1 A `SOLANATOKEN` entry without `program_id`:
+`TokenProtocolParseError`, HTTP 500, `{ticker, error}`, from the platform
+method (inline) and from the token method. The same for a missing
+`platform`, `decimals` or `mint_address`, and for `decimals` of 256.
+
+T40.6B.2 A platform entry of type `SOLANA` with `protocol_data: {}` and
+one with extra members inside `protocol_data` both activate. An entry
+without `protocol_data` activates as well once both configuration forms
+are accepted (R40.6B.3 item 1); the reference's refusal of it is not
+tested for.
+
+T40.6B.3 A token entry with top-level `decimals` of 9 and
+`protocol_data.decimals` of 6: balances and withdraw amounts scale by 6. A
+platform entry with top-level `decimals` of 6: SOL still scales by 9.
+
+T40.6B.4 A platform entry with `derivation_path` present, absent, and set
+to text that is not a path: the same address in all three cases.
+
+T40.6B.5 The single-key vector of R40.6B.8: that passphrase gives that
+address.
+
+T40.6B.6 (D40.6B.7) A global-HD login: the outcome the decision selects,
+the same on every surface the decision names.
+
+T40.6B.7 (D40.6B.2) A token whose mint exists and for which the wallet has
+no token account: activation succeeds with balance `"0"`, on both methods;
+`my_balance` answers `"0"`.
+
+T40.6B.8 (D40.6B.4) A token entry with the Token-2022 `program_id`: the
+outcome the decision selects; under option (a), a structured refusal at
+activation and no registered coin.
+
+*Withdraw.*
+
+T40.6B.9 SPL withdraw to a wallet that has no account for the token, with
+enough SOL: the transaction creates the recipient's associated token
+account and transfers; `rent_amount` is positive and `total_amount` is
+`fee_amount` plus `rent_amount`. The same with SOL below fee plus rent:
+`NotSufficientPlatformBalanceForFee`, HTTP 400,
+`{coin, available, required}` with the platform ticker in `coin`.
+
+T40.6B.10 SPL withdraw to a wallet that already has the account:
+`rent_amount` is `"0"` and the transaction has the transfer only.
+
+T40.6B.11 (D40.6B.3) SPL withdraw with `max` and no `amount`, from a
+balance with a fractional part: the transfer instruction carries the token
+account's whole amount, and `total_amount` equals it.
+
+T40.6B.12 SOL withdraw: `max` gives balance less fee; an amount plus fee
+above the balance gives `NotSufficientBalance`; an amount below one
+lamport gives `AmountTooLow`; `to` that is not 32 bytes of base58 gives
+`InvalidAddress`; a `fee` member changes nothing.
+
+T40.6B.13 (D40.6B.5) `fee_details` of a SOL and of an SPL withdraw has the
+members the decision selects; under option (a) exactly `type`,
+`fee_amount`, `rent_amount`, `total_amount`, the last three decimal
+strings in SOL.
+
+T40.6B.14 (D40.6B.6) SPL withdraw whose `to` is an existing token account:
+the outcome the decision selects; in no case a transaction that creates a
+token account owned by `to`.
+
+T40.6B.15 `send_raw_transaction` with the `tx_hex` of a withdraw answers
+`{tx_hash}` equal to the withdraw's `tx_hash`.
+
+*Per-method answers (R40.6B.14, D40.6B.1), each on SOL and on an SPL
+token.*
+
+T40.6B.16 `sign_message`, `verify_message`, `validateaddress`,
+`convertaddress`, `get_raw_transaction`, `set_required_confirmations`,
+`set_requires_notarization`, `show_priv_key`, `get_trade_fee`,
+`sign_raw_transaction`, `min_trading_vol` and both forms of
+`my_tx_history`: each answers. Where D40.6B.1 selects a refusal, the
+answer is a structured error naming the coin.
+
+T40.6B.17 (D40.6B.1 option (b)) `validateaddress` answers valid for a
+32-byte address of 43 characters and for one of 44, and invalid for text
+that does not decode to 32 bytes.
+
+T40.6B.18 (D40.6B.1 option (b)) `sign_message` followed by
+`verify_message` with the same message and the coin's address answers
+`is_valid: true`; a changed message answers `false`.
+
+T40.6B.19 `my_balance` on SOL and on a token answers `coin`, `balance`,
+`unspendable_balance` and `address`; `get_enabled_coins` lists both in its
+legacy and its versioned form.
+
+T40.6B.20 `disable_coin` on a token answers and removes it from
+`get_enabled_coins`; on a platform with no tokens likewise; on a platform
+with active tokens and no `force_disable` it answers in an orderly way,
+as chapter 55 D55.6 settles (the reference answers `passivized: true` and
+lets the platform be activated again); with `force_disable` it answers and
+removes the platform and its tokens.
+
+T40.6B.21 `tx_history: true` at activation, on either surface: the request
+answers and the coin is registered (T40.7 restated for both surfaces).
+
+T40.6B.22 `setprice`, `buy`, `sell` and `trade_preimage` naming a Solana
+coin whose entry has `wallet_only: false` answer a structured refusal (the
+as-built note of §40.6A, restated for the configuration value).
+
+### 40.6B.11 Not established; verification notes and provenance (section-scoped)
+
+- *Not established.*
+  - Nothing here was obtained by running the reference. The reference
+    facts were read at the rows named; node answers were observed on the
+    public network; this repository's column was read in this tree.
+  - The abnormal-end outcome on the WASM target.
+  - The exact state after an abnormally ended `disable_coin`; the table
+    gives what the reading shows and no more.
+  - Whether any background activity of an active Solana coin reaches a
+    placeholder without a request. The reading covered the methods of
+    §40.6B.5, not every path.
+  - Anything about a reference build newer than `main (as of 2026-10-07)`.
+    The registry branch and the swap-program branch are both newer than
+    that row and both presuppose capabilities it lacks. If such a build
+    exists it is not public: its activation, its key derivation under an
+    HD login, its swap messages, its dex-fee form, its history and its
+    configuration keys could not be established, and no statement in this
+    section should be read as describing it.
+  - Whether the devnet deployment of F40.6B.5 is the build of the interface
+    description recorded here. The program's deployment record predates the
+    branch's last commit, which changed program behavior and added an error
+    value, and names a build that is not a commit of the public repository.
+  - No history entry shape, no address under a global-HD login and no swap
+    message field exist to be established (R40.6B.15, R40.6B.7, F40.6B.3).
+  - Whether any client reads this repository's `fee_details.amount` for
+    Solana (D40.6B.5).
+  - One older, unmerged work-in-progress branch state of the historical
+    record that touches ed25519 HD derivation was not read: it predates all
+    three rows, never reached a release, and is not tabled.
+- *Re-verifying the public-network facts (chapter 01 R6).* On a public
+  devnet endpoint, `getAccountInfo` for the address of F40.6B.5 returns an
+  executable account; on a public mainnet endpoint it returns none.
+  `getTokenAccountBalance` for an address that has no account returns a
+  JSON-RPC error, not a zero amount; `getTokenAccountsByOwner` for an owner
+  with no account of an existing mint returns an empty list; the same call
+  with a mint address that has no account returns a JSON-RPC error. All
+  were observed on 2026-11-15.
+- *Sibling-repository citations (chapter 01 R14).* (1) The public
+  coins-registry repository `GLEECBTC/coins`, branch `solana-integration`;
+  earliest commit containing the integration document, the node lists and
+  the fixtures `83ed4b75564a1e097d774d64ac5343b161fcb44c` (2026-11-08).
+  The branch carries no license file; its text is treated as reference-side
+  material, and no sentence or example value of the document or the
+  fixtures is carried here. Configuration key names are the interface;
+  SLIP-0044's coin type is a public registry value. (2) The public
+  swap-program repository `KomodoPlatform/satomic-swap` (the same
+  references are served under `GLEECBTC/satomic-swap`), branch
+  `fix/htlc-correctness`; earliest commit containing the rewritten program
+  `4414761b74fc5868c41330db59bce9d18ba88e7c`, the interface description
+  `5ccf5cf4629dcda23804ea2734548017e0528af9` and the devnet deployment
+  record `72af9b6aa8032d7fd64993890455285502f4b2c0` (all 2026-10-21);
+  license MIT by the program crate's package metadata (the repository root
+  carries no license file at that branch). The instruction, account,
+  argument, event and error names are admitted by chapter 01 R11's
+  inter-operability class; the deployment facts by the observation above.
+  (3) The same repository, branch `dev`; the first-generation instruction
+  set first appears in `70d2fae63baad3a46e6957117fc8d4c97da0c06d`
+  (2024-03-28); no license statement at that state, so F40.6B.4 describes
+  function only. Neither repository is part of the forbidden corpus.
+- *Public specifications cited (chapter 01 R12/R13).* Solana JSON-RPC API
+  (`getHealth`, `getBalance`, `getAccountInfo`, `getTokenAccountsByOwner`,
+  `getTokenAccountBalance`, `getLatestBlockhash`, `getFeeForMessage`,
+  `getMinimumBalanceForRentExemption`, `sendTransaction`,
+  `getGenesisHash`, `getSignaturesForAddress`); the SPL Token, Token-2022
+  and Associated Token Account program specifications; RFC 8032 (ed25519);
+  BIP-39 (the test mnemonic); SLIP-0044 (coin type); SLIP-0010; the Anchor
+  framework's published instruction-discriminator convention.
+- *States read for this section:* `v2.6.0-beta`, `v3.0.0-beta`,
+  `main (as of 2026-10-07)`; `v2.1.0-beta` for F40.6B.4 and R40.6B.15's
+  last sentence; presence or absence of a Solana coin, by file listing
+  only, at `v2.2.0-beta`, `v2.3.0-beta`, `v2.4.0-beta`, `v2.5.0-beta`,
+  `v2.5.1-beta`, `v2.5.2-beta` and `v2.5.2-bebdc9a`; the sibling rows
+  `coins solana-integration (as of 2026-11-08)`,
+  `satomic-swap dev (as of 2024-06-18)` and
+  `satomic-swap fix/htlc-correctness (as of 2026-10-28)` (chapter 02
+  §2.15A). No other state of the historical record was read for this
+  section.
+- *Cross-chapter check.* Read against this section: chapter 02 §2.15A
+  (three rows added, cleared with this section); chapter 05 (R46 item 3
+  and the hardware-source table: the consistency note of §40.6B.3);
+  chapter 49 (the fee-policy note: agrees with R40.6B.9); chapter 55
+  (§55.3 Solana rows and D55.6: agree); chapter 60 (row P1, R60.6.5,
+  finding F6: agree, extended by R40.6B.14); chapter 21 §21.11B (the form
+  followed for a sibling swap program). No cleared sentence of any chapter
+  was edited.
+- *Clearance:* passed the KDF Dirty Gate on 2026-11-15, measure 0.01, no
+  findings (chapter 01 R37-R41); the attestation is in §40.12.
+
 ## 40.7 Tests
 
 T40.1 Both `experimental::` methods are routed on native and WASM builds.
@@ -478,3 +1369,74 @@ with the shapes listed in §40.6 items 3-5.
   own secrets switch) and on this repository's own code. They take no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required.
+- *Dirty-side addition of 2026-11-15 (§40.6B; Spec Reader round 0.5.0-4;
+  **KDF Dirty Gate: PASS on 2026-11-15, measure 0.01, no findings**):*
+  §40.6B and this entry passed the gate under chapter 01 R40; the
+  attestation below closes this item. *Forbidden corpus:* consulted
+  under the chapter-01 two-team clean-room workflow at the rows
+  `v3.0.0-beta`, `v2.6.0-beta` and `main (as of 2026-10-07)` of chapter 02
+  §2.15A, for the observable behavior of an active Solana coin and SPL
+  token only: the configuration keys read, the key source per login, the
+  withdraw and broadcast contract with its `fee_details` object and error
+  mapping, the answer or abnormal end of the wallet methods listed in
+  §40.6B.5, and the absence of history and of swaps; and at the row
+  `v2.1.0-beta` only to establish that an earlier release carried a partial
+  swap proof of concept. *Reference-side material, source class "sibling
+  public repository without a license statement":* the row
+  `coins solana-integration (as of 2026-11-08)` (registry entries,
+  integration document, registry tooling, fixtures) and the row
+  `satomic-swap dev (as of 2024-06-18)`; read by the dirty-side author
+  only, described by function, nothing quoted. *Sibling public repository
+  whose program crate declares the MIT license in its package metadata
+  (the repository root carries no license file at that branch):* the row
+  `satomic-swap fix/htlc-correctness (as of 2026-10-28)`, for the published
+  interface of a swap program (chapter 01 R3's published
+  application-binary-interface class and R4), cited under R14 in
+  §40.6B.11. *Public-network observation (chapter 01 R6):* devnet and
+  mainnet JSON-RPC answers of 2026-11-15. *This repository's own tree
+  (chapter 01 R1/R7):* the last column of §40.6B.5, the two findings on
+  this repository's code, and the test vector of R40.6B.8, which was
+  computed, not read. No source text, private identifier, internal
+  decomposition, error or log string literal, test name or test constant
+  was carried into §40.6B; findings are restated as behavior.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-15, measure
+  0.01 on chapter 01 R35's discretionary-expression basis, judged per token,
+  no findings (chapter 40: 0.01; chapter 02: 0.00; 0.00 against the
+  historical record); the section passed two full passes, the second after
+  five passages were reworded. Reference states (chapter 02 R13): no
+  finding; every state name used has a row, each row's identifier is the
+  state compared, and the three new rows are well-formed. Extent: the Solana
+  coin and SPL token subsystem of the historical record (coin, token, node
+  client, both activation paths, test file: 7 files) read in full at
+  `v3.0.0-beta`; the same files at `v2.6.0-beta` and `main (as of
+  2026-10-07)` by difference; the earlier Solana and SPL implementation at
+  `v2.1.0-beta` (10 files: swap operations read, the remainder compared
+  mechanically); the request dispatcher's method names and the
+  coin-deactivation handler by targeted reading; every text file of those
+  four trees mechanically; file listings at `v2.2.0-beta`, `v2.3.0-beta`,
+  `v2.4.0-beta`, `v2.5.0-beta`, `v2.5.1-beta`, `v2.5.2-beta` and
+  `v2.5.2-bebdc9a`; the sibling rows `coins solana-integration (as of
+  2026-11-08)` (18 files changed by the branch; integration document read in
+  full), `satomic-swap dev (as of 2024-06-18)` (16 files) and `satomic-swap
+  fix/htlc-correctness (as of 2026-10-28)` (19 files; read-me read in full,
+  program crate and interface description compared in full). Treatment of
+  the siblings: the registry branch and the older swap-program state carry
+  no license and were treated as protected expression; of the newer
+  swap-program state the checked-in interface description is published
+  interface, the program crate is MIT-declared expression admissible with
+  the R14 citation the section carries, and the read-me, deployment
+  document, tests and scripts were held to the protected-expression
+  standard. Method: reading; mechanical comparison of shared word runs
+  (three, four and five words) between the gated lines and each state;
+  per-token forced-versus-free classification of every quoted token;
+  recomputation of the six instruction discriminators and of the test
+  vector; comparison of string literals and comments; the section embeds no
+  code blocks, so the repository's clean-room gate tool was not run. Not
+  covered: the accuracy of the behavioral statements, the public-network
+  observations, and whether each R14 identifier is the earliest commit. The
+  test vector's values occur nowhere in the compared material.
+- *Status notes added 2026-11-15 -- after D40.6B.7 and D40.6B.8 (§40.6B).*
+  Reloaded-original, clean side: they record the maintainer's decisions of
+  2026-11-15 on Solana under a global-HD login and on the swap program; they
+  take no forbidden-class input, so chapter 01 R38 is not engaged and no
+  gate pass is required.
