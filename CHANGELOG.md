@@ -67,7 +67,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   browser build, if the task waiting for a storage request was cancelled before the request finished,
   the browser later called a handler that no longer existed, which made the browser abort the whole
   storage transaction, including other writes in it. The waiting code now withdraws its handlers when it
-  finishes or is cancelled, and a finished transaction withdraws its own. Detail: PR #N; CRD ch.26 R9A.
+  finishes or is cancelled, and a finished transaction withdraws its own. Detail: PR #376; CRD ch.26 R9A.
 
 #### QTUM and QRC20
 
