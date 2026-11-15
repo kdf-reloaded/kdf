@@ -123,6 +123,7 @@ impl QtumCoin {
                 reason: "Qtum doesn't support delegation for segwit".to_string(),
             });
         }
+        let _utxo_lock = UTXO_LOCK.lock().await;
         let delegation_output = self
             .remove_delegation_output(QRC20_GAS_LIMIT_DEFAULT, QRC20_GAS_PRICE_DEFAULT)
             .mm_err(Into::into)?;
@@ -249,7 +250,7 @@ impl QtumCoin {
         let to_addr =
             Address::from_str(request.address.as_str()).map_to_mm(|e| DelegationError::AddressError(e.to_string()))?;
         let fee = request.fee.unwrap_or(QTUM_DELEGATION_STANDARD_FEE);
-        let _utxo_lock = UTXO_LOCK.lock();
+        let _utxo_lock = UTXO_LOCK.lock().await;
         let staker_address_hex = qtum::contract_addr_from_utxo_addr(to_addr.clone()).mm_err(Into::into)?;
         let delegation_output = self.add_delegation_output(
             staker_address_hex,
