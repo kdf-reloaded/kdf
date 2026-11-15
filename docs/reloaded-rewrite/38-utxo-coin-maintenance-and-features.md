@@ -810,8 +810,8 @@ delegation builds, adding and removing a delegation, hold the same
 process-wide build lock from their listing through signing. Before this fix
 the adding build asked for the lock without waiting for it, so the lock was
 never held, and the removing build did not ask for it; either could be built
-at the same time as a withdraw from the same address and select the same
-inputs.
+at the same time as a withdraw from the same address and, while both were
+building, select the same inputs.
 
 R38.5B.6 **Rejection shape on the legacy broadcast path.** (Reference-bound
 at both rows; also the baseline's behaviour.) When the backend refuses a

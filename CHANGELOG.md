@@ -17,8 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   (`add_delegation`) asked for the lock that lets only one transaction from the wallet be built at
   a time but did not wait for it, so the lock was never held, and removing one
   (`remove_delegation`) did not ask for it at all. A delegation and a withdraw started together
-  could therefore pick the same coins. Both delegation calls now wait for the lock, as a withdraw
-  does. Detail: PR #354; CRD ch.38 R38.5B.5.
+  could therefore be built at the same time. Both delegation calls now wait for the lock, as a
+  withdraw does, so the builds no longer overlap; as with two withdraws, a transaction that is built
+  but not yet broadcast does not keep a later build from choosing the same coins. Detail: PR #354; CRD ch.38 R38.5B.5.
 
 ## [0.4.0-beta.1] — 2026-11-14
 
