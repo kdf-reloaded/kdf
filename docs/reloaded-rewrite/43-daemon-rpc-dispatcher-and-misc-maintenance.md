@@ -618,14 +618,13 @@ which the plan keeps `show_priv_key` legacy-only); (ii) keep it in group B and
 add a versioned form anyway, for clients that call the simpler single-coin
 query.
 
-## 43.1C Conventions of the documented versioned surface (Spec Reader round 0.5.0-2; pending the KDF Dirty Gate)
+## 43.1C Conventions of the documented versioned surface (reference documentation)
 
-> **Provenance status: pending the KDF Dirty Gate.** This section is a
-> candidate under chapter 01 R40: until the gate clears it and this marker is
-> replaced by the clearance record, it MUST NOT be relied on as a statement of
-> required behavior and MUST NOT be implemented from. It was written by the
-> dirty-side specification author on 2026-11-15 (Spec Reader round 0.5.0-2)
-> from three inputs: the published reference API documentation, requested at
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
+> measure 0.02 (attestation in §43.7).**
+> This section was written on 2026-11-15 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-2) under the two-team procedure of chapter 01 §1.4A, from three
+> inputs: the published reference API documentation, requested at
 > `https://komodoplatform.com/en/docs/komodo-defi-framework/api/` (fetched
 > 2026-11-15; the pages are listed in §43.7; a reference-side input that only
 > the two roles of chapter 01 R37 read); the reference lineage at the rows
@@ -634,8 +633,7 @@ query.
 > host answered every documentation address requested in this round with a
 > permanent redirect to the same path under `https://gleec.com/komodo/docs/`,
 > the host §43.1B names, so the two host names lead to one set of pages and
-> there are no two copies to compare. Every passage below is marked
-> *(pending gate)* until cleared.
+> there are no two copies to compare.
 
 *Scope.* §43.1B established that the documentation defines no versioned form
 of the legacy-only names, so every versioned form Reloaded adds for them (plan
@@ -654,7 +652,7 @@ both unless stated otherwise; a citation of another rule means that rule's
 own inputs. Method names, member names and tag values are the API contract
 and are listed; the documentation's descriptive text and its example values
 are not reproduced. The semantics of each method stay in the chapter that
-owns it. *(pending gate)*
+owns it.
 
 **R43.1C.1** *Which names have both forms.* Three sets have to be kept apart.
 **[doc]** The method index carries **eight** names in both its legacy column
@@ -676,12 +674,11 @@ points `show_priv_key` to `get_private_keys` and `get_trade_fee` to
 implementation: `consolidate_utxos` is indexed and exemplified as a legacy
 method with inline parameters, but **[impl]** only the versioned table routes
 it, so the documented legacy request is refused as R43.1A.1b describes.
-*(pending gate)*
 
 **R43.1C.2** *Request members, pair by pair.* `?` marks an optional member.
 "Relation" classes the step from the legacy request to the versioned
 `params`; the answer column states only how the versioned answer differs
-from the legacy one. *(pending gate)*
+from the legacy one.
 
 | Method | Legacy request members | Versioned `params` members | Relation | Versioned answer against legacy answer | Rests on |
 | --- | --- | --- | --- | --- | --- |
@@ -727,7 +724,6 @@ from the legacy one. *(pending gate)*
    required member answer `InvalidRequest` (chapter 55 R55.1.7). The
    documentation says nothing about unknown members.
 
-*(pending gate)*
 
 **R43.1C.4** *Numbers in versioned requests.* **[doc]** The versioned pages
 type a trading quantity (`price` and `volume` of `trade_preimage`) as a
@@ -744,7 +740,7 @@ bound by R43.1A.5 as a decimal string or a number. A wallet amount is a
 plain decimal, not that multi-form quantity, so the rational and the
 fraction are not forms of it. Counts, limits, page numbers, timestamps and
 indices are JSON integers. A versioned form therefore neither narrows nor
-widens the number forms of its legacy form. *(pending gate)*
+widens the number forms of its legacy form.
 
 **R43.1C.5** *Numbers in versioned answers.* The documented versioned surface
 uses three encodings, one per method:
@@ -771,7 +767,6 @@ answer, `max_taker_vol`, gives a fraction object alone. On the pages fetched
 no versioned answer to a request gives an exact form without a decimal
 beside it; the events of the two order streams of R43.1C.7, which are not
 answers to a request, carry their quantities as a rational alone.
-*(pending gate)*
 
 **R43.1C.6** *Success envelope.* **[doc]** A versioned success carries
 `mmrpc`, `result` and `id` (R43.1B.5); **[impl]** exactly as chapter 55
@@ -792,10 +787,10 @@ example and R43.1A.6 have the versioned ones; the response table of
 examples have `paging_options`; and the `my_recent_swaps` page shows untagged
 items and legacy error bodies where R43.1A.7 binds tagged items and typed
 errors. Two versioned success examples lack `mmrpc`; the implementation never
-omits it. *(pending gate)*
+omits it.
 
 **R43.1C.7** *Objects that carry a kind.* The documented versioned surface
-shapes such an object in four ways. *(pending gate)*
+shapes such an object in four ways.
 
 | Style | Shape | Where it is used |
 | --- | --- | --- |
@@ -813,7 +808,6 @@ re-shaped a kind that a legacy answer carries, and it chose style (a); a
 kind-carrying member inside a payload that was ported unchanged keeps its
 legacy style (`fee_details` of `withdraw`, style (c)). **[doc]** by example
 only — no response table names the pair — **[impl]**, and R43.1A.7.
-*(pending gate)*
 
 *Orders.* **[doc]** No documented versioned method answers one of the node's
 own maker or taker orders: the index has no versioned counterpart of
@@ -833,7 +827,7 @@ no kind member at all. The member name `order_type` already has three
 meanings across the two surfaces: the event tag of the two streams above; the
 fill policy of a taker order (an object whose `type` is `GoodTillCancelled`
 or `FillOrKill`); and the role (`Maker` or `Taker`) in the filter and in the
-summary rows of `orders_history_by_filter`. *(pending gate)*
+summary rows of `orders_history_by_filter`.
 
 **R43.1C.8** *Errors.* **[doc]** A versioned error carries `mmrpc`, `error`,
 `error_path`, `error_trace`, `error_type`, `error_data` and `id` (R43.1B.5),
@@ -850,7 +844,7 @@ the shared names show the spread: a caller-side refusal answers 400 in
 throughout. The legacy form of each of these methods answers the legacy error
 body with HTTP 500 for every one of those cases (R43.1A.1a), so the versioned
 form is the first place where a client can tell a refusal from a node
-failure. *(pending gate)*
+failure.
 
 *How the documentation lists a method's errors* differs from page to page:
 (1) a subsection per token, with a table of its `error_data` members and an
@@ -875,7 +869,7 @@ or a price below its floor), and the storage of the node's own orders.
 **[impl]** None of those tokens reaches a client as an `error_type` of a
 legacy-only method at either release row — those methods answer the legacy
 error body — so they are not an interface this project must match, and they
-are described here rather than named (chapter 01 R11). *(pending gate)*
+are described here rather than named (chapter 01 R11).
 
 *Conventions that hold across the documented sets:* a request that cannot be
 decoded answers `InvalidRequest` with a string, which method pages list among
@@ -889,7 +883,7 @@ others (`trade_preimage`, `withdraw`, `max_maker_vol`,
 different sets (`CoinIsWalletOnly` is a string in `best_orders` and
 `orderbook`, R43.1A.5–R43.1A.6, and a record with `coin` in
 `trade_preimage`). A token's payload kind and status are therefore facts of
-one method's set, not of the token. *(pending gate)*
+one method's set, not of the token.
 
 **R43.1C.9** *What the documentation says about the two forms of one method.*
 **[doc]** In general: the index and the two overview pages between them say
@@ -917,7 +911,7 @@ in a legacy request. **[impl]** For `withdraw` and `trade_preimage` the two
 forms are one operation: the legacy form accepts the member set of the
 versioned form and answers the same payload (bare for `withdraw`, under
 `result` for `trade_preimage`), with a typed error rendered as the legacy
-error string. *(pending gate)*
+error string.
 
 *Not established.* (1) The answer members of versioned-only methods were read
 from the documentation alone, except where §43.1A or this section cites the
@@ -931,8 +925,7 @@ The members of the stream events beyond the tag pair were not recorded, and
 chapter 10 does not bind them. (6) The statuses of R43.1C.8 are those of the
 named sets only; no status was read for a versioned-only method outside
 them. (7) Whether the by-volume `value` of `best_orders` also takes the
-rational and the fraction form was not established (R43.1C.4). *(pending
-gate)*
+rational and the fraction form was not established (R43.1C.4).
 
 > **Compatibility (this repository, 2026-11-15; not corpus-sourced).**
 > Checked against this repository's tree at the base of this round:
@@ -974,7 +967,7 @@ new capability has no documented precedent; (iii) option (i) as the rule,
 with a tagged object replacing a member only where the new form gains a
 capability — the documented pattern taken whole. The number forms of
 R43.1C.4 are the same under every option, because both surfaces read a
-quantity alike. *(pending gate)*
+quantity alike.
 
 **D43.1C.2** *Answer shape of a versioned `order_status`.* Options: (i) the
 legacy object as the value of `result` — `type`, `order`, and
@@ -992,7 +985,7 @@ inside the payload). The documented surface holds a precedent for either
 option: (ii) is the closer one by kind of method, (i) by least change.
 Whichever is taken also bears on the order objects that a versioned
 `my_orders`, `setprice`, `buy`, `sell` and `update_maker_order` would
-answer, which carry no kind member in their legacy forms. *(pending gate)*
+answer, which carry no kind member in their legacy forms.
 
 **D43.1C.3** *Number encoding of quantities in the new answers.* Options:
 (i) each legacy encoding as it stands — encoding (b), and the lone fraction
@@ -1002,7 +995,7 @@ object (a) for order prices and volumes — the precedent of `orderbook`,
 the documentation defines as a shared structure of its own; (iii) the
 companion members under one common member name — what Reloaded's two own
 forms do. A mixed outcome is itself what the documented surface shows
-(R43.1C.5). *(pending gate)*
+(R43.1C.5).
 
 **D43.1C.4** *Token spelling, payload kind and status for failures that the
 new forms share with existing sets.* The documented sets disagree on the
@@ -1013,7 +1006,6 @@ spelling, one payload kind and one status per token across all new forms
 some sibling sets differ; (ii) each new form follows the set of its nearest
 versioned sibling, so that a trade-related form would use `InternalError`
 and `NoSuchCoin` as a record with status 400, as `trade_preimage` does.
-*(pending gate)*
 
 **D43.1C.5** *Unknown members of `params` in the new forms.* The reference
 and Reloaded ignore them in every existing form of the shared names
@@ -1023,7 +1015,7 @@ and the matching test of its §1.6 then need correcting; (ii) refuse them
 with `InvalidRequest` in the new forms only — stricter than any reference
 sibling and a divergence of its own, under which a client that copies a
 legacy body's extra members into `params` fails where a sibling form would
-not. *(pending gate)*
+not.
 
 ## 43.2 Public vs protected method classification
 
@@ -1334,11 +1326,8 @@ shall be wound down as part of shutdown rather than abandoned.
 - *Scoped addition (2026-11-15, Spec Reader round 0.5.0-2) -- §43.1C
   (R43.1C.1--R43.1C.9, the request table and the table of kind-carrying
   shapes, the not-established paragraph, the compatibility note and
-  D43.1C.1--D43.1C.5); no other file was changed.* **KDF Dirty Gate: pending**
-  (chapter 01 R40; the section carries the pending-clearance marker at the
-  point at which it appears, and every passage in it is marked *(pending
-  gate)*; this item is replaced by the clearance record with the R39 scope
-  attestation when the gate clears it). *Inputs:* (1) the published reference
+  D43.1C.1--D43.1C.5); no other file was changed.* **KDF Dirty Gate: PASS on 2026-11-15, measure 0.02, no findings**
+  (chapter 01 R40; the attestation closes this item). *Inputs:* (1) the published reference
   API documentation, requested under
   `https://komodoplatform.com/en/docs/komodo-defi-framework/api/` and served,
   after a permanent redirect of every address, from
@@ -1431,3 +1420,35 @@ shall be wound down as part of shutdown rather than abandoned.
   documentation is not a state of the historical record and takes no row
   (§2.15A R13 tables commits, tags and branch states only), so it is named
   here by URL and fetch date instead.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-15, measure 0.02
+  on the R35 discretionary-expression basis, no findings. Reference states
+  (chapter 02 R13): four state names are used — `v2.6.0-beta`, `v3.0.0-beta`,
+  `dev (as of 2026-03-27)` and `main (as of 2026-10-07)` — all rows of §2.15A;
+  the first two are the states the section rests on, read at their rows' full
+  identifiers; the other two are named only as not read; the documentation is
+  a public site and takes no row. Extent: (a) at the rows `v2.6.0-beta` and
+  `v3.0.0-beta`: the daemon RPC dispatcher's versioned and legacy method
+  tables; the request, answer and error-set definitions of the versioned and
+  legacy forms of the nine names routed on both tables; the legacy forms of
+  the three further names of the R43.1C.2 table and the legacy order-status
+  answer; the request reading of multi-form quantities; the mmrpc request and
+  answer envelope; the tag pairs and tag values of the swap-status,
+  order-status and order-book stream events; the error sets R43.1C.8 names —
+  23 files per row, plus a mechanical comparison of the whole tree at each of
+  the two rows (893 and 943 text files) and at the rows `dev (as of
+  2026-03-27)` and `main (as of 2026-10-07)` (943 text files each); (b) the
+  published reference API documentation fetched 2026-11-15 from the host
+  §43.1B names: 183 pages (all 84 pages this item lists and 99 further pages
+  linked from the method index, the section indexes and the shared-structure
+  pages; the shared error catalog compared in full; the requested host's
+  permanent redirect to that host confirmed); (c) this repository's own tree
+  for the cited rules, the plan name and the §2.15A table. Method: reading of
+  the section and of the files at the tabled identifiers; set comparison of
+  the two method tables; classification of all 172 distinct backticked tokens;
+  word-shingle comparison (3, 4 and 5 words) against each tree and the
+  documentation pages; sentence-level ranking against the documentation with
+  the closest pairs read; comparison of the documentation's example literals;
+  scans for spelled-out source identifiers, catalog headings, commit
+  identifiers, source locations and code; the repository's clean-room gate
+  tool was not run, as the section embeds no code blocks. The gate judged
+  expression, not the accuracy of the [doc] and [impl] statements.
