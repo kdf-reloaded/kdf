@@ -308,6 +308,32 @@ refuses every request; see the availability note at the top of this chapter):
 7. **Keys.** Reloaded's keypair derivation produces the same ed25519 key as
    R40.1.4 for the same 32-byte secret; no change needed.
 
+> **Reloaded status (clean side, 2026-11-15).** The list above was checked
+> against the code of this date. Item 6 is partly out of date: the platform
+> reaches its nodes through a failover pool that tries them in the configured
+> order and sets a node aside for a while after a transport failure. The pool
+> sends no `getHealth` request, so it is not the node selection of R40.1.5. The
+> rest of item 6 holds. The shipped code has four further gaps; none of them can
+> be reached while Solana is switched off:
+>
+> - *Token-2022.* Reloaded's token configuration carries no `program_id`. The
+>   token's account, its balance, the transfer instruction and the creation of
+>   the receiver's token account all use the SPL Token program. A Token-2022
+>   mint therefore fails in every one of these operations, not only in the
+>   balance read the code-quality finding below names.
+> - *SPL `withdraw` with `max: true`* transfers the requested amount, not the
+>   balance the answer reports.
+> - *Rent.* An SPL `withdraw` that creates the receiver's associated token
+>   account also pays that account's rent deposit. The balance check and
+>   `fee_details` do not count it.
+> - *Unimplemented operations.* Several coin operations that ordinary RPCs reach,
+>   such as transaction history, address conversion, the raw-transaction query
+>   and the confirmation settings, are unimplemented and end the request
+>   abnormally.
+>
+> `docs/plans/solana-support.md` schedules each of them before Solana is
+> switched back on.
+
 > **Decision recorded (informative).** The baseline-inherited
 > `enable_solana_with_tokens` / `enable_spl` methods stay routed as the primary
 > surface (see the maintainer decision at the top of this chapter); in this
@@ -478,3 +504,6 @@ with the shapes listed in §40.6 items 3-5.
   own secrets switch) and on this repository's own code. They take no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required.
+- *Clean-context addition (2026-11-15, forbidden corpus not consulted):* the
+  Reloaded status note after §40.6 item 7 records the state of this
+  repository's own code. It takes no forbidden-class input.
