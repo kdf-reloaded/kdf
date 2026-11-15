@@ -51,10 +51,11 @@ const OBSOLETE_INTERNAL_ID_LEN: usize = 32;
 /// The token id of a denomination: the SHA-256 of the lower-cased denom, 32 bytes (R36.14.2).
 pub(crate) fn token_id_of_denom(denom: &str) -> BytesJson { sha256(denom.to_lowercase().as_bytes()).to_vec().into() }
 
-/// The byte string an identifier is cut from: the position as a little-endian integer of the build's native word
-/// size, followed by the characters of the upper-case hex hash (R36.14.10).
-fn id_byte_string(position: usize, tx_hash: &str) -> Vec<u8> {
-    let mut bytes = position.to_le_bytes().to_vec();
+/// The byte string an identifier is cut from: the position as a little-endian integer of `word_bytes` bytes (the
+/// build's native word size: 8, or 4 in the 32-bit browser build), followed by the characters of the upper-case hex
+/// hash (R36.14.10, R36.14.19 item 7).
+fn id_byte_string(position: usize, tx_hash: &str, word_bytes: usize) -> Vec<u8> {
+    let mut bytes = (position as u64).to_le_bytes()[..word_bytes].to_vec();
     bytes.extend_from_slice(tx_hash.as_bytes());
     bytes
 }
@@ -64,7 +65,13 @@ fn id_byte_string(position: usize, tx_hash: &str) -> Vec<u8> {
 /// (R36.14.10). The identifier depends on the build's word size, as at the reference; only the first 25 characters
 /// of the hash take part in it on a 64-bit build.
 pub(super) fn history_internal_id(position: usize, tx_hash: &str) -> BytesJson {
-    let mut bytes = id_byte_string(position, tx_hash);
+    history_internal_id_for_word(position, tx_hash, std::mem::size_of::<usize>())
+}
+
+/// [`history_internal_id`] for a build whose native word is `word_bytes` bytes (8 or 4); the 32-bit form is
+/// reproduced in tests on a 64-bit build (T36.45 (viii)).
+pub(super) fn history_internal_id_for_word(position: usize, tx_hash: &str, word_bytes: usize) -> BytesJson {
+    let mut bytes = id_byte_string(position, tx_hash, word_bytes);
     bytes.truncate(INTERNAL_ID_LEN);
     bytes.reverse();
     bytes.into()
@@ -81,7 +88,7 @@ pub(super) fn fee_row_internal_id(token_row_id: &BytesJson) -> BytesJson {
 /// **D36.11 (a).** The two earlier 32-byte identifier forms of the same row, in reverse and in forward order,
 /// which are deleted before a row is written (finding 2 of §36.14.1).
 pub(super) fn obsolete_internal_ids(position: usize, tx_hash: &str) -> [BytesJson; 2] {
-    let mut forward = id_byte_string(position, tx_hash);
+    let mut forward = id_byte_string(position, tx_hash, std::mem::size_of::<usize>());
     forward.truncate(OBSOLETE_INTERNAL_ID_LEN);
     let mut reversed = forward.clone();
     reversed.reverse();
@@ -314,175 +321,269 @@ pub(super) struct RowDraft {
     pub(super) position: Option<usize>,
 }
 
+/// One coin of an amount text: its integer must fit an unsigned 64-bit integer (R36.14.19 item 4), else the coin is
+/// not counted.
 fn parse_coin(text: &str) -> Option<(BigDecimal, String)> {
     let split = text.find(|c: char| !c.is_ascii_digit())?;
     if split == 0 {
         return None;
     }
     let (digits, denom) = text.split_at(split);
-    Some((BigDecimal::from_str(digits).ok()?, denom.to_owned()))
+    Some((BigDecimal::from(digits.parse::<u64>().ok()?), denom.to_owned()))
 }
 
 fn parse_coins(text: &str) -> Vec<(BigDecimal, String)> {
     text.split(',').filter_map(|part| parse_coin(part.trim())).collect()
 }
 
-fn delegation_transfers(event: &HistoryEvent) -> Vec<Transfer> {
+/// What a denomination resolves to. **Isolated for D36.13 / D36.21**: the set of denominations that resolve decides
+/// which coins take a position (R36.14.19 item 4) and which rows are written; today it is the set the fetcher built.
+fn resolve_denom<'a>(denoms: &'a HashMap<String, DenomInfo>, denom: &str) -> Option<&'a DenomInfo> { denoms.get(denom) }
+
+/// The coins of an amount text that meet the conditions of R36.14.19 item 4 on the amount: a u64 integer and a
+/// denomination that resolves. The party attributes are checked by the caller.
+fn counted_coins(text: &str, denoms: &HashMap<String, DenomInfo>) -> Vec<(BigDecimal, String)> {
+    parse_coins(text)
+        .into_iter()
+        .filter(|(_, denom)| resolve_denom(denoms, denom).is_some())
+        .collect()
+}
+
+/// R36.14.19 item 1: an event is dropped when it is identical to the event of the same type emitted just before it.
+fn drop_repeated_events(events: &[HistoryEvent]) -> Vec<HistoryEvent> {
+    let mut last: HashMap<&str, &HistoryEvent> = HashMap::new();
+    let mut kept = Vec::new();
+    for event in events {
+        if last.get(event.kind.as_str()) == Some(&event) {
+            continue;
+        }
+        last.insert(event.kind.as_str(), event);
+        kept.push(event.clone());
+    }
+    kept
+}
+
+/// R36.14.19 item 5: a candidate with the sender, recipient and denomination of a transfer already in the list is
+/// added to it (the earlier one keeps its kind); otherwise it is appended.
+fn push_merged(list: &mut Vec<Transfer>, candidate: Transfer) {
+    match list.iter_mut().find(|transfer| {
+        transfer.sender == candidate.sender
+            && transfer.recipient == candidate.recipient
+            && transfer.denom == candidate.denom
+    }) {
+        Some(merged) => {
+            merged.amount += &candidate.amount;
+            merged.is_fee_payment = false;
+        },
+        None => list.push(candidate),
+    }
+}
+
+/// The text of the fee payment's `transfer` event (R36.14.5). **Isolated for D36.19**: today the text of the first
+/// fee entry (R36.14.22 items 1 and 5); under D36.19 (b) it would be the text of the whole fee list.
+fn fee_payment_text(facts: &TxFacts) -> String { format!("{}{}", facts.fee_amount, facts.fee_denom) }
+
+fn delegation_transfers(event: &HistoryEvent, denoms: &HashMap<String, DenomInfo>) -> Vec<Transfer> {
     let (delegator, validator) = match (event.attr("delegator"), event.attr("validator")) {
         (Some(delegator), Some(validator)) => (delegator, validator),
         _ => return Vec::new(),
     };
-    parse_coins(event.attr("amount").unwrap_or_default())
-        .into_iter()
-        .map(|(amount, denom)| Transfer {
+    let mut list = Vec::new();
+    for (amount, denom) in counted_coins(event.attr("amount").unwrap_or_default(), denoms) {
+        push_merged(&mut list, Transfer {
             sender: delegator.to_owned(),
             recipient: Some(validator.to_owned()),
             denom,
             amount,
             kind: TransferKind::Delegation,
             is_fee_payment: false,
-        })
-        .collect()
+        });
+    }
+    list
 }
 
-fn reward_claim_transfers(event: &HistoryEvent) -> Vec<Transfer> {
+fn reward_claim_transfers(event: &HistoryEvent, denoms: &HashMap<String, DenomInfo>) -> Vec<Transfer> {
     let (delegator, validator) = match (event.attr("delegator"), event.attr("validator")) {
         (Some(delegator), Some(validator)) => (delegator, validator),
         _ => return Vec::new(),
     };
-    parse_coins(event.attr("amount").unwrap_or_default())
-        .into_iter()
-        .map(|(amount, denom)| Transfer {
+    let mut list = Vec::new();
+    for (amount, denom) in counted_coins(event.attr("amount").unwrap_or_default(), denoms) {
+        push_merged(&mut list, Transfer {
             sender: validator.to_owned(),
             recipient: Some(delegator.to_owned()),
             denom,
             amount,
             kind: TransferKind::RewardClaim,
             is_fee_payment: false,
-        })
-        .collect()
+        });
+    }
+    list
 }
 
-fn undelegation_transfer(event: &HistoryEvent, platform_denom: &str) -> Option<Transfer> {
-    Some(Transfer {
-        sender: event.attr("delegator")?.to_owned(),
-        recipient: None,
-        denom: platform_denom.to_owned(),
-        amount: BigDecimal::from(0),
-        kind: TransferKind::Undelegation,
-        is_fee_payment: false,
-    })
+/// R36.14.21: an `unbond` event needs `delegator` and an amount with at least one coin that counts, although the
+/// row's amount is zero whatever the text says; the row is in the platform denomination.
+fn undelegation_transfers(
+    event: &HistoryEvent,
+    platform_denom: &str,
+    denoms: &HashMap<String, DenomInfo>,
+) -> Vec<Transfer> {
+    let delegator = match event.attr("delegator") {
+        Some(delegator) => delegator,
+        None => return Vec::new(),
+    };
+    let mut list = Vec::new();
+    for _ in counted_coins(event.attr("amount").unwrap_or_default(), denoms) {
+        push_merged(&mut list, Transfer {
+            sender: delegator.to_owned(),
+            recipient: None,
+            denom: platform_denom.to_owned(),
+            amount: BigDecimal::from(0),
+            kind: TransferKind::Undelegation,
+            is_fee_payment: false,
+        });
+    }
+    list
 }
 
-/// Corrects the parties of the plain transfers from the module events of the result (R36.14.5). One module event
-/// corrects one transfer: the first one not corrected yet.
-fn apply_module_events(transfers: &mut [Transfer], events: &[HistoryEvent]) {
-    let has_htlc_event = events
-        .iter()
-        .any(|event| event.kind == "create_htlc" || event.kind == "claim_htlc");
-    let mut corrected = vec![false; transfers.len()];
-    for event in events {
-        let kind = match (event.kind.as_str(), has_htlc_event) {
-            ("create_htlc", _) => TransferKind::HtlcCreate,
-            ("claim_htlc", _) => TransferKind::HtlcClaim,
-            ("ibc_transfer", false) | ("fungible_token_packet", false) | ("non_fungible_token_packet", false) => {
-                TransferKind::Ibc
-            },
-            _ => continue,
-        };
-        let sender = match event.attr("sender") {
-            Some(sender) => sender,
-            None => continue,
-        };
-        let receiver = event.attr("receiver");
-        if kind != TransferKind::HtlcClaim && receiver.is_none() {
-            continue;
-        }
-        let index = match corrected.iter().position(|done| !done) {
-            Some(index) => index,
-            None => break,
-        };
-        corrected[index] = true;
-        let transfer = &mut transfers[index];
-        transfer.sender = sender.to_owned();
-        if kind != TransferKind::HtlcClaim {
-            transfer.recipient = receiver.map(str::to_owned);
-        }
-        transfer.kind = kind;
+/// The module events a candidate of case 4 can take, in the fixed order of R36.14.20: the `create_htlc` events, the
+/// `claim_htlc` events, then the three IBC types, each type from the last emitted to the first. **Isolated for
+/// D36.22 (a)**, the pairing by order.
+fn module_event_queue(events: &[HistoryEvent]) -> Vec<&HistoryEvent> {
+    let mut queue = Vec::new();
+    for kind in [
+        "create_htlc",
+        "claim_htlc",
+        "non_fungible_token_packet",
+        "ibc_transfer",
+        "fungible_token_packet",
+    ] {
+        queue.extend(events.iter().rev().filter(|event| event.kind == kind));
+    }
+    queue
+}
+
+/// Corrects the parties of a candidate from the module event it took (R36.14.20). An event without the attributes
+/// the correction needs corrects nothing; it is used up all the same.
+fn apply_module_event(transfer: &mut Transfer, event: &HistoryEvent) {
+    let sender = event.attr("sender");
+    let receiver = event.attr("receiver");
+    match event.kind.as_str() {
+        "claim_htlc" => {
+            if let Some(sender) = sender {
+                transfer.sender = sender.to_owned();
+                transfer.kind = TransferKind::HtlcClaim;
+            }
+        },
+        kind => {
+            if let (Some(sender), Some(receiver)) = (sender, receiver) {
+                transfer.sender = sender.to_owned();
+                transfer.recipient = Some(receiver.to_owned());
+                transfer.kind = if kind == "create_htlc" {
+                    TransferKind::HtlcCreate
+                } else {
+                    TransferKind::Ibc
+                };
+            }
+        },
     }
 }
 
-/// The transfers of a transaction, in the order R36.14.5 yields them. Under D36.12 (b) a transaction with several
-/// delegations, undelegations or reward claims yields one transfer per event, one row per validator.
-fn transfers_of(events: &[HistoryEvent], fee_text: &str, platform_denom: &str) -> Vec<Transfer> {
+/// The transfer list of a transaction (R36.14.19). `events` are already freed of repeated events.
+///
+/// Staking events decide the whole transaction (R36.14.5 cases 1 to 3). The reference reads the first event of the
+/// type only; under D36.12 (b) Reloaded writes one row per validator, so the later events follow the first one's
+/// transfers in the list. They come after every position the reference computes, so no reference identifier moves.
+fn transfers_of(
+    events: &[HistoryEvent],
+    fee_text: &str,
+    platform_denom: &str,
+    denoms: &HashMap<String, DenomInfo>,
+) -> Vec<Transfer> {
     let of_kind = |kind: &str| -> Vec<&HistoryEvent> { events.iter().filter(|event| event.kind == kind).collect() };
 
     let delegations = of_kind("delegate");
     if !delegations.is_empty() {
-        return delegations.into_iter().flat_map(delegation_transfers).collect();
+        return delegations
+            .into_iter()
+            .flat_map(|event| delegation_transfers(event, denoms))
+            .collect();
     }
     let undelegations = of_kind("unbond");
     if !undelegations.is_empty() {
         return undelegations
             .into_iter()
-            .filter_map(|event| undelegation_transfer(event, platform_denom))
+            .flat_map(|event| undelegation_transfers(event, platform_denom, denoms))
             .collect();
     }
     let claims = of_kind("withdraw_rewards");
     if !claims.is_empty() {
-        return claims.into_iter().flat_map(reward_claim_transfers).collect();
+        return claims
+            .into_iter()
+            .flat_map(|event| reward_claim_transfers(event, denoms))
+            .collect();
     }
 
     let transfer_events = of_kind("transfer");
     let only_transfer = transfer_events.len() == 1;
-    let mut fee_payment_left_out = false;
+    let has_parties = |event: &HistoryEvent| {
+        event.attr("sender").is_some() && event.attr("recipient").is_some() && event.attr("amount").is_some()
+    };
+    // With more than one transfer event, the first that moves the fee coin is the fee payment (R36.14.5).
+    let fee_payment_index = if transfer_events.len() > 1 {
+        transfer_events
+            .iter()
+            .position(|event| has_parties(event) && event.attr("amount") == Some(fee_text))
+    } else {
+        None
+    };
+
+    let mut module_events = module_event_queue(events).into_iter();
     let mut transfers: Vec<Transfer> = Vec::new();
-    for event in &transfer_events {
+    // R36.14.19 item 3: from the last emitted to the first.
+    for (index, event) in transfer_events.iter().enumerate().rev() {
+        if Some(index) == fee_payment_index || !has_parties(event) {
+            continue;
+        }
         let (sender, recipient, amount_text) =
             match (event.attr("sender"), event.attr("recipient"), event.attr("amount")) {
                 (Some(sender), Some(recipient), Some(amount)) => (sender, recipient, amount),
                 _ => continue,
             };
         let is_fee_text = amount_text == fee_text;
-        // With more than one transfer event, the one that moves the fee coin is the fee payment (R36.14.5).
-        if transfer_events.len() > 1 && is_fee_text && !fee_payment_left_out {
-            fee_payment_left_out = true;
-            continue;
-        }
-        for (amount, denom) in parse_coins(amount_text) {
-            match transfers.iter_mut().find(|transfer| {
-                transfer.sender == sender && transfer.recipient.as_deref() == Some(recipient) && transfer.denom == denom
-            }) {
-                Some(merged) => {
-                    merged.amount += &amount;
-                    merged.is_fee_payment = false;
-                },
-                None => transfers.push(Transfer {
-                    sender: sender.to_owned(),
-                    recipient: Some(recipient.to_owned()),
-                    denom,
-                    amount,
-                    kind: TransferKind::Plain,
-                    is_fee_payment: only_transfer && is_fee_text,
-                }),
+        for (amount, denom) in counted_coins(amount_text, denoms) {
+            let mut candidate = Transfer {
+                sender: sender.to_owned(),
+                recipient: Some(recipient.to_owned()),
+                denom,
+                amount,
+                kind: TransferKind::Plain,
+                is_fee_payment: only_transfer && is_fee_text,
+            };
+            if let Some(module_event) = module_events.next() {
+                apply_module_event(&mut candidate, module_event);
             }
+            push_merged(&mut transfers, candidate);
         }
     }
-    apply_module_events(&mut transfers, events);
     transfers
 }
 
 /// The rows of one transaction (R36.14.5 -- R36.14.9, D36.12 (b), D36.13 (b)); none when no transfer yields a row.
 ///
-/// The position that goes into the identifier counts the transfers as R36.14.5 yields them, including a transfer
-/// that gets no row because its denomination does not resolve or because it is an HTLC creation by another account.
+/// The position that goes into the identifier is the place in the transfer list of R36.14.19, which counts a transfer
+/// whether or not a row is written for it (an HTLC creation by another account, a transfer already stored); a coin
+/// that does not resolve is not in the list.
 pub(super) fn rows_for_tx(facts: &TxFacts, ctx: &ClassifyContext<'_>) -> Vec<RowDraft> {
-    let mut events = facts.events.clone();
-    // An event repeated identically in direct succession counts once (R36.14.5).
-    events.dedup();
+    // R36.14.22 item 3: a first fee entry that does not fit an unsigned 64-bit integer leaves the transaction out.
+    if facts.fee_amount > u128::from(u64::MAX) {
+        return Vec::new();
+    }
+    // An event repeated identically in direct succession counts once, per event type (R36.14.19 item 1).
+    let events = drop_repeated_events(&facts.events);
 
-    let fee_text = format!("{}{}", facts.fee_amount, facts.fee_denom);
-    let transfers = transfers_of(&events, &fee_text, ctx.platform_denom);
+    let fee_text = fee_payment_text(facts);
+    let transfers = transfers_of(&events, &fee_text, ctx.platform_denom, ctx.denoms);
 
     // The decimal text of an integer always parses; a transaction whose fee could not be read would be left out.
     let fee_base = match BigDecimal::from_str(&facts.fee_amount.to_string()) {
@@ -501,10 +602,10 @@ pub(super) fn rows_for_tx(facts: &TxFacts, ctx: &ClassifyContext<'_>) -> Vec<Row
     let zero = BigDecimal::from(0);
     let mut rows: Vec<RowDraft> = Vec::new();
     let mut fee_taken = false;
-    let mut first_token_row_sent_by_me: Option<usize> = None;
+    let mut fee_row_for: Option<usize> = None;
 
     for (position, transfer) in transfers.iter().enumerate() {
-        let info = match ctx.denoms.get(&transfer.denom) {
+        let info = match resolve_denom(ctx.denoms, &transfer.denom) {
             Some(info) => info,
             None => continue,
         };
@@ -586,20 +687,25 @@ pub(super) fn rows_for_tx(facts: &TxFacts, ctx: &ClassifyContext<'_>) -> Vec<Row
             amount.clone()
         };
 
-        // R36.14.8 item 2 and D36.12 (b): the first platform-denom transfer this account sent, or a reward claim,
-        // bears the fee; the fee payment itself already is the fee.
+        // R36.14.8 item 2, R36.14.22 item 4 and D36.12 (b): the first written entry this account sent (or a reward
+        // claim) bears the fee once, in its own amounts when it is in the platform denom and as a fee row when it is
+        // in a token denom; the fee payment itself already is the fee.
         let is_platform = info.token_id.is_none();
-        if !fee_taken && is_platform && (sent_by_me || transfer.kind == TransferKind::RewardClaim) {
+        if !fee_taken && (sent_by_me || transfer.kind == TransferKind::RewardClaim) {
             fee_taken = true;
-            // Fee-only: the transfer is the fee payment and no message of the transaction pays it.
-            let is_fee_payment = transfer.is_fee_payment
-                && !facts
-                    .payments
-                    .iter()
-                    .any(|payment| payment.explains(transfer.recipient.as_deref(), &fee_text));
-            if !is_fee_payment {
-                spent_by_me += &fee_display;
-                total_amount += &fee_display;
+            if is_platform {
+                // Fee-only: the transfer is the fee payment and no message of the transaction pays it.
+                let is_fee_payment = transfer.is_fee_payment
+                    && !facts
+                        .payments
+                        .iter()
+                        .any(|payment| payment.explains(transfer.recipient.as_deref(), &fee_text));
+                if !is_fee_payment {
+                    spent_by_me += &fee_display;
+                    total_amount += &fee_display;
+                }
+            } else {
+                fee_row_for = Some(rows.len());
             }
         }
 
@@ -622,9 +728,6 @@ pub(super) fn rows_for_tx(facts: &TxFacts, ctx: &ClassifyContext<'_>) -> Vec<Row
             transaction_type,
             memo: Some(facts.memo.clone()),
         };
-        if !is_platform && sent_by_me && first_token_row_sent_by_me.is_none() {
-            first_token_row_sent_by_me = Some(rows.len());
-        }
         rows.push(RowDraft {
             details,
             decimals: info.decimals,
@@ -633,7 +736,7 @@ pub(super) fn rows_for_tx(facts: &TxFacts, ctx: &ClassifyContext<'_>) -> Vec<Row
     }
 
     // R36.14.8 item 3.
-    if let (false, Some(index)) = (fee_taken, first_token_row_sent_by_me) {
+    if let Some(index) = fee_row_for {
         let token_row = &rows[index].details;
         let fee_row = TransactionDetails {
             tx_hex: token_row.tx_hex.clone(),

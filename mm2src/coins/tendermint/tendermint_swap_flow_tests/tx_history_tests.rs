@@ -7,9 +7,10 @@
 //! rules. No network is used.
 
 use super::super::htlc::CustomTendermintMsgType;
-use super::super::tendermint_tx_history::{fee_row_internal_id, history_internal_id, obsolete_internal_ids,
-                                          rows_for_tx, served_form, stored_form, token_id_of_denom, ClassifyContext,
-                                          DenomInfo, HistoryEvent, HistoryFetcher, MessagePayment, RowDraft, TxFacts};
+use super::super::tendermint_tx_history::{fee_row_internal_id, history_internal_id, history_internal_id_for_word,
+                                          obsolete_internal_ids, rows_for_tx, served_form, stored_form,
+                                          token_id_of_denom, ClassifyContext, DenomInfo, HistoryEvent, HistoryFetcher,
+                                          MessagePayment, RowDraft, TxFacts};
 use super::*;
 use crate::my_tx_history_v2::{my_tx_history_v2_rpc, HistoryCoinType, MyTxHistoryErrorV2, TxHistoryStorage};
 use crate::sql_tx_history_storage::SqliteTxHistoryStorage;
@@ -25,7 +26,7 @@ const COLLECTOR: &str = "iaa1feecollector";
 const VALIDATOR: &str = "iaavaloper1validator";
 const OTHER_CHAIN: &str = "cosmos1otherchain";
 const MODULE: &str = "iaa1htlcmodule";
-const HASH: &str = "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB";
+const HASH: &str = "9924962C7A343AB394FCF5FE3D1F0A2B7C6E58491B0D3F7A5E2C8B6D4F1A0E93";
 const BLOCK_TIME: u64 = 1_700_000_000;
 
 fn dec(text: &str) -> BigDecimal { BigDecimal::from_str(text).expect("a decimal amount") }
@@ -70,6 +71,15 @@ fn denoms() -> HashMap<String, DenomInfo> {
 fn rows(events: Vec<HistoryEvent>) -> Vec<RowDraft> { rows_with(events, vec![]) }
 
 fn rows_with(events: Vec<HistoryEvent>, payments: Vec<MessagePayment>) -> Vec<RowDraft> {
+    rows_with_fee(events, payments, 5_000, "uiris")
+}
+
+fn rows_with_fee(
+    events: Vec<HistoryEvent>,
+    payments: Vec<MessagePayment>,
+    fee_amount: u128,
+    fee_denom: &str,
+) -> Vec<RowDraft> {
     let denoms = denoms();
     let ctx = ClassifyContext {
         me: ME,
@@ -83,8 +93,8 @@ fn rows_with(events: Vec<HistoryEvent>, payments: Vec<MessagePayment>) -> Vec<Ro
         height: 10,
         timestamp: BLOCK_TIME,
         memo: "a memo".to_owned(),
-        fee_amount: 5_000,
-        fee_denom: "uiris".to_owned(),
+        fee_amount,
+        fee_denom: fee_denom.to_owned(),
         gas_limit: 125_000,
         events,
         raw_tx: vec![1, 2, 3],
@@ -115,7 +125,6 @@ fn one(events: Vec<HistoryEvent>) -> RowDraft {
     rows.remove(0)
 }
 
-// provisional reading, pending ch.36 §36.14.6
 #[test]
 fn plain_transfers_give_one_standard_row_each() {
     // T36.30
@@ -183,7 +192,6 @@ fn a_token_transfer_has_a_fee_row_on_the_platform_coin() {
 
 fn rows_of_incoming_token() -> Vec<RowDraft> { rows(vec![fee_from(PEER), transfer(PEER, ME, "1000000utoken")]) }
 
-// provisional reading, pending ch.36 §36.14.6
 #[test]
 fn htlc_rows_follow_who_created_and_who_claimed() {
     // T36.32
@@ -253,7 +261,6 @@ fn htlc_rows_follow_who_created_and_who_claimed() {
     .is_empty());
 }
 
-// provisional reading, pending ch.36 §36.14.6
 #[test]
 fn ibc_rows_name_the_other_chain() {
     // T36.33
@@ -295,7 +302,6 @@ fn ibc_rows_name_the_other_chain() {
     );
 }
 
-// provisional reading, pending ch.36 §36.14.6
 #[test]
 fn staking_rows_follow_d36_12() {
     // T36.34 under D36.12 (b).
@@ -381,7 +387,7 @@ fn a_send_of_exactly_the_fee_amount_is_not_taken_for_the_fee_payment() {
     ]);
 }
 
-// provisional reading, pending ch.36 §36.14.6
+// provisional: which denominations resolve is open (D36.13, D36.21)
 #[test]
 fn what_yields_no_row() {
     // T36.35: a denomination that does not resolve; a transaction without a transfer.
@@ -406,14 +412,19 @@ fn repeated_events_and_split_amounts() {
         transfer(ME, "iaa1other", "1uiris"),
         transfer(ME, PEER, "2000000uiris"),
     ]);
-    // Three transfers: the two sends of the same parties and denom are merged, so the first row holds 3 coins and
-    // bears the fee; the token row follows, and the fee has no row of its own.
+    // The transfers are read from the last emitted to the first (R36.14.19 item 3): the later send to the peer is
+    // position 0, the send to the other account 1, the earlier send to the peer merges into position 0, and the
+    // token coin is position 2. The first row bears the fee, so the token row needs no fee row.
     assert_eq!(split.len(), 3);
     assert_amounts(&split[0], ["3.005", "3.005", "0", "-3.005"]);
+    assert_eq!(split[1].details.to, vec!["iaa1other".to_owned()]);
     assert_eq!(
-        split[1].details.transaction_type,
+        split[2].details.transaction_type,
         TransactionType::TokenTransfer(token_id_of_denom("utoken"))
     );
+    assert_eq!(split[0].position, Some(0));
+    assert_eq!(split[1].position, Some(1));
+    assert_eq!(split[2].position, Some(2));
 }
 
 #[test]
@@ -431,10 +442,399 @@ fn attribute_keys_may_be_base64() {
 }
 
 // ---------------------------------------------------------------------------
+// Positions, pairing, staking and fee forms (R36.14.19 -- R36.14.22; T36.45 -- T36.48, the reference's values)
+// ---------------------------------------------------------------------------
+
+const STRANGER: &str = "iaa1stranger";
+
+/// Whether the identifier of a row ends in the 8-byte big-endian position `n` (R36.14.19 item 7).
+fn at_position(row: &RowDraft, n: u64) -> bool {
+    row.position == Some(n as usize)
+        && row.details.internal_id.0[25..] == n.to_be_bytes()
+        && row.details.internal_id == history_internal_id(n as usize, HASH)
+}
+
+fn find_to<'a>(rows: &'a [RowDraft], to: &str) -> &'a RowDraft {
+    rows.iter()
+        .find(|row| row.details.to == vec![to.to_owned()])
+        .unwrap_or_else(|| panic!("a row to {to}"))
+}
+
+#[test]
+fn positions_follow_the_transfer_list() {
+    // T36.45 (i): read from the last emitted to the first, so the later send is position 0 and bears the fee.
+    let sends = |between: Option<HistoryEvent>| {
+        let mut events = vec![fee_from(ME), transfer(ME, PEER, "1000000uiris")];
+        events.extend(between);
+        events.push(transfer(ME, STRANGER, "2000000uiris"));
+        rows(events)
+    };
+    let plain = sends(None);
+    assert_eq!(plain.len(), 2);
+    assert!(at_position(find_to(&plain, STRANGER), 0));
+    assert_amounts(find_to(&plain, STRANGER), ["2.005", "2.005", "0", "-2.005"]);
+    assert!(at_position(find_to(&plain, PEER), 1));
+    assert_amounts(find_to(&plain, PEER), ["1", "1", "0", "-1"]);
+
+    // (ii) A coin that does not resolve takes no position: the same two identifiers.
+    let with_foreign = sends(Some(transfer(ME, "iaa1else", "7ufoo")));
+    assert_eq!(with_foreign.len(), 2);
+    assert!(at_position(find_to(&with_foreign, STRANGER), 0));
+    assert!(at_position(find_to(&with_foreign, PEER), 1));
+}
+
+#[test]
+fn transfers_of_other_accounts_count_and_are_stored() {
+    // T36.45 (iii): X to Y, then X to A.
+    let rows = rows(vec![
+        fee_from(STRANGER),
+        transfer(STRANGER, PEER, "1000000uiris"),
+        transfer(STRANGER, ME, "1000000uiris"),
+    ]);
+    assert_eq!(rows.len(), 2);
+    assert!(at_position(find_to(&rows, ME), 0));
+    assert!(at_position(find_to(&rows, PEER), 1));
+}
+
+#[test]
+fn equal_parties_merge_and_repeated_events_count_once_per_type() {
+    // T36.45 (iv): A to X, A to X, A to Y.
+    let merged = rows(vec![
+        fee_from(ME),
+        transfer(ME, PEER, "1000000uiris"),
+        transfer(ME, PEER, "2000000uiris"),
+        transfer(ME, STRANGER, "3000000uiris"),
+    ]);
+    assert_eq!(merged.len(), 2);
+    assert!(at_position(find_to(&merged, STRANGER), 0));
+    assert!(at_position(find_to(&merged, PEER), 1));
+    assert_amounts(find_to(&merged, PEER), ["3", "3", "0", "-3"]);
+
+    // (v) Two identical events with only an event of another type between them are one transfer.
+    let once = one(vec![
+        fee_from(ME),
+        transfer(ME, PEER, "1000000uiris"),
+        event("message", &[("action", "/cosmos.bank.v1beta1.MsgSend")]),
+        transfer(ME, PEER, "1000000uiris"),
+    ]);
+    assert_amounts(&once, ["1.005", "1.005", "0", "-1.005"]);
+    // With a `transfer` event to another account between them they are not repeated and the sends merge.
+    let apart = rows(vec![
+        fee_from(ME),
+        transfer(ME, PEER, "1000000uiris"),
+        transfer(ME, STRANGER, "1000000uiris"),
+        transfer(ME, PEER, "1000000uiris"),
+    ]);
+    assert_eq!(apart.len(), 2);
+    assert!(at_position(find_to(&apart, PEER), 0));
+    assert_amounts(find_to(&apart, PEER), ["2.005", "2.005", "0", "-2.005"]);
+    assert!(at_position(find_to(&apart, STRANGER), 1));
+}
+
+#[test]
+fn coins_of_one_event_take_positions_in_the_order_of_the_text() {
+    // T36.45 (vi).
+    let rows = rows(vec![fee_from(ME), transfer(ME, PEER, "2500000utoken,1000000uiris")]);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows[0].details.transaction_type,
+        TransactionType::TokenTransfer(token_id_of_denom("utoken"))
+    );
+    assert!(at_position(&rows[0], 0));
+    assert_eq!(rows[1].details.transaction_type, TransactionType::StandardTransfer);
+    assert!(at_position(&rows[1], 1));
+    assert_amounts(&rows[1], ["1", "1", "0", "-1"]);
+    assert_eq!(rows[2].details.transaction_type, TransactionType::FeeForTokenTx);
+    assert_eq!(
+        rows[2].details.internal_id,
+        fee_row_internal_id(&rows[0].details.internal_id)
+    );
+}
+
+#[test]
+fn an_htlc_creation_of_another_account_counts_but_has_no_row() {
+    // T36.45 (vii).
+    let rows = rows(vec![
+        fee_from(STRANGER),
+        transfer(STRANGER, ME, "1000000uiris"),
+        transfer(STRANGER, MODULE, "1000000uiris"),
+        event("create_htlc", &[("sender", STRANGER), ("receiver", PEER)]),
+    ]);
+    assert_eq!(rows.len(), 1);
+    assert!(at_position(&rows[0], 1));
+    assert_eq!(rows[0].details.to, vec![ME.to_owned()]);
+}
+
+#[test]
+fn module_events_correct_transfers_by_order() {
+    let htlc_row = |to_module_first: bool| {
+        let mut events = vec![fee_from(ME)];
+        let (a, b) = (transfer(ME, MODULE, "1000000uiris"), transfer(ME, PEER, "2000000uiris"));
+        events.extend(if to_module_first { vec![a, b] } else { vec![b, a] });
+        events.push(event("create_htlc", &[("sender", ME), ("receiver", STRANGER)]));
+        rows(events)
+    };
+    // T36.46 (i): the transfer read first takes the creation event.
+    let rows_i = htlc_row(true);
+    assert_eq!(rows_i.len(), 2);
+    assert_eq!(
+        rows_i[0].details.transaction_type,
+        TransactionType::CustomTendermintMsg {
+            msg_type: CustomTendermintMsgType::SendHtlcAmount,
+            token_id: None
+        }
+    );
+    assert!(at_position(&rows_i[0], 0));
+    assert!(rows_i[0].details.to.is_empty());
+    assert_amounts(&rows_i[0], ["2.005", "2.005", "0", "-2.005"]);
+    assert_eq!(rows_i[1].details.transaction_type, TransactionType::StandardTransfer);
+    assert_eq!(rows_i[1].details.to, vec![MODULE.to_owned()]);
+    assert!(at_position(&rows_i[1], 1));
+
+    // (ii) One transfer, a creation and a claim event, in either emission order: one creation row, nothing else.
+    for claim_first in [false, true] {
+        let create = event("create_htlc", &[("sender", ME), ("receiver", STRANGER)]);
+        let claim = event("claim_htlc", &[("sender", ME)]);
+        let mut events = vec![fee_from(ME), transfer(ME, MODULE, "1000000uiris")];
+        events.extend(if claim_first {
+            vec![claim, create]
+        } else {
+            vec![create, claim]
+        });
+        let rows = rows(events);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].details.transaction_type, TransactionType::CustomTendermintMsg {
+            msg_type: CustomTendermintMsgType::SendHtlcAmount,
+            token_id: None
+        });
+    }
+
+    // (iii) Two transfers, one creation and one IBC event: the transfer read first is the creation.
+    let mixed = rows(vec![
+        fee_from(ME),
+        transfer(ME, PEER, "1000000uiris"),
+        transfer(ME, STRANGER, "2000000uiris"),
+        event("create_htlc", &[("sender", ME), ("receiver", "iaa1creation")]),
+        event("ibc_transfer", &[("sender", ME), ("receiver", OTHER_CHAIN)]),
+    ]);
+    assert_eq!(mixed.len(), 2);
+    assert_eq!(
+        mixed[0].details.transaction_type,
+        TransactionType::CustomTendermintMsg {
+            msg_type: CustomTendermintMsgType::SendHtlcAmount,
+            token_id: None
+        }
+    );
+    assert_amounts(&mixed[0], ["2.005", "2.005", "0", "-2.005"]);
+    assert_eq!(
+        mixed[1].details.transaction_type,
+        TransactionType::TendermintIBCTransfer { token_id: None }
+    );
+    assert_eq!(mixed[1].details.to, vec![OTHER_CHAIN.to_owned()]);
+
+    // (iv) A creation event without `receiver` is used up and corrects nothing.
+    let bare = rows(vec![
+        fee_from(ME),
+        transfer(ME, PEER, "1000000uiris"),
+        transfer(ME, STRANGER, "2000000uiris"),
+        event("create_htlc", &[("sender", ME)]),
+    ]);
+    assert_eq!(bare.len(), 2);
+    for row in &bare {
+        assert_eq!(row.details.transaction_type, TransactionType::StandardTransfer);
+    }
+    assert_eq!(find_to(&bare, PEER).position, Some(1));
+    assert_eq!(find_to(&bare, STRANGER).position, Some(0));
+}
+
+#[test]
+fn a_packet_event_pairs_by_order_not_by_content() {
+    // T36.46 (v): the transfer that does not resolve is not a candidate, so the one event goes to the other.
+    let one_event = rows(vec![
+        fee_from(PEER),
+        transfer("iaa1escrow", ME, "1000000uiris"),
+        transfer("iaa1escrow", ME, "9ufoo"),
+        event("fungible_token_packet", &[("sender", OTHER_CHAIN), ("receiver", ME)]),
+    ]);
+    assert_eq!(one_event.len(), 1);
+    assert_eq!(one_event[0].details.from, vec![OTHER_CHAIN.to_owned()]);
+    assert_eq!(one_event[0].details.to, vec![ME.to_owned()]);
+    assert!(at_position(&one_event[0], 0));
+    assert_eq!(
+        one_event[0].details.transaction_type,
+        TransactionType::TendermintIBCTransfer { token_id: None }
+    );
+
+    // (vi) D36.22 (a): the event read first is the one emitted last, so the one row carries the parties of the
+    // packet event to the other account.
+    let unequal = rows(vec![
+        fee_from(PEER),
+        transfer("iaa1escrow", ME, "1000000uiris"),
+        event("fungible_token_packet", &[("sender", OTHER_CHAIN), ("receiver", ME)]),
+        transfer("iaa1escrow", STRANGER, "9ufoo"),
+        event("fungible_token_packet", &[
+            ("sender", "cosmos1third"),
+            ("receiver", STRANGER),
+        ]),
+    ]);
+    assert_eq!(unequal.len(), 1);
+    assert!(at_position(&unequal[0], 0));
+    assert_eq!(unequal[0].details.from, vec!["cosmos1third".to_owned()]);
+    assert_eq!(unequal[0].details.to, vec![STRANGER.to_owned()]);
+}
+
+#[test]
+fn a_staking_event_decides_the_whole_transaction() {
+    // T36.46 (vii).
+    let rows = rows(vec![
+        event("delegate", &[
+            ("delegator", ME),
+            ("validator", VALIDATOR),
+            ("amount", "1000000uiris"),
+        ]),
+        transfer(ME, PEER, "1000000uiris"),
+    ]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].details.transaction_type, TransactionType::StakingDelegation);
+    assert!(at_position(&rows[0], 0));
+}
+
+fn staking(kind: &str, attributes: &[(&str, &str)]) -> Vec<RowDraft> { rows(vec![event(kind, attributes)]) }
+
+#[test]
+fn staking_events_without_what_they_need_give_no_row() {
+    // T36.47 (i): no `delegator`, although a `message` event and the bank events name the account.
+    let no_delegator = rows(vec![
+        fee_from(ME),
+        event("message", &[("sender", ME)]),
+        event("delegate", &[("validator", VALIDATOR), ("amount", "1000000uiris")]),
+        transfer(ME, VALIDATOR, "1000000uiris"),
+    ]);
+    assert!(no_delegator.is_empty());
+
+    // (ii) The same event with a base64 `delegator` key and value: the delegation row.
+    let b64 = |text: &str| base64::encode(text.as_bytes());
+    let encoded = HistoryEvent::from_raw("delegate".to_owned(), vec![
+        (b64("delegator"), b64(ME)),
+        ("validator".to_owned(), VALIDATOR.to_owned()),
+        ("amount".to_owned(), "1000000uiris".to_owned()),
+    ]);
+    let row = one(vec![encoded]);
+    assert_eq!(row.details.transaction_type, TransactionType::StakingDelegation);
+
+    // (iii) `unbond`: without `delegator`, with an amount without a denomination, and in full.
+    assert!(staking("unbond", &[("validator", VALIDATOR), ("amount", "1000000uiris")]).is_empty());
+    assert!(staking("unbond", &[("delegator", ME), ("amount", "1000000")]).is_empty());
+    assert!(staking("unbond", &[("delegator", ME), ("amount", "1000000ufoo")]).is_empty());
+    let full = staking("unbond", &[
+        ("delegator", ME),
+        ("validator", VALIDATOR),
+        ("amount", "1000000uiris"),
+    ]);
+    assert_eq!(full.len(), 1);
+    assert_eq!(full[0].details.transaction_type, TransactionType::RemoveDelegation);
+
+    // (iv) `withdraw_rewards` without `delegator`, without `validator`, and with an empty amount.
+    assert!(staking("withdraw_rewards", &[("validator", VALIDATOR), ("amount", "5uiris")]).is_empty());
+    assert!(staking("withdraw_rewards", &[("delegator", ME), ("amount", "5uiris")]).is_empty());
+    assert!(staking("withdraw_rewards", &[
+        ("delegator", ME),
+        ("validator", VALIDATOR),
+        ("amount", "")
+    ])
+    .is_empty());
+    assert!(staking("delegate", &[("delegator", ME), ("amount", "5uiris")]).is_empty());
+}
+
+#[test]
+fn a_reward_claim_of_two_denominations_gives_two_rows() {
+    // T36.47 (v).
+    let claim = staking("withdraw_rewards", &[
+        ("delegator", ME),
+        ("validator", VALIDATOR),
+        ("amount", "1000000uiris,2000000utoken"),
+    ]);
+    assert_eq!(claim.len(), 2);
+    for (row, position) in claim.iter().zip(0u64..) {
+        assert_eq!(row.details.transaction_type, TransactionType::ClaimDelegationRewards);
+        assert!(at_position(row, position));
+    }
+}
+
+#[test]
+fn the_fee_follows_the_first_fee_entry_in_platform_units() {
+    // T36.48 (i), the reference's values: the first fee entry is read as platform base units whatever its
+    // denomination.
+    let send = || {
+        vec![
+            transfer(ME, COLLECTOR, "7000utoken"),
+            transfer(ME, PEER, "1000000uiris"),
+        ]
+    };
+    let rows = rows_with_fee(send(), vec![], 7_000, "utoken");
+    assert_eq!(rows.len(), 1);
+    assert_amounts(&rows[0], ["1.007", "1.007", "0", "-1.007"]);
+    match rows[0].details.fee_details.clone() {
+        Some(TxFeeDetails::Tendermint(fee)) => {
+            assert_eq!(fee.coin, "IRIS");
+            assert_eq!(fee.amount, dec("0.007"));
+        },
+        other => panic!("fee details: {other:?}"),
+    }
+
+    // (ii) A fee of two entries: the event that pays both is not the fee payment, so its coins are transfers read
+    // last and take the highest positions.
+    let two = rows_with_fee(
+        vec![
+            transfer(ME, COLLECTOR, "300utoken,5000uiris"),
+            transfer(ME, PEER, "1000000uiris"),
+        ],
+        vec![],
+        300,
+        "utoken",
+    );
+    assert_eq!(two.len(), 3);
+    assert!(at_position(&two[0], 0));
+    assert_amounts(&two[0], ["1.0003", "1.0003", "0", "-1.0003"]);
+    assert_eq!(
+        two[1].details.transaction_type,
+        TransactionType::TokenTransfer(token_id_of_denom("utoken"))
+    );
+    assert_amounts(&two[1], ["0.0003", "0.0003", "0", "-0.0003"]);
+    assert!(at_position(&two[1], 1));
+    assert_eq!(two[2].details.transaction_type, TransactionType::StandardTransfer);
+    assert_amounts(&two[2], ["0.005", "0.005", "0", "-0.005"]);
+    assert!(at_position(&two[2], 2));
+    for row in &two {
+        match row.details.fee_details.clone() {
+            Some(TxFeeDetails::Tendermint(fee)) => assert_eq!(fee.amount, dec("0.0003")),
+            other => panic!("fee details: {other:?}"),
+        }
+    }
+
+    // (iii) A first fee entry of 2^64 leaves the transaction out.
+    assert!(rows_with_fee(send(), vec![], 1u128 << 64, "uiris").is_empty());
+}
+
+#[test]
+fn the_fee_is_attributed_once_to_the_first_entry_this_account_sent() {
+    // R36.14.22 item 4: a token entry read first takes the fee as a fee row; the platform entry read later does not.
+    let rows = rows(vec![
+        fee_from(ME),
+        transfer(ME, PEER, "1000000uiris"),
+        transfer(ME, STRANGER, "2000000utoken"),
+    ]);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[2].details.transaction_type, TransactionType::FeeForTokenTx);
+    assert_amounts(find_to(&rows, PEER), ["1", "1", "0", "-1"]);
+}
+
+// ---------------------------------------------------------------------------
 // Identifier, stored form and order (R36.14.10; D36.11 (a))
 // ---------------------------------------------------------------------------
 
-// provisional reading, pending ch.36 §36.14.6
+fn reversed_hash_first() -> Vec<u8> { HASH.as_bytes()[..25].iter().rev().copied().collect() }
+
 #[test]
 #[cfg(target_pointer_width = "64")]
 fn identifiers_follow_the_reference_byte_string() {
@@ -448,6 +848,15 @@ fn identifiers_follow_the_reference_byte_string() {
     let mut second = reversed_hash;
     second.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
     assert_eq!(history_internal_id(1, HASH).0, second);
+
+    // The 32-bit browser build (T36.45 (viii)): the first 29 characters in reverse order, then a 4-byte position.
+    let reversed_29: Vec<u8> = HASH.as_bytes()[..29].iter().rev().copied().collect();
+    let mut browser = reversed_29;
+    browser.extend_from_slice(&[0, 0, 0, 1]);
+    assert_eq!(browser.len(), 33);
+    assert_eq!(history_internal_id_for_word(1, HASH, 4).0, browser);
+    // The first 25 characters of this hash are not a palindrome, so the order is visible.
+    assert_ne!(reversed_hash_first(), HASH.as_bytes()[..25].to_vec());
 
     // The fee row has the bytes of its token row in the opposite order.
     let token_row_id = history_internal_id(0, HASH);

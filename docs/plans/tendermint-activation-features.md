@@ -89,8 +89,8 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    2026-11-15: the history state is `InProgress` during the first pass
    (D36.10 (b)); the store is meant to be byte-compatible with the reference as R36.14.10
    states it (D36.11 (a); unit-tested against the chapter's wording, not yet
-   checked against a store written by GLEEC KDF; one case pending a precision
-   round); amounts follow D36.12 (b); denominations resolve as D36.13 (b) in
+   checked against a store written by GLEEC KDF; the position counting follows
+   the cleared §36.14.6); amounts follow D36.12 (b); denominations resolve as D36.13 (b) in
    isolation (provisional, suspended pending §36.14.6); no row for a
    chain-side HTLC refund or a completed undelegation (D36.14), which stays a
    planning question. Native builds only.

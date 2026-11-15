@@ -1532,8 +1532,8 @@ is the persistent-data compatibility the project keeps by default.
 > and the stored form (base-unit amounts scaled when served, the fee row in
 > display units, a zero stored balance change) are byte-compatible with the
 > reference as R36.14.10 states it (unit-tested against the chapter's wording;
-> not yet checked against a store written by GLEEC KDF; the position count of a
-> transfer without a row is provisional, see the as-built note), and each write first deletes the rows under the two earlier
+> not yet checked against a store written by GLEEC KDF; the position count follows
+> R36.14.19), and each write first deletes the rows under the two earlier
 > 32-byte identifier forms (finding 2). Finding 1's remedy applies: a stored
 > amount that is not a non-negative integer is answered as `StorageError`,
 > never an abort. The identifier depends on the build's word size, as at the
@@ -1624,34 +1624,49 @@ clients.
 > naming the activated address are served (R36.14.2). The transaction-type set
 > gained `FeeForTokenTx`, `CustomTendermintMsg` and `TendermintIBCTransfer`;
 > `TransactionDetails` gained the optional `memo`, which a history row always
-> carries (R36.14.9). Readings the chapter leaves open, each kept as built:
-> (1) the fee payment of R36.14.5 item 4 is looked for when the result has
-> more than one `transfer` event, and only the first such event is left out;
-> (2) a transfer is the fee payment itself (D36.12 (b), counted once) only when
-> it is the sole `transfer` event, moves exactly the fee text, and no decoded
-> message of the transaction (a bank send to that recipient of that amount, an
-> IBC transfer or an HTLC creation) pays it, so a genuine send of exactly the
-> fee amount stays a transfer; (3) a module event corrects the first transfer
-> not corrected yet; (4) an event without the `delegator` attribute yields no
-> transfer; (5) the first fee coin is read in platform units whatever its
-> denomination; (6) a reward claim bears the fee although its sender is the
-> validator (D36.12 (b)). **Open point for a Spec Reader follow-up:**
-> R36.14.10 defines the position as "the position of the transfer among the
-> transfers of its transaction (counted from zero in the order R36.14.5
-> yields them)"; it does not say whether a transfer that yields no row (a
-> denomination that does not resolve, an HTLC creation by another account)
-> counts. The code counts every transfer R36.14.5 yields before those
-> filters, so such a transfer leaves a gap in the positions; if the reference
-> counts only the transfers that yield a row, identifiers differ in that
-> case. Provisional pending a Spec Reader precision round of §36.14.6 and
-> R36.14.10: the position counted for the identifier (above), the transfer a
-> module event corrects (reading 3), a staking event without `delegator`
-> (reading 4) and the fee coin read in platform units (reading 5); the unit
-> tests that pin them are marked "provisional reading". The block time is read with the SDK's `GetBlockByHeight` query. The fetcher and the method
+> carries (R36.14.9). Readings kept as built: (1) the fee payment of R36.14.5 item 4 is looked
+> for when the result has more than one `transfer` event, and only the first
+> such event is left out; (2) a transfer is the fee payment itself (D36.12 (b),
+> counted once) only when it is the sole `transfer` event, moves exactly the fee
+> text, and no decoded message of the transaction (a bank send to that
+> recipient of that amount, an IBC transfer or an HTLC creation) pays it, so a
+> genuine send of exactly the fee amount stays a transfer; (3) a reward claim
+> bears the fee although its sender is the validator (D36.12 (b)); (4) a
+> transaction with several staking events of one type gets one row per
+> validator (D36.12 (b)), the events after the first following the first
+> event's transfers in the list, so no position that R36.14.19 item 2 computes
+> moves. The position, the pairing of module events, the staking events
+> without their attributes and the fee forms follow R36.14.19 -- R36.14.22
+> (see the status note below). What is still provisional: the set of
+> denominations that resolve (D36.13, D36.21), the fee list and the fee
+> payment text (D36.19), the rows for a transaction without a fee or a staking
+> event without `delegator` (D36.20); the unit test `what_yields_no_row` is
+> marked for the first of them. The block time is read with the SDK's `GetBlockByHeight` query. The fetcher and the method
 > exist on native builds only (native only in 0.5.0): the browser build has no
 > versioned history store for any coin family (`NotSupportedInWasm`), a
 > limitation shared by every history family and not a Tendermint one. Tests: T36.30 -- T36.39 in
 > `mm2src/coins/tendermint/tendermint_swap_flow_tests/tx_history_tests.rs`.
+
+> **Status note (2026-11-15, Reloaded-original; belongs under §36.14.6 once the
+> branch carries it).** Built of R36.14.19 -- R36.14.22 in `rows_for_tx` and
+> the functions it calls in `tendermint_tx_history.rs`: the repeated-event
+> comparison per event type (`drop_repeated_events`); the transfer list read
+> from the last `transfer` event to the first, a coin counted only with an
+> `amount`, its party attributes, a u64 integer and a denomination that
+> resolves, module correction before merging (`transfers_of`, `push_merged`);
+> the identifier bytes of item 7, including the 32-bit form
+> (`history_internal_id_for_word`); the pairing of R36.14.20 by order, which is
+> D36.22 (a), isolated in `module_event_queue` and `apply_module_event`; the
+> staking events without `delegator`, `validator` or a counted amount giving no
+> row, `unbond` included; a first fee entry above u64 leaving the transaction
+> out; the fee attributed once to the first written entry this account sent
+> (a fee row when that entry is in a token denomination). Tests T36.45 --
+> T36.48 (the reference's values) are in `tx_history_tests.rs`. Waiting for
+> D36.19 -- D36.22 and D36.13: `fee_payment_text` (D36.19), `resolve_denom` and
+> `counted_coins` (D36.13, D36.21), and no row for a transaction with an empty
+> fee list or a staking event without `delegator` (D36.20), which T36.48 (iv)
+> and T36.47 (i) record as not written; the empty-fee-list case has no unit test
+> yet.
 
 ### 36.14.2 WalletConnect activation
 

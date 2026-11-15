@@ -639,7 +639,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   denomination gets a row when it is the platform's, a token activated on this platform (a custom token included) or a
   coins-file token whose `platform` is this coin; GLEEC KDF takes the first coins-file entry with that denomination,
   whatever its platform, and never lists a custom token (§36.14.1 finding 7). The row identifier and the stored form
-  are meant to be the same as GLEEC KDF's (one case pending a precision round), so a data directory can move between
+  are meant to be the same as GLEEC KDF's (the position counting follows the cleared §36.14.6; not yet checked against a store GLEEC KDF wrote), so a data directory can move between
   the two (§36.14.1 findings 1 and 2). No switch exists. Native builds only. CRD ch.36
   §36.14.1 (D36.10, D36.11, D36.12, D36.13). PR #363.
 - **Tendermint (Cosmos) coins and tokens are wallet-only in this beta.**
