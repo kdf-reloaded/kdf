@@ -62,7 +62,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 #### Solana coins
 
 - **Solana activation errors follow the shapes GLEEC KDF uses, and a token address is checked when
-  the coins file is read.** On `enable_solana_with_tokens` a failed block-height or balance read
+  its coins entry is parsed.** On `enable_solana_with_tokens` a failed block-height or balance read
   is now `PlatformCoinCreationError` with the platform ticker instead of `Internal`, and on
   `enable_spl` a node failure stays `Transport`. An SPL token entry whose `token_contract_address`
   is not a valid public key is now `TokenProtocolParseError` instead of `Internal`. The Solana
