@@ -99,6 +99,9 @@ pub struct MmCtx {
     /// The context belonging to the price service (CRD ch.62): the price sources and providers of this node and
     /// the node-wide state of its warn-once log lines.
     pub price_service_ctx: Mutex<Option<Arc<dyn Any + 'static + Send + Sync>>>,
+    /// The context belonging to the clock check (CRD ch.45 §45.6C): the keys the node started with, the refusal and
+    /// the last check times of this node.
+    pub clock_check_ctx: Mutex<Option<Arc<dyn Any + 'static + Send + Sync>>>,
     pub dispatcher_ctx: Mutex<Option<Arc<dyn Any + 'static + Send + Sync>>>,
     pub message_service_ctx: Mutex<Option<Arc<dyn Any + 'static + Send + Sync>>>,
     pub p2p_ctx: Mutex<Option<Arc<dyn Any + 'static + Send + Sync>>>,
@@ -173,6 +176,7 @@ impl MmCtx {
             rate_limit_ctx: Mutex::new(None),
             simple_market_maker_bot_ctx: Mutex::new(None),
             price_service_ctx: Mutex::new(None),
+            clock_check_ctx: Mutex::new(None),
             dispatcher_ctx: Mutex::new(None),
             message_service_ctx: Mutex::new(None),
             p2p_ctx: Mutex::new(None),

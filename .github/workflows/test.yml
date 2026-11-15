@@ -208,9 +208,12 @@ jobs:
           # that read 1 and 0.3 messages per second, takes about 15 minutes and is
           # `#[ignore]` (`t_mp8_relay_1_msg_per_s`, `t_mp8_relay_0_3_msg_per_s`).
           # The legacy maker-swap unit tests of `lp_swap::maker_swap` (the CRD ch.51 recovery
-          # rules R82 to R84 among them) also run in this cell.
+          # rules R82 to R84 among them) also run in this cell, and so do the clock-check tests
+          # (CRD ch.45 §45.6C, T45.23 to T45.31): stub time sources and a loopback socket, no
+          # real time server. The clock-check gate tests in `ordermatch_tests` run in the
+          # `ordermatch` cell.
           - name: maker-outbox
-            cmd: "cargo test -p mm2_main --lib -- maker_outbox:: t_mp8_harness lp_swap::maker_swap::"
+            cmd: "cargo test -p mm2_main --lib -- maker_outbox:: t_mp8_harness lp_swap::maker_swap:: lp_clock_check::"
           # The bounds on a value received from a peer (CRD ch.28 R16a, T4a): the check itself,
           # its use by the node's decode sites in `mm2_p2p`, `coins` and `mm2_main`, and the
           # deepest message the node sends. The `ordermatch_tests` ones also run in the

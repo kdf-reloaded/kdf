@@ -9,6 +9,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
 
+### Added
+
+#### Start-up and configuration
+
+- **The node checks the computer's clock against time servers.** At start, and again every hour
+  and after the computer slept or its clock was set, the node asks NTP time servers for the time
+  and takes the median of their answers. Swaps rely on the clock for their lock times and
+  deadlines. A clock more than 10 seconds off stops the node at start with an error that says by
+  how much the clock is off; swaps that were in progress then wait until the node starts with a
+  correct clock, so setting the clock right is urgent. While the node runs, it refuses new orders
+  and new swaps until the clock is right again; running swaps and withdrawals go on. By default
+  the node asks `0.pool.ntp.org` to `3.pool.ntp.org`; `ntp_servers` in `MM2.json` lists other
+  servers, and `[]` turns the check off. When no server answers, the node logs a warning and goes
+  on, unless `ntp_required` is `true`. Browser builds cannot send the queries and skip the check.
+  Detail: PR #348; CRD ch.45 §45.6C.
+
+### Plans touched
+
+- [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
+  NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
+
 ## [0.4.0-beta.1] — 2026-11-14
 
 Within each heading, entries are grouped by area. Each entry ends with the pull request that made
