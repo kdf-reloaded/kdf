@@ -1,6 +1,6 @@
 # Plan: finish Solana support
 
-**Status:** parked (nothing started; awaits a dedicated session) — **Last reviewed:** 2026-11-15
+**Status:** in progress (S0 and S2 done in PR #361; S1 and S3 to S9 before Solana is switched back on) — **Last reviewed:** 2026-11-15
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity` when the coin-activation wire-parity work found
