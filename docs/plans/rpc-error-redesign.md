@@ -55,10 +55,9 @@ Three mechanisms, to be chosen in D2; they can be combined.
    from the next) under `docs/COMPAT_SWITCHES.md`, with the GLEEC-compatible value recorded in
    `docs/GLEEC_COMPATIBILITY.md`. Simple for operators, invisible to clients, but a node cannot serve old
    and new clients at once.
-3. **Alias period.** The new token is emitted, the old token is still accepted where a client sends one (only
-   relevant for request-side tags, which errors do not have), and both spellings are listed in the chapter
-   for one release with a removal date. For errors this reduces to documentation and a deprecation notice,
-   since a client only reads them.
+3. **Documentation-only alias period.** The new token is emitted, and both spellings are listed in the
+   chapter for one release with a removal date and a deprecation notice. A client only reads error tokens,
+   so there is nothing to accept on the request side.
 
 Whichever is chosen, the release that flips the default carries an upgrade note in the CHANGELOG, the
 divergence record of §2.2, and a deprecation line in every affected `error_type` row of the governing
@@ -67,7 +66,8 @@ chapters.
 ## Work packages (when scheduled)
 
 1. **Inventory.** A table of every `error_type` the versioned surface returns, with its set, payload kind,
-   status, and the failure class it names (the R43.8.4 form), built from the chapters and the code. The
+   status, and the failure class it names (the per-method table form of ch.43 §43.1R R43.1R.4), built from
+   the chapters and the code. The
    reference's documented spellings come from ch.43 §43.1C and further Spec Reader rounds where a set is not
    yet recorded.
 2. **Vocabulary.** One row per failure class: the token, the payload kind and members, the status; the
