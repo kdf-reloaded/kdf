@@ -1657,9 +1657,9 @@ is the persistent-data compatibility the project keeps by default.
 > reference. The identifier and the stored form are each computed in one
 > function (`history_internal_id`, `stored_form` and `served_form` of
 > `mm2src/coins/tendermint/tendermint_tx_history.rs`). The address index of the
-> store is written so that the reference lists our rows (checked on 2026-11-15 against a reference release build: from a fresh store written by this build the reference listed the same 4 rows as this build, with equal (internal_id, address) index sets of 10 entries; a store written by the previous head of this change, after the backfill, was listed the same way) (provisional, from
-> observation of 2026-11-15; pending §36.14.7). Built in PR #363; test
-> T36.37.
+> store is written as R36.14.23 -- R36.14.26 state, so that the reference lists our rows
+> (checked on 2026-11-15 against a reference release build: from a fresh store written by this build the reference listed the same 4 rows as this build, with equal (internal_id, address) index sets of 10 entries; a store written by the previous head of this change, after the backfill, was listed the same way).
+> Built in PR #363; test T36.37.
 
 D36.12 *(maintainer decision.)* *Amounts of fee-only transactions and
 reward claims, and the content of `tx_hex`.* At the reference a row's
@@ -1769,22 +1769,29 @@ clients.
 > limitation shared by every history family and not a Tendermint one. Tests: T36.30 -- T36.39 in
 > `mm2src/coins/tendermint/tendermint_swap_flow_tests/tx_history_tests.rs`.
 >
-> Address index (provisional, from observation of 2026-11-15; pending §36.14.7).
-> Beside `<TICKER>_tx_history` the SQLite store keeps `<TICKER>_tx_address`
-> (`id`, `internal_id`, `address`), with one entry per distinct address in the
-> `from` and `to` lists of each stored row, because the reference selects an
-> account's rows through it and lists no row that has none. It is written in the
-> transaction that inserts the row (`write_address_index`), deleted with the row
-> (`delete_address_index`, also by `clear_history`) and filled for stored rows
-> that lack entries when the fetcher starts (`backfill_address_index`), so that
-> stores written by earlier builds of this change are listed by the reference
-> (checked on 2026-11-15 against a reference release build: from a fresh store written by this build the reference listed the same 4 rows as this build, with equal (internal_id, address) index sets of 10 entries; a store written by the previous head of this change, after the backfill, was listed the same way).
-> The index is kept for Tendermint only for now: the table is created, and the
-> entries are written and deleted, only for a coin whose table exists: created by
-> the Tendermint fetcher, or already present in a store written elsewhere
-> (`backfill_address_index`), so the stores of other families stay as they were
-> until §36.14.7 says the table is generic.
-> Our own serving still filters on the `from` and `to` lists.
+> Address index (R36.14.23 -- R36.14.26 as built). The SQLite store keeps three
+> tables per coin, `<T>_tx_history`, `<T>_tx_address` (`id INTEGER NOT NULL
+> PRIMARY KEY`, `internal_id VARCHAR(255) NOT NULL`, `address TEXT NOT NULL`) and
+> `<T>_tx_cache`, with every `-` of the ticker replaced by `_` (`table_ticker`).
+> An entry exists for each distinct address in the `from` and `to` lists of a
+> stored row (`write_address_index`); it is written in the transaction that
+> writes the row, and deleted with the row by its identifier
+> (`delete_address_index`, also by `clear_history`). A page of the fetcher is
+> stored in one database transaction, the removals of the earlier identifier
+> forms included (`TxHistoryStorage::store_page`). The account-scoped read
+> selects by the `token_id` column and by an entry for the account's address
+> (`address_entry_condition`), counts a row once, and takes nothing from
+> `details_json`. The preparation (`backfill_address_index`, called by the
+> fetcher after `init`) creates the address table when absent, removes entries
+> whose row is missing and writes the entries of every stored row that has none.
+> Tendermint only for now: the address table is created, and entries are written
+> and deleted, only for a coin whose table exists (created by the Tendermint
+> fetcher, or already present in a store written elsewhere), so the stores of
+> other families stay as they were; whether the table becomes generic is not yet
+> decided. Checked on 2026-11-15 against a reference release build: from a fresh
+> store written by this build the reference listed the same 4 rows as this build,
+> with equal (internal_id, address) index sets of 10 entries; a store written by
+> the previous head of this change, after the backfill, was listed the same way.
 
 ### 36.14.2 WalletConnect activation
 
@@ -2961,6 +2968,13 @@ goes on to a further page only when the answer's `total_count` shows
 one; the second query runs in every pass. The rows written are the same
 under both options. Recommended: (b).
 
+> **Status note (2026-11-15, Reloaded-original).** Decided (b): a query that
+> ended on a full page starts the next pass on that page again, and the identifier
+> check of R36.14.10 passes over the rows already stored. As built: the kept page
+> advances only when the answer's `total_count` shows more, both queries run in
+> every pass, and no request is made past the last page. Test T36.53 (iv),
+> `a_query_that_ended_on_a_full_page_is_read_again_from_that_page_without_asking_past_the_end`.
+
 **Tests.** Rows T36.49 -- T36.54 run against a mocked node on a 64-bit
 native build, with the conventions of §36.14.5: 6 decimals for the
 platform coin and for the token, a fee of 5,000 base units of the
@@ -3078,3 +3092,17 @@ the platform denom from `A` to `B`; the coin activated for `B` on that
 database. *Expected in `B`'s history:* under D36.23 (a), one row with
 `spent_by_me` 1.005 and `received_by_me` 0; under (b), one row with
 `spent_by_me` 0, `received_by_me` 1 and `my_balance_change` 1.
+
+> **Status note (2026-11-15, Reloaded-original).** Built of R36.14.23 --
+> R36.14.26: the table names with `-` replaced by `_`, the declarations of the
+> address table, the entries per row, their removal with the row, the page stored
+> in one transaction, the selection through the index and the preparation step of
+> R36.14.26 item 5 (including the removal of entries without a row), in
+> `mm2src/coins/sql_tx_history_storage.rs` and `store` of
+> `mm2src/coins/tendermint/tendermint_tx_history.rs`. Tests T36.49 (i) -- (viii),
+> T36.50, T36.51 (iv) and (v) and T36.52 are in
+> `mm2src/coins/tendermint/tendermint_swap_flow_tests/tx_history_tests.rs` and in
+> the test module of the store. Not yet built: D36.23 (the account record and the
+> rebuild for a different account; T36.54), D36.24 (its (b) form; T36.53 (iii)), and T36.51 (i) -- (iii) and (vi) (the store written by the other
+> program as the contract, and the lab row). R36.14.27 and R36.14.28 are met by
+> the fetcher as it stands, apart from those decisions.

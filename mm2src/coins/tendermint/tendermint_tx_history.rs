@@ -30,7 +30,7 @@ use kdf_crypto::sha256;
 use mm2_core::mm_ctx::MmArc;
 use rpc::v1::types::Bytes as BytesJson;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::str::FromStr;
 
@@ -1309,16 +1309,17 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
         let ticker = self.coin.ticker.as_str();
         let store_error = |e: mm2_err_handle::prelude::MmError<S::Error>| format!("{:?}", e.into_inner());
         let mut written = Vec::new();
+        let mut remove = Vec::new();
+        let mut add = Vec::new();
+        let mut page_ids = HashSet::new();
         for draft in drafts {
             if let Some(position) = draft.position {
-                for old_id in obsolete_internal_ids(position, &draft.details.tx_hash) {
-                    self.storage
-                        .remove_tx_from_history(ticker, &old_id)
-                        .await
-                        .map_err(store_error)?;
-                }
+                remove.extend(obsolete_internal_ids(position, &draft.details.tx_hash));
             }
             let stored = stored_form(draft.details.clone(), draft.decimals);
+            if !page_ids.insert(format!("{:02x}", stored.internal_id)) {
+                continue;
+            }
             if self
                 .storage
                 .get_tx_from_history(ticker, &stored.internal_id)
@@ -1328,12 +1329,14 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
             {
                 continue;
             }
-            self.storage
-                .add_transactions_to_history(ticker, vec![stored])
-                .await
-                .map_err(store_error)?;
+            add.push(stored);
             written.push(draft.details);
         }
+        // R36.14.24 item 3: the page is stored whole or not at all.
+        self.storage
+            .store_page(ticker, remove, add)
+            .await
+            .map_err(store_error)?;
         // CRD ch.10 R43: the stream carries what the history method serves.
         if let Some(ctx) = MmArc::from_weak(&self.coin.ctx) {
             for row in written {

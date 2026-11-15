@@ -1102,6 +1102,7 @@ fn the_store_serves_by_height_then_identifier_for_the_account_only() {
     // T36.37 (order and FromId) and R36.14.2 (the account scope).
     let storage = SqliteTxHistoryStorage::in_memory();
     common::block_on(storage.init("IRIS")).unwrap();
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
     let rows = vec![
         details(5, 10, ME, None),
         details(7, 12, ME, None),
@@ -1154,6 +1155,7 @@ fn a_memo_equal_to_the_address_does_not_put_a_row_in_the_account_scope() {
     // R36.14.2: the account scope binds the `from` and `to` lists, not any text of the row.
     let storage = SqliteTxHistoryStorage::in_memory();
     common::block_on(storage.init("IRIS")).unwrap();
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
     let mut memo_row = details(1, 10, "iaa1stranger", None);
     memo_row.memo = Some(ME.to_owned());
     let mut to_row = details(2, 9, "iaa1stranger", None);
@@ -1416,6 +1418,7 @@ fn incoming(fx: &Fixture, memo: &str, height: u64) -> Json {
 fn storage_with_init() -> SqliteTxHistoryStorage {
     let storage = SqliteTxHistoryStorage::in_memory();
     common::block_on(storage.init("IRIS")).unwrap();
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
     storage
 }
 
@@ -1878,6 +1881,7 @@ fn the_history_method_answers_with_and_without_a_store() {
     // state is `NotEnabled`, and a token sees its own rows.
     let storage = SqliteTxHistoryStorage(fx.ctx.sqlite_connection.as_option().expect("pinned").clone());
     common::block_on(storage.init("IRIS")).unwrap();
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
     let me = me(&fx);
     let mut platform_row = details(1, 10, &me, None);
     platform_row.total_amount = BigDecimal::from(1_005_000);
@@ -1982,6 +1986,7 @@ fn the_history_method_pages_through_the_store_with_exact_totals() {
         .expect("pin the database");
     let storage = SqliteTxHistoryStorage(fx.ctx.sqlite_connection.as_option().expect("pinned").clone());
     common::block_on(storage.init("IRIS")).unwrap();
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
     let me = me(&fx);
     // Heights 10 to 13, served newest first: ids 4, 3, 2, 1.
     let rows: Vec<_> = (1u8..=4).map(|id| details(id, 9 + u64::from(id), &me, None)).collect();
@@ -2079,4 +2084,470 @@ fn a_relayed_ibc_receive_with_a_tip_gives_two_rows_by_order_pairing() {
     for row in &rows {
         assert_eq!(fee_details_of_row(row), ("IRIS".to_owned(), dec("0.001928")));
     }
+}
+
+// ---------------------------------------------------------------------------
+// The address index of the store (R36.14.23 -- R36.14.26; T36.49 -- T36.52)
+// ---------------------------------------------------------------------------
+
+/// The entries of the address table of `ticker`, by identifier (lower-case hex), as sets of addresses.
+fn entry_sets(storage: &SqliteTxHistoryStorage, ticker: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    let conn = storage.0.lock().unwrap();
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT internal_id, address FROM {}_tx_address ORDER BY address;",
+            ticker.replace('-', "_")
+        ))
+        .unwrap();
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .unwrap();
+    let mut sets: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for row in rows {
+        let (id, address) = row.unwrap();
+        sets.entry(id).or_default().push(address);
+    }
+    sets
+}
+
+fn sorted(addresses: &[&str]) -> Vec<String> {
+    let mut list: Vec<String> = addresses.iter().map(|a| (*a).to_owned()).collect();
+    list.sort();
+    list
+}
+
+/// Stores the drafts as one page of an index-enabled store and returns the entries of each draft, in draft order.
+fn entries_of_drafts(drafts: &[RowDraft]) -> Vec<Vec<String>> {
+    let storage = SqliteTxHistoryStorage::in_memory();
+    common::block_on(storage.init("IRIS")).unwrap();
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
+    let stored: Vec<_> = drafts
+        .iter()
+        .map(|d| stored_form(d.details.clone(), d.decimals))
+        .collect();
+    common::block_on(storage.store_page("IRIS", vec![], stored.clone())).unwrap();
+    let sets = entry_sets(&storage, "IRIS");
+    stored
+        .iter()
+        .map(|row| {
+            sets.get(&format!("{:02x}", row.internal_id))
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+#[test]
+fn index_entries_follow_the_rows_of_each_kind() {
+    // T36.49 (i) -- (vii).
+    // (i) a send from this account to another has the entries of both.
+    let sent = rows(vec![fee_from(ME), transfer(ME, PEER, "1000000uiris")]);
+    assert_eq!(entries_of_drafts(&sent), vec![sorted(&[ME, PEER])]);
+    // (ii) a send to itself has one.
+    let itself = rows(vec![fee_from(ME), transfer(ME, ME, "1000000uiris")]);
+    assert_eq!(entries_of_drafts(&itself), vec![sorted(&[ME])]);
+    // (iii) a transfer between two other accounts has theirs and none for this account.
+    let others = rows(vec![
+        fee_from(PEER),
+        transfer(PEER, "iaa1y", "1000000uiris"),
+        transfer(PEER, ME, "1000000uiris"),
+    ]);
+    let entries = entries_of_drafts(&others);
+    let index_of = |to: &str| others.iter().position(|d| d.details.to == vec![to.to_owned()]).unwrap();
+    assert_eq!(entries[index_of("iaa1y")], sorted(&[PEER, "iaa1y"]));
+    assert!(entries[index_of(ME)].contains(&ME.to_owned()));
+    // (iv) a token send: the token row has both parties, the fee row this account under its own identifier.
+    let token = rows(vec![fee_from(ME), transfer(ME, PEER, "2500000utoken")]);
+    assert_eq!(entries_of_drafts(&token), vec![sorted(&[ME, PEER]), sorted(&[ME])]);
+    // (v) an HTLC creation by this account, and a claim by another account that pays it, have this account only.
+    let create = rows(vec![
+        fee_from(ME),
+        transfer(ME, MODULE, "1000000uiris"),
+        event("create_htlc", &[("sender", ME), ("receiver", PEER)]),
+    ]);
+    assert_eq!(entries_of_drafts(&create), vec![sorted(&[ME])]);
+    let claim = rows(vec![
+        fee_from(PEER),
+        transfer(MODULE, ME, "1000000uiris"),
+        event("claim_htlc", &[("sender", PEER)]),
+    ]);
+    assert_eq!(entries_of_drafts(&claim), vec![sorted(&[ME])]);
+    // (vi) staking: delegation has the delegator and the validator, undelegation the delegator, a reward claim the
+    // validator and the delegator.
+    let delegation = rows(vec![event("delegate", &[
+        ("delegator", ME),
+        ("validator", VALIDATOR),
+        ("amount", "1000000uiris"),
+    ])]);
+    assert_eq!(entries_of_drafts(&delegation), vec![sorted(&[ME, VALIDATOR])]);
+    let undelegation = rows(vec![event("unbond", &[
+        ("delegator", ME),
+        ("validator", VALIDATOR),
+        ("amount", "1000000uiris"),
+    ])]);
+    assert_eq!(entries_of_drafts(&undelegation), vec![sorted(&[ME])]);
+    let reward = rows(vec![event("withdraw_rewards", &[
+        ("delegator", ME),
+        ("validator", VALIDATOR),
+        ("amount", "12345uiris"),
+    ])]);
+    assert_eq!(entries_of_drafts(&reward), vec![sorted(&[ME, VALIDATOR])]);
+    // (vii) an incoming IBC transfer has the other chain's address and this account.
+    let ibc = rows(vec![
+        fee_from("iaa1relayer"),
+        transfer("iaa1escrow", ME, "1000000uiris"),
+        event("fungible_token_packet", &[("sender", OTHER_CHAIN), ("receiver", ME)]),
+    ]);
+    assert_eq!(entries_of_drafts(&ibc), vec![sorted(&[ME, OTHER_CHAIN])]);
+}
+
+/// Sets the entries of the address table to exactly `entries` (the contract applied by hand).
+fn set_entries(storage: &SqliteTxHistoryStorage, entries: &[(&str, &str)]) {
+    let conn = storage.0.lock().unwrap();
+    conn.execute("DELETE FROM IRIS_tx_address", []).unwrap();
+    for (id, address) in entries {
+        conn.execute("INSERT INTO IRIS_tx_address (internal_id, address) VALUES (?1, ?2)", [
+            *id, *address,
+        ])
+        .unwrap();
+    }
+}
+
+#[test]
+fn selection_total_and_paging_go_through_the_address_index() {
+    // T36.50.
+    let storage = SqliteTxHistoryStorage::in_memory();
+    common::block_on(storage.init("IRIS")).unwrap();
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
+    let rows = vec![
+        details(1, 12, ME, None),
+        details(2, 12, ME, None),
+        details(3, 10, "iaa1x", None),
+        details(4, 11, ME, None),
+        details(5, 11, ME, Some("utoken")),
+        details(6, 9, ME, None),
+    ];
+    common::block_on(storage.add_transactions_to_history("IRIS", rows)).unwrap();
+    let x = "iaa1x";
+    set_entries(&storage, &[
+        ("01", ME),
+        ("01", x),
+        ("02", ME),
+        ("03", x),
+        ("03", "iaa1y"),
+        ("05", ME),
+        ("05", x),
+        ("06", ME),
+        ("06", ME),
+    ]);
+    let scope = || HistoryCoinType::AccountCoin {
+        ticker: "IRIS".to_owned(),
+        address: ME.to_owned(),
+    };
+    let ids = |page: &crate::my_tx_history_v2::GetHistoryResult| -> Vec<u8> {
+        page.transactions.iter().map(|d| d.internal_id.0[0]).collect()
+    };
+    let page = |paging, limit| common::block_on(storage.get_history(scope(), paging, limit)).unwrap();
+    let nth = |n: usize| PagingOptionsEnum::PageNumber(std::num::NonZeroUsize::new(n).unwrap());
+
+    // The row without an entry (4) is not served and not counted; the entry stored twice counts once.
+    let all = page(PagingOptionsEnum::default(), 10);
+    assert_eq!(all.total, 3);
+    assert_eq!(ids(&all), vec![1, 2, 6]);
+    let second = page(nth(2), 2);
+    assert_eq!((ids(&second), second.skipped, second.total), (vec![6], 2, 3));
+    let third = page(nth(3), 2);
+    assert_eq!((ids(&third), third.skipped, third.total), (vec![], 4, 3));
+    let after_first = page(PagingOptionsEnum::FromId(BytesJson::from(vec![1u8])), 10);
+    assert_eq!((ids(&after_first), after_first.skipped), (vec![2, 6], 1));
+    // A row of other parties, a row without an entry, a row of another token and an unknown identifier.
+    for anchor in [3u8, 4, 5, 99] {
+        let none = page(PagingOptionsEnum::FromId(BytesJson::from(vec![anchor])), 10);
+        assert_eq!(
+            (ids(&none), none.skipped, none.total),
+            (vec![], 0, 3),
+            "anchor {anchor}"
+        );
+    }
+    let token = common::block_on(storage.get_history(
+        HistoryCoinType::AccountToken {
+            platform: "IRIS".to_owned(),
+            token_id: token_id_of_denom("utoken"),
+            address: ME.to_owned(),
+        },
+        PagingOptionsEnum::default(),
+        10,
+    ))
+    .unwrap();
+    assert_eq!((ids(&token), token.total), (vec![5], 1));
+
+    // An entry for this account is added to row 4: it stands between 2 and 6. An entry whose row does not exist
+    // changes no answer.
+    {
+        let conn = storage.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO IRIS_tx_address (internal_id, address) VALUES ('04', ?1)",
+            [ME],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO IRIS_tx_address (internal_id, address) VALUES ('63', ?1)",
+            [ME],
+        )
+        .unwrap();
+    }
+    let with_four = page(PagingOptionsEnum::default(), 10);
+    assert_eq!((ids(&with_four), with_four.total), (vec![1, 2, 4, 6], 4));
+}
+
+#[test]
+fn a_store_without_the_index_is_listed_after_the_preparation_and_a_second_one_adds_nothing() {
+    // T36.51 (iv), R36.14.26 items 2 and 5.
+    let storage = SqliteTxHistoryStorage::in_memory();
+    common::block_on(storage.init("IRIS")).unwrap();
+    // Rows written without the index (the state of a store of another program).
+    common::block_on(
+        storage.add_transactions_to_history("IRIS", vec![details(1, 12, ME, None), details(2, 11, "iaa1x", None)]),
+    )
+    .unwrap();
+    assert!(common::block_on(storage.get_history(
+        HistoryCoinType::AccountCoin {
+            ticker: "IRIS".to_owned(),
+            address: ME.to_owned()
+        },
+        PagingOptionsEnum::default(),
+        10
+    ))
+    .is_err());
+
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
+    let before = entry_sets(&storage, "IRIS");
+    assert_eq!(before.get("01"), Some(&sorted(&[ME, PEER])));
+    assert_eq!(platform_ids(&storage), vec![1]);
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
+    assert_eq!(entry_sets(&storage, "IRIS"), before);
+}
+
+fn platform_ids(storage: &SqliteTxHistoryStorage) -> Vec<u8> {
+    let page = common::block_on(storage.get_history(
+        HistoryCoinType::AccountCoin {
+            ticker: "IRIS".to_owned(),
+            address: ME.to_owned(),
+        },
+        PagingOptionsEnum::default(),
+        100,
+    ))
+    .unwrap();
+    page.transactions.iter().map(|d| d.internal_id.0[0]).collect()
+}
+
+#[test]
+fn preparing_the_store_removes_entries_without_a_row_and_keeps_a_partly_indexed_row() {
+    // R36.14.26 items 2 and 5.
+    let storage = SqliteTxHistoryStorage::in_memory();
+    common::block_on(storage.init("IRIS")).unwrap();
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
+    common::block_on(storage.add_transactions_to_history("IRIS", vec![details(1, 12, ME, None)])).unwrap();
+    set_entries(&storage, &[("01", ME), ("63", ME), ("63", "iaa1x")]);
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
+    // The entries of the missing row are gone; the row that has one entry is not topped up.
+    assert_eq!(entry_sets(&storage, "IRIS").into_iter().collect::<Vec<_>>(), vec![(
+        "01".to_owned(),
+        sorted(&[ME])
+    )]);
+}
+
+#[test]
+fn an_earlier_identifier_form_is_removed_with_its_entries_by_the_pass() {
+    // T36.51 (v), R36.14.24 item 4.
+    let fx = history_fixture();
+    let state = script_history(&fx);
+    let sent = outgoing(&fx, "old form", 10);
+    let hash = sent["hash"].as_str().unwrap().to_owned();
+    state.lock().unwrap().spender = vec![sent];
+    let storage = storage_with_init();
+    let [old_id, _] = obsolete_internal_ids(0, &hash);
+    let mut old = details(1, 10, &me(&fx), None);
+    old.tx_hash = hash.clone();
+    old.internal_id = old_id.clone();
+    common::block_on(storage.add_transactions_to_history("IRIS", vec![old])).unwrap();
+    let old_text = format!("{:02x}", old_id);
+    assert!(entry_sets(&storage, "IRIS").contains_key(&old_text));
+
+    let mut fetcher = HistoryFetcher::for_test(fx.coin.clone(), storage.clone());
+    common::block_on(fetcher.pass()).expect("a pass");
+    assert!(common::block_on(storage.get_tx_from_history("IRIS", &old_id))
+        .unwrap()
+        .is_none());
+    let sets = entry_sets(&storage, "IRIS");
+    assert!(!sets.contains_key(&old_text));
+    let rows = platform_history(&fx, &storage);
+    assert_eq!(rows.len(), 1);
+    let new_id = format!("{:02x}", rows[0].internal_id);
+    assert!(sets.get(&new_id).is_some_and(|entries| entries.contains(&me(&fx))));
+}
+
+#[test]
+fn a_first_pass_with_one_received_transfer_asks_spender_then_receiver_and_stores_the_ibc_row() {
+    // T36.52 (i).
+    let fx = history_fixture();
+    let state = script_history(&fx);
+    let me = me(&fx);
+    let relayed = entry(&tx_bytes(&fx, "relayed"), 10, 0, vec![
+        transfer_json("iaa1relayer", COLLECTOR, "5000uiris"),
+        transfer_json("iaa1escrow", me.as_str(), "1000000uiris"),
+        event_json("fungible_token_packet", &[
+            ("sender", OTHER_CHAIN),
+            ("receiver", me.as_str()),
+        ]),
+    ]);
+    state.lock().unwrap().receiver = vec![relayed];
+    let storage = storage_with_init();
+    let mut fetcher = HistoryFetcher::for_test(fx.coin.clone(), storage.clone());
+    assert_eq!(state_name(&fx.coin), "InProgress");
+    common::block_on(fetcher.pass()).expect("a pass");
+    assert_eq!(state_name(&fx.coin), "Finished");
+
+    // One request for page 1 of each query, the spender first, one block read, no second page.
+    let searches: Vec<(String, String)> = fx
+        .node
+        .requests("tx_search")
+        .iter()
+        .map(|p| {
+            let query = p["query"].as_str().unwrap_or_default();
+            let kind = if query.contains("coin_spent") {
+                "spender"
+            } else {
+                "receiver"
+            };
+            (kind.to_owned(), p["page"].to_string().replace('"', ""))
+        })
+        .collect();
+    assert_eq!(searches, vec![
+        ("spender".to_owned(), "1".to_owned()),
+        ("receiver".to_owned(), "1".to_owned())
+    ]);
+    let block_reads = fx
+        .node
+        .requests("abci_query")
+        .iter()
+        .filter(|p| {
+            p["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("GetBlockByHeight"))
+        })
+        .count();
+    assert_eq!(block_reads, 1);
+
+    let rows = platform_history(&fx, &storage);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].transaction_type, TransactionType::TendermintIBCTransfer {
+        token_id: None
+    });
+    assert_eq!(rows[0].from, vec![OTHER_CHAIN.to_owned()]);
+    assert_eq!(rows[0].to, vec![me.clone()]);
+    assert_eq!(rows[0].total_amount.to_string(), "1000000");
+    let sets = entry_sets(&storage, "IRIS");
+    assert_eq!(sets.len(), 1);
+    assert_eq!(sets.values().next().unwrap(), &sorted(&[me.as_str(), OTHER_CHAIN]));
+}
+
+#[test]
+fn a_received_bank_send_gives_one_standard_row_and_a_long_second_query_is_read_page_by_page() {
+    // T36.52 (ii), (iii).
+    let fx = history_fixture();
+    let state = script_history(&fx);
+    let me = me(&fx);
+    let from_other = entry(&tx_bytes(&fx, "from x"), 10, 0, vec![
+        transfer_json(&peer(&fx), COLLECTOR, "5000uiris"),
+        transfer_json(&peer(&fx), me.as_str(), "2000000uiris"),
+    ]);
+    state.lock().unwrap().receiver = vec![from_other];
+    let storage = storage_with_init();
+    let mut fetcher = HistoryFetcher::for_test(fx.coin.clone(), storage.clone());
+    common::block_on(fetcher.pass()).expect("a pass");
+    let rows = platform_history(&fx, &storage);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].transaction_type, TransactionType::StandardTransfer);
+
+    // 120 transactions in the second query: pages 1 to 3 of it, one request each.
+    let many = history_fixture();
+    let state = script_history(&many);
+    state.lock().unwrap().receiver = (0..120).map(|n| incoming(&many, &format!("m{n}"), 10 + n)).collect();
+    let storage = storage_with_init();
+    let mut fetcher = HistoryFetcher::for_test(many.coin.clone(), storage);
+    common::block_on(fetcher.pass()).expect("a pass");
+    let receiver_pages: Vec<String> = many
+        .node
+        .requests("tx_search")
+        .iter()
+        .filter(|p| p["query"].as_str().is_some_and(|q| q.contains("coin_received")))
+        .map(|p| p["page"].to_string().replace('"', ""))
+        .collect();
+    assert_eq!(receiver_pages, vec!["1", "2", "3"]);
+}
+
+#[test]
+fn a_query_that_ended_on_a_full_page_is_read_again_from_that_page_without_asking_past_the_end() {
+    // T36.53 (iv) under D36.25 (b).
+    let fx = history_fixture();
+    let state = script_history(&fx);
+    state.lock().unwrap().spender = (0..50).map(|n| outgoing(&fx, &format!("s{n}"), 10 + n)).collect();
+    let storage = storage_with_init();
+    let mut fetcher = HistoryFetcher::for_test(fx.coin.clone(), storage.clone());
+
+    // The requests made since the last call, as (query, page).
+    let seen = std::cell::Cell::new(0usize);
+    let requests_since = || -> Vec<(String, String)> {
+        let all = fx.node.requests("tx_search");
+        let new: Vec<(String, String)> = all
+            .iter()
+            .skip(seen.get())
+            .map(|p| {
+                let kind = if p["query"].as_str().is_some_and(|q| q.contains("coin_spent")) {
+                    "spender"
+                } else {
+                    "receiver"
+                };
+                (kind.to_owned(), p["page"].to_string().replace('"', ""))
+            })
+            .collect();
+        seen.set(all.len());
+        new
+    };
+    let request = |kind: &str, page: &str| (kind.to_owned(), page.to_owned());
+
+    // First pass: the first query is exactly one full page; no page 2 is asked for.
+    common::block_on(fetcher.pass()).expect("the first pass");
+    assert_eq!(requests_since(), vec![
+        request("spender", "1"),
+        request("receiver", "1")
+    ]);
+    assert_eq!(platform_history(&fx, &storage).len(), 50);
+
+    // Second pass, unchanged answers: the same page again, the stored rows are passed over, the second query runs.
+    common::block_on(fetcher.pass()).expect("the second pass");
+    assert_eq!(requests_since(), vec![
+        request("spender", "1"),
+        request("receiver", "1")
+    ]);
+    assert_eq!(platform_history(&fx, &storage).len(), 50);
+
+    // A further transaction: `total_count` now shows a second page, which is asked for once.
+    state.lock().unwrap().spender.push(outgoing(&fx, "s50", 60));
+    common::block_on(fetcher.pass()).expect("the third pass");
+    assert_eq!(requests_since(), vec![
+        request("spender", "1"),
+        request("spender", "2"),
+        request("receiver", "1")
+    ]);
+    assert_eq!(platform_history(&fx, &storage).len(), 51);
+
+    // Nothing new: the pass starts on page 2 and asks for nothing past it.
+    common::block_on(fetcher.pass()).expect("the fourth pass");
+    assert_eq!(requests_since(), vec![
+        request("spender", "2"),
+        request("receiver", "1")
+    ]);
+    assert_eq!(platform_history(&fx, &storage).len(), 51);
 }

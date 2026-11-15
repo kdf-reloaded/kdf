@@ -13,11 +13,15 @@ use serde_json::{self as json};
 use std::convert::TryInto;
 use std::sync::{Arc, Mutex};
 
-fn tx_history_table(ticker: &str) -> String { ticker.to_owned() + "_tx_history" }
+/// The ticker as it stands in the names of the three tables of a coin's history store: every `-` is replaced by `_`
+/// (CRD ch.36 R36.14.23). A ticker with `-` failed the table-name check before, so no store exists under the old form.
+fn table_ticker(ticker: &str) -> String { ticker.replace('-', "_") }
 
-fn tx_cache_table(ticker: &str) -> String { ticker.to_owned() + "_tx_cache" }
+fn tx_history_table(ticker: &str) -> String { table_ticker(ticker) + "_tx_history" }
 
-fn tx_address_table(ticker: &str) -> String { ticker.to_owned() + "_tx_address" }
+fn tx_cache_table(ticker: &str) -> String { table_ticker(ticker) + "_tx_cache" }
+
+fn tx_address_table(ticker: &str) -> String { table_ticker(ticker) + "_tx_address" }
 
 fn create_tx_address_table_sql(for_coin: &str) -> Result<String, MmError<SqlError>> {
     let table_name = tx_address_table(for_coin);
@@ -25,9 +29,9 @@ fn create_tx_address_table_sql(for_coin: &str) -> Result<String, MmError<SqlErro
 
     Ok(format!(
         "CREATE TABLE IF NOT EXISTS {} (
-            id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+            id INTEGER NOT NULL PRIMARY KEY,
             internal_id VARCHAR(255) NOT NULL,
-            address VARCHAR(255) NOT NULL
+            address TEXT NOT NULL
         );",
         table_name
     ))
@@ -42,11 +46,11 @@ fn address_index_enabled(conn: &Connection, for_coin: &str) -> Result<bool, MmEr
 }
 
 /// Writes the address index entries of one stored history row: one entry per distinct address in the `from` and `to`
-/// lists of `details`, `internal_id` in the stored form of the history row's column. Idempotent: an entry that exists
-/// is not written again.
+/// lists of `details`, `internal_id` in the stored form of the history row's column. An entry that exists is not
+/// written again.
 ///
-/// Provisional, from observation of 2026-11-15; pending ch.36 §36.14.7. Together with [`delete_address_index`] this is
-/// the only place that knows the form of the index.
+/// CRD ch.36 R36.14.24 item 1. Together with [`delete_address_index`] this is the only place that knows the form of the
+/// index.
 fn write_address_index(
     conn: &Connection,
     for_coin: &str,
@@ -77,7 +81,7 @@ fn write_address_index(
 
 /// Deletes the address index entries of one stored history row (`internal_id` in the stored form).
 ///
-/// Provisional, from observation of 2026-11-15; pending ch.36 §36.14.7.
+/// CRD ch.36 R36.14.24 item 4.
 fn delete_address_index(conn: &Connection, for_coin: &str, internal_id: &str) -> Result<(), MmError<SqlError>> {
     if !address_index_enabled(conn, for_coin)? {
         return Ok(());
@@ -291,68 +295,54 @@ fn finalize_get_history_sql_builder(sql_builder: &mut SqlBuilder, offset: usize,
     sql_builder.order_asc("internal_id");
 }
 
-/// The `LIKE` pattern that matches a stored row naming `address` in its `from` or `to` list: the address in
-/// JSON quotes, with the `LIKE` wildcards and the escape character of the address escaped.
-fn quoted_address_pattern(address: &str) -> String {
-    let mut pattern = String::from("%\"");
-    for c in address.chars() {
-        if matches!(c, '%' | '_' | '\\') {
-            pattern.push('\\');
-        }
-        pattern.push(c);
-    }
-    pattern.push_str("\"%");
-    pattern
+/// Writes one history row with its cache entry and its address index entries (when the index is kept for the coin).
+fn insert_history_row(conn: &Connection, for_coin: &str, tx: TransactionDetails) -> Result<(), MmError<SqlError>> {
+    let tx_hash = tx.tx_hash.clone();
+    let internal_id = format!("{:02x}", tx.internal_id);
+    let confirmation_status = if tx.block_height > 0 { 1 } else { 0 };
+    let token_id = match tx.transaction_type.history_token_id() {
+        Some(token_id) => format!("{:02x}", token_id),
+        None => "".to_owned(),
+    };
+    let tx_json = json::to_string(&tx).expect("serialization should not fail");
+
+    let tx_hex = format!("{:02x}", tx.tx_hex);
+    let tx_cache_params = [&tx_hash, &tx_hex];
+
+    conn.execute(&insert_tx_in_cache_sql(for_coin)?, tx_cache_params)?;
+
+    let params = [
+        tx_hash,
+        internal_id.clone(),
+        tx.block_height.to_string(),
+        confirmation_status.to_string(),
+        token_id,
+        tx_json,
+    ];
+
+    conn.execute(&insert_tx_in_history_sql(for_coin)?, params)?;
+    write_address_index(conn, for_coin, &internal_id, &tx)
 }
 
-/// The rows of an account-scoped read (CRD ch.36 R36.14.2). The `LIKE` pattern only pre-selects: it also matches a
-/// row whose memo (or any other text) equals the address, and R36.14.2 binds the `from` and `to` lists. So the
-/// selected rows are read in the served order and kept only when `from` or `to` holds the address; the total, the
-/// page offset and the `FromId` position are counted on that kept set.
-fn account_history(
-    conn: &Connection,
-    mut sql_builder: SqlBuilder,
-    params: &[String],
-    address: &str,
-    paging: PagingOptionsEnum<BytesJson>,
-    limit: usize,
-) -> Result<GetHistoryResult, SqlError> {
-    sql_builder.field("details_json");
-    sql_builder.order_asc("confirmation_status");
-    sql_builder.order_desc("block_height");
-    sql_builder.order_asc("internal_id");
-    let sql = sql_builder
-        .sql()
-        .map_err(|e| SqlError::InvalidParameterName(e.to_string()))?;
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query(params_from_iter(params.iter()))?;
-    let mut kept = Vec::new();
-    for details in rows.mapped(tx_details_from_row) {
-        let details = details?;
-        if details.from.iter().chain(details.to.iter()).any(|a| a == address) {
-            kept.push(details);
-        }
-    }
-    let total = kept.len();
-    let offset = match paging {
-        PagingOptionsEnum::PageNumber(page) => (page.get() - 1) * limit,
-        PagingOptionsEnum::FromId(id) => match kept.iter().position(|d| d.internal_id == id) {
-            Some(position) => position + 1,
-            None => {
-                return Ok(GetHistoryResult {
-                    transactions: vec![],
-                    skipped: 0,
-                    total,
-                })
-            },
-        },
-    };
-    let transactions = kept.into_iter().skip(offset).take(limit).collect();
-    Ok(GetHistoryResult {
-        transactions,
-        skipped: offset,
-        total,
-    })
+/// Removes one history row and its address index entries by identifier (the stored text form); the cache entry
+/// stays. Returns the number of removed rows.
+fn delete_history_row(conn: &Connection, for_coin: &str, internal_id: &str) -> Result<usize, MmError<SqlError>> {
+    let rows_num = conn.execute(&remove_tx_by_internal_id_sql(for_coin)?, [internal_id])?;
+    delete_address_index(conn, for_coin, internal_id)?;
+    Ok(rows_num)
+}
+
+/// The condition of an account-scoped read (CRD ch.36 R36.14.25): the address table holds an entry for the row with
+/// the address bound to `?2`. A row counts once however many entries match it.
+fn address_entry_condition(for_coin: &str) -> Result<String, MmError<SqlError>> {
+    let history_table = tx_history_table(for_coin);
+    validate_table_name(&history_table)?;
+    let address_table = tx_address_table(for_coin);
+    validate_table_name(&address_table)?;
+    Ok(format!(
+        "EXISTS (SELECT 1 FROM {1} WHERE {1}.internal_id = {0}.internal_id AND {1}.address = ?2)",
+        history_table, address_table
+    ))
 }
 
 #[derive(Clone)]
@@ -426,31 +416,31 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
             let sql_transaction = conn.transaction()?;
 
             for tx in transactions {
-                let tx_hash = tx.tx_hash.clone();
-                let internal_id = format!("{:02x}", tx.internal_id);
-                let confirmation_status = if tx.block_height > 0 { 1 } else { 0 };
-                let token_id = match tx.transaction_type.history_token_id() {
-                    Some(token_id) => format!("{:02x}", token_id),
-                    None => "".to_owned(),
-                };
-                let tx_json = json::to_string(&tx).expect("serialization should not fail");
+                insert_history_row(&sql_transaction, &for_coin, tx)?;
+            }
+            sql_transaction.commit()?;
+            Ok(())
+        })
+        .await
+    }
 
-                let tx_hex = format!("{:02x}", tx.tx_hex);
-                let tx_cache_params = [&tx_hash, &tx_hex];
+    async fn store_page(
+        &self,
+        for_coin: &str,
+        remove: Vec<BytesJson>,
+        add: Vec<TransactionDetails>,
+    ) -> Result<(), MmError<Self::Error>> {
+        let for_coin = for_coin.to_owned();
+        let selfi = self.clone();
 
-                sql_transaction.execute(&insert_tx_in_cache_sql(&for_coin)?, tx_cache_params)?;
-
-                let params = [
-                    tx_hash,
-                    internal_id.clone(),
-                    tx.block_height.to_string(),
-                    confirmation_status.to_string(),
-                    token_id,
-                    tx_json,
-                ];
-
-                sql_transaction.execute(&insert_tx_in_history_sql(&for_coin)?, params)?;
-                write_address_index(&sql_transaction, &for_coin, &internal_id, &tx)?;
+        async_blocking(move || {
+            let mut conn = selfi.0.lock().unwrap();
+            let sql_transaction = conn.transaction()?;
+            for internal_id in remove {
+                delete_history_row(&sql_transaction, &for_coin, &format!("{:02x}", internal_id))?;
+            }
+            for tx in add {
+                insert_history_row(&sql_transaction, &for_coin, tx)?;
             }
             sql_transaction.commit()?;
             Ok(())
@@ -463,7 +453,6 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
         for_coin: &str,
         internal_id: &BytesJson,
     ) -> Result<RemoveTxResult, MmError<Self::Error>> {
-        let sql = remove_tx_by_internal_id_sql(for_coin)?;
         let params = [format!("{:02x}", internal_id)];
         let for_coin = for_coin.to_owned();
         let selfi = self.clone();
@@ -471,8 +460,7 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
         async_blocking(move || {
             let mut conn = selfi.0.lock().unwrap();
             let sql_transaction = conn.transaction()?;
-            let rows_num = sql_transaction.execute(&sql, [params[0].as_str()])?;
-            delete_address_index(&sql_transaction, &for_coin, &params[0])?;
+            let rows_num = delete_history_row(&sql_transaction, &for_coin, &params[0])?;
             sql_transaction.commit()?;
             Ok(if rows_num > 0 {
                 RemoveTxResult::TxRemoved
@@ -646,6 +634,14 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
             let mut conn = selfi.0.lock().unwrap();
             let sql_transaction = conn.transaction()?;
             sql_transaction.execute(&create_address, [])?;
+            // R36.14.26 item 2: entries whose row is missing are removed when the store is prepared.
+            sql_transaction.execute(
+                &format!(
+                    "DELETE FROM {} WHERE internal_id NOT IN (SELECT internal_id FROM {});",
+                    address_table, history_table
+                ),
+                [],
+            )?;
             let missing: Vec<(String, String)> = {
                 let mut stmt = sql_transaction.prepare(&format!(
                     "SELECT internal_id, details_json FROM {} WHERE internal_id NOT IN (SELECT internal_id FROM {});",
@@ -710,13 +706,7 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
         async_blocking(move || {
             let conn = selfi.0.lock().unwrap();
             // `params` are the leading numbered parameters of every statement below: the token id, and for an
-            // account-scoped read the pattern of the account's quoted address (CRD ch.36 R36.14.2).
-            let account_address = match &coin_type {
-                HistoryCoinType::AccountCoin { address, .. } | HistoryCoinType::AccountToken { address, .. } => {
-                    Some(address.clone())
-                },
-                _ => None,
-            };
+            // account-scoped read the account's address, matched against the address index (CRD ch.36 R36.14.25).
             let (mut sql_builder, params) = match coin_type {
                 HistoryCoinType::Coin(ticker) => (get_history_builder_preimage(&ticker)?, vec!["".to_owned()]),
                 HistoryCoinType::Token { platform, token_id } => {
@@ -727,8 +717,8 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
                 },
                 HistoryCoinType::AccountCoin { ticker, address } => {
                     let mut builder = get_history_builder_preimage(&ticker)?;
-                    builder.and_where("details_json LIKE ?2 ESCAPE '\\'");
-                    (builder, vec!["".to_owned(), quoted_address_pattern(&address)])
+                    builder.and_where(address_entry_condition(&ticker)?);
+                    (builder, vec!["".to_owned(), address])
                 },
                 HistoryCoinType::AccountToken {
                     platform,
@@ -736,18 +726,11 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
                     address,
                 } => {
                     let mut builder = get_history_builder_preimage(&platform)?;
-                    builder.and_where("details_json LIKE ?2 ESCAPE '\\'");
-                    (builder, vec![
-                        format!("{:02x}", token_id),
-                        quoted_address_pattern(&address),
-                    ])
+                    builder.and_where(address_entry_condition(&platform)?);
+                    (builder, vec![format!("{:02x}", token_id), address])
                 },
                 HistoryCoinType::L2 { .. } => unreachable!("L2 history is rejected before entering async_blocking"),
             };
-
-            if let Some(address) = account_address {
-                return Ok(account_history(&conn, sql_builder, &params, &address, paging, limit)?);
-            }
 
             let mut total_builder = sql_builder.clone();
             total_builder.count("id");
@@ -939,6 +922,53 @@ mod sql_tx_history_storage_tests {
 
         let conn = storage.0.lock().unwrap();
         assert!(!address_index_enabled(&conn, for_coin).unwrap());
+    }
+
+    #[test]
+    fn the_tables_of_a_ticker_with_a_dash_carry_an_underscore() {
+        // T36.49, R36.14.23.
+        let for_coin = "IRIS-TEST";
+        let storage = SqliteTxHistoryStorage::in_memory();
+        block_on(storage.init(for_coin)).unwrap();
+        block_on(storage.backfill_address_index(for_coin)).unwrap();
+        block_on(
+            storage.add_transactions_to_history(for_coin, vec![address_index_details("aa", &["other1"], &["other2"])]),
+        )
+        .unwrap();
+        {
+            let conn = storage.0.lock().unwrap();
+            for table in ["IRIS_TEST_tx_history", "IRIS_TEST_tx_address", "IRIS_TEST_tx_cache"] {
+                let found: Option<String> =
+                    query_single_row(&conn, CHECK_TABLE_EXISTS_SQL, [table.to_owned()], string_from_row).unwrap();
+                assert!(found.is_some(), "{table}");
+            }
+        }
+        assert!(block_on(storage.is_initialized_for(for_coin)).unwrap());
+        assert_eq!(address_entries(&storage, for_coin).len(), 2);
+    }
+
+    #[test]
+    fn a_page_that_cannot_be_stored_stores_nothing() {
+        // T36.49 (viii), R36.14.24 item 3: the second row repeats the identifier of the first, so the page fails.
+        let for_coin = "address_index_page";
+        let storage = SqliteTxHistoryStorage::in_memory();
+        block_on(storage.init(for_coin)).unwrap();
+        block_on(storage.backfill_address_index(for_coin)).unwrap();
+        block_on(storage.add_transactions_to_history(for_coin, vec![address_index_details("aa", &["a"], &["b"])]))
+            .unwrap();
+        let result = block_on(storage.store_page(for_coin, vec!["aa".into()], vec![
+            address_index_details("bb", &["c"], &["d"]),
+            address_index_details("bb", &["e"], &["f"]),
+        ]));
+        assert!(result.is_err());
+        // The removal of the first row and the write of the first new row were rolled back with it.
+        assert_eq!(address_entries(&storage, for_coin).len(), 2);
+        assert!(block_on(storage.get_tx_from_history(for_coin, &"aa".into()))
+            .unwrap()
+            .is_some());
+        assert!(block_on(storage.get_tx_from_history(for_coin, &"bb".into()))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

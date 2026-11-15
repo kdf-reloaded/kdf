@@ -51,6 +51,21 @@ pub trait TxHistoryStorage: Send + Sync + 'static {
         transactions: impl IntoIterator<Item = TransactionDetails> + Send + 'static,
     ) -> Result<(), MmError<Self::Error>>;
 
+    /// Removes the rows named by `remove` and adds the rows of `add` (each with its cache entry and, where the store
+    /// keeps one, its address index entries) as one page: the SQLite store does it in one database transaction, so
+    /// the page is stored whole or not at all (CRD ch.36 R36.14.24 item 3). The default runs the steps in turn.
+    async fn store_page(
+        &self,
+        for_coin: &str,
+        remove: Vec<BytesJson>,
+        add: Vec<TransactionDetails>,
+    ) -> Result<(), MmError<Self::Error>> {
+        for internal_id in &remove {
+            self.remove_tx_from_history(for_coin, internal_id).await?;
+        }
+        self.add_transactions_to_history(for_coin, add).await
+    }
+
     /// Removes the transaction by internal_id from the selected coin's history
     async fn remove_tx_from_history(
         &self,
@@ -104,10 +119,10 @@ pub trait TxHistoryStorage: Send + Sync + 'static {
     /// Removes every row of the selected coin's history and its transaction cache. The tables stay.
     async fn clear_history(&self, for_coin: &str) -> Result<(), MmError<Self::Error>>;
 
-    /// Enables the address index for the coin (creates its table) and writes the entries of the stored rows that
-    /// lack them (provisional, from observation of 2026-11-15; pending ch.36 §36.14.7). Only the Tendermint fetcher
-    /// calls it; a coin for which it was never called keeps no index. Stores without an address index have nothing
-    /// to do.
+    /// Prepares the address index of the coin's store (CRD ch.36 R36.14.26 item 5): creates the table when absent,
+    /// removes the entries whose row is missing and writes the entries of every stored row that has none. Only the
+    /// Tendermint fetcher calls it; a coin for which it was never called keeps no index. Stores without an address
+    /// index have nothing to do.
     async fn backfill_address_index(&self, _for_coin: &str) -> Result<(), MmError<Self::Error>> { Ok(()) }
 
     /// The record kept beside the selected coin's history of the denominations that were resolvable when its rows
