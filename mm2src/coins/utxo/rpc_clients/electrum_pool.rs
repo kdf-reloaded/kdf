@@ -185,7 +185,7 @@ impl ServerOrder {
 /// The order `conf` asks for, and the warning to log when its `electrum_server_order` is not recognized.
 pub(super) fn parse_server_order(conf: &Json) -> (ServerOrder, Option<String>) {
     match &conf["electrum_server_order"] {
-        Json::Null => (ServerOrder::Random, None),
+        Json::Null => (ServerOrder::Mixed, None),
         Json::String(value) if value == "random" => (ServerOrder::Random, None),
         Json::String(value) if value == "listed" => (ServerOrder::Listed, None),
         Json::String(value) if value == "mixed" => (ServerOrder::Mixed, None),
@@ -196,18 +196,19 @@ pub(super) fn parse_server_order(conf: &Json) -> (ServerOrder, Option<String>) {
                 other => other.to_string(),
             };
             (
-                ServerOrder::Random,
+                ServerOrder::Mixed,
                 Some(format!(
-                    "electrum_server_order \"{shown}\" is not recognized; using \"random\""
+                    "electrum_server_order \"{shown}\" is not recognized; using \"mixed\""
                 )),
             )
         },
     }
 }
 
-/// CRD ch.38 R38.6.4b-R and R38.6.4l: the `MM2.json` string `electrum_server_order`. `random` (the default, also
-/// used when the key is absent) draws the order once at activation; `listed` keeps the listed order; `mixed`
-/// and `measured` rank by what the pool measures. Any other value is taken as `random` and one warning is logged.
+/// CRD ch.38 R38.6.4b-R and R38.6.4l: the `MM2.json` string `electrum_server_order`. `mixed` (the default since
+/// 2026-11-14, also used when the key is absent; CRD ch.38 R38.6.4b-R, R38.6.4l) and `measured` rank by what the
+/// pool measures; `random` (the previous default) draws the order once at activation; `listed` keeps the listed
+/// order. Any other value is taken as `mixed` and one warning is logged.
 ///
 /// **Compatibility:** for behaviour matching GLEEC KDF, set `electrum_server_order` to `listed`.
 pub(crate) fn electrum_server_order(ctx: &MmArc) -> ServerOrder {

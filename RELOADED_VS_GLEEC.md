@@ -226,8 +226,8 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   with a suffix refuses a hardware signing request before the device is
   contacted. A BC2 entry without the key still activates and logs one warning
   that the network will refuse its transactions. A coin without the key signs
-  exactly as before. The shared coins list must carry the key on the `BC2` and
-  `BC2-segwit` entries. **No switch returns the ordinary signature:** the
+  exactly as before. The shared coins repository carries the key on the `BC2` and
+  `BC2-segwit` entries since 2026-11-14. **No switch returns the ordinary signature:** the
   Komodo DeFi Framework 2.6.0-beta and the GLEEC KDF development build
   `a12695e` (the two builds measured) cannot sign BC2 transactions after block
   57,750 at all, so there is no reference behavior to return to. **BC2 swaps
@@ -238,10 +238,10 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   Set `require_suffix_counterparty` to `false` in the coin entry to admit them;
   a swap with them still cannot complete when they have to spend BC2. This
   check is temporary and will be removed as soon as the other implementations
-  support suffix signing. The global coins repository may not carry the
-  `sighash_suffix` key on the `BC2` and `BC2-segwit` entries yet: until it
-  does, add it to your coins file or use the KDF Reloaded coins file, because
-  without it the BC2 network rejects BC2 withdrawals and swaps. See
+  support suffix signing. A coins file from before 2026-11-14 may lack the
+  `sighash_suffix` key on the `BC2` and `BC2-segwit` entries: add it, or use
+  the KDF Reloaded coins file, because without it the BC2 network rejects BC2
+  withdrawals and swaps. See
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and
   [`docs/plans/bc2-replay-protection.md`](docs/plans/bc2-replay-protection.md).
 - **A clock check against NTP time servers.** At start, every hour and after the computer slept
@@ -805,7 +805,8 @@ behavior, except for `swap_key_check`; the row of each switch in
   trip (with spreading on, reads always take turns among at least the two fastest connected
   servers when two or more are connected), then have no effect.
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
-  listed instead of by a random draw.
+  listed instead of by measurement (`mixed`, the default since 2026-11-14; `random` gives the
+  earlier default, a random draw).
 - `electrum_tip_checks: false` — the node does not compare the block heights of a coin's Electrum
   servers, does not fail an activation or refuse trades when they disagree about the chain: a server
   that is behind the chain or stopped following it keeps its place in reads, broadcasts and a swap's

@@ -1441,16 +1441,20 @@ fn t38_6_4_13_r_with_the_switch_at_listed_the_listed_order_is_kept() {
     });
 }
 
-/// R38.6.4b-R item 1: `random` is the default, `listed` keeps the listed order, `mixed` and `measured` are
-/// recognized (R38.6.4l), anything else is `random` with one warning naming the switch and the value.
+/// R38.6.4b-R item 1 (default changed to `mixed` on 2026-11-14): an absent key is `mixed`, `random` and `listed`
+/// are recognized, `mixed` and `measured` are recognized (R38.6.4l), anything else is `mixed` with one warning
+/// naming the switch and the value.
 #[test]
 fn t38_6_4_13_r_the_switch_parses_as_stated() {
     let order_of = |conf: Json| parse_server_order(&conf);
-    for conf in [json!({}), json!({ "electrum_server_order": "random" })] {
+    for conf in [json!({}), json!({ "electrum_server_order": null })] {
         let (order, warning) = order_of(conf.clone());
-        assert!(matches!(order, ServerOrder::Random), "{conf}");
+        assert!(matches!(order, ServerOrder::Mixed), "{conf}");
         assert_eq!(warning, None, "{conf}");
     }
+    let (order, warning) = order_of(json!({ "electrum_server_order": "random" }));
+    assert!(matches!(order, ServerOrder::Random));
+    assert_eq!(warning, None);
     let (order, warning) = order_of(json!({ "electrum_server_order": "listed" }));
     assert!(matches!(order, ServerOrder::Listed));
     assert_eq!(warning, None);
@@ -1469,10 +1473,10 @@ fn t38_6_4_13_r_the_switch_parses_as_stated() {
         (json!(1), "1"),
     ] {
         let (order, warning) = order_of(json!({ "electrum_server_order": value }));
-        assert!(matches!(order, ServerOrder::Random), "{value}");
+        assert!(matches!(order, ServerOrder::Mixed), "{value}");
         assert_eq!(
             warning.as_deref(),
-            Some(format!("electrum_server_order \"{shown}\" is not recognized; using \"random\"").as_str()),
+            Some(format!("electrum_server_order \"{shown}\" is not recognized; using \"mixed\"").as_str()),
             "{value}"
         );
     }
