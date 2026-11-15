@@ -9,6 +9,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
 
+### Plans touched
+
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — checked against the code on
+  2026-11-15: phases A–F not started; the state found and the order of the work packages are in its
+  new section "State check (2026-11-15)".
+
 ## [0.4.0-beta.1] — 2026-11-14
 
 Within each heading, entries are grouped by area. Each entry ends with the pull request that made
