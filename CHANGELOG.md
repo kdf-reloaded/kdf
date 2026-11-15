@@ -25,6 +25,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   on, unless `ntp_required` is `true`. Browser builds cannot send the queries and skip the check.
   Detail: PR #348; CRD ch.45 §45.6C.
 
+#### RPC interface
+
+- **The order-management methods `setprice`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
+  `my_orders` and `order_status` accept `mmrpc: "2.0"` requests.** A versioned request carries the legacy
+  members unchanged inside `params`, gets the legacy result under `result` with the request's `id` echoed,
+  and a typed `error_type` with an HTTP status instead of the legacy error string: a request the client
+  got wrong (unknown coin, unknown order, a volume or price below the minimum, not enough balance) answers
+  400, a failure of the node 500, and a refusal while the computer's clock is off 503. An unknown member
+  inside `params` is ignored. The legacy forms of the six methods and their answers are unchanged, except
+  that a legacy error text no longer carries the inner `file:line]` trace tokens. This is a KDF Reloaded extension; the reference answers
+  `NoSuchMethod` for these names under `mmrpc: "2.0"`. The remaining legacy-only methods follow in later
+  releases (plan `docs/plans/mmrpc-v2-completion.md`). Detail: PR #359; CRD ch.43 §43.1R, D43.1A.1 status note.
+
 #### Solana coins
 
 - **Solana entries of a coins file in the form GLEEC KDF uses can be read.** Besides its own
@@ -66,11 +79,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Plans touched
 
+- [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
+  management) implemented in PR #359; decisions D1–D10 recorded; phases 2–5 open.
+- [`rpc-error-redesign`](docs/plans/rpc-error-redesign.md) — new, planning, no schedule: one error vocabulary
+  (token spelling, payload kind, HTTP status) for the whole versioned RPC surface, with a compatibility period;
+  ordered 2026-11-15, written in PR #359.
+- [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
+  pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361.
-- [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
-  pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 

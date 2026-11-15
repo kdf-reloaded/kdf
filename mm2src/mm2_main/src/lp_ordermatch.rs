@@ -101,6 +101,12 @@ mod my_orders_storage;
 pub(crate) mod order_events;
 #[path = "lp_ordermatch/order_requests_tracker.rs"]
 mod order_requests_tracker;
+#[path = "lp_ordermatch/order_rpc_errors.rs"]
+mod order_rpc_errors;
+pub use order_rpc_errors::*;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "lp_ordermatch/order_rpc_tests.rs"]
+pub(crate) mod order_rpc_tests;
 #[path = "lp_ordermatch/order_write_gate.rs"]
 mod order_write_gate;
 #[path = "lp_ordermatch/orderbook_depth.rs"] mod orderbook_depth;
@@ -187,10 +193,28 @@ pub struct CancelAllOrdersResponse {
     currently_matching: Vec<Uuid>,
 }
 
+/// The request of `cancel_all_orders`: the members the legacy form takes inline, `{"cancel_by": ...}`.
+#[derive(Deserialize)]
+pub struct CancelAllOrdersReq {
+    pub cancel_by: CancelBy,
+}
+
+/// The failures of `cancel_all_orders`. The cancellation of any `cancel_by` (all orders, one pair, one coin) cannot
+/// fail once the node's order-matching context is had, and an unknown pair or coin cancels nothing and is no failure.
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
 pub enum CancelAllOrdersError {
-    LegacyError(String),
+    /// The order-matching context of the node could not be obtained. The payload is the whole text.
+    #[display(fmt = "{}", _0)]
+    InternalError(String),
+}
+
+impl HttpStatusCode for CancelAllOrdersError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            CancelAllOrdersError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
 }
 
 /// Wrapper around `TimedMap` that enriches the flat maker-order store with:

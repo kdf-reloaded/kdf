@@ -259,7 +259,7 @@ touches:
 | Governing CRD chapter | a `Deliberate divergence (binding)` note next to the R-ID: what differs, on which of W1–W7, why, and the opt-back mechanism | always |
 | `docs/COMPAT_SWITCHES.md` rule + `docs/GLEEC_COMPATIBILITY.md` row | the opt-back setting and its GLEEC-compatible value | when the divergence can break an existing integration (which is almost always the case for W1–W7) |
 | `RELOADED_VS_GLEEC.md` | the public catalogue entry describing the difference for users | always, for a shipped divergence |
-| `docs/reloaded-rewrite/rpc-wire-parity-register.md` | the `X` cell and a pointer to the chapter note | always |
+| `docs/reloaded-rewrite/rpc-wire-parity-register.md` | the `X` cell and a pointer to the chapter note | always, once the register exists *(amended 2026-11-15: the file is not created yet; until Part 1 creates it, the chapter note, the `RELOADED_VS_GLEEC.md` entry and `docs/API_REFERENCE_DEVIATIONS.md` are the full record, as `mmrpc-v2-completion.md` §1.6 applies it)* |
 
 `docs/reloaded-rewrite/UPSTREAM-PARITY-GAPS.md` is not for divergences. It
 tracks unintended gaps: a method that is documented but not routed, or a
