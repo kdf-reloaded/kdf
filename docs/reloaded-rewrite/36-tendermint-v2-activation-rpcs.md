@@ -1589,7 +1589,9 @@ is the persistent-data compatibility the project keeps by default.
 > never an abort. The identifier depends on the build's word size, as at the
 > reference. The identifier and the stored form are each computed in one
 > function (`history_internal_id`, `stored_form` and `served_form` of
-> `mm2src/coins/tendermint/tendermint_tx_history.rs`). Built in PR #363; test
+> `mm2src/coins/tendermint/tendermint_tx_history.rs`). The address index of the
+> store is written so that the reference lists our rows (provisional, from
+> observation of 2026-11-15; pending §36.14.7). Built in PR #363; test
 > T36.37.
 
 D36.12 *(maintainer decision.)* *Amounts of fee-only transactions and
@@ -1699,6 +1701,21 @@ clients.
 > versioned history store for any coin family (`NotSupportedInWasm`), a
 > limitation shared by every history family and not a Tendermint one. Tests: T36.30 -- T36.39 in
 > `mm2src/coins/tendermint/tendermint_swap_flow_tests/tx_history_tests.rs`.
+>
+> Address index (provisional, from observation of 2026-11-15; pending §36.14.7).
+> Beside `<TICKER>_tx_history` the SQLite store keeps `<TICKER>_tx_address`
+> (`id`, `internal_id`, `address`), with one entry per distinct address in the
+> `from` and `to` lists of each stored row, because the reference selects an
+> account's rows through it and lists no row that has none. It is written in the
+> transaction that inserts the row (`write_address_index`), deleted with the row
+> (`delete_address_index`, also by `clear_history`) and filled for stored rows
+> that lack entries when the fetcher starts (`backfill_address_index`), so that
+> stores written by earlier builds of this change are listed by the reference.
+> The index is kept for Tendermint only for now: the table is created, and the
+> entries are written and deleted, only for a coin whose fetcher has enabled it
+> (`backfill_address_index`), so the stores of other families stay as they were
+> until §36.14.7 says the table is generic.
+> Our own serving still filters on the `from` and `to` lists.
 
 ### 36.14.2 WalletConnect activation
 
@@ -2490,3 +2507,20 @@ Under D36.20 (b): one row with `total_amount` 1 and `fee_details`
 > index flag, or in the encoding of a key, are both counted. T36.48 (iv) and
 > T36.47 (i) run in their (b) forms; an empty fee list is checked on a first and
 > a second pass by `transactions_without_a_row_do_not_stop_the_pass`.
+>
+> Observed form of D36.22 (a): a packet received through a relayer, the fee
+> paid by a fee granter and a tip paid on to a payee, gives two rows for the
+> receiving account. The tip transfer, read first, takes the packet event and
+> becomes the IBC row (the packet's parties, the amount of the tip transfer),
+> and the escrow transfer stays a plain row; test
+> `a_relayed_ibc_receive_with_a_tip_gives_two_rows_by_order_pairing`.
+>
+> Observed 2026-11-15 on ATOM mainnet with a load-balanced public node, this
+> build, 8 fresh first passes (one reference run alongside): the node's answers
+> to the same two queries differed between runs minutes apart (spender total 2
+> in 6 runs, 1 in 1, receiver total 3 in 5, 1 in 2, empty once); a transaction
+> absent from both answers was not stored (3 of 8 runs for the received IBC
+> transfer); in 1 run a listed height's block query returned a short answer
+> without a block time and that transaction was not stored (R36.14.4), warned
+> about since this change; listings equalled the stored sets and a later pass
+> changed nothing. No cause beyond the node's answers is claimed.

@@ -18,7 +18,7 @@ use super::tendermint_helpers::TendermintCommons;
 use super::tendermint_types::{TendermintCoin, TendermintFeeDetails, ABCI_GET_BLOCK_BY_HEIGHT_PATH,
                               ABCI_REQUEST_HEIGHT, ABCI_REQUEST_PROVE};
 use crate::my_tx_history_v2::{HistoryCoinType, TxHistoryStorage};
-use crate::node_url::scrub_urls_in_text;
+use crate::node_url::{host_only, scrub_urls_in_text};
 use crate::tx_history_streaming::{publish_tx_history_error, publish_tx_history_records};
 use crate::{HistorySyncState, MarketCoinOps, MmCoinEnum, TransactionDetails, TransactionType, TxFeeDetails};
 use bigdecimal::BigDecimal;
@@ -1123,6 +1123,10 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
             let message = format!("the history store could not be prepared: {:?}", e.into_inner());
             return Err(self.fail(message));
         }
+        if let Err(e) = self.storage.backfill_address_index(&self.coin.ticker).await {
+            let message = format!("the history store could not be prepared: {:?}", e.into_inner());
+            return Err(self.fail(message));
+        }
         // A failed first balance read is retried, not silent (D36.10 (b)).
         let mut snapshot = loop {
             match self.read_balances().await {
@@ -1198,6 +1202,19 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
     /// Reads, classifies and stores one page; returns the total of the query.
     async fn read_page(&self, query: &str, page: u32) -> Result<u64, PageError> {
         let response = search_page(&self.coin, query, page).await.map_err(PageError::Node)?;
+        let role = if query.starts_with("coin_spent") {
+            "spender"
+        } else {
+            "receiver"
+        };
+        debug!(
+            "history {} {} page {}: total {}, {} transactions",
+            self.coin.ticker,
+            role,
+            page,
+            response.total_count,
+            response.txs.len()
+        );
         let drafts = self.drafts_of(&response).await?;
         self.store(drafts).await.map_err(PageError::Store)?;
         Ok(u64::from(response.total_count))
@@ -1238,7 +1255,13 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
             };
             let timestamp = match timestamp {
                 Some(timestamp) => timestamp,
-                None => continue,
+                None => {
+                    warn!(
+                        "{}: history: the block query for height {} returned no time, the transaction {} is left out",
+                        self.coin.ticker, height, entry.hash
+                    );
+                    continue;
+                },
             };
             let events = entry
                 .tx_result
@@ -1358,6 +1381,12 @@ async fn search_page(coin: &TendermintCoin, query: &str, page: u32) -> Result<Tx
         .rpc_client()
         .await
         .map_err(|e| scrub_urls_in_text(&e.to_string()))?;
+    debug!(
+        "history {}: tx_search page {} answered by node {}",
+        coin.ticker,
+        page,
+        host_only(&client.uri().to_string())
+    );
     client
         .perform(request)
         .await

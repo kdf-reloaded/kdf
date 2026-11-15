@@ -2025,3 +2025,58 @@ fn the_history_method_pages_through_the_store_with_exact_totals() {
     assert_eq!(unknown["skipped"], 0);
     assert!(ids(&unknown).is_empty());
 }
+
+#[test]
+fn a_relayed_ibc_receive_with_a_tip_gives_two_rows_by_order_pairing() {
+    // The observed form of D36.22 (a): a packet received through a relayer whose fee is paid by a fee granter and
+    // whose tip is paid on to a payee. The fee list is one coin of 1,928 base units (1,473 fee, 455 tip). Events in
+    // the order of the result; no event involves a payment of this account.
+    const GRANTER: &str = "iaa1granter";
+    const ESCROW: &str = "iaa1escrow";
+    const TIP_PAYEE: &str = "iaa1tippayee";
+    let events = vec![
+        event("coin_spent", &[("spender", GRANTER), ("amount", "1928uiris")]),
+        transfer(GRANTER, COLLECTOR, "1928uiris"),
+        event("message", &[("sender", GRANTER)]),
+        event("coin_spent", &[("spender", ESCROW), ("amount", "696597uiris")]),
+        event("coin_received", &[("receiver", ME), ("amount", "696597uiris")]),
+        transfer(ESCROW, ME, "696597uiris"),
+        event("fungible_token_packet", &[
+            ("sender", OTHER_CHAIN),
+            ("receiver", ME),
+            ("denom", "transfer/channel-0/uiris"),
+            ("amount", "696597"),
+            ("success", "true"),
+        ]),
+        event("write_acknowledgement", &[("packet_sequence", "7")]),
+        event("coin_spent", &[("spender", COLLECTOR), ("amount", "455uiris")]),
+        transfer(COLLECTOR, TIP_PAYEE, "455uiris"),
+        event("fee_pay", &[("fee", "1473uiris")]),
+        event("tip_pay", &[("tip", "455uiris")]),
+    ];
+    let rows = rows_with_fee_list(events, vec![], &[(1_928, "uiris")]);
+
+    // The fee payment (the transfer equal to the fee text) is left out. The remaining candidates are read last to
+    // first: the tip transfer is position 0 and takes the packet event, the escrow transfer is position 1 and stays
+    // a plain transfer. Both name this account after the correction, so both are served.
+    assert_eq!(rows.len(), 2);
+    assert!(at_position(&rows[0], 0));
+    assert_eq!(
+        rows[0].details.transaction_type,
+        TransactionType::TendermintIBCTransfer { token_id: None }
+    );
+    assert_eq!(rows[0].details.from, vec![OTHER_CHAIN.to_owned()]);
+    assert_eq!(rows[0].details.to, vec![ME.to_owned()]);
+    assert_amounts(&rows[0], ["0.000455", "0", "0.000455", "0.000455"]);
+
+    assert!(at_position(&rows[1], 1));
+    assert_eq!(rows[1].details.transaction_type, TransactionType::StandardTransfer);
+    assert_eq!(rows[1].details.from, vec![ESCROW.to_owned()]);
+    assert_eq!(rows[1].details.to, vec![ME.to_owned()]);
+    assert_amounts(&rows[1], ["0.696597", "0", "0.696597", "0.696597"]);
+
+    // The fee was paid by the granter: it is in `fee_details` and in no amount of this account's rows.
+    for row in &rows {
+        assert_eq!(fee_details_of_row(row), ("IRIS".to_owned(), dec("0.001928")));
+    }
+}

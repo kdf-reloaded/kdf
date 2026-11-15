@@ -104,6 +104,12 @@ pub trait TxHistoryStorage: Send + Sync + 'static {
     /// Removes every row of the selected coin's history and its transaction cache. The tables stay.
     async fn clear_history(&self, for_coin: &str) -> Result<(), MmError<Self::Error>>;
 
+    /// Enables the address index for the coin (creates its table) and writes the entries of the stored rows that
+    /// lack them (provisional, from observation of 2026-11-15; pending ch.36 §36.14.7). Only the Tendermint fetcher
+    /// calls it; a coin for which it was never called keeps no index. Stores without an address index have nothing
+    /// to do.
+    async fn backfill_address_index(&self, _for_coin: &str) -> Result<(), MmError<Self::Error>> { Ok(()) }
+
     /// The record kept beside the selected coin's history of the denominations that were resolvable when its rows
     /// were written (CRD ch.36 D36.21 (b)); `None` when none was recorded.
     async fn get_resolved_denoms(&self, for_coin: &str) -> Result<Option<String>, MmError<Self::Error>>;
