@@ -146,8 +146,10 @@ they can fail when that server is down or slow, without any fault in the code. S
   they activate Solana through `enable_solana_with_tokens` / `enable_spl`, which
   refuse while `SOLANA_ACTIVATION_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`
   (Solana is postponed for the current beta). Effort to re-enable: flip the
-  constant to `true` and remove the three `#[ignore]` attributes; they need the
-  Solana docker node (`solana_supplied_node`). Lost coverage while off:
+  constant to `true` and remove the three `#[ignore]` attributes. They need
+  network access to the public Solana devnet (`https://api.devnet.solana.com`);
+  no docker container is involved, because `solana_supplied_node` only starts a
+  node with a Solana coins configuration. Lost coverage while off:
   Solana/SPL activation, balances and message signing against a live node.
   The refusal itself is covered by offline tests in `rpc/dispatcher/dispatcher.rs`
   and `lp_commands_legacy.rs`.

@@ -836,6 +836,12 @@ mod tests {
                     "platform": "SOL",
                     "token_contract_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
                     "decimals": 6 } } },
+                { "coin": "SOL-REF", "mm2": 1, "protocol": { "type": "SOLANA", "protocol_data": {} } },
+                { "coin": "USDC-SOL-REF", "mm2": 1, "protocol": { "type": "SOLANATOKEN", "protocol_data": {
+                    "platform": "SOL-REF",
+                    "decimals": 6,
+                    "mint_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "program_id": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" } } },
             ] }))
             .into_mm_arc();
 
@@ -868,7 +874,35 @@ mod tests {
         assert_eq!(body["error_data"], SOLANA_NOT_AVAILABLE);
         assert!(body["error"].as_str().unwrap().contains(SOLANA_NOT_AVAILABLE), "{body}");
 
-        for ticker in ["SOL", "USDC-SOL"] {
+        // The same requests against the reference configuration forms get the identical answers.
+        let (status, body) = answer_of(
+            &ctx,
+            "enable_solana_with_tokens",
+            json!({
+                "ticker": "SOL-REF",
+                "confirmation_commitment": "finalized",
+                "client_url": "http://127.0.0.1:1",
+                "tx_history": false,
+                "spl_tokens_requests": [{ "ticker": "USDC-SOL-REF" }],
+            }),
+        );
+        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error_type"], "PlatformCoinCreationError", "{body}");
+        assert_eq!(body["error_data"]["ticker"], "SOL-REF");
+        assert_eq!(body["error_data"]["error"], SOLANA_NOT_AVAILABLE);
+        assert!(body["error"].as_str().unwrap().contains(SOLANA_NOT_AVAILABLE), "{body}");
+
+        let (status, body) = answer_of(
+            &ctx,
+            "enable_spl",
+            json!({ "ticker": "USDC-SOL-REF", "activation_params": {} }),
+        );
+        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error_type"], "Internal", "{body}");
+        assert_eq!(body["error_data"], SOLANA_NOT_AVAILABLE);
+        assert!(body["error"].as_str().unwrap().contains(SOLANA_NOT_AVAILABLE), "{body}");
+
+        for ticker in ["SOL", "USDC-SOL", "SOL-REF", "USDC-SOL-REF"] {
             assert!(
                 block_on(lp_coinfind(&ctx, ticker)).unwrap().is_none(),
                 "{ticker} registered"

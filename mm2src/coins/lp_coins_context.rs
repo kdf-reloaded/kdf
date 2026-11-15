@@ -391,8 +391,12 @@ impl<Address, HDWallet> DerivationMethod<Address, HDWallet> {
 // Adjacent tagging omits `protocol_data` for a protocol without parameters (`{"type": "UTXO"}`). That is the form the
 // public docs show; the reference emits `"protocol_data": null` instead. Reloaded follows the docs, which are
 // explicit here (CRD ch.36 R36.0.3). This is the form every `error_data.protocol` member takes.
+//
+// `remote = "Self"` turns the derived `serialize` / `deserialize` into inherent functions; the real trait impls
+// below call them. `Serialize` forwards unchanged. `Deserialize` first drops the `protocol_data` of a `SOLANA`
+// descriptor when it is `null` or an object (CRD ch.40 R40.1.2), because a unit variant would reject `{}`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", content = "protocol_data")]
+#[serde(remote = "CoinProtocol", tag = "type", content = "protocol_data")]
 pub enum CoinProtocol {
     UTXO,
     QTUM,
@@ -434,6 +438,19 @@ pub enum CoinProtocol {
         platform: String,
         token_contract_address: String,
         decimals: u8,
+    },
+    /// Solana token in the reference configuration form (CRD ch.40 R40.1.3). All four members are required.
+    /// `mint_address` and `program_id` are base58 32-byte public keys, checked when the protocol is parsed, so an
+    /// invalid key makes the protocol unparsable. `program_id` is the token program that owns the mint (SPL Token
+    /// or Token-2022).
+    #[cfg(not(target_arch = "wasm32"))]
+    SOLANATOKEN {
+        platform: String,
+        decimals: u8,
+        #[serde(with = "base58_pubkey")]
+        mint_address: solana_pubkey::Pubkey,
+        #[serde(with = "base58_pubkey")]
+        program_id: solana_pubkey::Pubkey,
     },
     /// ZHTLC (Zcash-HTLC) shielded coin, e.g. ARRR/PIRATE and the ZOMBIE test
     /// coin. The variant carries a **required** `protocol_data` payload
@@ -507,6 +524,44 @@ pub enum CoinProtocol {
         /// The parent EVM platform coin ticker (e.g. `"ETH"`).
         platform: String,
     },
+}
+
+/// A Solana public key as a base58 string in JSON (the crate's own serde form is a byte array).
+#[cfg(not(target_arch = "wasm32"))]
+mod base58_pubkey {
+    use solana_pubkey::Pubkey;
+
+    pub fn serialize<S: serde::Serializer>(key: &Pubkey, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(key)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Pubkey, D::Error> {
+        let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+        text.parse::<Pubkey>()
+            .map_err(|e| <D::Error as serde::de::Error>::custom(format!("invalid base58 public key: {e}")))
+    }
+}
+
+impl serde::Serialize for CoinProtocol {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        CoinProtocol::serialize(self, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CoinProtocol {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("SOLANA") {
+            let ignorable = matches!(
+                value.get("protocol_data"),
+                Some(serde_json::Value::Null) | Some(serde_json::Value::Object(_))
+            );
+            if let (true, Some(obj)) = (ignorable, value.as_object_mut()) {
+                obj.remove("protocol_data");
+            }
+        }
+        CoinProtocol::deserialize(value).map_err(<D::Error as serde::de::Error>::custom)
+    }
 }
 
 impl CoinProtocol {
@@ -921,6 +976,155 @@ mod coin_protocol_tests {
         {
             CoinProtocol::NFT { platform } => assert_eq!(platform, "ETH"),
             other => panic!("expected NFT, got {:?}", other),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    const MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    #[cfg(not(target_arch = "wasm32"))]
+    const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn solanatoken_json() -> serde_json::Value {
+        json!({
+            "type": "SOLANATOKEN",
+            "protocol_data": {
+                "platform": "SOL",
+                "decimals": 6,
+                "mint_address": MINT,
+                "program_id": SPL_TOKEN_PROGRAM,
+            }
+        })
+    }
+
+    /// T40.2: the platform descriptor in the bare form, with an empty `protocol_data` and with a null one.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn t40_2_solana_protocol_accepts_three_forms() {
+        for protocol in [
+            json!({"type": "SOLANA"}),
+            json!({"type": "SOLANA", "protocol_data": {}}),
+            json!({"type": "SOLANA", "protocol_data": null}),
+            json!({"type": "SOLANA", "protocol_data": {"ignored": 1}}),
+        ] {
+            assert!(
+                matches!(CoinProtocol::from_conf_json(protocol.clone()), Ok(CoinProtocol::SOLANA)),
+                "{protocol}"
+            );
+            // The plain serde entry point behaves the same as `from_conf_json`.
+            assert!(matches!(
+                serde_json::from_value::<CoinProtocol>(protocol),
+                Ok(CoinProtocol::SOLANA)
+            ));
+        }
+        // A `protocol_data` that is neither null nor an object is still refused.
+        assert!(CoinProtocol::from_conf_json(json!({"type": "SOLANA", "protocol_data": 5})).is_err());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn solana_protocol_serializes_without_protocol_data() {
+        assert_eq!(
+            serde_json::to_value(CoinProtocol::SOLANA).unwrap(),
+            json!({"type": "SOLANA"})
+        );
+        // Other variants keep their serialized form.
+        assert_eq!(
+            serde_json::to_value(CoinProtocol::UTXO).unwrap(),
+            json!({"type": "UTXO"})
+        );
+        assert_eq!(
+            serde_json::to_value(CoinProtocol::ERC20 {
+                platform: "ETH".to_owned(),
+                contract_address: "0x0".to_owned(),
+            })
+            .unwrap(),
+            json!({"type": "ERC20", "protocol_data": {"platform": "ETH", "contract_address": "0x0"}})
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn t40_2_solanatoken_protocol_parses_and_round_trips() {
+        let parsed = CoinProtocol::from_conf_json(solanatoken_json()).unwrap();
+        match &parsed {
+            CoinProtocol::SOLANATOKEN {
+                platform,
+                decimals,
+                mint_address,
+                program_id,
+            } => {
+                assert_eq!(platform, "SOL");
+                assert_eq!(*decimals, 6);
+                assert_eq!(mint_address.to_string(), MINT);
+                assert_eq!(program_id.to_string(), SPL_TOKEN_PROGRAM);
+            },
+            other => panic!("expected SOLANATOKEN, got {:?}", other),
+        }
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), solanatoken_json());
+
+        // Unknown extra members are ignored.
+        let mut with_extra = solanatoken_json();
+        with_extra["protocol_data"]["extra"] = json!("x");
+        assert!(matches!(
+            CoinProtocol::from_conf_json(with_extra),
+            Ok(CoinProtocol::SOLANATOKEN { .. })
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn t40_2_solanatoken_protocol_requires_every_key() {
+        for key in ["platform", "decimals", "mint_address", "program_id"] {
+            let mut protocol = solanatoken_json();
+            protocol["protocol_data"].as_object_mut().unwrap().remove(key);
+            assert!(CoinProtocol::from_conf_json(protocol).is_err(), "missing {key}");
+        }
+        // No `protocol_data` at all.
+        assert!(CoinProtocol::from_conf_json(json!({"type": "SOLANATOKEN"})).is_err());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn t40_2_solanatoken_protocol_rejects_invalid_keys() {
+        // Not base58, and base58 of a wrong length (31 and 33 bytes).
+        for bad in [
+            "not base58 0OIl",
+            "",
+            "1111111111111111111111111111111",
+            "111111111111111111111111111111111",
+        ] {
+            for key in ["mint_address", "program_id"] {
+                let mut protocol = solanatoken_json();
+                protocol["protocol_data"][key] = json!(bad);
+                assert!(CoinProtocol::from_conf_json(protocol).is_err(), "{key} = {bad:?}");
+            }
+        }
+        // A number is not a key.
+        let mut protocol = solanatoken_json();
+        protocol["protocol_data"]["mint_address"] = json!(5);
+        assert!(CoinProtocol::from_conf_json(protocol).is_err());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn spltoken_protocol_still_parses() {
+        match CoinProtocol::from_conf_json(json!({
+            "type": "SPLTOKEN",
+            "protocol_data": {"platform": "SOL", "token_contract_address": MINT, "decimals": 6}
+        }))
+        .unwrap()
+        {
+            CoinProtocol::SPLTOKEN {
+                platform,
+                token_contract_address,
+                decimals,
+            } => {
+                assert_eq!(platform, "SOL");
+                assert_eq!(token_contract_address, MINT);
+                assert_eq!(decimals, 6);
+            },
+            other => panic!("expected SPLTOKEN, got {:?}", other),
         }
     }
 }
