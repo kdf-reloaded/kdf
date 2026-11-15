@@ -78,11 +78,11 @@ The legacy-only names, grouped as in the parity plan's batches:
 | Group | Methods |
 | --- | --- |
 | A. Order management | `setprice`, `update_maker_order`, `cancel_order`, `cancel_all_orders`, `my_orders`, `order_status` |
-| B. Trading | `buy`, `sell`, `orderbook_depth`, `get_trade_fee`, `orders_history_by_filter` *(corrected 2026-11-15: `max_taker_vol` and `min_trading_vol` are on both surfaces already)* |
+| B. Trading | `buy`, `sell`, `orderbook_depth`, `orders_history_by_filter` *(corrected 2026-11-15: `max_taker_vol` and `min_trading_vol` are on both surfaces already; `get_trade_fee` moved to the legacy-only list, D8)* |
 | C. Swaps | `all_swaps_uuids_by_filter`, `import_swaps`, `recover_funds_of_swap` *(the versioned `recover_funds_of_swap` waits for the swap architecture decisions; `stats_swap_status` moved to the legacy-only list on 2026-11-15)* |
 | D. Wallet and coins | `my_balance`, `disable_coin`, `send_raw_transaction`, `validateaddress`, `convertaddress`, `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`, `set_required_confirmations`, `set_requires_notarization` |
 | E. Daemon and network | `version`, `stop`, `metrics`, `get_my_peer_id`, `get_directly_connected_peers`, `get_gossip_mesh`, `get_gossip_peer_topics`, `get_gossip_topic_peers`, `get_relay_mesh`, `ban_pubkey`, `list_banned_pubkeys`, `unban_pubkeys` |
-| Legacy-only for good (§1.4) | `electrum`, `enable`, `help`, `show_priv_key`, `sim_panic`, `stats_swap_status` |
+| Legacy-only for good (§1.4) | `electrum`, `enable`, `help`, `show_priv_key`, `sim_panic`, `stats_swap_status`, `get_trade_fee` |
 
 The phase that takes a group first reconciles its list with Reloaded's dispatchers of that day.
 
@@ -149,6 +149,9 @@ default-side rule", it is the second arm, Reloaded's behavior by default.
   test-only Cargo feature `sim-panic-rpc` and is absent from shipped builds.)*
 - **`stats_swap_status`.** The legacy handler is a stub that ignores its input and answers a fixed body. A
   versioned form of a stub binds a contract nobody uses. *(Decided 2026-11-15.)*
+- **`get_trade_fee`.** The reference documentation marks it deprecated in favor of `trade_preimage`, which
+  already has a versioned form with a bound contract (chapter 08; CRD ch.43 R43.1B table and D43.1B.1). A
+  versioned `get_trade_fee` would be a second versioned fee method. *(Decided 2026-11-15.)*
 
 Each of these is recorded in the governing chapter as "legacy-only by decision", so a later phase
 does not reopen it by accident.
@@ -222,6 +225,7 @@ change to a shared piece (the alias registration, the success wrapper, the error
 | D5 | `order_status` success body | `result` is the bare legacy `{"type", "order"}` object; or a redesigned tagged shape. **Decided 2026-11-15: the legacy object unchanged under `result` (`type`, `order`, and `cancellation_reason` for a history order).** |
 | D6 | Where the divergence is recorded | **Decided 2026-11-15:** governing chapter note, `RELOADED_VS_GLEEC.md`, `docs/API_REFERENCE_DEVIATIONS.md`, CHANGELOG; no register file and no `GLEEC_COMPATIBILITY.md` row (§1.6). |
 | D7 | `stats_swap_status` | **Decided 2026-11-15:** legacy-only by decision (§1.4). |
+| D8 | `get_trade_fee` (CRD ch.43 D43.1B.1) | **Decided 2026-11-15:** legacy-only by decision (§1.4); group B is four names and the extension covers 40 methods. |
 
 ## Order of execution
 

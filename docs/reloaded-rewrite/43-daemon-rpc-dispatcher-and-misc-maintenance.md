@@ -394,8 +394,8 @@ added.*
 > KDF Reloaded v0.4.0. For v0.5.0 the maintainer scheduled the documented
 > extension of `docs/plans/mmrpc-v2-completion.md`: every method that only the
 > legacy table knows, except `electrum`, `enable`, `help`, `show_priv_key`,
-> `sim_panic` and `stats_swap_status`, gains a versioned form under the same
-> wire name, built in five phases (order management; trading; wallet and
+> `sim_panic`, `stats_swap_status` and `get_trade_fee` (D43.1B.1), gains a
+> versioned form under the same wire name (40 methods), built in five phases (order management; trading; wallet and
 > coins; swaps; daemon and network). The table of R43.1A.4 keeps the
 > reference's surfaces; the Reloaded surface of each phase is recorded here
 > as the phase merges, as a deliberate divergence under the plan's §1.6 and
@@ -653,6 +653,11 @@ second versioned fee method is added (recommended: it mirrors the ground on
 which the plan keeps `show_priv_key` legacy-only); (ii) keep it in group B and
 add a versioned form anyway, for clients that call the simpler single-coin
 query.
+
+> *Reloaded status (clean side, 2026-11-15):* resolved by the maintainer's
+> decision as option (i). `get_trade_fee` stays legacy-only for good and is
+> listed in plan `mmrpc-v2-completion` §1.4 with this reason; group B of that
+> plan is `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter`.
 
 ## 43.1R Reloaded versioned forms of the legacy-only order methods (Reloaded-original, clean side)
 
@@ -994,6 +999,10 @@ shall be wound down as part of shutdown rather than abandoned.
   or serialized interface and no function body, control-flow transcription,
   private non-wire identifier, discretionary error or log wording, internal
   module tree or test name is present; none was found.
+- *Status note added 2026-11-15 -- after D43.1B.1 (§43.1B).* Reloaded-original,
+  clean side: it records the maintainer's 2026-11-15 resolution of D43.1B.1
+  (`get_trade_fee` stays legacy-only); it takes no forbidden-class input, so
+  chapter 01 R38 is not engaged and no gate pass is required.
 - *Section 43.1R added 2026-11-15.* Reloaded-original, clean side: it binds
   this repository's versioned forms of six legacy-only order methods from the
   repository's own legacy shapes and failure classes; it takes no
