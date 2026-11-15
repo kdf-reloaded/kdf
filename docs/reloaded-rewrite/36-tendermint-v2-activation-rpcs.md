@@ -1159,6 +1159,30 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   row-to-row difference; the additions embed no code blocks, so the
   repository's clean-room gate tool was not applicable. The comparison
   concerns expression; it does not attest the accuracy of the statements.
+- *Scoped addition (2026-11-15, Spec Reader round 0.5.0-6) -- §36.14.6
+  (R36.14.19 -- R36.14.22, the informative finding, D36.19 -- D36.22,
+  T36.45 -- T36.48).* **KDF Dirty Gate: pending** (chapter 01 R40; the
+  subsection carries the pending-clearance marker at the point at which it
+  appears, and every passage in it is marked *(pending gate)*; this item is
+  replaced by the clearance record with the R39 scope attestation when the
+  gate clears it). *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`
+  and `v3.0.0-beta` of chapter 02 §2.15A, read read-only and consulted
+  **only** to establish, for the Tendermint history fetcher: which
+  transfers of a transaction take a position in the row identifier and in
+  which order they are counted; which module event corrects which transfer
+  and what happens when the two are unequal in number; what a staking
+  event without a delegator attribute yields; and which entry of a fee
+  list is read, in which units, what becomes of the other entries and of
+  an empty list; and the two rows' agreement on these points (the history
+  fetcher and the history store are the same at both rows, and the
+  denomination lookup was compared at both). Behavior, public wire shape
+  and persisted-row format only; no private identifier, function body,
+  helper decomposition, error, log, comment or test text was reproduced.
+  Event and attribute names are those of the public chain modules (Cosmos
+  SDK bank, staking and distribution; ibc-go transfer; irismod HTLC). The
+  options of the D-items rest on this chapter's own text; the test figures
+  are computed from the rules, not taken from any test. No cleared
+  sentence of §36.14.1 -- §36.14.5 was edited.
 
 ---
 
@@ -1901,3 +1925,382 @@ completes (finding 4 of §36.14.2). (iii) Whether a reference node's
 balance stream reports the balance change of an automatic HTLC refund;
 this could not be established by reading, because it depends on which
 block-level events the node delivers to a subscription.
+
+### 36.14.6 Precisions to §36.14.1 (Spec Reader round 0.5.0-6; pending the KDF Dirty Gate)
+
+> **Provenance status: pending the KDF Dirty Gate.** This subsection is a
+> candidate under chapter 01 R40: until the gate clears it and this marker
+> is replaced by the clearance record, it MUST NOT be relied on as a
+> statement of required behavior and MUST NOT be implemented from. It was
+> written by the dirty-side specification author on 2026-11-15 (Spec Reader
+> round 0.5.0-6) from the reference rows `v2.6.0-beta` and `v3.0.0-beta` of
+> chapter 02 §2.15A (read read-only; no untabled state was read), from the
+> public interface definitions of the Cosmos SDK bank, staking and
+> distribution modules, the ibc-go transfer module and the irismod HTLC
+> module, and from this chapter's own text. **The two rows agree on
+> everything in this subsection**: the part of the reference it describes
+> is the same at both. It edits no sentence of §36.14.1 -- §36.14.5. Each
+> rule names the rule it completes; where a rule here is more exact than
+> the sentence it completes, the rule here governs. It serves the
+> maintainer's decision that Reloaded's Tendermint history store is
+> byte-compatible with the reference's (D36.11 (a): the same row
+> identifier and the same stored form), and settles four points only.
+> Numbering: rules R36.14.19 -- R36.14.22, decisions D36.19 -- D36.22 and
+> tests T36.45 -- T36.48. Every passage below is marked *(pending gate)*
+> until cleared.
+
+R36.14.19 **Which transfers are counted, and in which order (completes
+R36.14.5 and R36.14.10).** The position that enters `internal_id` is the
+place of a transfer in the **transfer list** of its transaction, counted
+from zero. The list is built from the events of the execution result by
+the seven items below; an implementation that follows them computes the
+reference's identifier for every row. *(pending gate)*
+
+1. *Repeated events.* Events are compared within their own type, in the
+   order of emission. An event is dropped when it is identical to the
+   event of the same type emitted just before it: the same attributes in
+   the same order, each with the same key, value and index flag, in the
+   form the node delivered them. Events of other types lying between two
+   identical events do not keep them apart; a different event of the same
+   type between them does. This is the exact sense of "repeated
+   identically in direct succession" in R36.14.5, and it holds for every
+   event type, module events included.
+2. *Staking transactions (cases 1 to 3 of R36.14.5).* The one event read
+   is the first emitted of its type after item 1. Its `amount` text is
+   read coin by coin (the coins are separated by commas), in the order of
+   the text, and each coin that meets item 4 is one candidate with the
+   parties R36.14.5 names. An amount of two resolvable denominations
+   therefore yields two transfers, not one.
+3. *All other transactions (case 4).* The bank `transfer` events are read
+   **from the last emitted to the first**, the reverse of their order in
+   the result, once the fee payment has been left out under R36.14.5.
+   Within one event the coins of the `amount` text are read in the order
+   of the text. Each coin that meets item 4 is one candidate.
+4. *Conditions for a candidate.* A coin of an event is a candidate only
+   when the event has an `amount` attribute; the coin's denomination
+   resolves under the closing paragraph of R36.14.5 (the platform `denom`
+   compared exactly, otherwise the first coins-configuration entry whose
+   `protocol_data` `denom` equals it without regard to letter case); its
+   integer fits an unsigned 64-bit integer; and the event has the party
+   attributes its type needs: `sender` and `recipient` for `transfer`,
+   `delegator` and `validator` for `delegate` and `withdraw_rewards`,
+   `delegator` for `unbond`. A coin that fails any condition is **not
+   counted**: it takes no position and uses up no module event
+   (R36.14.20).
+5. *Correction, then merging.* A candidate of case 4 is first corrected
+   from a module event when one is left (R36.14.20). Then, when the list
+   already holds a transfer with the same sender and the same recipient
+   (both as corrected) and the same denomination text, the candidate's
+   amount is added to that transfer and the candidate takes no position
+   of its own; the earlier transfer keeps its kind. Otherwise the
+   candidate is appended to the list. Staking candidates are merged by
+   the same test.
+6. *What counts.* Every transfer in the list has a position, **whether or
+   not a row is written for it**. Two kinds of list entry write no row
+   and still count: an HTLC creation whose sender is not this account
+   (R36.14.6), and a transfer whose identifier is already stored. A
+   transfer between two other accounts is in the list, counts, and is
+   stored as a row; it is only never served (R36.14.2). What does not
+   count is exactly this: an event dropped under item 1, the fee payment
+   left out by R36.14.5, a coin that fails item 4, a candidate merged
+   under item 5, and a module event, which is never a transfer itself.
+7. *The bytes.* With `p` the position and `H` the 64 characters of the
+   upper-case hex hash, the 33 bytes of a transfer row's `internal_id`
+   are, on a 64-bit native build, the character codes of the first 25
+   characters of `H` in reverse order followed by `p` as an 8-byte
+   big-endian integer; in the 32-bit browser build, the first 29
+   characters of `H` in reverse order followed by `p` as a 4-byte
+   big-endian integer. The fee row of R36.14.8 item 3 has `p` as a
+   little-endian integer of 8 or 4 bytes followed by the same 25 or 29
+   characters in forward order, `p` being the position of the token
+   transfer that caused it. This is R36.14.10 read from the other end.
+   The two builds give different identifiers for one transaction;
+   Reloaded reproduces that.
+
+*(pending gate)*
+
+The reverse reading order of item 3, the comparison of item 1 and the
+merging of item 5 have no use of their own that the result shows; under
+the byte-compatibility decision Reloaded reproduces all three as they
+stand, because each one moves positions. *(pending gate)*
+
+> **Code-quality finding (informative; trigger: apparent with little
+> extra effort; D36.21).** *The position depends on the configuration.*
+> A coin whose denomination does not resolve is not counted (item 4), so
+> the positions of a transaction's other transfers change on the day that
+> denomination becomes resolvable, which a coins-configuration update
+> does. Every start reads the whole history again (finding 3 of
+> §36.14.1). The transaction is then listed anew: a transfer that now has
+> a position an older row already uses is never written, and a transfer
+> whose position moved is written a second time under its new identifier,
+> with the fee added again when it bears the fee. The history then shows
+> one transfer twice and another not at all. *(pending gate)*
+
+R36.14.20 **Which module event corrects which transfer (completes
+R36.14.5, "One module event corrects one transfer", and finding 10 of
+§36.14.1).** The pairing is by order. It is not by position in the
+result and not by content; "position" in the heading of finding 10
+means this order of reading. Each candidate of case 4, in the order of
+R36.14.19 item 3 and before it is merged, takes the first module event
+that no candidate has taken yet. The module events stand in this fixed
+order: the `create_htlc` events; then the `claim_htlc` events; then, and
+only when no HTLC event is left, the `non_fungible_token_packet` events,
+the `ibc_transfer` events and the `fungible_token_packet` events; within
+one type, from the last emitted to the first. *(pending gate)*
+
+- *More candidates than module events.* The candidates read first are
+  corrected; the others stay plain bank transfers.
+- *More module events than candidates.* The events left over yield
+  nothing: no transfer, no position, no row.
+- *A module event without the attributes the correction needs* (`sender`
+  and `receiver` for a creation and for the three IBC types, `sender` for
+  a claim) is used up all the same and corrects nothing: the candidate
+  that took it stays a plain transfer with the bank event's parties, and
+  no later candidate gets that event.
+- *Several coins in one `transfer` event* are separate candidates: with
+  one module event and an amount of two resolvable coins, the first coin
+  of the text is corrected and the second is a plain transfer.
+- *HTLC and IBC events in one transaction.* Every HTLC event is taken
+  before any IBC event.
+- *Staking events are never paired.* A `delegate`, `unbond` or
+  `withdraw_rewards` event decides the whole transaction (R36.14.5, cases
+  1 to 3): no bank transfer and no other module event of that
+  transaction is read, so a transaction that delegates and also sends
+  yields the staking row only.
+
+*(pending gate)*
+
+When a transaction has module events of one type only, as many as it has
+candidates and emitted in the same order as their transfers, each
+transfer gets its own event. Otherwise the event a transfer takes need
+not be the one emitted for it, and the row carries the parties of the
+event taken. Reloaded reproduces the pairing under the
+byte-compatibility decision, because the corrected parties decide which
+transfers merge and with that the positions; D36.22 puts the
+alternative. *(pending gate)*
+
+R36.14.21 **Staking events without a `delegator` attribute (completes
+R36.14.4 and R36.14.5, cases 1 to 3).** Older versions of the Cosmos SDK
+staking and distribution modules emit `delegate`, `unbond` and
+`withdraw_rewards` events without a `delegator` attribute. For such an
+event the reference writes **no row**. It reports no error and does not
+stop the pass, and the history state is unchanged. It attributes the
+event by nothing else: not by the `sender` of a `message` event, not by
+the transaction's messages, not by the bank events of the same
+transaction. Because the staking event has precedence (R36.14.5), the
+bank `transfer` events of the transaction are not read either, so the
+transaction is left out entirely under R36.14.4 and nothing is stored
+for it; the balance changes and the history has no row for the change.
+*(pending gate)*
+
+The same outcome, no row and no error, follows for a `delegate` or
+`withdraw_rewards` event without a `validator` attribute, and for any of
+the three events whose `amount` attribute is absent, is empty (a reward
+claim that pays nothing), names no denomination after the integer, or
+names only denominations that do not resolve. This holds for `unbond`
+too, although the row's amount is zero whatever the text says. An
+attribute whose key arrives base64-encoded is read as R36.14.5 states
+and counts as present. *(pending gate)*
+
+R36.14.22 **A fee of several coins or of another denomination, and an
+empty fee list (completes R36.14.4, R36.14.5 case 4 and R36.14.8).**
+*(pending gate)*
+
+1. *The entry read.* Only the **first** entry of the transaction's fee
+   list is read, in the order in which the transaction encodes the list.
+   Its integer is taken as base units of the **platform coin**, whatever
+   its denomination. `fee_details` is therefore always `coin` the
+   platform ticker, `amount` that integer scaled with the platform
+   coin's decimals, and `gas_limit` the transaction's. The denomination
+   of the entry is used for one thing only, the fee-payment text of
+   R36.14.5.
+2. *The other entries* are read nowhere: they are not in `fee_details`,
+   enter no amount, and cause no fee row.
+3. *An integer that does not fit an unsigned 64-bit integer* in the first
+   entry leaves the transaction out entirely, without a row and without
+   an error, like the cases of R36.14.4.
+4. *Amounts.* The integer of item 1 is what R36.14.8 item 2 adds, in base
+   units, to the stored `total_amount` and `spent_by_me`, and what the
+   fee row of R36.14.8 item 3 holds in platform display units. The fee
+   is attributed once, in the order of the transfer list (R36.14.19) and
+   only among the entries for which a row is written: the first of them
+   that this account sent takes it, into its own amounts when it is in
+   the platform denom and as a fee row when it is in a token denom. No
+   later entry of the transaction takes it.
+5. *Recognizing the fee payment.* R36.14.5 leaves out a `transfer` event
+   whose whole `amount` text equals the text of the first fee entry. The
+   bank event of a fee of several coins lists all of them in one text,
+   which does not equal it, so the fee payment is **not** left out: each
+   of its coins that resolves becomes a transfer from the payer to the
+   chain's fee-collector account, with a position of its own. Where the
+   fee is deducted before the messages run, which is the Cosmos SDK's
+   standard order, these transfers are read last and take the highest
+   positions.
+6. *An empty fee list.* The transaction is left out. **Nothing is
+   stored**: no transfer row, no fee row, no
+   row in the platform coin's or any token's history, and nothing is
+   offered to the history stream. Every later pass that reads the
+   transaction again does the same. A chain that accepts transactions
+   without a fee therefore has no history for them at all.
+
+*(pending gate)*
+
+Items 1, 2 and 5 misstate amounts whenever the first fee entry is not in
+the platform denom: the platform coin's history shows a spend of that
+integer in platform units that never took place, and the denomination
+that did pay shows nothing (D36.19). *(pending gate)*
+
+D36.19 *(maintainer decision.)* *A fee that is not one coin of the
+platform denom.* Options: (a) the reference's values exactly (R36.14.22
+items 1, 2 and 5); (b) Reloaded reads the fee entry in the platform denom
+wherever it stands in the list and uses it for `fee_details` and for
+R36.14.8 items 2 and 3; when the list has no such entry, the fee enters
+no amount and causes no fee row, and `fee_details` names the ticker the
+first entry's denomination resolves to, scaled with that coin's
+decimals, or is `null` when it resolves to none; and the fee payment is
+recognized by the text of the whole fee list, so that it is left out for
+several coins as it is for one. Identifiers and the stored form are the
+same under both options: where the fee payment is read last (R36.14.22
+item 5), leaving it out moves no other position. Under (b) a store that
+both programs have written can show different amounts for these
+transactions, as under D36.12, and the reference adds its own rows for
+the fee payment when it reads such a transaction. Recommended: (b).
+*(pending gate)*
+
+D36.20 *(maintainer decision.)* *Transactions the reference leaves out
+for want of a fee or of a `delegator` attribute.* Options: (a) no row, as
+at the reference (R36.14.21, R36.14.22 item 6); (b) Reloaded writes the
+rows: for an empty fee list, the rows of R36.14.5 -- R36.14.7 with a fee
+of zero and no fee row; for a staking event without `delegator`, the row
+of R36.14.6 with the delegator taken from the `delegator_address` of the
+transaction's staking message of the same kind (the public Cosmos SDK
+message definitions), when the transaction has exactly one such message.
+The identifier rule is unchanged. The reference never writes a row for
+these transactions, so no identifier can collide and no row is doubled;
+a store moved back to the reference keeps and serves the rows.
+Recommended: (b). *(pending gate)*
+
+D36.21 *(maintainer decision.)* *Positions when the resolvable
+denominations change.* Options: (a) the reference as it stands (the
+finding under R36.14.19); (b) the same counting, and Reloaded keeps
+beside the store the set of denominations its lookup resolved when the
+rows were written, and rebuilds the platform coin's history store from
+the chain when a pass would resolve a different set; a rebuilt store
+holds what the reference writes into an empty store under the same
+configuration, so it stays byte-compatible; (c) counting over another
+set of transfers, which gives identifiers the reference does not
+compute. This bears on D36.13: under D36.13 (b) Reloaded would give rows
+to transfers the reference's lookup does not count (a custom token) and
+none to some it does count (a configuration entry of another platform),
+and a transfer the reference does not count has no reference position.
+Byte-compatible identifiers need the counting of R36.14.19 item 4 for
+every transaction with transfers in more than one denomination, whatever
+D36.13 decides about the ticker a row carries. Recommended: (b), with
+the counting of R36.14.19 item 4. *(pending gate)*
+
+D36.22 *(maintainer decision.)* *Pairing of module events.* Options: (a)
+the reference's pairing by order (R36.14.20), with the wrong parties it
+gives when transfers and module events are unequal in number; (b)
+Reloaded pairs a module event with the transfer it belongs to (an IBC
+packet event names its amount and denomination), accepting that in the
+transactions where this changes which transfers merge, the positions and
+with them the identifiers differ from the reference's. Recommended: (a);
+the cases are batches of other parties' packets, and a row of this
+account in them is still recoverable from the chain. *(pending gate)*
+
+**Tests.** Rows T36.45 -- T36.48 run against a mocked node on a 64-bit
+native build unless a row says otherwise, with the conventions of
+§36.14.5: 6 decimals for the platform coin and for the token, a fee of
+5,000 base units of the platform denom. Unless a row says otherwise, the
+first event of each result is the fee payment's `transfer` event, whose
+text equals the fee coin and which is left out. `A` is this account; `X`,
+`Y`, `S` and `B` are others. "Position `n`" means an identifier that ends
+in the 8-byte big-endian integer `n` (R36.14.19 item 7). Figures are
+computed from the rules. *(pending gate)*
+
+T36.45 *Positions (R36.14.19).* (i) Transfers `A` to `X` of 1,000,000 and
+then `A` to `Y` of 2,000,000, both in the platform denom, emitted in that
+order: the row to `Y` has position 0 and bears the fee (`total_amount`
+2.005); the row to `X` has position 1 and `total_amount` 1. (ii) The same
+with a transfer in an unresolvable denomination emitted between the two:
+the same two identifiers. (iii) A transfer `X` to `Y` and then `X` to `A`:
+the row to `A` has position 0; the row `X` to `Y` is stored with position
+1 and is in no `my_tx_history` answer. (iv) `A` to `X` of 1,000,000, `A`
+to `X` of 2,000,000, then `A` to `Y` of 3,000,000: two rows, to `Y` at
+position 0 and to `X` at position 1 with amount 3. (v) Two identical
+events `A` to `X` of 1,000,000 with only an event of another type between
+them yield one transfer of 1; with a `transfer` event `A` to `Y` between
+them they yield the row to `X` at position 0 with amount 2 and the row to
+`Y` at position 1. (vi) One `transfer` event from `A` whose `amount` text
+names 2,500,000 of the token and then 1,000,000 of the platform denom:
+the token row has position 0; a `"FeeForTokenTx"` row carries the bytes
+of the token row in the opposite order; the platform row has position 1
+and `total_amount` 1, without the fee. (vii) A transfer `X` to `A` of
+1,000,000, then a transfer from `X` to the HTLC module account, then a
+`create_htlc` event with `sender` `X` and a `receiver`: one row is
+stored, the one to `A`, with position 1, and no row with position 0.
+(viii) Row (i) in the 32-bit browser build: the row to `X` has an
+identifier of the first 29 characters of the hash in reverse order
+followed by `00 00 00 01`. *(pending gate)*
+
+T36.46 *Pairing (R36.14.20).* (i) Transfers `A` to the HTLC module
+account of 1,000,000 and then `A` to `X` of 2,000,000, and one
+`create_htlc` event with `sender` `A` and a `receiver`: the transfer of
+2,000,000 is the `"SendHtlcAmount"` row at position 0 (`to` empty,
+`total_amount` 2.005), and the transfer of 1,000,000 is a
+`"StandardTransfer"` to the module account at position 1. (ii) One
+transfer from `A`, one `create_htlc` event as in (i) and one
+`claim_htlc` event: one `"SendHtlcAmount"` row; nothing for the claim,
+whichever of the two events was emitted first. (iii) Two transfers from
+`A`, one `create_htlc` and one `ibc_transfer` event, each with `sender`
+and `receiver`: the transfer emitted last is the HTLC creation, the
+other the IBC transfer. (iv) Two transfers from `A` to different
+recipients and one `create_htlc` event without `receiver`: two
+`"StandardTransfer"` rows with the bank events' parties. (v) A
+resolvable transfer to `A`, then an unresolvable one, and one
+`fungible_token_packet` event from `S` to `A`: one IBC row from `S` to
+`A` at position 0. (vi) A resolvable transfer to `A`, its packet event
+from `S` to `A`, an unresolvable transfer to `B` and its packet event
+to `B`, emitted in that order: under D36.22 (a) the one row stored, at
+position 0, has the parties of the packet event to `B`; under D36.22
+(b) it is the IBC transfer from `S` to `A`. (vii) A result with a
+`delegate` event of `A` and a bank transfer from `A` to `X`: one
+`"StakingDelegation"` row at position 0 and no row for the transfer.
+*(pending gate)*
+
+T36.47 *Staking events without a delegator (R36.14.21; D36.20).* (i) A
+`delegate` event with `validator` and `amount` only, in a result that
+also has a `message` event naming `A` as sender and the bank events of
+the delegation: no row; the pass goes on to the next transaction and the
+history state is as before. Under D36.20 (b): the delegation row of
+T36.34. (ii) The same event with a `delegator` attribute whose key and
+value are base64-encoded: the delegation row. (iii) An `unbond` event
+without `delegator`: no row; with `delegator` and an `amount` that is an
+integer without a denomination: no row; with both in full: the
+`"RemoveDelegation"` row. (iv) A `withdraw_rewards` event without
+`delegator`, one without `validator`, and one with an empty `amount`:
+no row each. (v) A `withdraw_rewards` event of `A` whose `amount` names
+two resolvable denominations: two `"ClaimDelegationRewards"` rows, at
+positions 0 and 1 in the order of the text, both in the platform coin's
+history. *(pending gate)*
+
+T36.48 *Fee forms (R36.14.22; D36.19, D36.20).* Each transaction is a
+bank send of 1,000,000 base units of the platform denom from `A` to `X`.
+(i) A fee of one entry, 7,000 base units of the token denom, with the
+fee payment's event text equal to it: one row with `fee_details` `coin`
+the platform ticker and `amount` 0.007, `total_amount` and `spent_by_me`
+1.007, and no row in the token's history. Under D36.19 (b):
+`fee_details` `coin` the token ticker, `amount` 0.007, `total_amount`
+and `spent_by_me` 1. (ii) A fee of two entries, 300 of the token denom
+first and 5,000 of the platform denom second, with one fee-payment event
+naming both: three rows, the send at position 0 with `total_amount`
+1.0003, a `{"TokenTransfer": <token id>}` row from `A` to the
+fee-collector account of 0.0003 at position 1 and a `"StandardTransfer"`
+to the fee-collector account of 0.005 at position 2; `fee_details`
+`amount` is 0.0003 in each, and there is no `"FeeForTokenTx"` row. Under
+D36.19 (b): the one row at position 0 with `total_amount` 1.005 and
+`fee_details` `amount` 0.005. (iii) A fee whose first entry is 2 to the
+power 64: no row. (iv) An empty fee list: no row in any history and
+nothing on the history stream, on the first pass and on a second one.
+Under D36.20 (b): one row with `total_amount` 1 and `fee_details`
+`amount` 0. *(pending gate)*
