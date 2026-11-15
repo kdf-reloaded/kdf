@@ -77,8 +77,8 @@ integration / docker / WASM suite inherited from upstream.
    ```
    Please note `CC` and `AR` must be specified in the same line as `wasm-pack test mm2src/mm2_main`.
 
-The same command runs the browser tests of any crate that has them, for example `mm2src/mm2_db`,
-`mm2src/mm2_net` or `mm2src/coins`. The `wasm-bindgen-test` release in `Cargo.lock` has to match the locked
+The same command runs the browser tests of a crate that has them, for example `mm2src/mm2_db` or
+`mm2src/mm2_net` (the browser tests of `mm2src/coins` do not compile yet). The `wasm-bindgen-test` release in `Cargo.lock` has to match the locked
 `wasm-bindgen` release, or the runner reports "no tests to run!". No CI job runs the browser tests yet; they
 are run by hand.
 

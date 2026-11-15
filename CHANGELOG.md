@@ -76,8 +76,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
   runs the tests of the browser build again; before, the test runner found none ("no tests to run!"),
   because the locked test library was far older than the locked `wasm-bindgen`. The test library is
-  updated to the matching release and the runner name in `.cargo/config.toml` is the standard one. No CI
-  job runs the browser tests yet. Detail: PR #373.
+  updated to the matching release and the runner name in `.cargo/config.toml` is the standard one. This also
+  updates `wasm-bindgen-futures`, which the browser build uses at run time, to 0.4.67. No CI job runs the
+  browser tests yet. Detail: PR #373.
 - **The Tendermint unit tests of `coins` now run in CI.** A new CI job runs the Tendermint swap-flow,
   priority-fee and WalletConnect signer tests and the postponed-family switch tests; the loopback
   tests of the native RPC server join the maker-outbox job.
