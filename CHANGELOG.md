@@ -102,6 +102,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Plans touched
 
+- [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)
+  build outside the shielded coins — versioned history, wallet management, event delivery to the page and
+  smaller items — in order of cost, and the limits a browser has by nature, also listed in
+  `docs/WASM_BUILD.md`.
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
   management) implemented in PR #359; decisions D1–D10 recorded; phases 2–5 open.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress (was parked):
@@ -110,6 +114,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [`rpc-error-redesign`](docs/plans/rpc-error-redesign.md) — new, planning, no schedule: one error vocabulary
   (token spelling, payload kind, HTTP status) for the whole versioned RPC surface, with a compatibility period;
   ordered 2026-11-15, written in PR #359.
+- [`shielded-coins-in-browser`](docs/plans/shielded-coins-in-browser.md) — new, planning: work packages to
+  activate shielded coins (ARRR) in the browser build — the wallet database on the SQLite route, one
+  parameter source for both targets, the gRPC-web transport, Worker hosting of wallet and prover, swaps
+  last — with the decisions of CRD ch.39 D39.6.6.a–i as proposals.
 - [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
