@@ -37,6 +37,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that a legacy error text no longer carries the inner `file:line]` trace tokens. This is a KDF Reloaded extension; the reference answers
   `NoSuchMethod` for these names under `mmrpc: "2.0"`. The remaining legacy-only methods follow in later
   releases (plan `docs/plans/mmrpc-v2-completion.md`). Detail: PR #359; CRD ch.43 §43.1R, D43.1A.1 status note.
+- **The trading methods `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter` accept `mmrpc: "2.0"`
+  requests**, in the same way as the order-management methods above: legacy members inside `params`, legacy
+  result under `result` with `id` echoed, typed `error_type` with an HTTP status (400 for a request the client
+  got wrong, 500 for a node failure, 503 while the computer's clock is off), unknown `params` members ignored,
+  legacy forms and success bodies unchanged, legacy error texts as for the order-management methods (no inner
+  trace tokens). `get_trade_fee` stays legacy-only: the reference documentation marks it
+  deprecated in favor of the versioned `trade_preimage`. Detail: PR #372; CRD ch.43 §43.1R.
 
 #### Solana coins
 
@@ -107,7 +114,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   smaller items — in order of cost, and the limits a browser has by nature, also listed in
   `docs/WASM_BUILD.md`.
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
-  management) implemented in PR #359; decisions D1–D10 recorded; phases 2–5 open.
+  management) implemented in PR #359, phase 2 (trading) in PR #372; decisions D1–D10 recorded; phases 3–5 open.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress (was parked):
   checked against the code on 2026-11-15: phases A–F not started; the state found and the order of the work packages are in its
   new section "State check (2026-11-15)".

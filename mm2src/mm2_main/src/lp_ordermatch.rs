@@ -76,7 +76,7 @@ use my_orders_storage::{delete_my_maker_order, delete_my_taker_order, maker_rest
                         removal_recorded_in_history, save_my_new_maker_order, save_my_new_taker_order, MyActiveOrders,
                         MyOrdersFilteringHistory, MyOrdersHistory, MyOrdersStorage};
 use order_write_gate::{OrderWriteGate, PublishedState, RemovedMakerOrder};
-pub use orderbook_depth::orderbook_depth_rpc;
+pub use orderbook_depth::{orderbook_depth_core, orderbook_depth_rpc};
 pub use orderbook_rpc::{orderbook_rpc, orderbook_rpc_v2};
 
 cfg_wasm32! {

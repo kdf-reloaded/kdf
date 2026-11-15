@@ -1,19 +1,22 @@
-use super::{orderbook_topic_from_base_rel, OrdermatchContext, OrdermatchRequest};
+use super::{orderbook_topic_from_base_rel, OrderbookDepthError, OrdermatchContext, OrdermatchRequest};
 use crate::mm2::lp_network::{request_any_relay, P2PRequest};
+use crate::mm2::rpc::legacy_adapter::legacy_result;
 use coins::is_wallet_only_ticker;
 use common::log;
 use http::Response;
 use mm2_core::mm_ctx::MmArc;
+use mm2_err_handle::prelude::*;
 use serde_json::{self as json, Value as Json};
 use std::collections::HashMap;
 
+/// The request of `orderbook_depth`: the pairs to count the orders of, each as `[base, rel]`.
 #[derive(Debug, Deserialize)]
-struct OrderbookDepthReq {
-    pairs: Vec<(String, String)>,
+pub struct OrderbookDepthReq {
+    pub(crate) pairs: Vec<(String, String)>,
 }
 
 #[derive(Copy, Clone, Debug, Deserialize, Serialize)]
-struct PairDepth {
+pub struct PairDepth {
     asks: usize,
     bids: usize,
 }
@@ -23,24 +26,40 @@ struct OrderbookDepthP2PResponse {
     depth: HashMap<(String, String), PairDepth>,
 }
 
+/// A requested pair with the number of asks and bids the node counts for it. The answer of `orderbook_depth` is a list
+/// of these, in no guaranteed order.
 #[derive(Debug, Deserialize, Serialize)]
-struct PairWithDepth {
+pub struct PairWithDepth {
     pair: (String, String),
     depth: PairDepth,
 }
 
-pub async fn orderbook_depth_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
-    let req: OrderbookDepthReq = try_s!(json::from_value(req));
+/// The typed core of `orderbook_depth`: for every requested pair, the number of asks and bids, from the node's own
+/// orderbook where it holds one and from a relay otherwise. The legacy surface renders its answer as `{"result":
+/// [<pair with depth>, ...]}` ([`orderbook_depth_rpc`]).
+///
+/// # Errors
+///
+/// An [`OrderbookDepthError`]: a pair holds a wallet-only coin, the relay request fails, or the node's order-matching
+/// context cannot be had.
+pub async fn orderbook_depth_core(
+    ctx: MmArc,
+    req: OrderbookDepthReq,
+) -> Result<Vec<PairWithDepth>, MmError<OrderbookDepthError>> {
+    let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).map_to_mm(OrderbookDepthError::Internal)?;
 
     let wallet_only_pairs: Vec<_> = req
         .pairs
         .iter()
         .filter(|pair| is_wallet_only_ticker(&ctx, &pair.0) || is_wallet_only_ticker(&ctx, &pair.1))
+        .cloned()
         .collect();
 
     if !wallet_only_pairs.is_empty() {
-        return ERR!("Pairs {:?} have wallet only coins", wallet_only_pairs);
+        return MmError::err(OrderbookDepthError::CoinIsWalletOnly(format!(
+            "Pairs {:?} have wallet only coins",
+            wallet_only_pairs
+        )));
     }
 
     let mut result = Vec::with_capacity(req.pairs.len());
@@ -82,9 +101,10 @@ pub async fn orderbook_depth_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u
                 .collect(),
         };
         log::debug!("Sending request_any_relay({:?})", p2p_request);
-        let p2p_response = try_s!(
-            request_any_relay::<OrderbookDepthP2PResponse>(ctx.clone(), P2PRequest::Ordermatch(p2p_request)).await
-        );
+        let p2p_response =
+            request_any_relay::<OrderbookDepthP2PResponse>(ctx.clone(), P2PRequest::Ordermatch(p2p_request))
+                .await
+                .mm_err(|e| OrderbookDepthError::P2PSubscribeError(e.to_string()))?;
         log::debug!("Received response {:?}", p2p_response);
         if let Some((response, _)) = p2p_response {
             for (pair, depth) in response.depth {
@@ -107,10 +127,14 @@ pub async fn orderbook_depth_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u
         }
     }
 
-    let res = json!({ "result": result });
-    Response::builder()
-        .body(json::to_vec(&res).expect("Serialization failed"))
-        .map_err(|e| ERRL!("{}", e))
+    Ok(result)
+}
+
+/// The legacy `orderbook_depth`: decodes the inline body, calls [`orderbook_depth_core`] and answers `{"result":
+/// [<pair with depth>, ...]}`.
+pub async fn orderbook_depth_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    let req: OrderbookDepthReq = try_s!(json::from_value(req));
+    legacy_result(orderbook_depth_core(ctx, req).await)
 }
 
 pub fn process_orderbook_depth_p2p_request(

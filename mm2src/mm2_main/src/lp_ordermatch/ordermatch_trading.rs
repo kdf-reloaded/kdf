@@ -1951,6 +1951,50 @@ pub struct AutoBuyInput {
     pub(crate) save_in_history: bool,
 }
 
+/// The request of the typed cores of `buy` and `sell`: the members of [`AutoBuyInput`] that the order uses, without
+/// `method` (the core names the action) and without the members the order never reads (`duration`, `gui`,
+/// `destpubkey`). The legacy members keep their names, types and defaults; the versioned surface ignores a member this
+/// type does not have.
+#[derive(Debug, Deserialize)]
+pub struct TakerOrderReq {
+    pub(crate) base: String,
+    pub(crate) rel: String,
+    pub(crate) price: MmNumber,
+    pub(crate) volume: MmNumber,
+    pub(crate) timeout: Option<u64>,
+    #[serde(default)]
+    pub(crate) match_by: MatchBy,
+    #[serde(default)]
+    pub(crate) order_type: OrderType,
+    pub(crate) base_confs: Option<u64>,
+    pub(crate) base_nota: Option<bool>,
+    pub(crate) rel_confs: Option<u64>,
+    pub(crate) rel_nota: Option<bool>,
+    pub(crate) min_volume: Option<MmNumber>,
+    #[serde(default = "get_true")]
+    pub(crate) save_in_history: bool,
+}
+
+impl From<AutoBuyInput> for TakerOrderReq {
+    fn from(input: AutoBuyInput) -> TakerOrderReq {
+        TakerOrderReq {
+            base: input.base,
+            rel: input.rel,
+            price: input.price,
+            volume: input.volume,
+            timeout: input.timeout,
+            match_by: input.match_by,
+            order_type: input.order_type,
+            base_confs: input.base_confs,
+            base_nota: input.base_nota,
+            rel_confs: input.rel_confs,
+            rel_nota: input.rel_nota,
+            min_volume: input.min_volume,
+            save_in_history: input.save_in_history,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct StartSwapRequest {
     base: String,
@@ -2124,111 +2168,228 @@ pub async fn start_swap_rpc(ctx: MmArc, req: StartSwapRequest) -> MmResult<Start
     }
 }
 
+/// The answer of `buy` and `sell`: the taker order that was placed, as the RPC renders its request. The legacy surface
+/// answers it as `{"result": <order>}` ([`buy`], [`sell`]).
+pub struct TakerOrderResponse(pub(crate) TakerOrder);
+
+impl serde::Serialize for TakerOrderResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let order = &self.0;
+        serde::Serialize::serialize(
+            &LpautobuyResult {
+                request: (&order.request).into(),
+                order_type: &order.order_type,
+                min_volume: order.min_volume.clone().into(),
+                base_orderbook_ticker: &order.base_orderbook_ticker,
+                rel_orderbook_ticker: &order.rel_orderbook_ticker,
+            },
+            serializer,
+        )
+    }
+}
+
+/// The typed core of `buy`: places a taker order that buys the base coin for the rel coin. The legacy surface renders
+/// its answer as `{"result": <order>}` ([`buy`]).
+///
+/// # Errors
+///
+/// A [`TakerOrderError`]: the first check the request fails, or a node or storage failure.
+pub async fn buy_core(ctx: MmArc, req: TakerOrderReq) -> Result<TakerOrderResponse, MmError<TakerOrderError>> {
+    with_request_fee_scope(&ctx, taker_order_impl(&ctx, req, TakerAction::Buy)).await
+}
+
+/// The typed core of `sell`: places a taker order that sells the base coin for the rel coin. The legacy surface
+/// renders its answer as `{"result": <order>}` ([`sell`]).
+///
+/// # Errors
+///
+/// A [`TakerOrderError`]: the first check the request fails, or a node or storage failure.
+pub async fn sell_core(ctx: MmArc, req: TakerOrderReq) -> Result<TakerOrderResponse, MmError<TakerOrderError>> {
+    with_request_fee_scope(&ctx, taker_order_impl(&ctx, req, TakerAction::Sell)).await
+}
+
+/// The legacy `buy`: decodes the inline body, calls [`buy_core`] and answers `{"result": <order>}`.
 pub async fn buy(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let scope_ctx = ctx.clone();
-    with_request_fee_scope(&scope_ctx, buy_impl(ctx, req)).await
-}
-
-async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let input: AutoBuyInput = try_s!(json::from_value(req));
-    if input.base == input.rel {
-        return ERR!("Base and rel must be different coins");
-    }
-    let rel_coin = try_s!(lp_coinfind(&ctx, &input.rel).await);
-    let rel_coin = try_s!(rel_coin.ok_or("Rel coin is not found or inactive"));
-    let base_coin = try_s!(lp_coinfind(&ctx, &input.base).await);
-    let base_coin: MmCoinEnum = try_s!(base_coin.ok_or("Base coin is not found or inactive"));
-    if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
-        return ERR!("Trading is not supported for coin {}", coin);
-    }
-    // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
-    if let Some(mismatch) = swap_key_mismatch(&ctx, &base_coin, &rel_coin) {
-        return ERR!("{}", mismatch);
-    }
-    // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain, before any
-    // balance check.
-    if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
-        return ERR!("{}", error);
-    }
-    // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
-    // balance check.
-    if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(&ctx) {
-        return ERR!("{}", error);
-    }
-    if base_coin.wallet_only(&ctx) {
-        return ERR!("Base coin {} is wallet only", input.base);
-    }
-    if rel_coin.wallet_only(&ctx) {
-        return ERR!("Rel coin {} is wallet only", input.rel);
-    }
-    let my_amount = &input.volume * &input.price;
-    try_s!(
-        check_balance_for_taker_swap(
-            &ctx,
-            &rel_coin,
-            &base_coin,
-            my_amount,
-            None,
-            None,
-            FeeApproxStage::OrderIssue
-        )
-        .await
-    );
-    let res = try_s!(lp_auto_buy(&ctx, &base_coin, &rel_coin, input).await).into_bytes();
-    Ok(try_s!(Response::builder().body(res)))
+    legacy_result(buy_core(ctx, input.into()).await)
 }
 
+/// The legacy `sell`: decodes the inline body, calls [`sell_core`] and answers `{"result": <order>}`.
 pub async fn sell(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let scope_ctx = ctx.clone();
-    with_request_fee_scope(&scope_ctx, sell_impl(ctx, req)).await
+    let input: AutoBuyInput = try_s!(json::from_value(req));
+    legacy_result(sell_core(ctx, input.into()).await)
 }
 
-async fn sell_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let input: AutoBuyInput = try_s!(json::from_value(req));
-    if input.base == input.rel {
-        return ERR!("Base and rel must be different coins");
+/// Looks the coin `ticker` up; `not_found` builds the refusal for a coin that is not activated.
+async fn find_taker_order_coin(
+    ctx: &MmArc,
+    ticker: &str,
+    not_found: fn(String) -> TakerOrderError,
+) -> Result<MmCoinEnum, MmError<TakerOrderError>> {
+    match lp_coinfind(ctx, ticker)
+        .await
+        .map_to_mm(TakerOrderError::InternalError)?
+    {
+        Some(coin) => Ok(coin),
+        None => MmError::err(not_found(ticker.to_owned())),
     }
-    let base_coin = try_s!(lp_coinfind(&ctx, &input.base).await);
-    let base_coin = try_s!(base_coin.ok_or("Base coin is not found or inactive"));
-    let rel_coin = try_s!(lp_coinfind(&ctx, &input.rel).await);
-    let rel_coin = try_s!(rel_coin.ok_or("Rel coin is not found or inactive"));
+}
+
+/// The checks of `buy` and `sell` that precede the order, then [`place_taker_order`]. `buy` looks the rel coin up
+/// before the base coin and `sell` the base coin before the rel coin, so a request that names two unknown coins is
+/// refused for the coin each method has always named first.
+async fn taker_order_impl(
+    ctx: &MmArc,
+    req: TakerOrderReq,
+    action: TakerAction,
+) -> Result<TakerOrderResponse, MmError<TakerOrderError>> {
+    if req.base == req.rel {
+        return MmError::err(TakerOrderError::BaseEqualRel);
+    }
+    let (base_coin, rel_coin) = match action {
+        TakerAction::Buy => {
+            let rel_coin = find_taker_order_coin(ctx, &req.rel, |coin| TakerOrderError::NoSuchRelCoin { coin }).await?;
+            let base_coin =
+                find_taker_order_coin(ctx, &req.base, |coin| TakerOrderError::NoSuchBaseCoin { coin }).await?;
+            (base_coin, rel_coin)
+        },
+        TakerAction::Sell => {
+            let base_coin =
+                find_taker_order_coin(ctx, &req.base, |coin| TakerOrderError::NoSuchBaseCoin { coin }).await?;
+            let rel_coin = find_taker_order_coin(ctx, &req.rel, |coin| TakerOrderError::NoSuchRelCoin { coin }).await?;
+            (base_coin, rel_coin)
+        },
+    };
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
-        return ERR!("Trading is not supported for coin {}", coin);
+        return MmError::err(TakerOrderError::TradingNotSupported { coin });
     }
     // CRD ch.05 R37: a pair whose swap key is not the key it pays from is refused before any balance check.
-    if let Some(mismatch) = swap_key_mismatch(&ctx, &base_coin, &rel_coin) {
-        return ERR!("{}", mismatch);
+    if let Some(mismatch) = swap_key_mismatch(ctx, &base_coin, &rel_coin) {
+        return MmError::err(TakerOrderError::from(mismatch));
     }
     // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain, before any
     // balance check.
     if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
-        return ERR!("{}", error);
+        return MmError::err(TakerOrderError::ChainDisagreement(error));
     }
     // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
     // balance check.
-    if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(&ctx) {
-        return ERR!("{}", error);
+    if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(ctx) {
+        return MmError::err(TakerOrderError::ClockOutOfRange(error));
     }
-    if base_coin.wallet_only(&ctx) {
-        return ERR!("Base coin {} is wallet only", input.base);
+    if base_coin.wallet_only(ctx) {
+        return MmError::err(TakerOrderError::BaseCoinIsWalletOnly { coin: req.base });
     }
-    if rel_coin.wallet_only(&ctx) {
-        return ERR!("Rel coin {} is wallet only", input.rel);
+    if rel_coin.wallet_only(ctx) {
+        return MmError::err(TakerOrderError::RelCoinIsWalletOnly { coin: req.rel });
     }
-    try_s!(
-        check_balance_for_taker_swap(
-            &ctx,
-            &base_coin,
-            &rel_coin,
-            input.volume.clone(),
-            None,
-            None,
-            FeeApproxStage::OrderIssue
-        )
+    // The coin that pays is the rel coin for `buy` (the amount is the volume times the price) and the base coin for
+    // `sell` (the amount is the volume).
+    let (my_coin, other_coin, my_amount) = match action {
+        TakerAction::Buy => (&rel_coin, &base_coin, &req.volume * &req.price),
+        TakerAction::Sell => (&base_coin, &rel_coin, req.volume.clone()),
+    };
+    check_balance_for_taker_swap(
+        ctx,
+        my_coin,
+        other_coin,
+        my_amount,
+        None,
+        None,
+        FeeApproxStage::OrderIssue,
+    )
+    .await
+    .mm_err(TakerOrderError::from)?;
+    place_taker_order(ctx, &base_coin, &rel_coin, req, action).await
+}
+
+/// The lowest price a taker order accepts, 0.00000001.
+fn min_taker_order_price() -> MmNumber { MmNumber::from(BigRational::new(1.into(), 100_000_000.into())) }
+
+/// Builds the taker order, saves it, subscribes to its orderbook topic, broadcasts the request and keeps the order
+/// among the node's taker orders: the typed form of [`lp_auto_buy`].
+#[allow(clippy::needless_borrow)]
+async fn place_taker_order(
+    ctx: &MmArc,
+    base_coin: &MmCoinEnum,
+    rel_coin: &MmCoinEnum,
+    req: TakerOrderReq,
+    action: TakerAction,
+) -> Result<TakerOrderResponse, MmError<TakerOrderError>> {
+    let min_price = min_taker_order_price();
+    if req.price < min_price {
+        return MmError::err(TakerOrderError::PriceTooLow {
+            price: req.price.to_decimal(),
+            threshold: min_price.to_decimal(),
+        });
+    }
+    // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain.
+    if let Some(error) = chain_disagreement(base_coin, rel_coin) {
+        return MmError::err(TakerOrderError::ChainDisagreement(error));
+    }
+    // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
+    // balance check.
+    if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(ctx) {
+        return MmError::err(TakerOrderError::ClockOutOfRange(error));
+    }
+    // CRD ch.60 R60.6.7 item 3: the smallest trade the order can produce must be spendable on both legs.
+    check_pre_trade_spend_safety(ctx, base_coin, rel_coin, req.min_volume.clone(), &req.price)
         .await
+        .map_to_mm(TakerOrderError::from)?;
+    let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).map_to_mm(TakerOrderError::InternalError)?;
+    let mut my_taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
+    let our_public_id = ctx.public_id().map_to_mm(TakerOrderError::InternalError)?;
+    let rel_volume = &req.volume * &req.price;
+    let conf_settings = OrderConfirmationsSettings {
+        base_confs: req.base_confs.unwrap_or_else(|| base_coin.required_confirmations()),
+        base_nota: req.base_nota.unwrap_or_else(|| base_coin.requires_notarization()),
+        rel_confs: req.rel_confs.unwrap_or_else(|| rel_coin.required_confirmations()),
+        rel_nota: req.rel_nota.unwrap_or_else(|| rel_coin.requires_notarization()),
+    };
+    let mut order_builder = TakerOrderBuilder::new(base_coin, rel_coin)
+        .with_base_amount(req.volume)
+        .with_rel_amount(rel_volume)
+        .with_action(action)
+        .with_match_by(req.match_by)
+        .with_min_volume(req.min_volume)
+        .with_order_type(req.order_type)
+        .with_conf_settings(conf_settings)
+        .with_sender_pubkey(H256Json::from(our_public_id.bytes))
+        .with_save_in_history(req.save_in_history)
+        .with_base_orderbook_ticker(ordermatch_ctx.orderbook_ticker(base_coin.ticker()))
+        .with_rel_orderbook_ticker(ordermatch_ctx.orderbook_ticker(rel_coin.ticker()));
+    if let Some(timeout) = req.timeout {
+        order_builder = order_builder.with_timeout(timeout);
+    }
+    let order = order_builder
+        .build()
+        .map_to_mm(|e| TakerOrderError::from_taker_order_build_error(e, base_coin.ticker(), rel_coin.ticker()))?;
+
+    // The save comes first (CRD ch.32 R-GH8a): a failed save returns its error with nothing subscribed and no
+    // request sent.
+    save_my_new_taker_order(ctx.clone(), &order)
+        .await
+        .mm_err(|e| TakerOrderError::DbError(e.to_string()))?;
+
+    let request_orderbook = false;
+    subscribe_to_orderbook_topic(
+        ctx,
+        order.base_orderbook_ticker(),
+        order.rel_orderbook_ticker(),
+        request_orderbook,
+    )
+    .await
+    .map_to_mm(TakerOrderError::InternalError)?;
+    broadcast_ordermatch_message(
+        ctx,
+        vec![order.orderbook_topic()],
+        order.clone().into(),
+        order.p2p_keypair(),
     );
-    let res = try_s!(lp_auto_buy(&ctx, &base_coin, &rel_coin, input).await).into_bytes();
-    Ok(try_s!(Response::builder().body(res)))
+
+    let response = TakerOrderResponse(order.clone());
+    my_taker_orders.insert(order.request.uuid, order);
+    Ok(response)
 }
 
 /// Created when maker order is matched with taker request
@@ -2300,93 +2461,24 @@ pub struct TakerRequestForRpc<'a> {
     pub(crate) conf_settings: &'a Option<OrderConfirmationsSettings>,
 }
 
-#[allow(clippy::needless_borrow)]
+/// Places a taker order for the legacy callers and answers its `{"result": <order>}` body as text, failing with the
+/// legacy text of the failure. The action is the one the `method` of the input names. Callers that need the class of
+/// a failure use [`buy_core`] and [`sell_core`].
 pub async fn lp_auto_buy(
     ctx: &MmArc,
     base_coin: &MmCoinEnum,
     rel_coin: &MmCoinEnum,
     input: AutoBuyInput,
 ) -> Result<String, String> {
-    if input.price < MmNumber::from(BigRational::new(1.into(), 100_000_000.into())) {
-        return ERR!("Price is too low, minimum is 0.00000001");
-    }
-
     let action = match Some(input.method.as_ref()) {
         Some("buy") => TakerAction::Buy,
         Some("sell") => TakerAction::Sell,
         _ => return ERR!("Auto buy must be called only from buy/sell RPC methods"),
     };
-    // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain.
-    if let Some(error) = chain_disagreement(base_coin, rel_coin) {
-        return ERR!("{}", error);
-    }
-    // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
-    // balance check.
-    if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(ctx) {
-        return ERR!("{}", error);
-    }
-    // CRD ch.60 R60.6.7 item 3: the smallest trade the order can produce must be spendable on both legs.
-    try_s!(check_pre_trade_spend_safety(ctx, base_coin, rel_coin, input.min_volume.clone(), &input.price).await);
-    let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
-    let mut my_taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
-    let our_public_id = try_s!(ctx.public_id());
-    let rel_volume = &input.volume * &input.price;
-    let conf_settings = OrderConfirmationsSettings {
-        base_confs: input.base_confs.unwrap_or_else(|| base_coin.required_confirmations()),
-        base_nota: input.base_nota.unwrap_or_else(|| base_coin.requires_notarization()),
-        rel_confs: input.rel_confs.unwrap_or_else(|| rel_coin.required_confirmations()),
-        rel_nota: input.rel_nota.unwrap_or_else(|| rel_coin.requires_notarization()),
-    };
-    let mut order_builder = TakerOrderBuilder::new(base_coin, rel_coin)
-        .with_base_amount(input.volume)
-        .with_rel_amount(rel_volume)
-        .with_action(action)
-        .with_match_by(input.match_by)
-        .with_min_volume(input.min_volume)
-        .with_order_type(input.order_type)
-        .with_conf_settings(conf_settings)
-        .with_sender_pubkey(H256Json::from(our_public_id.bytes))
-        .with_save_in_history(input.save_in_history)
-        .with_base_orderbook_ticker(ordermatch_ctx.orderbook_ticker(base_coin.ticker()))
-        .with_rel_orderbook_ticker(ordermatch_ctx.orderbook_ticker(rel_coin.ticker()));
-    if let Some(timeout) = input.timeout {
-        order_builder = order_builder.with_timeout(timeout);
-    }
-    let order = try_s!(order_builder.build());
-
-    // The save comes first (CRD ch.32 R-GH8a): a failed save returns its error with nothing subscribed and no
-    // request sent.
-    save_my_new_taker_order(ctx.clone(), &order)
+    let response = place_taker_order(ctx, base_coin, rel_coin, input.into(), action)
         .await
-        .map_err(|e| ERRL!("{}", e))?;
-
-    let request_orderbook = false;
-    try_s!(
-        subscribe_to_orderbook_topic(
-            ctx,
-            order.base_orderbook_ticker(),
-            order.rel_orderbook_ticker(),
-            request_orderbook
-        )
-        .await
-    );
-    broadcast_ordermatch_message(
-        ctx,
-        vec![order.orderbook_topic()],
-        order.clone().into(),
-        order.p2p_keypair(),
-    );
-
-    let result = json!({ "result": LpautobuyResult {
-        request: (&order.request).into(),
-        order_type: &order.order_type,
-        min_volume: order.min_volume.clone().into(),
-        base_orderbook_ticker: &order.base_orderbook_ticker,
-        rel_orderbook_ticker: &order.rel_orderbook_ticker,
-    } });
-
-    my_taker_orders.insert(order.request.uuid, order);
-    Ok(result.to_string())
+        .map_err(|e| legacy_error(e))?;
+    Ok(json!({ "result": response }).to_string())
 }
 
 #[derive(Deserialize)]
@@ -3294,12 +3386,55 @@ pub struct FilteringOrder {
     pub status: String,
 }
 
-/// Returns *all* uuids of swaps, which match the selected filter.
-pub async fn orders_history_by_filter(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+/// The answer of `orders_history_by_filter`: the orders that match the filter, their details (empty unless the filter
+/// asked for them) and the number of matching records. The legacy surface answers it as `{"result": {"orders": ...,
+/// "details": ..., "found_records": ..., "warnings": ...}}` ([`orders_history_by_filter`]).
+pub struct OrdersHistoryResponse {
+    pub(crate) orders: Vec<FilteringOrder>,
+    pub(crate) details: Vec<Order>,
+    pub(crate) found_records: usize,
+    pub(crate) warnings: Vec<UuidParseError>,
+}
+
+impl serde::Serialize for OrdersHistoryResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        /// The members are in the wire order: `orders`, `details`, `found_records`, `warnings`.
+        #[derive(Serialize)]
+        struct OrdersHistory<'a> {
+            orders: &'a Vec<FilteringOrder>,
+            details: Vec<OrderForRpc<'a>>,
+            found_records: usize,
+            warnings: &'a Vec<UuidParseError>,
+        }
+
+        serde::Serialize::serialize(
+            &OrdersHistory {
+                orders: &self.orders,
+                details: self.details.iter().map(OrderForRpc::from).collect(),
+                found_records: self.found_records,
+                warnings: &self.warnings,
+            },
+            serializer,
+        )
+    }
+}
+
+/// The typed core of `orders_history_by_filter`: the orders of the history that match the filter; every filter member
+/// is optional. The legacy surface renders its answer under `result` ([`orders_history_by_filter`]).
+///
+/// # Errors
+///
+/// An [`OrdersHistoryError`] when the history cannot be read or the order-matching context of the node cannot be had.
+pub async fn orders_history_by_filter_core(
+    ctx: MmArc,
+    filter: MyOrdersFilter,
+) -> Result<OrdersHistoryResponse, MmError<OrdersHistoryError>> {
     let storage = MyOrdersStorage::new(ctx.clone());
 
-    let filter: MyOrdersFilter = try_s!(json::from_value(req));
-    let db_result = try_s!(storage.select_orders_by_filter(&filter, None).await);
+    let db_result = storage
+        .select_orders_by_filter(&filter, None)
+        .await
+        .mm_err(|e| OrdersHistoryError::DbError(e.to_string()))?;
 
     let mut warnings = vec![];
     let rpc_orders = if filter.include_details {
@@ -3326,7 +3461,7 @@ pub async fn orders_history_by_filter(ctx: MmArc, req: Json) -> Result<Response<
                 continue;
             }
 
-            let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(&ctx));
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).map_to_mm(OrdersHistoryError::InternalError)?;
             if order.order_type == "Maker" {
                 let maybe_order_mutex = ordermatch_ctx.maker_orders_ctx.lock().get_order(&uuid);
                 if let Some(maker_order_mutex) = maybe_order_mutex {
@@ -3346,19 +3481,20 @@ pub async fn orders_history_by_filter(ctx: MmArc, req: Json) -> Result<Response<
         vec![]
     };
 
-    let details: Vec<_> = rpc_orders.iter().map(OrderForRpc::from).collect();
+    Ok(OrdersHistoryResponse {
+        orders: db_result.orders,
+        details: rpc_orders,
+        found_records: db_result.total_count,
+        warnings,
+    })
+}
 
-    let json = json!({
-    "result": {
-        "orders": db_result.orders,
-        "details": details,
-        "found_records": db_result.total_count,
-        "warnings": warnings,
-    }});
-
-    let res = try_s!(json::to_vec(&json));
-
-    Ok(try_s!(Response::builder().body(res)))
+/// The legacy `orders_history_by_filter`: decodes the inline body as the filter, calls
+/// [`orders_history_by_filter_core`] and answers `{"result": {"orders": ..., "details": ..., "found_records": ...,
+/// "warnings": ...}}`.
+pub async fn orders_history_by_filter(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    let filter: MyOrdersFilter = try_s!(json::from_value(req));
+    legacy_result(orders_history_by_filter_core(ctx, filter).await)
 }
 
 #[derive(Deserialize)]
