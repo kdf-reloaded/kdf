@@ -35,14 +35,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   400, a failure of the node 500. An unknown member inside `params` is ignored. The legacy forms of the six
   methods and their answers are unchanged. This is a KDF Reloaded extension; the reference answers
   `NoSuchMethod` for these names under `mmrpc: "2.0"`. The remaining legacy-only methods follow in later
-  releases (plan `docs/plans/mmrpc-v2-completion.md`). Detail: PR #TBD; CRD ch.43 D43.1A.1 status note.
+  releases (plan `docs/plans/mmrpc-v2-completion.md`). Detail: PR #359; CRD ch.43 D43.1A.1 status note.
 
 ### Plans touched
 
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — planning, scheduled for 0.5.0: phase 1 (order
-  management) implemented in PR #TBD; decisions D1–D7 recorded; the Status value is left to the maintainer.
+  management) implemented in PR #359; decisions D1–D7 recorded; the Status value is left to the maintainer.
 
 ## [0.4.0-beta.1] — 2026-11-14
 
