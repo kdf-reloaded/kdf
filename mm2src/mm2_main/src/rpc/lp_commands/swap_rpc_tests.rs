@@ -5,7 +5,8 @@
 //!   stood on dev at `c7116883e`, derived from its code and marked with the handler that produced it; the expected
 //!   error texts are those of its `try_s!` sites. The `file:line] ` tokens in front of a legacy error text change with
 //!   every edit of the source, so they are split off, checked to name the file of the handler, and the text behind
-//!   them is compared whole ([`legacy_refusal`]). 1c compares the bodies with the answers of a dev build.
+//!   them is compared whole ([`legacy_refusal`]).
+//!   The expected bodies were compared with the answers of a release build in the lab row of PR #387.
 //! * The wire forms of the error enum of `all_swaps_uuids_by_filter` are checked in `lp_swap/swap_rpc_errors.rs`
 //!   (`import_swaps` has no error value).
 //! * The two methods are registered on the versioned surface. Requests run through the whole server path
