@@ -1,6 +1,6 @@
 # Plan: gaps of the browser build
 
-**Status:** planning (written 2026-11-15 from the WASM probe of November 2026; not scheduled) — **Last reviewed:** 2026-11-15
+**Status:** planning (written 2026-11-15 from the WASM probe of November 2026; not scheduled) — **Last reviewed:** 2026-11-16
 
 > **Context.** A survey and probe of the browser (WASM) build in November 2026 found two kinds of gap. Some are
 > limits of a browser by nature (no raw sockets, no inbound connections, no UDP, the browser owns TLS); the rest
@@ -60,7 +60,7 @@ version-two swap.
 | Item | Browser behavior today | Notes |
 | --- | --- | --- |
 | `gui_storage::*` (11 methods) | every call errors (its IndexedDB backend is not ported) | small–medium |
-| NFT methods (7) and NFT activation | `NoSuchMethod`; activation succeeds with an empty snapshot | needs browser history storage |
+| NFT methods (7) and NFT activation | `NoSuchMethod`; activation succeeds with an empty snapshot | needs browser history storage; two NFT store tests fail in a browser (G6) |
 | EVM Trezor policy and withdraw | request fails to parse | WebUSB already works for Trezor |
 | ETH/ERC20 legacy history | logs "not supported" and ends | needs browser history storage; four "not implemented in WASM" panics sit behind the same early return |
 | `tx_history: true` on token-platform activations | silently ignored | follows G1b |
@@ -95,14 +95,35 @@ browser build; [`docs/WASM_BUILD.md`](../WASM_BUILD.md) lists them for users.
 - **RPC server, configuration and log files, crash reports, allocator settings.** Absent; configuration comes
   from JavaScript and logs go to a JavaScript callback.
 
-## Running separately
+### G6 — Browser tests and lint (small–medium)
 
-Three small fixes found by the probe are handled outside this plan and the shielded plan, as their own changes:
+The repository's browser tests could not run after the `wasm-bindgen` bump: the lockfile pinned an old
+`wasm-bindgen-test` against the newer `wasm-bindgen`, the configured test runner was not installed, and every
+runner reported "no tests to run". They run again locally (PR #373); the browser tests of `coins` compile again
+(PR #388); and the browser test modules of the storage and network layers are kept out of non-test builds
+(PR #389). What remains:
 
-- the browser-store layer's event handlers are not withdrawn when a pending request is discarded (chapter 39
-  F39.6.6.1);
-- the vendored `zcash_primitives` breaks the wallet library's `orchard` feature on every target;
-- the demo page in `wasm_build/` imports a bundle name that the build no longer produces.
+- **A CI job for the browser tests.** No CI job runs them, so such a breakage is not caught.
+- **Failing browser tests.** Since PR #389 each crate's browser test binary runs only its own tests. On the last
+  run recorded in `docs/DEV_ENVIRONMENT.md`: `mm2_db` 17 tests, all pass; `mm2_net` 5, of which 3 pass and 2 fail
+  (the invalid-URL WebSocket test gets no error, and one text-scrubbing test reports a different result);
+  `coins` 24, of which 18 pass, 5 fail and 1 hangs (it needs a public SLP node). Three `coins` failures need
+  public nodes (Ethereum, two Electrum); the other two are NFT IndexedDB store tests: one hits a
+  `ConstraintError` while uploading an item, the other reads back nothing where a transfer is expected. The
+  cause of the two NFT failures is not investigated; they belong with the NFT row of G5.
+- **Lint of the browser target.** A clippy run on the browser target reports 31 existing errors in `mm2_db`,
+  `mm2_core` and `mm2_metrics` (needless borrows, `&Vec` parameters, `expect_fun_call`, a never-read field, a
+  needless `return`); no CI job lints the browser target.
+
+## Fixed since this plan was written
+
+The three small fixes the probe found are merged:
+
+- the browser-store layer withdraws its event handlers when a request's waiter is dropped (chapter 39
+  F39.6.6.1; PR #376);
+- the vendored `zcash_primitives` keeps `BundlePadding` in its published shape, so the wallet library builds with
+  its `orchard` feature on (PR #375);
+- the demo page in `wasm_build/` imports the bundle name the build produces (PR #374).
 
 ## Notes on the dependency tree
 
@@ -121,5 +142,6 @@ Three small fixes found by the probe are handled outside this plan and the shiel
 
 ## Order
 
-G3 and G1a first (small, no dependencies), then G2, then G5 by demand, then G1b with or after the shielded plan's
-W1. G4 follows the version-two swap work.
+G3 and G1a first (small, no dependencies), then G6's CI job, so that the other packages are tested in a
+browser, then G2, then G5 by demand, then G1b with or after the shielded plan's W1. G4 follows the version-two
+swap work.

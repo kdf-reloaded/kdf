@@ -1,6 +1,6 @@
 # Plan: shielded coins (ARRR) in the browser build
 
-**Status:** planning (written 2026-11-15 from the WASM probe of November 2026; not scheduled) — **Last reviewed:** 2026-11-15
+**Status:** planning (written 2026-11-15 from the WASM probe of November 2026; not scheduled) — **Last reviewed:** 2026-11-16
 
 > **Context.** A browser (WASM) build of KDF Reloaded refuses to activate a shielded coin: CRD chapter 39
 > R39.10.1, remaining deviation 1, and D39.6.a ("shielded coins in WASM — after the beta"). D39.6.a names three
@@ -101,15 +101,14 @@ D39.6.6.a–i.
 | D39.6.6.h — bounded block download | (2) sequential ranges, each stored on arrival, stated memory bound, progress per range | 10,000 blocks ≈ 1.84 MB compact; scan ~1,000 blocks/s, so ranges of a few thousand blocks keep memory small and progress visible | to be decided by the maintainer |
 | D39.6.6.i — browser endpoints | (1) the caller passes gRPC-web endpoints in `light_wallet_d_servers`, with a distinct "endpoint does not serve gRPC-web" report; reading `light_wallet_d_servers_wss` from the coins entry only if callers ask | The public gRPC-web endpoint answered from a page with CORS; what the admission rule of R39.11.7a does with a two-entry list needs a look | to be decided by the maintainer |
 
-## Running separately
+## Fixed since this plan was written
 
-Two small fixes found by the probe are handled outside this plan, as their own changes:
+Two small fixes found by the probe are merged:
 
-- the browser-store layer does not withdraw its event handlers when a pending request is discarded (chapter 39
-  F39.6.6.1, confirmed in our code); W1 does not depend on it, but the browser build as a whole does;
-- our vendored `zcash_primitives` breaks the wallet library's `orchard` feature on every target (a compile
-  error, not a resolution conflict). Today's code keeps that feature off; any use of the library's
-  Orchard/Ironwood scanning needs it reconciled first.
+- the browser-store layer withdraws its event handlers when a request's waiter is dropped (chapter 39
+  F39.6.6.1; PR #376);
+- our vendored `zcash_primitives` keeps `BundlePadding` in its published shape, so the wallet library builds with
+  its `orchard` feature on (PR #375); the library's Orchard/Ironwood scanning is no longer blocked by it.
 
 ## Acceptance
 
