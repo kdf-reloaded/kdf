@@ -73,6 +73,8 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
      stay refused (R18.11.23a, D18.11.10 (a)). Lab row L4 (ATOM mainnet, any
      funded address) is owed before READY. The WalletConnect forms stay
      refused until item 1a.
+     This tree has no IBC `withdraw`, so a watch-only coin cannot produce an
+     unsigned IBC document; that is a separate item (the IBC send route).
 2. **HD-wallet mode**: honor `path_to_address` under the coin's derivation path
    (R36.1.2, R36.1.4 step 3). The ch. 36 code-quality finding applies: derive
    the public key from the activated private key, not the wallet's root public

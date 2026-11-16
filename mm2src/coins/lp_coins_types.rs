@@ -822,12 +822,16 @@ impl Default for TransactionType {
     fn default() -> Self { TransactionType::StandardTransfer }
 }
 /// Transaction details
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+///
+/// `Serialize` is written by hand (see [`TransactionDetailsWire`]): a result serializes exactly as it always did,
+/// `tx_hex` and `tx_hash` included even when empty, except the unsigned result of a watch-only Tendermint coin
+/// (`unsigned` is `Some`), which omits the two members (CRD ch.36 R36.14.17).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct TransactionDetails {
     /// Raw bytes of signed transaction, this should be sent as is to `send_raw_transaction_bytes` RPC to broadcast the transaction.
-    /// Empty, and then omitted from the serialized form, only in the unsigned result of a watch-only Tendermint coin
-    /// (`unsigned` is `Some`, CRD ch.36 R36.14.17).
-    #[serde(default, skip_serializing_if = "bytes_json_is_empty")]
+    /// Empty in the unsigned result of a watch-only Tendermint coin (`unsigned` is `Some`, CRD ch.36 R36.14.17), and
+    /// omitted from the serialized form there and nowhere else.
+    #[serde(default)]
     pub tx_hex: BytesJson,
     /// The signed transaction in a coin's native JSON form, for a coin whose native
     /// serialisation of a transaction is JSON text rather than a binary encoding --
@@ -836,8 +840,8 @@ pub struct TransactionDetails {
     /// family; its absence means "this coin has no JSON carrier", never an error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tx_json: Option<Json>,
-    /// Transaction hash in hexadecimal format. Empty, and then omitted, only where `tx_hex` is (see there).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// Transaction hash in hexadecimal format. Empty and omitted in the unsigned result only (see `tx_hex`).
+    #[serde(default)]
     pub(crate) tx_hash: String,
     /// Coins are sent from these addresses
     pub(crate) from: Vec<String>,
@@ -875,10 +879,64 @@ pub struct TransactionDetails {
     pub(crate) memo: Option<String>,
     /// The unsigned document a watch-only Tendermint coin answers instead of a signed transaction (CRD ch.36
     /// R36.14.17). Its members sit flat in the result; `None` for every signed transaction and every other family.
-    #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+    #[serde(default, flatten)]
     pub(crate) unsigned: Option<UnsignedTransaction>,
 }
-fn bytes_json_is_empty(bytes: &BytesJson) -> bool { bytes.is_empty() }
+/// The serialized form of [`TransactionDetails`]: the members in their declared order and under their usual
+/// skip rules. `tx_hex` and `tx_hash` are left out when, and only when, the result is unsigned.
+#[derive(Serialize)]
+struct TransactionDetailsWire<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_hex: Option<&'a BytesJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_json: &'a Option<Json>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_hash: Option<&'a String>,
+    from: &'a Vec<String>,
+    to: &'a Vec<String>,
+    total_amount: &'a BigDecimal,
+    spent_by_me: &'a BigDecimal,
+    received_by_me: &'a BigDecimal,
+    my_balance_change: &'a BigDecimal,
+    block_height: u64,
+    timestamp: u64,
+    fee_details: &'a Option<TxFeeDetails>,
+    coin: &'a String,
+    internal_id: &'a BytesJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kmd_rewards: &'a Option<KmdRewardsDetails>,
+    transaction_type: &'a TransactionType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memo: &'a Option<String>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    unsigned: Option<&'a UnsignedTransaction>,
+}
+impl Serialize for TransactionDetails {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let signed = !self.is_unsigned();
+        TransactionDetailsWire {
+            tx_hex: signed.then_some(&self.tx_hex),
+            tx_json: &self.tx_json,
+            tx_hash: signed.then_some(&self.tx_hash),
+            from: &self.from,
+            to: &self.to,
+            total_amount: &self.total_amount,
+            spent_by_me: &self.spent_by_me,
+            received_by_me: &self.received_by_me,
+            my_balance_change: &self.my_balance_change,
+            block_height: self.block_height,
+            timestamp: self.timestamp,
+            fee_details: &self.fee_details,
+            coin: &self.coin,
+            internal_id: &self.internal_id,
+            kmd_rewards: &self.kmd_rewards,
+            transaction_type: &self.transaction_type,
+            memo: &self.memo,
+            unsigned: self.unsigned.as_ref(),
+        }
+        .serialize(serializer)
+    }
+}
 /// The sign document of the direct sign mode (CRD ch.36 R36.14.17): the serialized transaction body and auth info,
 /// the chain id and the account number of the signer.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -1245,5 +1303,51 @@ mod tx_fee_details_tests {
             coin: Some("RIN".to_owned()),
             amount: "0.0001".parse().unwrap(),
         }));
+    }
+}
+
+#[cfg(test)]
+mod transaction_details_wire_tests {
+    //! The serialized form of `TransactionDetails` for every result that is not the unsigned result of a watch-only
+    //! Tendermint coin is the one it always was (CRD ch.36 R36.14.17): the members in their declared order, `tx_hex`
+    //! and `tx_hash` present even when empty, and a row stored before the `unsigned` member existed reads and
+    //! writes back byte for byte.
+    use super::*;
+
+    const STORED_BCH_ROW: &str = r#"{"tx_hex":"0400","tx_hash":"f05d786bd4b647a5720094bf0a2c6f23b5e131c451d750a96102898f7b5458e8","from":["bchtest:from"],"to":["bchtest:to"],"total_amount":"1.5","spent_by_me":"1.5","received_by_me":"0","my_balance_change":"-1.5","block_height":100,"timestamp":200,"fee_details":{"type":"Utxo","coin":null,"amount":"0.00001"},"coin":"DOC","internal_id":"f05d786bd4b647a5720094bf0a2c6f23b5e131c451d750a96102898f7b5458e8","transaction_type":{"TokenTransfer":"aabb"}}"#;
+
+    const EMPTY_HEX_ROW: &str = r#"{"tx_hex":"","tx_hash":"","from":[],"to":[],"total_amount":"0","spent_by_me":"0","received_by_me":"0","my_balance_change":"0","block_height":0,"timestamp":0,"fee_details":null,"coin":"SOL","internal_id":"","transaction_type":"StandardTransfer"}"#;
+
+    #[test]
+    fn a_stored_bch_row_with_a_token_transfer_round_trips_byte_for_byte() {
+        let row: TransactionDetails = json::from_str(STORED_BCH_ROW).expect("a stored row deserializes");
+        assert!(!row.is_unsigned());
+        assert!(matches!(row.transaction_type, TransactionType::TokenTransfer(_)));
+        assert!(row.fee_details.is_some());
+        assert_eq!(json::to_string(&row).expect("a row serializes"), STORED_BCH_ROW);
+    }
+
+    #[test]
+    fn a_row_with_an_empty_hex_and_hash_keeps_both_members() {
+        // A Solana-style history row is built with an empty `tx_hex`; the member stays on the wire, as before.
+        let row: TransactionDetails = json::from_str(EMPTY_HEX_ROW).expect("a row deserializes");
+        assert!(!row.is_unsigned() && row.tx_hex.is_empty() && row.tx_hash.is_empty());
+        let wire = json::to_string(&row).expect("a row serializes");
+        assert_eq!(wire, EMPTY_HEX_ROW);
+        assert!(wire.contains(r#""tx_hex":"""#) && wire.contains(r#""tx_hash":"""#));
+    }
+
+    #[test]
+    fn only_an_unsigned_result_omits_the_two_members() {
+        let mut row: TransactionDetails = json::from_str(EMPTY_HEX_ROW).expect("a row deserializes");
+        row.unsigned = Some(UnsignedTransaction::Amino {
+            legacy_amino_json: "{}".to_owned(),
+            original_tx_type_url: "/x".to_owned(),
+        });
+        let wire: Json = json::to_value(&row).expect("a row serializes");
+        assert!(wire.get("tx_hex").is_none() && wire.get("tx_hash").is_none(), "{wire}");
+        assert_eq!(wire["legacy_amino_json"], "{}");
+        assert_eq!(wire["original_tx_type_url"], "/x");
+        assert!(wire.get("internal_id").is_some());
     }
 }
