@@ -1,8 +1,11 @@
 use super::{SwapEvent, SwapsContext};
+use crate::mm2::rpc::daemon_rpc_errors::{BanListError, BanPubkeyError};
+use crate::mm2::rpc::legacy_adapter::legacy_result;
 use chain::hash::H256;
 use common::now_ms;
 use http::Response;
 use mm2_core::mm_ctx::MmArc;
+use mm2_err_handle::prelude::*;
 use rpc::v1::types::H256 as H256Json;
 use serde_json::{self as json, Value as Json};
 use std::collections::hash_map::{Entry, HashMap};
@@ -67,18 +70,38 @@ pub fn is_pubkey_banned(ctx: &MmArc, pubkey: &H256Json) -> bool {
     banned.contains_key(pubkey)
 }
 
-pub async fn list_banned_pubkeys_rpc(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
-    let ctx = try_s!(SwapsContext::from_ctx(&ctx));
-    let mut banned_pubs = try_s!(ctx.banned_pubkeys.lock());
+/// The request of `list_banned_pubkeys`: it takes no members. Any object (members are ignored) and, through the
+/// versioned dispatcher, an absent or `null` `params` decode to it.
+#[derive(Deserialize)]
+pub struct ListBannedPubkeysRequest {}
+
+/// The typed core of `list_banned_pubkeys`: the live bans, as the JSON object (public key -> reason) that the legacy
+/// body carries under `result`.
+///
+/// # Errors
+///
+/// A [`BanListError`].
+pub async fn list_banned_pubkeys_core(
+    ctx: MmArc,
+    _req: ListBannedPubkeysRequest,
+) -> Result<Json, MmError<BanListError>> {
+    let ctx = SwapsContext::from_ctx(&ctx).map_to_mm(BanListError::Internal)?;
+    let mut banned_pubs = ctx
+        .banned_pubkeys
+        .lock()
+        .map_to_mm(|e| BanListError::Internal(e.to_string()))?;
     purge_expired(&mut banned_pubs);
-    let res = try_s!(json::to_vec(&json!({
-        "result": bare_reasons(&banned_pubs),
-    })));
-    Ok(try_s!(Response::builder().body(res)))
+    json::to_value(bare_reasons(&banned_pubs)).map_to_mm(|e| BanListError::Internal(e.to_string()))
 }
 
+/// The legacy `list_banned_pubkeys`: calls [`list_banned_pubkeys_core`] and answers `{"result": {...}}`.
+pub async fn list_banned_pubkeys_rpc(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+    legacy_result(list_banned_pubkeys_core(ctx, ListBannedPubkeysRequest {}).await)
+}
+
+/// The request of `ban_pubkey` (the legacy members, unchanged).
 #[derive(Deserialize)]
-struct BanPubkeysReq {
+pub struct BanPubkeysReq {
     pubkey: H256Json,
     reason: String,
     /// Optional ban lifetime in minutes. When present the ban auto-clears after this
@@ -87,43 +110,80 @@ struct BanPubkeysReq {
     duration_min: Option<u64>,
 }
 
-pub async fn ban_pubkey_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let req: BanPubkeysReq = try_s!(json::from_value(req));
-    let ctx = try_s!(SwapsContext::from_ctx(&ctx));
-    let mut banned_pubs = try_s!(ctx.banned_pubkeys.lock());
+/// The typed core of `ban_pubkey`: bans a public key, for `duration_min` minutes or until it is unbanned. The success is
+/// the text that the legacy body carries under `result`.
+///
+/// # Errors
+///
+/// A [`BanPubkeyError`]: `InvalidParam` when the key is banned already.
+pub async fn ban_pubkey_core(ctx: MmArc, req: BanPubkeysReq) -> Result<&'static str, MmError<BanPubkeyError>> {
+    let ctx = SwapsContext::from_ctx(&ctx).map_to_mm(BanPubkeyError::Internal)?;
+    let mut banned_pubs = ctx
+        .banned_pubkeys
+        .lock()
+        .map_to_mm(|e| BanPubkeyError::Internal(e.to_string()))?;
     purge_expired(&mut banned_pubs);
 
     match banned_pubs.entry(req.pubkey) {
-        Entry::Occupied(_) => ERR!("Pubkey is banned already"),
+        Entry::Occupied(_) => MmError::err(BanPubkeyError::InvalidParam("Pubkey is banned already".to_owned())),
         Entry::Vacant(entry) => {
             let expires_at = req.duration_min.map(|minutes| now_ms() / 1000 + minutes * 60);
             entry.insert(BannedPubkey {
                 reason: BanReason::Manual { reason: req.reason },
                 expires_at,
             });
-            let res = try_s!(json::to_vec(&json!({
-                "result": "success",
-            })));
-            Ok(try_s!(Response::builder().body(res)))
+            Ok("success")
         },
     }
 }
 
+/// The legacy `ban_pubkey`: decodes the inline body, calls [`ban_pubkey_core`] and answers `{"result": "success"}`.
+pub async fn ban_pubkey_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    let req: BanPubkeysReq = try_s!(json::from_value(req));
+    legacy_result(ban_pubkey_core(ctx, req).await)
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type", content = "data")]
-enum UnbanPubkeysReq {
+pub enum UnbanPubkeysReq {
     All,
     Few(Vec<H256Json>),
 }
 
-pub async fn unban_pubkeys_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let req: UnbanPubkeysReq = try_s!(json::from_value(req["unban_by"].clone()));
-    let ctx = try_s!(SwapsContext::from_ctx(&ctx));
-    let mut banned_pubs = try_s!(ctx.banned_pubkeys.lock());
+/// The request of `unban_pubkeys`: who to unban (the legacy member, unchanged).
+#[derive(Deserialize)]
+pub struct UnbanPubkeysRequest {
+    pub unban_by: UnbanPubkeysReq,
+}
+
+/// The success of `unban_pubkeys`: the content that the legacy body carries under `result`. The bans are the JSON
+/// objects (public key -> reason) that the legacy body is made of.
+#[derive(Serialize)]
+pub struct UnbanPubkeysResponse {
+    still_banned: Json,
+    unbanned: Json,
+    were_not_banned: Vec<H256Json>,
+}
+
+/// The typed core of `unban_pubkeys`: removes the bans of all or of the listed public keys. A listed key that was not
+/// banned is answered in `were_not_banned`; an empty list unbans nothing and is not a failure.
+///
+/// # Errors
+///
+/// A [`BanListError`].
+pub async fn unban_pubkeys_core(
+    ctx: MmArc,
+    req: UnbanPubkeysRequest,
+) -> Result<UnbanPubkeysResponse, MmError<BanListError>> {
+    let ctx = SwapsContext::from_ctx(&ctx).map_to_mm(BanListError::Internal)?;
+    let mut banned_pubs = ctx
+        .banned_pubkeys
+        .lock()
+        .map_to_mm(|e| BanListError::Internal(e.to_string()))?;
     purge_expired(&mut banned_pubs);
     let mut unbanned = HashMap::new();
     let mut were_not_banned = vec![];
-    match req {
+    match req.unban_by {
         UnbanPubkeysReq::All => {
             unbanned = banned_pubs.drain().collect();
         },
@@ -138,14 +198,19 @@ pub async fn unban_pubkeys_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>
             }
         },
     }
-    let res = try_s!(json::to_vec(&json!({
-        "result": {
-            "still_banned": bare_reasons(&banned_pubs),
-            "unbanned": bare_reasons(&unbanned),
-            "were_not_banned": were_not_banned,
-        },
-    })));
-    Ok(try_s!(Response::builder().body(res)))
+    Ok(UnbanPubkeysResponse {
+        still_banned: json::to_value(bare_reasons(&banned_pubs))
+            .map_to_mm(|e| BanListError::Internal(e.to_string()))?,
+        unbanned: json::to_value(bare_reasons(&unbanned)).map_to_mm(|e| BanListError::Internal(e.to_string()))?,
+        were_not_banned,
+    })
+}
+
+/// The legacy `unban_pubkeys`: decodes the `unban_by` member of the inline body, calls [`unban_pubkeys_core`] and
+/// answers `{"result": {"still_banned", "unbanned", "were_not_banned"}}`.
+pub async fn unban_pubkeys_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    let unban_by: UnbanPubkeysReq = try_s!(json::from_value(req["unban_by"].clone()));
+    legacy_result(unban_pubkeys_core(ctx, UnbanPubkeysRequest { unban_by }).await)
 }
 
 #[cfg(test)]
