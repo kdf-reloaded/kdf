@@ -58,7 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `unban_pubkeys`, in the same way as the methods above. With this, every method that only the legacy surface knew
   has a versioned form, except `recover_funds_of_swap` (waits for the swap architecture decisions),
   `stats_swap_status`, `get_trade_fee`, `electrum`, `enable`, `help` and `show_priv_key`, which stay legacy-only on
-  purpose. Detail: PR #TBD; CRD ch.43 §43.1R.
+  purpose. Detail: PR #387; CRD ch.43 §43.1R.
 
 #### Solana coins
 
@@ -221,7 +221,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `docs/WASM_BUILD.md`.
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
   management) implemented in PR #359, phase 2 (trading) in PR #372, phase 3 (wallet and coins) in PR #379,
-  phases 4 and 5 (swaps; daemon and network) in PR #TBD; decisions D1–D10 recorded; the extension is complete except
+  phases 4 and 5 (swaps; daemon and network) in PR #387; decisions D1–D10 recorded; the extension is complete except
   `recover_funds_of_swap`.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress (was parked):
   checked against the code on 2026-11-15: phases A–F not started; the state found and the order of the work packages are in its

@@ -1,6 +1,6 @@
 # Plan: finish mmrpc 2.0 support for the legacy-only RPC methods
 
-**Status:** in progress (0.5.0; phase 1 PR #359; phase 2 PR #372; phase 3 PR #379; phases 4 and 5 in PR #TBD; `recover_funds_of_swap` waits for the swap architecture decisions) — **Last reviewed:** 2026-11-15
+**Status:** in progress (0.5.0; phase 1 PR #359; phase 2 PR #372; phase 3 PR #379; phases 4 and 5 in PR #387; `recover_funds_of_swap` waits for the swap architecture decisions) — **Last reviewed:** 2026-11-15
 
 > **Context:** written 2026-11-09, after CRD ch.43 §43.1A (PR #312) bound which methods exist on
 > which request surface. This plan proposes a Reloaded extension: versioned (`mmrpc: "2.0"`) forms of
