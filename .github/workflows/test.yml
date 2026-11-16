@@ -239,6 +239,16 @@ jobs:
           # no environment variable, none is `#[ignore]`d.
           - name: tendermint
             cmd: "cargo test -p coins --lib -- tendermint:: lp_coins_ops::postponed_family_switch_tests"
+          # The Electrum connection-pool tests of `coins` (`utxo::rpc_clients::electrum_pool_tests`: server
+          # order, spread reads, tip checks, reconnects, the activation divergence rule) and the offline QRC20
+          # tests (`qrc20::`), selected by the path prefix `utxo::rpc_clients::electrum` (the modules
+          # `electrum_pool_tests`, `electrum_rpc_client`, `electrum_measure` and `electrum_pool`) and the module path
+          # `qrc20::`. No other cell selected them: the `withdraw-family` filter (`withdraw qtum bch slp`)
+          # matches neither path. They run against in-process loopback servers; the tests of these paths that
+          # need a public server carry the `live-network-tests` `cfg_attr(... ignore)` pattern
+          # (docs/UNIT_TESTS.md) and stay ignored here.
+          - name: electrum-qrc20
+            cmd: "cargo test -p coins --lib -- utxo::rpc_clients::electrum qrc20::"
 
     steps:
       - uses: actions/checkout@v7
@@ -371,7 +381,11 @@ jobs:
       - name: Clean up stale test containers
         run: |
           docker rm -f $(docker ps -aq --filter ancestor=artempikulin/testblockchain:multiarch) 2>/dev/null || true
+          # The QTUM image is pinned by digest (qrc20_tests.rs). `ancestor` resolves its value to a local
+          # image, and a pull by digest creates no `latest` tag, so the bare name alone would match nothing:
+          # match the digest form too (and the bare name, for runners that still hold the tag).
           docker rm -f $(docker ps -aq --filter ancestor=sergeyboyko/qtumregtest) 2>/dev/null || true
+          docker rm -f $(docker ps -aq --filter ancestor=sergeyboyko/qtumregtest@sha256:a8b9489074e388d7b59a3ff904323c9a87d8a228287deea92d7c5f04dd0f2df6) 2>/dev/null || true
 
       - name: Ensure Zcash params are present
         # The artempikulin/testblockchain image bind-mounts ~/.zcash-params

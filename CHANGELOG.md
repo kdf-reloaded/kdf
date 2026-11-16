@@ -100,6 +100,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+#### Browser (WASM) build
+
+- **The browser demo page loads the current WASM build again.** The page `wasm_build/index.html`
+  imported a module file name (`mm2.js`) that the build no longer produces, so it could not start;
+  it now imports `kdflib.js`. The build guide and the page's README name the files the build writes,
+  and the build output directory `wasm_build/deps/` is ignored by git. Detail: PR #374; CRD ch.2 directory table (lists `wasm_build/`).
+
 #### Transaction history
 
 - **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is
@@ -132,9 +139,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Tests
 
+- **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
+  runs the tests of the browser build again; before, the test runner found none ("no tests to run!"),
+  because the locked test library was far older than the locked `wasm-bindgen`. The test library is
+  updated to the matching release and the runner name in `.cargo/config.toml` is the standard one. This also
+  updates `wasm-bindgen-futures`, which the browser build uses at run time, to 0.4.67. No CI job runs the
+  browser tests yet. Detail: PR #373.
 - **The Tendermint unit tests of `coins` now run in CI.** A new CI job runs the Tendermint swap-flow,
   priority-fee and WalletConnect signer tests and the postponed-family switch tests; the loopback
   tests of the native RPC server join the maker-outbox job.
+- **The Electrum connection-pool tests and the offline QRC20 tests now run in CI.** No CI job ran them
+  before. A new job runs 203 tests: those of the Electrum client, pool and measurement modules and
+  the offline QRC20 tests (about 10 s of test time); 32 more need public servers and are skipped. Five QRC20 tests that turned out to need a public
+  testnet server are now marked as such and are skipped without network access, like other tests
+  that need public servers. The QTUM regtest image of the docker tests is now pinned to a fixed
+  version, so a re-published image cannot change what the tests run against. The three docker tests
+  that withdraw on public testnet servers no longer fail when two of those servers briefly disagree
+  about the chain: they turn the server height checks off, which they do not test. Detail: PR #377.
 
 ### Plans touched
 
