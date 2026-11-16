@@ -109,8 +109,9 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    is created and written for every coin the SQLite history store serves (BCH and
    SLP tokens included; their listing is unchanged), and the BCH/SLP fetcher
    prepares it at start; in PR #363 only Tendermint coins wrote it. Next item of
-   this plan after that change: the BCH/SLP lab row against the reference writer
-   (funds from outside the lab) and the TH-2 row on a local chain, both pending.
+   this plan after that change: the SLP token lab row against the reference writer
+   and the TH-2 row on a local chain, both pending; the BCH row (one transaction, fresh stores of both programs,
+   each listing the other's) was run on 2026-11-16 with equal results.
 5. **Hardware `priv_key_policy`.** The reference ignores `priv_key_policy` for
    Tendermint, so `"Trezor"` silently activates with the context key (ch. 36
    code-quality finding).

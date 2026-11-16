@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #380; CRD ch.X RY". -->
+<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
 
 ### Added
@@ -136,14 +136,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   returns the store's total, the right `skipped` count and `total_pages`. Detail: PR #363; CRD ch.53
   R53.2.4, R53.2.8.
 - **A history store written by this node is now listed by the other implementation for every coin
-  the store serves.** The SQLite history store keeps, beside the history rows, a small table of the
+  the store serves (as the cleared rule states; checked in the lab for Tendermint stores and for a one-transaction BCH store, not yet for SLP tokens).** The SQLite history store keeps, beside the history rows, a small table of the
   addresses each row concerns, and the other implementation lists only the rows that have entries
   there. Until now this node wrote that table for Tendermint coins only, so a BCH or SLP-token
   history database it had written was listed empty (or incomplete) when the same database was
   opened by the other implementation. The table is now created and filled for every coin that
   opens the store, rows already stored are given their entries when the BCH/SLP fetcher starts, and
   entries whose row is gone are removed. The listing of BCH and SLP tokens, and every stored row,
-  are unchanged. Detail: PR #380; CRD ch.36 R36.14.23 -- R36.14.26.
+  are unchanged. The SLP token rows rest on unit tests; no live SLP row is run, because the coins file
+  the lab uses has no SLP token entry; the live store comparison covers BCH alone. Detail: PR #380;
+  CRD ch.36 R36.14.23 -- R36.14.26.
 
 #### QTUM and QRC20
 

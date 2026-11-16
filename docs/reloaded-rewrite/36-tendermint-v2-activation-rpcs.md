@@ -1811,8 +1811,12 @@ clients.
 > test module of the store, and
 > `starting_the_fetcher_prepares_the_address_index_of_an_existing_store` in the
 > BCH/SLP fetcher's tests. A failed preparation is logged as a warning and the BCH/SLP fetcher goes on (no new stop path for that family; the Tendermint fetcher keeps its `Error` state). The sentences above that say "Tendermint only for now"
-> describe the state of PR #363. The comparison of a BCH/SLP store against the
-> reference writer is a lab row, pending.
+> describe the state of PR #363. The SLP token rows rest on unit tests; no live SLP row is run,
+> because the coins file the lab uses has no SLP token entry; the live store comparison covers BCH alone.
+> Checked on 2026-11-16 on the head 79a4c484b of this change with the Komodo DeFi Framework 2.6.0-beta reference build
+> as the other writer: for a BCH account with one transaction, fresh stores of both programs held the same row,
+> identifier and two address-index entries, and each program listed the other's store (one row). The comparison of an
+> SLP token store against the reference writer is a lab row, pending.
 
 ### 36.14.2 WalletConnect activation
 
