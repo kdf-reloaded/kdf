@@ -715,6 +715,14 @@ coin not activated in HD mode, answers `CoinIsActivatedNotWithHDWallet`.
    `AccountLimitReached` 400, `RpcInvalidResponse` 500, `WalletStorageError`
    500, `HwError` 410, `Transport` 500, `Internal` 500.
 
+> *Reloaded status (clean side, 2026-11-16):* the HD account methods now answer
+> the hardware-wallet conditions as `HwError` (string: a word of chapter 55
+> R55.2.17's vocabulary, 410) and a connection timeout as `Timeout` (408), as
+> item 5 binds; before, four names of their own answered them and the timeout
+> answered 500. Conditions without a vocabulary word answer `Internal` (500).
+> The other statuses of the set are unchanged; `UnexpectedUserAction` is still
+> not a variant of this set (its case answers `Internal`), which stays open.
+
 > **Code-quality finding (informative; trigger: apparent with little extra
 > effort while reading item 1).** A caller that asks for an `account_id`
 > already in use receives the `Internal` arm at the reference, although the
@@ -2411,3 +2419,7 @@ surface.
   mechanical identity comparison between the rows and a corpus-wide text
   search for the quoted WARN text; the gate script was not run because there
   are no code blocks. *Measure:* 0.00 on the discretionary-expression basis.
+- *Status note added 2026-11-16 (under §5.9B R35c item 5).* Reloaded-original,
+  clean side: it records this repository's alignment of the HD account methods'
+  hardware and timeout errors with the cleared item 5; no forbidden-class
+  input, chapter 01 R38 not engaged.

@@ -47,8 +47,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **The wallet and coin methods `my_balance`, `disable_coin`, `send_raw_transaction`, `validateaddress`,
   `convertaddress`, `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
   `set_required_confirmations` and `set_requires_notarization` accept `mmrpc: "2.0"` requests**, in the same
-  way as the order and trading methods above. Their typed errors follow the documented statuses of the versioned
-  `withdraw`: an unknown coin answers `NoSuchCoin` with HTTP 404, a node or network failure `Transport` with 502, a request the client
+  way as the order and trading methods above. Their typed errors follow the versioned `withdraw` as the reference
+  answers it: an unknown coin answers `NoSuchCoin` with HTTP 404, a node or network failure `Transport` with 502, a request the client
   got wrong 400. `disable_coin` names the swaps or orders that block the deactivation inside `error_data`.
   Legacy forms and success bodies unchanged, legacy error texts as above (no inner trace tokens). Detail:
   PR #379; CRD ch.43 §43.1R.
@@ -99,6 +99,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   §36.14.3.
 
 ### Changed
+
+#### RPC interface
+
+- **A transport failure of `withdraw` answers HTTP 502 instead of 500.** The versioned `withdraw`, `withdraw_nft` and the
+  start of `task::withdraw::init` answer the error `Transport` (a node or server that does not answer, or answers
+  unusably) with status 502, as the reference does; the token and the body are unchanged. A client that treats
+  `withdraw` failures by status class now sees a network fault as 5xx gateway class rather than a server error.
+  Detail: PR #386; CRD ch.43 R43.1D.2, ch.49 status note.
+- **A refused legacy `disable_coin` always carries the lists a client may read.** When running swaps or orders
+  being matched block the deactivation, or the coin is not active, the error body carries `orders` (with
+  `matching` and `cancelled`), `active_swaps` and `swaps` (the same list as `active_swaps`), all present and
+  empty where nothing applies; before, each refusal carried one of them or none. The error text, HTTP 500 and the
+  cancel-first behavior are unchanged. Detail: PR #386; CRD ch.43 R43.1E.3, D43.1E.1 status note.
+- **Hardware-wallet failures of `withdraw` answer the one error `HwError`.** The versioned `withdraw`, `withdraw_nft`
+  and the start of `task::withdraw::init` no longer answer `TrezorDisconnected`, `NoTrezorDeviceAvailable`,
+  `FoundUnexpectedDevice` or `HardwareWalletInternal`. A device condition answers `error_type` `HwError` with
+  HTTP 410 and `error_data` naming the condition with the same words the activation methods use
+  (`NoTrezorDeviceAvailable`, `FoundMultipleDevices`, `FoundUnexpectedDevice`, `InvalidPin`, `ButtonExpected`,
+  `UserCancelled`, `InvalidSignature`, ...), so a client handles hardware failures of every method alike. A
+  connection timeout answers `Timeout` (408). Device failures that have no such word (transport, protocol,
+  invalid key data, internal) answer `InternalError` with HTTP 500, as before under the removed name. Detail:
+  PR #386; CRD ch.50 R50.17 status note, ch.43 R43.1D.2, ch.55 R55.2.17.
+- **The HD account methods answer hardware-wallet failures as `HwError` too.** `task::create_new_account` and the
+  other HD account methods no longer answer `TrezorDisconnected`, `NoTrezorDeviceAvailable`, `FoundUnexpectedDevice`
+  or `HardwareWalletInternal`; a device condition answers `HwError` (410) with the same words as above, and a
+  device that does not answer in time answers `Timeout` with HTTP 408 instead of 500. Device failures without a word
+  answer `Internal` (500). Detail: PR #386; CRD ch.05 §5.9B R35c.
 
 #### Shielded coins
 

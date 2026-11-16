@@ -99,25 +99,49 @@ pub async fn disable_coin_core(
     })
 }
 
-/// The legacy answer of a refused `disable_coin`: HTTP 500 and `{"error": <text>}`, with the members that the two
-/// deactivation conflicts carry beside `error` (`swaps`, or `orders` with `matching` and `cancelled`); every other
-/// failure is the legacy error text.
+/// The orders member of the extended refusal body.
+#[derive(Serialize)]
+struct LegacyDisableCoinOrders<'a> {
+    matching: &'a [String],
+    cancelled: &'a [String],
+}
+
+/// The extended body of a refused `disable_coin` (CRD ch.43 R43.1E.3 with D43.1E.1 option (c)): four members, all always
+/// present, in this order. `active_swaps` and `swaps` hold the same list.
+#[derive(Serialize)]
+struct LegacyDisableCoinRefusalBody<'a> {
+    error: String,
+    orders: LegacyDisableCoinOrders<'a>,
+    active_swaps: &'a [String],
+    swaps: &'a [String],
+}
+
+impl<'a> LegacyDisableCoinRefusalBody<'a> {
+    fn new(error: String, matching: &'a [String], cancelled: &'a [String], swaps: &'a [String]) -> Self {
+        LegacyDisableCoinRefusalBody {
+            error,
+            orders: LegacyDisableCoinOrders { matching, cancelled },
+            active_swaps: swaps,
+            swaps,
+        }
+    }
+}
+
+/// The legacy answer of a refused `disable_coin`: HTTP 500 and the extended body of CRD ch.43 R43.1E.3 with D43.1E.1
+/// option (c), `{"error", "orders": {"matching", "cancelled"}, "active_swaps", "swaps"}`, for the two deactivation
+/// conflicts and for a coin that is not active (empty lists); every other failure is the legacy error text.
 #[track_caller]
 pub(crate) fn legacy_disable_coin_refusal(error: MmError<DisableCoinError>) -> Result<Response<Vec<u8>>, String> {
+    let text = error.get_inner().to_string();
     let body = match error.get_inner() {
         DisableCoinError::ActiveSwapsBlockDeactivation { swaps, .. } => {
-            json!({ "error": error.get_inner().to_string(), "swaps": swaps })
+            LegacyDisableCoinRefusalBody::new(text, &[], &[], swaps)
         },
         DisableCoinError::MatchingOrdersBlockDeactivation {
             matching, cancelled, ..
-        } => json!({
-            "error": error.get_inner().to_string(),
-            "orders": {
-                "matching": matching,
-                "cancelled": cancelled,
-            }
-        }),
-        DisableCoinError::NoSuchCoin { .. } | DisableCoinError::InternalError(_) => return Err(legacy_error(error)),
+        } => LegacyDisableCoinRefusalBody::new(text, matching, cancelled, &[]),
+        DisableCoinError::NoSuchCoin { .. } => LegacyDisableCoinRefusalBody::new(text, &[], &[], &[]),
+        DisableCoinError::InternalError(_) => return Err(legacy_error(error)),
     };
     let body = try_s!(json::to_vec(&body));
     Response::builder().status(500).body(body).map_err(|e| ERRL!("{}", e))
