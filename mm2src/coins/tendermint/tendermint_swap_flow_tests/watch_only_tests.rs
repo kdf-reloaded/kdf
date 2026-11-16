@@ -857,3 +857,69 @@ fn t36_58_broadcast_of_a_transaction_signed_outside_the_node() {
     }
     assert_eq!(broadcasts(&fx).len(), 2, "no request for a refused transaction");
 }
+
+/// The result as the RPC puts it on the wire: serialized to bytes and parsed back.
+fn on_the_wire(coin: &impl MmCoin, ticker: &str) -> Json {
+    let request: WithdrawRequest =
+        serde_json::from_value(json!({ "coin": ticker, "to": peer(), "amount": "1" })).expect("a withdraw request");
+    let details = common::block_on(coin.withdraw(request).compat()).unwrap_or_else(|e| panic!("withdraw: {e}"));
+    let bytes = serde_json::to_vec(&details).expect("a serializable result");
+    serde_json::from_slice(&bytes).expect("the bytes parse back")
+}
+
+fn sorted_keys(wire: &Json) -> Vec<&str> {
+    let mut keys: Vec<&str> = wire
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
+#[test]
+fn unsigned_and_signed_results_have_the_full_key_set() {
+    // R36.14.29: the members of an unsigned result, `to` and `total_amount` among them, and the unchanged members of
+    // a signed one, asserted on the bytes the RPC writes.
+    let common_keys = [
+        "block_height",
+        "coin",
+        "fee_details",
+        "from",
+        "internal_id",
+        "my_balance_change",
+        "received_by_me",
+        "spent_by_me",
+        "timestamp",
+        "to",
+        "total_amount",
+        "transaction_type",
+    ];
+    let with = |extra: &[&'static str]| {
+        let mut keys: Vec<&str> = common_keys.iter().copied().chain(extra.iter().copied()).collect();
+        keys.sort_unstable();
+        keys
+    };
+
+    let direct = watch_only(secp_key(), false);
+    script_t36_node(&direct, 7, 3);
+    assert_eq!(
+        sorted_keys(&on_the_wire(&direct.coin, "IRIS")),
+        with(&["memo", "sign_doc"])
+    );
+
+    let amino = watch_only(secp_key(), true);
+    script_t36_node(&amino, 7, 3);
+    assert_eq!(
+        sorted_keys(&on_the_wire(&amino.coin, "IRIS")),
+        with(&["legacy_amino_json", "memo", "original_tx_type_url"])
+    );
+
+    let keyed = fixture(Chain::Iris);
+    script_fee_estimation(&keyed, 80_000);
+    assert_eq!(
+        sorted_keys(&on_the_wire(&keyed.coin, "IRIS")),
+        with(&["tx_hash", "tx_hex"])
+    );
+}
