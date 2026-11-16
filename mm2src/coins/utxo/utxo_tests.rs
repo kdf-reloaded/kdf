@@ -109,7 +109,6 @@ pub fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
 }
 
 /// Returned client won't work by default, requires some mocks to be usable
-#[cfg(not(target_arch = "wasm32"))]
 fn native_client_for_test() -> NativeClient { NativeClient(Arc::new(NativeClientImpl::default())) }
 
 #[test]

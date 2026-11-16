@@ -227,6 +227,7 @@ mod tests {
         assert_eq!(resolve_trc20_decimals(&conf, "USDT").unwrap(), 6);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn rejects_empty_urls() {
         let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
@@ -240,6 +241,7 @@ mod tests {
         assert!(err.contains("at least 1 node URL"));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn rejects_invalid_url() {
         let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
@@ -253,6 +255,7 @@ mod tests {
         assert!(err.contains("not a valid URI"));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn invalid_url_error_does_not_echo_the_configured_string() {
         let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
@@ -269,6 +272,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn builds_native_trx_coin_with_tron_api() {
         let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
@@ -287,6 +291,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn builds_trc20_coin_with_token_addr() {
         let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
@@ -309,6 +314,7 @@ mod tests {
         assert!(coin.tron_api.is_some());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn rejects_trc20_without_decimals() {
         let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();

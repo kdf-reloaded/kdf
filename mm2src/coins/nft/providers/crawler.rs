@@ -725,6 +725,7 @@ mod tests {
     /// new transfers must leave the bookmark where it was rather than move it
     /// to a provider-reported head. Advancing it without having seen the
     /// intervening blocks would silently skip transfers on the next crawl.
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn empty_chain_leaves_bookmark_unadvanced() {
         let store = StubStore::default();
@@ -740,6 +741,7 @@ mod tests {
         assert_eq!(report.last_scanned_block, 0);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn first_receive_inserts_inventory_and_attaches_meta() {
         let owner = addr(0xA);
@@ -772,6 +774,7 @@ mod tests {
         assert_eq!(inner.attached_meta.len(), 1);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn receive_then_send_in_same_crawl_drops_inventory() {
         let owner = addr(0xA);
@@ -815,6 +818,7 @@ mod tests {
         assert!(store.inner.lock().unwrap().owned.is_empty());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn send_existing_token_drops_row() {
         let owner = addr(0xA);
@@ -846,6 +850,7 @@ mod tests {
         assert!(store.inner.lock().unwrap().owned.is_empty());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn erc1155_partial_send_decrements_amount() {
         let owner = addr(0xA);
@@ -880,6 +885,7 @@ mod tests {
         assert_eq!(stored.common.amount, BigDecimal::from(3));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn from_block_filter_skips_already_seen_transfers() {
         let owner = addr(0xA);
