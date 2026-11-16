@@ -37,14 +37,6 @@ fn create_tx_address_table_sql(for_coin: &str) -> Result<String, MmError<SqlErro
     ))
 }
 
-/// The address index is kept for a coin only after [`TxHistoryStorage::backfill_address_index`] created its table
-/// (the Tendermint fetcher does so at start); the stores of every other family stay without it.
-fn address_index_enabled(conn: &Connection, for_coin: &str) -> Result<bool, MmError<SqlError>> {
-    let table_name = tx_address_table(for_coin);
-    validate_table_name(&table_name)?;
-    Ok(query_single_row(conn, CHECK_TABLE_EXISTS_SQL, [table_name], string_from_row)?.is_some())
-}
-
 /// Writes the address index entries of one stored history row: one entry per distinct address in the `from` and `to`
 /// lists of `details`, `internal_id` in the stored form of the history row's column. An entry that exists is not
 /// written again.
@@ -57,9 +49,6 @@ fn write_address_index(
     internal_id: &str,
     details: &TransactionDetails,
 ) -> Result<(), MmError<SqlError>> {
-    if !address_index_enabled(conn, for_coin)? {
-        return Ok(());
-    }
     let table_name = tx_address_table(for_coin);
     validate_table_name(&table_name)?;
     let sql = format!(
@@ -83,9 +72,6 @@ fn write_address_index(
 ///
 /// CRD ch.36 R36.14.24 item 4.
 fn delete_address_index(conn: &Connection, for_coin: &str, internal_id: &str) -> Result<(), MmError<SqlError>> {
-    if !address_index_enabled(conn, for_coin)? {
-        return Ok(());
-    }
     let table_name = tx_address_table(for_coin);
     validate_table_name(&table_name)?;
     conn.execute(&format!("DELETE FROM {} WHERE internal_id = ?1;", table_name), [
@@ -295,7 +281,7 @@ fn finalize_get_history_sql_builder(sql_builder: &mut SqlBuilder, offset: usize,
     sql_builder.order_asc("internal_id");
 }
 
-/// Writes one history row with its cache entry and its address index entries (when the index is kept for the coin).
+/// Writes one history row with its cache entry and its address index entries.
 fn insert_history_row(conn: &Connection, for_coin: &str, tx: TransactionDetails) -> Result<(), MmError<SqlError>> {
     let tx_hash = tx.tx_hash.clone();
     let internal_id = format!("{:02x}", tx.internal_id);
@@ -376,10 +362,12 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
         let selfi = self.clone();
         let sql_history = create_tx_history_table_sql(for_coin)?;
         let sql_cache = create_tx_cache_table_sql(for_coin)?;
+        let sql_address = create_tx_address_table_sql(for_coin)?;
         async_blocking(move || {
             let conn = selfi.0.lock().unwrap();
             conn.execute(&sql_history, []).map(|_| ())?;
             conn.execute(&sql_cache, []).map(|_| ())?;
+            conn.execute(&sql_address, []).map(|_| ())?;
             Ok(())
         })
         .await
@@ -604,7 +592,6 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
         validate_table_name(&cache_table)?;
         let address_table = tx_address_table(for_coin);
         validate_table_name(&address_table)?;
-        let for_coin = for_coin.to_owned();
         let selfi = self.clone();
 
         async_blocking(move || {
@@ -612,9 +599,7 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
             let sql_transaction = conn.transaction()?;
             sql_transaction.execute(&format!("DELETE FROM {};", history_table), [])?;
             sql_transaction.execute(&format!("DELETE FROM {};", cache_table), [])?;
-            if address_index_enabled(&sql_transaction, &for_coin)? {
-                sql_transaction.execute(&format!("DELETE FROM {};", address_table), [])?;
-            }
+            sql_transaction.execute(&format!("DELETE FROM {};", address_table), [])?;
             sql_transaction.commit()?;
             Ok(())
         })
@@ -908,20 +893,104 @@ mod sql_tx_history_storage_tests {
         assert_eq!(address_entries(&storage, for_coin).len(), 5);
     }
 
+    /// A history row set shaped like the BCH/SLP one: coin rows (empty token id) and token rows, entries per row.
+    fn bch_style_details(id: &str, from: &[&str], to: &[&str], token_id: Option<&str>) -> TransactionDetails {
+        let mut details = address_index_details(id, from, to);
+        if let Some(token_id) = token_id {
+            details.transaction_type = crate::TransactionType::TokenTransfer(hex::decode(token_id).unwrap().into());
+        }
+        details
+    }
+
     #[test]
-    fn a_store_without_the_index_enabled_writes_no_index_entries() {
-        let for_coin = "address_index_not_enabled";
+    fn init_creates_the_address_table_and_every_store_writes_the_index() {
+        // The index belongs to the shared store (CRD ch.36 R36.14.23): no `backfill_address_index` call is needed.
+        let for_coin = "address_index_from_init";
         let storage = SqliteTxHistoryStorage::in_memory();
         block_on(storage.init(for_coin)).unwrap();
-        block_on(
-            storage.add_transactions_to_history(for_coin, vec![address_index_details("aa", &["other1"], &["other2"])]),
-        )
-        .unwrap();
-        block_on(storage.remove_tx_from_history(for_coin, &"aa".into())).unwrap();
-        block_on(storage.clear_history(for_coin)).unwrap();
+        block_on(storage.init(for_coin)).unwrap();
+        {
+            let conn = storage.0.lock().unwrap();
+            let found: Option<String> = query_single_row(
+                &conn,
+                CHECK_TABLE_EXISTS_SQL,
+                [tx_address_table(for_coin)],
+                string_from_row,
+            )
+            .unwrap();
+            assert!(found.is_some());
+        }
 
-        let conn = storage.0.lock().unwrap();
-        assert!(!address_index_enabled(&conn, for_coin).unwrap());
+        let token = "aa".repeat(32);
+        block_on(storage.add_transactions_to_history(for_coin, vec![
+            bch_style_details("aa", &["other1"], &["other2"], None),
+            bch_style_details("bb", &["me"], &["me"], Some(&token)),
+            bch_style_details("cc", &["other1"], &["me"], Some(&token)),
+        ]))
+        .unwrap();
+        assert_eq!(address_entries(&storage, for_coin).len(), 5);
+
+        // The listing of the coin rows and of the token rows is unchanged: scoped by the token id alone.
+        let coin_rows = block_on(storage.get_history(
+            HistoryCoinType::Coin(for_coin.to_owned()),
+            PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap()),
+            10,
+        ))
+        .unwrap();
+        assert_eq!(coin_rows.total, 1);
+        let token_rows = block_on(storage.get_history(
+            HistoryCoinType::Token {
+                platform: for_coin.to_owned(),
+                token_id: hex::decode(&token).unwrap().into(),
+            },
+            PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap()),
+            10,
+        ))
+        .unwrap();
+        assert_eq!(token_rows.total, 2);
+
+        block_on(storage.remove_tx_from_history(for_coin, &"aa".into())).unwrap();
+        assert_eq!(address_entries(&storage, for_coin).len(), 3);
+        block_on(storage.clear_history(for_coin)).unwrap();
+        assert!(address_entries(&storage, for_coin).is_empty());
+    }
+
+    #[test]
+    fn preparing_an_existing_bch_style_store_backfills_and_cleans_orphans() {
+        // A store written before the index existed: init (as the BCH fetcher calls it) keeps its rows, the
+        // preparation step writes the entries of every row that has none and removes entries whose row is missing.
+        let for_coin = "address_index_bch_store";
+        let storage = SqliteTxHistoryStorage::in_memory();
+        let token = "bb".repeat(32);
+        block_on(storage.init(for_coin)).unwrap();
+        block_on(storage.add_transactions_to_history(for_coin, vec![
+            bch_style_details("aa", &["other1"], &["other2"], None),
+            bch_style_details("bb", &["me"], &["me"], Some(&token)),
+        ]))
+        .unwrap();
+        {
+            let conn = storage.0.lock().unwrap();
+            conn.execute(&format!("DELETE FROM {};", tx_address_table(for_coin)), [])
+                .unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {} (internal_id, address) VALUES ('gone', 'x');",
+                    tx_address_table(for_coin)
+                ),
+                [],
+            )
+            .unwrap();
+        }
+
+        block_on(storage.init(for_coin)).unwrap();
+        block_on(storage.backfill_address_index(for_coin)).unwrap();
+        let entries = address_entries(&storage, for_coin);
+        assert_eq!(entries.len(), 3);
+        assert!(entries.iter().all(|(id, _)| id != "gone"));
+
+        // A second preparation changes nothing.
+        block_on(storage.backfill_address_index(for_coin)).unwrap();
+        assert_eq!(address_entries(&storage, for_coin), entries);
     }
 
     #[test]

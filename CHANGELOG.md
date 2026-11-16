@@ -135,6 +135,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   reported the page size as `total`, and a request with `from_id` could return an empty page; it now
   returns the store's total, the right `skipped` count and `total_pages`. Detail: PR #363; CRD ch.53
   R53.2.4, R53.2.8.
+- **A history store written by this node is now listed by the other implementation for every coin
+  the store serves.** The SQLite history store keeps, beside the history rows, a small table of the
+  addresses each row concerns, and the other implementation lists only the rows that have entries
+  there. Until now this node wrote that table for Tendermint coins only, so a BCH or SLP-token
+  history database it had written was listed empty (or incomplete) when the same database was
+  opened by the other implementation. The table is now created and filled for every coin that
+  opens the store, rows already stored are given their entries when the BCH/SLP fetcher starts, and
+  entries whose row is gone are removed. The listing of BCH and SLP tokens, and every stored row,
+  are unchanged. Detail: PR #N; CRD ch.36 R36.14.23 -- R36.14.26.
 
 #### QTUM and QRC20
 
@@ -204,7 +213,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
-  Tendermint transaction history, is built in PR #363.
+  Tendermint transaction history, is built in PR #363; its address index now covers every
+  store-served coin family (PR #N).
 
 ## [0.4.0-beta.1] — 2026-11-14
 
