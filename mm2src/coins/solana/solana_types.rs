@@ -152,6 +152,91 @@ fn generate_keypair_from_slice(priv_key: &[u8]) -> Result<Keypair, MmError<KeyPa
         .map_to_mm(|e| KeyPairCreationError::KeyPairFromSeed(e.to_string()))
 }
 
+/// The value of `hd_path_layout` that selects `<derivation_path>/N'/0'` (CRD ch.40 R40.1A.2). The default.
+pub const SOLANA_HD_LAYOUT_BIP44_CHANGE: &str = "bip44_change";
+/// The value of `hd_path_layout` that selects `<derivation_path>/N'` (CRD ch.40 R40.1A.2).
+pub const SOLANA_HD_LAYOUT_BIP44: &str = "bip44";
+/// The base path of a coin entry without `derivation_path` (SLIP-0044 coin type 501).
+pub const SOLANA_DEFAULT_DERIVATION_PATH: &str = "m/44'/501'";
+
+/// The `hd_path_layout` of a request: where the account level sits under an HD login (CRD ch.40 R40.1A.2).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum SolanaHdLayout {
+    /// `<derivation_path>/N'/0'`
+    #[default]
+    Bip44Change,
+    /// `<derivation_path>/N'`
+    Bip44,
+}
+
+impl SolanaHdLayout {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SolanaHdLayout::Bip44Change => SOLANA_HD_LAYOUT_BIP44_CHANGE,
+            SolanaHdLayout::Bip44 => SOLANA_HD_LAYOUT_BIP44,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SolanaHdLayout {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        match value.as_str() {
+            SOLANA_HD_LAYOUT_BIP44_CHANGE => Ok(SolanaHdLayout::Bip44Change),
+            SOLANA_HD_LAYOUT_BIP44 => Ok(SolanaHdLayout::Bip44),
+            _ => Err(serde::de::Error::custom(format!(
+                "Invalid `hd_path_layout`: expected `{SOLANA_HD_LAYOUT_BIP44_CHANGE}` or `{SOLANA_HD_LAYOUT_BIP44}`"
+            ))),
+        }
+    }
+}
+
+/// One hardened level of a base path such as `44'`: the index without the hardened bit.
+fn parse_hardened_level(level: &str) -> Option<u32> {
+    let digits = level.strip_suffix('\'')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<u32>().ok().filter(|index| *index < 0x8000_0000)
+}
+
+/// The full derivation path of the platform key under a global-HD login (CRD ch.40 R40.1A.2): the coin entry's
+/// `derivation_path` (default `m/44'/501'`), then the account level and, for [`SolanaHdLayout::Bip44Change`], a
+/// change level `0'`. A base path that is not a two-level hardened path, or an account that cannot be hardened, is
+/// an error naming the offending member.
+pub fn solana_hd_derivation_path(conf: &Json, layout: SolanaHdLayout, account_id: u32) -> Result<String, String> {
+    let base = match conf.get("derivation_path") {
+        None | Some(Json::Null) => SOLANA_DEFAULT_DERIVATION_PATH,
+        Some(Json::String(path)) => path.as_str(),
+        Some(_) => return Err("Invalid `derivation_path`: expected a string".to_owned()),
+    };
+    let invalid = || {
+        format!("Invalid `derivation_path` `{base}`: expected a two-level hardened path such as `{SOLANA_DEFAULT_DERIVATION_PATH}`")
+    };
+    let levels: Vec<&str> = base.strip_prefix("m/").ok_or_else(invalid)?.split('/').collect();
+    if levels.len() != 2 || levels.iter().any(|level| parse_hardened_level(level).is_none()) {
+        return Err(invalid());
+    }
+    if account_id >= 0x8000_0000 {
+        return Err("Invalid `path_to_address`: `account_id` is out of range".to_owned());
+    }
+    Ok(match layout {
+        SolanaHdLayout::Bip44Change => format!("{base}/{account_id}'/0'"),
+        SolanaHdLayout::Bip44 => format!("{base}/{account_id}'"),
+    })
+}
+
+/// The 32-byte ed25519 secret at `path` (SLIP-0010 over the wallet's BIP-39 seed); the Solana keypair is built from
+/// it the same way as from the single key. The error text never carries key material.
+pub fn solana_hd_secret(global_hd: &crypto::GlobalHDAccountArc, path: &str) -> Result<[u8; 32], String> {
+    let derivation_path: ed25519_dalek_bip32::DerivationPath =
+        path.parse().map_err(|_| format!("Invalid derivation path `{path}`"))?;
+    let key = global_hd
+        .derive_ed25519_signing_key(&derivation_path)
+        .map_err(|_| format!("Could not derive the key at `{path}`"))?;
+    Ok(key.signing_key.to_bytes())
+}
+
 pub async fn solana_coin_from_conf_and_params(
     ticker: &str,
     _conf: &Json,

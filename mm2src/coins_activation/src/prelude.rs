@@ -27,8 +27,9 @@ impl TxHistory for coins::utxo::bch::BchActivationRequest {
 pub enum DerivationMethod {
     /// Legacy iguana's privkey derivation, used by default
     Iguana,
-    /// HD wallet derivation path, String is temporary here
-    #[allow(dead_code)]
+    /// HD wallet derivation path, String is temporary here. Only the Solana result uses it, and Solana is
+    /// native-only.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     HDWallet(String),
 }
 

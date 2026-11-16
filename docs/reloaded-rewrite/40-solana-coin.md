@@ -130,9 +130,103 @@ context fails platform activation (`PlatformCoinCreationError`). A token's
 address is the associated token account of the platform address for
 (`mint_address`, `program_id`), per the SPL associated-token-account derivation.
 
+> **Reloaded status (clean side, 2026-11-16).** Resolved for Reloaded by the
+> maintainer's decisions of 2026-11-15: a global-HD login activates with a
+> key derived from the seed (§40.1A) instead of failing; a hardware-wallet
+> policy is refused (R40.1A.6); no request selects WalletConnect, and its
+> `priv_key_policy` form is an invalid request. The single-key rule above is
+> unchanged. PR #N.
+
 R40.1.5 **Node selection.** Each request that needs the chain selects, in list
 order, the first node whose Solana JSON-RPC `getHealth` succeeds and uses it;
 when none succeeds the operation fails (mapped per §40.2 / §40.3).
+
+## 40.1A Keys under each login (Reloaded-original)
+
+The reference derives no Solana key from an HD seed at any public state and
+refuses a global-HD login (R40.6B.7). By the maintainer's decisions of
+2026-11-15 Reloaded derives the key under a global-HD login, keeps the
+single-key rule of R40.1.4 and refuses a hardware wallet.
+
+**R40.1A.1** *Key source by login.*
+
+| Login | Key |
+| --- | --- |
+| single-key (passphrase) | the key of R40.1.4; `hd_path_layout` and `path_to_address` are ignored |
+| global-HD | the SLIP-0010 ed25519 key derived from the wallet's BIP-39 seed at the path of R40.1A.2; the passphrase-hash key is never used for Solana |
+
+**R40.1A.2** *Path.* The coin entry's `derivation_path`, then the account
+level and, for the default layout, a change level; every level is hardened.
+
+| `hd_path_layout` | Path | Example (account 0) |
+| --- | --- | --- |
+| `"bip44_change"` (default when absent) | `<derivation_path>/N'/0'` | `m/44'/501'/0'/0'` |
+| `"bip44"` | `<derivation_path>/N'` | `m/44'/501'/0'` |
+
+N is `path_to_address.account_id` (default 0); `path_to_address.chain`
+must be `External` and `path_to_address.address_id` must be 0, because
+neither layout has an address-index level. A coin entry without
+`derivation_path` uses `m/44'/501'` (SLIP-0044 coin type 501).
+
+**R40.1A.3** *No stored state.* The layout is a request parameter, like
+`path_to_address`: the request's value, or the default when the member is
+absent. Nothing is stored per wallet; the same request gives the same
+address on every machine and in every session. A client that activated with
+`"bip44"` must send `"bip44"` again on every later activation, or it gets the
+default layout's address.
+
+**R40.1A.4** *One seed phrase, three addresses.* The same words give three
+different Solana addresses: used as a single-key passphrase (R40.6B.8), as an
+HD seed with `"bip44_change"`, and as an HD seed with `"bip44"`. None of them
+is wrong; a user who changes login or layout sees another address, and funds
+stay at the address they were sent to.
+
+**R40.1A.5** *Request members* on `enable_solana_with_tokens` (the
+compatibility methods take the same members when they are added):
+
+| Member | JSON type | Default | Under a single-key login |
+| --- | --- | --- | --- |
+| `hd_path_layout` | string, `"bip44_change"` or `"bip44"` | `"bip44_change"` | ignored |
+| `path_to_address` | `{account_id, chain, address_id}` | account 0, `External`, 0 | ignored |
+| `priv_key_policy` | object | the context key | as under HD |
+
+**R40.1A.6** *Errors.*
+
+| Case | `error_type` | `error_data` | HTTP |
+| --- | --- | --- | --- |
+| `hd_path_layout` other than the two values | `InvalidRequest` | string | 400 |
+| `priv_key_policy` of a form this method does not accept (the WalletConnect form included) | `InvalidRequest` | string | 400 |
+| `priv_key_policy` of a hardware wallet, or of another accepted form that is not the context key | `PlatformCoinCreationError` | `{ticker, error}` | 500 |
+| under HD: `path_to_address` that does not parse, a `chain` other than `External`, or an `address_id` other than 0 | `PlatformCoinCreationError` | `{ticker, error}` | 500 |
+| under HD: a `derivation_path` that is not a two-level hardened path | `PlatformCoinCreationError` | `{ticker, error}` | 500 |
+
+A refused `priv_key_policy` is answered before any node is contacted.
+
+**R40.1A.7** *Result.* `derivation_method` is `{"type": "HDWallet", "data":
+"<full path>"}` under a global-HD login and `{"type": "Iguana"}` under a
+single-key login (R40.3A.2).
+
+**T40.1A.1** *Vectors.* Mnemonic of eleven times `abandon` then `about`,
+empty BIP-39 passphrase; computed outside this repository with an
+independent SLIP-0010 implementation that reproduces the published
+SLIP-0010 ed25519 test vector 1:
+
+| Layout | Account | Address |
+| --- | --- | --- |
+| `bip44_change` | 0 | `HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk` |
+| `bip44_change` | 1 | `Hh8QwFUA6MtVu1qAoq12ucvFHNwCcVTV7hpWjeY1Hztb` |
+| `bip44` | 0 | `GjJyeC1r2RgkuoCWMyPYkCWSGSGLcz266EaAkLA27AhL` |
+| `bip44` | 1 | `ANf3TEKFL6jPWjzkndo4CbnNdUNkBk4KHPggJs2nu8Xi` |
+
+The same words as a single-key passphrase give
+`7zuqksARN8uXHz2yvrkiZZDPeALBSjzK12nkMPNzKSCJ` (R40.6B.8), different from all
+four.
+
+**T40.1A.2** Every row of R40.1A.6; the refused `priv_key_policy` rows with no
+node contacted.
+
+**T40.1A.3** Under a single-key login, `hd_path_layout` and `path_to_address`
+change nothing.
 
 ## 40.2 `experimental::enable_solana_with_assets`
 
@@ -1167,6 +1261,10 @@ chosen, chapter 05 R46 and T40.8 must be made to say the same thing.
 > R46 and T40.8 are aligned in the change that implements it. Nothing of it
 > is built yet.
 
+> *Reloaded status (clean side, 2026-11-16):* built in PR #N: the layouts
+> `bip44_change` (default) and `bip44`, chosen per request, nothing stored
+> (§40.1A); chapter 05 R46 and T40.8 carry matching status notes.
+
 **D40.6B.8** *The swap program (F40.6B.5).* Options: (a) target the public
 program of F40.6B.5 when Solana swaps are designed; (b) design or deploy
 another; (c) decide nothing now. *Recommendation:* (c). The lane is
@@ -1403,6 +1501,9 @@ T40.7 `tx_history: true` does not abort the request (R40.2.5).
 
 T40.8 An HD-wallet context yields HTTP 500 `PlatformCoinCreationError`.
 
+> **Reloaded status (clean side, 2026-11-16).** Retired for Reloaded;
+> T40.1A.1-T40.1A.3 replace it. PR #N.
+
 T40.9 (beta) While `SOLANA_ACTIVATION_AVAILABLE` is `false`, a well-formed
 `enable_solana_with_tokens` request answers HTTP 500 `PlatformCoinCreationError`
 and `enable_spl` answers HTTP 500 `Internal`, each with "Solana support is not
@@ -1420,6 +1521,9 @@ A unit test; it needs no activation and runs while Solana is switched off.
 D40.1 Solana transaction history.
 
 D40.2 HD-wallet, hardware-wallet and WalletConnect Solana policies.
+
+> **Reloaded status (clean side, 2026-11-16).** HD done (§40.1A, PR #N);
+> hardware-wallet and WalletConnect signing remain deferred.
 
 D40.3 Add the reference compatibility surface of §40.1-§40.3 (the two
 `experimental::` methods on all targets and the `SOLANA` / `SOLANATOKEN`
@@ -1581,3 +1685,8 @@ with the shapes listed in §40.6 items 3-5.
   own activation methods from this repository's code and the maintainer's
   decision of 2026-11-15 to map their failures as §40.2-§40.3 do. They take
   no forbidden-class input beyond the cleared rules they cite.
+- *Clean-context addition (2026-11-16, forbidden corpus not consulted):*
+  §40.1A (R40.1A.1-R40.1A.7, T40.1A.1-T40.1A.3) and the status notes after
+  R40.1.4, T40.8, D40.2 and D40.6B.7 rest on the maintainer's decisions of
+  2026-11-15, the public SLIP-0010, SLIP-0044 and BIP-39 specifications, and
+  this repository's own code. The vectors were computed, not read.

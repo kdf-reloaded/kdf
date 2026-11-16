@@ -9,11 +9,15 @@ use async_trait::async_trait;
 use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 use coins::node_url::scrub_urls_in_text;
+use coins::rpc_command::get_my_address::PathToAddress;
 use coins::solana::spl::SplProtocolConf;
-use coins::{solana_coin_from_conf_and_params, CoinBalance, CoinProtocol, MarketCoinOps, SolanaActivationParams,
-            SolanaCoin, SplToken, SOLANA_ACTIVATION_AVAILABLE, SOLANA_NOT_AVAILABLE};
+use coins::solana::{solana_hd_derivation_path, solana_hd_secret, SolanaHdLayout};
+use coins::{coin_conf, solana_coin_from_conf_and_params, CoinBalance, CoinProtocol, MarketCoinOps,
+            PrivKeyActivationPolicy, SolanaActivationParams, SolanaCoin, SplToken, SOLANA_ACTIVATION_AVAILABLE,
+            SOLANA_NOT_AVAILABLE};
 use common::mm_number::BigDecimal;
 use common::Future01CompatExt;
+use crypto::{Bip44Chain, CryptoCtx, KeyPairPolicy};
 use futures::future::AbortHandle;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
@@ -89,15 +93,107 @@ impl RegisterTokenInfo<SplToken> for SolanaCoin {
     fn register_token_info(&self, token: &SplToken) { self.add_spl_token_info(token.ticker().into(), token.get_info()) }
 }
 
+/// The `enable_solana_with_tokens` request. The key members (CRD ch.40 R40.1A.5) are all optional:
+/// `hd_path_layout` (an unknown value fails request parsing), `path_to_address` and `priv_key_policy` (any form
+/// other than a bare or tagged `ContextPrivKey`, `IguanaPrivKey` or `Trezor` fails request parsing).
 #[derive(Clone, Debug, Deserialize)]
 pub struct SolanaWithTokensActivationRequest {
     #[serde(flatten)]
     platform_request: SolanaActivationParams,
     spl_tokens_requests: Vec<TokenActivationRequest<SplActivationRequest>>,
+    #[serde(default)]
+    hd_path_layout: Option<SolanaHdLayout>,
+    // Kept raw: it matters under an HD login only, where a value that does not parse is a platform-coin creation
+    // error (CRD ch.40 R40.1A.6); under a single-key login it is ignored whatever it holds.
+    #[serde(default)]
+    path_to_address: Option<Json>,
+    #[serde(default)]
+    priv_key_policy: Option<PrivKeyActivationPolicy>,
+}
+
+fn creation_error(ticker: &str, error: impl Into<String>) -> MmError<SolanaWithTokensActivationError> {
+    MmError::new(SolanaWithTokensActivationError::PlatformCoinCreationError {
+        ticker: ticker.to_owned(),
+        error: error.into(),
+    })
+}
+
+/// Refuses a `priv_key_policy` the platform cannot honour before any node is contacted (CRD ch.40 R40.1A.6):
+/// a hardware key, and `IguanaPrivKey` under a global-HD login (it asks for the passphrase-hash key, which Solana
+/// never uses under HD). An absent value and `ContextPrivKey` always pass; `IguanaPrivKey` passes under a
+/// single-key login, where the context key is that key.
+fn reject_unsupported_policy(
+    ticker: &str,
+    priv_key_policy: &Option<PrivKeyActivationPolicy>,
+    is_hd_login: bool,
+) -> Result<(), MmError<SolanaWithTokensActivationError>> {
+    match priv_key_policy {
+        Some(PrivKeyActivationPolicy::Trezor) => Err(creation_error(
+            ticker,
+            "the hardware key policy is not supported for Solana coins; activate with the local key",
+        )),
+        Some(PrivKeyActivationPolicy::IguanaPrivKey) if is_hd_login => Err(creation_error(
+            ticker,
+            "the `IguanaPrivKey` policy asks for the passphrase-hash key, which Solana coins do not use under an \
+             HD login; activate with `ContextPrivKey`",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The account of a request under an HD login (CRD ch.40 R40.1A.2, R40.1A.6): `path_to_address` defaults to
+/// account 0, `External`, address 0; a value that does not parse, a `chain` other than `External` and an
+/// `address_id` other than 0 are platform-coin creation errors, because neither layout has an address-index level.
+fn hd_account_of(
+    ticker: &str,
+    path_to_address: &Option<Json>,
+) -> Result<u32, MmError<SolanaWithTokensActivationError>> {
+    let path_to_address = match path_to_address {
+        Some(path) if !path.is_null() => serde_json::from_value::<PathToAddress>(path.clone()).map_to_mm(|e| {
+            SolanaWithTokensActivationError::PlatformCoinCreationError {
+                ticker: ticker.to_owned(),
+                error: format!("Invalid `path_to_address`: {e}"),
+            }
+        })?,
+        _ => PathToAddress::default(),
+    };
+    if path_to_address.chain != Bip44Chain::External {
+        return Err(creation_error(
+            ticker,
+            "Invalid `path_to_address`: `chain` must be `External`, Solana paths have no address-index level",
+        ));
+    }
+    if path_to_address.address_id != 0 {
+        return Err(creation_error(
+            ticker,
+            "Invalid `path_to_address`: `address_id` must be 0, Solana paths have no address-index level",
+        ));
+    }
+    Ok(path_to_address.account_id)
 }
 
 impl TxHistory for SolanaWithTokensActivationRequest {
     fn tx_history(&self) -> bool { false }
+}
+
+/// The `derivation_method` of the result (CRD ch.40 R40.1A.7): the full path under a global-HD login (the request
+/// was validated when the coin was built), `Iguana` under a single-key login.
+pub(crate) fn derivation_method_of(
+    ctx: &MmArc,
+    ticker: &str,
+    activation_request: &SolanaWithTokensActivationRequest,
+) -> Result<DerivationMethod, MmError<SolanaWithTokensActivationError>> {
+    let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| SolanaWithTokensActivationError::Internal(e.to_string()))?;
+    match crypto_ctx.key_pair_policy() {
+        KeyPairPolicy::Iguana => Ok(DerivationMethod::Iguana),
+        KeyPairPolicy::GlobalHDAccount(_) => {
+            let account_id = hd_account_of(ticker, &activation_request.path_to_address)?;
+            let layout = activation_request.hd_path_layout.unwrap_or_default();
+            solana_hd_derivation_path(&coin_conf(ctx, ticker), layout, account_id)
+                .map(DerivationMethod::HDWallet)
+                .map_to_mm(SolanaWithTokensActivationError::Internal)
+        },
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -166,15 +262,45 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
     type ActivationError = SolanaWithTokensActivationError;
 
     async fn enable_platform_coin(
-        _ctx: MmArc,
+        ctx: MmArc,
         ticker: String,
         platform_conf: Json,
         activation_request: Self::ActivationRequest,
         _protocol_conf: Self::PlatformProtocolInfo,
         priv_key: &[u8],
     ) -> Result<Self, MmError<Self::ActivationError>> {
+        let crypto_ctx =
+            CryptoCtx::from_ctx(&ctx).mm_err(|e| SolanaWithTokensActivationError::Internal(e.to_string()))?;
+        reject_unsupported_policy(
+            &ticker,
+            &activation_request.priv_key_policy,
+            matches!(crypto_ctx.key_pair_policy(), KeyPairPolicy::GlobalHDAccount(_)),
+        )?;
+        // R40.1A.1: a single-key login uses the key passed in; a global-HD login derives its own and never uses
+        // the passphrase-hash key.
+        let hd_secret;
+        let key: &[u8] = match crypto_ctx.key_pair_policy() {
+            KeyPairPolicy::Iguana => priv_key,
+            KeyPairPolicy::GlobalHDAccount(global_hd) => {
+                let account_id = hd_account_of(&ticker, &activation_request.path_to_address)?;
+                let layout = activation_request.hd_path_layout.unwrap_or_default();
+                let path = solana_hd_derivation_path(&platform_conf, layout, account_id).map_to_mm(|error| {
+                    SolanaWithTokensActivationError::PlatformCoinCreationError {
+                        ticker: ticker.clone(),
+                        error,
+                    }
+                })?;
+                hd_secret = solana_hd_secret(global_hd, &path).map_to_mm(|error| {
+                    SolanaWithTokensActivationError::PlatformCoinCreationError {
+                        ticker: ticker.clone(),
+                        error,
+                    }
+                })?;
+                &hd_secret
+            },
+        };
         let platform_coin =
-            solana_coin_from_conf_and_params(&ticker, &platform_conf, activation_request.platform_request, priv_key)
+            solana_coin_from_conf_and_params(&ticker, &platform_conf, activation_request.platform_request, key)
                 .await
                 .map_to_mm(|error| SolanaWithTokensActivationError::PlatformCoinCreationError { ticker, error })?;
         Ok(platform_coin)
@@ -198,8 +324,8 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
 
     async fn get_activation_result<XPubExtractor>(
         &self,
-        _ctx: &MmArc,
-        _activation_request: &Self::ActivationRequest,
+        ctx: &MmArc,
+        activation_request: &Self::ActivationRequest,
         _xpub_extractor: Option<&XPubExtractor>,
     ) -> Result<Self::ActivationResult, MmError<Self::ActivationError>>
     where
@@ -208,6 +334,7 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         let my_address = self
             .my_address()
             .map_to_mm(Self::ActivationError::UnableToRetrieveMyAddress)?;
+        let derivation_method = derivation_method_of(ctx, self.ticker(), activation_request)?;
         // A failure to read the block height, the SOL balance or a token balance is reported as a platform coin
         // creation error naming the platform ticker (CRD ch.40 R40.2.4); a node is named host-only in its text.
         let read_failure = |error: String| SolanaWithTokensActivationError::PlatformCoinCreationError {
@@ -237,13 +364,13 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         result
             .solana_addresses_infos
             .insert(my_address.clone(), CoinAddressInfo {
-                derivation_method: DerivationMethod::Iguana,
+                derivation_method: derivation_method.clone(),
                 pubkey: my_address.clone(),
                 balances: solana_balance,
             });
 
         result.spl_addresses_infos.insert(my_address.clone(), CoinAddressInfo {
-            derivation_method: DerivationMethod::Iguana,
+            derivation_method,
             pubkey: my_address,
             balances: token_balances,
         });
