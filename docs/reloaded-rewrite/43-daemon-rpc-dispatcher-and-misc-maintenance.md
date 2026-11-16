@@ -1118,8 +1118,7 @@ and `NoSuchCoin` as a record with status 400, as `trade_preimage` does.
 > choice: a request the client got wrong `InvalidParam` (string, 400), a
 > failure of the node `Internal` (string, 500); a malformed public key never
 > reaches the method and answers the dispatcher's `InvalidRequest`. Decided
-> at orchestration level on 2026-11-16 under the maintainer's rule of
-> 2026-11-15.
+> on 2026-11-16 under the maintainer's rule of 2026-11-15.
 
 **D43.1C.5** *Unknown members of `params` in the new forms.* The reference
 and Reloaded ignore them in every existing form of the shared names
