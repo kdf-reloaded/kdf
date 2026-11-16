@@ -297,6 +297,15 @@ Two provenance statements were tightened after an external audit:
   published package ships no license files; the MIT and Apache-2.0 texts were copied from
   the sibling `zcash_transparent 0.10.0` (same upstream repository). See `KDF-PATCH.md`.
 
+### 2026-11-15 — `zcash_primitives` output-only carrier changed
+
+- In `vendor-patches/zcash_primitives-0.30.1/` the output-only Ironwood switch is no longer a
+  public field of `BundlePadding` (the type is back to the published shape); it is the
+  `spends_disabled` argument of the private `BuildConfig::ironwood_builder`, reached through the
+  new `Builder::new_with_output_only_ironwood`. Reason: the extra field made
+  `zcash_client_backend 0.24.0` fail to compile with its `orchard` feature on. No new vendored
+  source, no license change; the §34.3 row for this directory stays accurate. See `KDF-PATCH.md`.
+
 ## 34.3 Entries
 
 ### Generated artifacts
