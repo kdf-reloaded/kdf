@@ -22,6 +22,10 @@ cargo test -p coins --lib -- rpc_response_tests coin_protocol_capability::
 # The withdraw, QTUM, BCH and SLP tests of `coins`, offline (the CI row `withdraw-family`)
 cargo test -p coins --lib -- withdraw qtum bch slp
 
+# The Electrum client, pool and measurement tests and the QRC20 tests of `coins`, offline
+# (the CI row `electrum-qrc20`)
+cargo test -p coins --lib -- utxo::rpc_clients::electrum qrc20::
+
 # Bounds on a value received from a peer (CRD ch.28 R16a, T4a)
 cargo test -p common --lib msgpack_bounds::
 cargo test -p mm2_p2p --features application --lib t4a_
@@ -84,9 +88,9 @@ What does not, and why:
 - `polygon_check_if_my_payment_sent`, which skips itself when `POLYGON_RPC_URL` is not set.
 
 No CI job runs a gated test unless it passes the feature on purpose. The jobs that run unit tests select
-their tests by name. Only the filter of the `withdraw-family` row (`withdraw qtum bch slp`, added in batch 4)
-also matches gated tests; that row runs without the feature, so it skips them and runs the offline tests of
-the family. The `docker-tests` job selects three gated tests by name
+their tests by name. Only the filters of the `withdraw-family` row (`withdraw qtum bch slp`, added in batch 4)
+and of the `electrum-qrc20` row (`utxo::rpc_clients::electrum qrc20::`) also match gated tests; those rows
+run without the feature, so they skip them and run the offline tests. The `docker-tests` job selects three gated tests by name
 (`test_withdraw_segwit`, `test_withdraw_cashaddresses` and
 `test_withdraw_to_different_cashaddress_network_should_fail`), so it passes the feature. A new test that needs
 a public server should carry the attribute, and it joins a CI job only if someone adds the feature to that
@@ -110,6 +114,14 @@ to one server. The tests are in `mm2src/coins/utxo/utxo_tests.rs` (the `test_qtu
   timeout, run it again before suspecting the code.
 - **No broadcast.** The delegation tests (`add_delegation`, `remove_delegation`) only build and
   sign a transaction; none of these tests changes chain state.
+- **Gated.** These tests carry the `live-network-tests` attribute above. Among them are five
+  `r72a_qrc20_*` tests in `qrc20_tests.rs` that build a token coin against this server
+  (`r72a_qrc20_coin()`); the other `r72a_qrc20_*` tests run offline.
+- **The docker-tests job** passes the feature for its three gated withdraw tests, and those tests
+  set `electrum_tip_checks` to `false` in their node configuration. Public testnet servers can
+  briefly answer different headers at the same height, for example during a reorganization, and
+  an activation that finds such a difference fails by design (CRD ch.38 R38.6.4o item 12). The
+  tests check withdrawals, not server agreement.
 - The list lives in one place per test crate: `tqtum_test_servers()` in `utxo_tests.rs` (used by
   `qrc20_tests.rs` too) and `TQTUM_TEST_SERVERS` in `mm2_tests/electrums.rs`. Add a second testnet
   server there if one appears.
