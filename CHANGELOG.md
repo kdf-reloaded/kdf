@@ -201,7 +201,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [`rpc-error-redesign`](docs/plans/rpc-error-redesign.md) — new, planning, no schedule: one error vocabulary
   (token spelling, payload kind, HTTP status) for the whole versioned RPC surface, with a compatibility period;
   ordered 2026-11-15, written in PR #359.
-- [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — parked: it records that the
+- [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — done: it records that the
   stricter signing of malformed output scripts (step 8) is done and that the plan has no open step left.
 - [`shielded-coins-in-browser`](docs/plans/shielded-coins-in-browser.md) — new, planning: work packages to
   activate shielded coins (ARRR) in the browser build — the wallet database on the SQLite route, one

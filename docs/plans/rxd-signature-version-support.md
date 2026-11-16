@@ -1,6 +1,6 @@
 # Plan: Radiant signature-hash support
 
-**Status:** parked (signing shipped in PRs #54, #65, with its compatibility bookkeeping; swaps between KDF Reloaded nodes and with GLEEC KDF 3.0.0-beta tested on the mainnet 2026-11-09; step 8 open and post-beta) — **Last reviewed:** 2026-11-16
+**Status:** done (signing shipped in PRs #54, #65; swaps between KDF Reloaded nodes and with GLEEC KDF 3.0.0-beta tested on the mainnet 2026-11-09; step 8, the fail-early signing, in PR #381) — **Last reviewed:** 2026-11-16
 
 > **Context:** Radiant (`RXD`) is the one coin in the shipped registry whose
 > `signature_version` names a signing dialect this build did not implement.
