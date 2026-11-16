@@ -1256,7 +1256,7 @@ several legacy texts; the text is not part of the contract.
 | `Internal` | string | 500 | any other failure of the node (the `orderbook` set) | orderbook_depth |
 | `InternalError` | string | 500 | any other failure of the node | all others |
 | `NoSuchCoin` | object `{coin}` | 404 | coin not found or not activated (the documented `withdraw` set) | my_balance, disable_coin, send_raw_transaction, validateaddress, convertaddress, convert_utxo_address (target coin), kmd_rewards_info (KMD), set_required_confirmations, set_requires_notarization |
-| `Transport` | string | 502 | node or server unreachable, invalid answer, broadcast refused by the network (the documented `withdraw` set) | my_balance, send_raw_transaction, kmd_rewards_info |
+| `Transport` | string | 502 | node or server unreachable, invalid answer, broadcast refused by the network, and a transaction the coin cannot decode (the coin's broadcast gives one text for all three; the documented `withdraw` set) | my_balance, send_raw_transaction, kmd_rewards_info |
 | `InvalidParam` | string | 400 | request carries neither `tx_hex` nor `tx_json`, or the wrong type; address conversion refused by the coin | send_raw_transaction, convertaddress |
 | `InvalidAddress` | string | 400 | address does not parse | convert_utxo_address |
 | `UnsupportedError` | string | 400 | target coin is not a UTXO coin | convert_utxo_address |
