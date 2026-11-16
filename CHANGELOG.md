@@ -219,10 +219,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   compile errors, because some test code that only works natively (tests written for the `tokio` runtime and the BCH
   tests that use the SQLite history storage) was also built for the browser, and a test helper
   was built natively only. The native-only tests are now left out of the browser test build and the
-  helper is built there too; only test code changed. The browser build finds 44 tests: 37 pass, 6 fail and 1 hangs.
+  helper is built there too; only test code changed. The `coins` test build runs 44 browser tests: 24 of `coins` itself (18 pass, 5 fail, 1 hangs) and 20 that it
+  links in from `mm2_db` (16, all pass) and `mm2_net` (4: 3 pass, 1 fails), whose browser test modules are not limited
+  to test builds.
   Three failures and the hanging test need a public node (an Ethereum node, two Electrum
   servers, an SLP node). The other three failures are an NFT store test that hits a database
-  constraint error, an NFT store test that reads back nothing, and a WebSocket test of `mm2_net`
+  constraint error, an NFT store test that reads back nothing, and the linked-in WebSocket test of `mm2_net`
   that expects an error for an invalid address. The hanging test stops the whole run, so it has to be skipped with
   `-- --skip`. The failures are listed in `docs/DEV_ENVIRONMENT.md` and are not fixed here.
   No CI job runs the browser tests yet. Detail: PR #388.
