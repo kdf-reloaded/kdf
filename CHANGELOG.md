@@ -180,7 +180,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   browser build and into the test build of every crate that uses them, and the test library they use was
   a normal dependency of `mm2_net` and `mm2_db`. They are now built only for tests, and the test library
   is a test-only dependency of these two crates. The release browser bundle (`kdflib_bg.wasm`) shrinks from
-  23,196,199 to 22,963,595 bytes. The browser test run of `coins` now runs only the tests of `coins`. Detail: PR #N.
+  23,196,199 to 22,963,595 bytes. The browser test run of `coins` now runs only the tests of `coins`. Detail: PR #389.
 
 - **The browser demo page loads the current WASM build again.** The page `wasm_build/index.html`
   imported a module file name (`mm2.js`) that the build no longer produces, so it could not start;
