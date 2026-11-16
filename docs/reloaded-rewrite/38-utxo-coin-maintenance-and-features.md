@@ -4071,6 +4071,58 @@ pending. Parity: the withdraw does not return before the token's broadcast has
 been answered. Under D38.6.4Q.4 (b) it returns without waiting (R38.6.4Q.7
 item 6).
 
+> **Measured (2026-11-16, clean side; this repository on dev, Lane 4 P3a).**
+> Offline tests against the stub Electrum server
+> (`qrc20/qrc20_electrum_stub_tests.rs`, `t38_6_4q_*`) pin this tree's
+> behavior for rows T38.6.4Q.2 to T38.6.4Q.6. They run with
+> `electrum_server_order` `listed` and `electrum_spread_reads` `false`, so that
+> "the highest-ranked session" is deterministic. The activation is driven
+> through the legacy coin initialization plus the balance read and
+> deregistration of the `electrum` handler, not through the RPC itself.
+>
+> 1. *T38.6.4Q.2.* The activation sends `blockchain.headers.subscribe` and
+>    then exactly one `blockchain.contract.call`, with the token contract,
+>    the `balanceOf` call data and an empty sender. The balance is decoded
+>    from `executionResult.output`. Without `decimals`, a `decimals()` call
+>    comes first. Neither `blockchain.token.get_info` nor
+>    `blockchain.contract.event.subscribe` is sent. *Difference from
+>    R38.6.4Q.9:* this tree asks for the tip (`blockchain.headers.subscribe`)
+>    before the balance call, and with two servers it also asks
+>    `blockchain.block.header` of both (R38.6.4o).
+> 2. *T38.6.4Q.3.* As the reference.
+>    - An error answer to the balance read fails the activation, without a
+>      repeat. The token is deregistered and the session stays open. A second
+>      attempt fails the same way, not as already active.
+>    - Without `decimals`, the build fails on the `decimals()` call and
+>      nothing is registered.
+>    - With two servers, the first server's error answer ends the request,
+>      although the second would answer correctly.
+> 3. *T38.6.4Q.4.* As the reference. An error answer of the highest-ranked
+>    session fails `my_balance`. The other server is not asked, the session
+>    stays open and the token stays active. Each read asks again, no earlier
+>    value is served, and after recovery the next read succeeds.
+> 4. *T38.6.4Q.5.* The request order is: the balance read, then
+>    `blockchain.contract.event.get_history`, then per transaction the
+>    receipt (`blochchain.transaction.get_receipt`) and the verbose
+>    transaction, and each spent-from transaction once. The next pass with
+>    an unchanged balance sends one `blockchain.contract.call` and nothing
+>    else.
+> 5. *T38.6.4Q.6.*
+>    - (a) A failed history request is asked again after this tree's
+>      backoff: 10, 20, 40, 80, 160 and then 300 s (§38.6.5 item 8), and the
+>      history state is not an error.
+>    - (b) Only the exact error object `{"code": 1, "message": "history too
+>      large"}` ends the collector, with the state's code −1; the balance
+>      still answers.
+>    - (c) A failed receipt leaves that transaction out. The other is stored.
+>      While the balance is unchanged, no pass asks again, as the finding
+>      after R38.6.4Q.6 says.
+>
+> Not measured here: rows T38.6.4Q.1 and T38.6.4Q.7 to T38.6.4Q.11 (next
+> package); the dropping of an unlisted transaction (R38.6.4Q.6 item 2),
+> which this tree does not do (§38.5C, decided 2026-11-16); and the default
+> server order and read spreading.
+
 *Not established.* (1) The session count of R38.6.4Q.1 item 4 follows from
 how the reference builds its clients; it was not measured against a running
 reference binary and a live server in this pass. (2) Which error answers
@@ -5595,3 +5647,9 @@ R38.8.6 **Tests (two-direction, observable).**
   forbidden corpus, on a maintainer decision. The inputs are this repository's
   code and this project's own field-run counts. It takes no forbidden-class
   input, so chapter 01 R38 is not engaged and no gate pass is required.
+- *Measured note (2026-11-16), clean side -- before "Not established" in
+  §38.6.4Q: this repository's behavior for rows T38.6.4Q.2 to T38.6.4Q.6, from
+  offline tests against the stub Electrum server.* Written by a session that
+  never read the forbidden corpus. The input is this repository's code and its
+  tests. It takes no forbidden-class input, so chapter 01 R38 is not engaged
+  and no gate pass is required.
