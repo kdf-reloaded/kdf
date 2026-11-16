@@ -286,7 +286,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)
   build outside the shielded coins — versioned history, wallet management, event delivery to the page and
   smaller items — in order of cost, and the limits a browser has by nature, also listed in
-  `docs/WASM_BUILD.md`.
+  `docs/WASM_BUILD.md`. It now also lists the browser tests and lint (a CI job, the failing browser tests,
+  the browser-target lint) and the three probe fixes merged since it was written.
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
   management) implemented in PR #359, phase 2 (trading) in PR #372, phase 3 (wallet and coins) in PR #379,
   phases 4 and 5 (swaps; daemon and network) in PR #387; decisions D1–D10 recorded; the extension is complete except
