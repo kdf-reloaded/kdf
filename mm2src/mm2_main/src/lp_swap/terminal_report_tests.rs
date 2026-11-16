@@ -45,13 +45,13 @@ fn key33(hex: &str) -> H264Json { hex.parse().unwrap() }
 fn key32(hex: &str) -> H256Json { hex.parse().unwrap() }
 
 #[derive(Clone, Copy, Debug)]
-enum Role {
+pub(crate) enum Role {
     Maker,
     Taker,
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Outcome {
+pub(crate) enum Outcome {
     Success,
     NegotiationRefusal,
     PaymentStageFailure,
@@ -224,7 +224,14 @@ fn taker_events(started: TakerSwapData, outcome: Outcome) -> Vec<TakerSavedEvent
 
 /// A finished saved swap of `role` for the coin pair, with every start-event field set to a non-default value.
 /// `ephemeral` is whether the swap signed its peer-to-peer traffic with a per-swap key.
-fn record(uuid: Uuid, role: Role, maker_coin: &str, taker_coin: &str, outcome: Outcome, ephemeral: bool) -> SavedSwap {
+pub(crate) fn record(
+    uuid: Uuid,
+    role: Role,
+    maker_coin: &str,
+    taker_coin: &str,
+    outcome: Outcome,
+    ephemeral: bool,
+) -> SavedSwap {
     let success_events = vec!["Started".to_string(), "Finished".to_string()];
     let error_events = vec!["StartFailed".to_string(), "NegotiateFailed".to_string()];
     match role {

@@ -19,8 +19,9 @@ use crate::{mm2::lp_stats::{add_node_to_version_stat, remove_node_from_version_s
                             stop_version_stat_collection, update_version_stat_collection},
             mm2::lp_swap::swap_v2_rpcs::{active_swaps_rpc as active_swaps_rpc_v2,
                                          my_recent_swaps_rpc as my_recent_swaps_rpc_v2, my_swap_status_rpc},
-            mm2::lp_swap::{coins_needed_for_kick_start_core, get_locked_amount_rpc, max_maker_vol, max_taker_vol_v2,
-                           min_trading_vol_v2, recreate_swap_data, trade_preimage_rpc},
+            mm2::lp_swap::{all_swaps_uuids_by_filter_core, coins_needed_for_kick_start_core, get_locked_amount_rpc,
+                           import_swaps_core, max_maker_vol, max_taker_vol_v2, min_trading_vol_v2,
+                           recreate_swap_data, trade_preimage_rpc},
             mm2::rpc::lp_commands::{get_public_key, get_public_key_hash, peer_connection_healthcheck},
             mm2::rpc::lp_commands_legacy::{disable_coin_core, my_balance_core}};
 use coins::eth::fee_estimation::rpc::get_eth_estimated_fee_per_gas;
@@ -237,6 +238,7 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "active_swaps" => handle_mmrpc(ctx, request, active_swaps_rpc_v2).await,
         "add_delegation" => handle_mmrpc(ctx, request, add_delegation).await,
         "add_node_to_version_stat" => handle_mmrpc(ctx, request, add_node_to_version_stat).await,
+        "all_swaps_uuids_by_filter" => handle_mmrpc(ctx, request, all_swaps_uuids_by_filter_core).await,
         "approve_token" => handle_mmrpc(ctx, request, approve_token).await,
         "best_orders" => handle_mmrpc(ctx, request, best_orders_rpc_v2).await,
         "buy" => handle_mmrpc(ctx, request, buy_core).await,
@@ -276,6 +278,7 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "get_token_info" => handle_mmrpc(ctx, request, get_token_info).await,
         "sign_raw_transaction" => handle_mmrpc(ctx, request, sign_raw_transaction).await,
         "get_locked_amount" => handle_mmrpc(ctx, request, get_locked_amount_rpc).await,
+        "import_swaps" => handle_mmrpc(ctx, request, import_swaps_core).await,
         "init_account_balance" => handle_mmrpc(ctx, request, init_account_balance).await,
         "init_account_balance_status" => handle_mmrpc(ctx, request, init_account_balance_status).await,
         "init_create_new_account" => handle_mmrpc(ctx, request, init_create_new_account).await,

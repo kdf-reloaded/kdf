@@ -137,6 +137,7 @@ pub use check_balance::{check_other_coin_balance_for_swap, CheckBalanceError};
 pub use swap_msg::*;
 
 #[path = "lp_swap/swap_rpc.rs"] mod swap_rpc;
+#[path = "lp_swap/swap_rpc_errors.rs"] mod swap_rpc_errors;
 use keys::{KeyPair, Public, SECP_SIGN, SECP_VERIFY};
 pub use maker_swap::{calc_max_maker_vol, check_balance_for_maker_swap, maker_swap_trade_preimage, run_maker_swap,
                      MakerSavedEvent, MakerSavedSwap, MakerSwap, MakerSwapEvent, MakerSwapStatusChanged,
@@ -150,6 +151,7 @@ pub use recreate_swap_data::recreate_swap_data;
 pub use saved_swap::{SavedSwap, SavedSwapError, SavedSwapIo, SavedSwapResult};
 use std::num::NonZeroUsize;
 pub use swap_rpc::*;
+pub use swap_rpc_errors::*;
 #[allow(unused_imports)]
 pub use swap_watcher::{process_watcher_msg, watcher_topic, SwapWatcherMsg, TakerSwapWatcherData, WATCHER_PREFIX};
 #[cfg(test)] pub(crate) use taker_swap::penalise_maker_if_due;
