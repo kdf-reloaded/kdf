@@ -677,6 +677,282 @@ T38.5A.8 *BCH and SLP maturation.* A test shall store an unconfirmed BCH row
 and present a listing that reports its hash at a positive height, and assert
 that the stored row takes that height.
 
+## 38.5C Stored history rows the backend no longer lists (T-DOC, reference-bound)
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-16,
+> measure 0.04 (attestation in §38.9).**
+> This section was written on 2026-11-16 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-9) under the two-team procedure of chapter 01 §1.4A, from the
+> reference lineage at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter
+> 02 §2.15A (read read-only; no untabled state was read), from the public
+> Electrum protocol documentation, from this repository's own tree and from
+> this chapter's own text. **The two rows agree on everything in this
+> section**: the legacy history collector, the collector of the versioned
+> method, the history store and both method tables are the same at both. It
+> edits no sentence of §38.5A, §38.5B or §38.6.4Q. Each rule names the rule
+> it completes; where a rule here is more exact than the sentence it
+> completes, the rule here governs. The section is numbered 38.5C because
+> 38.5B was already bound; it stands directly after §38.5A, whose rules it
+> completes. Numbering: R38.5C.1 -- R38.5C.5, D38.5C.1 -- D38.5C.2 and
+> T38.5C.1 -- T38.5C.10.
+
+*Scope.* What becomes of a stored history row when the backend's listing no
+longer contains its transaction hash, or reports it at another height -- the
+state a store is in after the coin's server followed a chain that was later
+abandoned. Three surfaces: the legacy history file of a UTXO coin
+(R38.5C.1 -- R38.5C.2), the SQLite history store of the versioned
+`my_tx_history` for the four families whose collector writes it
+(R38.5C.3 -- R38.5C.4), and the means of clearing or rebuilding one coin's
+stored history (R38.5C.5). The QRC20 token collector is bound by R38.6.4Q.6
+item 2, which already says that a stored transaction its listing no longer
+contains is dropped; nothing is added for it. The Tendermint collector is
+chapter 36's.
+
+R38.5C.1 **Legacy file: every unlisted row is removed (completes R38.5A.3
+item (a)).**
+
+1. *Which rows.* In a pass that received the backend's listing, every stored
+   row whose transaction hash the listing does not contain is removed --
+   confirmed and unconfirmed rows alike. No property of the row is looked at:
+   not its height, not its age, not its amounts.
+2. *When.* The removal is the first thing done with the listing, before any
+   detail request of the pass, and the history is written at once if at
+   least one row was removed (R38.5A.3). A pass that did not get a listing --
+   the request failed and is repeated, or the pass was skipped under the
+   need-to-run test of R38.5A.5 -- removes nothing.
+3. *What else.* Nothing else is removed with the row. The row is all the
+   legacy collector stores for a transaction; the node's cache of verbose
+   transactions is not touched by the removal.
+4. *Afterwards.* A removed hash that a later listing contains again is
+   treated as a transaction never seen: its details are requested and a new
+   row is written, with the height that listing reports.
+5. *What the removal rests on.* One successful listing. With an Electrum
+   backend that is one answer to `blockchain.scripthash.get_history` for the
+   wallet's address, in which an unconfirmed transaction has a height of 0
+   or below; the collector reads every such height as 0. The collector does
+   not ask a second server before it removes, and it cannot tell a
+   transaction that left the chain from one the answering server does not
+   know. The rows hold nothing that the backend does not supply, so a row
+   removed on a server's incomplete answer returns under item 4.
+
+R38.5C.2 **Legacy file: what a listing does not change (completes
+R38.5A.5).** A stored row whose hash is still listed is changed only as
+R38.5A.5 says: a height is filled in when the stored one is 0 or the old
+sentinel, and the row is fetched again when its timestamp is 0. Therefore:
+
+1. a stored row with a positive height keeps that height and its timestamp
+   when the listing reports its hash at a **different** positive height;
+2. a stored row with a positive height keeps it when the listing reports its
+   hash as unconfirmed;
+3. neither case makes a pass necessary under the need-to-run test, so while
+   the balance is unchanged no pass runs at all.
+
+R38.5C.3 **SQLite store: an unlisted unconfirmed row is removed (completes
+R38.5A.7 and R38.5A.10).** One collector serves standard UTXO coins, Qtum,
+BCH and, through the BCH coin, SLP tokens.
+
+1. *A pass and its addresses.* A pass asks the backend for the listing of a
+   set of the wallet's addresses: all of them in the first pass and whenever
+   the store holds an unconfirmed row for one of them (looked at every 30 s),
+   otherwise those whose balance changed; after a pass that was given up,
+   the addresses of that pass as well.
+2. *Which rows are looked at.* After the listing has arrived and before any
+   detail request, the collector takes the stored rows that are unconfirmed
+   (stored `block_height` 0) **and** that the address index ties to one of
+   the pass's addresses. No other stored row is looked at in the pass.
+3. *What happens to each.* Listed at a positive height: the row gets that
+   height and the block's time (R38.5A.10). Listed without a height: the row
+   is left as it is. Not listed, or its stored hash cannot be read as a
+   hash: the row is removed.
+4. *What a removal covers.* The row in the history table and the row's
+   entries in the address index, in one database transaction. The raw
+   transaction kept in the store's transaction cache stays. The tables are
+   the three of the coin's store, whose names end in `_tx_history`,
+   `_tx_address` and `_tx_cache`.
+5. *Afterwards.* As R38.5C.1 item 4: a removed hash that a later listing
+   contains is fetched as new.
+6. *Failures.* When the block time of a row to be matured cannot be read,
+   the pass is given up and repeated after 30 s; rows already handled keep
+   their change. A failure of the store ends the collector for the life of
+   the coin instance.
+
+R38.5C.4 **SQLite store: a confirmed row is never looked at again (completes
+R38.5A.7).**
+
+1. A stored confirmed row whose hash the listing no longer contains
+   **stays**. No pass removes it, and the versioned method goes on serving it
+   at its stored height, with `confirmations` counted from that height
+   (R38.5A.6).
+2. A changed height is **not** taken over. A listed hash that the store
+   already holds -- in any row -- is passed over without a detail request,
+   so a stored confirmed row keeps its height and its time when the listing
+   reports the hash at another height or as unconfirmed.
+3. The two stores therefore differ for the same event: the legacy file drops
+   a confirmed row that is no longer listed (R38.5C.1), the SQLite store
+   keeps it. Neither takes over a changed height (R38.5C.2).
+
+> **Code-quality finding (informative; trigger 1 -- apparent when the row
+> builder and the collector's row selection are read side by side).** An SLP transaction yields two rows: the BCH row, and a token row
+> whose addresses are written in the token address form. The collector
+> selects the rows of R38.5C.3 item 2 by the BCH coin's own address form, so
+> a token row is never among them. A token row stored while unconfirmed is
+> thus neither given its height nor removed, and it stays unconfirmed; and
+> when the BCH row of that transaction is removed as unlisted, the token row
+> that remains makes the store count the hash as held, so the BCH row is not
+> written again if the hash is listed later. R38.5A.10 states what the
+> collector is required to do for both rows; the reference does it for the
+> BCH row. Proposed fix: select the unconfirmed rows of the store by
+> transaction hash or without an address condition, and remove or mature all
+> rows of one hash together. *Reloaded (this repository on dev, 2026-11-16):*
+> its BCH and SLP collector takes every unconfirmed row of the store,
+> without an address condition, so it has no such gap.
+
+R38.5C.5 **Clearing or rebuilding one coin's stored history.**
+
+1. *Requests.* Neither method table routes, at either row, a method that
+   clears, rebuilds or reads again one coin's stored history, for the file or
+   for the SQLite store. Both forms of `my_tx_history` only read.
+2. *Activation.* No activation member of these families asks for the stored
+   history to be cleared or rebuilt. `tx_history` true starts the collector
+   over whatever is stored, and the collector asks for details only of
+   hashes it does not hold and of rows that R38.5A.5 has it fetch again.
+3. *Start of the legacy collector.* The file is read once, when the
+   collector starts; from then on the collector works from memory and every
+   write replaces the file from memory (R38.5A.3). A file that cannot be
+   decoded is deleted and the history is built again from the backend
+   (R38.5A.4). On a native build one conversion of rows written by old
+   versions runs once per coin and address and is recorded in a marker file;
+   it rebuilds nothing. The file is `<ticker>_<address>.json` in the
+   directory `TRANSACTIONS` of the node's database directory, with a `:` in
+   the address written as `_`, and the marker is
+   `<ticker>_<address>_migration` beside it.
+4. *Start of the versioned collector.* The three tables are created when
+   they are absent. They are never emptied and never dropped.
+5. *What a user has.* The reference offers a user nothing to reset the
+   history of one coin. What follows from items 3 and 4 is by hand only: the
+   legacy file can be deleted while the coin is not active, and the next
+   activation with `tx_history` true then builds it again (deleted while the
+   collector runs, it comes back at the collector's next write, unchanged);
+   the SQLite store has no file of its own per coin, so its rows can be
+   removed only with a database tool while the node is stopped. Neither is
+   documented behavior of the reference, and the second was not tried.
+
+> **Compatibility (this repository on dev, 2026-11-16; its own code, not the
+> reference).**
+>
+> 1. *Legacy file.* Reloaded's legacy UTXO collector removes **no** row: a
+>    stored row whose hash the listing no longer contains stays in the file,
+>    confirmed or not, and is served. This does not conform to R38.5A.3
+>    item (a) and R38.5C.1. The baseline did not remove such rows either.
+> 2. *Versioned method, standard UTXO and Qtum.* Reloaded serves it from the
+>    legacy file (the divergence note under R38.5A.7), so item 1 holds for it
+>    as well.
+> 3. *Versioned method, BCH and SLP.* Reloaded's collector removes an
+>    unlisted unconfirmed row and matures a listed one, for the BCH row and
+>    the token row alike (the finding above); a confirmed row is not looked
+>    at again, and a listed hash the store holds is passed over. **Parity**
+>    with R38.5C.4.
+> 4. *Changed height.* Reloaded's legacy collector fills a height in only
+>    when the stored one is 0 or the sentinel. **Parity** with R38.5C.2.
+> 5. *Reset.* Reloaded has no request, activation member or start-up step
+>    that clears one coin's history. **Parity** with R38.5C.5.
+>
+
+D38.5C.1 *(Open, 2026-11-16.)* **A stored row for a transaction that is no
+longer on the chain.** Reproducing the reference, the versioned method keeps
+serving a confirmed row whose transaction the backend no longer lists
+(R38.5C.4 item 1), and Reloaded's legacy file keeps every such row
+(compatibility note, item 1); the row states a payment the chain does not
+hold. Options: (a) the reference as it stands: the legacy file drops every
+unlisted row, the SQLite store drops unconfirmed ones only; (b) one rule for
+both stores: a row is removed, confirmed or not, when a successful listing
+that covers **every** own address the row concerns does not contain its
+hash, and all rows of one hash are removed together; (c) option (b), and in
+addition no row is removed while the coin is in the state of R38.6.4o item
+12, in which its servers disagree about the chain. *Recommendation:* (c).
+Under each option Reloaded's legacy collector first has to meet R38.5A.3
+item (a).
+
+D38.5C.2 *(Open, 2026-11-16.)* **A stored confirmed row whose transaction is
+now at another height.** Neither store of the reference takes the new height
+over, and no pass runs for it while the balance is unchanged (R38.5C.2,
+R38.5C.4 item 2); the row then reports a height, a time and a count of
+confirmations that are not those of the transaction. Options: (a) the
+reference as it stands; (b) in a pass that runs, a listed positive height
+that differs from the stored one is taken over together with the block's
+time, and a stored confirmed row that the listing reports as unconfirmed
+goes back to height 0; (c) option (b), and a pass is also started when the
+coin's client sees that the chain it follows has changed, since the
+need-to-run test alone does not start one. *Recommendation:* (c); what
+makes the client see the change is this repository's own design.
+
+*Acceptance rows for a mock backend.* Each row names what the mock answers
+and what the node does. *Parity* is the reference behavior bound above;
+where a D-item would change the expected result, the row says so.
+
+T38.5C.1 *Legacy file, unlisted rows.* With a stored history of three rows --
+one confirmed, one unconfirmed, one confirmed -- and a listing that contains
+the hash of the third only, one pass shall leave a file with the third row
+alone, written before the mock receives any detail request of that pass.
+
+T38.5C.2 *Legacy file, failed listing.* With the same stored history and a
+mock that answers the listing request with an error, the file shall be
+unchanged after the pass and the request shall be repeated.
+
+T38.5C.3 *Legacy file, a hash comes back.* After T38.5C.1, a balance change
+and a listing that contains a removed hash again shall produce one detail
+request for it and one row with the height the listing reports.
+
+T38.5C.4 *Legacy file, changed height.* With a stored confirmed row and a
+listing that reports its hash at another positive height, in a pass that
+runs because the balance changed. Parity: the row keeps its height. Under
+D38.5C.2 (b) the row takes the listed height and that block's time and moves
+to its place in the order of R38.5A.1.
+
+T38.5C.5 *SQLite store, unlisted unconfirmed row.* With a store that holds
+one unconfirmed row and a listing without its hash, one pass shall remove
+the row and its address-index entries; the versioned `my_tx_history` then
+reports a `total` lower by one, and the raw transaction is still in the
+transaction cache.
+
+T38.5C.6 *SQLite store, unlisted confirmed row.* With a store that holds one
+confirmed row and a listing without its hash. Parity: the row is served
+unchanged after any number of passes. Under D38.5C.1 (b) it is removed in
+the first pass whose listing covers the row's own addresses.
+
+T38.5C.7 *SQLite store, changed height.* With a stored confirmed row and a
+listing that reports its hash at another positive height. Parity: no detail
+request is made for the hash and the row is unchanged. Under D38.5C.2 (b)
+the row takes the listed height and that block's time.
+
+T38.5C.8 *SLP token row.* With a BCH store that holds the BCH row and the
+token row of one unconfirmed SLP transaction: (a) a listing that reports the
+hash at a positive height shall give **both** rows that height and the
+block's time; (b) a listing without the hash shall remove both rows, and a
+later listing with the hash shall write both again (R38.5A.10; the finding
+under R38.5C.4).
+
+T38.5C.9 *Rebuilding the legacy file.* With the coin not active and its
+history file deleted, an activation with `tx_history` true shall request the
+details of every listed hash and write a file equal, row for row, to the one
+a first activation writes. With the file replaced by bytes that do not
+decode, the same shall hold (R38.5A.4).
+
+T38.5C.10 *Activation does not rebuild.* With a non-empty stored history
+that holds every listed hash complete, an activation with `tx_history` true
+shall make one listing request and no detail request, and shall leave the
+stored history as it was (R38.5C.5 item 2).
+
+*Not established.* (1) Native mode was read only as far as the listing is a
+source; whether a daemon's wallet listing still contains a transaction that
+left the chain was not examined. (2) The browser (WASM) form of either store
+was not examined. (3) What the cache of verbose transactions holds for a
+transaction that left the chain, and what reads it, was not followed beyond
+the fact that the legacy collector's removal does not touch it. (4) The
+finding under R38.5C.4 and the hand procedure of R38.5C.5 item 5 for the
+SQLite store were read, not reproduced in a run. (5) Nothing was measured
+against a running reference binary or a live server.
+
 ## 38.5B Spent-output bookkeeping across user withdrawals and broadcasts (T-DOC, reference-bound)
 
 > **Cleared (chapter 01 R40).** R38.5B.1--R38.5B.8, D38.5B.1--D38.5B.3,
@@ -5595,3 +5871,53 @@ R38.8.6 **Tests (two-direction, observable).**
   forbidden corpus, on a maintainer decision. The inputs are this repository's
   code and this project's own field-run counts. It takes no forbidden-class
   input, so chapter 01 R38 is not engaged and no gate pass is required.
+- *Scoped addition (2026-11-16, Spec Reader round 0.5.0-9) -- §38.5C
+  (R38.5C.1 -- R38.5C.5, the code-quality finding, the compatibility note,
+  D38.5C.1 -- D38.5C.2, T38.5C.1 -- T38.5C.10 and the not-established
+  paragraph); no other text of this chapter was changed.* **KDF Dirty Gate:
+  PASS on 2026-11-16, measure 0.04, no findings** (chapter 01 R40; the
+  attestation closes this item). *Inputs:* the forbidden
+  corpus at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+  read read-only and consulted **only** to establish: for the legacy UTXO
+  history collector, which stored rows a pass removes when the backend's
+  listing no longer contains their hashes, at which point of the pass,
+  whether anything else stored is removed with a row, what a failed listing
+  changes, and which stored values a listing does not change; for the
+  collector of the versioned method that standard UTXO coins, Qtum, BCH and
+  SLP tokens share, which addresses a pass covers, which stored rows a pass
+  looks at, what becomes of an unconfirmed row that is listed, listed without
+  a height or not listed, which tables a removal covers, what becomes of a
+  confirmed row that is no longer listed or is listed at another height, and
+  in which address form a token row is indexed and stored rows are selected;
+  for both stores, whether any routed method, activation member or start-up
+  step clears or rebuilds one coin's stored history, where the legacy
+  history file and its marker file are kept and how they are named, and the
+  name endings of the store's three tables; and the two rows' agreement (the
+  legacy collector, the versioned collector, the history store and both
+  method tables are the same at both rows). Behavior, public wire names and
+  persisted names only; no private identifier, function body, helper
+  decomposition, query text, error, log, comment or test text was
+  reproduced. File, directory and table names are those of the persisted
+  store; the method name `blockchain.scripthash.get_history` and the meaning
+  of its heights are those of the public Electrum protocol documentation.
+  The compatibility note and the last sentence of the finding rest on this
+  repository's tree at the base of this round (the dev branch as of
+  2026-11-16) and on the baseline; D38.5C.1 -- D38.5C.2 are
+  Reloaded-original. No row was added to chapter 02 §2.15A: both states read
+  already had one, and each row's identifier was confirmed, by read-only
+  inspection of the historical record's reference metadata, to be the commit
+  its release tag names.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-16, measure
+  0.04, no findings. Reference states (chapter 02 R13): PASS; the rows
+  `v2.6.0-beta` and `v3.0.0-beta`, and "the baseline" refers to the row
+  baseline anchor (R1). Extent: the legacy UTXO history collector, the
+  collector of the versioned history method shared by standard UTXO coins,
+  Qtum, BCH and SLP, the SQLite history store with its schema, the history
+  file and marker naming, both method tables, the reference's history-store
+  tests, and one statement checked at the row baseline anchor (R1); 8 source
+  files read in the relevant parts at `v3.0.0-beta`, with row agreement
+  confirmed by mechanical difference; mechanical comparison over 29 files at
+  `v3.0.0-beta` and 28 at `v2.6.0-beta`. Method: reading, plus mechanical
+  comparison (5-word overlap of the gated lines against comment and literal
+  wording; identifier-shaped tokens and identifier-derived phrases against
+  the identifier set); the additions embed no code blocks.
