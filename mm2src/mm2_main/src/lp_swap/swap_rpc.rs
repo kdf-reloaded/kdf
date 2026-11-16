@@ -4,6 +4,7 @@ use crate::mm2::database::stats_swaps::FiatPriceSnapshot;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mm2::lp_ordermatch::price_service::{fetch_combined, pair_usd_prices, PriceServiceContext, PriceSource,
                                                PriceTable};
+use crate::mm2::rpc::legacy_adapter::legacy_result;
 
 /// The tickers of the maker coin and the taker coin of `swap`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -299,31 +300,52 @@ pub struct MySwapsFilter {
     pub to_timestamp: Option<u64>,
 }
 
+/// The success of `all_swaps_uuids_by_filter`: the content that the legacy body carries under `result`. The members
+/// keep the order of the legacy body.
+#[derive(Serialize)]
+pub struct AllSwapsUuidsByFilterResponse {
+    pub uuids: Vec<Uuid>,
+    pub my_coin: Option<String>,
+    pub other_coin: Option<String>,
+    pub from_timestamp: Option<u64>,
+    pub to_timestamp: Option<u64>,
+    pub found_records: usize,
+}
+
 // TODO: Should return the result from SQL like in order history. So it can be clear the exact started_at time
 // and the coins if they are not included in the filter request
-/// Returns *all* uuids of swaps, which match the selected filter.
-pub async fn all_swaps_uuids_by_filter(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let filter: MySwapsFilter = try_s!(json::from_value(req));
-    let db_result = try_s!(
-        MySwapsStorage::new(ctx)
-            .my_recent_swaps_with_filters(&filter, None)
-            .await
-    );
+/// The typed core of `all_swaps_uuids_by_filter`: returns *all* uuids of swaps, which match the selected filter. The
+/// request is the filter itself: its four members are the members of the legacy request, all optional.
+///
+/// # Errors
+///
+/// An [`AllSwapsUuidsByFilterError`].
+pub async fn all_swaps_uuids_by_filter_core(
+    ctx: MmArc,
+    filter: MySwapsFilter,
+) -> Result<AllSwapsUuidsByFilterResponse, MmError<AllSwapsUuidsByFilterError>> {
+    let db_result = MySwapsStorage::new(ctx)
+        .my_recent_swaps_with_filters(&filter, None)
+        .await
+        .mm_err(AllSwapsUuidsByFilterError::from)?;
 
     let uuids: Vec<Uuid> = db_result.uuids_and_types.iter().map(|(u, _)| *u).collect();
     let found_records = uuids.len();
-    let res_js = json!({
-        "result": {
-            "uuids": uuids,
-            "my_coin": filter.my_coin,
-            "other_coin": filter.other_coin,
-            "from_timestamp": filter.from_timestamp,
-            "to_timestamp": filter.to_timestamp,
-            "found_records": found_records,
-        },
-    });
-    let res = try_s!(json::to_vec(&res_js));
-    Ok(try_s!(Response::builder().body(res)))
+    Ok(AllSwapsUuidsByFilterResponse {
+        uuids,
+        my_coin: filter.my_coin,
+        other_coin: filter.other_coin,
+        from_timestamp: filter.from_timestamp,
+        to_timestamp: filter.to_timestamp,
+        found_records,
+    })
+}
+
+/// The legacy `all_swaps_uuids_by_filter`: decodes the filter from the inline body, calls
+/// [`all_swaps_uuids_by_filter_core`] and answers `{"result": {...}}`.
+pub async fn all_swaps_uuids_by_filter(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    let filter: MySwapsFilter = try_s!(json::from_value(req));
+    legacy_result(all_swaps_uuids_by_filter_core(ctx, filter).await)
 }
 
 #[derive(Debug, Deserialize)]
@@ -676,11 +698,29 @@ fn recovered_swap_response(recover_data: &RecoveredSwap) -> Json {
     })
 }
 
-pub async fn import_swaps(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let swaps: Vec<SavedSwap> = try_s!(json::from_value(req["swaps"].clone()));
+/// The request of `import_swaps`: the swap records to import (the member of the legacy request, unchanged).
+#[derive(Deserialize)]
+pub struct ImportSwapsRequest {
+    pub swaps: Vec<SavedSwap>,
+}
+
+/// The success of `import_swaps`: the content that the legacy body carries under `result`. A record that could not be
+/// stored is not a failure of the call: it is an entry of `skipped`, with the text of its failure.
+#[derive(Serialize)]
+pub struct ImportSwapsResponse {
+    pub imported: Vec<Uuid>,
+    pub skipped: HashMap<Uuid, String>,
+}
+
+/// The typed core of `import_swaps`: stores each record and lists the new swap in the swap index. A record that cannot
+/// be stored is answered in `skipped`, never as a failure of the call.
+pub async fn import_swaps_core(
+    ctx: MmArc,
+    req: ImportSwapsRequest,
+) -> Result<ImportSwapsResponse, MmError<ImportSwapsError>> {
     let mut imported = vec![];
     let mut skipped = HashMap::new();
-    for swap in swaps {
+    for swap in req.swaps {
         match swap.save_to_db(&ctx).await {
             Ok(_) => {
                 if let Some(info) = swap.get_my_info() {
@@ -703,13 +743,14 @@ pub async fn import_swaps(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, St
             },
         }
     }
-    let res = try_s!(json::to_vec(&json!({
-        "result": {
-            "imported": imported,
-            "skipped": skipped,
-        }
-    })));
-    Ok(try_s!(Response::builder().body(res)))
+    Ok(ImportSwapsResponse { imported, skipped })
+}
+
+/// The legacy `import_swaps`: decodes the `swaps` member of the inline body, calls [`import_swaps_core`] and answers
+/// `{"result": {"imported": [...], "skipped": {...}}}`.
+pub async fn import_swaps(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    let swaps: Vec<SavedSwap> = try_s!(json::from_value(req["swaps"].clone()));
+    legacy_result(import_swaps_core(ctx, ImportSwapsRequest { swaps }).await)
 }
 
 #[derive(Deserialize)]
@@ -1271,7 +1312,7 @@ mod lp_swap_tests {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "terminal_report_tests.rs"]
-mod terminal_report_tests;
+pub(crate) mod terminal_report_tests;
 
 /// The reference prices recorded at swap completion (CRD ch.62 R62.5.1, R62.7): the saved answers of both default
 /// price services, the combination of the sources and the refusals. The services are loopback servers that answer

@@ -96,7 +96,7 @@ pub fn dispatcher(req: Json, ctx: MmArc) -> DispatcherRes {
         // "inventory" => inventory (ctx, req),
         "list_banned_pubkeys" => hyres(list_banned_pubkeys_rpc(ctx)),
         "max_taker_vol" => hyres(max_taker_vol(ctx, req)),
-        "metrics" => metrics(ctx),
+        "metrics" => hyres(metrics(ctx)),
         "min_trading_vol" => hyres(min_trading_vol(ctx, req)),
         "my_balance" => hyres(my_balance(ctx, req)),
         "my_orders" => hyres(my_orders(ctx)),
@@ -123,7 +123,7 @@ pub fn dispatcher(req: Json, ctx: MmArc) -> DispatcherRes {
         "unban_pubkeys" => hyres(unban_pubkeys_rpc(ctx, req)),
         "update_maker_order" => hyres(update_maker_order_rpc(ctx, req)),
         "validateaddress" => hyres(into_legacy::validate_address(ctx, req)),
-        "version" => version(),
+        "version" => hyres(version(ctx)),
         "withdraw" => hyres(into_legacy::withdraw(ctx, req)),
         _ => return DispatcherRes::NoMatch(req),
     })
