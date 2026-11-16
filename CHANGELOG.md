@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
+<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #380; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
 
 ### Added
@@ -143,7 +143,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   opened by the other implementation. The table is now created and filled for every coin that
   opens the store, rows already stored are given their entries when the BCH/SLP fetcher starts, and
   entries whose row is gone are removed. The listing of BCH and SLP tokens, and every stored row,
-  are unchanged. Detail: PR #N; CRD ch.36 R36.14.23 -- R36.14.26.
+  are unchanged. Detail: PR #380; CRD ch.36 R36.14.23 -- R36.14.26.
 
 #### QTUM and QRC20
 
@@ -214,7 +214,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
   Tendermint transaction history, is built in PR #363; its address index now covers every
-  store-served coin family (PR #N).
+  store-served coin family (PR #380).
 
 ## [0.4.0-beta.1] — 2026-11-14
 

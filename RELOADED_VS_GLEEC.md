@@ -655,7 +655,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   The table of addresses that GLEEC KDF needs in order to list a history row is written for every coin the SQLite history
   store serves (BCH and SLP tokens too), not for Tendermint coins only, and the BCH/SLP fetcher prepares it at start
   (rows stored earlier get their entries, entries without a row are removed); the listing of BCH and SLP tokens is
-  unchanged. CRD ch.36 R36.14.23 -- R36.14.26. PR #N. A comparison of a BCH/SLP store with the one GLEEC KDF writes is
+  unchanged. CRD ch.36 R36.14.23 -- R36.14.26. PR #380. A comparison of a BCH/SLP store with the one GLEEC KDF writes is
   still to be run.
 - **Tendermint (Cosmos) coins and tokens are wallet-only in this beta.**
   Activation, balances and `withdraw` work; `setprice`, `buy`, `sell` and
