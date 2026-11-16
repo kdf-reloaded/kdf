@@ -4,7 +4,8 @@
 //! The coin talks to the scripted node of the swap-flow tests. The keys are fixed throwaway keys; no address in
 //! this file holds funds.
 
-use super::super::tendermint_types::{FeeIntent, UnsignedTxError, GAS_LIMIT_DEFAULT, GAS_WANTED_BASE_VALUE};
+use super::super::tendermint_types::{unsigned_internal_id, FeeIntent, UnsignedTxError, GAS_LIMIT_DEFAULT,
+                                     GAS_WANTED_BASE_VALUE};
 use super::super::{tendermint_coin_from_conf_and_request_with_public_key, TendermintPublicKey};
 use super::*;
 use crate::rpc_command::tendermint::staking::{ClaimRewardsPayload, DelegationPayload};
@@ -216,7 +217,12 @@ fn staking_requests_answer_the_unsigned_sign_doc() {
     script_node(&fx);
     let details = common::block_on(fx.coin.delegate(delegation())).expect("an unsigned delegation");
     assert!(details.is_unsigned() && details.tx_hex.is_empty() && details.tx_hash.is_empty());
-    assert!(details.internal_id.is_empty());
+    assert_eq!(
+        details.internal_id,
+        unsigned_internal_id(None),
+        "the constant identifier (R36.14.29)"
+    );
+    assert_eq!(details.memo.as_deref(), Some(""));
     let Some(UnsignedTransaction::SignDoc { sign_doc }) = details.unsigned.clone() else {
         panic!("expected the sign-doc form");
     };
@@ -274,8 +280,10 @@ fn the_ledger_flag_answers_the_amino_form_with_three_times_the_fee() {
     assert_eq!(amount, big_decimal_from_sat_unsigned(uamount, 6));
     assert_eq!(gas_limit, GAS_LIMIT_DEFAULT);
 
-    let doc: Json = serde_json::from_str(wire["legacy_amino_json"].as_str().expect("the Amino document as text"))
-        .expect("the Amino document is JSON");
+    // R36.14.31 item 1: the document is a JSON object, not text; item 4: it has no `timeout_height`.
+    let doc = &wire["legacy_amino_json"];
+    assert!(doc.is_object(), "{doc}");
+    assert!(doc.get("timeout_height").is_none(), "{doc}");
     assert_eq!(doc["chain_id"], "irishub-1");
     assert_eq!(doc["account_number"], "1");
     assert_eq!(doc["sequence"], "1");
@@ -340,14 +348,16 @@ fn with_the_ledger_flag_staking_and_every_other_message_fail() {
 }
 
 #[test]
-fn the_ledger_flag_triples_the_fee_of_a_token_withdraw_too() {
+fn the_ledger_factor_does_not_apply_to_a_token() {
+    // R36.14.31 item 5: the factor of R36.14.18 item 4 is the platform coin's; a token carries the computed amount
+    // once (T36.57 is the full row).
     let plain = watch_only(secp_key(), false);
     script_node(&plain);
     let plain_fee = fee_details_of(&withdraw_of(&nyan(&plain), "IRIS-NYAN").expect("an unsigned withdraw")).1;
     let fx = watch_only(secp_key(), true);
     script_node(&fx);
     let details = withdraw_of(&nyan(&fx), "IRIS-NYAN").expect("an Amino token withdraw");
-    assert_eq!(fee_details_of(&details).1, plain_fee * 3);
+    assert_eq!(fee_details_of(&details).1, plain_fee);
     assert!(matches!(details.unsigned, Some(UnsignedTransaction::Amino { .. })));
 }
 
@@ -507,4 +517,343 @@ fn claim_rewards_payload_shape_is_unchanged() {
     let payload: ClaimRewardsPayload =
         serde_json::from_value(json!({ "validator_address": peer() })).expect("a claim payload");
     assert!(!payload.force);
+}
+
+// ---------------------------------------------------------------------------
+// T36.55 -- T36.58 (CRD ch.36 §36.14.8): the unsigned result, member by member
+// ---------------------------------------------------------------------------
+//
+// One fixture: the coin of 6 decimals with no `gas_price` (0.25, so the computed fee is 18,750 base units), a token
+// on it, a public-key activation with a 33-byte secp256k1 key, a node reporting account number 7, sequence 3, the
+// height 1,000 and balances of 10,000,000 base units of every denomination. The request is a `withdraw` of 1 coin to
+// another account with the memo `m`.
+
+use cosmrs::proto::cosmos::crypto::secp256k1::PubKey as Secp256k1PubKeyProto;
+use cosmrs::proto::cosmos::tx::signing::v1beta1::SignMode as SignModeProto;
+use cosmrs::proto::cosmos::tx::v1beta1::mode_info::Sum as ModeSum;
+use cosmrs::tx::SignDoc as CosmrsSignDoc;
+
+/// The SHA-256 digest of the empty byte string, lower-case hex.
+const SHA256_EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+/// The hash the scripted node answers to a broadcast.
+const BROADCAST_HASH: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+fn script_t36_node(fx: &Fixture, account_number: u64, sequence: u64) {
+    let account = QueryAccountResponse {
+        account: Some(Any {
+            type_url: "/cosmos.auth.v1beta1.BaseAccount".to_owned(),
+            value: BaseAccount {
+                account_number,
+                sequence,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        }),
+    }
+    .encode_to_vec();
+    let balance = QueryBalanceResponse {
+        balance: Some(CoinProto {
+            denom: "scripted".to_owned(),
+            amount: "10000000".to_owned(),
+        }),
+    }
+    .encode_to_vec();
+    let tx_result = json!({ "code": 0, "data": null, "log": "", "info": "", "gas_wanted": "0", "gas_used": "0",
+                            "events": [], "codespace": "" });
+    fx.node.answer(move |method, params| match method {
+        "abci_info" => Some(
+            json!({ "response": { "data": "test", "version": "0", "app_version": "1",
+                                    "last_block_height": "1000", "last_block_app_hash": "" } }),
+        ),
+        "abci_query" if params["path"] == "/cosmos.auth.v1beta1.Query/Account" => Some(abci_value(&account)),
+        "abci_query" if params["path"] == "/cosmos.bank.v1beta1.Query/Balance" => Some(abci_value(&balance)),
+        "broadcast_tx_commit" => Some(json!({ "check_tx": tx_result, "deliver_tx": tx_result,
+                                              "hash": BROADCAST_HASH, "height": "1001" })),
+        _ => None,
+    });
+}
+
+/// The serialized result of a `withdraw` of `amount` of `ticker` to another account, with the memo when given.
+fn t36_withdraw(coin: &impl MmCoin, ticker: &str, amount: &str, memo: Option<&str>) -> Json {
+    let mut request = json!({ "coin": ticker, "to": peer(), "amount": amount });
+    if let Some(memo) = memo {
+        request["memo"] = json!(memo);
+    }
+    let request: WithdrawRequest = serde_json::from_value(request).expect("a withdraw request");
+    let details = common::block_on(coin.withdraw(request).compat()).unwrap_or_else(|e| panic!("withdraw: {e}"));
+    serde_json::to_value(&details).expect("a serializable result")
+}
+
+fn bytes_of(array: &Json) -> Vec<u8> {
+    array
+        .as_array()
+        .expect("an array of byte values")
+        .iter()
+        .map(|n| u8::try_from(n.as_u64().expect("an integer")).expect("an integer from 0 to 255"))
+        .collect()
+}
+
+fn has_a_number(value: &Json) -> bool {
+    match value {
+        Json::Number(_) => true,
+        Json::Array(items) => items.iter().any(has_a_number),
+        Json::Object(members) => members.values().any(has_a_number),
+        _ => false,
+    }
+}
+
+#[test]
+fn t36_55_the_sign_doc_result() {
+    // T36.55 (R36.14.29, R36.14.30; extends T36.42).
+    let fx = watch_only(secp_key(), false);
+    script_t36_node(&fx, 7, 3);
+    let wire = t36_withdraw(&fx.coin, "IRIS", "1", Some("m"));
+    let me = fx.coin.my_address().expect("an address");
+
+    for absent in [
+        "tx_hex",
+        "tx_hash",
+        "kmd_rewards",
+        "legacy_amino_json",
+        "original_tx_type_url",
+    ] {
+        assert!(wire.get(absent).is_none(), "{absent} is present: {wire}");
+    }
+    let sign_doc = wire["sign_doc"].as_object().expect("a sign_doc object");
+    assert_eq!(sign_doc.len(), 4, "{sign_doc:?}");
+    assert_eq!(sign_doc["chain_id"], "irishub-1");
+    assert_eq!(sign_doc["account_number"], json!(7));
+    assert!(sign_doc["account_number"].is_u64(), "a JSON number, not a string");
+
+    let body = TxBodyProto::decode(bytes_of(&sign_doc["body_bytes"]).as_slice()).expect("a transaction body");
+    assert_eq!(body.messages.len(), 1);
+    assert_eq!(body.messages[0].type_url, MSG_SEND_URL);
+    let send = MsgSend::decode(body.messages[0].value.as_slice()).expect("a bank send");
+    assert_eq!(
+        (send.from_address.as_str(), send.to_address.as_str()),
+        (me.as_str(), peer().as_str())
+    );
+    assert_eq!(send.amount.len(), 1);
+    assert_eq!(
+        (send.amount[0].denom.as_str(), send.amount[0].amount.as_str()),
+        ("uiris", "1000000")
+    );
+    assert_eq!(body.memo, "m");
+    assert_eq!(body.timeout_height, 1_100);
+    assert!(body.extension_options.is_empty() && body.non_critical_extension_options.is_empty());
+
+    let auth_info = AuthInfoProto::decode(bytes_of(&sign_doc["auth_info_bytes"]).as_slice()).expect("an auth info");
+    assert_eq!(auth_info.signer_infos.len(), 1);
+    let signer = &auth_info.signer_infos[0];
+    let key = signer.public_key.as_ref().expect("the activation key");
+    assert_eq!(
+        Secp256k1PubKeyProto::decode(key.value.as_slice())
+            .expect("a secp256k1 key")
+            .key,
+        pubkey(&OWN_KEY)
+    );
+    let Some(ModeSum::Single(single)) = signer.mode_info.as_ref().and_then(|m| m.sum.clone()) else {
+        panic!("a single sign mode");
+    };
+    assert_eq!(single.mode, SignModeProto::Direct as i32);
+    assert_eq!(signer.sequence, 3);
+    let fee = auth_info.fee.expect("a fee");
+    assert_eq!(fee.amount.len(), 1);
+    assert_eq!(
+        (fee.amount[0].denom.as_str(), fee.amount[0].amount.as_str()),
+        ("uiris", "18750")
+    );
+    assert_eq!(fee.gas_limit, 125_000);
+    assert!(fee.payer.is_empty() && fee.granter.is_empty());
+
+    assert_eq!(wire["from"], json!([me]));
+    assert_eq!(wire["to"], json!([peer()]));
+    assert_eq!(wire["total_amount"], "1.01875");
+    assert_eq!(wire["spent_by_me"], "1.01875");
+    assert_eq!(wire["received_by_me"], "0");
+    assert_eq!(wire["my_balance_change"], "-1.01875");
+    assert_eq!(
+        wire["fee_details"],
+        json!({ "type": "Tendermint", "coin": "IRIS", "amount": "0.01875", "gas_limit": 125_000 })
+    );
+    assert_eq!(wire["block_height"], 0);
+    assert_eq!(wire["timestamp"], 0);
+    assert_eq!(wire["transaction_type"], "StandardTransfer");
+    assert_eq!(wire["memo"], "m");
+    assert_eq!(wire["internal_id"], SHA256_EMPTY);
+
+    // A request without a memo answers the empty memo and the same identifier.
+    let without = t36_withdraw(&fx.coin, "IRIS", "1", None);
+    assert_eq!(without["memo"], "");
+    assert_eq!(without["internal_id"], SHA256_EMPTY);
+    let without_body =
+        TxBodyProto::decode(bytes_of(&without["sign_doc"]["body_bytes"]).as_slice()).expect("a transaction body");
+    assert_eq!(without_body.memo, "");
+}
+
+#[test]
+fn t36_56_the_amino_result() {
+    // T36.56 (R36.14.29, R36.14.31; extends T36.43).
+    let fx = watch_only(secp_key(), true);
+    script_t36_node(&fx, 7, 3);
+    let wire = t36_withdraw(&fx.coin, "IRIS", "1", Some("m"));
+    let me = fx.coin.my_address().expect("an address");
+
+    for absent in ["sign_doc", "tx_hex", "tx_hash", "kmd_rewards"] {
+        assert!(wire.get(absent).is_none(), "{absent} is present: {wire}");
+    }
+    assert_eq!(wire["original_tx_type_url"], MSG_SEND_URL);
+    let doc = &wire["legacy_amino_json"];
+    let members: Vec<&str> = doc
+        .as_object()
+        .expect("a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let mut sorted = members.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, [
+        "account_number",
+        "chain_id",
+        "fee",
+        "memo",
+        "msgs",
+        "sequence"
+    ]);
+    assert_eq!(doc["account_number"], "7");
+    assert_eq!(doc["chain_id"], "irishub-1");
+    assert_eq!(doc["memo"], "m");
+    assert_eq!(doc["sequence"], "3");
+    assert_eq!(
+        doc["fee"],
+        json!({ "amount": [{ "denom": "uiris", "amount": "56250" }], "gas": "125000" })
+    );
+    assert_eq!(doc["msgs"].as_array().map(Vec::len), Some(1));
+    assert_eq!(doc["msgs"][0]["type"], "cosmos-sdk/MsgSend");
+    assert_eq!(
+        doc["msgs"][0]["value"],
+        json!({ "from_address": me, "to_address": peer(), "amount": [{ "denom": "uiris", "amount": "1000000" }] })
+    );
+    assert!(!has_a_number(doc), "a number in the document: {doc}");
+    assert_eq!(wire["fee_details"]["amount"], "0.05625");
+    assert_eq!(wire["fee_details"]["gas_limit"], 125_000);
+    assert_eq!(wire["total_amount"], "1.05625");
+    assert_eq!(wire["internal_id"], SHA256_EMPTY);
+
+    // Zero account number and sequence are present as "0"; a request without a memo gives the empty memo.
+    let zero = watch_only(secp_key(), true);
+    script_t36_node(&zero, 0, 0);
+    let zero_wire = t36_withdraw(&zero.coin, "IRIS", "1", None);
+    assert_eq!(zero_wire["legacy_amino_json"]["account_number"], "0");
+    assert_eq!(zero_wire["legacy_amino_json"]["sequence"], "0");
+    assert_eq!(zero_wire["legacy_amino_json"]["memo"], "");
+    assert_eq!(zero_wire["memo"], "");
+}
+
+#[test]
+fn t36_57_a_token_under_the_ledger_flag() {
+    // T36.57 (R36.14.31 item 5): the fee of a token is not tripled.
+    let fx = watch_only(secp_key(), true);
+    script_t36_node(&fx, 7, 3);
+    let token = nyan(&fx);
+    let wire = t36_withdraw(&token, "IRIS-NYAN", "2", Some("m"));
+    let doc = &wire["legacy_amino_json"];
+    assert_eq!(
+        doc["msgs"][0]["value"]["amount"],
+        json!([{ "denom": "unyan", "amount": "2000000" }])
+    );
+    assert_eq!(
+        doc["fee"],
+        json!({ "amount": [{ "denom": "uiris", "amount": "18750" }], "gas": "125000" })
+    );
+    assert_eq!(wire["fee_details"]["coin"], "IRIS");
+    assert_eq!(wire["fee_details"]["amount"], "0.01875");
+    assert_eq!(wire["total_amount"], "2");
+    let token_id = hex::decode(token.token_id()).expect("a token id of 32 bytes");
+    assert_eq!(token_id.len(), 32);
+    assert_eq!(wire["internal_id"], hex::encode(Sha256::digest(&token_id[..])));
+    assert_ne!(wire["internal_id"], SHA256_EMPTY);
+}
+
+#[test]
+fn t36_58_broadcast_of_a_transaction_signed_outside_the_node() {
+    // T36.58 (R36.14.32).
+    let key = SigningKey::from_slice(&OWN_KEY).expect("a signing key");
+    let broadcasts = |fx: &Fixture| fx.node.requests("broadcast_tx_commit");
+
+    // (i) The sign document of T36.55, signed under the direct mode and assembled from the two byte strings.
+    let fx = watch_only(secp_key(), false);
+    script_t36_node(&fx, 7, 3);
+    let wire = t36_withdraw(&fx.coin, "IRIS", "1", Some("m"));
+    let direct = CosmrsSignDoc {
+        body_bytes: bytes_of(&wire["sign_doc"]["body_bytes"]),
+        auth_info_bytes: bytes_of(&wire["sign_doc"]["auth_info_bytes"]),
+        chain_id: "irishub-1".to_owned(),
+        account_number: 7,
+    }
+    .sign(&key)
+    .expect("a signed document")
+    .to_bytes()
+    .expect("the encoded transaction");
+    let tx_raw = TxRaw::decode(direct.as_slice()).expect("a TxRaw");
+    assert_eq!(
+        tx_raw.body_bytes,
+        bytes_of(&wire["sign_doc"]["body_bytes"]),
+        "the bytes are unchanged"
+    );
+    let hash = common::block_on(fx.coin.send_raw_tx(&hex::encode(&direct)).compat()).expect("a broadcast");
+    assert_eq!(hash, BROADCAST_HASH);
+    let sent = broadcasts(&fx);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["tx"], base64::encode(&direct), "exactly those bytes");
+
+    // (ii) A transaction built from the Amino document under R36.14.31 item 7: no timeout height.
+    let amino = watch_only(secp_key(), true);
+    script_t36_node(&amino, 7, 3);
+    let wire = t36_withdraw(&amino.coin, "IRIS", "1", Some("m"));
+    let value = &wire["legacy_amino_json"]["msgs"][0]["value"];
+    let message = msg_send_any(
+        &amino.coin.account_id,
+        &AccountId::from_str(value["to_address"].as_str().expect("a destination")).expect("an account"),
+        vec![coin_proto("uiris", 1_000_000)],
+    );
+    let body = tx::Body::new(vec![message], "m", 0u32);
+    let auth_info = SignerInfo {
+        public_key: Some(cosmrs::crypto::PublicKey::from(secp_key()).into()),
+        mode_info: tx::ModeInfo::single(tx::SignMode::LegacyAminoJson),
+        sequence: 3,
+    }
+    .auth_info(Fee::from_amount_and_gas(coin_of(Chain::Iris, 56_250), 125_000u64));
+    let body_bytes = body.into_bytes().expect("a body");
+    assert_eq!(
+        TxBodyProto::decode(body_bytes.as_slice())
+            .expect("a body")
+            .timeout_height,
+        0
+    );
+    let built = TxRaw {
+        body_bytes,
+        auth_info_bytes: auth_info.into_bytes().expect("an auth info"),
+        signatures: vec![vec![7u8; 64]],
+    }
+    .encode_to_vec();
+    let hash = common::block_on(amino.coin.send_raw_tx(&hex::encode(&built)).compat()).expect("a broadcast");
+    assert_eq!(hash, BROADCAST_HASH);
+    assert_eq!(broadcasts(&amino)[0]["tx"], base64::encode(&built));
+
+    // (iii) The same transaction sent under the token's ticker is broadcast in the same way.
+    let hash = common::block_on(nyan(&fx).send_raw_tx(&hex::encode(&direct)).compat()).expect("a broadcast");
+    assert_eq!(hash, BROADCAST_HASH);
+    let sent = broadcasts(&fx);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1]["tx"], base64::encode(&direct));
+
+    // (iv) Bytes that do not decode as a TxRaw yield the legacy error answer and no request to the node.
+    for not_a_tx_raw in ["zz", "00", "ffffffff"] {
+        assert!(
+            common::block_on(fx.coin.send_raw_tx(not_a_tx_raw).compat()).is_err(),
+            "{not_a_tx_raw}"
+        );
+    }
+    assert_eq!(broadcasts(&fx).len(), 2, "no request for a refused transaction");
 }

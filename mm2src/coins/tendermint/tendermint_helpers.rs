@@ -429,9 +429,10 @@ impl TendermintCoin {
             .map(|e| TransactionErr::Plain(e.get_inner().to_string()))
     }
 
-    /// The unsigned document of a watch-only coin for one message (CRD ch.36 R36.14.17): the direct sign document
-    /// (body, auth info, chain id, account number) without the Ledger flag, the Amino sign document of a bank send
-    /// and the type URL of its message with it. Nothing is signed or broadcast. With the Ledger flag every message
+    /// The unsigned document of a watch-only coin for one message (CRD ch.36 R36.14.17, R36.14.30, R36.14.31): the
+    /// direct sign document (body with `timeout_height`, auth info, chain id, account number) without the Ledger flag,
+    /// the Amino sign document of a bank send (an object, without a timeout height) and the type URL of its message
+    /// with it. Nothing is signed or broadcast. With the Ledger flag every message
     /// other than the bank send fails (R36.14.18 item 3).
     ///
     /// # Errors
@@ -473,7 +474,8 @@ impl TendermintCoin {
                 .iter()
                 .map(|c| json!({ "amount": c.amount.to_string(), "denom": c.denom.to_string() }))
                 .collect();
-            // The Amino sign document: members in alphabetical order, numbers as decimal strings.
+            // The Amino sign document (CRD ch.36 R36.14.31 items 1 and 3): a JSON object, every number a decimal
+            // string, and no `timeout_height` (item 4: the transaction built from it has none).
             let doc = json!({
                 "account_number": account_info.account_number.to_string(),
                 "chain_id": chain_id,
@@ -481,10 +483,9 @@ impl TendermintCoin {
                 "memo": memo,
                 "msgs": [amino_msg],
                 "sequence": account_info.sequence.to_string(),
-                "timeout_height": timeout_height.to_string(),
             });
             return Ok(UnsignedTransaction::Amino {
-                legacy_amino_json: doc.to_string(),
+                legacy_amino_json: doc,
                 original_tx_type_url: msg.type_url,
             });
         }

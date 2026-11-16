@@ -578,6 +578,13 @@ pub(super) enum HtlcMsgError {
     InvalidInput(String),
 }
 
+/// The `internal_id` of an unsigned result (CRD ch.36 R36.14.29): constant, because an unsigned transaction has no
+/// hash. For the platform coin it is the SHA-256 digest of the empty byte string, for a token the SHA-256 digest of
+/// the 32 bytes of its token id. It identifies no transaction.
+pub(super) fn unsigned_internal_id(token_id: Option<&[u8]>) -> BytesJson {
+    sha256(token_id.unwrap_or_default()).as_slice().to_vec().into()
+}
+
 /// Why the unsigned document of a watch-only coin could not be built (CRD ch.36 R36.14.17, R36.14.18).
 #[derive(Display, Debug)]
 pub(super) enum UnsignedTxError {

@@ -1123,6 +1123,7 @@ fn test_withdraw_impl_set_fixed_fee() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1169,6 +1170,7 @@ fn test_withdraw_impl_sat_per_kb_fee() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1239,6 +1241,7 @@ fn explicit_fee_withdraw(
 
     let amount: BigDecimal = rate.parse().unwrap();
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1380,6 +1383,7 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: "9.9789".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1426,6 +1430,7 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max_dust_included_to_fee() 
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: "9.9789".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1472,6 +1477,7 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_over_max() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: "9.97939455".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1505,6 +1511,7 @@ fn test_withdraw_impl_sat_per_kb_fee_max() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 0u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1566,6 +1573,7 @@ fn test_withdraw_kmd_rewards_impl(
     let coin = utxo_coin_from_fields(fields);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1676,6 +1684,7 @@ fn test_withdraw_kmd_rewards_post_fork_reduction() {
     let coin = utxo_coin_from_fields(fields);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1920,6 +1929,7 @@ fn test_withdraw_doc_rewards_none() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -4487,6 +4497,7 @@ fn test_withdraw_to_p2pkh() {
     };
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1.into(),
         from: None,
         to: p2pkh_address.to_string(),
@@ -4534,6 +4545,7 @@ fn test_withdraw_to_p2sh() {
     };
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1.into(),
         from: None,
         to: p2sh_address.to_string(),
@@ -4581,6 +4593,7 @@ fn test_withdraw_to_p2wpkh() {
     };
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1.into(),
         from: None,
         to: p2wpkh_address.to_string(),
@@ -9488,6 +9501,7 @@ mod withdraw_recent_spent {
 
     fn withdraw_request() -> WithdrawRequest {
         WithdrawRequest {
+            memo: None,
             amount: "0.001".parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -10960,6 +10974,7 @@ mod hd_coin_swap_key_tests {
 
         fn request(from: Option<WithdrawFrom>) -> WithdrawRequest {
             WithdrawRequest {
+                memo: None,
                 amount: 1u64.into(),
                 from,
                 to: RECEIVER.to_string(),
@@ -11487,6 +11502,7 @@ mod sighash_suffix_sites {
 
     fn withdraw_request() -> WithdrawRequest {
         WithdrawRequest {
+            memo: None,
             amount: "0.001".parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),

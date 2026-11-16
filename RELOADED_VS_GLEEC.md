@@ -634,7 +634,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 - **A Tendermint coin activated from a public key is watch-only, and its orders are refused.** The `WithPubkey` form
   of `activation_params` builds a coin that holds no private key: it answers `withdraw` and the staking requests with
   an unsigned document for the caller's own wallet (a `sign_doc`, or with `is_ledger_connection: true` the Amino form
-  with three times the fee), as GLEEC KDF does, and refuses every signing path with `PrivKeyNotAllowed::WatchOnlyCoin`.
+  with three times the fee for the coin, not for a token), as GLEEC KDF does, and refuses every signing path with `PrivKeyNotAllowed::WatchOnlyCoin`.
   Where it differs: GLEEC KDF accepts orders for such a coin when the Ledger flag is off; KDF Reloaded refuses them for
   both forms (CRD ch.18 R18.11.23a), because it would announce a key the coin cannot sign with. An `ed25519` key gets
   the account of the public Cosmos SDK rule for that key type, where GLEEC KDF applies the secp256k1 rule to it. A

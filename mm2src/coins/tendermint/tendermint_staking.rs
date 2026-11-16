@@ -442,6 +442,11 @@ impl TendermintCoin {
         .map_err(|e| DelegationError::InternalError(e.to_string()))?;
 
         let (tx_hex, tx_id, unsigned) = self.send_or_unsigned(msg, fee, timeout_height, &req.memo).await?;
+        // An unsigned result carries the constant identifier and the memo of R36.14.29; a signed one its transaction.
+        let (internal_id, result_memo) = match &unsigned {
+            Some(_) => (unsigned_internal_id(None), Some(req.memo.clone())),
+            None => (tx_hex.clone(), None),
+        };
 
         let tx_details = TransactionDetails {
             unsigned,
@@ -463,10 +468,10 @@ impl TendermintCoin {
                 gas_limit,
             })),
             coin: self.ticker.to_string(),
-            internal_id: tx_hex.clone(),
+            internal_id,
             kmd_rewards: None,
             transaction_type: TransactionType::StakingDelegation,
-            memo: None,
+            memo: result_memo,
         };
         if !tx_details.is_unsigned() {
             self.publish_tx_history_record(self.ticker(), &tx_details);
@@ -551,6 +556,11 @@ impl TendermintCoin {
         }
 
         let (tx_hex, tx_id, unsigned) = self.send_or_unsigned(msg, fee, timeout_height, &req.memo).await?;
+        // An unsigned result carries the constant identifier and the memo of R36.14.29; a signed one its transaction.
+        let (internal_id, result_memo) = match &unsigned {
+            Some(_) => (unsigned_internal_id(None), Some(req.memo.clone())),
+            None => (tx_hex.clone(), None),
+        };
 
         let tx_details = TransactionDetails {
             unsigned,
@@ -572,10 +582,10 @@ impl TendermintCoin {
                 gas_limit,
             })),
             coin: self.ticker.to_string(),
-            internal_id: tx_hex.clone(),
+            internal_id,
             kmd_rewards: None,
             transaction_type: TransactionType::RemoveDelegation,
-            memo: None,
+            memo: result_memo,
         };
         if !tx_details.is_unsigned() {
             self.publish_tx_history_record(self.ticker(), &tx_details);
@@ -648,6 +658,11 @@ impl TendermintCoin {
         }
 
         let (tx_hex, tx_id, unsigned) = self.send_or_unsigned(msg, fee, timeout_height, &req.memo).await?;
+        // An unsigned result carries the constant identifier and the memo of R36.14.29; a signed one its transaction.
+        let (internal_id, result_memo) = match &unsigned {
+            Some(_) => (unsigned_internal_id(None), Some(req.memo.clone())),
+            None => (tx_hex.clone(), None),
+        };
 
         let tx_details = TransactionDetails {
             unsigned,
@@ -669,10 +684,10 @@ impl TendermintCoin {
                 gas_limit,
             })),
             coin: self.ticker.to_string(),
-            internal_id: tx_hex.clone(),
+            internal_id,
             kmd_rewards: None,
             transaction_type: TransactionType::ClaimDelegationRewards,
-            memo: None,
+            memo: result_memo,
         };
         if !tx_details.is_unsigned() {
             self.publish_tx_history_record(self.ticker(), &tx_details);

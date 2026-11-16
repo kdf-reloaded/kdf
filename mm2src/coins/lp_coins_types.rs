@@ -571,6 +571,10 @@ pub struct WithdrawRequest {
     #[serde(default)]
     pub(crate) max: bool,
     pub(crate) fee: Option<WithdrawFee>,
+    /// The memo of the transaction, for a coin family that carries one: Tendermint (CRD ch.36 R36.14.29, the memo of
+    /// the transaction and of an unsigned result). Absent is the empty memo. Ignored by every other family.
+    #[serde(default)]
+    pub(crate) memo: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -622,6 +626,7 @@ impl WithdrawRequest {
             amount,
             max,
             fee,
+            memo: None,
         }
     }
 
@@ -633,6 +638,7 @@ impl WithdrawRequest {
             amount: 0.into(),
             max: true,
             fee: None,
+            memo: None,
         }
     }
 }
@@ -953,10 +959,10 @@ pub struct UnsignedSignDoc {
 pub enum UnsignedTransaction {
     /// The direct form, without the Ledger flag.
     SignDoc { sign_doc: UnsignedSignDoc },
-    /// The Amino form, with the Ledger flag: the Amino sign document as JSON text and the protobuf type URL of its
-    /// message.
+    /// The Amino form, with the Ledger flag: the Amino sign document as a JSON object (CRD ch.36 R36.14.31 item 1)
+    /// and the protobuf type URL of its message.
     Amino {
-        legacy_amino_json: String,
+        legacy_amino_json: Json,
         original_tx_type_url: String,
     },
 }
@@ -1341,12 +1347,12 @@ mod transaction_details_wire_tests {
     fn only_an_unsigned_result_omits_the_two_members() {
         let mut row: TransactionDetails = json::from_str(EMPTY_HEX_ROW).expect("a row deserializes");
         row.unsigned = Some(UnsignedTransaction::Amino {
-            legacy_amino_json: "{}".to_owned(),
+            legacy_amino_json: json!({}),
             original_tx_type_url: "/x".to_owned(),
         });
         let wire: Json = json::to_value(&row).expect("a row serializes");
         assert!(wire.get("tx_hex").is_none() && wire.get("tx_hash").is_none(), "{wire}");
-        assert_eq!(wire["legacy_amino_json"], "{}");
+        assert_eq!(wire["legacy_amino_json"], json!({}));
         assert_eq!(wire["original_tx_type_url"], "/x");
         assert!(wire.get("internal_id").is_some());
     }

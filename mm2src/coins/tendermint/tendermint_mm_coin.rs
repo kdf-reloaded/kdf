@@ -264,7 +264,8 @@ impl MmCoin for TendermintCoin {
                 value: msg.encode_to_vec(),
             };
 
-            let memo = TX_DEFAULT_MEMO.to_string();
+            // The request's memo, empty when it has none (CRD ch.36 R36.14.29).
+            let memo = req.memo.clone().unwrap_or_else(|| TX_DEFAULT_MEMO.to_string());
 
             let current_block = coin
                 .current_block()
@@ -345,7 +346,7 @@ impl MmCoin for TendermintCoin {
             };
 
             // The signed transaction, or the unsigned document of a watch-only coin (nothing signed, no hash).
-            let (tx_bytes, tx_hash, unsigned) = match priv_key {
+            let (tx_bytes, tx_hash, unsigned, internal_id) = match priv_key {
                 Some(priv_key) => {
                     let account_info = coin.account_info(&account_id).await.map_mm_err()?;
                     let tx_raw = coin
@@ -355,17 +356,19 @@ impl MmCoin for TendermintCoin {
                         .to_bytes()
                         .map_to_mm(|e| WithdrawError::InternalError(format!("Failed to encode tx: {}", e)))?;
                     let tx_hash = hex::encode_upper(sha256(&tx_bytes).as_slice());
-                    (tx_bytes, tx_hash, None)
+                    let internal_id = tx_hash_to_internal_id(&tx_hash);
+                    (tx_bytes, tx_hash, None, internal_id)
                 },
                 None => {
                     let unsigned = coin
                         .build_unsigned_transaction(msg_payload, fee, timeout_height, &memo)
                         .await
                         .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
-                    (Vec::new(), String::new(), Some(unsigned))
+                    (Vec::new(), String::new(), Some(unsigned), unsigned_internal_id(None))
                 },
             };
-            let internal_id = tx_hash_to_internal_id(&tx_hash);
+            // An unsigned result answers the memo it carries (R36.14.29); a signed one has none here.
+            let result_memo = unsigned.is_some().then(|| memo.clone());
 
             let tx_details = TransactionDetails {
                 unsigned,
@@ -390,7 +393,7 @@ impl MmCoin for TendermintCoin {
                 internal_id,
                 kmd_rewards: None,
                 transaction_type: TransactionType::StandardTransfer,
-                memo: None,
+                memo: result_memo,
             };
             if !tx_details.is_unsigned() {
                 coin.publish_tx_history_record(coin.ticker(), &tx_details);

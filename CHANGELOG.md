@@ -92,7 +92,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   document for the caller's own wallet to sign (no `tx_hex` and no `tx_hash`; a `sign_doc` with
   `body_bytes`, `auth_info_bytes`, `chain_id` and `account_number`). With `is_ledger_connection: true`
   a `withdraw` answers the Amino form instead (`legacy_amino_json` and `original_tx_type_url`) with
-  three times the computed fee, and the staking requests fail. Placing an order with the coin or one
+  three times the computed fee (for the coin, not for a token), and the staking requests fail. A `memo` in the `withdraw` request is carried in the transaction. Placing an order with the coin or one
   of its tokens, message signing, private-key display, and every swap payment, claim and refund are
   refused (`PrivKeyNotAllowed::WatchOnlyCoin`). A malformed `activation_params` now fails request
   parsing with `InvalidRequest`; the WalletConnect forms are still refused. Detail: PR #382; CRD ch.36

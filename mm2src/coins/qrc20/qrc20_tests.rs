@@ -95,6 +95,7 @@ fn test_withdraw_impl_fee_details() {
     let (_ctx, coin) = qrc20_coin_for_test(&priv_key, None);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 10.into(),
         from: None,
         to: "qHmJ3KA6ZAjR9wGjpFASn4gtUSeFAqdZgs".into(),
