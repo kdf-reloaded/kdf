@@ -1658,7 +1658,7 @@ is the persistent-data compatibility the project keeps by default.
 > function (`history_internal_id`, `stored_form` and `served_form` of
 > `mm2src/coins/tendermint/tendermint_tx_history.rs`). The address index of the
 > store is written as R36.14.23 -- R36.14.26 state, so that the reference lists our rows
-> (checked on 2026-11-15 against a reference release build: from a fresh store written by this build the reference listed the same 4 rows as this build, with equal (internal_id, address) index sets of 10 entries; a store written by the previous head of this change, after the backfill, was listed the same way).
+> (checked on 2026-11-15 against a reference release build: from a fresh store written by the head 358a56944 of this change the reference listed the same 4 rows as this build, with equal (internal_id, address) index sets of 10 entries; a store written by the previous head of this change, after the backfill, was listed the same way) Checked again on 2026-11-16 on the head 4d7fb6326 of this change (two runs; the reference release build as the other writer): in every continuation leg (each program on a copy of the other's fresh store, and both on a store written by an earlier head of this change and backfilled) both programs ended with the same 4 listed rows, 6 stored rows and 10 index entries; the fresh first passes differed only in which transactions the node answered with..
 > Built in PR #363; test T36.37.
 
 D36.12 *(maintainer decision.)* *Amounts of fee-only transactions and
@@ -1772,7 +1772,7 @@ clients.
 > Address index (R36.14.23 -- R36.14.26 as built). The SQLite store keeps three
 > tables per coin, `<T>_tx_history`, `<T>_tx_address` (`id INTEGER NOT NULL
 > PRIMARY KEY`, `internal_id VARCHAR(255) NOT NULL`, `address TEXT NOT NULL`) and
-> `<T>_tx_cache`, with every `-` of the ticker replaced by `_` (`table_ticker`).
+> `<T>_tx_cache`, with every `-` of the ticker replaced by `_` (`table_ticker`), so tickers that differ only in a dash versus an underscore share one set of tables (reference-bound).
 > An entry exists for each distinct address in the `from` and `to` lists of a
 > stored row (`write_address_index`); it is written in the transaction that
 > writes the row, and deleted with the row by its identifier
@@ -1787,11 +1787,13 @@ clients.
 > Tendermint only for now: the address table is created, and entries are written
 > and deleted, only for a coin whose table exists (created by the Tendermint
 > fetcher, or already present in a store written elsewhere), so the stores of
-> other families stay as they were; whether the table becomes generic is not yet
-> decided. Checked on 2026-11-15 against a reference release build: from a fresh
-> store written by this build the reference listed the same 4 rows as this build,
-> with equal (internal_id, address) index sets of 10 entries; a store written by
-> the previous head of this change, after the backfill, was listed the same way.
+> other families stay as they were: in this change only Tendermint coins write the
+> index. A follow-up change of the same release adds it for every family the store
+> serves (BCH and SLP tokens). Checked on 2026-11-15 against a reference release
+> build: from a fresh store written by the head 358a56944 of this change the
+> reference listed the same 4 rows as this build, with equal (internal_id, address)
+> index sets of 10 entries; a store written by the previous head of this change,
+> after the backfill, was listed the same way.
 
 ### 36.14.2 WalletConnect activation
 
@@ -2835,6 +2837,14 @@ continue, and the earlier account's rows are re-creatable in the same
 way. Option (b) does not detect a store that the reference filled for
 two accounts. Recommended: (b).
 
+> **Status note (2026-11-15, Reloaded-original).** Decided: (a), the reference as it
+> stands. Reloaded keeps no account record beside the store and does not rebuild it
+> when the coin is activated for a different account (the record of the resolved
+> denominations, D36.21, stays). A row carries the values of the account that wrote
+> it and is listed under each of its own addresses; the second account's rows are
+> written beside it, once each. Built in PR #363; test T36.54
+> (`a_second_account_on_the_same_store_is_listed_with_the_rows_of_the_first`).
+
 R36.14.27 **The first pass (this family; completes R36.14.3, R36.14.4
 and R36.14.11).**
 
@@ -2958,6 +2968,16 @@ of the earliest transaction left out for this reason, so that every
 later pass reads from there again. The rows written are the same under
 both options, so the store stays one that either program can continue.
 Recommended: (b).
+
+> **Status note (2026-11-15, Reloaded-original).** Decided (b). When the block answer
+> for a transaction's height carries no block or no time, every other configured
+> node is asked once (`block_time_from_any_node`); a node that fails counts as not
+> having the block. When none has it, no row is written and the query's page cursor
+> is set to the earliest page of the pass that held such a transaction, so every
+> later pass reads from there again (`pass`, `read_page`). The warning of the left
+> out transaction stays. Built in PR #363; tests T36.53 (iii),
+> `a_block_that_the_first_node_lacks_is_asked_of_the_other_nodes` and
+> `a_block_that_no_node_has_keeps_the_earliest_such_page_for_the_next_pass`.
 
 D36.25 *(maintainer decision.)* *A query that ended on a full page.*
 Options: (a) the reference as it stands (R36.14.28 item 4); (b) Reloaded
@@ -3102,7 +3122,7 @@ database. *Expected in `B`'s history:* under D36.23 (a), one row with
 > `mm2src/coins/tendermint/tendermint_tx_history.rs`. Tests T36.49 (i) -- (viii),
 > T36.50, T36.51 (iv) and (v) and T36.52 are in
 > `mm2src/coins/tendermint/tendermint_swap_flow_tests/tx_history_tests.rs` and in
-> the test module of the store. Not yet built: D36.23 (the account record and the
-> rebuild for a different account; T36.54), D36.24 (its (b) form; T36.53 (iii)), and T36.51 (i) -- (iii) and (vi) (the store written by the other
-> program as the contract, and the lab row). R36.14.27 and R36.14.28 are met by
-> the fetcher as it stands, apart from those decisions.
+> the test module of the store. T36.51 (i) -- (iii) and (vi) (the store written by
+> the other program as the contract, and the lab row) are lab rows and are not
+> built as unit tests. R36.14.27 and R36.14.28 are met by the fetcher as it stands
+> and by the decisions D36.23 -- D36.25 as noted at each.

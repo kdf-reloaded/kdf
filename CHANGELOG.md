@@ -67,7 +67,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `tx_hex` is the signed transaction. The history of a refunded HTLC or a completed undelegation has
   no row, because the chain records no transaction for them. The history of a custom token that is
   not in the coins file is absent in 0.5.0. A history store written by this node is listed by the other
-  implementation too (checked against a reference release build on 2026-11-15). Native only in 0.5.0: the
+  implementation too (checked against a reference release build on 2026-11-15); in this change only
+  Tendermint coins write the index that makes this work. A history database is per coin and shared by
+  every account activated on it, so rows of an earlier account stay and are listed under their own
+  addresses (a known property of the shared database, the same as at GLEEC KDF). A transaction whose
+  block time no node can give is read again by the next pass. Native only in 0.5.0: the
   browser build has no versioned history store for any coin family. Detail: PR #363;
   CRD ch.36 §36.14.1; §36.14.7.
 

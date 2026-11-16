@@ -1170,10 +1170,15 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
         self.rebuild_when_resolution_changed().await?;
         let queries = self.queries();
         for (index, query) in queries.iter().enumerate() {
+            // D36.24 (b): the earliest page of this pass that held a transaction left out for want of a block time.
+            let mut earliest_left_out: Option<u32> = None;
             loop {
                 let page = self.cursors[index];
                 match self.read_page(query, page).await {
-                    Ok(total) => {
+                    Ok((total, left_out_for_time)) => {
+                        if left_out_for_time && earliest_left_out.is_none() {
+                            earliest_left_out = Some(page);
+                        }
                         if !self.first_pass_done {
                             let left = total.saturating_sub(u64::from(page) * u64::from(HISTORY_PAGE_SIZE));
                             self.coin.set_history_sync_state(HistorySyncState::InProgress(
@@ -1193,14 +1198,19 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
                     Err(PageError::Store(e)) => return Err(e),
                 }
             }
+            if let Some(page) = earliest_left_out {
+                // Every later pass reads from there again.
+                self.cursors[index] = page;
+            }
         }
         self.first_pass_done = true;
         self.coin.set_history_sync_state(HistorySyncState::Finished);
         Ok(())
     }
 
-    /// Reads, classifies and stores one page; returns the total of the query.
-    async fn read_page(&self, query: &str, page: u32) -> Result<u64, PageError> {
+    /// Reads, classifies and stores one page; returns the total of the query and whether a transaction of the page
+    /// was left out because no node had the time of its block (D36.24 (b)).
+    async fn read_page(&self, query: &str, page: u32) -> Result<(u64, bool), PageError> {
         let response = search_page(&self.coin, query, page).await.map_err(PageError::Node)?;
         let role = if query.starts_with("coin_spent") {
             "spender"
@@ -1215,12 +1225,12 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
             response.total_count,
             response.txs.len()
         );
-        let drafts = self.drafts_of(&response).await?;
+        let (drafts, left_out_for_time) = self.drafts_of(&response).await?;
         self.store(drafts).await.map_err(PageError::Store)?;
-        Ok(u64::from(response.total_count))
+        Ok((u64::from(response.total_count), left_out_for_time))
     }
 
-    async fn drafts_of(&self, response: &TxSearchResponse) -> Result<Vec<RowDraft>, PageError> {
+    async fn drafts_of(&self, response: &TxSearchResponse) -> Result<(Vec<RowDraft>, bool), PageError> {
         let me = self.coin.account_id.to_string();
         let platform_denom = self.coin.platform_denom().to_string();
         let ctx = ClassifyContext {
@@ -1232,6 +1242,7 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
         };
         let mut block_times: HashMap<u64, Option<u64>> = HashMap::new();
         let mut drafts = Vec::new();
+        let mut left_out_for_time = false;
         for entry in &response.txs {
             // R36.14.4: left out entirely, without stopping the pass.
             if !entry.tx_result.code.is_ok() {
@@ -1248,7 +1259,9 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
             let timestamp = match block_times.get(&height) {
                 Some(time) => *time,
                 None => {
-                    let time = block_time(&self.coin, height).await.map_err(PageError::Node)?;
+                    let time = block_time_from_any_node(&self.coin, height)
+                        .await
+                        .map_err(PageError::Node)?;
                     block_times.insert(height, time);
                     time
                 },
@@ -1256,6 +1269,7 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
             let timestamp = match timestamp {
                 Some(timestamp) => timestamp,
                 None => {
+                    left_out_for_time = true;
                     warn!(
                         "{}: history: the block query for height {} returned no time, the transaction {} is left out",
                         self.coin.ticker, height, entry.hash
@@ -1300,7 +1314,7 @@ impl<S: TxHistoryStorage> HistoryFetcher<S> {
             };
             drafts.extend(rows_for_tx(&facts, &ctx));
         }
-        Ok(drafts)
+        Ok((drafts, left_out_for_time))
     }
 
     /// Writes the rows that are not stored yet; a row whose identifier is stored is never written again
@@ -1399,13 +1413,38 @@ async fn search_page(coin: &TendermintCoin, query: &str, page: u32) -> Result<Tx
 /// The time in seconds of the block at `height`; `None` when the node's answer carries no time for it
 /// (R36.14.4).
 async fn block_time(coin: &TendermintCoin, height: u64) -> Result<Option<u64>, String> {
-    let request = GetBlockByHeightRequest {
-        height: i64::try_from(height).map_err(|e| e.to_string())?,
-    };
     let client = coin
         .rpc_client()
         .await
         .map_err(|e| scrub_urls_in_text(&e.to_string()))?;
+    block_time_on(&client, height).await
+}
+
+/// The time of the block at `height` from the node that answers first; when its answer carries no block or no time,
+/// every other configured node is asked once (D36.24 (b)). `None` when no node has it. A failure of the first node
+/// is returned as before; a failure of another node counts as that node not having the block.
+async fn block_time_from_any_node(coin: &TendermintCoin, height: u64) -> Result<Option<u64>, String> {
+    if let Some(time) = block_time(coin, height).await? {
+        return Ok(Some(time));
+    }
+    let clients = coin.client.0.lock().await.rpc_clients.clone();
+    for client in clients {
+        match block_time_on(&client, height).await {
+            Ok(Some(time)) => return Ok(Some(time)),
+            Ok(None) => {},
+            Err(e) => debug!(
+                "history {}: a node could not answer the block query for height {}: {}",
+                coin.ticker, height, e
+            ),
+        }
+    }
+    Ok(None)
+}
+
+async fn block_time_on(client: &HttpClient, height: u64) -> Result<Option<u64>, String> {
+    let request = GetBlockByHeightRequest {
+        height: i64::try_from(height).map_err(|e| e.to_string())?,
+    };
     let answer = client
         .abci_query(
             Some(ABCI_GET_BLOCK_BY_HEIGHT_PATH.to_string()),

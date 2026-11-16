@@ -99,7 +99,10 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    planning question. Native builds only. Limitation: the history of a custom
    token that is absent from the coins file does not exist in 0.5.0. A later
    package, not scheduled: a Reloaded-side identifier scheme for transfers the
-   reference does not count (such custom-token transfers).
+   reference does not count (such custom-token transfers). Next item of this lane
+   after PR #363: the store's address index for every store-served family (BCH, SLP
+   tokens), with a BCH/SLP lab row against the reference writer; in PR #363 only
+   Tendermint coins write the index.
 5. **Hardware `priv_key_policy`.** The reference ignores `priv_key_policy` for
    Tendermint, so `"Trezor"` silently activates with the context key (ch. 36
    code-quality finding).

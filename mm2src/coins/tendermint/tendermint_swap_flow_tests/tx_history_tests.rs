@@ -1232,7 +1232,10 @@ struct NodeState {
 
 type SharedState = Arc<Mutex<NodeState>>;
 
-fn script_history(fx: &Fixture) -> SharedState {
+fn script_history(fx: &Fixture) -> SharedState { script_history_on(&fx.node, &fx.coin) }
+
+/// Scripts one node (the history queries, the block query and the balance query) for the coin.
+fn script_history_on(node: &FakeNode, coin: &TendermintCoin) -> SharedState {
     let state = Arc::new(Mutex::new(NodeState {
         spender: Vec::new(),
         receiver: Vec::new(),
@@ -1242,8 +1245,8 @@ fn script_history(fx: &Fixture) -> SharedState {
         balance: 1_000_000,
         states: Vec::new(),
     }));
-    let (node_state, coin) = (state.clone(), fx.coin.clone());
-    fx.node.answer(move |method, params| {
+    let (node_state, coin) = (state.clone(), coin.clone());
+    node.answer(move |method, params| {
         let mut st = node_state.lock().unwrap();
         match method {
             "abci_info" => Some(json!({ "response": {
@@ -1322,7 +1325,10 @@ fn script_history(fx: &Fixture) -> SharedState {
 /// A coin with the token `TOK` activated (its denom is in the coins file under another ticker), a coins file that
 /// names more tokens of this platform and one of another platform, and the denom `unew` in the file with no token
 /// activated for it.
-fn history_fixture() -> Fixture {
+fn history_fixture() -> Fixture { history_fixture_for(&OWN_KEY, None) }
+
+/// The fixture for the account of `key`; with `extra`, a second configured node.
+fn history_fixture_for(key: &[u8], extra: Option<&FakeNode>) -> Fixture {
     let node = FakeNode::start();
     let ctx = MmCtxBuilder::new()
         .with_conf(json!({
@@ -1350,8 +1356,10 @@ fn history_fixture() -> Fixture {
         &ctx,
         Chain::Iris.ticker().to_owned(),
         &Chain::Iris.conf(),
-        vec![RpcNode::for_test(&node.url())],
-        &OWN_KEY,
+        std::iter::once(RpcNode::for_test(&node.url()))
+            .chain(extra.map(|n| RpcNode::for_test(&n.url())))
+            .collect(),
+        key,
         false,
     ))
     .unwrap_or_else(|e| panic!("cannot build the test coin: {}", e));
@@ -2550,4 +2558,140 @@ fn a_query_that_ended_on_a_full_page_is_read_again_from_that_page_without_asking
         request("receiver", "1")
     ]);
     assert_eq!(platform_history(&fx, &storage).len(), 51);
+}
+
+fn history_total_of(storage: &SqliteTxHistoryStorage, address: &str) -> usize {
+    common::block_on(storage.get_history(
+        HistoryCoinType::AccountCoin {
+            ticker: "IRIS".to_owned(),
+            address: address.to_owned(),
+        },
+        PagingOptionsEnum::default(),
+        1,
+    ))
+    .unwrap()
+    .total
+}
+
+#[test]
+fn a_block_that_the_first_node_lacks_is_asked_of_the_other_nodes() {
+    // T36.53 (iii), D36.24 (b): the first node answers without a block time, the second has the block.
+    let second = FakeNode::start();
+    let fx = history_fixture_for(&OWN_KEY, Some(&second));
+    let state_a = script_history(&fx);
+    let _state_b = script_history_on(&second, &fx.coin);
+    {
+        let mut st = state_a.lock().unwrap();
+        st.block_times.insert(20, None);
+        st.spender = vec![outgoing(&fx, "has time", 10), outgoing(&fx, "first node lacks it", 20)];
+    }
+    let storage = storage_with_init();
+    let mut fetcher = HistoryFetcher::for_test(fx.coin.clone(), storage.clone());
+    common::block_on(fetcher.pass()).expect("a pass");
+    assert_eq!(history_total_of(&storage, &me(&fx)), 2);
+    assert!(
+        !second.requests("abci_query").is_empty(),
+        "the second node was asked for the block"
+    );
+}
+
+#[test]
+fn a_block_that_no_node_has_keeps_the_earliest_such_page_for_the_next_pass() {
+    // T36.53 (iii), D36.24 (b): no row is written for it, and every later pass reads from the earliest page that
+    // held such a transaction. Transactions at positions 60 (page 2) and 110 (page 3) of 120 lack their block time.
+    let second = FakeNode::start();
+    let fx = history_fixture_for(&OWN_KEY, Some(&second));
+    let state_a = script_history(&fx);
+    let state_b = script_history_on(&second, &fx.coin);
+    let heights = |n: u64| match n {
+        60 => 500,
+        110 => 600,
+        _ => 10 + n,
+    };
+    {
+        let mut a = state_a.lock().unwrap();
+        a.spender = (0..120).map(|n| outgoing(&fx, &format!("s{n}"), heights(n))).collect();
+        a.block_times.insert(500, None);
+        a.block_times.insert(600, None);
+        let mut b = state_b.lock().unwrap();
+        b.block_times.insert(500, None);
+        b.block_times.insert(600, None);
+    }
+    let storage = storage_with_init();
+    let mut fetcher = HistoryFetcher::for_test(fx.coin.clone(), storage.clone());
+    common::block_on(fetcher.pass()).expect("the first pass");
+    assert_eq!(
+        history_total_of(&storage, &me(&fx)),
+        118,
+        "the two transactions have no row"
+    );
+
+    // The blocks become known. The next pass starts the first query on page 2, the earliest page that lost a row.
+    let before = fx.node.requests("tx_search").len();
+    state_a.lock().unwrap().block_times.clear();
+    state_b.lock().unwrap().block_times.clear();
+    common::block_on(fetcher.pass()).expect("the second pass");
+    let spender_pages: Vec<String> = fx
+        .node
+        .requests("tx_search")
+        .iter()
+        .skip(before)
+        .filter(|p| p["query"].as_str().is_some_and(|q| q.contains("coin_spent")))
+        .map(|p| p["page"].to_string().replace('"', ""))
+        .collect();
+    assert_eq!(spender_pages, vec!["2", "3"]);
+    assert_eq!(history_total_of(&storage, &me(&fx)), 120);
+}
+
+#[test]
+fn a_second_account_on_the_same_store_is_listed_with_the_rows_of_the_first() {
+    // T36.54 under D36.23 (a): no account record and no rebuild; a row carries the values of the account that wrote
+    // it, and the second account's own rows are written beside it without duplicates.
+    let storage = SqliteTxHistoryStorage::in_memory();
+    common::block_on(storage.init("IRIS")).unwrap();
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
+
+    // The store is filled for the first account with one send of 1,000,000 base units to the second account.
+    let first = history_fixture();
+    let first_state = script_history(&first);
+    let sent = outgoing(&first, "from the first", 10);
+    first_state.lock().unwrap().spender = vec![sent.clone()];
+    let mut first_fetcher = HistoryFetcher::for_test(first.coin.clone(), storage.clone());
+    common::block_on(first_fetcher.pass()).expect("the first account's pass");
+    let (a, b) = (me(&first), peer(&first));
+    assert_eq!(history_total_of(&storage, &a), 1);
+
+    // The coin is activated for the second account on the same database. Its node returns the same transaction as a
+    // received one, and one transaction of its own.
+    let second = history_fixture_for(&PEER_KEY, None);
+    assert_eq!(me(&second), b);
+    let second_state = script_history(&second);
+    {
+        let mut st = second_state.lock().unwrap();
+        st.receiver = vec![sent];
+        st.spender = vec![outgoing(&second, "from the second", 11)];
+    }
+    let mut second_fetcher = HistoryFetcher::for_test(second.coin.clone(), storage.clone());
+    common::block_on(second_fetcher.pass()).expect("the second account's pass");
+
+    // The second account's list holds its own row and the first account's row, with the first account's values.
+    let rows = platform_history(&second, &storage);
+    assert_eq!(rows.len(), 2);
+    let carried = rows
+        .iter()
+        .find(|row| row.memo.as_deref() == Some("from the first"))
+        .expect("the row of the first account");
+    // The store holds base units (1.005 in display units); the method scales when it serves.
+    assert_eq!(carried.spent_by_me.to_string(), "1005000");
+    assert_eq!(carried.received_by_me.to_string(), "0");
+    assert_eq!(carried.from, vec![a.clone()]);
+    // The first account still lists its row, and no row exists twice.
+    assert_eq!(history_total_of(&storage, &a), 1);
+    let all_rows: i64 = storage
+        .0
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM IRIS_tx_history", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(all_rows, 2);
 }
