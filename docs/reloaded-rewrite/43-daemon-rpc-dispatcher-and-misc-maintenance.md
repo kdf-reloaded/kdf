@@ -1119,30 +1119,28 @@ not.
 > listed in plan `mmrpc-v2-completion` §1.4 with this reason; group B of that
 > plan is `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter`.
 
-## 43.1D Statuses and payloads of the versioned `withdraw` errors (reference behavior; Spec Reader round 0.5.0-9; pending the KDF Dirty Gate)
+## 43.1D Statuses and payloads of the versioned `withdraw` errors (reference behavior)
 
-> **Provenance status: pending the KDF Dirty Gate.** This section is a
-> candidate under chapter 01 R40: until the gate clears it and this marker is
-> replaced by the clearance record, it MUST NOT be relied on as a statement of
-> required behavior and MUST NOT be implemented from. It was written by the
-> dirty-side specification author on 2026-11-16 (Spec Reader round 0.5.0-9)
-> under the two-team procedure of chapter 01 §1.4A, from three inputs: the
-> reference lineage at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
-> §2.15A (read read-only; no untabled state was read); two pages of the
-> published reference API documentation, fetched again on 2026-11-16 from the
-> host §43.1C names (the versioned `withdraw` page and the v2.0 protocol
-> overview page); and this repository's own tree. It edits no sentence of
-> §43.1A -- §43.1C. It **completes R43.1C.8**, and where a statement here is
-> more exact than the sentence it completes, the statement here governs.
-> Numbering: R43.1D.1 -- R43.1D.4 and T43.1D.1 -- T43.1D.6; no decision item
-> is raised. Every passage below is marked *(pending gate)* until cleared.
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-16,
+> measure 0.02 (attestation in §43.7).**
+> This section was written on 2026-11-16 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-9) under the two-team procedure of chapter 01 §1.4A, from
+> three inputs: the reference lineage at the rows `v2.6.0-beta` and
+> `v3.0.0-beta` of chapter 02 §2.15A (read read-only; no untabled state was
+> read); two pages of the published reference API documentation, fetched
+> again on 2026-11-16 from the host §43.1C names (the versioned `withdraw`
+> page and the v2.0 protocol overview page); and this repository's own tree.
+> It edits no sentence of §43.1A -- §43.1C. It **completes R43.1C.8**, and
+> where a statement here is more exact than the sentence it completes, the
+> statement here governs. Numbering: R43.1D.1 -- R43.1D.4 and T43.1D.1 --
+> T43.1D.6; no decision item is raised.
 
 *Scope.* R43.1C.8 names two statuses of the versioned `withdraw` error set (an
 unknown coin 404, a transport failure 502). This section states the whole
 set as the reference answers it: each `error_type` token, the JSON kind of
 its `error_data`, and its HTTP status. It records tokens, payload kinds and
 statuses only; which condition of which coin family leads to a token stays
-with the chapter that owns the family. *(pending gate)*
+with the chapter that owns the family.
 
 **R43.1D.1** *What the statuses rest on (completes R43.1C.8).* The two pages
 fetched for this section state **no HTTP status** for any error, as R43.1C.8
@@ -1155,11 +1153,11 @@ R43.1D.2 as the status of the HTTP response, and with the error envelope of
 R43.1C.8 as its body. A token without payload leaves `error_data` out
 (chapter 55 R55.1.2 -- R55.1.3). A request whose `params` cannot be decoded
 never reaches the method and answers the dispatcher's `InvalidRequest`
-(string, HTTP 400, R43.1A.3). *(pending gate)*
+(string, HTTP 400, R43.1A.3).
 
 **R43.1D.2** *The error set.* At the row `v3.0.0-beta` the set has the 32
 tokens below. "Record" means a JSON object with the members named; an amount
-is a decimal string, as R43.1C.8 says. *(pending gate)*
+is a decimal string, as R43.1C.8 says.
 
 | `error_type` | `error_data` | HTTP status |
 | --- | --- | --- |
@@ -1196,14 +1194,12 @@ is a decimal string, as R43.1C.8 says. *(pending gate)*
 | `IBCError` | record with exactly one key, which names the case, and a record as its value: `IBCChannelCouldNotBeFound` (`address_prefix`, string), `IBCChannelNotHealthy` (`channel_id`, integer), `IBCChannelMissingOnNode` (`channel_id`, integer), `Transport` (`reason`, string) or `InternalError` (`reason`, string) | 400 |
 | `BroadcastExpected` (browser builds only) | string | 400 |
 
-*(pending gate)*
-
 Read by status: 404 for `NoSuchCoin` alone; 408 for `Timeout` alone; 410 for
 `HwError` alone; 502 for `Transport` alone; 500 for `InternalError`, `DbError`
 and `ProtocolNotSupported`; 400 for every other token. `NoSuchCoin` answers
 a ticker that is not active in the node, whatever the reason: an unknown
 ticker, a coin that was never activated, and a platform coin in the passive
-state of R43.1E.6 answer alike. *(pending gate)*
+state of R43.1E.6 answer alike.
 
 **R43.1D.3** *One set, three methods.* The set is shared by the versioned
 `withdraw`, by `withdraw_nft` and by the task-managed withdraw
@@ -1216,8 +1212,7 @@ task-managed form only (`CoinDoesntSupportInitWithdraw`). Four further tokens
 are part of the set but no case that answers them was found at either row:
 `ActionNotAllowed`, `ContractTypeDoesntSupportNftWithdrawing`, `DbError` and
 `NoChainIdSet`. A client therefore has to accept every token of the table
-from `withdraw`, and may expect the general ones in practice. *(pending
-gate)*
+from `withdraw`, and may expect the general ones in practice.
 
 **R43.1D.4** *Reference states, and the documentation.* The two rows agree on
 the whole table except one line: where `v3.0.0-beta` has
@@ -1231,10 +1226,10 @@ documented payload kinds agree with the table; the other tokens of the table
 are not documented on the two pages. The error example that the overview
 page shows for `withdraw` carries a token that is in the set at neither row;
 the set's token for an amount below the floor is `AmountTooLow`, with
-`amount` and `threshold`. *(pending gate)*
+`amount` and `threshold`.
 
 > **Compatibility (this repository on dev, 2026-11-16; its own code, not the
-> reference).** *(pending gate)* Reloaded's versioned `withdraw` has an error
+> reference).** Reloaded's versioned `withdraw` has an error
 > set of its own. The statuses agree for every token both sets have, except
 > one: Reloaded answers `Transport` with 500, the reference with 502 (the
 > difference the second status note under D43.1C.4 already records).
@@ -1252,84 +1247,76 @@ reference answers as `Transport` and which as `InternalError` was not traced
 request by request. (2) The tokens a nested `GetNftInfoError` and the
 `HwError` string can take were not listed. (3) Only the two release rows and
 the two documentation pages named above were read. (4) Nothing was measured
-against a running reference binary. *(pending gate)*
+against a running reference binary.
 
 *Acceptance rows.* Each row is a versioned request (`mmrpc: "2.0"`, method
 `withdraw`) against a node with one coin active on a mock backend. *Parity*
-is the reference behavior of R43.1D.2. *(pending gate)*
+is the reference behavior of R43.1D.2.
 
 T43.1D.1 *Unknown coin.* A request that names a ticker the node has not
 activated answers HTTP 404 with `error_type` `NoSuchCoin` and `error_data` a
-record whose `coin` is the requested ticker. *(pending gate)*
+record whose `coin` is the requested ticker.
 
 T43.1D.2 *Transport failure.* With a mock backend that, after activation,
 fails the requests the withdraw needs in a way the coin family's chapter
 classes as a transport failure, a request that is otherwise valid answers
 `error_type` `Transport` with a string as `error_data`. Parity: HTTP 502.
-*(pending gate)*
 
 T43.1D.3 *Insufficient balance.* A request for more than the wallet holds
 answers HTTP 400 with `NotSufficientBalance` and a record of `coin`,
-`available` and `required`, the two amounts as decimal strings. *(pending
-gate)*
+`available` and `required`, the two amounts as decimal strings.
 
 T43.1D.4 *A token without payload.* A request with `max` true from a wallet
 that holds nothing, for a coin family that answers
 `ZeroBalanceToWithdrawMax`, answers HTTP 400 and a body without an
-`error_data` member. *(pending gate)*
+`error_data` member.
 
 T43.1D.5 *Invalid destination.* A request whose `to` is not an address of
-the coin answers HTTP 400 with `InvalidAddress` and a string. *(pending
-gate)*
+the coin answers HTTP 400 with `InvalidAddress` and a string.
 
 T43.1D.6 *Undecodable `params`.* A request whose `amount` has a JSON kind the
 method does not accept answers the dispatcher's `InvalidRequest`, HTTP 400,
-and no token of R43.1D.2 (R43.1D.1). *(pending gate)*
+and no token of R43.1D.2 (R43.1D.1).
 
-## 43.1E The legacy `disable_coin` method (reference behavior; Spec Reader round 0.5.0-9; pending the KDF Dirty Gate)
+## 43.1E The legacy `disable_coin` method (reference behavior)
 
-> **Provenance status: pending the KDF Dirty Gate.** This section is a
-> candidate under chapter 01 R40: until the gate clears it and this marker is
-> replaced by the clearance record, it MUST NOT be relied on as a statement of
-> required behavior and MUST NOT be implemented from. It was written by the
-> dirty-side specification author on 2026-11-16 (Spec Reader round 0.5.0-9)
-> under the two-team procedure of chapter 01 §1.4A, from three inputs: the
-> reference lineage at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
-> §2.15A (read read-only; no untabled state was read), **which agree on
-> everything in this section**; the legacy `disable_coin` page of the
-> published reference API documentation, fetched again on 2026-11-16 from the
-> host §43.1C names; and this repository's own tree. It edits no sentence of
-> §43.1A -- §43.1C or of §43.1R. It **completes R43.1B.3 and the
-> `disable_coin` line of the table of documented forms in §43.1B**, and it
-> supplies what chapter 55 D55.6 and chapter 38 R38.6.4Q.10 item 4 leave to
-> this chapter; where a statement here is more exact than the sentence it
-> completes, the statement here governs. Numbering: R43.1E.1 -- R43.1E.8,
-> D43.1E.1 -- D43.1E.2 and T43.1E.1 -- T43.1E.9. Every passage below is
-> marked *(pending gate)* until cleared.
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-16,
+> measure 0.02 (attestation in §43.7).**
+> This section was written on 2026-11-16 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-9) under the two-team procedure of chapter 01 §1.4A, from
+> three inputs: the reference lineage at the rows `v2.6.0-beta` and
+> `v3.0.0-beta` of chapter 02 §2.15A (read read-only; no untabled state was
+> read), **which agree on everything in this section**; the legacy
+> `disable_coin` page of the published reference API documentation, fetched
+> again on 2026-11-16 from the host §43.1C names; and this repository's own
+> tree. It edits no sentence of §43.1A -- §43.1C or of §43.1R. It
+> **completes R43.1B.3 and the `disable_coin` line of the table of
+> documented forms in §43.1B**, and it supplies what chapter 55 D55.6 and
+> chapter 38 R38.6.4Q.10 item 4 leave to this chapter; where a statement
+> here is more exact than the sentence it completes, the statement here
+> governs. Numbering: R43.1E.1 -- R43.1E.8, D43.1E.1 -- D43.1E.2 and
+> T43.1E.1 -- T43.1E.9.
 
 *Scope.* A wire contract of the legacy `disable_coin` method: its request,
 its answers with their HTTP statuses, and what a successful call does to the
 node's orders, to the coin and to the tokens of a platform coin. Statements
 marked **[doc]** rest on the documentation page, all others on the reference
-implementation. *(pending gate)*
+implementation.
 
 **R43.1E.1** *Surface and request.* `disable_coin` is routed on the legacy
 table only, at both rows; no versioned form exists at either, and a versioned
 request for the name answers `NoSuchMethod` (R43.1A.3). The request carries
-these members beside the envelope's own: *(pending gate)*
+these members beside the envelope's own:
 
 | Member | Kind | Meaning |
 | --- | --- | --- |
 | `coin` | string, required | the ticker to disable |
 | `force_disable` | boolean, optional | absent, false or any value that is not a boolean: not forced. True: forced (R43.1E.5) |
 
-*(pending gate)*
-
 **[doc]** The page documents `coin` alone; `force_disable` is not documented.
-*(pending gate)*
 
 **R43.1E.2** *Success.* HTTP 200 and a `result` object with exactly three
-members: *(pending gate)*
+members:
 
 | Member | Kind | Meaning |
 | --- | --- | --- |
@@ -1337,17 +1324,15 @@ members: *(pending gate)*
 | `cancelled_orders` | array of strings | the identifiers of the orders this call cancelled (R43.1E.4); empty when there were none |
 | `passivized` | boolean | true when the coin was made passive instead of being removed (R43.1E.5), false when it was removed |
 
-*(pending gate)*
-
 **[doc]** The page documents `coin` and `cancelled_orders`; `passivized` is
-not documented. *(pending gate)*
+not documented.
 
 **R43.1E.3** *Refusals.* Every refusal answers **HTTP 500**. Two body shapes
 occur. The *plain* shape is the legacy error body of chapter 55 R55.1.10: an
 `error` string and nothing else. The *extended* shape has three top-level
 members, all always present: `error` (string), `orders` (object with the two
 arrays `matching` and `cancelled`) and `active_swaps` (array). Identifiers
-are strings in the usual hyphenated form. *(pending gate)*
+are strings in the usual hyphenated form.
 
 | Refusal | When it applies | Body |
 | --- | --- | --- |
@@ -1356,13 +1341,10 @@ are strings in the usual hyphenated form. *(pending gate)*
 | Coin in use | at least one running swap of this node has the ticker as either of its coins (swaps of both protocol generations count), or at least one of this node's own orders, maker or taker, names the ticker on either side of its pair and is being matched at that moment | extended; `active_swaps` lists the identifiers of those swaps, `orders.matching` those of the orders being matched, either of them empty when it does not apply; `orders.cancelled` is empty |
 | Node failure | the node's registry, swap state or order state cannot be read, or the cancellation step fails | plain, or extended with empty lists |
 
-*(pending gate)*
-
 The coin-in-use refusal is **one** refusal for both causes, with one `error`
 text; a client tells the cause from which list is not empty. It is decided
 before anything is changed: no order is cancelled, the coin stays active, and
 `orders.cancelled` is therefore empty in every refusal the reference answers.
-*(pending gate)*
 
 **R43.1E.4** *What a successful call does to the orders.* After the checks of
 R43.1E.3 have passed, the node cancels every one of its own orders, maker and
@@ -1374,10 +1356,9 @@ began to be matched between the check and the cancellation is left in place
 and is not reported in the answer. The cancellation happens in every
 successful call, whether the coin is then removed or made passive. Only
 orders that name the **requested** ticker are considered: orders of a
-platform coin's tokens are untouched (R43.1E.5). *(pending gate)*
+platform coin's tokens are untouched (R43.1E.5).
 
 **R43.1E.5** *What a successful call does to the coin and to its tokens.*
-*(pending gate)*
 
 1. *Dependent tokens.* The node keeps, for each platform coin, the set of
    tokens that depend on it. A token enters the set when it is activated by a
@@ -1385,42 +1366,39 @@ platform coin's tokens are untouched (R43.1E.5). *(pending gate)*
    (chapter 55) while its platform is registered; a layer-two coin enters the
    set of its platform in the same way. A token activated by the legacy
    `enable` or `electrum` method does **not** enter it (chapter 38
-   R38.6.4Q.10 item 2 records this for QRC20). *(pending gate)*
+   R38.6.4Q.10 item 2 records this for QRC20).
 2. *A token, or a coin without dependent tokens.* The coin is removed from
    the node's registry and its background work is ended; a token is also
-   taken out of its platform's set. `passivized` is false. *(pending gate)*
+   taken out of its platform's set. `passivized` is false.
 3. *A platform coin with at least one dependent token, not forced.* Nothing
    is removed. The platform coin becomes **passive** (R43.1E.6), its tokens
-   stay active, and `passivized` is true. *(pending gate)*
+   stay active, and `passivized` is true.
 4. *A platform coin with dependent tokens, forced.* The platform coin and
    every dependent token are removed from the registry and their background
    work is ended. `passivized` is false. The checks of R43.1E.3 and the
    cancellation of R43.1E.4 were made for the platform's ticker only: a
    running swap or an order of a dependent token neither refuses the call nor
-   is cancelled by it (D43.1E.2). *(pending gate)*
+   is cancelled by it (D43.1E.2).
 5. *Forcing a coin that is not a platform with tokens* changes nothing: the
-   call behaves as item 2. *(pending gate)*
+   call behaves as item 2.
 
 **R43.1E.6** *The passive state.* Only a platform coin can be passive.
-*(pending gate)*
 
 1. Every method that needs an active coin treats a passive coin as not
    active: the versioned `withdraw`, for example, answers `NoSuchCoin`
-   (R43.1D.2). *(pending gate)*
-2. `get_enabled_coins`, in both forms, still lists it. *(pending gate)*
+   (R43.1D.2).
+2. `get_enabled_coins`, in both forms, still lists it.
 3. The coin's own instance and its background work go on, and its dependent
-   tokens stay active. *(pending gate)*
+   tokens stay active.
 4. A further `disable_coin` for it answers the coin-not-active refusal unless
    forced; forced, it is removed as R43.1E.5 item 4 or item 2 describes.
-   *(pending gate)*
 5. Disabling its last dependent token neither removes it nor makes it active
-   again: it stays registered and passive. *(pending gate)*
+   again: it stays registered and passive.
 6. A platform-with-tokens activation of the ticker makes it active again
    (chapter 55 D55.6); the legacy `enable` and `electrum` methods refuse the
-   ticker as already activated, with the legacy error body. *(pending gate)*
+   ticker as already activated, with the legacy error body.
 
 **R43.1E.7** *Where the reference differs from its documentation.*
-*(pending gate)*
 
 | Subject | **[doc]** | Reference |
 | --- | --- | --- |
@@ -1432,19 +1410,16 @@ platform coin's tokens are untouched (R43.1E.5). *(pending gate)*
 | A coin that is not active | an error; no members named | the extended shape with empty lists |
 | HTTP status of a refusal | not stated | 500 |
 
-*(pending gate)*
-
 R43.1B.3 records the documented members correctly; the table adds what the
-reference answers in their place. *(pending gate)*
+reference answers in their place.
 
 **R43.1E.8** *Reference states.* The method, the registry operations it uses
 and the checks of R43.1E.3 are the same at `v2.6.0-beta` and `v3.0.0-beta`.
 Exceptions that a coin family makes to this section are that family's
-chapter's to state (chapter 40 §40.6B.5 records them for Solana). *(pending
-gate)*
+chapter's to state (chapter 40 §40.6B.5 records them for Solana).
 
 > **Compatibility (this repository on dev, 2026-11-16; its own code, not the
-> reference).** *(pending gate)*
+> reference).**
 >
 > 1. *Request.* Reloaded reads `coin` only; `force_disable` is ignored.
 > 2. *No dependent-token set, no passive state.* Reloaded removes the
@@ -1462,7 +1437,6 @@ gate)*
 > 5. *Versioned form.* Reloaded's versioned `disable_coin` is §43.1R's and has
 >    no reference counterpart (R43.1E.1).
 >
-> *(pending gate)*
 
 **D43.1E.1** *(Open, 2026-11-16.)* **Which members a refused `disable_coin`
 carries.** A client written from the documentation reads `swaps`; a client
@@ -1478,7 +1452,7 @@ refusal: the documented behavior (cancel first, report in
 `orders.cancelled`) and the reference behavior (cancel nothing) differ, and a
 client cannot tell from the body which one it got unless `orders.cancelled`
 is filled. *Recommendation:* (c), and keep the documented cancel-first
-behavior, which the body makes visible. *(pending gate)*
+behavior, which the body makes visible.
 
 **D43.1E.2** *(Open, 2026-11-16.)* **A forced removal does not look at the
 dependent tokens.** In the reference the swap check, the matching-order check
@@ -1488,7 +1462,7 @@ arises for Reloaded only if D55.6 brings the dependent-token set and the
 forced removal. Options: (a) reproduce the reference; (b) apply R43.1E.3 and
 R43.1E.4 to the platform's ticker and to every dependent token before
 anything is removed, and refuse the whole call if any of them is in use.
-*Recommendation:* (b). *(pending gate)*
+*Recommendation:* (b).
 
 *Not established.* (1) What ending a coin's background work covers was not
 traced family by family; chapter 38 R38.6.4Q.10 states it for QRC20 and
@@ -1496,44 +1470,41 @@ chapter 40 §40.6B.5 for Solana. (2) Whether a passive platform coin still
 appears in answers other than `get_enabled_coins` was not examined method by
 method; R43.1E.6 item 1 states the rule those methods share. (3) The `error`
 texts are not recorded; they are not part of the contract. (4) Nothing was
-measured against a running reference binary. *(pending gate)*
+measured against a running reference binary.
 
 *Acceptance rows.* Each row is a legacy request (no `mmrpc` member) against a
 node with mock backends. *Parity* is the reference behavior bound above;
-where a D-item would change the expected result, the row says so. *(pending
-gate)*
+where a D-item would change the expected result, the row says so.
 
 T43.1E.1 *Success without orders.* With a coin active that has no orders and
 no swaps, the call answers HTTP 200 and `result` with `coin` equal to the
 ticker and an empty `cancelled_orders`; the coin is no longer listed by
-`get_enabled_coins`. Parity: `passivized` is present and false. *(pending
-gate)*
+`get_enabled_coins`. Parity: `passivized` is present and false.
 
 T43.1E.2 *Orders are cancelled.* With two maker orders that have the coin on
 either side and one that has not, the call answers the two identifiers in
 `cancelled_orders`, `my_orders` afterwards shows the third order only, and
-the coin is removed. *(pending gate)*
+the coin is removed.
 
 T43.1E.3 *Coin not active.* A call for a ticker that was never activated
 answers HTTP 500. Parity: `error`, `orders` with two empty arrays and an
-empty `active_swaps`. *(pending gate)*
+empty `active_swaps`.
 
 T43.1E.4 *No coin named.* A call without `coin` answers HTTP 500 and a body
-whose only member is `error`. *(pending gate)*
+whose only member is `error`.
 
 T43.1E.5 *Running swap.* With a swap in progress that uses the coin, the call
 answers HTTP 500 and names the swap's identifier; the coin stays active and
 no order is cancelled. Parity: the identifier is in `active_swaps`, `orders`
 is present with two empty arrays, and there is no `swaps` member. Under
-D43.1E.1 (c) the identifier is in `active_swaps` and in `swaps`. *(pending
-gate)*
+D43.1E.1 (c) the identifier is in `active_swaps` and in `swaps`.
 
 T43.1E.6 *Order being matched.* With one order of the coin held in the
 matching state and a second, idle order of the coin, the call answers HTTP
 500 with the first identifier in `orders.matching` and the coin stays
 active. Parity: the second order is not cancelled and `orders.cancelled` is
 empty. Under the documented behavior the second order is cancelled and
-listed in `orders.cancelled` (D43.1E.1). *(pending gate)*
+listed in `orders.cancelled` (D43.1E.1).
 
 T43.1E.7 *Platform with a dependent token (reference behavior; applies to
 Reloaded if D55.6 brings the passive state).* With a platform coin and one
@@ -1541,16 +1512,16 @@ token activated by a token activation method, an unforced call for the
 platform answers `passivized` true; afterwards the token's `my_balance`
 answers, a versioned `withdraw` for the platform answers `NoSuchCoin`,
 `get_enabled_coins` lists both, and a second unforced call answers the
-coin-not-active refusal. *(pending gate)*
+coin-not-active refusal.
 
 T43.1E.8 *Forced removal (as T43.1E.7).* From the state T43.1E.7 ends in, a
 call with `force_disable` true answers `passivized` false, and afterwards
 neither the platform nor the token is listed. Under D43.1E.2 (b) the same
-call is refused while the token has a running swap. *(pending gate)*
+call is refused while the token has a running swap.
 
 T43.1E.9 *No versioned form in the reference.* A request with `mmrpc: "2.0"`
 and method `disable_coin` answers `NoSuchMethod`, HTTP 400, from the
-reference; from Reloaded it answers the form of §43.1R. *(pending gate)*
+reference; from Reloaded it answers the form of §43.1R.
 
 ## 43.1R Reloaded versioned forms of the legacy-only order, trading and wallet methods (Reloaded-original, clean side)
 
@@ -2173,11 +2144,8 @@ shall be wound down as part of shutdown rather than abandoned.
   not-established paragraph, T43.1D.1 -- T43.1D.6) and §43.1E (R43.1E.1 --
   R43.1E.8 with their tables, the compatibility note, D43.1E.1 -- D43.1E.2,
   the not-established paragraph, T43.1E.1 -- T43.1E.9); no other text of
-  this chapter was changed.* **KDF Dirty Gate: pending** (chapter 01 R40;
-  each of the two sections carries the pending-clearance marker at the point
-  at which it appears, and every passage in them is marked *(pending gate)*;
-  this item is replaced by the clearance record with the R39 scope
-  attestation when the gate clears it). *Inputs:* (1) the forbidden corpus
+  this chapter was changed.* **KDF Dirty Gate: PASS on 2026-11-16, measure 0.02, no findings**
+  (chapter 01 R40; the attestation closes this item). *Inputs:* (1) the forbidden corpus
   at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, read
   read-only and consulted **only** to establish: for the versioned
   `withdraw`, the `error_type` tokens of its error set, the JSON kind of
@@ -2218,3 +2186,18 @@ shall be wound down as part of shutdown rather than abandoned.
   record's reference metadata, to be the commit its release tag names; the
   documentation is not a state of the historical record and takes no row, so
   it is named here by URL and fetch date.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-16, measure
+  0.02, no findings. Reference states (chapter 02 R13): PASS; the rows
+  `v2.6.0-beta` and `v3.0.0-beta`. Extent: the versioned `withdraw` error
+  set with its payload serialization and status mapping; the legacy
+  `disable_coin` method, the coin-registry operations and the two in-use
+  checks it relies on, the order cancellation by coin; both method tables;
+  the reference's tests on disabling platform coins; 12 source files read in
+  the relevant parts at `v3.0.0-beta`, with row agreement confirmed by
+  mechanical difference against `v2.6.0-beta`; mechanical comparison against
+  29 files at `v3.0.0-beta` and 28 at `v2.6.0-beta`; three public
+  documentation pages reached on 2026-11-16 and compared. Method: reading,
+  plus mechanical comparison (5-word overlap of the gated lines against
+  comment and literal wording; identifier-shaped tokens and
+  identifier-derived phrases against the identifier set); the additions
+  embed no code blocks.
