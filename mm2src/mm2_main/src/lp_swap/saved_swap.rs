@@ -352,7 +352,7 @@ mod wasm_impl {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use super::*;
     use crate::mm2::lp_swap::swap_wasm_db::{ItemId, SavedSwapTable};

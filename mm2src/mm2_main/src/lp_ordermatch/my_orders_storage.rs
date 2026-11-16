@@ -883,7 +883,7 @@ mod wasm_impl {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use super::wasm_impl::{maker_order_to_filtering_history_item, taker_order_to_filtering_history_item};
     use super::*;

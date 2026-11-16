@@ -164,7 +164,7 @@ mod eth_swap_dev_tests;
     feature = "trezor-emulator-tests"
 ))]
 mod eth_trezor_emulator_tests;
-#[cfg(target_arch = "wasm32")] mod eth_wasm_tests;
+#[cfg(all(test, target_arch = "wasm32"))] mod eth_wasm_tests;
 // ─── EthCoin newtype ────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]

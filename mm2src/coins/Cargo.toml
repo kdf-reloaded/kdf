@@ -171,7 +171,6 @@ js-sys = { version = "0.3.27" }
 uuid = { version = "1", features = ["v4", "serde", "js"] }
 wasm-bindgen = { version = "0.2.50" }
 wasm-bindgen-futures = { version = "0.4.1" }
-wasm-bindgen-test = { version = "0.3.2" }
 web-sys = { version = "0.3.55", features = ["console", "Headers", "Request", "RequestInit", "RequestMode", "Response", "Window"] }
 # R39.6.1: zcash_primitives (shielded types) and zcash_client_backend (note
 # trial-decryption) are needed on WASM for sapling state sync and balance
@@ -179,6 +178,9 @@ web-sys = { version = "0.3.55", features = ["console", "Headers", "Request", "Re
 zcash_client_backend = { version = "=0.24.0", default-features = false, features = ["transparent-inputs"] }
 sapling = { package = "sapling-crypto", version = "=0.7.0", default-features = false, features = ["std"] }
 zcash_primitives = { version = "=0.30.1", default-features = false, features = ["non-standard-fees", "std", "transparent-inputs"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = { version = "0.3.2" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # 1.0.5 (2018) pulls redox_users 0.3 -> rust-argon2 0.7 -> crossbeam-utils 0.7.2

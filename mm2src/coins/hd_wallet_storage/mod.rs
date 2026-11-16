@@ -320,7 +320,7 @@ impl HDWalletCoinStorage {
         })
     }
 
-    #[cfg(any(test, target_arch = "wasm32"))]
+    #[cfg(test)]
     pub async fn init_with_rmd160(
         ctx: &MmArc,
         coin: String,
@@ -453,7 +453,7 @@ fn is_account_of_the_seed(
 
 fn display_rmd160(rmd160: &H160) -> String { hex::encode(rmd160.deref()) }
 
-#[cfg(any(test, target_arch = "wasm32"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use itertools::Itertools;
