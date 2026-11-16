@@ -122,7 +122,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   500) for `withdraw` and for the staking requests, where GLEEC KDF answers a general internal error.
   Placing an order with such a coin or one of its tokens is refused, as for a watch-only coin, and swaps
   do not sign through the wallet. The top-level `priv_key_policy` member of the request still refuses the
-  WalletConnect spelling. A test with a real wallet is still to be run. Detail: PR #N; CRD ch.36
+  WalletConnect spelling. A test with a real wallet is still to be run. Detail: PR #393; CRD ch.36
   R36.14.13--R36.14.15.
 
 ### Changed
@@ -332,7 +332,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
   Tendermint transaction history, is built in PR #363; its address index now covers every
-  store-served coin family (PR #380); item 1a, the WalletConnect form of the activation, is built (PR #N).
+  store-served coin family (PR #380); item 1a, the WalletConnect form of the activation, is built (PR #393).
 
 ## [0.4.0-beta.1] — 2026-11-14
 
