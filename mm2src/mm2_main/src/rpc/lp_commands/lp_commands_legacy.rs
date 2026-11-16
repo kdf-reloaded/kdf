@@ -18,7 +18,8 @@
 //
 
 use coins::utxo::rpc_clients::with_call_budget;
-use coins::{disable_coin as disable_coin_impl, lp_coinfind, lp_coininit, CoinBalance, CoinsContext, MmCoinEnum};
+use coins::{disable_coin as disable_coin_impl, lp_coinfind, lp_coininit, CoinBalance, CoinsContext, DisableCoinError,
+            MmCoinEnum, MyBalanceRpcError};
 use common::custom_futures::FutureTimerExt;
 use common::executor::{spawn, Timer};
 use common::log::{error, warn};
@@ -36,52 +37,99 @@ use crate::mm2::lp_dispatcher::{dispatch_lp_event, StopCtxEvent};
 use crate::mm2::lp_network::{peer_connection_healthcheck as peer_connection_healthcheck_impl, subscribe_to_topic};
 use crate::mm2::lp_ordermatch::{cancel_orders_by, CancelBy};
 use crate::mm2::lp_swap::{active_swaps_using_coin, tx_helper_topic, watcher_topic};
+use crate::mm2::rpc::legacy_adapter::{legacy_bare, legacy_error, legacy_result_body};
 use crate::mm2::MmVersionResult;
+use mm2_err_handle::prelude::*;
+use uuid::Uuid;
+
+/// The request of `disable_coin` (legacy members, unchanged).
+#[derive(Deserialize)]
+pub struct DisableCoinRequest {
+    pub coin: String,
+}
+
+/// The success of `disable_coin`: the content that the legacy body carries under `result`.
+#[derive(Serialize)]
+pub struct DisableCoinResponse {
+    pub coin: String,
+    pub cancelled_orders: Vec<Uuid>,
+}
+
+/// The typed core of `disable_coin`: cancels the orders of the coin and removes the coin, unless a running swap uses
+/// the coin or one of its orders is being matched.
+///
+/// # Errors
+///
+/// A [`DisableCoinError`]: `NoSuchCoin`, the two deactivation conflicts (`ActiveSwapsBlockDeactivation`,
+/// `MatchingOrdersBlockDeactivation`) and `InternalError`.
+pub async fn disable_coin_core(
+    ctx: MmArc,
+    req: DisableCoinRequest,
+) -> Result<DisableCoinResponse, MmError<DisableCoinError>> {
+    let ticker = req.coin;
+    match lp_coinfind(&ctx, &ticker).await {
+        Ok(Some(_)) => (),
+        Ok(None) => return MmError::err(DisableCoinError::NoSuchCoin { coin: ticker }),
+        // The text is the one of the dev handler, which did not name the ticker.
+        Err(err) => return MmError::err(DisableCoinError::InternalError(format!("!lp_coinfind({}): ", err))),
+    };
+    let swaps = active_swaps_using_coin(&ctx, &ticker).map_to_mm(DisableCoinError::InternalError)?;
+    if !swaps.is_empty() {
+        return MmError::err(DisableCoinError::ActiveSwapsBlockDeactivation {
+            coin: ticker,
+            swaps: swaps.iter().map(Uuid::to_string).collect(),
+        });
+    }
+    let (cancelled, still_matching) = cancel_orders_by(&ctx, CancelBy::Coin { ticker: ticker.clone() })
+        .await
+        .map_to_mm(DisableCoinError::InternalError)?;
+    if !still_matching.is_empty() {
+        return MmError::err(DisableCoinError::MatchingOrdersBlockDeactivation {
+            coin: ticker,
+            matching: still_matching.iter().map(Uuid::to_string).collect(),
+            cancelled: cancelled.iter().map(Uuid::to_string).collect(),
+        });
+    }
+    disable_coin_impl(&ctx, &ticker)
+        .await
+        .map_to_mm(DisableCoinError::InternalError)?;
+    Ok(DisableCoinResponse {
+        coin: ticker,
+        cancelled_orders: cancelled,
+    })
+}
+
+/// The legacy answer of a refused `disable_coin`: HTTP 500 and `{"error": <text>}`, with the members that the two
+/// deactivation conflicts carry beside `error` (`swaps`, or `orders` with `matching` and `cancelled`); every other
+/// failure is the legacy error text.
+#[track_caller]
+pub(crate) fn legacy_disable_coin_refusal(error: MmError<DisableCoinError>) -> Result<Response<Vec<u8>>, String> {
+    let body = match error.get_inner() {
+        DisableCoinError::ActiveSwapsBlockDeactivation { swaps, .. } => {
+            json!({ "error": error.get_inner().to_string(), "swaps": swaps })
+        },
+        DisableCoinError::MatchingOrdersBlockDeactivation {
+            matching, cancelled, ..
+        } => json!({
+            "error": error.get_inner().to_string(),
+            "orders": {
+                "matching": matching,
+                "cancelled": cancelled,
+            }
+        }),
+        DisableCoinError::NoSuchCoin { .. } | DisableCoinError::InternalError(_) => return Err(legacy_error(error)),
+    };
+    let body = try_s!(json::to_vec(&body));
+    Response::builder().status(500).body(body).map_err(|e| ERRL!("{}", e))
+}
 
 /// Attempts to disable the coin
 pub async fn disable_coin(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let ticker = try_s!(req["coin"].as_str().ok_or("No 'coin' field")).to_owned();
-    let _coin = match lp_coinfind(&ctx, &ticker).await {
-        Ok(Some(t)) => t,
-        Ok(None) => return ERR!("No such coin: {}", ticker),
-        Err(err) => return ERR!("!lp_coinfind({}): ", err),
-    };
-    let swaps = try_s!(active_swaps_using_coin(&ctx, &ticker));
-    if !swaps.is_empty() {
-        let err = json!({
-            "error": fomat! ("There're active swaps using " (ticker)),
-            "swaps": swaps,
-        });
-        return Response::builder()
-            .status(500)
-            .body(json::to_vec(&err).unwrap())
-            .map_err(|e| ERRL!("{}", e));
+    let coin = try_s!(req["coin"].as_str().ok_or("No 'coin' field")).to_owned();
+    match disable_coin_core(ctx, DisableCoinRequest { coin }).await {
+        Ok(response) => legacy_result_body(&response),
+        Err(error) => legacy_disable_coin_refusal(error),
     }
-    let (cancelled, still_matching) = try_s!(cancel_orders_by(&ctx, CancelBy::Coin { ticker: ticker.clone() }).await);
-    if !still_matching.is_empty() {
-        let err = json!({
-            "error": fomat! ("There're currently matching orders using " (ticker)),
-            "orders": {
-                "matching": still_matching,
-                "cancelled": cancelled,
-            }
-        });
-        return Response::builder()
-            .status(500)
-            .body(json::to_vec(&err).unwrap())
-            .map_err(|e| ERRL!("{}", e));
-    }
-
-    try_s!(disable_coin_impl(&ctx, &ticker).await);
-    let res = json!({
-        "result": {
-            "coin": ticker,
-            "cancelled_orders": cancelled,
-        }
-    });
-    Response::builder()
-        .body(json::to_vec(&res).unwrap())
-        .map_err(|e| ERRL!("{}", e))
 }
 
 // Docs vs reference (CRD ch.55 R55.4.5, public-docs erratum): some published examples of the legacy `enable`
@@ -264,23 +312,55 @@ pub fn metrics(ctx: MmArc) -> HyRes {
     }
 }
 
-/// Get my_balance of a coin
-pub async fn my_balance(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let ticker = try_s!(req["coin"].as_str().ok_or("No 'coin' field")).to_owned();
+/// The request of `my_balance` (legacy members, unchanged).
+#[derive(Deserialize)]
+pub struct MyBalanceRequest {
+    pub coin: String,
+}
+
+/// The success of `my_balance`: the whole legacy body, a bare object. The members keep the order of the legacy body.
+#[derive(Serialize)]
+pub struct MyBalanceRpcResponse {
+    pub coin: String,
+    pub balance: BigDecimal,
+    pub unspendable_balance: BigDecimal,
+    pub address: String,
+}
+
+/// The typed core of `my_balance`: the spendable and the unspendable balance and the address of a coin.
+///
+/// # Errors
+///
+/// A [`MyBalanceRpcError`].
+pub async fn my_balance_core(
+    ctx: MmArc,
+    req: MyBalanceRequest,
+) -> Result<MyBalanceRpcResponse, MmError<MyBalanceRpcError>> {
+    let ticker = req.coin;
     let coin = match lp_coinfind(&ctx, &ticker).await {
         Ok(Some(t)) => t,
-        Ok(None) => return ERR!("No such coin: {}", ticker),
-        Err(err) => return ERR!("!lp_coinfind({}): {}", ticker, err),
+        Ok(None) => return MmError::err(MyBalanceRpcError::NoSuchCoin { coin: ticker }),
+        Err(err) => {
+            return MmError::err(MyBalanceRpcError::InternalError(format!(
+                "!lp_coinfind({}): {}",
+                ticker, err
+            )))
+        },
     };
-    let my_balance = try_s!(coin.my_balance().compat().await);
-    let res = json!({
-        "coin": ticker,
-        "balance": my_balance.spendable,
-        "unspendable_balance": my_balance.unspendable,
-        "address": try_s!(coin.my_address()),
-    });
-    let res = try_s!(json::to_vec(&res));
-    Ok(try_s!(Response::builder().body(res)))
+    let balance = coin.my_balance().compat().await.mm_err(MyBalanceRpcError::from)?;
+    let address = coin.my_address().map_to_mm(MyBalanceRpcError::InternalError)?;
+    Ok(MyBalanceRpcResponse {
+        coin: ticker,
+        balance: balance.spendable,
+        unspendable_balance: balance.unspendable,
+        address,
+    })
+}
+
+/// Get my_balance of a coin
+pub async fn my_balance(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    let coin = try_s!(req["coin"].as_str().ok_or("No 'coin' field")).to_owned();
+    legacy_bare(my_balance_core(ctx, MyBalanceRequest { coin }).await)
 }
 
 pub async fn stop(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {

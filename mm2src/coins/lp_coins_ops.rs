@@ -307,46 +307,76 @@ pub async fn lp_coinfind_or_err(ctx: &MmArc, ticker: &str) -> CoinFindResult<MmC
         Err(e) => panic!("Unexpected error: {}", e),
     }
 }
+/// The request of `convertaddress` (legacy members, unchanged).
 #[derive(Deserialize)]
-struct ConvertAddressReq {
-    pub(crate) coin: String,
-    pub(crate) from: String,
+pub struct ConvertAddressReq {
+    pub coin: String,
+    pub from: String,
     /// format to that the input address should be converted
-    pub(crate) to_address_format: Json,
+    pub to_address_format: Json,
 }
-pub async fn convert_address(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let req: ConvertAddressReq = try_s!(json::from_value(req));
+/// The success of `convertaddress`: the content that the legacy body carries under `result`.
+#[derive(Serialize)]
+pub struct ConvertAddressResponse {
+    pub address: String,
+}
+/// The typed core of `convertaddress`.
+pub async fn convert_address_core(
+    ctx: MmArc,
+    req: ConvertAddressReq,
+) -> Result<ConvertAddressResponse, MmError<ConvertAddressError>> {
     let coin = match lp_coinfind(&ctx, &req.coin).await {
         Ok(Some(t)) => t,
-        Ok(None) => return ERR!("No such coin: {}", req.coin),
-        Err(err) => return ERR!("!lp_coinfind({}): {}", req.coin, err),
-    };
-    let result = json!({
-        "result": {
-            "address": try_s!(coin.convert_to_address(&req.from, req.to_address_format)),
+        Ok(None) => return MmError::err(ConvertAddressError::NoSuchCoin { coin: req.coin.clone() }),
+        Err(err) => {
+            return MmError::err(ConvertAddressError::InternalError(format!(
+                "!lp_coinfind({}): {}",
+                req.coin, err
+            )))
         },
-    });
-    let body = try_s!(json::to_vec(&result));
-    Ok(try_s!(Response::builder().body(body)))
+    };
+    let address = coin
+        .convert_to_address(&req.from, req.to_address_format)
+        .map_to_mm(ConvertAddressError::InvalidParam)?;
+    Ok(ConvertAddressResponse { address })
 }
-pub async fn kmd_rewards_info(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+/// The request of `kmd_rewards_info`: it takes no members. Any object (members are ignored) and, through the
+/// versioned dispatcher, an absent or `null` `params` decode to it.
+#[derive(Deserialize)]
+pub struct KmdRewardsInfoRequest {}
+/// The typed core of `kmd_rewards_info`: the rewards info of the unspent outputs of KMD, ordered by output value.
+pub async fn kmd_rewards_info_core(
+    ctx: MmArc,
+    _req: KmdRewardsInfoRequest,
+) -> Result<Vec<utxo::KmdRewardsInfoElement>, MmError<KmdRewardsInfoError>> {
     let coin = match lp_coinfind(&ctx, "KMD").await {
         Ok(Some(MmCoinEnum::UtxoCoin(t))) => t,
-        Ok(Some(_)) => return ERR!("KMD was expected to be UTXO"),
-        Ok(None) => return ERR!("KMD is not activated"),
-        Err(err) => return ERR!("!lp_coinfind({}): KMD", err),
+        Ok(Some(_)) => {
+            return MmError::err(KmdRewardsInfoError::InternalError(
+                "KMD was expected to be UTXO".to_owned(),
+            ))
+        },
+        Ok(None) => return MmError::err(KmdRewardsInfoError::NoSuchCoin { coin: "KMD".to_owned() }),
+        Err(err) => {
+            return MmError::err(KmdRewardsInfoError::InternalError(format!(
+                "!lp_coinfind({}): KMD",
+                err
+            )))
+        },
     };
-
-    let res = json!({
-        "result": try_s!(utxo::kmd_rewards_info(&coin).await),
-    });
-    let res = try_s!(json::to_vec(&res));
-    Ok(try_s!(Response::builder().body(res)))
+    // The one failure of the computation that is not a read of the node: a wallet without an Iguana key.
+    if let Err(error) = coin.as_ref().derivation_method.iguana_or_err() {
+        return MmError::err(KmdRewardsInfoError::InternalError(error.get_inner().to_string()));
+    }
+    utxo::kmd_rewards_info(&coin)
+        .await
+        .map_to_mm(KmdRewardsInfoError::Transport)
 }
+/// The request of `validateaddress` (legacy members, unchanged).
 #[derive(Deserialize)]
-struct ValidateAddressReq {
-    pub(crate) coin: String,
-    pub(crate) address: String,
+pub struct ValidateAddressReq {
+    pub coin: String,
+    pub address: String,
 }
 #[derive(Serialize)]
 pub struct ValidateAddressResult {
@@ -354,17 +384,22 @@ pub struct ValidateAddressResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
-pub async fn validate_address(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let req: ValidateAddressReq = try_s!(json::from_value(req));
+/// The typed core of `validateaddress`. An address that is not valid is a success with `is_valid: false`.
+pub async fn validate_address_core(
+    ctx: MmArc,
+    req: ValidateAddressReq,
+) -> Result<ValidateAddressResult, MmError<ValidateAddressError>> {
     let coin = match lp_coinfind(&ctx, &req.coin).await {
         Ok(Some(t)) => t,
-        Ok(None) => return ERR!("No such coin: {}", req.coin),
-        Err(err) => return ERR!("!lp_coinfind({}): {}", req.coin, err),
+        Ok(None) => return MmError::err(ValidateAddressError::NoSuchCoin { coin: req.coin.clone() }),
+        Err(err) => {
+            return MmError::err(ValidateAddressError::InternalError(format!(
+                "!lp_coinfind({}): {}",
+                req.coin, err
+            )))
+        },
     };
-
-    let res = json!({ "result": coin.validate_address(&req.address) });
-    let body = try_s!(json::to_vec(&res));
-    Ok(try_s!(Response::builder().body(body)))
+    Ok(coin.validate_address(&req.address))
 }
 pub async fn withdraw(ctx: MmArc, req: WithdrawRequest) -> WithdrawResult {
     let coin = lp_coinfind_or_err(&ctx, &req.coin).await.mm_err(Into::into)?;
@@ -530,25 +565,58 @@ pub async fn validators_info(
     )
     .await
 }
-pub async fn send_raw_transaction(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let ticker = try_s!(req["coin"].as_str().ok_or("No 'coin' field")).to_owned();
-    let coin = match lp_coinfind(&ctx, &ticker).await {
+/// The request of `send_raw_transaction` (legacy members, unchanged): the coin and one transaction carrier, `tx_hex`
+/// or `tx_json` (CRD ch.20 R-W8). Both carriers are kept as the request spelled them, so that a carrier of the wrong
+/// type is refused by [`select_raw_tx_carrier`] and not by the decoder; `null` counts as absent.
+#[derive(Deserialize)]
+pub struct SendRawTransactionReq {
+    pub coin: String,
+    #[serde(default)]
+    pub tx_hex: Option<Json>,
+    #[serde(default)]
+    pub tx_json: Option<Json>,
+}
+/// The success of `send_raw_transaction`: the whole legacy body, a bare object.
+#[derive(Serialize)]
+pub struct SendRawTransactionResponse {
+    pub tx_hash: String,
+}
+/// The typed core of `send_raw_transaction`.
+pub async fn send_raw_transaction_core(
+    ctx: MmArc,
+    req: SendRawTransactionReq,
+) -> Result<SendRawTransactionResponse, MmError<SendRawTransactionError>> {
+    let coin = match lp_coinfind(&ctx, &req.coin).await {
         Ok(Some(t)) => t,
-        Ok(None) => return ERR!("No such coin: {}", ticker),
-        Err(err) => return ERR!("!lp_coinfind({}): {}", ticker, err),
+        Ok(None) => return MmError::err(SendRawTransactionError::NoSuchCoin { coin: req.coin.clone() }),
+        Err(err) => {
+            return MmError::err(SendRawTransactionError::InternalError(format!(
+                "!lp_coinfind({}): {}",
+                req.coin, err
+            )))
+        },
     };
-    let res = match try_s!(select_raw_tx_carrier(&req)) {
-        RawTxCarrier::Hex(hex) => try_s!(coin.send_raw_tx(hex).compat().await),
+    let carriers = json!({ "tx_hex": req.tx_hex, "tx_json": req.tx_json });
+    let carrier = select_raw_tx_carrier(&carriers)
+        .map_err(|text| MmError::new(SendRawTransactionError::InvalidParam(text.to_owned())))?;
+    let tx_hash = match carrier {
+        RawTxCarrier::Hex(hex) => coin
+            .send_raw_tx(hex)
+            .compat()
+            .await
+            .map_to_mm(SendRawTransactionError::Transport)?,
         // A JSON carrier is already the coin's native serialised form, so its
         // bytes go to the bytes-taking half of the trait rather than through
         // the hex layer `send_raw_tx` exists to strip.
         RawTxCarrier::Json(tx_json) => {
-            let bytes = try_s!(json::to_vec(tx_json));
-            try_s!(coin.send_raw_tx_bytes(&bytes).compat().await)
+            let bytes = json::to_vec(tx_json).map_to_mm(|e| SendRawTransactionError::InternalError(e.to_string()))?;
+            coin.send_raw_tx_bytes(&bytes)
+                .compat()
+                .await
+                .map_to_mm(SendRawTransactionError::Transport)?
         },
     };
-    let body = try_s!(json::to_vec(&json!({ "tx_hash": res })));
-    Ok(try_s!(Response::builder().body(body)))
+    Ok(SendRawTransactionResponse { tx_hash })
 }
 
 /// Which of `send_raw_transaction`'s two accepted transaction carriers a
@@ -571,16 +639,16 @@ enum RawTxCarrier<'a> {
 /// other one: falling through would broadcast a transaction the caller did not
 /// select. A `null` counts as absent, so that echoing an object whose optional
 /// carrier was serialised as `null` behaves like omitting it.
-fn select_raw_tx_carrier(req: &Json) -> Result<RawTxCarrier<'_>, String> {
+fn select_raw_tx_carrier(req: &Json) -> Result<RawTxCarrier<'_>, &'static str> {
     let present = |field| req.get(field).filter(|value| !value.is_null());
     match (present("tx_hex"), present("tx_json")) {
         (Some(tx_hex), _) => match tx_hex.as_str() {
             Some(tx_hex) => Ok(RawTxCarrier::Hex(tx_hex)),
-            None => ERR!("'tx_hex' must be a string"),
+            None => Err("'tx_hex' must be a string"),
         },
         (None, Some(tx_json)) if tx_json.is_object() => Ok(RawTxCarrier::Json(tx_json)),
-        (None, Some(_)) => ERR!("'tx_json' must be an object"),
-        (None, None) => ERR!("Request must carry either a 'tx_hex' or a 'tx_json' field"),
+        (None, Some(_)) => Err("'tx_json' must be an object"),
+        (None, None) => Err("Request must carry either a 'tx_hex' or a 'tx_json' field"),
     }
 }
 #[derive(Deserialize)]
@@ -706,47 +774,71 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
         None => ERR!("{} is disabled already", ticker),
     }
 }
+/// The request of `set_required_confirmations` (legacy members, unchanged).
 #[derive(Deserialize)]
 pub struct ConfirmationsReq {
-    pub(crate) coin: String,
-    pub(crate) confirmations: u64,
+    pub coin: String,
+    pub confirmations: u64,
 }
-pub async fn set_required_confirmations(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let req: ConfirmationsReq = try_s!(json::from_value(req));
+/// The success of `set_required_confirmations`: the content that the legacy body carries under `result`.
+#[derive(Serialize)]
+pub struct ConfirmationsResponse {
+    pub coin: String,
+    pub confirmations: u64,
+}
+/// The typed core of `set_required_confirmations`. The answer carries the setting as the coin now reports it.
+pub async fn set_required_confirmations_core(
+    ctx: MmArc,
+    req: ConfirmationsReq,
+) -> Result<ConfirmationsResponse, MmError<CoinSettingError>> {
     let coin = match lp_coinfind(&ctx, &req.coin).await {
         Ok(Some(t)) => t,
-        Ok(None) => return ERR!("No such coin {}", req.coin),
-        Err(err) => return ERR!("!lp_coinfind ({}): {}", req.coin, err),
+        Ok(None) => return MmError::err(CoinSettingError::NoSuchCoin { coin: req.coin.clone() }),
+        Err(err) => {
+            return MmError::err(CoinSettingError::InternalError(format!(
+                "!lp_coinfind ({}): {}",
+                req.coin, err
+            )))
+        },
     };
     coin.set_required_confirmations(req.confirmations);
-    let res = try_s!(json::to_vec(&json!({
-        "result": {
-            "coin": req.coin,
-            "confirmations": coin.required_confirmations(),
-        }
-    })));
-    Ok(try_s!(Response::builder().body(res)))
+    Ok(ConfirmationsResponse {
+        coin: req.coin,
+        confirmations: coin.required_confirmations(),
+    })
 }
+/// The request of `set_requires_notarization` (legacy members, unchanged).
 #[derive(Deserialize)]
 pub struct RequiresNotaReq {
-    pub(crate) coin: String,
-    pub(crate) requires_notarization: bool,
+    pub coin: String,
+    pub requires_notarization: bool,
 }
-pub async fn set_requires_notarization(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let req: RequiresNotaReq = try_s!(json::from_value(req));
+/// The success of `set_requires_notarization`: the content that the legacy body carries under `result`.
+#[derive(Serialize)]
+pub struct RequiresNotaResponse {
+    pub coin: String,
+    pub requires_notarization: bool,
+}
+/// The typed core of `set_requires_notarization`. The answer carries the setting as the coin now reports it.
+pub async fn set_requires_notarization_core(
+    ctx: MmArc,
+    req: RequiresNotaReq,
+) -> Result<RequiresNotaResponse, MmError<CoinSettingError>> {
     let coin = match lp_coinfind(&ctx, &req.coin).await {
         Ok(Some(t)) => t,
-        Ok(None) => return ERR!("No such coin {}", req.coin),
-        Err(err) => return ERR!("!lp_coinfind ({}): {}", req.coin, err),
+        Ok(None) => return MmError::err(CoinSettingError::NoSuchCoin { coin: req.coin.clone() }),
+        Err(err) => {
+            return MmError::err(CoinSettingError::InternalError(format!(
+                "!lp_coinfind ({}): {}",
+                req.coin, err
+            )))
+        },
     };
     coin.set_requires_notarization(req.requires_notarization);
-    let res = try_s!(json::to_vec(&json!({
-        "result": {
-            "coin": req.coin,
-            "requires_notarization": coin.requires_notarization(),
-        }
-    })));
-    Ok(try_s!(Response::builder().body(res)))
+    Ok(RequiresNotaResponse {
+        coin: req.coin,
+        requires_notarization: coin.requires_notarization(),
+    })
 }
 pub async fn show_priv_key(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let ticker = try_s!(req["coin"].as_str().ok_or("No 'coin' field")).to_owned();
@@ -818,30 +910,43 @@ pub fn update_coins_config(mut config: Json) -> Result<Json, String> {
 
     Ok(config)
 }
+/// The request of `convert_utxo_address` (legacy members, unchanged).
 #[derive(Deserialize)]
-struct ConvertUtxoAddressReq {
-    pub(crate) address: String,
-    pub(crate) to_coin: String,
+pub struct ConvertUtxoAddressReq {
+    pub address: String,
+    pub to_coin: String,
 }
-pub async fn convert_utxo_address(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    let req: ConvertUtxoAddressReq = try_s!(json::from_value(req));
-    let mut addr: utxo::Address = try_s!(req.address.parse());
+/// The typed core of `convert_utxo_address`: the address in the format of the target coin. The success is the string
+/// that the legacy body carries under `result`.
+pub async fn convert_utxo_address_core(
+    ctx: MmArc,
+    req: ConvertUtxoAddressReq,
+) -> Result<String, MmError<ConvertUtxoAddressError>> {
+    let mut addr = req
+        .address
+        .parse::<utxo::Address>()
+        .map_to_mm(|e| ConvertUtxoAddressError::InvalidAddress(format!("{}", e)))?;
     let coin = match lp_coinfind(&ctx, &req.to_coin).await {
         Ok(Some(c)) => c,
-        _ => return ERR!("Coin {} is not activated", req.to_coin),
+        _ => {
+            return MmError::err(ConvertUtxoAddressError::NoSuchCoin {
+                coin: req.to_coin.clone(),
+            })
+        },
     };
     let coin = match coin {
         MmCoinEnum::UtxoCoin(utxo) => utxo,
-        _ => return ERR!("Coin {} is not utxo", req.to_coin),
+        _ => {
+            return MmError::err(ConvertUtxoAddressError::UnsupportedError(format!(
+                "Coin {} is not utxo",
+                req.to_coin
+            )))
+        },
     };
     addr.prefix = coin.as_ref().conf.pub_addr_prefix;
     addr.t_addr_prefix = coin.as_ref().conf.pub_t_addr_prefix;
     addr.checksum_type = coin.as_ref().conf.checksum_type;
-
-    let response = try_s!(json::to_vec(&json!({
-        "result": addr.to_string(),
-    })));
-    Ok(try_s!(Response::builder().body(response)))
+    Ok(addr.to_string())
 }
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn load_history_from_file_impl<T>(coin: &T, ctx: &MmArc) -> TxHistoryFut<Vec<TransactionDetails>>

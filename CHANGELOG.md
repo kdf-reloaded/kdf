@@ -44,6 +44,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   legacy forms and success bodies unchanged, legacy error texts as for the order-management methods (no inner
   trace tokens). `get_trade_fee` stays legacy-only: the reference documentation marks it
   deprecated in favor of the versioned `trade_preimage`. Detail: PR #372; CRD ch.43 §43.1R.
+- **The wallet and coin methods `my_balance`, `disable_coin`, `send_raw_transaction`, `validateaddress`,
+  `convertaddress`, `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
+  `set_required_confirmations` and `set_requires_notarization` accept `mmrpc: "2.0"` requests**, in the same
+  way as the order and trading methods above. Their typed errors follow the versioned `withdraw`: an unknown
+  coin answers `NoSuchCoin` with HTTP 404, a node or network failure `Transport` with 502, a request the client
+  got wrong 400. `disable_coin` names the swaps or orders that block the deactivation inside `error_data`.
+  Legacy forms and success bodies unchanged, legacy error texts as above (no inner trace tokens). Detail:
+  PR #TBD; CRD ch.43 §43.1R.
 
 #### Solana coins
 
@@ -114,7 +122,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   smaller items — in order of cost, and the limits a browser has by nature, also listed in
   `docs/WASM_BUILD.md`.
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
-  management) implemented in PR #359, phase 2 (trading) in PR #372; decisions D1–D10 recorded; phases 3–5 open.
+  management) implemented in PR #359, phase 2 (trading) in PR #372, phase 3 (wallet and coins) in PR #TBD;
+  decisions D1–D10 recorded; phases 4–5 open.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress (was parked):
   checked against the code on 2026-11-15: phases A–F not started; the state found and the order of the work packages are in its
   new section "State check (2026-11-15)".

@@ -68,6 +68,9 @@ pub mod streaming_activations;
 pub mod trezor;
 #[path = "rpc/lp_commands/wallet_connect.rs"]
 pub mod wallet_connect;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "rpc/lp_commands/wallet_rpc_tests.rs"]
+mod wallet_rpc_tests;
 
 /// Lists the RPC method not requiring the "userpass" authentication.  
 /// None is also public to skip auth and display proper error in case of method is missing
@@ -1038,8 +1041,9 @@ mod server_tests {
     /// plan. The order methods are not among them: since 0.5.0 `setprice`, `update_maker_order`, `cancel_order`,
     /// `cancel_all_orders`, `my_orders` and `order_status` (phase 1) and `buy`, `sell`, `orderbook_depth` and
     /// `orders_history_by_filter` (phase 2) also have a versioned form, a Reloaded extension that the reference does
-    /// not have (tested in `versioned_order_methods_*` and `versioned_trading_methods_*` below). A method that gets a
-    /// versioned form leaves this list.
+    /// not have (tested in `versioned_order_methods_*` and `versioned_trading_methods_*` below), and so do the ten
+    /// wallet and coin methods of phase 3 (tested in `wallet_rpc_tests`). A method that gets a versioned form
+    /// leaves this list.
     const LEGACY_ONLY_METHODS: [&str; 2] = ["get_trade_fee", "import_swaps"];
 
     fn assert_http_status(status_line: &str, code: u16) {

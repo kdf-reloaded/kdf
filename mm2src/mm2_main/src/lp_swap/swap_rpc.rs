@@ -624,11 +624,31 @@ async fn kickstart_thread_handler(ctx: MmArc, swap: SavedSwap, maker_coin_ticker
     }
 }
 
+/// The request of `coins_needed_for_kick_start`: it takes no members. Any object (members are ignored) and, through the
+/// versioned dispatcher, an absent or `null` `params` decode to it.
+#[derive(Deserialize)]
+pub struct CoinsNeededForKickStartRequest {}
+
+/// The typed core of `coins_needed_for_kick_start`: the coins that the interrupted swaps and orders need to be
+/// activated for them to be kicked start. The success is the list that the legacy body carries under `result`.
+pub async fn coins_needed_for_kick_start_core(
+    ctx: MmArc,
+    _req: CoinsNeededForKickStartRequest,
+) -> Result<std::collections::HashSet<String>, MmError<coins::CoinsNeededForKickStartError>> {
+    let coins = ctx
+        .coins_needed_for_kick_start
+        .lock()
+        .map_to_mm(|e| coins::CoinsNeededForKickStartError::InternalError(e.to_string()))?
+        .clone();
+    Ok(coins)
+}
+
+/// The legacy `coins_needed_for_kick_start`: calls [`coins_needed_for_kick_start_core`] and answers
+/// `{"result": [<tickers>]}`.
 pub async fn coins_needed_for_kick_start(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
-    let res = try_s!(json::to_vec(&json!({
-        "result": *(try_s!(ctx.coins_needed_for_kick_start.lock()))
-    })));
-    Ok(try_s!(Response::builder().body(res)))
+    crate::mm2::rpc::legacy_adapter::legacy_result(
+        coins_needed_for_kick_start_core(ctx, CoinsNeededForKickStartRequest {}).await,
+    )
 }
 
 pub async fn recover_funds_of_swap(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
