@@ -89,15 +89,8 @@ fn legacy_refusal(ctx: &MmArc, method: &str, params: Json, handler_file: &str) -
     rest
 }
 
-/// A versioned request. `params` is left out when `None`. `userpass` is left out when `password` is false.
-fn versioned_with(ctx: &MmArc, method: &str, params: Option<Json>, id: usize, password: bool) -> (u16, Json) {
-    let mut request = json!({ "mmrpc": "2.0", "method": method, "id": id });
-    if password {
-        request["userpass"] = json!("pw");
-    }
-    if let Some(params) = params {
-        request["params"] = params;
-    }
+/// Sends a versioned request `request` and returns the status and the JSON body of the answer.
+fn send_versioned(ctx: &MmArc, method: &str, request: Json) -> (u16, Json) {
     let answer = match run(ctx, request) {
         Ok(answer) => answer,
         Err(_) => panic!("{method}: the versioned surface answers every request"),
@@ -106,8 +99,22 @@ fn versioned_with(ctx: &MmArc, method: &str, params: Option<Json>, id: usize, pa
     (answer.status().as_u16(), body)
 }
 
+/// A versioned request. `params` is left out when `None`.
 fn versioned(ctx: &MmArc, method: &str, params: Option<Json>, id: usize) -> (u16, Json) {
-    versioned_with(ctx, method, params, id, true)
+    let mut request = json!({ "mmrpc": "2.0", "userpass": "pw", "method": method, "id": id });
+    if let Some(params) = params {
+        request["params"] = params;
+    }
+    send_versioned(ctx, method, request)
+}
+
+/// A versioned request of a public method: no `userpass` member. `params` is left out when `None`.
+fn versioned_public(ctx: &MmArc, method: &str, params: Option<Json>, id: usize) -> (u16, Json) {
+    let mut request = json!({ "mmrpc": "2.0", "method": method, "id": id });
+    if let Some(params) = params {
+        request["params"] = params;
+    }
+    send_versioned(ctx, method, request)
 }
 
 /// A versioned success: HTTP 200, the 2.0 envelope with the `id` echoed and no error member. Returns `result`.
@@ -285,7 +292,7 @@ fn metrics_answers_a_node_without_metrics_with_its_text() {
         "the versioned text"
     );
     assert_typed_refusal(
-        &versioned_with(&ctx, "metrics", None, 322, false),
+        &versioned_public(&ctx, "metrics", None, 322),
         500,
         "Internal",
         Some("string"),
@@ -321,7 +328,7 @@ fn metrics_answers_the_legacy_body_and_the_versioned_result() {
         );
     }
     same(
-        &versioned_result(versioned_with(&ctx, "metrics", None, 335, false), 335),
+        &versioned_result(versioned_public(&ctx, "metrics", None, 335), 335),
         &json!({ "metrics": [] }),
         "the versioned result without the password",
     );
