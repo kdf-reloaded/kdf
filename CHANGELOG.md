@@ -54,6 +54,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   activation reports a protocol parse error. Solana stays switched off in this build, so no Solana
   coin can be activated yet. Detail: PR #361; CRD ch.40 R40.1.2, R40.1.3.
 
+#### Tendermint (Cosmos) coins
+
+- **A Tendermint coin now has a transaction history.** `tx_history: true` on a Tendermint platform
+  coin starts reading the account's transactions from a node in the background, and `my_tx_history`
+  (the mmrpc-2.0 method) lists them for the coin and for its tokens: plain sends, token sends,
+  IBC transfers, HTLC creations and claims, delegations, undelegations and reward claims, each with
+  its amounts, fee and memo, and the fee of a token send as a row of the platform coin. While the
+  first read of the chain runs, the history state is `InProgress` with the number of transactions
+  left; it is `Finished` afterwards. A fee-only transaction counts its fee once, a reward claim
+  counts the fee it cost, a transaction touching several validators gets one row per validator, and
+  `tx_hex` is the signed transaction. The history of a refunded HTLC or a completed undelegation has
+  no row, because the chain records no transaction for them. The history of a custom token that is
+  not in the coins file is absent in 0.5.0. A history store written by this node is listed by the other
+  implementation too (checked against a reference release build on 2026-11-15); in this change only
+  Tendermint coins write the index that makes this work. A history database is per coin and shared by
+  every account activated on it, so rows of an earlier account stay and are listed under their own
+  addresses (a known property of the shared database, the same as at GLEEC KDF). A transaction whose
+  block time no node can give is read again by the next pass. Native only in 0.5.0: the
+  browser build has no versioned history store for any coin family. Detail: PR #363;
+  CRD ch.36 §36.14.1; §36.14.7.
+
 ### Changed
 
 #### Shielded coins
@@ -106,6 +127,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   for a coin without a block time in its coins entry). A server that keeps sending notifications
   without reaching that block now counts as stuck too. A coin with a single connected server keeps
   the old rule. Detail: PR #378; CRD ch.38 R38.6.4o item 4.
+
+#### Transaction history
+
+- **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is
+  served from the store (BCH and SLP tokens, and now Tendermint coins), the versioned method
+  reported the page size as `total`, and a request with `from_id` could return an empty page; it now
+  returns the store's total, the right `skipped` count and `total_pages`. Detail: PR #363; CRD ch.53
+  R53.2.4, R53.2.8.
 
 #### QTUM and QRC20
 
@@ -174,6 +203,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   packages S0 and S2 done in PR #361, S1 in PR #371.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
+- [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
+  Tendermint transaction history, is built in PR #363.
 
 ## [0.4.0-beta.1] — 2026-11-14
 

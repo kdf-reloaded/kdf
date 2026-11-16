@@ -662,6 +662,7 @@ impl MmCoin for TendermintToken {
                 internal_id: tx_hash.as_bytes().to_vec().into(),
                 kmd_rewards: None,
                 transaction_type: TransactionType::StandardTransfer,
+                memo: None,
             };
             token
                 .platform_coin

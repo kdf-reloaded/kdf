@@ -434,15 +434,28 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
         &self,
         _ctx: mm2_core::mm_ctx::MmArc,
         _metrics: MetricsArc,
-        _storage: impl TxHistoryStorage + 'static,
+        storage: impl TxHistoryStorage + 'static,
         _initial_balance: BigDecimal,
     ) -> AbortHandle {
-        // Tendermint transaction-history background fetching is not yet wired in
-        // reloaded; return a detached no-op abort handle so the platform-with-
-        // tokens framework's `tx_history` path stays consistent with the other
-        // coins without spawning a fetch loop.
-        let (_fut, abort_handle) = abortable(futures::future::ready(()));
-        abort_handle
+        // CRD ch.36 R36.14.3: the platform coin's fetcher is the only writer of the history store. The
+        // browser build has no history store in this tree, so there the call starts nothing.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let ticker = self.ticker().to_owned();
+            let (fut, abort_handle) = abortable(coins::tendermint::start_tendermint_history(self.clone(), storage));
+            common::executor::spawn(async move {
+                if let Ok(Err(e)) = fut.await {
+                    common::log::info!("the Tendermint history fetcher stopped for {}, reason {}", ticker, e);
+                }
+            });
+            abort_handle
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = storage;
+            let (_fut, abort_handle) = abortable(futures::future::ready(()));
+            abort_handle
+        }
     }
 }
 

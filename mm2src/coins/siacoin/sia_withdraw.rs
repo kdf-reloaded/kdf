@@ -455,6 +455,7 @@ impl<'a> SiaWithdrawBuilder<'a> {
             // subsystem produced it (ch.20 R-W9, ch.53 R53.5.10). The history
             // path reports the same value for the same transaction.
             transaction_type: TransactionType::SiaV2Transaction,
+            memo: None,
         })
     }
 }

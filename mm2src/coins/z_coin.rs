@@ -3528,6 +3528,7 @@ impl MmCoin for ZCoin {
                     internal_id: tx_hash.into(),
                     kmd_rewards: None,
                     transaction_type: Default::default(),
+                    memo: None,
                 })
             };
             Box::new(fut.boxed().compat())
