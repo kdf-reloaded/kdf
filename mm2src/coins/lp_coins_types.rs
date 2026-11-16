@@ -824,7 +824,10 @@ impl Default for TransactionType {
 /// Transaction details
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TransactionDetails {
-    /// Raw bytes of signed transaction, this should be sent as is to `send_raw_transaction_bytes` RPC to broadcast the transaction
+    /// Raw bytes of signed transaction, this should be sent as is to `send_raw_transaction_bytes` RPC to broadcast the transaction.
+    /// Empty, and then omitted from the serialized form, only in the unsigned result of a watch-only Tendermint coin
+    /// (`unsigned` is `Some`, CRD ch.36 R36.14.17).
+    #[serde(default, skip_serializing_if = "bytes_json_is_empty")]
     pub tx_hex: BytesJson,
     /// The signed transaction in a coin's native JSON form, for a coin whose native
     /// serialisation of a transaction is JSON text rather than a binary encoding --
@@ -833,7 +836,8 @@ pub struct TransactionDetails {
     /// family; its absence means "this coin has no JSON carrier", never an error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tx_json: Option<Json>,
-    /// Transaction hash in hexadecimal format
+    /// Transaction hash in hexadecimal format. Empty, and then omitted, only where `tx_hex` is (see there).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) tx_hash: String,
     /// Coins are sent from these addresses
     pub(crate) from: Vec<String>,
@@ -869,6 +873,34 @@ pub struct TransactionDetails {
     /// R36.14.9: always present on a history row, possibly empty). Omitted for every other family.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) memo: Option<String>,
+    /// The unsigned document a watch-only Tendermint coin answers instead of a signed transaction (CRD ch.36
+    /// R36.14.17). Its members sit flat in the result; `None` for every signed transaction and every other family.
+    #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+    pub(crate) unsigned: Option<UnsignedTransaction>,
+}
+fn bytes_json_is_empty(bytes: &BytesJson) -> bool { bytes.is_empty() }
+/// The sign document of the direct sign mode (CRD ch.36 R36.14.17): the serialized transaction body and auth info,
+/// the chain id and the account number of the signer.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct UnsignedSignDoc {
+    pub body_bytes: Vec<u8>,
+    pub auth_info_bytes: Vec<u8>,
+    pub chain_id: String,
+    pub account_number: u64,
+}
+/// What a watch-only Tendermint coin answers in place of `tx_hex` and `tx_hash` (CRD ch.36 R36.14.17). The members
+/// of the variant sit flat in the withdraw result.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum UnsignedTransaction {
+    /// The direct form, without the Ledger flag.
+    SignDoc { sign_doc: UnsignedSignDoc },
+    /// The Amino form, with the Ledger flag: the Amino sign document as JSON text and the protobuf type URL of its
+    /// message.
+    Amino {
+        legacy_amino_json: String,
+        original_tx_type_url: String,
+    },
 }
 #[derive(Clone, Copy, Debug)]
 pub struct BlockHeightAndTime {
@@ -876,6 +908,10 @@ pub struct BlockHeightAndTime {
     pub(crate) timestamp: u64,
 }
 impl TransactionDetails {
+    /// Whether this is the unsigned result of a watch-only coin: nothing was signed or broadcast, and the caller's
+    /// own wallet signs the document (CRD ch.36 R36.14.17).
+    pub fn is_unsigned(&self) -> bool { self.unsigned.is_some() }
+
     /// Whether the transaction details block height should be updated (when tx is confirmed)
     pub fn should_update_block_height(&self) -> bool {
         // checking for std::u64::MAX because there was integer overflow

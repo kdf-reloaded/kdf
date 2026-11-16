@@ -1664,6 +1664,15 @@ this section):
   that implements the exchange. Recommended: (a) for 0.5.0, (b) as a
   plan item of its own, (c) not planned.
 
+  > **Status note (2026-11-16, Reloaded-original).** Decided 2026-11-15:
+  > (a). The public-key form is built in 0.5.0 as a watch-only coin
+  > (Chapter 36 §36.14.3, as-built note): its orders and those of its tokens
+  > are refused as wallet-only with and without the Ledger flag
+  > (R18.11.23a), and every swap send, claim and refund call of such a coin
+  > is refused with the typed error `PrivKeyNotAllowed::WatchOnlyCoin` before
+  > any node is contacted. The reference accepts the orders of a public-key
+  > coin without the flag; the refusal is the recorded difference.
+
 **The own-payment check and the query answer (completes R18.11.22).**
 
 - **R18.11.53.** *The code of the query answer is not read.* At both

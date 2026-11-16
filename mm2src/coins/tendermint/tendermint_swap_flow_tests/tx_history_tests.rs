@@ -1074,6 +1074,7 @@ fn stored_rows_hold_base_units_and_are_scaled_when_served() {
 
 fn details(id: u8, height: u64, from: &str, token: Option<&str>) -> crate::TransactionDetails {
     crate::TransactionDetails {
+        unsigned: None,
         tx_hex: vec![id].into(),
         tx_json: None,
         tx_hash: format!("{id:02X}"),

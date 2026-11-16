@@ -134,6 +134,7 @@ impl MmCoin for SlpToken {
 
             let tx_hash: BytesJson = signed.hash().reversed().take().to_vec().into();
             let details = TransactionDetails {
+                unsigned: None,
                 tx_json: None,
                 tx_hex: serialize(&signed).into(),
                 internal_id: tx_hash.clone(),

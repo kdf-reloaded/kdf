@@ -756,6 +756,10 @@ terms; the clean implementer works from this list):
    public-key or WalletConnect request silently activates with the local
    context key. Bound: the three forms of R36.1.3 with their effects; malformed
    input is `InvalidRequest`.
+   *Status note (2026-11-16, Reloaded-original).* Narrowed: the public-key form
+   (form 1) is built (§36.14.3, as-built note) and malformed input is now
+   `InvalidRequest`; the interim refusal above remains for the WalletConnect
+   forms (forms 2 and 3) only, until their activation is built.
 7. **Token platform check.** Reloaded does not check that an inline token's
    `platform` equals the activated platform. Bound: `PlatformCoinMismatch`
    (unit, HTTP 400).
@@ -1988,6 +1992,16 @@ the public SDK rule for that key type, the coin being watch-only.
 Recommended: (c), or (b) if (c) is not wanted; not (a), which shows an
 account that is not the key's.
 
+> **Status note (2026-11-16, Reloaded-original).** Decided 2026-11-15:
+> (c). An `ed25519` public key in the public-key form is accepted, and its
+> account is the bech32 of the first 20 bytes of the SHA-256 of the 32 key
+> bytes (the public Cosmos SDK rule for that key type) under the coin's
+> `account_prefix`; a `secp256k1` key keeps the rule of R36.14.16. The coin is
+> watch-only and, like every coin of the form, cannot serve as an HTLC key
+> (`get_htlc_key_pair` answers none, and its orders are refused, R18.11.23a).
+> A key whose bytes are not a valid key of its type or have the wrong length
+> is a request-parse failure (`InvalidRequest`, R36.1.3).
+
 D36.18 *(maintainer decision.)* *What a watch-only coin's `withdraw`
 answers in Reloaded.* The public-key form is built in 0.5.0 as a
 watch-only coin, and Chapter 18 R18.11.23a already refuses its orders.
@@ -1996,6 +2010,72 @@ unsigned results of R36.14.17, in both forms, which involve no key and
 are what lets a client's own wallet sign; (b) a typed refusal. Recommended:
 (a). The external-signing channel of Chapter 18 R18.11.52 is not needed
 for (a) and stays unbuilt while R18.11.23a stands.
+
+> **Status note (2026-11-16, Reloaded-original).** Decided 2026-11-15: (a),
+> built as stated in the as-built note below.
+
+> **As built (Reloaded, 2026-11-16, 0.5.0; informative).** The public-key form
+> builds a coin whose activation policy holds the key and the Ledger flag and
+> no private key. Activation contacts no node, wallet or session for the key and
+> the node's own login plays no part; a WalletConnect form is still refused with
+> `PlatformCoinCreationError` until its activation is built. A malformed
+> `activation_params` (any other shape, an unknown or missing `type`, a key type
+> other than the two, a `value` that is not an array of bytes, a key that is not
+> valid for its type) fails request parsing (`InvalidRequest`).
+>
+> - *`withdraw`, same chain.* Without the Ledger flag the result carries no
+>   `tx_hex` and no `tx_hash` (and an empty internal identifier) and a
+>   `sign_doc` member `{body_bytes, auth_info_bytes, chain_id, account_number}`
+>   (arrays of byte values, the coin's chain id, the account number the node
+>   reports). The body holds the one bank send; the auth info carries the
+>   watched public key and the fee. The fee is the fixed assumed one
+>   (Chapter 18 R18.11.9): nothing is simulated. The `from` selector is
+>   ignored. For an unsigned result `tx_hex` and `tx_hash` are omitted and
+>   `internal_id` is empty, by construction (nothing is signed, so there is no
+>   transaction or hash). With the Ledger flag the result carries
+>   `legacy_amino_json` (the
+>   Amino sign document as JSON text: `account_number`, `chain_id`, `fee`,
+>   `memo`, `msgs` with one `cosmos-sdk/MsgSend`, `sequence`,
+>   `timeout_height`, members in alphabetical order, numbers as decimal
+>   strings) and `original_tx_type_url` (`/cosmos.bank.v1beta1.MsgSend`), no
+>   `sign_doc`, and the fee amount is three times the computed one, in both
+>   `fee_details` and the document. *Provisional:* the chapter names only "the
+>   Amino sign document"; the string form of `legacy_amino_json` and the included
+>   `timeout_height` await a precision.
+> - *Staking requests* (delegation, undelegation, reward claim) answer the same
+>   direct form. With the Ledger flag they fail with the request's
+>   internal-error type, because the Amino form exists for the bank send only
+>   (R36.14.18 item 3); the same build fails for any message other than the
+>   bank send. This tree has no IBC `withdraw`, so the R36.14.17 IBC rows (the
+>   unsigned result without the flag, the failure with it) are not buildable
+>   here; that is not a gap of this change.
+> - *A token* on a watch-only platform follows the platform: the same unsigned
+>   results (a bank send in the token's denomination, the fee in the platform
+>   denomination), the same Ledger effects.
+> - *Orders* of the coin and of a token are refused as wallet-only with and
+>   without the flag (R18.11.23a, D18.11.10 (a)); the reference accepts the
+>   orders of a public-key coin without the flag, the recorded difference.
+> - *Refused paths.* Every path that would sign with a node-held key is refused
+>   with the typed error `PrivKeyNotAllowed::WatchOnlyCoin` ("The coin is
+>   watch-only and holds no signing key"), before any node is contacted: the
+>   taker-fee send, the maker and taker payment sends, the maker and taker
+>   spends (claims), the maker and taker refund calls, the node's own signing
+>   and broadcast of any transaction it built (the one every staking and swap
+>   send ends in), message signing and private-key display (the answers carry
+>   that error's text), and the public-key query (the existing typed
+>   `UnexpectedDerivationMethod::IguanaPrivKeyUnavailable` answer; no new variant,
+>   because that enum is matched exhaustively elsewhere). Allowed: the broadcast
+>   of a transaction the caller signed elsewhere (`send_raw_transaction`) is not a
+>   signing path and is unchanged; it is the watch-only user's path after the
+>   unsigned document is signed.
+> - *Tests:* T36.42 and T36.43 are covered by the unit tests in
+>   `tendermint_swap_flow_tests/watch_only_tests.rs` (secp256k1 and
+>   ed25519 accounts without node contact, the unsigned sign document with the
+>   body decoded to one bank send, the token, the delegation, the Amino form
+>   with the threefold fee, the failing staking and non-bank messages with the
+>   flag, the order refusals, and each refused signing path), and the
+>   request-parse and activation tests of the wire tests of
+>   `tendermint_with_tokens_activation`.
 
 ### 36.14.4 Notes on existing rules, and our side
 

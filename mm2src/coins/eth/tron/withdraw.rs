@@ -147,6 +147,7 @@ async fn withdraw_native_trx(
     let spent_by_me = amount_dec.clone();
 
     Ok(TransactionDetails {
+        unsigned: None,
         tx_json: None,
         tx_hex: BytesJson::from(tx_bytes),
         tx_hash: format!("{:x}", hash),
@@ -236,6 +237,7 @@ async fn withdraw_trc20_token(
     let spent_by_me = amount_dec.clone();
 
     Ok(TransactionDetails {
+        unsigned: None,
         tx_json: None,
         tx_hex: BytesJson::from(tx_bytes),
         tx_hash: format!("{:x}", hash),
