@@ -103,7 +103,7 @@ runner reported "no tests to run". They run again locally (PR #373); the browser
 (PR #388); and the browser test modules of the storage and network layers are kept out of non-test builds
 (PR #389). What remains:
 
-- **A CI job for the browser tests.** No CI job runs them, which is why the breakage went unnoticed.
+- **A CI job for the browser tests.** No CI job runs them, so such a breakage is not caught.
 - **Failing browser tests.** Since PR #389 each crate's browser test binary runs only its own tests. On the last
   run recorded in `docs/DEV_ENVIRONMENT.md`: `mm2_db` 17 tests, all pass; `mm2_net` 5, of which 3 pass and 2 fail
   (the invalid-URL WebSocket test gets no error, and one text-scrubbing test reports a different result);
