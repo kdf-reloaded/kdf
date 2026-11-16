@@ -1123,6 +1123,7 @@ fn test_withdraw_impl_set_fixed_fee() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1169,6 +1170,7 @@ fn test_withdraw_impl_sat_per_kb_fee() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1239,6 +1241,7 @@ fn explicit_fee_withdraw(
 
     let amount: BigDecimal = rate.parse().unwrap();
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1380,6 +1383,7 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: "9.9789".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1426,6 +1430,7 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max_dust_included_to_fee() 
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: "9.9789".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1472,6 +1477,7 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_over_max() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: "9.97939455".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1505,6 +1511,7 @@ fn test_withdraw_impl_sat_per_kb_fee_max() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 0u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1566,6 +1573,7 @@ fn test_withdraw_kmd_rewards_impl(
     let coin = utxo_coin_from_fields(fields);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1676,6 +1684,7 @@ fn test_withdraw_kmd_rewards_post_fork_reduction() {
     let coin = utxo_coin_from_fields(fields);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1920,6 +1929,7 @@ fn test_withdraw_doc_rewards_none() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -4487,6 +4497,7 @@ fn test_withdraw_to_p2pkh() {
     };
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1.into(),
         from: None,
         to: p2pkh_address.to_string(),
@@ -4534,6 +4545,7 @@ fn test_withdraw_to_p2sh() {
     };
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1.into(),
         from: None,
         to: p2sh_address.to_string(),
@@ -4581,6 +4593,7 @@ fn test_withdraw_to_p2wpkh() {
     };
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1.into(),
         from: None,
         to: p2wpkh_address.to_string(),
@@ -5999,13 +6012,15 @@ mod swap_v2_funding_spend_tests {
 
         // Recompute the cooperative-branch sighash and verify the supplied sig.
         let sighash_type = 1u32 | fields.conf.fork_id;
-        let digest = signer.signature_hash(
-            0,
-            signer.inputs[0].amount,
-            &funding_redeem,
-            fields.conf.signature_version,
-            sighash_type,
-        );
+        let digest = signer
+            .signature_hash(
+                0,
+                signer.inputs[0].amount,
+                &funding_redeem,
+                fields.conf.signature_version,
+                sighash_type,
+            )
+            .expect("signature hash");
         assert!(
             kp.public().verify(&digest, &sig).expect("verify"),
             "partial sig must verify against signer's pub"
@@ -6168,13 +6183,15 @@ mod swap_v2_taker_payment_spend_tests {
         // SIGHASH_SINGLE (3) for the DexFee::Standard path.
         let sighash_type = 3u32 | fields.conf.fork_id;
         let sig = sign_taker_payment_spend_input(&signer, &redeem, &taker, &fields, sighash_type).expect("sign");
-        let digest = signer.signature_hash(
-            0,
-            signer.inputs[0].amount,
-            &redeem,
-            fields.conf.signature_version,
-            sighash_type,
-        );
+        let digest = signer
+            .signature_hash(
+                0,
+                signer.inputs[0].amount,
+                &redeem,
+                fields.conf.signature_version,
+                sighash_type,
+            )
+            .expect("signature hash");
         assert!(
             taker.public().verify(&digest, &sig).expect("verify"),
             "taker partial sig must verify against the cooperative-branch sighash"
@@ -6743,13 +6760,15 @@ mod swap_v2_pre_burn_tests {
         let redeem = taker_payment_script(TAKER_PAYMENT_TIME_LOCK, &MAKER_SECRET_HASH, &taker_pub, &maker_pub);
         // SIGHASH_ALL_BASE = 1, fork_id from fixture is 0.
         let sighash = 1u32 | coin.as_ref().conf.fork_id;
-        let digest = signer.signature_hash(
-            0,
-            signer.inputs[0].amount,
-            &redeem,
-            coin.as_ref().conf.signature_version,
-            sighash,
-        );
+        let digest = signer
+            .signature_hash(
+                0,
+                signer.inputs[0].amount,
+                &redeem,
+                coin.as_ref().conf.signature_version,
+                sighash,
+            )
+            .expect("signature hash");
         assert!(
             taker_pub.verify(&digest, &preimage.signature).expect("verify"),
             "WithBurn partial sig must verify under SIGHASH_ALL"
@@ -9482,6 +9501,7 @@ mod withdraw_recent_spent {
 
     fn withdraw_request() -> WithdrawRequest {
         WithdrawRequest {
+            memo: None,
             amount: "0.001".parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -10954,6 +10974,7 @@ mod hd_coin_swap_key_tests {
 
         fn request(from: Option<WithdrawFrom>) -> WithdrawRequest {
             WithdrawRequest {
+                memo: None,
                 amount: 1u64.into(),
                 from,
                 to: RECEIVER.to_string(),
@@ -11417,13 +11438,9 @@ mod sighash_suffix_sites {
         suffix: u32,
     ) {
         let digest = |suffix: u32| {
-            TransactionInputSigner::from_transaction(tx.clone(), suffix).signature_hash(
-                index,
-                amount,
-                script_code,
-                SignatureVersion::Base,
-                1,
-            )
+            TransactionInputSigner::from_transaction(tx.clone(), suffix)
+                .signature_hash(index, amount, script_code, SignatureVersion::Base, 1)
+                .expect("signature hash")
         };
         let suffixed = digest(suffix);
         let ordinary = digest(0);
@@ -11485,6 +11502,7 @@ mod sighash_suffix_sites {
 
     fn withdraw_request() -> WithdrawRequest {
         WithdrawRequest {
+            memo: None,
             amount: "0.001".parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -11650,13 +11668,15 @@ mod sighash_suffix_sites {
         let mut ordinary_signer = signer.clone();
         ordinary_signer.sighash_suffix = 0;
         let digest = |signer: &TransactionInputSigner| {
-            signer.signature_hash(
-                0,
-                signer.inputs[0].amount,
-                &redeem,
-                SignatureVersion::Base,
-                sighash_type,
-            )
+            signer
+                .signature_hash(
+                    0,
+                    signer.inputs[0].amount,
+                    &redeem,
+                    SignatureVersion::Base,
+                    sighash_type,
+                )
+                .expect("signature hash")
         };
         assert_ne!(digest(&signer), digest(&ordinary_signer));
         assert!(taker.public().verify(&digest(&signer), &signature).unwrap());

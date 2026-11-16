@@ -28,15 +28,19 @@ output-only bundle: spends disabled, outputs enabled, anchored at the empty-tree
 could only build an Ironwood bundle with the bundle version's default flags (spends and outputs
 enabled). The extension is additive and tiny:
 
-- `BundlePadding` gained a public field `spends_disabled: bool` (documented in the source) and a
-  constant `BundlePadding::OUTPUT_ONLY` (`DEFAULT` with `spends_disabled: true`). `DEFAULT` and
-  `UNPADDED` set it to `false`, so every existing user of those constants is unchanged.
-- `BuildConfig::ironwood_builder` (the `Standard` arm only) builds the Ironwood bundle with
-  `orchard::bundle::Flags::SPENDS_DISABLED` when `ironwood_padding.spends_disabled` is set, and
-  with `bundle_version.default_flags()` otherwise, as before.
+- `BundlePadding` has the same shape as upstream (`bundle_required`, `pad_to_minimum`; constants
+  `DEFAULT` and `UNPADDED`). The output-only choice is deliberately not a field of it: a public
+  field of a struct that dependants build by literal would stop `zcash_client_backend` from
+  compiling with its `orchard` feature on (an earlier form of this patch did that).
+- `BuildConfig::ironwood_builder` (private) takes a `spends_disabled` flag: with it, the Ironwood
+  bundle of `BuildConfig::Standard` is built with `orchard::bundle::Flags::SPENDS_DISABLED`;
+  without it, with `bundle_version.default_flags()`, as upstream does.
+- `Builder::new` is unchanged and passes `false`. A new `Builder::new_with_output_only_ironwood`
+  takes the same arguments and passes `true`; only KDF Reloaded code calls it, for a payment from
+  Sapling into Ironwood.
 
-What it does not touch: the Orchard builder (`orchard_builder`) ignores the field and always uses
-the default flags; the coinbase arm, the deferred-PCZT builder, signing, proof construction, fee
-arithmetic and the transaction format are unchanged. The field was put on `BundlePadding` rather
-than `BuildConfig::Standard` so that no existing `BuildConfig::Standard { .. }` literal, in this
-crate or in a dependant, has to change.
+What it does not touch: the Orchard builder (`orchard_builder`), the coinbase arm, the
+deferred-PCZT builder, signing, proof construction, fee arithmetic and the transaction format are
+unchanged, and no `BuildConfig::Standard` or `BundlePadding` literal in this crate or in a
+dependant needs a change. The flags a built output-only bundle carries are asserted by
+`z_pirate1_tests.rs` in `coins` (CRD ch.39 T39.6.5d).

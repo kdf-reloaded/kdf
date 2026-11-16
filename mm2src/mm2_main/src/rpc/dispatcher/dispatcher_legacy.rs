@@ -14,10 +14,9 @@ use crate::mm2::lp_ordermatch::{best_orders_rpc, buy, cancel_all_orders_rpc, can
 use crate::mm2::lp_swap::{active_swaps_rpc, all_swaps_uuids_by_filter, ban_pubkey_rpc, coins_needed_for_kick_start,
                           import_swaps, list_banned_pubkeys_rpc, max_taker_vol, my_recent_swaps_rpc, my_swap_status,
                           recover_funds_of_swap, stats_swap_status, unban_pubkeys_rpc};
+use crate::mm2::rpc::legacy_adapter::{legacy_bare, legacy_result};
 use crate::mm2::rpc::rate_limiter::{process_rate_limit, RateLimitContext};
-use coins::{convert_address, convert_utxo_address, get_enabled_coins, get_trade_fee, kmd_rewards_info, my_tx_history,
-            send_raw_transaction, set_required_confirmations, set_requires_notarization, show_priv_key,
-            validate_address};
+use coins::{get_enabled_coins, get_trade_fee, my_tx_history, show_priv_key};
 
 /// Result of `fn dispatcher`.
 pub enum DispatcherRes {
@@ -77,8 +76,8 @@ pub fn dispatcher(req: Json, ctx: MmArc) -> DispatcherRes {
         "cancel_all_orders" => hyres(cancel_all_orders_rpc(ctx, req)),
         "cancel_order" => hyres(cancel_order_rpc(ctx, req)),
         "coins_needed_for_kick_start" => hyres(coins_needed_for_kick_start(ctx)),
-        "convertaddress" => hyres(convert_address(ctx, req)),
-        "convert_utxo_address" => hyres(convert_utxo_address(ctx, req)),
+        "convertaddress" => hyres(into_legacy::convert_address(ctx, req)),
+        "convert_utxo_address" => hyres(into_legacy::convert_utxo_address(ctx, req)),
         "disable_coin" => hyres(disable_coin(ctx, req)),
         "electrum" => hyres(electrum(ctx, req)),
         "enable" => hyres(enable(ctx, req)),
@@ -93,7 +92,7 @@ pub fn dispatcher(req: Json, ctx: MmArc) -> DispatcherRes {
         // "fundvalue" => lp_fundvalue (ctx, req, false),
         "help" => help(),
         "import_swaps" => spawn_highload_future(move || hyres(import_swaps(ctx, req))),
-        "kmd_rewards_info" => hyres(kmd_rewards_info(ctx)),
+        "kmd_rewards_info" => hyres(into_legacy::kmd_rewards_info(ctx)),
         // "inventory" => inventory (ctx, req),
         "list_banned_pubkeys" => hyres(list_banned_pubkeys_rpc(ctx)),
         "max_taker_vol" => hyres(max_taker_vol(ctx, req)),
@@ -114,16 +113,16 @@ pub fn dispatcher(req: Json, ctx: MmArc) -> DispatcherRes {
         "recover_funds_of_swap" => spawn_highload_future(move || hyres(recover_funds_of_swap(ctx, req))),
         "sell" => hyres(sell(ctx, req)),
         "show_priv_key" => hyres(show_priv_key(ctx, req)),
-        "send_raw_transaction" => hyres(send_raw_transaction(ctx, req)),
-        "set_required_confirmations" => hyres(set_required_confirmations(ctx, req)),
-        "set_requires_notarization" => hyres(set_requires_notarization(ctx, req)),
+        "send_raw_transaction" => hyres(into_legacy::send_raw_transaction(ctx, req)),
+        "set_required_confirmations" => hyres(into_legacy::set_required_confirmations(ctx, req)),
+        "set_requires_notarization" => hyres(into_legacy::set_requires_notarization(ctx, req)),
         "setprice" => hyres(set_price(ctx, req)),
         "stats_swap_status" => hyres(stats_swap_status(ctx, req)),
         "stop" => hyres(stop(ctx)),
         "trade_preimage" => hyres(into_legacy::trade_preimage(ctx, req)),
         "unban_pubkeys" => hyres(unban_pubkeys_rpc(ctx, req)),
         "update_maker_order" => hyres(update_maker_order_rpc(ctx, req)),
-        "validateaddress" => hyres(validate_address(ctx, req)),
+        "validateaddress" => hyres(into_legacy::validate_address(ctx, req)),
         "version" => version(),
         "withdraw" => hyres(into_legacy::withdraw(ctx, req)),
         _ => return DispatcherRes::NoMatch(req),
@@ -219,6 +218,51 @@ mod into_legacy {
         let res = json!({ "result": result });
         let body = try_s!(json::to_vec(&res));
         Ok(try_s!(Response::builder().body(body)))
+    }
+
+    // The wallet and coin methods of group D (plan `mmrpc-v2-completion`, phase 3) keep their legacy answers: each
+    // decodes the inline body as the legacy handler did, calls the typed core and renders `{"result": ...}` (or the
+    // bare object of `send_raw_transaction`). A failure is the legacy error text of the core's error.
+
+    pub async fn convert_address(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+        let req: coins::ConvertAddressReq = try_s!(json::from_value(req));
+        legacy_result(coins::convert_address_core(ctx, req).await)
+    }
+
+    pub async fn convert_utxo_address(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+        let req: coins::ConvertUtxoAddressReq = try_s!(json::from_value(req));
+        legacy_result(coins::convert_utxo_address_core(ctx, req).await)
+    }
+
+    pub async fn kmd_rewards_info(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+        legacy_result(coins::kmd_rewards_info_core(ctx, coins::KmdRewardsInfoRequest {}).await)
+    }
+
+    /// The legacy body is the bare `{"tx_hash": ...}`. A request without a string `coin` keeps the legacy text; the
+    /// carriers are handed to the core as the request spelled them.
+    pub async fn send_raw_transaction(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+        let coin = try_s!(req["coin"].as_str().ok_or("No 'coin' field")).to_owned();
+        let request = coins::SendRawTransactionReq {
+            coin,
+            tx_hex: req.get("tx_hex").cloned(),
+            tx_json: req.get("tx_json").cloned(),
+        };
+        legacy_bare(coins::send_raw_transaction_core(ctx, request).await)
+    }
+
+    pub async fn set_required_confirmations(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+        let req: coins::ConfirmationsReq = try_s!(json::from_value(req));
+        legacy_result(coins::set_required_confirmations_core(ctx, req).await)
+    }
+
+    pub async fn set_requires_notarization(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+        let req: coins::RequiresNotaReq = try_s!(json::from_value(req));
+        legacy_result(coins::set_requires_notarization_core(ctx, req).await)
+    }
+
+    pub async fn validate_address(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+        let req: coins::ValidateAddressReq = try_s!(json::from_value(req));
+        legacy_result(coins::validate_address_core(ctx, req).await)
     }
 }
 

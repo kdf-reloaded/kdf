@@ -279,12 +279,6 @@ pub struct BundlePadding {
     /// action count reveals the transaction shape (acceptable when that shape is already
     /// public, e.g. pool migrations).
     pub pad_to_minimum: Option<u8>,
-    /// KDF Reloaded extension: build the bundle with spends disabled and outputs enabled
-    /// ([`orchard::bundle::Flags::SPENDS_DISABLED`]) instead of the bundle version's default
-    /// flags, so that it can only pay into the pool. Honoured by the **Ironwood** builder of
-    /// [`BuildConfig::Standard`] only; the Orchard builder always uses the default flags. The
-    /// padding actions still carry the zero-value dummy spend the circuit requires.
-    pub spends_disabled: bool,
 }
 
 impl BundlePadding {
@@ -293,16 +287,6 @@ impl BundlePadding {
     pub const DEFAULT: BundlePadding = BundlePadding {
         bundle_required: false,
         pad_to_minimum: None,
-        spends_disabled: false,
-    };
-
-    /// [`Self::DEFAULT`] padding with spends disabled (KDF Reloaded extension): an output-only
-    /// bundle, as a payment into the Ironwood pool from another pool is built. Only the Ironwood
-    /// builder honours it.
-    pub const OUTPUT_ONLY: BundlePadding = BundlePadding {
-        bundle_required: false,
-        pad_to_minimum: None,
-        spends_disabled: true,
     };
 
     /// Unpadded transactional padding, matching [`orchard::builder::BundleType::UNPADDED`]:
@@ -311,7 +295,6 @@ impl BundlePadding {
     pub const UNPADDED: BundlePadding = BundlePadding {
         bundle_required: false,
         pad_to_minimum: Some(1),
-        spends_disabled: false,
     };
 
     /// Returns the orchard [`BundleType`](orchard::builder::BundleType) selecting this
@@ -395,7 +378,12 @@ impl BuildConfig {
     }
 
     /// Returns the Ironwood builder for this configuration.
-    fn ironwood_builder(&self) -> Option<orchard::builder::Builder> {
+    ///
+    /// KDF Reloaded extension: with `spends_disabled` the bundle is built with
+    /// [`orchard::bundle::Flags::SPENDS_DISABLED`] (outputs enabled), so that it can only pay into
+    /// the pool; otherwise with the bundle version's default flags, as upstream does. The
+    /// `Coinbase` arm ignores the argument.
+    fn ironwood_builder(&self, spends_disabled: bool) -> Option<orchard::builder::Builder> {
         let bundle_version = orchard::bundle::BundleVersion::ironwood_v3();
         match self {
             BuildConfig::Standard {
@@ -403,8 +391,7 @@ impl BuildConfig {
                 ironwood_padding,
                 ..
             } => ironwood_anchor.as_ref().map(|a| {
-                // KDF Reloaded extension: `spends_disabled` selects the output-only flag set.
-                let flags = if ironwood_padding.spends_disabled {
+                let flags = if spends_disabled {
                     orchard::bundle::Flags::SPENDS_DISABLED
                 } else {
                     bundle_version.default_flags()
@@ -970,6 +957,28 @@ impl<P: consensus::Parameters> Builder<P, ()> {
     /// The expiry height will be set to the given height plus the default transaction
     /// expiry delta (20 blocks).
     pub fn new(params: P, target_height: BlockHeight, build_config: BuildConfig) -> Self {
+        Self::new_inner(params, target_height, build_config, false)
+    }
+
+    /// KDF Reloaded extension: like [`Self::new`], but the Ironwood bundle, if the configuration
+    /// carries an Ironwood anchor, is built output-only: spends disabled and outputs enabled
+    /// ([`orchard::bundle::Flags::SPENDS_DISABLED`]), as a payment from another pool into Ironwood
+    /// is built. The Orchard builder, the coinbase arm and the deferred-PCZT builder are
+    /// unaffected.
+    pub fn new_with_output_only_ironwood(
+        params: P,
+        target_height: BlockHeight,
+        build_config: BuildConfig,
+    ) -> Self {
+        Self::new_inner(params, target_height, build_config, true)
+    }
+
+    fn new_inner(
+        params: P,
+        target_height: BlockHeight,
+        build_config: BuildConfig,
+        ironwood_spends_disabled: bool,
+    ) -> Self {
         let consensus_branch_id = BranchId::for_height(&params, target_height);
         // `bundle_version_for_branch` returns `Some` exactly for the branches in
         // which the Orchard pool is supported (NU5 onward), so this also gates
@@ -985,7 +994,7 @@ impl<P: consensus::Parameters> Builder<P, ()> {
         // The Ironwood builder exists exactly when the branch's transaction version
         // carries an Ironwood bundle (V6, i.e. NU6.3 onward).
         let ironwood_builder = if tx_version.has_ironwood() {
-            build_config.ironwood_builder()
+            build_config.ironwood_builder(ironwood_spends_disabled)
         } else {
             None
         };

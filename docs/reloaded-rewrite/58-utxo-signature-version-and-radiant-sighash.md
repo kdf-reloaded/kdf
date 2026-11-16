@@ -353,6 +353,15 @@ and a 32-bit target would otherwise wrap.
 > Making the signature-hash computation fallible is outside the three
 > changes of R58.5.2 and is deferred as **D5**.
 
+> **Closed (2026-11-16, PR #381).** The walk is now fatal on the four cases
+> above for the outputs in scope of the sighash base type: the
+> signature-hash computation returns a typed error that names the output
+> index and the case, and no digest. For a caller-supplied script through
+> the raw-transaction signing RPC, this replaces "signs a transaction the
+> network rejects" with a refusal whose text is that error. Swaps and
+> withdrawals never reach the four cases (R58.3.5). The divergence recorded
+> above no longer exists.
+
 **R58.3.4** *Degenerate input indices.* When the index of the input being
 signed is not a valid input index, or when the base type is **single**
 and that index is not a valid output index, the digest shall be the
@@ -646,6 +655,8 @@ All three changes of R58.5.2 live in the signing substrate,
    set (de-duplicated, ascending), and yielding 32 zero bytes for a
    reference-free output. The walk's tolerance is the divergence from
    Radiant-Core that R58.3.3's as-built note records and D5 defers.
+   *Superseded 2026-11-16 (PR #381): the walk is fatal on the four cases of
+   R58.3.3.*
 3. **Strict encoding.** `is_defined` masks `0x40 | 0x80` for the new
    value, and `from_u32` recognizes the fork-id bit for it (R58.2.3).
 
@@ -780,6 +791,12 @@ asserts the **as-built tolerant** behavior that R58.3.3's divergence
 note records, not Radiant-Core's rule; when D5 is done, that clause
 inverts to assert an error for a truncated script, and this test gains
 the other three fatal cases of R58.3.3.
+
+*Done (2026-11-16, PR #381).* The truncation clause now asserts the error
+of fatal case 1 with the output index; one test per remaining case asserts
+its error; a script with one state separator, or with a return that follows
+the separator, is not an error; base type none and an out-of-range base type
+single never walk an output.
 
 **T7.** *Degenerate indices.* An out-of-range input index, and a
 base-type-single signature whose input index exceeds the output count,
@@ -973,6 +990,11 @@ preimage — so it does not gate the beta.
 *Decided 2026-11-09 (the maintainer's decision).* The signing stays
 tolerant for 0.4.0. The fatal form described above becomes a separate
 post-beta change (size M); this item stays open until then.
+
+*Done 2026-11-16 (PR #381).* The fatal form is implemented: `signature_hash`
+returns a typed error for the four cases, every signing site passes it on,
+and the raw-transaction signing RPC reports it as a signing error with a
+plain text. The refusal is local, so no compatibility switch exists for it.
 
 ## 58.8 Baseline Verifications
 

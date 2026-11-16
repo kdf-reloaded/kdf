@@ -58,6 +58,7 @@ impl SolanaConfirmedTransaction {
                 };
                 let fee = BigDecimal::try_from(lamports_to_sol(self.meta.fee))?;
                 let tx = TransactionDetails {
+                    unsigned: None,
                     tx_json: None,
                     tx_hex: Default::default(),
                     tx_hash: self.transaction.signatures[0].to_string(),
@@ -74,6 +75,7 @@ impl SolanaConfirmedTransaction {
                     internal_id: Default::default(),
                     kmd_rewards: None,
                     transaction_type: TransactionType::StandardTransfer,
+                    memo: None,
                 };
                 transactions.push(tx);
             }

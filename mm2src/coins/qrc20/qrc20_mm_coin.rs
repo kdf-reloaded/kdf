@@ -255,6 +255,7 @@ pub(crate) async fn qrc20_withdraw(coin: Qrc20Coin, req: WithdrawRequest) -> Wit
         total_gas_fee: utxo_common::big_decimal_from_sat(gas_fee as i64, coin.utxo.decimals),
     };
     Ok(TransactionDetails {
+        unsigned: None,
         tx_json: None,
         from: vec![my_address_string],
         to: vec![to_address],
@@ -271,5 +272,6 @@ pub(crate) async fn qrc20_withdraw(coin: Qrc20Coin, req: WithdrawRequest) -> Wit
         timestamp: now_ms() / 1000,
         kmd_rewards: None,
         transaction_type: TransactionType::StandardTransfer,
+        memo: None,
     })
 }

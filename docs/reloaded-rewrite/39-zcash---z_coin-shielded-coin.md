@@ -1610,6 +1610,15 @@ T39.6.5d *The anchor.* The Ironwood anchor of a built Pirate1 withdrawal is the
 empty-tree root, and its flags disable spends and enable outputs. The mainnet fixture
 of T39.6.5a that pays from Sapling into Ironwood has the same flags and the same anchor.
 
+> **Status note (2026-11-15).** The way the transaction builder is told to build the Ironwood bundle
+> output-only changed; R39.6.5d and R39.6.5e are unchanged. The choice is no longer a public field of
+> the builder's `BundlePadding` type (which kept `zcash_client_backend` from compiling with its
+> `orchard` feature on) but a dedicated builder constructor,
+> `Builder::new_with_output_only_ironwood`, that only this repository's code calls; `Builder::new`
+> is unchanged. The built bundle carries the same flags, anchor and padding as before. Evidence:
+> T39.6.5d (the flags and anchor of a built bundle, `z_pirate1_tests.rs`) and T39.6.5c (the built
+> withdrawal, `z_note_lock_tests/pirate1_withdraw.rs`), which pass before and after.
+
 T39.6.5e *The broadcast record.* A submitted Pirate1 withdrawal is recorded: its fee is
 derived from the bytes, its notes are excluded from the next selection until its block
 is scanned or it expires, its unmined history row carries the final amounts, and its

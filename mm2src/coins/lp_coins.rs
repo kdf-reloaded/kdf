@@ -289,9 +289,11 @@ mod lp_coins_errors;
 mod lp_coins_ops;
 mod lp_coins_traits;
 mod lp_coins_types;
+mod wallet_rpc_errors;
 
 pub use lp_coins_context::*;
 pub use lp_coins_errors::*;
 pub use lp_coins_ops::*;
 pub use lp_coins_traits::*;
 pub use lp_coins_types::*;
+pub use wallet_rpc_errors::*;

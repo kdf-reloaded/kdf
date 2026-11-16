@@ -756,11 +756,18 @@ terms; the clean implementer works from this list):
    public-key or WalletConnect request silently activates with the local
    context key. Bound: the three forms of R36.1.3 with their effects; malformed
    input is `InvalidRequest`.
+   *Status note (2026-11-16, Reloaded-original).* Narrowed: the public-key form
+   (form 1) is built (§36.14.3, as-built note) and malformed input is now
+   `InvalidRequest`; the interim refusal above remains for the WalletConnect
+   forms (forms 2 and 3) only, until their activation is built.
 7. **Token platform check.** Reloaded does not check that an inline token's
    `platform` equals the activated platform. Bound: `PlatformCoinMismatch`
    (unit, HTTP 400).
 9. **`tx_history`.** Reloaded accepts `true` but starts no history fetching.
    Bound: background history fetching starts after activation.
+   *Status note (2026-11-15, Reloaded-original).* Closed by PR #363: `tx_history:
+   true` starts the fetcher of R36.14.3 and the divergence recorded here no
+   longer exists (§36.14.1).
 10. **`protocol` member of `UnexpectedPlatformProtocol` /
     `UnexpectedTokenProtocol`.** Reloaded serializes its own internal protocol
     representation; bound: the canonical coin-configuration form (R36.0.3). A
@@ -999,6 +1006,18 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   `enable_tendermint_token`, `task::enable_tendermint`, common structures
   (activation, wallet), error-type catalogue.
 - Cosmos SDK / Tendermint RPC, ICS-20 IBC transfer, BIP-173 bech32.
+- §36.14.1 (transaction history): the CometBFT RPC specification (`tx_search`
+  with its event query language, paging and ordering, `abci_info`); the Cosmos
+  SDK module documentation for the bank events (`coin_spent`, `coin_received`,
+  `transfer`), the staking events (`delegate`, `unbond`) and the distribution
+  event (`withdraw_rewards`); the ibc-go transfer module documentation
+  (`ibc_transfer`, `fungible_token_packet`, `non_fungible_token_packet`); the
+  irismod HTLC module documentation (`create_htlc`, `claim_htlc`); the Cosmos
+  SDK protobuf definitions `cosmos.tx.v1beta1.Tx` (body memo, auth info, fee)
+  and `cosmos.base.tendermint.v1beta1.Service` (`GetBlockByHeight`).
+- §36.14.2 and §36.14.3 (key-less activation): the public WalletConnect
+  Cosmos method reference (`cosmos_getAccounts`, `cosmos_signDirect`,
+  `cosmos_signAmino`).
 
 ## 36.13 Provenance Footer
 
@@ -1276,6 +1295,57 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   difference; the additions embed no code blocks, so the repository's
   clean-room gate tool was not applicable. The comparison concerns
   expression, not the accuracy of the statements.
+- *Scoped addition (2026-11-16, Spec Reader round 0.5.0-8) -- §36.14.8
+  (R36.14.29 -- R36.14.35, the informative note, T36.55 -- T36.60).*
+  **KDF Dirty Gate: PASS on 2026-11-16, measure 0.03, no findings**
+  (chapter 01 R40; the attestation closes this item). *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`
+  and `v3.0.0-beta` of chapter 02 §2.15A, read read-only and consulted
+  **only** to establish: for a Tendermint coin or token activated in the
+  public-key form, which members the `withdraw` result has and lacks when
+  it carries an unsigned transaction and what their values are; the JSON
+  types and encodings of the members of `sign_doc` and the values its two
+  byte strings hold; the members of the Amino document, their JSON types,
+  which of them are present when zero or empty and which are never
+  written, and the member that stands beside it; to which requests the
+  fee factor of R36.14.18 item 4 applies; which request broadcasts a
+  transaction that was signed outside the node and what that request
+  checks; for the versioned and for the legacy history method, at which
+  point the current height is read, the order of the conditions around
+  that read, the error type and status when it fails, and whether the
+  path is shared by the coin families the method serves; for the
+  Tendermint height read, the requests it makes and the time given to a
+  node; and the two rows' agreement on these points (the withdraw path of
+  the coin and of the token, both forms of the unsigned document, the
+  result type, the broadcast method, both history methods, the node
+  choice and the height read were compared by row-to-row difference and
+  are the same at both rows). Behavior and public wire shape only; no
+  private identifier, function body, helper decomposition, error, log,
+  comment or test text was reproduced. Member names are those of the wire
+  results; message, sign-mode, type and method names are those of the
+  public Cosmos SDK and of the public CometBFT RPC. The meaning of the
+  members of the sign document, the canonical form of the Amino
+  document, the content of a signed transaction and what a signer does
+  with either document are the public conventions, which the subsection
+  names instead of describing the reference. The *Our side* note rests on
+  this repository's tree; the legacy error shape is that of Chapter 55
+  R55.1.10; the test inputs were chosen by the author and the figures are
+  computed from the rules, not taken from any test. No cleared sentence
+  of §36.14.1 -- §36.14.7 was edited.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-16, measure
+  0.03 on the discretionary-expression basis, no findings. Reference states
+  (chapter 02 R13): PASS; the rows `v2.6.0-beta` and `v3.0.0-beta`, both
+  tabled in §2.15A. Extent: the Tendermint coin-family subsystem as §36.14.8
+  scopes it, at the two rows: the withdraw path of the platform coin and of
+  the token, both forms of the unsigned sign document, the withdraw result
+  type and its serialization, the legacy raw-transaction broadcast path, the
+  versioned and the legacy transaction-history serving methods with their
+  error type and status mapping, the node choice and the current-height
+  read, and the test code of the same subsystem; 11 source files at each row
+  compared mechanically, 4 read in their relevant parts at the first row,
+  row-to-row difference over the same set. Method: reading, combined with
+  mechanical comparison (identifier-shaped token intersection at both rows;
+  5-, 4- and 3-word sequence comparison against comment and string-literal
+  text; row-to-row difference); the additions embed no code blocks.
 
 ---
 
@@ -1604,6 +1674,16 @@ Recommended: (b); the content of `additional_info` for `InProgress` is
 then Reloaded's own (the node's `tx_search` answer carries the total
 count, so a remaining-transactions figure is available).
 
+> **Status note (2026-11-15, Reloaded-original).** Decided: (b). The history
+> state is `InProgress` during the first pass, with `additional_info`
+> `{"transactions_left": <n>}` where `n` is what remains of the current query's
+> `tx_search` total (`null` until the first answer arrives); it is `Finished`
+> after the first complete pass and through every later pass, wait and pause;
+> it is `Error` with `additional_info` `{"message": <text>}` only when the
+> fetcher has stopped for good or the history store cannot be prepared or
+> written. A failed first balance read is retried after the 30-second pause,
+> not silent. Built in PR #363; tests T36.38.
+
 D36.11 *(maintainer decision.)* *Interchange with a store written by the
 reference.* A user who moves a data directory between the reference and
 Reloaded brings Tendermint history rows along. Options: (a) Reloaded
@@ -1619,6 +1699,23 @@ R36.14.3), accepting that the reference would show duplicates if the
 directory were moved back. Recommended: (a), with finding 1's remedy; it
 is the persistent-data compatibility the project keeps by default.
 
+> **Status note (2026-11-15, Reloaded-original).** Decided: (a). The
+> identifier (R36.14.10, from the transfer position and the upper-case hash)
+> and the stored form (base-unit amounts scaled when served, the fee row in
+> display units, a zero stored balance change) are byte-compatible with the
+> reference as R36.14.10 states it (unit-tested against the chapter's wording;
+> not yet checked against a store written by GLEEC KDF; the position count follows
+> R36.14.19), and each write first deletes the rows under the two earlier
+> 32-byte identifier forms (finding 2). Finding 1's remedy applies: a stored
+> amount that is not a non-negative integer is answered as `StorageError`,
+> never an abort. The identifier depends on the build's word size, as at the
+> reference. The identifier and the stored form are each computed in one
+> function (`history_internal_id`, `stored_form` and `served_form` of
+> `mm2src/coins/tendermint/tendermint_tx_history.rs`). The address index of the
+> store is written as R36.14.23 -- R36.14.26 state, so that the reference lists our rows
+> (checked on 2026-11-15 against a reference release build: from a fresh store written by the head 358a56944 of this change the reference listed the same 4 rows as this build, with equal (internal_id, address) index sets of 10 entries; a store written by the previous head of this change, after the backfill, was listed the same way) Checked again on 2026-11-16 on the head 4d7fb6326 of this change (two runs; the reference release build as the other writer): in every continuation leg (each program on a copy of the other's fresh store, and both on a store written by an earlier head of this change and backfilled) both programs ended with the same 4 listed rows, 6 stored rows and 10 index entries; the fresh first passes differed only in which transactions the node answered with..
+> Built in PR #363; test T36.37.
+
 D36.12 *(maintainer decision.)* *Amounts of fee-only transactions and
 reward claims, and the content of `tx_hex`.* At the reference a row's
 `tx_hex` is the encoded value of the transaction's **first message**, not
@@ -1633,6 +1730,14 @@ show different amounts for these kinds only. Whether a multi-validator
 staking transaction gets one row per validator is part of the same
 decision; recommended: yes.
 
+> **Status note (2026-11-15, Reloaded-original).** Decided: (b). A row of a
+> fee-only transaction counts the fee once (the transfer that is the fee
+> payment is the row, and the fee is not added again); a reward claim counts
+> its fee in `spent_by_me` and `total_amount`; `tx_hex` is the raw signed
+> transaction; a transaction that delegates to, undelegates from or claims from
+> several validators gets one row per validator, the first of them bearing the
+> fee. Built in PR #363; test T36.34.
+
 D36.13 *(maintainer decision.)* *Which denominations get rows, and under
 which ticker.* Options: (a) the reference's lookup (finding 7); (b) a
 denomination is resolved, in this order, to the platform coin, to a token
@@ -1641,6 +1746,22 @@ configuration entry whose `platform` is this coin; anything else gets no
 row. Recommended: (b). Under (b) a token activated after the transfers
 happened still shows them only when the fetcher reads those transactions
 again, which D36.11 and finding 3 bear on.
+
+> **Status note (2026-11-15, Reloaded-original).** Decided: (a'), the
+> reference's lookup (finding 7, R36.14.19 item 4), for the counting and for the
+> rows. A denomination resolves to the platform coin when it equals the platform
+> `denom` exactly; otherwise to the first coins-configuration entry, in the order
+> of the file and of whatever platform, whose `protocol_data` `denom` equals it
+> without regard to letter case, and the transfer takes that entry's ticker and
+> decimals. The row's `coin` is the ticker of the activated token when an
+> activated token matches that entry, else the entry's ticker. A custom token
+> that is absent from the coins file resolves to nothing: it takes no position
+> and gets no row (documented limitation: the history of custom tokens is absent
+> in 0.5.0). A coins-file token of another platform is counted and shown under
+> its entry's ticker, in the history store of this platform coin. The lookup is
+> read once at the start of a pass (`resolution_map`, `resolve_denom`); a change
+> of what it resolves rebuilds the store (D36.21). Built in PR #363; tests
+> T36.31, T36.35, T36.45 (ii).
 
 D36.14 *(decided for 0.5.0 by the maintainer's decision of 2026-11-15: no
 row; the planning question is open.)* *Balance changes that have no
@@ -1662,6 +1783,95 @@ account, on nodes that index block events; (c) none. A row of either kind
 needs an identifier that is not a transaction hash and a
 `transaction_type` value; a value outside R36.14.6 is unknown to existing
 clients.
+
+> **Status note (2026-11-15, Reloaded-original).** Decided for 0.5.0: no
+> row. Nothing is synthesized for a chain-side HTLC refund or a completed
+> undelegation; the balance read of R36.14.3 notices the change and the pass it
+> starts finds no new transaction. The planning question stays open in
+> `docs/plans/tendermint-activation-features.md`.
+
+> **As-built note (2026-11-15, Reloaded-original).** R36.14.1 -- R36.14.12 are
+> built in PR #363 in `mm2src/coins/tendermint/tendermint_tx_history.rs`.
+> `rows_for_tx` classifies one transaction from its result events (R36.14.5 --
+> R36.14.9); `history_internal_id`, `fee_row_internal_id`,
+> `obsolete_internal_ids`, `stored_form` and `served_form` hold R36.14.10 and
+> D36.11 (a); `start_tendermint_history` runs the fetcher (R36.14.3, R36.14.4,
+> R36.14.11, D36.10); `history_scope` and `served_row` serve `my_tx_history`
+> (`mm2src/coins/my_tx_history_v2.rs`), whose store read takes the new
+> `HistoryCoinType::AccountCoin` and `AccountToken` scopes so that only the rows
+> naming the activated address are served (R36.14.2). The transaction-type set
+> gained `FeeForTokenTx`, `CustomTendermintMsg` and `TendermintIBCTransfer`;
+> `TransactionDetails` gained the optional `memo`, which a history row always
+> carries (R36.14.9). Readings kept as built: (1) the fee payment of R36.14.5 item 4 is looked
+> for when the result has more than one `transfer` event, and only the first
+> such event is left out; (2) a transfer is the fee payment itself (D36.12 (b),
+> counted once) only when it is the sole `transfer` event, moves exactly the fee
+> text, and no decoded message of the transaction (a bank send to that
+> recipient of that amount, an IBC transfer or an HTLC creation) pays it, so a
+> genuine send of exactly the fee amount stays a transfer; (3) a reward claim
+> bears the fee although its sender is the validator (D36.12 (b)); (4) a
+> transaction with several staking events of one type gets one row per
+> validator (D36.12 (b)), the events after the first following the first
+> event's transfers in the list, so no position that R36.14.19 item 2 computes
+> moves. The position, the pairing of module events, the staking events
+> without their attributes and the fee forms follow R36.14.19 -- R36.14.22
+> (see the status note below). Provisional: none open after the decisions
+> of 2026-11-15 (D36.13, D36.19 -- D36.22). Reading kept as built: the coins-file lookup of D36.13 (a') takes
+> "the first entry" among the entries whose `protocol_data` names a `denom` and a
+> numeric `decimals`; an entry without either is skipped. The block time is read with the SDK's `GetBlockByHeight` query. The fetcher and the method
+> exist on native builds only (native only in 0.5.0): the browser build has no
+> versioned history store for any coin family (`NotSupportedInWasm`), a
+> limitation shared by every history family and not a Tendermint one. Tests: T36.30 -- T36.39 in
+> `mm2src/coins/tendermint/tendermint_swap_flow_tests/tx_history_tests.rs`.
+>
+> Address index (R36.14.23 -- R36.14.26 as built). The SQLite store keeps three
+> tables per coin, `<T>_tx_history`, `<T>_tx_address` (`id INTEGER NOT NULL
+> PRIMARY KEY`, `internal_id VARCHAR(255) NOT NULL`, `address TEXT NOT NULL`) and
+> `<T>_tx_cache`, with every `-` of the ticker replaced by `_` (`table_ticker`), so tickers that differ only in a dash versus an underscore share one set of tables (reference-bound).
+> An entry exists for each distinct address in the `from` and `to` lists of a
+> stored row (`write_address_index`); it is written in the transaction that
+> writes the row, and deleted with the row by its identifier
+> (`delete_address_index`, also by `clear_history`). A page of the fetcher is
+> stored in one database transaction, the removals of the earlier identifier
+> forms included (`TxHistoryStorage::store_page`). The account-scoped read
+> selects by the `token_id` column and by an entry for the account's address
+> (`address_entry_condition`), counts a row once, and takes nothing from
+> `details_json`. The preparation (`backfill_address_index`, called by the
+> fetcher after `init`) creates the address table when absent, removes entries
+> whose row is missing and writes the entries of every stored row that has none.
+> Tendermint only for now: the address table is created, and entries are written
+> and deleted, only for a coin whose table exists (created by the Tendermint
+> fetcher, or already present in a store written elsewhere), so the stores of
+> other families stay as they were: in this change only Tendermint coins write the
+> index. A follow-up change of the same release adds it for every family the store
+> serves (BCH and SLP tokens). Checked on 2026-11-15 against a reference release
+> build: from a fresh store written by the head 358a56944 of this change the
+> reference listed the same 4 rows as this build, with equal (internal_id, address)
+> index sets of 10 entries; a store written by the previous head of this change,
+> after the backfill, was listed the same way.
+>
+> **Status note (2026-11-16, Reloaded-original).** The scope of the address index
+> is now every family the SQLite history store serves, not Tendermint only: `init`
+> creates the three tables of R36.14.23 for every coin that opens the store,
+> `write_address_index` and `delete_address_index` no longer test for the address
+> table (the test, `address_index_enabled`, is removed), `clear_history` empties it
+> for every coin, and the preparation step (`backfill_address_index`: orphan
+> clean-up and backfill, R36.14.26 items 2 and 5) runs when any fetcher of the
+> store starts, that is the Tendermint fetcher and the BCH/SLP fetcher
+> (`Init` state of `mm2src/coins/utxo/bch_and_slp_tx_history.rs`). The listing of
+> BCH and SLP tokens stays scoped by the token id alone; no row, no row content and
+> no listing of another family changes, only the address table and its entries are
+> added. Tests: `init_creates_the_address_table_and_every_store_writes_the_index`
+> and `preparing_an_existing_bch_style_store_backfills_and_cleans_orphans` in the
+> test module of the store, and
+> `starting_the_fetcher_prepares_the_address_index_of_an_existing_store` in the
+> BCH/SLP fetcher's tests. A failed preparation is logged as a warning and the BCH/SLP fetcher goes on (no new stop path for that family; the Tendermint fetcher keeps its `Error` state). The sentences above that say "Tendermint only for now"
+> describe the state of PR #363. The SLP token rows rest on unit tests; no live SLP row is run,
+> because the coins file the lab uses has no SLP token entry; the live store comparison covers BCH alone.
+> Checked on 2026-11-16 on the head 79a4c484b of this change with the Komodo DeFi Framework 2.6.0-beta reference build
+> as the other writer: for a BCH account with one transaction, fresh stores of both programs held the same row,
+> identifier and two address-index entries, and each program listed the other's store (one row). The comparison of an
+> SLP token store against the reference writer is a lab row, pending.
 
 ### 36.14.2 WalletConnect activation
 
@@ -1833,6 +2043,16 @@ the public SDK rule for that key type, the coin being watch-only.
 Recommended: (c), or (b) if (c) is not wanted; not (a), which shows an
 account that is not the key's.
 
+> **Status note (2026-11-16, Reloaded-original).** Decided 2026-11-15:
+> (c). An `ed25519` public key in the public-key form is accepted, and its
+> account is the bech32 of the first 20 bytes of the SHA-256 of the 32 key
+> bytes (the public Cosmos SDK rule for that key type) under the coin's
+> `account_prefix`; a `secp256k1` key keeps the rule of R36.14.16. The coin is
+> watch-only and, like every coin of the form, cannot serve as an HTLC key
+> (`get_htlc_key_pair` answers none, and its orders are refused, R18.11.23a).
+> A key whose bytes are not a valid key of its type or have the wrong length
+> is a request-parse failure (`InvalidRequest`, R36.1.3).
+
 D36.18 *(maintainer decision.)* *What a watch-only coin's `withdraw`
 answers in Reloaded.* The public-key form is built in 0.5.0 as a
 watch-only coin, and Chapter 18 R18.11.23a already refuses its orders.
@@ -1841,6 +2061,73 @@ unsigned results of R36.14.17, in both forms, which involve no key and
 are what lets a client's own wallet sign; (b) a typed refusal. Recommended:
 (a). The external-signing channel of Chapter 18 R18.11.52 is not needed
 for (a) and stays unbuilt while R18.11.23a stands.
+
+> **Status note (2026-11-16, Reloaded-original).** Decided 2026-11-15: (a),
+> built as stated in the as-built note below.
+
+> **As built (Reloaded, 2026-11-16, 0.5.0; informative).** The public-key form
+> builds a coin whose activation policy holds the key and the Ledger flag and
+> no private key. Activation contacts no node, wallet or session for the key and
+> the node's own login plays no part; a WalletConnect form is still refused with
+> `PlatformCoinCreationError` until its activation is built. A malformed
+> `activation_params` (any other shape, an unknown or missing `type`, a key type
+> other than the two, a `value` that is not an array of bytes, a key that is not
+> valid for its type) fails request parsing (`InvalidRequest`).
+>
+> - *`withdraw`, same chain.* Without the Ledger flag the result carries no
+>   `tx_hex` and no `tx_hash` and a `sign_doc` member `{body_bytes,
+>   auth_info_bytes, chain_id, account_number}` (arrays of byte values, the
+>   coin's chain id, the account number the node reports; R36.14.29,
+>   R36.14.30). The body holds the one bank send, the request's memo and the
+>   timeout height of the node's chain height plus 100; the auth info carries the
+>   watched public key, the direct sign mode, the node's sequence and the fee.
+>   The fee is the fixed assumed one (Chapter 18 R18.11.9): nothing is
+>   simulated. The `from` selector is ignored. With the Ledger flag the result
+>   carries `legacy_amino_json` and `original_tx_type_url`
+>   (`/cosmos.bank.v1beta1.MsgSend`) and no `sign_doc` (R36.14.31). The
+>   document is a JSON object with the members `account_number`, `chain_id`,
+>   `fee`, `memo`, `msgs` (one `cosmos-sdk/MsgSend`) and `sequence`, every number
+>   a decimal string and no `timeout_height`; the fee amount of the platform
+>   coin is three times the computed one, in both `fee_details` and the
+>   document (R36.14.18 item 4).
+> - *Staking requests* (delegation, undelegation, reward claim) answer the same
+>   direct form. With the Ledger flag they fail with the request's
+>   internal-error type, because the Amino form exists for the bank send only
+>   (R36.14.18 item 3); the same build fails for any message other than the
+>   bank send. This tree has no IBC `withdraw`, so the R36.14.17 IBC rows (the
+>   unsigned result without the flag, the failure with it) are not buildable
+>   here; that is not a gap of this change.
+> - *A token* on a watch-only platform follows the platform: the same unsigned
+>   results (a bank send in the token's denomination, the fee in the platform
+>   denomination). Under the Ledger flag the factor three is the platform coin's
+>   only: a token's document and `fee_details` carry the computed amount once
+>   (R36.14.31 item 5).
+> - *Orders* of the coin and of a token are refused as wallet-only with and
+>   without the flag (R18.11.23a, D18.11.10 (a)); the reference accepts the
+>   orders of a public-key coin without the flag, the recorded difference.
+> - *Refused paths.* Every path that would sign with a node-held key is refused
+>   with the typed error `PrivKeyNotAllowed::WatchOnlyCoin` ("The coin is
+>   watch-only and holds no signing key"), before any node is contacted: the
+>   taker-fee send, the maker and taker payment sends, the maker and taker
+>   spends (claims), the maker and taker refund calls, the node's own signing
+>   and broadcast of any transaction it built (the one every staking and swap
+>   send ends in), message signing and private-key display (the answers carry
+>   that error's text), and the public-key query (the existing typed
+>   `UnexpectedDerivationMethod::IguanaPrivKeyUnavailable` answer; no new variant,
+>   because that enum is matched exhaustively elsewhere). Allowed: the broadcast
+>   of a transaction the caller signed elsewhere (`send_raw_transaction`) is not a
+>   signing path and is unchanged; it is the watch-only user's path after the
+>   unsigned document is signed.
+> - *Tests:* T36.42 and T36.43 are covered by the unit tests in
+>   `tendermint_swap_flow_tests/watch_only_tests.rs` (secp256k1 and
+>   ed25519 accounts without node contact, the unsigned sign document with the
+>   body decoded to one bank send, the token, the delegation, the Amino form
+>   with the threefold fee, the failing staking and non-bank messages with the
+>   flag, the order refusals, and each refused signing path), and the
+>   request-parse and activation tests of the wire tests of
+>   `tendermint_with_tokens_activation`; T36.55 -- T36.58 by the tests named
+>   `t36_55_*` -- `t36_58_*` of the same file (see the status note at the end of
+>   §36.14.8).
 
 ### 36.14.4 Notes on existing rules, and our side
 
@@ -2251,6 +2538,18 @@ both programs have written can show different amounts for these
 transactions, as under D36.12, and the reference adds its own rows for
 the fee payment when it reads such a transaction. Recommended: (b).
 
+> **Status note (2026-11-15, Reloaded-original).** Decided: (b). The fee
+> payment is recognized by the text of the whole fee list (`fee_payment_text`),
+> so it is left out for several coins as for one. The fee entry in the platform
+> `denom` is read wherever it stands in the list and gives `fee_details` and the
+> fee of R36.14.8 items 2 and 3. A list without a platform entry enters no
+> amount and causes no fee row; `fee_details` then names the ticker the first
+> entry's denomination resolves to, scaled with that coin's decimals, or is
+> `null` when it resolves to none. A fee entry that is read (the first entry, and
+> the platform entry) and does not fit an unsigned 64-bit integer leaves the
+> transaction out. Amounts can differ from the reference's for these
+> transactions, as under D36.12. Built in PR #363; tests T36.48 (i) -- (iii).
+
 D36.20 *(maintainer decision.)* *Transactions the reference leaves out
 for want of a fee or of a `delegator` attribute.* Options: (a) no row, as
 at the reference (R36.14.21, R36.14.22 item 6); (b) Reloaded writes the
@@ -2263,6 +2562,17 @@ The identifier rule is unchanged. The reference never writes a row for
 these transactions, so no identifier can collide and no row is doubled;
 a store moved back to the reference keeps and serves the rows.
 Recommended: (b).
+
+> **Status note (2026-11-15, Reloaded-original).** Decided: (b). A
+> transaction with an empty fee list gets the rows of R36.14.5 -- R36.14.7 with a
+> fee of zero (`fee_details` the platform ticker, amount 0) and no fee row; an
+> empty fee list has no fee payment to recognize. A `delegate`, `unbond` or
+> `withdraw_rewards` event without `delegator` takes the `delegator_address` of
+> the transaction's staking message of the same kind (`MsgDelegate`,
+> `MsgUndelegate`, `MsgWithdrawDelegatorReward`) when the transaction has exactly
+> one such message; with none or several it gives no row, as before. The
+> identifier rule is unchanged. The reference writes no row for these
+> transactions. Built in PR #363; tests T36.47 (i), T36.48 (iv).
 
 D36.21 *(maintainer decision.)* *Positions when the resolvable
 denominations change.* Options: (a) the reference as it stands (the
@@ -2282,6 +2592,21 @@ every transaction with transfers in more than one denomination, whatever
 D36.13 decides about the ticker a row carries. Recommended: (b), with
 the counting of R36.14.19 item 4.
 
+> **Status note (2026-11-15, Reloaded-original).** Decided: (b), with the
+> counting of R36.14.19 item 4. Beside the platform coin's store the fetcher
+> keeps a record of what every denomination of its lookup resolved to when the
+> rows were written (the ticker, the decimals and whether it is the platform
+> coin or a token; `get_resolved_denoms`, `set_resolved_denoms` of the history
+> storage, one row in `<TICKER>_tx_resolved_denoms`). At the start of a pass the
+> lookup is compared with the record. When it differs, the store of the platform
+> coin (its rows and those of its tokens) is cleared, the fetcher starts again at
+> the first page and the history state is `InProgress`, so the store becomes what
+> the reference writes into an empty store under the same configuration; the
+> new record is written. A store with no record gets the record without a
+> rebuild. Any change of the lookup, not only one that concerns this account,
+> triggers one rebuild. Built in PR #363; tests for the record, the rebuild and
+> the unchanged case.
+
 D36.22 *(maintainer decision.)* *Pairing of module events.* Options: (a)
 the reference's pairing by order (R36.14.20), with the wrong parties it
 gives when transfers and module events are unequal in number; (b)
@@ -2291,6 +2616,11 @@ transactions where this changes which transfers merge, the positions and
 with them the identifiers differ from the reference's. Recommended: (a);
 the cases are batches of other parties' packets, and a row of this
 account in them is still recoverable from the chain.
+
+> **Status note (2026-11-15, Reloaded-original).** Decided: (a), the pairing
+> by order of R36.14.20, as built (`module_event_queue`, `apply_module_event`);
+> a row of this account in a batch of other parties' packets stays recoverable
+> from the chain. Tests T36.46 (v) and (vi) are as built.
 
 **Tests.** Rows T36.45 -- T36.48 run against a mocked node on a 64-bit
 native build unless a row says otherwise, with the conventions of
@@ -2387,6 +2717,46 @@ power 64: no row. (iv) An empty fee list: no row in any history and
 nothing on the history stream, on the first pass and on a second one.
 Under D36.20 (b): one row with `total_amount` 1 and `fee_details`
 `amount` 0.
+
+> **Status note (2026-11-15, Reloaded-original).** Built of R36.14.19 -- R36.14.22 in `rows_for_tx` and
+> the functions it calls in `tendermint_tx_history.rs`: the repeated-event
+> comparison per event type (`drop_repeated_events`); the transfer list read
+> from the last `transfer` event to the first, a coin counted only with an
+> `amount`, its party attributes, a u64 integer and a denomination that
+> resolves, module correction before merging (`transfers_of`, `push_merged`);
+> the identifier bytes of item 7, including the 32-bit form
+> (`history_internal_id_for_word`); the pairing of R36.14.20 by order, which is
+> D36.22 (a), isolated in `module_event_queue` and `apply_module_event`; the
+> staking events without `delegator`, `validator` or a counted amount giving no
+> row, `unbond` included; a first fee entry above u64 leaving the transaction
+> out; the fee attributed once to the first written entry this account sent
+> (a fee row when that entry is in a token denomination). Tests T36.45 --
+> T36.48 are in `tx_history_tests.rs`, the reference's values where the
+> decisions left them. Decisions D36.19 -- D36.22 and D36.13 are taken (the status notes
+> at each); nothing of R36.14.19 -- R36.14.22 is provisional any more. The
+> comparison of repeated events (item 1) is made on the attributes in the form
+> the node delivered them, key, value and index flag in order (`HistoryEvent`
+> keeps them beside the decoded pairs), so two events that differ only in the
+> index flag, or in the encoding of a key, are both counted. T36.48 (iv) and
+> T36.47 (i) run in their (b) forms; an empty fee list is checked on a first and
+> a second pass by `transactions_without_a_row_do_not_stop_the_pass`.
+>
+> Observed form of D36.22 (a): a packet received through a relayer, the fee
+> paid by a fee granter and a tip paid on to a payee, gives two rows for the
+> receiving account. The tip transfer, read first, takes the packet event and
+> becomes the IBC row (the packet's parties, the amount of the tip transfer),
+> and the escrow transfer stays a plain row; test
+> `a_relayed_ibc_receive_with_a_tip_gives_two_rows_by_order_pairing`.
+>
+> Observed 2026-11-15 on ATOM mainnet with a load-balanced public node, this
+> build, 8 fresh first passes (one reference run alongside): the node's answers
+> to the same two queries differed between runs minutes apart (spender total 2
+> in 6 runs, 1 in 1, receiver total 3 in 5, 1 in 2, empty once); a transaction
+> absent from both answers was not stored (3 of 8 runs for the received IBC
+> transfer); in 1 run a listed height's block query returned a short answer
+> without a block time and that transaction was not stored (R36.14.4), warned
+> about since this change; listings equalled the stored sets and a later pass
+> changed nothing. No cause beyond the node's answers is claimed.
 
 ### 36.14.7 The store's address index and the first pass
 
@@ -2622,6 +2992,14 @@ continue, and the earlier account's rows are re-creatable in the same
 way. Option (b) does not detect a store that the reference filled for
 two accounts. Recommended: (b).
 
+> **Status note (2026-11-15, Reloaded-original).** Decided: (a), the reference as it
+> stands. Reloaded keeps no account record beside the store and does not rebuild it
+> when the coin is activated for a different account (the record of the resolved
+> denominations, D36.21, stays). A row carries the values of the account that wrote
+> it and is listed under each of its own addresses; the second account's rows are
+> written beside it, once each. Built in PR #363; test T36.54
+> (`a_second_account_on_the_same_store_is_listed_with_the_rows_of_the_first`).
+
 R36.14.27 **The first pass (this family; completes R36.14.3, R36.14.4
 and R36.14.11).**
 
@@ -2746,6 +3124,16 @@ later pass reads from there again. The rows written are the same under
 both options, so the store stays one that either program can continue.
 Recommended: (b).
 
+> **Status note (2026-11-15, Reloaded-original).** Decided (b). When the block answer
+> for a transaction's height carries no block or no time, every other configured
+> node is asked once (`block_time_from_any_node`); a node that fails counts as not
+> having the block. When none has it, no row is written and the query's page cursor
+> is set to the earliest page of the pass that held such a transaction, so every
+> later pass reads from there again (`pass`, `read_page`). The warning of the left
+> out transaction stays. Built in PR #363; tests T36.53 (iii),
+> `a_block_that_the_first_node_lacks_is_asked_of_the_other_nodes` and
+> `a_block_that_no_node_has_keeps_the_earliest_such_page_for_the_next_pass`.
+
 D36.25 *(maintainer decision.)* *A query that ended on a full page.*
 Options: (a) the reference as it stands (R36.14.28 item 4); (b) Reloaded
 never asks for a page past the last one it has read: a query that ended
@@ -2754,6 +3142,13 @@ identifier check of R36.14.10 passes over the rows already stored, and
 goes on to a further page only when the answer's `total_count` shows
 one; the second query runs in every pass. The rows written are the same
 under both options. Recommended: (b).
+
+> **Status note (2026-11-15, Reloaded-original).** Decided (b): a query that
+> ended on a full page starts the next pass on that page again, and the identifier
+> check of R36.14.10 passes over the rows already stored. As built: the kept page
+> advances only when the answer's `total_count` shows more, both queries run in
+> every pass, and no request is made past the last page. Test T36.53 (iv),
+> `a_query_that_ended_on_a_full_page_is_read_again_from_that_page_without_asking_past_the_end`.
 
 **Tests.** Rows T36.49 -- T36.54 run against a mocked node on a 64-bit
 native build, with the conventions of §36.14.5: 6 decimals for the
@@ -2872,3 +3267,434 @@ the platform denom from `A` to `B`; the coin activated for `B` on that
 database. *Expected in `B`'s history:* under D36.23 (a), one row with
 `spent_by_me` 1.005 and `received_by_me` 0; under (b), one row with
 `spent_by_me` 0, `received_by_me` 1 and `my_balance_change` 1.
+
+> **Status note (2026-11-15, Reloaded-original).** Built of R36.14.23 --
+> R36.14.26: the table names with `-` replaced by `_`, the declarations of the
+> address table, the entries per row, their removal with the row, the page stored
+> in one transaction, the selection through the index and the preparation step of
+> R36.14.26 item 5 (including the removal of entries without a row), in
+> `mm2src/coins/sql_tx_history_storage.rs` and `store` of
+> `mm2src/coins/tendermint/tendermint_tx_history.rs`. Tests T36.49 (i) -- (viii),
+> T36.50, T36.51 (iv) and (v) and T36.52 are in
+> `mm2src/coins/tendermint/tendermint_swap_flow_tests/tx_history_tests.rs` and in
+> the test module of the store. T36.51 (i) -- (iii) and (vi) (the store written by
+> the other program as the contract, and the lab row) are lab rows and are not
+> built as unit tests. R36.14.27 and R36.14.28 are met by the fetcher as it stands
+> and by the decisions D36.23 -- D36.25 as noted at each.
+
+### 36.14.8 Precisions: the unsigned transaction of a watch-only coin, and a history request while no node answers
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-16,
+> measure 0.03 (attestation in §36.13).**
+> This subsection was written on 2026-11-16 by the KDF Spec Reader (Spec
+> Reader round 0.5.0-8) under the two-team procedure of chapter 01 §1.4A,
+> from the reference rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A (read read-only; no untabled state was read), from the public
+> transaction and signing definitions of the Cosmos SDK (the
+> `cosmos.tx.v1beta1` messages, the direct sign mode, the legacy Amino JSON
+> sign mode and its sign document, the bank module's send message), from the
+> public CometBFT RPC, from [Chapter 18](18-tendermint-ibc-htlc.md),
+> [Chapter 38](38-utxo-coin-maintenance-and-features.md) §38.5A and [Chapter
+> 55](55-coin-activation-wire-contract.md) R55.1.10, from this repository's
+> own tree and from this chapter's own text. **The two rows agree on
+> everything in this subsection**: the parts of the reference it describes
+> are the same at both. It edits no sentence of §36.14.1 -- §36.14.7. Each
+> rule names the rule it completes; where a rule here is more exact than the
+> sentence it completes, the rule here governs. It answers two questions
+> only: what exactly the unsigned transaction is that `withdraw` answers for
+> a coin activated in the public-key form (§36.14.3), as a contract for the
+> external signer that consumes it; and what a history request answers while
+> no configured node answers. Each rule says in its heading whether it
+> concerns **this family** only or a **shared serving path**, that is every
+> coin family the method serves. Numbering: rules R36.14.29 -- R36.14.35 and
+> tests T36.55 -- T36.60; the subsection raises no decision.
+
+R36.14.29 **The `withdraw` result that carries an unsigned transaction
+(this family; completes R36.14.17).** For a coin or token activated in
+the public-key form, `withdraw` (both the legacy and the mmrpc-2.0 form,
+which answer the same payload) answers the ordinary result object with
+the members below. The unsigned transaction is not wrapped: its members
+stand directly among the other members of the result.
+
+| Member | In the unsigned result |
+| --- | --- |
+| `tx_hex`, `tx_hash` | **absent** (not null, not empty) |
+| `sign_doc` | present when the Ledger flag is off (R36.14.30); absent otherwise |
+| `legacy_amino_json`, `original_tx_type_url` | present when the Ledger flag is on (R36.14.31); absent otherwise |
+| `from` | one entry, the activated address |
+| `to` | one entry, the request's `to` as sent |
+| `total_amount`, `spent_by_me`, `received_by_me`, `my_balance_change` | as for a signed `withdraw` of the same request, computed with the fee of the unsigned transaction |
+| `fee_details` | `{"type": "Tendermint", "coin": <platform ticker>, "amount": <fee in display units>, "gas_limit": <gas limit>}`, the same fee and gas limit that the unsigned transaction carries |
+| `coin` | the ticker the request named |
+| `block_height`, `timestamp` | 0 |
+| `internal_id` | 32 bytes as hex text: for the platform coin the SHA-256 digest of the empty byte string, for a token the SHA-256 digest of the 32 bytes of its token id (R36.14.2) |
+| `transaction_type` | as for a signed `withdraw` (`"StandardTransfer"`, `{"TokenTransfer": <token id>}`, or the IBC form) |
+| `memo` | a string: the request's `memo`, or the empty string when the request has none |
+| `kmd_rewards` | absent |
+
+The `internal_id` of an unsigned result is therefore the same for every
+unsigned result of a coin. It identifies no transaction, which has no
+hash before it is signed, and a client must not use it as a key.
+Reloaded answers the same members with the same values (D36.18 (a)).
+The node keeps nothing about an unsigned transaction after it has
+answered: no later request refers back to it.
+
+R36.14.30 **The `sign_doc` form (this family; completes R36.14.17 and
+T36.42).** `sign_doc` is a JSON object with exactly four members. Their
+names and meaning are those of the public Cosmos SDK message
+`cosmos.tx.v1beta1.SignDoc`; only the JSON encoding is the reference's
+own.
+
+| Member | JSON type and encoding | Content |
+| --- | --- | --- |
+| `body_bytes` | array of integers from 0 to 255, one per byte, in order; not a hex or base64 string | the protobuf serialization of the transaction body (`TxBody`) |
+| `auth_info_bytes` | array of integers, as above | the protobuf serialization of the `AuthInfo` |
+| `chain_id` | string | the coin's `chain_id` (R36.3.1) |
+| `account_number` | JSON **number** (an unsigned 64-bit integer), not a string | the account number the node reports for the activated address |
+
+The order of the four members in the object carries no meaning. What the
+two byte strings hold is fixed by the public definitions once the
+following values are given, and Reloaded produces byte strings that
+decode to the same values.
+
+1. *Body.* Exactly one message, the message of the operation (for a
+   same-chain `withdraw` the bank module's `/cosmos.bank.v1beta1.MsgSend`
+   from the activated address to the `to` address with one coin: the
+   denomination of the coin or token and the amount in base units); the
+   `memo` of R36.14.29; a `timeout_height` of the chain height the node
+   read while it answered the request, plus 100. No other member of the
+   body is set.
+2. *Authorization.* Exactly one signer entry: the public key the coin
+   was activated with, as the public Cosmos SDK key message of the key
+   type the activation declared (D36.17 concerns the `ed25519` case); the
+   single sign mode `SIGN_MODE_DIRECT`; and as `sequence` the sequence
+   the node reports for the account while it answers the request. The
+   fee has exactly one coin, in the platform denomination also for a
+   token; for a same-chain `withdraw` its amount is that of Chapter 18
+   R18.11.9 and R18.6B.2. The gas limit is that of Chapter 18 R18.6B.3;
+   payer and granter are empty.
+3. *What the signer does* is the public convention of the direct sign
+   mode and is not restated here: it signs the protobuf serialization of
+   the `SignDoc` that these four values form and puts the two byte
+   strings, unchanged, with its signature into a `TxRaw`.
+
+Two consequences follow from the values alone. The document can be
+accepted by the chain only up to the height in its body, about 100
+blocks after the request. And it is bound to one sequence: two requests
+answered before either transaction is broadcast carry the same
+sequence, and the chain accepts only one of the two transactions.
+
+R36.14.31 **The `legacy_amino_json` form (this family; completes
+R36.14.17, R36.14.18 and T36.43).** With the Ledger flag the result
+carries two members in place of `sign_doc`.
+
+1. *`legacy_amino_json`* is a JSON **object**, not a string that holds a
+   serialized document. It is the sign document of the public Cosmos
+   SDK legacy Amino JSON sign mode (`StdSignDoc`) and departs from that
+   definition in no member it carries.
+2. *`original_tx_type_url`* is a string, the protobuf type URL of the
+   message that the document's one `msgs` entry stands for. Because the
+   Amino form exists for the bank send only (R36.14.18 item 3), it is
+   always `/cosmos.bank.v1beta1.MsgSend`. The Amino document does not
+   carry this URL; the member supplies it for the protobuf message of
+   the transaction that is broadcast.
+3. *The members of the document.*
+
+   | Member | JSON type | Value |
+   | --- | --- | --- |
+   | `account_number` | string, decimal digits | the account number the node reports; present also when it is zero, as `"0"` |
+   | `chain_id` | string | the coin's `chain_id` |
+   | `fee` | object with exactly `amount` and `gas` | `amount`: an array with exactly one coin object `{"denom": <platform denom>, "amount": <base units as a decimal string>}`, present with that one entry also when the amount is zero; `gas`: the gas limit as a decimal string |
+   | `memo` | string | the `memo` of R36.14.29; present also when empty, as `""` |
+   | `msgs` | array with exactly one entry | `{"type": "cosmos-sdk/MsgSend", "value": {"from_address": <activated address>, "to_address": <destination address>, "amount": [{"denom": <denom of the coin or token>, "amount": <base units as a decimal string>}]}}` |
+   | `sequence` | string, decimal digits | the sequence the node reports for the account; present also when it is zero, as `"0"` |
+
+   Every number in the document is a JSON string. The document has no
+   other member: no `timeout_height`, and no `payer` or `granter` in
+   `fee`.
+4. *Timeout height.* The public definition leaves `timeout_height` out
+   of the document when the transaction has none, and the reference
+   never writes it. The transaction a signer builds from this document
+   therefore has **no** timeout height, unlike the transaction of the
+   `sign_doc` form (R36.14.30 item 1). This is a difference between the
+   two forms and not a departure from the public definition.
+5. *Fee.* The fee in the document is the fee of the result
+   (R36.14.29). For the **platform coin** it is three times the computed
+   amount (R36.14.18 item 4), multiplied as an integer of base units
+   after the rounding of Chapter 18 R18.6B.2. For a **token** on that
+   platform the factor is not applied: the document and `fee_details`
+   carry the computed amount once. This is the exact scope of R36.14.18
+   item 4. The `gas` member is the gas limit of Chapter 18 R18.6B.3 in
+   both cases and is not multiplied.
+6. *Order and canonical form.* The order in which the reference writes
+   the members of the document and of its inner objects is not the
+   canonical order of the sign mode at every level, and it is not part
+   of the contract: Reloaded MAY write the members in any order. The
+   bytes that are signed are not the bytes of the answer. They are the
+   canonical JSON of the public sign mode (the members of every object
+   sorted by name, no insignificant whitespace), which the signer
+   produces itself from the document.
+7. *The transaction the signer builds* is fixed by the public
+   convention and by items 2 to 4: a body with the protobuf form of the
+   one message, the same memo and no timeout height; one signer entry
+   with the account's public key, the sign mode
+   `SIGN_MODE_LEGACY_AMINO_JSON` and the document's sequence; and the
+   document's fee and gas limit.
+
+R36.14.32 **Having the signed transaction broadcast (this family;
+completes R36.14.17).** The reference has no request that takes a
+signature, or a signed document, and completes the transaction: no
+member of an unsigned result is ever sent back to the node. The caller
+has two ways, and both begin with its own wallet assembling the signed
+transaction (`TxRaw`) by the public convention.
+
+1. The wallet broadcasts the transaction itself, to any node of the
+   chain. The node that answered `withdraw` takes no further part and
+   learns of the transaction from the chain (the history fetcher,
+   R36.14.28).
+2. The caller sends the legacy method `send_raw_transaction` with
+   `coin` (the platform coin or a token on it) and `tx_hex`, the
+   protobuf serialization of the `TxRaw` as hex text. The node needs no
+   key for this. It checks only that the bytes decode as a `TxRaw`; it
+   does not compare them with any document it answered earlier. It
+   submits them with the CometBFT `broadcast_tx_commit` method, so the
+   answer waits for the transaction's block, and answers `{"tx_hash":
+   <the node's hash, upper-case hex>}`. A transaction that the node's
+   check or the block's execution refuses yields the legacy error
+   answer. The `tx_json` member of that method does not serve this
+   family.
+
+The exchange of Chapter 18 R18.11.52 (a data-needed event answered by
+`send_asked_data` with a transaction hash) belongs to swap transactions
+only; a `withdraw` never starts it.
+
+R36.14.33 **A versioned history request while the current height cannot
+be read (shared serving path; completes R36.14.9 and R36.14.12).** The
+mmrpc-2.0 `my_tx_history` reads the chain's current height from a node
+on **every** request, before it reads any row, and keeps no earlier
+height to fall back on. When that read fails, the request fails with the
+error type `RpcError`, string data (the text is not bound) and HTTP 500.
+No stored row is served: the answer is an error answer and has no
+`transactions`, `current_block` or `sync_status`, so the question of a
+`confirmations` value does not arise. The store is not changed by the
+failure, and the first request whose height read succeeds serves the
+stored rows again, with `confirmations` by R36.14.9 from the height then
+read.
+
+The conditions are tested in this order, and the first that holds
+decides the answer.
+
+1. The coin is not active: `CoinIsNotActive` (HTTP 404).
+2. This node's database has no history store for the store's ticker:
+   `StorageIsNotInitialized` (HTTP 500). The test contacts no node, so
+   the first row of the table of R36.14.12 answers this error whether or
+   not a node answers.
+3. The height read fails: `RpcError` (HTTP 500). The second and third
+   rows of that table answer this error while no node answers.
+4. Everything else, namely a `target` that a family refuses and a store
+   that cannot be read (`StorageError`), is tested only after the height
+   was read.
+
+This is a property of the serving path, not of this family: the method
+is one and the same for every family that Chapter 38 R38.5A.7 lists as
+served from the history store, in the native and in the browser build,
+and only the height read itself belongs to the family. For this family
+the height read is the following, for a token through its platform coin.
+A node is chosen as in R36.14.27 item 3: the configured nodes are asked
+a CometBFT `health` request one after the other, in their current
+order. The chosen node is then asked the CometBFT `abci_info` request,
+and the height is the `last_block_height` of its answer. The read fails
+when no configured node answers `health`, and when the chosen node does
+not answer `abci_info`. At the reference each node is given up to 15
+seconds for its `health` answer, so with `n` configured nodes that do
+not respond the error can take up to `n × 15` seconds to arrive; the
+figure is the reference's and is not part of the contract. Reloaded
+answers the same error type and status in the same order of conditions.
+
+R36.14.34 **The legacy method in the same situation (shared legacy path;
+completes R36.14.1 and R36.14.12).** The legacy flat `my_tx_history`
+also reads the current height on every request, for every coin family,
+after it has loaded its own store, and it fails the request when the
+read fails. The answer is the legacy error answer of Chapter 55
+R55.1.10: HTTP 500 and an object with only an `error` string, whose
+text is not bound. The last sentence of R36.14.1 and the "success,
+empty list" cells of R36.14.12 therefore hold **while a node answers
+the height read**. While none does, the legacy method answers the
+legacy error for a Tendermint coin or token as well, although it has no
+row whose confirmations the height would serve. A successful legacy
+answer for this family carries the height read as `current_block`. In
+this situation the legacy method differs from the versioned one in two
+points: it has no `StorageIsNotInitialized` case, and its error has the
+legacy shape.
+
+R36.14.35 **`sync_status` while no node answers (this family; completes
+R36.14.11 and T36.38).** The history state is carried only by a
+successful answer of one of the two methods. While no configured node
+answers the height read, neither method answers successfully, so no
+state can be read at all. The `Finished` that R36.14.11 keeps through a
+node failure, and that T36.38 expects "during a node outage", is
+therefore observable in two cases only: when a node still answers
+`health` and `abci_info` while the fetcher's own requests fail, and
+after the outage has ended. A fixture for T36.38 uses the first case.
+
+> **Our side (informative; this repository's tree at the base of this
+> round, 2026-11-16).** Both history methods already read the height in
+> the place R36.14.33 and R36.14.34 give it: the versioned method tests
+> the store first and answers `RpcError` (HTTP 500) when the height read
+> fails, and the legacy method loads its store and then answers the
+> legacy error. The Tendermint height read is the `abci_info` request
+> through the node choice of R36.14.27. Nothing is to be changed for
+> R36.14.33 -- R36.14.35. The `withdraw` result type of this tree always
+> carries `tx_hex` and has no unsigned form; R36.14.29 -- R36.14.31
+> describe what the public-key form adds to it.
+
+**Tests.** Rows T36.55 -- T36.58 share one fixture: a platform coin with
+6 decimals, platform denomination `D`, chain id `C` and no `gas_price`
+in its configuration (the price is then 0.25, Chapter 18 R18.11.6), so
+the computed fee is `ceil(50,000 × 1.5 × 0.25)` = 18,750 base units
+(0.01875); a token on it with 6 decimals and denomination `K`; the coin
+activated in the public-key form with a 33-byte secp256k1 key whose
+account is `A`; a mocked node that reports account number 7 and sequence
+3 for `A`, the height 1,000, and balances of 10,000,000 base units of
+`D` and of `K`. The request is a `withdraw` of 1 coin to another account
+`B` of the same chain, with `memo` `"m"` and no `fee` member. Figures
+are computed from the rules.
+
+T36.55 *The `sign_doc` result (R36.14.29, R36.14.30; extends T36.42).*
+Ledger flag off. *Expected:* the result has no `tx_hex`, `tx_hash`,
+`kmd_rewards`, `legacy_amino_json` or `original_tx_type_url` member;
+`sign_doc` has exactly four members; `chain_id` is the string `C`;
+`account_number` is the JSON number 7; `body_bytes` and
+`auth_info_bytes` are arrays of integers from 0 to 255. Decoded,
+`body_bytes` is a body with one `/cosmos.bank.v1beta1.MsgSend` from `A`
+to `B` of 1,000,000 `D`, the memo `m` and the timeout height 1,100;
+`auth_info_bytes` has one signer entry with the activation key, the mode
+`SIGN_MODE_DIRECT` and the sequence 3, a fee of one coin of 18,750 `D`
+and the gas limit 125,000. Beside it: `from` `[A]`, `to` `[B]`,
+`total_amount` 1.01875, `spent_by_me` 1.01875, `received_by_me` 0,
+`my_balance_change` -1.01875, `fee_details` `{"type": "Tendermint",
+"coin": <platform ticker>, "amount": "0.01875", "gas_limit": 125000}`,
+`block_height` 0, `timestamp` 0, `transaction_type`
+`"StandardTransfer"`, `memo` `"m"`, and an `internal_id` equal to the
+SHA-256 digest of the empty byte string. A second request without
+`memo` answers `memo` `""` and the same `internal_id`. The same request
+through the legacy `withdraw` answers the same members.
+
+T36.56 *The Amino result (R36.14.29, R36.14.31; extends T36.43).* Ledger
+flag on. *Expected:* no `sign_doc`, `tx_hex` or `tx_hash`;
+`original_tx_type_url` is `/cosmos.bank.v1beta1.MsgSend`;
+`legacy_amino_json` is a JSON object with exactly the members
+`account_number` `"7"`, `chain_id` `C`, `fee`, `memo` `"m"`, `msgs` and
+`sequence` `"3"`; `fee` is exactly `amount`, an array of the one coin
+with `denom` `D` and `amount` `"56250"`, and `gas` `"125000"`; `msgs`
+has one entry of `type` `cosmos-sdk/MsgSend` whose `value` has
+`from_address` `A`, `to_address` `B` and an `amount` array of the one
+coin with `denom` `D` and `amount` `"1000000"`. No value in the document
+is a JSON number, and the document has no `timeout_height`. Beside it:
+`fee_details` with `amount` `"0.05625"` and `gas_limit` 125000,
+`total_amount` 1.05625. With a node that reports sequence 0 and account
+number 0, both members are present as `"0"`; without `memo` in the
+request, `memo` is present as `""`. A fixture compares the document as
+a JSON value, not as text (R36.14.31 item 6).
+
+T36.57 *A token under the Ledger flag (R36.14.31 item 5).* Ledger flag
+on; a `withdraw` of 2 units of the token to `B`. *Expected:* the `msgs`
+entry carries one coin with `denom` `K` and `amount` `"2000000"`; the
+fee carries one coin with `denom` `D` and `amount` `"18750"` (not
+tripled); `fee_details` names the platform ticker with `amount`
+`"0.01875"`; `total_amount` is 2; `internal_id` is the SHA-256 digest of
+the token id's 32 bytes.
+
+T36.58 *Broadcast of a transaction signed outside the node (R36.14.32).*
+(i) The `sign_doc` of T36.55 is signed by a test key under the public
+direct sign mode and assembled into a `TxRaw` from the two byte strings
+unchanged; `send_raw_transaction` with `coin` and the hex of that
+`TxRaw` makes the mocked node receive one `broadcast_tx_commit` request
+with exactly those bytes, and answers `tx_hash`. (ii) The same with a
+`TxRaw` built from the document of T36.56 under R36.14.31 item 7, whose
+body has no timeout height. (iii) The same `tx_hex` sent with the
+token's ticker as `coin` is broadcast in the same way. (iv) A `tx_hex`
+that does not decode as a `TxRaw` (for instance text that is not hex)
+yields the legacy error answer and no request to the node.
+
+T36.59 *Versioned history while no node answers (R36.14.33).* *Input:* a
+platform coin and a token on it, activated with `tx_history: true`,
+whose store holds rows from a completed first pass; then every
+configured node refuses connections. *Expected:* (i) the mmrpc-2.0
+`my_tx_history` for the coin and for the token answers HTTP 500 with
+the error type `RpcError` and string data, and no `result`; (ii) the
+row count of the store is unchanged afterwards; (iii) once a node
+answers again at height `h`, the same request answers the stored rows
+with `current_block` `h` and, for each row at or below `h`,
+`confirmations` equal to `h` minus the row's height plus one; (iv) with
+two configured nodes of
+which only the first refuses connections, the request succeeds; (v) a
+coin activated without `tx_history` on a database that has no store for
+its ticker answers `StorageIsNotInitialized` (HTTP 500) while every
+node refuses connections, not `RpcError`; (vi) a coin activated without
+`tx_history` on a database that holds an earlier store answers
+`RpcError` in the same situation; (vii) a node that answers `health`
+and fails `abci_info` yields `RpcError`.
+
+T36.60 *Legacy history and the state while no node answers (R36.14.34,
+R36.14.35).* With the input of T36.59: (i) the legacy `my_tx_history`
+for the coin and for the token answers HTTP 500 and an object whose
+only member is an `error` string; (ii) once a node answers again at
+height `h` it answers an empty `transactions` list, `total` 0,
+`current_block` `h` and the `sync_status` of R36.14.11; (iii) with a
+node that answers `health` and `abci_info` and fails every history
+query of the fetcher, both methods answer successfully with
+`sync_status` `{"state": "Finished"}`.
+
+> **Status note (2026-11-16, Reloaded-original; as built after the clearance
+> of this subsection).** The unsigned result of a watch-only coin was compared
+> with R36.14.29 -- R36.14.32 member by member and corrected where it differed.
+>
+> - *R36.14.31 item 1 and item 4.* `legacy_amino_json` is a JSON object, not
+>   text, and has no `timeout_height`. (The earlier text form and the included
+>   timeout height were this tree's own and are gone.)
+> - *R36.14.31 item 5.* The factor three of R36.14.18 item 4 applies to the
+>   platform coin only; a token's document and `fee_details` carry the computed
+>   amount once.
+> - *R36.14.29, `internal_id`.* An unsigned result carries the constant
+>   identifier: the SHA-256 digest of the empty byte string for the platform
+>   coin, the SHA-256 digest of the 32 bytes of the token id for a token. It
+>   identifies no transaction. The staking requests of a watch-only coin
+>   (D36.18 (a)) use the platform coin's constant.
+> - *R36.14.29, `memo`.* The shared `withdraw` request has a `memo` member
+>   (absent is the empty memo). It is the memo of the transaction body and of the
+>   Amino document, and an unsigned result answers it as `memo`, `""` when the
+>   request has none. A signed Tendermint `withdraw` takes the same memo in its
+>   body (it was always empty before); every other coin family ignores the member.
+> - *R36.14.29 other members; R36.14.30.* `tx_hex`, `tx_hash` and `kmd_rewards`
+>   are absent, `from` is the activated address, `to` the request's `to`,
+>   `fee_details` the Tendermint form with the platform ticker, `block_height`
+>   and `timestamp` 0, `transaction_type` as for a signed `withdraw` (a token's
+>   signed `withdraw` answers `"StandardTransfer"` in this tree, and so does its
+>   unsigned result); `sign_doc` has the four members in the encodings of
+>   R36.14.30 (the body's timeout height is the height read plus 100). No
+>   difference was found.
+> - *R36.14.32.* No difference: `send_raw_transaction` takes the hex of a
+>   `TxRaw` for the platform coin or a token, checks that it decodes, submits it
+>   with `broadcast_tx_commit` and answers the node's upper-case hash; bytes that
+>   do not decode give the legacy error and no node request. The node never
+>   reads an unsigned result back.
+> - *R36.14.33 -- R36.14.35.* The "Our side" note above holds in this tree and
+>   nothing was changed: the versioned `my_tx_history` tests the store first and
+>   answers `RpcError` (HTTP 500) when the height read fails, the legacy method
+>   loads its store and then answers the legacy error, and the state is read
+>   from a successful answer only. The `RpcError` observed on 2026-11-16 while no
+>   node answered is therefore the conforming answer, not a difference.
+> - *Tests.* T36.55 (`t36_55_the_sign_doc_result`), T36.56
+>   (`t36_56_the_amino_result`), T36.57
+>   (`t36_57_a_token_under_the_ledger_flag`) and T36.58
+>   (`t36_58_broadcast_of_a_transaction_signed_outside_the_node`) are in
+>   `tendermint_swap_flow_tests/watch_only_tests.rs`; T36.59
+>   (`t36_59_versioned_history_while_no_node_answers`,
+>   `t36_59_a_node_that_answers_health_and_fails_abci_info_gives_rpc_error_and_serving_resumes`)
+>   and T36.60 (`t36_60_legacy_history_while_every_node_refuses_connections`,
+>   `t36_60_the_state_is_finished_while_a_node_answers_and_the_fetcher_fails`) in
+>   `tendermint_swap_flow_tests/tx_history_tests.rs`. T36.60 (iii) leaves the
+>   fetcher unrun after its first pass (a failing fetcher would pause and
+>   retry); the legacy `withdraw` of T36.55 shares the result type and its
+>   serialization with the mmrpc-2.0 form and is not run separately.

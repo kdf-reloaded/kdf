@@ -29,6 +29,7 @@ use keys::KeyPair;
 use serde::Deserialize;
 use serialization::Stream;
 use std::collections::BTreeSet;
+use std::fmt;
 
 // --- ZIP-243 personalisation tags (16 bytes each, last 4 bytes
 // optionally carry the consensus branch id at runtime) -------------
@@ -125,6 +126,49 @@ impl Sighash {
         }
     }
 }
+
+/// Why a signature hash could not be computed. Only the Radiant dialect can fail (CRD ch.58
+/// R58.3.3): an output script in scope of the sighash base type that its reference walk cannot
+/// accept leaves no digest, so no signature over such a transaction could verify. Each variant names
+/// the index of the offending output in the transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureHashError {
+    /// The script cannot be decoded: an operand runs past its end, a push length is cut off or a
+    /// reference opcode has fewer than 36 bytes behind it.
+    UndecodableOutputScript { output_index: usize },
+    /// A reference named by `OP_DISALLOWPUSHINPUTREF` is also pushed by `OP_PUSHINPUTREF` or
+    /// `OP_PUSHINPUTREFSINGLETON` in the same script.
+    DisallowedReferenceAlsoPushed { output_index: usize },
+    /// The script contains more than one `OP_STATESEPARATOR`.
+    MultipleStateSeparators { output_index: usize },
+    /// An `OP_RETURN` comes before an `OP_STATESEPARATOR` in the script.
+    ReturnBeforeStateSeparator { output_index: usize },
+}
+
+impl fmt::Display for SignatureHashError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SignatureHashError::UndecodableOutputScript { output_index } => {
+                write!(f, "output {output_index}: the script cannot be decoded")
+            },
+            SignatureHashError::DisallowedReferenceAlsoPushed { output_index } => write!(
+                f,
+                "output {output_index}: a reference that the script disallows is also pushed by it"
+            ),
+            SignatureHashError::MultipleStateSeparators { output_index } => {
+                write!(f, "output {output_index}: the script has more than one state separator")
+            },
+            SignatureHashError::ReturnBeforeStateSeparator { output_index } => {
+                write!(
+                    f,
+                    "output {output_index}: the script has OP_RETURN before a state separator"
+                )
+            },
+        }
+    }
+}
+
+impl std::error::Error for SignatureHashError {}
 
 // --- Signer-side input + transaction shape ------------------------
 
@@ -262,6 +306,12 @@ impl TransactionInputSigner {
     /// Compute the digest that ECDSA will sign for one input. This is the one routine every
     /// signing and verifying site goes through (CRD ch.61 R61.4.2); the signer's
     /// `sighash_suffix` enters here.
+    ///
+    /// # Errors
+    ///
+    /// Only the Radiant dialect with the fork-id bit set can fail, for an output script in scope of
+    /// the sighash base type that its reference walk rejects (CRD ch.58 R58.3.3). Every other
+    /// version and flag combination returns `Ok`.
     pub fn signature_hash(
         &self,
         input_index: usize,
@@ -269,7 +319,7 @@ impl TransactionInputSigner {
         script_pubkey: &Script,
         sigversion: SignatureVersion,
         sighashtype: u32,
-    ) -> H256 {
+    ) -> Result<H256, SignatureHashError> {
         let sighash = Sighash::from_u32(sigversion, sighashtype);
         // The Radiant dialect has its own digest and takes no suffix; configuration refuses the
         // combination (R61.3.3), so this zero is unreachable from a resolved coin configuration.
@@ -279,22 +329,26 @@ impl TransactionInputSigner {
         };
         match sigversion {
             SignatureVersion::ForkId if sighash.fork_id => {
-                self.sighash_fork_id(input_index, input_amount, script_pubkey, sighashtype, sighash, suffix)
+                Ok(self.sighash_fork_id(input_index, input_amount, script_pubkey, sighashtype, sighash, suffix))
             },
             SignatureVersion::ForkIdRxd if sighash.fork_id => {
                 self.sighash_fork_id_rxd(input_index, input_amount, script_pubkey, sighashtype, sighash)
             },
             SignatureVersion::Base | SignatureVersion::ForkId | SignatureVersion::ForkIdRxd => {
-                self.sighash_legacy(input_index, script_pubkey, sighashtype, sighash, suffix)
+                Ok(self.sighash_legacy(input_index, script_pubkey, sighashtype, sighash, suffix))
             },
             SignatureVersion::WitnessV0 => {
-                self.sighash_witness_v0(input_index, input_amount, script_pubkey, sighashtype, sighash, suffix)
+                Ok(self.sighash_witness_v0(input_index, input_amount, script_pubkey, sighashtype, sighash, suffix))
             },
         }
     }
 
     /// Sign one input; returns the signed `TransactionInput` ready to
     /// drop into the corresponding slot of the final transaction.
+    ///
+    /// # Errors
+    ///
+    /// The error of [`TransactionInputSigner::signature_hash`].
     pub fn signed_input(
         &self,
         keypair: &KeyPair,
@@ -303,18 +357,18 @@ impl TransactionInputSigner {
         script_pubkey: &Script,
         sigversion: SignatureVersion,
         sighash: u32,
-    ) -> TransactionInput {
-        let digest = self.signature_hash(input_index, input_amount, script_pubkey, sigversion, sighash);
+    ) -> Result<TransactionInput, SignatureHashError> {
+        let digest = self.signature_hash(input_index, input_amount, script_pubkey, sigversion, sighash)?;
         let mut sig: Vec<u8> = keypair.private().sign(&digest).expect("ECDSA signing").into();
         sig.push(sighash as u8);
         let script_sig = Builder::default().push_data(&sig).into_script();
         let unsigned = &self.inputs[input_index];
-        TransactionInput {
+        Ok(TransactionInput {
             previous_output: unsigned.previous_output,
             sequence: unsigned.sequence,
             script_sig: script_sig.to_bytes(),
             script_witness: vec![],
-        }
+        })
     }
 
     // --- Legacy (pre-segwit) sighash -----------------------------
@@ -498,17 +552,17 @@ impl TransactionInputSigner {
         script_pubkey: &Script,
         sighashtype: u32,
         sighash: Sighash,
-    ) -> H256 {
+    ) -> Result<H256, SignatureHashError> {
         // Degenerate indices agree with the other fork-id dialect (R58.3.4).
         if input_index >= self.inputs.len() {
-            return 1u8.into();
+            return Ok(1u8.into());
         }
         if sighash.base == SighashBase::Single && input_index >= self.outputs.len() {
-            return 1u8.into();
+            return Ok(1u8.into());
         }
         let prev = hash_prevouts(sighash, &self.inputs);
         let seq = hash_sequence(sighash, &self.inputs);
-        let summaries = hash_output_summaries(sighash, input_index, &self.outputs);
+        let summaries = hash_output_summaries(sighash, input_index, &self.outputs)?;
         let outs = hash_outputs(sighash, input_index, &self.outputs);
         let i = &self.inputs[input_index];
 
@@ -524,7 +578,7 @@ impl TransactionInputSigner {
             .append(&outs)
             .append(&self.lock_time)
             .append(&sighashtype);
-        dhash256(&s.out())
+        Ok(dhash256(&s.out()))
     }
 
     // --- ZIP-243 Zcash Sapling sighash ----------------------------
@@ -692,23 +746,34 @@ fn hash_outputs(sh: Sighash, input_index: usize, outputs: &[TransactionOutput]) 
 }
 
 /// Radiant output-summaries digest (R58.3.2): double-SHA256 over a 76-byte summary per output in
-/// scope, or 32 zero bytes when the base type selects none.
-fn hash_output_summaries(sh: Sighash, input_index: usize, outputs: &[TransactionOutput]) -> H256 {
+/// scope, or 32 zero bytes when the base type selects none. Only outputs in scope are walked, so
+/// only they can fail; the error names the lowest-indexed output that does (R58.3.3).
+fn hash_output_summaries(
+    sh: Sighash,
+    input_index: usize,
+    outputs: &[TransactionOutput],
+) -> Result<H256, SignatureHashError> {
     let mut s = Stream::default();
     match sh.base {
         SighashBase::All => {
-            for o in outputs {
-                append_output_summary(&mut s, o);
+            for (index, o) in outputs.iter().enumerate() {
+                append_output_summary(&mut s, o, index)?;
             }
         },
-        SighashBase::Single if input_index < outputs.len() => append_output_summary(&mut s, &outputs[input_index]),
-        _ => return 0u8.into(),
+        SighashBase::Single if input_index < outputs.len() => {
+            append_output_summary(&mut s, &outputs[input_index], input_index)?
+        },
+        _ => return Ok(0u8.into()),
     }
-    dhash256(&s.out())
+    Ok(dhash256(&s.out()))
 }
 
-fn append_output_summary(s: &mut Stream, output: &TransactionOutput) {
-    let refs = extract_push_refs(&output.script_pubkey);
+fn append_output_summary(
+    s: &mut Stream,
+    output: &TransactionOutput,
+    output_index: usize,
+) -> Result<(), SignatureHashError> {
+    let refs = extract_push_refs(&output.script_pubkey, output_index)?;
     s.append(&output.value).append(&dhash256(&output.script_pubkey));
     // The count is the number of distinct references; a script cannot hold 2^32 of them, and the
     // width is the 4-byte field of the summary layout.
@@ -723,6 +788,7 @@ fn append_output_summary(s: &mut Stream, output: &TransactionOutput) {
         }
         s.append(&dhash256(&concatenated));
     }
+    Ok(())
 }
 
 const REF_LEN: usize = 36;
@@ -734,12 +800,20 @@ const OP_REQUIREINPUTREF: u8 = 0xd1;
 const OP_DISALLOWPUSHINPUTREF: u8 = 0xd2;
 const OP_DISALLOWPUSHINPUTREFSIBLING: u8 = 0xd3;
 const OP_PUSHINPUTREFSINGLETON: u8 = 0xd8;
+const OP_STATESEPARATOR: u8 = 0xbd;
+const OP_RETURN: u8 = 0x6a;
 
 /// Distinct references pushed by a script, ascending by their 36 bytes (R58.3.3). Only
-/// `OP_PUSHINPUTREF` and `OP_PUSHINPUTREFSINGLETON` contribute. The walk is tolerant: an operand that
-/// runs past the end of the script (or whose length does not fit) stops it, keeping what was found.
-fn extract_push_refs(script: &[u8]) -> BTreeSet<[u8; REF_LEN]> {
+/// `OP_PUSHINPUTREF` and `OP_PUSHINPUTREFSINGLETON` contribute. The walk is fatal, not tolerant:
+/// it returns the error of the first of the four cases of R58.3.3 that it meets in byte order,
+/// naming `output_index`. A conflict between a disallowed and a pushed reference is met at the
+/// second of the two operations.
+fn extract_push_refs(script: &[u8], output_index: usize) -> Result<BTreeSet<[u8; REF_LEN]>, SignatureHashError> {
+    let undecodable = || SignatureHashError::UndecodableOutputScript { output_index };
     let mut refs = BTreeSet::new();
+    let mut disallowed = BTreeSet::new();
+    let mut seen_return = false;
+    let mut seen_separator = false;
     let mut pc = 0usize;
     while let Some(&op) = script.get(pc) {
         pc += 1;
@@ -758,15 +832,39 @@ fn extract_push_refs(script: &[u8]) -> BTreeSet<[u8; REF_LEN]> {
         let operand = data_len
             .and_then(|len| pc.checked_add(header)?.checked_add(len).map(|end| (pc + header, end)))
             .and_then(|(start, end)| script.get(start..end).map(|bytes| (end, bytes)));
-        let Some((end, bytes)) = operand else { break };
-        if matches!(op, OP_PUSHINPUTREF | OP_PUSHINPUTREFSINGLETON) {
-            if let Ok(r) = <[u8; REF_LEN]>::try_from(bytes) {
+        let Some((end, bytes)) = operand else {
+            return Err(undecodable());
+        };
+        match op {
+            OP_PUSHINPUTREF | OP_PUSHINPUTREFSINGLETON => {
+                let r = <[u8; REF_LEN]>::try_from(bytes).map_err(|_| undecodable())?;
+                if disallowed.contains(&r) {
+                    return Err(SignatureHashError::DisallowedReferenceAlsoPushed { output_index });
+                }
                 refs.insert(r);
-            }
+            },
+            OP_DISALLOWPUSHINPUTREF => {
+                let r = <[u8; REF_LEN]>::try_from(bytes).map_err(|_| undecodable())?;
+                if refs.contains(&r) {
+                    return Err(SignatureHashError::DisallowedReferenceAlsoPushed { output_index });
+                }
+                disallowed.insert(r);
+            },
+            OP_STATESEPARATOR => {
+                if seen_separator {
+                    return Err(SignatureHashError::MultipleStateSeparators { output_index });
+                }
+                if seen_return {
+                    return Err(SignatureHashError::ReturnBeforeStateSeparator { output_index });
+                }
+                seen_separator = true;
+            },
+            OP_RETURN => seen_return = true,
+            _ => (),
         }
         pc = end;
     }
-    refs
+    Ok(refs)
 }
 
 /// Little-endian length of `width` bytes at `pos`; `None` when it is cut off or does not fit `usize`.
@@ -849,13 +947,15 @@ mod tests {
             hash_algo: SignerHashAlgo::DSHA256,
             sighash_suffix: 0,
         };
-        let got = signer.signature_hash(
-            0,
-            0,
-            &prev_script_pubkey,
-            SignatureVersion::Base,
-            SighashBase::All.into(),
-        );
+        let got = signer
+            .signature_hash(
+                0,
+                0,
+                &prev_script_pubkey,
+                SignatureVersion::Base,
+                SighashBase::All.into(),
+            )
+            .expect("signature hash");
         assert_eq!(got, want);
     }
 
@@ -915,13 +1015,15 @@ mod tests {
         let mut signer = TransactionInputSigner::from_transaction(tx, 0);
         signer.inputs[0].amount = 9_924_260;
         signer.consensus_branch_id = 0x76b8_09bb;
-        let got = signer.signature_hash(
-            0,
-            0,
-            &Script::from("76a91405aab5342166f8594baf17a7d9bef5d56744332788ac"),
-            SignatureVersion::Base,
-            1,
-        );
+        let got = signer
+            .signature_hash(
+                0,
+                0,
+                &Script::from("76a91405aab5342166f8594baf17a7d9bef5d56744332788ac"),
+                SignatureVersion::Base,
+                1,
+            )
+            .expect("signature hash");
         assert_eq!(
             H256::from("047da0d9932545770fc570122c4451b53fadad219650008e5026162e957a46f9"),
             got
@@ -932,7 +1034,7 @@ mod tests {
 #[cfg(test)]
 mod rxd_tests {
     use super::{append_output_summary, extract_push_refs, hash_output_summaries, hash_outputs, hash_prevouts,
-                hash_sequence, Sighash, SignatureVersion, TransactionInputSigner};
+                hash_sequence, Sighash, SignatureHashError, SignatureVersion, TransactionInputSigner};
     use crate::bytes::Bytes;
     use crate::hash::H256;
     use crate::script::Script;
@@ -1008,13 +1110,15 @@ mod rxd_tests {
     fn check_vectors(tx_hex: &'static str, inputs: &[RxdInput]) {
         let (tx, signer) = signer_of(tx_hex);
         for i in inputs {
-            let digest = signer.signature_hash(
-                i.index,
-                i.value,
-                &Script::from(i.prev_script),
-                SignatureVersion::ForkIdRxd,
-                0x41,
-            );
+            let digest = signer
+                .signature_hash(
+                    i.index,
+                    i.value,
+                    &Script::from(i.prev_script),
+                    SignatureVersion::ForkIdRxd,
+                    0x41,
+                )
+                .expect("signature hash");
             assert_eq!(&digest[..], &bytes_of(i.digest)[..], "input {}", i.index);
             assert!(verifies(&tx, i.index, &digest), "input {} signature", i.index);
         }
@@ -1031,7 +1135,13 @@ mod rxd_tests {
     fn preimage_digest(signer: &TransactionInputSigner, i: &RxdInput, place: Option<bool>) -> H256 {
         let sh = Sighash::from_u32(SignatureVersion::ForkIdRxd, 0x41);
         let inp = &signer.inputs[i.index];
-        let summaries = hash_output_summaries(sh, i.index, &signer.outputs);
+        // Only appended when the field is placed, so a transaction a Radiant walk would refuse can
+        // still be hashed in the plain form.
+        let summaries = if place.is_some() {
+            hash_output_summaries(sh, i.index, &signer.outputs).expect("output summaries")
+        } else {
+            H256::default()
+        };
         let mut s = Stream::default();
         s.append(&signer.version)
             .append(&hash_prevouts(sh, &signer.inputs))
@@ -1071,13 +1181,15 @@ mod rxd_tests {
                 assert_ne!(omitted, right);
                 assert!(!verifies(&tx, i.index, &omitted), "no field 8 must not verify");
                 // ... and the omitted form is exactly the existing fork-id result.
-                let fork_id = signer.signature_hash(
-                    i.index,
-                    i.value,
-                    &Script::from(i.prev_script),
-                    SignatureVersion::ForkId,
-                    0x41,
-                );
+                let fork_id = signer
+                    .signature_hash(
+                        i.index,
+                        i.value,
+                        &Script::from(i.prev_script),
+                        SignatureVersion::ForkId,
+                        0x41,
+                    )
+                    .expect("signature hash");
                 assert_eq!(fork_id, omitted);
             }
         }
@@ -1088,7 +1200,11 @@ mod rxd_tests {
         let (_, signer) = signer_of(TX1);
         let i = &TX1_INPUTS[0];
         let script = Script::from(i.prev_script);
-        let digest = |v, raw| signer.signature_hash(i.index, i.value, &script, v, raw);
+        let digest = |v, raw| {
+            signer
+                .signature_hash(i.index, i.value, &script, v, raw)
+                .expect("signature hash")
+        };
         // Bit 0x40 set: the Radiant dialect, which differs from the plain fork-id digest.
         assert_eq!(&digest(SignatureVersion::ForkIdRxd, 0x41)[..], &bytes_of(i.digest)[..]);
         assert_ne!(
@@ -1134,7 +1250,7 @@ mod rxd_tests {
             script_pubkey: Bytes::from(script.clone()),
         };
         let mut s = Stream::default();
-        append_output_summary(&mut s, &output);
+        append_output_summary(&mut s, &output, 0).expect("output summary");
         let got = s.out().to_vec();
         assert_eq!(got.len(), 76);
         let mut want = 0x0102_0304_0506_0708u64.to_le_bytes().to_vec();
@@ -1171,22 +1287,265 @@ mod rxd_tests {
         script.extend(push36(0xd8, 0x06));
         script.extend([0x76, 0xa9, 0x88, 0xac]);
 
-        let refs: Vec<_> = extract_push_refs(&script).into_iter().collect();
+        let refs: Vec<_> = extract_push_refs(&script, 0)
+            .expect("valid script")
+            .into_iter()
+            .collect();
         assert_eq!(refs, vec![[0x10u8; 36], [0x20u8; 36], [0x30u8; 36]]);
 
-        // Truncated tail: references collected before the truncation survive, nothing fails.
-        let mut cut = script.clone();
-        cut.extend(push36(0xd0, 0x40)[..20].to_vec());
-        assert_eq!(extract_push_refs(&cut).len(), 3);
-        // A PUSHDATA4 whose length cannot fit, a cut-off length field, and an empty script.
-        let mut big = push36(0xd0, 0x50);
-        big.extend([0x4e, 0xff, 0xff, 0xff, 0xff, 0xaa]);
-        big.extend(push36(0xd0, 0x60));
-        assert_eq!(extract_push_refs(&big).into_iter().collect::<Vec<_>>(), vec![
-            [0x50u8; 36]
-        ]);
-        assert_eq!(extract_push_refs(&[0x4d, 0x01]).len(), 0);
-        assert_eq!(extract_push_refs(&[]).len(), 0);
+        // The truncation clause is inverted by D5: see `rxd_d5_truncated_output_script_is_undecodable`.
+        assert!(extract_push_refs(&[], 0).expect("empty script").is_empty());
+    }
+
+    // D5 (CRD ch.58 R58.3.3): the four fatal cases. All scripts are synthetic.
+    fn with_output_script(signer: &TransactionInputSigner, index: usize, script: Vec<u8>) -> TransactionInputSigner {
+        let mut signer = signer.clone();
+        signer.outputs[index].script_pubkey = Bytes::from(script);
+        signer
+    }
+
+    fn rxd_hash(signer: &TransactionInputSigner, input: &RxdInput, raw: u32) -> Result<H256, SignatureHashError> {
+        signer.signature_hash(
+            input.index,
+            input.value,
+            &Script::from(input.prev_script),
+            SignatureVersion::ForkIdRxd,
+            raw,
+        )
+    }
+
+    #[test]
+    fn rxd_d5_truncated_output_script_is_undecodable() {
+        let (_, signer) = signer_of(TX1);
+        let mut cut_after_reference = push36(0xd0, 0x10);
+        cut_after_reference.extend(push36(0xd0, 0x40)[..20].to_vec());
+        let truncated: Vec<Vec<u8>> = vec![
+            vec![0x05, 0x01],                         // direct push runs past the end
+            vec![0x4c],                               // PUSHDATA1 without its length byte
+            vec![0x4c, 0x02, 0xaa],                   // PUSHDATA1 payload cut short
+            vec![0x4d, 0x01],                         // PUSHDATA2 length cut off
+            vec![0x4e, 0xff, 0xff, 0xff, 0xff, 0xaa], // PUSHDATA4 length that cannot fit
+            push36(0xd0, 0x50)[..36].to_vec(),        // reference opcode with 35 bytes behind it
+            push36(0xd1, 0x50)[..1].to_vec(),         // a skipped reference opcode needs 36 bytes too
+            cut_after_reference,                      // references seen before the cut do not help
+        ];
+        for script in truncated {
+            let bad = with_output_script(&signer, 1, script.clone());
+            let err = rxd_hash(&bad, &TX1_INPUTS[0], 0x41).expect_err("truncated script");
+            assert_eq!(err, SignatureHashError::UndecodableOutputScript { output_index: 1 });
+            assert_eq!(err.to_string(), "output 1: the script cannot be decoded");
+            assert_eq!(
+                extract_push_refs(&script, 5),
+                Err(SignatureHashError::UndecodableOutputScript { output_index: 5 })
+            );
+        }
+    }
+
+    #[test]
+    fn rxd_d5_disallowed_reference_that_is_also_pushed_is_fatal() {
+        for (first, second) in [(0xd2u8, 0xd0u8), (0xd0, 0xd2), (0xd2, 0xd8), (0xd8, 0xd2)] {
+            let mut script = push36(first, 0x11);
+            script.extend([0x76, 0xa9]);
+            script.extend(push36(second, 0x11));
+            let err = extract_push_refs(&script, 3).expect_err("conflict");
+            assert_eq!(err, SignatureHashError::DisallowedReferenceAlsoPushed {
+                output_index: 3
+            });
+            assert_eq!(
+                err.to_string(),
+                "output 3: a reference that the script disallows is also pushed by it"
+            );
+        }
+        let (_, signer) = signer_of(TX1);
+        let mut script = push36(0xd2, 0x11);
+        script.extend(push36(0xd0, 0x11));
+        let bad = with_output_script(&signer, 0, script);
+        assert_eq!(
+            rxd_hash(&bad, &TX1_INPUTS[0], 0x41),
+            Err(SignatureHashError::DisallowedReferenceAlsoPushed { output_index: 0 })
+        );
+    }
+
+    #[test]
+    fn rxd_d5_more_than_one_state_separator_is_fatal() {
+        for script in [vec![0xbd, 0xbd], vec![0xbd, 0x76, 0xa9, 0xbd], vec![
+            0xbd, 0x02, 0xbd, 0xbd, 0xbd,
+        ]] {
+            assert_eq!(
+                extract_push_refs(&script, 2),
+                Err(SignatureHashError::MultipleStateSeparators { output_index: 2 })
+            );
+        }
+        assert_eq!(
+            SignatureHashError::MultipleStateSeparators { output_index: 2 }.to_string(),
+            "output 2: the script has more than one state separator"
+        );
+        let (_, signer) = signer_of(TX1);
+        let bad = with_output_script(&signer, 1, vec![0xbd, 0xbd]);
+        assert_eq!(
+            rxd_hash(&bad, &TX1_INPUTS[0], 0x41),
+            Err(SignatureHashError::MultipleStateSeparators { output_index: 1 })
+        );
+    }
+
+    #[test]
+    fn rxd_d5_return_before_state_separator_is_fatal() {
+        // The script `OP_RETURN ... OP_STATESEPARATOR`; the last has a second separator after the first.
+        for script in [vec![0x6a, 0xbd], vec![0x6a, 0x01, 0xff, 0xbd], vec![0x6a, 0xbd, 0xbd]] {
+            assert_eq!(
+                extract_push_refs(&script, 4),
+                Err(SignatureHashError::ReturnBeforeStateSeparator { output_index: 4 })
+            );
+        }
+        assert_eq!(
+            SignatureHashError::ReturnBeforeStateSeparator { output_index: 4 }.to_string(),
+            "output 4: the script has OP_RETURN before a state separator"
+        );
+        let (_, signer) = signer_of(TX1);
+        let bad = with_output_script(&signer, 0, vec![0x6a, 0xbd]);
+        assert_eq!(
+            rxd_hash(&bad, &TX1_INPUTS[0], 0x41),
+            Err(SignatureHashError::ReturnBeforeStateSeparator { output_index: 0 })
+        );
+    }
+
+    #[test]
+    fn rxd_d5_valid_scripts_near_the_fatal_cases_are_accepted() {
+        let a = [0x11u8; 36];
+        let b = [0x22u8; 36];
+        let mut disallow_a_push_b = push36(0xd2, 0x11);
+        disallow_a_push_b.extend(push36(0xd0, 0x22));
+        let mut push_b_disallow_a = push36(0xd8, 0x22);
+        push_b_disallow_a.extend(push36(0xd2, 0x11));
+        // The other reference opcodes that name a reference do not conflict with a push of it.
+        let mut skipped_kinds = push36(0xd1, 0x11);
+        skipped_kinds.extend(push36(0xd3, 0x11));
+        skipped_kinds.extend(push36(0xd0, 0x11));
+        let cases: Vec<(Vec<u8>, Vec<[u8; 36]>)> = vec![
+            (vec![0xbd], vec![]),       // one separator
+            (vec![0xbd, 0x6a], vec![]), // OP_RETURN after the separator
+            (vec![0xbd, 0x6a, 0x02, 0xaa, 0xbb], vec![]),
+            (vec![0x6a], vec![]),                   // OP_RETURN alone
+            (vec![0x6a, 0x6a, 0x01, 0xff], vec![]), // two OP_RETURN, no separator
+            (vec![0x02, 0x6a, 0xbd], vec![]),       // the bytes are push data, not opcodes
+            (vec![0x4c, 0x02, 0xbd, 0xbd, 0x6a], vec![]),
+            (disallow_a_push_b, vec![b]), // a different reference than the disallowed one
+            (push_b_disallow_a, vec![b]),
+            (skipped_kinds, vec![a]),
+        ];
+        for (script, want) in cases {
+            let refs: Vec<_> = extract_push_refs(&script, 0)
+                .expect("valid script")
+                .into_iter()
+                .collect();
+            assert_eq!(refs, want, "script {:02x?}", script);
+        }
+        // ... and a transaction carrying such an output still has a digest.
+        let (_, signer) = signer_of(TX1);
+        let ok = with_output_script(&signer, 1, vec![0xbd, 0x6a]);
+        assert!(rxd_hash(&ok, &TX1_INPUTS[0], 0x41).is_ok());
+    }
+
+    #[test]
+    fn rxd_d5_first_case_in_byte_order_and_first_output_are_reported() {
+        let mut conflict_then_truncation = push36(0xd0, 0x11);
+        conflict_then_truncation.extend(push36(0xd2, 0x11));
+        conflict_then_truncation.push(0x4c);
+        for (script, want) in [
+            (vec![0xbd, 0xbd, 0x4c], SignatureHashError::MultipleStateSeparators {
+                output_index: 0,
+            }),
+            (vec![0x6a, 0xbd, 0xbd], SignatureHashError::ReturnBeforeStateSeparator {
+                output_index: 0,
+            }),
+            (
+                vec![0x4c, 0xff, 0xbd, 0xbd],
+                SignatureHashError::UndecodableOutputScript { output_index: 0 },
+            ),
+            (
+                conflict_then_truncation,
+                SignatureHashError::DisallowedReferenceAlsoPushed { output_index: 0 },
+            ),
+        ] {
+            assert_eq!(extract_push_refs(&script, 0), Err(want));
+        }
+        // Base all: the lowest-indexed offending output is named, whatever its case.
+        let (_, signer) = signer_of(TX1);
+        let both = with_output_script(&with_output_script(&signer, 1, vec![0xbd, 0xbd]), 0, vec![0x4c]);
+        assert_eq!(
+            rxd_hash(&both, &TX1_INPUTS[0], 0x41),
+            Err(SignatureHashError::UndecodableOutputScript { output_index: 0 })
+        );
+        let second = with_output_script(&signer, 1, vec![0xbd, 0xbd]);
+        assert_eq!(
+            rxd_hash(&second, &TX1_INPUTS[0], 0x41),
+            Err(SignatureHashError::MultipleStateSeparators { output_index: 1 })
+        );
+    }
+
+    #[test]
+    fn rxd_d5_outputs_out_of_scope_of_the_base_type_are_never_walked() {
+        let (_, signer) = signer_of(TX1);
+        assert_eq!(signer.outputs.len(), 2);
+        let bad_both = with_output_script(&with_output_script(&signer, 0, vec![0x4c]), 1, vec![0x6a, 0xbd]);
+        let bad_second = with_output_script(&signer, 1, vec![0x6a, 0xbd]);
+
+        // Base none walks no output: no error, and the digest does not depend on the outputs at all.
+        for raw in [0x42u32, 0xc2] {
+            for input in TX1_INPUTS {
+                let got = rxd_hash(&bad_both, input, raw).expect("base none");
+                assert_eq!(got, rxd_hash(&signer, input, raw).expect("base none"));
+            }
+        }
+        // Base single walks only the output at the input's index.
+        let ok = rxd_hash(&bad_second, &TX1_INPUTS[0], 0x43).expect("output 0 is the only one in scope");
+        assert_eq!(ok, rxd_hash(&signer, &TX1_INPUTS[0], 0x43).expect("single"));
+        assert_eq!(
+            rxd_hash(&bad_second, &TX1_INPUTS[1], 0x43),
+            Err(SignatureHashError::ReturnBeforeStateSeparator { output_index: 1 })
+        );
+        assert_eq!(
+            rxd_hash(&bad_both, &TX1_INPUTS[0], 0x43),
+            Err(SignatureHashError::UndecodableOutputScript { output_index: 0 })
+        );
+        // Base single with no output at the input's index is the sentinel, with no walk and no error.
+        let mut one_output = bad_both.clone();
+        one_output.outputs.truncate(1);
+        let sentinel: H256 = 1u8.into();
+        assert_eq!(rxd_hash(&one_output, &TX1_INPUTS[1], 0x43), Ok(sentinel));
+        // Base all walks every output.
+        assert!(rxd_hash(&bad_second, &TX1_INPUTS[0], 0x41).is_err());
+    }
+
+    #[test]
+    fn rxd_d5_other_dialects_hash_malformed_output_scripts_as_before() {
+        let (_, signer) = signer_of(TX1);
+        let i = &TX1_INPUTS[0];
+        let script = Script::from(i.prev_script);
+        for bad_script in [vec![0x4c], vec![0xbd, 0xbd], vec![0x6a, 0xbd]] {
+            let bad = with_output_script(&with_output_script(&signer, 0, bad_script.clone()), 1, bad_script);
+            let digest = |v, raw| {
+                bad.signature_hash(i.index, i.value, &script, v, raw)
+                    .expect("not Radiant")
+            };
+            // The fork-id form is the plain BIP-143 preimage, built here without field 8.
+            let plain = preimage_digest(&bad, i, None);
+            assert_eq!(digest(SignatureVersion::ForkId, 0x41), plain);
+            assert_eq!(digest(SignatureVersion::WitnessV0, 0x41), plain);
+            // The Radiant value without the fork-id bit is the base algorithm.
+            assert_eq!(
+                digest(SignatureVersion::ForkIdRxd, 0x01),
+                digest(SignatureVersion::Base, 0x01)
+            );
+            assert_ne!(digest(SignatureVersion::Base, 0x01), plain);
+            // The same digest as the transaction with well-formed outputs only where the outputs do not enter.
+            assert_eq!(
+                digest(SignatureVersion::ForkId, 0x42),
+                signer
+                    .signature_hash(i.index, i.value, &script, SignatureVersion::ForkId, 0x42)
+                    .expect("not Radiant")
+            );
+        }
     }
 
     #[test]
@@ -1196,23 +1555,38 @@ mod rxd_tests {
         let script = Script::from(i.prev_script);
         let sentinel: H256 = 1u8.into();
         for v in [SignatureVersion::ForkId, SignatureVersion::ForkIdRxd] {
-            assert_eq!(signer.signature_hash(7, i.value, &script, v, 0x41), sentinel);
+            assert_eq!(
+                signer
+                    .signature_hash(7, i.value, &script, v, 0x41)
+                    .expect("signature hash"),
+                sentinel
+            );
             let mut s = signer.clone();
             s.outputs.truncate(1);
-            assert_eq!(s.signature_hash(i.index, i.value, &script, v, 0x43), sentinel);
+            assert_eq!(
+                s.signature_hash(i.index, i.value, &script, v, 0x43)
+                    .expect("signature hash"),
+                sentinel
+            );
         }
         // Single with an in-range output index is not degenerate.
         assert_ne!(
-            signer.signature_hash(0, i.value, &script, SignatureVersion::ForkIdRxd, 0x43),
+            signer
+                .signature_hash(0, i.value, &script, SignatureVersion::ForkIdRxd, 0x43)
+                .expect("signature hash"),
             sentinel
         );
         signer.outputs.clear();
         assert_eq!(
-            signer.signature_hash(0, i.value, &script, SignatureVersion::ForkIdRxd, 0x43),
+            signer
+                .signature_hash(0, i.value, &script, SignatureVersion::ForkIdRxd, 0x43)
+                .expect("signature hash"),
             sentinel
         );
         assert_ne!(
-            signer.signature_hash(0, i.value, &script, SignatureVersion::ForkIdRxd, 0x41),
+            signer
+                .signature_hash(0, i.value, &script, SignatureVersion::ForkIdRxd, 0x41)
+                .expect("signature hash"),
             sentinel
         );
     }
@@ -1265,7 +1639,9 @@ mod suffix_tests {
     }
 
     fn t1_digest(suffix: u32, version: SignatureVersion, sighashtype: u32) -> H256 {
-        t1_signer(suffix).signature_hash(0, T1_AMOUNT, &Script::from(T1_SCRIPT_CODE), version, sighashtype)
+        t1_signer(suffix)
+            .signature_hash(0, T1_AMOUNT, &Script::from(T1_SCRIPT_CODE), version, sighashtype)
+            .expect("signature hash")
     }
 
     /// The signature and public key of T1's witness `[signature || type][pubkey]`; the signed
@@ -1349,7 +1725,9 @@ mod suffix_tests {
         let digest = |suffix: u32| {
             let mut signer = TransactionInputSigner::from_transaction(tx.clone(), suffix);
             signer.inputs[0].amount = T3_AMOUNT;
-            signer.signature_hash(0, T3_AMOUNT, &Script::from(T3_SCRIPT_CODE), SignatureVersion::Base, 1)
+            signer
+                .signature_hash(0, T3_AMOUNT, &Script::from(T3_SCRIPT_CODE), SignatureVersion::Base, 1)
+                .expect("signature hash")
         };
         let ordinary = digest(0);
         let suffixed = digest(BC2_SUFFIX);
@@ -1379,11 +1757,15 @@ mod suffix_tests {
             without_suffix.outputs.clear();
             let script = Script::from(T1_SCRIPT_CODE);
 
-            let got = with_suffix.signature_hash(0, T1_AMOUNT, &script, version, sighashtype);
+            let got = with_suffix
+                .signature_hash(0, T1_AMOUNT, &script, version, sighashtype)
+                .expect("signature hash");
             assert_eq!(got, expected_with_suffix(sighashtype), "{version:?}");
             assert_ne!(got, one, "{version:?}: the bare constant must not be returned");
 
-            let got = without_suffix.signature_hash(0, T1_AMOUNT, &script, version, sighashtype);
+            let got = without_suffix
+                .signature_hash(0, T1_AMOUNT, &script, version, sighashtype)
+                .expect("signature hash");
             assert_eq!(got, one, "{version:?}");
         }
     }
@@ -1402,7 +1784,9 @@ mod suffix_tests {
         signer.outputs.clear();
         let script = Script::from(T1_SCRIPT_CODE);
         assert_eq!(
-            signer.signature_hash(0, T1_AMOUNT, &script, SignatureVersion::Base, 3),
+            signer
+                .signature_hash(0, T1_AMOUNT, &script, SignatureVersion::Base, 3)
+                .expect("signature hash"),
             expected
         );
         // With a zero suffix the digest is the bare constant, again from literal bytes.
@@ -1410,7 +1794,9 @@ mod suffix_tests {
         constant[0] = 0x01;
         signer.sighash_suffix = 0;
         assert_eq!(
-            &signer.signature_hash(0, T1_AMOUNT, &script, SignatureVersion::Base, 3)[..],
+            &signer
+                .signature_hash(0, T1_AMOUNT, &script, SignatureVersion::Base, 3)
+                .expect("signature hash")[..],
             &constant[..]
         );
     }

@@ -701,3 +701,26 @@ its default limit is tested); the swap sends themselves (create-HTLC, claim, DEX
 than `Legacy`, and the receiver trade-fee estimate: covered through the fee computation they share; and the fixed
 50,000 gas units of a coin with no local key (the activated coin always has one). The warning-count assertions run
 only when the test owns the process logger.
+
+## Radiant signature hash: fail early on malformed output scripts (9 tests, one inverted)
+
+Location: eight tests in `mm2src/kdf_script/src/sign.rs` (names start with `rxd_d5_`) and one in
+`mm2src/coins/utxo_signer/src/with_key_pair.rs`. CRD: chapter 58, R58.3.3 (the four fatal cases), R58.3.2, T6 and D5.
+Run with `cargo test -p kdf_script --lib rxd_d5_` and `cargo test -p utxo_signer --lib rxd_d5_`. The truncation clause
+of `t6_reference_extraction` (same module) was removed: a truncated output script is now an error, asserted by the
+first test below; the positive cases of T6 are unchanged.
+
+| Test | CRD | What is tested |
+|---|---|---|
+| `rxd_d5_truncated_output_script_is_undecodable` | R58.3.3 case 1 | An operand that runs past the end, a cut-off push length and a reference opcode with fewer than 36 bytes behind it each give the undecodable error with the output index |
+| `rxd_d5_disallowed_reference_that_is_also_pushed_is_fatal` | R58.3.3 case 2 | A reference named by the disallow opcode and pushed by either push opcode gives the error, in either order |
+| `rxd_d5_more_than_one_state_separator_is_fatal` | R58.3.3 case 3 | Two state separators give the error |
+| `rxd_d5_return_before_state_separator_is_fatal` | R58.3.3 case 4 | A return before a state separator gives the error |
+| `rxd_d5_valid_scripts_near_the_fatal_cases_are_accepted` | R58.3.3 | One separator, a return after the separator, and a disallowed reference with a different pushed reference are not errors |
+| `rxd_d5_first_case_in_byte_order_and_first_output_are_reported` | R58.3.3 | With several faults the lowest output index is reported, and within one script the case met first in byte order |
+| `rxd_d5_outputs_out_of_scope_of_the_base_type_are_never_walked` | R58.3.2 | Base type none, base type single with an out-of-range input index, and the outputs other than the one at the input's index under single are never walked and never fail |
+| `rxd_d5_other_dialects_hash_malformed_output_scripts_as_before` | R58.2.3 | The fork-id, the legacy and the witness version-0 dialects return their ordinary digest for a malformed output script |
+| `rxd_d5_signing_a_malformed_radiant_output_returns_the_plain_error` | R58.3.3 | Signing a transaction with a malformed Radiant output returns the error with its plain text (output index and case, no script bytes); the plain fork-id dialect still signs the same transaction |
+
+Not covered: the raw-transaction signing request end to end (a lab row on the wire covers the text); the four swap
+functions that pass the error on (it cannot occur for the outputs they build).

@@ -251,6 +251,7 @@ where
             .note_pending_withdraw(&tx_bytes, spent_by_tx, signed.hash(), signed.outputs.clone());
         let tx_hex = tx_bytes.into();
         Ok(TransactionDetails {
+            unsigned: None,
             tx_json: None,
             from: vec![self.sender_address_string()],
             to: vec![req.to.clone()],
@@ -267,6 +268,7 @@ where
             timestamp: now_ms() / 1000,
             kmd_rewards: data.kmd_rewards,
             transaction_type: Default::default(),
+            memo: None,
         })
     }
 }

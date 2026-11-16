@@ -798,6 +798,7 @@ pub async fn tx_details_by_hash<T: UtxoCommonOps>(
     };
 
     Ok(TransactionDetails {
+        unsigned: None,
         tx_json: None,
         from: from_addresses,
         to: to_addresses,
@@ -814,6 +815,7 @@ pub async fn tx_details_by_hash<T: UtxoCommonOps>(
         timestamp: verbose_tx.time.into(),
         kmd_rewards,
         transaction_type: Default::default(),
+        memo: None,
     })
 }
 

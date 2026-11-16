@@ -882,6 +882,7 @@ pub(crate) fn build_evm_withdraw_details(
         spent_by_me += &fee_details.total_fee;
     }
     Ok(TransactionDetails {
+        unsigned: None,
         tx_json: None,
         to: vec![checksum_address(&format!("{:#02x}", plan.to_addr))],
         from: vec![from_checksum],
@@ -898,6 +899,7 @@ pub(crate) fn build_evm_withdraw_details(
         timestamp: now_ms() / 1000,
         kmd_rewards: None,
         transaction_type: Default::default(),
+        memo: None,
     })
 }
 
@@ -2044,6 +2046,7 @@ impl EthCoin {
                 };
 
                 let details = TransactionDetails {
+                    unsigned: None,
                     tx_json: None,
                     my_balance_change: &received_by_me - &spent_by_me,
                     spent_by_me,
@@ -2060,6 +2063,7 @@ impl EthCoin {
                     timestamp: block_ts,
                     kmd_rewards: None,
                     transaction_type: Default::default(),
+                    memo: None,
                 };
 
                 existing_history.push(details);
@@ -2439,6 +2443,7 @@ impl EthCoin {
                 };
 
                 let details = TransactionDetails {
+                    unsigned: None,
                     tx_json: None,
                     my_balance_change: &received_by_me - &spent_by_me,
                     spent_by_me,
@@ -2455,6 +2460,7 @@ impl EthCoin {
                     timestamp: block_ts,
                     kmd_rewards: None,
                     transaction_type: Default::default(),
+                    memo: None,
                 };
 
                 existing_history.push(details);

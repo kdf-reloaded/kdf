@@ -1,6 +1,6 @@
 # Plan: Tendermint activation features
 
-**Status:** parked (deferred by maintainer decision 2026-10-11; custom tokens and the HD `path_to_address` shipped in PR #319; the swap-path fixes and the priority fees in PRs #299 and #323; Tendermint swaps added to the 0.4.0 scope on 2026-11-08 and put aside again on 2026-11-10; the per-swap lock choice and the chain-refund path (CRD ch.18 D18.11.1–D18.11.3) not built) — **Last reviewed:** 2026-11-15
+**Status:** in progress (items 2, 3 and 5's refusal are done; item 4, transaction history, is built in PR #363 (0.5.0); the public-key form (item 1b) is built (0.5.0); open: the WalletConnect form (item 1a), item 6 (not in 0.5.0), the hardware signing package (item 7), the per-swap lock choice and the chain-refund path (CRD ch.18 D18.11.1–D18.11.3), and turning Tendermint swaps on again; deferred by maintainer decision 2026-10-11, custom tokens and the HD `path_to_address` shipped in PR #319, the swap-path fixes and the priority fees in PRs #299 and #323) — **Last reviewed:** 2026-11-16
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity`. That branch brings Tendermint activation to wire
@@ -30,7 +30,7 @@ Reloaded used to accept any `activation_params` and ignore it, so a request for
 a public-key (Ledger / watch-only) or WalletConnect activation silently
 activated with the local context key. A user who asked for a device-backed
 activation got a hot-key one without knowing. Until the features below land,
-Reloaded rejects a request that carries `activation_params` with
+Reloaded rejects a request that carries a WalletConnect `activation_params` (the public-key form is built, 2026-11-16, item 1b) with
 `PlatformCoinCreationError` (`{ticker, error}`, HTTP 500) -- the discriminant the
 reference uses for an unsupported signing context -- instead of activating with
 the local key. This is a deliberate, temporary divergence recorded in ch. 36
@@ -61,6 +61,22 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
      holds it and no construction site builds a coin with it, so a request cannot
      reach it. The WalletConnect form (item 1a) and the public-key form (item 1b)
      are the two remaining pieces of this item.
+   - *Item 1b built (2026-11-16, 0.5.0).* The public-key form activates a
+     watch-only coin: `TendermintActivationPolicy::PublicKey` holds the key and
+     the Ledger flag, the account is derived by the public SDK rule of the key
+     type (secp256k1 or ed25519, D36.17 (c)), and nothing is contacted at
+     activation. A malformed `activation_params` is now an `InvalidRequest`
+     parse failure at the request. `withdraw` and the staking requests answer
+     the unsigned documents of R36.14.17 (D36.18 (a)), with the Amino form and
+     the threefold fee under the Ledger flag; every path that would sign with a
+     node-held key is refused with `PrivKeyNotAllowed::WatchOnlyCoin`; orders
+     stay refused (R18.11.23a, D18.11.10 (a)). Lab row L4 (ATOM mainnet, any
+     funded address) is owed before READY. The WalletConnect forms stay
+     refused until item 1a.
+     The unsigned result follows CRD ch.36 §36.14.8 (R36.14.29 -- R36.14.32;
+     status note of 2026-11-16 there).
+     This tree has no IBC `withdraw`, so a watch-only coin cannot produce an
+     unsigned IBC document; that is a separate item (the IBC send route).
 2. **HD-wallet mode**: honor `path_to_address` under the coin's derivation path
    (R36.1.2, R36.1.4 step 3). The ch. 36 code-quality finding applies: derive
    the public key from the activated private key, not the wallet's root public
@@ -83,6 +99,35 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    token is marked custom and is wallet-only.
 4. **`tx_history: true`** starts background transaction-history fetching
    (Reloaded accepts the flag and does nothing).
+   *Built in PR #363 (0.5.0).* `tx_history: true` on the platform coin starts the
+   fetcher of CRD ch.36 R36.14.3; `my_tx_history` serves the platform coin and
+   its tokens from the platform's store (R36.14.1, R36.14.2). Decided
+   2026-11-15: the history state is `InProgress` during the first pass
+   (D36.10 (b)); the store is meant to be byte-compatible with the reference as R36.14.10
+   states it (D36.11 (a); unit-tested against the chapter's wording and checked in the lab
+   (TH-3, 2026-11-15 and 2026-11-16) with a reference build on the lab network as
+   the other writer, in both directions: a fresh store written by each program,
+   each program continuing the other's store, and a store written by an earlier
+   head backfilled and then listed by the other program, with the same rows,
+   identifiers and address-index entries; the other reference binary refuses
+   that network and was not run; the position counting follows the cleared
+   §36.14.6); amounts follow D36.12 (b); denominations resolve as at the
+   reference (D36.13 (a'): the platform `denom`, else the first coins-file entry
+   of any platform), and the store is read again from the chain when that lookup
+   changes (D36.21 (b)); the fee, the empty fee list and the staking events
+   without a delegator follow D36.19 (b) and D36.20 (b); no row for a
+   chain-side HTLC refund or a completed undelegation (D36.14), which stays a
+   planning question. Native builds only. Limitation: the history of a custom
+   token that is absent from the coins file does not exist in 0.5.0. A later
+   package, not scheduled: a Reloaded-side identifier scheme for transfers the
+   reference does not count (such custom-token transfers). *Address index for every store-served
+   family (built in PR #380, the follow-up to PR #363, 0.5.0).* The store's address index
+   is created and written for every coin the SQLite history store serves (BCH and
+   SLP tokens included; their listing is unchanged), and the BCH/SLP fetcher
+   prepares it at start; in PR #363 only Tendermint coins wrote it. Owed before the 0.5.0 beta
+   freeze: the SLP token store comparison against the reference writer. The BCH row (one transaction, fresh stores
+   of both programs, each listing the other's) was run on 2026-11-16 with equal results, and the
+   interrupted-first-pass leg of the TH-2 row on a local chain passed in the lab on 2026-11-16.
 5. **Hardware `priv_key_policy`.** The reference ignores `priv_key_policy` for
    Tendermint, so `"Trezor"` silently activates with the context key (ch. 36
    code-quality finding).
@@ -105,9 +150,9 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
 
 ## Order
 
-Items 2 and 3 are done. The remaining order: history (item 4) first, then
-WalletConnect (item 1a) and the public-key form (item 1b), then item 5's future
-package (item 7). Item 6 is not in 0.5.0.
+Items 2 and 3 are done, item 4 is built (PR #363) and item 1b, the public-key
+form, is built (0.5.0). The remaining order: WalletConnect (item 1a), then item
+5's future package (item 7). Item 6 is not in 0.5.0.
 
 ## Lab rows owed before swaps are switched on
 
@@ -188,6 +233,14 @@ builds a Tendermint activation policy, and it always builds
 (`mm2src/coins/tendermint/tendermint_coin.rs:174` and `192`). Nothing can hand
 Tendermint `PrivKeyPolicy::Trezor` today. The hazard goes live the moment item 1
 or item 5 adds a second policy variant or a second construction site.
+
+*Update (2026-11-16, item 1b).* The second policy variant now exists:
+`TendermintActivationPolicy::PublicKey` (a watch-only coin). It holds no local
+key, so the wallet-only predicate refuses its orders (`has_local_key` is false for
+it), a token uses its platform coin's policy, `get_htlc_key_pair` answers `None`,
+and every swap send, claim, refund, message-signing and private-key path refuses
+with `PrivKeyNotAllowed::WatchOnlyCoin` before any node is asked. The gate
+described below stands unchanged; only the order-time refusal is relied on.
 
 **Not covered by the existing early-refusal duties.** Ch. 22 RP11.1 binds the
 swap-protocol-v2 HTLC paths and the watcher-message paths; ch. 47 R47.5.13a

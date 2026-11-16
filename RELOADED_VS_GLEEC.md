@@ -272,6 +272,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 
 - **Order-management methods under `mmrpc: "2.0"`.** `setprice`, `update_maker_order`, `cancel_order`, `cancel_all_orders`, `my_orders` and `order_status` are legacy-only in GLEEC KDF: a versioned request answers `NoSuchMethod`. KDF Reloaded also routes them on the versioned surface, with the legacy members inside `params`, the legacy result under `result`, typed errors with HTTP statuses, and unknown `params` members ignored. The legacy forms and their success bodies are unchanged; a legacy error text no longer carries the inner `file:line]` trace tokens. Additive; no switch. Plan: [`docs/plans/mmrpc-v2-completion.md`](docs/plans/mmrpc-v2-completion.md); CRD ch.43 D43.1A.1 status note.
 - **Trading methods under `mmrpc: "2.0"`.** `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter` are legacy-only in GLEEC KDF. KDF Reloaded also routes them on the versioned surface in the same way as the order-management methods above (legacy members inside `params`, legacy result under `result`, typed errors with HTTP statuses, unknown `params` members ignored; legacy forms and success bodies unchanged). `get_trade_fee` stays legacy-only, as the reference documentation marks it deprecated in favor of the versioned `trade_preimage`. Additive; no switch. CRD ch.43 §43.1R.
+- **Wallet and coin methods under `mmrpc: "2.0"`.** `my_balance`, `disable_coin`, `send_raw_transaction`, `validateaddress`, `convertaddress`, `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`, `set_required_confirmations` and `set_requires_notarization` are legacy-only in GLEEC KDF. KDF Reloaded also routes them on the versioned surface as above; their typed errors follow the documented statuses of the versioned `withdraw` (an unknown coin answers 404, a transport failure 502; KDF Reloaded's own `withdraw` answers a transport failure with 500 today, a difference recorded for a later alignment), and `disable_coin` reports the blocking swaps or orders inside `error_data`. Legacy forms and success bodies unchanged. Additive; no switch. CRD ch.43 §43.1R.
 - **Withdraw with an omitted HD `from`.** For an HD-mode UTXO wallet, `withdraw` and `task::withdraw` with no `from` sender spend from the coin's activated address, the address at `path_to_address` (by default account 0, external chain, index 0), instead of failing. GLEEC KDF rejects an omitted `from` with `FromAddressNotFound`. This makes the shipped Komodo DeFi wallet's withdraw-preview flow (which omits `from`) work against a reloaded node; the maintainer kept it deliberately on 2026-11-04, set the address on 2026-11-06, and no switch is planned. An explicit but invalid `from` is still rejected (`UnknownAccount` / `UnexpectedFromAddress`) on both methods. Until plan [`hd-key-unification`](docs/plans/hd-key-unification.md) item H5 (PR #270), the fallback was always account 0, external chain, index 0, and the direct `withdraw` method refused an HD UTXO wallet. Code: `coins/utxo/utxo_common/utxo_common_hd.rs` (`get_withdraw_hd_sender`), `utxo_withdraw.rs` (`resolve_withdraw_sender`), `utxo_common_helpers.rs` (`withdraw_with_hd_sender`, `validate_task_withdraw_sender`).
 - **An HD account number already in use.** `task::create_new_account` with an `account_id` that the wallet already holds ends the task with `AccountAlreadyExists` (with the `account_id`) before any key is derived; `task::create_new_account::status` reports it. GLEEC KDF derives the key first and then reports an internal error. Only a client that asks for an existing account sees the difference. The same task also serves Siacoin, which GLEEC KDF does not offer HD accounts for; that is a Reloaded extension (the maintainer's decision of 2026-11-04). Plan [`hd-key-unification`](docs/plans/hd-key-unification.md) item H5.4 (PR #279); CRD ch.05 R35c. Code: `coins/hd_wallet.rs` (`choose_new_account_id`), `coins/rpc_command/init_create_account.rs`.
 - **`get_my_address` while a Trezor is initialized.** For an EVM coin that is not activated, KDF Reloaded derives the reported address from the login's key, also when a Trezor context exists. GLEEC KDF derives it from the device whenever a Trezor context exists. As on GLEEC KDF, each coin takes its keys and stores its accounts by its own key policy, and only a coin activated for the Trezor is refused key export. Two points still differ: a new address of a coin activated for the Trezor is not confirmed on the device, and the BCH activation task refuses the Trezor policy (CRD ch.05 §5.10B). Batch 4 item B4-2 (PR #293); CRD ch.05 §5.10B R57 and D7.e.
@@ -630,6 +631,42 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   with the local key. An absent value, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
   as the WalletConnect form (not built yet), fails request parsing with `InvalidRequest` (HTTP 400). No switch exists.
   CRD ch.36 §36.7. PR #358.
+- **A Tendermint coin activated from a public key is watch-only, and its orders are refused.** The `WithPubkey` form
+  of `activation_params` builds a coin that holds no private key: it answers `withdraw` and the staking requests with
+  an unsigned document for the caller's own wallet (a `sign_doc`, or with `is_ledger_connection: true` the Amino form
+  with three times the fee for the coin, not for a token), as GLEEC KDF does, and refuses every signing path with `PrivKeyNotAllowed::WatchOnlyCoin`.
+  Where it differs: GLEEC KDF accepts orders for such a coin when the Ledger flag is off; KDF Reloaded refuses them for
+  both forms (CRD ch.18 R18.11.23a), because it would announce a key the coin cannot sign with. An `ed25519` key gets
+  the account of the public Cosmos SDK rule for that key type, where GLEEC KDF applies the secp256k1 rule to it. A
+  malformed key is `InvalidRequest`, where GLEEC KDF aborts the request. No switch exists. CRD ch.36 §36.14.3, D36.17,
+  D36.18; ch.18 D18.11.10. PR #382.
+- **A Tendermint coin's transaction history differs from GLEEC KDF in three ways.** (1) While the first read of the
+  chain runs, the history state is `InProgress` (with `{"transactions_left": n}`); GLEEC KDF reports `NotStarted`
+  until the first read ends (§36.14.1 R36.14.11), and a failed first balance read ends its fetcher silently where KDF
+  Reloaded retries it (§36.14.1 finding 4).
+  (2) A fee-only transaction counts its fee once (GLEEC KDF counts it twice), a reward claim counts the fee it cost
+  (GLEEC KDF leaves it out), a transaction that touches several validators gets one row per validator (GLEEC KDF one
+  row) (all three: §36.14.1 finding 5), and `tx_hex` holds the signed transaction (GLEEC KDF the first message, which
+  cannot be broadcast; D36.12). (3) A denomination resolves as at GLEEC KDF (§36.14.1 finding 7): the platform's `denom`
+  exactly, otherwise the first coins-file entry with that denomination whatever its platform, so a coins-file token
+  of another platform is counted and shown under the entry's ticker (the activated token's ticker when one is
+  activated); a custom token absent from the coins file is not counted and has no history in 0.5.0. When what the
+  coins file resolves changes, the history store of the platform coin is read again from the chain. A fee that is
+  not one coin of the platform denom enters no amount (the platform entry is read wherever it stands in the fee
+  list), and a transaction with an empty fee list, and a staking event without a `delegator` attribute when the
+  transaction has exactly one staking message of that kind, get rows, where GLEEC KDF writes none; for these
+  transactions amounts and rows can differ from GLEEC KDF's (§36.14.6 D36.19, D36.20). The row identifier and the stored form
+  are meant to be the same as GLEEC KDF's (the position counting follows the cleared §36.14.6; checked in the lab on 2026-11-15 and 2026-11-16 with the Komodo DeFi Framework 2.6.0-beta reference build as the other writer, in both directions: the same rows, identifiers and address-index entries from a fresh store written by either program, from each program continuing the other's store, and from a store written by an earlier head and backfilled; GLEEC KDF 3.0.0-beta (it refuses the lab network) was not run), so a data directory can move between
+  the two (§36.14.1 findings 1 and 2). No switch exists. Native builds only. CRD ch.36
+  §36.14.1 (D36.10, D36.11, D36.12, D36.13, D36.19, D36.20, D36.21). A history database is per coin and shared
+  by every account activated on it, so rows of an earlier account stay and are listed under their own addresses,
+  as at GLEEC KDF (D36.23). A transaction whose block time no node gives is read again by the next pass
+  (D36.24; GLEEC KDF leaves it out of that pass). PR #363.
+  The table of addresses that GLEEC KDF needs in order to list a history row is written for every coin the SQLite history
+  store serves (BCH and SLP tokens too), not for Tendermint coins only, and the BCH/SLP fetcher prepares it at start
+  (rows stored earlier get their entries, entries without a row are removed); the listing of BCH and SLP tokens is
+  unchanged. CRD ch.36 R36.14.23 -- R36.14.26. PR #380. A comparison of a BCH store (one transaction) with the one the Komodo DeFi Framework 2.6.0-beta build writes was run on
+  2026-11-16 with equal results; an SLP token store is still to be compared.
 - **Tendermint (Cosmos) coins and tokens are wallet-only in this beta.**
   Activation, balances and `withdraw` work; `setprice`, `buy`, `sell` and
   `start_swap` refuse the coin with the usual "… is wallet only" answer, and an

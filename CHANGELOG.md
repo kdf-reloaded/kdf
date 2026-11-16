@@ -44,6 +44,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   legacy forms and success bodies unchanged, legacy error texts as for the order-management methods (no inner
   trace tokens). `get_trade_fee` stays legacy-only: the reference documentation marks it
   deprecated in favor of the versioned `trade_preimage`. Detail: PR #372; CRD ch.43 §43.1R.
+- **The wallet and coin methods `my_balance`, `disable_coin`, `send_raw_transaction`, `validateaddress`,
+  `convertaddress`, `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
+  `set_required_confirmations` and `set_requires_notarization` accept `mmrpc: "2.0"` requests**, in the same
+  way as the order and trading methods above. Their typed errors follow the documented statuses of the versioned
+  `withdraw`: an unknown coin answers `NoSuchCoin` with HTTP 404, a node or network failure `Transport` with 502, a request the client
+  got wrong 400. `disable_coin` names the swaps or orders that block the deactivation inside `error_data`.
+  Legacy forms and success bodies unchanged, legacy error texts as above (no inner trace tokens). Detail:
+  PR #379; CRD ch.43 §43.1R.
 
 #### Solana coins
 
@@ -54,7 +62,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   activation reports a protocol parse error. Solana stays switched off in this build, so no Solana
   coin can be activated yet. Detail: PR #361; CRD ch.40 R40.1.2, R40.1.3.
 
+#### Tendermint (Cosmos) coins
+
+- **A Tendermint coin now has a transaction history.** `tx_history: true` on a Tendermint platform
+  coin starts reading the account's transactions from a node in the background, and `my_tx_history`
+  (the mmrpc-2.0 method) lists them for the coin and for its tokens: plain sends, token sends,
+  IBC transfers, HTLC creations and claims, delegations, undelegations and reward claims, each with
+  its amounts, fee and memo, and the fee of a token send as a row of the platform coin. While the
+  first read of the chain runs, the history state is `InProgress` with the number of transactions
+  left; it is `Finished` afterwards. A fee-only transaction counts its fee once, a reward claim
+  counts the fee it cost, a transaction touching several validators gets one row per validator, and
+  `tx_hex` is the signed transaction. The history of a refunded HTLC or a completed undelegation has
+  no row, because the chain records no transaction for them. The history of a custom token that is
+  not in the coins file is absent in 0.5.0. A history store written by this node is listed by the other
+  implementation too (checked against a reference release build on 2026-11-15); in this change only
+  Tendermint coins write the index that makes this work. A history database is per coin and shared by
+  every account activated on it, so rows of an earlier account stay and are listed under their own
+  addresses (a known property of the shared database, the same as at GLEEC KDF). A transaction whose
+  block time no node can give is read again by the next pass. Native only in 0.5.0: the
+  browser build has no versioned history store for any coin family. Detail: PR #363;
+  CRD ch.36 §36.14.1; §36.14.7.
+- **A Tendermint coin can be activated from a public key (watch-only).** `activation_params` of
+  `enable_tendermint_with_assets` (and the task form) now accepts `{"type": "WithPubkey", "params":
+  {"pubkey": {"type": "secp256k1" | "ed25519", "value": [bytes]}, "is_ledger_connection": bool}}`. The
+  coin's address is the account of that key (an `ed25519` key by the public Cosmos SDK rule for that
+  key type), and nothing is asked of a node or a wallet at activation. Such a coin holds no private
+  key: balances, the address and the history work as for any coin; `withdraw` and the delegation,
+  undelegation and reward-claim requests do not sign or send anything but answer an unsigned
+  document for the caller's own wallet to sign (no `tx_hex` and no `tx_hash`; a `sign_doc` with
+  `body_bytes`, `auth_info_bytes`, `chain_id` and `account_number`). With `is_ledger_connection: true`
+  a `withdraw` answers the Amino form instead (`legacy_amino_json` and `original_tx_type_url`) with
+  three times the computed fee (for the coin, not for a token), and the staking requests fail. A `memo` in the `withdraw` request is carried in the transaction: `memo` is now a typed member of every withdraw request: a `memo` that is not a string is refused as a malformed request for every coin (it was ignored before); only Tendermint coins and tokens read it. Placing an order with the coin or one
+  of its tokens, message signing, private-key display, and every swap payment, claim and refund are
+  refused (`PrivKeyNotAllowed::WatchOnlyCoin`). A malformed `activation_params` now fails request
+  parsing with `InvalidRequest`; the WalletConnect forms are still refused. Detail: PR #382; CRD ch.36
+  §36.14.3.
+
 ### Changed
+
+#### Shielded coins
+
+- **The shielded coin's library stack now also builds with Orchard scanning enabled; no behavior
+  change.** The way the transaction builder is asked for an output-only Ironwood bundle no longer
+  changes a public type that the Zcash wallet library constructs itself, which kept that library from
+  compiling with its Orchard feature on. Transactions are built exactly as before.
+  Detail: PR #375; CRD ch.39 status note of 2026-11-15, ch.34 ledger entry of 2026-11-15.
 
 #### Tendermint (Cosmos) coins
 
@@ -76,6 +128,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   platform always counts 9 decimals; a `decimals` value in its coins entry is ignored, and a token
   takes its decimals from `protocol_data` only. Solana stays switched off in this build. Detail:
   PR #371; CRD ch.40 §40.3A, R40.6B.2.
+
+#### UTXO coins and Electrum
+
+- **Signing a Radiant (RXD) transaction with a malformed output script now fails with an error.** Radiant's
+  signature hash is undefined for an output script that cannot be decoded, that pushes a reference it also
+  disallows, that holds more than one state separator, or that has a return before a state separator. The
+  raw-transaction signing request used to sign such a transaction anyway, and Radiant rejected it. It now
+  answers with a signing error that names the output index and the case. Withdrawals and swaps never build
+  such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
 
 ### Fixed
 
@@ -104,6 +165,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   for a coin without a block time in its coins entry). A server that keeps sending notifications
   without reaching that block now counts as stuck too. A coin with a single connected server keeps
   the old rule. Detail: PR #378; CRD ch.38 R38.6.4o item 4.
+
+#### Transaction history
+
+- **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is
+  served from the store (BCH and SLP tokens, and now Tendermint coins), the versioned method
+  reported the page size as `total`, and a request with `from_id` could return an empty page; it now
+  returns the store's total, the right `skipped` count and `total_pages`. Detail: PR #363; CRD ch.53
+  R53.2.4, R53.2.8.
+- **A history store written by this node is now listed by the other implementation for every coin
+  the store serves (as the cleared rule states; checked in the lab for Tendermint stores and for a one-transaction BCH store, not yet for SLP tokens).** The SQLite history store keeps, beside the history rows, a small table of the
+  addresses each row concerns, and the other implementation lists only the rows that have entries
+  there. Until now this node wrote that table for Tendermint coins only, so a BCH or SLP-token
+  history database it had written was listed empty (or incomplete) when the same database was
+  opened by the other implementation. The table is now created and filled for every coin that
+  opens the store, rows already stored are given their entries when the BCH/SLP fetcher starts, and
+  entries whose row is gone are removed. The listing of BCH and SLP tokens, and every stored row,
+  are unchanged. The SLP token rows rest on unit tests; no live SLP row is run, because the coins file
+  the lab uses has no SLP token entry; the live store comparison covers BCH alone. Detail: PR #380;
+  CRD ch.36 R36.14.23 -- R36.14.26.
 
 #### QTUM and QRC20
 
@@ -154,13 +234,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   smaller items — in order of cost, and the limits a browser has by nature, also listed in
   `docs/WASM_BUILD.md`.
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
-  management) implemented in PR #359, phase 2 (trading) in PR #372; decisions D1–D10 recorded; phases 3–5 open.
+  management) implemented in PR #359, phase 2 (trading) in PR #372, phase 3 (wallet and coins) in PR #379;
+  decisions D1–D10 recorded; phases 4–5 open.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress (was parked):
   checked against the code on 2026-11-15: phases A–F not started; the state found and the order of the work packages are in its
   new section "State check (2026-11-15)".
 - [`rpc-error-redesign`](docs/plans/rpc-error-redesign.md) — new, planning, no schedule: one error vocabulary
   (token spelling, payload kind, HTTP status) for the whole versioned RPC surface, with a compatibility period;
   ordered 2026-11-15, written in PR #359.
+- [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — done: it records that the
+  stricter signing of malformed output scripts (step 8) is done and that the plan has no open step left.
 - [`shielded-coins-in-browser`](docs/plans/shielded-coins-in-browser.md) — new, planning: work packages to
   activate shielded coins (ARRR) in the browser build — the wallet database on the SQLite route, one
   parameter source for both targets, the gRPC-web transport, Worker hosting of wallet and prover, swaps
@@ -172,6 +255,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   packages S0 and S2 done in PR #361, S1 in PR #371.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
+- [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
+  Tendermint transaction history, is built in PR #363; its address index now covers every
+  store-served coin family (PR #380).
 
 ## [0.4.0-beta.1] — 2026-11-14
 

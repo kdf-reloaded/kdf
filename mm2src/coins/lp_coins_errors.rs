@@ -139,6 +139,10 @@ pub enum TxHistoryError {
 pub enum PrivKeyNotAllowed {
     #[display(fmt = "Hardware Wallet is not supported")]
     HardwareWalletNotSupported,
+    /// The coin was activated by a public key (watch-only, CRD ch.36 R36.14.16 -- R36.14.18) and holds no key this
+    /// node signs with, so every path that would sign is refused with this error.
+    #[display(fmt = "The coin is watch-only and holds no signing key")]
+    WatchOnlyCoin,
 }
 #[derive(Debug, Display, PartialEq, Serialize)]
 pub enum UnexpectedDerivationMethod {
