@@ -91,12 +91,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   start of `task::withdraw::init` answer the error `Transport` (a node or server that does not answer, or answers
   unusably) with status 502, as the reference does; the token and the body are unchanged. A client that treats
   `withdraw` failures by status class now sees a network fault as 5xx gateway class rather than a server error.
-  Detail: PR #TBD; CRD ch.43 R43.1D.2, ch.49 status note.
+  Detail: PR #386; CRD ch.43 R43.1D.2, ch.49 status note.
 - **A refused legacy `disable_coin` always carries the lists a client may read.** When running swaps or orders
   being matched block the deactivation, or the coin is not active, the error body carries `orders` (with
   `matching` and `cancelled`), `active_swaps` and `swaps` (the same list as `active_swaps`), all present and
   empty where nothing applies; before, each refusal carried one of them or none. The error text, HTTP 500 and the
-  cancel-first behavior are unchanged. Detail: PR #TBD; CRD ch.43 R43.1E.3, D43.1E.1 status note.
+  cancel-first behavior are unchanged. Detail: PR #386; CRD ch.43 R43.1E.3, D43.1E.1 status note.
 - **Hardware-wallet failures of `withdraw` answer the one error `HwError`.** The versioned `withdraw`, `withdraw_nft`
   and the start of `task::withdraw::init` no longer answer `TrezorDisconnected`, `NoTrezorDeviceAvailable`,
   `FoundUnexpectedDevice` or `HardwareWalletInternal`. A device condition answers `error_type` `HwError` with
@@ -105,12 +105,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `UserCancelled`, `InvalidSignature`, ...), so a client handles hardware failures of every method alike. A
   connection timeout answers `Timeout` (408). Device failures that have no such word (transport, protocol,
   invalid key data, internal) answer `InternalError` with HTTP 500, as before under the removed name. Detail:
-  PR #TBD; CRD ch.50 R50.17 status note, ch.43 R43.1D.2, ch.55 R55.2.17.
+  PR #386; CRD ch.50 R50.17 status note, ch.43 R43.1D.2, ch.55 R55.2.17.
 - **The HD account methods answer hardware-wallet failures as `HwError` too.** `task::create_new_account` and the
   other HD account methods no longer answer `TrezorDisconnected`, `NoTrezorDeviceAvailable`, `FoundUnexpectedDevice`
   or `HardwareWalletInternal`; a device condition answers `HwError` (410) with the same words as above, and a
   device that does not answer in time answers `Timeout` with HTTP 408 instead of 500. Device failures without a word
-  answer `Internal` (500). Detail: PR #TBD; CRD ch.05 §5.9B R35c.
+  answer `Internal` (500). Detail: PR #386; CRD ch.05 §5.9B R35c.
 
 #### Shielded coins
 
