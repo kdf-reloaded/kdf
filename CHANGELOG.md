@@ -225,7 +225,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   constraint error, an NFT store test that reads back nothing, and a WebSocket test of `mm2_net`
   that expects an error for an invalid address. The hanging test stops the whole run, so it has to be skipped with
   `-- --skip`. The failures are listed in `docs/DEV_ENVIRONMENT.md` and are not fixed here.
-  No CI job runs the browser tests yet. Detail: PR #N.
+  No CI job runs the browser tests yet. Detail: PR #388.
 - **The Tendermint unit tests of `coins` now run in CI.** A new CI job runs the Tendermint swap-flow,
   priority-fee and WalletConnect signer tests and the postponed-family switch tests; the loopback
   tests of the native RPC server join the maker-outbox job.
