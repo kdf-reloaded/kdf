@@ -113,7 +113,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   disallows, that holds more than one state separator, or that has a return before a state separator. The
   raw-transaction signing request used to sign such a transaction anyway, and Radiant rejected it. It now
   answers with a signing error that names the output index and the case. Withdrawals and swaps never build
-  such outputs and are not affected, and no other coin is affected. Detail: PR #TBD; CRD ch.58 R58.3.3, D5.
+  such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
 
 ### Fixed
 
