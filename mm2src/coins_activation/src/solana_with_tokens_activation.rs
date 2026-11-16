@@ -1,5 +1,5 @@
 use crate::platform_coin_with_tokens::{enable_platform_coin_with_tokens, EnablePlatformCoinWithTokensError,
-                                       EnablePlatformCoinWithTokensReq, GetPlatformBalance, InitTokensAsMmCoinsError,
+                                       EnablePlatformCoinWithTokensReq, GetPlatformBalance,
                                        PlatformWithTokensActivationOps, RegisterTokenInfo, TokenActivationParams,
                                        TokenActivationRequest, TokenAsMmCoinInitializer, TokenInitializer, TokenOf};
 use crate::prelude::*;
@@ -8,9 +8,10 @@ use crate::spl_token_activation::SplActivationRequest;
 use async_trait::async_trait;
 use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
-use coins::solana::spl::{SplProtocolConf, SplTokenCreationError};
-use coins::{solana_coin_from_conf_and_params, BalanceError, CoinBalance, CoinProtocol, MarketCoinOps,
-            SolanaActivationParams, SolanaCoin, SplToken, SOLANA_ACTIVATION_AVAILABLE, SOLANA_NOT_AVAILABLE};
+use coins::node_url::scrub_urls_in_text;
+use coins::solana::spl::SplProtocolConf;
+use coins::{solana_coin_from_conf_and_params, CoinBalance, CoinProtocol, MarketCoinOps, SolanaActivationParams,
+            SolanaCoin, SplToken, SOLANA_ACTIVATION_AVAILABLE, SOLANA_NOT_AVAILABLE};
 use common::mm_number::BigDecimal;
 use common::Future01CompatExt;
 use futures::future::AbortHandle;
@@ -53,7 +54,8 @@ impl TokenInitializer for SplTokenInitializer {
     type Token = SplToken;
     type TokenActivationRequest = SplActivationRequest;
     type TokenProtocol = SplProtocolConf;
-    type InitTokensError = SplTokenCreationError;
+    /// Initialising a token reads no node and cannot fail: its key is parsed with its protocol.
+    type InitTokensError = std::convert::Infallible;
 
     fn tokens_requests_from_platform_request(
         platform_params: &SolanaWithTokensActivationRequest,
@@ -76,7 +78,7 @@ impl TokenInitializer for SplTokenInitializer {
                     self.platform_coin.clone(),
                 )
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
         Ok(tokens)
     }
 
@@ -123,7 +125,6 @@ impl CurrentBlock for SolanaWithTokensActivationResult {
 pub enum SolanaWithTokensActivationError {
     PlatformCoinCreationError { ticker: String, error: String },
     UnableToRetrieveMyAddress(String),
-    GetBalanceError(BalanceError),
     Transport(String),
     Internal(String),
 }
@@ -137,17 +138,10 @@ impl From<SolanaWithTokensActivationError> for EnablePlatformCoinWithTokensError
             SolanaWithTokensActivationError::UnableToRetrieveMyAddress(e) => {
                 EnablePlatformCoinWithTokensError::Internal(e)
             },
-            SolanaWithTokensActivationError::GetBalanceError(e) => {
-                EnablePlatformCoinWithTokensError::Internal(format!("{:?}", e))
-            },
             SolanaWithTokensActivationError::Transport(e) => EnablePlatformCoinWithTokensError::Transport(e),
             SolanaWithTokensActivationError::Internal(e) => EnablePlatformCoinWithTokensError::Internal(e),
         }
     }
-}
-
-impl From<BalanceError> for SolanaWithTokensActivationError {
-    fn from(e: BalanceError) -> Self { SolanaWithTokensActivationError::GetBalanceError(e) }
 }
 
 pub struct SolanaProtocolInfo {}
@@ -160,14 +154,6 @@ impl TryFromCoinProtocol for SolanaProtocolInfo {
         match proto {
             CoinProtocol::SOLANA => Ok(SolanaProtocolInfo {}),
             protocol => MmError::err(protocol),
-        }
-    }
-}
-
-impl From<SplTokenCreationError> for InitTokensAsMmCoinsError {
-    fn from(error: SplTokenCreationError) -> Self {
-        match error {
-            SplTokenCreationError::InvalidPubkey(e) => InitTokensAsMmCoinsError::InvalidPubkey(e),
         }
     }
 }
@@ -222,20 +208,25 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         let my_address = self
             .my_address()
             .map_to_mm(Self::ActivationError::UnableToRetrieveMyAddress)?;
-        let current_block = self
-            .current_block()
-            .compat()
-            .await
-            .map_to_mm(Self::ActivationError::Internal)?;
+        // A failure to read the block height, the SOL balance or a token balance is reported as a platform coin
+        // creation error naming the platform ticker (CRD ch.40 R40.2.4); a node is named host-only in its text.
+        let read_failure = |error: String| SolanaWithTokensActivationError::PlatformCoinCreationError {
+            ticker: self.ticker().to_owned(),
+            error: scrub_urls_in_text(&error),
+        };
+        let current_block = self.current_block().compat().await.map_to_mm(read_failure)?;
         let solana_balance = self
             .my_balance()
             .compat()
             .await
-            .map_err(|e| Self::ActivationError::GetBalanceError(e.into_inner()))?;
+            .map_err(|e| read_failure(e.into_inner().to_string()))?;
         let mut token_balances = HashMap::new();
         let token_infos = self.get_spl_tokens_infos();
         for (token_ticker, info) in token_infos.into_iter() {
-            let balance = self.my_balance_spl(&info.clone()).await.mm_err(Into::into)?;
+            let balance = self
+                .my_balance_spl(&info.clone())
+                .await
+                .map_err(|e| read_failure(e.into_inner().to_string()))?;
             token_balances.insert(token_ticker.to_owned(), balance);
         }
         let mut result = SolanaWithTokensActivationResult {

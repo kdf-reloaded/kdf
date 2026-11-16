@@ -7,6 +7,8 @@
 //! gathers the figures, calls these and acts on the result. Every random choice takes a [`Draw`], a source of numbers in `[0, 1)`, so tests
 //! inject the draw instead of seeding a generator.
 
+use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::time::Duration;
 
 /// A source of uniform numbers in `[0, 1)`.
@@ -34,6 +36,12 @@ const TOLERANCE_WINDOW_SECS: f64 = 180.;
 const TOLERANCE_MAX_BLOCKS: u64 = 20;
 /// P1 with one maintained connection: the limit is this many block intervals (item 6).
 const STALE_BLOCK_INTERVALS: u32 = 3;
+/// The stuck period of a connection among several is this many block intervals, at least the floor (R38.6.4o item 4,
+/// amendment of 2026-11-15).
+const STUCK_BLOCK_INTERVALS: u32 = 2;
+/// The most heights the record of first reports holds (R38.6.4o item 4, amendment of 2026-11-15): a safety net above
+/// the bound of `2 * tolerance + 1` (at most 41) that the pruning keeps. The lowest are dropped first.
+pub(super) const MAX_FIRST_REPORTS: usize = 64;
 /// P2: the smoothed latency is slow above this many times the connection's own reference latency ...
 const SLOW_OWN_FACTOR: f64 = 4.;
 /// ... and above this many times the best latency of the activation round (item 6).
@@ -130,8 +138,9 @@ pub(super) enum OutOfDate {
     Behind { lag: u64, tip: u64 },
     /// Its lead over the running agreed tip is more than the tolerance (D38.6.4o.9).
     Ahead { lead: u64, tip: u64 },
-    /// It sent no header notification for longer than the stuck period while another connection did.
-    Stuck { silent_secs: f64 },
+    /// Another connection reported `height`, the lowest height above its own, longer than the stuck period ago
+    /// (`reported_secs`).
+    Stuck { height: u64, reported_secs: f64 },
 }
 
 /// The state of an out-of-date connection without its figures: what a change of state compares.
@@ -163,61 +172,107 @@ impl OutOfDateKind {
     }
 }
 
-/// What the out-of-date judgment knows of one maintained connection that has a height (R38.6.4o items 3 and 4).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct TipFigure {
-    pub height: u64,
-    /// When the answer to its header request arrived or its last notification, whichever is later (seconds since the
-    /// epoch).
-    pub since: f64,
-    /// When its last header notification arrived, if one has.
-    pub notified_at: Option<f64>,
+/// The stuck period of a connection among several maintained connections (R38.6.4o item 4, amendment of
+/// 2026-11-15): the larger of 2 block intervals and `floor` (180 s). Without a block interval, `no_interval`
+/// (10 minutes).
+pub(super) fn stuck_period(block_interval: Option<Duration>, floor: Duration, no_interval: Duration) -> Duration {
+    block_interval.map_or(no_interval, |interval| (interval * STUCK_BLOCK_INTERVALS).max(floor))
 }
 
-/// The out-of-date state of each maintained connection (CRD ch.38 R38.6.4o item 4). `figures` holds one entry per
+/// Records the moment each height was first reported by a maintained connection (R38.6.4o item 4, amendment of
+/// 2026-11-15). `heights` are the current heights of the maintained connections, `reports` the record. Only the
+/// heights within `tolerance` of the running agreed tip of `heights` are kept: above the agreed tip minus `tolerance`
+/// and up to the agreed tip plus `tolerance`. A connection further behind is behind, which wins over stuck, and higher
+/// heights do not count. So the record holds at most `2 * tolerance + 1` heights, however long a connection stays
+/// behind or whatever a server reports. A height above the lowest of `heights` that the record lacks is entered with
+/// `now`; the heights at or below the lowest are dropped. Nothing changes when fewer than two connections have a
+/// height (there is no agreed tip). [`MAX_FIRST_REPORTS`] is a safety net only; it drops the lowest heights.
+pub(super) fn note_first_reports(reports: &mut BTreeMap<u64, f64>, heights: &[u64], tolerance: u64, now: f64) {
+    let Some(agreed) = agreed_tip(heights) else {
+        return;
+    };
+    let lowest = heights.iter().copied().min().unwrap_or(agreed);
+    // Kept: `above` < height <= `up_to`.
+    let above = agreed.saturating_sub(tolerance).max(lowest);
+    let up_to = agreed.saturating_add(tolerance);
+    for height in heights.iter().filter(|height| **height > above && **height <= up_to) {
+        reports.entry(*height).or_insert(now);
+    }
+    reports.retain(|height, _| *height > above && *height <= up_to);
+    while reports.len() > MAX_FIRST_REPORTS {
+        reports.pop_first();
+    }
+}
+
+/// For each maintained connection, the lowest height above its own that another maintained connection reported,
+/// with the moment it was first reported (R38.6.4o item 4, amendment of 2026-11-15). `None` for a connection without
+/// a height, when fewer than two connections have a height, and when no height above its own was reported. A height
+/// above the agreed tip by more than `tolerance` (a server that may report a height that does not exist, item 2)
+/// and a height that no connection has now do not count.
+pub(super) fn first_reports_above(
+    heights: &[Option<u64>],
+    reports: &BTreeMap<u64, f64>,
+    tolerance: u64,
+) -> Vec<Option<(u64, f64)>> {
+    let known: Vec<u64> = heights.iter().flatten().copied().collect();
+    let (Some(agreed), Some(highest)) = (agreed_tip(&known), known.iter().copied().max()) else {
+        return vec![None; heights.len()];
+    };
+    let upper = highest.min(agreed.saturating_add(tolerance));
+    heights
+        .iter()
+        .map(|height| {
+            let height = (*height)?;
+            if upper <= height {
+                return None;
+            }
+            reports
+                .range((Bound::Excluded(height), Bound::Included(upper)))
+                .next()
+                .map(|(reported, at)| (*reported, *at))
+        })
+        .collect()
+}
+
+/// The out-of-date state of each maintained connection (CRD ch.38 R38.6.4o item 4). `heights` holds one entry per
 /// maintained connection, `None` for one without a height, which no judgment applies to. The running agreed tip is
 /// the agreed tip of the heights given. A connection is *behind* when its lag to it exceeds `tolerance`, and
 /// *ahead* when its lead over it exceeds `tolerance` (D38.6.4o.9), and *stuck* when there are two or more
-/// connections with a height, it has had no news for longer than `stuck_after` and at least one other has received a
-/// header notification within `stuck_after` (D38.6.4o.7); when none has, the chain itself may have stopped and none
-/// is stuck. Behind and ahead win over stuck.
+/// connections with a height and another one has reported a height above its own for longer than `stuck_after`,
+/// counted from the first report of the lowest such height (`first_reports`, amendment of 2026-11-15); when no other
+/// connection has a higher height, none is stuck. Behind and ahead win over stuck.
 pub(super) fn out_of_date_states(
-    figures: &[Option<TipFigure>],
+    heights: &[Option<u64>],
+    first_reports: &BTreeMap<u64, f64>,
     tolerance: u64,
     stuck_after: Duration,
     now: f64,
 ) -> Vec<Option<OutOfDate>> {
-    let heights: Vec<u64> = figures.iter().flatten().map(|figure| figure.height).collect();
-    let agreed = agreed_tip(&heights);
+    let known: Vec<u64> = heights.iter().flatten().copied().collect();
+    let agreed = agreed_tip(&known);
     let stuck_after = stuck_after.as_secs_f64();
-    figures
+    let reported = first_reports_above(heights, first_reports, tolerance);
+    heights
         .iter()
-        .enumerate()
-        .map(|(index, figure)| {
-            let figure = (*figure)?;
+        .zip(reported)
+        .map(|(height, reported)| {
+            let height = (*height)?;
             if let Some(tip) = agreed {
-                let behind = lag(tip, figure.height);
+                let behind = lag(tip, height);
                 if behind > tolerance {
                     return Some(OutOfDate::Behind { lag: behind, tip });
                 }
-                let ahead = lead(tip, figure.height);
+                let ahead = lead(tip, height);
                 if ahead > tolerance {
                     return Some(OutOfDate::Ahead { lead: ahead, tip });
                 }
             }
-            let silent = now - figure.since;
-            if heights.len() >= 2 && silent > stuck_after {
-                let another_notified = figures.iter().enumerate().any(|(other, figure)| {
-                    other != index
-                        && figure
-                            .and_then(|figure| figure.notified_at)
-                            .map_or(false, |at| now - at <= stuck_after)
-                });
-                if another_notified {
-                    return Some(OutOfDate::Stuck { silent_secs: silent });
-                }
-            }
-            None
+            let (reported_height, at) = reported?;
+            let since = now - at;
+            (since > stuck_after).then_some(OutOfDate::Stuck {
+                height: reported_height,
+                reported_secs: since,
+            })
         })
         .collect()
 }
@@ -818,22 +873,24 @@ mod tests {
         assert!(!is_outside_tolerance(None, 0, 1));
     }
 
-    fn figure(height: u64, since: f64, notified_at: Option<f64>) -> Option<TipFigure> {
-        Some(TipFigure {
-            height,
-            since,
-            notified_at,
-        })
+    fn secs(s: u64) -> Duration { Duration::from_secs(s) }
+
+    /// The heights of connections that all have one.
+    fn heights(heights: &[u64]) -> Vec<Option<u64>> { heights.iter().map(|height| Some(*height)).collect() }
+
+    /// A record of first reports.
+    fn reports(entries: &[(u64, f64)]) -> BTreeMap<u64, f64> { entries.iter().copied().collect() }
+
+    /// The states with no first report on record, which is all that behind and ahead need.
+    fn height_states(heights: &[Option<u64>], tolerance: u64) -> Vec<Option<OutOfDate>> {
+        out_of_date_states(heights, &BTreeMap::new(), tolerance, secs(600), 1.)
     }
 
     /// T38.6.4o items 4 and 5: a connection more than the tolerance behind the running agreed tip is out of date as
     /// behind, and is up to date again when it catches up; a connection at the tolerance never is.
     #[test]
     fn a_connection_is_behind_only_beyond_the_tolerance() {
-        let states = |heights: [u64; 3]| {
-            let figures: Vec<_> = heights.iter().map(|height| figure(*height, 0., Some(0.))).collect();
-            out_of_date_states(&figures, 3, Duration::from_secs(600), 1.)
-        };
+        let states = |heights_: [u64; 3]| height_states(&heights(&heights_), 3);
         assert_eq!(states([100, 100, 96]), vec![
             None,
             None,
@@ -842,53 +899,333 @@ mod tests {
         assert_eq!(states([100, 100, 97]), vec![None, None, None]);
         assert_eq!(states([100, 100, 100]), vec![None, None, None]);
         // The field case: two connections, one far behind. The agreed tip is the higher of the two.
-        let two = out_of_date_states(
-            &[figure(2_000, 0., Some(0.)), figure(1_000, 0., Some(0.))],
-            3,
-            Duration::from_secs(600),
-            1.,
-        );
-        assert_eq!(two, vec![None, Some(OutOfDate::Behind { lag: 1_000, tip: 2_000 })]);
+        assert_eq!(height_states(&heights(&[2_000, 1_000]), 3), vec![
+            None,
+            Some(OutOfDate::Behind { lag: 1_000, tip: 2_000 })
+        ]);
         // One height, or none, judges nobody; a connection without a height is never judged.
+        assert_eq!(height_states(&[Some(1), None], 3), vec![None, None]);
+    }
+
+    const H: u64 = 700_000;
+
+    /// The state of the second of two connections, at `a_height` and `b_height`, at `now`, with the first reports
+    /// of `record` and a stuck period of `period` seconds.
+    fn stuck_state_of_b(
+        a_height: u64,
+        b_height: u64,
+        record: &[(u64, f64)],
+        period: u64,
+        now: f64,
+    ) -> Option<OutOfDate> {
+        out_of_date_states(&heights(&[a_height, b_height]), &reports(record), 3, secs(period), now)[1]
+    }
+
+    /// T38.6.4o item 4 (amended 2026-11-15), the slow block: A reports H + 1 at t0 and B reports it 5 s later, after
+    /// 30 minutes without a block. B is never stuck: not before its report, and not after it.
+    #[test]
+    fn a_slow_block_does_not_make_the_second_server_stuck() {
+        let t0 = 1_800.;
+        // B has not reported yet, 5 s after A: the period is far from over.
+        assert_eq!(stuck_state_of_b(H + 1, H, &[(H + 1, t0)], 180, t0 + 5.), None);
+        assert_eq!(stuck_state_of_b(H + 1, H, &[(H + 1, t0)], 600, t0 + 5.), None);
+        // B has reported: nothing is above it any more, and the record holds nothing it could be judged by.
+        assert_eq!(stuck_state_of_b(H + 1, H + 1, &[], 180, t0 + 5.), None);
+        assert_eq!(stuck_state_of_b(H + 1, H + 1, &[], 180, t0 + 3_600.), None);
+    }
+
+    /// T38.6.4o item 4 (amended 2026-11-15), a server that never delivers: B is not stuck at P - 1 s and is stuck at
+    /// P + 1 s after A's first report, for the periods of the coins; and the stuck state names the height and the
+    /// time since A reported it.
+    #[test]
+    fn a_server_that_never_delivers_is_stuck_after_the_period() {
+        let t0 = 5_000.;
+        for (interval, period) in [(Some(600.), 1_200.), (Some(60.), 180.), (Some(15.), 180.), (None, 600.)] {
+            let p = stuck_period(interval.map(Duration::from_secs_f64), secs(180), secs(600));
+            assert_eq!(p, Duration::from_secs_f64(period), "{interval:?}");
+            let record = [(H + 1, t0)];
+            assert_eq!(
+                stuck_state_of_b(H + 1, H, &record, period as u64, t0 + period - 1.),
+                None
+            );
+            // More than P, not at P.
+            assert_eq!(stuck_state_of_b(H + 1, H, &record, period as u64, t0 + period), None);
+            assert_eq!(
+                stuck_state_of_b(H + 1, H, &record, period as u64, t0 + period + 1.),
+                Some(OutOfDate::Stuck {
+                    height: H + 1,
+                    reported_secs: period + 1.
+                })
+            );
+        }
+        // A's own state is never stuck: nobody is above it.
+        let record = [(H + 1, t0)];
         assert_eq!(
-            out_of_date_states(&[figure(1, 0., None), None], 3, Duration::from_secs(600), 1.),
+            out_of_date_states(&heights(&[H + 1, H]), &reports(&record), 3, secs(180), t0 + 1_000.)[0],
+            None
+        );
+    }
+
+    /// T38.6.4o item 4 (amended 2026-11-15), a configured interval much shorter than the real spacing: with an
+    /// `avg_blocktime` of 60 s (P = 180 s) and blocks every 15 minutes, a second server 3 to 10 s late is never
+    /// stuck, whatever the silence before the block; and the period is counted from the first report, not from the
+    /// connection's own last notification.
+    #[test]
+    fn a_late_server_is_not_stuck_when_blocks_come_slower_than_configured() {
+        let period = stuck_period(Some(secs(60)), secs(180), secs(600));
+        assert_eq!(period, secs(180));
+        for late in [3., 5., 10.] {
+            for t0 in [900., 1_800., 2_700.] {
+                // Before B's report: the block is `late` seconds old at most.
+                assert_eq!(stuck_state_of_b(H + 1, H, &[(H + 1, t0)], 180, t0 + late), None);
+                // After B's report: the record is empty.
+                assert_eq!(stuck_state_of_b(H + 1, H + 1, &[], 180, t0 + late + 1.), None);
+            }
+        }
+    }
+
+    /// T38.6.4o item 4 (amended 2026-11-15), notifying without advancing: B's own notifications of H do not change
+    /// the first report of H + 1, so B is stuck after the period.
+    #[test]
+    fn a_connection_that_notifies_without_advancing_is_stuck() {
+        let mut record = BTreeMap::new();
+        let t0 = 100.;
+        note_first_reports(&mut record, &[H + 1, H], 3, t0);
+        // B notifies H again and again.
+        for repeat in 1..=5 {
+            note_first_reports(&mut record, &[H + 1, H], 3, t0 + 40. * repeat as f64);
+        }
+        assert_eq!(record, reports(&[(H + 1, t0)]));
+        assert_eq!(
+            out_of_date_states(&heights(&[H + 1, H]), &record, 3, secs(180), t0 + 179.)[1],
+            None
+        );
+        assert_eq!(
+            out_of_date_states(&heights(&[H + 1, H]), &record, 3, secs(180), t0 + 181.)[1],
+            Some(OutOfDate::Stuck {
+                height: H + 1,
+                reported_secs: 181.
+            })
+        );
+    }
+
+    /// T38.6.4o item 4 (amended 2026-11-15), nobody advances: all at H for an hour, none is stuck; and a single
+    /// connection with a height is never stuck.
+    #[test]
+    fn when_nobody_advances_none_is_stuck() {
+        assert_eq!(
+            out_of_date_states(&heights(&[H, H, H]), &BTreeMap::new(), 3, secs(180), 3_600.),
+            vec![None, None, None]
+        );
+        assert_eq!(
+            out_of_date_states(&[Some(H), None], &reports(&[(H + 1, 0.)]), 3, secs(180), 3_600.),
+            vec![None, None]
+        );
+        // A first report of a height that no connection has now (the connection left) judges nobody.
+        assert_eq!(
+            out_of_date_states(&heights(&[H, H]), &reports(&[(H + 1, 0.)]), 3, secs(180), 3_600.),
             vec![None, None]
         );
     }
 
-    /// T38.6.4o item 4: stuck needs two connections with a height, more silence than the period and another
-    /// connection that was notified within the period.
+    /// T38.6.4o item 4 (amended 2026-11-15): the time is counted from the first report of the lowest height above the
+    /// connection's own, whichever connection reported it; a connection that is two blocks behind is judged by the
+    /// older block.
     #[test]
-    fn a_connection_is_stuck_when_another_one_hears_news_and_it_does_not() {
-        let period = Duration::from_secs(600);
-        // Joined at 0, silent since; the other notified at 700. At 700 the silent one has been quiet for 700 s.
-        let figures = [figure(100, 0., None), figure(100, 700., Some(700.))];
-        assert_eq!(out_of_date_states(&figures, 3, period, 700.), vec![
-            Some(OutOfDate::Stuck { silent_secs: 700. }),
+    fn the_period_runs_from_the_first_report_of_the_lowest_height_above() {
+        let record = reports(&[(H + 1, 100.), (H + 2, 400.)]);
+        let states = |now: f64| out_of_date_states(&heights(&[H + 2, H + 1, H]), &record, 3, secs(180), now);
+        assert_eq!(states(279.), vec![None, None, None]);
+        // At 281 s the block H + 1 is 181 s old: the connection at H is stuck, the one at H + 1 is not (H + 2 is
+        // only 0 s old).
+        assert_eq!(states(281.), vec![
+            None,
+            None,
+            Some(OutOfDate::Stuck {
+                height: H + 1,
+                reported_secs: 181.
+            })
+        ]);
+        // At 581 s H + 2 is 181 s old, so the connection at H + 1 is stuck as well.
+        assert_eq!(states(581.), vec![
+            None,
+            Some(OutOfDate::Stuck {
+                height: H + 2,
+                reported_secs: 181.
+            }),
+            Some(OutOfDate::Stuck {
+                height: H + 1,
+                reported_secs: 481.
+            })
+        ]);
+    }
+
+    /// T38.6.4o item 4: behind and ahead win over stuck.
+    #[test]
+    fn behind_and_ahead_win_over_stuck() {
+        // Behind: B lags 4 blocks (T = 3), and the oldest block above it is old enough to make it stuck.
+        let record = reports(&[(H + 1, 0.), (H + 4, 0.)]);
+        assert_eq!(
+            out_of_date_states(&heights(&[H + 4, H + 4, H]), &record, 3, secs(180), 1_000.)[2],
+            Some(OutOfDate::Behind { lag: 4, tip: H + 4 })
+        );
+        // Ahead: C is above the agreed tip by more than T; nothing above it, so not stuck either way. B, at the agreed
+        // tip's side, is not made stuck by the liar's height.
+        let record = reports(&[(H + 1_000_000, 0.)]);
+        assert_eq!(
+            out_of_date_states(&heights(&[H + 1_000_000, H, H]), &record, 3, secs(180), 1_000.),
+            vec![
+                Some(OutOfDate::Ahead {
+                    lead: 1_000_000,
+                    tip: H
+                }),
+                None,
+                None
+            ]
+        );
+    }
+
+    /// The first reports are recorded once, pruned at and below the lowest height, and bounded.
+    #[test]
+    fn the_record_of_first_reports_is_pruned_and_bounded() {
+        let mut record = BTreeMap::new();
+        note_first_reports(&mut record, &[H + 1, H, H], 3, 10.);
+        assert_eq!(record, reports(&[(H + 1, 10.)]));
+        // The second connection reaches H + 1: the first moment stays while one is still below.
+        note_first_reports(&mut record, &[H + 1, H + 1, H], 3, 20.);
+        assert_eq!(record, reports(&[(H + 1, 10.)]));
+        // Every connection at H + 1: nothing at or below H + 1 is kept.
+        note_first_reports(&mut record, &[H + 1, H + 1, H + 1], 3, 30.);
+        assert!(record.is_empty(), "{record:?}");
+        // The next block is entered at its first report, and a later report of it does not move it.
+        note_first_reports(&mut record, &[H + 2, H + 1, H + 1], 3, 40.);
+        note_first_reports(&mut record, &[H + 2, H + 2, H + 1], 3, 50.);
+        assert_eq!(record, reports(&[(H + 2, 40.)]));
+        // No connection has a height: nothing changes.
+        note_first_reports(&mut record, &[], 3, 60.);
+        assert_eq!(record, reports(&[(H + 2, 40.)]));
+        // A single connection with a height has no agreed tip: nothing changes.
+        note_first_reports(&mut record, &[H + 9], 3, 70.);
+        assert_eq!(record, reports(&[(H + 2, 40.)]));
+        // The record keeps the heights above the agreed tip minus T and up to the agreed tip plus T: here the agreed
+        // tip is H + 10 and T = 3, so H + 7 and H + 14 are dropped and H + 8 to H + 13 stay; the lowest height bounds it too.
+        let mut window = reports(&[(H + 7, 1.), (H + 8, 2.), (H + 9, 3.), (H + 13, 4.), (H + 14, 5.)]);
+        note_first_reports(&mut window, &[H + 10, H + 10, H + 5], 3, 80.);
+        assert_eq!(
+            window,
+            reports(&[(H + 8, 2.), (H + 9, 3.), (H + 10, 80.), (H + 13, 4.)])
+        );
+        let mut window = reports(&[(H + 1, 1.), (H + 2, 2.), (H + 7, 3.)]);
+        note_first_reports(&mut window, &[H + 10, H + 10, H + 5, H + 8], 3, 80.);
+        assert_eq!(window, reports(&[(H + 8, 80.), (H + 10, 80.)]));
+        // A server reporting a new height every time cannot grow the record beyond 2T + 1, for any T up to the
+        // maximum, and one that stays far behind does not change that.
+        for tolerance in [0, 3, TOLERANCE_MAX_BLOCKS] {
+            let mut flood = BTreeMap::new();
+            for step in 1..=(MAX_FIRST_REPORTS as u64 * 4) {
+                note_first_reports(&mut flood, &[H + step, H + step - 1, H - 1_000], tolerance, step as f64);
+                assert!(
+                    flood.len() as u64 <= 2 * tolerance + 1,
+                    "T = {tolerance}: {}",
+                    flood.len()
+                );
+            }
+        }
+        // The safety net: with a tolerance beyond any real one the cap drops the LOWEST heights.
+        let mut capped = BTreeMap::new();
+        let steps = MAX_FIRST_REPORTS as u64 * 2;
+        for step in 1..=steps {
+            note_first_reports(&mut capped, &[H + step, H + step - 1, 1], 1_000, step as f64);
+        }
+        assert_eq!(capped.len(), MAX_FIRST_REPORTS);
+        assert_eq!(capped.keys().next_back().copied(), Some(H + steps));
+        assert_eq!(
+            capped.keys().next().copied(),
+            Some(H + steps - MAX_FIRST_REPORTS as u64 + 1)
+        );
+        // The highest height there is does not overflow the pruning.
+        let mut extreme = BTreeMap::new();
+        note_first_reports(&mut extreme, &[u64::MAX, u64::MAX], 3, 1.);
+        assert!(extreme.is_empty());
+        note_first_reports(&mut extreme, &[u64::MAX, u64::MAX - 1], u64::MAX, 1.);
+        assert_eq!(extreme, reports(&[(u64::MAX, 1.)]));
+        // Near zero the window does not underflow.
+        let mut low = BTreeMap::new();
+        note_first_reports(&mut low, &[2, 1], 3, 1.);
+        assert_eq!(low, reports(&[(2, 1.)]));
+    }
+
+    /// T38.6.4o item 4 (amended 2026-11-15), the record under a frozen server: one connection stays far behind (more
+    /// than the record bound and more than T blocks), the chain moves on by 300 heights, and then a faster peer
+    /// reports a block that another connection does not reach. The frozen one is behind and stays so; the stalled one
+    /// is stuck just after the period counted from that first report, and not before.
+    #[test]
+    fn a_frozen_server_far_behind_does_not_hide_a_stalled_one() {
+        let frozen = H - 500;
+        let period = secs(120);
+        let mut record = BTreeMap::new();
+        // The chain advances: the two live connections move together, the third is frozen. Every update goes through
+        // the record as the pool does.
+        for step in 1..=300u64 {
+            note_first_reports(&mut record, &[frozen, H + step, H + step], 3, step as f64);
+            assert!(record.len() <= 7, "{record:?}");
+        }
+        let stalled = H + 300;
+        // A faster peer reports the next block at t0; the stalled connection does not.
+        let t0 = 1_000.;
+        for repeat in 0..5 {
+            note_first_reports(
+                &mut record,
+                &[frozen, stalled, stalled + 1],
+                3,
+                t0 + 10. * repeat as f64,
+            );
+        }
+        assert_eq!(record.get(&(stalled + 1)), Some(&t0));
+        let states = |now: f64| {
+            out_of_date_states(
+                &[Some(frozen), Some(stalled), Some(stalled + 1)],
+                &record,
+                3,
+                period,
+                now,
+            )
+        };
+        let behind = Some(OutOfDate::Behind { lag: 800, tip: stalled });
+        assert_eq!(states(t0 + 1.), vec![behind, None, None]);
+        assert_eq!(states(t0 + 119.), vec![behind, None, None]);
+        assert_eq!(states(t0 + 120.), vec![behind, None, None]);
+        assert_eq!(states(t0 + 121.), vec![
+            behind,
+            Some(OutOfDate::Stuck {
+                height: stalled + 1,
+                reported_secs: 121.
+            }),
             None
         ]);
-        // Not before the period: at exactly 600 s of silence it is not stuck (more than, not at).
-        let figures = [figure(100, 0., None), figure(100, 600., Some(600.))];
-        assert_eq!(out_of_date_states(&figures, 3, period, 600.), vec![None, None]);
-        // Every connection silent for longer than the period: the chain may have halted, none is stuck.
-        let figures = [figure(100, 0., Some(0.)), figure(100, 0., Some(0.))];
-        assert_eq!(out_of_date_states(&figures, 3, period, 1_000.), vec![None, None]);
-        // The answer to a header request is no notification: a connection that only answered recently does not
-        // vouch for the chain.
-        let figures = [figure(100, 0., None), figure(100, 900., None)];
-        assert_eq!(out_of_date_states(&figures, 3, period, 1_000.), vec![None, None]);
-        // A single connection with a height is never stuck.
-        let figures = [figure(100, 0., None), None];
-        assert_eq!(out_of_date_states(&figures, 3, period, 1_000.), vec![None, None]);
-        // Behind wins over stuck.
-        let figures = [
-            figure(100, 0., None),
-            figure(200, 700., Some(700.)),
-            figure(200, 700., Some(700.)),
-        ];
+        // The record still holds the heights the stalled one waits for, so the next check is computed from it.
+        let reported = first_reports_above(&[Some(frozen), Some(stalled), Some(stalled + 1)], &record, 3);
+        assert_eq!(reported[1], Some((stalled + 1, t0)));
+        assert_eq!(reported[2], None);
+    }
+
+    /// T38.6.4o item 4 (amended 2026-11-15): a server above the agreed tip by more than the tolerance (D38.6.4o.9) does
+    /// not make the honest ones stuck; one at the tolerance above does.
+    #[test]
+    fn a_liar_above_does_not_make_the_others_stuck() {
+        let record = reports(&[(H + 1_000_000, 0.)]);
         assert_eq!(
-            out_of_date_states(&figures, 3, period, 700.)[0],
-            Some(OutOfDate::Behind { lag: 100, tip: 200 })
+            out_of_date_states(&heights(&[H + 1_000_000, H, H]), &record, 3, secs(180), 1_000.)[1],
+            None
+        );
+        // At H + T the height counts.
+        let record = reports(&[(H + 3, 0.)]);
+        assert_eq!(
+            out_of_date_states(&heights(&[H + 3, H, H]), &record, 3, secs(180), 1_000.)[1],
+            Some(OutOfDate::Stuck {
+                height: H + 3,
+                reported_secs: 1_000.
+            })
         );
     }
 
@@ -897,12 +1234,7 @@ mod tests {
     #[test]
     fn a_liar_above_the_others_is_ahead_and_does_not_make_them_look_behind() {
         const H: u64 = 700_000;
-        let figures = [
-            figure(H + 1_000_000, 0., Some(0.)),
-            figure(H, 0., Some(0.)),
-            figure(H, 0., Some(0.)),
-        ];
-        assert_eq!(out_of_date_states(&figures, 3, Duration::from_secs(600), 1.), vec![
+        assert_eq!(height_states(&heights(&[H + 1_000_000, H, H]), 3), vec![
             Some(OutOfDate::Ahead {
                 lead: 1_000_000,
                 tip: H
@@ -914,29 +1246,15 @@ mod tests {
         let round = [server(0, 50., H + 1_000_000), server(1, 50., H), server(2, 50., H)];
         assert_eq!(eligible_ids(&round), vec![1, 2]);
         // A server at H + T stays eligible and up to date (T = 3); one block more is ahead.
-        let figures = [
-            figure(H + 3, 0., Some(0.)),
-            figure(H, 0., Some(0.)),
-            figure(H, 0., Some(0.)),
-        ];
-        assert_eq!(out_of_date_states(&figures, 3, Duration::from_secs(600), 1.), vec![
-            None;
-            3
-        ]);
-        let figures = [
-            figure(H + 4, 0., Some(0.)),
-            figure(H, 0., Some(0.)),
-            figure(H, 0., Some(0.)),
-        ];
+        assert_eq!(height_states(&heights(&[H + 3, H, H]), 3), vec![None; 3]);
         assert_eq!(
-            out_of_date_states(&figures, 3, Duration::from_secs(600), 1.)[0],
+            height_states(&heights(&[H + 4, H, H]), 3)[0],
             Some(OutOfDate::Ahead { lead: 4, tip: H })
         );
         let round = [server(0, 50., H + 3), server(1, 50., H), server(2, 50., H)];
         assert_eq!(eligible_servers(&round, &[], 3, FLOOR).len(), 3);
         // With two servers the agreed tip is the higher one: nobody is ahead.
-        let figures = [figure(H + 1_000_000, 0., Some(0.)), figure(H, 0., Some(0.))];
-        assert_eq!(out_of_date_states(&figures, 3, Duration::from_secs(600), 1.)[0], None);
+        assert_eq!(height_states(&heights(&[H + 1_000_000, H]), 3)[0], None);
     }
 
     /// T38.6.4o.18 (items 7 and 12): two headers name the same block when their first 80 bytes are equal; the bytes after

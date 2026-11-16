@@ -436,7 +436,9 @@ pub enum CoinProtocol {
     #[cfg(not(target_arch = "wasm32"))]
     SPLTOKEN {
         platform: String,
-        token_contract_address: String,
+        /// A base58 32-byte public key, checked when the protocol is parsed (like `SOLANATOKEN`'s `mint_address`).
+        #[serde(with = "base58_pubkey")]
+        token_contract_address: solana_pubkey::Pubkey,
         decimals: u8,
     },
     /// Solana token in the reference configuration form (CRD ch.40 R40.1.3). All four members are required.
@@ -1121,7 +1123,7 @@ mod coin_protocol_tests {
                 decimals,
             } => {
                 assert_eq!(platform, "SOL");
-                assert_eq!(token_contract_address, MINT);
+                assert_eq!(token_contract_address.to_string(), MINT);
                 assert_eq!(decimals, 6);
             },
             other => panic!("expected SPLTOKEN, got {:?}", other),

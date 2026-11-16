@@ -1209,6 +1209,73 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   difference; the additions embed no code blocks, so the repository's
   clean-room gate tool was not applicable. The comparison concerns
   expression, not the accuracy of the statements.
+- *Scoped addition (2026-11-15, Spec Reader round 0.5.0-7) -- §36.14.7
+  (R36.14.23 -- R36.14.28, the informative notes, D36.23 -- D36.25,
+  T36.49 -- T36.54).* **KDF Dirty Gate: PASS on 2026-11-15, measure 0.01, no findings**
+  (chapter 01 R40; the attestation closes this item). *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`
+  and `v3.0.0-beta` of chapter 02 §2.15A, read read-only and consulted
+  **only** to establish: for the indexed history store that the
+  reference's coin families share, the names and declared columns of its
+  tables and the stored forms of their values, which addresses are indexed
+  for a row, when index entries are written and when they are removed, the
+  rule by which the versioned history method selects, orders and counts
+  rows, and what becomes of a row without an entry, of an entry without a
+  row and of a store without the index table; for the Tendermint history
+  fetcher, the requests of a pass, their order and paging, what ends a
+  query and a pass, what starts a later pass and which pages it reads, how
+  a node is chosen for a request, and what a block answer without a time
+  yields; and the two rows' agreement on these points (the history store,
+  the versioned history method, the Tendermint fetcher, the other
+  families' fetcher as far as it uses the index, and the activation path
+  that starts the fetcher are the same at both rows; the Tendermint coin's
+  node choice, block read, balance read and denomination lookup were
+  compared and are the same at both rows). Behavior, public wire shape and
+  persisted schema only; no private identifier, function body, helper
+  decomposition, query text, error, log, comment or test text was
+  reproduced. Table, column, index and member names are those of the
+  persisted store; method, service, event and attribute names are those of
+  the public CometBFT RPC and of the public Cosmos SDK and ibc-go modules;
+  the answer to a page number beyond the last page is that of the public
+  CometBFT RPC. The *Our side* note rests on this repository's tree and on
+  Chapter 38 §38.5A; item 5 of R36.14.26 and the options of the D-items
+  rest on this chapter's own text; the test figures are computed from the
+  rules, not taken from any test. No cleared sentence of §36.14.1 --
+  §36.14.6 was edited.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-15, measure
+  0.01 on the discretionary-expression basis of chapter 01 R35
+  (dictated-interop and pinned-interface content excluded), no findings; the
+  subsection passed on a second full pass, after the passages named by the
+  first were removed or reworded (no statement of the relative order of two
+  writes or two removals inside one database transaction remains). Matching
+  tokens, all judged forced: persisted table, column and index names and the
+  column declarations; persisted member names of the browser store;
+  serialized transaction-type values, sync-status states and typed-error
+  tokens; public RPC request and response field names; public CometBFT
+  method and response-field names; public Cosmos SDK service, event and
+  attribute names. Reference states (chapter 02 R13): no findings; the only
+  state names are `v2.6.0-beta` and `v3.0.0-beta`, both rows of §2.15A,
+  compared at the rows' full identifiers; the row-agreement statements were
+  checked by row-to-row difference. Extent: the indexed transaction-history
+  store shared by the coin families, in its native and browser forms; the
+  versioned history method; the Tendermint history fetcher; the other
+  families' fetcher as far as it uses the address index; the activation path
+  that starts the fetcher; the Tendermint coin's node choice, block read,
+  balance read and denomination lookup; the store's test code for scenario
+  and name overlap — 3 units read in full and 4 in the parts concerned;
+  mechanical comparison over 103 source files at the first row and 128 at
+  the second; a wider word 4-gram sweep over 734 and 772 source files;
+  fixture data files not included (a gap left visible). Classification: the
+  table name pattern, the three tables, the columns and stored forms are
+  dictated by the persisted-store contract; the selection, ordering,
+  counting and paging rule is observable behavior of a public method over
+  that contract, stated in words; the first-pass sequence and paging are
+  observable in the requests. Method: reading of both ranges in full; search
+  for every backticked token at both rows, each match judged forced or free;
+  scan for identifier-shaped words outside backticks; word 4-gram and 3-gram
+  comparison against comment, string-literal and code text; row-to-row
+  difference; the additions embed no code blocks, so the repository's
+  clean-room gate tool was not applicable. The comparison concerns
+  expression, not the accuracy of the statements.
 
 ---
 
@@ -2320,3 +2387,488 @@ power 64: no row. (iv) An empty fee list: no row in any history and
 nothing on the history stream, on the first pass and on a second one.
 Under D36.20 (b): one row with `total_amount` 1 and `fee_details`
 `amount` 0.
+
+### 36.14.7 The store's address index and the first pass
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
+> measure 0.01 (attestation in §36.13).**
+> This subsection was written on 2026-11-15 by the KDF Spec Reader (Spec
+> Reader round 0.5.0-7) under the two-team procedure of chapter 01 §1.4A,
+> from the reference rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A (read read-only; no untabled state was read), from the public
+> interface definitions of the CometBFT RPC and of the Cosmos SDK bank
+> module and block service, from [Chapter
+> 38](38-utxo-coin-maintenance-and-features.md) §38.5A, from this
+> repository's own tree and from this chapter's own text. **The two rows
+> agree on everything in this subsection**: the parts of the reference it
+> describes are the same at both. It edits no sentence of §36.14.1 --
+> §36.14.6. Each rule names the rule it completes; where a rule here is more
+> exact than the sentence it completes, the rule here governs. It serves the
+> maintainer's decision that Reloaded's Tendermint history store is one that
+> either program can continue (D36.11 (a)), and answers two questions only:
+> what the address index of the history store is, and what the first pass of
+> the fetcher reads. Each rule says in its heading whether it concerns the
+> **shared store**, that is every coin family served from the indexed
+> history store (Chapter 38 R38.5A.7), or **this family** only. Numbering:
+> rules R36.14.23 -- R36.14.28, decisions D36.23 -- D36.25 and tests T36.49
+> -- T36.54.
+
+R36.14.23 **The tables of a coin's history store (shared store; completes
+R36.14.1 and R36.14.10).** On a native build the indexed history store of
+a coin is three tables in the node's SQLite database. `<T>` is the
+store's ticker, for this family the platform ticker (R36.14.1), with
+every `-` in it replaced by `_`.
+
+| Table | Columns, as declared | Holds |
+| --- | --- | --- |
+| `<T>_tx_history` | `id INTEGER NOT NULL PRIMARY KEY`, `tx_hash VARCHAR(255) NOT NULL`, `internal_id VARCHAR(255) NOT NULL UNIQUE`, `block_height INTEGER NOT NULL`, `confirmation_status INTEGER NOT NULL`, `token_id VARCHAR(255) NOT NULL`, `details_json TEXT` | one row per history row |
+| `<T>_tx_address` | `id INTEGER NOT NULL PRIMARY KEY`, `internal_id VARCHAR(255) NOT NULL`, `address TEXT NOT NULL` | the address index: which addresses a history row concerns |
+| `<T>_tx_cache` | `tx_hash VARCHAR(255) NOT NULL UNIQUE`, `tx_hex TEXT NOT NULL` | one entry per transaction hash |
+
+
+The stored forms are these.
+
+- `internal_id`, in both tables: the identifier bytes as lower-case hex
+  text, 66 characters for a row of this family (R36.14.10). The two tables
+  are related by equality of this text and by nothing else.
+- `tx_hash`: the row's `tx_hash` text as the row carries it.
+- `block_height`: the row's height. `confirmation_status`: 0 when that
+  height is zero and 1 otherwise; always 1 for this family.
+- `token_id`: the token id of R36.14.2 as 64 lower-case hex characters
+  when the row's `transaction_type` is `TokenTransfer`, or is
+  `TendermintIBCTransfer` or `CustomTendermintMsg` with a `token_id` that
+  is not null; the empty text for every other row, the `FeeForTokenTx`
+  row and the three staking rows included.
+- `details_json`: the row in its stored JSON form (R36.14.10).
+- `tx_hex` of the cache table: the row's `tx_hex` bytes as lower-case
+  hex. A hash that already has an entry keeps it.
+- `id`, in both tables: assigned by the database. It carries no meaning
+  and need not agree between two programs.
+
+
+The address table has no uniqueness rule beyond its `id`: it accepts the
+same pair of `internal_id` and `address` more than once, and nothing in
+the schema ties an entry to a row. The table names, the declarations and
+the stored forms above are the persisted contract that two programs
+working on one database share; Reloaded creates and writes them exactly
+so. The three tables are created, each only when absent, every time a
+history fetcher starts for the coin (R36.14.12).
+
+The reference also asks, with a create-when-absent statement, for an
+index named `internal_id_idx` on the `internal_id` column, first of the
+row table and then of the address table. An index name is unique within
+a SQLite database, so the index exists on the first table for which it
+was ever asked in that database and on no other. It is not part of the
+contract: Reloaded MAY index either table under names of its own and
+MUST NOT depend on an index of that name being present or being on a
+particular table.
+
+In the browser build there is no address table. Each stored row object
+carries two members, `from_addresses` and `to_addresses`, which hold the
+distinct strings of the row's `from` and of its `to`, and the selection
+of R36.14.25 tests those members where the native build tests the index.
+
+R36.14.24 **The entries of the address index (shared store, except item
+2; completes R36.14.2 and R36.14.10).**
+
+1. *Which entries.* A stored row has one entry for each distinct string
+   in the union of its `from` and `to` arrays: `internal_id` is the
+   row's, `address` is that string exactly as it stands in the row, with
+   no change of letter case, prefix or encoding. A string that stands in
+   both arrays yields one entry; a row whose arrays are both empty has no
+   entry. The entries of a row can therefore be derived from its
+   `details_json` alone.
+2. *This family.* With the parties R36.14.6 gives a row:
+
+   | Row | Entries |
+   | --- | --- |
+   | plain transfer, token transfer, IBC transfer | the sender and the recipient: this account and the other party, the other party being an address of the other chain for an IBC transfer; one entry when both are this account |
+   | a transfer between two other accounts (R36.14.19 item 6) | those two accounts, and none for this account |
+   | HTLC creation, HTLC claim (all three `msg_type` values) | this account only |
+   | delegation | the delegator and the validator's operator address |
+   | undelegation | this account only |
+   | reward claim | the validator's operator address and the delegator |
+   | fee row of a token transaction (R36.14.8 item 3) | this account only, under the fee row's own identifier |
+
+   A token row lives in the platform coin's row table (R36.14.1), and its
+   entries live in the platform coin's address table.
+3. *When.* The entries of a row are written in the same database
+   transaction as the row and its cache entry. For this
+   family all rows of one fetched page (R36.14.3) are written in one
+   transaction with their entries: the page is stored whole or not at
+   all, and a page that cannot be stored ends the fetcher with the
+   `Error` state (R36.14.11). An entry is never written without its row,
+   and is not changed afterwards; a later change of a row's height, which
+   other families make, leaves its entries as they are.
+4. *Removal.* Entries are removed only together with a row and by its
+   identifier: every entry with that `internal_id` and the row, in one
+   transaction. The cache entry stays. Two things remove a row. For this
+   family it is the clean-up of the earlier identifier forms (finding 2 of
+   §36.14.1): for every transfer the fetcher reads, on every pass and
+   before the identifier check of R36.14.10, a row stored under either of
+   the two earlier 32-byte forms is removed with its entries; where no
+   row is stored under such a form nothing is removed, entries under that
+   form included. For the UTXO families it is a row of height zero whose
+   transaction the node's listing no longer contains.
+5. *No removal of a history.* The reference has no operation that removes
+   a coin's history. Deactivating the coin, restarting, and activating it
+   again with or without `tx_history` leave the three tables as they are,
+   and no method empties or drops them.
+
+
+R36.14.25 **Which rows the versioned `my_tx_history` serves (shared
+store; completes R36.14.2 and R36.14.10, and Chapter 38 R38.5A.6 as to
+what its address filter is).** A request stands for a set of addresses
+and a token id. For this family the set is the one activated account
+address in its bech32 text, whatever `target` says; the token id is the
+64 lower-case hex characters of R36.14.2 for a token and the empty text
+for the platform coin.
+
+- *Selection.* A row of `<T>_tx_history` is selected when its `token_id`
+  column equals the request's token id **and** `<T>_tx_address` holds at
+  least one entry whose `internal_id` equals the row's and whose
+  `address` equals an address of the request's set. Both comparisons are
+  exact comparisons of text. A selected row counts once, however many
+  entries match it. Nothing inside `details_json` takes part: not `from`,
+  not `to`, not `coin`, not `transaction_type`.
+- *Order.* By the columns, as Chapter 38 R38.5A.6 states: `confirmation_status`
+  ascending, then `block_height` descending, then the `internal_id` text
+  ascending.
+- *`total`* is the number of selected rows. It counts rows, not
+  transactions, so a token transaction with its fee row adds one to the
+  token's total and one to the platform coin's.
+- *Page number `p`.* The first `(p - 1) × limit` selected rows are left
+  out and `skipped` is that number, also when it exceeds `total`.
+- *`FromId`.* The anchor is looked up among the selected rows in their
+  order. When it is the `k`-th of them, counted from one, the rows after
+  it are served and `skipped` is `k`. When it is not among them, because
+  no row has that identifier, or the row belongs to another token id, or
+  the row has no entry for an address of the set, the answer is the one
+  R36.14.10 states: an empty list, `skipped` 0 and the true `total`.
+- *Content.* Each served row is its `details_json`, with the scaling of
+  R36.14.7 for this family.
+
+
+This is the exact sense of "only the rows whose `from` or `to` list
+contains the activated account address are served" in R36.14.2: the test
+is made on the index and on the `token_id` column, not on the row's
+content. A program that writes rows without entries, or with a
+`token_id` column that differs from the row's `transaction_type`, writes
+rows that the other program lists differently or not at all.
+
+R36.14.26 **Rows without entries, entries without rows, and a store
+without the index (shared store unless an item says otherwise; completes
+R36.14.12 and D36.11).**
+
+1. *A row without an entry for the requesting address* is not served, is
+   not counted in `total` and is no anchor for `FromId`. It still exists
+   for everything that goes by identifier or by hash. For this family the
+   fetcher therefore finds its identifier stored, and writes neither the
+   row again nor any entry for it (R36.14.10): no later pass and no
+   restart makes the row visible. The reference repairs nothing.
+2. *Entries whose row is missing* select nothing, and nothing removes
+   them (R36.14.24 item 4 removes through a stored row). Reloaded
+   removes them when it prepares a coin's store.
+3. *An entry stored twice* changes nothing: the row is served once and
+   counted once.
+4. *A store with the row table and the cache table but without the
+   address table.* The reference takes such a store as prepared, because
+   the test behind `StorageIsNotInitialized` (R36.14.12) looks for those
+   two tables only. For a coin activated without `tx_history` every
+   request of the versioned method then fails with `StorageError`
+   (HTTP 500). For a coin activated with `tx_history: true` the fetcher
+   creates the address table, empty, at its first step; from then on the
+   method succeeds with an empty list and `total` 0 whatever the row
+   table holds, and item 1 applies to every row in it.
+5. *Reloaded.* Reloaded writes the entries of R36.14.24 with every row,
+   removes them with the row, and selects by R36.14.25. When it prepares
+   a coin's store it creates the address table when absent and adds, for
+   every stored row that has no entry at all, the entries of R36.14.24
+   item 1 derived from that row's `details_json`; a row that has at least
+   one entry is left as it is, and a second preparation adds nothing.
+   This step has no counterpart at the reference. It is what makes a
+   store written without the index one that the reference lists in full.
+
+
+> **Our side (informative; this repository's tree, 2026-11-15).** The
+> indexed history store of this repository is the shared one: it has the
+> row table and the cache table, named from the ticker as it stands,
+> without the replacement of `-`; it has no address table; it fills the
+> `token_id` column for `TokenTransfer` only; and its listing selects on
+> the token id alone and counts every row of that id. It serves BCH and
+> SLP tokens today (Chapter 38, the note under R38.5A.7). The index
+> therefore belongs in the shared store, for every family that store
+> serves or comes to serve, and not in a layer of this family.
+
+> **Code-quality finding (informative; trigger: apparent with little
+> extra effort; D36.23).** *One store for every account under a ticker.*
+> The tables are named from the ticker alone, so every account that is
+> activated under that ticker with the same database writes to and reads
+> from the same three tables; the index is what keeps their rows apart.
+> A row is written once, with the amounts, the `transaction_type` and,
+> for the HTLC and undelegation rows, the `from` of the account that was
+> active when it was written (R36.14.6, R36.14.7), and R36.14.24 indexes
+> it under both parties. A served row carries those values whichever
+> account requests it; the remedy is D36.23.
+
+D36.23 *(maintainer decision.)* *Rows of another account in the same
+store.* Options: (a) the reference as it stands (the finding above);
+(b) the same tables and rows, and Reloaded keeps beside the store the
+account address for which it was filled and rebuilds the platform coin's
+history store from the chain when the coin is activated for a different
+account; a rebuilt store holds what the reference writes into an empty
+store for that account, so it stays one that either program can
+continue, and the earlier account's rows are re-creatable in the same
+way. Option (b) does not detect a store that the reference filled for
+two accounts. Recommended: (b).
+
+R36.14.27 **The first pass (this family; completes R36.14.3, R36.14.4
+and R36.14.11).**
+
+1. *Sequence.* The fetcher prepares the store (R36.14.23); walks the
+   query `coin_spent.spender = '<address>'` from page 1 to its end; walks
+   the query `coin_received.receiver = '<address>'` from page 1 to its
+   end; and only then sets the state `Finished`. It runs no other query:
+   none by a `transfer` or `message` attribute, and none bounded by
+   height.
+2. *Paging and the end of a query.* A request names a page `n`, 50
+   results per page, ascending order. The transactions of the answer are
+   worked through in the node's order, with one block read per
+   transaction that passed the result-code test. The rows of the page are
+   then written together (R36.14.24 item 3) and are served by
+   `my_tx_history` from that moment, while the state is still
+   `NotStarted`. The query ends when `n × 50` is at least the
+   `total_count` of that same answer; otherwise page `n + 1` is
+   requested. `total_count` is read from every answer anew. The query
+   keeps a page number for the next pass: `n + 1` when its last page held
+   50 transactions, and `n` otherwise.
+3. *Which node.* The pages of one query in one pass come from one node,
+   chosen when the query starts: the first of the configured nodes, in
+   their current order, that answers a CometBFT `health` request. Every
+   block read and every balance read chooses its node in the same way at
+   the moment it is made. The requests of one pass need not all reach
+   the same node.
+4. *A transaction in which this account is only the recipient.* The bank
+   module emits a `coin_received` event with the `receiver` for every
+   credit, whoever signed the transaction and whoever paid for it. Such a
+   transaction is therefore returned by the second query, and by that
+   query only. It is processed exactly as a transaction this account
+   sent: no rule of the fetch depends on which of the two queries
+   returned a transaction or on which pass reads it. A transfer that a
+   relayer delivered yields the IBC row of R36.14.6, from the packet
+   event's `sender` to this account, with entries for both addresses,
+   nothing spent, and the relayer's fee in `fee_details` only (R36.14.8
+   item 4).
+5. *What `my_tx_history` lists for an account that has only received
+   funds.* Until the store is prepared, `StorageIsNotInitialized`
+   (R36.14.12). Then success with `NotStarted` and the rows of the pages
+   written so far. At `Finished`: the first query was answered with no
+   transaction and a `total_count` of 0, which ends it at page 1; the
+   list holds one row for every received transfer that R36.14.4 --
+   R36.14.6 and R36.14.19 -- R36.14.22 yield, and `total` is their
+   number.
+6. *When a received transaction that was on the chain before the pass
+   began is nevertheless absent after the first `Finished`.* The cases
+   are these:
+   - (a) *the node did not return it.* The answer to `tx_search` is
+     taken as it comes and is compared with no other source. The
+     transaction is written by a later pass that reads its page again
+     (R36.14.28 item 2).
+   - (b) *the block read carried no time.* The block of the
+     transaction's height is read through the node's `abci_query` method
+     from the Cosmos SDK `GetBlockByHeight` service. An answer without a
+     block or without a header time leaves the transaction out
+     (R36.14.4): no error, no pause, no retry, and the pass goes on to
+     `Finished`. The result code of the answer is not inspected; the
+     remedy is D36.24.
+   - (c) *no pass writes it*: one of the cases of R36.14.4, R36.14.21 and
+     R36.14.22 items 3 and 6 applies, or its denomination does not
+     resolve (R36.14.19 item 4).
+   - (d) *it is stored and not served*: the pairing of R36.14.20 gave its
+     transfer the parties of another module event of the same
+     transaction, so the row has no entry for this account; or its
+     identifier was already stored without such an entry (R36.14.26
+     item 1). No pass changes either.
+
+   Cases (a) and (b) depend on the node and can differ from one pass to
+   the next; cases (c) and (d) are the same in every pass.
+
+
+R36.14.28 **What reads a transaction after the first pass (this family;
+completes R36.14.3).**
+
+1. *Only a pass reads transactions, and three things start one.* (i) A
+   balance read, made every 30 seconds, that differs from the previous
+   one. The balances compared are those of the platform coin and of the
+   tokens activated at the moment of the read, taken as a set, so a
+   token activated on the platform since the previous read counts as a
+   change even when its balance is zero. (ii) The retry 30 seconds after
+   a node failure, a failed balance read included. (iii) A start of the
+   coin. No timer, no new block and no `my_tx_history` request starts a
+   pass.
+2. *What a pass started by (i) or (ii) reads.* Each query from the page
+   number it kept (R36.14.27 item 2), the first query and then the
+   second, each to its end. Earlier pages are not requested again while
+   the coin stays active. A transaction left out under R36.14.27 item 6
+   (a) or (b) is therefore read again at the next balance change when it
+   stands on the kept page, and otherwise only at the next start of the
+   coin, which begins both queries at page 1: the page numbers are not
+   persisted (finding 3 of §36.14.1).
+3. *A transaction received after the first pass* changes a compared
+   balance when it is in the platform denom or in the denom of an
+   activated token; the next balance read then starts a pass, which
+   writes it. A credit in any other denomination changes no compared
+   balance and is read only when something else starts a pass. The same
+   holds for credits and debits that cancel out between two balance
+   reads.
+4. *A kept page past the end.* When a query ended on a page of 50
+   transactions its kept page is one that does not exist until that
+   query has a further transaction. The CometBFT RPC answers a page
+   number beyond the last page of a result with an error. The reference
+   handles that answer as it handles a node failure (R36.14.3). The
+   remedy is D36.25.
+
+
+> **Code-quality findings (informative; trigger for both: apparent with
+> little extra effort).** *A transaction skipped for want of a block
+> time* (R36.14.27 item 6 (b)) leaves no trace, and the pass that
+> skipped it reports `Finished`; it is read again only under R36.14.28
+> item 2 (D36.24). *A kept page past the end* (R36.14.28 item 4) is
+> handled as a node failure where no node has failed; the remedy is
+> D36.25.
+
+D36.24 *(maintainer decision.)* *A block answer without a time.*
+Options: (a) the reference as it stands: the transaction is left out of
+that pass; (b) Reloaded asks the other configured nodes for the block,
+and when none has it, writes no row and keeps for that query the page
+of the earliest transaction left out for this reason, so that every
+later pass reads from there again. The rows written are the same under
+both options, so the store stays one that either program can continue.
+Recommended: (b).
+
+D36.25 *(maintainer decision.)* *A query that ended on a full page.*
+Options: (a) the reference as it stands (R36.14.28 item 4); (b) Reloaded
+never asks for a page past the last one it has read: a query that ended
+on a full page starts the next pass on that page again, where the
+identifier check of R36.14.10 passes over the rows already stored, and
+goes on to a further page only when the answer's `total_count` shows
+one; the second query runs in every pass. The rows written are the same
+under both options. Recommended: (b).
+
+**Tests.** Rows T36.49 -- T36.54 run against a mocked node on a 64-bit
+native build, with the conventions of §36.14.5: 6 decimals for the
+platform coin and for the token, a fee of 5,000 base units of the
+platform denom. `A` is this account; `X`, `Y` and `B` are other accounts
+of the chain, `S` an address of another chain, `V` a validator's
+operator address. "The contract" means the tables, forms and selection
+of R36.14.23 -- R36.14.25 applied directly to the database by the test,
+without either program. Figures are computed from the rules.
+
+T36.49 *Index entries (R36.14.23, R36.14.24).* After one pass: (i) a
+send from `A` to `X` has two entries, `A` and `X`, under the row's
+identifier in lower-case hex; (ii) a send from `A` to `A` has one;
+(iii) in a transaction with a transfer from `X` to `Y` and one from `X`
+to `A`, the row from `X` to `Y` has the entries `X` and `Y` and none for
+`A`; (iv) a token send from `A` to `X` has the entries `A` and `X` for
+the token row, whose `token_id` column is the 64 hex characters of the
+token id, and one entry `A` for the fee row, under the fee row's own
+identifier and with an empty `token_id` column; (v) an HTLC creation by
+`A` and a claim by another account that pays `A` have one entry each,
+`A`; (vi) a delegation has `A` and `V`, an undelegation `A`, a reward
+claim `V` and `A`; (vii) an incoming IBC transfer has `S` and `A`. For a
+platform ticker that contains `-`, the three tables carry `_` in its
+place. (viii) A store that fails while a page is being written holds no
+row and no entry of that page afterwards, and the state is `Error`.
+
+T36.50 *Selection, `total` and paging (R36.14.25, R36.14.26).* A store
+is prepared by the contract with six rows: `r1` and `r2` at height 12,
+platform coin, `r1` with entries `A` and `X` and `r2` with entry `A`,
+the identifier of `r1` sorting before that of `r2`; `r3` at height 10,
+platform coin, entries `X` and `Y`; `r4` at height 11, platform coin,
+no entry; `r5` at height 11, token, entries `A` and `X`; `r6` at height
+9, platform coin, the entry `A` stored twice. For the platform coin and
+`A`: `total` is 3 and the order is `r1`, `r2`, `r6`; with `limit` 2,
+page 2 holds `r6` with `skipped` 2 and page 3 is empty with `skipped`
+4; `FromId` of `r1` serves `r2` and `r6` with `skipped` 1; `FromId` of
+`r3`, of `r4`, of `r5` and of an unknown identifier each give an empty
+list, `skipped` 0 and `total` 3. For the token: `r5`, `total` 1. After
+the entry of `r4` for `A` is added, `total` is 4 and `r4` stands between
+`r2` and `r6`. An entry for `A` under an identifier that no row has
+changes no answer.
+
+T36.51 *A store written by one program, continued and served by the
+other (R36.14.23 -- R36.14.26; D36.11 (a)).* (i) *Served.* A store
+prepared by the contract with the rows and entries of T36.30, T36.31 and
+T36.33 is served by Reloaded, for a coin activated without
+`tx_history`, with those rows, the totals of R36.14.25 and
+`sync_status` `NotEnabled`. (ii) *Continued.* The same store with
+`tx_history: true` and a node that returns the same transactions and
+one more: after the pass the store holds the earlier rows and entries
+unchanged, each once, and the new row with its entries. (iii) *Written.*
+After Reloaded's pass over those transactions into an empty database,
+the contract applied to that database gives the same rows, order and
+`total` as Reloaded's own answers, for the platform coin and for the
+token, and the address table holds exactly the entries of T36.49. (iv)
+*A store without the index.* A database with the row table and the
+cache table only, holding those rows: after Reloaded prepares the store
+the address table exists with the entries of T36.49 and the answers are
+those of (i); a second preparation adds no entry. (v) *An earlier
+identifier form.* A row stored under a 32-byte identifier of finding 2
+of §36.14.1, with its entries, and a node that returns its transaction:
+after the pass that row and its entries are gone and the row of
+R36.14.10 is stored with its entries. (vi) *Lab row against reference
+release binaries (permitted-input class R6, black box; extends
+T36.44).* One database filled by Reloaded and then opened by a
+reference binary, and one filled by a reference binary and then opened
+by Reloaded: each program serves the other's rows with the same
+`total`, the same pages by page number and the same pages by `FromId`,
+for the platform coin and for a token, and a pass of the second program
+adds no row.
+
+T36.52 *First pass, an account with one received transfer only
+(R36.14.27).* The node answers the first query with no transaction and
+a `total_count` of 0, and the second with one transaction and a
+`total_count` of 1. (i) The transaction is a relayer's: its events are
+the relayer's fee payment, a `transfer` of 1,000,000 base units of the
+platform denom from a module account to `A`, and a
+`fungible_token_packet` event from `S` to `A`. The fetcher's history
+requests are, in this order, one for page 1 of the first query, one for
+page 1 of the second and one block read, with no request for a second
+page; the state is then `Finished`. The platform coin's history has `total` 1:
+`{"TendermintIBCTransfer": {"token_id": null}}`, `from` `S`, `to` `A`,
+`total_amount` 1, `spent_by_me` 0, `received_by_me` 1,
+`my_balance_change` 1, the relayer's fee in `fee_details`; the address
+table has the entries `S` and `A`. A request made before that page is
+written answers an empty list with `NotStarted`. (ii) The transaction is
+a bank send from `X` to `A`: one `"StandardTransfer"` row. (iii) A
+second query with 120 transactions is read in three requests, pages 1 to
+3, and keeps page 3; with 100 transactions it is read in two requests
+and keeps page 3.
+
+T36.53 *What a later pass reads (R36.14.28; D36.24, D36.25).* (i) After
+T36.52 (i), with unchanged balances over several balance reads, no
+`tx_search` request is sent. After a balance change one request is sent
+for page 1 of each query, the first query first; a further received
+transaction on that page is written and the earlier row is stored
+once. (ii) A token activated on the platform after the first pass, with
+a balance of zero, starts one pass. (iii) The block read for the
+received transaction's height answers without a time during the first
+pass and with a time afterwards: under D36.24 (a) the state is
+`Finished` with an empty list, and the row is present after the pass
+that the next balance change starts; under (b), with a second
+configured node that has the block, the row is present at the first
+`Finished`. (iv) *Input:* a first query of exactly 50 transactions; a
+node that answers a request for page 2 of that query with an error;
+after the first pass, one further transaction in the second query's
+answer and a changed balance. *Expected:* under D36.25 (a), requests
+for page 2 of the first query 30 seconds apart and no request of the
+second query; under (b), one request for page 1 of the first query
+that adds no row, then the second query, and the row of the further
+transaction.
+
+T36.54 *Two accounts under one ticker (D36.23).* *Input:* a database
+whose store was filled for `A` with one send of 1,000,000 base units of
+the platform denom from `A` to `B`; the coin activated for `B` on that
+database. *Expected in `B`'s history:* under D36.23 (a), one row with
+`spent_by_me` 1.005 and `received_by_me` 0; under (b), one row with
+`spent_by_me` 0, `received_by_me` 1 and `my_balance_change` 1.

@@ -1,7 +1,7 @@
 use crate::prelude::{TryFromCoinProtocol, TryPlatformCoinFromMmCoinEnum};
 use crate::token::{enable_token, EnableTokenError, EnableTokenRequest, TokenActivationOps, TokenProtocolParams};
 use async_trait::async_trait;
-use coins::solana::spl::{SplProtocolConf, SplTokenCreationError, SPL_TOKEN_PROGRAM_ID};
+use coins::solana::spl::{SplProtocolConf, SPL_TOKEN_PROGRAM_ID};
 use coins::{BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, MmCoinEnum, SolanaCoin, SplToken,
             SOLANA_ACTIVATION_AVAILABLE, SOLANA_NOT_AVAILABLE};
 use common::Future01CompatExt;
@@ -64,7 +64,7 @@ impl TryFromCoinProtocol for SplProtocolConf {
             } => Ok(SplProtocolConf {
                 platform_coin_ticker: platform,
                 decimals,
-                token_contract_address: mint_address.to_string(),
+                token_contract_address: mint_address,
                 program_id,
             }),
             proto => MmError::err(proto),
@@ -87,19 +87,13 @@ pub struct SplInitResult {
 #[allow(clippy::large_enum_variant)]
 pub enum SplInitError {
     GetBalanceError(BalanceError),
-    TokenCreationFailed(SplTokenCreationError),
     MyAddressError(String),
-}
-
-impl From<SplTokenCreationError> for SplInitError {
-    fn from(e: SplTokenCreationError) -> Self { SplInitError::TokenCreationFailed(e) }
 }
 
 impl From<SplInitError> for EnableTokenError {
     fn from(err: SplInitError) -> Self {
         match err {
             SplInitError::GetBalanceError(rpc_err) => rpc_err.into(),
-            SplInitError::TokenCreationFailed(e) => EnableTokenError::Internal(format! {"{:?}", e}),
             SplInitError::MyAddressError(e) => EnableTokenError::Internal(e),
         }
     }
@@ -126,8 +120,7 @@ impl TokenActivationOps for SplToken {
             protocol_conf.token_contract_address,
             protocol_conf.program_id,
             platform_coin,
-        )
-        .mm_err(Into::into)?;
+        );
         let balance = token
             .my_balance()
             .compat()

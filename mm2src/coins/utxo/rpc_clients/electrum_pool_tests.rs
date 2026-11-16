@@ -3,7 +3,7 @@
 //! The pool is built with millisecond timings, so no test waits real seconds. The production figures are
 //! pinned in `electrum_pool::budget_tests`; the 12-hour suspension cap is tested there with a clock stub.
 
-use super::electrum_measure::NEAR_OFFSET_DEFAULT_MS;
+use super::electrum_measure::{OutOfDate, NEAR_OFFSET_DEFAULT_MS};
 use super::electrum_pool::{parse_server_order, ElectrumPoolOptions, ElectrumPoolTimings, OpenedByCall, ServerOrder,
                            ServerStateSnapshot};
 use super::electrum_stub_server::{StubBehavior, StubServer};
@@ -42,6 +42,7 @@ fn test_timings() -> ElectrumPoolTimings {
         confirm_floor: ms(200),
         poor_demotion: ms(900),
         stale_floor: ms(300),
+        stuck_floor: ms(300),
         latency_floor: ms(300),
         slow_floor: ms(60),
     }
@@ -124,6 +125,7 @@ fn pool_client_spreading(
         timings,
         order,
         spread_reads,
+        listed_order_for_spends: false,
         near_factor,
         near_offset_ms,
         block_interval: None,
@@ -1807,6 +1809,357 @@ fn t38_6_4_14_the_switch_in_mm2_json_defaults_to_on_and_false_turns_it_off() {
     assert!(ElectrumPoolOptions::default().spread_reads);
 }
 
+// ---- CRD ch.38 R38.6.4a, amendment of 2026-11-15: the QTUM family's unspent lists are not spread -------------------
+
+const LIST_UNSPENT: &str = "blockchain.scripthash.listunspent";
+
+/// Three answering servers ranked by `order`, all maintained, spreading on and the unspent lists and broadcasts taking
+/// the listed order or not as `listed_order_for_spends` says (`true` is the QTUM family's setting). The servers are
+/// returned in the listed order. The tip checks are off.
+async fn three_maintained_listing_ranked(
+    listed_order_for_spends: bool,
+    order: ServerOrder,
+) -> ([StubServer; 3], Arc<ElectrumClientImpl>) {
+    let servers = three_answering().await;
+    let refs: Vec<&StubServer> = servers.iter().collect();
+    let client = checked_pool(
+        &refs,
+        PoolSetup {
+            listed_order_for_spends,
+            order,
+            tip_checks: false,
+            ..PoolSetup::new("QGUARD")
+        },
+        test_timings(),
+        script_draw(&[], 0.5),
+    );
+    client.pool.run_pass().await;
+    assert_eq!(maintained(&client), vec![0, 1, 2]);
+    (servers, client)
+}
+
+/// [`three_maintained_listing_ranked`] with the listed order as the rank.
+async fn three_maintained_listing(listed_order_for_spends: bool) -> ([StubServer; 3], Arc<ElectrumClientImpl>) {
+    three_maintained_listing_ranked(listed_order_for_spends, ServerOrder::Listed).await
+}
+
+/// T38.6.4a.10 (1): with the guard on, unspent lists in a row all start at the first-ranked session and do not move
+/// the turn: the other reads still take turns, and the first of them after the lists is the first session's.
+#[test]
+fn t38_6_4a_10_guarded_unspent_lists_start_at_the_first_session_and_do_not_move_the_turn() {
+    block_on(async {
+        let (servers, client) = three_maintained_listing(true).await;
+        for _ in 0..6 {
+            assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), servers[0].addr());
+        }
+        assert_eq!(servers[0].requests(LIST_UNSPENT), 6);
+        // The turn is untouched: balance reads start at the first session, then the second and the third.
+        let mut answered = Vec::new();
+        for _ in 0..4 {
+            answered.push(ask(&client, "blockchain.scripthash.get_balance").await.unwrap());
+        }
+        let addr = |i: usize| servers[i].addr();
+        assert_eq!(answered, vec![addr(0), addr(1), addr(2), addr(0)]);
+        // Lists between the reads neither take a turn nor give one.
+        assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), addr(0));
+        assert_eq!(
+            ask(&client, "blockchain.scripthash.get_balance").await.unwrap(),
+            addr(1)
+        );
+        assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), addr(0));
+        assert_eq!(
+            ask(&client, "blockchain.scripthash.get_balance").await.unwrap(),
+            addr(2)
+        );
+        // The other read methods of the closed list still spread.
+        assert_eq!(ask(&client, "blockchain.block.header").await.unwrap(), addr(0));
+        assert_eq!(ask(&client, "blockchain.transaction.get").await.unwrap(), addr(1));
+    });
+}
+
+/// T38.6.4a.10 (2): with the guard on, a batch that carries an unspent list keeps the priority order, whatever else
+/// is in it; a batch of other reads spreads; the batch does not move the turn.
+#[test]
+fn t38_6_4a_10_a_guarded_batch_with_an_unspent_list_keeps_the_priority_order() {
+    block_on(async {
+        let (servers, client) = three_maintained_listing(true).await;
+        let with_list = ["blockchain.scripthash.get_balance", LIST_UNSPENT];
+        for _ in 0..4 {
+            assert_eq!(
+                route_to(&client, batch_of(&with_list)).await.unwrap(),
+                servers[0].addr()
+            );
+        }
+        assert_eq!(
+            route_to(&client, batch_of(&[LIST_UNSPENT])).await.unwrap(),
+            servers[0].addr()
+        );
+        // A batch of reads that carries no list spreads, from the untouched turn.
+        let others = ["blockchain.scripthash.get_balance", "blockchain.scripthash.get_history"];
+        let mut answered = Vec::new();
+        for _ in 0..3 {
+            answered.push(route_to(&client, batch_of(&others)).await.unwrap());
+        }
+        assert_eq!(answered, servers.iter().map(StubServer::addr).collect::<Vec<_>>());
+    });
+}
+
+/// T38.6.4a.10 (3): with the guard on and an out-of-date session ranked first, the list starts at the first
+/// up-to-date session and the out-of-date one comes last (R38.6.4o item 5): it answers only when the others fail.
+/// The other reads still take turns over the up-to-date sessions.
+#[test]
+fn t38_6_4a_10_a_guarded_unspent_list_skips_an_out_of_date_session_and_keeps_it_as_the_last_resort() {
+    block_on(async {
+        const H: u64 = 2_000;
+        let (stale, good_a, good_b) = (stub_at(5, H - 1_000).await, stub_at(5, H).await, stub_at(5, H).await);
+        let client = checked_pool(
+            &[&stale, &good_a, &good_b],
+            PoolSetup {
+                listed_order_for_spends: true,
+                block_interval: Some(Duration::from_secs(60)),
+                ..PoolSetup::new("QGUARDOOD")
+            },
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&stale, &good_a, &good_b]).await;
+        assert_eq!(view_of(&client, &stale).out_of_date, Some("behind"));
+        for _ in 0..5 {
+            assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), good_a.addr());
+        }
+        assert_eq!(stale.requests(LIST_UNSPENT), 0);
+        // The other reads spread over the two up-to-date sessions, the stale one taking none.
+        let answered = answered_by(&client, 6).await;
+        assert!(
+            answered.contains(&good_a.addr()) && answered.contains(&good_b.addr()),
+            "{answered:?}"
+        );
+        assert!(answered.iter().all(|addr| *addr != stale.addr()), "{answered:?}");
+        // The up-to-date sessions failing, the stale one is the last resort for the list.
+        good_a.set_behavior(StubBehavior::Down).await;
+        good_b.set_behavior(StubBehavior::Down).await;
+        assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), stale.addr());
+    });
+}
+
+/// T38.6.4a.10 (4): with the guard off (the default, every coin but the QTUM family), unspent lists take turns; the
+/// existing `t38_6_4_14_the_other_read_methods_spread_too` covers it too, and this pins it with the option named.
+#[test]
+fn t38_6_4a_10_unguarded_unspent_lists_take_turns() {
+    assert!(!ElectrumPoolOptions::default().listed_order_for_spends);
+    block_on(async {
+        let (servers, client) = three_maintained_listing(false).await;
+        let mut answered = Vec::new();
+        for _ in 0..4 {
+            answered.push(ask(&client, LIST_UNSPENT).await.unwrap());
+        }
+        let addr = |i: usize| servers[i].addr();
+        assert_eq!(answered, vec![addr(0), addr(1), addr(2), addr(0)]);
+        let mut batches = Vec::new();
+        for _ in 0..3 {
+            batches.push(route_to(&client, batch_of(&[LIST_UNSPENT])).await.unwrap());
+        }
+        assert_eq!(batches, vec![addr(1), addr(2), addr(0)]);
+    });
+}
+
+/// T38.6.4a.10 (5): the coins-file `protocol.type` decides: `QTUM` and `QRC20` turn the listed order for unspent lists
+/// and broadcasts on, every other coin keeps its routing.
+#[test]
+fn t38_6_4a_10_the_coins_file_protocol_type_decides_the_guard() {
+    use super::electrum_pool::electrum_listed_order_for_spends;
+    assert!(electrum_listed_order_for_spends(
+        &json!({"coin": "QTUM", "protocol": {"type": "QTUM"}})
+    ));
+    assert!(electrum_listed_order_for_spends(&json!({
+        "coin": "QTUM-USDT",
+        "protocol": {"type": "QRC20", "protocol_data": {"platform": "QTUM", "contract_address": "0x00"}}
+    })));
+    assert!(!electrum_listed_order_for_spends(
+        &json!({"coin": "RIN", "protocol": {"type": "UTXO"}})
+    ));
+    assert!(!electrum_listed_order_for_spends(&json!({"coin": "RIN"})));
+    assert!(!electrum_listed_order_for_spends(
+        &json!({"coin": "BCH", "protocol": {"type": "BCH"}})
+    ));
+    assert!(!electrum_listed_order_for_spends(
+        &json!({"coin": "ETH", "protocol": {"type": "ETH"}})
+    ));
+    // The type is read as written: a lower-case spelling is not the QTUM family's.
+    assert!(!electrum_listed_order_for_spends(
+        &json!({"protocol": {"type": "qtum"}})
+    ));
+}
+
+/// T38.6.4a.10 (5, wiring): the builder that every Electrum coin activation goes through sets the option from the coin's
+/// `protocol.type`: a QTUM and a QRC20 instance start their unspent lists at the first session every time, an ordinary
+/// UTXO instance spreads them over the sessions in turn.
+#[test]
+fn t38_6_4a_10_the_builder_sets_the_guard_from_the_coin_conf() {
+    use crate::utxo::utxo_builder::build_electrum_client;
+    use crate::utxo::ElectrumBuilderArgs;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    block_on(async {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        let confs = [
+            (json!({"coin": "QTUM", "protocol": {"type": "QTUM"}}), false),
+            (
+                json!({"coin": "QTUM-USDT", "protocol": {"type": "QRC20", "protocol_data": {"platform": "QTUM"}}}),
+                false,
+            ),
+            (json!({"coin": "RIN", "protocol": {"type": "UTXO"}}), true),
+            (json!({"coin": "RIN2"}), true),
+        ];
+        for (conf, spread) in confs {
+            let servers = [good_stub().await, good_stub().await];
+            let args = ElectrumBuilderArgs {
+                spawn_ping: false,
+                negotiate_version: true,
+                collect_metrics: false,
+            };
+            let requests = servers.iter().map(StubServer::request).collect();
+            let client = build_electrum_client(
+                &ctx,
+                conf["coin"].as_str().unwrap(),
+                &conf,
+                args,
+                requests,
+                Some(2),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut answered = Vec::new();
+            for _ in 0..4 {
+                answered.push(ask(&client.0, LIST_UNSPENT).await.unwrap());
+            }
+            let distinct: std::collections::HashSet<&String> = answered.iter().collect();
+            assert_eq!(distinct.len() > 1, spread, "{conf}: {answered:?}");
+        }
+    });
+}
+
+const BROADCAST: &str = "blockchain.transaction.broadcast";
+
+/// T38.6.4a.10 (6): a QTUM-family pool whose rank (2, 0, 1) differs from the list order starts every unspent list (alone
+/// or in a batch) and every broadcast at the first listed session, and does not move the turn; the other reads keep
+/// taking turns over the ranked sessions.
+#[test]
+fn t38_6_4a_10_a_listed_order_pool_starts_listings_and_broadcasts_at_the_first_listed_session() {
+    block_on(async {
+        let (servers, client) = three_maintained_listing_ranked(true, drawn()).await;
+        // Rank 0 is the listed server 2: the pool's priority differs from the list.
+        assert_eq!(ranked_addrs(&client)[0], servers[2].addr());
+        let first = servers[0].addr();
+        for _ in 0..3 {
+            assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), first);
+            assert_eq!(ask(&client, BROADCAST).await.unwrap(), first);
+            assert_eq!(
+                route_to(&client, batch_of(&["blockchain.scripthash.get_balance", LIST_UNSPENT]))
+                    .await
+                    .unwrap(),
+                first
+            );
+        }
+        assert_eq!(servers[0].requests(LIST_UNSPENT), 6);
+        assert_eq!(servers[0].requests(BROADCAST), 3);
+        assert_eq!(servers[2].requests(LIST_UNSPENT) + servers[2].requests(BROADCAST), 0);
+        // The turn is untouched; the other reads start at the first-ranked session (listed 2) and take turns.
+        let mut answered = Vec::new();
+        for _ in 0..3 {
+            answered.push(ask(&client, "blockchain.scripthash.get_balance").await.unwrap());
+        }
+        assert_eq!(answered, vec![servers[2].addr(), servers[0].addr(), servers[1].addr()]);
+    });
+}
+
+/// T38.6.4a.10 (7): the same pool with the first listed session out of date: listings and broadcasts start at the first
+/// up-to-date session in the list order and the out-of-date one is the last resort (R38.6.4o item 5).
+#[test]
+fn t38_6_4a_10_a_listed_order_pool_with_the_first_listed_session_out_of_date_starts_at_the_next_listed_one() {
+    block_on(async {
+        const H: u64 = 2_000;
+        let (stale, good_a, good_b) = (stub_at(5, H - 1_000).await, stub_at(5, H).await, stub_at(5, H).await);
+        // Rank 0 is the listed server 2 (`good_b`), rank 1 the stale listed server 0, rank 2 `good_a`.
+        let client = checked_pool(
+            &[&stale, &good_a, &good_b],
+            PoolSetup {
+                listed_order_for_spends: true,
+                order: drawn(),
+                block_interval: Some(Duration::from_secs(60)),
+                ..PoolSetup::new("QGUARDLIST")
+            },
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&stale, &good_a, &good_b]).await;
+        assert_eq!(view_of(&client, &stale).out_of_date, Some("behind"));
+        for _ in 0..3 {
+            assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), good_a.addr());
+            assert_eq!(ask(&client, BROADCAST).await.unwrap(), good_a.addr());
+        }
+        assert_eq!(stale.requests(LIST_UNSPENT) + stale.requests(BROADCAST), 0);
+        // The first listed up-to-date session failing, the second listed one answers; the stale one is last.
+        good_a.set_behavior(StubBehavior::Down).await;
+        assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), good_b.addr());
+        assert_eq!(ask(&client, BROADCAST).await.unwrap(), good_b.addr());
+        good_b.set_behavior(StubBehavior::Down).await;
+        assert_eq!(ask(&client, LIST_UNSPENT).await.unwrap(), stale.addr());
+        assert_eq!(ask(&client, BROADCAST).await.unwrap(), stale.addr());
+    });
+}
+
+/// T38.6.4a.10 (8): two QTUM-family pools over the same servers with different ranks (stand-ins for QTUM and a token):
+/// the first session a listing tries in one is the first session a broadcast tries in the other.
+#[test]
+fn t38_6_4a_10_two_listed_order_pools_with_different_ranks_start_a_listing_and_a_broadcast_at_the_same_server() {
+    block_on(async {
+        let servers = three_answering().await;
+        let refs: Vec<&StubServer> = servers.iter().collect();
+        let pool = |ticker: &'static str, order: ServerOrder| {
+            checked_pool(
+                &refs,
+                PoolSetup {
+                    listed_order_for_spends: true,
+                    order,
+                    tip_checks: false,
+                    ..PoolSetup::new(ticker)
+                },
+                test_timings(),
+                script_draw(&[], 0.5),
+            )
+        };
+        let platform = pool("QTUMP", ServerOrder::Fixed(vec![2, 0, 1]));
+        let token = pool("QTOKEN", ServerOrder::Fixed(vec![1, 2, 0]));
+        platform.pool.run_pass().await;
+        token.pool.run_pass().await;
+        assert_ne!(ranked_addrs(&platform), ranked_addrs(&token));
+        let sent = ask(&token, BROADCAST).await.unwrap();
+        assert_eq!(ask(&platform, LIST_UNSPENT).await.unwrap(), sent);
+        let sent = ask(&platform, BROADCAST).await.unwrap();
+        assert_eq!(ask(&token, LIST_UNSPENT).await.unwrap(), sent);
+        assert_eq!(sent, servers[0].addr());
+    });
+}
+
+/// T38.6.4a.10 (9): a coin outside the QTUM family whose rank differs from the list order keeps its routing: a broadcast
+/// goes to the first-ranked session and unspent lists take turns from it.
+#[test]
+fn t38_6_4a_10_a_pool_without_the_option_follows_its_rank_for_listings_and_broadcasts() {
+    block_on(async {
+        let (servers, client) = three_maintained_listing_ranked(false, drawn()).await;
+        for _ in 0..3 {
+            assert_eq!(ask(&client, BROADCAST).await.unwrap(), servers[2].addr());
+        }
+        let mut answered = Vec::new();
+        for _ in 0..4 {
+            answered.push(ask(&client, LIST_UNSPENT).await.unwrap());
+        }
+        let addr = |i: usize| servers[i].addr();
+        assert_eq!(answered, vec![addr(2), addr(0), addr(1), addr(2)]);
+    });
+}
+
 // ---- CRD ch.38 R38.6.4a items 6-8: reads over the near sessions ------------------------------------------------------
 
 /// The factor the pool tests of the near sessions set, as the chapter's cases state it. It is set on purpose and is
@@ -2356,6 +2709,9 @@ struct PoolSetup {
     order: ServerOrder,
     /// Whether read-only queries are spread (R38.6.4a item 5).
     spread_reads: bool,
+    /// Whether unspent lists and broadcasts take the listed order (R38.6.4a, amendment of 2026-11-15); `true` is the
+    /// QTUM family's.
+    listed_order_for_spends: bool,
     near_factor: f64,
     block_interval: Option<Duration>,
     /// The `electrum_tip_checks` switch (R38.6.4o item 11).
@@ -2370,6 +2726,7 @@ impl PoolSetup {
             max_connected: None,
             order: ServerOrder::Listed,
             spread_reads: true,
+            listed_order_for_spends: false,
             near_factor: 0.,
             block_interval: None,
             tip_checks: true,
@@ -2392,6 +2749,7 @@ fn checked_pool(
         timings,
         order: setup.order,
         spread_reads: setup.spread_reads,
+        listed_order_for_spends: setup.listed_order_for_spends,
         near_factor: setup.near_factor,
         near_offset_ms: NEAR_OFFSET_DEFAULT_MS,
         block_interval: setup.block_interval,
@@ -2438,6 +2796,7 @@ fn methods_received(server: &StubServer) -> Vec<String> {
 fn quiet_timings() -> ElectrumPoolTimings {
     ElectrumPoolTimings {
         stale_floor: ms(60_000),
+        stuck_floor: ms(60_000),
         ..test_timings()
     }
 }
@@ -3383,8 +3742,9 @@ fn t38_6_4o_4_two_servers_one_far_behind() {
 }
 
 /// T38.6.4o.5: with three maintained stubs and the stuck period shortened, two stubs notifying new tips and one
-/// silent, the silent one becomes out of date as stuck after the period and not before, and leaves the read turn. With
-/// every stub silent for longer than the period none is stuck. With a single maintained stub item 4 does not apply.
+/// silent, the silent one becomes out of date as stuck after the period and not before, and leaves the read turn; when
+/// it reaches the tip it is up to date again. With every stub silent for longer than the period none is stuck. With a
+/// single maintained stub item 4 does not apply.
 #[test]
 fn t38_6_4o_5_a_silent_connection_is_stuck_while_another_one_hears_news() {
     let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
@@ -3392,10 +3752,11 @@ fn t38_6_4o_5_a_silent_connection_is_stuck_while_another_one_hears_news() {
         let ticker = "OOD5";
         let period = ms(600);
         // A block interval of 100 ms: the tolerance is the cap of 20 blocks, so the silent stub never lags that far
-        // behind in the time of the test, and the stuck period is the larger of 3 intervals and the floor: 600 ms.
+        // behind in the time of the test, and the stuck period is the larger of 2 intervals and the floor: 600 ms.
         let block_interval = Some(ms(100));
         let timings = ElectrumPoolTimings {
             stale_floor: period,
+            stuck_floor: period,
             ..quiet_timings()
         };
         let (a, b, c) = (
@@ -3442,10 +3803,29 @@ fn t38_6_4o_5_a_silent_connection_is_stuck_while_another_one_hears_news() {
             assert_eq!(lines.len(), 1, "{lines:?}");
             assert!(
                 lines[0].starts_with(&format!(
-                    "WARN {ticker}: Electrum server {} has sent no new block for ",
+                    "WARN {ticker}: Electrum server {} has not reported block ",
                     c.addr()
-                )) && lines[0].ends_with(" s while another server did"),
+                )) && lines[0].contains(", which another server reported ")
+                    && lines[0].ends_with(" s ago"),
                 "{lines:?}"
+            );
+        }
+
+        // It reaches the tip: up to date again, one more line.
+        height += 1;
+        a.set_tip(height);
+        b.set_tip(height);
+        c.set_tip(height);
+        wait_until("the silent stub to be up to date again", || {
+            view_of(&client, &c).out_of_date.is_none()
+        })
+        .await;
+        if capturing {
+            let lines = warn_lines(ticker);
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert_eq!(
+                lines[1],
+                format!("WARN {ticker}: Electrum server {} is up to date again", c.addr())
             );
         }
 
@@ -3489,6 +3869,213 @@ fn t38_6_4o_5_a_silent_connection_is_stuck_while_another_one_hears_news() {
         Timer::sleep(0.9).await;
         answered_by(&client, 2).await;
         assert_eq!(view_of(&client, &lone).out_of_date, None);
+    });
+}
+
+/// The stuck period of a coin with the given `avg_blocktime` under [`quiet_timings`] (R38.6.4o item 4, amendment of
+/// 2026-11-15): the larger of 2 intervals and the floor, the fallback without an interval. The floors of the quiet
+/// timings are a minute, so the figures are the larger of 2 intervals and 60 s, and a minute without an interval.
+fn stuck_secs(interval_secs: Option<u64>) -> f64 { interval_secs.map_or(60., |secs| (2 * secs).max(60) as f64) }
+
+/// Two maintained stubs at `H`, over a coin with the given block interval, ready for the stuck tests.
+async fn two_stubs_at(
+    ticker: &'static str,
+    interval_secs: Option<u64>,
+) -> (Arc<ElectrumClientImpl>, StubServer, StubServer) {
+    let (a, b) = (stub_at(5, 1_000).await, stub_at(5, 1_000).await);
+    let client = checked_pool(
+        &[&a, &b],
+        PoolSetup {
+            block_interval: interval_secs.map(Duration::from_secs),
+            ..PoolSetup::new(ticker)
+        },
+        quiet_timings(),
+        script_draw(&[], 0.5),
+    );
+    join_with_heights(&client, &[&a, &b]).await;
+    (client, a, b)
+}
+
+/// The moment the pool first saw `height` reported, once it has.
+async fn first_report_of(client: &ElectrumClientImpl, height: u64) -> f64 {
+    wait_until("the height to be reported", || {
+        client.pool.first_reports_for_test().contains_key(&height)
+    })
+    .await;
+    client.pool.first_reports_for_test()[&height]
+}
+
+/// T38.6.4o.stuck.1 (amended 2026-11-15, item 4): a connection that does not reach a height another one reported is stuck
+/// after the period counted from that first report, not before; the poor mark follows; the next check is at that
+/// moment. Under every `avg_blocktime`: 600 s gives 1200 s, 60 s and 15 s the floor, none the fallback.
+#[test]
+fn t38_6_4o_stuck_1_a_server_that_never_delivers_is_stuck_after_the_period() {
+    block_on(async {
+        const H: u64 = 1_000;
+        for (ticker, interval) in [
+            ("STK600", Some(600)),
+            ("STK60", Some(60)),
+            ("STK15", Some(15)),
+            ("STKNO", None),
+        ] {
+            let period = stuck_secs(interval);
+            let (client, a, b) = two_stubs_at(ticker, interval).await;
+            // Nobody has advanced: nobody is stuck, however late the time, and no check is due.
+            assert_eq!(client.pool.out_of_date_at_for_test(now_float() + 3_600.), vec![
+                None, None
+            ]);
+            assert_eq!(client.pool.next_stale_check(now_float()), None);
+
+            a.set_tip(H + 1);
+            let t0 = first_report_of(&client, H + 1).await;
+            let judged = |at: f64| client.pool.out_of_date_at_for_test(at);
+            assert_eq!(judged(t0 + period - 1.), vec![None, None], "{ticker}");
+            assert_eq!(judged(t0 + period + 1.)[0], None, "{ticker}");
+            assert!(
+                matches!(judged(t0 + period + 1.)[1], Some(OutOfDate::Stuck { height, .. }) if height == H + 1),
+                "{ticker}: {:?}",
+                judged(t0 + period + 1.)
+            );
+            // The poor mark follows: not before the period, on B after it.
+            assert!(!client.pool.mark_poor_connections(t0 + period - 1.), "{ticker}");
+            assert_eq!(snap_of(&client, &b).poor_until, 0.);
+            assert!(client.pool.mark_poor_connections(t0 + period + 1.), "{ticker}");
+            assert!(snap_of(&client, &b).poor_until > 0., "{ticker}");
+            assert_eq!(snap_of(&client, &a).poor_until, 0., "{ticker}");
+            // The next check is the moment B turns stuck.
+            assert_eq!(client.pool.next_stale_check(t0 + 1.), Some(t0 + period), "{ticker}");
+            assert_eq!(client.pool.next_stale_check(t0 + period + 1.), None, "{ticker}");
+
+            // B reaches the height: nothing is stuck, the record holds nothing at or below it.
+            b.set_tip(H + 1);
+            wait_until("B to reach the height", || snap_of(&client, &b).height == Some(H + 1)).await;
+            wait_until("the record to be pruned", || {
+                client.pool.first_reports_for_test().is_empty()
+            })
+            .await;
+            assert_eq!(judged(t0 + 3_600.), vec![None, None], "{ticker}");
+            assert_eq!(client.pool.next_stale_check(t0 + 1.), None, "{ticker}");
+        }
+    });
+}
+
+/// T38.6.4o.stuck.2 (amended 2026-11-15, item 4), the field case: the second server reports a new block seconds after the
+/// first, after a long silence. It is never stuck, not before its report and not after it, and never marked poor,
+/// with an `avg_blocktime` of 600 s and with one of 60 s whose blocks really come every 15 minutes.
+#[test]
+fn t38_6_4o_stuck_2_a_slow_block_does_not_make_the_second_server_stuck() {
+    block_on(async {
+        const H: u64 = 1_000;
+        for (ticker, interval) in [("SLOW600", Some(600)), ("SLOW60", Some(60))] {
+            let (client, a, b) = two_stubs_at(ticker, interval).await;
+            a.set_tip(H + 1);
+            let t0 = first_report_of(&client, H + 1).await;
+            // B is 3 s, then 5 s late: before its report it is not stuck, and nothing is marked.
+            for late in [3., 5.] {
+                assert_eq!(
+                    client.pool.out_of_date_at_for_test(t0 + late),
+                    vec![None, None],
+                    "{ticker}"
+                );
+                assert!(!client.pool.mark_poor_connections(t0 + late), "{ticker}");
+            }
+            b.set_tip(H + 1);
+            wait_until("B to reach the height", || snap_of(&client, &b).height == Some(H + 1)).await;
+            // After its report, at any time: not stuck, not marked, no check due.
+            for at in [t0 + 5., t0 + 60., t0 + 900.] {
+                assert_eq!(client.pool.out_of_date_at_for_test(at), vec![None, None], "{ticker}");
+                assert!(!client.pool.mark_poor_connections(at), "{ticker}");
+            }
+            assert_eq!(snap_of(&client, &a).poor_until + snap_of(&client, &b).poor_until, 0.);
+            assert_eq!(client.pool.next_stale_check(t0 + 1.), None, "{ticker}");
+        }
+    });
+}
+
+/// T38.6.4o.stuck.3 (amended 2026-11-15, item 4): a connection that keeps notifying its own height without reaching the
+/// reported one is stuck after the period, counted from the first report; and behind still wins over stuck.
+#[test]
+fn t38_6_4o_stuck_3_notifying_without_advancing_is_stuck_and_behind_wins() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let (client, a, b) = two_stubs_at("STKN", Some(60)).await;
+        a.set_tip(H + 1);
+        let t0 = first_report_of(&client, H + 1).await;
+        for _ in 0..3 {
+            b.set_tip(H);
+            Timer::sleep(0.05).await;
+        }
+        assert_eq!(client.pool.first_reports_for_test().get(&(H + 1)), Some(&t0));
+        // The period of a 60 s coin under the quiet timings is 120 s.
+        assert_eq!(client.pool.out_of_date_at_for_test(t0 + 119.), vec![None, None]);
+        assert!(client.pool.out_of_date_at_for_test(t0 + 121.)[1].is_some());
+
+        // Behind (T = 3 for a 60 s coin) wins over stuck.
+        let (client, a, b) = two_stubs_at("STKB", Some(60)).await;
+        a.set_tip(H + 4);
+        let t0 = first_report_of(&client, H + 4).await;
+        assert_eq!(client.pool.out_of_date_at_for_test(t0 + 1_000.), vec![
+            None,
+            Some(OutOfDate::Behind { lag: 4, tip: H + 4 })
+        ]);
+        let _ = b;
+    });
+}
+
+/// T38.6.4o.stuck.4 (amended 2026-11-15, item 4): a server that stays far behind (behind wins over stuck and stays
+/// maintained) does not blind the stuck rule once the chain has moved on by more heights than the record may hold.
+/// Three stubs, one frozen 500 blocks back; the other two follow 300 new heights, then one reports a block the other
+/// does not reach. That one is stuck after the period, the frozen one is behind, and the record stays within 2T + 1.
+#[test]
+fn t38_6_4o_stuck_4_a_frozen_server_does_not_hide_a_stalled_one() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let (frozen, a, b) = (stub_at(5, H - 500).await, stub_at(5, H).await, stub_at(5, H).await);
+        let client = checked_pool(
+            &[&frozen, &a, &b],
+            PoolSetup {
+                block_interval: Some(Duration::from_secs(60)),
+                ..PoolSetup::new("STKF")
+            },
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&frozen, &a, &b]).await;
+        for step in 1..=300u64 {
+            a.set_tip(H + step);
+            b.set_tip(H + step);
+            wait_until("both live connections to follow", || {
+                snap_of(&client, &a).height == Some(H + step) && snap_of(&client, &b).height == Some(H + step)
+            })
+            .await;
+            assert!(client.pool.first_reports_for_test().len() <= 7);
+        }
+        a.set_tip(H + 301);
+        let t0 = first_report_of(&client, H + 301).await;
+        assert!(client.pool.first_reports_for_test().len() <= 7);
+        // The period of a 60 s coin under the quiet timings is 120 s.
+        let judged = |at: f64| client.pool.out_of_date_at_for_test(at);
+        let count = |states: &[Option<OutOfDate>], matcher: fn(&Option<OutOfDate>) -> bool| {
+            states.iter().filter(|state| matcher(state)).count()
+        };
+        let is_stuck = |state: &Option<OutOfDate>| matches!(state, Some(OutOfDate::Stuck { .. }));
+        let is_behind = |state: &Option<OutOfDate>| matches!(state, Some(OutOfDate::Behind { .. }));
+        let before = judged(t0 + 119.);
+        assert_eq!(
+            (count(&before, is_stuck), count(&before, is_behind)),
+            (0, 1),
+            "{before:?}"
+        );
+        let after = judged(t0 + 121.);
+        assert_eq!((count(&after, is_stuck), count(&after, is_behind)), (1, 1), "{after:?}");
+        assert!(
+            after
+                .iter()
+                .any(|state| matches!(state, Some(OutOfDate::Stuck { height, .. }) if *height == H + 301)),
+            "{after:?}"
+        );
+        // A check is due by the moment the stalled one turns stuck (the frozen one may add earlier, harmless, wake-ups).
+        assert!(client.pool.next_stale_check(t0 + 1.).is_some_and(|at| at <= t0 + 120.));
     });
 }
 

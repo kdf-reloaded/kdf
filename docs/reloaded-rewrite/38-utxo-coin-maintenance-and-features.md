@@ -1354,6 +1354,51 @@ every maintained session.
 >   number; using 2` or `electrum_spread_near_offset_ms <value> is not a non-negative
 >   number; using 20`; the figure is the default constant.
 
+*Amendment (2026-11-15, clean side; Reloaded-original; interim until
+D38.6.4Q.1 and D38.6.4Q.4 are implemented). The QTUM family's unspent lists
+are not spread, and they and its broadcasts take the listed order.*
+1. For a coin instance whose coins-file `protocol.type` is `QTUM` or `QRC20`,
+   an unspent-list request (`blockchain.scripthash.listunspent`), and an
+   R38.6.3a batch that carries one, does not take a turn under item 1. It
+   does not advance the turn counter.
+2. For such an instance, an unspent-list request (item 1) and a transaction
+   broadcast (`blockchain.transaction.broadcast`) try the up-to-date
+   maintained sessions first and then the out-of-date ones (R38.6.4o item 5),
+   and within each group in the order of the activation request's server list
+   (R38.6.4b item 1), whatever `electrum_server_order` says. These two request
+   kinds of this one family therefore do not follow the configured order
+   (R38.6.4b-R, R38.6.4l) until the shared client of D38.6.4Q.1 and the shared
+   record of D38.6.4Q.4 land. Every other request of those instances, and
+   every request of every other coin, keeps its routing; every other read of
+   those instances still spreads. `electrum_spread_reads` `false` still turns
+   all spreading off.
+3. *Reason.* Item 4 relies on the recently-spent record. For the QTUM family
+   that record does not cover a QRC20 token's broadcasts, and the listings of
+   QTUM and of its tokens do not consult one shared record (R38.6.4Q.7 item 6;
+   §38.6.4Q, note 2 on existing text). QTUM and each token also have pools of
+   their own (R38.6.4Q.1), and under `random`, `mixed` and `measured` each pool
+   draws its own order. A listing sent in turn, or in a pool's own order, to a
+   session that has not yet seen this node's last broadcast from another
+   instance of the family could therefore offer an input that broadcast
+   already spent. With items 1 and 2, every instance of the family that names
+   the same servers tries the same first session for its listings and its
+   broadcasts, as at the reference, where every pool ranks by list position
+   and reads are not spread.
+4. *Limits.* This narrows the exposure and does not close it:
+   - a session can answer a listing before it has indexed a broadcast it took;
+   - a broadcast that failed over to another session leaves the gap open;
+   - instances whose activation requests name different servers, or list them
+     in a different order, do not share a first session;
+   - a session can be out of date in one instance's pool and up to date in
+     another's;
+   - with `max_connected` below the number of listed servers, two pools can
+     maintain different subsets.
+   The shared client of D38.6.4Q.1 and the shared record of D38.6.4Q.4 close
+   the gap, and this amendment then lapses.
+5. No peer observes it. A user sees no change in amounts or timing, only that
+   the QTUM family's unspent lists and broadcasts go to the servers in list
+   order instead of taking turns or following the measured order.
+
 R38.6.4b **Pool composition and bounds.** (Reference-bound at the rows
 `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, which agree.)
 1. The servers listed in the activation request ([chapter 55](55-coin-activation-wire-contract.md)
@@ -2269,6 +2314,51 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    moment; a connection is up to date again as soon as neither condition
    holds. Being out of date is not a suspension and not a demotion: the
    connection stays maintained, keeps its rank and keeps answering pings.
+
+   *Amended 2026-11-15 (clean side; Reloaded-original; maintainer decision of
+   2026-11-15; replaces the stuck condition above and amends D38.6.4o.7).*
+   - *stuck:* there are two or more maintained connections with a height, and
+     another maintained connection has reported a height above this
+     connection's height for longer than *P*. The time is counted from the
+     moment the first maintained connection reported the lowest height above
+     this connection's height, not from this connection's own last
+     notification. *P* is the larger of 2 × `avg_blocktime` and 180 s; for a
+     coin without a valid `avg_blocktime` it is 10 minutes.
+   - The pool keeps, per coin instance, the moment each height was first
+     reported by a maintained connection, through a header notification or
+     the answer to a header request. It keeps only the heights within *T* of
+     the running agreed tip, above the agreed tip minus *T* and up to the
+     agreed tip plus *T*, and above the lowest height of its maintained
+     connections. A connection further behind is behind, which wins over
+     stuck; higher heights do not count (below); and a height every
+     connection has reached is no longer awaited.
+   - A connection that keeps sending notifications without reaching the
+     reported height is stuck too. Under the earlier own-silence condition it
+     was not.
+   - When no other connection has reported a higher height, none is stuck,
+     however long the silence: the chain itself may have stopped, or a block
+     may be slow.
+   - Only heights up to the running agreed tip plus *T* count as reported
+     above. A height more than *T* above the agreed tip does not start the
+     stuck period; it is judged by the ahead condition and the disagreement of
+     item 12.
+   - The behind and ahead conditions are unchanged and still win over stuck.
+     The minimum of 180 s is the time *T* covers (item 1): a connection is
+     never called stuck sooner than a lag the behind condition still accepts.
+   - *Reason.* The own-silence condition marked every connection that was not
+     first with a new block whenever the time between two blocks exceeded the
+     period, and the mark cleared about a second later when its own
+     notification came. In a 72-hour field run of this project (2026-11-10 to
+     2026-11-13, four nodes), 405 of 411 such marks cleared within 1 s; one
+     cleared within 30 s, and the other 5 were each followed by a second mark
+     of the same server and cleared with it in the same second. No mark stayed
+     uncleared. The
+     marks also made the connection poor (R38.6.4l items 6 and 7) and made a
+     re-measure round due.
+   - *Known limit.* The lone-connection rule of R38.6.4l item 6 has no other
+     connection to count from. It keeps its limit (the larger of 3 ×
+     `avg_blocktime` and 10 minutes) and still marks a lone connection after
+     a block gap longer than that limit.
 5. *Reads and broadcasts avoid out-of-date connections.*
    - *Reads (amends R38.6.4a item 6).* An out-of-date connection is not near.
      The near sessions, and the floor of two near sessions, are chosen among
@@ -3298,6 +3388,12 @@ D38.6.4o.7 *(Decided 2026-11-09, maintainer.)* *The stuck period.* The larger of
 R38.6.4l item 6. Judging staleness by the tip header's timestamp was
 considered and not chosen: it needs per-family header parsing, says little on
 proof-of-stake chains, and trusts the local clock.
+
+*Status note (2026-11-15, clean side; maintainer decision).* For the stuck
+condition of item 4 this decision is replaced by the amendment of 2026-11-15
+under item 4: the larger of 2 × `avg_blocktime` and 180 s, counted from another
+connection's first report of a higher height. The lone-connection rule of
+R38.6.4l item 6 keeps the figure above.
 
 D38.6.4o.8 *(Decided 2026-11-09, maintainer.)* *Header agreement.* Applied in
 measurement rounds only, at the agreed tip height only, and only with two
@@ -5485,4 +5581,17 @@ R38.8.6 **Tests (two-direction, observable).**
   session that never read the forbidden corpus. The inputs are this repository's
   code, the cleared §38.6.4Q (its notes 1, 3 and 6 on existing text), PR #354,
   and the two public sources now listed in §38.10. It takes no forbidden-class
+  input, so chapter 01 R38 is not engaged and no gate pass is required.
+- *Reloaded-original amendment (2026-11-15), clean side -- after the as-built notes
+  of R38.6.4a: the QTUM family's unspent lists are not spread, and they and its
+  broadcasts take the listed order (interim until D38.6.4Q.1 and D38.6.4Q.4).* Written by a session that never read the forbidden corpus. The
+  inputs are this repository's code and the cleared §38.6.4Q (R38.6.4Q.1,
+  R38.6.4Q.7 and its note 2 on existing text). It takes no forbidden-class input, so chapter 01 R38
+  is not engaged and no gate pass is required.
+- *Reloaded-original amendment (2026-11-15), clean side -- under R38.6.4o item 4
+  and a status note after D38.6.4o.7: a stuck connection is judged from another
+  connection's first report of a higher height, with the period of the larger of
+  2 × `avg_blocktime` and 180 s.* Written by a session that never read the
+  forbidden corpus, on a maintainer decision. The inputs are this repository's
+  code and this project's own field-run counts. It takes no forbidden-class
   input, so chapter 01 R38 is not engaged and no gate pass is required.
