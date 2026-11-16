@@ -1653,8 +1653,12 @@ reason?}` (an invalid address is a success with `is_valid: false`);
 `all_swaps_uuids_by_filter` `{uuids, my_coin, other_coin, from_timestamp,
 to_timestamp, found_records}` (the member is `found_records`, as the legacy
 body has it); `import_swaps` `{imported, skipped}` (per-record failures stay
-inside `skipped`, R43.1B.3); `version` the legacy object unchanged (`result`
-holding the version string, `datetime`); `stop` the string `"success"`,
+inside `skipped`, R43.1B.3; the versioned form runs on the request task,
+where the legacy form runs on the blocking-work executor, an accepted
+difference with no wire effect); `version` the legacy object unchanged, so the
+versioned answer nests a `result` member holding the version string beside
+`datetime` inside `result` (the bare-body rule of R43.1C.6 applied without a
+redesign); `stop` the string `"success"`,
 answered before the shutdown proceeds; `metrics` the bare `{metrics}` object;
 `get_my_peer_id` the peer identifier string; the four gossip and peer
 queries their legacy maps or lists; `ban_pubkey` `"success"`;

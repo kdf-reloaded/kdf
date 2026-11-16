@@ -58,7 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `unban_pubkeys`, in the same way as the methods above. With this, every method that only the legacy surface knew
   has a versioned form, except `recover_funds_of_swap` (waits for the swap architecture decisions),
   `stats_swap_status`, `get_trade_fee`, `electrum`, `enable`, `help` and `show_priv_key`, which stay legacy-only on
-  purpose. Detail: PR #387; CRD ch.43 §43.1R.
+  purpose, and the test-only `sim_panic`. Detail: PR #387; CRD ch.43 §43.1R.
 
 #### Solana coins
 
