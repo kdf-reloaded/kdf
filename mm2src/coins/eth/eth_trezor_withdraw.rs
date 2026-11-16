@@ -15,7 +15,7 @@ use crate::{CoinWithDerivationMethod, DerivationMethod, WithdrawError, WithdrawR
 use crypto::hw_rpc_task::{HwConnectStatuses, TrezorRpcTaskConnectProcessor};
 use crypto::trezor::client::TrezorClient;
 use crypto::trezor::ethereum::TrezorEthTxInput;
-use crypto::{Bip44DerivationPath, DerivationPath};
+use crypto::{Bip44DerivationPath, DerivationPath, HwRpcError};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use std::str::FromStr;
@@ -229,8 +229,8 @@ pub(crate) async fn withdraw_trezor_impl(
 
     // R50.7 / R50.12 / R50.18: normalize the recovery value, re-apply EIP-155
     // replay protection, and assemble the byte-identical signed transaction. An
-    // invalid recovery value / unrecoverable signature fails as a device-internal
-    // error rather than emitting a malformed transaction.
+    // invalid recovery value / unrecoverable signature fails as the `InvalidSignature`
+    // hardware error rather than emitting a malformed transaction.
     let signed = super::legacy_tx::signed_eth_tx_from_rsv(
         plan.unsigned.clone(),
         signature.v as u32,
@@ -238,7 +238,7 @@ pub(crate) async fn withdraw_trezor_impl(
         &signature.s,
         Some(chain_id),
     )
-    .map_to_mm(|e| WithdrawError::HardwareWalletInternal(format!("Invalid device signature: {}", e)))?;
+    .map_to_mm(|_| WithdrawError::hardware_wallet(HwRpcError::InvalidSignature))?;
 
     let bytes = rlp::encode(&signed);
     let from_checksum = checksum_address(&format!("{:#02x}", sender_address));

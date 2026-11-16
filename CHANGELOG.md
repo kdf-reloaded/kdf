@@ -97,6 +97,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `matching` and `cancelled`), `active_swaps` and `swaps` (the same list as `active_swaps`), all present and
   empty where nothing applies; before, each refusal carried one of them or none. The error text, HTTP 500 and the
   cancel-first behavior are unchanged. Detail: PR #TBD; CRD ch.43 R43.1E.3, D43.1E.1 status note.
+- **Hardware-wallet failures of `withdraw` answer the one error `HwError`.** The versioned `withdraw`, `withdraw_nft`
+  and the start of `task::withdraw::init` no longer answer `TrezorDisconnected`, `NoTrezorDeviceAvailable`,
+  `FoundUnexpectedDevice` or `HardwareWalletInternal`. A device condition answers `error_type` `HwError` with
+  HTTP 410 and `error_data` naming the condition with the same words the activation methods use
+  (`NoTrezorDeviceAvailable`, `FoundMultipleDevices`, `FoundUnexpectedDevice`, `InvalidPin`, `ButtonExpected`,
+  `UserCancelled`, `InvalidSignature`, ...), so a client handles hardware failures of every method alike. A
+  connection timeout answers `Timeout` (408). Device failures that have no such word (transport, protocol,
+  invalid key data, internal) answer `InternalError` with HTTP 500, as before under the removed name. Detail:
+  PR #TBD; CRD ch.50 R50.17 status note, ch.43 R43.1D.2, ch.55 R55.2.17.
 
 #### Shielded coins
 

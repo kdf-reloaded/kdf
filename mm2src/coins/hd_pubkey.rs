@@ -7,7 +7,7 @@ use crypto::trezor::utxo::TrezorUtxoCoin;
 use crypto::trezor::{ProcessTrezorResponse, TrezorError, TrezorPassphraseResponse, TrezorPinMatrix3x3Response,
                      TrezorProcessingError};
 use crypto::{Bip32Error, CryptoCtx, CryptoCtxError, CryptoInitError, DerivationPath, EcdsaCurve, HardwareWalletArc,
-             HwError, HwProcessingError, XPub};
+             HwError, HwProcessingError, HwRpcError, XPub};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use rpc_task::{RpcTask, RpcTaskError, RpcTaskHandle};
@@ -146,7 +146,7 @@ pub(crate) fn hardware_context_for_signing(
     let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
     let hw_ctx = crypto_ctx
         .hw_ctx()
-        .or_mm_err(|| WithdrawError::NoTrezorDeviceAvailable)?;
+        .or_mm_err(|| WithdrawError::hardware_wallet(HwRpcError::NoTrezorDeviceAvailable))?;
     require_same_device(activated_with, &hw_ctx).map_to_mm(WithdrawError::from)?;
     Ok(hw_ctx)
 }

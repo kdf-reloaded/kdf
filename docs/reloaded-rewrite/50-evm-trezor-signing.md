@@ -339,6 +339,27 @@ discriminant mapping is:
 The human-readable message text carried alongside the discriminant is not part of
 the contract.
 
+> *Reloaded status (clean side, 2026-11-16):* the four hardware-wallet
+> discriminants of the table above are **superseded for the withdraw set**
+> (`withdraw`, `withdraw_nft`, the start of `task::withdraw::init`) by the
+> maintainer's decision of 2026-11-16: the set now answers the reference's
+> single discriminant `HwError` (chapter 43 R43.1D.2), with `error_data` a
+> string holding one word of the vocabulary chapter 55 R55.2.17 binds for
+> activation, HTTP 410, so that every surface speaks one hardware vocabulary.
+> The mapping mirrors the activation path: no device, a disconnected device or
+> denied access answer `NoTrezorDeviceAvailable`; several devices
+> `FoundMultipleDevices`; an identity mismatch `FoundUnexpectedDevice`; a
+> device-reported failure its word (`InvalidPin`, `ButtonExpected`,
+> `UserCancelled`, ...); an invalid device signature `InvalidSignature`. A
+> connection timeout answers `Timeout` (408). Hardware conditions that have
+> no word in that vocabulary (transport not supported, invalid xpub, protocol
+> error, unexpected interaction request, other or internal failures, the
+> missing device record of a coin, a pubkey the device returned that does not
+> parse) answer `InternalError` (500), as before under another name: those
+> cases do not move to 410. The table's condition-to-discriminant mapping
+> stays the record of v0.4.0 behavior. Rows R50.17 and R50.18 of §50.8 are to
+> be read with `HwError` and its string in place of the four names.
+
 R50.18. A device-returned signature that is structurally invalid (for example an
 invalid recovery value, R50.7) shall fail the withdrawal with the device-internal
 class discriminant of R50.17 rather than emitting a malformed signed transaction.
@@ -592,3 +613,6 @@ outside the signing-behaviour contract bound here.
   R49.27a, which passed the KDF Dirty Gate on 2026-11-04, and on this
   repository's own code. It takes no forbidden-class input, so it does not
   engage chapter 01 R38.
+- *Status note added 2026-11-16 (under R50.17).* Reloaded-original, clean side:
+  it records the maintainer's 2026-11-16 decision to answer `HwError` in the
+  withdraw set; no forbidden-class input, chapter 01 R38 not engaged.

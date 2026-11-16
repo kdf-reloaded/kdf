@@ -13333,8 +13333,8 @@ pub(crate) mod hd_accounts_at_index_tests {
     }
 
     /// R58a, T36: signing takes its hardware context through one check. The device of the activation passes, an
-    /// empty slot answers `NoTrezorDeviceAvailable` as before, and another device answers `FoundUnexpectedDevice`
-    /// (HTTP 410 of the withdraw error class), all before any device is contacted. Both withdraw routes, the UTXO
+    /// empty slot answers `HwError` `NoTrezorDeviceAvailable`, and another device answers `HwError`
+    /// `FoundUnexpectedDevice` (both HTTP 410 of the withdraw error class), all before any device is contacted. Both withdraw routes, the UTXO
     /// one (`InitUtxoWithdraw::trezor_client`) and the EVM one (`eth_trezor_withdraw::trezor_client`), call this
     /// check; they need a task handle to run, so only the check itself is run here.
     #[test]
@@ -13353,21 +13353,32 @@ pub(crate) mod hd_accounts_at_index_tests {
             .err()
             .expect("the replaced device must be refused")
             .into_inner();
-        assert!(matches!(error, WithdrawError::FoundUnexpectedDevice(_)), "{:?}", error);
+        assert!(
+            matches!(&error, WithdrawError::HwError(word) if word == "FoundUnexpectedDevice"),
+            "the replaced device answers HwError FoundUnexpectedDevice"
+        );
         assert_eq!(error.status_code(), common::StatusCode::GONE);
 
         let error = hardware_context_for_signing(&ctx, None)
             .err()
             .expect("a coin without a record of its device is refused")
             .into_inner();
-        assert!(matches!(error, WithdrawError::HardwareWalletInternal(_)), "{:?}", error);
+        assert!(
+            matches!(error, WithdrawError::InternalError(_)),
+            "a coin without a device record answers InternalError"
+        );
+        assert_eq!(error.status_code(), common::StatusCode::INTERNAL_SERVER_ERROR);
 
         CryptoCtx::from_ctx(&ctx).unwrap().reset_hw_ctx();
         let error = hardware_context_for_signing(&ctx, Some(&activated_with))
             .err()
             .expect("an empty slot has no device")
             .into_inner();
-        assert!(matches!(error, WithdrawError::NoTrezorDeviceAvailable), "{:?}", error);
+        assert!(
+            matches!(&error, WithdrawError::HwError(word) if word == "NoTrezorDeviceAvailable"),
+            "an empty slot answers HwError NoTrezorDeviceAvailable"
+        );
+        assert_eq!(error.status_code(), common::StatusCode::GONE);
     }
 }
 
