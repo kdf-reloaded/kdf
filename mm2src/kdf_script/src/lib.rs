@@ -25,4 +25,5 @@ pub use crate::error::Error;
 pub use crate::num::Num;
 pub use crate::opcode::Opcode;
 pub use crate::script::{is_witness_commitment_script, Instruction, Script, ScriptAddress, ScriptType, ScriptWitness};
-pub use crate::sign::{SignatureVersion, SignerHashAlgo, TransactionInputSigner, UnsignedTransactionInput};
+pub use crate::sign::{SignatureHashError, SignatureVersion, SignerHashAlgo, TransactionInputSigner,
+                      UnsignedTransactionInput};

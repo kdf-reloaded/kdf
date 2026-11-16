@@ -104,6 +104,9 @@ impl From<UtxoSignWithKeyPairError> for UtxoSignTxError {
             // that are expected to be checked by [`sign_common::UtxoSignTxParamsBuilder::build`] already.
             // So if this error happens, it's our internal error.
             UtxoSignWithKeyPairError::InputIndexOutOfBound { .. } => UtxoSignTxError::Internal(error),
+            // A malformed output script is the caller's input, not an internal fault, yet this error type has no
+            // variant for it; the plain text of the signature-hash error is kept.
+            UtxoSignWithKeyPairError::SignatureHash(_) => UtxoSignTxError::Internal(error),
             UtxoSignWithKeyPairError::ErrorSigning(sign) => UtxoSignTxError::ErrorSigning(sign),
         }
     }
