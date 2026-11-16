@@ -647,12 +647,17 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   list), and a transaction with an empty fee list, and a staking event without a `delegator` attribute when the
   transaction has exactly one staking message of that kind, get rows, where GLEEC KDF writes none; for these
   transactions amounts and rows can differ from GLEEC KDF's (§36.14.6 D36.19, D36.20). The row identifier and the stored form
-  are meant to be the same as GLEEC KDF's (the position counting follows the cleared §36.14.6; not yet checked against a store GLEEC KDF wrote), so a data directory can move between
+  are meant to be the same as GLEEC KDF's (the position counting follows the cleared §36.14.6; checked in the lab on 2026-11-15 and 2026-11-16 with the Komodo DeFi Framework 2.6.0-beta reference build as the other writer, in both directions: the same rows, identifiers and address-index entries from a fresh store written by either program, from each program continuing the other's store, and from a store written by an earlier head and backfilled; GLEEC KDF 3.0.0-beta (it refuses the lab network) was not run), so a data directory can move between
   the two (§36.14.1 findings 1 and 2). No switch exists. Native builds only. CRD ch.36
   §36.14.1 (D36.10, D36.11, D36.12, D36.13, D36.19, D36.20, D36.21). A history database is per coin and shared
   by every account activated on it, so rows of an earlier account stay and are listed under their own addresses,
   as at GLEEC KDF (D36.23). A transaction whose block time no node gives is read again by the next pass
   (D36.24; GLEEC KDF leaves it out of that pass). PR #363.
+  The table of addresses that GLEEC KDF needs in order to list a history row is written for every coin the SQLite history
+  store serves (BCH and SLP tokens too), not for Tendermint coins only, and the BCH/SLP fetcher prepares it at start
+  (rows stored earlier get their entries, entries without a row are removed); the listing of BCH and SLP tokens is
+  unchanged. CRD ch.36 R36.14.23 -- R36.14.26. PR #380. A comparison of a BCH store (one transaction) with the one the Komodo DeFi Framework 2.6.0-beta build writes was run on
+  2026-11-16 with equal results; an SLP token store is still to be compared.
 - **Tendermint (Cosmos) coins and tokens are wallet-only in this beta.**
   Activation, balances and `withdraw` work; `setprice`, `buy`, `sell` and
   `start_swap` refuse the coin with the usual "… is wallet only" answer, and an

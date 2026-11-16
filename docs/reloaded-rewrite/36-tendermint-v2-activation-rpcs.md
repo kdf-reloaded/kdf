@@ -1794,6 +1794,29 @@ clients.
 > reference listed the same 4 rows as this build, with equal (internal_id, address)
 > index sets of 10 entries; a store written by the previous head of this change,
 > after the backfill, was listed the same way.
+>
+> **Status note (2026-11-16, Reloaded-original).** The scope of the address index
+> is now every family the SQLite history store serves, not Tendermint only: `init`
+> creates the three tables of R36.14.23 for every coin that opens the store,
+> `write_address_index` and `delete_address_index` no longer test for the address
+> table (the test, `address_index_enabled`, is removed), `clear_history` empties it
+> for every coin, and the preparation step (`backfill_address_index`: orphan
+> clean-up and backfill, R36.14.26 items 2 and 5) runs when any fetcher of the
+> store starts, that is the Tendermint fetcher and the BCH/SLP fetcher
+> (`Init` state of `mm2src/coins/utxo/bch_and_slp_tx_history.rs`). The listing of
+> BCH and SLP tokens stays scoped by the token id alone; no row, no row content and
+> no listing of another family changes, only the address table and its entries are
+> added. Tests: `init_creates_the_address_table_and_every_store_writes_the_index`
+> and `preparing_an_existing_bch_style_store_backfills_and_cleans_orphans` in the
+> test module of the store, and
+> `starting_the_fetcher_prepares_the_address_index_of_an_existing_store` in the
+> BCH/SLP fetcher's tests. A failed preparation is logged as a warning and the BCH/SLP fetcher goes on (no new stop path for that family; the Tendermint fetcher keeps its `Error` state). The sentences above that say "Tendermint only for now"
+> describe the state of PR #363. The SLP token rows rest on unit tests; no live SLP row is run,
+> because the coins file the lab uses has no SLP token entry; the live store comparison covers BCH alone.
+> Checked on 2026-11-16 on the head 79a4c484b of this change with the Komodo DeFi Framework 2.6.0-beta reference build
+> as the other writer: for a BCH account with one transaction, fresh stores of both programs held the same row,
+> identifier and two address-index entries, and each program listed the other's store (one row). The comparison of an
+> SLP token store against the reference writer is a lab row, pending.
 
 ### 36.14.2 WalletConnect activation
 

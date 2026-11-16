@@ -1,6 +1,6 @@
 # Plan: Tendermint activation features
 
-**Status:** in progress (items 2, 3 and 5's refusal are done; item 4, transaction history, is built in PR #363 (0.5.0); open: the WalletConnect form and the public-key form (item 1), item 6 (not in 0.5.0), the hardware signing package (item 7), the per-swap lock choice and the chain-refund path (CRD ch.18 D18.11.1–D18.11.3), and turning Tendermint swaps on again; deferred by maintainer decision 2026-10-11, custom tokens and the HD `path_to_address` shipped in PR #319, the swap-path fixes and the priority fees in PRs #299 and #323) — **Last reviewed:** 2026-11-15
+**Status:** in progress (items 2, 3 and 5's refusal are done; item 4, transaction history, is built in PR #363 (0.5.0); open: the WalletConnect form and the public-key form (item 1), item 6 (not in 0.5.0), the hardware signing package (item 7), the per-swap lock choice and the chain-refund path (CRD ch.18 D18.11.1–D18.11.3), and turning Tendermint swaps on again; deferred by maintainer decision 2026-10-11, custom tokens and the HD `path_to_address` shipped in PR #319, the swap-path fixes and the priority fees in PRs #299 and #323) — **Last reviewed:** 2026-11-16
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity`. That branch brings Tendermint activation to wire
@@ -88,9 +88,14 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    its tokens from the platform's store (R36.14.1, R36.14.2). Decided
    2026-11-15: the history state is `InProgress` during the first pass
    (D36.10 (b)); the store is meant to be byte-compatible with the reference as R36.14.10
-   states it (D36.11 (a); unit-tested against the chapter's wording, not yet
-   checked against a store written by GLEEC KDF; the position counting follows
-   the cleared §36.14.6); amounts follow D36.12 (b); denominations resolve as at the
+   states it (D36.11 (a); unit-tested against the chapter's wording and checked in the lab
+   (TH-3, 2026-11-15 and 2026-11-16) with a reference build on the lab network as
+   the other writer, in both directions: a fresh store written by each program,
+   each program continuing the other's store, and a store written by an earlier
+   head backfilled and then listed by the other program, with the same rows,
+   identifiers and address-index entries; the other reference binary refuses
+   that network and was not run; the position counting follows the cleared
+   §36.14.6); amounts follow D36.12 (b); denominations resolve as at the
    reference (D36.13 (a'): the platform `denom`, else the first coins-file entry
    of any platform), and the store is read again from the chain when that lookup
    changes (D36.21 (b)); the fee, the empty fee list and the staking events
@@ -99,10 +104,14 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
    planning question. Native builds only. Limitation: the history of a custom
    token that is absent from the coins file does not exist in 0.5.0. A later
    package, not scheduled: a Reloaded-side identifier scheme for transfers the
-   reference does not count (such custom-token transfers). Next item of this lane
-   after PR #363: the store's address index for every store-served family (BCH, SLP
-   tokens), with a BCH/SLP lab row against the reference writer; in PR #363 only
-   Tendermint coins write the index.
+   reference does not count (such custom-token transfers). *Address index for every store-served
+   family (built in the follow-up to PR #363, 0.5.0).* The store's address index
+   is created and written for every coin the SQLite history store serves (BCH and
+   SLP tokens included; their listing is unchanged), and the BCH/SLP fetcher
+   prepares it at start; in PR #363 only Tendermint coins wrote it. Next item of
+   this plan after that change: the SLP token lab row against the reference writer
+   and the TH-2 row on a local chain, both pending; the BCH row (one transaction, fresh stores of both programs,
+   each listing the other's) was run on 2026-11-16 with equal results.
 5. **Hardware `priv_key_policy`.** The reference ignores `priv_key_policy` for
    Tendermint, so `"Trezor"` silently activates with the context key (ch. 36
    code-quality finding).

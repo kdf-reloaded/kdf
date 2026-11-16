@@ -2318,15 +2318,23 @@ fn a_store_without_the_index_is_listed_after_the_preparation_and_a_second_one_ad
         storage.add_transactions_to_history("IRIS", vec![details(1, 12, ME, None), details(2, 11, "iaa1x", None)]),
     )
     .unwrap();
-    assert!(common::block_on(storage.get_history(
+    // The store writes the entries with every row now, so the state of another program's store is made by hand.
+    storage
+        .0
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM IRIS_tx_address", [])
+        .unwrap();
+    let unlisted = common::block_on(storage.get_history(
         HistoryCoinType::AccountCoin {
             ticker: "IRIS".to_owned(),
-            address: ME.to_owned()
+            address: ME.to_owned(),
         },
         PagingOptionsEnum::default(),
-        10
+        10,
     ))
-    .is_err());
+    .unwrap();
+    assert_eq!((unlisted.transactions.len(), unlisted.total), (0, 0));
 
     common::block_on(storage.backfill_address_index("IRIS")).unwrap();
     let before = entry_sets(&storage, "IRIS");

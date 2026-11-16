@@ -8,7 +8,7 @@ use crate::utxo::UtxoStandardOps;
 use crate::{BlockHeightAndTime, HistorySyncState, MarketCoinOps};
 use async_trait::async_trait;
 use common::executor::Timer;
-use common::log::{error, info};
+use common::log::{error, info, warn};
 use common::mm_number::BigDecimal;
 use common::state_machine::prelude::*;
 use futures::compat::Future01CompatExt;
@@ -50,6 +50,15 @@ impl<T: TxHistoryStorage> State for Init<T> {
 
         if let Err(e) = ctx.storage.init(ctx.coin.ticker()).await {
             return Self::change_state(Stopped::storage_error(e));
+        }
+        // The address index of the shared store (CRD ch.36 R36.14.26 item 5): orphan clean-up and backfill. A failure
+        // is logged and the fetcher goes on: this family has no stop path for it.
+        if let Err(e) = ctx.storage.backfill_address_index(ctx.coin.ticker()).await {
+            warn!(
+                "{}: the address index of the history store could not be prepared: {:?}",
+                ctx.coin.ticker(),
+                e.into_inner()
+            );
         }
 
         Self::change_state(FetchingTxHashes::new())
@@ -580,5 +589,111 @@ mod tests {
             |hash: H256Json| block_on(ctx.storage.history_has_tx_hash(&ticker, &format!("{:02x}", hash))).unwrap();
         assert!(has(valid_hash), "the rest of the pass is stored");
         assert!(!has(malformed_hash), "the malformed transaction is not written");
+    }
+
+    #[test]
+    fn starting_the_fetcher_prepares_the_address_index_of_an_existing_store() {
+        // CRD ch.36 R36.14.26 item 5: the preparation (orphan clean-up and backfill) runs when the fetcher starts.
+        use crate::sql_tx_history_storage::SqliteTxHistoryStorage;
+        use crate::utxo::bch::bch_coin_without_network_for_test;
+        use common::block_on;
+        use mm2_core::mm_ctx::MmCtxBuilder;
+
+        let coin = bch_coin_without_network_for_test();
+        let ticker = coin.ticker().to_owned();
+        let table = format!("{}_tx_address", ticker.replace('-', "_"));
+        let storage = SqliteTxHistoryStorage::in_memory();
+        block_on(storage.init(&ticker)).unwrap();
+        let details = |id: &str, from: &str, to: &str| -> crate::TransactionDetails {
+            serde_json::from_value(json!({
+                "tx_hex": "00", "tx_hash": id, "from": [from], "to": [to],
+                "total_amount": "1", "spent_by_me": "0", "received_by_me": "0", "my_balance_change": "0",
+                "block_height": 5, "timestamp": 1, "fee_details": {"type": "Utxo", "amount": "0.00001"},
+                "coin": ticker, "internal_id": id
+            }))
+            .unwrap()
+        };
+        block_on(storage.add_transactions_to_history(&ticker, vec![
+            details("aa", "other1", "other2"),
+            details("bb", "other3", "other4"),
+        ]))
+        .unwrap();
+        {
+            // The state of a store written before the index: no entries of the rows, one entry of a missing row.
+            let conn = storage.0.lock().unwrap();
+            conn.execute(&format!("DELETE FROM {};", table), []).unwrap();
+            conn.execute(
+                &format!("INSERT INTO {} (internal_id, address) VALUES ('gone', 'x');", table),
+                [],
+            )
+            .unwrap();
+        }
+
+        let mm_ctx = MmCtxBuilder::default().into_mm_arc();
+        let mut ctx = BchAndSlpHistoryCtx {
+            coin,
+            metrics: mm_ctx.metrics.clone(),
+            mm_ctx,
+            storage,
+            current_balance: BigDecimal::from(0),
+        };
+        let _next = block_on(Box::new(Init::<SqliteTxHistoryStorage>::new()).on_changed(&mut ctx));
+
+        let conn = ctx.storage.0.lock().unwrap();
+        let count = |condition: &str| -> i64 {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM {} WHERE {};", table, condition),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count("internal_id = 'gone'"), 0);
+        assert_eq!(count("internal_id = 'aa'"), 2);
+        assert_eq!(count("internal_id = 'bb'"), 2);
+    }
+
+    #[test]
+    fn a_failing_preparation_of_the_address_index_does_not_stop_the_fetcher() {
+        use crate::sql_tx_history_storage::SqliteTxHistoryStorage;
+        use crate::utxo::bch::bch_coin_without_network_for_test;
+        use common::block_on;
+        use mm2_core::mm_ctx::MmCtxBuilder;
+
+        let coin = bch_coin_without_network_for_test();
+        let ticker = coin.ticker().to_owned();
+        let storage = SqliteTxHistoryStorage::in_memory();
+        block_on(storage.init(&ticker)).unwrap();
+        {
+            // A stored row whose JSON cannot be read makes the backfill fail.
+            let conn = storage.0.lock().unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {}_tx_history (tx_hash, internal_id, block_height, confirmation_status, token_id, details_json) \
+                     VALUES ('aa', 'aa', 5, 1, '', 'not json');",
+                    ticker.replace('-', "_")
+                ),
+                [],
+            )
+            .unwrap();
+        }
+        assert!(block_on(storage.backfill_address_index(&ticker)).is_err());
+
+        let mm_ctx = MmCtxBuilder::default().into_mm_arc();
+        let mut ctx = BchAndSlpHistoryCtx {
+            coin,
+            metrics: mm_ctx.metrics.clone(),
+            mm_ctx,
+            storage,
+            current_balance: BigDecimal::from(0),
+        };
+        // Indirect check only: the state machine gives no hook to name the next state, so this proves that the state
+        // does not panic and hands over (a `ChangeState`, not a `Finish`) with the sync state as `Init` set it.
+        let next = block_on(Box::new(Init::<SqliteTxHistoryStorage>::new()).on_changed(&mut ctx));
+        assert!(matches!(next, StateResult::ChangeState(_)));
+        assert!(matches!(
+            *ctx.coin.as_ref().history_sync_state.lock().unwrap(),
+            HistorySyncState::NotStarted
+        ));
     }
 }

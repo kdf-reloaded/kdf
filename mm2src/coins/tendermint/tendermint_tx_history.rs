@@ -1421,14 +1421,15 @@ async fn block_time(coin: &TendermintCoin, height: u64) -> Result<Option<u64>, S
 }
 
 /// The time of the block at `height` from the node that answers first; when its answer carries no block or no time,
-/// every other configured node is asked once (D36.24 (b)). `None` when no node has it. A failure of the first node
-/// is returned as before; a failure of another node counts as that node not having the block.
+/// every other configured node is asked once (D36.24 (b)): the node that answered first is at the front of the
+/// client list (`rpc_client` rotates it there), so the loop skips it. `None` when no node has it. A failure of the
+/// first node is returned as before; a failure of another node counts as that node not having the block.
 async fn block_time_from_any_node(coin: &TendermintCoin, height: u64) -> Result<Option<u64>, String> {
     if let Some(time) = block_time(coin, height).await? {
         return Ok(Some(time));
     }
     let clients = coin.client.0.lock().await.rpc_clients.clone();
-    for client in clients {
+    for client in clients.into_iter().skip(1) {
         match block_time_on(&client, height).await {
             Ok(Some(time)) => return Ok(Some(time)),
             Ok(None) => {},

@@ -120,9 +120,9 @@ pub trait TxHistoryStorage: Send + Sync + 'static {
     async fn clear_history(&self, for_coin: &str) -> Result<(), MmError<Self::Error>>;
 
     /// Prepares the address index of the coin's store (CRD ch.36 R36.14.26 item 5): creates the table when absent,
-    /// removes the entries whose row is missing and writes the entries of every stored row that has none. Only the
-    /// Tendermint fetcher calls it; a coin for which it was never called keeps no index. Stores without an address
-    /// index have nothing to do.
+    /// removes the entries whose row is missing and writes the entries of every stored row that has none. Every
+    /// fetcher of the store calls it after `init` (the Tendermint and the BCH/SLP fetchers). Stores without an
+    /// address index have nothing to do.
     async fn backfill_address_index(&self, _for_coin: &str) -> Result<(), MmError<Self::Error>> { Ok(()) }
 
     /// The record kept beside the selected coin's history of the denominations that were resolvable when its rows
