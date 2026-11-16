@@ -607,6 +607,7 @@ mod internal {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use common::log::wasm_log::register_wasm_log;

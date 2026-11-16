@@ -534,6 +534,7 @@ async fn send_event_recv_response<Event, Result>(
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::indexed_db::{DbIdentifier, DbTable, DbUpgrader, IndexedDbBuilder, OnUpgradeResult};

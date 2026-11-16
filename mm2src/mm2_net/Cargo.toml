@@ -31,10 +31,12 @@ fomat-macros = "0.2"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gstuff = { version = "0.7" }
 wasm-bindgen = { version = "0.2.50" }
-wasm-bindgen-test = { version = "0.3.2" }
 wasm-bindgen-futures = "0.4.21"
 web-sys = { version = "0.3.55", features = ["console", "CloseEvent", "DomException", "ErrorEvent", "IdbDatabase", "IdbCursor", "IdbCursorWithValue", "IdbFactory", "IdbIndex", "IdbIndexParameters", "IdbObjectStore", "IdbObjectStoreParameters", "IdbOpenDbRequest", "IdbKeyRange", "IdbTransaction", "IdbTransactionMode", "IdbVersionChangeEvent", "MessageEvent", "WebSocket", "Headers", "Request", "RequestInit", "RequestMode", "Response"] }
 js-sys = "0.3.27"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = { version = "0.3.2" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 http-body-util = "0.1"
