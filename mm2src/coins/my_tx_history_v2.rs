@@ -236,6 +236,7 @@ impl<'a, Addr: Clone + DisplayAddress + Eq + std::hash::Hash, Tx: Transaction> T
         };
 
         TransactionDetails {
+            unsigned: None,
             tx_json: None,
             coin: self.coin,
             tx_hex: self.tx.tx_hex().into(),
@@ -708,6 +709,7 @@ mod z_coin_tx_history_tests {
 
     fn tx_details(id: u8, block_height: u64) -> TransactionDetails {
         TransactionDetails {
+            unsigned: None,
             tx_json: None,
             tx_hex: vec![id].into(),
             tx_hash: format!("{id:02x}"),

@@ -340,6 +340,7 @@ impl Qrc20Coin {
             };
 
             let tx_details = TransactionDetails {
+                unsigned: None,
                 tx_json: None,
                 from: vec![from],
                 to: vec![to],

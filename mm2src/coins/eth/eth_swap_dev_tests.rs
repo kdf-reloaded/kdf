@@ -248,6 +248,7 @@ fn withdraw_eth_and_erc20() {
     let (_eth_ctx, eth_coin) = dev_eth_coin(EthCoinType::Eth, &node, swap_addr);
     let details = eth_coin
         .withdraw(WithdrawRequest {
+            memo: None,
             coin: "ETH".into(),
             from: None,
             to: recipient.into(),
@@ -277,6 +278,7 @@ fn withdraw_eth_and_erc20() {
     );
     let details = erc20_coin
         .withdraw(WithdrawRequest {
+            memo: None,
             coin: "TEST".into(),
             from: None,
             to: recipient.into(),

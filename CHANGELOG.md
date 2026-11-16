@@ -82,6 +82,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   block time no node can give is read again by the next pass. Native only in 0.5.0: the
   browser build has no versioned history store for any coin family. Detail: PR #363;
   CRD ch.36 §36.14.1; §36.14.7.
+- **A Tendermint coin can be activated from a public key (watch-only).** `activation_params` of
+  `enable_tendermint_with_assets` (and the task form) now accepts `{"type": "WithPubkey", "params":
+  {"pubkey": {"type": "secp256k1" | "ed25519", "value": [bytes]}, "is_ledger_connection": bool}}`. The
+  coin's address is the account of that key (an `ed25519` key by the public Cosmos SDK rule for that
+  key type), and nothing is asked of a node or a wallet at activation. Such a coin holds no private
+  key: balances, the address and the history work as for any coin; `withdraw` and the delegation,
+  undelegation and reward-claim requests do not sign or send anything but answer an unsigned
+  document for the caller's own wallet to sign (no `tx_hex` and no `tx_hash`; a `sign_doc` with
+  `body_bytes`, `auth_info_bytes`, `chain_id` and `account_number`). With `is_ledger_connection: true`
+  a `withdraw` answers the Amino form instead (`legacy_amino_json` and `original_tx_type_url`) with
+  three times the computed fee (for the coin, not for a token), and the staking requests fail. A `memo` in the `withdraw` request is carried in the transaction: `memo` is now a typed member of every withdraw request: a `memo` that is not a string is refused as a malformed request for every coin (it was ignored before); only Tendermint coins and tokens read it. Placing an order with the coin or one
+  of its tokens, message signing, private-key display, and every swap payment, claim and refund are
+  refused (`PrivKeyNotAllowed::WatchOnlyCoin`). A malformed `activation_params` now fails request
+  parsing with `InvalidRequest`; the WalletConnect forms are still refused. Detail: PR #382; CRD ch.36
+  §36.14.3.
 
 ### Changed
 

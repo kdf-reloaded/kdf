@@ -798,6 +798,7 @@ pub async fn tx_details_by_hash<T: UtxoCommonOps>(
     };
 
     Ok(TransactionDetails {
+        unsigned: None,
         tx_json: None,
         from: from_addresses,
         to: to_addresses,

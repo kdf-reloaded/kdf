@@ -243,15 +243,39 @@ fn a_missing_avg_blocktime_is_a_platform_coin_creation_error() {
     assert_creation_error(&failure(&ctx, request(json!({ "ticker": "NOAVG" }))), "NOAVG");
 }
 
+/// The compressed secp256k1 generator point, a valid public key (a public constant).
+const SECP_KEY_HEX: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+/// The public key of the first test vector of RFC 8032 (an `ed25519` key).
+const ED25519_KEY_HEX: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+
+fn with_pubkey(key_type: &str, key_hex: &str, is_ledger_connection: bool) -> Json {
+    json!({ "type": "WithPubkey", "params": {
+        "pubkey": { "type": key_type, "value": hex::decode(key_hex).unwrap() },
+        "is_ledger_connection": is_ledger_connection,
+    } })
+}
+
+/// The `activation_params` of a request as the request parse leaves it, or the parse failure.
+fn parsed_form(activation_params: Json) -> Result<Option<ActivationParamsForm>, String> {
+    let mut value = request_json(json!({}));
+    value["activation_params"] = activation_params;
+    serde_json::from_value::<Req>(value)
+        .map(|req| req.request.activation_params)
+        .map_err(|e| e.to_string())
+}
+
 #[test]
-fn a_non_null_activation_params_is_a_platform_coin_creation_error() {
+fn the_wallet_connect_forms_are_parsed_and_refused_as_a_platform_coin_creation_error() {
+    // R36.1.3 forms 2 and 3 are not built yet (plan item 2): refused instead of activating with the local key.
     let ctx = ctx();
     for activation_params in [
-        json!({ "type": "WithPubkey", "params": { "pubkey": { "type": "secp256k1", "value": [] }, "is_ledger_connection": false } }),
         json!({ "type": "WalletConnect", "params": { "session_topic": "topic" } }),
         json!({ "priv_key_policy": { "type": "WalletConnect", "data": "topic" } }),
-        json!("anything"),
     ] {
+        assert_eq!(
+            parsed_form(activation_params.clone()),
+            Ok(Some(ActivationParamsForm::WalletConnect))
+        );
         let wire = failure(&ctx, request(json!({ "activation_params": activation_params })));
         assert_creation_error(&wire, PLATFORM);
         // The refusal is the signing-policy one, not a node failure.
@@ -268,9 +292,63 @@ fn a_non_null_activation_params_is_a_platform_coin_creation_error() {
 }
 
 #[test]
+fn the_public_key_form_is_parsed_for_both_key_types_and_the_ledger_flag() {
+    // R36.1.3 form 1 (T36.8, D36.17 (c)): both key types, the flag as given.
+    for (key_type, key_hex) in [("secp256k1", SECP_KEY_HEX), ("ed25519", ED25519_KEY_HEX)] {
+        for is_ledger_connection in [false, true] {
+            let form = parsed_form(with_pubkey(key_type, key_hex, is_ledger_connection))
+                .unwrap_or_else(|e| panic!("{key_type} {is_ledger_connection}: {e}"));
+            let Some(ActivationParamsForm::PublicKey {
+                public_key,
+                is_ledger_connection: parsed_flag,
+            }) = form
+            else {
+                panic!("expected the public-key form");
+            };
+            assert_eq!(public_key.to_bytes(), hex::decode(key_hex).unwrap(), "{key_type}");
+            assert_eq!(parsed_flag, is_ledger_connection);
+        }
+    }
+}
+
+#[test]
+fn a_malformed_activation_params_fails_request_parsing() {
+    // R36.1.3: an unknown type, a missing member, a key type other than the two, a value that is not an array of
+    // byte integers and a key of invalid length are request-parse failures (`InvalidRequest`), never a crash.
+    let wrong_length = json!({ "type": "WithPubkey", "params": {
+        "pubkey": { "type": "secp256k1", "value": [2, 1, 2, 3] }, "is_ledger_connection": false } });
+    let no_flag = json!({ "type": "WithPubkey", "params": { "pubkey": { "type": "secp256k1", "value": [] } } });
+    let rsa = json!({ "type": "WithPubkey", "params": {
+        "pubkey": { "type": "rsa", "value": [1, 2] }, "is_ledger_connection": false } });
+    let not_bytes = json!({ "type": "WithPubkey", "params": {
+        "pubkey": { "type": "ed25519", "value": [256, -1, "x"] }, "is_ledger_connection": false } });
+    let as_text = json!({ "type": "WithPubkey", "params": {
+        "pubkey": { "type": "ed25519", "value": ED25519_KEY_HEX }, "is_ledger_connection": false } });
+    let ed25519_wrong_length = json!({ "type": "WithPubkey", "params": {
+        "pubkey": { "type": "ed25519", "value": [1, 2, 3] }, "is_ledger_connection": false } });
+    for malformed in [
+        json!("anything"),
+        json!([]),
+        json!({}),
+        json!({ "type": "Other", "params": {} }),
+        json!({ "type": "WithPubkey" }),
+        json!({ "type": "WalletConnect", "params": {} }),
+        json!({ "priv_key_policy": { "type": "Trezor" } }),
+        wrong_length,
+        no_flag,
+        rsa,
+        not_bytes,
+        as_text,
+        ed25519_wrong_length,
+    ] {
+        assert!(parsed_form(malformed.clone()).is_err(), "{malformed}");
+    }
+}
+
+#[test]
 fn an_absent_or_null_activation_params_is_not_refused() {
+    assert_eq!(parsed_form(Json::Null), Ok(None));
     assert!(reject_unsupported_activation_params(PLATFORM, &None).is_ok());
-    assert!(reject_unsupported_activation_params(PLATFORM, &Some(Json::Null)).is_ok());
     // End to end the request proceeds to the nodes, so the error is the node failure, not the policy refusal.
     let ctx = ctx();
     let wire = failure(&ctx, request(json!({ "activation_params": null })));
@@ -279,6 +357,34 @@ fn an_absent_or_null_activation_params_is_not_refused() {
         .as_str()
         .unwrap()
         .contains("activation_params"));
+}
+
+/// T36.42 (R36.14.16, D36.17 (c)): the public-key form builds a coin at the key's account with no node reachable,
+/// whatever the login; the coin holds no private key.
+#[test]
+fn the_public_key_form_activates_the_account_of_the_key_without_a_node_and_whatever_the_login() {
+    for ctx in [ctx(), hd_ctx()] {
+        let form = |key_type: &str, key_hex: &str, ledger: bool| json!({ "activation_params": with_pubkey(key_type, key_hex, ledger) });
+        // secp256k1: the address of the key by the secp256k1 rule, not the login's.
+        let expected = coins::tendermint::account_id_from_pubkey_hex("cosmos", SECP_KEY_HEX)
+            .unwrap()
+            .to_string();
+        for ledger in [false, true] {
+            let coin =
+                built_platform(&ctx, "ATOM", form("secp256k1", SECP_KEY_HEX, ledger)).expect("a watch-only coin");
+            assert_eq!(coin.account_id.to_string(), expected);
+            assert!(coin.display_priv_key().is_err(), "no private key to display");
+        }
+        // ed25519: a different, valid account (the SDK rule of that key type), not the login's.
+        let ed25519 = built_platform(&ctx, "ATOM", form("ed25519", ED25519_KEY_HEX, false)).expect("a watch-only coin");
+        let login = built_address(&ctx, "ATOM", json!({}));
+        assert_ne!(ed25519.account_id.to_string(), login);
+        assert_ne!(ed25519.account_id.to_string(), expected);
+        assert!(ed25519.account_id.to_string().starts_with("cosmos1"));
+        assert!(ed25519.display_priv_key().is_err());
+        // The coin is wallet-only whatever the flag (R18.11.23a).
+        assert!(ed25519.wallet_only(&ctx));
+    }
 }
 
 const HARDWARE_REFUSAL: &str = "the hardware key policy Trezor is not supported for Tendermint coins in this version; \
