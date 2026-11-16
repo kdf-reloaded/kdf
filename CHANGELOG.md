@@ -95,7 +95,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   three times the computed fee, and the staking requests fail. Placing an order with the coin or one
   of its tokens, message signing, private-key display, and every swap payment, claim and refund are
   refused (`PrivKeyNotAllowed::WatchOnlyCoin`). A malformed `activation_params` now fails request
-  parsing with `InvalidRequest`; the WalletConnect forms are still refused. Detail: PR #N; CRD ch.36
+  parsing with `InvalidRequest`; the WalletConnect forms are still refused. Detail: PR #382; CRD ch.36
   §36.14.3.
 
 ### Changed

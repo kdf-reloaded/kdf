@@ -639,7 +639,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   both forms (CRD ch.18 R18.11.23a), because it would announce a key the coin cannot sign with. An `ed25519` key gets
   the account of the public Cosmos SDK rule for that key type, where GLEEC KDF applies the secp256k1 rule to it. A
   malformed key is `InvalidRequest`, where GLEEC KDF aborts the request. No switch exists. CRD ch.36 §36.14.3, D36.17,
-  D36.18; ch.18 D18.11.10. PR #N.
+  D36.18; ch.18 D18.11.10. PR #382.
 - **A Tendermint coin's transaction history differs from GLEEC KDF in three ways.** (1) While the first read of the
   chain runs, the history state is `InProgress` (with `{"transactions_left": n}`); GLEEC KDF reports `NotStarted`
   until the first read ends (§36.14.1 R36.14.11), and a failed first balance read ends its fetcher silently where KDF
