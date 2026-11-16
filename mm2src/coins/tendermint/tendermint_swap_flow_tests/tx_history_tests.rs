@@ -1074,6 +1074,7 @@ fn stored_rows_hold_base_units_and_are_scaled_when_served() {
 
 fn details(id: u8, height: u64, from: &str, token: Option<&str>) -> crate::TransactionDetails {
     crate::TransactionDetails {
+        unsigned: None,
         tx_hex: vec![id].into(),
         tx_json: None,
         tx_hash: format!("{id:02X}"),
@@ -2702,4 +2703,191 @@ fn a_second_account_on_the_same_store_is_listed_with_the_rows_of_the_first() {
         .query_row("SELECT COUNT(*) FROM IRIS_tx_history", [], |row| row.get(0))
         .unwrap();
     assert_eq!(all_rows, 2);
+}
+
+// ---------------------------------------------------------------------------
+// T36.59, T36.60: a history request while no node answers (CRD ch.36 §36.14.8, R36.14.33 -- R36.14.35)
+// ---------------------------------------------------------------------------
+
+/// Registers the platform coin and the token `TOK` and pins an in-memory database to the context of `fx`.
+fn register_with_database(fx: &Fixture) {
+    let coins_ctx = crate::CoinsContext::from_ctx(&fx.ctx).expect("the coins context");
+    common::block_on(coins_ctx.add_coin(fx.coin.clone().into())).expect("register the platform");
+    let token = TendermintToken::new("TOK".to_owned(), fx.coin.clone(), 6, "utoken".parse().expect("a denom"));
+    common::block_on(coins_ctx.add_coin(token.into())).expect("register the token");
+    let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().expect("a database");
+    fx.ctx
+        .sqlite_connection
+        .pin(Arc::new(Mutex::new(connection)))
+        .expect("pin the database");
+}
+
+/// A store for the platform ticker holding one row of the platform coin (height 10) and one of the token
+/// (height 11), as left by a completed first pass.
+fn seed_store(fx: &Fixture) -> SqliteTxHistoryStorage {
+    let storage = SqliteTxHistoryStorage(fx.ctx.sqlite_connection.as_option().expect("pinned").clone());
+    common::block_on(storage.init("IRIS")).unwrap();
+    common::block_on(storage.backfill_address_index("IRIS")).unwrap();
+    let me = me(fx);
+    let mut platform_row = details(1, 10, &me, None);
+    platform_row.total_amount = BigDecimal::from(1_005_000);
+    platform_row.spent_by_me = BigDecimal::from(1_005_000);
+    let mut token_row = details(2, 11, &me, Some("utoken"));
+    token_row.coin = "TOK".to_owned();
+    token_row.total_amount = BigDecimal::from(2_500_000);
+    token_row.spent_by_me = BigDecimal::from(2_500_000);
+    common::block_on(storage.add_transactions_to_history("IRIS", vec![platform_row, token_row])).unwrap();
+    storage
+}
+
+/// Stops a scripted node: its port stops accepting connections.
+fn refuse_connections(node: &FakeNode) {
+    node.stop.store(true, Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(100));
+}
+
+fn versioned_error(fx: &Fixture, coin: &str) -> MyTxHistoryErrorV2 {
+    common::block_on(my_tx_history_v2_rpc(fx.ctx.clone(), history_request(coin)))
+        .err()
+        .unwrap_or_else(|| panic!("{coin}: expected an error"))
+        .into_inner()
+}
+
+fn versioned_answer(fx: &Fixture, coin: &str) -> Json {
+    let answer = common::block_on(my_tx_history_v2_rpc(fx.ctx.clone(), history_request(coin)))
+        .ok()
+        .unwrap_or_else(|| panic!("{coin}: expected an answer"));
+    serde_json::to_value(&answer).unwrap()
+}
+
+fn assert_rpc_error(fx: &Fixture, coin: &str) {
+    let error = versioned_error(fx, coin);
+    assert!(matches!(error, MyTxHistoryErrorV2::RpcError(_)), "{coin}: {error:?}");
+    assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[test]
+fn t36_59_versioned_history_while_no_node_answers() {
+    // T36.59 (R36.14.33). (i), (ii), (vi): every configured node refuses connections, with a store.
+    let fx = history_fixture();
+    let _state = script_history(&fx);
+    register_with_database(&fx);
+    let storage = seed_store(&fx);
+    let rows_before = platform_history(&fx, &storage).len();
+    assert_eq!(versioned_answer(&fx, "IRIS")["current_block"], 100);
+    refuse_connections(&fx.node);
+    assert_rpc_error(&fx, "IRIS");
+    assert_rpc_error(&fx, "TOK");
+    assert_eq!(
+        platform_history(&fx, &storage).len(),
+        rows_before,
+        "the failure changes no row"
+    );
+
+    // (v): without a store for the ticker the first condition decides, whether or not a node answers.
+    let bare = history_fixture();
+    register_with_database(&bare);
+    refuse_connections(&bare.node);
+    for coin in ["IRIS", "TOK"] {
+        let error = versioned_error(&bare, coin);
+        assert!(
+            matches!(error, MyTxHistoryErrorV2::StorageIsNotInitialized(_)),
+            "{coin}: {error:?}"
+        );
+        assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // (iv): with two nodes of which only the first refuses connections the request succeeds.
+    let live = FakeNode::start();
+    let two = history_fixture_for(&OWN_KEY, Some(&live));
+    let _live_state = script_history_on(&live, &two.coin);
+    register_with_database(&two);
+    seed_store(&two);
+    refuse_connections(&two.node);
+    assert_eq!(versioned_answer(&two, "IRIS")["current_block"], 100);
+    // Both refuse: the error again, for the coin and for the token.
+    refuse_connections(&live);
+    assert_rpc_error(&two, "IRIS");
+    assert_rpc_error(&two, "TOK");
+}
+
+#[test]
+fn t36_59_a_node_that_answers_health_and_fails_abci_info_gives_rpc_error_and_serving_resumes() {
+    // T36.59 (vii) and (iii): a node that answers `health` and fails `abci_info` yields `RpcError`; once a node
+    // answers again at height `h` the stored rows are served with `current_block` `h` and `confirmations` of
+    // `h - height + 1`. T36.60 (ii) on the legacy method.
+    let fx = history_fixture();
+    register_with_database(&fx);
+    let storage = seed_store(&fx);
+    fx.node.answer(|_, _| None);
+    assert_rpc_error(&fx, "IRIS");
+    assert_rpc_error(&fx, "TOK");
+    // T36.60 (i): the legacy method answers the legacy error for the coin and for the token.
+    for coin in ["IRIS", "TOK"] {
+        let legacy = common::block_on(crate::my_tx_history(fx.ctx.clone(), json!({ "coin": coin })));
+        assert!(
+            legacy.is_err(),
+            "{coin}: the legacy method must fail while no node answers"
+        );
+    }
+    assert_eq!(platform_history(&fx, &storage).len(), 1, "the failure changes no row");
+
+    let _state = script_history(&fx);
+    let platform = versioned_answer(&fx, "IRIS");
+    assert_eq!(platform["current_block"], 100);
+    assert_eq!(platform["transactions"][0]["confirmations"], 91);
+    let token = versioned_answer(&fx, "TOK");
+    assert_eq!(token["current_block"], 100);
+    assert_eq!(token["transactions"][0]["confirmations"], 90);
+
+    // T36.60 (ii): the legacy method answers an empty list, the height and the state of R36.14.11.
+    for coin in ["IRIS", "TOK"] {
+        let legacy =
+            common::block_on(crate::my_tx_history(fx.ctx.clone(), json!({ "coin": coin }))).expect("an answer");
+        let legacy: Json = serde_json::from_slice(legacy.body()).unwrap();
+        assert_eq!(legacy["result"]["transactions"], json!([]), "{coin}");
+        assert_eq!(legacy["result"]["total"], 0, "{coin}");
+        assert_eq!(legacy["result"]["current_block"], 100, "{coin}");
+        assert!(legacy["result"]["sync_status"]["state"].is_string(), "{coin}");
+    }
+}
+
+#[test]
+fn t36_60_legacy_history_while_every_node_refuses_connections() {
+    // T36.60 (i): the legacy `my_tx_history` fails, for the coin and for the token, and the error has the legacy
+    // shape of a plain string (the dispatcher answers HTTP 500 and an object with only `error`).
+    let fx = history_fixture();
+    let _state = script_history(&fx);
+    register_with_database(&fx);
+    seed_store(&fx);
+    refuse_connections(&fx.node);
+    for coin in ["IRIS", "TOK"] {
+        let legacy = common::block_on(crate::my_tx_history(fx.ctx.clone(), json!({ "coin": coin })));
+        assert!(legacy.is_err(), "{coin}");
+    }
+}
+
+#[test]
+fn t36_60_the_state_is_finished_while_a_node_answers_and_the_fetcher_fails() {
+    // T36.60 (iii) / R36.14.35: with a node that answers `health` and `abci_info` and fails every history query,
+    // both methods answer successfully with `Finished` once a first pass has completed (the fetcher is not run
+    // again here: it would pause and retry, R36.14.3, and the state must not change in the meantime).
+    let fx = history_fixture();
+    let _state = script_history(&fx);
+    register_with_database(&fx);
+    let storage = seed_store(&fx);
+    let mut fetcher = HistoryFetcher::for_test(fx.coin.clone(), storage);
+    common::block_on(fetcher.pass()).expect("a first pass");
+    assert_eq!(state_name(&fx.coin), "Finished");
+    fx.node.answer(|method, _| match method {
+        "abci_info" => Some(
+            json!({ "response": { "data": "test", "version": "0", "app_version": "1",
+                                    "last_block_height": "100", "last_block_app_hash": "" } }),
+        ),
+        _ => None,
+    });
+    assert_eq!(versioned_answer(&fx, "IRIS")["sync_status"]["state"], "Finished");
+    let legacy = common::block_on(crate::my_tx_history(fx.ctx.clone(), json!({ "coin": "IRIS" }))).expect("an answer");
+    let legacy: Json = serde_json::from_slice(legacy.body()).unwrap();
+    assert_eq!(legacy["result"]["sync_status"]["state"], "Finished");
 }

@@ -1,4 +1,4 @@
-use super::construct_event_closure;
+use super::{construct_event_closure, RequestHandlersGuard};
 use crate::indexed_db::db_driver::{InternalItem, ItemId};
 use async_trait::async_trait;
 use common::{deserialize_from_js, stringify_js_error};
@@ -163,6 +163,8 @@ pub trait CursorOps: Sized {
 
         cursor_request.set_onsuccess(Some(onsuccess_closure.as_ref().unchecked_ref()));
         cursor_request.set_onerror(Some(onerror_closure.as_ref().unchecked_ref()));
+        // Declared after the closures, so the handlers are withdrawn before the closures are freed.
+        let _handlers_guard = RequestHandlersGuard::new(&cursor_request);
 
         let mut collected_items = Vec::new();
 

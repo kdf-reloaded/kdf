@@ -241,11 +241,25 @@ impl TendermintConf {
 
 pub enum TendermintActivationPolicy {
     PrivateKey(PrivKeyPolicy<TendermintKeyPair>),
+    /// A coin activated by a public key (CRD ch.36 R36.14.16 -- R36.14.18): watch-only, it holds no private key.
+    /// `is_ledger_connection` is the Ledger flag of R36.14.18.
+    PublicKey {
+        public_key: cosmrs::tendermint::PublicKey,
+        is_ledger_connection: bool,
+    },
 }
 
 impl TendermintActivationPolicy {
     pub fn with_private_key_policy(private_key_policy: PrivKeyPolicy<TendermintKeyPair>) -> Self {
         Self::PrivateKey(private_key_policy)
+    }
+
+    /// The policy of a watch-only coin (CRD ch.36 R36.14.16).
+    pub fn with_public_key(public_key: cosmrs::tendermint::PublicKey, is_ledger_connection: bool) -> Self {
+        Self::PublicKey {
+            public_key,
+            is_ledger_connection,
+        }
     }
 
     pub(super) fn generate_account_id(&self, account_prefix: &str) -> Result<AccountId, ErrorReport> {
@@ -257,6 +271,7 @@ impl TendermintActivationPolicy {
                 account_id_from_privkey(pk.private_key_secret.as_slice(), account_prefix)
                     .map_err(|e| ErrorReport::new(io::Error::new(io::ErrorKind::InvalidData, e.to_string())))
             },
+            Self::PublicKey { public_key, .. } => account_id_from_public_key(public_key, account_prefix),
         }
     }
 
@@ -274,23 +289,40 @@ impl TendermintActivationPolicy {
                     "Trezor is not supported yet!",
                 )),
             },
+            Self::PublicKey { public_key, .. } => Ok(*public_key),
         }
     }
 
+    /// The key this node signs with. Refused for a hardware policy and, with
+    /// [`PrivKeyNotAllowed::WatchOnlyCoin`], for a coin activated by a public key: every path that would sign with a
+    /// node-held key goes through this and so fails for a watch-only coin (CRD ch.36 R36.14.17).
     pub(crate) fn activated_key_or_err(&self) -> Result<&Secp256k1Secret, MmError<PrivKeyNotAllowed>> {
         match self {
             Self::PrivateKey(private_key) => Ok(private_key.key_pair_or_err()?.private_key_secret.as_ref()),
+            Self::PublicKey { .. } => MmError::err(PrivKeyNotAllowed::WatchOnlyCoin),
         }
     }
 
     pub(crate) fn activated_key(&self) -> Option<Secp256k1Secret> {
         match self {
             Self::PrivateKey(private_key) => Some(*private_key.key_pair()?.private_key_secret.as_ref()),
+            Self::PublicKey { .. } => None,
+        }
+    }
+
+    /// `Some(is_ledger_connection)` for a coin activated by a public key, `None` for a coin with a private key
+    /// policy.
+    pub(crate) fn watch_only_ledger_flag(&self) -> Option<bool> {
+        match self {
+            Self::PrivateKey(_) => None,
+            Self::PublicKey {
+                is_ledger_connection, ..
+            } => Some(*is_ledger_connection),
         }
     }
 
     /// Whether the policy holds a private key this node signs with. A policy without one (the hardware-wallet
-    /// policy) cannot sign the HTLC transactions of a swap, so the coin is wallet-only (see
+    /// policy, the public-key policy) cannot sign the HTLC transactions of a swap, so the coin is wallet-only (see
     /// [`tendermint_wallet_only`]).
     pub(crate) fn has_local_key(&self) -> bool { self.activated_key_or_err().is_ok() }
 }
@@ -546,6 +578,27 @@ pub(super) enum HtlcMsgError {
     InvalidInput(String),
 }
 
+/// The `internal_id` of an unsigned result (CRD ch.36 R36.14.29): constant, because an unsigned transaction has no
+/// hash. For the platform coin it is the SHA-256 digest of the empty byte string, for a token the SHA-256 digest of
+/// the 32 bytes of its token id. It identifies no transaction.
+pub(super) fn unsigned_internal_id(token_id: Option<&[u8]>) -> BytesJson {
+    sha256(token_id.unwrap_or_default()).as_slice().to_vec().into()
+}
+
+/// Why the unsigned document of a watch-only coin could not be built (CRD ch.36 R36.14.17, R36.14.18).
+#[derive(Display, Debug)]
+pub(super) enum UnsignedTxError {
+    #[display(fmt = "The coin holds a signing key; no unsigned document is built")]
+    NotWatchOnly,
+    #[display(fmt = "Account query failed: {}", _0)]
+    Rpc(String),
+    #[display(fmt = "Could not encode the unsigned document: {}", _0)]
+    Encode(String),
+    /// The Amino form (the Ledger flag) exists for the bank send only (R36.14.18 item 3).
+    #[display(fmt = "The Amino form is not available for the message {}", _0)]
+    AminoUnsupported(String),
+}
+
 // ————————————————————————————————————————————————————————————————
 // Free functions
 // ————————————————————————————————————————————————————————————————
@@ -591,6 +644,17 @@ pub(crate) fn account_id_from_privkey(priv_key: &[u8], prefix: &str) -> MmResult
         .public_key()
         .account_id(prefix)
         .map_to_mm(|e| TendermintInitErrorKind::CouldNotGenerateAccountId(e.to_string()))
+}
+
+/// The bech32 account of a public key under `prefix`, by the public Cosmos SDK address rule of the key's type:
+/// `RIPEMD160(SHA256(key))` for a secp256k1 key and the first 20 bytes of `SHA256(key)` for an ed25519 key
+/// (CRD ch.36 R36.14.16, D36.17 (c)).
+pub(crate) fn account_id_from_public_key(
+    public_key: &cosmrs::tendermint::PublicKey,
+    prefix: &str,
+) -> Result<AccountId, ErrorReport> {
+    let id = cosmrs::tendermint::account::Id::from(*public_key);
+    AccountId::new(prefix, id.as_bytes())
 }
 
 fn account_id_from_raw_pubkey(prefix: &str, pubkey: &[u8]) -> Result<AccountId, ErrorReport> {

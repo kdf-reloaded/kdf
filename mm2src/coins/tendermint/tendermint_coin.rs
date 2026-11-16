@@ -10,6 +10,7 @@
 //!   `pub use tendermint_token::*;`
 
 use super::tendermint_types::*;
+use super::TendermintPublicKey;
 use crate::node_url::{host_only, scrub_node_url, scrub_urls_in_text};
 use crate::rpc_command::get_my_address::PathToAddress;
 use crate::utxo::utxo_builder::derive_activated_hd_secret;
@@ -65,6 +66,11 @@ enum ActivationKey<'a> {
         global_hd: &'a GlobalHDAccountArc,
         path_to_address: &'a PathToAddress,
     },
+    /// A public key and the Ledger flag (CRD ch.36 R36.1.3 form 1, R36.14.16): no private key, watch-only.
+    PublicKey {
+        public_key: TendermintPublicKey,
+        is_ledger_connection: bool,
+    },
 }
 
 /// Build a [`TendermintCoin`] from coin configuration and an activation request.
@@ -76,8 +82,9 @@ enum ActivationKey<'a> {
 /// decimals from `conf["protocol"]["protocol_data"]`, derives the Cosmos
 /// account id from the given single private key, and assembles the coin.
 ///
-/// Under an HD login use [`tendermint_coin_from_conf_and_request_with_global_hd`]. The WalletConnect, hardware
-/// and public-key policies are not built here.
+/// Under an HD login use [`tendermint_coin_from_conf_and_request_with_global_hd`], for a public key
+/// [`tendermint_coin_from_conf_and_request_with_public_key`]. The WalletConnect and hardware policies are not
+/// built here.
 pub async fn tendermint_coin_from_conf_and_request(
     ctx: &MmArc,
     ticker: String,
@@ -113,6 +120,31 @@ pub async fn tendermint_coin_from_conf_and_request_with_global_hd(
     let key = ActivationKey::GlobalHd {
         global_hd,
         path_to_address,
+    };
+    build_tendermint_coin(ctx, ticker, conf, nodes, key, get_balances).await
+}
+
+/// Build a watch-only [`TendermintCoin`] from a public key (CRD ch.36 R36.1.3 form 1, R36.14.16). The account is
+/// the bech32 account of the key under the coin's `account_prefix` by the public SDK rule of the key's type; no
+/// node, wallet or session is contacted, and the login plays no part. The coin holds no private key: it refuses
+/// every path that would sign (CRD ch.36 R36.14.17) and `is_ledger_connection` sets the Ledger flag of R36.14.18.
+///
+/// # Errors
+///
+/// The failures of [`tendermint_coin_from_conf_and_request`], and
+/// [`TendermintInitErrorKind::CouldNotGenerateAccountId`] when the account cannot be derived from the key.
+pub async fn tendermint_coin_from_conf_and_request_with_public_key(
+    ctx: &MmArc,
+    ticker: String,
+    conf: &Json,
+    nodes: Vec<RpcNode>,
+    public_key: TendermintPublicKey,
+    is_ledger_connection: bool,
+    get_balances: bool,
+) -> MmResult<TendermintCoin, TendermintInitError> {
+    let key = ActivationKey::PublicKey {
+        public_key,
+        is_ledger_connection,
     };
     build_tendermint_coin(ctx, ticker, conf, nodes, key, get_balances).await
 }
@@ -195,6 +227,17 @@ async fn build_tendermint_coin(
                 path_to_address: path_to_address.clone(),
             };
             (account_id, TendermintActivationPolicy::with_private_key_policy(policy))
+        },
+        ActivationKey::PublicKey {
+            public_key,
+            is_ledger_connection,
+        } => {
+            let account_id = account_id_from_public_key(&public_key, &protocol_info.account_prefix)
+                .map_to_mm(|e| init_err(TendermintInitErrorKind::CouldNotGenerateAccountId(e.to_string())))?;
+            (
+                account_id,
+                TendermintActivationPolicy::with_public_key(public_key, is_ledger_connection),
+            )
         },
     };
 

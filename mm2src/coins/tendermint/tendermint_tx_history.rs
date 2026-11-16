@@ -932,6 +932,7 @@ pub(super) fn rows_for_tx(facts: &TxFacts, ctx: &ClassifyContext<'_>) -> Vec<Row
         }
 
         let details = TransactionDetails {
+            unsigned: None,
             tx_hex: facts.raw_tx.clone().into(),
             tx_json: None,
             tx_hash: facts.hash.clone(),
@@ -961,6 +962,7 @@ pub(super) fn rows_for_tx(facts: &TxFacts, ctx: &ClassifyContext<'_>) -> Vec<Row
     if let (Some(index), Some(fee_display)) = (fee_row_for, &fee_display) {
         let token_row = &rows[index].details;
         let fee_row = TransactionDetails {
+            unsigned: None,
             tx_hex: token_row.tx_hex.clone(),
             tx_json: None,
             tx_hash: token_row.tx_hash.clone(),

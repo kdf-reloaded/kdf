@@ -44,6 +44,12 @@ impl MarketCoinOps for TendermintCoin {
     fn sign_message_hash(&self, _message: &str) -> Option<[u8; 32]> { None }
 
     fn sign_message(&self, _message: &str) -> SignatureResult<String> {
+        // A watch-only coin names the refusal of CRD ch.36 R36.14.17 (`PrivKeyNotAllowed::WatchOnlyCoin`).
+        if let Err(e) = self.activation_policy.activated_key_or_err() {
+            if self.activation_policy.watch_only_ledger_flag().is_some() {
+                return MmError::err(SignatureError::InternalError(e.get_inner().to_string()));
+            }
+        }
         MmError::err(SignatureError::InternalError("Not implemented".into()))
     }
 

@@ -8,7 +8,7 @@ use crate::node_url::{host_only, scrub_urls_in_text};
 use crate::utxo::sat_from_big_decimal;
 use crate::utxo::utxo_common::{big_decimal_from_sat, big_decimal_from_sat_unsigned};
 use crate::{CoinBalance, CosmosGasPriceOption, HistorySyncState, MarketCoinOps, TransactionDetails, TransactionEnum,
-            TransactionErr, WithdrawFee};
+            TransactionErr, UnsignedSignDoc, UnsignedTransaction, WithdrawFee};
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use common::executor::Timer;
@@ -16,7 +16,7 @@ use common::log::{debug, warn};
 use common::now_ms;
 use cosmrs::crypto::secp256k1::SigningKey;
 use cosmrs::proto::cosmos::auth::v1beta1::{BaseAccount, QueryAccountRequest, QueryAccountResponse};
-use cosmrs::proto::cosmos::bank::v1beta1::{QueryBalanceRequest, QueryBalanceResponse};
+use cosmrs::proto::cosmos::bank::v1beta1::{MsgSend as MsgSendProto, QueryBalanceRequest, QueryBalanceResponse};
 use cosmrs::proto::cosmos::base::tendermint::v1beta1::{GetLatestBlockRequest, GetLatestBlockResponse};
 use cosmrs::proto::cosmos::tx::v1beta1::{GetTxRequest, GetTxResponse, SimulateRequest, SimulateResponse, Tx, TxRaw};
 use cosmrs::proto::prost::Message;
@@ -28,6 +28,7 @@ use futures::FutureExt;
 use kdf_crypto::sha256;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::str::FromStr;
@@ -418,6 +419,91 @@ impl TendermintCoin {
         sign_doc.sign(&signkey)
     }
 
+    /// The refusal of a coin that holds no signing key (a watch-only coin, a hardware policy), for the swap paths
+    /// that sign and broadcast with the node's key: they ask it first, before any node is contacted (CRD ch.36
+    /// R36.14.17).
+    pub(super) fn signing_refusal(&self) -> Option<TransactionErr> {
+        self.activation_policy
+            .activated_key_or_err()
+            .err()
+            .map(|e| TransactionErr::Plain(e.get_inner().to_string()))
+    }
+
+    /// The unsigned document of a watch-only coin for one message (CRD ch.36 R36.14.17, R36.14.30, R36.14.31): the
+    /// direct sign document (body with `timeout_height`, auth info, chain id, account number) without the Ledger flag,
+    /// the Amino sign document of a bank send (an object, without a timeout height) and the type URL of its message
+    /// with it. Nothing is signed or broadcast. With the Ledger flag every message
+    /// other than the bank send fails (R36.14.18 item 3).
+    ///
+    /// # Errors
+    ///
+    /// [`UnsignedTxError::NotWatchOnly`] for a coin with a private key policy.
+    pub(super) async fn build_unsigned_transaction(
+        &self,
+        msg: Any,
+        fee: Fee,
+        timeout_height: u64,
+        memo: &str,
+    ) -> Result<UnsignedTransaction, UnsignedTxError> {
+        let is_ledger = self
+            .activation_policy
+            .watch_only_ledger_flag()
+            .ok_or(UnsignedTxError::NotWatchOnly)?;
+        let public_key = cosmrs::crypto::PublicKey::from(
+            self.activation_policy
+                .public_key()
+                .map_err(|e| UnsignedTxError::Encode(e.to_string()))?,
+        );
+        let chain_id = self.protocol_info.chain_id.as_ref().to_string();
+
+        // The Amino form is checked before the account is queried, so a message without one fails at once.
+        let amino_msg = if is_ledger {
+            Some(amino_bank_send_json(&msg)?)
+        } else {
+            None
+        };
+
+        let account_info = self
+            .account_info(&self.account_id)
+            .await
+            .map_err(|e| UnsignedTxError::Rpc(e.to_string()))?;
+
+        if let Some(amino_msg) = amino_msg {
+            let fee_amount: Vec<_> = fee
+                .amount
+                .iter()
+                .map(|c| json!({ "amount": c.amount.to_string(), "denom": c.denom.to_string() }))
+                .collect();
+            // The Amino sign document (CRD ch.36 R36.14.31 items 1 and 3): a JSON object, every number a decimal
+            // string, and no `timeout_height` (item 4: the transaction built from it has none).
+            let doc = json!({
+                "account_number": account_info.account_number.to_string(),
+                "chain_id": chain_id,
+                "fee": { "amount": fee_amount, "gas": fee.gas_limit.to_string() },
+                "memo": memo,
+                "msgs": [amino_msg],
+                "sequence": account_info.sequence.to_string(),
+            });
+            return Ok(UnsignedTransaction::Amino {
+                legacy_amino_json: doc,
+                original_tx_type_url: msg.type_url,
+            });
+        }
+
+        let body = tx::Body::new(vec![msg], memo, timeout_height as u32);
+        let auth_info = SignerInfo::single_direct(Some(public_key), account_info.sequence).auth_info(fee);
+        Ok(UnsignedTransaction::SignDoc {
+            sign_doc: UnsignedSignDoc {
+                body_bytes: body.into_bytes().map_err(|e| UnsignedTxError::Encode(e.to_string()))?,
+                auth_info_bytes: auth_info
+                    .into_bytes()
+                    .map_err(|e| UnsignedTxError::Encode(e.to_string()))?,
+                chain_id,
+                account_number: account_info.account_number,
+            },
+        })
+    }
+
     // ————————————————————————————————————————————————————————————
     // Fee calculation
     // ————————————————————————————————————————————————————————————
@@ -588,6 +674,11 @@ impl TendermintCoin {
         timeout_height: u64,
         memo: &str,
     ) -> Result<(String, Raw), TransactionErr> {
+        // A coin without a signing key (a watch-only coin, a hardware policy) refuses before any node is asked
+        // (CRD ch.36 R36.14.17).
+        if let Err(e) = self.activation_policy.activated_key_or_err() {
+            return Err(TransactionErr::Plain(e.get_inner().to_string()));
+        }
         let mut account_info = try_tx_s!(self.account_info(&self.account_id).await);
 
         loop {
@@ -794,4 +885,23 @@ impl TendermintCoin {
             unexpected_state => MmError::err(SearchForSwapTxSpendErr::UnexpectedHtlcState(unexpected_state)),
         }
     }
+}
+
+/// The Amino JSON of a bank send message (`cosmos-sdk/MsgSend`); any other message has no Amino form here
+/// (CRD ch.36 R36.14.18 item 3).
+fn amino_bank_send_json(msg: &Any) -> Result<serde_json::Value, UnsignedTxError> {
+    const MSG_SEND_TYPE_URL: &str = "/cosmos.bank.v1beta1.MsgSend";
+    if msg.type_url != MSG_SEND_TYPE_URL {
+        return Err(UnsignedTxError::AminoUnsupported(msg.type_url.clone()));
+    }
+    let send = MsgSendProto::decode(msg.value.as_slice()).map_err(|e| UnsignedTxError::Encode(e.to_string()))?;
+    let amount: Vec<_> = send
+        .amount
+        .iter()
+        .map(|c| json!({ "amount": c.amount, "denom": c.denom }))
+        .collect();
+    Ok(json!({
+        "type": "cosmos-sdk/MsgSend",
+        "value": { "amount": amount, "from_address": send.from_address, "to_address": send.to_address },
+    }))
 }

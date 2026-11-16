@@ -259,6 +259,11 @@ impl SwapOps for TendermintToken {
         _htlc_privkey: &[u8],
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
+        if self.platform_coin.activation_policy.watch_only_ledger_flag().is_some() {
+            return Box::new(futures01::future::err(TransactionErr::Plain(
+                crate::PrivKeyNotAllowed::WatchOnlyCoin.to_string(),
+            )));
+        }
         Box::new(futures01::future::err(TransactionErr::Plain(
             "Tendermint HTLCs auto-refund on chain; no broadcast required.".into(),
         )))
@@ -273,6 +278,11 @@ impl SwapOps for TendermintToken {
         _htlc_privkey: &[u8],
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
+        if self.platform_coin.activation_policy.watch_only_ledger_flag().is_some() {
+            return Box::new(futures01::future::err(TransactionErr::Plain(
+                crate::PrivKeyNotAllowed::WatchOnlyCoin.to_string(),
+            )));
+        }
         Box::new(futures01::future::err(TransactionErr::Plain(
             "Tendermint HTLCs auto-refund on chain; no broadcast required.".into(),
         )))
@@ -528,11 +538,19 @@ impl MmCoin for TendermintToken {
                 AccountId::from_str(&req.to).map_to_mm(|e| WithdrawError::InvalidAddress(e.to_string()))?;
 
             let account_id = token.platform_coin.account_id.clone();
-            let priv_key = token
-                .platform_coin
-                .activation_policy
-                .activated_key_or_err()
-                .map_err(|e| WithdrawError::InternalError(e.to_string()))?;
+            // A token follows its platform coin: on a watch-only platform it answers the unsigned document, with the
+            // fixed assumed fee (CRD ch.36 R36.14.17).
+            let watch_only = token.platform_coin.activation_policy.watch_only_ledger_flag();
+            let priv_key = match watch_only {
+                Some(_) => None,
+                None => Some(
+                    *token
+                        .platform_coin
+                        .activation_policy
+                        .activated_key_or_err()
+                        .map_err(|e| WithdrawError::InternalError(e.to_string()))?,
+                ),
+            };
 
             let balance_denom = token
                 .platform_coin
@@ -579,7 +597,8 @@ impl MmCoin for TendermintToken {
                 value: msg.encode_to_vec(),
             };
 
-            let memo = TX_DEFAULT_MEMO.to_string();
+            // The request's memo, empty when it has none (CRD ch.36 R36.14.29).
+            let memo = req.memo.clone().unwrap_or_else(|| TX_DEFAULT_MEMO.to_string());
 
             let current_block = token
                 .platform_coin
@@ -597,7 +616,7 @@ impl MmCoin for TendermintToken {
                 .platform_coin
                 .calculate_account_fee_amount_as_u64(
                     &account_id,
-                    Some(priv_key.clone()),
+                    priv_key,
                     msg_payload.clone(),
                     timeout_height,
                     &memo,
@@ -605,6 +624,8 @@ impl MmCoin for TendermintToken {
                 )
                 .await
                 .map_mm_err()?;
+            // CRD ch.36 R36.14.31 item 5: the Ledger factor of R36.14.18 item 4 applies to the platform coin only;
+            // a token's document and `fee_details` carry the computed amount once.
 
             let fee_amount_dec = big_decimal_from_sat_unsigned(fee_amount_u64, token.platform_coin.decimals());
 
@@ -628,22 +649,47 @@ impl MmCoin for TendermintToken {
                 }
             }
 
-            let account_info = token.platform_coin.account_info(&account_id).await.map_mm_err()?;
-
-            let tx_raw = token
-                .platform_coin
-                .any_to_signed_raw_tx(priv_key, &account_info, msg_payload, fee, timeout_height, &memo)
-                .map_to_mm(|e| WithdrawError::InternalError(format!("Failed to sign tx: {}", e)))?;
-
-            let tx_bytes = tx_raw
-                .to_bytes()
-                .map_to_mm(|e| WithdrawError::InternalError(format!("Failed to encode tx: {}", e)))?;
-            let tx_hash = hex::encode_upper(sha256(&tx_bytes).as_slice());
+            // The signed transaction, or the unsigned document of a watch-only platform (nothing signed, no hash).
+            let (tx_bytes, tx_hash, unsigned, internal_id) = match priv_key {
+                Some(priv_key) => {
+                    let account_info = token.platform_coin.account_info(&account_id).await.map_mm_err()?;
+                    let tx_raw = token
+                        .platform_coin
+                        .any_to_signed_raw_tx(&priv_key, &account_info, msg_payload, fee, timeout_height, &memo)
+                        .map_to_mm(|e| WithdrawError::InternalError(format!("Failed to sign tx: {}", e)))?;
+                    let tx_bytes = tx_raw
+                        .to_bytes()
+                        .map_to_mm(|e| WithdrawError::InternalError(format!("Failed to encode tx: {}", e)))?;
+                    let tx_hash = hex::encode_upper(sha256(&tx_bytes).as_slice());
+                    let internal_id: BytesJson = tx_hash.as_bytes().to_vec().into();
+                    (tx_bytes, tx_hash, None, internal_id)
+                },
+                None => {
+                    let unsigned = token
+                        .platform_coin
+                        .build_unsigned_transaction(msg_payload, fee, timeout_height, &memo)
+                        .await
+                        .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
+                    // The constant identifier of an unsigned token result: the digest of the token id's 32 bytes
+                    // (CRD ch.36 R36.14.29).
+                    let token_id = hex::decode(token.token_id())
+                        .map_to_mm(|e| WithdrawError::InternalError(format!("Invalid token id: {e}")))?;
+                    (
+                        Vec::new(),
+                        String::new(),
+                        Some(unsigned),
+                        unsigned_internal_id(Some(&token_id)),
+                    )
+                },
+            };
+            // An unsigned result answers the memo it carries (R36.14.29); a signed one has none here.
+            let result_memo = unsigned.is_some().then(|| memo.clone());
 
             let tx_details = TransactionDetails {
+                unsigned,
                 tx_json: None,
                 tx_hex: tx_bytes.into(),
-                tx_hash: tx_hash.clone(),
+                tx_hash,
                 from: vec![account_id.to_string()],
                 to: vec![req.to],
                 my_balance_change: &received_by_me - &amount_dec,
@@ -659,14 +705,16 @@ impl MmCoin for TendermintToken {
                     gas_limit,
                 })),
                 coin: token.ticker.to_string(),
-                internal_id: tx_hash.as_bytes().to_vec().into(),
+                internal_id,
                 kmd_rewards: None,
                 transaction_type: TransactionType::StandardTransfer,
-                memo: None,
+                memo: result_memo,
             };
-            token
-                .platform_coin
-                .publish_tx_history_record(token.ticker(), &tx_details);
+            if !tx_details.is_unsigned() {
+                token
+                    .platform_coin
+                    .publish_tx_history_record(token.ticker(), &tx_details);
+            }
             Ok(tx_details)
         };
         Box::new(fut.boxed().compat())

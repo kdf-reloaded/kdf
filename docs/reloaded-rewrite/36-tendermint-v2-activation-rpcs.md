@@ -756,6 +756,10 @@ terms; the clean implementer works from this list):
    public-key or WalletConnect request silently activates with the local
    context key. Bound: the three forms of R36.1.3 with their effects; malformed
    input is `InvalidRequest`.
+   *Status note (2026-11-16, Reloaded-original).* Narrowed: the public-key form
+   (form 1) is built (§36.14.3, as-built note) and malformed input is now
+   `InvalidRequest`; the interim refusal above remains for the WalletConnect
+   forms (forms 2 and 3) only, until their activation is built.
 7. **Token platform check.** Reloaded does not check that an inline token's
    `platform` equals the activated platform. Bound: `PlatformCoinMismatch`
    (unit, HTTP 400).
@@ -2039,6 +2043,16 @@ the public SDK rule for that key type, the coin being watch-only.
 Recommended: (c), or (b) if (c) is not wanted; not (a), which shows an
 account that is not the key's.
 
+> **Status note (2026-11-16, Reloaded-original).** Decided 2026-11-15:
+> (c). An `ed25519` public key in the public-key form is accepted, and its
+> account is the bech32 of the first 20 bytes of the SHA-256 of the 32 key
+> bytes (the public Cosmos SDK rule for that key type) under the coin's
+> `account_prefix`; a `secp256k1` key keeps the rule of R36.14.16. The coin is
+> watch-only and, like every coin of the form, cannot serve as an HTLC key
+> (`get_htlc_key_pair` answers none, and its orders are refused, R18.11.23a).
+> A key whose bytes are not a valid key of its type or have the wrong length
+> is a request-parse failure (`InvalidRequest`, R36.1.3).
+
 D36.18 *(maintainer decision.)* *What a watch-only coin's `withdraw`
 answers in Reloaded.* The public-key form is built in 0.5.0 as a
 watch-only coin, and Chapter 18 R18.11.23a already refuses its orders.
@@ -2047,6 +2061,73 @@ unsigned results of R36.14.17, in both forms, which involve no key and
 are what lets a client's own wallet sign; (b) a typed refusal. Recommended:
 (a). The external-signing channel of Chapter 18 R18.11.52 is not needed
 for (a) and stays unbuilt while R18.11.23a stands.
+
+> **Status note (2026-11-16, Reloaded-original).** Decided 2026-11-15: (a),
+> built as stated in the as-built note below.
+
+> **As built (Reloaded, 2026-11-16, 0.5.0; informative).** The public-key form
+> builds a coin whose activation policy holds the key and the Ledger flag and
+> no private key. Activation contacts no node, wallet or session for the key and
+> the node's own login plays no part; a WalletConnect form is still refused with
+> `PlatformCoinCreationError` until its activation is built. A malformed
+> `activation_params` (any other shape, an unknown or missing `type`, a key type
+> other than the two, a `value` that is not an array of bytes, a key that is not
+> valid for its type) fails request parsing (`InvalidRequest`).
+>
+> - *`withdraw`, same chain.* Without the Ledger flag the result carries no
+>   `tx_hex` and no `tx_hash` and a `sign_doc` member `{body_bytes,
+>   auth_info_bytes, chain_id, account_number}` (arrays of byte values, the
+>   coin's chain id, the account number the node reports; R36.14.29,
+>   R36.14.30). The body holds the one bank send, the request's memo and the
+>   timeout height of the node's chain height plus 100; the auth info carries the
+>   watched public key, the direct sign mode, the node's sequence and the fee.
+>   The fee is the fixed assumed one (Chapter 18 R18.11.9): nothing is
+>   simulated. The `from` selector is ignored. With the Ledger flag the result
+>   carries `legacy_amino_json` and `original_tx_type_url`
+>   (`/cosmos.bank.v1beta1.MsgSend`) and no `sign_doc` (R36.14.31). The
+>   document is a JSON object with the members `account_number`, `chain_id`,
+>   `fee`, `memo`, `msgs` (one `cosmos-sdk/MsgSend`) and `sequence`, every number
+>   a decimal string and no `timeout_height`; the fee amount of the platform
+>   coin is three times the computed one, in both `fee_details` and the
+>   document (R36.14.18 item 4).
+> - *Staking requests* (delegation, undelegation, reward claim) answer the same
+>   direct form. With the Ledger flag they fail with the request's
+>   internal-error type, because the Amino form exists for the bank send only
+>   (R36.14.18 item 3); the same build fails for any message other than the
+>   bank send. This tree has no IBC `withdraw`, so the R36.14.17 IBC rows (the
+>   unsigned result without the flag, the failure with it) are not buildable
+>   here; that is not a gap of this change.
+> - *A token* on a watch-only platform follows the platform: the same unsigned
+>   results (a bank send in the token's denomination, the fee in the platform
+>   denomination). Under the Ledger flag the factor three is the platform coin's
+>   only: a token's document and `fee_details` carry the computed amount once
+>   (R36.14.31 item 5).
+> - *Orders* of the coin and of a token are refused as wallet-only with and
+>   without the flag (R18.11.23a, D18.11.10 (a)); the reference accepts the
+>   orders of a public-key coin without the flag, the recorded difference.
+> - *Refused paths.* Every path that would sign with a node-held key is refused
+>   with the typed error `PrivKeyNotAllowed::WatchOnlyCoin` ("The coin is
+>   watch-only and holds no signing key"), before any node is contacted: the
+>   taker-fee send, the maker and taker payment sends, the maker and taker
+>   spends (claims), the maker and taker refund calls, the node's own signing
+>   and broadcast of any transaction it built (the one every staking and swap
+>   send ends in), message signing and private-key display (the answers carry
+>   that error's text), and the public-key query (the existing typed
+>   `UnexpectedDerivationMethod::IguanaPrivKeyUnavailable` answer; no new variant,
+>   because that enum is matched exhaustively elsewhere). Allowed: the broadcast
+>   of a transaction the caller signed elsewhere (`send_raw_transaction`) is not a
+>   signing path and is unchanged; it is the watch-only user's path after the
+>   unsigned document is signed.
+> - *Tests:* T36.42 and T36.43 are covered by the unit tests in
+>   `tendermint_swap_flow_tests/watch_only_tests.rs` (secp256k1 and
+>   ed25519 accounts without node contact, the unsigned sign document with the
+>   body decoded to one bank send, the token, the delegation, the Amino form
+>   with the threefold fee, the failing staking and non-bank messages with the
+>   flag, the order refusals, and each refused signing path), and the
+>   request-parse and activation tests of the wire tests of
+>   `tendermint_with_tokens_activation`; T36.55 -- T36.58 by the tests named
+>   `t36_55_*` -- `t36_58_*` of the same file (see the status note at the end of
+>   §36.14.8).
 
 ### 36.14.4 Notes on existing rules, and our side
 
@@ -3564,3 +3645,56 @@ height `h` it answers an empty `transactions` list, `total` 0,
 node that answers `health` and `abci_info` and fails every history
 query of the fetcher, both methods answer successfully with
 `sync_status` `{"state": "Finished"}`.
+
+> **Status note (2026-11-16, Reloaded-original; as built after the clearance
+> of this subsection).** The unsigned result of a watch-only coin was compared
+> with R36.14.29 -- R36.14.32 member by member and corrected where it differed.
+>
+> - *R36.14.31 item 1 and item 4.* `legacy_amino_json` is a JSON object, not
+>   text, and has no `timeout_height`. (The earlier text form and the included
+>   timeout height were this tree's own and are gone.)
+> - *R36.14.31 item 5.* The factor three of R36.14.18 item 4 applies to the
+>   platform coin only; a token's document and `fee_details` carry the computed
+>   amount once.
+> - *R36.14.29, `internal_id`.* An unsigned result carries the constant
+>   identifier: the SHA-256 digest of the empty byte string for the platform
+>   coin, the SHA-256 digest of the 32 bytes of the token id for a token. It
+>   identifies no transaction. The staking requests of a watch-only coin
+>   (D36.18 (a)) use the platform coin's constant.
+> - *R36.14.29, `memo`.* The shared `withdraw` request has a `memo` member
+>   (absent is the empty memo). It is the memo of the transaction body and of the
+>   Amino document, and an unsigned result answers it as `memo`, `""` when the
+>   request has none. A signed Tendermint `withdraw` takes the same memo in its
+>   body (it was always empty before); every other coin family ignores the member.
+> - *R36.14.29 other members; R36.14.30.* `tx_hex`, `tx_hash` and `kmd_rewards`
+>   are absent, `from` is the activated address, `to` the request's `to`,
+>   `fee_details` the Tendermint form with the platform ticker, `block_height`
+>   and `timestamp` 0, `transaction_type` as for a signed `withdraw` (a token's
+>   signed `withdraw` answers `"StandardTransfer"` in this tree, and so does its
+>   unsigned result); `sign_doc` has the four members in the encodings of
+>   R36.14.30 (the body's timeout height is the height read plus 100). No
+>   difference was found.
+> - *R36.14.32.* No difference: `send_raw_transaction` takes the hex of a
+>   `TxRaw` for the platform coin or a token, checks that it decodes, submits it
+>   with `broadcast_tx_commit` and answers the node's upper-case hash; bytes that
+>   do not decode give the legacy error and no node request. The node never
+>   reads an unsigned result back.
+> - *R36.14.33 -- R36.14.35.* The "Our side" note above holds in this tree and
+>   nothing was changed: the versioned `my_tx_history` tests the store first and
+>   answers `RpcError` (HTTP 500) when the height read fails, the legacy method
+>   loads its store and then answers the legacy error, and the state is read
+>   from a successful answer only. The `RpcError` observed on 2026-11-16 while no
+>   node answered is therefore the conforming answer, not a difference.
+> - *Tests.* T36.55 (`t36_55_the_sign_doc_result`), T36.56
+>   (`t36_56_the_amino_result`), T36.57
+>   (`t36_57_a_token_under_the_ledger_flag`) and T36.58
+>   (`t36_58_broadcast_of_a_transaction_signed_outside_the_node`) are in
+>   `tendermint_swap_flow_tests/watch_only_tests.rs`; T36.59
+>   (`t36_59_versioned_history_while_no_node_answers`,
+>   `t36_59_a_node_that_answers_health_and_fails_abci_info_gives_rpc_error_and_serving_resumes`)
+>   and T36.60 (`t36_60_legacy_history_while_every_node_refuses_connections`,
+>   `t36_60_the_state_is_finished_while_a_node_answers_and_the_fetcher_fails`) in
+>   `tendermint_swap_flow_tests/tx_history_tests.rs`. T36.60 (iii) leaves the
+>   fetcher unrun after its first pass (a failing fetcher would pause and
+>   retry); the legacy `withdraw` of T36.55 shares the result type and its
+>   serialization with the mmrpc-2.0 form and is not run separately.

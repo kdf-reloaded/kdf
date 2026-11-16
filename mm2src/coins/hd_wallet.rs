@@ -195,14 +195,10 @@ impl From<AccountUpdatingError> for BalanceError {
 #[serde(tag = "error_type", content = "error_data")]
 pub enum HDWalletRpcError {
     /* ----------- Trezor device errors ----------- */
-    #[display(fmt = "Trezor device disconnected")]
-    TrezorDisconnected,
-    #[display(fmt = "Trezor internal error: {}", _0)]
-    HardwareWalletInternal(String),
-    #[display(fmt = "No Trezor device available")]
-    NoTrezorDeviceAvailable,
-    #[display(fmt = "Unexpected Hardware Wallet device: {}", _0)]
-    FoundUnexpectedDevice(String),
+    /// A hardware-wallet condition. The payload is exactly one name of the hardware RPC error vocabulary
+    /// (CRD ch.55 R55.2.17); CRD ch.05 R35c binds the token and HTTP 410.
+    #[display(fmt = "Hardware wallet error: {}", _0)]
+    HwError(String),
     #[display(
         fmt = "Coin doesn't support Trezor hardware wallet. Please consider adding the 'trezor_coin' field to the coins config"
     )]
@@ -314,13 +310,17 @@ impl From<RpcTaskError> for HDWalletRpcError {
     }
 }
 
+/// CRD ch.05 R35c: a condition that has a name in the hardware RPC error vocabulary ([`HwError::hw_rpc_error`]) is the
+/// `HwError` token with that name; a connection timeout is `Timeout`; any other failure of the device or of its
+/// transport is `Internal` with its text.
 impl From<HwError> for HDWalletRpcError {
     fn from(e: HwError) -> Self {
-        let error = e.to_string();
-        match e {
-            HwError::NoTrezorDeviceAvailable => HDWalletRpcError::NoTrezorDeviceAvailable,
-            HwError::FoundUnexpectedDevice { .. } => HDWalletRpcError::FoundUnexpectedDevice(error),
-            _ => HDWalletRpcError::HardwareWalletInternal(error),
+        if let HwError::ConnectionTimedOut { timeout } = &e {
+            return HDWalletRpcError::Timeout(*timeout);
+        }
+        match e.hw_rpc_error() {
+            Some(word) => HDWalletRpcError::HwError(word.to_string()),
+            None => HDWalletRpcError::Internal(e.to_string()),
         }
     }
 }
@@ -338,12 +338,9 @@ impl HttpStatusCode for HDWalletRpcError {
             | HDWalletRpcError::AddressLimitReached { .. }
             | HDWalletRpcError::AccountLimitReached { .. }
             | HDWalletRpcError::AccountAlreadyExists { .. } => StatusCode::BAD_REQUEST,
-            HDWalletRpcError::TrezorDisconnected
-            | HDWalletRpcError::HardwareWalletInternal(_)
-            | HDWalletRpcError::NoTrezorDeviceAvailable
-            | HDWalletRpcError::FoundUnexpectedDevice(_)
-            | HDWalletRpcError::Timeout(_)
-            | HDWalletRpcError::Transport(_)
+            HDWalletRpcError::HwError(_) => StatusCode::GONE,
+            HDWalletRpcError::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
+            HDWalletRpcError::Transport(_)
             | HDWalletRpcError::RpcInvalidResponse(_)
             | HDWalletRpcError::WalletStorageError(_)
             | HDWalletRpcError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -759,5 +756,50 @@ mod new_account_index_tests {
         let wire = serde_json::to_value(&rpc_error).expect("a serializable error");
         assert_eq!(wire["error_type"], "AccountAlreadyExists");
         assert_eq!(wire["error_data"]["account_id"], 3);
+    }
+}
+
+#[cfg(test)]
+mod hw_error_wire_tests {
+    use super::*;
+
+    /// CRD ch.05 R35c item 5: a hardware-wallet condition with a name in the hardware RPC error vocabulary is the
+    /// `HwError` token with that name as its string payload, HTTP 410. The test compares the discriminant, the word
+    /// and the status only.
+    #[test]
+    fn a_named_hardware_condition_is_the_hw_error_token() {
+        for (hw, word) in [
+            (HwError::NoTrezorDeviceAvailable, "NoTrezorDeviceAvailable"),
+            (HwError::DeviceDisconnected, "NoTrezorDeviceAvailable"),
+            (HwError::CannotChooseDevice { count: 2 }, "FoundMultipleDevices"),
+        ] {
+            let error = HDWalletRpcError::from(hw);
+            assert_eq!(error.status_code(), StatusCode::GONE, "{word}: status");
+            let wire = serde_json::to_value(&error).expect("a serializable error");
+            assert_eq!(wire["error_type"], "HwError", "{word}: error_type");
+            assert_eq!(wire["error_data"], word, "{word}: error_data");
+            assert_eq!(wire.as_object().unwrap().len(), 2, "{word}: members");
+        }
+    }
+
+    /// CRD ch.05 R35c item 5: a connection timeout is `Timeout`, HTTP 408.
+    #[test]
+    fn a_connection_timeout_is_a_timeout() {
+        let error = HDWalletRpcError::from(HwError::ConnectionTimedOut {
+            timeout: Duration::from_secs(300),
+        });
+        assert_eq!(error.status_code(), StatusCode::REQUEST_TIMEOUT);
+        let wire = serde_json::to_value(&error).expect("a serializable error");
+        assert_eq!(wire["error_type"], "Timeout");
+    }
+
+    /// A failure of the device or of its transport that has no name in the vocabulary is `Internal`, HTTP 500.
+    #[test]
+    fn an_unnamed_hardware_failure_is_internal() {
+        let error = HDWalletRpcError::from(HwError::UnderlyingError("x".to_owned()));
+        assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        let wire = serde_json::to_value(&error).expect("a serializable error");
+        assert_eq!(wire["error_type"], "Internal");
+        assert!(wire["error_data"].is_string());
     }
 }

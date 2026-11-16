@@ -135,6 +135,7 @@ async fn withdraw_spl_token_impl(coin: SplToken, req: WithdrawRequest) -> Withdr
         0.into()
     };
     Ok(TransactionDetails {
+        unsigned: None,
         tx_json: None,
         tx_hex: serialized_tx.into(),
         tx_hash: tx.signatures[0].to_string(),

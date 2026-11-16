@@ -168,6 +168,7 @@ pub(crate) fn tx_details_from_event(
     let spent_by_me = hastings_to_siacoin(Currency(spent_by_me));
 
     Ok(Some(TransactionDetails {
+        unsigned: None,
         // A walletd event is not a rebroadcastable serialised transaction
         // (R53.5.11, D53.4), so neither carrier is populated here: the JSON
         // carrier ch.20 R-W7 binds is the withdraw path's, not the history

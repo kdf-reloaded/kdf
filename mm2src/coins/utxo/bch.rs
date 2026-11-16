@@ -939,7 +939,7 @@ pub(crate) fn bch_coin_without_network_for_test() -> BchCoin {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod bch_tests {
     use super::*;
     use crate::sql_tx_history_storage::SqliteTxHistoryStorage;

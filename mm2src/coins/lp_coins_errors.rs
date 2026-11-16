@@ -139,6 +139,10 @@ pub enum TxHistoryError {
 pub enum PrivKeyNotAllowed {
     #[display(fmt = "Hardware Wallet is not supported")]
     HardwareWalletNotSupported,
+    /// The coin was activated by a public key (watch-only, CRD ch.36 R36.14.16 -- R36.14.18) and holds no key this
+    /// node signs with, so every path that would sign is refused with this error.
+    #[display(fmt = "The coin is watch-only and holds no signing key")]
+    WatchOnlyCoin,
 }
 #[derive(Debug, Display, PartialEq, Serialize)]
 pub enum UnexpectedDerivationMethod {
@@ -542,14 +546,10 @@ pub enum WithdrawError {
     /*                                              */
     /*------------ Trezor device errors ------------*/
     /*                                             */
-    #[display(fmt = "Trezor device disconnected")]
-    TrezorDisconnected,
-    #[display(fmt = "Trezor internal error: {}", _0)]
-    HardwareWalletInternal(String),
-    #[display(fmt = "No Trezor device available")]
-    NoTrezorDeviceAvailable,
-    #[display(fmt = "Unexpected Hardware Wallet device: {}", _0)]
-    FoundUnexpectedDevice(String),
+    /// A hardware-wallet condition. The payload is exactly one name of the hardware RPC error vocabulary
+    /// (CRD ch.55 R55.2.17), the string that the activation error sets carry under the same token.
+    #[display(fmt = "Hardware wallet error: {}", _0)]
+    HwError(String),
     /*                                         */
     /*------------- WithdrawError -------------*/
     /*                                         */
@@ -643,6 +643,10 @@ pub enum WithdrawError {
     #[display(fmt = "Unsupported after a network upgrade: {}", _0)]
     UnsupportedAfterNetworkUpgrade(String),
 }
+impl WithdrawError {
+    /// The hardware-wallet condition `word`, as the string of the `HwError` token (CRD ch.55 R55.2.17).
+    pub(crate) fn hardware_wallet(word: crypto::HwRpcError) -> Self { WithdrawError::HwError(word.to_string()) }
+}
 impl HttpStatusCode for WithdrawError {
     fn status_code(&self) -> StatusCode {
         match self {
@@ -666,14 +670,13 @@ impl HttpStatusCode for WithdrawError {
             // CRD ch.39 R39.6.4c: an upgrade this build cannot transact on is the
             // user's to resolve, not a server fault.
             | WithdrawError::UnsupportedAfterNetworkUpgrade(_) => StatusCode::BAD_REQUEST,
-            WithdrawError::NoTrezorDeviceAvailable
-            | WithdrawError::TrezorDisconnected
-            | WithdrawError::FoundUnexpectedDevice(_) => StatusCode::GONE,
-            WithdrawError::HardwareWalletInternal(_)
-            | WithdrawError::Transport(_)
+            WithdrawError::HwError(_) => StatusCode::GONE,
+            // CRD ch.43 R43.1D.2: a failure of the backend the coin talks to is a bad gateway.
+            WithdrawError::Transport(_) => StatusCode::BAD_GATEWAY,
             // A node's verdict on a fee the daemon chose, transient by nature: not a fault of the request.
-            | WithdrawError::FeeCapBelowBaseFee(_)
-            | WithdrawError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            WithdrawError::FeeCapBelowBaseFee(_) | WithdrawError::InternalError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
         }
     }
 }
@@ -955,5 +958,103 @@ mod withdraw_error_wire_tests {
         assert!(json["error_data"].is_string());
         // The wire form is a tagged object with exactly these two members.
         assert_eq!(json.as_object().unwrap().len(), 2);
+    }
+
+    /// CRD ch.43 R43.1D.2: a transport failure of the versioned `withdraw` answers HTTP 502 with `error_type`
+    /// `Transport` and `error_data` a plain JSON string; the neighboring internal failures stay at 500. The test
+    /// compares the discriminant and the JSON type of `error_data` only, never its text.
+    #[test]
+    fn transport_error_wire_form_is_a_bad_gateway() {
+        let err = WithdrawError::Transport("x".to_owned());
+        assert_eq!(err.status_code(), StatusCode::BAD_GATEWAY);
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["error_type"], "Transport");
+        assert!(json["error_data"].is_string());
+        assert_eq!(json.as_object().unwrap().len(), 2);
+        assert_eq!(
+            WithdrawError::InternalError("x".to_owned()).status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// CRD ch.43 R43.1D.2: every hardware-wallet condition that has a name in the hardware RPC error vocabulary is the
+    /// `HwError` token with that name as its string payload, HTTP 410, and the four former hardware tokens are gone.
+    /// The test compares the discriminant, the payload word and the status only.
+    #[test]
+    fn hardware_wallet_conditions_are_the_hw_error_token() {
+        use crypto::trezor::{OperationFailure, TrezorError};
+        use crypto::{HwError, HwRpcError};
+
+        let hw_error = |error: WithdrawError, word: &str| {
+            assert_eq!(error.status_code(), StatusCode::GONE, "{word}: status");
+            let json = serde_json::to_value(&error).unwrap();
+            assert_eq!(json["error_type"], "HwError", "{word}: error_type");
+            assert_eq!(json["error_data"], word, "{word}: error_data");
+            assert_eq!(json.as_object().unwrap().len(), 2, "{word}: members");
+        };
+        hw_error(
+            WithdrawError::from(HwError::NoTrezorDeviceAvailable),
+            "NoTrezorDeviceAvailable",
+        );
+        hw_error(
+            WithdrawError::from(HwError::DeviceDisconnected),
+            "NoTrezorDeviceAvailable",
+        );
+        hw_error(
+            WithdrawError::from(HwError::CannotChooseDevice { count: 2 }),
+            "FoundMultipleDevices",
+        );
+        hw_error(
+            WithdrawError::from(HwError::DeviceFailure(HwRpcError::ButtonExpected)),
+            "ButtonExpected",
+        );
+        hw_error(
+            WithdrawError::from(TrezorError::DeviceDisconnected),
+            "NoTrezorDeviceAvailable",
+        );
+        hw_error(
+            WithdrawError::from(TrezorError::ErrorRequestingAccessPermission("x".to_owned())),
+            "NoTrezorDeviceAvailable",
+        );
+        hw_error(
+            WithdrawError::from(TrezorError::Failure(OperationFailure::InvalidPin)),
+            "InvalidPin",
+        );
+        hw_error(
+            WithdrawError::from(TrezorError::Failure(OperationFailure::Device(
+                HwRpcError::UserCancelled,
+            ))),
+            "UserCancelled",
+        );
+        hw_error(
+            WithdrawError::hardware_wallet(HwRpcError::InvalidSignature),
+            "InvalidSignature",
+        );
+    }
+
+    /// The hardware conditions that have no name in the vocabulary: a connection timeout is `Timeout` (408), any other
+    /// failure of the device or of its transport is `InternalError` (500).
+    #[test]
+    fn hardware_wallet_conditions_without_a_vocabulary_name() {
+        use crypto::trezor::TrezorError;
+        use crypto::HwError;
+        use std::time::Duration;
+
+        let error = WithdrawError::from(HwError::ConnectionTimedOut {
+            timeout: Duration::from_secs(300),
+        });
+        assert_eq!(error.status_code(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(serde_json::to_value(&error).unwrap()["error_type"], "Timeout");
+
+        for error in [
+            WithdrawError::from(HwError::Internal("x".to_owned())),
+            WithdrawError::from(HwError::UnderlyingError("x".to_owned())),
+            WithdrawError::from(TrezorError::ProtocolError("x".to_owned())),
+        ] {
+            assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+            let json = serde_json::to_value(&error).unwrap();
+            assert_eq!(json["error_type"], "InternalError");
+            assert!(json["error_data"].is_string());
+        }
     }
 }

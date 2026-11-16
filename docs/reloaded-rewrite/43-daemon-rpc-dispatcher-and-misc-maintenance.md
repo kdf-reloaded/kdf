@@ -1105,6 +1105,15 @@ and `NoSuchCoin` as a record with status 400, as `trade_preimage` does.
 > today; the difference to the documented 502 is recorded for a later
 > alignment of `withdraw` itself, after a reference-behavior round.
 >
+> *Reloaded status (clean side, 2026-11-16, third note):* §43.1D established
+> that the documentation states no status for `withdraw` and that 404 and 502
+> are what the reference answers (R43.1D.1, R43.1D.2); the two notes above
+> and the texts of 2026-11-15 that say "documented statuses" are to be read
+> as "the statuses the reference answers for `withdraw`". By the maintainer's
+> decision of 2026-11-16, Reloaded's versioned `withdraw`, `withdraw_nft` and
+> the start request of `task::withdraw::init` now answer `Transport` with
+> 502, as the reference does; the sentence above on the 500 is historical.
+>
 > *Reloaded status (clean side, 2026-11-16, sibling sets of the last two
 > groups):* the swap forms `all_swaps_uuids_by_filter` and `import_swaps`
 > follow `my_recent_swaps` (R43.1A.7); the peer and gossip queries
@@ -1479,6 +1488,17 @@ client cannot tell from the body which one it got unless `orders.cancelled`
 is filled. *Recommendation:* (c), and keep the documented cancel-first
 behavior, which the body makes visible.
 
+> *Reloaded status (clean side, 2026-11-16):* resolved by the maintainer's
+> decision as option (c). A refused legacy `disable_coin` of the coin-in-use
+> and coin-not-active kinds answers the extended shape of R43.1E.3 (`error`,
+> `orders` with `matching` and `cancelled`, `active_swaps`) with `swaps` added
+> as a fourth member holding the same list as `active_swaps`; the "no coin
+> named" refusal and a node failure without lists stay plain; HTTP 500
+> throughout. The documented cancel-first behavior is kept and is visible in
+> `orders.cancelled`. The success answer is unchanged (`passivized` waits for
+> chapter 55 D55.6); `force_disable` is still not read. The versioned
+> `disable_coin` of §43.1R is unchanged.
+
 **D43.1E.2** *(Open, 2026-11-16.)* **A forced removal does not look at the
 dependent tokens.** In the reference the swap check, the matching-order check
 and the order cancellation of a forced call cover the platform's ticker only,
@@ -1576,10 +1596,12 @@ sibling, the versioned `orderbook` (R43.1A.6), the other three that of
 `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
 `set_required_confirmations` and `set_requires_notarization` are added. They
 follow the error set of their nearest documented sibling, the versioned
-`withdraw` as R43.1C.8 documents it: `NoSuchCoin` at 404 and `Transport` at
-502, where the order and trading forms answer 400 and 500. (Reloaded's own
-versioned `withdraw` answers a transport failure with 500 today; that
-difference is recorded at D43.1C.4 for a later alignment.) The same error name thus carries
+`withdraw`, with the statuses the reference answers for it (R43.1D.2; the
+documentation states none): `NoSuchCoin` at 404 and `Transport` at 502, where
+the order and trading forms answer 400 and 500. *(Amended 2026-11-16: the
+wording of 2026-11-15 said "as R43.1C.8 documents it" and noted Reloaded's
+`withdraw` answering 500; since 2026-11-16 Reloaded's `withdraw` answers 502
+as well, D43.1C.4 third note.)* The same error name thus carries
 different statuses in the two groups, as it does on the documented surface
 (D43.1C.4 second status note).
 
@@ -1673,9 +1695,9 @@ table row `order_status`).
 R55.1.2. A request the client got wrong answers 400, a failure of the node
 500; a refusal while the node's own clock is off (`ClockOutOfRange`) 503. A
 refusal while a coin's Electrum servers disagree answers 400, as `withdraw`
-does (chapter 38). The wallet and coin forms (phase 3) follow the documented
-`withdraw` set instead (R43.1C.8): an unknown coin 404, a transport failure
-502. One token may cover
+does (chapter 38). The wallet and coin forms (phase 3) follow the `withdraw`
+set as the reference answers it (R43.1D.2; the documentation states no
+status): an unknown coin 404, a transport failure 502. One token may cover
 several legacy texts; the text is not part of the contract.
 
 | `error_type` | `error_data` | Status | Failure class | Methods |
@@ -1708,8 +1730,8 @@ several legacy texts; the text is not part of the contract.
 | `CannotRetrieveOrderMatchContext` | none | 500 | ordermatch context unavailable | cancel_order |
 | `Internal` | string | 500 | any other failure of the node (the `orderbook` set) | orderbook_depth |
 | `InternalError` | string | 500 | any other failure of the node | all others |
-| `NoSuchCoin` | object `{coin}` | 404 | coin not found or not activated (the documented `withdraw` set) | my_balance, disable_coin, send_raw_transaction, validateaddress, convertaddress, convert_utxo_address (target coin), kmd_rewards_info (KMD), set_required_confirmations, set_requires_notarization |
-| `Transport` | string | 502 | node or server unreachable, invalid answer, broadcast refused by the network, and a transaction the coin cannot decode (the coin's broadcast gives one text for all three; the documented `withdraw` set) | my_balance, send_raw_transaction, kmd_rewards_info |
+| `NoSuchCoin` | object `{coin}` | 404 | coin not found or not activated (the `withdraw` set of R43.1D.2) | my_balance, disable_coin, send_raw_transaction, validateaddress, convertaddress, convert_utxo_address (target coin), kmd_rewards_info (KMD), set_required_confirmations, set_requires_notarization |
+| `Transport` | string | 502 | node or server unreachable, invalid answer, broadcast refused by the network, and a transaction the coin cannot decode (the coin's broadcast gives one text for all three; the `withdraw` set of R43.1D.2) | my_balance, send_raw_transaction, kmd_rewards_info |
 | `InvalidParam` | string | 400 | request carries neither `tx_hex` nor `tx_json`, or the wrong type; address conversion refused by the coin | send_raw_transaction, convertaddress |
 | `InvalidAddress` | string | 400 | address does not parse | convert_utxo_address |
 | `UnsupportedError` | string | 400 | target coin is not a UTXO coin | convert_utxo_address |
@@ -2260,3 +2282,8 @@ shall be wound down as part of shutdown rather than abandoned.
   comment and literal wording; identifier-shaped tokens and
   identifier-derived phrases against the identifier set); the additions
   embed no code blocks.
+- *Status notes added 2026-11-16 -- third note after D43.1C.4, note after
+  D43.1E.1; wording amendment in §43.1R.* Reloaded-original, clean side: they
+  record the maintainer's 2026-11-16 decisions (withdraw `Transport` 502;
+  D43.1E.1 option (c)) and correct the "documented statuses" wording to what
+  §43.1D established; no forbidden-class input, chapter 01 R38 not engaged.

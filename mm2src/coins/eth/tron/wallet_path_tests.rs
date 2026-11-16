@@ -491,6 +491,7 @@ fn my_tron_form() -> String {
 
 fn withdraw_request(coin: &EthCoin, fee: Option<WithdrawFee>) -> WithdrawRequest {
     WithdrawRequest {
+        memo: None,
         coin: coin.ticker.clone(),
         from: None,
         to: "TNPeeaaFB7K9cmo4uQpcU32zGK8G1NYqeL".to_owned(),

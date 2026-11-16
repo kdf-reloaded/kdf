@@ -109,7 +109,6 @@ pub fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
 }
 
 /// Returned client won't work by default, requires some mocks to be usable
-#[cfg(not(target_arch = "wasm32"))]
 fn native_client_for_test() -> NativeClient { NativeClient(Arc::new(NativeClientImpl::default())) }
 
 #[test]
@@ -1123,6 +1122,7 @@ fn test_withdraw_impl_set_fixed_fee() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1169,6 +1169,7 @@ fn test_withdraw_impl_sat_per_kb_fee() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1239,6 +1240,7 @@ fn explicit_fee_withdraw(
 
     let amount: BigDecimal = rate.parse().unwrap();
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1380,6 +1382,7 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: "9.9789".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1426,6 +1429,7 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max_dust_included_to_fee() 
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: "9.9789".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1472,6 +1476,7 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_over_max() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: "9.97939455".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1505,6 +1510,7 @@ fn test_withdraw_impl_sat_per_kb_fee_max() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 0u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1566,6 +1572,7 @@ fn test_withdraw_kmd_rewards_impl(
     let coin = utxo_coin_from_fields(fields);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1676,6 +1683,7 @@ fn test_withdraw_kmd_rewards_post_fork_reduction() {
     let coin = utxo_coin_from_fields(fields);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1920,6 +1928,7 @@ fn test_withdraw_doc_rewards_none() {
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None, false);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -4487,6 +4496,7 @@ fn test_withdraw_to_p2pkh() {
     };
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1.into(),
         from: None,
         to: p2pkh_address.to_string(),
@@ -4534,6 +4544,7 @@ fn test_withdraw_to_p2sh() {
     };
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1.into(),
         from: None,
         to: p2sh_address.to_string(),
@@ -4581,6 +4592,7 @@ fn test_withdraw_to_p2wpkh() {
     };
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 1.into(),
         from: None,
         to: p2wpkh_address.to_string(),
@@ -9488,6 +9500,7 @@ mod withdraw_recent_spent {
 
     fn withdraw_request() -> WithdrawRequest {
         WithdrawRequest {
+            memo: None,
             amount: "0.001".parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -10960,6 +10973,7 @@ mod hd_coin_swap_key_tests {
 
         fn request(from: Option<WithdrawFrom>) -> WithdrawRequest {
             WithdrawRequest {
+                memo: None,
                 amount: 1u64.into(),
                 from,
                 to: RECEIVER.to_string(),
@@ -11487,6 +11501,7 @@ mod sighash_suffix_sites {
 
     fn withdraw_request() -> WithdrawRequest {
         WithdrawRequest {
+            memo: None,
             amount: "0.001".parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -13146,11 +13161,10 @@ pub(crate) mod hd_accounts_at_index_tests {
         .expect("the replaced device must be refused")
         .into_inner();
         assert!(
-            matches!(error, HDWalletRpcError::FoundUnexpectedDevice(_)),
-            "{:?}",
-            error
+            matches!(&error, HDWalletRpcError::HwError(word) if word == "FoundUnexpectedDevice"),
+            "the replaced device answers HwError FoundUnexpectedDevice"
         );
-        assert_eq!(error.status_code(), common::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.status_code(), common::StatusCode::GONE);
         assert_eq!(*items.lock().unwrap(), stored_with_device_a, "the storage is unchanged");
 
         block_on(crate::hd_wallet::get_new_address(ctx, new_address_request("DOC")))
@@ -13175,10 +13189,10 @@ pub(crate) mod hd_accounts_at_index_tests {
                 .unwrap_err()
                 .into_inner();
         assert!(
-            matches!(error, HDWalletRpcError::FoundUnexpectedDevice(_)),
-            "{:?}",
-            error
+            matches!(&error, HDWalletRpcError::HwError(word) if word == "FoundUnexpectedDevice"),
+            "the replaced device answers HwError FoundUnexpectedDevice"
         );
+        assert_eq!(error.status_code(), common::StatusCode::GONE);
         assert_eq!(device_b.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(items.lock().unwrap().is_empty(), "nothing is stored");
 
@@ -13314,10 +13328,10 @@ pub(crate) mod hd_accounts_at_index_tests {
         .unwrap_err()
         .into_inner();
         assert!(
-            matches!(error, HDWalletRpcError::HardwareWalletInternal(_)),
-            "{:?}",
-            error
+            matches!(error, HDWalletRpcError::Internal(_)),
+            "a coin without a device record answers Internal"
         );
+        assert_eq!(error.status_code(), common::StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(device_a.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 
         let ctx = node_with_hd_coins(true, vec![("TRZ", trezor_policy_hd_coin_activated_with(None))], &items);
@@ -13326,15 +13340,15 @@ pub(crate) mod hd_accounts_at_index_tests {
             .expect("a coin without a record of its device is refused")
             .into_inner();
         assert!(
-            matches!(error, HDWalletRpcError::HardwareWalletInternal(_)),
-            "{:?}",
-            error
+            matches!(error, HDWalletRpcError::Internal(_)),
+            "a coin without a device record answers Internal"
         );
+        assert_eq!(error.status_code(), common::StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     /// R58a, T36: signing takes its hardware context through one check. The device of the activation passes, an
-    /// empty slot answers `NoTrezorDeviceAvailable` as before, and another device answers `FoundUnexpectedDevice`
-    /// (HTTP 410 of the withdraw error class), all before any device is contacted. Both withdraw routes, the UTXO
+    /// empty slot answers `HwError` `NoTrezorDeviceAvailable`, and another device answers `HwError`
+    /// `FoundUnexpectedDevice` (both HTTP 410 of the withdraw error class), all before any device is contacted. Both withdraw routes, the UTXO
     /// one (`InitUtxoWithdraw::trezor_client`) and the EVM one (`eth_trezor_withdraw::trezor_client`), call this
     /// check; they need a task handle to run, so only the check itself is run here.
     #[test]
@@ -13353,21 +13367,32 @@ pub(crate) mod hd_accounts_at_index_tests {
             .err()
             .expect("the replaced device must be refused")
             .into_inner();
-        assert!(matches!(error, WithdrawError::FoundUnexpectedDevice(_)), "{:?}", error);
+        assert!(
+            matches!(&error, WithdrawError::HwError(word) if word == "FoundUnexpectedDevice"),
+            "the replaced device answers HwError FoundUnexpectedDevice"
+        );
         assert_eq!(error.status_code(), common::StatusCode::GONE);
 
         let error = hardware_context_for_signing(&ctx, None)
             .err()
             .expect("a coin without a record of its device is refused")
             .into_inner();
-        assert!(matches!(error, WithdrawError::HardwareWalletInternal(_)), "{:?}", error);
+        assert!(
+            matches!(error, WithdrawError::InternalError(_)),
+            "a coin without a device record answers InternalError"
+        );
+        assert_eq!(error.status_code(), common::StatusCode::INTERNAL_SERVER_ERROR);
 
         CryptoCtx::from_ctx(&ctx).unwrap().reset_hw_ctx();
         let error = hardware_context_for_signing(&ctx, Some(&activated_with))
             .err()
             .expect("an empty slot has no device")
             .into_inner();
-        assert!(matches!(error, WithdrawError::NoTrezorDeviceAvailable), "{:?}", error);
+        assert!(
+            matches!(&error, WithdrawError::HwError(word) if word == "NoTrezorDeviceAvailable"),
+            "an empty slot answers HwError NoTrezorDeviceAvailable"
+        );
+        assert_eq!(error.status_code(), common::StatusCode::GONE);
     }
 }
 

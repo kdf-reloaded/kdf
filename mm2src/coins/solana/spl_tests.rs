@@ -106,6 +106,7 @@ fn test_spl_transactions() {
     let valid_tx_details = block_on(
         usdc_sol_coin
             .withdraw(WithdrawRequest {
+                memo: None,
                 coin: "USDC".to_string(),
                 from: None,
                 to: "AYJmtzc9D4KU6xsDzhKShFyYKUNXY622j9QoQEo4LfpX".to_string(),

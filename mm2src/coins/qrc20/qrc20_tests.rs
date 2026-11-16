@@ -95,6 +95,7 @@ fn test_withdraw_impl_fee_details() {
     let (_ctx, coin) = qrc20_coin_for_test(&priv_key, None);
 
     let withdraw_req = WithdrawRequest {
+        memo: None,
         amount: 10.into(),
         from: None,
         to: "qHmJ3KA6ZAjR9wGjpFASn4gtUSeFAqdZgs".into(),
@@ -535,6 +536,7 @@ fn test_transfer_details_by_hash() {
     // qKVvtDqpnFGDxsDzck5jmLwdnD2jRH6aM8 is UTXO representation of 1549128bbfb33b997949b4105b6a6371c998e212 contract address
     let (_id, actual) = it.next().unwrap();
     let expected = TransactionDetails {
+        unsigned: None,
         tx_json: None,
         tx_hex: tx_hex.clone(),
         tx_hash: tx_hash_bytes.to_tx_hash(),
@@ -561,6 +563,7 @@ fn test_transfer_details_by_hash() {
 
     let (_id, actual) = it.next().unwrap();
     let expected = TransactionDetails {
+        unsigned: None,
         tx_json: None,
         tx_hex: tx_hex.clone(),
         tx_hash: tx_hash_bytes.to_tx_hash(),
@@ -587,6 +590,7 @@ fn test_transfer_details_by_hash() {
 
     let (_id, actual) = it.next().unwrap();
     let expected = TransactionDetails {
+        unsigned: None,
         tx_json: None,
         tx_hex: tx_hex.clone(),
         tx_hash: tx_hash_bytes.to_tx_hash(),
@@ -613,6 +617,7 @@ fn test_transfer_details_by_hash() {
 
     let (_id, actual) = it.next().unwrap();
     let expected = TransactionDetails {
+        unsigned: None,
         tx_json: None,
         tx_hex: tx_hex.clone(),
         tx_hash: tx_hash_bytes.to_tx_hash(),
@@ -639,6 +644,7 @@ fn test_transfer_details_by_hash() {
 
     let (_id, actual) = it.next().unwrap();
     let expected = TransactionDetails {
+        unsigned: None,
         tx_json: None,
         tx_hex: tx_hex.clone(),
         tx_hash: tx_hash_bytes.to_tx_hash(),
