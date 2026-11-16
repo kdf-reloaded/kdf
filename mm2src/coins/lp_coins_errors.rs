@@ -669,8 +669,9 @@ impl HttpStatusCode for WithdrawError {
             WithdrawError::NoTrezorDeviceAvailable
             | WithdrawError::TrezorDisconnected
             | WithdrawError::FoundUnexpectedDevice(_) => StatusCode::GONE,
+            // CRD ch.43 R43.1D.2: a failure of the backend the coin talks to is a bad gateway.
+            WithdrawError::Transport(_) => StatusCode::BAD_GATEWAY,
             WithdrawError::HardwareWalletInternal(_)
-            | WithdrawError::Transport(_)
             // A node's verdict on a fee the daemon chose, transient by nature: not a fault of the request.
             | WithdrawError::FeeCapBelowBaseFee(_)
             | WithdrawError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -955,5 +956,26 @@ mod withdraw_error_wire_tests {
         assert!(json["error_data"].is_string());
         // The wire form is a tagged object with exactly these two members.
         assert_eq!(json.as_object().unwrap().len(), 2);
+    }
+
+    /// CRD ch.43 R43.1D.2: a transport failure of the versioned `withdraw` answers HTTP 502 with `error_type`
+    /// `Transport` and `error_data` a plain JSON string; the neighboring internal failures stay at 500. The test
+    /// compares the discriminant and the JSON type of `error_data` only, never its text.
+    #[test]
+    fn transport_error_wire_form_is_a_bad_gateway() {
+        let err = WithdrawError::Transport("x".to_owned());
+        assert_eq!(err.status_code(), StatusCode::BAD_GATEWAY);
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["error_type"], "Transport");
+        assert!(json["error_data"].is_string());
+        assert_eq!(json.as_object().unwrap().len(), 2);
+        assert_eq!(
+            WithdrawError::InternalError("x".to_owned()).status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            WithdrawError::HardwareWalletInternal("x".to_owned()).status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }
