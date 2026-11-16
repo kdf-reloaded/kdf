@@ -1293,11 +1293,8 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   expression, not the accuracy of the statements.
 - *Scoped addition (2026-11-16, Spec Reader round 0.5.0-8) -- §36.14.8
   (R36.14.29 -- R36.14.35, the informative note, T36.55 -- T36.60).*
-  **KDF Dirty Gate: pending** (chapter 01 R40; the
-  subsection carries the pending-clearance marker at the point at which it
-  appears, and every passage in it is marked *(pending gate)*; this item is
-  replaced by the clearance record with the R39 scope attestation when the
-  gate clears it). *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`
+  **KDF Dirty Gate: PASS on 2026-11-16, measure 0.03, no findings**
+  (chapter 01 R40; the attestation closes this item). *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`
   and `v3.0.0-beta` of chapter 02 §2.15A, read read-only and consulted
   **only** to establish: for a Tendermint coin or token activated in the
   public-key form, which members the `withdraw` result has and lacks when
@@ -1330,6 +1327,21 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   R55.1.10; the test inputs were chosen by the author and the figures are
   computed from the rules, not taken from any test. No cleared sentence
   of §36.14.1 -- §36.14.7 was edited.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-16, measure
+  0.03 on the discretionary-expression basis, no findings. Reference states
+  (chapter 02 R13): PASS; the rows `v2.6.0-beta` and `v3.0.0-beta`, both
+  tabled in §2.15A. Extent: the Tendermint coin-family subsystem as §36.14.8
+  scopes it, at the two rows: the withdraw path of the platform coin and of
+  the token, both forms of the unsigned sign document, the withdraw result
+  type and its serialization, the legacy raw-transaction broadcast path, the
+  versioned and the legacy transaction-history serving methods with their
+  error type and status mapping, the node choice and the current-height
+  read, and the test code of the same subsystem; 11 source files at each row
+  compared mechanically, 4 read in their relevant parts at the first row,
+  row-to-row difference over the same set. Method: reading, combined with
+  mechanical comparison (identifier-shaped token intersection at both rows;
+  5-, 4- and 3-word sequence comparison against comment and string-literal
+  text; row-to-row difference); the additions embed no code blocks.
 
 ---
 
@@ -3189,43 +3201,39 @@ database. *Expected in `B`'s history:* under D36.23 (a), one row with
 > built as unit tests. R36.14.27 and R36.14.28 are met by the fetcher as it stands
 > and by the decisions D36.23 -- D36.25 as noted at each.
 
-### 36.14.8 Precisions: the unsigned transaction of a watch-only coin, and a history request while no node answers (Spec Reader round 0.5.0-8; pending the KDF Dirty Gate)
+### 36.14.8 Precisions: the unsigned transaction of a watch-only coin, and a history request while no node answers
 
-> **Provenance status: pending the KDF Dirty Gate.** This subsection is a
-> candidate under chapter 01 R40: until the gate clears it and this marker
-> is replaced by the clearance record, it MUST NOT be relied on as a
-> statement of required behavior and MUST NOT be implemented from. It was
-> written by the dirty-side specification author on 2026-11-16 (Spec Reader
-> round 0.5.0-8) from the reference rows `v2.6.0-beta` and `v3.0.0-beta` of
-> chapter 02 §2.15A (read read-only; no untabled state was read), from the
-> public transaction and signing definitions of the Cosmos SDK (the
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-16,
+> measure 0.03 (attestation in §36.13).**
+> This subsection was written on 2026-11-16 by the KDF Spec Reader (Spec
+> Reader round 0.5.0-8) under the two-team procedure of chapter 01 §1.4A,
+> from the reference rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A (read read-only; no untabled state was read), from the public
+> transaction and signing definitions of the Cosmos SDK (the
 > `cosmos.tx.v1beta1` messages, the direct sign mode, the legacy Amino JSON
-> sign mode and its sign document, the bank module's send message), from
-> the public CometBFT RPC, from
-> [Chapter 18](18-tendermint-ibc-htlc.md),
-> [Chapter 38](38-utxo-coin-maintenance-and-features.md) §38.5A and
-> [Chapter 55](55-coin-activation-wire-contract.md) R55.1.10, from this
-> repository's own tree and from this chapter's own text. **The two rows
-> agree on everything in this subsection**: the parts of the reference it
-> describes are the same at both. It edits no sentence of §36.14.1 --
-> §36.14.7. Each rule names the rule it completes; where a rule here is
-> more exact than the sentence it completes, the rule here governs. It
-> answers two questions only: what exactly the unsigned transaction is
-> that `withdraw` answers for a coin activated in the public-key form
-> (§36.14.3), as a contract for the external signer that consumes it; and
-> what a history request answers while no configured node answers. Each
-> rule says in its heading whether it concerns **this family** only or a
-> **shared serving path**, that is every coin family the method serves.
-> Numbering: rules R36.14.29 -- R36.14.35 and tests T36.55 -- T36.60; the
-> subsection raises no decision. Every passage below is marked *(pending
-> gate)* until cleared.
+> sign mode and its sign document, the bank module's send message), from the
+> public CometBFT RPC, from [Chapter 18](18-tendermint-ibc-htlc.md),
+> [Chapter 38](38-utxo-coin-maintenance-and-features.md) §38.5A and [Chapter
+> 55](55-coin-activation-wire-contract.md) R55.1.10, from this repository's
+> own tree and from this chapter's own text. **The two rows agree on
+> everything in this subsection**: the parts of the reference it describes
+> are the same at both. It edits no sentence of §36.14.1 -- §36.14.7. Each
+> rule names the rule it completes; where a rule here is more exact than the
+> sentence it completes, the rule here governs. It answers two questions
+> only: what exactly the unsigned transaction is that `withdraw` answers for
+> a coin activated in the public-key form (§36.14.3), as a contract for the
+> external signer that consumes it; and what a history request answers while
+> no configured node answers. Each rule says in its heading whether it
+> concerns **this family** only or a **shared serving path**, that is every
+> coin family the method serves. Numbering: rules R36.14.29 -- R36.14.35 and
+> tests T36.55 -- T36.60; the subsection raises no decision.
 
 R36.14.29 **The `withdraw` result that carries an unsigned transaction
 (this family; completes R36.14.17).** For a coin or token activated in
 the public-key form, `withdraw` (both the legacy and the mmrpc-2.0 form,
 which answer the same payload) answers the ordinary result object with
 the members below. The unsigned transaction is not wrapped: its members
-stand directly among the other members of the result. *(pending gate)*
+stand directly among the other members of the result.
 
 | Member | In the unsigned result |
 | --- | --- |
@@ -3243,20 +3251,18 @@ stand directly among the other members of the result. *(pending gate)*
 | `memo` | a string: the request's `memo`, or the empty string when the request has none |
 | `kmd_rewards` | absent |
 
-*(pending gate)*
-
 The `internal_id` of an unsigned result is therefore the same for every
 unsigned result of a coin. It identifies no transaction, which has no
 hash before it is signed, and a client must not use it as a key.
 Reloaded answers the same members with the same values (D36.18 (a)).
 The node keeps nothing about an unsigned transaction after it has
-answered: no later request refers back to it. *(pending gate)*
+answered: no later request refers back to it.
 
 R36.14.30 **The `sign_doc` form (this family; completes R36.14.17 and
 T36.42).** `sign_doc` is a JSON object with exactly four members. Their
 names and meaning are those of the public Cosmos SDK message
 `cosmos.tx.v1beta1.SignDoc`; only the JSON encoding is the reference's
-own. *(pending gate)*
+own.
 
 | Member | JSON type and encoding | Content |
 | --- | --- | --- |
@@ -3265,12 +3271,10 @@ own. *(pending gate)*
 | `chain_id` | string | the coin's `chain_id` (R36.3.1) |
 | `account_number` | JSON **number** (an unsigned 64-bit integer), not a string | the account number the node reports for the activated address |
 
-*(pending gate)*
-
 The order of the four members in the object carries no meaning. What the
 two byte strings hold is fixed by the public definitions once the
 following values are given, and Reloaded produces byte strings that
-decode to the same values. *(pending gate)*
+decode to the same values.
 
 1. *Body.* Exactly one message, the message of the operation (for a
    same-chain `withdraw` the bank module's `/cosmos.bank.v1beta1.MsgSend`
@@ -3278,7 +3282,7 @@ decode to the same values. *(pending gate)*
    denomination of the coin or token and the amount in base units); the
    `memo` of R36.14.29; a `timeout_height` of the chain height the node
    read while it answered the request, plus 100. No other member of the
-   body is set. *(pending gate)*
+   body is set.
 2. *Authorization.* Exactly one signer entry: the public key the coin
    was activated with, as the public Cosmos SDK key message of the key
    type the activation declared (D36.17 concerns the `ed25519` case); the
@@ -3287,35 +3291,33 @@ decode to the same values. *(pending gate)*
    fee has exactly one coin, in the platform denomination also for a
    token; for a same-chain `withdraw` its amount is that of Chapter 18
    R18.11.9 and R18.6B.2. The gas limit is that of Chapter 18 R18.6B.3;
-   payer and granter are empty. *(pending gate)*
+   payer and granter are empty.
 3. *What the signer does* is the public convention of the direct sign
    mode and is not restated here: it signs the protobuf serialization of
    the `SignDoc` that these four values form and puts the two byte
-   strings, unchanged, with its signature into a `TxRaw`. *(pending
-   gate)*
+   strings, unchanged, with its signature into a `TxRaw`.
 
 Two consequences follow from the values alone. The document can be
 accepted by the chain only up to the height in its body, about 100
 blocks after the request. And it is bound to one sequence: two requests
 answered before either transaction is broadcast carry the same
 sequence, and the chain accepts only one of the two transactions.
-*(pending gate)*
 
 R36.14.31 **The `legacy_amino_json` form (this family; completes
 R36.14.17, R36.14.18 and T36.43).** With the Ledger flag the result
-carries two members in place of `sign_doc`. *(pending gate)*
+carries two members in place of `sign_doc`.
 
 1. *`legacy_amino_json`* is a JSON **object**, not a string that holds a
    serialized document. It is the sign document of the public Cosmos
    SDK legacy Amino JSON sign mode (`StdSignDoc`) and departs from that
-   definition in no member it carries. *(pending gate)*
+   definition in no member it carries.
 2. *`original_tx_type_url`* is a string, the protobuf type URL of the
    message that the document's one `msgs` entry stands for. Because the
    Amino form exists for the bank send only (R36.14.18 item 3), it is
    always `/cosmos.bank.v1beta1.MsgSend`. The Amino document does not
    carry this URL; the member supplies it for the protobuf message of
-   the transaction that is broadcast. *(pending gate)*
-3. *The members of the document.* *(pending gate)*
+   the transaction that is broadcast.
+3. *The members of the document.*
 
    | Member | JSON type | Value |
    | --- | --- | --- |
@@ -3326,18 +3328,15 @@ carries two members in place of `sign_doc`. *(pending gate)*
    | `msgs` | array with exactly one entry | `{"type": "cosmos-sdk/MsgSend", "value": {"from_address": <activated address>, "to_address": <destination address>, "amount": [{"denom": <denom of the coin or token>, "amount": <base units as a decimal string>}]}}` |
    | `sequence` | string, decimal digits | the sequence the node reports for the account; present also when it is zero, as `"0"` |
 
-   *(pending gate)*
-
    Every number in the document is a JSON string. The document has no
    other member: no `timeout_height`, and no `payer` or `granter` in
-   `fee`. *(pending gate)*
+   `fee`.
 4. *Timeout height.* The public definition leaves `timeout_height` out
    of the document when the transaction has none, and the reference
    never writes it. The transaction a signer builds from this document
    therefore has **no** timeout height, unlike the transaction of the
    `sign_doc` form (R36.14.30 item 1). This is a difference between the
-   two forms and not a departure from the public definition. *(pending
-   gate)*
+   two forms and not a departure from the public definition.
 5. *Fee.* The fee in the document is the fee of the result
    (R36.14.29). For the **platform coin** it is three times the computed
    amount (R36.14.18 item 4), multiplied as an integer of base units
@@ -3345,7 +3344,7 @@ carries two members in place of `sign_doc`. *(pending gate)*
    platform the factor is not applied: the document and `fee_details`
    carry the computed amount once. This is the exact scope of R36.14.18
    item 4. The `gas` member is the gas limit of Chapter 18 R18.6B.3 in
-   both cases and is not multiplied. *(pending gate)*
+   both cases and is not multiplied.
 6. *Order and canonical form.* The order in which the reference writes
    the members of the document and of its inner objects is not the
    canonical order of the sign mode at every level, and it is not part
@@ -3353,25 +3352,25 @@ carries two members in place of `sign_doc`. *(pending gate)*
    bytes that are signed are not the bytes of the answer. They are the
    canonical JSON of the public sign mode (the members of every object
    sorted by name, no insignificant whitespace), which the signer
-   produces itself from the document. *(pending gate)*
+   produces itself from the document.
 7. *The transaction the signer builds* is fixed by the public
    convention and by items 2 to 4: a body with the protobuf form of the
    one message, the same memo and no timeout height; one signer entry
    with the account's public key, the sign mode
    `SIGN_MODE_LEGACY_AMINO_JSON` and the document's sequence; and the
-   document's fee and gas limit. *(pending gate)*
+   document's fee and gas limit.
 
 R36.14.32 **Having the signed transaction broadcast (this family;
 completes R36.14.17).** The reference has no request that takes a
 signature, or a signed document, and completes the transaction: no
 member of an unsigned result is ever sent back to the node. The caller
 has two ways, and both begin with its own wallet assembling the signed
-transaction (`TxRaw`) by the public convention. *(pending gate)*
+transaction (`TxRaw`) by the public convention.
 
 1. The wallet broadcasts the transaction itself, to any node of the
    chain. The node that answered `withdraw` takes no further part and
    learns of the transaction from the chain (the history fetcher,
-   R36.14.28). *(pending gate)*
+   R36.14.28).
 2. The caller sends the legacy method `send_raw_transaction` with
    `coin` (the platform coin or a token on it) and `tx_hex`, the
    protobuf serialization of the `TxRaw` as hex text. The node needs no
@@ -3382,11 +3381,11 @@ transaction (`TxRaw`) by the public convention. *(pending gate)*
    <the node's hash, upper-case hex>}`. A transaction that the node's
    check or the block's execution refuses yields the legacy error
    answer. The `tx_json` member of that method does not serve this
-   family. *(pending gate)*
+   family.
 
 The exchange of Chapter 18 R18.11.52 (a data-needed event answered by
 `send_asked_data` with a transaction hash) belongs to swap transactions
-only; a `withdraw` never starts it. *(pending gate)*
+only; a `withdraw` never starts it.
 
 R36.14.33 **A versioned history request while the current height cannot
 be read (shared serving path; completes R36.14.9 and R36.14.12).** The
@@ -3399,23 +3398,21 @@ No stored row is served: the answer is an error answer and has no
 `confirmations` value does not arise. The store is not changed by the
 failure, and the first request whose height read succeeds serves the
 stored rows again, with `confirmations` by R36.14.9 from the height then
-read. *(pending gate)*
+read.
 
 The conditions are tested in this order, and the first that holds
-decides the answer. *(pending gate)*
+decides the answer.
 
-1. The coin is not active: `CoinIsNotActive` (HTTP 404). *(pending
-   gate)*
+1. The coin is not active: `CoinIsNotActive` (HTTP 404).
 2. This node's database has no history store for the store's ticker:
    `StorageIsNotInitialized` (HTTP 500). The test contacts no node, so
    the first row of the table of R36.14.12 answers this error whether or
-   not a node answers. *(pending gate)*
+   not a node answers.
 3. The height read fails: `RpcError` (HTTP 500). The second and third
    rows of that table answer this error while no node answers.
-   *(pending gate)*
 4. Everything else, namely a `target` that a family refuses and a store
    that cannot be read (`StorageError`), is tested only after the height
-   was read. *(pending gate)*
+   was read.
 
 This is a property of the serving path, not of this family: the method
 is one and the same for every family that Chapter 38 R38.5A.7 lists as
@@ -3432,7 +3429,6 @@ seconds for its `health` answer, so with `n` configured nodes that do
 not respond the error can take up to `n × 15` seconds to arrive; the
 figure is the reference's and is not part of the contract. Reloaded
 answers the same error type and status in the same order of conditions.
-*(pending gate)*
 
 R36.14.34 **The legacy method in the same situation (shared legacy path;
 completes R36.14.1 and R36.14.12).** The legacy flat `my_tx_history`
@@ -3448,7 +3444,7 @@ row whose confirmations the height would serve. A successful legacy
 answer for this family carries the height read as `current_block`. In
 this situation the legacy method differs from the versioned one in two
 points: it has no `StorageIsNotInitialized` case, and its error has the
-legacy shape. *(pending gate)*
+legacy shape.
 
 R36.14.35 **`sync_status` while no node answers (this family; completes
 R36.14.11 and T36.38).** The history state is carried only by a
@@ -3459,7 +3455,6 @@ node failure, and that T36.38 expects "during a node outage", is
 therefore observable in two cases only: when a node still answers
 `health` and `abci_info` while the fetcher's own requests fail, and
 after the outage has ended. A fixture for T36.38 uses the first case.
-*(pending gate)*
 
 > **Our side (informative; this repository's tree at the base of this
 > round, 2026-11-16).** Both history methods already read the height in
@@ -3470,7 +3465,7 @@ after the outage has ended. A fixture for T36.38 uses the first case.
 > through the node choice of R36.14.27. Nothing is to be changed for
 > R36.14.33 -- R36.14.35. The `withdraw` result type of this tree always
 > carries `tx_hex` and has no unsigned form; R36.14.29 -- R36.14.31
-> describe what the public-key form adds to it. *(pending gate)*
+> describe what the public-key form adds to it.
 
 **Tests.** Rows T36.55 -- T36.58 share one fixture: a platform coin with
 6 decimals, platform denomination `D`, chain id `C` and no `gas_price`
@@ -3482,7 +3477,7 @@ account is `A`; a mocked node that reports account number 7 and sequence
 3 for `A`, the height 1,000, and balances of 10,000,000 base units of
 `D` and of `K`. The request is a `withdraw` of 1 coin to another account
 `B` of the same chain, with `memo` `"m"` and no `fee` member. Figures
-are computed from the rules. *(pending gate)*
+are computed from the rules.
 
 T36.55 *The `sign_doc` result (R36.14.29, R36.14.30; extends T36.42).*
 Ledger flag off. *Expected:* the result has no `tx_hex`, `tx_hash`,
@@ -3502,7 +3497,7 @@ and the gas limit 125,000. Beside it: `from` `[A]`, `to` `[B]`,
 `"StandardTransfer"`, `memo` `"m"`, and an `internal_id` equal to the
 SHA-256 digest of the empty byte string. A second request without
 `memo` answers `memo` `""` and the same `internal_id`. The same request
-through the legacy `withdraw` answers the same members. *(pending gate)*
+through the legacy `withdraw` answers the same members.
 
 T36.56 *The Amino result (R36.14.29, R36.14.31; extends T36.43).* Ledger
 flag on. *Expected:* no `sign_doc`, `tx_hex` or `tx_hash`;
@@ -3519,7 +3514,7 @@ is a JSON number, and the document has no `timeout_height`. Beside it:
 `total_amount` 1.05625. With a node that reports sequence 0 and account
 number 0, both members are present as `"0"`; without `memo` in the
 request, `memo` is present as `""`. A fixture compares the document as
-a JSON value, not as text (R36.14.31 item 6). *(pending gate)*
+a JSON value, not as text (R36.14.31 item 6).
 
 T36.57 *A token under the Ledger flag (R36.14.31 item 5).* Ledger flag
 on; a `withdraw` of 2 units of the token to `B`. *Expected:* the `msgs`
@@ -3527,7 +3522,7 @@ entry carries one coin with `denom` `K` and `amount` `"2000000"`; the
 fee carries one coin with `denom` `D` and `amount` `"18750"` (not
 tripled); `fee_details` names the platform ticker with `amount`
 `"0.01875"`; `total_amount` is 2; `internal_id` is the SHA-256 digest of
-the token id's 32 bytes. *(pending gate)*
+the token id's 32 bytes.
 
 T36.58 *Broadcast of a transaction signed outside the node (R36.14.32).*
 (i) The `sign_doc` of T36.55 is signed by a test key under the public
@@ -3539,8 +3534,7 @@ with exactly those bytes, and answers `tx_hash`. (ii) The same with a
 body has no timeout height. (iii) The same `tx_hex` sent with the
 token's ticker as `coin` is broadcast in the same way. (iv) A `tx_hex`
 that does not decode as a `TxRaw` (for instance text that is not hex)
-yields the legacy error answer and no request to the node. *(pending
-gate)*
+yields the legacy error answer and no request to the node.
 
 T36.59 *Versioned history while no node answers (R36.14.33).* *Input:* a
 platform coin and a token on it, activated with `tx_history: true`,
@@ -3559,7 +3553,7 @@ its ticker answers `StorageIsNotInitialized` (HTTP 500) while every
 node refuses connections, not `RpcError`; (vi) a coin activated without
 `tx_history` on a database that holds an earlier store answers
 `RpcError` in the same situation; (vii) a node that answers `health`
-and fails `abci_info` yields `RpcError`. *(pending gate)*
+and fails `abci_info` yields `RpcError`.
 
 T36.60 *Legacy history and the state while no node answers (R36.14.34,
 R36.14.35).* With the input of T36.59: (i) the legacy `my_tx_history`
@@ -3569,4 +3563,4 @@ height `h` it answers an empty `transactions` list, `total` 0,
 `current_block` `h` and the `sync_status` of R36.14.11; (iii) with a
 node that answers `health` and `abci_info` and fails every history
 query of the fetcher, both methods answer successfully with
-`sync_status` `{"state": "Finished"}`. *(pending gate)*
+`sync_status` `{"state": "Finished"}`.
