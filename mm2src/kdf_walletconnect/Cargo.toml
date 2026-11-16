@@ -39,7 +39,6 @@ js-sys = "0.3"
 mm2_db = { path = "../mm2_db" }
 timed-map = { workspace = true, features = ["rustc-hash", "wasm"] }
 wasm-bindgen = "0.2"
-wasm-bindgen-test = "0.3"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
     "console", "CloseEvent", "DomException", "ErrorEvent",

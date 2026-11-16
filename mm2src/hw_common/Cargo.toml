@@ -24,5 +24,4 @@ rusb = { version = "0.7.0" }
 js-sys = { version = "0.3.27" }
 wasm-bindgen = { version = "0.2.50" }
 wasm-bindgen-futures = { version = "0.4.1" }
-wasm-bindgen-test = { version = "0.3.1" }
 web-sys = { version = "0.3.55", features = ["console", "Navigator", "Usb", "UsbDevice", "UsbDeviceFilter", "UsbDeviceRequestOptions", "UsbInTransferResult", "UsbOutTransferResult"] }

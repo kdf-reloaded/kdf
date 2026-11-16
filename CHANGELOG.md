@@ -182,6 +182,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   storage transaction, including other writes in it. The waiting code now withdraws its handlers when it
   finishes or is cancelled, and a finished transaction withdraws its own. Detail: PR #376; CRD ch.26 R9A.
 
+- **Test code of the coin and node layers is no longer shipped in the browser build.** The browser test
+  modules of `coins` and of the node library (`mm2_main`), and the test helpers only they use, were
+  compiled into the browser build, and the browser test library was a normal dependency of eight crates.
+  They are now built only for tests, and the test library is a test-only dependency of `coins` and
+  `mm2_main` and no longer a dependency of the six crates that do not use it. The release browser bundle
+  (`kdflib_bg.wasm`) shrinks from 23,005,576 to 22,253,053 bytes. The browser tests of `coins` are the
+  same 24 as before, test for test (18 pass, 5 fail, 1 hangs, as before). The browser tests of `mm2_main`
+  and `mm2_gui_storage` did not compile before and do not compile now, with the same errors.
+  Detail: PR #391.
+
 - **Test code of the storage and network layers is no longer shipped in the browser build.** The browser
   test modules of the storage layer (`mm2_db`) and the network layer (`mm2_net`) were compiled into the
   browser build and into the test build of every crate that uses them, and the test library they use was

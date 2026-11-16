@@ -325,7 +325,7 @@ mod wasm_impl {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_tests {
     use super::wasm_impl::*;
     use super::*;

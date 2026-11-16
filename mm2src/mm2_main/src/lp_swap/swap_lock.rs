@@ -194,7 +194,7 @@ mod wasm_lock {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use super::wasm_lock::*;
     use super::*;
