@@ -1,6 +1,6 @@
 # Plan: Radiant signature-hash support
 
-**Status:** parked (signing shipped in PRs #54, #65, with its compatibility bookkeeping; swaps between KDF Reloaded nodes and with GLEEC KDF 3.0.0-beta tested on the mainnet 2026-11-09; step 8 open and post-beta) — **Last reviewed:** 2026-11-09
+**Status:** done (signing shipped in PRs #54, #65; swaps between KDF Reloaded nodes and with GLEEC KDF 3.0.0-beta tested on the mainnet 2026-11-09; step 8, the fail-early signing, in PR #381) — **Last reviewed:** 2026-11-16
 
 > **Context:** Radiant (`RXD`) is the one coin in the shipped registry whose
 > `signature_version` names a signing dialect this build did not implement.
@@ -21,7 +21,7 @@
 | Step 6 (compatibility bookkeeping) | **done** in PR #65 (commit `1c0dc2a4a`, 2026-10-25): the switch's wording in `docs/GLEEC_COMPATIBILITY.md` and `RELOADED_VS_GLEEC.md` lists `fork_id_rxd` as recognized (see step 6) |
 | R58.3.3 correction against Radiant-Core | **done** in ch.58 on 2026-10-25 (see "The R58.3.3 correction" below) |
 | Swap fitness between two KDF Reloaded nodes (ch.58 D2) | **tested 2026-11-09** on the mainnet, RXD against RIN: both directions finished (930 s and 720 s), a maker refund and a taker refund of an RXD payment went out after the lock time (broadcast 27 and 18 minutes after the lock time recorded in the payment transaction, not rejected), a plain withdrawal confirmed within about 90 seconds; RXD swaps with GLEEC KDF 3.0.0-beta (build d56a7bc50) completed in both directions on a private test mesh (871 and 1531 seconds); an RXD swap with Komodo DeFi Framework 2.6.0-beta (no Radiant dialect) did not complete in the 0.3.0 tests |
-| Fail-early follow-up (ch.58 D5) | **open**, owner ch.58 §58.3, not a beta item; the maintainer's decision of 2026-11-09: the signing stays tolerant for 0.4.0 and the stricter form becomes a separate post-beta change |
+| Fail-early follow-up (ch.58 D5) | **done** (PR #381, 2026-11-16): the signature hash returns a typed error for the four fatal cases of R58.3.3 and the raw-transaction signing RPC refuses such an output; kept tolerant for 0.4.0 by the maintainer's decision of 2026-11-09 |
 
 ## Current state
 
@@ -255,8 +255,7 @@ step 5 done in ch.58; step 6 done in PR #65; step 7 done in ch.58; step 8 open.*
 7. **R58.3.3 correction.** *Done 2026-10-25 in ch.58* — see "The R58.3.3
    correction" above. Nothing in the implementation changes for it; the
    chapter now records the as-built tolerance as a divergence.
-8. **Fail-early follow-up (ch.58 D5).** *Open; owner ch.58 §58.3; not a beta
-   item.* Make the Radiant dialect's signature-hash computation fallible on the
+8. **Fail-early follow-up (ch.58 D5).** *Done 2026-11-16 (PR #381).* Make the Radiant dialect's signature-hash computation fallible on the
    four fatal cases of R58.3.3, returning a typed error instead of a digest;
    invert T6's truncation clause and add the other three cases. Separate PR
    after the implementation lands; it changes the signing substrate's error
@@ -293,8 +292,8 @@ counterparty, or to verify rather than report what the lineage says about
   switch set, and resolves to the Radiant dialect — asserted on the resolved
   version, not merely on activation succeeding (T1). *Done in PR #65.*
 - An RXD withdrawal built and signed by this node is accepted by the Radiant
-  network. *Not yet exercised against the live network; the two mainnet
-  vectors are the evidence so far.*
+  network. *Done: a lab withdrawal on the mainnet on 2026-11-09 was accepted
+  and mined (besides the two mainnet vectors).*
 - T3 passes as a deterministic unit test with embedded mainnet bytes, and T4
   fails if field 8 moves. *Done — two vectors.*
 - Ch.58 R58.5.1 is closed and D1 is answered in the chapter. *Done
@@ -333,8 +332,8 @@ counterparty, or to verify rather than report what the lineage says about
   sentinel, reference de-duplication and the skipped opcodes `0xd1`–`0xd3`
   are tested against the chapter and Radiant-Core only (D3). Treat an
   unverified shape as unverified in the release notes.
-- **The walk is tolerant where Radiant-Core's is fatal** (ch.58 R58.3.3
-  as-built note, D5). Bounded: no project-constructed output can trip it, and
+- **The walk was tolerant where Radiant-Core's is fatal** (ch.58 R58.3.3
+  as-built note, D5; closed 2026-11-16, PR #381). Bounded: no project-constructed output can trip it, and
   for a caller-supplied script it yields a signature on a transaction the
   network rejects anyway. Not a funds-safety risk; a diagnostics one.
 - **Enabling activation re-exposes the trade-off in reverse.** If the dialect

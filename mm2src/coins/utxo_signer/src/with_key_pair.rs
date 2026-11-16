@@ -7,7 +7,7 @@ use keys::bytes::Bytes;
 use keys::KeyPair;
 use mm2_err_handle::prelude::*;
 use primitives::hash::H256;
-use script::{Builder, Script, SignatureVersion, TransactionInputSigner, UnsignedTransactionInput};
+use script::{Builder, Script, SignatureHashError, SignatureVersion, TransactionInputSigner, UnsignedTransactionInput};
 use std::collections::HashSet;
 
 pub type UtxoSignWithKeyPairResult<T> = Result<T, MmError<UtxoSignWithKeyPairError>>;
@@ -29,10 +29,16 @@ pub enum UtxoSignWithKeyPairError {
     InputIndexOutOfBound { len: usize, index: usize },
     #[display(fmt = "Error signing using a private key")]
     ErrorSigning(keys::Error),
+    #[display(fmt = "{}", _0)]
+    SignatureHash(SignatureHashError),
 }
 
 impl From<keys::Error> for UtxoSignWithKeyPairError {
     fn from(sign: keys::Error) -> Self { UtxoSignWithKeyPairError::ErrorSigning(sign) }
+}
+
+impl From<SignatureHashError> for UtxoSignWithKeyPairError {
+    fn from(error: SignatureHashError) -> Self { UtxoSignWithKeyPairError::SignatureHash(error) }
 }
 
 pub fn sign_tx(
@@ -226,7 +232,7 @@ fn signature_hash_to_sign(
         &output_script,
         signature_version,
         sighash_type,
-    ))
+    )?)
 }
 
 fn sign_message(message: &H256, key_pair: &KeyPair) -> UtxoSignWithKeyPairResult<Bytes> {
@@ -345,13 +351,15 @@ mod tests {
         let der_sig = Signature::from(sig_with_type[..sig_with_type.len() - 1].to_vec());
 
         let p2pk_script = Builder::build_p2pk(key_pair.public());
-        let sighash = unsigned_for_checks.signature_hash(
-            0,
-            unsigned_for_checks.inputs[0].amount,
-            &p2pk_script,
-            SignatureVersion::Base,
-            sighash_type,
-        );
+        let sighash = unsigned_for_checks
+            .signature_hash(
+                0,
+                unsigned_for_checks.inputs[0].amount,
+                &p2pk_script,
+                SignatureVersion::Base,
+                sighash_type,
+            )
+            .expect("signature hash");
         assert!(key_pair.public().verify(&sighash, &der_sig).unwrap());
     }
 
@@ -401,13 +409,15 @@ mod tests {
         assert_eq!(p2pk_sig_with_type.last().copied(), Some(sighash_type as u8));
         let p2pk_der = Signature::from(p2pk_sig_with_type[..p2pk_sig_with_type.len() - 1].to_vec());
         let p2pk_prev_script = Builder::build_p2pk(key_pair.public());
-        let p2pk_sighash = unsigned_for_checks.signature_hash(
-            0,
-            unsigned_for_checks.inputs[0].amount,
-            &p2pk_prev_script,
-            SignatureVersion::Base,
-            sighash_type,
-        );
+        let p2pk_sighash = unsigned_for_checks
+            .signature_hash(
+                0,
+                unsigned_for_checks.inputs[0].amount,
+                &p2pk_prev_script,
+                SignatureVersion::Base,
+                sighash_type,
+            )
+            .expect("signature hash");
         assert!(key_pair.public().verify(&p2pk_sighash, &p2pk_der).unwrap());
 
         // Input 1: P2PKH => signature + pubkey scriptSig
@@ -423,13 +433,64 @@ mod tests {
         let p2pkh_sig_with_type = parse_sig_with_hashtype(&signed.inputs[1].script_sig);
         assert_eq!(p2pkh_sig_with_type.last().copied(), Some(sighash_type as u8));
         let p2pkh_der = Signature::from(p2pkh_sig_with_type[..p2pkh_sig_with_type.len() - 1].to_vec());
-        let p2pkh_sighash = unsigned_for_checks.signature_hash(
-            1,
-            unsigned_for_checks.inputs[1].amount,
-            &p2pkh_script,
-            SignatureVersion::Base,
-            sighash_type,
-        );
+        let p2pkh_sighash = unsigned_for_checks
+            .signature_hash(
+                1,
+                unsigned_for_checks.inputs[1].amount,
+                &p2pkh_script,
+                SignatureVersion::Base,
+                sighash_type,
+            )
+            .expect("signature hash");
         assert!(key_pair.public().verify(&p2pkh_sighash, &p2pkh_der).unwrap());
+    }
+
+    #[test]
+    fn rxd_d5_signing_a_malformed_radiant_output_returns_the_plain_error() {
+        let key_pair = KeyPair::from_private(SECRET_1C.into()).unwrap();
+        let prevout = OutPoint {
+            hash: "0404040404040404040404040404040404040404040404040404040404040404"
+                .parse()
+                .unwrap(),
+            index: 0,
+        };
+        let prev_script = Builder::build_p2pkh(&AddressHashEnum::AddressHash(key_pair.public().address_hash()));
+        let radiant_fork_id = 0x40;
+
+        // Output 1 is a push whose data runs past the end of the script.
+        let mut malformed = make_unsigned(&[prevout], &[42_000]);
+        malformed.outputs.push(TransactionOutput {
+            value: 2,
+            script_pubkey: vec![0x05, 0x01].into(),
+        });
+        let err = sign_tx(
+            malformed.clone(),
+            &key_pair,
+            prev_script.clone(),
+            SignatureVersion::ForkIdRxd,
+            radiant_fork_id,
+        )
+        .expect_err("a malformed output script must not be signed");
+        assert!(matches!(err.get_inner(), UtxoSignWithKeyPairError::SignatureHash(_)));
+        assert_eq!(err.get_inner().to_string(), "output 1: the script cannot be decoded");
+
+        // The same transaction under the other fork-id dialect, and the Radiant dialect without
+        // its output script malformed, sign as before.
+        sign_tx(
+            malformed,
+            &key_pair,
+            prev_script.clone(),
+            SignatureVersion::ForkId,
+            0x40,
+        )
+        .expect("the plain fork-id dialect does not read output scripts");
+        sign_tx(
+            make_unsigned(&[prevout], &[42_000]),
+            &key_pair,
+            prev_script,
+            SignatureVersion::ForkIdRxd,
+            radiant_fork_id,
+        )
+        .expect("a well-formed output signs under the Radiant dialect");
     }
 }

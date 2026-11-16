@@ -2156,13 +2156,15 @@ pub(crate) fn sign_funding_spend_input(
     fields: &UtxoCoinFields,
 ) -> Result<keys::Signature, String> {
     let sighash_type = 1u32 | fields.conf.fork_id;
-    let digest = signer.signature_hash(
-        DEFAULT_SWAP_VOUT,
-        signer.inputs[DEFAULT_SWAP_VOUT].amount,
-        funding_redeem,
-        fields.conf.signature_version,
-        sighash_type,
-    );
+    let digest = signer
+        .signature_hash(
+            DEFAULT_SWAP_VOUT,
+            signer.inputs[DEFAULT_SWAP_VOUT].amount,
+            funding_redeem,
+            fields.conf.signature_version,
+            sighash_type,
+        )
+        .map_err(|e| e.to_string())?;
     keypair.private().sign(&digest).map_err(|e| e.to_string())
 }
 
@@ -2311,13 +2313,15 @@ where
         gen_args.maker_pub,
     );
     let sighash_type = 1u32 | coin.as_ref().conf.fork_id;
-    let digest = signer.signature_hash(
-        DEFAULT_SWAP_VOUT,
-        signer.inputs[DEFAULT_SWAP_VOUT].amount,
-        &funding_redeem,
-        coin.as_ref().conf.signature_version,
-        sighash_type,
-    );
+    let digest = signer
+        .signature_hash(
+            DEFAULT_SWAP_VOUT,
+            signer.inputs[DEFAULT_SWAP_VOUT].amount,
+            &funding_redeem,
+            coin.as_ref().conf.signature_version,
+            sighash_type,
+        )
+        .map_to_mm(|e| ValidateTakerFundingSpendPreimageError::InvalidPreimage(e.to_string()))?;
     let ok = counterparty_pub
         .verify(&digest, &preimage.signature)
         .map_to_mm(|e| ValidateTakerFundingSpendPreimageError::InternalError(e.to_string()))?;
@@ -2496,13 +2500,15 @@ pub(crate) fn sign_taker_payment_spend_input(
     fields: &UtxoCoinFields,
     sighash_type: u32,
 ) -> Result<keys::Signature, String> {
-    let digest = signer.signature_hash(
-        DEFAULT_SWAP_VOUT,
-        signer.inputs[DEFAULT_SWAP_VOUT].amount,
-        taker_payment_redeem,
-        fields.conf.signature_version,
-        sighash_type,
-    );
+    let digest = signer
+        .signature_hash(
+            DEFAULT_SWAP_VOUT,
+            signer.inputs[DEFAULT_SWAP_VOUT].amount,
+            taker_payment_redeem,
+            fields.conf.signature_version,
+            sighash_type,
+        )
+        .map_err(|e| e.to_string())?;
     keypair.private().sign(&digest).map_err(|e| e.to_string())
 }
 
@@ -2771,13 +2777,15 @@ where
         gen_args.taker_pub,
         gen_args.maker_pub,
     );
-    let digest = signer.signature_hash(
-        DEFAULT_SWAP_VOUT,
-        signer.inputs[DEFAULT_SWAP_VOUT].amount,
-        &taker_payment_redeem,
-        coin.as_ref().conf.signature_version,
-        sighash_type,
-    );
+    let digest = signer
+        .signature_hash(
+            DEFAULT_SWAP_VOUT,
+            signer.inputs[DEFAULT_SWAP_VOUT].amount,
+            &taker_payment_redeem,
+            coin.as_ref().conf.signature_version,
+            sighash_type,
+        )
+        .map_to_mm(|e| ValidateTakerPaymentSpendPreimageError::InvalidPreimage(e.to_string()))?;
     let ok = gen_args
         .taker_pub
         .verify(&digest, &preimage.signature)

@@ -106,6 +106,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   takes its decimals from `protocol_data` only. Solana stays switched off in this build. Detail:
   PR #371; CRD ch.40 §40.3A, R40.6B.2.
 
+#### UTXO coins and Electrum
+
+- **Signing a Radiant (RXD) transaction with a malformed output script now fails with an error.** Radiant's
+  signature hash is undefined for an output script that cannot be decoded, that pushes a reference it also
+  disallows, that holds more than one state separator, or that has a return before a state separator. The
+  raw-transaction signing request used to sign such a transaction anyway, and Radiant rejected it. It now
+  answers with a signing error that names the output index and the case. Withdrawals and swaps never build
+  such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
+
 ### Fixed
 
 #### Browser (WASM) build
@@ -192,6 +201,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [`rpc-error-redesign`](docs/plans/rpc-error-redesign.md) — new, planning, no schedule: one error vocabulary
   (token spelling, payload kind, HTTP status) for the whole versioned RPC surface, with a compatibility period;
   ordered 2026-11-15, written in PR #359.
+- [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — done: it records that the
+  stricter signing of malformed output scripts (step 8) is done and that the plan has no open step left.
 - [`shielded-coins-in-browser`](docs/plans/shielded-coins-in-browser.md) — new, planning: work packages to
   activate shielded coins (ARRR) in the browser build — the wallet database on the SQLite route, one
   parameter source for both targets, the gRPC-web transport, Worker hosting of wallet and prover, swaps

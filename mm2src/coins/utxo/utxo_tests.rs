@@ -5999,13 +5999,15 @@ mod swap_v2_funding_spend_tests {
 
         // Recompute the cooperative-branch sighash and verify the supplied sig.
         let sighash_type = 1u32 | fields.conf.fork_id;
-        let digest = signer.signature_hash(
-            0,
-            signer.inputs[0].amount,
-            &funding_redeem,
-            fields.conf.signature_version,
-            sighash_type,
-        );
+        let digest = signer
+            .signature_hash(
+                0,
+                signer.inputs[0].amount,
+                &funding_redeem,
+                fields.conf.signature_version,
+                sighash_type,
+            )
+            .expect("signature hash");
         assert!(
             kp.public().verify(&digest, &sig).expect("verify"),
             "partial sig must verify against signer's pub"
@@ -6168,13 +6170,15 @@ mod swap_v2_taker_payment_spend_tests {
         // SIGHASH_SINGLE (3) for the DexFee::Standard path.
         let sighash_type = 3u32 | fields.conf.fork_id;
         let sig = sign_taker_payment_spend_input(&signer, &redeem, &taker, &fields, sighash_type).expect("sign");
-        let digest = signer.signature_hash(
-            0,
-            signer.inputs[0].amount,
-            &redeem,
-            fields.conf.signature_version,
-            sighash_type,
-        );
+        let digest = signer
+            .signature_hash(
+                0,
+                signer.inputs[0].amount,
+                &redeem,
+                fields.conf.signature_version,
+                sighash_type,
+            )
+            .expect("signature hash");
         assert!(
             taker.public().verify(&digest, &sig).expect("verify"),
             "taker partial sig must verify against the cooperative-branch sighash"
@@ -6743,13 +6747,15 @@ mod swap_v2_pre_burn_tests {
         let redeem = taker_payment_script(TAKER_PAYMENT_TIME_LOCK, &MAKER_SECRET_HASH, &taker_pub, &maker_pub);
         // SIGHASH_ALL_BASE = 1, fork_id from fixture is 0.
         let sighash = 1u32 | coin.as_ref().conf.fork_id;
-        let digest = signer.signature_hash(
-            0,
-            signer.inputs[0].amount,
-            &redeem,
-            coin.as_ref().conf.signature_version,
-            sighash,
-        );
+        let digest = signer
+            .signature_hash(
+                0,
+                signer.inputs[0].amount,
+                &redeem,
+                coin.as_ref().conf.signature_version,
+                sighash,
+            )
+            .expect("signature hash");
         assert!(
             taker_pub.verify(&digest, &preimage.signature).expect("verify"),
             "WithBurn partial sig must verify under SIGHASH_ALL"
@@ -11417,13 +11423,9 @@ mod sighash_suffix_sites {
         suffix: u32,
     ) {
         let digest = |suffix: u32| {
-            TransactionInputSigner::from_transaction(tx.clone(), suffix).signature_hash(
-                index,
-                amount,
-                script_code,
-                SignatureVersion::Base,
-                1,
-            )
+            TransactionInputSigner::from_transaction(tx.clone(), suffix)
+                .signature_hash(index, amount, script_code, SignatureVersion::Base, 1)
+                .expect("signature hash")
         };
         let suffixed = digest(suffix);
         let ordinary = digest(0);
@@ -11650,13 +11652,15 @@ mod sighash_suffix_sites {
         let mut ordinary_signer = signer.clone();
         ordinary_signer.sighash_suffix = 0;
         let digest = |signer: &TransactionInputSigner| {
-            signer.signature_hash(
-                0,
-                signer.inputs[0].amount,
-                &redeem,
-                SignatureVersion::Base,
-                sighash_type,
-            )
+            signer
+                .signature_hash(
+                    0,
+                    signer.inputs[0].amount,
+                    &redeem,
+                    SignatureVersion::Base,
+                    sighash_type,
+                )
+                .expect("signature hash")
         };
         assert_ne!(digest(&signer), digest(&ordinary_signer));
         assert!(taker.public().verify(&digest(&signer), &signature).unwrap());
