@@ -142,6 +142,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 #### Browser (WASM) build
 
+- **A cancelled storage request no longer aborts other writes of the same transaction.** In the
+  browser build, if the task waiting for a storage request was cancelled before the request finished,
+  the browser later called a handler that no longer existed, which made the browser abort the whole
+  storage transaction, including other writes in it. The waiting code now withdraws its handlers when it
+  finishes or is cancelled, and a finished transaction withdraws its own. Detail: PR #376; CRD ch.26 R9A.
+
 - **The browser demo page loads the current WASM build again.** The page `wasm_build/index.html`
   imported a module file name (`mm2.js`) that the build no longer produces, so it could not start;
   it now imports `kdflib.js`. The build guide and the page's README name the files the build writes,

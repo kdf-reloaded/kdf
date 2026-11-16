@@ -1,4 +1,5 @@
-use super::{construct_event_closure, DbUpgrader, IdbDatabaseImpl, OnUpgradeError, OnUpgradeNeededCb, OPEN_DATABASES};
+use super::{construct_event_closure, DbUpgrader, IdbDatabaseImpl, OnUpgradeError, OnUpgradeNeededCb,
+            RequestHandlersGuard, OPEN_DATABASES};
 use common::{log::info, stringify_js_error};
 use derive_more::Display;
 use futures::channel::mpsc;
@@ -93,6 +94,8 @@ impl IdbDatabaseBuilder {
         db_request.set_onerror(Some(onerror_closure.as_ref().unchecked_ref()));
         db_request.set_onsuccess(Some(onsuccess_closure.as_ref().unchecked_ref()));
         db_request.set_onupgradeneeded(Some(onupgradeneeded_closure.as_ref().unchecked_ref()));
+        // Declared after the closures, so the handlers are withdrawn before the closures are freed.
+        let _handlers_guard = RequestHandlersGuard::for_open_request(&db_request);
 
         let mut on_upgrade_needed_handlers = Some(on_upgrade_needed_handlers);
         while let Some(event) = rx.next().await {
