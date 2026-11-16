@@ -52,6 +52,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   got wrong 400. `disable_coin` names the swaps or orders that block the deactivation inside `error_data`.
   Legacy forms and success bodies unchanged, legacy error texts as above (no inner trace tokens). Detail:
   PR #379; CRD ch.43 §43.1R.
+- **The remaining legacy-only methods accept `mmrpc: "2.0"` requests**: `all_swaps_uuids_by_filter`, `import_swaps`,
+  `version`, `stop`, `metrics`, `get_my_peer_id`, `get_directly_connected_peers`, `get_gossip_mesh`,
+  `get_gossip_peer_topics`, `get_gossip_topic_peers`, `get_relay_mesh`, `ban_pubkey`, `list_banned_pubkeys` and
+  `unban_pubkeys`, in the same way as the methods above. With this, every method that only the legacy surface knew
+  has a versioned form, except `recover_funds_of_swap` (waits for the swap architecture decisions),
+  `stats_swap_status`, `get_trade_fee`, `electrum`, `enable`, `help` and `show_priv_key`, which stay legacy-only on
+  purpose. Detail: PR #TBD; CRD ch.43 §43.1R.
 
 #### Solana coins
 
@@ -213,8 +220,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   smaller items — in order of cost, and the limits a browser has by nature, also listed in
   `docs/WASM_BUILD.md`.
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
-  management) implemented in PR #359, phase 2 (trading) in PR #372, phase 3 (wallet and coins) in PR #379;
-  decisions D1–D10 recorded; phases 4–5 open.
+  management) implemented in PR #359, phase 2 (trading) in PR #372, phase 3 (wallet and coins) in PR #379,
+  phases 4 and 5 (swaps; daemon and network) in PR #TBD; decisions D1–D10 recorded; the extension is complete except
+  `recover_funds_of_swap`.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress (was parked):
   checked against the code on 2026-11-15: phases A–F not started; the state found and the order of the work packages are in its
   new section "State check (2026-11-15)".

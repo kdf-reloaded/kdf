@@ -436,6 +436,16 @@ added.*
 > `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
 > `set_required_confirmations` and `set_requires_notarization` are routed on
 > both surfaces. Per-method shapes and error tables: §43.1R (dated amendment).
+>
+> *Phases 4 and 5 (swaps; daemon and network; this repository, 2026-11, one
+> pull request):* `all_swaps_uuids_by_filter`, `import_swaps`, `version`,
+> `stop`, `metrics`, `get_my_peer_id`, `get_directly_connected_peers`,
+> `get_gossip_mesh`, `get_gossip_peer_topics`, `get_gossip_topic_peers`,
+> `get_relay_mesh`, `ban_pubkey`, `list_banned_pubkeys` and `unban_pubkeys`
+> are routed on both surfaces. `recover_funds_of_swap` stays legacy-only until
+> the swap architecture decisions; `stats_swap_status` and `get_trade_fee`
+> stay legacy-only for good. With this the extension of the plan is complete:
+> 40 methods. Per-method shapes and error tables: §43.1R (dated amendment).
 
 **D43.1A.2** *Implement the reference's legacy-to-versioned fallback
 (R43.1A.1)?* Options: (i) parity — a legacy request for an unknown legacy
@@ -1094,6 +1104,22 @@ and `NoSuchCoin` as a record with status 400, as `trade_preimage` does.
 > Reloaded's own versioned `withdraw` answers a transport failure with 500
 > today; the difference to the documented 502 is recorded for a later
 > alignment of `withdraw` itself, after a reference-behavior round.
+>
+> *Reloaded status (clean side, 2026-11-16, sibling sets of the last two
+> groups):* the swap forms `all_swaps_uuids_by_filter` and `import_swaps`
+> follow `my_recent_swaps` (R43.1A.7); the peer and gossip queries
+> `get_my_peer_id`, `get_directly_connected_peers`, `get_gossip_mesh`,
+> `get_gossip_peer_topics`, `get_gossip_topic_peers` and `get_relay_mesh`
+> follow `peer_connection_healthcheck` (`Internal`, string, 500); `version`,
+> `stop` and `metrics` have no failure class of their own beyond `Internal`
+> where a string source exists. The ban methods `ban_pubkey`,
+> `list_banned_pubkeys` and `unban_pubkeys` have no documented versioned
+> sibling and take the general convention of R43.1C.8 as Reloaded's own
+> choice: a request the client got wrong `InvalidParam` (string, 400), a
+> failure of the node `Internal` (string, 500); a malformed public key never
+> reaches the method and answers the dispatcher's `InvalidRequest`. Decided
+> at orchestration level on 2026-11-16 under the maintainer's rule of
+> 2026-11-15.
 
 **D43.1C.5** *Unknown members of `params` in the new forms.* The reference
 and Reloaded ignore them in every existing form of the shared names
@@ -1523,7 +1549,7 @@ T43.1E.9 *No versioned form in the reference.* A request with `mmrpc: "2.0"`
 and method `disable_coin` answers `NoSuchMethod`, HTTP 400, from the
 reference; from Reloaded it answers the form of §43.1R.
 
-## 43.1R Reloaded versioned forms of the legacy-only order, trading and wallet methods (Reloaded-original, clean side)
+## 43.1R Reloaded versioned forms of the legacy-only methods (Reloaded-original, clean side)
 
 *Added 2026-11-15. This section binds a KDF Reloaded extension (D43.1A.1 status
 note of 2026-11-15; plan `docs/plans/mmrpc-v2-completion.md`). §43.1B records
@@ -1563,8 +1589,13 @@ different statuses in the two groups, as it does on the documented surface
 `orderbook_depth`, `orders_history_by_filter`, `my_balance`, `disable_coin`,
 `send_raw_transaction`, `validateaddress`, `convertaddress`,
 `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
-`set_required_confirmations` and `set_requires_notarization` are routed on the
-versioned table as well as the legacy table. The legacy forms and their
+`set_required_confirmations`, `set_requires_notarization`,
+`all_swaps_uuids_by_filter`, `import_swaps`, `version`, `stop`, `metrics`,
+`get_my_peer_id`, `get_directly_connected_peers`, `get_gossip_mesh`,
+`get_gossip_peer_topics`, `get_gossip_topic_peers`, `get_relay_mesh`,
+`ban_pubkey`, `list_banned_pubkeys` and `unban_pubkeys` are routed on the
+versioned table as well as the legacy table. *(Amended 2026-11-16, phases 4
+and 5: the fourteen swap, daemon and network methods added.)* The legacy forms and their
 success bodies are unchanged; a legacy error keeps its text behind one
 `file:line]` token of the handler (the inner trace tokens of chained errors
 are no longer printed; the text is not part of the contract). Tested against
@@ -1595,6 +1626,11 @@ answer `InvalidRequest` (string, 400).
 | `kmd_rewards_info`, `coins_needed_for_kick_start` | none; `params` absent, `null`, `{}` or any object |
 | `set_required_confirmations` | `coin` string; `confirmations` integer |
 | `set_requires_notarization` | `coin` string; `requires_notarization` bool |
+| `all_swaps_uuids_by_filter` | all optional: `my_coin` string, `other_coin` string, `from_timestamp` integer, `to_timestamp` integer (seconds) |
+| `import_swaps` | `swaps` list of swap records |
+| `version`, `stop`, `metrics`, `get_my_peer_id`, `get_directly_connected_peers`, `get_gossip_mesh`, `get_gossip_peer_topics`, `get_gossip_topic_peers`, `get_relay_mesh`, `list_banned_pubkeys` | none; `params` absent, `null`, `{}` or any object |
+| `ban_pubkey` | `pubkey` string (32-byte hex); `reason` string (required, as on the legacy surface); `duration_min` integer (optional; absent = until unbanned) |
+| `unban_pubkeys` | `unban_by` object `{"type": "All"}` or `{"type": "Few", "data": [pubkeys]}` |
 
 Numbers accept the forms the legacy member accepts (decimal string, number,
 or the rational forms of chapter 08).
@@ -1615,6 +1651,16 @@ reason?}` (an invalid address is a success with `is_valid: false`);
 `kmd_rewards_info` the list; `coins_needed_for_kick_start` the ticker list;
 `set_required_confirmations` `{coin, confirmations}`;
 `set_requires_notarization` `{coin, requires_notarization}`;
+`all_swaps_uuids_by_filter` `{uuids, my_coin, other_coin, from_timestamp,
+to_timestamp, found_records}` (the member is `found_records`, as the legacy
+body has it); `import_swaps` `{imported, skipped}` (per-record failures stay
+inside `skipped`, R43.1B.3); `version` the legacy object unchanged (`result`
+holding the version string, `datetime`); `stop` the string `"success"`,
+answered before the shutdown proceeds; `metrics` the bare `{metrics}` object;
+`get_my_peer_id` the peer identifier string; the four gossip and peer
+queries their legacy maps or lists; `ban_pubkey` `"success"`;
+`list_banned_pubkeys` the map of public key to ban record;
+`unban_pubkeys` `{still_banned, unbanned, were_not_banned}`;
 `order_status` the legacy
 bare object unchanged (`type`, `order`, the orderbook-ticker members where the
 legacy body has them, and `cancellation_reason` for a history order; R43.1B
@@ -1667,6 +1713,11 @@ several legacy texts; the text is not part of the contract.
 | `ActiveSwapsBlockDeactivation` | object `{coin, swaps}` | 400 | running swaps use the coin (the legacy body carries `swaps` beside `error`) | disable_coin |
 | `MatchingOrdersBlockDeactivation` | object `{coin, matching, cancelled}` | 400 | orders of the coin are being matched (the legacy body carries `orders` beside `error`) | disable_coin |
 | `FeeCapBelowBaseFee` | as chapter 35 | 500 | EVM fee estimate below base fee (balance read) | my_balance |
+| `InvalidTimeStampRange` | none | 400 | `from_timestamp` after `to_timestamp` (browser builds; a native node answers an empty list) | all_swaps_uuids_by_filter |
+| `DbError` | string | 500 | swap storage failure (the `my_recent_swaps` set) | all_swaps_uuids_by_filter |
+| `InvalidParam` | string | 400 | public key banned already | ban_pubkey |
+| `Internal` | string | 500 | peer identity not initialized; metrics registry failure; swaps context or ban-list lock failure (the `peer_connection_healthcheck` set and the general convention) | get_my_peer_id, metrics, ban_pubkey, list_banned_pubkeys, unban_pubkeys |
+| none | | | `version`, `stop`, `import_swaps` and the peer and gossip queries other than `get_my_peer_id` have no failure of their own; a request that does not decode answers the dispatcher's `InvalidRequest` | |
 
 **T43.1R** *Tests.* Each versioned form: success in the 2.0 envelope with `id`
 echoed and `result` equal to the legacy content member by member; an unknown
@@ -2133,6 +2184,11 @@ shall be wound down as part of shutdown rather than abandoned.
   Reloaded-original, clean side: the four trading methods join the tables from
   this repository's own legacy shapes and failure classes; no forbidden-class
   input, chapter 01 R38 not engaged.
+- *Section 43.1R amended 2026-11-16 (phases 4 and 5), D43.1A.1 status note
+  extended, status note after D43.1C.4 on the sibling sets of the last two
+  groups.* Reloaded-original, clean side: the fourteen swap, daemon and network
+  methods join the tables from this repository's own legacy shapes and failure
+  classes; no forbidden-class input, chapter 01 R38 not engaged.
 - *Section 43.1R amended 2026-11-15 (phase 3), D43.1A.1 status note extended,
   second status note after D43.1C.4.* Reloaded-original, clean side: the ten
   wallet and coin methods join the tables from this repository's own legacy
