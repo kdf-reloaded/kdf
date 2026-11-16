@@ -78,7 +78,7 @@ integration / docker / WASM suite inherited from upstream.
    Please note `CC` and `AR` must be specified in the same line as `wasm-pack test mm2src/mm2_main`.
 
 The same command runs the browser tests of a crate that has them, for example `mm2src/mm2_db` or
-`mm2src/mm2_net` (the browser tests of `mm2src/coins` do not compile yet). The `wasm-bindgen-test` release in `Cargo.lock` has to match the locked
+`mm2src/mm2_net` (the browser tests of `mm2src/coins` now compile; on the last run they found 44 tests: 37 passed, 6 failed, 1 hung. Failed, needing a public node: `eth::eth_wasm_tests::test_init_eth_coin` (node fetch fails), `utxo::utxo_wasm_tests::test_electrum_rpc_client` (server answers "use server.version to identify client") and `utxo::utxo_wasm_tests::test_electrum_display_balances` (cannot connect to the Electrum servers in 5 s). Failed, other: `wasm_ws::tests::test_websocket_invalid_url` (an `mm2_net` test, expects an error and gets none), `nft::store::idb::tests::attach_metadata_to_transfers_backfills_payload_and_columns` (IndexedDB ConstraintError while uploading an item) and `nft::store::idb::tests::append_transfers_and_lookup_by_log` (reads back `None` where a transfer is expected). Hung, needing a public node: `utxo::bchd_grpc::wasm_tests::test_check_slp_transaction_valid`, which stops the run unless it is skipped with `wasm-pack test --firefox --headless mm2src/coins -- --skip test_check_slp_transaction_valid`). Tests that only work natively are left out of the browser build. The `wasm-bindgen-test` release in `Cargo.lock` has to match the locked
 `wasm-bindgen` release, or the runner reports "no tests to run!". No CI job runs the browser tests yet; they
 are run by hand.
 

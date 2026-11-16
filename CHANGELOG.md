@@ -215,6 +215,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   updated to the matching release and the runner name in `.cargo/config.toml` is the standard one. This also
   updates `wasm-bindgen-futures`, which the browser build uses at run time, to 0.4.67. No CI job runs the
   browser tests yet. Detail: PR #373.
+- **The browser tests of `coins` now compile.** `wasm-pack test --firefox --headless mm2src/coins` stopped at
+  compile errors, because some test code that only works natively (tests written for the `tokio` runtime and the BCH
+  tests that use the SQLite history storage) was also built for the browser, and a test helper
+  was built natively only. The native-only tests are now left out of the browser test build and the
+  helper is built there too; only test code changed. The browser build finds 44 tests: 37 pass, 6 fail and 1 hangs.
+  Three failures and the hanging test need a public node (an Ethereum node, two Electrum
+  servers, an SLP node). The other three failures are an NFT store test that hits a database
+  constraint error, an NFT store test that reads back nothing, and a WebSocket test of `mm2_net`
+  that expects an error for an invalid address. The hanging test stops the whole run, so it has to be skipped with
+  `-- --skip`. The failures are listed in `docs/DEV_ENVIRONMENT.md` and are not fixed here.
+  No CI job runs the browser tests yet. Detail: PR #N.
 - **The Tendermint unit tests of `coins` now run in CI.** A new CI job runs the Tendermint swap-flow,
   priority-fee and WalletConnect signer tests and the postponed-family switch tests; the loopback
   tests of the native RPC server join the maker-outbox job.

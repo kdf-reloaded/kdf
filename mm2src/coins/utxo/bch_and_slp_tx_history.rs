@@ -591,6 +591,7 @@ mod tests {
         assert!(!has(malformed_hash), "the malformed transaction is not written");
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn starting_the_fetcher_prepares_the_address_index_of_an_existing_store() {
         // CRD ch.36 R36.14.26 item 5: the preparation (orphan clean-up and backfill) runs when the fetcher starts.
@@ -653,6 +654,7 @@ mod tests {
         assert_eq!(count("internal_id = 'bb'"), 2);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_failing_preparation_of_the_address_index_does_not_stop_the_fetcher() {
         use crate::sql_tx_history_storage::SqliteTxHistoryStorage;
