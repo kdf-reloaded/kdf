@@ -210,7 +210,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   now answers the QRC20 contract methods. Twelve new tests cover token activation, a balance read
   that a server answers with an error, the history collector's requests and its failures,
   including the server's "history too large" answer. The five QRC20 tests that needed the public
-  Qtum testnet server now run against the stub, offline, in CI. Detail: PR #N; CRD ch.38
+  Qtum testnet server now run against the stub, offline, in CI. Detail: PR #385; CRD ch.38
   §38.6.4Q.
 
 ### Plans touched

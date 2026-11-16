@@ -4071,7 +4071,8 @@ pending. Parity: the withdraw does not return before the token's broadcast has
 been answered. Under D38.6.4Q.4 (b) it returns without waiting (R38.6.4Q.7
 item 6).
 
-> **Measured (2026-11-16, clean side; this repository on dev, Lane 4 P3a).**
+> **Measured (2026-11-16, clean side; this repository on dev; plan
+> `qtum-qrc20-stabilization`).**
 > Offline tests against the stub Electrum server
 > (`qrc20/qrc20_electrum_stub_tests.rs`, `t38_6_4q_*`) pin this tree's
 > behavior for rows T38.6.4Q.2 to T38.6.4Q.6. They run with
@@ -4088,7 +4089,7 @@ item 6).
 >    `blockchain.contract.event.subscribe` is sent. *Difference from
 >    R38.6.4Q.9:* this tree asks for the tip (`blockchain.headers.subscribe`)
 >    before the balance call, and with two servers it also asks
->    `blockchain.block.header` of both (R38.6.4o).
+>    `blockchain.block.header` of both (by R38.6.4o; not asserted here).
 > 2. *T38.6.4Q.3.* As the reference.
 >    - An error answer to the balance read fails the activation, without a
 >      repeat. The token is deregistered and the session stays open. A second
