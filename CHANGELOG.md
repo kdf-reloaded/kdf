@@ -190,7 +190,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   (`kdflib_bg.wasm`) shrinks from 23,005,576 to 22,253,053 bytes. The browser tests of `coins` are the
   same 24 as before, test for test (18 pass, 5 fail, 1 hangs, as before). The browser tests of `mm2_main`
   and `mm2_gui_storage` did not compile before and do not compile now, with the same errors.
-  Detail: PR #N.
+  Detail: PR #391.
 
 - **Test code of the storage and network layers is no longer shipped in the browser build.** The browser
   test modules of the storage layer (`mm2_db`) and the network layer (`mm2_net`) were compiled into the
