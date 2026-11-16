@@ -13,6 +13,7 @@ mod tendermint_staking;
 mod tendermint_swap_flow_tests;
 mod tendermint_swap_ops;
 mod tendermint_token;
+#[cfg(not(target_arch = "wasm32"))] mod tendermint_tx_history;
 mod tendermint_types;
 pub mod wc_integration;
 
@@ -20,6 +21,8 @@ pub use cosmrs::tendermint::PublicKey as TendermintPublicKey;
 pub use cosmrs::AccountId;
 pub use tendermint_coin::*;
 pub use tendermint_token::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub use tendermint_tx_history::{history_scope, served_row, start_tendermint_history};
 pub use tendermint_types::*;
 
 pub(crate) const TENDERMINT_COIN_PROTOCOL_TYPE: &str = "TENDERMINT";

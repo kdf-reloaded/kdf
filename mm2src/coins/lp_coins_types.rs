@@ -782,7 +782,42 @@ pub enum TransactionType {
     /// A Siacoin miner *or* foundation payout event (CRD ch.53 R53.5.10);
     /// both consensus payout kinds share this wire value.
     SiaMinerPayout,
+    /// The fee a Tendermint account paid for a token transaction, as a row of the platform coin (CRD ch.36
+    /// R36.14.8 item 3).
+    FeeForTokenTx,
+    /// An HTLC creation or claim row of a Tendermint coin (CRD ch.36 R36.14.6). `token_id` is `null` for the
+    /// platform denom.
+    CustomTendermintMsg {
+        msg_type: crate::tendermint::htlc::CustomTendermintMsgType,
+        token_id: Option<BytesJson>,
+    },
+    /// An IBC transfer row of a Tendermint coin (CRD ch.36 R36.14.6). `token_id` is `null` for the platform
+    /// denom.
+    TendermintIBCTransfer {
+        token_id: Option<BytesJson>,
+    },
 }
+
+impl TransactionType {
+    /// The token a history row belongs to, when it belongs to one: the id the indexed history store tags the
+    /// row with (CRD ch.36 R36.14.2). A row of the platform coin has none.
+    pub fn history_token_id(&self) -> Option<&BytesJson> {
+        match self {
+            TransactionType::TokenTransfer(token_id) => Some(token_id),
+            TransactionType::CustomTendermintMsg { token_id, .. }
+            | TransactionType::TendermintIBCTransfer { token_id } => token_id.as_ref(),
+            TransactionType::StakingDelegation
+            | TransactionType::RemoveDelegation
+            | TransactionType::ClaimDelegationRewards
+            | TransactionType::StandardTransfer
+            | TransactionType::SiaV1Transaction
+            | TransactionType::SiaV2Transaction
+            | TransactionType::SiaMinerPayout
+            | TransactionType::FeeForTokenTx => None,
+        }
+    }
+}
+
 impl Default for TransactionType {
     fn default() -> Self { TransactionType::StandardTransfer }
 }
@@ -830,6 +865,10 @@ pub struct TransactionDetails {
     /// Type of transactions, default is StandardTransfer
     #[serde(default)]
     pub(crate) transaction_type: TransactionType,
+    /// The memo of the transaction, for a coin family whose history rows carry one (Tendermint, CRD ch.36
+    /// R36.14.9: always present on a history row, possibly empty). Omitted for every other family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) memo: Option<String>,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct BlockHeightAndTime {

@@ -238,25 +238,28 @@ pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String
 /// Tells the pool that the connection with the given id ended.
 pub(crate) type SessionEnded = Arc<dyn Fn(u64) + Send + Sync>;
 
-/// Tells the pool the height of a header notification that arrived over a connection (CRD ch.38 R38.6.4l item 2).
-pub(crate) type HeaderNotified = Arc<dyn Fn(u64) + Send + Sync>;
+/// Where a height reported over a connection came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeaderSource {
+    /// The answer to a header request (`blockchain.headers.subscribe`).
+    Answer,
+    /// A header notification pushed by the server.
+    Notification,
+}
+
+/// Tells the pool the height that a header answer or notification carried over a connection (CRD ch.38 R38.6.4l
+/// item 2, R38.6.4o item 4).
+pub(crate) type HeaderNotified = Arc<dyn Fn(u64, HeaderSource) + Send + Sync>;
 
 /// No tip is known yet.
 const NO_TIP: u64 = u64::MAX;
-/// No moment is known yet.
-const NO_TIME_MS: u64 = u64::MAX;
 
 /// What a connection has learned about the chain tip: the height of the last header it carried, and whether
 /// a header request was answered over it, which makes the server push a notification for each new tip
-/// (CRD ch.38 R38.6.4l items 2 and 6, D38.6.4l.4), and when the first answer and the last notification came
-/// (R38.6.4o item 4).
+/// (CRD ch.38 R38.6.4l items 2 and 6, D38.6.4l.4).
 pub(crate) struct HeaderTrack {
     notifying: AtomicBool,
     tip: AtomicU64,
-    /// When the first header answer came, in milliseconds since the epoch.
-    answered_at_ms: AtomicU64,
-    /// When the last header notification came, in milliseconds since the epoch.
-    notified_at_ms: AtomicU64,
     /// The height and the header bytes of the last header answer or notification that carried readable bytes (CRD ch.38
     /// R38.6.4o item 7).
     last_header: StdMutex<Option<(u64, Vec<u8>)>>,
@@ -268,23 +271,19 @@ impl HeaderTrack {
         HeaderTrack {
             notifying: AtomicBool::new(false),
             tip: AtomicU64::new(NO_TIP),
-            answered_at_ms: AtomicU64::new(NO_TIME_MS),
-            notified_at_ms: AtomicU64::new(NO_TIME_MS),
             last_header: StdMutex::new(None),
             on_notification,
         }
     }
 
-    /// The answer to a header request: the server now pushes the tips that follow. The first answer starts the
-    /// silence a stuck connection is counted from; a later one (a block-count read over the connection) only moves
-    /// the height.
+    /// The answer to a header request: the server now pushes the tips that follow.
     fn note_answer(&self, height: u64) {
-        let first = self.tip.swap(height, AtomicOrdering::Relaxed) == NO_TIP;
-        if first {
-            self.answered_at_ms.store(now_ms(), AtomicOrdering::Relaxed);
-        }
+        self.tip.store(height, AtomicOrdering::Relaxed);
         self.notifying.store(true, AtomicOrdering::Relaxed);
     }
+
+    /// Tells the pool that a header answer carried `height`; the connection has taken it already.
+    fn report_answer(&self, height: u64) { (self.on_notification)(height, HeaderSource::Answer); }
 
     /// Keeps the header bytes (hex) that came with `height`; bytes that cannot be read leave what was kept.
     fn store_header(&self, height: u64, hex: Option<&str>) {
@@ -304,17 +303,8 @@ impl HeaderTrack {
     /// A header notification: the connection's height moves, and the pool is told.
     fn note_notification(&self, height: u64) {
         self.note_answer(height);
-        self.notified_at_ms.store(now_ms(), AtomicOrdering::Relaxed);
-        (self.on_notification)(height);
+        (self.on_notification)(height, HeaderSource::Notification);
     }
-
-    /// When the first header answer came (seconds since the epoch).
-    pub(crate) fn answered_at(&self) -> Option<f64> { Self::seconds(self.answered_at_ms.load(AtomicOrdering::Relaxed)) }
-
-    /// When the last header notification came (seconds since the epoch).
-    pub(crate) fn notified_at(&self) -> Option<f64> { Self::seconds(self.notified_at_ms.load(AtomicOrdering::Relaxed)) }
-
-    fn seconds(ms: u64) -> Option<f64> { (ms != NO_TIME_MS).then(|| ms as f64 / 1000.) }
 
     /// The height of the last header the connection carried.
     pub(crate) fn tip(&self) -> Option<u64> {
@@ -425,6 +415,7 @@ impl Session {
                 if let Some(height) = response.result["height"].as_u64() {
                     self.headers.note_answer(height);
                     self.headers.store_header(height, response.result["hex"].as_str());
+                    self.headers.report_answer(height);
                 }
             }
         }
@@ -2467,7 +2458,7 @@ mod tls_tests {
         }
     }
 
-    fn no_op_callbacks() -> (SessionEnded, HeaderNotified) { (Arc::new(|_| {}), Arc::new(|_| {})) }
+    fn no_op_callbacks() -> (SessionEnded, HeaderNotified) { (Arc::new(|_| {}), Arc::new(|_, _| {})) }
 
     #[test]
     fn a_tcp_server_name_is_resolved_through_the_installed_resolver() {

@@ -62,7 +62,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   activation reports a protocol parse error. Solana stays switched off in this build, so no Solana
   coin can be activated yet. Detail: PR #361; CRD ch.40 R40.1.2, R40.1.3.
 
+#### Tendermint (Cosmos) coins
+
+- **A Tendermint coin now has a transaction history.** `tx_history: true` on a Tendermint platform
+  coin starts reading the account's transactions from a node in the background, and `my_tx_history`
+  (the mmrpc-2.0 method) lists them for the coin and for its tokens: plain sends, token sends,
+  IBC transfers, HTLC creations and claims, delegations, undelegations and reward claims, each with
+  its amounts, fee and memo, and the fee of a token send as a row of the platform coin. While the
+  first read of the chain runs, the history state is `InProgress` with the number of transactions
+  left; it is `Finished` afterwards. A fee-only transaction counts its fee once, a reward claim
+  counts the fee it cost, a transaction touching several validators gets one row per validator, and
+  `tx_hex` is the signed transaction. The history of a refunded HTLC or a completed undelegation has
+  no row, because the chain records no transaction for them. The history of a custom token that is
+  not in the coins file is absent in 0.5.0. A history store written by this node is listed by the other
+  implementation too (checked against a reference release build on 2026-11-15); in this change only
+  Tendermint coins write the index that makes this work. A history database is per coin and shared by
+  every account activated on it, so rows of an earlier account stay and are listed under their own
+  addresses (a known property of the shared database, the same as at GLEEC KDF). A transaction whose
+  block time no node can give is read again by the next pass. Native only in 0.5.0: the
+  browser build has no versioned history store for any coin family. Detail: PR #363;
+  CRD ch.36 §36.14.1; §36.14.7.
+
 ### Changed
+
+#### Shielded coins
+
+- **The shielded coin's library stack now also builds with Orchard scanning enabled; no behavior
+  change.** The way the transaction builder is asked for an output-only Ironwood bundle no longer
+  changes a public type that the Zcash wallet library constructs itself, which kept that library from
+  compiling with its Orchard feature on. Transactions are built exactly as before.
+  Detail: PR #375; CRD ch.39 status note of 2026-11-15, ch.34 ledger entry of 2026-11-15.
 
 #### Tendermint (Cosmos) coins
 
@@ -86,6 +115,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   PR #371; CRD ch.40 §40.3A, R40.6B.2.
 
 ### Fixed
+
+#### Browser (WASM) build
+
+- **The browser demo page loads the current WASM build again.** The page `wasm_build/index.html`
+  imported a module file name (`mm2.js`) that the build no longer produces, so it could not start;
+  it now imports `kdflib.js`. The build guide and the page's README name the files the build writes,
+  and the build output directory `wasm_build/deps/` is ignored by git. Detail: PR #374; CRD ch.2 directory table (lists `wasm_build/`).
+
+#### Electrum servers
+
+- **An Electrum server is no longer marked as stuck just because the next block was slow.** A
+  server counted as stuck when it had sent no new block for a while (at least 10 minutes) while
+  another server had. After any long gap between blocks, every server except the first one to
+  report the new block was therefore marked stuck for about a second, which also demoted it and
+  started a new measurement of the servers. In a 72-hour run with four nodes, 405 of 411 such marks
+  cleared within one second. A server now counts as stuck only when another server has reported a
+  block this one has not, for longer than two block intervals and at least 180 seconds (10 minutes
+  for a coin without a block time in its coins entry). A server that keeps sending notifications
+  without reaching that block now counts as stuck too. A coin with a single connected server keeps
+  the old rule. Detail: PR #378; CRD ch.38 R38.6.4o item 4.
+
+#### Transaction history
+
+- **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is
+  served from the store (BCH and SLP tokens, and now Tendermint coins), the versioned method
+  reported the page size as `total`, and a request with `from_id` could return an empty page; it now
+  returns the store's total, the right `skipped` count and `total_pages`. Detail: PR #363; CRD ch.53
+  R53.2.4, R53.2.8.
 
 #### QTUM and QRC20
 
@@ -111,9 +168,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Tests
 
+- **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
+  runs the tests of the browser build again; before, the test runner found none ("no tests to run!"),
+  because the locked test library was far older than the locked `wasm-bindgen`. The test library is
+  updated to the matching release and the runner name in `.cargo/config.toml` is the standard one. This also
+  updates `wasm-bindgen-futures`, which the browser build uses at run time, to 0.4.67. No CI job runs the
+  browser tests yet. Detail: PR #373.
 - **The Tendermint unit tests of `coins` now run in CI.** A new CI job runs the Tendermint swap-flow,
   priority-fee and WalletConnect signer tests and the postponed-family switch tests; the loopback
   tests of the native RPC server join the maker-outbox job.
+- **The Electrum connection-pool tests and the offline QRC20 tests now run in CI.** No CI job ran them
+  before. A new job runs 203 tests: those of the Electrum client, pool and measurement modules and
+  the offline QRC20 tests (about 10 s of test time); 32 more need public servers and are skipped. Five QRC20 tests that turned out to need a public
+  testnet server are now marked as such and are skipped without network access, like other tests
+  that need public servers. The QTUM regtest image of the docker tests is now pinned to a fixed
+  version, so a re-published image cannot change what the tests run against. The three docker tests
+  that withdraw on public testnet servers no longer fail when two of those servers briefly disagree
+  about the chain: they turn the server height checks off, which they do not test. Detail: PR #377.
 
 ### Plans touched
 
@@ -141,6 +212,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   packages S0 and S2 done in PR #361, S1 in PR #371.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
+- [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
+  Tendermint transaction history, is built in PR #363.
 
 ## [0.4.0-beta.1] — 2026-11-14
 

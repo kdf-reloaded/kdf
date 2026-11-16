@@ -150,6 +150,7 @@ impl MmCoin for SlpToken {
                 coin: coin.ticker().into(),
                 kmd_rewards: None,
                 transaction_type: Default::default(),
+                memo: None,
             };
             Ok(details)
         };

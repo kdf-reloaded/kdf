@@ -444,6 +444,7 @@ impl TendermintCoin {
             internal_id: tx_hex.clone(),
             kmd_rewards: None,
             transaction_type: TransactionType::StakingDelegation,
+            memo: None,
         };
         self.publish_tx_history_record(self.ticker(), &tx_details);
         Ok(tx_details)
@@ -557,6 +558,7 @@ impl TendermintCoin {
             internal_id: tx_hex.clone(),
             kmd_rewards: None,
             transaction_type: TransactionType::RemoveDelegation,
+            memo: None,
         };
         self.publish_tx_history_record(self.ticker(), &tx_details);
         Ok(tx_details)
@@ -658,6 +660,7 @@ impl TendermintCoin {
             internal_id: tx_hex.clone(),
             kmd_rewards: None,
             transaction_type: TransactionType::ClaimDelegationRewards,
+            memo: None,
         };
         self.publish_tx_history_record(self.ticker(), &tx_details);
         Ok(tx_details)

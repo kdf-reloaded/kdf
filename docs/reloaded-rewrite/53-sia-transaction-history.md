@@ -164,6 +164,13 @@ union keyed on the byte-string `internal_id`); the result carries `coin`,
 `total_pages`, and the echoed `paging_options`. The per-record content and
 the `confirmations` derivation are those of R53.2.5.
 
+> **Status note (2026-11-15, Reloaded-original).** The stored-page path of the
+> mmrpc-2.0 `my_tx_history` (a coin whose history is read from the SQL store:
+> BCH and SLP tokens, and Tendermint coins) serves the store's own `total`,
+> `skipped` and `total_pages` since PR #363. Before it, the method cut the page
+> a second time, so `total` was the page size and a `from_id` could give an empty
+> page. The runtime-store path used for Sia is unchanged.
+
 > **Upstream divergence (informative).** The upstream lineage serves Sia
 > history through the tier-1 method only and rejects Sia at the mmrpc-2.0
 > method with the not-supported discriminant. R53.2.7 is a deliberate

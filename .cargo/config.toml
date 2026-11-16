@@ -26,7 +26,9 @@ RUSTC_BOOTSTRAP = "common,mm2_err_handle,mm2_state_machine,docker_tests,mocktopu
 IPHONEOS_DEPLOYMENT_TARGET = "14.0"
 
 [target.wasm32-unknown-unknown]
-runner = 'wasm-bindgen-test-runner-0.2.78'
+# `wasm-bindgen-test-runner`: the browser-test runner; `wasm-pack test` supplies the one matching the locked
+# `wasm-bindgen` (and `wasm-bindgen-test` in Cargo.lock must be the release for that same version).
+runner = 'wasm-bindgen-test-runner'
 # `--cfg=web_sys_unstable_apis`: gated web-sys APIs used by the WASM build.
 # `getrandom_backend="wasm_js"`: getrandom 0.3 (pulled transitively via rand_core
 # 0.9 / uuid) refuses to build for wasm32-unknown-unknown unless its backend is

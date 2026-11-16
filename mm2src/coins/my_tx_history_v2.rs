@@ -51,6 +51,21 @@ pub trait TxHistoryStorage: Send + Sync + 'static {
         transactions: impl IntoIterator<Item = TransactionDetails> + Send + 'static,
     ) -> Result<(), MmError<Self::Error>>;
 
+    /// Removes the rows named by `remove` and adds the rows of `add` (each with its cache entry and, where the store
+    /// keeps one, its address index entries) as one page: the SQLite store does it in one database transaction, so
+    /// the page is stored whole or not at all (CRD ch.36 R36.14.24 item 3). The default runs the steps in turn.
+    async fn store_page(
+        &self,
+        for_coin: &str,
+        remove: Vec<BytesJson>,
+        add: Vec<TransactionDetails>,
+    ) -> Result<(), MmError<Self::Error>> {
+        for internal_id in &remove {
+            self.remove_tx_from_history(for_coin, internal_id).await?;
+        }
+        self.add_transactions_to_history(for_coin, add).await
+    }
+
     /// Removes the transaction by internal_id from the selected coin's history
     async fn remove_tx_from_history(
         &self,
@@ -100,6 +115,22 @@ pub trait TxHistoryStorage: Send + Sync + 'static {
         paging: PagingOptionsEnum<BytesJson>,
         limit: usize,
     ) -> Result<GetHistoryResult, MmError<Self::Error>>;
+
+    /// Removes every row of the selected coin's history and its transaction cache. The tables stay.
+    async fn clear_history(&self, for_coin: &str) -> Result<(), MmError<Self::Error>>;
+
+    /// Prepares the address index of the coin's store (CRD ch.36 R36.14.26 item 5): creates the table when absent,
+    /// removes the entries whose row is missing and writes the entries of every stored row that has none. Only the
+    /// Tendermint fetcher calls it; a coin for which it was never called keeps no index. Stores without an address
+    /// index have nothing to do.
+    async fn backfill_address_index(&self, _for_coin: &str) -> Result<(), MmError<Self::Error>> { Ok(()) }
+
+    /// The record kept beside the selected coin's history of the denominations that were resolvable when its rows
+    /// were written (CRD ch.36 D36.21 (b)); `None` when none was recorded.
+    async fn get_resolved_denoms(&self, for_coin: &str) -> Result<Option<String>, MmError<Self::Error>>;
+
+    /// Replaces the record of [`TxHistoryStorage::get_resolved_denoms`].
+    async fn set_resolved_denoms(&self, for_coin: &str, record: &str) -> Result<(), MmError<Self::Error>>;
 }
 
 pub trait DisplayAddress {
@@ -198,7 +229,10 @@ impl<'a, Addr: Clone + DisplayAddress + Eq + std::hash::Hash, Tx: Transaction> T
             | TransactionType::StandardTransfer
             | TransactionType::SiaV1Transaction
             | TransactionType::SiaV2Transaction
-            | TransactionType::SiaMinerPayout => tx_hash.clone(),
+            | TransactionType::SiaMinerPayout
+            | TransactionType::FeeForTokenTx
+            | TransactionType::CustomTendermintMsg { .. }
+            | TransactionType::TendermintIBCTransfer { .. } => tx_hash.clone(),
         };
 
         TransactionDetails {
@@ -218,6 +252,7 @@ impl<'a, Addr: Clone + DisplayAddress + Eq + std::hash::Hash, Tx: Transaction> T
             internal_id,
             kmd_rewards: None,
             transaction_type: self.transaction_type,
+            memo: None,
         }
     }
 }
@@ -295,16 +330,36 @@ impl<T: TxHistoryStorageError> From<T> for MyTxHistoryErrorV2 {
 
 pub enum HistoryCoinType {
     Coin(String),
-    Token { platform: String, token_id: BytesJson },
+    Token {
+        platform: String,
+        token_id: BytesJson,
+    },
+    /// A platform coin's rows (those without a token id) that name `address` in their `from` or `to` list (CRD
+    /// ch.36 R36.14.2).
+    AccountCoin {
+        ticker: String,
+        address: String,
+    },
+    /// A token's rows (those with its token id) that name `address` in their `from` or `to` list (CRD ch.36
+    /// R36.14.2).
+    AccountToken {
+        platform: String,
+        token_id: BytesJson,
+        address: String,
+    },
     // TODO extend with the L2 required info
-    L2 { platform: String },
+    L2 {
+        platform: String,
+    },
 }
 
 impl HistoryCoinType {
     fn storage_ticker(&self) -> &str {
         match self {
-            HistoryCoinType::Coin(ticker) => ticker,
-            HistoryCoinType::Token { platform, .. } | HistoryCoinType::L2 { platform } => platform,
+            HistoryCoinType::Coin(ticker) | HistoryCoinType::AccountCoin { ticker, .. } => ticker,
+            HistoryCoinType::Token { platform, .. }
+            | HistoryCoinType::AccountToken { platform, .. }
+            | HistoryCoinType::L2 { platform } => platform,
         }
     }
 }
@@ -380,6 +435,41 @@ fn build_response_from_history(
     }
 }
 
+/// The response for a page the history store has already cut: the rows are served as they are, with the store's
+/// `skipped` and `total`.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_response_from_stored_page(
+    request: MyTxHistoryRequestV2,
+    sync_status: HistorySyncState,
+    current_block: u64,
+    page: Vec<TransactionDetails>,
+    skipped: usize,
+    total: usize,
+) -> MyTxHistoryResponseV2 {
+    let transactions = page
+        .into_iter()
+        .map(|details| {
+            let confirmations = if details.block_height == 0 || details.block_height > current_block {
+                0
+            } else {
+                current_block + 1 - details.block_height
+            };
+            MyTxHistoryDetails { confirmations, details }
+        })
+        .collect();
+    MyTxHistoryResponseV2 {
+        coin: request.coin,
+        current_block,
+        transactions,
+        sync_status,
+        limit: request.limit,
+        skipped,
+        total,
+        total_pages: calc_total_pages(total, request.limit),
+        paging_options: request.paging_options,
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 async fn build_response_from_runtime_history(
     ctx: MmArc,
@@ -423,9 +513,14 @@ pub async fn my_tx_history_v2_rpc(
         return build_response_from_runtime_history(ctx, request, coin).await;
     }
 
-    let history_coin_type = match coin.get_history_coin_type() {
-        Some(t) => t,
-        None => return MmError::err(MyTxHistoryErrorV2::NotSupportedFor(coin.ticker().to_owned())),
+    // A Tendermint coin or token is served from the platform's store, scoped to the activated address, with the
+    // stored amounts scaled by the decimals of the coin the request names (CRD ch.36 R36.14.1, R36.14.2).
+    let (history_coin_type, served_decimals) = match crate::tendermint::history_scope(&coin) {
+        Some((history_coin_type, decimals)) => (history_coin_type, Some(decimals)),
+        None => match coin.get_history_coin_type() {
+            Some(t) => (t, None),
+            None => return MmError::err(MyTxHistoryErrorV2::NotSupportedFor(coin.ticker().to_owned())),
+        },
     };
     let tx_history_storage = SqliteTxHistoryStorage(
         ctx.sqlite_connection
@@ -453,24 +548,32 @@ pub async fn my_tx_history_v2_rpc(
         .await
         .mm_err(Into::into)?;
 
-    let history = history
-        .transactions
-        .into_iter()
-        .map(|mut details| {
-            // it can be the platform ticker instead of the token ticker for a pre-saved record
-            if details.coin != request.coin {
-                details.coin = request.coin.clone();
-            }
-            details
-        })
-        .collect();
+    let (skipped, total) = (history.skipped, history.total);
+    let mut served = Vec::with_capacity(history.transactions.len());
+    for mut details in history.transactions {
+        // it can be the platform ticker instead of the token ticker for a pre-saved record
+        if details.coin != request.coin {
+            details.coin = request.coin.clone();
+        }
+        if let Some(decimals) = served_decimals {
+            // A stored amount that cannot be scaled is a storage error, never an abort (CRD ch.36 finding 1 of
+            // §36.14.1).
+            details = crate::tendermint::served_row(details, decimals)
+                .map_err(|e| MmError::new(MyTxHistoryErrorV2::StorageError(e)))?;
+        }
+        served.push(details);
+    }
     let sync_status = coin.history_sync_status();
 
-    Ok(build_response_from_history(
+    // The store has already applied the paging: `skipped` and `total` are its own (the total of the whole scope, the
+    // offset of the page or of the `FromId`), so the page is not paged a second time here.
+    Ok(build_response_from_stored_page(
         request,
         sync_status,
         current_block,
-        history,
+        served,
+        skipped,
+        total,
     ))
 }
 
@@ -621,6 +724,7 @@ mod z_coin_tx_history_tests {
             internal_id: vec![id].into(),
             kmd_rewards: None,
             transaction_type: TransactionType::StandardTransfer,
+            memo: None,
         }
     }
 

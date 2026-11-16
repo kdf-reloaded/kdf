@@ -254,6 +254,7 @@ async fn build_signed_tx(ctx: &MmArc, req: EvmTxRequest) -> Result<TransactionDe
         timestamp: now_ms() / 1000,
         kmd_rewards: None,
         transaction_type: Default::default(),
+        memo: None,
     })
 }
 

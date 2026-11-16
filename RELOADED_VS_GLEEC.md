@@ -631,6 +631,28 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   with the local key. An absent value, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
   as the WalletConnect form (not built yet), fails request parsing with `InvalidRequest` (HTTP 400). No switch exists.
   CRD ch.36 §36.7. PR #358.
+- **A Tendermint coin's transaction history differs from GLEEC KDF in three ways.** (1) While the first read of the
+  chain runs, the history state is `InProgress` (with `{"transactions_left": n}`); GLEEC KDF reports `NotStarted`
+  until the first read ends (§36.14.1 R36.14.11), and a failed first balance read ends its fetcher silently where KDF
+  Reloaded retries it (§36.14.1 finding 4).
+  (2) A fee-only transaction counts its fee once (GLEEC KDF counts it twice), a reward claim counts the fee it cost
+  (GLEEC KDF leaves it out), a transaction that touches several validators gets one row per validator (GLEEC KDF one
+  row) (all three: §36.14.1 finding 5), and `tx_hex` holds the signed transaction (GLEEC KDF the first message, which
+  cannot be broadcast; D36.12). (3) A denomination resolves as at GLEEC KDF (§36.14.1 finding 7): the platform's `denom`
+  exactly, otherwise the first coins-file entry with that denomination whatever its platform, so a coins-file token
+  of another platform is counted and shown under the entry's ticker (the activated token's ticker when one is
+  activated); a custom token absent from the coins file is not counted and has no history in 0.5.0. When what the
+  coins file resolves changes, the history store of the platform coin is read again from the chain. A fee that is
+  not one coin of the platform denom enters no amount (the platform entry is read wherever it stands in the fee
+  list), and a transaction with an empty fee list, and a staking event without a `delegator` attribute when the
+  transaction has exactly one staking message of that kind, get rows, where GLEEC KDF writes none; for these
+  transactions amounts and rows can differ from GLEEC KDF's (§36.14.6 D36.19, D36.20). The row identifier and the stored form
+  are meant to be the same as GLEEC KDF's (the position counting follows the cleared §36.14.6; not yet checked against a store GLEEC KDF wrote), so a data directory can move between
+  the two (§36.14.1 findings 1 and 2). No switch exists. Native builds only. CRD ch.36
+  §36.14.1 (D36.10, D36.11, D36.12, D36.13, D36.19, D36.20, D36.21). A history database is per coin and shared
+  by every account activated on it, so rows of an earlier account stay and are listed under their own addresses,
+  as at GLEEC KDF (D36.23). A transaction whose block time no node gives is read again by the next pass
+  (D36.24; GLEEC KDF leaves it out of that pass). PR #363.
 - **Tendermint (Cosmos) coins and tokens are wallet-only in this beta.**
   Activation, balances and `withdraw` work; `setprice`, `buy`, `sell` and
   `start_swap` refuse the coin with the usual "… is wallet only" answer, and an

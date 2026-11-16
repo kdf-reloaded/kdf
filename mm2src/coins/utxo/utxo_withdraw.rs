@@ -267,6 +267,7 @@ where
             timestamp: now_ms() / 1000,
             kmd_rewards: data.kmd_rewards,
             transaction_type: Default::default(),
+            memo: None,
         })
     }
 }

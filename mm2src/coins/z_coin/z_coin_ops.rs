@@ -1159,18 +1159,19 @@ pub(crate) fn build_from_wallet_db(
     // at the root of the empty Ironwood tree, which it spends nothing of, as the dictated chain's own
     // wallets build a payment into Ironwood; no tree state is read for it (R39.6.5d, R39.6.5e). The bundle
     // is padded to the default two actions. Every other transaction carries no Ironwood bundle.
-    let (ironwood_anchor, ironwood_padding) = if ironwood.is_some() {
-        (Some(orchard::Anchor::empty_tree()), BundlePadding::OUTPUT_ONLY)
-    } else {
-        (None, BundlePadding::DEFAULT)
-    };
-    let mut tx_builder = ZTxBuilder::new(inputs.params.clone(), builder_height.into(), BuildConfig::Standard {
+    let ironwood_anchor = ironwood.is_some().then(orchard::Anchor::empty_tree);
+    let build_config = BuildConfig::Standard {
         sapling_anchor: Some(sapling_anchor.into()),
         orchard_anchor: None,
         ironwood_anchor,
         orchard_padding: BundlePadding::DEFAULT,
-        ironwood_padding,
-    });
+        ironwood_padding: BundlePadding::DEFAULT,
+    };
+    let mut tx_builder = if ironwood.is_some() {
+        ZTxBuilder::new_with_output_only_ironwood(inputs.params.clone(), builder_height.into(), build_config)
+    } else {
+        ZTxBuilder::new(inputs.params.clone(), builder_height.into(), build_config)
+    };
     let fvk = FullViewingKey::from_expanded_spending_key(&inputs.spending_key.expsk);
     for (note, merkle_path) in selected_notes_with_paths {
         tx_builder.add_sapling_spend(fvk.clone(), note, merkle_path)?;

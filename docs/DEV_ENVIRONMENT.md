@@ -51,11 +51,12 @@ integration / docker / WASM suite inherited from upstream.
 
 1. Set up [WASM Build Environment](../docs/WASM_BUILD.md#Setting-up-the-environment)
 2. Install Firefox.
-3. Download [Gecko driver](https://github.com/mozilla/geckodriver/releases) for your OS
+3. Gecko driver: if `geckodriver` is not on your `PATH` and `GECKODRIVER` is not set, `wasm-pack` downloads a copy into its cache (`~/.cache/.wasm-pack`) on the first run. To use your own, download it for your OS from the [releases](https://github.com/mozilla/geckodriver/releases).
 4. Set environment variables required to run WASM tests
    ```shell
    # wasm-bindgen specific variables
    export WASM_BINDGEN_TEST_TIMEOUT=120
+   # optional, only to use your own geckodriver instead of the one `wasm-pack` downloads
    export GECKODRIVER=PATH_TO_GECKO_DRIVER_BIN
    # MarketMaker specific variables
    export BOB_PASSPHRASE="also shoot benefit prefer juice shell elder veteran woman mimic image kidney"
@@ -75,5 +76,10 @@ integration / docker / WASM suite inherited from upstream.
    CC=/opt/homebrew/opt/llvm/bin/clang AR=/opt/homebrew/opt/llvm/bin/llvm-ar wasm-pack test --firefox --headless mm2src/mm2_main
    ```
    Please note `CC` and `AR` must be specified in the same line as `wasm-pack test mm2src/mm2_main`.
+
+The same command runs the browser tests of a crate that has them, for example `mm2src/mm2_db` or
+`mm2src/mm2_net` (the browser tests of `mm2src/coins` do not compile yet). The `wasm-bindgen-test` release in `Cargo.lock` has to match the locked
+`wasm-bindgen` release, or the runner reports "no tests to run!". No CI job runs the browser tests yet; they
+are run by hand.
 
 PS If you notice that this guide is outdated, please submit a PR.
