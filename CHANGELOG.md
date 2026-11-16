@@ -107,6 +107,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   it now imports `kdflib.js`. The build guide and the page's README name the files the build writes,
   and the build output directory `wasm_build/deps/` is ignored by git. Detail: PR #374; CRD ch.2 directory table (lists `wasm_build/`).
 
+#### Electrum servers
+
+- **An Electrum server is no longer marked as stuck just because the next block was slow.** A
+  server counted as stuck when it had sent no new block for a while (at least 10 minutes) while
+  another server had. After any long gap between blocks, every server except the first one to
+  report the new block was therefore marked stuck for about a second, which also demoted it and
+  started a new measurement of the servers. In a 72-hour run with four nodes, 405 of 411 such marks
+  cleared within one second. A server now counts as stuck only when another server has reported a
+  block this one has not, for longer than two block intervals and at least 180 seconds (10 minutes
+  for a coin without a block time in its coins entry). A server that keeps sending notifications
+  without reaching that block now counts as stuck too. A coin with a single connected server keeps
+  the old rule. Detail: PR #378; CRD ch.38 R38.6.4o item 4.
+
 #### Transaction history
 
 - **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is
