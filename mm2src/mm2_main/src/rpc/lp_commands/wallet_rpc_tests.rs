@@ -7,7 +7,8 @@
 //!   stood on dev at `afb8b1bb8`, derived from its code and marked with the handler that produced it; the expected
 //!   error texts are those of its `ERR!`/`try_s!`/`ERRL!` sites. The `file:line] ` tokens in front of a legacy error
 //!   text change with every edit of the source, so they are split off, checked to name the file of the handler, and the
-//!   text behind them is compared whole ([`legacy_refusal`]). 1c re-checks the expected bodies against a dev build.
+//!   text behind them is compared whole ([`legacy_refusal`]). The expected bodies were compared with the answers of a
+//!   release build in the lab row of PR #379.
 //! * Every variant of every error enum has its serialized `error_type` token, its `error_data` JSON type, its HTTP
 //!   status and its `Display` text checked (CRD ch.43 R43.8.6, the form of the tests of PR #312).
 //! * The ten methods are registered on the versioned surface. Requests run through the whole server path
