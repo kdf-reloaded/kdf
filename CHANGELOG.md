@@ -70,7 +70,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   addresses: as a single-key passphrase, with the default layout, and with `"bip44"`. A request
   that asks for a hardware wallet, or for the single-key policy under an HD login, is refused;
   the WalletConnect form is an invalid request. Solana stays switched off in this build. Detail:
-  PR #N; CRD ch.40 §40.1A.
+  PR #392; CRD ch.40 §40.1A.
 
 - **Solana entries of a coins file in the form GLEEC KDF uses can be read.** Besides its own
   forms, KDF Reloaded now reads, in native builds, a Solana platform entry with
@@ -317,7 +317,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #N.
+  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the

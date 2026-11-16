@@ -1766,7 +1766,7 @@ No other part of the node may use it.
 > **Reloaded status (clean side, 2026-11-16).** Solana no longer takes the
 > legacy key: under a global-HD login it takes the coin key derived at its
 > path (chapter 40 §40.1A), as Tendermint does since PR #319. Item 3's
-> mention of Solana no longer describes the code. PR #N.
+> mention of Solana no longer describes the code. PR #392.
 
 **R47.** *Swaps that recorded the legacy key.* A swap whose Started event
 recorded the legacy key as its own persistent key was started by an earlier

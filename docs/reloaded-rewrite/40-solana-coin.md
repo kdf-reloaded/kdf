@@ -135,7 +135,7 @@ address is the associated token account of the platform address for
 > key derived from the seed (§40.1A) instead of failing; a hardware-wallet
 > policy is refused (R40.1A.6); no request selects WalletConnect, and its
 > `priv_key_policy` form is an invalid request. The single-key rule above is
-> unchanged. PR #N.
+> unchanged. PR #392.
 
 R40.1.5 **Node selection.** Each request that needs the chain selects, in list
 order, the first node whose Solana JSON-RPC `getHealth` succeeds and uses it;
@@ -1261,7 +1261,7 @@ chosen, chapter 05 R46 and T40.8 must be made to say the same thing.
 > R46 and T40.8 are aligned in the change that implements it. Nothing of it
 > is built yet.
 
-> *Reloaded status (clean side, 2026-11-16):* built in PR #N: the layouts
+> *Reloaded status (clean side, 2026-11-16):* built in PR #392: the layouts
 > `bip44_change` (default) and `bip44`, chosen per request, nothing stored
 > (§40.1A); chapter 05 R46 and T40.8 carry matching status notes.
 
@@ -1502,7 +1502,7 @@ T40.7 `tx_history: true` does not abort the request (R40.2.5).
 T40.8 An HD-wallet context yields HTTP 500 `PlatformCoinCreationError`.
 
 > **Reloaded status (clean side, 2026-11-16).** Retired for Reloaded;
-> T40.1A.1-T40.1A.3 replace it. PR #N.
+> T40.1A.1-T40.1A.3 replace it. PR #392.
 
 T40.9 (beta) While `SOLANA_ACTIVATION_AVAILABLE` is `false`, a well-formed
 `enable_solana_with_tokens` request answers HTTP 500 `PlatformCoinCreationError`
@@ -1522,7 +1522,7 @@ D40.1 Solana transaction history.
 
 D40.2 HD-wallet, hardware-wallet and WalletConnect Solana policies.
 
-> **Reloaded status (clean side, 2026-11-16).** HD done (§40.1A, PR #N);
+> **Reloaded status (clean side, 2026-11-16).** HD done (§40.1A, PR #392);
 > hardware-wallet and WalletConnect signing remain deferred.
 
 D40.3 Add the reference compatibility surface of §40.1-§40.3 (the two

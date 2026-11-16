@@ -148,7 +148,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   are additional request members; a hardware-wallet policy is refused. No
   switch: the reference behavior is a refusal, which cannot be a useful
   compatibility target, and no peer sees which key a wallet uses. CRD ch.40
-  §40.1A; PR #N.
+  §40.1A; PR #392.
 
 - **Opt-in: an absent `max_eth_tx_type` read as unrestricted.** By default
   Reloaded reads a coin configuration with no `max_eth_tx_type` key as GLEEC KDF
