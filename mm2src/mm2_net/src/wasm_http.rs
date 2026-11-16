@@ -279,6 +279,7 @@ impl RequestBody {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use wasm_bindgen_test::*;
