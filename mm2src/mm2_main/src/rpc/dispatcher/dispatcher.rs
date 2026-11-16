@@ -19,9 +19,10 @@ use crate::{mm2::lp_stats::{add_node_to_version_stat, remove_node_from_version_s
                             stop_version_stat_collection, update_version_stat_collection},
             mm2::lp_swap::swap_v2_rpcs::{active_swaps_rpc as active_swaps_rpc_v2,
                                          my_recent_swaps_rpc as my_recent_swaps_rpc_v2, my_swap_status_rpc},
-            mm2::lp_swap::{get_locked_amount_rpc, max_maker_vol, max_taker_vol_v2, min_trading_vol_v2,
-                           recreate_swap_data, trade_preimage_rpc},
-            mm2::rpc::lp_commands::{get_public_key, get_public_key_hash, peer_connection_healthcheck}};
+            mm2::lp_swap::{coins_needed_for_kick_start_core, get_locked_amount_rpc, max_maker_vol, max_taker_vol_v2,
+                           min_trading_vol_v2, recreate_swap_data, trade_preimage_rpc},
+            mm2::rpc::lp_commands::{get_public_key, get_public_key_hash, peer_connection_healthcheck},
+            mm2::rpc::lp_commands_legacy::{disable_coin_core, my_balance_core}};
 use coins::eth::fee_estimation::rpc::get_eth_estimated_fee_per_gas;
 use coins::eth::EthCoin;
 use coins::hd_wallet::get_new_address;
@@ -58,9 +59,11 @@ use coins::utxo::qtum::QtumCoin;
 use coins::utxo::slp::SlpToken;
 use coins::utxo::utxo_standard::UtxoStandardCoin;
 use coins::z_coin::ZCoin;
-use coins::{add_delegation, claim_staking_rewards, delegations_info, get_raw_transaction, get_staking_infos,
-            ongoing_undelegations_info, remove_delegation, sign_message, sign_raw_transaction, validators_info,
-            verify_message, withdraw};
+use coins::{add_delegation, claim_staking_rewards, convert_address_core, convert_utxo_address_core, delegations_info,
+            get_raw_transaction, get_staking_infos, kmd_rewards_info_core, ongoing_undelegations_info,
+            remove_delegation, send_raw_transaction_core, set_required_confirmations_core,
+            set_requires_notarization_core, sign_message, sign_raw_transaction, validate_address_core,
+            validators_info, verify_message, withdraw};
 use coins_activation::{cancel_init_platform_coin_with_tokens, cancel_init_token, enable_evm_token,
                        init_platform_coin_with_tokens, init_platform_coin_with_tokens_status,
                        init_platform_coin_with_tokens_user_action, init_token, init_token_status,
@@ -239,7 +242,11 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "buy" => handle_mmrpc(ctx, request, buy_core).await,
         "cancel_all_orders" => handle_mmrpc(ctx, request, cancel_all_orders_core).await,
         "cancel_order" => handle_mmrpc(ctx, request, cancel_order_core).await,
+        "coins_needed_for_kick_start" => handle_mmrpc(ctx, request, coins_needed_for_kick_start_core).await,
         "consolidate_utxos" => handle_mmrpc(ctx, request, consolidate_utxos_rpc).await,
+        "convert_utxo_address" => handle_mmrpc(ctx, request, convert_utxo_address_core).await,
+        "convertaddress" => handle_mmrpc(ctx, request, convert_address_core).await,
+        "disable_coin" => handle_mmrpc(ctx, request, disable_coin_core).await,
         "electrum_servers" => handle_mmrpc(ctx, request, electrum_servers_rpc).await,
         "enable_bch_with_tokens" => handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<BchCoin>).await,
         // `enable_erc20` and its alias `enable_nft` share one single-token handler (CRD ch. 35 R35.2.4).
@@ -291,8 +298,10 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
             handle_mmrpc(ctx, request, init_standalone_coin_user_action::<UtxoStandardCoin>).await
         },
         "init_withdraw" => handle_mmrpc(ctx, request, init_withdraw).await,
+        "kmd_rewards_info" => handle_mmrpc(ctx, request, kmd_rewards_info_core).await,
         "max_taker_vol" => handle_mmrpc(ctx, request, max_taker_vol_v2).await,
         "max_maker_vol" => handle_mmrpc(ctx, request, max_maker_vol).await,
+        "my_balance" => handle_mmrpc(ctx, request, my_balance_core).await,
         "my_orders" => handle_mmrpc(ctx, request, my_orders_core).await,
         "my_recent_swaps" => handle_mmrpc(ctx, request, my_recent_swaps_rpc_v2).await,
         "my_swap_status" => handle_mmrpc(ctx, request, my_swap_status_rpc).await,
@@ -308,6 +317,9 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "remove_node_from_version_stat" => handle_mmrpc(ctx, request, remove_node_from_version_stat).await,
         "sell" => handle_mmrpc(ctx, request, sell_core).await,
         "send_asked_data" => handle_mmrpc(ctx, request, send_asked_data).await,
+        "send_raw_transaction" => handle_mmrpc(ctx, request, send_raw_transaction_core).await,
+        "set_required_confirmations" => handle_mmrpc(ctx, request, set_required_confirmations_core).await,
+        "set_requires_notarization" => handle_mmrpc(ctx, request, set_requires_notarization_core).await,
         "set_swap_gas_fee_policy" => handle_mmrpc(ctx, request, set_swap_gas_fee_policy).await,
         "setprice" => handle_mmrpc(ctx, request, set_price_core).await,
         "sign_message" => handle_mmrpc(ctx, request, sign_message).await,
@@ -319,6 +331,7 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "trade_preimage" => handle_mmrpc(ctx, request, trade_preimage_rpc).await,
         "update_maker_order" => handle_mmrpc(ctx, request, update_maker_order_core).await,
         "update_version_stat_collection" => handle_mmrpc(ctx, request, update_version_stat_collection).await,
+        "validateaddress" => handle_mmrpc(ctx, request, validate_address_core).await,
         "verify_message" => handle_mmrpc(ctx, request, verify_message).await,
         "wc_delete_session" => handle_mmrpc(ctx, request, wc_delete_session).await,
         "wc_get_session" => handle_mmrpc(ctx, request, wc_get_session).await,

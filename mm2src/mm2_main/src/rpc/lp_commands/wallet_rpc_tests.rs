@@ -1,0 +1,1299 @@
+//! Tests of the typed cores of the wallet and coin RPC methods of group D (CRD ch.43 §43.1R; plan
+//! `mmrpc-v2-completion`, phase 3): `my_balance`, `disable_coin`, `send_raw_transaction`, `validateaddress`,
+//! `convertaddress`, `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
+//! `set_required_confirmations` and `set_requires_notarization`.
+//!
+//! * The legacy arms keep their answers. Every expected legacy body below is the body that the handler produced as it
+//!   stood on dev at `afb8b1bb8`, derived from its code and marked with the handler that produced it; the expected
+//!   error texts are those of its `ERR!`/`try_s!`/`ERRL!` sites. The `file:line] ` tokens in front of a legacy error
+//!   text change with every edit of the source, so they are split off, checked to name the file of the handler, and the
+//!   text behind them is compared whole ([`legacy_refusal`]). The expected bodies were compared with the answers of a
+//!   release build in the lab row of PR #379.
+//! * Every variant of every error enum has its serialized `error_type` token, its `error_data` JSON type, its HTTP
+//!   status and its `Display` text checked (CRD ch.43 R43.8.6, the form of the tests of PR #312).
+//! * The ten methods are registered on the versioned surface. Requests run through the whole server path
+//!   (`process_single_request`: the legacy table, the fallback, the versioned dispatcher) on the test thread, so that
+//!   the coin mocks of a test apply.
+//! * No assertion message carries an error payload, a body or a `Display` text: only tokens, method names and labels.
+
+use super::*;
+use crate::mm2::lp_ordermatch::order_rpc_tests::Node;
+use crate::mm2::rpc::lp_commands_legacy::legacy_disable_coin_refusal;
+use coins::{BalanceError, CoinBalance, CoinSettingError, CoinsContext, CoinsNeededForKickStartError,
+            ConvertAddressError, ConvertUtxoAddressError, DisableCoinError, FeeCapBelowBaseFee, KmdRewardsInfoError,
+            MarketCoinOps, MmCoin, MmCoinEnum, MyBalanceRpcError, SendRawTransactionError, TestCoin,
+            UnexpectedDerivationMethod, ValidateAddressError, ValidateAddressResult};
+use common::block_on;
+use common::mm_number::BigDecimal;
+use mm2_core::mm_ctx::MmCtxBuilder;
+use mocktopus::mocking::*;
+use serde_json::json;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+fn bd(s: &str) -> BigDecimal { s.parse().unwrap() }
+
+/// `actual` is `expected`; the message names `what` only (the values are bodies or texts).
+fn same<T: PartialEq>(actual: &T, expected: &T, what: &str) {
+    assert!(actual == expected, "{what}: the values differ");
+}
+
+/// CRD ch.43 R43.8.6: the serialized `error_type` token, the JSON type of `error_data` (`None`: the key is absent), the
+/// HTTP status and the `Display` text of an error.
+fn assert_wire<E>(error: &E, token: &str, data: Option<&str>, status: u16, text: &str)
+where
+    E: serde::Serialize + HttpStatusCode + std::fmt::Display,
+{
+    // No assertion message below carries the error, its payload or its text: only the token.
+    let wire = json::to_value(error).unwrap();
+    assert_eq!(wire["error_type"], token, "{token}: error_type");
+    match data {
+        Some("object") => assert!(wire["error_data"].is_object(), "{token}: error_data kind"),
+        Some("string") => assert!(wire["error_data"].is_string(), "{token}: error_data kind"),
+        Some(other) => panic!("unknown kind of error_data: {other}"),
+        None => assert!(wire.get("error_data").is_none(), "{token}: error_data kind"),
+    }
+    assert_eq!(error.status_code().as_u16(), status, "{token}: status");
+    assert!(error.to_string() == text, "{token}: Display text");
+}
+
+/// Splits the `file:line] ` tokens that `try_s!` and `ERR!` put in front of a legacy error text.
+fn split_location(error: &str) -> (Vec<String>, String) {
+    let token = Regex::new(r"^([A-Za-z0-9_]+):\d+\] ").unwrap();
+    let mut files = Vec::new();
+    let mut rest = error;
+    while let Some(found) = token.captures(rest) {
+        files.push(found[1].to_owned());
+        rest = &rest[found[0].len()..];
+    }
+    (files, rest.to_owned())
+}
+
+fn client() -> SocketAddr { SocketAddr::from(([127, 0, 0, 1], 4242)) }
+
+/// Runs `request` through the whole server path on the test thread.
+fn run(ctx: &MmArc, request: Json) -> Result<Response<Vec<u8>>, String> {
+    block_on(process_single_request(ctx.clone(), request, client()))
+}
+
+/// A legacy request: no `mmrpc` key, the members inline next to `method`, the server password.
+fn legacy_request(method: &str, params: Json) -> Json {
+    let mut request = json!({ "userpass": "pw", "method": method });
+    for (key, value) in params.as_object().expect("the inline parameters are an object") {
+        request[key.as_str()] = value.clone();
+    }
+    request
+}
+
+/// A legacy success: HTTP 200. Returns the body text exactly as the client receives it.
+fn legacy_success(ctx: &MmArc, method: &str, params: Json) -> String {
+    let answer = match run(ctx, legacy_request(method, params)) {
+        Ok(answer) => answer,
+        Err(_) => panic!("{method}: a legacy success was expected"),
+    };
+    assert_eq!(answer.status().as_u16(), 200, "{method}: legacy success status");
+    String::from_utf8(answer.into_body()).unwrap()
+}
+
+/// A legacy refusal: the legacy surface answers it as `{"error": <text>}` with HTTP 500, which is what an `Err(String)`
+/// of the handler becomes. Returns the text without its `file:line] ` tokens; the innermost token names `handler_file`
+/// (the file name without its extension).
+fn legacy_refusal(ctx: &MmArc, method: &str, params: Json, handler_file: &str) -> String {
+    let error = match run(ctx, legacy_request(method, params)) {
+        Ok(_) => panic!("{method}: a legacy refusal was expected"),
+        Err(error) => error,
+    };
+    let (files, rest) = split_location(&error);
+    assert!(
+        files.last().map(String::as_str) == Some(handler_file),
+        "{method}: the legacy error names its handler file"
+    );
+    rest
+}
+
+/// A versioned request. `params` is left out when `None`.
+fn versioned(ctx: &MmArc, method: &str, params: Option<Json>, id: usize) -> (u16, Json) {
+    let mut request = json!({ "mmrpc": "2.0", "userpass": "pw", "method": method, "id": id });
+    if let Some(params) = params {
+        request["params"] = params;
+    }
+    let answer = match run(ctx, request) {
+        Ok(answer) => answer,
+        Err(_) => panic!("{method}: the versioned surface answers every request"),
+    };
+    let body = json::from_slice(answer.body()).unwrap_or_else(|_| panic!("the answer is JSON"));
+    (answer.status().as_u16(), body)
+}
+
+/// A versioned success: HTTP 200, the 2.0 envelope with the `id` echoed and no error member. Returns `result`.
+fn versioned_result(answer: (u16, Json), id: usize) -> Json {
+    let (status, body) = answer;
+    // No message below carries the body: a refused request would put an error payload into it.
+    assert_eq!(status, 200, "versioned success: status");
+    assert_eq!(body["mmrpc"], "2.0", "versioned success: mmrpc version");
+    assert_eq!(body["id"], id, "versioned success: id");
+    assert!(
+        body.get("error").is_none() && body.get("error_type").is_none(),
+        "versioned success: no error member"
+    );
+    body["result"].clone()
+}
+
+/// The typed refusal: HTTP status, `error_type` token, the JSON type of `error_data` (`None`: the key is absent) and
+/// the echoed `id`, in the mmrpc 2.0 error envelope.
+fn assert_typed_refusal(answer: &(u16, Json), status: u16, token: &str, data: Option<&str>, id: usize) {
+    let (code, body) = answer;
+    assert_eq!(*code, status, "{token}: status");
+    assert_eq!(body["mmrpc"], "2.0", "{token}: mmrpc version");
+    assert_eq!(body["error_type"], token, "{token}: error_type");
+    assert_eq!(body.get("id"), Some(&json!(id)), "{token}: id");
+    match data {
+        Some("object") => assert!(body["error_data"].is_object(), "{token}: error_data kind"),
+        Some("string") => assert!(body["error_data"].is_string(), "{token}: error_data kind"),
+        Some(other) => panic!("unknown kind of error_data: {other}"),
+        None => assert!(body.get("error_data").is_none(), "{token}: error_data kind"),
+    }
+    assert!(
+        body["error"].is_string() && body.get("result").is_none(),
+        "{token}: error envelope"
+    );
+}
+
+/// The member `member` of the `error_data` record of a typed refusal is `expected`; the message names the member only.
+fn assert_data_member(answer: &(u16, Json), member: &str, expected: Json) {
+    assert!(answer.1["error_data"][member] == expected, "error_data member {member}");
+}
+
+/// A node without coins, orders or swaps.
+fn bare_node() -> MmArc {
+    MmCtxBuilder::new()
+        .with_conf(json!({ "rpc_password": "pw" }))
+        .into_mm_arc()
+}
+
+// ----- The wire forms of the error enums -----
+
+#[test]
+fn my_balance_error_wire_forms() {
+    let rejection = FeeCapBelowBaseFee {
+        max_fee_per_gas: None,
+        base_fee: None,
+        node: None,
+    };
+    let rejection_text = rejection.to_string();
+    assert_wire(
+        &MyBalanceRpcError::NoSuchCoin { coin: "BTC".into() },
+        "NoSuchCoin",
+        Some("object"),
+        404,
+        "No such coin: BTC",
+    );
+    assert_wire(
+        &MyBalanceRpcError::Transport("node down".into()),
+        "Transport",
+        Some("string"),
+        502,
+        "node down",
+    );
+    assert_wire(
+        &MyBalanceRpcError::FeeCapBelowBaseFee(rejection),
+        "FeeCapBelowBaseFee",
+        Some("object"),
+        500,
+        &rejection_text,
+    );
+    assert_wire(
+        &MyBalanceRpcError::InternalError("no address".into()),
+        "InternalError",
+        Some("string"),
+        500,
+        "no address",
+    );
+}
+
+/// The balance errors of a coin land in the variants of the nearest sibling, `WithdrawError` (its conversion of the
+/// same type), with the legacy text of the balance error.
+#[test]
+fn my_balance_error_classifies_the_balance_errors_of_a_coin() {
+    let token = |error: BalanceError| json::to_value(MyBalanceRpcError::from(error)).unwrap()["error_type"].clone();
+    assert_eq!(token(BalanceError::Transport("t".into())), "Transport");
+    assert_eq!(token(BalanceError::InvalidResponse("r".into())), "Transport");
+    assert_eq!(token(BalanceError::WalletStorageError("s".into())), "InternalError");
+    assert_eq!(token(BalanceError::Internal("i".into())), "InternalError");
+    assert_eq!(
+        token(BalanceError::UnexpectedDerivationMethod(
+            UnexpectedDerivationMethod::IguanaPrivKeyUnavailable
+        )),
+        "InternalError"
+    );
+    assert_eq!(
+        token(BalanceError::FeeCapBelowBaseFee(FeeCapBelowBaseFee {
+            max_fee_per_gas: None,
+            base_fee: None,
+            node: None,
+        })),
+        "FeeCapBelowBaseFee"
+    );
+    assert!(
+        MyBalanceRpcError::from(BalanceError::Transport("t".into())).to_string() == "Transport: t",
+        "the text of a balance error is the legacy text"
+    );
+}
+
+#[test]
+fn disable_coin_error_wire_forms() {
+    let uuid = uuid::Uuid::nil();
+    assert_wire(
+        &DisableCoinError::NoSuchCoin { coin: "BTC".into() },
+        "NoSuchCoin",
+        Some("object"),
+        404,
+        "No such coin: BTC",
+    );
+    assert_wire(
+        &DisableCoinError::ActiveSwapsBlockDeactivation {
+            coin: "KMD".into(),
+            swaps: vec![uuid.to_string()],
+        },
+        "ActiveSwapsBlockDeactivation",
+        Some("object"),
+        400,
+        "There're active swaps using KMD",
+    );
+    assert_wire(
+        &DisableCoinError::MatchingOrdersBlockDeactivation {
+            coin: "KMD".into(),
+            matching: vec![uuid.to_string()],
+            cancelled: vec![],
+        },
+        "MatchingOrdersBlockDeactivation",
+        Some("object"),
+        400,
+        "There're currently matching orders using KMD",
+    );
+    assert_wire(
+        &DisableCoinError::InternalError("KMD is disabled already".into()),
+        "InternalError",
+        Some("string"),
+        500,
+        "KMD is disabled already",
+    );
+    // The records carry the lists, as the legacy error body does beside `error`.
+    let wire = json::to_value(DisableCoinError::MatchingOrdersBlockDeactivation {
+        coin: "KMD".into(),
+        matching: vec![uuid.to_string()],
+        cancelled: vec![uuid.to_string()],
+    })
+    .unwrap();
+    assert_eq!(wire["error_data"]["coin"], "KMD");
+    assert!(wire["error_data"]["matching"].is_array() && wire["error_data"]["cancelled"].is_array());
+    let wire = json::to_value(DisableCoinError::ActiveSwapsBlockDeactivation {
+        coin: "KMD".into(),
+        swaps: vec![uuid.to_string()],
+    })
+    .unwrap();
+    assert!(wire["error_data"]["swaps"].is_array());
+}
+
+#[test]
+fn send_raw_transaction_error_wire_forms() {
+    assert_wire(
+        &SendRawTransactionError::NoSuchCoin { coin: "BTC".into() },
+        "NoSuchCoin",
+        Some("object"),
+        404,
+        "No such coin: BTC",
+    );
+    assert_wire(
+        &SendRawTransactionError::InvalidParam("'tx_hex' must be a string".into()),
+        "InvalidParam",
+        Some("string"),
+        400,
+        "'tx_hex' must be a string",
+    );
+    assert_wire(
+        &SendRawTransactionError::Transport("refused".into()),
+        "Transport",
+        Some("string"),
+        502,
+        "refused",
+    );
+    assert_wire(
+        &SendRawTransactionError::InternalError("lp_coinfind".into()),
+        "InternalError",
+        Some("string"),
+        500,
+        "lp_coinfind",
+    );
+}
+
+#[test]
+fn address_error_wire_forms() {
+    assert_wire(
+        &ValidateAddressError::NoSuchCoin { coin: "BTC".into() },
+        "NoSuchCoin",
+        Some("object"),
+        404,
+        "No such coin: BTC",
+    );
+    assert_wire(
+        &ValidateAddressError::InternalError("x".into()),
+        "InternalError",
+        Some("string"),
+        500,
+        "x",
+    );
+    assert_wire(
+        &ConvertAddressError::NoSuchCoin { coin: "BTC".into() },
+        "NoSuchCoin",
+        Some("object"),
+        404,
+        "No such coin: BTC",
+    );
+    assert_wire(
+        &ConvertAddressError::InvalidParam("conversion refused".into()),
+        "InvalidParam",
+        Some("string"),
+        400,
+        "conversion refused",
+    );
+    assert_wire(
+        &ConvertAddressError::InternalError("x".into()),
+        "InternalError",
+        Some("string"),
+        500,
+        "x",
+    );
+    assert_wire(
+        &ConvertUtxoAddressError::NoSuchCoin { coin: "BTC".into() },
+        "NoSuchCoin",
+        Some("object"),
+        404,
+        "Coin BTC is not activated",
+    );
+    assert_wire(
+        &ConvertUtxoAddressError::InvalidAddress("bad".into()),
+        "InvalidAddress",
+        Some("string"),
+        400,
+        "bad",
+    );
+    assert_wire(
+        &ConvertUtxoAddressError::UnsupportedError("Coin ETH is not utxo".into()),
+        "UnsupportedError",
+        Some("string"),
+        400,
+        "Coin ETH is not utxo",
+    );
+}
+
+#[test]
+fn kmd_rewards_info_and_kick_start_and_setting_error_wire_forms() {
+    assert_wire(
+        &KmdRewardsInfoError::NoSuchCoin { coin: "KMD".into() },
+        "NoSuchCoin",
+        Some("object"),
+        404,
+        "KMD is not activated",
+    );
+    assert_wire(
+        &KmdRewardsInfoError::Transport("node down".into()),
+        "Transport",
+        Some("string"),
+        502,
+        "node down",
+    );
+    assert_wire(
+        &KmdRewardsInfoError::InternalError("KMD was expected to be UTXO".into()),
+        "InternalError",
+        Some("string"),
+        500,
+        "KMD was expected to be UTXO",
+    );
+    assert_wire(
+        &CoinsNeededForKickStartError::InternalError("poisoned".into()),
+        "InternalError",
+        Some("string"),
+        500,
+        "poisoned",
+    );
+    assert_wire(
+        &CoinSettingError::NoSuchCoin { coin: "BTC".into() },
+        "NoSuchCoin",
+        Some("object"),
+        404,
+        "No such coin BTC",
+    );
+    assert_wire(
+        &CoinSettingError::InternalError("x".into()),
+        "InternalError",
+        Some("string"),
+        500,
+        "x",
+    );
+}
+
+// ----- The legacy answer of a refused `disable_coin` -----
+
+/// The dev handler answered a blocked deactivation with HTTP 500 and `json!({"error": ..., "swaps": swaps})`, or
+/// `json!({"error": ..., "orders": {"matching": ..., "cancelled": ...}})` (`lp_commands_legacy::disable_coin`).
+#[test]
+fn disable_coin_legacy_refusals_keep_the_members_beside_error() {
+    let uuid = uuid::Uuid::nil();
+    let answer = legacy_disable_coin_refusal(MmError::new(DisableCoinError::ActiveSwapsBlockDeactivation {
+        coin: "KMD".into(),
+        swaps: vec![uuid.to_string()],
+    }))
+    .unwrap_or_else(|_| panic!("an answer"));
+    assert_eq!(answer.status().as_u16(), 500);
+    same(
+        &String::from_utf8(answer.into_body()).unwrap(),
+        &r#"{"error":"There're active swaps using KMD","swaps":["00000000-0000-0000-0000-000000000000"]}"#.to_owned(),
+        "the active-swaps body",
+    );
+
+    let answer = legacy_disable_coin_refusal(MmError::new(DisableCoinError::MatchingOrdersBlockDeactivation {
+        coin: "KMD".into(),
+        matching: vec![uuid.to_string()],
+        cancelled: vec![],
+    }))
+    .unwrap_or_else(|_| panic!("an answer"));
+    assert_eq!(answer.status().as_u16(), 500);
+    same(
+        &String::from_utf8(answer.into_body()).unwrap(),
+        &r#"{"error":"There're currently matching orders using KMD","orders":{"matching":["00000000-0000-0000-0000-000000000000"],"cancelled":[]}}"#
+            .to_owned(),
+        "the matching-orders body",
+    );
+
+    // Every other failure is the legacy error text.
+    let refusal = legacy_disable_coin_refusal(MmError::new(DisableCoinError::NoSuchCoin { coin: "KMD".into() }));
+    match refusal {
+        Err(error) => {
+            let (files, rest) = split_location(&error);
+            // The location is that of the caller of the helper, which is this test.
+            assert!(
+                files == vec!["wallet_rpc_tests".to_owned()],
+                "the refusal names its caller"
+            );
+            assert!(rest == "No such coin: KMD", "the refusal text");
+        },
+        Ok(_) => panic!("a refusal without extra members is a legacy error"),
+    }
+}
+
+// ----- `my_balance` -----
+
+#[test]
+fn my_balance_answers_the_legacy_body_and_the_versioned_result() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    TestCoin::my_balance.mock_safe(|_| {
+        MockResult::Return(Box::new(futures01::future::ok(CoinBalance {
+            spendable: bd("12.5"),
+            unspendable: bd("0.5"),
+        })))
+    });
+    TestCoin::my_address.mock_safe(|_| MockResult::Return(Ok("dyn-address".to_owned())));
+
+    // The body of the dev `lp_commands_legacy::my_balance`: the bare object `json!({ "coin": ticker, "balance":
+    // spendable, "unspendable_balance": unspendable, "address": address })`.
+    let dev_body = json::to_string(&json!({
+        "coin": "DYN",
+        "balance": bd("12.5"),
+        "unspendable_balance": bd("0.5"),
+        "address": "dyn-address",
+    }))
+    .unwrap();
+    let legacy = legacy_success(ctx, "my_balance", json!({ "coin": "DYN" }));
+    same(&legacy, &dev_body, "the legacy body");
+
+    // The versioned result is the bare legacy body, unchanged; an unknown member of `params` is ignored.
+    let result = versioned_result(
+        versioned(
+            ctx,
+            "my_balance",
+            Some(json!({ "coin": "DYN", "unknown_member": true })),
+            11,
+        ),
+        11,
+    );
+    same(
+        &result,
+        &json::from_str::<Json>(&dev_body).unwrap(),
+        "the versioned result",
+    );
+
+    // Refusals: legacy text and versioned token.
+    same(
+        &legacy_refusal(ctx, "my_balance", json!({ "coin": "NOPE" }), "lp_commands_legacy"),
+        &"No such coin: NOPE".to_owned(),
+        "the unknown-coin text",
+    );
+    same(
+        &legacy_refusal(ctx, "my_balance", json!({}), "lp_commands_legacy"),
+        &"No 'coin' field".to_owned(),
+        "the missing-coin text",
+    );
+    let answer = versioned(ctx, "my_balance", Some(json!({ "coin": "NOPE" })), 12);
+    assert_typed_refusal(&answer, 404, "NoSuchCoin", Some("object"), 12);
+    assert_data_member(&answer, "coin", json!("NOPE"));
+    // A request without the member the legacy form needs is undecodable on the versioned surface.
+    assert_typed_refusal(
+        &versioned(ctx, "my_balance", Some(json!({})), 13),
+        400,
+        "InvalidRequest",
+        Some("string"),
+        13,
+    );
+}
+
+#[test]
+fn my_balance_classifies_the_failures_of_the_coin() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    TestCoin::my_balance.mock_safe(|_| {
+        MockResult::Return(Box::new(futures01::future::err::<CoinBalance, MmError<BalanceError>>(
+            MmError::new(BalanceError::Transport("node down".into())),
+        )))
+    });
+    same(
+        &legacy_refusal(ctx, "my_balance", json!({ "coin": "DYN" }), "lp_commands_legacy"),
+        &"Transport: node down".to_owned(),
+        "the transport text",
+    );
+    assert_typed_refusal(
+        &versioned(ctx, "my_balance", Some(json!({ "coin": "DYN" })), 21),
+        502,
+        "Transport",
+        Some("string"),
+        21,
+    );
+
+    TestCoin::my_balance
+        .mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(CoinBalance::new(BigDecimal::from(1))))));
+    TestCoin::my_address.mock_safe(|_| MockResult::Return(Err("no address".to_owned())));
+    same(
+        &legacy_refusal(ctx, "my_balance", json!({ "coin": "DYN" }), "lp_commands_legacy"),
+        &"no address".to_owned(),
+        "the address text",
+    );
+    assert_typed_refusal(
+        &versioned(ctx, "my_balance", Some(json!({ "coin": "DYN" })), 22),
+        500,
+        "InternalError",
+        Some("string"),
+        22,
+    );
+}
+
+// ----- `validateaddress` and `convertaddress` -----
+
+fn mock_address_checks() {
+    TestCoin::validate_address.mock_safe(|_, address| {
+        MockResult::Return(if address == "good" {
+            ValidateAddressResult {
+                is_valid: true,
+                reason: None,
+            }
+        } else {
+            ValidateAddressResult {
+                is_valid: false,
+                reason: Some("not an address".to_owned()),
+            }
+        })
+    });
+    TestCoin::convert_to_address.mock_safe(|_, from, _format| {
+        MockResult::Return(if from == "bad" {
+            Err("conversion refused".to_owned())
+        } else {
+            Ok(format!("converted-{from}"))
+        })
+    });
+}
+
+#[test]
+fn validate_address_answers_the_legacy_body_and_the_versioned_result() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    mock_address_checks();
+
+    // The body of the dev `coins::validate_address`: `json!({ "result": ValidateAddressResult })`, `reason` absent
+    // for a valid address.
+    same(
+        &legacy_success(ctx, "validateaddress", json!({ "coin": "DYN", "address": "good" })),
+        &r#"{"result":{"is_valid":true}}"#.to_owned(),
+        "the valid body",
+    );
+    same(
+        &legacy_success(ctx, "validateaddress", json!({ "coin": "DYN", "address": "bad" })),
+        &r#"{"result":{"is_valid":false,"reason":"not an address"}}"#.to_owned(),
+        "the invalid body",
+    );
+
+    // An invalid address is a success on the versioned surface too, never an error.
+    let valid = versioned_result(
+        versioned(
+            ctx,
+            "validateaddress",
+            Some(json!({ "coin": "DYN", "address": "good", "unknown_member": 1 })),
+            31,
+        ),
+        31,
+    );
+    same(&valid, &json!({ "is_valid": true }), "the valid result");
+    let invalid = versioned_result(
+        versioned(
+            ctx,
+            "validateaddress",
+            Some(json!({ "coin": "DYN", "address": "bad" })),
+            32,
+        ),
+        32,
+    );
+    same(
+        &invalid,
+        &json!({ "is_valid": false, "reason": "not an address" }),
+        "the invalid result",
+    );
+
+    same(
+        &legacy_refusal(
+            ctx,
+            "validateaddress",
+            json!({ "coin": "NOPE", "address": "good" }),
+            "dispatcher_legacy",
+        ),
+        &"No such coin: NOPE".to_owned(),
+        "the unknown-coin text",
+    );
+    assert_typed_refusal(
+        &versioned(
+            ctx,
+            "validateaddress",
+            Some(json!({ "coin": "NOPE", "address": "good" })),
+            33,
+        ),
+        404,
+        "NoSuchCoin",
+        Some("object"),
+        33,
+    );
+}
+
+#[test]
+fn convert_address_answers_the_legacy_body_and_the_versioned_result() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    mock_address_checks();
+    let params = json!({ "coin": "DYN", "from": "addr", "to_address_format": { "format": "mixedcase" } });
+
+    // The body of the dev `coins::convert_address`: `json!({ "result": { "address": <converted> } })`.
+    same(
+        &legacy_success(ctx, "convertaddress", params.clone()),
+        &r#"{"result":{"address":"converted-addr"}}"#.to_owned(),
+        "the legacy body",
+    );
+    let mut versioned_params = params.clone();
+    versioned_params["unknown_member"] = json!(true);
+    let result = versioned_result(versioned(ctx, "convertaddress", Some(versioned_params), 41), 41);
+    same(&result, &json!({ "address": "converted-addr" }), "the versioned result");
+
+    // The coin's conversion refuses the address: caller-side, with the coin's text.
+    let refused = json!({ "coin": "DYN", "from": "bad", "to_address_format": {} });
+    same(
+        &legacy_refusal(ctx, "convertaddress", refused.clone(), "dispatcher_legacy"),
+        &"conversion refused".to_owned(),
+        "the conversion text",
+    );
+    assert_typed_refusal(
+        &versioned(ctx, "convertaddress", Some(refused), 42),
+        400,
+        "InvalidParam",
+        Some("string"),
+        42,
+    );
+
+    let unknown = json!({ "coin": "NOPE", "from": "addr", "to_address_format": {} });
+    same(
+        &legacy_refusal(ctx, "convertaddress", unknown.clone(), "dispatcher_legacy"),
+        &"No such coin: NOPE".to_owned(),
+        "the unknown-coin text",
+    );
+    assert_typed_refusal(
+        &versioned(ctx, "convertaddress", Some(unknown), 43),
+        404,
+        "NoSuchCoin",
+        Some("object"),
+        43,
+    );
+
+    // A body that does not decode keeps the text of the decoder on the legacy surface.
+    same(
+        &legacy_refusal(ctx, "convertaddress", json!({ "coin": "DYN" }), "dispatcher_legacy"),
+        &"missing field `from`".to_owned(),
+        "the decoder text",
+    );
+}
+
+/// A UTXO coin is not activated on a test node, so the success of `convert_utxo_address` is not reachable here; the
+/// three refusals are. The address is a valid transparent address of a UTXO chain (it is the one that the history
+/// storage tests use).
+#[test]
+fn convert_utxo_address_refusals() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    let address = "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD";
+
+    // The address does not parse: the dev handler's `try_s!(req.address.parse())` came before the coin lookup.
+    let params = json!({ "address": "not an address", "to_coin": "DYN" });
+    let (files, _text) = split_location(
+        &match run(ctx, legacy_request("convert_utxo_address", params.clone())) {
+            Ok(_) => panic!("a legacy refusal was expected"),
+            Err(error) => error,
+        },
+    );
+    assert!(
+        files.last().map(String::as_str) == Some("dispatcher_legacy"),
+        "the legacy error names its handler file"
+    );
+    assert_typed_refusal(
+        &versioned(ctx, "convert_utxo_address", Some(params), 51),
+        400,
+        "InvalidAddress",
+        Some("string"),
+        51,
+    );
+
+    // The target coin is not activated (one text for an unknown coin and for a registry that cannot be read).
+    let params = json!({ "address": address, "to_coin": "NOPE" });
+    same(
+        &legacy_refusal(ctx, "convert_utxo_address", params.clone(), "dispatcher_legacy"),
+        &"Coin NOPE is not activated".to_owned(),
+        "the not-activated text",
+    );
+    let answer = versioned(ctx, "convert_utxo_address", Some(params), 52);
+    assert_typed_refusal(&answer, 404, "NoSuchCoin", Some("object"), 52);
+    assert_data_member(&answer, "coin", json!("NOPE"));
+
+    // The target coin is not a UTXO coin.
+    let params = json!({ "address": address, "to_coin": "DYN", "unknown_member": 1 });
+    same(
+        &legacy_refusal(ctx, "convert_utxo_address", params.clone(), "dispatcher_legacy"),
+        &"Coin DYN is not utxo".to_owned(),
+        "the not-utxo text",
+    );
+    assert_typed_refusal(
+        &versioned(ctx, "convert_utxo_address", Some(params), 53),
+        400,
+        "UnsupportedError",
+        Some("string"),
+        53,
+    );
+}
+
+// ----- `send_raw_transaction` -----
+
+#[test]
+fn send_raw_transaction_answers_the_legacy_body_and_the_versioned_result() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    TestCoin::send_raw_tx.mock_safe(|_, tx| {
+        let answer: Result<String, String> = if tx == "dead" {
+            Err("broadcast refused".to_owned())
+        } else {
+            Ok(format!("hash:{tx}"))
+        };
+        MockResult::Return(Box::new(futures01::future::result(answer)))
+    });
+    TestCoin::send_raw_tx_bytes.mock_safe(|_, tx| {
+        MockResult::Return(Box::new(futures01::future::ok::<String, String>(format!(
+            "bytes:{}",
+            tx.len()
+        ))))
+    });
+
+    // The body of the dev `coins::send_raw_transaction`: the bare object `json!({ "tx_hash": hash })`.
+    same(
+        &legacy_success(ctx, "send_raw_transaction", json!({ "coin": "DYN", "tx_hex": "00ff" })),
+        &r#"{"tx_hash":"hash:00ff"}"#.to_owned(),
+        "the hex body",
+    );
+    // The JSON carrier goes to the bytes-taking half of the coin: `{"a":1}` is seven bytes.
+    same(
+        &legacy_success(
+            ctx,
+            "send_raw_transaction",
+            json!({ "coin": "DYN", "tx_json": { "a": 1 } }),
+        ),
+        &r#"{"tx_hash":"bytes:7"}"#.to_owned(),
+        "the JSON-carrier body",
+    );
+    // `tx_hex` wins when both carriers are present; a `null` carrier counts as absent.
+    same(
+        &legacy_success(
+            ctx,
+            "send_raw_transaction",
+            json!({ "coin": "DYN", "tx_hex": "00ff", "tx_json": { "a": 1 } }),
+        ),
+        &r#"{"tx_hash":"hash:00ff"}"#.to_owned(),
+        "both carriers",
+    );
+    same(
+        &legacy_success(
+            ctx,
+            "send_raw_transaction",
+            json!({ "coin": "DYN", "tx_hex": null, "tx_json": { "a": 1 } }),
+        ),
+        &r#"{"tx_hash":"bytes:7"}"#.to_owned(),
+        "a null carrier",
+    );
+
+    // The versioned result is the bare legacy body, unchanged.
+    let result = versioned_result(
+        versioned(
+            ctx,
+            "send_raw_transaction",
+            Some(json!({ "coin": "DYN", "tx_hex": "00ff", "unknown_member": 1 })),
+            61,
+        ),
+        61,
+    );
+    same(&result, &json!({ "tx_hash": "hash:00ff" }), "the versioned result");
+
+    // A broadcast the coin refuses.
+    let refused = json!({ "coin": "DYN", "tx_hex": "dead" });
+    same(
+        &legacy_refusal(ctx, "send_raw_transaction", refused.clone(), "dispatcher_legacy"),
+        &"broadcast refused".to_owned(),
+        "the broadcast text",
+    );
+    assert_typed_refusal(
+        &versioned(ctx, "send_raw_transaction", Some(refused), 62),
+        502,
+        "Transport",
+        Some("string"),
+        62,
+    );
+
+    // The carrier checks.
+    for (params, text) in [
+        (
+            json!({ "coin": "DYN" }),
+            "Request must carry either a 'tx_hex' or a 'tx_json' field",
+        ),
+        (json!({ "coin": "DYN", "tx_hex": 42 }), "'tx_hex' must be a string"),
+        (
+            json!({ "coin": "DYN", "tx_json": "text" }),
+            "'tx_json' must be an object",
+        ),
+    ] {
+        same(
+            &legacy_refusal(ctx, "send_raw_transaction", params.clone(), "dispatcher_legacy"),
+            &text.to_owned(),
+            "the carrier text",
+        );
+        assert_typed_refusal(
+            &versioned(ctx, "send_raw_transaction", Some(params), 63),
+            400,
+            "InvalidParam",
+            Some("string"),
+            63,
+        );
+    }
+
+    // An unknown coin, and the legacy text of a request without `coin`.
+    same(
+        &legacy_refusal(
+            ctx,
+            "send_raw_transaction",
+            json!({ "coin": "NOPE", "tx_hex": "00ff" }),
+            "dispatcher_legacy",
+        ),
+        &"No such coin: NOPE".to_owned(),
+        "the unknown-coin text",
+    );
+    same(
+        &legacy_refusal(
+            ctx,
+            "send_raw_transaction",
+            json!({ "tx_hex": "00ff" }),
+            "dispatcher_legacy",
+        ),
+        &"No 'coin' field".to_owned(),
+        "the missing-coin text",
+    );
+    assert_typed_refusal(
+        &versioned(
+            ctx,
+            "send_raw_transaction",
+            Some(json!({ "coin": "NOPE", "tx_hex": "00ff" })),
+            64,
+        ),
+        404,
+        "NoSuchCoin",
+        Some("object"),
+        64,
+    );
+}
+
+// ----- `set_required_confirmations` and `set_requires_notarization` -----
+
+#[test]
+fn set_required_confirmations_answers_the_legacy_body_and_the_versioned_result() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    static SET_TO: AtomicU64 = AtomicU64::new(0);
+    TestCoin::set_required_confirmations.mock_safe(|_, confirmations| {
+        SET_TO.store(confirmations, Ordering::SeqCst);
+        MockResult::Return(())
+    });
+    // The answer carries the setting as the coin reports it after the change.
+    TestCoin::required_confirmations.mock_safe(|_| MockResult::Return(5));
+
+    // The body of the dev `coins::set_required_confirmations`: `json!({ "result": { "coin": ..., "confirmations":
+    // coin.required_confirmations() } })`.
+    same(
+        &legacy_success(
+            ctx,
+            "set_required_confirmations",
+            json!({ "coin": "DYN", "confirmations": 5 }),
+        ),
+        &r#"{"result":{"coin":"DYN","confirmations":5}}"#.to_owned(),
+        "the legacy body",
+    );
+    assert_eq!(SET_TO.load(Ordering::SeqCst), 5, "the coin is told the number");
+
+    let result = versioned_result(
+        versioned(
+            ctx,
+            "set_required_confirmations",
+            Some(json!({ "coin": "DYN", "confirmations": 7, "unknown_member": 1 })),
+            71,
+        ),
+        71,
+    );
+    same(
+        &result,
+        &json!({ "coin": "DYN", "confirmations": 5 }),
+        "the versioned result",
+    );
+    assert_eq!(SET_TO.load(Ordering::SeqCst), 7, "the coin is told the number");
+
+    same(
+        &legacy_refusal(
+            ctx,
+            "set_required_confirmations",
+            json!({ "coin": "NOPE", "confirmations": 1 }),
+            "dispatcher_legacy",
+        ),
+        &"No such coin NOPE".to_owned(),
+        "the unknown-coin text",
+    );
+    let answer = versioned(
+        ctx,
+        "set_required_confirmations",
+        Some(json!({ "coin": "NOPE", "confirmations": 1 })),
+        72,
+    );
+    assert_typed_refusal(&answer, 404, "NoSuchCoin", Some("object"), 72);
+    assert_data_member(&answer, "coin", json!("NOPE"));
+
+    // A body that does not decode keeps the text of the decoder on the legacy surface and is `InvalidRequest` on the
+    // versioned one.
+    same(
+        &legacy_refusal(
+            ctx,
+            "set_required_confirmations",
+            json!({ "coin": "DYN" }),
+            "dispatcher_legacy",
+        ),
+        &"missing field `confirmations`".to_owned(),
+        "the decoder text",
+    );
+    assert_typed_refusal(
+        &versioned(ctx, "set_required_confirmations", Some(json!({ "coin": "DYN" })), 73),
+        400,
+        "InvalidRequest",
+        Some("string"),
+        73,
+    );
+}
+
+#[test]
+fn set_requires_notarization_answers_the_legacy_body_and_the_versioned_result() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    static SET_TO: AtomicBool = AtomicBool::new(false);
+    TestCoin::set_requires_notarization.mock_safe(|_, requires_nota| {
+        SET_TO.store(requires_nota, Ordering::SeqCst);
+        MockResult::Return(())
+    });
+    TestCoin::requires_notarization.mock_safe(|_| MockResult::Return(true));
+
+    // The body of the dev `coins::set_requires_notarization`: `json!({ "result": { "coin": ...,
+    // "requires_notarization": coin.requires_notarization() } })`.
+    same(
+        &legacy_success(
+            ctx,
+            "set_requires_notarization",
+            json!({ "coin": "DYN", "requires_notarization": true }),
+        ),
+        &r#"{"result":{"coin":"DYN","requires_notarization":true}}"#.to_owned(),
+        "the legacy body",
+    );
+    assert!(SET_TO.load(Ordering::SeqCst), "the coin is told the setting");
+
+    let result = versioned_result(
+        versioned(
+            ctx,
+            "set_requires_notarization",
+            Some(json!({ "coin": "DYN", "requires_notarization": true, "unknown_member": 1 })),
+            81,
+        ),
+        81,
+    );
+    same(
+        &result,
+        &json!({ "coin": "DYN", "requires_notarization": true }),
+        "the versioned result",
+    );
+
+    same(
+        &legacy_refusal(
+            ctx,
+            "set_requires_notarization",
+            json!({ "coin": "NOPE", "requires_notarization": true }),
+            "dispatcher_legacy",
+        ),
+        &"No such coin NOPE".to_owned(),
+        "the unknown-coin text",
+    );
+    assert_typed_refusal(
+        &versioned(
+            ctx,
+            "set_requires_notarization",
+            Some(json!({ "coin": "NOPE", "requires_notarization": true })),
+            82,
+        ),
+        404,
+        "NoSuchCoin",
+        Some("object"),
+        82,
+    );
+}
+
+// ----- `kmd_rewards_info` and `coins_needed_for_kick_start` -----
+
+/// KMD is not activated: the same refusal whatever form `params` takes (absent, `null`, `{}`, or an object with
+/// members, which are ignored). The success needs a UTXO coin and a node and is not reachable on a test node.
+#[test]
+fn kmd_rewards_info_refuses_a_node_without_kmd_for_every_form_of_params() {
+    let ctx = bare_node();
+    same(
+        &legacy_refusal(&ctx, "kmd_rewards_info", json!({}), "dispatcher_legacy"),
+        &"KMD is not activated".to_owned(),
+        "the not-activated text",
+    );
+    for (params, id) in [
+        (None, 91),
+        (Some(Json::Null), 92),
+        (Some(json!({})), 93),
+        (Some(json!({ "unknown_member": 1 })), 94),
+    ] {
+        let answer = versioned(&ctx, "kmd_rewards_info", params, id);
+        assert_typed_refusal(&answer, 404, "NoSuchCoin", Some("object"), id);
+        assert_data_member(&answer, "coin", json!("KMD"));
+    }
+}
+
+/// KMD is activated as a coin that is not a UTXO coin (the test coin): the dev handler's `ERR!("KMD was expected to
+/// be UTXO")`.
+#[test]
+fn kmd_rewards_info_refuses_a_kmd_that_is_not_utxo() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    same(
+        &legacy_refusal(ctx, "kmd_rewards_info", json!({}), "dispatcher_legacy"),
+        &"KMD was expected to be UTXO".to_owned(),
+        "the not-utxo text",
+    );
+    assert_typed_refusal(
+        &versioned(ctx, "kmd_rewards_info", None, 95),
+        500,
+        "InternalError",
+        Some("string"),
+        95,
+    );
+}
+
+#[test]
+fn coins_needed_for_kick_start_answers_the_legacy_body_and_the_versioned_result() {
+    let ctx = bare_node();
+
+    // The body of the dev `swap_rpc::coins_needed_for_kick_start`: `json!({ "result": <the set of tickers> })`.
+    same(
+        &legacy_success(&ctx, "coins_needed_for_kick_start", json!({})),
+        &r#"{"result":[]}"#.to_owned(),
+        "the empty body",
+    );
+    ctx.coins_needed_for_kick_start.lock().unwrap().insert("KMD".to_owned());
+    same(
+        &legacy_success(&ctx, "coins_needed_for_kick_start", json!({})),
+        &r#"{"result":["KMD"]}"#.to_owned(),
+        "the legacy body",
+    );
+
+    // `params` absent, `null`, `{}` and an object with members all succeed with the list under `result`.
+    for (params, id) in [
+        (None, 101),
+        (Some(Json::Null), 102),
+        (Some(json!({})), 103),
+        (Some(json!({ "unknown_member": 1 })), 104),
+    ] {
+        let result = versioned_result(versioned(&ctx, "coins_needed_for_kick_start", params, id), id);
+        same(&result, &json!(["KMD"]), "the versioned result");
+    }
+}
+
+// ----- `disable_coin` -----
+
+/// A coin without orders or swaps is disabled; the answer lists the orders the call cancelled. The legacy body is the
+/// one of the dev `lp_commands_legacy::disable_coin`: `json!({ "result": { "coin": ticker, "cancelled_orders":
+/// cancelled } })`.
+#[test]
+fn disable_coin_answers_the_legacy_body() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    let order = node.add_order(true, true);
+    let expected = json::to_string(&json!({ "result": { "coin": "DYN", "cancelled_orders": [order.uuid] } })).unwrap();
+    same(
+        &legacy_success(ctx, "disable_coin", json!({ "coin": "DYN" })),
+        &expected,
+        "the legacy body",
+    );
+    assert!(!node.in_container(&order.uuid), "the order is cancelled");
+    // The coin is gone.
+    same(
+        &legacy_refusal(ctx, "disable_coin", json!({ "coin": "DYN" }), "lp_commands_legacy"),
+        &"No such coin: DYN".to_owned(),
+        "the unknown-coin text",
+    );
+    same(
+        &legacy_refusal(ctx, "disable_coin", json!({}), "lp_commands_legacy"),
+        &"No 'coin' field".to_owned(),
+        "the missing-coin text",
+    );
+}
+
+#[test]
+fn disable_coin_answers_the_versioned_result_and_its_refusals() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    let order = node.add_order(true, true);
+    let result = versioned_result(
+        versioned(
+            ctx,
+            "disable_coin",
+            Some(json!({ "coin": "DYN", "unknown_member": true })),
+            111,
+        ),
+        111,
+    );
+    same(
+        &result,
+        &json!({ "coin": "DYN", "cancelled_orders": [order.uuid] }),
+        "the versioned result",
+    );
+
+    let answer = versioned(ctx, "disable_coin", Some(json!({ "coin": "DYN" })), 112);
+    assert_typed_refusal(&answer, 404, "NoSuchCoin", Some("object"), 112);
+    assert_data_member(&answer, "coin", json!("DYN"));
+}
+
+/// An order of the coin that is being matched blocks the deactivation: the legacy answer is HTTP 500 with the body
+/// `{"error": ..., "orders": {"matching": [...], "cancelled": [...]}}` and the versioned answer is the typed conflict.
+/// The coin stays.
+#[test]
+fn disable_coin_is_blocked_by_an_order_that_is_being_matched() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    block_on(
+        CoinsContext::from_ctx(ctx)
+            .unwrap()
+            .add_coin(MmCoinEnum::Test(TestCoin::new("ETH"))),
+    )
+    .unwrap();
+    let matching = node.add_order_with_an_ongoing_match();
+
+    let answer = run(ctx, legacy_request("disable_coin", json!({ "coin": "ETH" })))
+        .unwrap_or_else(|_| panic!("the legacy blocked answer is a response"));
+    assert_eq!(answer.status().as_u16(), 500);
+    same(
+        &String::from_utf8(answer.into_body()).unwrap(),
+        &json::to_string(&json!({
+            "error": "There're currently matching orders using ETH",
+            "orders": { "matching": [matching.uuid], "cancelled": [] },
+        }))
+        .unwrap(),
+        "the legacy blocked body",
+    );
+
+    let answer = versioned(ctx, "disable_coin", Some(json!({ "coin": "ETH" })), 121);
+    assert_typed_refusal(&answer, 400, "MatchingOrdersBlockDeactivation", Some("object"), 121);
+    assert_data_member(&answer, "coin", json!("ETH"));
+    assert_data_member(&answer, "matching", json!([matching.uuid]));
+    assert_data_member(&answer, "cancelled", json!([]));
+
+    // The coin is still activated, and the order still there.
+    assert!(node.in_container(&matching.uuid), "the order stays");
+    assert!(
+        block_on(coins::lp_coinfind(ctx, "ETH")).unwrap().is_some(),
+        "the coin stays activated"
+    );
+}
+
+// ----- The envelope -----
+
+/// CRD ch.43 R43.1A.2: a legacy-shaped body (parameters inline) with an added `"mmrpc": "2.0"` is undecodable under the
+/// versioned envelope and answers `InvalidRequest` (string payload, HTTP 400) before any method lookup, for every
+/// method of the group.
+#[test]
+fn legacy_shaped_body_with_an_mmrpc_key_answers_invalid_request_for_every_method_of_the_group() {
+    let ctx = bare_node();
+    let cases = [
+        ("my_balance", json!({ "coin": "DYN" })),
+        ("disable_coin", json!({ "coin": "DYN" })),
+        ("send_raw_transaction", json!({ "coin": "DYN", "tx_hex": "00" })),
+        ("validateaddress", json!({ "coin": "DYN", "address": "a" })),
+        (
+            "convertaddress",
+            json!({ "coin": "DYN", "from": "a", "to_address_format": {} }),
+        ),
+        ("convert_utxo_address", json!({ "address": "a", "to_coin": "DYN" })),
+        ("kmd_rewards_info", json!({ "unknown": 1 })),
+        ("coins_needed_for_kick_start", json!({ "unknown": 1 })),
+        (
+            "set_required_confirmations",
+            json!({ "coin": "DYN", "confirmations": 1 }),
+        ),
+        (
+            "set_requires_notarization",
+            json!({ "coin": "DYN", "requires_notarization": true }),
+        ),
+    ];
+    for (method, inline) in cases {
+        let mut request = json!({ "mmrpc": "2.0", "userpass": "pw", "method": method, "id": 3 });
+        for (key, value) in inline.as_object().unwrap() {
+            request[key.as_str()] = value.clone();
+        }
+        let answer = match run(&ctx, request) {
+            Ok(answer) => answer,
+            Err(_) => panic!("{method}: the versioned surface answers every request"),
+        };
+        let body: Json = json::from_slice(answer.body()).unwrap();
+        assert_eq!(answer.status().as_u16(), 400, "{method}: status");
+        assert_eq!(body["error_type"], "InvalidRequest", "{method}: error_type");
+        assert!(body["error_data"].is_string(), "{method}: error_data kind");
+        assert_eq!(body["id"], 3, "{method}: id");
+    }
+}

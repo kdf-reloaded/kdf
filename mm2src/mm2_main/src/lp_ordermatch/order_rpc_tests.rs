@@ -3,7 +3,7 @@
 //! `cancel_all_orders`, `my_orders` and `order_status` (group A), `buy`, `sell`, `orderbook_depth` and
 //! `orders_history_by_filter` (group B, phase 2). The expected legacy bodies and texts of group B are those of the
 //! handlers as they stood on dev at `0f309c779`, derived from their code and marked with the handler that produced
-//! them; 1c re-checks them against a dev build.
+//! them. They were compared with the answers of a release build in the lab rows of PRs #359 and #372.
 //!
 //! * The legacy arms keep their answers. Every expected legacy body below is the body that the handler produced as it
 //!   stood on dev at `d4928e1fb`, derived from its code and marked with the handler that produced it; the expected

@@ -430,6 +430,12 @@ added.*
 > `orderbook_depth` and `orders_history_by_filter` are routed on both surfaces;
 > `get_trade_fee` stays legacy-only (D43.1B.1). Per-method shapes and error
 > tables: §43.1R (dated amendment).
+>
+> *Phase 3 (wallet and coins; this repository, 2026-11):* `my_balance`,
+> `disable_coin`, `send_raw_transaction`, `validateaddress`, `convertaddress`,
+> `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
+> `set_required_confirmations` and `set_requires_notarization` are routed on
+> both surfaces. Per-method shapes and error tables: §43.1R (dated amendment).
 
 **D43.1A.2** *Implement the reference's legacy-to-versioned fallback
 (R43.1A.1)?* Options: (i) parity — a legacy request for an unknown legacy
@@ -1072,6 +1078,22 @@ and `NoSuchCoin` as a record with status 400, as `trade_preimage` does.
 > redesign of the error answers of the whole versioned surface (one spelling
 > and one payload kind per failure, HTTP statuses where HTTP has a fitting
 > one) is a plan for a later version: `docs/plans/rpc-error-redesign.md`.
+>
+> *Reloaded status (clean side, 2026-11-15, second note):* the rule is applied
+> per group. The wallet and coin forms of plan phase 3 (`my_balance`,
+> `disable_coin`, `send_raw_transaction`, `validateaddress`, `convertaddress`,
+> `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
+> `set_required_confirmations`, `set_requires_notarization`) follow their
+> nearest documented sibling, `withdraw`, with the statuses R43.1C.8 records
+> for the documented `withdraw`: `NoSuchCoin` as a record with `coin` at 404,
+> `Transport` at 502, `InternalError` 500,
+> caller-side refusals 400 (the maintainer's decision of 2026-11-15). The
+> trading groups keep 400 and 500. The same error name therefore carries
+> different statuses in the two groups, as it does on the documented surface
+> (R43.1C.8); `docs/plans/rpc-error-redesign.md` is where that is unified.
+> Reloaded's own versioned `withdraw` answers a transport failure with 500
+> today; the difference to the documented 502 is recorded for a later
+> alignment of `withdraw` itself, after a reference-behavior round.
 
 **D43.1C.5** *Unknown members of `params` in the new forms.* The reference
 and Reloaded ignore them in every existing form of the shared names
@@ -1097,7 +1119,7 @@ not.
 > listed in plan `mmrpc-v2-completion` §1.4 with this reason; group B of that
 > plan is `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter`.
 
-## 43.1R Reloaded versioned forms of the legacy-only order and trading methods (Reloaded-original, clean side)
+## 43.1R Reloaded versioned forms of the legacy-only order, trading and wallet methods (Reloaded-original, clean side)
 
 *Added 2026-11-15. This section binds a KDF Reloaded extension (D43.1A.1 status
 note of 2026-11-15; plan `docs/plans/mmrpc-v2-completion.md`). §43.1B records
@@ -1120,9 +1142,24 @@ table below; `orderbook_depth` follows the error set of its nearest documented
 sibling, the versioned `orderbook` (R43.1A.6), the other three that of
 `trade_preimage`.
 
+*Amended 2026-11-15 (phase 3):* the wallet and coin methods `my_balance`,
+`disable_coin`, `send_raw_transaction`, `validateaddress`, `convertaddress`,
+`convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
+`set_required_confirmations` and `set_requires_notarization` are added. They
+follow the error set of their nearest documented sibling, the versioned
+`withdraw` as R43.1C.8 documents it: `NoSuchCoin` at 404 and `Transport` at
+502, where the order and trading forms answer 400 and 500. (Reloaded's own
+versioned `withdraw` answers a transport failure with 500 today; that
+difference is recorded at D43.1C.4 for a later alignment.) The same error name thus carries
+different statuses in the two groups, as it does on the documented surface
+(D43.1C.4 second status note).
+
 **R43.1R.1** *Surface.* `setprice`, `update_maker_order`, `cancel_order`,
 `cancel_all_orders`, `my_orders`, `order_status`, `buy`, `sell`,
-`orderbook_depth` and `orders_history_by_filter` are routed on the
+`orderbook_depth`, `orders_history_by_filter`, `my_balance`, `disable_coin`,
+`send_raw_transaction`, `validateaddress`, `convertaddress`,
+`convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
+`set_required_confirmations` and `set_requires_notarization` are routed on the
 versioned table as well as the legacy table. The legacy forms and their
 success bodies are unchanged; a legacy error keeps its text behind one
 `file:line]` token of the handler (the inner trace tokens of chained errors
@@ -1146,6 +1183,14 @@ answer `InvalidRequest` (string, 400).
 | `buy`, `sell` | `base` string; `rel` string; `price` number; `volume` number; optional: `min_volume` number, `timeout` integer, `base_confs` integer, `base_nota` bool, `rel_confs` integer, `rel_nota` bool; `match_by` object (default any), `order_type` object (default good-till-cancelled), `save_in_history` bool (default `true`) |
 | `orderbook_depth` | `pairs` list of `[base, rel]` string pairs |
 | `orders_history_by_filter` | all optional: `order_type`, `initial_action`, `base`, `rel`, `from_price`, `to_price`, `from_volume`, `to_volume`, `from_timestamp`, `to_timestamp`, `was_taker`, `status`, `include_details` (default `false`) |
+| `my_balance`, `disable_coin` | `coin` string |
+| `send_raw_transaction` | `coin` string; `tx_hex` string, or `tx_json` object for coins that broadcast a structured transaction (one of the two) |
+| `validateaddress` | `coin` string; `address` string |
+| `convertaddress` | `coin` string; `from` string; `to_address_format` object |
+| `convert_utxo_address` | `address` string; `to_coin` string |
+| `kmd_rewards_info`, `coins_needed_for_kick_start` | none; `params` absent, `null`, `{}` or any object |
+| `set_required_confirmations` | `coin` string; `confirmations` integer |
+| `set_requires_notarization` | `coin` string; `requires_notarization` bool |
 
 Numbers accept the forms the legacy member accepts (decimal string, number,
 or the rational forms of chapter 08).
@@ -1158,6 +1203,14 @@ number encoding: `setprice`, `update_maker_order` the maker-order object;
 `{"maker_orders": {...}, "taker_orders": {...}}`; `buy`, `sell` the taker
 request object; `orderbook_depth` the list of `{pair, depth: {asks, bids}}`;
 `orders_history_by_filter` `{orders, details, found_records, warnings}`;
+`my_balance` the legacy bare object unchanged (`coin`, `balance`,
+`unspendable_balance`, `address`); `send_raw_transaction` the bare `{tx_hash}`;
+`disable_coin` `{coin, cancelled_orders}`; `validateaddress` `{is_valid,
+reason?}` (an invalid address is a success with `is_valid: false`);
+`convertaddress` `{address}`; `convert_utxo_address` the address string;
+`kmd_rewards_info` the list; `coins_needed_for_kick_start` the ticker list;
+`set_required_confirmations` `{coin, confirmations}`;
+`set_requires_notarization` `{coin, requires_notarization}`;
 `order_status` the legacy
 bare object unchanged (`type`, `order`, the orderbook-ticker members where the
 legacy body has them, and `cancellation_reason` for a history order; R43.1B
@@ -1167,8 +1220,10 @@ table row `order_status`).
 R55.1.2. A request the client got wrong answers 400, a failure of the node
 500; a refusal while the node's own clock is off (`ClockOutOfRange`) 503. A
 refusal while a coin's Electrum servers disagree answers 400, as `withdraw`
-does (chapter 38). One token may cover several legacy texts; the text is not part of the
-contract.
+does (chapter 38). The wallet and coin forms (phase 3) follow the documented
+`withdraw` set instead (R43.1C.8): an unknown coin 404, a transport failure
+502. One token may cover
+several legacy texts; the text is not part of the contract.
 
 | `error_type` | `error_data` | Status | Failure class | Methods |
 | --- | --- | --- | --- | --- |
@@ -1200,6 +1255,14 @@ contract.
 | `CannotRetrieveOrderMatchContext` | none | 500 | ordermatch context unavailable | cancel_order |
 | `Internal` | string | 500 | any other failure of the node (the `orderbook` set) | orderbook_depth |
 | `InternalError` | string | 500 | any other failure of the node | all others |
+| `NoSuchCoin` | object `{coin}` | 404 | coin not found or not activated (the documented `withdraw` set) | my_balance, disable_coin, send_raw_transaction, validateaddress, convertaddress, convert_utxo_address (target coin), kmd_rewards_info (KMD), set_required_confirmations, set_requires_notarization |
+| `Transport` | string | 502 | node or server unreachable, invalid answer, broadcast refused by the network, and a transaction the coin cannot decode (the coin's broadcast gives one text for all three; the documented `withdraw` set) | my_balance, send_raw_transaction, kmd_rewards_info |
+| `InvalidParam` | string | 400 | request carries neither `tx_hex` nor `tx_json`, or the wrong type; address conversion refused by the coin | send_raw_transaction, convertaddress |
+| `InvalidAddress` | string | 400 | address does not parse | convert_utxo_address |
+| `UnsupportedError` | string | 400 | target coin is not a UTXO coin | convert_utxo_address |
+| `ActiveSwapsBlockDeactivation` | object `{coin, swaps}` | 400 | running swaps use the coin (the legacy body carries `swaps` beside `error`) | disable_coin |
+| `MatchingOrdersBlockDeactivation` | object `{coin, matching, cancelled}` | 400 | orders of the coin are being matched (the legacy body carries `orders` beside `error`) | disable_coin |
+| `FeeCapBelowBaseFee` | as chapter 35 | 500 | EVM fee estimate below base fee (balance read) | my_balance |
 
 **T43.1R** *Tests.* Each versioned form: success in the 2.0 envelope with `id`
 echoed and `result` equal to the legacy content member by member; an unknown
@@ -1658,11 +1721,17 @@ shall be wound down as part of shutdown rather than abandoned.
   versioned-form extension for v0.5.0 and points to its plan; it takes no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required.
-- *Section 43.1R amended 2026-11-15 (phase 2) and D43.1A.1 status note extended.*
-  Reloaded-original, clean side: the four trading methods join the tables from
-  this repository's own legacy shapes and failure classes; no forbidden-class
-  input, chapter 01 R38 not engaged.
 - *Status notes added 2026-11-15 -- after D43.1C.1 to D43.1C.5 (§43.1C).*
   Reloaded-original, clean side: they record the maintainer's 2026-11-15
   resolutions of the five decisions; they take no forbidden-class
   input, so chapter 01 R38 is not engaged and no gate pass is required.
+- *Section 43.1R amended 2026-11-15 (phase 2) and D43.1A.1 status note extended.*
+  Reloaded-original, clean side: the four trading methods join the tables from
+  this repository's own legacy shapes and failure classes; no forbidden-class
+  input, chapter 01 R38 not engaged.
+- *Section 43.1R amended 2026-11-15 (phase 3), D43.1A.1 status note extended,
+  second status note after D43.1C.4.* Reloaded-original, clean side: the ten
+  wallet and coin methods join the tables from this repository's own legacy
+  shapes and failure classes, and the per-group application of D43.1C.4 is
+  recorded as the maintainer decided; no forbidden-class input, chapter 01
+  R38 not engaged.

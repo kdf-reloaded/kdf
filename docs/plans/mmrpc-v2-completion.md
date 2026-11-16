@@ -1,6 +1,6 @@
 # Plan: finish mmrpc 2.0 support for the legacy-only RPC methods
 
-**Status:** in progress (0.5.0; phase 1, order management, PR #359; phase 2, trading, PR #372; phases 3–5 open) — **Last reviewed:** 2026-11-15
+**Status:** in progress (0.5.0; phase 1, order management, PR #359; phase 2, trading, PR #372; phase 3, wallet and coins, PR #379; phases 4–5 open) — **Last reviewed:** 2026-11-15
 
 > **Context:** written 2026-11-09, after CRD ch.43 §43.1A (PR #312) bound which methods exist on
 > which request surface. This plan proposes a Reloaded extension: versioned (`mmrpc: "2.0"`) forms of
@@ -164,7 +164,7 @@ One phase per group, one PR per phase, ordered by client impact:
 | --- | --- | --- |
 | 1 | A. Order management | 43, 11, 12, 59 |
 | 2 | B. Trading | 43 (§43.1R), 08, 11, 57, 60 |
-| 3 | D. Wallet and coins | 43, 38, 49 and the chapters of the coin families each method serves |
+| 3 | D. Wallet and coins | 43 (§43.1R; errors follow the documented statuses of the versioned `withdraw`, D43.1C.4 second status note), 38, 49 |
 | 4 | C. Swaps | 43, 13, 51, 52 |
 | 5 | E. Daemon and network | 43, 28 |
 
