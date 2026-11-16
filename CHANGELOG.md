@@ -106,6 +106,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   connection timeout answers `Timeout` (408). Device failures that have no such word (transport, protocol,
   invalid key data, internal) answer `InternalError` with HTTP 500, as before under the removed name. Detail:
   PR #TBD; CRD ch.50 R50.17 status note, ch.43 R43.1D.2, ch.55 R55.2.17.
+- **The HD account methods answer hardware-wallet failures as `HwError` too.** `task::create_new_account` and the
+  other HD account methods no longer answer `TrezorDisconnected`, `NoTrezorDeviceAvailable`, `FoundUnexpectedDevice`
+  or `HardwareWalletInternal`; a device condition answers `HwError` (410) with the same words as above, and a
+  device that does not answer in time answers `Timeout` with HTTP 408 instead of 500. Device failures without a word
+  answer `Internal` (500). Detail: PR #TBD; CRD ch.05 §5.9B R35c.
 
 #### Shielded coins
 

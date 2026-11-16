@@ -13146,11 +13146,10 @@ pub(crate) mod hd_accounts_at_index_tests {
         .expect("the replaced device must be refused")
         .into_inner();
         assert!(
-            matches!(error, HDWalletRpcError::FoundUnexpectedDevice(_)),
-            "{:?}",
-            error
+            matches!(&error, HDWalletRpcError::HwError(word) if word == "FoundUnexpectedDevice"),
+            "the replaced device answers HwError FoundUnexpectedDevice"
         );
-        assert_eq!(error.status_code(), common::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.status_code(), common::StatusCode::GONE);
         assert_eq!(*items.lock().unwrap(), stored_with_device_a, "the storage is unchanged");
 
         block_on(crate::hd_wallet::get_new_address(ctx, new_address_request("DOC")))
@@ -13175,10 +13174,10 @@ pub(crate) mod hd_accounts_at_index_tests {
                 .unwrap_err()
                 .into_inner();
         assert!(
-            matches!(error, HDWalletRpcError::FoundUnexpectedDevice(_)),
-            "{:?}",
-            error
+            matches!(&error, HDWalletRpcError::HwError(word) if word == "FoundUnexpectedDevice"),
+            "the replaced device answers HwError FoundUnexpectedDevice"
         );
+        assert_eq!(error.status_code(), common::StatusCode::GONE);
         assert_eq!(device_b.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(items.lock().unwrap().is_empty(), "nothing is stored");
 
@@ -13314,10 +13313,10 @@ pub(crate) mod hd_accounts_at_index_tests {
         .unwrap_err()
         .into_inner();
         assert!(
-            matches!(error, HDWalletRpcError::HardwareWalletInternal(_)),
-            "{:?}",
-            error
+            matches!(error, HDWalletRpcError::Internal(_)),
+            "a coin without a device record answers Internal"
         );
+        assert_eq!(error.status_code(), common::StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(device_a.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 
         let ctx = node_with_hd_coins(true, vec![("TRZ", trezor_policy_hd_coin_activated_with(None))], &items);
@@ -13326,10 +13325,10 @@ pub(crate) mod hd_accounts_at_index_tests {
             .expect("a coin without a record of its device is refused")
             .into_inner();
         assert!(
-            matches!(error, HDWalletRpcError::HardwareWalletInternal(_)),
-            "{:?}",
-            error
+            matches!(error, HDWalletRpcError::Internal(_)),
+            "a coin without a device record answers Internal"
         );
+        assert_eq!(error.status_code(), common::StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     /// R58a, T36: signing takes its hardware context through one check. The device of the activation passes, an
