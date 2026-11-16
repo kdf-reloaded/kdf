@@ -164,7 +164,7 @@ One phase per group, one PR per phase, ordered by client impact:
 | --- | --- | --- |
 | 1 | A. Order management | 43, 11, 12, 59 |
 | 2 | B. Trading | 43 (§43.1R), 08, 11, 57, 60 |
-| 3 | D. Wallet and coins | 43 (§43.1R; errors follow the versioned `withdraw` set, D43.1C.4 second status note), 38, 49 |
+| 3 | D. Wallet and coins | 43 (§43.1R; errors follow the documented statuses of the versioned `withdraw`, D43.1C.4 second status note), 38, 49 |
 | 4 | C. Swaps | 43, 13, 51, 52 |
 | 5 | E. Daemon and network | 43, 28 |
 

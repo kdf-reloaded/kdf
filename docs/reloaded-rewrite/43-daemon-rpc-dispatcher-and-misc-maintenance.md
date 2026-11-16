@@ -1084,12 +1084,16 @@ and `NoSuchCoin` as a record with status 400, as `trade_preimage` does.
 > `disable_coin`, `send_raw_transaction`, `validateaddress`, `convertaddress`,
 > `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
 > `set_required_confirmations`, `set_requires_notarization`) follow their
-> nearest documented sibling, `withdraw`, statuses included: `NoSuchCoin` as a
-> record with `coin` at 404, `Transport` at 502, `InternalError` 500,
+> nearest documented sibling, `withdraw`, with the statuses R43.1C.8 records
+> for the documented `withdraw`: `NoSuchCoin` as a record with `coin` at 404,
+> `Transport` at 502, `InternalError` 500,
 > caller-side refusals 400 (the maintainer's decision of 2026-11-15). The
 > trading groups keep 400 and 500. The same error name therefore carries
 > different statuses in the two groups, as it does on the documented surface
 > (R43.1C.8); `docs/plans/rpc-error-redesign.md` is where that is unified.
+> Reloaded's own versioned `withdraw` answers a transport failure with 500
+> today; the difference to the documented 502 is recorded for a later
+> alignment of `withdraw` itself, after a reference-behavior round.
 
 **D43.1C.5** *Unknown members of `params` in the new forms.* The reference
 and Reloaded ignore them in every existing form of the shared names
@@ -1143,8 +1147,10 @@ sibling, the versioned `orderbook` (R43.1A.6), the other three that of
 `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
 `set_required_confirmations` and `set_requires_notarization` are added. They
 follow the error set of their nearest documented sibling, the versioned
-`withdraw` (R43.1C.8): `NoSuchCoin` at 404 and `Transport` at 502, where the
-order and trading forms answer 400 and 500. The same error name thus carries
+`withdraw` as R43.1C.8 documents it: `NoSuchCoin` at 404 and `Transport` at
+502, where the order and trading forms answer 400 and 500. (Reloaded's own
+versioned `withdraw` answers a transport failure with 500 today; that
+difference is recorded at D43.1C.4 for a later alignment.) The same error name thus carries
 different statuses in the two groups, as it does on the documented surface
 (D43.1C.4 second status note).
 
@@ -1214,8 +1220,9 @@ table row `order_status`).
 R55.1.2. A request the client got wrong answers 400, a failure of the node
 500; a refusal while the node's own clock is off (`ClockOutOfRange`) 503. A
 refusal while a coin's Electrum servers disagree answers 400, as `withdraw`
-does (chapter 38). The wallet and coin forms (phase 3) follow the `withdraw`
-set instead: an unknown coin 404, a transport failure 502. One token may cover
+does (chapter 38). The wallet and coin forms (phase 3) follow the documented
+`withdraw` set instead (R43.1C.8): an unknown coin 404, a transport failure
+502. One token may cover
 several legacy texts; the text is not part of the contract.
 
 | `error_type` | `error_data` | Status | Failure class | Methods |
@@ -1248,8 +1255,8 @@ several legacy texts; the text is not part of the contract.
 | `CannotRetrieveOrderMatchContext` | none | 500 | ordermatch context unavailable | cancel_order |
 | `Internal` | string | 500 | any other failure of the node (the `orderbook` set) | orderbook_depth |
 | `InternalError` | string | 500 | any other failure of the node | all others |
-| `NoSuchCoin` | object `{coin}` | 404 | coin not found or not activated (the `withdraw` set) | my_balance, disable_coin, send_raw_transaction, validateaddress, convertaddress, convert_utxo_address (target coin), kmd_rewards_info (KMD), set_required_confirmations, set_requires_notarization |
-| `Transport` | string | 502 | node or server unreachable, invalid answer, broadcast refused by the network (the `withdraw` set) | my_balance, send_raw_transaction, kmd_rewards_info |
+| `NoSuchCoin` | object `{coin}` | 404 | coin not found or not activated (the documented `withdraw` set) | my_balance, disable_coin, send_raw_transaction, validateaddress, convertaddress, convert_utxo_address (target coin), kmd_rewards_info (KMD), set_required_confirmations, set_requires_notarization |
+| `Transport` | string | 502 | node or server unreachable, invalid answer, broadcast refused by the network (the documented `withdraw` set) | my_balance, send_raw_transaction, kmd_rewards_info |
 | `InvalidParam` | string | 400 | request carries neither `tx_hex` nor `tx_json`, or the wrong type; address conversion refused by the coin | send_raw_transaction, convertaddress |
 | `InvalidAddress` | string | 400 | address does not parse | convert_utxo_address |
 | `UnsupportedError` | string | 400 | target coin is not a UTXO coin | convert_utxo_address |

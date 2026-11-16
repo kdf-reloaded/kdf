@@ -47,8 +47,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **The wallet and coin methods `my_balance`, `disable_coin`, `send_raw_transaction`, `validateaddress`,
   `convertaddress`, `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
   `set_required_confirmations` and `set_requires_notarization` accept `mmrpc: "2.0"` requests**, in the same
-  way as the order and trading methods above. Their typed errors follow the versioned `withdraw`: an unknown
-  coin answers `NoSuchCoin` with HTTP 404, a node or network failure `Transport` with 502, a request the client
+  way as the order and trading methods above. Their typed errors follow the documented statuses of the versioned
+  `withdraw`: an unknown coin answers `NoSuchCoin` with HTTP 404, a node or network failure `Transport` with 502, a request the client
   got wrong 400. `disable_coin` names the swaps or orders that block the deactivation inside `error_data`.
   Legacy forms and success bodies unchanged, legacy error texts as above (no inner trace tokens). Detail:
   PR #379; CRD ch.43 §43.1R.
