@@ -22,7 +22,7 @@ const MSG_SEND_URL: &str = "/cosmos.bank.v1beta1.MsgSend";
 /// What one coin is withdrawn: 1 coin at the 6 decimals of the test chain.
 const WITHDRAWN_SAT: u64 = 1_000_000;
 
-fn secp_key() -> TendermintPublicKey {
+pub(super) fn secp_key() -> TendermintPublicKey {
     TendermintPublicKey::from_raw_secp256k1(&pubkey(&OWN_KEY)).expect("a valid secp256k1 key")
 }
 
@@ -32,7 +32,7 @@ fn ed25519_key() -> TendermintPublicKey {
 
 /// A watch-only coin of the IRIS test chain for `key`, whose only node is the scripted one; the node answers the
 /// account, balance and block queries (never a simulation: a watch-only coin simulates nothing).
-fn watch_only(key: TendermintPublicKey, ledger: bool) -> Fixture {
+pub(super) fn watch_only(key: TendermintPublicKey, ledger: bool) -> Fixture {
     let node = FakeNode::start();
     let ctx = MmCtxBuilder::new()
         .with_conf(json!({ "netid": mm2_net_config::SUPPORTED_NETIDS[0] }))
@@ -538,7 +538,7 @@ const SHA256_EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495
 /// The hash the scripted node answers to a broadcast.
 const BROADCAST_HASH: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-fn script_t36_node(fx: &Fixture, account_number: u64, sequence: u64) {
+pub(super) fn script_t36_node(fx: &Fixture, account_number: u64, sequence: u64) {
     let account = QueryAccountResponse {
         account: Some(Any {
             type_url: "/cosmos.auth.v1beta1.BaseAccount".to_owned(),
@@ -574,7 +574,7 @@ fn script_t36_node(fx: &Fixture, account_number: u64, sequence: u64) {
 }
 
 /// The serialized result of a `withdraw` of `amount` of `ticker` to another account, with the memo when given.
-fn t36_withdraw(coin: &impl MmCoin, ticker: &str, amount: &str, memo: Option<&str>) -> Json {
+pub(super) fn t36_withdraw(coin: &impl MmCoin, ticker: &str, amount: &str, memo: Option<&str>) -> Json {
     let mut request = json!({ "coin": ticker, "to": peer(), "amount": amount });
     if let Some(memo) = memo {
         request["memo"] = json!(memo);
@@ -584,7 +584,7 @@ fn t36_withdraw(coin: &impl MmCoin, ticker: &str, amount: &str, memo: Option<&st
     serde_json::to_value(&details).expect("a serializable result")
 }
 
-fn bytes_of(array: &Json) -> Vec<u8> {
+pub(super) fn bytes_of(array: &Json) -> Vec<u8> {
     array
         .as_array()
         .expect("an array of byte values")

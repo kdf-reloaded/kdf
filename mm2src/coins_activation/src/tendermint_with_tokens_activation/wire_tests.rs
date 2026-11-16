@@ -265,30 +265,52 @@ fn parsed_form(activation_params: Json) -> Result<Option<ActivationParamsForm>, 
 }
 
 #[test]
-fn the_wallet_connect_forms_are_parsed_and_refused_as_a_platform_coin_creation_error() {
-    // R36.1.3 forms 2 and 3 are not built yet (plan item 2): refused instead of activating with the local key.
+fn the_wallet_connect_forms_are_parsed_alike_and_a_missing_session_is_a_platform_coin_creation_error() {
+    // R36.1.3 forms 2 and 3 (the second is the public docs' example) parse to the same thing; the activation reads
+    // the session (R36.14.14 item 1): a topic that names no live session, and a build without a configured
+    // WalletConnect subsystem, fail as a platform-coin creation error, with no hot-key fallback and nothing
+    // registered. The nodes are never asked: the failure comes first (the node set is valid, the wallet is not).
     let ctx = ctx();
-    for activation_params in [
-        json!({ "type": "WalletConnect", "params": { "session_topic": "topic" } }),
-        json!({ "priv_key_policy": { "type": "WalletConnect", "data": "topic" } }),
-    ] {
-        assert_eq!(
-            parsed_form(activation_params.clone()),
-            Ok(Some(ActivationParamsForm::WalletConnect))
-        );
-        let wire = failure(&ctx, request(json!({ "activation_params": activation_params })));
-        assert_creation_error(&wire, PLATFORM);
-        // The refusal is the signing-policy one, not a node failure.
-        assert!(
-            wire.0["error_data"]["error"]
-                .as_str()
-                .unwrap()
-                .contains("activation_params"),
-            "{:?}",
-            wire.0
-        );
-    }
+    let form_2 = json!({ "type": "WalletConnect", "params": { "session_topic": "topic" } });
+    let form_3 = json!({ "priv_key_policy": { "type": "WalletConnect", "data": "topic" } });
+    let expected = Ok(Some(ActivationParamsForm::WalletConnect {
+        session_topic: "topic".to_owned(),
+    }));
+    assert_eq!(parsed_form(form_2.clone()), expected);
+    assert_eq!(
+        parsed_form(form_3.clone()),
+        expected,
+        "form 3 is treated exactly as form 2"
+    );
+
+    let wire_2 = failure(&ctx, request(json!({ "activation_params": form_2 })));
+    let wire_3 = failure(&ctx, request(json!({ "activation_params": form_3 })));
+    assert_creation_error(&wire_2, PLATFORM);
+    assert_creation_error(&wire_3, PLATFORM);
+    assert_eq!(wire_2.0, wire_3.0, "form 3 fails exactly as form 2");
+    assert!(
+        wire_2.0["error_data"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("WalletConnect"),
+        "{:?}",
+        wire_2.0
+    );
     assert_nothing_registered(&ctx, &[PLATFORM]);
+}
+
+#[test]
+fn a_malformed_wallet_connect_form_fails_request_parsing() {
+    // R36.1.3: a `session_topic` that is not a string, a missing one and a form-3 `data` that is not a string are
+    // request-parse failures.
+    for malformed in [
+        json!({ "type": "WalletConnect", "params": { "session_topic": 5 } }),
+        json!({ "type": "WalletConnect", "params": { "session_topic": null } }),
+        json!({ "priv_key_policy": { "type": "WalletConnect", "data": 5 } }),
+        json!({ "priv_key_policy": { "type": "WalletConnect" } }),
+    ] {
+        assert!(parsed_form(malformed.clone()).is_err(), "{malformed}");
+    }
 }
 
 #[test]
@@ -348,7 +370,6 @@ fn a_malformed_activation_params_fails_request_parsing() {
 #[test]
 fn an_absent_or_null_activation_params_is_not_refused() {
     assert_eq!(parsed_form(Json::Null), Ok(None));
-    assert!(reject_unsupported_activation_params(PLATFORM, &None).is_ok());
     // End to end the request proceeds to the nodes, so the error is the node failure, not the policy refusal.
     let ctx = ctx();
     let wire = failure(&ctx, request(json!({ "activation_params": null })));

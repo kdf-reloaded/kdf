@@ -469,21 +469,14 @@ impl TendermintCoin {
             .map_err(|e| UnsignedTxError::Rpc(e.to_string()))?;
 
         if let Some(amino_msg) = amino_msg {
-            let fee_amount: Vec<_> = fee
-                .amount
-                .iter()
-                .map(|c| json!({ "amount": c.amount.to_string(), "denom": c.denom.to_string() }))
-                .collect();
-            // The Amino sign document (CRD ch.36 R36.14.31 items 1 and 3): a JSON object, every number a decimal
-            // string, and no `timeout_height` (item 4: the transaction built from it has none).
-            let doc = json!({
-                "account_number": account_info.account_number.to_string(),
-                "chain_id": chain_id,
-                "fee": { "amount": fee_amount, "gas": fee.gas_limit.to_string() },
-                "memo": memo,
-                "msgs": [amino_msg],
-                "sequence": account_info.sequence.to_string(),
-            });
+            let doc = amino_sign_doc(
+                &chain_id,
+                account_info.account_number,
+                account_info.sequence,
+                &fee,
+                memo,
+                vec![amino_msg],
+            );
             return Ok(UnsignedTransaction::Amino {
                 legacy_amino_json: doc,
                 original_tx_type_url: msg.type_url,
@@ -887,9 +880,37 @@ impl TendermintCoin {
     }
 }
 
+/// The Amino sign document (`StdSignDoc`) of CRD ch.36 R36.14.31 items 1 and 3, the one document both Amino
+/// producers use: the unsigned result of a watch-only coin and the `cosmos_signAmino` request of a WalletConnect
+/// coin. A JSON object with the members `account_number`, `chain_id`, `fee` (`amount`: one coin object, also when
+/// the amount is zero, and `gas`), `memo` (also when empty), `msgs` and `sequence`; every number is a decimal string
+/// and there is no `timeout_height` (item 4: the transaction built from the document has none).
+pub(super) fn amino_sign_doc(
+    chain_id: &str,
+    account_number: u64,
+    sequence: u64,
+    fee: &Fee,
+    memo: &str,
+    msgs: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    let fee_amount: Vec<_> = fee
+        .amount
+        .iter()
+        .map(|c| json!({ "amount": c.amount.to_string(), "denom": c.denom.to_string() }))
+        .collect();
+    json!({
+        "account_number": account_number.to_string(),
+        "chain_id": chain_id,
+        "fee": { "amount": fee_amount, "gas": fee.gas_limit.to_string() },
+        "memo": memo,
+        "msgs": msgs,
+        "sequence": sequence.to_string(),
+    })
+}
+
 /// The Amino JSON of a bank send message (`cosmos-sdk/MsgSend`); any other message has no Amino form here
 /// (CRD ch.36 R36.14.18 item 3).
-fn amino_bank_send_json(msg: &Any) -> Result<serde_json::Value, UnsignedTxError> {
+pub(super) fn amino_bank_send_json(msg: &Any) -> Result<serde_json::Value, UnsignedTxError> {
     const MSG_SEND_TYPE_URL: &str = "/cosmos.bank.v1beta1.MsgSend";
     if msg.type_url != MSG_SEND_TYPE_URL {
         return Err(UnsignedTxError::AminoUnsupported(msg.type_url.clone()));

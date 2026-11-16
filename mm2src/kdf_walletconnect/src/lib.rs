@@ -289,6 +289,34 @@ impl WalletConnectCtx {
         Ok(handle)
     }
 
+    /// The per-context handle: the one cached on the context when there is one, else a freshly initialised one
+    /// that is cached for later callers (chapter 22 §22.2). A coin activation that needs a wallet session uses this,
+    /// so that it does not depend on a `wc_*` request having initialised the subsystem first.
+    ///
+    /// # Errors
+    ///
+    /// The failures of [`WalletConnectCtx::init`], and [`WalletConnectError::Internal`] when the value cached on the
+    /// context is not a [`WalletConnectCtx`].
+    pub async fn get_or_init(ctx: &MmArc) -> Result<Arc<Self>, WalletConnectError> {
+        fn downcast(any: Arc<dyn std::any::Any + Send + Sync>) -> Result<Arc<WalletConnectCtx>, WalletConnectError> {
+            any.downcast::<WalletConnectCtx>()
+                .map_err(|_| WalletConnectError::Internal("unexpected WalletConnect context type".to_string()))
+        }
+
+        if let Some(existing) = ctx.wallet_connect.lock().unwrap().clone() {
+            return downcast(existing);
+        }
+        let handle = Self::init(ctx).await?;
+        let mut guard = ctx.wallet_connect.lock().unwrap();
+        // Another caller may have initialised the handle while this one was connecting: keep the stored one.
+        if let Some(existing) = guard.clone() {
+            return downcast(existing);
+        }
+        let any: Arc<dyn std::any::Any + Send + Sync> = handle.clone();
+        *guard = Some(any);
+        Ok(handle)
+    }
+
     /// The live session index.
     pub fn sessions(&self) -> &SessionManager { &self.sessions }
 

@@ -102,8 +102,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   three times the computed fee (for the coin, not for a token), and the staking requests fail. A `memo` in the `withdraw` request is carried in the transaction: `memo` is now a typed member of every withdraw request: a `memo` that is not a string is refused as a malformed request for every coin (it was ignored before); only Tendermint coins and tokens read it. Placing an order with the coin or one
   of its tokens, message signing, private-key display, and every swap payment, claim and refund are
   refused (`PrivKeyNotAllowed::WatchOnlyCoin`). A malformed `activation_params` now fails request
-  parsing with `InvalidRequest`; the WalletConnect forms are still refused. Detail: PR #382; CRD ch.36
+  parsing with `InvalidRequest`. Detail: PR #382; CRD ch.36
   §36.14.3.
+- **A Tendermint coin can be activated with a WalletConnect wallet, and the wallet signs its
+  withdrawals.** `activation_params` of `enable_tendermint_with_assets` (and the task form) now accepts
+  `{"type": "WalletConnect", "params": {"session_topic": "..."}}` and the form the public docs show,
+  `{"priv_key_policy": {"type": "WalletConnect", "data": "..."}}`; both do the same. The node reads the
+  account and its public key for the coin's chain from the paired session: from the key record the wallet
+  delivered with the session when it has one for that chain, otherwise by asking the wallet once for its
+  accounts. When the key does not give the account the session granted for that chain, the activation
+  fails (`PlatformCoinCreationError`) instead of activating another account. The coin holds no private
+  key. `withdraw` and the delegation, undelegation and reward-claim requests are signed in the wallet (the
+  Ledger-backed account of a wallet signs the Amino form, which covers a plain send only, and a Ledger
+  `withdraw` costs three times the computed fee, for the coin and not for a token). A `withdraw` answers
+  the signed transaction (`tx_hex`, `tx_hash`) and broadcasts nothing; the staking requests broadcast the
+  signed transaction. The wallet's answer must carry the transaction body that was asked to be signed;
+  an echo of another body fails the request. A request the wallet refuses, does not answer within five
+  minutes, or cannot receive because the session is gone fails with the new error `SigningError` (HTTP
+  500) for `withdraw` and for the staking requests, where GLEEC KDF answers a general internal error.
+  Placing an order with such a coin or one of its tokens is refused, as for a watch-only coin, and swaps
+  do not sign through the wallet. The top-level `priv_key_policy` member of the request still refuses the
+  WalletConnect spelling. A test with a real wallet is still to be run. Detail: PR #N; CRD ch.36
+  R36.14.13--R36.14.15.
 
 ### Changed
 
@@ -312,7 +332,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
   Tendermint transaction history, is built in PR #363; its address index now covers every
-  store-served coin family (PR #380).
+  store-served coin family (PR #380); item 1a, the WalletConnect form of the activation, is built (PR #N).
 
 ## [0.4.0-beta.1] — 2026-11-14
 

@@ -207,9 +207,10 @@ impl MmCoin for TendermintCoin {
                 AccountId::from_str(&req.to).map_to_mm(|e| WithdrawError::InvalidAddress(e.to_string()))?;
 
             let account_id = coin.account_id.clone();
-            // A watch-only coin holds no key: it answers the unsigned document (CRD ch.36 R36.14.17) and the fee
-            // is the fixed assumed one (CRD ch.18 R18.11.9). Every other coin signs with its key.
-            let watch_only = coin.activation_policy.watch_only_ledger_flag();
+            // A coin without a key holds the Ledger flag of R36.14.18: a watch-only coin answers the unsigned document
+            // (CRD ch.36 R36.14.17), a WalletConnect coin has the wallet sign (R36.14.15); the fee of both is the
+            // fixed assumed one (CRD ch.18 R18.11.9). Every other coin signs with its key.
+            let watch_only = coin.activation_policy.ledger_flag();
             let priv_key = match watch_only {
                 Some(_) => None,
                 None => Some(
@@ -355,6 +356,16 @@ impl MmCoin for TendermintCoin {
                     let tx_bytes = tx_raw
                         .to_bytes()
                         .map_to_mm(|e| WithdrawError::InternalError(format!("Failed to encode tx: {}", e)))?;
+                    let tx_hash = hex::encode_upper(sha256(&tx_bytes).as_slice());
+                    let internal_id = tx_hash_to_internal_id(&tx_hash);
+                    (tx_bytes, tx_hash, None, internal_id)
+                },
+                // CRD ch.36 R36.14.15: the wallet signs; nothing is broadcast, the signed transaction is the answer.
+                None if coin.activation_policy.wallet_connect_session().is_some() => {
+                    let tx_bytes = coin
+                        .wc_sign_message(msg_payload, fee, timeout_height, &memo)
+                        .await
+                        .map_to_mm(WithdrawError::from)?;
                     let tx_hash = hex::encode_upper(sha256(&tx_bytes).as_slice());
                     let internal_id = tx_hash_to_internal_id(&tx_hash);
                     (tx_bytes, tx_hash, None, internal_id)

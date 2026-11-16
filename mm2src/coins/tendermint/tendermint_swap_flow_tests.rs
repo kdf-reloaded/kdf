@@ -2598,4 +2598,5 @@ fn tm_act_hd_withdrawal_is_signed_with_the_key_at_the_path() {
 
 mod priority_fee_tests;
 mod tx_history_tests;
+mod wallet_connect_tests;
 mod watch_only_tests;

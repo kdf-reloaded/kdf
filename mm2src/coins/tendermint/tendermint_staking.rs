@@ -317,8 +317,8 @@ impl TendermintCoin {
 impl TendermintCoin {
     /// Signs and broadcasts the message, answering the raw transaction and its hash; a watch-only coin signs and
     /// broadcasts nothing and answers its unsigned document instead, with an empty transaction and hash
-    /// (CRD ch.36 R36.14.17). With the Ledger flag the build fails: the Amino form covers the bank send only
-    /// (R36.14.18 item 3).
+    /// (CRD ch.36 R36.14.17); a WalletConnect coin has the wallet sign (R36.14.15). With the Ledger flag the build
+    /// fails: the Amino form covers the bank send only (R36.14.18 item 3).
     async fn send_or_unsigned(
         &self,
         msg: cosmrs::Any,
@@ -326,6 +326,20 @@ impl TendermintCoin {
         timeout_height: u64,
         memo: &str,
     ) -> MmResult<(BytesJson, String, Option<UnsignedTransaction>), DelegationError> {
+        // CRD ch.36 R36.14.15: a WalletConnect coin has the wallet sign and broadcasts the transaction as a coin with
+        // a key does. With the Ledger flag the build fails before any wallet request, as for a watch-only coin.
+        if self.activation_policy.wallet_connect_session().is_some() {
+            let tx_bytes = self
+                .wc_sign_message(msg, fee, timeout_height, memo)
+                .await
+                .map_err(DelegationError::from)?;
+            let tx_id = self
+                .send_raw_tx_bytes(&tx_bytes)
+                .compat()
+                .await
+                .map_err(|e| DelegationError::InternalError(format!("Transaction failed: {e}")))?;
+            return Ok((tx_bytes.into(), tx_id, None));
+        }
         if self.activation_policy.watch_only_ledger_flag().is_some() {
             let unsigned = self
                 .build_unsigned_transaction(msg, fee, timeout_height, memo)

@@ -538,9 +538,10 @@ impl MmCoin for TendermintToken {
                 AccountId::from_str(&req.to).map_to_mm(|e| WithdrawError::InvalidAddress(e.to_string()))?;
 
             let account_id = token.platform_coin.account_id.clone();
-            // A token follows its platform coin: on a watch-only platform it answers the unsigned document, with the
-            // fixed assumed fee (CRD ch.36 R36.14.17).
-            let watch_only = token.platform_coin.activation_policy.watch_only_ledger_flag();
+            // A token follows its platform coin: on a watch-only platform it answers the unsigned document, on a
+            // WalletConnect platform the wallet signs, both with the fixed assumed fee (CRD ch.36 R36.14.17,
+            // R36.14.15).
+            let watch_only = token.platform_coin.activation_policy.ledger_flag();
             let priv_key = match watch_only {
                 Some(_) => None,
                 None => Some(
@@ -660,6 +661,17 @@ impl MmCoin for TendermintToken {
                     let tx_bytes = tx_raw
                         .to_bytes()
                         .map_to_mm(|e| WithdrawError::InternalError(format!("Failed to encode tx: {}", e)))?;
+                    let tx_hash = hex::encode_upper(sha256(&tx_bytes).as_slice());
+                    let internal_id: BytesJson = tx_hash.as_bytes().to_vec().into();
+                    (tx_bytes, tx_hash, None, internal_id)
+                },
+                // CRD ch.36 R36.14.15: the wallet signs; nothing is broadcast, the signed transaction is the answer.
+                None if token.platform_coin.activation_policy.wallet_connect_session().is_some() => {
+                    let tx_bytes = token
+                        .platform_coin
+                        .wc_sign_message(msg_payload, fee, timeout_height, &memo)
+                        .await
+                        .map_to_mm(WithdrawError::from)?;
                     let tx_hash = hex::encode_upper(sha256(&tx_bytes).as_slice());
                     let internal_id: BytesJson = tx_hash.as_bytes().to_vec().into();
                     (tx_bytes, tx_hash, None, internal_id)
