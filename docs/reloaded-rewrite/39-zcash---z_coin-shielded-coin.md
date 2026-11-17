@@ -6809,8 +6809,14 @@ plan `zec-v5-transactions` settles the rate Reloaded uses.
 > about 4 bytes shorter (a four-byte branch id field in the header, a 3-byte
 > empty tail instead of 11 bytes), so the fee is marginally lower than the same
 > rate over the version-4 layout. The policy of chapter 38 R38.6.6a --
-> R38.6.6b is otherwise unchanged; with the ZEC rate of the coins file the fee
-> stays above ZIP 317's conventional fee for transparent transactions.
+> R38.6.6b is otherwise unchanged. With the ZEC rate of the coins file (70000
+> per kilobyte) the fee stays above ZIP 317's conventional fee for the transparent
+> shapes this software builds (at most three outputs per transaction); a
+> transaction with five or more outputs per input would fall below it, because
+> ZIP 317 counts 5000 zatoshi per logical action while an output costs about
+> 2380 zatoshi by size. The earlier note after the compatibility note of
+> §39.11.4V ("a transparent transaction pays more than ZIP 317's conventional
+> fee") holds for these shapes only.
 
 D39.11.4V.1 *(Open.)* *A transaction of a version the history cannot read.*
 Reproducing the reference (R39.11.4V.8) leaves such a transaction out of the

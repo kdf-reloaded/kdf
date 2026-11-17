@@ -33,7 +33,7 @@ or undo, and every change that needs a step from you.
 - **ZEC sends need the coins entry with `"txversion": 5` and `"consensus_branch_id": "77190ad9"`** (the branch id is
   accepted with or without `0x`). Since the Zcash network upgrade NU7 the network refuses version-4 transactions. This
   release builds version-5 ZEC transactions when the ZEC entry says `txversion` 5; with the old entry (`txversion` 4) every
-  ZEC send is still refused by the network, which accepts no version-4 transaction since NU7. With either entry, a lab
+  ZEC send is still refused by the network. With either entry, a lab
   test of 0.4.0-beta.1 and of the development build before this change activated ZEC and showed its balance, and the
   network refused the ZEC withdrawal it sent (version-4 entry: "not supported by the network upgrade Nu7"; version-5
   entry: an invalid consensus branch id).
