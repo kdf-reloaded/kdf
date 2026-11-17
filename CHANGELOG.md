@@ -402,6 +402,13 @@ the previous version used. The safe way:
   that withdraw on public testnet servers no longer fail when two of those servers briefly disagree
   about the chain: they turn the server height checks off, which they do not test. Detail: PR #377.
 
+- **Offline tests now pin how a QRC20 token behaves over Electrum.** A local stub Electrum server
+  now answers the QRC20 contract methods. Twelve new tests cover token activation, a balance read
+  that a server answers with an error, the history collector's requests and its failures,
+  including the server's "history too large" answer. The five QRC20 tests that needed the public
+  Qtum testnet server now run against the stub, offline, in CI. Detail: PR #385; CRD ch.38
+  §38.6.4Q.
+
 ### Plans touched
 
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — the H7 row and Decision CB note now say that H7 applies to an absent
