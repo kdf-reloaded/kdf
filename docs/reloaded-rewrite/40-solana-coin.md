@@ -240,9 +240,10 @@ secret the UTXO family uses there, and differs from R40.6B.8's address and
 from the T40.1A.1 vectors.
 
 > *Status (clean side, 2026-11-17):* by the maintainer's decision of
-> 2026-11-17, for every coin family, an activation that asks for
-> `IguanaPrivKey` under a global-HD login is honoured with the wallet's single
-> internal key; R40.1A.1, R40.1A.6, R40.1A.7 and T40.1A.4 state it.
+> 2026-11-17, every coin family is to honour an activation that asks for
+> `IguanaPrivKey` under a global-HD login with the wallet's single internal
+> key; for Solana, R40.1A.1, R40.1A.6, R40.1A.7 and T40.1A.4 state it
+> (PR #392).
 
 ## 40.2 `experimental::enable_solana_with_assets`
 
