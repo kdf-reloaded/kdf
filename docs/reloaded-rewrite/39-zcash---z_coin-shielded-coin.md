@@ -6774,6 +6774,25 @@ the transparent coin.
 > fields of R39.11.4V.2 with the same forms and defaults, writes the layouts of
 > R39.11.4V.3, signs with the digest of R39.11.4V.4 and sets the expiry height to
 > 0. Nothing else of Reloaded's behavior was checked for this section.
+>
+> *Reloaded status (clean side, 2026-11-17):* the compatibility note above
+> describes dev before the version-5 work. No tabled reference state has any
+> version-5 behavior (R39.11.4V.1), so KDF Reloaded's version 5 is its own and
+> claims no parity. Since the version-5 layout in the shared UTXO code (status
+> note of 2026-11-17 under R39.11.15), Reloaded differs on purpose for
+> version 5 from R39.11.4V.3 (it writes and reads the ZIP 225 layout, not the
+> version-4 layout), R39.11.4V.4 (it signs with the ZIP 244 digest; for an HTLC
+> input that digest commits to the spent pay-to-script-hash scriptPubKey, which
+> ZIP 244 defines, not to the redeem script as script code), R39.11.4V.7 (it
+> computes the ZIP 244 identifier) and R39.11.4V.8 (it reads version 5; a
+> version-6 transaction is refused at parsing until D39.11.4V.3 is decided).
+> Versions 3 and 4 are unchanged. It is the same as R39.11.4V.6 (expiry height 0
+> everywhere) and R39.11.4V.10 (the per-kilobyte `txfee` policy; with the ZEC
+> rate of 70000 per kilobyte a transparent transaction pays more than ZIP 317's
+> conventional fee, a lab withdraw of one input and two outputs paying 0.0001715
+> ZEC on 2026-11-16). The plan's configuration step (version group id default
+> `0x26A7270A` for version 5, refusal of a version-5 entry without a branch id)
+> is option (b) of D39.11.4V.2 and waits for that decision.
 
 **R39.11.4V.10** *Fee (completes R39.11.15).* A transparent Zcash-family coin
 pays the fee its `txfee` sets under the policy of chapter 38 R38.6.6a --
@@ -8557,3 +8576,8 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   it records this repository's version-5 layout and ZIP-244 digests in the
   shared UTXO code, written from the public ZIPs 225 and 244 and checked against
   the public test vectors; no forbidden-class input, chapter 01 R38 not engaged.
+- *Status note added 2026-11-17 -- after the compatibility note of §39.11.4V.*
+  Reloaded-original, clean side: it records where this repository's version-5
+  code differs from and agrees with R39.11.4V.2 -- R39.11.4V.10; no
+  forbidden-class input beyond the cleared section it cites, chapter 01 R38 not
+  engaged.
