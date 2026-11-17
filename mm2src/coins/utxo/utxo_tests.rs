@@ -12255,7 +12255,7 @@ mod zec_v5_wiring {
             matches!(&unrecorded, Err(e) if e.to_string().contains("scriptPubKey")),
             "{unrecorded:?}"
         );
-        let recorded = with_spent_output_recorded(&received, &spent_output);
+        let recorded = with_spent_output_recorded(&received, &spent_output, BRANCH_ID);
         assert_eq!(recorded.inputs[0].amount, 1_000_000);
         let digest = recorded
             .signature_hash(0, 1_000_000, &redeem, SignatureVersion::Base, 3)
@@ -12276,7 +12276,7 @@ mod zec_v5_wiring {
         // The funding spend: the first signer signs `SIGHASH_ALL`, the receiver verifies and signs the same digest.
         let signer = build_funding_spend_preimage_tx(&fields, &spent_tx, &redeem, 1_000).unwrap();
         let taker_sig = sign_funding_spend_input(&signer, &redeem, &taker, &fields).unwrap();
-        let recorded = with_spent_output_recorded(&over_the_wire(&signer), &spent_output);
+        let recorded = with_spent_output_recorded(&over_the_wire(&signer), &spent_output, BRANCH_ID);
         let digest = recorded
             .signature_hash(0, 1_000_000, &redeem, SignatureVersion::Base, 1)
             .unwrap();
@@ -12284,30 +12284,333 @@ mod zec_v5_wiring {
         let maker_sig = sign_funding_spend_input(&recorded, &redeem, &maker, &fields).unwrap();
         assert!(maker.public().verify(&digest, &maker_sig).unwrap());
     }
+}
 
-    /// Versions 3 and 4 are not changed by the record: a received preimage keeps the amount and the scriptPubKey it
-    /// was parsed with.
+// ---- Version-two swaps: the received preimage of an overwintered coin ----
+
+/// The signature digest of an overwintered transaction commits to the amount of the output an input spends, to the
+/// consensus branch id and, from version 5 on, to the scriptPubKey of that output. A preimage a node receives is
+/// parsed from transaction bytes, which carry none of the three for the digest's purposes, so the receiving side
+/// takes the amount and the script from the funding or taker-payment output the swap knows, and the branch id from
+/// its own configuration. These tests run the preimage through its wire form (serialize, then `parse_preimage`) for
+/// an overwintered version 4 coin and for a version 5 coin, for the funding spend and the taker-payment spend.
+#[cfg(not(target_arch = "wasm32"))]
+mod received_preimage_spent_output {
+    use super::order_posting_latency::my_address;
+    use super::*;
+    use crate::utxo::swap_proto_v2_scripts::{taker_funding_script, taker_payment_script};
+    use crate::utxo::utxo_common::{build_taker_payment_spend_preimage_tx, gen_taker_funding_spend_preimage,
+                                   gen_taker_payment_spend_preimage, sign_and_broadcast_taker_payment_spend,
+                                   sign_and_send_taker_funding_spend, sign_funding_spend_input,
+                                   sign_taker_payment_spend_input, validate_taker_funding_spend_preimage,
+                                   validate_taker_payment_spend_preimage, with_spent_output_recorded};
+    use crate::utxo::utxo_standard_swap_v2::UtxoTxPreimage;
+    use crate::{GenTakerFundingSpendArgs, GenTakerPaymentSpendArgs, TxPreimageWithSig};
+    use keys::{KeyPair, Public, Signature};
+    use serialization::serialize;
+
+    const SPENT_VALUE: u64 = 1_000_000;
+    const FUNDING_TIME_LOCK: u64 = 1_700_000_000;
+    const PAYMENT_TIME_LOCK: u64 = 1_700_001_000;
+    const TAKER_SECRET_HASH: [u8; 32] = [0xcc; 32];
+    const MAKER_SECRET_HASH: [u8; 32] = [0xbb; 32];
+    const MAKER_SECRET: [u8; 32] = [0x42; 32];
+    const UNIQUE_DATA: &[u8] = b"received preimage";
+
+    /// The coin shapes under test.
+    #[derive(Clone, Copy, Debug)]
+    enum Shape {
+        /// Overwintered, `txversion` 4, the version group id `0x892f2085` and the branch id `0x76b809bb`, ticker KMD.
+        Version4,
+        /// Overwintered, `txversion` 5, the version group id `0x26a7270a` and the branch id `0x77190ad9`.
+        Version5,
+    }
+
+    fn coin_of(shape: Shape, seed: &str) -> UtxoStandardCoin {
+        let mut fields =
+            utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), Some(seed), false);
+        match shape {
+            Shape::Version4 => {
+                fields.conf.ticker = "KMD".to_owned();
+                assert_eq!(
+                    (
+                        fields.conf.tx_version,
+                        fields.conf.version_group_id,
+                        fields.conf.consensus_branch_id
+                    ),
+                    (4, 0x892f_2085, 0x76b8_09bb)
+                );
+            },
+            Shape::Version5 => {
+                fields.conf.tx_version = 5;
+                fields.conf.version_group_id = 0x26a7_270a;
+                fields.conf.consensus_branch_id = 0x7719_0ad9;
+            },
+        }
+        assert!(fields.conf.overwintered);
+        utxo_coin_from_fields(fields)
+    }
+
+    fn key_pair_of(coin: &UtxoStandardCoin) -> &KeyPair { coin.as_ref().priv_key_policy.key_pair().unwrap() }
+
+    /// A transaction of the coin's version whose output 0 pays `script`.
+    fn paying_tx(coin: &UtxoStandardCoin, script: &Script) -> UtxoTx {
+        let conf = &coin.as_ref().conf;
+        let mut tx = UtxoTx::default();
+        tx.version = conf.tx_version;
+        tx.overwintered = true;
+        tx.version_group_id = conf.version_group_id;
+        tx.consensus_branch_id = if conf.tx_version == 5 {
+            conf.consensus_branch_id
+        } else {
+            0
+        };
+        tx.outputs.push(TransactionOutput {
+            value: SPENT_VALUE,
+            script_pubkey: script.to_bytes(),
+        });
+        tx
+    }
+
+    /// The preimage as the receiving node gets it: through its wire form.
+    fn parsed(receiver: &UtxoStandardCoin, in_memory: &TransactionInputSigner) -> TransactionInputSigner {
+        let bytes = serialize(&UtxoTx::from(in_memory.clone())).take();
+        receiver.parse_preimage(&bytes).unwrap().0
+    }
+
+    fn with_sig(preimage: TransactionInputSigner, signature: &Signature) -> TxPreimageWithSig<UtxoStandardCoin> {
+        TxPreimageWithSig {
+            preimage: UtxoTxPreimage(preimage),
+            signature: signature.clone(),
+        }
+    }
+
+    /// The `index`-th data push of a scriptSig, without the sighash-type byte that ends it.
+    fn signature_push(script_sig: &Bytes, index: usize) -> Signature {
+        let script = Script::from(script_sig.to_vec());
+        let instruction = script
+            .get_instruction(index)
+            .expect("the scriptSig has the instruction")
+            .expect("the instruction decodes");
+        let push = instruction.data.expect("the instruction is a push");
+        Signature::from(push[..push.len() - 1].to_vec())
+    }
+
+    fn mock_broadcast() {
+        NativeClient::send_transaction
+            .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(H256Json::default()))));
+    }
+
+    /// The signature of `public` over the digest of the received signer, taken with the amount and the script of
+    /// `spent` verifies; taken with another amount it does not.
+    fn assert_digest_commits_to_the_spent_output(
+        received: &TransactionInputSigner,
+        spent: &TransactionOutput,
+        branch_id: u32,
+        script_code: &Script,
+        hash_type: u32,
+        public: &Public,
+        signature: &Signature,
+    ) {
+        let digest = |output: &TransactionOutput| {
+            with_spent_output_recorded(received, output, branch_id)
+                .signature_hash(0, output.value, script_code, SignatureVersion::Base, hash_type)
+                .unwrap()
+        };
+        assert!(public.verify(&digest(spent), signature).unwrap());
+        let mut other_amount = spent.clone();
+        other_amount.value += 1;
+        assert!(!public.verify(&digest(&other_amount), signature).unwrap());
+        // A received version 4 signer has no branch id; the record gives it the receiving coin's.
+        assert_eq!(
+            with_spent_output_recorded(received, spent, branch_id).consensus_branch_id,
+            branch_id
+        );
+    }
+
+    fn funding_spend_case(shape: Shape) {
+        // The maker authors the preimage, the taker receives it.
+        let author = coin_of(shape, "received preimage maker");
+        let receiver = coin_of(shape, "received preimage taker");
+        let (maker_pub, taker_pub) = (*key_pair_of(&author).public(), *key_pair_of(&receiver).public());
+        let funding_redeem = taker_funding_script(FUNDING_TIME_LOCK as u32, &TAKER_SECRET_HASH, &taker_pub, &maker_pub);
+        let funding_tx = paying_tx(&receiver, &Builder::build_p2sh(&dhash160(&funding_redeem).into()));
+        let args = GenTakerFundingSpendArgs {
+            funding_tx: &funding_tx,
+            maker_pub: &maker_pub,
+            taker_pub: &taker_pub,
+            funding_time_lock: FUNDING_TIME_LOCK,
+            taker_secret_hash: &TAKER_SECRET_HASH,
+            taker_payment_time_lock: PAYMENT_TIME_LOCK,
+            maker_secret_hash: &MAKER_SECRET_HASH,
+        };
+        let authored = block_on(gen_taker_funding_spend_preimage(&author, &args, UNIQUE_DATA)).unwrap();
+        let in_memory = authored.preimage.0;
+        let author_signature = authored.signature;
+        let received = parsed(&receiver, &in_memory);
+
+        // An honest peer's signature verifies.
+        block_on(validate_taker_funding_spend_preimage(
+            &receiver,
+            &args,
+            &with_sig(received.clone(), &author_signature),
+        ))
+        .unwrap();
+        assert_digest_commits_to_the_spent_output(
+            &received,
+            &funding_tx.outputs[0],
+            receiver.as_ref().conf.consensus_branch_id,
+            &funding_redeem,
+            1,
+            &maker_pub,
+            &author_signature,
+        );
+
+        // A signature of another key does not.
+        let stranger = key_pair_from_seed("received preimage stranger").unwrap();
+        let wrong = sign_funding_spend_input(&in_memory, &funding_redeem, &stranger, author.as_ref()).unwrap();
+        let rejected = block_on(validate_taker_funding_spend_preimage(
+            &receiver,
+            &args,
+            &with_sig(received.clone(), &wrong),
+        ));
+        assert!(rejected.is_err());
+
+        // Signing from the stored, parsed preimage, as a restarted swap does, gives the signature of a fresh run.
+        mock_broadcast();
+        let sent = block_on(sign_and_send_taker_funding_spend(
+            &receiver,
+            &with_sig(received, &author_signature),
+            &args,
+            UNIQUE_DATA,
+        ))
+        .unwrap();
+        let fresh =
+            sign_funding_spend_input(&in_memory, &funding_redeem, key_pair_of(&receiver), receiver.as_ref()).unwrap();
+        // The cooperative script pushes the maker's signature, then the taker's.
+        assert!(signature_push(&sent.inputs[0].script_sig, 0) == author_signature);
+        assert!(signature_push(&sent.inputs[0].script_sig, 1) == fresh, "{shape:?}");
+    }
+
+    fn taker_payment_spend_case(shape: Shape) {
+        // The taker authors the preimage, the maker receives it.
+        let author = coin_of(shape, "received preimage taker");
+        let receiver = coin_of(shape, "received preimage maker");
+        let (taker_pub, maker_pub) = (*key_pair_of(&author).public(), *key_pair_of(&receiver).public());
+        let taker_redeem = taker_payment_script(PAYMENT_TIME_LOCK as u32, &MAKER_SECRET_HASH, &taker_pub, &maker_pub);
+        let taker_tx = paying_tx(&receiver, &Builder::build_p2sh(&dhash160(&taker_redeem).into()));
+        let maker_address = my_address(&receiver);
+        let dex_fee = DexFee::Standard(MmNumber::from((10_000u64, 100_000_000u64)));
+        let args = GenTakerPaymentSpendArgs {
+            taker_tx: &taker_tx,
+            time_lock: PAYMENT_TIME_LOCK,
+            maker_secret_hash: &MAKER_SECRET_HASH,
+            maker_pub: &maker_pub,
+            maker_address: &maker_address,
+            taker_pub: &taker_pub,
+            dex_fee: &dex_fee,
+            premium_amount: 0u64.into(),
+            trading_amount: 1u64.into(),
+            dex_fee_addr_raw_pubkey: test_dex_fee_addr_raw_pubkey(),
+        };
+        let authored = block_on(gen_taker_payment_spend_preimage(&author, &args, UNIQUE_DATA)).unwrap();
+        let in_memory = authored.preimage.0;
+        let author_signature = authored.signature;
+        let received = parsed(&receiver, &in_memory);
+
+        // An honest peer's signature (`SIGHASH_SINGLE`) verifies.
+        block_on(validate_taker_payment_spend_preimage(
+            &receiver,
+            &args,
+            &with_sig(received.clone(), &author_signature),
+        ))
+        .unwrap();
+        assert_digest_commits_to_the_spent_output(
+            &received,
+            &taker_tx.outputs[0],
+            receiver.as_ref().conf.consensus_branch_id,
+            &taker_redeem,
+            3,
+            &taker_pub,
+            &author_signature,
+        );
+
+        // A signature of another key does not.
+        let stranger = key_pair_from_seed("received preimage stranger").unwrap();
+        let wrong = sign_taker_payment_spend_input(&in_memory, &taker_redeem, &stranger, author.as_ref(), 3).unwrap();
+        let rejected = block_on(validate_taker_payment_spend_preimage(
+            &receiver,
+            &args,
+            &with_sig(received.clone(), &wrong),
+        ));
+        assert!(rejected.is_err());
+
+        // Signing from the stored, parsed preimage, as a restarted swap does, gives the signature of a fresh run
+        // over the same final outputs (`SIGHASH_ALL`).
+        mock_broadcast();
+        let sent = block_on(sign_and_broadcast_taker_payment_spend(
+            &receiver,
+            Some(&with_sig(received, &author_signature)),
+            &args,
+            &MAKER_SECRET,
+            UNIQUE_DATA,
+        ))
+        .unwrap();
+        assert_eq!(sent.outputs.len(), 2, "the fee output, then the maker's");
+        let final_signer = TransactionInputSigner {
+            outputs: sent.outputs.clone(),
+            ..in_memory
+        };
+        let fresh = sign_taker_payment_spend_input(
+            &final_signer,
+            &taker_redeem,
+            key_pair_of(&receiver),
+            receiver.as_ref(),
+            1,
+        )
+        .unwrap();
+        // The cooperative script pushes the maker's signature, then the taker's.
+        assert!(signature_push(&sent.inputs[0].script_sig, 0) == fresh, "{shape:?}");
+        assert!(signature_push(&sent.inputs[0].script_sig, 1) == author_signature);
+    }
+
     #[test]
-    fn t39_11_4v_6_recording_the_spent_output_leaves_version_4_unchanged() {
-        use crate::utxo::utxo_common::with_spent_output_recorded;
+    fn received_funding_spend_preimage_of_an_overwintered_version_4_coin() { funding_spend_case(Shape::Version4); }
 
-        let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
-        let mut spent_tx = UtxoTx::default();
-        spent_tx.version = 4;
-        spent_tx.overwintered = true;
-        spent_tx.outputs.push(TransactionOutput {
-            value: 1_000_000,
+    #[test]
+    fn received_funding_spend_preimage_of_a_version_5_coin() { funding_spend_case(Shape::Version5); }
+
+    #[test]
+    fn received_taker_payment_spend_preimage_of_an_overwintered_version_4_coin() {
+        taker_payment_spend_case(Shape::Version4);
+    }
+
+    #[test]
+    fn received_taker_payment_spend_preimage_of_a_version_5_coin() { taker_payment_spend_case(Shape::Version5); }
+
+    /// A signer that is not overwintered is returned unchanged by the record.
+    #[test]
+    fn recording_the_spent_output_leaves_a_coin_that_is_not_overwintered_unchanged() {
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+        fields.conf.overwintered = false;
+        fields.conf.zcash = false;
+        fields.conf.tx_version = 2;
+        let mut spent = UtxoTx::default();
+        spent.version = 2;
+        spent.outputs.push(TransactionOutput {
+            value: SPENT_VALUE,
             script_pubkey: vec![0xaa; 23].into(),
         });
         let outputs = vec![TransactionOutput {
             value: 10_000,
             script_pubkey: vec![0x51].into(),
         }];
-        let signer = build_taker_payment_spend_preimage_tx(&fields, &spent_tx, outputs).unwrap();
+        let signer = build_taker_payment_spend_preimage_tx(&fields, &spent, outputs).unwrap();
         let received = TransactionInputSigner::from_transaction(UtxoTx::from(signer), 0);
-        let recorded = with_spent_output_recorded(&received, &spent_tx.outputs[0]);
+        let recorded = with_spent_output_recorded(&received, &spent.outputs[0], 0x76b8_09bb);
         assert_eq!(recorded.inputs[0].amount, received.inputs[0].amount);
         assert_eq!(recorded.inputs[0].script_pubkey, received.inputs[0].script_pubkey);
+        assert_eq!(recorded.consensus_branch_id, received.consensus_branch_id);
     }
 }
 

@@ -2151,20 +2151,24 @@ pub(crate) fn build_funding_spend_preimage_tx(
 }
 
 /// A preimage received from the counterparty is parsed from transaction bytes, which carry neither the amount
-/// nor the scriptPubKey of the output an input spends. The ZIP 244 digest of a version 5 transaction commits to
-/// both, so the receiving side records them from the output it knows the input spends (the funding output or the
-/// taker payment output of the swap) before it signs or verifies. Any other transaction version is returned
-/// unchanged.
+/// nor the scriptPubKey of the output an input spends, and a parsed transaction of a version below 5 has no
+/// consensus branch id. The signature digest of an overwintered transaction commits to that amount, to the
+/// branch id and, from version 5 on (ZIP 244), to that scriptPubKey. So the receiving side records them before it
+/// signs or verifies: the amount and the scriptPubKey from the output it knows the input spends (the funding
+/// output or the taker payment output of the swap), the branch id from its own coin configuration. A signer that
+/// is not overwintered is returned unchanged.
 pub(crate) fn with_spent_output_recorded(
     signer: &TransactionInputSigner,
     spent_output: &TransactionOutput,
+    consensus_branch_id: u32,
 ) -> TransactionInputSigner {
     let mut signer = signer.clone();
-    if signer.overwintered && signer.version == 5 {
+    if signer.overwintered {
         if let Some(input) = signer.inputs.get_mut(DEFAULT_SWAP_VOUT) {
             input.amount = spent_output.value;
             input.script_pubkey = Some(spent_output.script_pubkey.clone().into());
         }
+        signer.consensus_branch_id = consensus_branch_id;
     }
     signer
 }
@@ -2283,7 +2287,11 @@ where
         ))
     })?;
 
-    let signer = &with_spent_output_recorded(&preimage.preimage.0, funding_output);
+    let signer = &with_spent_output_recorded(
+        &preimage.preimage.0,
+        funding_output,
+        coin.as_ref().conf.consensus_branch_id,
+    );
     if signer.inputs.len() != 1
         || signer.inputs[0].previous_output.hash != gen_args.funding_tx.hash()
         || signer.inputs[0].previous_output.index != DEFAULT_SWAP_VOUT as u32
@@ -2378,7 +2386,11 @@ where
         Some(output) => output,
         None => return TX_PLAIN_ERR!("funding tx has no output 0"),
     };
-    let signer = &with_spent_output_recorded(&preimage.preimage.0, funding_output);
+    let signer = &with_spent_output_recorded(
+        &preimage.preimage.0,
+        funding_output,
+        coin.as_ref().conf.consensus_branch_id,
+    );
     let my_sig = try_tx_s!(sign_funding_spend_input(
         signer,
         &funding_redeem,
@@ -2774,7 +2786,11 @@ where
     )
     .map_to_mm(|e| ValidateTakerPaymentSpendPreimageError::InternalError(format!("{:?}", e)))?;
 
-    let signer = &with_spent_output_recorded(&preimage.preimage.0, taker_output);
+    let signer = &with_spent_output_recorded(
+        &preimage.preimage.0,
+        taker_output,
+        coin.as_ref().conf.consensus_branch_id,
+    );
 
     if signer.inputs.len() != 1
         || signer.inputs[0].previous_output.hash != gen_args.taker_tx.hash()
@@ -2901,7 +2917,11 @@ where
     };
     let signer = TransactionInputSigner {
         outputs: std::mem::take(&mut outputs),
-        ..with_spent_output_recorded(&preimage.preimage.0, taker_payment_output)
+        ..with_spent_output_recorded(
+            &preimage.preimage.0,
+            taker_payment_output,
+            coin.as_ref().conf.consensus_branch_id,
+        )
     };
 
     let maker_sighash_type = SIGHASH_ALL_BASE | coin.as_ref().conf.fork_id;
