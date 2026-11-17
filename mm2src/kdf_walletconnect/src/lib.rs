@@ -38,6 +38,7 @@ use wc_common::{EnvelopeType, SymKey};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 pub mod chain;
+mod client_key;
 pub mod connection_handler;
 pub mod error;
 pub mod inbound_message;
@@ -83,22 +84,28 @@ fn reconnect_backoff(attempt: u32) -> Duration {
 struct RelayConnectParams {
     project_id: String,
     relay_address: String,
+    /// The one relay client signing key of this node's WalletConnect context (secret; never logged or returned).
+    signing_key: SigningKey,
+    /// Whether `signing_key` was loaded from the storage or created at start.
+    key_source: client_key::ClientKeySource,
 }
 
 impl RelayConnectParams {
     /// Connection options with a freshly signed auth token (the token of an earlier connection may have expired).
     /// `attempt` is the number of this connect attempt (1 for the first connect), used only for the debug log.
     fn options(&self, attempt: u32) -> Result<ConnectionOptions, WalletConnectError> {
-        let auth = relay_auth_token(&self.relay_address)?;
+        let auth = relay_auth_token(&self.relay_address, &self.signing_key)?;
         let opts = ConnectionOptions::new(self.project_id.clone(), auth).with_address(self.relay_address.as_str());
         let has_token =
             matches!(&opts.auth, relay_client::Authorization::Query(token) if !token.to_string().is_empty());
         common::log::debug!(
             "walletconnect: relay connect attempt={attempt} host={} project_id_present={} auth_token_present={} \
-             auth_token_fresh=true",
+             auth_token_fresh=true client_key={} client_key_source={}",
             relay_host(&opts.address),
             !self.project_id.is_empty(),
-            has_token
+            has_token,
+            client_key::fingerprint(&self.signing_key),
+            self.key_source.as_str()
         );
         Ok(opts)
     }
@@ -313,9 +320,12 @@ impl WalletConnectCtx {
         let storage = open_storage(ctx).await?;
         storage.init().await?;
 
+        let (signing_key, key_source) = client_key::load_or_create(storage.as_ref()).await?;
         let connect_params = RelayConnectParams {
             project_id: config.project_id,
             relay_address: config.relay_address,
+            signing_key,
+            key_source,
         };
         let opts = connect_params.options(1)?;
 
@@ -1044,13 +1054,16 @@ fn settle_to_relay_namespaces(namespaces: BTreeMap<String, settle::SettleNamespa
 /// attaches one.
 fn no_attestation() -> Option<std::sync::Arc<str>> { None }
 
-/// Builds the short-lived ed25519 JWT the relay requires for the connection.
-fn relay_auth_token(relay_address: &str) -> Result<relay_rpc::auth::SerializedAuthToken, WalletConnectError> {
-    let signing_key = SigningKey::generate(&mut rand::thread_rng());
+/// Builds the short-lived ed25519 JWT the relay requires for the connection, freshly signed (new issue and expiry
+/// time) with the node's stable client key.
+fn relay_auth_token(
+    relay_address: &str,
+    signing_key: &SigningKey,
+) -> Result<relay_rpc::auth::SerializedAuthToken, WalletConnectError> {
     AuthToken::new(metadata::APP_URL)
         .aud(relay_address)
         .ttl(Duration::from_secs(RELAY_AUTH_TTL_SECS))
-        .as_jwt(&signing_key)
+        .as_jwt(signing_key)
         .map_err(|e| WalletConnectError::Config(e.to_string()))
 }
 
@@ -1722,6 +1735,11 @@ mod establishment_tests {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod reconnect_tests {
+    use super::storage::sqlite::SqliteSessionStorage;
+    use super::storage::WcStorageOps;
+    use common::block_on;
+    use db_common::async_sql_conn::AsyncConnection;
+
     #[test]
     fn the_relay_host_has_no_port_path_or_query() {
         assert_eq!(
@@ -1783,5 +1801,108 @@ mod reconnect_tests {
             "wc_sessionRequest",
             &7,
         );
+    }
+
+    /// The `iss` (`did:key`) claim of a relay auth token.
+    fn token_issuer(opts: &ConnectionOptions) -> String {
+        use base64::Engine;
+        let relay_client::Authorization::Query(token) = &opts.auth else {
+            panic!("the relay auth is a query token");
+        };
+        let token = token.to_string();
+        let payload = token.split('.').nth(1).expect("JWT payload segment");
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("base64url payload");
+        let claims: serde_json::Value = serde_json::from_slice(&payload).expect("JSON claims");
+        claims["iss"].as_str().expect("iss claim").to_string()
+    }
+
+    fn params_with(signing_key: SigningKey) -> RelayConnectParams {
+        RelayConnectParams {
+            project_id: "test-project".to_string(),
+            relay_address: metadata::RELAY_ADDRESS.to_string(),
+            signing_key,
+            key_source: client_key::ClientKeySource::Created,
+        }
+    }
+
+    #[test]
+    fn relay_client_key_is_created_once_and_reused_across_connects() {
+        block_on(async {
+            let conn = AsyncConnection::open_in_memory().await.expect("open in-memory db");
+            let storage = SqliteSessionStorage::new(conn);
+            storage.init().await.expect("init schema");
+            assert_eq!(storage.load_client_key().await.unwrap(), None);
+
+            let (key, source) = client_key::load_or_create(&storage).await.expect("create key");
+            assert_eq!(source, client_key::ClientKeySource::Created);
+            let params = params_with(key);
+            let first = token_issuer(&params.options(1).expect("first connect"));
+            let second = token_issuer(&params.options(2).expect("reconnect"));
+            assert_eq!(first, second, "every connect is signed with the same client key");
+
+            // Another key is another client identity.
+            let other = params_with(SigningKey::generate(&mut rand::thread_rng()));
+            assert_ne!(first, token_issuer(&other.options(1).expect("other connect")));
+        });
+    }
+
+    #[test]
+    fn relay_client_key_survives_a_storage_round_trip() {
+        block_on(async {
+            let path = std::env::temp_dir().join(format!("kdf-wc-client-key-test-{}.db", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let created = {
+                let conn = AsyncConnection::open(path.clone()).await.expect("open db");
+                let storage = SqliteSessionStorage::new(conn);
+                storage.init().await.expect("init schema");
+                let (key, source) = client_key::load_or_create(&storage).await.expect("create key");
+                assert_eq!(source, client_key::ClientKeySource::Created);
+                key
+            };
+            // A new connection to the same file is the restarted node.
+            let conn = AsyncConnection::open(path.clone()).await.expect("reopen db");
+            let storage = SqliteSessionStorage::new(conn);
+            storage.init().await.expect("init schema again");
+            let (loaded, source) = client_key::load_or_create(&storage).await.expect("load key");
+            let _ = std::fs::remove_file(&path);
+            assert_eq!(source, client_key::ClientKeySource::Loaded);
+            assert_eq!(loaded.to_bytes(), created.to_bytes());
+            assert_eq!(
+                token_issuer(&params_with(loaded).options(1).unwrap()),
+                token_issuer(&params_with(created).options(1).unwrap()),
+            );
+        });
+    }
+
+    #[test]
+    fn corrupt_stored_relay_client_key_is_replaced_by_a_new_one() {
+        block_on(async {
+            for corrupt in ["not hex at all", "abcd", ""] {
+                let conn = AsyncConnection::open_in_memory().await.expect("open in-memory db");
+                let storage = SqliteSessionStorage::new(conn);
+                storage.init().await.expect("init schema");
+                storage.save_client_key(corrupt.to_string()).await.unwrap();
+
+                let (key, source) = client_key::load_or_create(&storage).await.expect("replace key");
+                assert_eq!(
+                    source,
+                    client_key::ClientKeySource::Created,
+                    "corrupt value {corrupt:?}"
+                );
+                let (again, source) = client_key::load_or_create(&storage).await.expect("load new key");
+                assert_eq!(source, client_key::ClientKeySource::Loaded);
+                assert_eq!(again.to_bytes(), key.to_bytes());
+            }
+        });
+    }
+
+    #[test]
+    fn relay_client_key_fingerprint_is_the_public_key_prefix_only() {
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let fp = client_key::fingerprint(&key);
+        assert_eq!(fp.len(), 8);
+        assert!(hex::encode(key.verifying_key().as_bytes()).starts_with(&fp));
     }
 }

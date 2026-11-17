@@ -353,6 +353,21 @@ Lifecycle on relay connect:
 > could not be read), the first eight characters of the topic, the relay tag and
 > the request id; a payload, a key or a full topic is never logged.
 
+> **Status note (2026-11-17, Reloaded-original; informative).** The relay
+> identifies a client by the ed25519 key that signs its auth token. The node
+> keeps one such client key for its WalletConnect context: it is created once,
+> stored next to the sessions (the same store, native and browser), loaded
+> before the first connect, and used to sign every later token (the token
+> itself is still signed anew for each connect, with a new issue and expiry
+> time). A missing or unusable stored key is replaced by a new one, which is
+> stored. Reason: sessions are meant to keep working after a relay reconnect
+> and after a node restart, and a client identity that changed with each
+> connect could make the relay refuse requests on sessions made under an
+> earlier identity. Lab check pending. The key is secret: it is never logged,
+> returned or put into an error text; the debug log carries only the first
+> eight hex digits of the public key and whether the key was loaded or newly
+> created.
+
 ### 22.5.3 On-disk record format (Interop / wire-format reuse, R29)
 
 The `open` on-disk session record exists to be byte-interchangeable

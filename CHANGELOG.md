@@ -311,6 +311,9 @@ the previous version used. The safe way:
   minutes; the node did not reopen it, and a new connection request failed until a restart. It now
   reconnects with a growing wait and subscribes again to its pairings and sessions. Detail: PR #393;
   CRD ch.22 §22.5.2.
+- **A WalletConnect session keeps working after the relay reconnects or the node restarts.** The node now
+  keeps one relay client identity, stored with its sessions, instead of a new one for every connection.
+  Lab check pending. Detail: PR #393; CRD ch.22 §22.5.2.
 
 #### Tendermint (Cosmos) coins
 
