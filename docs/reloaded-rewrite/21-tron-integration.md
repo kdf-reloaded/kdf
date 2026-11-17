@@ -548,30 +548,27 @@ transaction, and check that the encoded contract of a TRX transfer
 starts with its type field (`08 01`) and that of a TRC20 transfer
 with `08 1f`.
 
-## 21.10B Reference behavior of the TRON wallet surface (Spec Reader round 0.5.0-10; pending the KDF Dirty Gate)
+## 21.10B Reference behavior of the TRON wallet surface
 
-> **Provenance status: pending the KDF Dirty Gate.** This section is a
-> candidate under chapter 01 R40: until the gate clears it and this marker is
-> replaced by the clearance record, it MUST NOT be relied on as a statement of
-> required behavior and MUST NOT be implemented from. It was written by the
-> dirty-side specification author on 2026-11-17 (Spec Reader round 0.5.0-10)
-> under the two-team procedure of chapter 01 §1.4A, from the reference
-> lineage at the rows `v3.0.0-beta`, `v2.6.0-beta` and `feat/tron-swap-support
-> (as of 2026-04-23)` of chapter 02 §2.15A (read read-only; no untabled state
-> was read), public TRON documentation, and this repository's own tree. It
-> edits no sentence of §21.0 -- §21.11B. Each rule names the existing rule it
-> completes; where a statement here is more exact than the sentence it
-> completes, the statement here describes the reference and the completed
-> rule still governs Reloaded until the lane decides otherwise. Numbering:
-> R21.10B.1 -- R21.10B.9, T21.10B.1 -- T21.10B.15, D21.10B.1 -- D21.10B.3.
-> Every passage below is marked *(pending gate)* until cleared.
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-17,
+> measure 0.04 (attestation in §21.13).**
+> This section was written on 2026-11-17 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-10) under the two-team procedure of chapter 01 §1.4A, from the
+> reference lineage at the rows `v3.0.0-beta`, `v2.6.0-beta` and
+> `feat/tron-swap-support (as of 2026-04-23)` of chapter 02 §2.15A (read
+> read-only; no untabled state was read), public TRON documentation, and
+> this repository's own tree. It edits no sentence of §21.0 -- §21.11B. Each
+> rule names the existing rule it completes; where a statement here is more
+> exact than the sentence it completes, the statement here describes the
+> reference and the completed rule still governs Reloaded until the lane
+> decides otherwise. Numbering: R21.10B.1 -- R21.10B.9, T21.10B.1 --
+> T21.10B.15, D21.10B.1 -- D21.10B.3.
 
 *Scope.* The wallet surface a client meets when TRON is switched on: the
 mmrpc 2.0 activation route, the node client's order and failover, key
 policies and HD methods, the activation result, transaction history, the
 withdraw fee estimate, the address methods, and orders. Swaps stay with
 §21.11B. Unless a rule says otherwise it states the row `v3.0.0-beta`.
-*(pending gate)*
 
 **R21.10B.1** *Reference states (completes the §21.4 reference note).* The
 row `v2.6.0-beta` has **no TRON wallet behavior**: the `TRX` protocol case
@@ -583,11 +580,10 @@ required as for every EVM platform at that row); no rule below holds there.
 The row `feat/tron-swap-support (as of 2026-04-23)` agrees with
 `v3.0.0-beta` on every point of this section except one: its withdraw fee
 estimate has no account-creation cost and its fee details have no
-`account_creation_fee` member (R21.10B.7). *(pending gate)*
+`account_creation_fee` member (R21.10B.7).
 
 **R21.10B.2** *Activation request (completes R-A1 and the §21.4 note; the
 member table of chapter 35 R35.1.1 applies with these TRON points).*
-*(pending gate)*
 
 - *Routes.* Both `enable_eth_with_tokens` and `task::enable_eth::init`
   read the same request; TRC20 tokens may also be added later through
@@ -636,7 +632,6 @@ member table of chapter 35 R35.1.1 applies with these TRON points).*
   balance read answers `Transport` (HTTP 502).
 
 **R21.10B.3** *Node order and failover (completes R-N1, R-N2 and R-WP2).*
-*(pending gate)*
 
 - *Order.* The configured list is shuffled into a random order once, at
   activation. Each request walks the list from its head. When a node
@@ -675,9 +670,9 @@ member table of chapter 35 R35.1.1 applies with these TRON points).*
 
 R-WP2 makes Reloaded move on after a top-level `Error` object of any text;
 the reference stops there unless the text is the rate limiter's. R-WP2
-governs Reloaded. *(pending gate)*
+governs Reloaded.
 
-**R21.10B.4** *Key policies and HD (completes R-A2).* *(pending gate)*
+**R21.10B.4** *Key policies and HD (completes R-A2).*
 
 - *Single key and global HD.* Both activate. Under a global-HD login the
   address is derived under the coin config's `derivation_path` (the
@@ -720,7 +715,7 @@ and `unspendable` (0) decimal strings; `nfts_infos` is empty. Global HD:
 `current_block`, `ticker`, `wallet_balance` (accounts with base58check
 addresses and their derivation paths) and an empty `nfts_infos`.
 `enable_erc20` reports the token contract in base58check as
-`token_contract_address`. *(pending gate)*
+`token_contract_address`.
 
 **R21.10B.6** *Transaction history (completes R-T4).* No TRON history source
 exists at either row: the reference reads none of the full-node API, a
@@ -736,10 +731,10 @@ and `to` in base58check, `tx_hash` as 64 lowercase hex digits without
 `0x`, `tx_hex` the signed protobuf transaction, `block_height` 0,
 `internal_id` empty, `timestamp` the local time of building,
 `transaction_type` `StandardTransfer`, `memo` null and `fee_details` of
-R21.10B.7. *(pending gate)*
+R21.10B.7.
 
 **R21.10B.7** *Withdraw fee estimate and amounts (completes R-F1, R-F2,
-R-W2, R-W3 and R-W6).* *(pending gate)*
+R-W2, R-W3 and R-W6).*
 
 - *Inputs read per withdraw:* the current block, the sender's
   `POST /wallet/getaccountresource` (`freeNetUsed`, `freeNetLimit`,
@@ -798,9 +793,8 @@ a transaction's bandwidth from staked or from free bandwidth as a whole and
 otherwise burns TRX for the whole size; the reference charges only the
 shortfall of the two pools summed. Remedy: Reloaded's estimate follows the
 node's rule, so that it is never below what the node charges.
-*(pending gate)*
 
-**R21.10B.8** *Address methods (completes R-WP5 and R-AD1).* *(pending gate)*
+**R21.10B.8** *Address methods (completes R-WP5 and R-AD1).*
 
 - `validateaddress` accepts the base58check form (34 characters starting
   with `T`, checksum checked) and the hex wire form (42 hex digits
@@ -829,7 +823,7 @@ activated as trading-capable passes that check and then fails the
 balance-and-fee check, because the swap fee is computed through the EVM
 gas path and the coin has no EVM node; the answer is the same legacy
 error body and no order is created. The row `v2.6.0-beta` has the same
-wallet-only check. *(pending gate)*
+wallet-only check.
 
 **D21.10B.1** *TRC20 `fee_limit` policy.* The reference sets `fee_limit` to
 the dry-run energy times the energy price with no margin; Reloaded today
@@ -837,18 +831,18 @@ sets a fixed cap (compatibility note). The cap is not visible to a peer.
 Options: (a) the reference's figure; (b) the estimate plus a stated margin,
 bounded by a stated maximum; (c) a fixed cap. The choice also fixes what
 the fee details report as the most the transfer can cost (D21.B5 of
-§21.11B.4 states the charging semantics). *(pending gate)*
+§21.11B.4 states the charging semantics).
 
 **D21.10B.2** *`convertaddress` for a TRON coin.* The reference answers an
 EVM `0x` form for a TRON coin. Options: (a) parity; (b) refuse the method
 for TRX and TRC20; (c) convert between the base58check and the `41…` hex
-form under a TRON-specific format value. *(pending gate)*
+form under a TRON-specific format value.
 
 **D21.10B.3** *Key policies that activate but cannot send.* At the
 reference a browser build activates TRON under MetaMask and shows an
 address that withdraw then refuses. Options: (a) parity; (b) refuse at
 activation every key policy the TRON withdraw refuses (R21.10B.4), with
-the refusal token of the route. *(pending gate)*
+the refusal token of the route.
 
 > **Compatibility (this repository on dev, 2026-11-17; its own code, not
 > the reference).** TRX and TRC20 activate only through legacy `enable`
@@ -868,19 +862,18 @@ the refusal token of the route. *(pending gate)*
 > node read fails); `max: true` for TRX sends the whole balance without
 > deducting the fee, and a TRX amount plus fee above the balance is not
 > refused before building; the TRC20 `fee_limit` is a fixed cap.
-> *(pending gate)*
 
 *Not established.* (1) Nothing was measured against a running reference
 binary or a live node. (2) The exact text the legacy error body carries in
 R21.10B.8 and R21.10B.9 is deliberately not recorded. (3) Whether the TRON
 node's energy dry run includes the dynamic-energy penalty in
 `energy_used` was not checked. (4) The swap-fee failure of R21.10B.9 for a
-trading-capable coin was read, not executed. *(pending gate)*
+trading-capable coin was read, not executed.
 
 *Acceptance rows.* Each row runs against a stub TRON node that answers the
 public endpoints of §21.9 with the forms the row names. *Parity* is the
 reference behavior above; where Reloaded keeps a different rule the row
-names it. *(pending gate)*
+names it.
 
 T21.10B.1 *Activation result.* A one-shot activation of a TRX platform
 with one TRC20 token, single key, answers a result keyed by the
@@ -1535,10 +1528,8 @@ V3. The address encoding, protobuf transaction/contract formats,
 - *Scoped addition (2026-11-17, Spec Reader round 0.5.0-10) -- §21.10B
   (R21.10B.1 -- R21.10B.9, D21.10B.1 -- D21.10B.3, the compatibility note,
   the not-established paragraph, T21.10B.1 -- T21.10B.15); no other text of
-  this chapter was changed.* **KDF Dirty Gate: pending** (chapter 01 R40;
-  the section carries the pending-clearance marker at its head and every
-  passage in it is marked *(pending gate)*; this item is replaced by the
-  clearance record with the R39 scope attestation when the gate clears it).
+  this chapter was changed.* **KDF Dirty Gate: PASS on 2026-11-17, measure 0.04, no findings**
+  (chapter 01 R40; the attestation closes this item).
   *Inputs:* (1) the forbidden corpus at the rows `v3.0.0-beta`,
   `v2.6.0-beta` and `feat/tron-swap-support (as of 2026-04-23)` of chapter
   02 §2.15A, read read-only (the `v3.0.0-beta` sources were read from a
@@ -1569,3 +1560,19 @@ V3. The address encoding, protobuf transaction/contract formats,
   02 §2.15A: every state read already had one, and each row's identifier
   was confirmed, by read-only inspection of the historical record's
   reference metadata, to be the commit the row names.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-17, measure
+  0.04 on the discretionary-expression basis, no findings. Reference states
+  (chapter 02 R13): PASS; the rows `dev (as of 2026-03-27)` and
+  `v3.0.0-beta`, whose trees are identical, `feat/tron-swap-support (as of
+  2026-04-23)` and `v2.6.0-beta`, all tabled in §2.15A. Extent: the TRON
+  wallet surface of the reference (mmrpc 2.0 platform and token activation;
+  the node client and its failover; key policies and HD; the activation
+  result; history; the withdraw fee estimate and amounts; fee details;
+  address methods; order creation), compared at the rows `dev (as of
+  2026-03-27)` and `v3.0.0-beta` (the same tree), `feat/tron-swap-support
+  (as of 2026-04-23)` and `v2.6.0-beta`; 22 source files of that surface
+  compared at the dev/`v3.0.0-beta` tree, the core client, fee, withdraw and
+  activation files read in full or in their relevant parts; the branch row
+  and `v2.6.0-beta` compared on the points attributed to them. Method:
+  reading, combined with a mechanical word n-gram comparison (6-gram and
+  4-gram) and a per-token inventory; the additions embed no code blocks.
