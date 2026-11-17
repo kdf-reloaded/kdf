@@ -818,6 +818,29 @@ terms; the clean implementer works from this list):
 > activation starts, answered as `InvalidRequest` (string, HTTP 400) instead of
 > activating with the local key; the WalletConnect form is accepted only once
 > its activation (plan item 1) is built.
+>
+> **Status note (2026-11-17, Reloaded-original).** Decided by the maintainer
+> for every coin family; this change does Tendermint. The 2026-11-15 note's
+> "`IguanaPrivKey` activates as before" is superseded under an HD login. There
+> a request with `priv_key_policy: IguanaPrivKey` (bare string or
+> `{"type": "IguanaPrivKey"}`) is honored: the coin signs with the single
+> internal key of the node's crypto context, the key the UTXO family takes for
+> the same request, which under an HD login is the seed-derived internal key
+> and not the key of an iguana login with the same passphrase. The coin's
+> address is the bech32 account of that key under the coin's `account_prefix`;
+> `path_to_address` plays no part, so a value that does not parse is not an
+> error in this case. An absent value and `ContextPrivKey` keep R36.1.2 and
+> R36.1.4 step 3 under an HD login (the key at `path_to_address`) and the single
+> key under an iguana login; `IguanaPrivKey` under an iguana login is unchanged.
+> The hardware refusal stays first and applies under both logins; when
+> `activation_params` is present (public-key or WalletConnect form) the login
+> and `priv_key_policy` play no part, as before (R36.14.13). Tokens of the
+> platform follow the platform coin's key, and the activation result has the
+> same shape as under an iguana login (`address` of the single key). The task
+> variant (`task::enable_tendermint::init`) shares the build and behaves the
+> same. Tendermint swaps are off, so no swap-key question arises now; the
+> question is open for when they return. This is a deliberate divergence from
+> the reference, which accepts and ignores the member and uses the HD key.
 
 > **Code-quality finding (informative; trigger: apparent with little extra
 > effort).** In the reference, a malformed `WithPubkey` key (a `value` that is

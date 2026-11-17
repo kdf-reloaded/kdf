@@ -6538,6 +6538,341 @@ rather than as a generic RPC failure.
 > behaviour for the transparent side: nothing on this coin's path asks the backend to
 > decode a transaction.
 
+### 39.11.4V Transparent Zcash transaction versions
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-17,
+> measure 0.02 (attestation in §39.9).**
+> This section was written on 2026-11-17 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-11) under the two-team procedure of chapter 01 §1.4A, from the
+> reference lineage at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter
+> 02 §2.15A, with the later rows `main (as of 2026-10-07)`,
+> `feat/tron-swap-support (as of 2026-04-23)` and `feat/tron-gasfree (as of
+> 2026-05-04)` compared on the files concerned (read read-only; no untabled
+> state was read), the public ZIPs it names, the coins file, and this
+> repository's own tree. It edits no sentence of this chapter. It
+> **completes R39.11.15**, and the status note of 2026-11-12 under it, for
+> the transparent coins of the Zcash family; where a statement here is more
+> exact than the sentence it completes, the statement here describes the
+> reference and the completed rule still governs Reloaded until the lane
+> decides otherwise. Numbering: R39.11.4V.1 -- R39.11.4V.10, D39.11.4V.1 --
+> D39.11.4V.3 and T39.11.4V.1 -- T39.11.4V.12.
+
+*Scope and placement.* A transparent Zcash-family coin is an ordinary UTXO coin
+whose coins-file entry sets `overwintered` (ZEC, KMD and the Komodo asset
+chains, ZER, BTCZ, FLUX and others); it is not a shielded coin of this chapter.
+The section sits here because R39.11.15 is the one rule of the document set that
+binds which transaction versions the shared UTXO parser reads, and no chapter
+binds the four configuration fields `txversion`, `overwintered`,
+`version_group_id` and `consensus_branch_id`: chapter 58 §58.2 binds
+`signature_version` and `fork_id` only (R58.2.6 names the overwintered flags
+without binding them), chapter 61 binds the sighash suffix, and chapter 38 binds
+the UTXO fee, history and Electrum rules this section refers to. Swaps of these
+coins follow chapters 15, 51 and 52; this section states only what depends on
+the transaction version.
+
+**R39.11.4V.1** *Reference states (completes R39.11.15).* The rows `v2.6.0-beta`
+and `v3.0.0-beta` agree on every point of this section. The later rows `main (as
+of 2026-10-07)`, `feat/tron-swap-support (as of 2026-04-23)` and
+`feat/tron-gasfree (as of 2026-05-04)` do not differ from `v3.0.0-beta` in any
+file this section rests on. No tabled state of the historical record has the
+version-5 transaction layout of ZIP 225, the ZIP 244 transaction identifier or
+signature digest, the version-5 version group id, a branch id for NU7, or a
+ZIP 317 fee: for a transparent Zcash-family coin the reference **has no
+version-5 behavior at all**, and every statement below about version 5
+describes what its version-4 machinery does when a coin entry names version 5.
+
+**R39.11.4V.2** *The four configuration fields (completes R39.11.15).* Each is a
+top-level member of the coin's entry and is read once, at activation.
+
+| Field | Read as | When absent, or of another JSON kind | Refused at activation |
+| --- | --- | --- | --- |
+| `txversion` | a JSON integer, kept as a signed 32-bit number | 1 | never: any integer is accepted, 5 and higher included |
+| `overwintered` | the Zcash-family format is selected only by the JSON integer `1` | not overwintered; so are `0`, any other integer, the boolean `true` and a string | never |
+| `version_group_id` | a JSON string of exactly eight hexadecimal digits, with or without a leading `0x`, digits in either case, read as the number written (most significant digit first) | `0x03C48270` when `txversion` is 3 and the coin is overwintered; `0x892F2085` when `txversion` is 4 and the coin is overwintered; `0` otherwise, `txversion` 5 and higher included | a string that is not eight hexadecimal digits after the optional prefix |
+| `consensus_branch_id` | the same string form as `version_group_id` | `0x5BA81B19` when `txversion` is 3; `0x76B809BB` when `txversion` is 4, whether or not the coin is overwintered; `0` otherwise, `txversion` 5 and higher included | as for `version_group_id` |
+
+A refused hexadecimal value fails the activation: the task-managed UTXO
+activation answers `CoinCreationError` with the ticker and an error string, and
+the legacy activation methods answer the legacy error body (chapter 55
+R55.1.10). A JSON number given for either hexadecimal field is not refused; it is
+treated as absent and the default applies. The branch id is a static value of
+the entry: the reference has no table of upgrade heights and never changes the
+value with the chain's height, so the branch id in force is the one the entry
+names. Every Zcash-family UTXO entry of the coins file sets `txversion` 4 and
+`overwintered` 1.
+
+**R39.11.4V.3** *The layouts built and read (completes R39.11.15).* The reference
+builds every transparent transaction of a coin from these fields, with no version
+check:
+
+- a coin that is not overwintered gets the Bitcoin layout, with the plain
+  `txversion` as its version field;
+- an overwintered coin with `txversion` 3 gets the Overwinter layout of ZIP 202:
+  the header word (the version with the overwintered flag, the top bit, set), the
+  version group id, the inputs, the outputs, the lock time, the expiry height and
+  an empty JoinSplit count;
+- an overwintered coin with `txversion` 4 **or higher** gets the version-4
+  (Sapling) layout of the Zcash protocol specification: the same fields followed
+  by a zero value balance, an empty Sapling spend list, an empty Sapling output
+  list and an empty JoinSplit count, with no binding signature.
+
+With `txversion` 5 the header word therefore carries version 5 and the
+overwintered flag, and the body after it is the version-4 layout: no consensus
+branch id field is written, the lock time and the expiry height stay after the
+outputs, and none of the Sapling or Orchard bundle fields of ZIP 225 appear. The
+reference parses by the same rules: an overwintered header with version 4 or
+higher is read in the version-4 field order, whatever the version, and the parser
+has no version-5 or version-6 layout. This is the behavior R39.11.15 records for
+this repository's shared parser; the two agree.
+
+**R39.11.4V.4** *Signature hash (completes R39.11.15).* For an overwintered coin
+with `txversion` 3 or higher, the reference signs every transparent input --
+pay-to-public-key-hash, pay-to-public-key and the HTLC's pay-to-script-hash --
+with the digest whose shape ZIP 243 defines: BLAKE2b-256 under the
+personalization `ZcashSigHash` followed by the configured `consensus_branch_id`
+as four little-endian bytes, over the header word, the version group id, the
+prevouts, sequence and outputs hashes, the JoinSplit, Sapling spend and Sapling
+output hashes (all zero for these transactions), the lock time, the expiry
+height, the value balance, the sighash type, and the signed input's outpoint,
+script code, amount and sequence. The same shape is used for every version from 3
+upward, 5 included; the reference has no ZIP 244 digest. The configured
+`consensus_branch_id` enters only this personalization and is written nowhere in
+the transaction; the `version_group_id` enters both the transaction header and
+the digest. A coin that is not overwintered signs with the algorithm its
+`signature_version` selects (chapter 58 §58.2).
+
+> **Code-quality finding (informative).** For `txversion` 3 the reference's
+> digest still includes the Sapling spend and output hashes and the value
+> balance, which the Overwinter digest of ZIP 143 does not have, so a signature
+> over an overwintered version-3 transaction does not match the digest ZIP 143
+> defines. No Zcash-family entry of the coins file uses version 3, and this
+> repository's digest has the same shape. Remedy: refuse an overwintered
+> `txversion` 3 at activation (D39.11.4V.2 (b) does), or give version 3 the
+> ZIP 143 field list. *(Trigger: a rule the code plainly violates -- the public
+> ZIP 143 field list -- seen while reading the digest for this rule.)*
+
+**R39.11.4V.5** *An entry with `txversion` 5 (completes R39.11.15).* With
+`txversion` 5 and `overwintered` 1 in the coin's entry:
+
+- *Activation* succeeds like any other; nothing is refused or warned about.
+  Without `version_group_id` and `consensus_branch_id` in the entry both are `0`
+  (R39.11.4V.2); with them, the configured values are used.
+- *Withdraw* (the legacy and the versioned method alike) builds the layout of
+  R39.11.4V.3 with header version 5, signs each input with the digest of
+  R39.11.4V.4 under the configured branch id and with the sighash type
+  `SIGHASH_ALL` (`0x01`, the coin's `fork_id` being 0), and answers the
+  transaction in `tx_hex` and the identifier of R39.11.4V.7 in `tx_hash`,
+  without broadcasting it. Neither the layout nor the digest is the one ZIP 225
+  and ZIP 244 define, and the identifier is not computed by the version-5 rule.
+- *Broadcast* goes through `send_raw_transaction`, which passes the bytes to the
+  backend (`blockchain.transaction.broadcast` over Electrum, `sendrawtransaction`
+  on a native node). A refusal by the node answers the legacy error body
+  (chapter 55 R55.1.10: HTTP 500, an `error` string) whose text carries the
+  node's refusal; there is no typed error token. On success the method answers
+  `tx_hash` as the backend returns it. In a swap the same refusal ends the step
+  with that step's failure event (for example `TakerFeeSendFailed`,
+  `MakerPaymentTransactionFailed`, `TakerPaymentTransactionFailed`,
+  `TakerPaymentSpendFailed`, `MakerPaymentRefundFailed`), which carries the
+  refusal as an error string.
+
+The same answer reports a version-4 transaction on a network that no longer
+accepts version 4: the error shape does not depend on the reason for the
+refusal.
+
+**R39.11.4V.6** *Expiry height (completes R39.11.15).* The reference sets the
+expiry height to 0 in every transparent transaction it builds for an
+overwintered coin -- withdraws, DEX fee and burn transactions, swap payments,
+HTLC spends and refunds, and the version-two funding transaction and its spends
+-- whatever the `txversion`. Under ZIP 203 an expiry height of 0 means that the
+transaction does not expire. The swap's confirmation wait applies an expiry check
+only to a non-zero expiry height, so it applies none to these transactions. The
+reference has no version-5 expiry rule; an entry naming version 5 gets the same
+0.
+
+**R39.11.4V.7** *Transaction identifier (completes R39.11.15).* For a transparent
+Zcash-family transaction the reference computes the identifier as the double
+SHA-256 of the serialized bytes and reports it in display (byte-reversed) order:
+in the `tx_hash` of a withdraw answer, in the `tx_hash` and `internal_id` of a
+history row, and in the `tx_hash` of the swap events that carry a transaction.
+The swap's confirmation wait and the validation of a counterparty's payment look
+the transaction up at the backend under that identifier. Only
+`send_raw_transaction` answers the identifier the backend returns. For versions
+1 to 4 this is the network's identifier. For a version-5 transaction of the
+reference's own building it is the double SHA-256 of bytes the network refuses,
+so it names no network transaction; the ZIP 244 identifier is computed nowhere.
+
+**R39.11.4V.8** *Reading a version the parser does not have (completes
+R39.11.15).* A ZIP 225 transaction (version 5, with or without shielded parts),
+and likewise a version-6 one, is read against the version-4 field order of
+R39.11.4V.3 and refused as malformed, unless its bytes happen to form a
+well-formed version-4-layout transaction of the same length, in which case it is
+read with wrong contents. What each surface does with the refusal:
+
+- *Balance and spendable outputs* are unaffected: they come from the backend's
+  listing of the address's unspent outputs, which the reference does not parse,
+  so an output received in such a transaction is counted and can be spent.
+- *Legacy history* (the per-coin history file of chapter 38 §38.5A): the
+  transaction gets no row, the failure is logged, and the next collection pass
+  tries it again, with the same result. A transaction whose inputs spend outputs
+  of an unreadable transaction gets no row either, because the input amounts and
+  senders are read from the parsed previous transaction.
+- *Version-two history* (the SQLite store of chapter 38 §38.5A): the fetch stops
+  at the unreadable transaction, pauses, and starts again from the address
+  listing; the transactions fetched before it keep their rows, those after it in
+  the fetch order are never added, and the history's sync status never reaches
+  finished.
+- *Swap validation*: a counterparty's DEX fee or payment that cannot be read
+  fails the validation step. An unreadable DEX fee is recorded by the maker as
+  `TakerFeeValidateFailed`; an unreadable taker payment is recorded by the
+  maker as `TakerPaymentValidateFailed`, followed by
+  `MakerPaymentWaitRefundStarted`; an unreadable maker payment is recorded by
+  the taker as `MakerPaymentValidateFailed`. Remedy: a reader for every
+  transaction version the network accepts -- the version-5 reader of plan
+  `zec-v5-transactions`, completing R39.11.15 -- with version 6 decided by
+  D39.11.4V.3.
+- *Spend detection and secret extraction*: when the backend's history of the
+  HTLC address holds a transaction that cannot be read, the search for the
+  payment's spend reports an error instead of a spend or its absence, and a
+  spend that cannot be read yields no secret. Remedy: as for swap validation,
+  a reader for every transaction version the network accepts -- the version-5
+  reader of plan `zec-v5-transactions`, completing R39.11.15 -- with version 6
+  decided by D39.11.4V.3.
+
+**R39.11.4V.9** *`avg_blocktime` (completes R39.11.15).* For a transparent UTXO
+coin the reference reads `avg_blocktime` as a non-negative JSON integer
+(seconds) and uses it in two places only: a Lightning activation requires it on
+the platform coin, and the shielded coin of this chapter derives a sync start
+height from a date with it (§39.6). It is read nowhere on the swap path (lock
+times, confirmation waits and polling intervals do not use it), nowhere in the
+history collectors, and nowhere in the Electrum client or the fee logic. A change
+of a Zcash-family coin's block spacing therefore changes no reference behavior of
+the transparent coin.
+
+> **Compatibility (this repository on dev, 2026-11-17; its own code, not the
+> reference).** Reloaded reads `avg_blocktime` where the reference does not: in
+> the Electrum server order and staleness rules of chapter 38 (R38.6.4l,
+> R38.6.4o) and in the per-coin fee-estimate cache lifetime (R38.6.6k), so a
+> Zcash-family coin's value is an input to those rules. Reloaded reads the four
+> fields of R39.11.4V.2 with the same forms and defaults, writes the layouts of
+> R39.11.4V.3, signs with the digest of R39.11.4V.4 and sets the expiry height to
+> 0. Nothing else of Reloaded's behavior was checked for this section.
+
+**R39.11.4V.10** *Fee (completes R39.11.15).* A transparent Zcash-family coin
+pays the fee its `txfee` sets under the policy of chapter 38 R38.6.6a --
+R38.6.6b, computed over the size of the version-4-layout bytes; the reference has
+no Zcash-specific fee rule and no ZIP 317 computation at either row. ZIP 317's
+conventional fee is counted in logical actions derived from the inputs and
+outputs, not in bytes, so whether a per-kilobyte rate meets it depends on the
+rate and on the transaction's shape. Remedy: the open point on ZIP 317 fees in
+plan `zec-v5-transactions` settles the rate Reloaded uses.
+
+D39.11.4V.1 *(Open.)* *A transaction of a version the history cannot read.*
+Reproducing the reference (R39.11.4V.8) leaves such a transaction out of the
+legacy history without a signal, and keeps the version-two history in progress
+for ever without the transactions after it. A version the Zcash reader cannot
+read remains possible after the plan's reading step. Options: (a) parity with
+the reference; (b) skip such a transaction so that the rest of the history is
+complete, and report its identifier through the history's sync status or error
+channel; (c) add a row from the backend's listing alone (identifier and height,
+amounts unknown). Recommendation: (b).
+
+D39.11.4V.2 *(Open.)* *An entry whose version this software cannot build.*
+Reproducing the reference (R39.11.4V.5) accepts any `txversion`, gives version 5
+a version group id and a branch id of 0 when the entry names none, and answers a
+withdraw with a transaction and an identifier the network refuses. Options:
+(a) parity with the reference; (b) refuse at activation, with a typed error
+naming the field, an overwintered entry whose `txversion` the builder has no
+layout for (today every value other than 4; 5 once the plan's withdrawal step
+ships) and an overwintered entry that names no version group id or branch id for
+a version that has no default; (c) as (b), and also refuse an `overwintered`
+value other than the integers `0` and `1`. Recommendation: (b), which is the
+plan's configuration step; (c) only after a check of the coins files in use.
+
+D39.11.4V.3 *(Open.)* *Version 6 on the transparent coin's read path.* The
+network accepts versions 5 and 6 (the status note under R39.11.15); the plan's
+reading step names version 5. Options: (a) read version 5 only, and treat a
+version-6 transaction as unreadable under D39.11.4V.1 and in the swap steps of
+R39.11.4V.8; (b) read versions 5 and 6 through the Zcash library reader, whose
+version coverage R39.11.15 records. Recommendation: (b).
+
+*Not established.* (1) Nothing was run against a reference binary or a live
+Zcash node; no node's refusal text is recorded. (2) Whether the WalletConnect
+signer of the `v3.0.0-beta` row signs a Zcash-family HTLC spend with the same
+digest, and how the hardware-wallet signer treats version 5, were not traced.
+(3) Which ZIP 225 byte strings, if any, the parser reads as a version-4-layout
+transaction was not enumerated. (4) The ZIP 225 layout and the ZIP 244 digests
+are not restated here; the ZIPs are the source.
+
+*Acceptance rows.* Each row runs against a node with one overwintered UTXO coin
+on a mock backend. *Parity* is the reference behavior of R39.11.4V.1 --
+R39.11.4V.10; where a decision item or a plan step sets Reloaded's result, the
+row says so.
+
+T39.11.4V.1 *Hexadecimal forms.* Entries that differ only in how
+`version_group_id` and `consensus_branch_id` are written -- with and without
+`0x`, in lower and in upper case -- activate with the same values. An entry with
+seven or nine hexadecimal digits in either field fails activation (task-managed:
+`CoinCreationError` with the ticker). An entry giving either field as a JSON
+number activates with the default of R39.11.4V.2.
+
+T39.11.4V.2 *Defaults.* An overwintered entry with `txversion` 4 and neither
+hexadecimal field signs and serializes with `0x892F2085` and `0x76B809BB`; one
+with `txversion` 3 with `0x03C48270` and `0x5BA81B19`. Parity for `txversion` 5:
+both are 0; D39.11.4V.2 sets Reloaded's result.
+
+T39.11.4V.3 *The overwintered selector.* An entry with `txversion` 4 and
+`overwintered` given as the boolean `true` builds the Bitcoin layout (parity;
+D39.11.4V.2 (c) sets Reloaded's result).
+
+T39.11.4V.4 *Version-4 withdraw.* With a mock backend listing one
+pay-to-public-key-hash output of the wallet, a withdraw answers bytes that begin
+with the header word of version 4 with the overwintered flag and the configured
+version group id, and that end with the lock time, an expiry height of 0, a zero
+value balance and three empty counts; the input's signature verifies under the
+ZIP 243 digest with the configured branch id and sighash type `0x01`, and
+`tx_hash` is the byte-reversed double SHA-256 of the answered bytes.
+
+T39.11.4V.5 *Version-5 entry.* The same withdraw with `txversion` 5 answers, at
+parity, a header word with version 5 and the overwintered flag followed by the
+version-4 layout, with no branch id in the bytes and a signature under the
+ZIP 243 digest. Reloaded's required result is set by D39.11.4V.2 and the plan's
+configuration and withdrawal steps, not by this row.
+
+T39.11.4V.6 *HTLC spend and refund.* For an HTLC payment of the coin, the spend
+and the refund each have one input whose signature verifies under the ZIP 243
+digest with the full HTLC redeem script as script code, the HTLC output's value as
+amount and sighash type `0x01`, and each carries an expiry height of 0.
+
+T39.11.4V.7 *Expiry everywhere.* Every transaction the node builds for the coin
+-- withdraw, DEX fee, payment, spend and refund -- carries an expiry height of 0.
+
+T39.11.4V.8 *Unreadable transaction in the history.* A mock backend lists, for
+the wallet's address, a version-4 transaction, a ZIP 225 transaction taken from
+the public ZIP 225 test vectors and a second version-4 transaction. Parity: the
+legacy history holds rows for the two version-4 transactions only; the
+version-two history stops at the ZIP 225 transaction and does not reach
+finished. Reloaded's required result is set by D39.11.4V.1 and the plan's reading
+step.
+
+T39.11.4V.9 *Unreadable counterparty transaction.* A swap in which the
+counterparty's maker payment, taker payment or DEX fee arrives as a ZIP 225
+transaction ends, at parity, with `MakerPaymentValidateFailed` on the taker,
+with `TakerPaymentValidateFailed` followed by `MakerPaymentWaitRefundStarted` on
+the maker, or with `TakerFeeValidateFailed` on the maker, respectively.
+
+T39.11.4V.10 *Broadcast refusal.* A mock backend that refuses a broadcast makes
+`send_raw_transaction` answer HTTP 500 with the legacy error body, whose `error`
+string contains the backend's refusal text.
+
+T39.11.4V.11 *Block time.* Two activations of the coin that differ only in
+`avg_blocktime` give the same swap lock times and the same confirmation waits
+(parity); Reloaded's Electrum and fee-cache rules of chapter 38 differ as that
+chapter states.
+
+T39.11.4V.12 *Fee.* With `txfee` `r` and no `dingo_fee`, a withdraw's fee is
+`floor(r × s / 1000)` for the size `s` of the answered bytes, with no adjustment
+toward ZIP 317 (parity; the plan's fee point sets Reloaded's result).
+
 ### 39.11.5 Swap-path transparent queries: reference contract and the Light-mode failure policy
 
 > **Derivation record (sanitized).** This subsection was authored by the KDF Spec
@@ -8136,3 +8471,67 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   tree at both release rows; diffs between the tabled states; pattern
   searches for numerals and store-layout wording; the additions embed no
   code blocks, so the repository's clean-room gate tool was not run.
+- *Scoped addition (2026-11-17, Spec Reader round 0.5.0-11) -- §39.11.4V
+  (R39.11.4V.1 -- R39.11.4V.10 with the configuration table, the code-quality
+  finding, the compatibility note, D39.11.4V.1 -- D39.11.4V.3, the
+  not-established paragraph and T39.11.4V.1 -- T39.11.4V.12); no other text of
+  this chapter was changed.* **KDF Dirty Gate: PASS on 2026-11-17, measure 0.02, no findings** (chapter 01
+  R40; the attestation closes this item). *Inputs:* (1) the
+  forbidden corpus at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+  §2.15A, read read-only from the tags themselves, with the rows `main (as of
+  2026-10-07)`, `feat/tron-swap-support (as of 2026-04-23)` and
+  `feat/tron-gasfree (as of 2026-05-04)` compared against `v3.0.0-beta` by file
+  difference over the files concerned (no difference), consulted **only** to
+  establish: for a transparent UTXO coin of the Zcash family, how the four
+  configuration fields are read, their accepted forms, defaults and refusals and
+  the activation error that a refusal answers; which transaction layout is
+  written and read for each version; the shape of the signature digest, where
+  the branch id and the version group id enter it, and the sighash type and
+  script code of the HTLC spend and refund; the expiry height set in each
+  transaction; the identifier computed and where it is reported; what the
+  history collectors, the swap validation and the spend detection do with
+  bytes the parser refuses, including the swap events recorded; the answer of
+  the broadcast method to a refusal; where `avg_blocktime` is read; the fee rule;
+  and that no tabled state has version-5, ZIP 244, NU7 or ZIP 317 behavior.
+  Behavior, public configuration-field names, wire tokens, swap event names,
+  public ZIP constants and method names only; no private identifier, function
+  body, helper decomposition, error, log, comment or test text was reproduced,
+  and no value was taken from the reference's tests. (2) The public Zcash
+  Improvement Proposals ZIP 143, ZIP 202, ZIP 203, ZIP 225, ZIP 243, ZIP 244,
+  ZIP 317 and ZIP 2003 and the Zcash protocol specification, named for the
+  layouts, digests, constants and fee rule they define; nothing of them is
+  restated beyond the names and the constants the reference's defaults equal.
+  (3) The coins file, for the statement that every Zcash-family UTXO entry sets
+  `txversion` 4 and `overwintered` 1: the sibling repository
+  `takologi/komodo-coins` at its commit
+  `0fb96204af0d3382e9fe2d17a2c249178253c289` (chapter 01 R14); the earliest
+  commit that holds those entries was not determined, and that gap is flagged
+  here. (4) This repository's tree on the dev branch as of 2026-11-17, for the
+  compatibility note and the code-quality finding's statement about this
+  repository. D39.11.4V.1 -- D39.11.4V.3 and T39.11.4V.1 -- T39.11.4V.12 are
+  original to this subsection. No row was added to chapter 02 §2.15A: every
+  state read already had one, and each row's identifier was confirmed, by
+  read-only inspection of the historical record's reference metadata, to be the
+  commit compared. *Scope of the edit:* additions only; no sentence of this
+  chapter that the Dirty Gate cleared is edited, and no other chapter is edited.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-17, measure
+  0.02, no findings, in a first pass and a delta pass after a rewording (two
+  swap-path items reduced to neutral fact plus remedy, a new D39.11.4V.3,
+  per-row markers); nothing outside the listed lines changed. Reference
+  states (chapter 02 R13): PASS; the coins-repository citation conforms to
+  chapter 01 R14. Extent: the reference's handling of a transparent
+  Zcash-family UTXO coin (configuration-field reading, transaction layouts
+  read and written, signature digest, expiry, identifier, what history, swap
+  validation and spend detection do with unparseable bytes, broadcast
+  refusal, block-time use, the fee rule), compared at the rows `v2.6.0-beta`
+  and `v3.0.0-beta`, about ten source files read in the relevant parts; the
+  rows `main (as of 2026-10-07)`, `feat/tron-swap-support (as of
+  2026-04-23)` and `feat/tron-gasfree (as of 2026-05-04)` compared with
+  `v3.0.0-beta` by file difference over the same files and the signer
+  component (no difference); the delta's reworded and new prose lines
+  compared mechanically against the whole tree at both release rows (906 and
+  857 files), 0 five-word matches. Method: reading, matching of
+  identifier-shaped tokens judged forced or free, 4-, 5- and 6-word sequence
+  overlap against the whole tree at both release rows, diffs between the
+  tabled states; the delta by a line-exact diff against the hash-verified
+  first-pass text plus 5-word overlap; the additions embed no code blocks.

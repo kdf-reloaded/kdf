@@ -6,8 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
+<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". A change that an older version can no longer read or undo, or that needs a step from the user before or after upgrading, also gets an emphasized plain-words item under "### Breaking changes and upgrade notes" at the top of the section. -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
+
+### Breaking changes and upgrade notes
+
+Read this before you upgrade. It lists every change in this release that an older version can no longer read
+or undo, and every change that needs a step from you.
+
+#### Coins that are no longer visible after an upgrade
+
+**If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
+before you move or spend anything.** For some coin families a release can change the rule
+that picks a coin's key or address, for example which key is used for a given `priv_key_policy` under
+an HD login. The node then shows a different address for that coin, and the funds stay at the address
+the previous version used. The safe way:
+1. Note the address the new version shows for that coin.
+2. Start the previous version again, with the same passphrase, `MM2.json` and activation requests.
+3. Move the coins to the address you noted, or close the Lightning channels.
+4. Upgrade again.
 
 ### Added
 
@@ -61,6 +78,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   purpose, and the test-only `sim_panic`. Detail: PR #387; CRD ch.43 §43.1R.
 
 #### Solana coins
+
+- **Solana activates under an HD login, at a path the request chooses.** Under an HD login the
+  Solana key is now derived from the seed phrase at `m/44'/501'/N'/0'` by default, or at
+  `m/44'/501'/N'` when the activation request sends `"hd_path_layout": "bip44"`; N comes from
+  `path_to_address.account_id`. Nothing is stored: a wallet that used `"bip44"` must send it on
+  every activation, or it gets the default address. One seed phrase therefore gives three Solana
+  addresses: as a single-key passphrase, with the default layout, and with `"bip44"`. A request
+  that asks for a hardware wallet is refused and the WalletConnect form is an invalid request; a
+  request that asks for `IguanaPrivKey` under an HD login gets the wallet's single internal key and
+  its address, not the address of a single-key login with the same words. Solana stays switched off in this build. Detail:
+  PR #392; CRD ch.40 §40.1A.
 
 - **Solana entries of a coins file in the form GLEEC KDF uses can be read.** Besides its own
   forms, KDF Reloaded now reads, in native builds, a Solana platform entry with
@@ -166,6 +194,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `priv_key_policy`, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
   as the WalletConnect form, fails request parsing with `InvalidRequest` (HTTP 400) instead of
   activating with the local key. Detail: PR #358; CRD ch.36 §36.7, status note of 2026-11-15
+- **A Tendermint activation under an HD login now honors `priv_key_policy: IguanaPrivKey`.** It used
+  to ignore the member and activate the key at `path_to_address`. It now activates the coin with the
+  node's single internal key, as the UTXO family does, and `path_to_address` plays no part.
+  An absent `priv_key_policy` and `ContextPrivKey` activate the key at `path_to_address` as before,
+  and an iguana login does not change. Tokens follow the platform coin's key, and the task form
+  behaves the same. Detail: PR #396; CRD ch.36 §36.7, status note of 2026-11-17
 
 #### Solana coins
 
@@ -333,7 +367,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361, S1 in PR #371.
+  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the

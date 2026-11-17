@@ -54,7 +54,9 @@ fn default_get_balances() -> bool { true }
 /// this method. The reference ignores all three for Tendermint, since the docs do not state an observable effect.
 /// Reloaded does the same for the first two: they are not declared here and so are ignored (CRD ch.36 R36.1.2).
 /// `priv_key_policy` is declared: an absent value or `ContextPrivKey` activates as before, a hardware value is
-/// refused, see [`reject_hardware_policy`] (CRD ch.36 §36.7, status note of 2026-11-15).
+/// refused, see [`reject_hardware_policy`] (CRD ch.36 §36.7, status note of 2026-11-15). `IguanaPrivKey` under an
+/// HD login activates with the single internal key of the context and ignores `path_to_address` (Reloaded-original,
+/// CRD ch.36 §36.7, status note of 2026-11-17).
 #[derive(Clone, Deserialize)]
 pub struct TendermintActivationParams {
     nodes: Vec<RpcNode>,
@@ -64,8 +66,8 @@ pub struct TendermintActivationParams {
     tx_history: bool,
     #[serde(default = "default_get_balances")]
     get_balances: bool,
-    // Kept raw: it matters under an HD login only, where a value that does not parse is a platform-coin creation
-    // error (CRD ch.36 R36.1.4 step 3); under an iguana login it is ignored whatever it holds.
+    // Kept raw: it matters under an HD login without `IguanaPrivKey` only, where a value that does not parse is a
+    // platform-coin creation error (CRD ch.36 R36.1.4 step 3); under an iguana login it is ignored whatever it holds.
     #[serde(default)]
     path_to_address: Option<Json>,
     #[serde(default, deserialize_with = "deserialize_activation_params")]
@@ -461,6 +463,27 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
                     &platform_conf,
                     activation_request.nodes,
                     priv_key,
+                    activation_request.get_balances,
+                )
+                .await
+            },
+            // An HD login whose request asks for `IguanaPrivKey` signs with the single internal key of the context,
+            // the key the UTXO family takes for this case, and `path_to_address` plays no part (Reloaded-original,
+            // CRD ch.36 §36.7, status note of 2026-11-17). The `priv_key` the generic activator passes is the
+            // passphrase key of the legacy context under either login; it is not used for the HD login.
+            KeyPairPolicy::GlobalHDAccount(_)
+                if matches!(
+                    activation_request.priv_key_policy,
+                    Some(PrivKeyActivationPolicy::IguanaPrivKey)
+                ) =>
+            {
+                let internal_key = crypto_ctx.mm2_internal_privkey_secret();
+                tendermint_coin_from_conf_and_request(
+                    &ctx,
+                    ticker,
+                    &platform_conf,
+                    activation_request.nodes,
+                    internal_key.as_slice(),
                     activation_request.get_balances,
                 )
                 .await
