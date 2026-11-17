@@ -619,7 +619,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   whose headers go to that node only, and the top-level `MM2.json` key `tron_api_key` is sent as `TRON-PRO-API-KEY`
   to TronGrid hosts over HTTPS only. Both are Reloaded request extensions that a reference client never sends; no switch is
   needed because a request without them is served as before. The values are secrets and are never logged or shown.
-  Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.21 §21.9 R-N3 to R-N9.
+  Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
 
 ### Removed / disabled in KDF Reloaded
 

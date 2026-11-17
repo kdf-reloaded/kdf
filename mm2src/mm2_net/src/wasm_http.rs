@@ -214,7 +214,8 @@ impl FetchRequest {
             js_request
                 .headers()
                 .set(&hkey, &hval)
-                .map_to_mm(|e| SlurpError::Internal(scrub(stringify_js_error(&e))))?;
+                // A fixed text: the browser's own message can quote the header value.
+                .map_to_mm(|_| SlurpError::Internal("a request header could not be set".to_owned()))?;
         }
 
         let request_promise = window.fetch_with_request(&js_request);

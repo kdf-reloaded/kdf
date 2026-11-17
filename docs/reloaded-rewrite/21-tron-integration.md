@@ -503,6 +503,16 @@ boundary, as no Tron request goes through it. A reference client never sends
 either form (a Reloaded request extension; no switch, because it adds an
 input and changes nothing for a client that does not send it).
 
+*Status note (2026-11-17), follow-ups of R-N3 and R-N6.* (1) On the browser
+build the request to a node is not aborted at the cutoff of R-N3; only the
+wait ends. Remedy: wire an abort signal (`AbortController`) into the browser
+request. (2) R-N6: an attempt that timed out may already have delivered the
+transaction, so a later node's rejection of the duplicate can report a sent
+transaction as rejected. Remedy: measure on the Nile test network how a node
+answers a duplicate broadcast (lab row W9); until that is measured, no swap
+path may rely on broadcast failover, and a caller confirms a broadcast through
+`gettransactioninfobyid`.
+
 > **Binding scope (R36).** The endpoint paths and their JSON
 > request/response shapes are the dictated public Tron node API.
 > The client struct, its node-storage representation, and the

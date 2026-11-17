@@ -80,7 +80,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   TRON `urls` list can now be an object `{"url": "...", "headers": {...}}` whose headers go to that node
   only, and the new `MM2.json` key `tron_api_key` is sent as the `TRON-PRO-API-KEY` header to TronGrid
   hosts over HTTPS only. Header values and the key are never logged or shown. TRON stays switched off in this build,
-  so none of this can be used yet. Detail: CRD ch.21 §21.9 R-N3 to R-N9.
+  so none of this can be used yet. Detail: PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
 
 #### Tendermint (Cosmos) coins
 
