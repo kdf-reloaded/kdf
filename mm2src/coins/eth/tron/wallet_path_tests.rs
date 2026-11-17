@@ -691,3 +691,157 @@ fn withdraw_balance_read_of_a_node_error_answer_is_an_error_not_zero() {
     // Nothing past the balance read was attempted.
     assert!(node.requests().iter().all(|(path, _)| path == "/wallet/getaccount"));
 }
+
+/// A node with an account of 2.5 TRX, a token balance and a head block.
+fn wallet_node() -> StubNode {
+    StubNode::start(|path, _| match path {
+        "/wallet/getaccount" => Reply::ok(r#"{"balance":2500000,"create_time":1700000000000}"#),
+        "/wallet/triggerconstantcontract" => Reply::ok(&format!(r#"{{"constant_result":["{:064x}"]}}"#, 777u64)),
+        "/wallet/getnowblock" => Reply::ok(&format!(
+            r#"{{"blockID":"{}","block_header":{{"raw_data":{{"number":4242,"timestamp":1700000000000}}}}}}"#,
+            "ab".repeat(32)
+        )),
+        other => Reply::status(404, &format!("unexpected endpoint {other}")),
+    })
+}
+
+/// CRD ch.21 R-WP1 and the platform balance of a token: `base_coin_balance` is the TRX balance at 6 decimals, for
+/// TRX and for the platform of a TRC20 token, whatever the token's own decimals are.
+#[test]
+fn base_coin_balance_is_the_trx_balance_at_6_decimals_for_trx_and_trc20() {
+    let node = wallet_node();
+    block_on(async {
+        let (_ctx, trx) = trx_coin(&node.url()).await;
+        let balance = MarketCoinOps::base_coin_balance(&trx).compat().await.expect("balance");
+        assert_eq!(balance, BigDecimal::from_str("2.5").unwrap());
+
+        // A token of 8 decimals: its own balance is read at 8, the platform balance still at 6.
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        let req = json!({ "urls": [node.url()] });
+        let token = tron_coin_from_conf_and_request(
+            &ctx,
+            "USDT-TRC20",
+            &json!({ "decimals": 8 }),
+            &req,
+            &priv_key(),
+            CoinProtocol::TRC20 {
+                platform: "TRX".to_owned(),
+                contract_address: TRC20_CONTRACT.to_owned(),
+            },
+        )
+        .await
+        .expect("a TRC20 coin activates against a stub node");
+        let base = MarketCoinOps::base_coin_balance(&token)
+            .compat()
+            .await
+            .expect("balance");
+        assert_eq!(base, BigDecimal::from_str("2.5").unwrap());
+        let own = MarketCoinOps::my_balance(&token).compat().await.expect("balance");
+        assert_eq!(own.spendable, BigDecimal::from_str("0.00000777").unwrap());
+    });
+}
+
+#[test]
+fn base_coin_balance_of_a_failed_read_is_an_error() {
+    let node = getaccount_node(500, "{}");
+    let result = block_on(async {
+        let (_ctx, coin) = trx_coin(&node.url()).await;
+        MarketCoinOps::base_coin_balance(&coin).compat().await
+    })
+    .map_err(|e| e.into_inner());
+    assert!(matches!(result, Err(BalanceError::Transport(_))), "{result:?}");
+}
+
+/// CRD ch.21 R21.10B.5: the head block of a TRON coin is the `getnowblock` number, not an EVM node's.
+#[test]
+fn the_current_block_of_a_tron_coin_comes_from_getnowblock() {
+    let node = wallet_node();
+    let block = block_on(async {
+        let (_ctx, coin) = trx_coin(&node.url()).await;
+        MarketCoinOps::current_block(&coin).compat().await
+    });
+    assert_eq!(block, Ok(4242));
+    assert!(!node.bodies_for("/wallet/getnowblock").is_empty());
+
+    let down = getaccount_node(200, "{}");
+    let failed = block_on(async {
+        let (_ctx, coin) = trx_coin(&down.url()).await;
+        MarketCoinOps::current_block(&coin).compat().await
+    });
+    assert!(failed.is_err(), "{failed:?}");
+}
+
+/// CRD ch.21 R-AD1: a TRON coin parses both address forms where it parses an address; the EVM form is refused.
+#[test]
+fn a_tron_coin_parses_both_address_forms_and_refuses_the_evm_form() {
+    let node = wallet_node();
+    block_on(async {
+        for (_ctx, coin) in [trx_coin(&node.url()).await, trc20_coin(&node.url()).await] {
+            let parsed = TronAddress::from_base58(TRC20_CONTRACT).expect("valid");
+            let wire = parsed.to_hex();
+            for form in [TRC20_CONTRACT.to_owned(), wire.clone(), format!("0x{wire}")] {
+                assert_eq!(coin.address_from_str(&form), Ok(parsed.to_evm_address()), "{form}");
+            }
+            let evm = format!("0x{}", hex::encode(parsed.to_evm_address()));
+            assert!(coin.address_from_str(&evm).is_err(), "the EVM form is refused");
+            assert!(coin.address_from_str("").is_err());
+        }
+    });
+}
+
+/// CRD ch.21 R21.10B.7 "Routes", ch.49 R49.9: `task::withdraw` takes TRX and TRC20 for a key-local coin.
+#[test]
+fn the_withdraw_check_of_the_family_admits_trx_and_trc20() {
+    let node = wallet_node();
+    let req: WithdrawRequest = serde_json::from_value(json!({ "coin": "TRX", "to": TRC20_CONTRACT, "amount": "1" }))
+        .expect("a withdraw request");
+    block_on(async {
+        for (_ctx, coin) in [trx_coin(&node.url()).await, trc20_coin(&node.url()).await] {
+            crate::eth::validate_evm_withdraw_request(&coin, &req).expect("TRON is in the family");
+        }
+    });
+}
+
+/// `verify_message` of a TRX or TRC20 coin is unchanged: the address is read with the EVM parser, so a TRON address
+/// (base58check or `41...` hex) is refused with `AddressDecodingError` and never verified with the EVM message
+/// scheme; an EVM `0x` address is still parsed, as before.
+#[test]
+fn verify_message_of_a_tron_coin_reads_the_address_with_the_evm_parser() {
+    use crate::VerificationError;
+    let node = wallet_node();
+    let signature = format!("0x{}", "00".repeat(65));
+    block_on(async {
+        for coin in [{
+            let ctx = MmCtxBuilder::new().into_mm_arc();
+            let req = json!({ "urls": [node.url()] });
+            let conf = json!({ "sign_message_prefix": "Tron Signed Message:\n" });
+            let coin = tron_coin_from_conf_and_request(&ctx, "TRX", &conf, &req, &priv_key(), CoinProtocol::TRX {
+                network: Network::Nile,
+            })
+            .await
+            .expect("a TRX coin activates against a stub node");
+            (ctx, coin)
+        }] {
+            let (_ctx, coin) = coin;
+            let parsed = TronAddress::from_base58(TRC20_CONTRACT).expect("valid");
+            for form in [
+                TRC20_CONTRACT.to_owned(),
+                parsed.to_hex(),
+                format!("0x{}", parsed.to_hex()),
+            ] {
+                let result =
+                    MarketCoinOps::verify_message(&coin, &signature, "message", &form).map_err(|e| e.into_inner());
+                assert!(
+                    matches!(result, Err(VerificationError::AddressDecodingError(_))),
+                    "{form}: {result:?}"
+                );
+            }
+            let evm = crate::eth::checksum_address(&format!("0x{}", hex::encode(parsed.to_evm_address())));
+            let result = MarketCoinOps::verify_message(&coin, &signature, "message", &evm).map_err(|e| e.into_inner());
+            assert!(
+                !matches!(result, Err(VerificationError::AddressDecodingError(_))),
+                "the EVM form is still parsed: {result:?}"
+            );
+        }
+    });
+}

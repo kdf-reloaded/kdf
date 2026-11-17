@@ -38,6 +38,13 @@ the next beta. Swap participation follows once its own blocker is cleared
    `task::enable_eth::*`) and keeps the legacy route. *Decided 2026-11-10:* TRON
    stays switched off in the 0.4.0 beta; the node-client, activation-route and
    switch-on changes move to a later version.
+
+   *Built 2026-11-17 (T2a):* the mmrpc 2.0 route accepts the TRX platform and
+   its TRC20 tokens (`enable_eth_with_tokens`, `task::enable_eth::*`,
+   `enable_erc20`, `task::enable_erc20::init`), the legacy route stays as an
+   extension, and both are still behind the constant. The global-HD path, the
+   address methods (`convertaddress`, `get_my_address`, `show_priv_key`) and
+   history are the following changes. CRD ch.21 §21.4 and its decision notes.
 2. **Switch activation back on** (ch. 21 D6): set the constant to `true` and
    retire the refusal tests that go with it.
 3. **Node access.** Check Reloaded's TRON node client against ch. 21 §21.9

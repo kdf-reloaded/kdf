@@ -93,6 +93,17 @@ fn is_retryable(e: &TronApiError) -> bool {
     )
 }
 
+/// The URL of the endpoint `path` of the node `base`: the path is appended to the path of `base` and the query of
+/// `base` stays at the end, so `https://h/x?key=1` gives `https://h/x/wallet/getaccount?key=1` (CRD ch.21 R-N9, the
+/// query-string key of a node URL). A fragment is not sent to a server and is dropped.
+fn endpoint_url(base: &str, path: &str) -> String {
+    let without_fragment = base.split_once('#').map_or(base, |(head, _)| head);
+    match without_fragment.split_once('?') {
+        Some((head, query)) => format!("{head}{path}?{query}"),
+        None => format!("{without_fragment}{path}"),
+    }
+}
+
 /// POST a JSON body to one node, bounded by `cutoff_s` seconds for the whole exchange, and decode a 2xx answer as
 /// `Resp`, then check it with `validate` (an [`TronApiError::InvalidResponse`] fails the attempt). `headers` are the node's own headers; redirects are not followed, so a 3xx answer is a non-2xx failure.
 ///
@@ -457,7 +468,7 @@ impl TronApiClient {
 
         for (position, &index) in order.iter().enumerate() {
             let node = &inner.nodes[index];
-            let url = format!("{}{}", node.url, path);
+            let url = endpoint_url(&node.url, path);
             match post_json_checked::<Resp>(&url, json_body.clone(), &node.headers, inner.cutoff_s, validate).await {
                 Ok(resp) => {
                     // The answering node first, the nodes that failed before it at the tail in their relative
@@ -854,6 +865,21 @@ mod tests {
         let err = common::block_on(client.get_now_block()).unwrap_err().to_string();
         for secret in ["user", "secret", "APIKEY", "OTHERKEY"] {
             assert!(!err.contains(secret), "a credential part is rendered");
+        }
+    }
+
+    #[test]
+    fn the_endpoint_path_goes_before_the_query_of_a_node_url() {
+        for (base, expected) in [
+            ("https://h/x?key=1", "https://h/x/wallet/getaccount?key=1"),
+            ("https://h?key=1", "https://h/wallet/getaccount?key=1"),
+            ("https://h/x?key=1&b=2", "https://h/x/wallet/getaccount?key=1&b=2"),
+            ("https://h/x?key=1#frag", "https://h/x/wallet/getaccount?key=1"),
+            ("https://h/x#frag", "https://h/x/wallet/getaccount"),
+            ("https://h/x", "https://h/x/wallet/getaccount"),
+            ("https://h", "https://h/wallet/getaccount"),
+        ] {
+            assert_eq!(endpoint_url(base, "/wallet/getaccount"), expected, "{base}");
         }
     }
 }

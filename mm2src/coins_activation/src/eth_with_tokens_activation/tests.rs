@@ -1512,7 +1512,7 @@ fn initial_swap_gas_fee_policy_precedence_is_request_then_coin_config() {
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let policy_of = |conf: Json, extra: Json| {
         let req = request(&[], extra).request;
-        activation_params(&ctx, &conf, &req)
+        activation_params(&ctx, &conf, &req, false)
             .unwrap_or_else(|e| panic!("activation_params: {}", e))
             .swap_gas_fee_policy
     };
