@@ -169,6 +169,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   and an iguana login does not change. Tokens follow the platform coin's key, and the task form
   behaves the same. Detail: PR #396; CRD ch.36 §36.7, status note of 2026-11-17
 
+#### EVM, BCH, Sia and Lightning coins
+
+- **Under an HD login, `priv_key_policy: IguanaPrivKey` now activates the node's own single address for
+  EVM coins, BCH with its tokens, Sia and Lightning, as the UTXO family does.** Under a global-HD login
+  these families ignored the value (EVM treated it as `ContextPrivKey`, so the coin was an HD coin at
+  `path_to_address`; BCH with tokens ran on the old passphrase-hash key; Sia and Lightning had no such
+  request member). The value now runs the coin on the node's internal key, the key the node uses as its
+  own identity under an HD login, and the activation answers in the single-address form. An absent value
+  and `ContextPrivKey` keep today's behavior, and an iguana login is unchanged. `get_my_address` answers
+  the address of an EVM coin that is active as a single address, instead of the HD address at
+  `path_to_address`, and a token activated with `path_to_address` on such a platform is no longer refused.
+  Sia and Lightning take the new member `priv_key_policy` (default `ContextPrivKey`; a hardware value is
+  refused by both). EVM still takes the value only in the
+  object form, `{"type": "IguanaPrivKey"}`, as before.
+  **Warning for Lightning:** with an HD login, requesting `IguanaPrivKey` starts a separate Lightning
+  identity (its own node key, data directory, backup directory and history). The channels of the other
+  identity are not shown and are not watched while this identity is in use: close or settle them first,
+  or do not stay on the other identity longer than the channels' dispute delay. A counterparty could
+  close such a channel with an old state, and if nobody watches within the dispute delay the penalty
+  cannot be claimed and funds can be lost. Nothing is moved or deleted, and the channels are shown and
+  watched again when the activation goes back to the default policy. A data directory that was opened
+  by another node key is refused instead of being opened. Detail: PR #N; CRD ch.05 R46,
+  status note of 2026-11-17.
+
 #### Solana coins
 
 - **Solana activation errors follow the shapes GLEEC KDF uses, and a token address is checked when
@@ -310,6 +334,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Plans touched
 
+- [`hd-key-unification`](docs/plans/hd-key-unification.md) — the H7 row and Decision CB note now say that H7 applies to an absent
+  `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family.
 - [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)
   build outside the shielded coins — versioned history, wallet management, event delivery to the page and
   smaller items — in order of cost, and the limits a browser has by nature, also listed in

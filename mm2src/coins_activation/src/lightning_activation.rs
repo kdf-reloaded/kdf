@@ -8,7 +8,8 @@ use coins::lightning::ln_errors::EnableLightningError;
 use coins::lightning::{start_lightning, LightningCoin, LightningParams};
 use coins::utxo::utxo_standard::UtxoStandardCoin;
 use coins::utxo::UtxoCommonOps;
-use coins::{coin_conf, BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, MmCoinEnum, RegisterCoinError};
+use coins::{coin_conf, BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, MmCoinEnum, PrivKeyActivationPolicy,
+            RegisterCoinError};
 use common::{HttpStatusCode, StatusCode};
 use derive_more::Display;
 use futures::compat::Future01CompatExt;
@@ -72,6 +73,11 @@ pub struct LightningActivationParams {
     pub payment_retries: Option<usize>,
     // Node's backup path for channels and other data that requires backup.
     pub backup_path: Option<String>,
+    // `IguanaPrivKey` runs the node on the internal key under a global-HD login, a separate Lightning identity
+    // (CRD ch.05 R46 item 2, status note of 2026-11-17). Same enum and spellings as the UTXO request. A hardware
+    // value is refused.
+    #[serde(default = "PrivKeyActivationPolicy::context_priv_key")]
+    pub priv_key_policy: PrivKeyActivationPolicy,
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
@@ -338,6 +344,12 @@ impl L2ActivationOps for LightningCoin {
                     .into(),
             );
         }
+        // A hardware wallet cannot sign for a Lightning node (see the todo of `start_lightning`).
+        if matches!(activation_params.priv_key_policy, PrivKeyActivationPolicy::Trezor) {
+            return MmError::err(
+                LightningValidationErr::UnsupportedMode("Lightning network".into(), "software key".into()).into(),
+            );
+        }
         let mut node_name = [b' '; 32];
         node_name[0..activation_params.name.len()].copy_from_slice(activation_params.name.as_bytes());
 
@@ -357,6 +369,7 @@ impl L2ActivationOps for LightningCoin {
             node_color,
             payment_retries: activation_params.payment_retries,
             backup_path: activation_params.backup_path,
+            priv_key_policy: activation_params.priv_key_policy,
         })
     }
 
@@ -464,6 +477,11 @@ impl InitL2ActivationOps for LightningCoin {
                 "Node name length can't be more than 32 characters".into(),
             ));
         }
+        if matches!(activation_params.priv_key_policy, PrivKeyActivationPolicy::Trezor) {
+            return MmError::err(LightningTaskError::Validation(
+                "Lightning network is only supported in software key mode".into(),
+            ));
+        }
         let mut node_name = [b' '; 32];
         node_name[0..activation_params.name.len()].copy_from_slice(activation_params.name.as_bytes());
 
@@ -482,6 +500,7 @@ impl InitL2ActivationOps for LightningCoin {
             node_color,
             payment_retries: activation_params.payment_retries,
             backup_path: activation_params.backup_path,
+            priv_key_policy: activation_params.priv_key_policy,
         })
     }
 

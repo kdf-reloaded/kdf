@@ -208,7 +208,8 @@ impl InitStandaloneCoinActivationOps for SiaCoin {
         _protocol_info: SiaProtocolInfo,
         _task_handle: &SiaRpcTaskHandle,
     ) -> MmResult<Self, SiaInitError> {
-        let priv_key_policy = PrivKeyBuildPolicy::detect_priv_key_policy(&ctx).mm_err(SiaInitError::from)?;
+        let priv_key_policy = PrivKeyBuildPolicy::from_activation_policy(&ctx, activation_request.0.priv_key_policy)
+            .mm_err(SiaInitError::from)?;
         let coin = SiaCoin::new(&ctx, coin_conf, &activation_request.0, priv_key_policy)
             .await
             .mm_err(|e| SiaInitError::from_new_err(e, ticker))?;

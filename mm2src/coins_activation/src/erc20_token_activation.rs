@@ -679,6 +679,11 @@ async fn path_selects_enabled_address(
             .map_err(|e| InitTokenError::Internal(e.to_string()))?;
         return Ok(path == enabled_path);
     }
+    // A single-address platform (`IguanaPrivKey` under an HD login, or any coin under an iguana login) has no
+    // HD-derived address to compare with: the token runs on the platform's own address.
+    if matches!(platform_coin.derivation_method, DerivationMethod::Iguana(_)) {
+        return Ok(true);
+    }
     let crypto_ctx = CryptoCtx::from_ctx(ctx).map_err(|e| InitTokenError::Internal(e.to_string()))?;
     match crypto_ctx.key_pair_policy() {
         KeyPairPolicy::GlobalHDAccount(global_hd) => {

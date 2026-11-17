@@ -93,16 +93,20 @@ pub enum EthRpcMode {
 /// `{"type": "WalletConnect", "params": {"session_topic": <topic>}}`, which is what is parsed here. The docs form
 /// is to be accepted alongside it when EVM WalletConnect signing is implemented (CRD ch.35 R35.1.4, erratum (e)).
 ///
-/// `ContextPrivKey` (the default, also accepted as `Iguana` and `IguanaPrivKey`) is the daemon's own key:
-/// single-address in Iguana mode, HD derivation in HD mode. `Metamask` is defined **only on the WASM target**
+/// `ContextPrivKey` (the default) is the daemon's own key: single-address in Iguana mode, HD derivation in HD
+/// mode. `IguanaPrivKey` (also accepted as `Iguana`) is always single-address on the daemon's internal key
+/// (`CryptoCtx::mm2_internal_privkey_secret()`): under an HD login that is the node key, not an HD-derived
+/// address; under an iguana login it is the same as `ContextPrivKey` (CRD ch.05 R46 item 3, status note of
+/// 2026-11-17). `Metamask` is defined **only on the WASM target**
 /// (CRD R47.7.1); on native builds the variant does not exist, so a `{"type":"Metamask"}` request fails to
 /// deserialize and is rejected (CRD R47.7.2 / R47.6.7).
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(tag = "type", content = "params")]
 pub enum EthPrivKeyPolicy {
-    #[serde(alias = "IguanaPrivKey", alias = "Iguana")]
     #[default]
     ContextPrivKey,
+    #[serde(alias = "Iguana")]
+    IguanaPrivKey,
     /// The hardware wallet policy. Native, non-iOS only; usable through the task variant only because the
     /// connect / PIN / passphrase exchange needs a task to surface its states.
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
@@ -583,6 +587,20 @@ impl PlatformWithTokensActivationOps for EthCoin {
         }
 
         let crypto_ctx = CryptoCtx::from_ctx(&ctx).mm_err(|e| ActivationErr::Internal(e.to_string()))?;
+        // `IguanaPrivKey` pins the single-address coin to the internal key under either login. The `_priv_key`
+        // argument is the passphrase-hash key, which is not the internal key under an HD login.
+        if matches!(policy, EthPrivKeyPolicy::IguanaPrivKey) {
+            return eth_coin_from_params_with_priv_key(
+                &ctx,
+                &ticker,
+                &platform_conf,
+                &params,
+                crypto_ctx.mm2_internal_privkey_slice(),
+                protocol,
+            )
+            .await
+            .mm_err(ActivationErr::from);
+        }
         match crypto_ctx.key_pair_policy() {
             KeyPairPolicy::Iguana => eth_coin_from_params_with_priv_key(
                 &ctx,

@@ -2433,3 +2433,51 @@ surface.
   clean side: it records this repository's alignment of the HD account methods'
   hardware and timeout errors with the cleared item 5; no forbidden-class
   input, chapter 01 R38 not engaged.
+- *Status note added 2026-11-17 (under R41 item 2, R46 items 2 and 3, T21, T29 and
+  the §5.9B R35 table).* Reloaded-original, clean side: it records this
+  repository's behavior of the activation request `priv_key_policy:
+  IguanaPrivKey` under a global-HD login; no forbidden-class input, chapter 01
+  R38 not engaged. The reference's behavior for this value under HD is not
+  recorded in this chapter, so the note claims no parity. Cleared sentences above
+  are unchanged. (1) *R41 item 2:* the policy pins the internal key regardless
+  of item H7: a coin activated with `IguanaPrivKey` signs, funds and announces
+  its HTLC key from the internal key, and H7 applies only to an absent policy
+  or `ContextPrivKey`. (2) *R46 item 3:* the shared platform-with-tokens
+  activation still passes the passphrase-hash key, but BCH with its tokens
+  now uses the internal key when the request names `IguanaPrivKey` (SLP tokens
+  follow the platform); an absent value and `ContextPrivKey` keep the
+  passphrase-hash key. EVM, Tendermint and Solana never read the passed key.
+  (3) *R46 item 2:* a Lightning activation that requests `IguanaPrivKey` under
+  a global-HD login seeds the node from the internal key; an absent value and
+  `ContextPrivKey` keep the passphrase-hash seed, and an iguana login is
+  unchanged. The internal-key node is a separate identity: it has its own data
+  directory (`LIGHTNING/<ticker>/internal-key/` below the node's database
+  directory, and the same sub-directory below the ticker in the backup
+  directory) and its own history tables, so it never shares a channel manager,
+  channel monitors or backups with the passphrase-seed node, whose paths are
+  unchanged. A data directory records the node id it was opened with, and an
+  activation whose key gives another node id is refused. The channels of the identity that is not in use are not shown and are not
+  watched: a counterparty could close one with an old state, and if nobody
+  watches within the channel's dispute delay (`to_self_delay`) the penalty cannot
+  be claimed and funds can be lost. They must be closed or settled first, or the
+  other identity must not stay in use longer than that delay. An HD platform is
+  still refused, and a hardware value is refused. (4) *T21:* "the swap saves the
+  key pair" is stale; a single-key coin announces the key it signs with, which
+  under a global-HD login with `IguanaPrivKey` is the internal key, and the
+  swap saves no pair (R43). (5) *T29:* the Lightning seed and the BCH platform
+  key are the passphrase-hash key only for an absent value or `ContextPrivKey`.
+  (6) *§5.9B R35 table:* Sia takes `priv_key_policy` (default
+  `ContextPrivKey`, the same spellings as the UTXO request) in the task and the
+  legacy request; `IguanaPrivKey` builds the single ed25519 key from the
+  internal secret bytes, as under an iguana login, and the row "not reachable
+  from the request" for Sia no longer holds for this member. A hardware value
+  is refused for Sia (last sentence of this note). The `my_tx_history` row's "the `Iguana` target is refused under HD"
+  must key on the coin's derivation, not on the login, when it is built (plan
+  item H6): such a coin is a single address. EVM coins: `IguanaPrivKey` is its
+  own policy (ch.35 R35.1.4), `get_my_address` answers the address of an EVM
+  coin that is active as a single address, and a token request with
+  `path_to_address` on such a platform is not compared with an HD address.
+  A Sia activation that requests a hardware `priv_key_policy` is refused before
+  any network access, with the task-level coin-creation error of the
+  unsupported key policy, on the task and the legacy routes; it never activates
+  a software-key coin.

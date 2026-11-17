@@ -51,6 +51,19 @@ pub enum EnableLightningError {
     #[display(fmt = "DB error {}", _0)]
     DbError(String),
     ConnectToNodeError(String),
+    /// The data directory of the coin records another node id than the one the activation's key gives. It is not
+    /// opened (CRD ch.05 R46 item 2, status note of 2026-11-17).
+    #[display(
+        fmt = "The Lightning data directory {} belongs to node {}, but this activation's key is node {}",
+        data_dir,
+        recorded,
+        requested
+    )]
+    NodeIdentityMismatch {
+        data_dir: String,
+        recorded: String,
+        requested: String,
+    },
 }
 
 impl HttpStatusCode for EnableLightningError {
@@ -65,6 +78,7 @@ impl HttpStatusCode for EnableLightningError {
             | EnableLightningError::HashError(_)
             | EnableLightningError::ConnectToNodeError(_)
             | EnableLightningError::InvalidConfiguration(_)
+            | EnableLightningError::NodeIdentityMismatch { .. }
             | EnableLightningError::DbError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

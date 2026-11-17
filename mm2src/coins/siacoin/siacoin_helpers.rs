@@ -9,6 +9,11 @@ impl SiaCoin {
         request: &SiaCoinActivationRequest,
         priv_key_policy: PrivKeyBuildPolicy,
     ) -> Result<Self, MmError<SiaCoinNewError>> {
+        // A request for a hardware wallet is refused before anything else (no hot-key coin for a caller who asked
+        // for a device, and no network access).
+        if matches!(request.priv_key_policy, PrivKeyActivationPolicy::Trezor) {
+            return Err(SiaCoinNewError::UnsupportedPrivKeyPolicy.into());
+        }
         // `derivation_method` mirrors the priv-key-policy branch it's built alongside:
         // Iguana yields a fixed single address, GlobalHDAccount yields a real
         // `SiaHDWallet` (CRD ch.20 D1) rooted at `m/44'/1991'`. `key_pair` itself is
@@ -172,5 +177,169 @@ mod node_naming_tests {
         });
         let error = client.err().unwrap();
         assert_host_only(&sia_text(&error));
+    }
+}
+
+/// `priv_key_policy: IguanaPrivKey` under a global-HD login (CRD ch.05 R46 item 3 and R35 table, Sia row, status
+/// note of 2026-11-17).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod priv_key_policy_tests {
+    use super::*;
+    use crypto::CryptoCtx;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use serde_json::json;
+
+    const MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const CLIENT_CONF: &str = r#"{ "server_url": "http://127.0.0.1:1/", "password": "pw" }"#;
+
+    fn hd_ctx() -> MmArc {
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({ "enable_hd": true }))
+            .into_mm_arc();
+        CryptoCtx::init_with_global_hd_account(ctx.clone(), MNEMONIC).unwrap();
+        ctx
+    }
+
+    fn iguana_ctx() -> MmArc {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        CryptoCtx::init_with_iguana_passphrase(ctx.clone(), MNEMONIC).unwrap();
+        ctx
+    }
+
+    fn task_request(extra: Json) -> SiaCoinActivationRequest {
+        let mut request = json!({ "client_conf": serde_json::from_str::<Json>(CLIENT_CONF).unwrap() });
+        if let Json::Object(extra) = extra {
+            request.as_object_mut().unwrap().extend(extra);
+        }
+        serde_json::from_value(request).unwrap()
+    }
+
+    fn legacy_request(extra: Json) -> Result<SiaCoinActivationRequest, MmError<SiaCoinFromLegacyReqErr>> {
+        let mut request = json!({ "coin": "SC", "client_conf": serde_json::from_str::<Json>(CLIENT_CONF).unwrap() });
+        if let Json::Object(extra) = extra {
+            request.as_object_mut().unwrap().extend(extra);
+        }
+        SiaCoinActivationRequest::from_legacy_req(&request)
+    }
+
+    #[test]
+    fn the_request_member_defaults_to_the_context_policy_and_takes_both_spellings() {
+        assert!(matches!(
+            task_request(json!({})).priv_key_policy,
+            PrivKeyActivationPolicy::ContextPrivKey
+        ));
+        for spelling in [json!("IguanaPrivKey"), json!({ "type": "IguanaPrivKey" })] {
+            let extra = json!({ "priv_key_policy": spelling });
+            assert!(matches!(
+                task_request(extra.clone()).priv_key_policy,
+                PrivKeyActivationPolicy::IguanaPrivKey
+            ));
+            assert!(matches!(
+                legacy_request(extra).unwrap().priv_key_policy,
+                PrivKeyActivationPolicy::IguanaPrivKey
+            ));
+        }
+        assert!(matches!(
+            legacy_request(json!({})).unwrap().priv_key_policy,
+            PrivKeyActivationPolicy::ContextPrivKey
+        ));
+        assert!(matches!(
+            legacy_request(json!({ "priv_key_policy": "ContextPrivKey" }))
+                .unwrap()
+                .priv_key_policy,
+            PrivKeyActivationPolicy::ContextPrivKey
+        ));
+        assert!(legacy_request(json!({ "priv_key_policy": "NoSuchPolicy" })).is_err());
+        assert!(serde_json::from_value::<SiaCoinActivationRequest>(
+            json!({ "client_conf": serde_json::from_str::<Json>(CLIENT_CONF).unwrap(), "priv_key_policy": "NoSuchPolicy" })
+        )
+        .is_err());
+    }
+
+    /// A hardware value is refused by the constructor both routes share, before any network access (the
+    /// walletd address of the request is a closed port, so a network attempt would give another error).
+    #[test]
+    fn a_hardware_priv_key_policy_is_refused_on_both_routes() {
+        let ctx = hd_ctx();
+        for request in [
+            task_request(json!({ "priv_key_policy": "Trezor" })),
+            legacy_request(json!({ "priv_key_policy": { "type": "Trezor" } })).unwrap(),
+        ] {
+            let policy = PrivKeyBuildPolicy::detect_priv_key_policy(&ctx).unwrap();
+            match common::block_on(SiaCoin::new(&ctx, json!({}), &request, policy)) {
+                Err(e) => assert!(matches!(e.into_inner(), SiaCoinNewError::UnsupportedPrivKeyPolicy)),
+                Ok(_) => panic!("a hardware policy must not activate a coin"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_hd_login_with_iguana_priv_key_builds_on_the_internal_key() {
+        let ctx = hd_ctx();
+        let internal = CryptoCtx::from_ctx(&ctx).unwrap().mm2_internal_privkey_secret();
+        for request in [
+            task_request(json!({ "priv_key_policy": "IguanaPrivKey" })),
+            legacy_request(json!({ "priv_key_policy": "IguanaPrivKey" })).unwrap(),
+        ] {
+            match PrivKeyBuildPolicy::from_activation_policy(&ctx, request.priv_key_policy).unwrap() {
+                PrivKeyBuildPolicy::IguanaPrivKey(secret) => assert_eq!(secret, internal),
+                _ => panic!("the single-key policy is expected"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_hd_login_without_or_with_context_priv_key_keeps_the_hd_policy() {
+        let ctx = hd_ctx();
+        for request in [
+            task_request(json!({})),
+            task_request(json!({ "priv_key_policy": "ContextPrivKey" })),
+            legacy_request(json!({})).unwrap(),
+        ] {
+            assert!(matches!(
+                PrivKeyBuildPolicy::from_activation_policy(&ctx, request.priv_key_policy).unwrap(),
+                PrivKeyBuildPolicy::GlobalHDAccount(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn an_iguana_login_is_unchanged_by_the_member() {
+        let ctx = iguana_ctx();
+        let internal = CryptoCtx::from_ctx(&ctx).unwrap().mm2_internal_privkey_secret();
+        for policy in [
+            PrivKeyActivationPolicy::IguanaPrivKey,
+            PrivKeyActivationPolicy::ContextPrivKey,
+        ] {
+            match PrivKeyBuildPolicy::from_activation_policy(&ctx, policy).unwrap() {
+                PrivKeyBuildPolicy::IguanaPrivKey(secret) => assert_eq!(secret, internal),
+                _ => panic!("the single-key policy is expected"),
+            }
+        }
+    }
+
+    /// The single address under `IguanaPrivKey` is the one the ed25519 key built from the internal secret bytes
+    /// has, as `SiaCoin::new` builds it. The key and the address are fixed here: the secret is the first test
+    /// vector of RFC 8032 section 7.1 and its public key is the one the RFC lists.
+    #[test]
+    fn the_sia_address_of_a_fixed_internal_secret_is_pinned() {
+        let secret_bytes: [u8; 32] = hex::decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let secret = keys::Secret::from(&secret_bytes[..]);
+        let key_pair = SiaKeypair::from_private_bytes(secret.as_slice()).unwrap();
+        assert_eq!(
+            hex::encode(key_pair.public().to_bytes()),
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        );
+        // The address is a function of that public key alone. The literal was computed independently of the
+        // code, from the address rule (a hash of the single-key policy) that also reproduces the address
+        // constants of the other tests of this module family.
+        assert_eq!(
+            key_pair.public().address().to_string(),
+            "0951975e893dc10b9b4ce98bd61fa6e07447f3e045e90e28d417bb5ef84590cc4d79f88492e7"
+        );
     }
 }
