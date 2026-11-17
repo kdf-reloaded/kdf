@@ -206,6 +206,11 @@ derived address under HD. A client can tell the two shapes apart by
 `wallet_type`. Balances are decimal
 strings in whole siacoin (1 SC = 10^24 hastings, ch. 20 §20.5).
 
+> **Reloaded status (2026-11-17, Reloaded-original).** As built, the HD report of R46.2.4 holds account 0
+> with exactly one address: address 0 of the external chain, the address the coin answers as its own
+> (ch. 20 §20.4.1), with its balance. The activation lists that address without a gap-limit scan, so no
+> further address of the account is reported, and it never reports a second account (R46.1.3).
+
 R46.2.5 Sia activation has **no activation deadline**. The `TaskTimedOut`
 discriminant is produced only by a timed-out wait for a user action, which a
 Sia task never performs (§46.3); it is listed in §46.5.2 for completeness with
@@ -380,6 +385,10 @@ T46.8.3 Result shape: under the single-key context the `Ok` `details` carry
 carry the HD report (`wallet_type == "HD"`) by default, and the `"Iguana"` form
 with the single derived address when `sia_activation_single_address_balance` is
 `true` (R46.2.4).
+
+> **Reloaded status (2026-11-17, Reloaded-original).** The HD case of T46.8.3 is now also tested with a
+> local test double of walletd: the HD report holds one account (index 0) with one address, equal to the
+> coin's own address, and that address's balance.
 
 T46.8.4 `init` errors: `CoinIsAlreadyActivated` (object, 400),
 `CoinConfigIsNotFound` (string = ticker, 400), `CoinProtocolParseError`

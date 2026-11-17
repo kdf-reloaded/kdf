@@ -314,6 +314,13 @@ the previous version used. The safe way:
   the lab uses has no SLP token entry; the live store comparison covers BCH alone. Detail: PR #380;
   CRD ch.36 R36.14.23 -- R36.14.26.
 
+#### Siacoin
+
+- **Under an HD login the Sia activation answer now lists the coin's address.** The answer of
+  `task::enable_sia` is the per-account report under an HD login, but it listed account 0 with no
+  address. It now lists account 0 with its single address, the one the coin uses, and that address's
+  balance. Detail: PR #N; CRD ch.46 R46.2.4.
+
 #### QTUM and QRC20
 
 - **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation
