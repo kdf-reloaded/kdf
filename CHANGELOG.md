@@ -16,9 +16,10 @@ previous version before you do anything else.** For some coin families a release
 that picks a coin's key or address, for example which key is used for a given `priv_key_policy` under
 an HD login. The node then shows a different address for that coin, and the funds stay at the address
 the previous version used. The safe way:
-1. Start the previous version again, with the same passphrase and settings.
-2. Move the coins to an address the new version shows, or close the Lightning channels.
-3. Upgrade again.
+1. Note the address the new version shows for that coin.
+2. Start the previous version again, with the same passphrase, `MM2.json` and activation requests.
+3. Move the coins to the address you noted, or close the Lightning channels.
+4. Upgrade again.
 
 ### Added
 
