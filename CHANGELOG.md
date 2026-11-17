@@ -114,6 +114,21 @@ the previous version used. The safe way:
   activation reports a protocol parse error. Solana stays switched off in this build, so no Solana
   coin can be activated yet. Detail: PR #361; CRD ch.40 R40.1.2, R40.1.3.
 
+#### TRON coins
+
+- **The TRON node client gives each node a time limit and fails over when a node answers badly.** A node
+  that does not answer within 10 seconds is skipped, and so is a node that answers with an error status
+  (a rate limit included), with something that is not the expected JSON, or with the node's own error form;
+  such an answer is never read as an empty account. The node that answers is asked first by the next
+  request, and several requests of one coin can run at the same time instead of waiting for each other.
+  A node that answers "busy" or "not in sync" (`SERVER_BUSY`, `NO_CONNECTION`, `NOT_ENOUGH_EFFECTIVE_CONNECTION`,
+  `BLOCK_UNSOLIDIFIED`) is skipped too, and the node list is shuffled once at activation and accepts only `http`
+  and `https` URLs. A signed transaction that a node rejects with any other code ends the request with that code. An entry of the
+  TRON `urls` list can now be an object `{"url": "...", "headers": {...}}` whose headers go to that node
+  only, and the new `MM2.json` key `tron_api_key` is sent as the `TRON-PRO-API-KEY` header to TronGrid
+  hosts over HTTPS only. Header values and the key are never logged or shown. TRON stays switched off in this build,
+  so none of this can be used yet. Detail: PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
+
 #### Tendermint (Cosmos) coins
 
 - **A Tendermint coin now has a transaction history.** `tx_history: true` on a Tendermint platform
@@ -404,6 +419,9 @@ the previous version used. The safe way:
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
   Tendermint transaction history, is built in PR #363; its address index now covers every
   store-served coin family (PR #380).
+- [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
+  client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
+  headers and an API key; decisions about what lands before TRON is switched back on recorded.
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser are in progress (PR #397).
 

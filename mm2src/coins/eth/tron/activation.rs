@@ -13,8 +13,8 @@
 //! flows.
 
 use super::api::TronApiClient;
+use super::nodes::{parse_nodes, TronApiKey};
 use super::{Network, TronAddress, TRX_DECIMALS};
-use crate::node_url::host_only;
 
 use crate::eth::{rpc_event_handlers_for_eth_transport, EthCoin, EthCoinImpl, EthCoinType, EthGasLimit, EthGasLimitV2,
                  EthSigner, SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
@@ -70,21 +70,12 @@ pub async fn tron_coin_from_conf_and_request(
     priv_key: &[u8],
     protocol: CoinProtocol,
 ) -> Result<EthCoin, String> {
-    let urls: Vec<String> = match json::from_value(req["urls"].clone()) {
-        Ok(v) => v,
-        Err(e) => return Err(format!("Failed to parse 'urls' for TRON activation: {e}")),
-    };
-    if urls.is_empty() {
-        return Err("Enable request for TRON coin must have at least 1 node URL".to_owned());
-    }
-
-    // Validate URLs eagerly so misconfiguration surfaces at activation time.
-    for url in &urls {
-        if http::Uri::from_str(url).is_err() {
-            // Never echo the configured string: it may carry an API key (CRD ch.35 R35.1.14).
-            return Err(format!("TRON node URL '{}' is not a valid URI", host_only(url)));
-        }
-    }
+    // Each entry of `urls` is a URL string or an object with the node's own request headers; `tron_api_key`
+    // reaches the TronGrid hosts only (CRD ch.21 R-N9). Misconfiguration surfaces here, and no error echoes a
+    // configured string.
+    let api_key = TronApiKey::from_conf(&ctx.conf).map_err(|e| e.to_string())?;
+    let nodes = parse_nodes(&req["urls"], api_key.as_ref()).map_err(|e| e.to_string())?;
+    let urls: Vec<String> = nodes.iter().map(|node| node.url().to_owned()).collect();
 
     let (coin_type, decimals, network) = match protocol {
         CoinProtocol::TRX { network } => (EthCoinType::Tron, TRX_DECIMALS, network),
@@ -113,11 +104,13 @@ pub async fn tron_coin_from_conf_and_request(
     let key_pair = KeyPair::from_secret_slice(priv_key).map_err(|e| format!("Failed to derive TRON key pair: {e}"))?;
     let my_address = key_pair.address();
 
-    let tron_api = TronApiClient::new(urls.clone());
+    let tron_api = TronApiClient::new(ticker, nodes);
 
-    // Placeholder alloy provider over the TRON URLs. The TRON coin paths
-    // never dispatch RPCs through this provider; it exists only to satisfy
-    // the shared `EthCoinImpl` shape.
+    // Placeholder alloy provider over the TRON URLs, to satisfy the shared `EthCoinImpl` shape. The TRON wallet
+    // paths (balance, withdraw, broadcast) use the TRON API client instead, but not every path is moved off it
+    // yet: `MarketCoinOps::current_block` still sends `eth_blockNumber` through this provider, which is why the
+    // legacy history does not work for TRON; a later history change replaces that. Known boundary: the provider
+    // is given the plain URL strings only, so a request sent through it carries no headers and no key.
     let event_handlers = rpc_event_handlers_for_eth_transport(ctx, ticker.to_string());
     let web3 = crate::eth::alloy_compat::build_provider(crate::node_url::listed_nodes(ticker, urls), event_handlers)
         .map_err(|e| format!("Failed to build placeholder alloy provider for TRON: {e}"))?;

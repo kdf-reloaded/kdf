@@ -898,6 +898,15 @@ debugging build feature, off by default, and keeps its own secrets switch
 (`MM2_RPC_WIRE_DUMP_SECRETS`); what it redacts is that feature's own
 contract (maintainer decision 2026-10-26). No other output is exempt.
 
+*Wire dump, headers and API keys (status note 2026-11-17).* In the dump's
+redacted mode a member named `headers` (letter case ignored) is redacted as a
+whole, whatever it contains, and a member whose name contains `api-key` or
+`authorization` (letter case ignored) is redacted like the members whose names
+already contain `api_key`, `token` or `secret`. This covers the request headers
+and API key of a Tron node entry ([Chapter 21](21-tron-integration.md) R-N9).
+Nothing else of the dump changes, and `MM2_RPC_WIRE_DUMP_SECRETS=1` still shows
+everything. The sentences above are left as written.
+
 *URLs in the redacted wire dump (maintainer decision 2026-10-28, D35.10).* In
 the dump's redacted mode, the default whenever the dump is on, every URL with
 a scheme and a host inside a dumped string value -- a whole value or a URL
