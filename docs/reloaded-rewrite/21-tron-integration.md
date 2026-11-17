@@ -420,6 +420,89 @@ debug form already hides its node list.
 per-request timeout so a stalled node cannot block the pipeline.
 The concrete timeout value is discretionary.
 
+*Status note (2026-11-17).* The sentence of R-N1 that speaks of the
+ordering policy's "stop on a non-retryable rejection" is narrowed to
+R-N6: the only answer that ends a request at a node without trying the
+others is a well-formed broadcast rejection. Every other node failure
+(R-N4) moves on to the next node. The sentence itself is left as written.
+
+**R-N3 (per-attempt cutoff; Reloaded-original).** Each node attempt MUST
+be bounded by a wall-clock cutoff of 10 seconds that covers connecting,
+sending the request, reading the whole body and decoding it. There is no
+overall deadline beyond the attempts: a request over N nodes takes at most
+about N times the cutoff. The value is that of
+[Chapter 35](35-evm-v2-activation-rpcs.md) R35.1.10, so that Tron and EVM
+nodes behave alike. This realizes R-N2. A native build ends the spawned
+exchange at the cutoff; a browser build ends the wait only (the browser's
+own request is not aborted).
+
+**R-N4 (what a node failure is; Reloaded-original).** Each of the
+following moves the request on to the next node: (a) a connection,
+transport or name-lookup failure; (b) the cutoff of R-N3; (c) an HTTP
+status outside 2xx, 429 included; (d) a body that is not JSON or does not
+decode into the endpoint's answer; (e) a 2xx body that is the node's error
+form, a JSON object with a top-level `Error` string (measured on a public
+node). A read MUST never be answered from a non-2xx body. An endpoint's
+"empty" answer (an absent account) counts only as a 2xx answer in the
+endpoint's documented empty form. A redirect is not followed: a 3xx status
+is a non-2xx failure (c).
+
+**R-N5 (order; Reloaded-original).** The starting order is the configured
+order; the client does not shuffle it. Whether the reference shuffles it as
+the EVM path does (R35.1.7) is an open parity question; until it is
+answered the configured order stands. The node that answers becomes the
+first node of the order and the nodes that failed before it move to the
+tail in their relative order. The order is shared by the coin's client and
+its clones and lives as long as the coin is activated.
+
+**R-N6 (broadcast; Reloaded-original).** `broadcasthex` moves on after
+(a) to (d) like every other endpoint (and after (e), as before), so a signed
+transaction may reach several nodes; this is safe because the transaction
+id is fixed. A well-formed rejection by a node (`result: false` with a code)
+ends the request with that node's code and message; no further node is
+asked. How a node answers a duplicate of a transaction that an earlier,
+timed-out attempt already delivered has not been measured: the rejection is
+reported as it is, and the caller can confirm the transaction through
+`gettransactioninfobyid`.
+
+**R-N7 (concurrency; Reloaded-original).** No lock is held while a node is
+being asked. A request walks a snapshot of the order and, when a node
+answers, stores the rotation of that snapshot; the last store wins and the
+stored order is always a complete permutation (as D35.8 (iii) for the EVM
+path). Two requests of one coin MAY run at the same time, and a request
+stuck on a slow node does not hold up another.
+
+**R-N8 (all nodes failed; Reloaded-original).** The caller gets one error:
+of the class of the last failure that was not a cutoff, or, when every node
+hit the cutoff, a timeout-class "nodes unreachable" error. The text is
+host-only (R35.1.14 via R-N1) and credential-free (R35.1.17), and lists each
+host tried once with its failure. Each node failure is logged at debug level
+with the coin's ticker and the node's position in the configured list
+(R35.1.16 form); logging the all-failed error is the caller's.
+
+**R-N9 (request headers and API key; Reloaded-original).** An entry of the
+legacy `urls` array of the activation request is either a URL string or an
+object `{"url": "...", "headers": {"Name": "value", ...}}`; the headers of
+an object entry go to that node only. Header names MUST be valid HTTP
+header names and values valid HTTP header values; an invalid one refuses
+the activation with an error that does not echo it. The optional top-level
+`MM2.json` key `tron_api_key` is sent as the header `TRON-PRO-API-KEY` only
+to the hosts `api.trongrid.io`, `nile.trongrid.io` and
+`api.shasta.trongrid.io` (an exact host match, letter case ignored; never a
+prefix, suffix or substring match, and never the userinfo of a URL), and only
+when the node URL's scheme is `https`: a TronGrid host given as `http` gets no
+key, while the headers of its own entry stay as configured. The key is never
+sent to another host of the same list. A header of the same name (letter
+case ignored) on the node's own entry wins over the key for that node. The
+headers and the key are secrets: no log line, error text, RPC answer or
+debug output shows them (the debug forms say `headers: <set>` and
+`tron_api_key: <set>`), they go to no other host, and no peer sees them. The
+placeholder alloy provider that activation builds from the same node list
+(§21.4) receives the plain URL strings only, without headers: a known
+boundary, as no Tron request goes through it. A reference client never sends
+either form (a Reloaded request extension; no switch, because it adds an
+input and changes nothing for a client that does not send it).
+
 > **Binding scope (R36).** The endpoint paths and their JSON
 > request/response shapes are the dictated public Tron node API.
 > The client struct, its node-storage representation, and the
@@ -1097,6 +1180,16 @@ V3. The address encoding, protobuf transaction/contract formats,
   listing and an on-chain query; the gate script was not run because there
   are no code blocks. *Measure:* 0.01 on the discretionary-expression
   basis.
+- *Clean-context addition (2026-11-17, forbidden corpus not consulted):*
+  R-N3 to R-N9 and the status note after R-N2 in §21.9 are
+  Reloaded-original. They rest on this repository's own code, chapter 35
+  R35.1.7 to R35.1.17 and D35.8 (iii), and on a black-box measurement of a
+  public Tron test node on 2026-11-10 (the error form of the node API: a 2xx
+  answer with a top-level `Error` string, a non-2xx status only from the HTTP
+  layer). The open parity question is whether the reference shuffles the
+  configured node order (R-N5); it was not asked and nothing was taken from
+  the reference. Their tests are in the Tron node-client test module
+  (T-N1 to T-N8 and the header tests of R-N9).
 - *Clean-context addition (2026-10-28, forbidden corpus not consulted):* the
   sentence in §21.9 R-N1 that applies chapter 35 R35.1.17 to the Tron client,
   with its status remark, is Reloaded-original. It rests on the maintainer

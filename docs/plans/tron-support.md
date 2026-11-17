@@ -1,6 +1,6 @@
 # Plan: make TRON work again
 
-**Status:** parked at the 0.4.0 freeze (added to the 0.4.0 scope on 2026-11-08; the work stops after PR #333, the TRON wallet path, with TRON activation still off; swaps not built) — **Last reviewed:** 2026-11-10
+**Status:** in progress — **Last reviewed:** 2026-11-17
 
 > **Context:** created 2026-10-28 as the umbrella plan for bringing TRON (TRX,
 > TRC20) back. By maintainer decision TRON activation is switched off on `dev`
@@ -49,6 +49,14 @@ the next beta. Swap participation follows once its own blocker is cleared
      naming rule of ch. 35 R35.1.14 that ch. 21 §21.9 applies to TRON. The
      host-only naming change of 2026-10-28 (ch. 21 R-N1) covers this text;
      confirm it once that change is merged.
+   *Done 2026-11-17:* the node client meets ch. 21 §21.9 R-N2 to R-N9: a
+   10-second cutoff per node, failover on a status outside 2xx, on a body that
+   is not the expected JSON and on the node's own error form, the answering node
+   first, no lock held while a node is asked, one all-failed error that names each
+   host once and no credential. Entries of the `urls` list can carry request
+   headers, and the `MM2.json` key `tron_api_key` goes to TronGrid hosts over HTTPS only
+   (ch. 21 R-N9; `docs/NETWORK_CONFIG.md`). Open parity question: whether the
+   reference shuffles the configured node order.
 4. **Wallet path end to end.** Activation, balance, history and withdraw for
    TRX and one TRC20 token, on a testnet first, then on mainnet with small
    amounts.
@@ -76,3 +84,15 @@ the next beta. Swap participation follows once its own blocker is cleared
    ch. 21 and ch. 55, `docs/GLEEC_COMPATIBILITY.md`,
    `docs/API_REFERENCE_DEVIATIONS.md` and the two branch plans, and add a
    `CHANGELOG.md` entry.
+
+## Decisions
+
+*2026-11-17:* Everything the TRON wallet needs lands before activation is
+switched back on: the node client, the mmrpc 2.0 activation route, HD wallets,
+transaction history and the accuracy of the fee estimate. Switching activation
+on (work package 2) is the last step, after these.
+
+*2026-11-17:* GasFree gets its modules before the switch-on, and its reachable
+rail (the user-visible fee method) after it. GasFree also submits the signed
+transfer to the provider and tracks it until it ends; that is a KDF Reloaded
+extension, not something a reference client is known to do.

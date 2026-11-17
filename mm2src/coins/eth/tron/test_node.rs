@@ -40,6 +40,8 @@ pub(super) struct StubNode {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
     requests: Arc<Mutex<Vec<(String, String)>>>,
+    /// The request headers of every request, as `(lower-case name, value)` pairs, in arrival order.
+    request_headers: Arc<Mutex<Vec<Vec<(String, String)>>>>,
 }
 
 impl StubNode {
@@ -50,20 +52,26 @@ impl StubNode {
         let addr = listener.local_addr().expect("local address");
         let stop = Arc::new(AtomicBool::new(false));
         let requests: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+        let request_headers: Arc<Mutex<Vec<Vec<(String, String)>>>> = Arc::default();
         let handler: Arc<Handler> = Arc::new(handler);
 
-        let (accept_stop, accept_requests) = (stop.clone(), requests.clone());
+        let (accept_stop, accept_requests, accept_headers) = (stop.clone(), requests.clone(), request_headers.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 if accept_stop.load(Ordering::SeqCst) {
                     break;
                 }
                 let Ok(stream) = stream else { continue };
-                let (handler, requests) = (handler.clone(), accept_requests.clone());
-                std::thread::spawn(move || serve(stream, &*handler, &requests));
+                let (handler, requests, headers) = (handler.clone(), accept_requests.clone(), accept_headers.clone());
+                std::thread::spawn(move || serve(stream, &*handler, &requests, &headers));
             }
         });
-        StubNode { addr, stop, requests }
+        StubNode {
+            addr,
+            stop,
+            requests,
+            request_headers,
+        }
     }
 
     /// The node's base URL, as a caller would configure it.
@@ -72,6 +80,18 @@ impl StubNode {
     /// `(path, body)` of every request the node received, in arrival order.
     pub(super) fn requests(&self) -> Vec<(String, String)> {
         self.requests.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The values of the request header `name` (letter case ignored), one entry per request received, in arrival
+    /// order: `None` for a request that did not carry it.
+    pub(super) fn header_values(&self, name: &str) -> Vec<Option<String>> {
+        let name = name.to_ascii_lowercase();
+        self.request_headers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|headers| headers.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone()))
+            .collect()
     }
 
     /// The bodies of the requests to `path`, parsed as JSON, in arrival order.
@@ -93,7 +113,12 @@ impl Drop for StubNode {
 }
 
 /// Reads one HTTP request from `stream`, records it, writes the handler's answer and closes the connection.
-fn serve(mut stream: TcpStream, handler: &Handler, requests: &Mutex<Vec<(String, String)>>) {
+fn serve(
+    mut stream: TcpStream,
+    handler: &Handler,
+    requests: &Mutex<Vec<(String, String)>>,
+    request_headers: &Mutex<Vec<Vec<(String, String)>>>,
+) {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let head_end = loop {
@@ -112,6 +137,14 @@ fn serve(mut stream: TcpStream, handler: &Handler, requests: &Mutex<Vec<(String,
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or_default()
         .to_owned();
+    let headers: Vec<(String, String)> = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        })
+        .collect();
     let content_length = head
         .lines()
         .find_map(|line| {
@@ -134,6 +167,7 @@ fn serve(mut stream: TcpStream, handler: &Handler, requests: &Mutex<Vec<(String,
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push((path.clone(), body.clone()));
+    request_headers.lock().unwrap_or_else(|e| e.into_inner()).push(headers);
 
     let reply = handler(&path, &body);
     let response = format!(

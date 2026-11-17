@@ -1,18 +1,29 @@
-//! TRON HTTP API client with multi-node failover.
+//! TRON HTTP API client with multi-node failover (CRD ch.21 §21.9, R-N1 to R-N9).
 //!
-//! All TRON full-node HTTP API endpoints use POST with JSON bodies.
-//! The client rotates through configured nodes, promoting successful
-//! nodes to the front of the list.
+//! All TRON full-node HTTP API endpoints use POST with JSON bodies. A request walks the nodes in the current order,
+//! one node at a time, each attempt bounded by a cutoff (R-N3). The node that answers becomes the first node of the
+//! order, the nodes that failed before it move to the tail (R-N5). No lock is held while a node is asked (R-N7).
+//!
+//! # Invariants
+//!
+//! - Nothing this module logs or returns names a node by more than scheme, host and port, and no header value or
+//!   API key is ever rendered (R-N1, R-N8, R-N9).
+//! - The node order is shared by a client and its clones, and is always a complete permutation of the nodes.
+//! - Whether the reference client shuffles the configured order is an open parity question; this client keeps the
+//!   configured order (R-N5).
 
 use derive_more::Display;
 use mm2_err_handle::prelude::*;
-use mm2_net::transport::{slurp_post_json, SlurpError};
+use mm2_net::transport::{slurp_post_json_with_headers_bounded, SlurpError};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use super::address::TronAddress;
+use super::nodes::TronNode;
 use super::proto::TaposBlockData;
-use crate::node_url::scrub_node_url;
+use super::TRON_API_TIMEOUT_SEC;
+use crate::node_url::{host_only, listed_nodes, scrub_node_url, NodeSlot};
+use common::log::debug;
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -68,26 +79,40 @@ impl TronApiError {
     }
 }
 
-/// Whether a TRON API error is retryable on the next node.
+/// Whether a TRON API error is a node failure that moves the request on to the next node (R-N4): a connection or
+/// transport failure, the cutoff, a status outside 2xx, a body that is not JSON or does not decode into the
+/// endpoint's answer, and a 2xx body that is the node's error form.
 fn is_retryable(e: &TronApiError) -> bool {
     matches!(
         e,
-        TronApiError::Transport(_) | TronApiError::Timeout(_) | TronApiError::NodeError(_)
+        TronApiError::Transport(_)
+            | TronApiError::Timeout(_)
+            | TronApiError::NodeError(_)
+            | TronApiError::InvalidResponse(_)
     )
 }
 
-/// POST a JSON body to one node and decode a 2xx answer as `Resp`.
+/// POST a JSON body to one node, bounded by `cutoff_s` seconds for the whole exchange, and decode a 2xx answer as
+/// `Resp`, then check it with `validate` (an [`TronApiError::InvalidResponse`] fails the attempt). `headers` are the node's own headers; redirects are not followed, so a 3xx answer is a non-2xx failure.
 ///
 /// A non-2xx status is a node failure (retryable on the next node), whatever its body says: a rate-limit or
 /// error body that happens to fit `Resp` must never be taken for an answer (for example `{}` on `getaccount`
 /// means "account does not exist" only as a 2xx answer). The node's own error form is a 2xx answer, a JSON object
 /// with a top-level `Error` string (measured on the public Nile node, on every endpoint); it is a
 /// [`TronApiError::NodeError`] (retryable) and never decodes as `Resp`. The error texts carry no URL.
-async fn post_json_checked<Resp>(url: &str, json_body: String) -> Result<Resp, TronApiError>
+async fn post_json_checked<Resp>(
+    url: &str,
+    json_body: String,
+    headers: &http::HeaderMap,
+    cutoff_s: f64,
+    validate: fn(&Resp) -> Result<(), TronApiError>,
+) -> Result<Resp, TronApiError>
 where
     Resp: serde::de::DeserializeOwned,
 {
-    let (status, _headers, body) = slurp_post_json(url, json_body).await.map_err(TronApiError::from)?;
+    let (status, _headers, body) = slurp_post_json_with_headers_bounded(url, json_body, headers, cutoff_s)
+        .await
+        .map_err(TronApiError::from)?;
     if !status.is_success() {
         return Err(TronApiError::Transport(format!(
             "node answered HTTP status {}",
@@ -100,8 +125,11 @@ where
         let text = error.as_str().map_or_else(|| error.to_string(), str::to_owned);
         return Err(TronApiError::NodeError(text));
     }
-    serde_json::from_value(value)
-        .map_err(|e| TronApiError::InvalidResponse(format!("node answer does not decode: {e}")))
+    let answer: Resp = serde_json::from_value(value)
+        .map_err(|e| TronApiError::InvalidResponse(format!("node answer does not decode: {e}")))?;
+    // The endpoint's own shape check runs inside the attempt, so a wrongly shaped answer fails over (R-N4 (d)).
+    validate(&answer)?;
+    Ok(answer)
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +206,8 @@ pub struct TriggerConstantContractRequest {
 /// `/wallet/triggerconstantcontract` response.
 #[derive(Debug, Deserialize)]
 pub struct TriggerConstantContractResponse {
+    /// The node's own status object (a contract failure is reported here); only its presence is used.
+    pub result: Option<serde_json::Value>,
     pub constant_result: Option<Vec<String>>,
     pub energy_used: Option<u64>,
 }
@@ -241,76 +271,180 @@ pub struct GetAccountResourceRequest {
     pub visible: bool,
 }
 
+/// The shape of a `getaccount` answer: a JSON object that is empty (the account does not exist on chain) or carries
+/// a `balance` or a `create_time` and decodes as [`AccountInfo`]. Anything else, such as a proxy's
+/// `{"message": "..."}`, is a bad answer.
+fn check_account_shape(answer: &serde_json::Value) -> Result<(), TronApiError> {
+    let object = answer
+        .as_object()
+        .ok_or_else(|| TronApiError::InvalidResponse("getaccount answer is not a JSON object".to_owned()))?;
+    if object.is_empty() {
+        return Ok(());
+    }
+    if !object.contains_key("balance") && !object.contains_key("create_time") {
+        return Err(TronApiError::InvalidResponse(
+            "getaccount answer carries neither a balance nor a creation time".to_owned(),
+        ));
+    }
+    AccountInfo::deserialize(answer)
+        .map(|_| ())
+        .map_err(|e| TronApiError::InvalidResponse(format!("node answer does not decode: {e}")))
+}
+
 // ---------------------------------------------------------------------------
 // API Client
 // ---------------------------------------------------------------------------
 
-/// A TRON HTTP API client that rotates through configured nodes.
+/// A TRON HTTP API client that fails over between configured nodes.
+///
+/// Clones share the node order.
 pub struct TronApiClient {
-    /// List of TRON full-node API URLs (e.g., `https://api.trongrid.io`).
-    nodes: Arc<async_std::sync::Mutex<Vec<String>>>,
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    nodes: Vec<Node>,
+    /// Indices into `nodes`, in the order the next request starts with. Never held across an `.await` (R-N7).
+    order: Mutex<Vec<usize>>,
+    /// The cutoff of one node attempt, in seconds (R-N3).
+    cutoff_s: f64,
+}
+
+struct Node {
+    /// The configured URL: a credential, so only used to send and to scrub.
+    url: String,
+    /// The headers every request to this node carries. Secrets: never rendered.
+    headers: http::HeaderMap,
+    /// The host-only form of the node (R-N1): the only way the node is named.
+    label: String,
+    /// The coin's ticker and the node's position in the coin's list as the request gave it (R-N8).
+    slot: NodeSlot,
 }
 
 impl std::fmt::Debug for TronApiClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // We can't lock the mutex synchronously here; just record the type.
         write!(f, "TronApiClient {{ <nodes hidden> }}")
     }
 }
 
+/// How one node attempt failed, for the all-failed error.
+struct Failure {
+    /// Index of the node in `Inner::nodes`.
+    node: usize,
+    error: TronApiError,
+}
+
 impl TronApiClient {
-    /// Create a new client from a list of node base URLs.
-    pub fn new(node_urls: Vec<String>) -> Self {
+    /// Create a client over `nodes`, in the configured order, for the coin `ticker` (used in debug lines). Each node
+    /// attempt is bounded by the [`TRON_API_TIMEOUT_SEC`] cutoff.
+    pub fn new(ticker: &str, nodes: Vec<TronNode>) -> Self {
+        Self::with_cutoff(ticker, nodes, TRON_API_TIMEOUT_SEC as f64)
+    }
+
+    /// Like [`Self::new`] with another cutoff; for tests, which cannot wait 10 s.
+    fn with_cutoff(ticker: &str, nodes: Vec<TronNode>, cutoff_s: f64) -> Self {
+        let urls: Vec<String> = nodes.iter().map(|node| node.url().to_owned()).collect();
+        let nodes: Vec<Node> = nodes
+            .into_iter()
+            .zip(listed_nodes(ticker, urls))
+            .map(|(node, listed)| Node {
+                label: host_only(node.url()),
+                headers: node.headers().clone(),
+                url: listed.url,
+                slot: listed.slot,
+            })
+            .collect();
+        let order = Mutex::new((0..nodes.len()).collect());
         TronApiClient {
-            nodes: Arc::new(async_std::sync::Mutex::new(node_urls)),
+            inner: Arc::new(Inner { nodes, order, cutoff_s }),
         }
     }
 
-    /// Execute an HTTP POST to a TRON endpoint, rotating through nodes on
-    /// retryable errors. On success, the successful node is promoted to
-    /// the front of the list.
+    /// Test constructor with an injected cutoff.
+    #[cfg(test)]
+    pub(crate) fn new_with_cutoff_s(ticker: &str, nodes: Vec<TronNode>, cutoff_s: f64) -> Self {
+        Self::with_cutoff(ticker, nodes, cutoff_s)
+    }
+
+    /// The host-only names of the nodes in the order the next request starts with.
+    #[cfg(test)]
+    pub(crate) fn order_labels(&self) -> Vec<String> {
+        let inner = &self.inner;
+        inner
+            .current_order()
+            .into_iter()
+            .map(|i| inner.nodes[i].label.clone())
+            .collect()
+    }
+
+    /// Execute an HTTP POST to a TRON endpoint, trying the nodes one at a time in the current order (R-N4). The
+    /// node that answers becomes the first node of the order (R-N5); no lock is held while a node is asked (R-N7).
     async fn try_post<Req, Resp>(&self, path: &str, request: &Req) -> Result<Resp, TronApiError>
     where
         Req: Serialize,
         Resp: serde::de::DeserializeOwned + Send + 'static,
     {
+        self.try_post_validated(path, request, |_| Ok(())).await
+    }
+
+    /// Like [`Self::try_post`], with a shape check of the decoded answer that runs inside each node attempt: a
+    /// wrongly shaped 2xx answer is an [`TronApiError::InvalidResponse`] and moves on to the next node (R-N4 (d)).
+    async fn try_post_validated<Req, Resp>(
+        &self,
+        path: &str,
+        request: &Req,
+        validate: fn(&Resp) -> Result<(), TronApiError>,
+    ) -> Result<Resp, TronApiError>
+    where
+        Req: Serialize,
+        Resp: serde::de::DeserializeOwned + Send + 'static,
+    {
         let json_body = serde_json::to_string(request).map_err(|e| TronApiError::InvalidResponse(e.to_string()))?;
+        let inner = &self.inner;
+        // The snapshot this request walks; concurrent requests work on their own snapshots.
+        let order = inner.current_order();
+        let mut failures: Vec<Failure> = Vec::new();
 
-        let mut nodes = self.nodes.lock().await;
-        let mut last_err = TronApiError::AllNodesFailed("no nodes configured".to_string());
-
-        for i in 0..nodes.len() {
-            let url = format!("{}{}", nodes[i], path);
-            match post_json_checked::<Resp>(&url, json_body.clone()).await {
+        for (position, &index) in order.iter().enumerate() {
+            let node = &inner.nodes[index];
+            let url = format!("{}{}", node.url, path);
+            match post_json_checked::<Resp>(&url, json_body.clone(), &node.headers, inner.cutoff_s, validate).await {
                 Ok(resp) => {
-                    // Promote this node to front.
-                    if i > 0 {
-                        nodes.rotate_left(i);
+                    // The answering node first, the nodes that failed before it at the tail in their relative
+                    // order. The last store wins and is always a complete permutation.
+                    if position > 0 {
+                        let mut rotated = order.clone();
+                        rotated.rotate_left(position);
+                        inner.set_order(rotated);
                     }
                     return Ok(resp);
                 },
                 Err(e) => {
-                    let api_err = e.without_node_urls(&[&url, &nodes[i]]);
-                    if !is_retryable(&api_err) {
-                        return Err(api_err);
+                    let error = e.without_node_urls(&[&url, &node.url]);
+                    debug!(
+                        "{}",
+                        node.slot
+                            .line("TRON node ", &node.label, &format!(" failed {path}: {error}"))
+                    );
+                    if !is_retryable(&error) {
+                        return Err(error);
                     }
-                    last_err = api_err;
+                    failures.push(Failure { node: index, error });
                 },
             }
         }
-
-        // The failure of the last node, kept typed when it is the node's own error answer.
-        match last_err {
-            node_error @ TronApiError::NodeError(_) => Err(node_error),
-            other => Err(TronApiError::AllNodesFailed(other.to_string())),
-        }
+        Err(all_failed(inner, failures))
     }
 
     /// Get the current block (for TAPOS data and timestamp).
     pub async fn get_now_block(&self) -> Result<GetNowBlockResponse, TronApiError> {
         #[derive(Serialize)]
         struct Empty {}
-        self.try_post("/wallet/getnowblock", &Empty {}).await
+        // The block id must be usable for TAPOS: a body that decodes but carries an unusable id is a bad answer.
+        self.try_post_validated("/wallet/getnowblock", &Empty {}, |block: &GetNowBlockResponse| {
+            block.to_tapos().map(|_| ())
+        })
+        .await
     }
 
     /// Get account info. Returns `None` only when the node answers a 2xx empty JSON object `{}`, its documented
@@ -323,17 +457,12 @@ impl TronApiClient {
             address: address.to_base58(),
             visible: true,
         };
-        let answer: serde_json::Value = self.try_post("/wallet/getaccount", &req).await?;
-        let object = answer
-            .as_object()
-            .ok_or_else(|| TronApiError::InvalidResponse("getaccount answer is not a JSON object".to_owned()))?;
-        if object.is_empty() {
+        let answer: serde_json::Value = self
+            .try_post_validated("/wallet/getaccount", &req, check_account_shape)
+            .await?;
+        // The shape was checked in the attempt: an object, empty or an existing account.
+        if answer.as_object().is_some_and(serde_json::Map::is_empty) {
             return Ok(None);
-        }
-        if !object.contains_key("balance") && !object.contains_key("create_time") {
-            return Err(TronApiError::InvalidResponse(
-                "getaccount answer carries neither a balance nor a creation time".to_owned(),
-            ));
         }
         serde_json::from_value(answer)
             .map(Some)
@@ -355,7 +484,22 @@ impl TronApiClient {
             parameter: parameter_hex.to_string(),
             visible: true,
         };
-        self.try_post("/wallet/triggerconstantcontract", &req).await
+        self.try_post_validated(
+            "/wallet/triggerconstantcontract",
+            &req,
+            |answer: &TriggerConstantContractResponse| {
+                // A result, a constant result or an energy figure marks a node's own answer (a contract failure is
+                // a `result` object); a body with none of them is not an answer to this endpoint.
+                if answer.result.is_some() || answer.constant_result.is_some() || answer.energy_used.is_some() {
+                    Ok(())
+                } else {
+                    Err(TronApiError::InvalidResponse(
+                        "triggerconstantcontract answer carries no result".to_owned(),
+                    ))
+                }
+            },
+        )
+        .await
     }
 
     /// Broadcast a signed transaction (protobuf hex).
@@ -363,7 +507,19 @@ impl TronApiClient {
         let req = BroadcastHexRequest {
             transaction: tx_hex.to_string(),
         };
-        let resp: BroadcastHexResponse = self.try_post("/wallet/broadcasthex", &req).await?;
+        // A body without a `result` flag is not a node's answer and fails over; a well-formed `result: false`
+        // passes the check and ends the request below (R-N6).
+        let resp: BroadcastHexResponse = self
+            .try_post_validated("/wallet/broadcasthex", &req, |answer: &BroadcastHexResponse| {
+                if answer.result.is_some() {
+                    Ok(())
+                } else {
+                    Err(TronApiError::InvalidResponse(
+                        "broadcasthex answer carries no result flag".to_owned(),
+                    ))
+                }
+            })
+            .await?;
         if resp.result == Some(false) {
             return Err(TronApiError::RemoteError {
                 code: resp.code.unwrap_or_default(),
@@ -401,8 +557,59 @@ impl TronApiClient {
 impl Clone for TronApiClient {
     fn clone(&self) -> Self {
         TronApiClient {
-            nodes: Arc::clone(&self.nodes),
+            inner: Arc::clone(&self.inner),
         }
+    }
+}
+
+impl Inner {
+    fn current_order(&self) -> Vec<usize> { self.order.lock().unwrap_or_else(PoisonError::into_inner).clone() }
+
+    fn set_order(&self, order: Vec<usize>) { *self.order.lock().unwrap_or_else(PoisonError::into_inner) = order; }
+}
+
+/// The error of a request that every node failed (R-N8).
+///
+/// The class is that of the last failure that was not a cutoff: the node's own error form stays a
+/// [`TronApiError::NodeError`] and an undecodable answer stays an [`TronApiError::InvalidResponse`], anything else
+/// is [`TronApiError::AllNodesFailed`]. When every node hit the cutoff, the error is a [`TronApiError::Timeout`]
+/// that says no node answered in time. The text lists each host tried once, host-only, with its failure; it carries
+/// no URL part and no header value.
+fn all_failed(inner: &Inner, failures: Vec<Failure>) -> TronApiError {
+    if failures.is_empty() {
+        return TronApiError::AllNodesFailed("no nodes configured".to_owned());
+    }
+    let Some(last) = failures
+        .iter()
+        .rev()
+        .find(|f| !matches!(f.error, TronApiError::Timeout(_)))
+    else {
+        return TronApiError::Timeout(format!(
+            "nodes unreachable: no node answered within {} s",
+            inner.cutoff_s
+        ));
+    };
+    let mut tried: Vec<(&str, String)> = Vec::new();
+    for failure in &failures {
+        let label = inner.nodes[failure.node].label.as_str();
+        let text = match &failure.error {
+            TronApiError::Timeout(_) => format!("no answer within {} s", inner.cutoff_s),
+            other => other.to_string(),
+        };
+        match tried.iter_mut().find(|(seen, _)| *seen == label) {
+            Some(entry) => entry.1 = text,
+            None => tried.push((label, text)),
+        }
+    }
+    let listing = tried
+        .into_iter()
+        .map(|(label, text)| format!("{label}: {text}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    match last.error {
+        TronApiError::NodeError(_) => TronApiError::NodeError(listing),
+        TronApiError::InvalidResponse(_) => TronApiError::InvalidResponse(listing),
+        _ => TronApiError::AllNodesFailed(listing),
     }
 }
 
@@ -534,9 +741,9 @@ mod tests {
     #[test]
     fn all_nodes_failed_error_names_no_key() {
         // Port 1 on the loopback is closed: every attempt fails at connect.
-        let client = TronApiClient::new(vec![
-            "http://user:secret@127.0.0.1:1/APIKEY".to_owned(),
-            "http://127.0.0.1:1/OTHERKEY".to_owned(),
+        let client = TronApiClient::new("TRX", vec![
+            TronNode::plain("http://user:secret@127.0.0.1:1/APIKEY".to_owned()),
+            TronNode::plain("http://127.0.0.1:1/OTHERKEY".to_owned()),
         ]);
         let err = common::block_on(client.get_now_block()).unwrap_err().to_string();
         for secret in ["user", "secret", "APIKEY", "OTHERKEY"] {

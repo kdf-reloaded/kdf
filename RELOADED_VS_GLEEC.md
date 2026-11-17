@@ -610,6 +610,17 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.36 R36.3.5, ch.18 R18.6B, ch.49 R49.28 to
   R49.30, ch.35 R35.6.8, R35.6.9. PR #323.
 
+- **The TRON node client (TRON is still switched off) gives each node a time limit, fails over on bad answers and
+  accepts request headers and an API key.** A TRON node that does not answer within 10 seconds is skipped, and so is a
+  node that answers with an error status, with something that is not the expected JSON, or with the node's own
+  error form; a rate-limit answer is never read as an empty account. The node that answers is asked first next time,
+  and several requests of one coin run at the same time. A signed transaction that a node rejects with a code ends the
+  request with that code. An entry of the TRON `urls` list may also be an object `{"url": "...", "headers": {...}}`
+  whose headers go to that node only, and the top-level `MM2.json` key `tron_api_key` is sent as `TRON-PRO-API-KEY`
+  to TronGrid hosts over HTTPS only. Both are Reloaded request extensions that a reference client never sends; no switch is
+  needed because a request without them is served as before. The values are secrets and are never logged or shown.
+  Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.21 §21.9 R-N3 to R-N9.
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.

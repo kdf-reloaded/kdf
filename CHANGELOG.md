@@ -69,6 +69,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   activation reports a protocol parse error. Solana stays switched off in this build, so no Solana
   coin can be activated yet. Detail: PR #361; CRD ch.40 R40.1.2, R40.1.3.
 
+#### TRON coins
+
+- **The TRON node client gives each node a time limit and fails over when a node answers badly.** A node
+  that does not answer within 10 seconds is skipped, and so is a node that answers with an error status
+  (a rate limit included), with something that is not the expected JSON, or with the node's own error form;
+  such an answer is never read as an empty account. The node that answers is asked first by the next
+  request, and several requests of one coin can run at the same time instead of waiting for each other.
+  A signed transaction that a node rejects with a code ends the request with that code. An entry of the
+  TRON `urls` list can now be an object `{"url": "...", "headers": {...}}` whose headers go to that node
+  only, and the new `MM2.json` key `tron_api_key` is sent as the `TRON-PRO-API-KEY` header to TronGrid
+  hosts over HTTPS only. Header values and the key are never logged or shown. TRON stays switched off in this build,
+  so none of this can be used yet. Detail: CRD ch.21 §21.9 R-N3 to R-N9.
+
 #### Tendermint (Cosmos) coins
 
 - **A Tendermint coin now has a transaction history.** `tx_history: true` on a Tendermint platform
@@ -324,6 +337,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
   Tendermint transaction history, is built in PR #363; its address index now covers every
   store-served coin family (PR #380).
+- [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
+  client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
+  headers and an API key; decisions about what lands before TRON is switched back on recorded.
 
 ## [0.4.0-beta.1] — 2026-11-14
 
