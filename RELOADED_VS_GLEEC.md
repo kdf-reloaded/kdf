@@ -138,6 +138,20 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
   R40.1.2, R40.1.3; PR #361.
 
+- **Solana under an HD login.** GLEEC KDF refuses Solana activation under a
+  global-HD login and derives no Solana key from a seed. Reloaded derives the
+  key from the seed phrase at `m/44'/501'/N'/0'` by default, or at
+  `m/44'/501'/N'` with the request member `"hd_path_layout": "bip44"`; nothing
+  is stored per wallet, so a client that used `"bip44"` must send it on every
+  activation. One seed phrase gives three Solana addresses (single-key, default
+  layout, `"bip44"`). `hd_path_layout`, `path_to_address` and `priv_key_policy`
+  are additional request members; a hardware-wallet policy is refused, and
+  `IguanaPrivKey` under an HD login gives the wallet's single internal key
+  and its address. No
+  switch: the reference behavior is a refusal, which cannot be a useful
+  compatibility target, and no peer sees which key a wallet uses. CRD ch.40
+  §40.1A; PR #392.
+
 - **Opt-in: an absent `max_eth_tx_type` read as unrestricted.** By default
   Reloaded reads a coin configuration with no `max_eth_tx_type` key as GLEEC KDF
   does: the coin may send untyped (legacy) transactions only, and an EIP-1559
