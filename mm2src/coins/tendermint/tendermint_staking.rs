@@ -5,6 +5,7 @@
 
 use super::rpc::*;
 use super::tendermint_types::*;
+use super::wc_integration::signed_fee_of;
 use crate::rpc_command::tendermint::staking::{ClaimRewardsPayload, Delegation, DelegationPayload,
                                               DelegationsQueryResponse, Undelegation, UndelegationEntry,
                                               UndelegationsQueryResponse, ValidatorStatus};
@@ -358,6 +359,21 @@ impl TendermintCoin {
         Ok((tx_hex, tx_id, None))
     }
 
+    /// The fee carried by the transaction a WalletConnect wallet signed (amount in the smallest unit, gas limit), read
+    /// from the answered transaction; `None` for a result that is unsigned or that a key of this node signed.
+    fn wc_signed_fee(
+        &self,
+        tx_hex: &BytesJson,
+        unsigned: &Option<UnsignedTransaction>,
+    ) -> MmResult<Option<(u64, u64)>, DelegationError> {
+        if unsigned.is_some() || self.activation_policy.wallet_connect_session().is_none() {
+            return Ok(None);
+        }
+        signed_fee_of(tx_hex, &self.protocol_info.denom.to_string())
+            .map(Some)
+            .map_to_mm(DelegationError::InternalError)
+    }
+
     /// Send a delegation (stake) transaction.
     pub(crate) async fn delegate(&self, req: DelegationPayload) -> MmResult<TransactionDetails, DelegationError> {
         fn make_msg(
@@ -456,6 +472,16 @@ impl TendermintCoin {
         .map_err(|e| DelegationError::InternalError(e.to_string()))?;
 
         let (tx_hex, tx_id, unsigned) = self.send_or_unsigned(msg, fee, timeout_height, &req.memo).await?;
+        // CRD ch.36 R36.14.15, as-built note of 2026-11-17: the fee of a transaction a wallet signed is the one the signed
+        // transaction carries.
+        let (fee_amount_u64, fee_amount_dec, gas_limit) = match self.wc_signed_fee(&tx_hex, &unsigned)? {
+            Some((signed_amount, signed_gas_limit)) => (
+                signed_amount,
+                big_decimal_from_sat_unsigned(signed_amount, self.decimals()),
+                signed_gas_limit,
+            ),
+            None => (fee_amount_u64, fee_amount_dec, gas_limit),
+        };
         // An unsigned result carries the constant identifier and the memo of R36.14.29; a signed one its transaction.
         let (internal_id, result_memo) = match &unsigned {
             Some(_) => (unsigned_internal_id(None), Some(req.memo.clone())),
@@ -570,6 +596,16 @@ impl TendermintCoin {
         }
 
         let (tx_hex, tx_id, unsigned) = self.send_or_unsigned(msg, fee, timeout_height, &req.memo).await?;
+        // CRD ch.36 R36.14.15, as-built note of 2026-11-17: the fee of a transaction a wallet signed is the one the signed
+        // transaction carries.
+        let (fee_amount_u64, fee_amount_dec, gas_limit) = match self.wc_signed_fee(&tx_hex, &unsigned)? {
+            Some((signed_amount, signed_gas_limit)) => (
+                signed_amount,
+                big_decimal_from_sat_unsigned(signed_amount, self.decimals()),
+                signed_gas_limit,
+            ),
+            None => (fee_amount_u64, fee_amount_dec, gas_limit),
+        };
         // An unsigned result carries the constant identifier and the memo of R36.14.29; a signed one its transaction.
         let (internal_id, result_memo) = match &unsigned {
             Some(_) => (unsigned_internal_id(None), Some(req.memo.clone())),
@@ -672,6 +708,16 @@ impl TendermintCoin {
         }
 
         let (tx_hex, tx_id, unsigned) = self.send_or_unsigned(msg, fee, timeout_height, &req.memo).await?;
+        // CRD ch.36 R36.14.15, as-built note of 2026-11-17: the fee of a transaction a wallet signed is the one the signed
+        // transaction carries.
+        let (fee_amount_u64, fee_amount_dec, gas_limit) = match self.wc_signed_fee(&tx_hex, &unsigned)? {
+            Some((signed_amount, signed_gas_limit)) => (
+                signed_amount,
+                big_decimal_from_sat_unsigned(signed_amount, self.decimals()),
+                signed_gas_limit,
+            ),
+            None => (fee_amount_u64, fee_amount_dec, gas_limit),
+        };
         // An unsigned result carries the constant identifier and the memo of R36.14.29; a signed one its transaction.
         let (internal_id, result_memo) = match &unsigned {
             Some(_) => (unsigned_internal_id(None), Some(req.memo.clone())),

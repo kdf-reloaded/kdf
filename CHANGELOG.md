@@ -122,7 +122,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   500) for `withdraw` and for the staking requests, where GLEEC KDF answers a general internal error.
   Placing an order with such a coin or one of its tokens is refused, as for a watch-only coin, and swaps
   do not sign through the wallet. The top-level `priv_key_policy` member of the request still refuses the
-  WalletConnect spelling. A test with a real wallet is still to be run. Detail: PR #393; CRD ch.36
+  WalletConnect spelling. The fee and the gas limit of such a request come from the node's gas simulation
+  (gas limit = simulated gas x 1.5, fee = limit x gas price; an explicit gas limit is kept), because the fixed
+  limit of 125,000 ran out of gas for a real send and lost the fee; a failed simulation fails the request.
+  A test with a real wallet is still to be run. Detail: PR #393; CRD ch.36
   R36.14.13--R36.14.15.
 
 ### Changed
@@ -193,6 +196,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
 
 ### Fixed
+
+#### WalletConnect
+
+- **The pairing link of `wc_new_connection` is usable by a wallet.** Every `&` after the first was
+  returned as the text `&amp;`, so a wallet found no key in the link and refused it. The `wc_*` answers now
+  carry the characters as JSON escapes that a client decodes to the plain characters. Detail: PR #393;
+  CRD ch.22 §22.2.
+- **The node reconnects to the WalletConnect relay.** The relay closes the connection about every ten
+  minutes; the node did not reopen it, and a new connection request failed until a restart. It now
+  reconnects with a growing wait and subscribes again to its pairings and sessions. Detail: PR #393;
+  CRD ch.22 §22.5.2.
+
+#### Tendermint (Cosmos) coins
+
+- **The fee reported for a transaction signed by a WalletConnect wallet is the fee of that transaction.**
+  `fee_details` of `withdraw` and the staking requests is read from the signed transaction; it showed the
+  computed fee even when the wallet signed another one. Detail: PR #393; CRD ch.36 R36.14.15.
+- **Sending a Tendermint transaction the node already holds answers its hash.** A repeated
+  `send_raw_transaction` was answered with an error ("tx already exists in cache") although the transaction
+  was included. Detail: PR #393; CRD ch.36 R36.14.15.
 
 #### Browser (WASM) build
 

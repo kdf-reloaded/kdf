@@ -27,14 +27,16 @@
 
 use super::rpc::*;
 use super::tendermint_helpers::{amino_bank_send_json, amino_sign_doc, TendermintCommons};
-use super::tendermint_types::account_id_from_public_key;
+use super::tendermint_types::{account_id_from_public_key, parse_expected_sequence_number, FeeIntent,
+                              TendermintCoinRpcError, ABCI_REQUEST_HEIGHT, ABCI_REQUEST_PROVE, ABCI_SIMULATE_TX_PATH,
+                              ACCOUNT_SEQUENCE_ERR, FEE_GAS_MARGIN, GAS_LIMIT_DEFAULT};
 use super::{TendermintCoin, TendermintPublicKey};
-use crate::{DelegationError, WithdrawError};
+use crate::{DelegationError, WithdrawError, WithdrawFee};
 use async_trait::async_trait;
-use cosmrs::proto::cosmos::tx::v1beta1::TxRaw;
+use cosmrs::proto::cosmos::tx::v1beta1::{AuthInfo as AuthInfoProto, SimulateRequest, SimulateResponse, TxRaw};
 use cosmrs::proto::prost::Message;
 use cosmrs::tx::{self, Fee, ModeInfo, SignMode, SignerInfo};
-use cosmrs::{AccountId, Any};
+use cosmrs::{AccountId, Any, Coin};
 use derive_more::Display;
 use kdf_walletconnect::chain::WcRequestMethods;
 use kdf_walletconnect::error::WalletConnectError;
@@ -42,6 +44,7 @@ use kdf_walletconnect::integration::WcCoinSigner;
 use kdf_walletconnect::session::KeyInfo;
 use kdf_walletconnect::{Topic, WalletConnectCtx};
 use mm2_core::mm_ctx::MmArc;
+use mm2_err_handle::prelude::*;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -525,6 +528,48 @@ async fn read_session_key(
     })
 }
 
+/// The fee the signed transaction carries: the amount of the coin `denom` in the fee of the `AuthInfo` of the `TxRaw`
+/// (zero when the fee holds no coin of that denomination) and the gas limit. The wallet may sign an `AuthInfo` that
+/// differs from the one requested, so the fee a WalletConnect result reports is read from the transaction that is
+/// answered (CRD ch.36 R36.14.15, as-built note of 2026-11-17). For the Amino path the `AuthInfo` is the one this node
+/// assembled from the requested fee; both paths decode the same way.
+///
+/// # Errors
+///
+/// A description when the bytes are not a `TxRaw`, the `AuthInfo` is not decodable, it carries no fee, or an amount is
+/// not a decimal number that fits 64 bits.
+pub(super) fn signed_fee_of(tx_bytes: &[u8], denom: &str) -> Result<(u64, u64), String> {
+    let raw = TxRaw::decode(tx_bytes).map_err(|e| format!("the signed transaction does not decode: {e}"))?;
+    let auth_info = AuthInfoProto::decode(raw.auth_info_bytes.as_slice())
+        .map_err(|e| format!("the signed auth info does not decode: {e}"))?;
+    let fee = auth_info
+        .fee
+        .ok_or_else(|| "the signed auth info carries no fee".to_owned())?;
+    let amount = match fee.amount.iter().find(|coin| coin.denom == denom) {
+        Some(coin) => coin
+            .amount
+            .parse::<u64>()
+            .map_err(|e| format!("the signed fee amount is not a number: {e}"))?,
+        None => 0,
+    };
+    Ok((amount, fee.gas_limit))
+}
+
+/// The gas limit and the fee amount (in the smallest unit) of a request the wallet signs, from the simulated gas
+/// (see `TendermintCoin::wc_request_fee`). With `explicit_gas_limit` the limit is kept and the amount is the
+/// simulated gas times the margin times the price; without it the limit is the simulated gas times the margin and the
+/// amount is that limit times the price. Both round up.
+fn wc_fee_figures(gas_used: u64, gas_price: f64, explicit_gas_limit: Option<u64>) -> (u64, u64) {
+    let margin_gas = gas_used as f64 * FEE_GAS_MARGIN;
+    match explicit_gas_limit {
+        Some(limit) => (limit, (margin_gas * gas_price).ceil() as u64),
+        None => {
+            let limit = margin_gas.ceil();
+            (limit as u64, (limit * gas_price).ceil() as u64)
+        },
+    }
+}
+
 impl TendermintCoin {
     /// This coin's CAIP-2 chain id (`cosmos:<chain-registry name>`).
     fn wc_cosmos_chain_id(&self) -> String { cosmos_caip2_chain_id(self.protocol_info.chain_id.as_ref()) }
@@ -571,6 +616,122 @@ impl TendermintCoin {
             amino_msgs,
             memo,
         })
+    }
+
+    /// The gas the node's simulation reports for one message, with the activated public key in the signer info and an
+    /// empty signature (the simulation path does not verify signatures; the transaction still carries one signature
+    /// slot). The wallet's key is not held here, so this is how a WalletConnect coin gets a gas figure at all (CRD
+    /// ch.36 R36.14.15, as-built note of 2026-11-17).
+    ///
+    /// # Errors
+    ///
+    /// A [`TendermintCoinRpcError`] when the account or the node cannot be queried, the node refuses the simulation
+    /// or its answer carries no gas information.
+    async fn wc_simulate_gas_used(
+        &self,
+        msg: &Any,
+        timeout_height: u64,
+        memo: &str,
+    ) -> MmResult<u64, TendermintCoinRpcError> {
+        let public_key = cosmrs::crypto::PublicKey::from(
+            self.activation_policy
+                .public_key()
+                .map_err(|e| TendermintCoinRpcError::InternalError(format!("public key unavailable: {e}")))?,
+        );
+        let mut account_info = self.account_info(&self.account_id).await?;
+
+        let (response, raw_response) = loop {
+            let body_bytes = tx::Body::new(vec![msg.clone()], memo, timeout_height as u32)
+                .into_bytes()
+                .map_to_mm(|e| TendermintCoinRpcError::InternalError(format!("encode tx body: {e}")))?;
+            let fee = Fee::from_amount_and_gas(
+                Coin {
+                    denom: self.protocol_info.denom.clone(),
+                    amount: 0_u64.into(),
+                },
+                GAS_LIMIT_DEFAULT,
+            );
+            let auth_info_bytes = SignerInfo::single_direct(Some(public_key.clone()), account_info.sequence)
+                .auth_info(fee)
+                .into_bytes()
+                .map_to_mm(|e| TendermintCoinRpcError::InternalError(format!("encode auth info: {e}")))?;
+            let tx_bytes = assemble_tx_raw(body_bytes, auth_info_bytes, Vec::new());
+
+            let request = AbciRequest::new(
+                Some(ABCI_SIMULATE_TX_PATH.to_string()),
+                SimulateRequest {
+                    tx_bytes,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                ABCI_REQUEST_HEIGHT,
+                ABCI_REQUEST_PROVE,
+            );
+            let raw_response = self.rpc_client().await?.perform(request).await?;
+            let log = raw_response.response.log.to_string();
+
+            if log.contains(ACCOUNT_SEQUENCE_ERR) {
+                account_info.sequence = parse_expected_sequence_number(&log)?;
+                continue;
+            }
+            match raw_response.response.code {
+                cosmrs::tendermint::abci::Code::Ok => {},
+                cosmrs::tendermint::abci::Code::Err(code) => {
+                    return MmError::err(TendermintCoinRpcError::InvalidResponse(format!(
+                        "The gas simulation failed. Error code: {} Message: {}",
+                        code, raw_response.response.log
+                    )));
+                },
+            }
+            break (
+                SimulateResponse::decode(raw_response.response.value.as_slice())?,
+                raw_response,
+            );
+        };
+
+        response.gas_info.as_ref().map(|gas| gas.gas_used).ok_or_else(|| {
+            MmError::new(TendermintCoinRpcError::InvalidResponse(format!(
+                "Could not read gas_info. Response: {raw_response:?}"
+            )))
+        })
+    }
+
+    /// The fee of a transaction the wallet signs for a request (withdraw, delegation, undelegation, reward claim),
+    /// from the node's gas simulation instead of a fixed assumed gas (CRD ch.36 R36.14.15, as-built note of
+    /// 2026-11-17; a Reloaded divergence, since the fixed limit ran out of gas for a real transaction and the fee
+    /// was lost). The margin is the one the local-key fee computation applies, [`FEE_GAS_MARGIN`].
+    ///
+    /// - A request with an explicit gas limit keeps it, as it does for a local key; the fee amount is the simulated
+    ///   gas times the margin times the gas price (the local-key formula).
+    /// - Without one, the gas limit is the simulated gas times the margin (rounded up) and the fee amount is that
+    ///   limit times the gas price (rounded up), so the amount always covers the limit at the selected price.
+    ///
+    /// When the simulation fails the call fails; no guessed limit is used.
+    ///
+    /// # Errors
+    ///
+    /// The errors of the simulation (see `wc_simulate_gas_used`).
+    pub(super) async fn wc_request_fee(
+        &self,
+        msg: &Any,
+        timeout_height: u64,
+        memo: &str,
+        intent: &FeeIntent,
+    ) -> MmResult<Fee, TendermintCoinRpcError> {
+        let gas_used = self.wc_simulate_gas_used(msg, timeout_height, memo).await?;
+        let (gas_price, selected_gas_limit) = self.selected_gas_price_and_limit(intent);
+        let explicit_limit = matches!(intent, FeeIntent::Request {
+            fee: Some(WithdrawFee::CosmosGas { .. } | WithdrawFee::CosmosGasPriority { .. }),
+            ..
+        });
+        let (gas_limit, amount) = wc_fee_figures(gas_used, gas_price, explicit_limit.then_some(selected_gas_limit));
+        Ok(Fee::from_amount_and_gas(
+            Coin {
+                denom: self.platform_denom().clone(),
+                amount: amount.into(),
+            },
+            gas_limit,
+        ))
     }
 
     /// Re-builds the broadcast `AuthInfo` with SignMode `SIGN_MODE_LEGACY_AMINO_JSON`
@@ -944,5 +1105,51 @@ mod tests {
             parse_cosmos_signature(&bad_base64, CosmosByteEncoding::Base64),
             Err(WalletConnectError::InvalidResponse(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod fee_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn the_gas_limit_covers_the_simulated_gas_with_the_margin() {
+        // The real defect: a send that used 125,865 gas ran out of gas under the fixed limit 125,000.
+        let (limit, amount) = wc_fee_figures(125_865, 0.006, None);
+        assert_eq!(limit, 188_798, "ceil(125,865 * 1.5)");
+        assert!(limit > 125_865);
+        assert_eq!(amount, 1_133, "ceil(188,798 * 0.006)");
+        // The amount covers the limit at the price.
+        assert!(amount as f64 >= limit as f64 * 0.006);
+    }
+
+    #[test]
+    fn an_explicit_limit_is_kept_and_the_amount_is_the_local_key_formula() {
+        let (limit, amount) = wc_fee_figures(100_000, 0.5, Some(200_000));
+        assert_eq!((limit, amount), (200_000, 75_000), "100,000 * 1.5 * 0.5");
+    }
+
+    #[test]
+    fn the_fee_of_the_signed_auth_info_is_read_for_the_direct_and_the_amino_assembly() {
+        let denom = cosmrs::Denom::from_str("uatom").unwrap();
+        let fee = Fee::from_amount_and_gas(
+            Coin {
+                denom,
+                amount: 900_u64.into(),
+            },
+            150_000u64,
+        );
+        let auth_info_bytes = SignerInfo::single_direct(None, 3).auth_info(fee).into_bytes().unwrap();
+        // The direct path answers the echoed auth info bytes, the Amino path an auth info this node assembled: both
+        // reach the same decoder.
+        let tx = assemble_tx_raw(vec![1, 2], auth_info_bytes, vec![7; 64]);
+        assert_eq!(signed_fee_of(&tx, "uatom"), Ok((900, 150_000)));
+        assert_eq!(
+            signed_fee_of(&tx, "other"),
+            Ok((0, 150_000)),
+            "no coin of that denomination"
+        );
+        assert!(signed_fee_of(&[0xff, 0xff], "uatom").is_err());
     }
 }

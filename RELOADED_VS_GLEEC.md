@@ -657,8 +657,12 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   fails with `PlatformCoinCreationError`, where GLEEC KDF does not compare; (4) in the direct sign mode the
   transaction body the wallet echoes must equal the one that was requested, where GLEEC KDF assembles the transaction
   from the echo without comparing; (5) orders of such a coin and of its tokens are refused as wallet-only, where GLEEC
-  KDF accepts them (swaps are not signed through the wallet). A test with a real wallet is still to be run. No switch
-  exists. CRD ch.36 §36.14.2, D36.15, D36.16; ch.18 D18.11.10.
+  KDF accepts them (swaps are not signed through the wallet); (6) the fee and gas limit of a request the wallet signs
+  come from the node's gas simulation (gas limit = simulated gas x 1.5, fee = limit x gas price; an explicit gas limit
+  is kept), where GLEEC KDF uses a fixed assumed gas of 125,000, which ran out of gas for a real send and lost the
+  fee, and a failed simulation fails the request; `fee_details` reports the fee of the transaction the wallet signed.
+  A test with a real wallet is still to be run. No switch exists (a fixed limit that runs out of gas loses the fee).
+  CRD ch.36 §36.14.2, D36.15, D36.16; ch.18 D18.11.10.
 - **A Tendermint coin's transaction history differs from GLEEC KDF in three ways.** (1) While the first read of the
   chain runs, the history state is `InProgress` (with `{"transactions_left": n}`); GLEEC KDF reports `NotStarted`
   until the first read ends (§36.14.1 R36.14.11), and a failed first balance read ends its fetcher silently where KDF

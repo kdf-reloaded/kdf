@@ -8,7 +8,6 @@
 
 use super::super::tendermint_coin_from_conf_and_request_with_wallet_connect;
 use super::super::tendermint_helpers::amino_bank_send_json;
-use super::super::tendermint_types::GAS_LIMIT_DEFAULT;
 use super::super::wc_integration::{CosmosWallet, TestWalletSlot, WcNamespace, WcSessionView};
 use super::watch_only_tests::{script_t36_node, secp_key, t36_withdraw, watch_only};
 use super::*;
@@ -28,8 +27,12 @@ use std::collections::HashMap;
 const TOPIC: &str = "session-topic";
 /// The signature the scripted wallet answers; the node never verifies it.
 const WALLET_SIGNATURE: [u8; 64] = [0x77; 64];
-/// The fixed assumed fee of the test chain (CRD ch.18 R18.11.9): ceil(50,000 * 1.5 * 0.25).
-const FIXED_FEE_SAT: u64 = 18_750;
+/// The gas the scripted node reports for a simulation.
+const SIMULATED_GAS: u64 = 100_000;
+/// The gas limit a WalletConnect request without an explicit one gets: the simulated gas times the margin 1.5.
+const WC_GAS_LIMIT: u64 = 150_000;
+/// The fee of such a request at the gas price 0.25 of the test chain: the limit times the price.
+const WC_FEE_SAT: u64 = 37_500;
 const MSG_SEND_URL: &str = "/cosmos.bank.v1beta1.MsgSend";
 
 // ---------------------------------------------------------------------------
@@ -230,9 +233,13 @@ impl Harness {
             .unwrap_or_else(|e| panic!("cannot activate with the session: {e}"))
     }
 
-    /// The node of the withdraw tests: account number 7, sequence 3, height 1,000, balances of 10,000,000 base units
-    /// and a broadcast that succeeds. It answers no simulation, so the fixed fee is the only one there can be.
-    fn script_node(&self) {
+    /// The node of the withdraw tests: account number 7, sequence 3, height 1,000, balances of 10,000,000 base units,
+    /// a simulation that reports [`SIMULATED_GAS`] and a broadcast that succeeds.
+    fn script_node(&self) { self.script_node_with(None, None); }
+
+    /// [`Self::script_node`] with another answer to the simulation (`abci_query` result) and/or to the broadcast
+    /// (a result, or `{ "__rpc_error": .. }`).
+    fn script_node_with(&self, simulate_answer: Option<Json>, broadcast_answer: Option<Json>) {
         let account = QueryAccountResponse {
             account: Some(Any {
                 type_url: "/cosmos.auth.v1beta1.BaseAccount".to_owned(),
@@ -252,8 +259,20 @@ impl Harness {
             }),
         }
         .encode_to_vec();
+        let simulation = SimulateResponse {
+            gas_info: Some(GasInfo {
+                gas_wanted: 125_000,
+                gas_used: SIMULATED_GAS,
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec();
         let tx_result = json!({ "code": 0, "data": null, "log": "", "info": "", "gas_wanted": "0", "gas_used": "0",
                                 "events": [], "codespace": "" });
+        let simulate_answer = simulate_answer.unwrap_or_else(|| abci_value(&simulation));
+        let broadcast_answer = broadcast_answer.unwrap_or_else(
+            || json!({ "check_tx": tx_result, "deliver_tx": tx_result, "hash": BROADCAST_HASH, "height": "1001" }),
+        );
         self.node.answer(move |method, params| match method {
             "abci_info" => Some(
                 json!({ "response": { "data": "test", "version": "0", "app_version": "1",
@@ -261,8 +280,8 @@ impl Harness {
             ),
             "abci_query" if params["path"] == "/cosmos.auth.v1beta1.Query/Account" => Some(abci_value(&account)),
             "abci_query" if params["path"] == "/cosmos.bank.v1beta1.Query/Balance" => Some(abci_value(&balance)),
-            "broadcast_tx_commit" => Some(json!({ "check_tx": tx_result, "deliver_tx": tx_result,
-                                                  "hash": BROADCAST_HASH, "height": "1001" })),
+            "abci_query" if params["path"] == "/cosmos.tx.v1beta1.Service/Simulate" => Some(simulate_answer.clone()),
+            "broadcast_tx_commit" => Some(broadcast_answer.clone()),
             _ => None,
         });
     }
@@ -597,9 +616,9 @@ fn orders_are_refused_for_a_wallet_connect_coin_and_its_token() {
 
 #[test]
 fn a_direct_withdraw_is_signed_by_the_wallet_and_broadcast_by_nobody() {
-    // T36.41: exactly one `cosmos_signDirect`; `tx_hex` and `tx_hash` answered; nothing broadcast and nothing
-    // simulated; the fee is the fixed assumed one; the signed transaction carries the wallet's signature and the
-    // body that was requested.
+    // T36.41: exactly one `cosmos_signDirect`; `tx_hex` and `tx_hash` answered; nothing broadcast; one simulation
+    // prices the request (gas limit = simulated gas times 1.5, fee = limit times price); the signed transaction
+    // carries the wallet's signature and the body that was requested.
     let h = harness(standard_view(false));
     h.script_node();
     let coin = h.coin();
@@ -607,7 +626,7 @@ fn a_direct_withdraw_is_signed_by_the_wallet_and_broadcast_by_nobody() {
 
     assert_eq!(h.wallet.methods(), vec!["cosmos_signDirect".to_owned()]);
     assert_eq!(h.broadcasts(), 0, "withdraw broadcasts nothing");
-    assert_eq!(h.simulations(), 0, "no simulation");
+    assert_eq!(h.simulations(), 1, "one simulation prices the request");
     assert!(!details.is_unsigned());
     let wire = serde_json::to_value(&details).expect("a serializable result");
     assert!(wire["tx_hex"].is_string() && wire["tx_hash"].is_string(), "{wire}");
@@ -641,8 +660,13 @@ fn a_direct_withdraw_is_signed_by_the_wallet_and_broadcast_by_nobody() {
     };
     assert_eq!(single.mode, SignModeProto::Direct as i32);
     let fee = auth_info.fee.expect("a fee");
-    assert_eq!(fee.amount[0].amount, FIXED_FEE_SAT.to_string());
-    assert_eq!(fee.gas_limit, GAS_LIMIT_DEFAULT);
+    assert_eq!(fee.amount[0].amount, WC_FEE_SAT.to_string());
+    assert_eq!(fee.gas_limit, WC_GAS_LIMIT);
+    // The reported fee is the one of the signed auth info.
+    let TxFeeDetails::Tendermint(fee_details) = details.fee_details.clone().expect("fee details") else {
+        panic!("a Tendermint fee");
+    };
+    assert_eq!((fee_details.uamount, fee_details.gas_limit), (WC_FEE_SAT, WC_GAS_LIMIT));
 }
 
 #[test]
@@ -742,17 +766,37 @@ fn an_echoed_body_that_differs_from_the_requested_one_fails_the_request() {
     let h = harness(standard_view(false));
     h.script_node();
     let coin = h.coin();
+    // An auth info that still carries a fee (a wallet may rewrite the transaction's other parts) is used as echoed;
+    // one without a fee cannot be reported and is refused.
+    let echoed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let echoed_in_wallet = echoed.clone();
+    h.wallet.respond(move |_, payload| {
+        let params = &payload["request"]["params"];
+        let requested = hex::decode(params["signDoc"]["authInfoBytes"].as_str().unwrap()).unwrap();
+        let mut auth_info = AuthInfoProto::decode(requested.as_slice()).unwrap();
+        auth_info.fee.as_mut().unwrap().granter = "iaa1granter".to_owned();
+        let bytes = auth_info.encode_to_vec();
+        *echoed_in_wallet.lock().unwrap() = bytes.clone();
+        Ok(json!({ "signature": { "signature": hex::encode(WALLET_SIGNATURE) },
+                   "signed": { "bodyBytes": params["signDoc"]["bodyBytes"], "authInfoBytes": hex::encode(bytes) } }))
+    });
+    let details = withdraw_typed(&coin, "IRIS").expect("another auth info is allowed");
+    assert_eq!(
+        tx_raw_of(&details).auth_info_bytes,
+        *echoed.lock().unwrap(),
+        "the echoed auth info is used"
+    );
+
+    let h = harness(standard_view(false));
+    h.script_node();
+    let coin = h.coin();
     h.wallet.respond(|_, payload| {
         let params = &payload["request"]["params"];
         Ok(json!({ "signature": { "signature": hex::encode(WALLET_SIGNATURE) },
                    "signed": { "bodyBytes": params["signDoc"]["bodyBytes"], "authInfoBytes": "0a00" } }))
     });
-    let details = withdraw_typed(&coin, "IRIS").expect("another auth info is allowed");
-    assert_eq!(
-        tx_raw_of(&details).auth_info_bytes,
-        vec![0x0a, 0x00],
-        "the echoed auth info is used"
-    );
+    let error = withdraw_typed(&coin, "IRIS").expect_err("an auth info without a fee");
+    assert!(error.to_string().contains("carries no fee"), "{error}");
 }
 
 #[test]
@@ -770,15 +814,15 @@ fn an_answer_without_a_signature_is_a_signing_error() {
 #[test]
 fn a_ledger_session_withdraw_signs_the_amino_document_with_no_timeout_height() {
     // T36.41, R36.14.15, R36.14.18, R36.14.31: `cosmos_signAmino`, a document without `timeout_height`, a fee three
-    // times the fixed one, and a broadcast transaction whose body carries no timeout height and whose signer uses
-    // the Amino sign mode.
+    // times the simulated one, and a broadcast transaction whose body carries no timeout height and whose signer
+    // uses the Amino sign mode.
     let h = harness(standard_view(true));
     h.script_node();
     let coin = h.coin();
     let details = withdraw_typed(&coin, "IRIS").expect("a signed Amino withdraw");
     assert_eq!(h.wallet.methods(), vec!["cosmos_signAmino".to_owned()]);
     assert_eq!(h.broadcasts(), 0);
-    assert_eq!(h.simulations(), 0);
+    assert_eq!(h.simulations(), 1);
 
     let payload = &h.wallet.payloads_of("cosmos_signAmino")[0];
     let doc = &payload["request"]["params"]["signDoc"];
@@ -787,10 +831,10 @@ fn a_ledger_session_withdraw_signs_the_amino_document_with_no_timeout_height() {
     assert_eq!(doc["account_number"], "7");
     assert_eq!(doc["sequence"], "3");
     assert_eq!(doc["memo"], "");
-    assert_eq!(doc["fee"]["gas"], GAS_LIMIT_DEFAULT.to_string());
+    assert_eq!(doc["fee"]["gas"], WC_GAS_LIMIT.to_string());
     assert_eq!(
         doc["fee"]["amount"],
-        json!([{ "amount": (FIXED_FEE_SAT * 3).to_string(), "denom": "uiris" }])
+        json!([{ "amount": (WC_FEE_SAT * 3).to_string(), "denom": "uiris" }])
     );
     assert_eq!(doc["msgs"][0]["type"], "cosmos-sdk/MsgSend");
 
@@ -807,13 +851,17 @@ fn a_ledger_session_withdraw_signs_the_amino_document_with_no_timeout_height() {
     assert_eq!(auth_info.signer_infos[0].sequence, 3);
     assert_eq!(
         auth_info.fee.expect("a fee").amount[0].amount,
-        (FIXED_FEE_SAT * 3).to_string()
+        (WC_FEE_SAT * 3).to_string()
     );
     assert_eq!(raw.signatures, vec![WALLET_SIGNATURE.to_vec()]);
     let TxFeeDetails::Tendermint(fee_details) = details.fee_details.clone().expect("fee details") else {
         panic!("a Tendermint fee");
     };
-    assert_eq!(fee_details.uamount, FIXED_FEE_SAT * 3);
+    // The reported fee is the one of the signed (Amino) auth info.
+    assert_eq!(
+        (fee_details.uamount, fee_details.gas_limit),
+        (WC_FEE_SAT * 3, WC_GAS_LIMIT)
+    );
 }
 
 #[test]
@@ -829,7 +877,13 @@ fn the_amino_document_of_the_wallet_request_is_the_one_of_the_watch_only_result(
     let watch = watch_only(secp_key(), true);
     script_t36_node(&watch, 7, 3);
     let wire = t36_withdraw(&watch.coin, "IRIS", "1", None);
-    assert_eq!(wire["legacy_amino_json"], sent);
+    // The two documents are one builder's output; they differ in the fee only: a watch-only result carries the fixed
+    // assumed fee (R36.14.8), a WalletConnect request the simulated one (as-built note of 2026-11-17).
+    let (mut watch_doc, mut sent_doc) = (wire["legacy_amino_json"].clone(), sent.clone());
+    assert_ne!(watch_doc["fee"], sent_doc["fee"]);
+    watch_doc.as_object_mut().expect("an object").remove("fee");
+    sent_doc.as_object_mut().expect("an object").remove("fee");
+    assert_eq!(watch_doc, sent_doc);
     // The members of R36.14.31 item 3 and no other.
     let document = sent.as_object().expect("an object");
     let mut members: Vec<&str> = document.keys().map(String::as_str).collect();
@@ -902,7 +956,7 @@ fn a_delegation_is_signed_by_the_wallet_and_broadcast_as_with_a_local_key() {
     let details = common::block_on(coin.delegate(delegation())).expect("a signed delegation");
     assert_eq!(h.wallet.methods(), vec!["cosmos_signDirect".to_owned()]);
     assert_eq!(h.broadcasts(), 1);
-    assert_eq!(h.simulations(), 0);
+    assert_eq!(h.simulations(), 1);
     assert!(!details.is_unsigned());
     assert_eq!(details.tx_hash, BROADCAST_HASH);
     let raw = tx_raw_of(&details);
@@ -952,7 +1006,7 @@ fn a_token_withdraw_follows_the_platform_and_the_ledger_factor_is_the_platforms_
         .expect("a fee");
     assert_eq!(
         (fee.amount[0].denom.as_str(), fee.amount[0].amount.as_str()),
-        ("uiris", "18750")
+        ("uiris", WC_FEE_SAT.to_string().as_str())
     );
 
     let ledger = harness(standard_view(true));
@@ -963,7 +1017,7 @@ fn a_token_withdraw_follows_the_platform_and_the_ledger_factor_is_the_platforms_
     let doc = &ledger.wallet.payloads_of("cosmos_signAmino")[0]["request"]["params"]["signDoc"];
     assert_eq!(
         doc["fee"]["amount"],
-        json!([{ "amount": FIXED_FEE_SAT.to_string(), "denom": "uiris" }])
+        json!([{ "amount": WC_FEE_SAT.to_string(), "denom": "uiris" }])
     );
     assert_eq!(
         doc["msgs"][0]["value"]["amount"],
@@ -972,5 +1026,138 @@ fn a_token_withdraw_follows_the_platform_and_the_ledger_factor_is_the_platforms_
     let TxFeeDetails::Tendermint(fee_details) = details.fee_details.expect("fee details") else {
         panic!("a Tendermint fee");
     };
-    assert_eq!(fee_details.uamount, FIXED_FEE_SAT);
+    assert_eq!(fee_details.uamount, WC_FEE_SAT);
+}
+
+// ---------------------------------------------------------------------------
+// CRD ch.36 R36.14.15, as-built note of 2026-11-17: the simulated fee, the reported fee, the broadcast
+// ---------------------------------------------------------------------------
+
+fn withdraw_with_fee(coin: &impl MmCoin, fee: Json) -> Result<TransactionDetails, WithdrawError> {
+    let request: WithdrawRequest = serde_json::from_value(json!({
+        "coin": "IRIS", "to": peer_address(), "amount": "1", "fee": fee }))
+    .expect("a withdraw request");
+    common::block_on(coin.withdraw(request).compat()).map_err(|e| e.get_inner().clone())
+}
+
+#[test]
+fn the_simulation_carries_the_activated_key_and_an_empty_signature() {
+    let h = harness(standard_view(false));
+    h.script_node();
+    let coin = h.coin();
+    withdraw_typed(&coin, "IRIS").expect("a signed withdraw");
+
+    let requests: Vec<Json> = h
+        .node
+        .requests("abci_query")
+        .into_iter()
+        .filter(|params| params["path"] == "/cosmos.tx.v1beta1.Service/Simulate")
+        .collect();
+    assert_eq!(requests.len(), 1);
+    let data = requests[0]["data"].as_str().expect("the request data");
+    let simulate = cosmrs::proto::cosmos::tx::v1beta1::SimulateRequest::decode(hex::decode(data).unwrap().as_slice())
+        .expect("a simulate request");
+    let raw = TxRaw::decode(simulate.tx_bytes.as_slice()).expect("a TxRaw");
+    assert_eq!(raw.signatures, vec![Vec::<u8>::new()], "one empty signature slot");
+    let auth_info = AuthInfoProto::decode(raw.auth_info_bytes.as_slice()).expect("an auth info");
+    assert!(
+        auth_info.signer_infos[0].public_key.is_some(),
+        "the activated public key"
+    );
+    assert_eq!(auth_info.signer_infos[0].sequence, 3);
+}
+
+#[test]
+fn a_request_with_an_explicit_gas_limit_keeps_it() {
+    // The limit of the request is kept; the amount is the simulated gas times the margin times the price.
+    let h = harness(standard_view(false));
+    h.script_node();
+    let coin = h.coin();
+    let details = withdraw_with_fee(
+        &coin,
+        json!({ "type": "CosmosGas", "gas_limit": 200_000, "gas_price": 0.5 }),
+    )
+    .expect("a signed withdraw");
+    let fee = AuthInfoProto::decode(tx_raw_of(&details).auth_info_bytes.as_slice())
+        .unwrap()
+        .fee
+        .expect("a fee");
+    assert_eq!(fee.gas_limit, 200_000);
+    assert_eq!(fee.amount[0].amount, "75000", "100,000 * 1.5 * 0.5");
+}
+
+#[test]
+fn a_failed_simulation_fails_the_withdraw_before_the_wallet_is_asked() {
+    // No guessed limit is signed: the node answers no simulation, so the request fails and the wallet is not asked.
+    let h = harness(standard_view(false));
+    h.script_node_with(
+        Some(json!({ "response": { "code": 11, "log": "out of gas in simulation", "value": "" } })),
+        None,
+    );
+    let coin = h.coin();
+    let error = withdraw_typed(&coin, "IRIS").expect_err("the simulation fails");
+    assert!(!matches!(error, WithdrawError::SigningError(_)), "{error:?}");
+    assert!(h.wallet.methods().is_empty(), "the wallet is not asked");
+}
+
+#[test]
+fn the_reported_fee_is_the_fee_of_the_auth_info_the_wallet_signed() {
+    // Direct: the wallet answers an auth info whose fee differs from the requested one (a wallet may rewrite it);
+    // `fee_details` carries the fee of the transaction that is answered.
+    let h = harness(standard_view(false));
+    h.script_node();
+    let coin = h.coin();
+    h.wallet.respond(|_, payload| {
+        let params = &payload["request"]["params"];
+        let requested = hex::decode(params["signDoc"]["authInfoBytes"].as_str().unwrap()).unwrap();
+        let mut auth_info = AuthInfoProto::decode(requested.as_slice()).unwrap();
+        let fee = auth_info.fee.as_mut().unwrap();
+        fee.amount[0].amount = "900".to_owned();
+        fee.gas_limit = 150_001;
+        Ok(json!({ "signature": { "signature": hex::encode(WALLET_SIGNATURE) },
+                   "signed": { "bodyBytes": params["signDoc"]["bodyBytes"],
+                               "authInfoBytes": hex::encode(auth_info.encode_to_vec()) } }))
+    });
+    let details = withdraw_typed(&coin, "IRIS").expect("a signed withdraw");
+    let signed = AuthInfoProto::decode(tx_raw_of(&details).auth_info_bytes.as_slice())
+        .unwrap()
+        .fee
+        .expect("a fee");
+    assert_eq!((signed.amount[0].amount.as_str(), signed.gas_limit), ("900", 150_001));
+    let TxFeeDetails::Tendermint(fee_details) = details.fee_details.expect("fee details") else {
+        panic!("a Tendermint fee");
+    };
+    assert_eq!((fee_details.uamount, fee_details.gas_limit), (900, 150_001));
+    assert_eq!(fee_details.amount.to_string(), "0.0009");
+    // The totals follow the signed fee: the amount sent (1) plus 0.0009.
+    let expected_total = "1.0009".parse::<BigDecimal>().unwrap();
+    assert_eq!(details.total_amount, expected_total);
+    assert_eq!(details.spent_by_me, expected_total);
+    assert_eq!(details.my_balance_change, -expected_total);
+}
+
+#[test]
+fn a_broadcast_the_node_already_holds_answers_the_hash_of_the_transaction() {
+    // The node answers "tx already exists in cache" to a broadcast it has seen: the broadcast succeeded earlier, and
+    // the answer is the hash computed from the bytes.
+    let h = harness(standard_view(false));
+    h.script_node_with(
+        None,
+        Some(json!({ "__rpc_error": { "code": -32603, "message": "Internal error",
+                                       "data": "tx already exists in cache" } })),
+    );
+    let coin = h.coin();
+    let details = withdraw_typed(&coin, "IRIS").expect("a signed withdraw");
+    let hash = common::block_on(coin.send_raw_tx_bytes(&details.tx_hex.0).compat()).expect("an accepted rebroadcast");
+    assert_eq!(hash, details.tx_hash);
+
+    // Any other node error stays an error.
+    let h = harness(standard_view(false));
+    h.script_node_with(
+        None,
+        Some(json!({ "__rpc_error": { "code": -32603, "message": "Internal error", "data": "mempool is full" } })),
+    );
+    let coin = h.coin();
+    let details = withdraw_typed(&coin, "IRIS").expect("a signed withdraw");
+    assert!(common::block_on(coin.send_raw_tx_bytes(&details.tx_hex.0).compat()).is_err());
 }

@@ -138,6 +138,18 @@ The pairing URI follows the public WC2 format
 (`wc:<topic>@2?...`) and is opaque to the project: it is
 delivered verbatim to the consumer (a GUI, a CLI, a deep link).
 
+> **Status note (2026-11-17, Reloaded-original; informative).** A lab run with
+> a mobile wallet found that the URI in the answer of `wc_new_connection`
+> reached the client with every `&` after the first written as the text `&amp;`,
+> so a wallet read the keys `amp;symKey` and `amp;expiryTimestamp` and found no
+> symmetric key. The cause was not the URI builder but the response writer of the
+> RPC server, which HTML-escapes `<`, `>` and `&` in every answer body (Chapter
+> 55's status note names the same behavior). "Verbatim" is now met for the
+> methods of this chapter: for the `wc_*` methods the three characters are
+> written as the JSON escapes `\u0026`, `\u003c` and `\u003e`, which a JSON parser
+> decodes to the original characters; the answers of every other method are
+> unchanged. The URI the client reads has the plain separators.
+
 ## 22.3 The Integration Trait
 
 Coin support modules that wish to expose WalletConnect-backed
@@ -322,6 +334,24 @@ Lifecycle on relay connect:
    skipped).
 6. On user-initiated disconnect, delete the record and
    unsubscribe.
+
+> **Status note (2026-11-17, Reloaded-original; informative).** The relay closes
+> the websocket from time to time (about every ten minutes in the lab, with the
+> close code 4010, "Disconnecting for load balancing reasons"). Before this
+> note the node did not reconnect, and a later `wc_new_connection` failed with
+> the relay error "Not connected" until a restart. The node now opens the
+> connection again after any close or connection error, waiting 1 s, 2 s, 4 s
+> and so on up to 60 s between attempts, with a freshly signed relay token, and
+> then subscribes again to every unexpired pairing topic, every in-flight
+> establishment topic and every settled session topic, so a session approved
+> before the drop still takes signing requests (step 4 is thus also run after
+> each reconnect, not only at start). Messages that arrive while a reconnect
+> runs are kept and routed afterwards.
+>
+> Every relay message the node publishes or receives is logged at debug level
+> with its direction, JSON-RPC method (`response` for a response, `-` when it
+> could not be read), the first eight characters of the topic, the relay tag and
+> the request id; a payload, a key or a full topic is never logged.
 
 ### 22.5.3 On-disk record format (Interop / wire-format reuse, R29)
 

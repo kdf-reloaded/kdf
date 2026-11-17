@@ -2096,6 +2096,49 @@ that chain. Recommended: (b).
 >   parsing for the WalletConnect spelling (§36.7, status note of 2026-11-15);
 >   only the two spellings of `activation_params` activate.
 
+> **As built (Reloaded, 2026-11-17, 0.5.0; informative; amends the "Signing"
+> and "Amino mode" items of the note above).** A lab run with a mobile wallet
+> (Cosmos Hub mainnet) signed and rejected requests as described, and found
+> three defects of the fee that this note records.
+>
+> - *Fee and gas limit from a simulation (a Reloaded divergence from
+>   R18.11.9).* The fixed assumed gas is no longer used for a transaction a
+>   wallet signs. A send of the lab used 125,865 gas under the fixed limit
+>   125,000, ran out of gas and still lost its fee. For `withdraw` (platform
+>   coin and token) and for the staking requests the node now simulates the
+>   message through the node's simulation request with the activated public key
+>   in the signer info and one empty signature slot, and prices from the gas
+>   reported. The local-key fee computation simulates too, and multiplies the
+>   reported gas by 1.5 for the fee amount; it keeps the fixed (or requested)
+>   gas limit. The wallet path applies the same 1.5: a request without a gas
+>   limit gets the limit ceil(gas x 1.5) and the amount ceil(limit x price); a
+>   request with an explicit gas limit keeps it, and its amount is
+>   ceil(gas x 1.5 x price), the local-key formula. When the simulation fails,
+>   the request fails (its transport error) and the wallet is not asked; no
+>   guessed limit is signed. The unsigned results of a watch-only coin keep the
+>   fixed fee and gas bound by §36.14.8, and swap and trade-fee pricing are
+>   unchanged. The Ledger factor three of R36.14.18 item 4 is applied to the
+>   amount as before. No compatibility switch exists: a fixed limit that runs
+>   out of gas loses the fee, so the old figure is no option worth keeping.
+> - *The reported fee is the signed one.* In Direct mode the wallet may answer
+>   an auth-info that differs from the requested one (the note above lets the
+>   echoed auth-info bytes through), so the fee of the transaction that is
+>   answered can differ from the one that was computed. `fee_details` (`amount`,
+>   `uamount`, `gas_limit`) of a signed result of `withdraw` and of the staking
+>   requests is read from the auth-info of the transaction answered, in Direct
+>   and in Amino mode; the totals of the result keep the requested fee.
+> - *Broadcast of a transaction the node already holds.* The broadcast helper of
+>   the coin treats the answer "tx already exists in cache" as "already
+>   broadcast": it answers the transaction's hash (computed from the bytes), or
+>   the error of a delivery that the chain shows as failed. Every other error
+>   of the broadcast stays an error. The helper serves every broadcast of the
+>   coin, the swap sends included; a repeated send of the same bytes is
+>   correct there too.
+> - *Tests.* The gas limit and the amounts (`fee_tests` of the wallet module
+>   and the wallet-connect tests of the coin, with a scripted simulation), the
+>   simulated transaction (activated key, empty signature), a failed simulation,
+>   `fee_details` against the signed auth-info, and the repeated broadcast.
+
 ### 36.14.3 Public-key activation, the `WithPubkey` form
 
 R36.14.16 **Account.** The activated address is the bech32 account of the

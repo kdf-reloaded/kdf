@@ -12,7 +12,7 @@
 //! - [`connection_handler`] / [`inbound_message`] — relay event loop plumbing.
 //! - [`storage`] — session persistence (SQLite native, IndexedDB wasm).
 
-use connection_handler::WcConnectionHandler;
+use connection_handler::{RelayEvent, WcConnectionHandler};
 use error::WalletConnectError;
 use inbound_message::PendingRequests;
 use mm2_core::mm_ctx::MmArc;
@@ -30,7 +30,7 @@ use relay_rpc::rpc::params::session::{Namespace, ProposeNamespaces, SettleNamesp
 use relay_rpc::rpc::params::Relay;
 use session::rpc::{propose, settle};
 use session::{EncodingAlgo, Session, SessionManager};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -63,6 +63,35 @@ const RELAY_AUTH_TTL_SECS: u64 = 8 * 60 * 60;
 const SESSION_REQUEST_METHOD: &str = "wc_sessionRequest";
 /// IRN relay tag for an outbound `wc_sessionRequest`.
 const SESSION_REQUEST_TAG: u32 = 1108;
+
+/// First wait before a relay reconnect attempt; it doubles after every failed attempt.
+const RECONNECT_BACKOFF_START_SECS: u64 = 1;
+/// Longest wait between two relay reconnect attempts.
+const RECONNECT_BACKOFF_MAX_SECS: u64 = 60;
+
+/// The wait before reconnect attempt number `attempt` (counted from zero): 1 s, 2 s, 4 s, ... capped at
+/// [`RECONNECT_BACKOFF_MAX_SECS`].
+fn reconnect_backoff(attempt: u32) -> Duration {
+    let secs = RECONNECT_BACKOFF_START_SECS
+        .checked_shl(attempt)
+        .unwrap_or(RECONNECT_BACKOFF_MAX_SECS)
+        .min(RECONNECT_BACKOFF_MAX_SECS);
+    Duration::from_secs(secs)
+}
+
+/// What is needed to open the relay connection again after it was lost.
+struct RelayConnectParams {
+    project_id: String,
+    relay_address: String,
+}
+
+impl RelayConnectParams {
+    /// Connection options with a freshly signed auth token (the token of an earlier connection may have expired).
+    fn options(&self) -> Result<ConnectionOptions, WalletConnectError> {
+        let auth = relay_auth_token(&self.relay_address)?;
+        Ok(ConnectionOptions::new(self.project_id.clone(), auth).with_address(self.relay_address.as_str()))
+    }
+}
 
 /// Configuration the subsystem pulls from `MmCtx::conf`.
 ///
@@ -223,6 +252,8 @@ pub struct WalletConnectCtx {
     establishing: Mutex<HashMap<Topic, PendingSettle>>,
     storage: Arc<dyn storage::WcStorageOps>,
     persistence: WcSessionPersistence,
+    /// Used to reopen the relay connection after the relay closed it.
+    connect_params: RelayConnectParams,
 }
 
 /// In-progress proposal state retained between publishing a `wc_sessionPropose`
@@ -263,8 +294,11 @@ impl WalletConnectCtx {
         let storage = open_storage(ctx).await?;
         storage.init().await?;
 
-        let auth = relay_auth_token(&config.relay_address)?;
-        let opts = ConnectionOptions::new(config.project_id, auth).with_address(config.relay_address.as_str());
+        let connect_params = RelayConnectParams {
+            project_id: config.project_id,
+            relay_address: config.relay_address,
+        };
+        let opts = connect_params.options()?;
 
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel();
         let client = Client::new(WcConnectionHandler::new(inbound_tx));
@@ -280,6 +314,7 @@ impl WalletConnectCtx {
             establishing: Mutex::new(HashMap::new()),
             storage,
             persistence: config.persistence,
+            connect_params,
         });
 
         handle.restore_sessions().await?;
@@ -388,17 +423,8 @@ impl WalletConnectCtx {
             "params": request,
         });
         let encoded = self.encode_payload(&sym_key, &payload)?;
-        self.client
-            .publish(
-                topic.clone(),
-                encoded,
-                no_attestation(),
-                propose::TAG.request,
-                REQUEST_RESPONSE_TTL,
-                true,
-            )
-            .await
-            .map_err(|e| WalletConnectError::Relay(e.to_string()))?;
+        self.publish_frame(&topic, encoded, propose::METHOD, id, propose::TAG.request, true)
+            .await?;
 
         // Retain our ephemeral secret + requirements until the response arrives.
         self.proposals.lock().insert(topic.clone(), PendingProposal {
@@ -453,19 +479,10 @@ impl WalletConnectCtx {
 
         let response_rx = self.pending.register(id);
 
-        self.client
-            .publish(
-                topic.clone(),
-                encoded,
-                no_attestation(),
-                SESSION_REQUEST_TAG,
-                REQUEST_RESPONSE_TTL,
-                true,
-            )
+        self.publish_frame(topic, encoded, SESSION_REQUEST_METHOD, id, SESSION_REQUEST_TAG, true)
             .await
-            .map_err(|e| {
+            .inspect_err(|_| {
                 self.pending.cancel(id);
-                WalletConnectError::Relay(e.to_string())
             })?;
 
         let deadline = common::executor::Timer::sleep(REQUEST_RESPONSE_TTL.as_secs_f64());
@@ -502,20 +519,18 @@ impl WalletConnectCtx {
 
         let response_rx = self.pending.register(id);
 
-        self.client
-            .publish(
-                topic.clone(),
-                encoded,
-                no_attestation(),
-                session::rpc::ping::TAG.request,
-                REQUEST_RESPONSE_TTL,
-                true,
-            )
-            .await
-            .map_err(|e| {
-                self.pending.cancel(id);
-                WalletConnectError::Relay(e.to_string())
-            })?;
+        self.publish_frame(
+            topic,
+            encoded,
+            session::rpc::ping::METHOD,
+            id,
+            session::rpc::ping::TAG.request,
+            true,
+        )
+        .await
+        .inspect_err(|_| {
+            self.pending.cancel(id);
+        })?;
 
         let deadline = common::executor::Timer::sleep(REQUEST_RESPONSE_TTL.as_secs_f64());
         match futures::future::select(response_rx, deadline).await {
@@ -545,13 +560,12 @@ impl WalletConnectCtx {
             });
             if let Ok(encoded) = self.encode_payload(&sym_key, &request) {
                 let _ = self
-                    .client
-                    .publish(
-                        topic.clone(),
+                    .publish_frame(
+                        topic,
                         encoded,
-                        no_attestation(),
+                        session::rpc::delete::METHOD,
+                        id,
                         session::rpc::delete::TAG.request,
-                        REQUEST_RESPONSE_TTL,
                         false,
                     )
                     .await;
@@ -559,6 +573,48 @@ impl WalletConnectCtx {
         }
 
         self.forget_session(topic).await
+    }
+
+    /// Every topic the node must be subscribed to: settled sessions, unexpired pairings and in-flight establishments.
+    fn topics_to_subscribe(&self) -> Vec<Topic> {
+        let establishing: Vec<Topic> = self.establishing.lock().keys().cloned().collect();
+        collect_resubscribe_topics(self.sessions.topics(), &self.pairings.lock(), establishing, unix_now())
+    }
+
+    /// Subscribes to every topic of [`Self::topics_to_subscribe`] again. The relay forgets subscriptions together
+    /// with the connection that held them. A failure of one topic is logged and does not stop the others.
+    async fn resubscribe_all(&self) {
+        for topic in self.topics_to_subscribe() {
+            if let Err(e) = self.client.subscribe(topic).await {
+                common::log::warn!("walletconnect: re-subscribe after reconnect failed: {e}");
+            }
+        }
+    }
+
+    /// Publishes an already encrypted message on the relay and logs the frame at debug level: the JSON-RPC method,
+    /// the first 8 characters of the topic, the relay tag and the request id. The payload, keys and the full topic
+    /// are never logged.
+    async fn publish_frame(
+        &self,
+        topic: &Topic,
+        encoded: String,
+        method: &str,
+        request_id: impl std::fmt::Display,
+        tag: u32,
+        prompt: bool,
+    ) -> Result<(), WalletConnectError> {
+        log_relay_frame("publish", topic, tag, method, &request_id);
+        self.client
+            .publish(
+                topic.clone(),
+                encoded,
+                no_attestation(),
+                tag,
+                REQUEST_RESPONSE_TTL,
+                prompt,
+            )
+            .await
+            .map_err(|e| WalletConnectError::Relay(e.to_string()))
     }
 
     /// Loads persisted sessions on connect (chapter 22 \u00a722.5.2). Loading is
@@ -583,10 +639,15 @@ impl WalletConnectCtx {
             };
             let topic = session.topic.clone();
             self.sessions.insert(session);
-            self.client
-                .subscribe(topic)
-                .await
-                .map_err(|e| WalletConnectError::Relay(e.to_string()))?;
+            // A failed subscription does not stop the start-up: the loop that reopens a lost relay connection
+            // subscribes to every session topic again.
+            match self.client.subscribe(topic.clone()).await {
+                Ok(_) => common::log::debug!(
+                    "walletconnect: re-subscribed restored session topic {}..",
+                    &topic.as_ref()[..8.min(topic.as_ref().len())]
+                ),
+                Err(e) => common::log::warn!("walletconnect: re-subscribe of a restored session failed: {e}"),
+            }
         }
         Ok(())
     }
@@ -620,6 +681,7 @@ impl WalletConnectCtx {
         let Some((sym_key, kind)) = self.inbound_transport(&topic) else {
             // Traffic on a topic with no settled session, pairing or in-flight
             // establishment; nothing to route.
+            log_relay_frame("receive (unknown topic)", &topic, message.tag, "-", &"-");
             common::log::debug!("walletconnect: dropping inbound message on unknown topic");
             return;
         };
@@ -627,12 +689,23 @@ impl WalletConnectCtx {
         let payload = match self.decode_payload(&sym_key, &message.message) {
             Ok(payload) => payload,
             Err(e) => {
+                log_relay_frame("receive (undecryptable)", &topic, message.tag, "-", &"-");
                 common::log::error!("walletconnect: failed to decrypt inbound message: {e}");
                 return;
             },
         };
 
         let id = payload.get("id").and_then(serde_json::Value::as_u64);
+        log_relay_frame(
+            "receive",
+            &topic,
+            message.tag,
+            payload
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("response"),
+            &id.map_or_else(|| "-".to_string(), |id| id.to_string()),
+        );
 
         // A response carries `result`/`error` and no `method`; correlate it. On
         // a pairing topic the only response we expect is the `wc_sessionPropose`
@@ -711,17 +784,7 @@ impl WalletConnectCtx {
             "result": true,
         });
         if let Ok(encoded) = self.encode_payload(sym_key, &response) {
-            let _ = self
-                .client
-                .publish(
-                    topic.clone(),
-                    encoded,
-                    no_attestation(),
-                    tag,
-                    REQUEST_RESPONSE_TTL,
-                    false,
-                )
-                .await;
+            let _ = self.publish_frame(topic, encoded, "response", id, tag, false).await;
         }
     }
 
@@ -985,13 +1048,99 @@ async fn open_storage(ctx: &MmArc) -> Result<Arc<dyn storage::WcStorageOps>, Wal
 
 /// Drains the inbound relay channel, dispatching each message until the handle
 /// is dropped or the relay closes the channel.
-async fn run_inbound_loop(handle: Weak<WalletConnectCtx>, mut inbound_rx: UnboundedReceiver<PublishedMessage>) {
-    while let Some(message) = inbound_rx.recv().await {
-        match handle.upgrade() {
-            Some(ctx) => ctx.dispatch_inbound(message).await,
+async fn run_inbound_loop(handle: Weak<WalletConnectCtx>, mut inbound_rx: UnboundedReceiver<RelayEvent>) {
+    // Messages that arrived while a reconnect was running; they are routed before the channel is read again.
+    let mut backlog: VecDeque<PublishedMessage> = VecDeque::new();
+    loop {
+        if let Some(message) = backlog.pop_front() {
+            match handle.upgrade() {
+                Some(ctx) => ctx.dispatch_inbound(message).await,
+                None => break,
+            }
+            continue;
+        }
+        match inbound_rx.recv().await {
+            Some(RelayEvent::Message(message)) => match handle.upgrade() {
+                Some(ctx) => ctx.dispatch_inbound(message).await,
+                None => break,
+            },
+            Some(RelayEvent::Lost(reason)) => {
+                common::log::warn!("walletconnect: relay connection lost ({reason}), reconnecting");
+                if !reconnect_relay(&handle).await {
+                    break;
+                }
+                // Loss events raised by the connection that was just replaced are stale; keep only the messages.
+                while let Ok(event) = inbound_rx.try_recv() {
+                    if let RelayEvent::Message(message) = event {
+                        backlog.push_back(message);
+                    }
+                }
+            },
             None => break,
         }
     }
+}
+
+/// Opens the relay connection again, retrying with a growing wait (see [`reconnect_backoff`]) until it succeeds, and
+/// subscribes to the topics of the pairings and sessions again. Returns `false` when the handle was dropped meanwhile.
+/// The handle is held only for the duration of one attempt, so dropping it stops the retries.
+async fn reconnect_relay(handle: &Weak<WalletConnectCtx>) -> bool {
+    let mut attempt: u32 = 0;
+    loop {
+        common::executor::Timer::sleep(reconnect_backoff(attempt).as_secs_f64()).await;
+        let Some(ctx) = handle.upgrade() else {
+            return false;
+        };
+        let outcome = match ctx.connect_params.options() {
+            Ok(opts) => ctx.client.connect(&opts).await.map_err(WalletConnectError::from),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(()) => {
+                ctx.resubscribe_all().await;
+                common::log::info!("walletconnect: relay connection restored (attempt {})", attempt + 1);
+                return true;
+            },
+            Err(e) => {
+                common::log::warn!("walletconnect: relay reconnect attempt {} failed: {e}", attempt + 1);
+                attempt = attempt.saturating_add(1);
+            },
+        }
+    }
+}
+
+/// The topics to subscribe to after a reconnect: the given session topics and in-flight establishment topics, plus
+/// every pairing that has not expired at `now`. Each topic appears once.
+fn collect_resubscribe_topics(
+    session_topics: Vec<Topic>,
+    pairings: &HashMap<Topic, Pairing>,
+    establishing_topics: Vec<Topic>,
+    now: u64,
+) -> Vec<Topic> {
+    let mut seen: HashSet<Topic> = HashSet::new();
+    let mut topics = Vec::new();
+    let live_pairings = pairings
+        .values()
+        .filter(|pairing| pairing.expiry > now)
+        .map(|pairing| pairing.topic.clone());
+    for topic in session_topics
+        .into_iter()
+        .chain(establishing_topics)
+        .chain(live_pairings)
+    {
+        if seen.insert(topic.clone()) {
+            topics.push(topic);
+        }
+    }
+    topics
+}
+
+/// Debug log of one relay frame. Only the direction, the JSON-RPC method, the first 8 characters of the topic, the
+/// relay tag and the request id are written; never a payload, a key or a full topic.
+fn log_relay_frame(direction: &str, topic: &Topic, tag: u32, method: &str, request_id: &dyn std::fmt::Display) {
+    let topic: &str = topic.as_ref();
+    let prefix: String = topic.chars().take(8).collect();
+    common::log::debug!("walletconnect: relay {direction} method={method} topic={prefix}.. tag={tag} id={request_id}");
 }
 
 /// Current unix timestamp in seconds.
@@ -1528,6 +1677,62 @@ mod establishment_tests {
                 .data
                 .contains("\"encoding_algo\":\"Hex\""),
             "non-Keplr cosmos sessions must persist Hex encoding_algo"
+        );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod reconnect_tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_backoff_doubles_and_is_capped() {
+        let secs: Vec<u64> = (0..9).map(|attempt| reconnect_backoff(attempt).as_secs()).collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(reconnect_backoff(200).as_secs(), RECONNECT_BACKOFF_MAX_SECS);
+        assert_eq!(reconnect_backoff(u32::MAX).as_secs(), RECONNECT_BACKOFF_MAX_SECS);
+    }
+
+    #[test]
+    fn resubscribe_covers_sessions_establishments_and_live_pairings_once() {
+        let now = 1_000_000;
+        let mut live = Pairing::generate(300);
+        live.expiry = now + 300;
+        let mut expired = Pairing::generate(300);
+        expired.expiry = now - 1;
+        let pairings: HashMap<Topic, Pairing> = [live.clone(), expired.clone()]
+            .into_iter()
+            .map(|pairing| (pairing.topic.clone(), pairing))
+            .collect();
+
+        let session = Topic::generate();
+        let establishing = Topic::generate();
+        let topics = collect_resubscribe_topics(
+            // The same session topic twice and a live pairing that is also listed as a session topic.
+            vec![session.clone(), session.clone(), live.topic.clone()],
+            &pairings,
+            vec![establishing.clone()],
+            now,
+        );
+
+        assert_eq!(topics.len(), 3, "each topic once");
+        assert!(topics.contains(&session));
+        assert!(topics.contains(&establishing));
+        assert!(topics.contains(&live.topic));
+        assert!(
+            !topics.contains(&expired.topic),
+            "an expired pairing is not subscribed again"
+        );
+    }
+
+    #[test]
+    fn relay_frame_log_helper_does_not_panic_on_short_topics() {
+        log_relay_frame(
+            "publish",
+            &Topic::from("abc".to_string()),
+            1108,
+            "wc_sessionRequest",
+            &7,
         );
     }
 }

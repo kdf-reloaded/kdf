@@ -55,6 +55,9 @@ pub(super) const STAKING_GAS_LIMIT_DEFAULT: u64 = 187_500;
 /// Default gas limit of an undelegation: twice [`GAS_LIMIT_DEFAULT`] (CRD ch.18 R18.6B.3).
 pub(super) const UNDELEGATE_GAS_LIMIT_DEFAULT: u64 = 250_000;
 pub const GAS_WANTED_BASE_VALUE: f64 = 50_000.;
+/// The margin the fee computations apply to the simulated gas: the local-key path (`calculate_fee`) multiplies the
+/// simulated gas by it for the fee amount, and the WalletConnect path (`wc_request_fee`) also for the gas limit.
+pub(super) const FEE_GAS_MARGIN: f64 = 1.5;
 pub(crate) const TX_DEFAULT_MEMO: &str = "";
 
 // IRIS HTLC time-lock bounds (in blocks)

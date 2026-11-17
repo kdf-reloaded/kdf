@@ -511,6 +511,13 @@ impl TendermintCoin {
         let activated_priv_key = if let Ok(key) = self.activation_policy.activated_key_or_err() {
             key
         } else {
+            // A request signed by a WalletConnect wallet is priced from the node's gas simulation (CRD ch.36
+            // R36.14.15, as-built note of 2026-11-17). Swap and trade-fee pricing, and the unsigned results of a
+            // watch-only coin (R36.14.8), keep the fixed figures below.
+            if matches!(intent, FeeIntent::Request { .. }) && self.activation_policy.wallet_connect_session().is_some()
+            {
+                return self.wc_request_fee(&msg, timeout_height, memo, intent).await;
+            }
             let (gas_price, gas_limit) = self.selected_gas_price_and_limit(intent);
             let amount = ((GAS_WANTED_BASE_VALUE * 1.5) * gas_price).ceil();
             let fee_amount = Coin {
