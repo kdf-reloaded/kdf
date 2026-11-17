@@ -2149,7 +2149,8 @@ that chain. Recommended: (b).
 >   answered can differ from the one that was computed. `fee_details` (`amount`,
 >   `uamount`, `gas_limit`) of a signed result of `withdraw` and of the staking
 >   requests is read from the auth-info of the transaction answered, in Direct
->   and in Amino mode; the totals of the result keep the requested fee.
+>   and in Amino mode; the totals of a platform-coin result follow the signed
+>   fee; a token's totals do not include the fee.
 > - *Broadcast of a transaction the node already holds.* The broadcast helper of
 >   the coin treats the answer "tx already exists in cache" as "already
 >   broadcast": it answers the transaction's hash (computed from the bytes), or

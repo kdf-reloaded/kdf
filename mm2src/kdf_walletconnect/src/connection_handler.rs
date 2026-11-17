@@ -9,6 +9,8 @@ use relay_client::error::ClientError;
 use relay_client::websocket::{CloseFrame, ConnectionHandler, PublishedMessage};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::error::relay_error_kind;
+
 /// An event of the relay connection, as seen by the subsystem's processing loop.
 #[derive(Debug)]
 pub enum RelayEvent {
@@ -48,9 +50,13 @@ impl ConnectionHandler for WcConnectionHandler {
         self.lost(reason);
     }
 
-    fn inbound_error(&mut self, error: ClientError) { self.lost(format!("inbound error: {error}")); }
+    fn inbound_error(&mut self, error: ClientError) {
+        self.lost(format!("inbound error: {}", relay_error_kind(&error)));
+    }
 
-    fn outbound_error(&mut self, error: ClientError) { self.lost(format!("outbound error: {error}")); }
+    fn outbound_error(&mut self, error: ClientError) {
+        self.lost(format!("outbound error: {}", relay_error_kind(&error)));
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

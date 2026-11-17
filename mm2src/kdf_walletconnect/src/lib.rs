@@ -87,10 +87,29 @@ struct RelayConnectParams {
 
 impl RelayConnectParams {
     /// Connection options with a freshly signed auth token (the token of an earlier connection may have expired).
-    fn options(&self) -> Result<ConnectionOptions, WalletConnectError> {
+    /// `attempt` is the number of this connect attempt (1 for the first connect), used only for the debug log.
+    fn options(&self, attempt: u32) -> Result<ConnectionOptions, WalletConnectError> {
         let auth = relay_auth_token(&self.relay_address)?;
-        Ok(ConnectionOptions::new(self.project_id.clone(), auth).with_address(self.relay_address.as_str()))
+        let opts = ConnectionOptions::new(self.project_id.clone(), auth).with_address(self.relay_address.as_str());
+        let has_token =
+            matches!(&opts.auth, relay_client::Authorization::Query(token) if !token.to_string().is_empty());
+        common::log::debug!(
+            "walletconnect: relay connect attempt={attempt} host={} project_id_present={} auth_token_present={} \
+             auth_token_fresh=true",
+            relay_host(&opts.address),
+            !self.project_id.is_empty(),
+            has_token
+        );
+        Ok(opts)
     }
+}
+
+/// The host of a relay address, without scheme, port, path or query string.
+fn relay_host(address: &str) -> &str {
+    let rest = address.split_once("://").map_or(address, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    authority.split(':').next().unwrap_or("")
 }
 
 /// Configuration the subsystem pulls from `MmCtx::conf`.
@@ -298,7 +317,7 @@ impl WalletConnectCtx {
             project_id: config.project_id,
             relay_address: config.relay_address,
         };
-        let opts = connect_params.options()?;
+        let opts = connect_params.options(1)?;
 
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel();
         let client = Client::new(WcConnectionHandler::new(inbound_tx));
@@ -410,10 +429,9 @@ impl WalletConnectCtx {
         self.pairings.lock().insert(topic.clone(), pairing);
 
         // Subscribe before publishing so the responder's reply is delivered.
-        self.client
-            .subscribe(topic.clone())
-            .await
-            .map_err(|e| WalletConnectError::Relay(e.to_string()))?;
+        let subscribed = self.client.subscribe(topic.clone()).await;
+        log_subscribe("subscribe to a pairing topic", &topic, &subscribed);
+        subscribed.map_err(WalletConnectError::from)?;
 
         let id = self.next_message_id();
         let payload = serde_json::json!({
@@ -585,9 +603,8 @@ impl WalletConnectCtx {
     /// with the connection that held them. A failure of one topic is logged and does not stop the others.
     async fn resubscribe_all(&self) {
         for topic in self.topics_to_subscribe() {
-            if let Err(e) = self.client.subscribe(topic).await {
-                common::log::warn!("walletconnect: re-subscribe after reconnect failed: {e}");
-            }
+            let result = self.client.subscribe(topic.clone()).await;
+            log_subscribe("re-subscribe after reconnect", &topic, &result);
         }
     }
 
@@ -604,7 +621,8 @@ impl WalletConnectCtx {
         prompt: bool,
     ) -> Result<(), WalletConnectError> {
         log_relay_frame("publish", topic, tag, method, &request_id);
-        self.client
+        let result = self
+            .client
             .publish(
                 topic.clone(),
                 encoded,
@@ -613,8 +631,19 @@ impl WalletConnectCtx {
                 REQUEST_RESPONSE_TTL,
                 prompt,
             )
-            .await
-            .map_err(|e| WalletConnectError::Relay(e.to_string()))
+            .await;
+        match &result {
+            Ok(()) => common::log::debug!(
+                "walletconnect: relay publish accepted method={method} topic={}.. id={request_id}",
+                topic_prefix(topic)
+            ),
+            Err(e) => common::log::warn!(
+                "walletconnect: relay publish failed method={method} topic={}.. tag={tag} id={request_id}: {}",
+                topic_prefix(topic),
+                error::relay_call_error_kind(e)
+            ),
+        }
+        result.map_err(WalletConnectError::from)
     }
 
     /// Loads persisted sessions on connect (chapter 22 \u00a722.5.2). Loading is
@@ -641,13 +670,8 @@ impl WalletConnectCtx {
             self.sessions.insert(session);
             // A failed subscription does not stop the start-up: the loop that reopens a lost relay connection
             // subscribes to every session topic again.
-            match self.client.subscribe(topic.clone()).await {
-                Ok(_) => common::log::debug!(
-                    "walletconnect: re-subscribed restored session topic {}..",
-                    &topic.as_ref()[..8.min(topic.as_ref().len())]
-                ),
-                Err(e) => common::log::warn!("walletconnect: re-subscribe of a restored session failed: {e}"),
-            }
+            let result = self.client.subscribe(topic.clone()).await;
+            log_subscribe("re-subscribe of a restored session", &topic, &result);
         }
         Ok(())
     }
@@ -855,8 +879,9 @@ impl WalletConnectCtx {
         }
         let session_topic = Topic::from(session_key.generate_topic());
 
-        if let Err(e) = self.client.subscribe(session_topic.clone()).await {
-            common::log::error!("walletconnect: failed to subscribe to session topic: {e}");
+        let subscribed = self.client.subscribe(session_topic.clone()).await;
+        log_subscribe("subscribe to a session topic", &session_topic, &subscribed);
+        if subscribed.is_err() {
             return;
         }
 
@@ -1091,7 +1116,7 @@ async fn reconnect_relay(handle: &Weak<WalletConnectCtx>) -> bool {
         let Some(ctx) = handle.upgrade() else {
             return false;
         };
-        let outcome = match ctx.connect_params.options() {
+        let outcome = match ctx.connect_params.options(attempt + 1) {
             Ok(opts) => ctx.client.connect(&opts).await.map_err(WalletConnectError::from),
             Err(e) => Err(e),
         };
@@ -1137,6 +1162,20 @@ fn collect_resubscribe_topics(
 
 /// Debug log of one relay frame. Only the direction, the JSON-RPC method, the first 8 characters of the topic, the
 /// relay tag and the request id are written; never a payload, a key or a full topic.
+fn topic_prefix(topic: &Topic) -> String { topic.as_ref().chars().take(8).collect() }
+
+/// Logs the outcome of a relay subscribe: the topic prefix and "ok" at debug level, or the error kind at warn level.
+fn log_subscribe<R, T>(what: &str, topic: &Topic, result: &Result<R, relay_client::error::Error<T>>) {
+    match result {
+        Ok(_) => common::log::debug!("walletconnect: {what} topic={}.. ok", topic_prefix(topic)),
+        Err(e) => common::log::warn!(
+            "walletconnect: {what} topic={}.. failed: {}",
+            topic_prefix(topic),
+            error::relay_call_error_kind(e)
+        ),
+    }
+}
+
 fn log_relay_frame(direction: &str, topic: &Topic, tag: u32, method: &str, request_id: &dyn std::fmt::Display) {
     let topic: &str = topic.as_ref();
     let prefix: String = topic.chars().take(8).collect();
@@ -1683,6 +1722,16 @@ mod establishment_tests {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod reconnect_tests {
+    #[test]
+    fn the_relay_host_has_no_port_path_or_query() {
+        assert_eq!(
+            super::relay_host("wss://relay.example.com/?projectId=P&auth=J"),
+            "relay.example.com"
+        );
+        assert_eq!(super::relay_host("wss://relay.example.com:443/x"), "relay.example.com");
+        assert_eq!(super::relay_host("relay.example.com"), "relay.example.com");
+    }
+
     use super::*;
 
     #[test]
