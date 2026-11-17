@@ -404,6 +404,8 @@ the previous version used. The safe way:
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
   Tendermint transaction history, is built in PR #363; its address index now covers every
   store-served coin family (PR #380).
+- [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
+  the version-5 format and digests in the shared parser are in progress (PR #397).
 
 ## [0.4.0-beta.1] — 2026-11-14
 

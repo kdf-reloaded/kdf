@@ -4782,6 +4782,7 @@ dependencies = [
 name = "kdf_chain"
 version = "0.1.0"
 dependencies = [
+ "blake2b_simd 0.5.10",
  "kdf_codec",
  "kdf_codec_derive",
  "kdf_crypto",
