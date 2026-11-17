@@ -6,8 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
+<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". A change that an older version can no longer read or undo, or that needs a step from the user before or after upgrading, also gets an emphasized plain-words item under "### Breaking changes and upgrade notes" at the top of the section. -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
+
+### Breaking changes and upgrade notes
+
+Read this before you upgrade. It lists every change in this release that an older version can no longer read
+or undo, and every change that needs a step from you.
+
+#### Coins that are no longer visible after an upgrade
+
+**If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
+before you move or spend anything.** For some coin families a release can change the rule
+that picks a coin's key or address, for example which key is used for a given `priv_key_policy` under
+an HD login. The node then shows a different address for that coin, and the funds stay at the address
+the previous version used. The safe way:
+1. Note the address the new version shows for that coin.
+2. Start the previous version again, with the same passphrase, `MM2.json` and activation requests.
+3. Move the coins to the address you noted, or close the Lightning channels.
+4. Upgrade again.
 
 ### Added
 
