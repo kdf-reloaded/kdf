@@ -232,7 +232,8 @@ note at D21.B7), `required_confirmations`, `get_balances`, the NFT refusal, the
 key-policy refusals (see the note at D21.10B.3), and the result keyed by the
 base58check address. Not built in this change: the global-HD path (a
 global-HD login is refused with `PrivKeyPolicyNotAllowed` naming TRON HD as not
-yet available; it is unreachable while the constant is `false`), transaction
+yet available, except for `IguanaPrivKey`, which is honored on the node's
+internal key; unreachable while the constant is `false`), transaction
 history (`tx_history` is ignored), `convertaddress`, `get_my_address` and
 `show_priv_key`, and swaps. On `task::enable_erc20::init` a token of the other
 family than its active platform is `PlatformCoinMismatch` inside the task
@@ -1014,6 +1015,15 @@ browser build only, so the refusal is tested on the policy facts it reads. The
 bullet "MetaMask (browser builds only)" of R21.10B.4, which accepts the MetaMask
 policy with the default `rpc_mode`, describes the reference and is not Reloaded's
 rule.
+
+*Status note (2026-11-17), HD interim rule (maintainer decision across the
+coin families).* Under a global-HD login a TRON activation that asks for
+`IguanaPrivKey` is honored: the coin uses the node's internal key
+(`mm2_internal_privkey_secret`), the key the UTXO family uses for that policy
+under an HD login, on both routes, and is a single-address coin. An absent
+policy, `ContextPrivKey` and any HD-wallet policy under a global-HD login stay
+refused with `PrivKeyPolicyNotAllowed` until the TRON HD wallet (R21.10B.4,
+R-A2) is built. Under an iguana login nothing changes.
 
 > **Compatibility (this repository on dev, 2026-11-17; its own code, not
 > the reference).** TRX and TRC20 activate only through legacy `enable`

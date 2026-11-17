@@ -643,7 +643,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md): swap-contract members may also be written as
   base58check or `41...` hex on a TRON platform (a wider input; an EVM platform keeps `0x` only); the MetaMask
   policy and `rpc_mode` are refused for TRON at activation (the reference activates an address its withdraw then
-  refuses); a global-HD login is refused for now, until the TRON HD wallet is built in the next change; and a key in the
+  refuses); a global-HD login is refused for now, until the TRON HD wallet is built in the next change, except that `IguanaPrivKey` under an HD login is honored with the node's single internal key; and a key in the
   query string of a node URL works. Entries of `nodes` may also carry a `headers` object and get `tron_api_key`.
   CRD ch.21 §21.4, R21.10B.2, R21.10B.4, D21.B1, D21.B7, D21.10B.3.
 

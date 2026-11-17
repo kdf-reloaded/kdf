@@ -136,7 +136,7 @@ the previous version used. The safe way:
   unparsable URL or a scheme other than `http` and `https` with `InvalidPayload`, before any node is asked.
   The result lists the balances at the base58check address, with the head block from the TRON node. A TRC20 token
   whose config has no `decimals` reads them from the contract, on both routes. The Trezor, WalletConnect and MetaMask
-  policies are refused at activation, and so is a global-HD login for now (TRON HD wallets come in a later change).
+  policies are refused at activation, and so is a global-HD login for now, except that `IguanaPrivKey` under an HD login is honored with the node's single internal key (the other HD forms wait for TRON HD wallets, in a later change).
   The legacy `enable` and `electrum` methods keep activating TRON as an extension. A key in the query string of a
   TRON node URL now works: `https://h/x?key=1` is asked as `https://h/x/wallet/getaccount?key=1`.
   `task::withdraw` takes TRX and TRC20 coins. **TRON stays switched off in this build**, so every route still
