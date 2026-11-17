@@ -134,8 +134,10 @@ address is the associated token account of the platform address for
 > maintainer's decisions of 2026-11-15: a global-HD login activates with a
 > key derived from the seed (§40.1A) instead of failing; a hardware-wallet
 > policy is refused (R40.1A.6); no request selects WalletConnect, and its
-> `priv_key_policy` form is an invalid request. The single-key rule above is
-> unchanged. PR #392.
+> `priv_key_policy` form is an invalid request; a request for `IguanaPrivKey`
+> under a global-HD login uses the wallet's single internal key (§40.1A,
+> maintainer decision of 2026-11-17).
+> The single-key rule above is unchanged. PR #392.
 
 R40.1.5 **Node selection.** Each request that needs the chain selects, in list
 order, the first node whose Solana JSON-RPC `getHealth` succeeds and uses it;
@@ -154,6 +156,7 @@ single-key rule of R40.1.4 and refuses a hardware wallet.
 | --- | --- |
 | single-key (passphrase) | the key of R40.1.4; `hd_path_layout` and `path_to_address` are ignored |
 | global-HD | the SLIP-0010 ed25519 key derived from the wallet's BIP-39 seed at the path of R40.1A.2; the passphrase-hash key is never used for Solana |
+| global-HD, request with `priv_key_policy` `IguanaPrivKey` | the wallet's single internal key: the secret the HD login derives from the seed for the node's own use, which the UTXO family also takes for `IguanaPrivKey` under an HD login; the keypair is made from it as R40.1.4 makes it from the single key. It is not the key or address a single-key login with the same words gives. `hd_path_layout` and `path_to_address` are ignored |
 
 **R40.1A.2** *Path.* The coin entry's `derivation_path`, then the account
 level and, for the default layout, a change level; every level is hardened.
@@ -196,7 +199,7 @@ compatibility methods take the same members when they are added):
 | --- | --- | --- | --- |
 | `hd_path_layout` other than the two values | `InvalidRequest` | string | 400 |
 | `priv_key_policy` of a form this method does not accept (the WalletConnect form included) | `InvalidRequest` | string | 400 |
-| `priv_key_policy` of a hardware wallet, or of another accepted form that is not the context key | `PlatformCoinCreationError` | `{ticker, error}` | 500 |
+| `priv_key_policy` of a hardware wallet | `PlatformCoinCreationError` | `{ticker, error}` | 500 |
 | under HD: `path_to_address` that does not parse, a `chain` other than `External`, or an `address_id` other than 0 | `PlatformCoinCreationError` | `{ticker, error}` | 500 |
 | under HD: a `derivation_path` that is not a two-level hardened path | `PlatformCoinCreationError` | `{ticker, error}` | 500 |
 
@@ -204,7 +207,8 @@ A refused `priv_key_policy` is answered before any node is contacted.
 
 **R40.1A.7** *Result.* `derivation_method` is `{"type": "HDWallet", "data":
 "<full path>"}` under a global-HD login and `{"type": "Iguana"}` under a
-single-key login (R40.3A.2).
+single-key login and whenever the request asks for `IguanaPrivKey`
+(R40.3A.2).
 
 **T40.1A.1** *Vectors.* Mnemonic of eleven times `abandon` then `about`,
 empty BIP-39 passphrase; computed outside this repository with an
@@ -227,6 +231,18 @@ node contacted.
 
 **T40.1A.3** Under a single-key login, `hd_path_layout` and `path_to_address`
 change nothing.
+
+**T40.1A.4** `priv_key_policy` `IguanaPrivKey` gives `derivation_method`
+`{"type": "Iguana"}` under either login. Under a single-key login the
+address is the one of R40.6B.8's rule; under a global-HD login it is the
+address of the keypair made from the wallet's single internal key, the same
+secret the UTXO family uses there, and differs from R40.6B.8's address and
+from the T40.1A.1 vectors.
+
+> *Status (clean side, 2026-11-17):* by the maintainer's decision of
+> 2026-11-17, for every coin family, an activation that asks for
+> `IguanaPrivKey` under a global-HD login is honoured with the wallet's single
+> internal key; R40.1A.1, R40.1A.6, R40.1A.7 and T40.1A.4 state it.
 
 ## 40.2 `experimental::enable_solana_with_assets`
 

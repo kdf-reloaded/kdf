@@ -841,8 +841,10 @@ fn t40_1a_6_unaccepted_priv_key_policy_forms_fail_request_parsing() {
     }
 }
 
-/// R40.1A.6: `ContextPrivKey` and an absent policy activate under either login; `IguanaPrivKey` activates under a
-/// single-key login (the context key) and is refused under HD before any node is contacted.
+/// R40.1A.1, R40.1A.6: `ContextPrivKey` and an absent policy activate under either login with the login's own key;
+/// `IguanaPrivKey` is honoured under either login: under a single-key login the passphrase-hash address, under HD
+/// the address of the context's internal key (the one the UTXO family uses), whatever `hd_path_layout` and
+/// `path_to_address` hold, and `derivation_method` `Iguana`.
 #[test]
 fn t40_1a_6_context_and_iguana_policies() {
     let hd = hd_ctx_with(vec![platform_entry()]);
@@ -861,20 +863,57 @@ fn t40_1a_6_context_and_iguana_policies() {
             "a policy changed the single-key address"
         );
     }
-    let req = platform_request(None, &[], json!({ "priv_key_policy": "IguanaPrivKey" }));
-    let priv_key = *hd.legacy_passphrase_key_pair().private().secret;
-    let err = block_on(<SolanaCoin as PlatformWithTokensActivationOps>::enable_platform_coin(
-        hd.clone(),
-        "SOL".to_owned(),
-        platform_entry(),
-        req.request,
-        SolanaProtocolInfo {},
-        &priv_key,
-    ))
-    .unwrap_err();
-    let text = creation_error_text(err.get_inner());
-    assert!(text.contains("IguanaPrivKey"), "unexpected refusal text");
-    assert!(!text.contains("RPC endpoint"), "the refusal came after the node check");
+    // Under an HD login the request is honoured: the context's internal key, with or without HD members.
+    let internal_address = {
+        let secret = crypto::CryptoCtx::from_ctx(&hd)
+            .expect("the crypto context")
+            .mm2_internal_privkey_secret();
+        let params: SolanaActivationParams = serde_json::from_value(json!({
+            "confirmation_commitment": "finalized",
+            "client_url": CLOSED_NODE,
+        }))
+        .expect("well-formed activation parameters");
+        let coin = block_on(solana_coin_from_conf_and_params(
+            "SOL",
+            &platform_entry(),
+            params,
+            secret.as_slice(),
+        ))
+        .expect("the platform coin is built");
+        address_of(&coin)
+    };
+    assert!(
+        internal_address != PASSPHRASE_ADDRESS && internal_address != BIP44_CHANGE_ACCOUNT_0,
+        "the internal-key address equals another vector"
+    );
+    for extra in [
+        json!({ "priv_key_policy": "IguanaPrivKey" }),
+        json!({ "priv_key_policy": { "type": "IguanaPrivKey" } }),
+        json!({
+            "priv_key_policy": "IguanaPrivKey",
+            "hd_path_layout": SOLANA_HD_LAYOUT_BIP44,
+            "path_to_address": { "account_id": 1, "chain": "Internal", "address_id": 3 },
+        }),
+    ] {
+        let coin = built_platform(&hd, &platform_entry(), extra.clone()).expect("a coin");
+        assert!(
+            address_of(&coin) == internal_address,
+            "IguanaPrivKey under HD did not give the internal-key address"
+        );
+        let request = platform_request(None, &[], extra).request;
+        let method = derivation_method_of(&hd, "SOL", &request).expect("a derivation method");
+        assert!(
+            serde_json::to_value(method).expect("serializable") == json!({ "type": "Iguana" }),
+            "IguanaPrivKey under HD did not give the Iguana derivation method"
+        );
+    }
+    // Under a single-key login the method is Iguana as well.
+    let request = platform_request(None, &[], json!({ "priv_key_policy": "IguanaPrivKey" })).request;
+    let method = derivation_method_of(&single, "SOL", &request).expect("a derivation method");
+    assert!(
+        serde_json::to_value(method).expect("serializable") == json!({ "type": "Iguana" }),
+        "unexpected derivation method"
+    );
 }
 
 /// R40.1A.7: the `derivation_method` wire shape under HD (full path, both layouts) and under a single-key login.

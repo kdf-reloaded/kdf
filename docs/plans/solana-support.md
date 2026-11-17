@@ -109,7 +109,9 @@ specifications unless a reference question below changes them.
 - **Maintainer decision (2026-11-15), keys:** under a global-HD login Solana
   activates with an ed25519 key derived from the wallet seed at the coin's
   path; hardware-wallet and WalletConnect requests get a typed refusal; the
-  passphrase-hash key is never used for Solana under HD (S4, before the
+  passphrase-hash key is never used for Solana under HD; an activation that
+  asks for `IguanaPrivKey` gets the wallet's single internal key (decision of
+  2026-11-17) (S4, before the
   switch-on). The path layout matches the reference if the reference derives
   HD Solana keys; otherwise it follows the layout common Solana wallets use,
   under a named public standard, with vectors from a public test mnemonic.

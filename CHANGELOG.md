@@ -68,8 +68,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `path_to_address.account_id`. Nothing is stored: a wallet that used `"bip44"` must send it on
   every activation, or it gets the default address. One seed phrase therefore gives three Solana
   addresses: as a single-key passphrase, with the default layout, and with `"bip44"`. A request
-  that asks for a hardware wallet, or for the single-key policy under an HD login, is refused;
-  the WalletConnect form is an invalid request. Solana stays switched off in this build. Detail:
+  that asks for a hardware wallet is refused and the WalletConnect form is an invalid request; a
+  request that asks for `IguanaPrivKey` under an HD login gets the wallet's single internal key and
+  its address, not the address of a single-key login with the same words. Solana stays switched off in this build. Detail:
   PR #392; CRD ch.40 §40.1A.
 
 - **Solana entries of a coins file in the form GLEEC KDF uses can be read.** Besides its own

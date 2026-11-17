@@ -118,24 +118,22 @@ fn creation_error(ticker: &str, error: impl Into<String>) -> MmError<SolanaWithT
     })
 }
 
-/// Refuses a `priv_key_policy` the platform cannot honour before any node is contacted (CRD ch.40 R40.1A.6):
-/// a hardware key, and `IguanaPrivKey` under a global-HD login (it asks for the passphrase-hash key, which Solana
-/// never uses under HD). An absent value and `ContextPrivKey` always pass; `IguanaPrivKey` passes under a
-/// single-key login, where the context key is that key.
+/// Whether the request asks for `IguanaPrivKey`: the single key, under either login. Under a global-HD login it is
+/// the context's internal key (CRD ch.40 R40.1A.1, maintainer decision of 2026-11-17).
+fn iguana_key_requested(priv_key_policy: &Option<PrivKeyActivationPolicy>) -> bool {
+    matches!(priv_key_policy, Some(PrivKeyActivationPolicy::IguanaPrivKey))
+}
+
+/// Refuses a hardware `priv_key_policy` before any node is contacted (CRD ch.40 R40.1A.6). An absent value,
+/// `ContextPrivKey` and `IguanaPrivKey` pass; `IguanaPrivKey` is honoured under either login.
 fn reject_unsupported_policy(
     ticker: &str,
     priv_key_policy: &Option<PrivKeyActivationPolicy>,
-    is_hd_login: bool,
 ) -> Result<(), MmError<SolanaWithTokensActivationError>> {
     match priv_key_policy {
         Some(PrivKeyActivationPolicy::Trezor) => Err(creation_error(
             ticker,
             "the hardware key policy is not supported for Solana coins; activate with the local key",
-        )),
-        Some(PrivKeyActivationPolicy::IguanaPrivKey) if is_hd_login => Err(creation_error(
-            ticker,
-            "the `IguanaPrivKey` policy asks for the passphrase-hash key, which Solana coins do not use under an \
-             HD login; activate with `ContextPrivKey`",
         )),
         _ => Ok(()),
     }
@@ -177,7 +175,8 @@ impl TxHistory for SolanaWithTokensActivationRequest {
 }
 
 /// The `derivation_method` of the result (CRD ch.40 R40.1A.7): the full path under a global-HD login (the request
-/// was validated when the coin was built), `Iguana` under a single-key login.
+/// was validated when the coin was built), `Iguana` under a single-key login and whenever the request asks for
+/// `IguanaPrivKey`.
 pub(crate) fn derivation_method_of(
     ctx: &MmArc,
     ticker: &str,
@@ -185,14 +184,14 @@ pub(crate) fn derivation_method_of(
 ) -> Result<DerivationMethod, MmError<SolanaWithTokensActivationError>> {
     let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| SolanaWithTokensActivationError::Internal(e.to_string()))?;
     match crypto_ctx.key_pair_policy() {
-        KeyPairPolicy::Iguana => Ok(DerivationMethod::Iguana),
-        KeyPairPolicy::GlobalHDAccount(_) => {
+        KeyPairPolicy::GlobalHDAccount(_) if !iguana_key_requested(&activation_request.priv_key_policy) => {
             let account_id = hd_account_of(ticker, &activation_request.path_to_address)?;
             let layout = activation_request.hd_path_layout.unwrap_or_default();
             solana_hd_derivation_path(&coin_conf(ctx, ticker), layout, account_id)
                 .map(DerivationMethod::HDWallet)
                 .map_to_mm(SolanaWithTokensActivationError::Internal)
         },
+        _ => Ok(DerivationMethod::Iguana),
     }
 }
 
@@ -271,17 +270,14 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
     ) -> Result<Self, MmError<Self::ActivationError>> {
         let crypto_ctx =
             CryptoCtx::from_ctx(&ctx).mm_err(|e| SolanaWithTokensActivationError::Internal(e.to_string()))?;
-        reject_unsupported_policy(
-            &ticker,
-            &activation_request.priv_key_policy,
-            matches!(crypto_ctx.key_pair_policy(), KeyPairPolicy::GlobalHDAccount(_)),
-        )?;
-        // R40.1A.1: a single-key login uses the key passed in; a global-HD login derives its own and never uses
-        // the passphrase-hash key.
+        reject_unsupported_policy(&ticker, &activation_request.priv_key_policy)?;
+        // R40.1A.1: a single-key login uses the key passed in; a global-HD login derives its own key, or uses the
+        // context's internal key when the request asks for `IguanaPrivKey` (`hd_path_layout` and `path_to_address`
+        // are then ignored).
         let hd_secret;
+        let internal_secret;
         let key: &[u8] = match crypto_ctx.key_pair_policy() {
-            KeyPairPolicy::Iguana => priv_key,
-            KeyPairPolicy::GlobalHDAccount(global_hd) => {
+            KeyPairPolicy::GlobalHDAccount(global_hd) if !iguana_key_requested(&activation_request.priv_key_policy) => {
                 let account_id = hd_account_of(&ticker, &activation_request.path_to_address)?;
                 let layout = activation_request.hd_path_layout.unwrap_or_default();
                 let path = solana_hd_derivation_path(&platform_conf, layout, account_id).map_to_mm(|error| {
@@ -298,6 +294,13 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
                 })?;
                 &hd_secret
             },
+            // `IguanaPrivKey` under a global-HD login: the context's internal key, derived from the seed, the key the
+            // UTXO family uses for that policy.
+            KeyPairPolicy::GlobalHDAccount(_) => {
+                internal_secret = crypto_ctx.mm2_internal_privkey_secret();
+                internal_secret.as_slice()
+            },
+            KeyPairPolicy::Iguana => priv_key,
         };
         let platform_coin =
             solana_coin_from_conf_and_params(&ticker, &platform_conf, activation_request.platform_request, key)

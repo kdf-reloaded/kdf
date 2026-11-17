@@ -145,7 +145,9 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   is stored per wallet, so a client that used `"bip44"` must send it on every
   activation. One seed phrase gives three Solana addresses (single-key, default
   layout, `"bip44"`). `hd_path_layout`, `path_to_address` and `priv_key_policy`
-  are additional request members; a hardware-wallet policy is refused. No
+  are additional request members; a hardware-wallet policy is refused, and
+  `IguanaPrivKey` under an HD login gives the wallet's single internal key
+  and its address. No
   switch: the reference behavior is a refusal, which cannot be a useful
   compatibility target, and no peer sees which key a wallet uses. CRD ch.40
   §40.1A; PR #392.
