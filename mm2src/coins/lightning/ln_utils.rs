@@ -86,6 +86,24 @@ impl LightningIdentity {
         }
     }
 
+    /// The other identity of the node.
+    fn other(&self) -> LightningIdentity {
+        match self {
+            LightningIdentity::PassphraseSeed => LightningIdentity::InternalKey,
+            LightningIdentity::InternalKey => LightningIdentity::PassphraseSeed,
+        }
+    }
+
+    /// How the identity is named to the user, with the `priv_key_policy` that selects it.
+    fn user_name(&self) -> &'static str {
+        match self {
+            LightningIdentity::PassphraseSeed => {
+                "passphrase-seed identity (the default priv_key_policy, ContextPrivKey)"
+            },
+            LightningIdentity::InternalKey => "internal-key identity (priv_key_policy IguanaPrivKey)",
+        }
+    }
+
     /// The identity's own part of a data path, below the ticker.
     fn below_ticker(&self, ticker_dir: PathBuf) -> PathBuf {
         match self {
@@ -142,6 +160,36 @@ fn check_node_identity(dir: &Path, node_id: &str) -> EnableLightningResult<()> {
     }
 }
 
+/// Refuses to start an identity while the other identity of the node still has channels that are not settled.
+///
+/// Only one identity runs at a time, and the channels of the other one are then not watched, so a counterparty could
+/// close one with an old state unnoticed. The other identity's SQL channel history is read for this (see
+/// `has_unsettled_channels` for what counts as unsettled), which needs none of its keys. A missing or empty history,
+/// and a history of closed channels only, allow the activation. A history that cannot be read refuses it: when it is
+/// unknown whether a channel is closed, the activation does not go on.
+async fn check_other_identity_settled(
+    ctx: &MmArc,
+    ticker: &str,
+    identity: LightningIdentity,
+) -> EnableLightningResult<()> {
+    let other = identity.other();
+    let sqlite_connection = ctx
+        .sqlite_connection
+        .ok_or(MmError::new(EnableLightningError::DbError(
+            "sqlite_connection is not initialized".into(),
+        )))?
+        .clone();
+    let unsettled =
+        lightning_persister::has_unsettled_channels(sqlite_connection, other.storage_ticker(ticker)).await?;
+    if unsettled {
+        return MmError::err(EnableLightningError::OtherIdentityHasOpenChannels {
+            ticker: ticker.to_owned(),
+            other_identity: other.user_name().to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// The node id (compressed public key, hex) the keys manager gives the node.
 fn node_id_of(keys_manager: &KeysManager) -> EnableLightningResult<String> {
     let secret = keys_manager
@@ -177,6 +225,8 @@ pub async fn init_persister(
     }
     // Nothing is read from the directory, and nothing is spawned for it, before it is known to be this node's.
     check_node_identity(&persister.main_path(), &node_id_of(keys_manager)?)?;
+    // And the other identity of the node must have nothing left to watch.
+    check_other_identity_settled(ctx, &ticker, identity).await?;
     let is_db_initialized = persister.is_db_initialized().await?;
     if !is_db_initialized {
         persister.init_db().await?;
@@ -524,5 +574,117 @@ mod identity_tests {
         }
         assert_eq!(std::fs::read_to_string(dir.join(NODE_ID_FILE)).unwrap(), ours);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ----- the other identity must have nothing left to watch -----
+
+    fn ctx_with_db(ctx: MmArc) -> (MmArc, Arc<Mutex<db_common::sqlite::rusqlite::Connection>>) {
+        let conn = Arc::new(Mutex::new(
+            db_common::sqlite::rusqlite::Connection::open_in_memory().unwrap(),
+        ));
+        let _ = ctx.sqlite_connection.pin(conn.clone());
+        (ctx, conn)
+    }
+
+    /// Creates the history tables of `storage_ticker`, as an identity's first activation does.
+    fn create_history(conn: &Arc<Mutex<db_common::sqlite::rusqlite::Connection>>, storage_ticker: &str) {
+        let persister = LightningPersister::new(storage_ticker.to_owned(), std::env::temp_dir(), None, conn.clone());
+        common::block_on(persister.init_db()).unwrap();
+    }
+
+    fn insert_channel(
+        conn: &Arc<Mutex<db_common::sqlite::rusqlite::Connection>>,
+        storage_ticker: &str,
+        rpc_id: u32,
+        funding_tx: Option<&str>,
+        closing_tx: Option<&str>,
+        is_closed: bool,
+    ) {
+        let sql = format!(
+            "INSERT INTO {}_channels_history (rpc_id, channel_id, counterparty_node_id, funding_tx, closing_tx, \
+             is_outbound, is_public, is_closed, created_at, last_updated) VALUES (?1, 'c', 'n', ?2, ?3, 1, 0, ?4, 0, 0);",
+            storage_ticker
+        );
+        conn.lock()
+            .unwrap()
+            .execute(&sql, db_common::sqlite::rusqlite::params![
+                rpc_id, funding_tx, closing_tx, is_closed
+            ])
+            .unwrap();
+    }
+
+    fn refusal(ctx: &MmArc, identity: LightningIdentity) -> Option<String> {
+        match common::block_on(check_other_identity_settled(ctx, "LNBTC", identity)) {
+            Ok(()) => None,
+            Err(e) => match e.into_inner() {
+                EnableLightningError::OtherIdentityHasOpenChannels { ticker, other_identity } => {
+                    assert_eq!(ticker, "LNBTC");
+                    Some(other_identity)
+                },
+                _ => panic!("only the open-channels refusal is expected"),
+            },
+        }
+    }
+
+    #[test]
+    fn an_open_channel_of_the_other_identity_refuses_in_both_directions() {
+        // A channel that is pending open (no funding transaction yet) or open (funded, not closed).
+        for (funding, closing) in [(None, None), (Some("aa"), None)] {
+            let (ctx, conn) = ctx_with_db(hd_ctx());
+            create_history(&conn, "LNBTC");
+            create_history(&conn, "LNBTC_internal_key");
+            insert_channel(&conn, "LNBTC", 1, funding, closing, false);
+            // The internal-key identity is refused, and the message names the identity to close under.
+            let named = refusal(&ctx, LightningIdentity::InternalKey).expect("refused");
+            assert!(
+                named.contains("passphrase-seed") && named.contains("ContextPrivKey"),
+                "{named}"
+            );
+            // The passphrase-seed identity is not refused by that: its own channels are the ones that run.
+            assert!(refusal(&ctx, LightningIdentity::PassphraseSeed).is_none());
+
+            let (ctx, conn) = ctx_with_db(hd_ctx());
+            create_history(&conn, "LNBTC_internal_key");
+            insert_channel(&conn, "LNBTC_internal_key", 1, funding, closing, false);
+            let named = refusal(&ctx, LightningIdentity::PassphraseSeed).expect("refused");
+            assert!(
+                named.contains("internal-key") && named.contains("IguanaPrivKey"),
+                "{named}"
+            );
+            assert!(refusal(&ctx, LightningIdentity::InternalKey).is_none());
+        }
+    }
+
+    #[test]
+    fn a_funded_closed_channel_without_a_recorded_closing_transaction_refuses() {
+        let (ctx, conn) = ctx_with_db(hd_ctx());
+        create_history(&conn, "LNBTC");
+        // Closed, funded, closing transaction not recorded: unknown whether it is settled, so refuse.
+        insert_channel(&conn, "LNBTC", 1, Some("aa"), None, true);
+        assert!(refusal(&ctx, LightningIdentity::InternalKey).is_some());
+    }
+
+    #[test]
+    fn closed_channels_only_an_empty_and_a_missing_history_allow() {
+        let (ctx, conn) = ctx_with_db(hd_ctx());
+        // No table of the other identity at all.
+        assert!(refusal(&ctx, LightningIdentity::InternalKey).is_none());
+        // An empty table.
+        create_history(&conn, "LNBTC");
+        assert!(refusal(&ctx, LightningIdentity::InternalKey).is_none());
+        // Closed channels only: funded and closed with the closing transaction recorded, and one closed before it
+        // was ever funded.
+        insert_channel(&conn, "LNBTC", 1, Some("aa"), Some("bb"), true);
+        insert_channel(&conn, "LNBTC", 2, None, None, true);
+        assert!(refusal(&ctx, LightningIdentity::InternalKey).is_none());
+    }
+
+    #[test]
+    fn under_an_iguana_login_the_other_identity_has_no_history_and_nothing_changes() {
+        let (ctx, conn) = ctx_with_db(iguana_ctx());
+        // Only the passphrase identity exists; its own table is not the one checked.
+        create_history(&conn, "LNBTC");
+        insert_channel(&conn, "LNBTC", 1, Some("aa"), None, false);
+        assert!(refusal(&ctx, LightningIdentity::PassphraseSeed).is_none());
     }
 }

@@ -64,12 +64,26 @@ pub enum EnableLightningError {
         recorded: String,
         requested: String,
     },
+    /// The other Lightning identity of this node (the one the other `priv_key_policy` selects) still has channels
+    /// that are not settled, and they would stop being watched. A request error the caller can correct, so 400.
+    #[display(
+        fmt = "Lightning coin {} has channels that are not closed under the {}; close them first by activating \
+               with the priv_key_policy of that identity",
+        ticker,
+        other_identity
+    )]
+    OtherIdentityHasOpenChannels {
+        ticker: String,
+        other_identity: String,
+    },
 }
 
 impl HttpStatusCode for EnableLightningError {
     fn status_code(&self) -> StatusCode {
         match self {
-            EnableLightningError::InvalidRequest(_) | EnableLightningError::RpcError(_) => StatusCode::BAD_REQUEST,
+            EnableLightningError::InvalidRequest(_)
+            | EnableLightningError::RpcError(_)
+            | EnableLightningError::OtherIdentityHasOpenChannels { .. } => StatusCode::BAD_REQUEST,
             EnableLightningError::UnsupportedMode(_, _) => StatusCode::NOT_IMPLEMENTED,
             EnableLightningError::InvalidAddress(_)
             | EnableLightningError::InvalidPath(_)

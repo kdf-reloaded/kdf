@@ -2460,7 +2460,18 @@ surface.
   watched: a counterparty could close one with an old state, and if nobody
   watches within the channel's dispute delay (`to_self_delay`) the penalty cannot
   be claimed and funds can be lost. They must be closed or settled first, or the
-  other identity must not stay in use longer than that delay. An HD platform is
+  other identity must not stay in use longer than that delay.
+  A Lightning activation is therefore refused, with a request error that tells
+  the user to close those channels first under the previous `priv_key_policy`,
+  while the other identity's channel history still holds a channel that is not
+  settled. "Not settled" is decided from that identity's persisted channel
+  history alone, so it needs none of its keys: any channel not recorded as
+  closed (pending open, open, or closing but not yet recorded), and any channel
+  recorded as closed that was funded and has no closing transaction recorded
+  yet. A missing or empty history, and a history of channels closed before
+  funding or closed with their closing transaction recorded, allow the
+  activation; a history that cannot be read refuses it. The check runs after the
+  data directory's node-id check and before the node starts. An HD platform is
   still refused, and a hardware value is refused. (4) *T21:* "the swap saves the
   key pair" is stale; a single-key coin announces the key it signs with, which
   under a global-HD login with `IguanaPrivKey` is the internal key, and the

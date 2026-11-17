@@ -190,7 +190,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   close such a channel with an old state, and if nobody watches within the dispute delay the penalty
   cannot be claimed and funds can be lost. Nothing is moved or deleted, and the channels are shown and
   watched again when the activation goes back to the default policy. A data directory that was opened
-  by another node key is refused instead of being opened. Detail: PR #400; CRD ch.05 R46,
+  by another node key is refused instead of being opened. A Lightning activation is also refused while the other identity still has channels that are
+  not closed (pending open, open, or closing without a recorded closing transaction): the error tells you
+  to close them first by activating under the previous `priv_key_policy`. Closed channels, and an empty or
+  missing history of the other identity, allow the activation. Detail: PR #400; CRD ch.05 R46,
   status note of 2026-11-17.
 
 #### Solana coins
