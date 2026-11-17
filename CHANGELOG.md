@@ -288,7 +288,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   runtime, tests that create random identifiers with a function the browser build does not have, and
   tests that use a native-only database helper) was also built for the browser. That test code is now left
   out of the browser test build, as is the same kind of test code in `mm2_gui_storage`; only test code
-  changed. The run finds 12 tests: one fails because it needs a trade setup, one hangs because it starts a node on a network id the browser build does not support, and the other ten, the storage tests of orders and swaps, all pass; the list by name is in `docs/DEV_ENVIRONMENT.md`. No CI job runs the browser tests yet.
+  changed. The run finds 12 tests: one fails without the `BOB_PASSPHRASE` test setup it asks for, one (`test_qrc20_tx_history`, which starts a node on network id 9998) hangs and is skipped, and the other ten, the storage tests of orders and swaps, all pass; the list by name is in `docs/DEV_ENVIRONMENT.md`. No CI job runs the browser tests yet.
   Detail: PR #403.
 - **The browser tests of `coins` now compile.** `wasm-pack test --firefox --headless mm2src/coins` stopped at
   compile errors, because some test code that only works natively (tests written for the `tokio` runtime and the BCH
