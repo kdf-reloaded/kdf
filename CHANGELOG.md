@@ -156,7 +156,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   node's single internal key, as the other coin families do, and `path_to_address` plays no part.
   An absent `priv_key_policy` and `ContextPrivKey` activate the key at `path_to_address` as before,
   and an iguana login does not change. Tokens follow the platform coin's key, and the task form
-  behaves the same. Detail: PR #N; CRD ch.36 §36.7, status note of 2026-11-17
+  behaves the same. Detail: PR #396; CRD ch.36 §36.7, status note of 2026-11-17
 
 #### Solana coins
 

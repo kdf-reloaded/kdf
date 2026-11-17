@@ -636,7 +636,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 - **A Tendermint activation under an HD login honors `priv_key_policy: IguanaPrivKey`.** GLEEC KDF accepts and ignores
   `priv_key_policy` for Tendermint coins; Reloaded activates the coin with the single internal key of the node, as for
   the other coin families, and `path_to_address` then plays no part. An absent value and `ContextPrivKey` still use
-  the key at `path_to_address`. No switch exists. CRD ch.36 §36.7. PR #N.
+  the key at `path_to_address`. No switch exists. CRD ch.36 §36.7. PR #396.
 - **A Tendermint coin activated from a public key is watch-only, and its orders are refused.** The `WithPubkey` form
   of `activation_params` builds a coin that holds no private key: it answers `withdraw` and the staking requests with
   an unsigned document for the caller's own wallet (a `sign_doc`, or with `is_ledger_connection: true` the Amino form
