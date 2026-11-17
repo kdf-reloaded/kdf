@@ -490,7 +490,8 @@ host of the same list, so a list can mix TronGrid with other providers. A header
 Header values and `tron_api_key` are secrets. No log line, error text, RPC answer or debug output
 shows them, they go to no other host, and no peer sees them. A request is not redirected: a node
 that answers with a redirect counts as failed, so the headers never reach another host. A URL that
-carries the key in its path or query keeps working and is shown host-only everywhere.
+carries a key in its path is shown host-only everywhere. A key in the query string does not work
+today, because the endpoint path is appended to the URL as given; use a `headers` entry instead.
 
 The node list is put into a random order once, when the coin is activated, and only `http://` and
 `https://` URLs are accepted.
