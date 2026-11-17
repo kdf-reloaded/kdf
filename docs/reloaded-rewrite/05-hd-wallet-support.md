@@ -1763,6 +1763,16 @@ an explicitly named **legacy key** (Decision CR). It MUST be used only:
 
 No other part of the node may use it.
 
+> **Reloaded status (clean side, 2026-11-16).** Solana no longer takes the
+> legacy key: under a global-HD login it takes the coin key derived at its
+> path (chapter 40 §40.1A), as Tendermint does since PR #319, unless the
+> activation asks for `IguanaPrivKey`. By the maintainer decision of
+> 2026-11-17 every coin family is to honour that request with the wallet's
+> single internal key, the key R45 names the node key (Solana: PR #392; the
+> other families follow in their own changes). The legacy key of R46 is not
+> used. Item 3's
+> mention of Solana no longer describes the code. PR #392.
+
 **R47.** *Swaps that recorded the legacy key.* A swap whose Started event
 recorded the legacy key as its own persistent key was started by an earlier
 build. When resumed, it MUST use as its node key the key pair, out of the

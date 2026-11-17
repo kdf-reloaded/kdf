@@ -1167,3 +1167,190 @@ fn an_hd_login_with_an_invalid_path_to_address_is_a_platform_coin_creation_error
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// `priv_key_policy: IguanaPrivKey` under an HD login (CRD ch.36 §36.7, status note of 2026-11-17)
+// ---------------------------------------------------------------------------
+
+/// The address of the single internal key of the context, the key the UTXO family takes for `IguanaPrivKey`
+/// (`priv_key_build_policy` of the UTXO activation passes `CryptoCtx::mm2_internal_privkey_secret()`).
+fn internal_key_address(ctx: &MmArc) -> String {
+    let crypto_ctx = crypto::CryptoCtx::from_ctx(ctx).unwrap();
+    address_of_secret(crypto_ctx.mm2_internal_privkey_secret().as_slice())
+}
+
+/// Both spellings of the `IguanaPrivKey` value.
+fn iguana_policy_forms() -> [Json; 2] { [json!("IguanaPrivKey"), json!({ "type": "IguanaPrivKey" })] }
+
+#[test]
+fn an_hd_login_with_iguana_priv_key_activates_the_internal_key_not_the_hd_path_key() {
+    let ctx = hd_ctx();
+    let internal = internal_key_address(&ctx);
+    let hd_default = hd_address_at(&ctx, "m/44'/118'/0'/0/0");
+    assert_ne!(internal, hd_default);
+    for policy in iguana_policy_forms() {
+        assert_eq!(
+            built_address(&ctx, "ATOM", json!({ "priv_key_policy": policy })),
+            internal
+        );
+    }
+    // `path_to_address` plays no part: neither a valid one nor one that does not parse changes the key or fails.
+    for path_to_address in [
+        json!({ "account_id": 2, "chain": "Internal", "address_id": 5 }),
+        json!("nonsense"),
+        json!({ "chain": "Sideways" }),
+    ] {
+        let extra = json!({ "priv_key_policy": "IguanaPrivKey", "path_to_address": path_to_address });
+        assert_eq!(built_address(&ctx, "ATOM", extra), internal);
+    }
+    // A coin without a `derivation_path` needs none for the single key.
+    assert_eq!(
+        built_address(&ctx, "ATOM-NODERIV", json!({ "priv_key_policy": "IguanaPrivKey" })),
+        internal
+    );
+}
+
+#[test]
+fn the_internal_key_of_an_hd_login_is_the_key_the_utxo_family_takes_for_iguana_priv_key() {
+    // The UTXO activation builds `PrivKeyBuildPolicy::IguanaPrivKey(crypto_ctx.mm2_internal_privkey_secret())`.
+    let ctx = hd_ctx();
+    let crypto_ctx = crypto::CryptoCtx::from_ctx(&ctx).unwrap();
+    let internal = crypto_ctx.mm2_internal_privkey_secret();
+    let public_key = crypto::privkey::key_pair_from_secret(internal.as_slice())
+        .unwrap()
+        .public_slice()
+        .to_vec();
+    let coin = match built_platform(&ctx, "ATOM", json!({ "priv_key_policy": "IguanaPrivKey" })) {
+        Ok(coin) => coin,
+        Err(e) => panic!("the platform must be built: {:?}", e.get_inner()),
+    };
+    let expected = coins::tendermint::account_id_from_pubkey_hex("cosmos", &hex::encode(&public_key)).unwrap();
+    assert_eq!(coin.account_id, expected);
+}
+
+#[test]
+fn an_hd_login_with_context_priv_key_or_no_policy_still_activates_the_hd_path_key() {
+    let ctx = hd_ctx();
+    let expected = hd_address_at(&ctx, "m/44'/118'/0'/0/0");
+    for policy in [
+        json!(null),
+        json!("ContextPrivKey"),
+        json!({ "type": "ContextPrivKey" }),
+    ] {
+        assert_eq!(
+            built_address(&ctx, "ATOM", json!({ "priv_key_policy": policy })),
+            expected
+        );
+    }
+    // A malformed `path_to_address` still fails there, as before.
+    assert!(built_platform(
+        &ctx,
+        "ATOM",
+        json!({ "priv_key_policy": "ContextPrivKey", "path_to_address": "nonsense" })
+    )
+    .is_err());
+}
+
+#[test]
+fn an_iguana_login_activates_the_same_single_key_for_every_software_policy() {
+    let ctx = ctx();
+    let expected = address_of_secret(&*ctx.legacy_passphrase_key_pair().private().secret);
+    let policies = [
+        json!(null),
+        json!("ContextPrivKey"),
+        json!({ "type": "ContextPrivKey" }),
+        json!("IguanaPrivKey"),
+        json!({ "type": "IguanaPrivKey" }),
+    ];
+    for policy in policies {
+        assert_eq!(
+            built_address(&ctx, "ATOM", json!({ "priv_key_policy": policy })),
+            expected
+        );
+    }
+}
+
+#[test]
+fn the_hardware_policy_is_refused_under_both_logins() {
+    for ctx in [ctx(), hd_ctx()] {
+        for policy in [json!("Trezor"), json!({ "type": "Trezor" })] {
+            match built_platform(&ctx, "ATOM", json!({ "priv_key_policy": policy })) {
+                Ok(_) => panic!("the hardware policy must be refused"),
+                Err(e) => match e.get_inner() {
+                    TendermintActivationError::PlatformCoinCreationError { ticker, error } => {
+                        assert_eq!(ticker, "ATOM");
+                        assert_eq!(error, HARDWARE_REFUSAL);
+                    },
+                    other => panic!("unexpected error {:?}", other),
+                },
+            }
+        }
+    }
+}
+
+#[test]
+fn tokens_follow_the_key_of_the_platform_coin() {
+    // A token is built on the platform coin and holds no key of its own: its account is the platform's.
+    let ctx = hd_ctx();
+    let platform = built_platform(&ctx, "ATOM", json!({ "priv_key_policy": "IguanaPrivKey" }))
+        .unwrap_or_else(|e| panic!("the platform must be built: {:?}", e.get_inner()));
+    assert_eq!(platform.account_id.to_string(), internal_key_address(&ctx));
+
+    let initializer = TendermintTokenInitializer {
+        platform_coin: platform.clone(),
+    };
+    let req = request(json!({ "ticker": "ATOM", "tokens_params": [inline_token("CUSTOM-TOKEN", "ATOM")] }));
+    let coins = match block_on(initializer.enable_tokens_as_mm_coins(ctx.clone(), &req.request)) {
+        Ok(coins) => coins,
+        Err(_) => panic!("the token must be enabled"),
+    };
+    match coins.as_slice() {
+        [MmCoinEnum::TendermintToken(token)] => {
+            assert_eq!(token.my_address().unwrap(), internal_key_address(&ctx));
+            assert_eq!(token.my_address().unwrap(), platform.my_address().unwrap());
+        },
+        _ => panic!("one Tendermint token"),
+    }
+}
+
+/// A node that answers the health check and the ABCI info the activation result asks for.
+fn info_node() -> crate::evm_test_support::MockEvmNode {
+    spawn_node(move |method, _params| match method {
+        "health" => Reply::Result(json!({})),
+        "abci_info" => Reply::Result(json!({ "response": {
+            "data": "test", "version": "0", "app_version": "1", "last_block_height": "42",
+            "last_block_app_hash": ""
+        } })),
+        _ => Reply::RpcError,
+    })
+}
+
+#[test]
+fn the_task_variant_under_an_hd_login_honors_iguana_priv_key() {
+    let ctx = hd_ctx();
+    let node = info_node();
+    let task_id = init(
+        &ctx,
+        request(json!({
+            "ticker": "ATOM",
+            "nodes": [{ "url": node.url.clone() }],
+            "get_balances": false,
+            "priv_key_policy": { "type": "IguanaPrivKey" },
+        })),
+    )
+    .expect("init accepts the request");
+    let mut status = status(&ctx, task_id);
+    for _ in 0..300 {
+        if status["status"] != "InProgress" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        status = self::status(&ctx, task_id);
+    }
+    assert_eq!(status["status"], "Ok", "{:?}", status);
+    assert_eq!(status["details"]["address"], json!(internal_key_address(&ctx)));
+    assert_ne!(
+        status["details"]["address"],
+        json!(hd_address_at(&ctx, "m/44'/118'/0'/0/0"))
+    );
+}
