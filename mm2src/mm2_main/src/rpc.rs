@@ -593,8 +593,8 @@ mod wire_dump_tests {
             {"url":"https://node.example","headers":{"TRON-PRO-API-KEY":"k1","X-API-Key":"k2","Authorization":"Bearer k3"}},
             {"url":"https://node2.example","Headers":{"X-Custom":"k5"}}]}"#;
         let dumped = format_rpc_wire_dump_payload(payload, false);
-        for secret in ["k1", "k2", "k3", "k4", "k5"] {
-            assert!(!dumped.contains(secret), "{secret} is in the dump");
+        for probe in ["k1", "k2", "k3", "k4", "k5"] {
+            assert!(!dumped.contains(probe), "a redacted value is in the dump");
         }
         let parsed: Json = json::from_str(&dumped).expect("expected valid JSON");
         assert_eq!(parsed["coin"], "TRX");
