@@ -105,11 +105,17 @@ impl IdbTransactionImpl {
         // Don't set the `onerror` closure, because the `onabort` is called immediately after the error.
         transaction.set_onabort(Some(onabort_closure.as_ref().unchecked_ref()));
 
+        let transaction_for_fut = transaction.clone();
+
         // move the closures into this async block to keep it alive until either `oncomplete` or `onabort` handler is called
         let fut = async move {
             let complete_or_abort = event_rx.next().await.expect("The event channel must not be closed");
             // ignore if the receiver is closed
             let _res = complete_tx.send(complete_or_abort);
+
+            // the transaction is over, withdraw the handlers before the closures are freed
+            transaction_for_fut.set_oncomplete(None);
+            transaction_for_fut.set_onabort(None);
 
             // do any action to move the closures into this async block to keep it alive until the `state_machine` finishes
             drop(oncomplete_closure);

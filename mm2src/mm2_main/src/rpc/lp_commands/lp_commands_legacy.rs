@@ -31,13 +31,15 @@ use mm2_core::mm_ctx::MmArc;
 use mm2_metrics::MetricsOps;
 use serde_json::{self as json, Value as Json};
 #[cfg(feature = "sim-panic-rpc")] use std::borrow::Cow;
+use std::collections::HashMap;
 use std::future::Future;
 
 use crate::mm2::lp_dispatcher::{dispatch_lp_event, StopCtxEvent};
 use crate::mm2::lp_network::{peer_connection_healthcheck as peer_connection_healthcheck_impl, subscribe_to_topic};
 use crate::mm2::lp_ordermatch::{cancel_orders_by, CancelBy};
 use crate::mm2::lp_swap::{active_swaps_using_coin, tx_helper_topic, watcher_topic};
-use crate::mm2::rpc::legacy_adapter::{legacy_bare, legacy_error, legacy_result_body};
+use crate::mm2::rpc::daemon_rpc_errors::{GetMyPeerIdError, InfallibleRpcError, MetricsError};
+use crate::mm2::rpc::legacy_adapter::{legacy_bare, legacy_error, legacy_result, legacy_result_body};
 use crate::mm2::MmVersionResult;
 use mm2_err_handle::prelude::*;
 use uuid::Uuid;
@@ -99,25 +101,49 @@ pub async fn disable_coin_core(
     })
 }
 
-/// The legacy answer of a refused `disable_coin`: HTTP 500 and `{"error": <text>}`, with the members that the two
-/// deactivation conflicts carry beside `error` (`swaps`, or `orders` with `matching` and `cancelled`); every other
-/// failure is the legacy error text.
+/// The orders member of the extended refusal body.
+#[derive(Serialize)]
+struct LegacyDisableCoinOrders<'a> {
+    matching: &'a [String],
+    cancelled: &'a [String],
+}
+
+/// The extended body of a refused `disable_coin` (CRD ch.43 R43.1E.3 with D43.1E.1 option (c)): four members, all always
+/// present, in this order. `active_swaps` and `swaps` hold the same list.
+#[derive(Serialize)]
+struct LegacyDisableCoinRefusalBody<'a> {
+    error: String,
+    orders: LegacyDisableCoinOrders<'a>,
+    active_swaps: &'a [String],
+    swaps: &'a [String],
+}
+
+impl<'a> LegacyDisableCoinRefusalBody<'a> {
+    fn new(error: String, matching: &'a [String], cancelled: &'a [String], swaps: &'a [String]) -> Self {
+        LegacyDisableCoinRefusalBody {
+            error,
+            orders: LegacyDisableCoinOrders { matching, cancelled },
+            active_swaps: swaps,
+            swaps,
+        }
+    }
+}
+
+/// The legacy answer of a refused `disable_coin`: HTTP 500 and the extended body of CRD ch.43 R43.1E.3 with D43.1E.1
+/// option (c), `{"error", "orders": {"matching", "cancelled"}, "active_swaps", "swaps"}`, for the two deactivation
+/// conflicts and for a coin that is not active (empty lists); every other failure is the legacy error text.
 #[track_caller]
 pub(crate) fn legacy_disable_coin_refusal(error: MmError<DisableCoinError>) -> Result<Response<Vec<u8>>, String> {
+    let text = error.get_inner().to_string();
     let body = match error.get_inner() {
         DisableCoinError::ActiveSwapsBlockDeactivation { swaps, .. } => {
-            json!({ "error": error.get_inner().to_string(), "swaps": swaps })
+            LegacyDisableCoinRefusalBody::new(text, &[], &[], swaps)
         },
         DisableCoinError::MatchingOrdersBlockDeactivation {
             matching, cancelled, ..
-        } => json!({
-            "error": error.get_inner().to_string(),
-            "orders": {
-                "matching": matching,
-                "cancelled": cancelled,
-            }
-        }),
-        DisableCoinError::NoSuchCoin { .. } | DisableCoinError::InternalError(_) => return Err(legacy_error(error)),
+        } => LegacyDisableCoinRefusalBody::new(text, matching, cancelled, &[]),
+        DisableCoinError::NoSuchCoin { .. } => LegacyDisableCoinRefusalBody::new(text, &[], &[], &[]),
+        DisableCoinError::InternalError(_) => return Err(legacy_error(error)),
     };
     let body = try_s!(json::to_vec(&body));
     Response::builder().status(500).body(body).map_err(|e| ERRL!("{}", e))
@@ -304,11 +330,27 @@ pub fn help() -> HyRes {
     )
 }
 
-/// Get MarketMaker session metrics
-pub fn metrics(ctx: MmArc) -> HyRes {
-    match ctx.metrics.collect_json().map(|value| value.to_string()) {
-        Ok(response) => rpc_response(200, response),
-        Err(err) => rpc_err_response(500, &err),
+/// The request of a method that takes no members (`version`, `stop`, `metrics`, `get_my_peer_id` and the peer and
+/// gossip queries). Any object (members are ignored) and, through the versioned dispatcher, an absent or `null`
+/// `params` decode to it.
+#[derive(Deserialize)]
+pub struct NoParamsRequest {}
+
+/// The typed core of `metrics`: the session metrics, as the JSON the legacy body is made of.
+///
+/// # Errors
+///
+/// A [`MetricsError`].
+pub async fn metrics_core(ctx: MmArc, _req: NoParamsRequest) -> Result<Json, MmError<MetricsError>> {
+    ctx.metrics.collect_json().map_to_mm(MetricsError::Internal)
+}
+
+/// The legacy `metrics`: the bare metrics JSON as the whole body (HTTP 200, `application/json`); a failure is
+/// `{"error": <text>}` with HTTP 500, logged, as before.
+pub async fn metrics(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+    match metrics_core(ctx, NoParamsRequest {}).await {
+        Ok(metrics) => rpc_response(200, metrics.to_string()).compat().await,
+        Err(error) => rpc_err_response(500, &error.get_inner().to_string()).compat().await,
     }
 }
 
@@ -363,7 +405,10 @@ pub async fn my_balance(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, Stri
     legacy_bare(my_balance_core(ctx, MyBalanceRequest { coin }).await)
 }
 
-pub async fn stop(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+/// The typed core of `stop`: raises the stop event and schedules the shutdown, which starts shortly after the answer
+/// leaves, so the caller of the versioned form gets its answer as the legacy caller does. The success is the text that
+/// the legacy body carries under `result`.
+pub async fn stop_core(ctx: MmArc, _req: NoParamsRequest) -> Result<&'static str, MmError<InfallibleRpcError>> {
     dispatch_lp_event(ctx.clone(), StopCtxEvent.into()).await;
     // Should delay the shutdown a bit in order not to trip the "stop" RPC call in unit tests.
     // Stopping immediately leads to the "stop" RPC call failing with the "errno 10054" sometimes.
@@ -373,11 +418,12 @@ pub async fn stop(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
             error!("Error stopping MmCtx: {}", e);
         }
     });
-    let res = json!({
-        "result": "success"
-    });
-    let res = try_s!(json::to_vec(&res));
-    Ok(try_s!(Response::builder().body(res)))
+    Ok("success")
+}
+
+/// The legacy `stop`: calls [`stop_core`] and answers `{"result": "success"}`.
+pub async fn stop(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+    legacy_result(stop_core(ctx, NoParamsRequest {}).await)
 }
 
 #[cfg(feature = "sim-panic-rpc")]
@@ -411,80 +457,121 @@ pub async fn sim_panic(req: Json) -> Result<Response<Vec<u8>>, String> {
     Ok(try_s!(Response::builder().body(js)))
 }
 
-pub fn version() -> HyRes { rpc_response(200, MmVersionResult::new().to_json().to_string()) }
+/// The typed core of `version`: the version object, whole, as the legacy body is (`result`, `datetime`).
+pub async fn version_core(_ctx: MmArc, _req: NoParamsRequest) -> Result<MmVersionResult, MmError<InfallibleRpcError>> {
+    Ok(MmVersionResult::new())
+}
 
-pub async fn get_peers_info(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+/// The legacy `version`: the version object as the whole body (HTTP 200, `application/json`).
+pub async fn version(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+    match version_core(ctx, NoParamsRequest {}).await {
+        Ok(version) => rpc_response(200, version.to_json().to_string()).compat().await,
+        Err(error) => match error.into_inner() {},
+    }
+}
+
+/// The typed core of `get_directly_connected_peers`: the peers this node is connected to, each with its addresses.
+pub async fn get_directly_connected_peers_core(
+    ctx: MmArc,
+    _req: NoParamsRequest,
+) -> Result<HashMap<String, Vec<String>>, MmError<InfallibleRpcError>> {
     use crate::mm2::lp_network::P2PContext;
     use mm2_p2p::atomicdex_behaviour::get_peers_info;
     let ctx = P2PContext::fetch_from_mm_arc(&ctx);
     let cmd_tx = ctx.cmd_tx.lock().clone();
-    let result = get_peers_info(cmd_tx).await;
-    let result = json!({
-        "result": result,
-    });
-    let res = try_s!(json::to_vec(&result));
-    Ok(try_s!(Response::builder().body(res)))
+    Ok(get_peers_info(cmd_tx).await)
 }
 
-pub async fn get_gossip_mesh(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+/// The legacy `get_directly_connected_peers`: calls [`get_directly_connected_peers_core`] and answers
+/// `{"result": {<peer>: [<address>]}}`.
+pub async fn get_peers_info(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+    legacy_result(get_directly_connected_peers_core(ctx, NoParamsRequest {}).await)
+}
+
+/// The typed core of `get_gossip_mesh`: the current gossipsub mesh state.
+pub async fn get_gossip_mesh_core(
+    ctx: MmArc,
+    _req: NoParamsRequest,
+) -> Result<HashMap<String, Vec<String>>, MmError<InfallibleRpcError>> {
     use crate::mm2::lp_network::P2PContext;
     use mm2_p2p::atomicdex_behaviour::get_gossip_mesh;
     let ctx = P2PContext::fetch_from_mm_arc(&ctx);
     let cmd_tx = ctx.cmd_tx.lock().clone();
-    let result = get_gossip_mesh(cmd_tx).await;
-    let result = json!({
-        "result": result,
-    });
-    let res = try_s!(json::to_vec(&result));
-    Ok(try_s!(Response::builder().body(res)))
+    Ok(get_gossip_mesh(cmd_tx).await)
 }
 
-pub async fn get_gossip_peer_topics(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+/// The legacy `get_gossip_mesh`: calls [`get_gossip_mesh_core`] and answers `{"result": {...}}`.
+pub async fn get_gossip_mesh(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+    legacy_result(get_gossip_mesh_core(ctx, NoParamsRequest {}).await)
+}
+
+/// The typed core of `get_gossip_peer_topics`: the topics of each gossip peer.
+pub async fn get_gossip_peer_topics_core(
+    ctx: MmArc,
+    _req: NoParamsRequest,
+) -> Result<HashMap<String, Vec<String>>, MmError<InfallibleRpcError>> {
     use crate::mm2::lp_network::P2PContext;
     use mm2_p2p::atomicdex_behaviour::get_gossip_peer_topics;
     let ctx = P2PContext::fetch_from_mm_arc(&ctx);
     let cmd_tx = ctx.cmd_tx.lock().clone();
-    let result = get_gossip_peer_topics(cmd_tx).await;
-    let result = json!({
-        "result": result,
-    });
-    let res = try_s!(json::to_vec(&result));
-    Ok(try_s!(Response::builder().body(res)))
+    Ok(get_gossip_peer_topics(cmd_tx).await)
 }
 
-pub async fn get_gossip_topic_peers(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+/// The legacy `get_gossip_peer_topics`: calls [`get_gossip_peer_topics_core`] and answers `{"result": {...}}`.
+pub async fn get_gossip_peer_topics(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+    legacy_result(get_gossip_peer_topics_core(ctx, NoParamsRequest {}).await)
+}
+
+/// The typed core of `get_gossip_topic_peers`: the peers of each gossip topic.
+pub async fn get_gossip_topic_peers_core(
+    ctx: MmArc,
+    _req: NoParamsRequest,
+) -> Result<HashMap<String, Vec<String>>, MmError<InfallibleRpcError>> {
     use crate::mm2::lp_network::P2PContext;
     use mm2_p2p::atomicdex_behaviour::get_gossip_topic_peers;
     let ctx = P2PContext::fetch_from_mm_arc(&ctx);
     let cmd_tx = ctx.cmd_tx.lock().clone();
-    let result = get_gossip_topic_peers(cmd_tx).await;
-    let result = json!({
-        "result": result,
-    });
-    let res = try_s!(json::to_vec(&result));
-    Ok(try_s!(Response::builder().body(res)))
+    Ok(get_gossip_topic_peers(cmd_tx).await)
 }
 
-pub async fn get_relay_mesh(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+/// The legacy `get_gossip_topic_peers`: calls [`get_gossip_topic_peers_core`] and answers `{"result": {...}}`.
+pub async fn get_gossip_topic_peers(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+    legacy_result(get_gossip_topic_peers_core(ctx, NoParamsRequest {}).await)
+}
+
+/// The typed core of `get_relay_mesh`: the relays of the relay mesh.
+pub async fn get_relay_mesh_core(
+    ctx: MmArc,
+    _req: NoParamsRequest,
+) -> Result<Vec<String>, MmError<InfallibleRpcError>> {
     use crate::mm2::lp_network::P2PContext;
     use mm2_p2p::atomicdex_behaviour::get_relay_mesh;
     let ctx = P2PContext::fetch_from_mm_arc(&ctx);
     let cmd_tx = ctx.cmd_tx.lock().clone();
-    let result = get_relay_mesh(cmd_tx).await;
-    let result = json!({
-        "result": result,
-    });
-    let res = try_s!(json::to_vec(&result));
-    Ok(try_s!(Response::builder().body(res)))
+    Ok(get_relay_mesh(cmd_tx).await)
 }
 
+/// The legacy `get_relay_mesh`: calls [`get_relay_mesh_core`] and answers `{"result": [...]}`.
+pub async fn get_relay_mesh(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
+    legacy_result(get_relay_mesh_core(ctx, NoParamsRequest {}).await)
+}
+
+/// The typed core of `get_my_peer_id`: the peer identifier of this node.
+///
+/// # Errors
+///
+/// A [`GetMyPeerIdError`] when the node has no peer identifier yet.
+pub async fn get_my_peer_id_core(ctx: MmArc, _req: NoParamsRequest) -> Result<String, MmError<GetMyPeerIdError>> {
+    let peer_id = ctx
+        .peer_id
+        .ok_or("Peer ID is not initialized")
+        .map_to_mm(|e| GetMyPeerIdError::Internal(e.to_string()))?;
+    Ok(peer_id.clone())
+}
+
+/// The legacy `get_my_peer_id`: calls [`get_my_peer_id_core`] and answers `{"result": "<peer id>"}`.
 pub async fn get_my_peer_id(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
-    let peer_id = try_s!(ctx.peer_id.ok_or("Peer ID is not initialized"));
-    let result = json!({
-        "result": peer_id,
-    });
-    let res = try_s!(json::to_vec(&result));
-    Ok(try_s!(Response::builder().body(res)))
+    legacy_result(get_my_peer_id_core(ctx, NoParamsRequest {}).await)
 }
 
 #[derive(Deserialize)]

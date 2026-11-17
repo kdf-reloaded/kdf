@@ -425,6 +425,7 @@ impl<'a> SiaWithdrawBuilder<'a> {
         let tx_hash = txid.to_string();
 
         Ok(TransactionDetails {
+            unsigned: None,
             tx_hex: BytesJson(tx_bytes),
             tx_json: Some(tx_json),
             tx_hash,

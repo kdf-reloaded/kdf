@@ -425,7 +425,7 @@ mod bchd_grpc_tests {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_tests {
     use super::*;
     use wasm_bindgen_test::*;

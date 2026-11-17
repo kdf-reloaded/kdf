@@ -288,6 +288,46 @@ fn activation_parameters_are_validated_as_bound() {
     );
 }
 
+/// CRD ch.05 R46 item 2, status note of 2026-11-17: the request carries `priv_key_policy` (default
+/// `ContextPrivKey`, both spellings of the UTXO request) and a hardware value is refused.
+#[test]
+fn the_priv_key_policy_member_is_parsed_and_a_hardware_value_is_refused() {
+    let params = |value: Json| -> LightningActivationParams { serde_json::from_value(value).unwrap() };
+    let policy_of = |value: Json| {
+        <LightningCoin as InitL2ActivationOps>::validate_activation_params(params(value))
+            .unwrap_or_else(|e| panic!("{}", e))
+            .priv_key_policy
+    };
+    assert!(matches!(
+        policy_of(json!({ "name": "n" })),
+        PrivKeyActivationPolicy::ContextPrivKey
+    ));
+    for spelling in [json!("IguanaPrivKey"), json!({ "type": "IguanaPrivKey" })] {
+        assert!(matches!(
+            policy_of(json!({ "name": "n", "priv_key_policy": spelling })),
+            PrivKeyActivationPolicy::IguanaPrivKey
+        ));
+        let one_shot = match <LightningCoin as crate::l2::L2ActivationOps>::validate_activation_params(params(
+            json!({ "name": "n", "priv_key_policy": spelling }),
+        )) {
+            Ok(validated) => validated,
+            Err(_) => panic!("the one-shot validation accepts the member"),
+        };
+        assert!(matches!(
+            one_shot.priv_key_policy,
+            PrivKeyActivationPolicy::IguanaPrivKey
+        ));
+    }
+    // A hardware value is refused on both routes, before anything starts.
+    let hardware = json!({ "name": "n", "priv_key_policy": "Trezor" });
+    assert!(<LightningCoin as InitL2ActivationOps>::validate_activation_params(params(hardware.clone())).is_err());
+    assert!(<LightningCoin as crate::l2::L2ActivationOps>::validate_activation_params(params(hardware)).is_err());
+    assert!(serde_json::from_value::<LightningActivationParams>(
+        json!({ "name": "n", "priv_key_policy": "NoSuchPolicy" })
+    )
+    .is_err());
+}
+
 // ---------------------------------------------------------------------------
 // T41.4: status-level mapping (R41.2.7)
 // ---------------------------------------------------------------------------

@@ -238,6 +238,7 @@ async fn build_signed_tx(ctx: &MmArc, req: EvmTxRequest) -> Result<TransactionDe
     let my_address = coin.my_address().map_err(GetNftInfoError::Internal)?;
 
     Ok(TransactionDetails {
+        unsigned: None,
         tx_json: None,
         to: vec![checksum_address(&format!("{:#02x}", to_address))],
         from: vec![my_address],

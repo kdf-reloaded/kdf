@@ -14,6 +14,7 @@ description = "KDF-original chain primitives (Block / BlockHeader / Transaction 
 # Firo MTP-PoW + ProgPoW, Qtum PoS header fields, Ravencoin KAWPOW, Verus.
 
 [dependencies]
+blake2b_simd = "0.5"
 hex = { version = "2", package = "rustc-hex" }
 crypto = { package = "kdf_crypto", path = "../kdf_crypto" }
 primitives = { package = "kdf_primitives", path = "../kdf_primitives" }

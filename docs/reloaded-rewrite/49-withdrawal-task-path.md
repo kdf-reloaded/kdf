@@ -808,6 +808,14 @@ with three known external addresses in account `0`, a `from` naming
 answers `UnknownAccount`, and `account_balance` afterwards still lists three
 addresses.
 
+> *Reloaded status (clean side, 2026-11-16):* the structured withdrawal error
+> `Transport` answers HTTP **502** on the direct `withdraw` method, on
+> `withdraw_nft` and on the start request of `task::withdraw::init` (the
+> maintainer's decision of 2026-11-16, aligning with the reference as chapter
+> 43 R43.1D.2 records it; it answered 500 before). Inside a status poll the
+> error object has no HTTP status of its own (R49.20). The other statuses of
+> the error are unchanged.
+
 ## 49.7 Provenance Footer
 
 - *Inputs:* the project's own revision history and current tree (the
@@ -983,3 +991,6 @@ addresses.
   status note describe the maintainer's decision of 2026-11-09 and this repository's code.
   They take no forbidden-class input, so chapter 01 R38 is not engaged and no
   gate pass is required.
+- *Status note added 2026-11-16 (before §49.7).* Reloaded-original, clean side:
+  it records the maintainer's 2026-11-16 decision on the `Transport` status;
+  no forbidden-class input, chapter 01 R38 not engaged.

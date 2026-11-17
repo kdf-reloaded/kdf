@@ -1637,6 +1637,15 @@ on Cosmos-family software configured for secp256k1) uses the field
 directly with no padding, and its validator MUST reject any input that
 is not a well-formed secp256k1 point.
 
+> *Status note added 2026-11-17 (Reloaded-original, clean side; the cleared text
+> above is unchanged; no forbidden-class input).* The Sia key this rule pads is
+> the ed25519 key of the single Sia address. Under a global-HD login that key is
+> derived at the fixed single-address path by default; when the Sia activation
+> request carries `priv_key_policy: IguanaPrivKey`, it is built from the
+> internal key's secret bytes instead, as under an iguana login, and the HTLC
+> key follows it (padded as above). See chapter 05 R46, status note of
+> 2026-11-17.
+
 **R65.** *Secret-hash field width is shape-dependent.* The `secret_hash`
 field MUST be a fixed-width 20-byte value in shape 1 and a
 variable-length byte sequence in shapes 2 and 3. This asymmetry is

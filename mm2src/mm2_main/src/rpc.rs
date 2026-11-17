@@ -48,6 +48,11 @@ use std::net::SocketAddr;
 #[cfg(target_arch = "wasm32")]
 #[path = "rpc/lp_commands/connect_metamask.rs"]
 pub mod connect_metamask;
+#[path = "rpc/lp_commands/daemon_rpc_errors.rs"]
+pub mod daemon_rpc_errors;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "rpc/lp_commands/daemon_rpc_tests.rs"]
+mod daemon_rpc_tests;
 #[path = "rpc/dispatcher/dispatcher.rs"] mod dispatcher;
 #[path = "rpc/dispatcher/dispatcher_legacy.rs"]
 mod dispatcher_legacy;
@@ -63,6 +68,9 @@ pub mod send_asked_data;
 #[path = "rpc/sse_handler.rs"] mod sse_handler;
 #[path = "rpc/streaming_activations/mod.rs"]
 pub mod streaming_activations;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "rpc/lp_commands/swap_rpc_tests.rs"]
+mod swap_rpc_tests;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "rpc/lp_commands/trezor.rs"]
 pub mod trezor;
@@ -1037,14 +1045,15 @@ mod server_tests {
     }
 
     /// Methods that only the legacy method table knows (CRD ch.43 R43.1A.4): `get_trade_fee`, which stays legacy-only
-    /// by decision (D8 of `docs/plans/mmrpc-v2-completion.md`), and `import_swaps`, a method of a later group of that
-    /// plan. The order methods are not among them: since 0.5.0 `setprice`, `update_maker_order`, `cancel_order`,
-    /// `cancel_all_orders`, `my_orders` and `order_status` (phase 1) and `buy`, `sell`, `orderbook_depth` and
-    /// `orders_history_by_filter` (phase 2) also have a versioned form, a Reloaded extension that the reference does
-    /// not have (tested in `versioned_order_methods_*` and `versioned_trading_methods_*` below), and so do the ten
-    /// wallet and coin methods of phase 3 (tested in `wallet_rpc_tests`). A method that gets a versioned form
-    /// leaves this list.
-    const LEGACY_ONLY_METHODS: [&str; 2] = ["get_trade_fee", "import_swaps"];
+    /// by decision (D8 of `docs/plans/mmrpc-v2-completion.md`), and `recover_funds_of_swap`, which waits for the swap
+    /// architecture decisions of that plan. The order methods are not among them: since 0.5.0 `setprice`,
+    /// `update_maker_order`, `cancel_order`, `cancel_all_orders`, `my_orders` and `order_status` (phase 1) and `buy`,
+    /// `sell`, `orderbook_depth` and `orders_history_by_filter` (phase 2) also have a versioned form, a Reloaded
+    /// extension that the reference does not have (tested in `versioned_order_methods_*` and
+    /// `versioned_trading_methods_*` below), and so do the ten wallet and coin methods of phase 3 (tested in
+    /// `wallet_rpc_tests`) and the two swap-list methods `all_swaps_uuids_by_filter` and `import_swaps` of phase 4
+    /// (tested in `swap_rpc_tests`). A method that gets a versioned form leaves this list.
+    const LEGACY_ONLY_METHODS: [&str; 2] = ["get_trade_fee", "recover_funds_of_swap"];
 
     fn assert_http_status(status_line: &str, code: u16) {
         assert!(
@@ -1094,7 +1103,7 @@ mod server_tests {
     #[test]
     fn versioned_request_for_a_legacy_only_method_is_authenticated_before_the_lookup() {
         let (_ctx, addr) = start_server();
-        let request = json!({ "mmrpc": "2.0", "method": "import_swaps", "params": {}, "id": 5 });
+        let request = json!({ "mmrpc": "2.0", "method": "recover_funds_of_swap", "params": {}, "id": 5 });
         let (status, body) = post(addr, &request);
         assert_http_status(&status, 403);
         assert_eq!(body["mmrpc"], "2.0", "{body}");

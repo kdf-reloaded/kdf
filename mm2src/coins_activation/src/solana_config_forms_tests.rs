@@ -4,16 +4,19 @@
 //! refuse every request is bypassed. Nothing here touches the network.
 
 use crate::platform_coin_with_tokens::{enable_platform_coin_with_tokens, EnablePlatformCoinWithTokensError,
-                                       EnablePlatformCoinWithTokensReq};
+                                       EnablePlatformCoinWithTokensReq, PlatformWithTokensActivationOps};
 use crate::prelude::TryFromCoinProtocol;
-use crate::solana_with_tokens_activation::SolanaWithTokensActivationRequest;
+use crate::solana_with_tokens_activation::{derivation_method_of, SolanaProtocolInfo, SolanaWithTokensActivationError,
+                                           SolanaWithTokensActivationRequest};
 use crate::spl_token_activation::SplActivationRequest;
 use crate::token::{enable_token, EnableTokenError, EnableTokenRequest};
 use coins::solana::spl::SplProtocolConf;
+use coins::solana::{SOLANA_HD_LAYOUT_BIP44, SOLANA_HD_LAYOUT_BIP44_CHANGE};
 use coins::{lp_register_coin, solana_coin_from_conf_and_params, CoinProtocol, MarketCoinOps, MmCoin, MmCoinEnum,
             RegisterCoinParams, SolanaActivationParams, SolanaCoin, SplToken};
 use common::{block_on, HttpStatusCode, StatusCode};
 use mm2_core::mm_ctx::{MmArc, MmCtxBuilder};
+use mm2_err_handle::prelude::MmError;
 use serde_json::{json, Value as Json};
 use std::collections::BTreeSet;
 
@@ -509,4 +512,479 @@ fn t40_6b_21_tx_history_true_is_ignored_on_the_platform_method() {
         },
         _ => panic!("expected PlatformCoinCreationError"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Keys under each login (CRD ch.40 §40.1A, R40.1A.1-R40.1A.7, T40.1A.1-T40.1A.3)
+//
+// No assertion message below carries a key, a seed, a mnemonic or an address derived from one (CodeQL rule):
+// values are compared with `assert!(a == b, "<fixed text>")`. The mnemonic and the addresses appear only in
+// fixtures and expected-value constants.
+// ---------------------------------------------------------------------------
+
+const HD_MNEMONIC: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+const PASSPHRASE_ADDRESS: &str = "7zuqksARN8uXHz2yvrkiZZDPeALBSjzK12nkMPNzKSCJ";
+const BIP44_CHANGE_ACCOUNT_0: &str = "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk";
+const BIP44_CHANGE_ACCOUNT_1: &str = "Hh8QwFUA6MtVu1qAoq12ucvFHNwCcVTV7hpWjeY1Hztb";
+const BIP44_ACCOUNT_0: &str = "GjJyeC1r2RgkuoCWMyPYkCWSGSGLcz266EaAkLA27AhL";
+const BIP44_ACCOUNT_1: &str = "ANf3TEKFL6jPWjzkndo4CbnNdUNkBk4KHPggJs2nu8Xi";
+
+/// A context whose login is a global-HD wallet of the test mnemonic (the passphrase-hash key of the same words is
+/// still held by the context, which is what the HD address must never equal).
+fn hd_ctx_with(coins: Vec<Json>) -> MmArc {
+    let ctx = MmCtxBuilder::new().with_conf(json!({ "coins": coins })).into_mm_arc();
+    crypto::CryptoCtx::init_with_global_hd_account(ctx.clone(), HD_MNEMONIC).expect("initialize the HD crypto context");
+    ctx
+}
+
+/// A single-key (passphrase) context of the same words.
+fn single_key_ctx_with(coins: Vec<Json>) -> MmArc {
+    let ctx = MmCtxBuilder::new().with_conf(json!({ "coins": coins })).into_mm_arc();
+    crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), HD_MNEMONIC).expect("initialize the crypto context");
+    ctx
+}
+
+fn entry_with_path(derivation_path: Option<Json>) -> Json {
+    let mut entry = platform_entry();
+    if let Some(path) = derivation_path {
+        entry["derivation_path"] = path;
+    }
+    entry
+}
+
+/// Builds the platform coin the way the activation does (key choice included), with a closed-port node that is
+/// never contacted: the build reads nothing from the network.
+fn built_platform(
+    ctx: &MmArc,
+    entry: &Json,
+    extra: Json,
+) -> Result<SolanaCoin, MmError<SolanaWithTokensActivationError>> {
+    let req = platform_request(Some(CLOSED_NODE), &[], extra);
+    let priv_key = *ctx.legacy_passphrase_key_pair().private().secret;
+    block_on(<SolanaCoin as PlatformWithTokensActivationOps>::enable_platform_coin(
+        ctx.clone(),
+        "SOL".to_owned(),
+        entry.clone(),
+        req.request,
+        SolanaProtocolInfo {},
+        &priv_key,
+    ))
+}
+
+fn address_of(coin: &SolanaCoin) -> String { coin.my_address().expect("an address") }
+
+/// The error text of a platform-coin creation error, or a failed assertion saying the variant was another one.
+fn creation_error_text(err: &SolanaWithTokensActivationError) -> String {
+    match err {
+        SolanaWithTokensActivationError::PlatformCoinCreationError { ticker, error } => {
+            assert!(ticker.as_str() == "SOL", "unexpected ticker");
+            error.clone()
+        },
+        _ => panic!("expected PlatformCoinCreationError"),
+    }
+}
+
+fn hd_address(layout: Option<&str>, account_id: u32) -> String {
+    let ctx = hd_ctx_with(vec![platform_entry()]);
+    let mut extra = json!({ "path_to_address": { "account_id": account_id } });
+    if let Some(layout) = layout {
+        extra["hd_path_layout"] = json!(layout);
+    }
+    address_of(&built_platform(&ctx, &platform_entry(), extra).expect("the platform coin is built"))
+}
+
+/// The two layout names are written once, in the constants; the request type reads exactly those.
+#[test]
+fn t40_1a_layout_values_are_the_constants() {
+    assert!(
+        SOLANA_HD_LAYOUT_BIP44_CHANGE == "bip44_change",
+        "unexpected layout name"
+    );
+    assert!(SOLANA_HD_LAYOUT_BIP44 == "bip44", "unexpected layout name");
+    for (name, expected) in [
+        (SOLANA_HD_LAYOUT_BIP44_CHANGE, "bip44_change"),
+        (SOLANA_HD_LAYOUT_BIP44, "bip44"),
+    ] {
+        let layout: coins::solana::SolanaHdLayout = serde_json::from_value(json!(name)).expect("a known layout name");
+        assert!(layout.as_str() == expected, "the parsed layout does not round-trip");
+    }
+}
+
+/// T40.1A.1: the four published vectors.
+#[test]
+fn t40_1a_1_hd_vectors_of_the_test_mnemonic() {
+    assert!(
+        hd_address(Some(SOLANA_HD_LAYOUT_BIP44_CHANGE), 0) == BIP44_CHANGE_ACCOUNT_0,
+        "vector mismatch"
+    );
+    assert!(
+        hd_address(Some(SOLANA_HD_LAYOUT_BIP44_CHANGE), 1) == BIP44_CHANGE_ACCOUNT_1,
+        "vector mismatch"
+    );
+    assert!(
+        hd_address(Some(SOLANA_HD_LAYOUT_BIP44), 0) == BIP44_ACCOUNT_0,
+        "vector mismatch"
+    );
+    assert!(
+        hd_address(Some(SOLANA_HD_LAYOUT_BIP44), 1) == BIP44_ACCOUNT_1,
+        "vector mismatch"
+    );
+}
+
+/// R40.1A.1, R40.1A.4: the HD address never equals the passphrase-hash address of the same words, and the
+/// single-key address of those words is the S1 vector.
+#[test]
+fn t40_1a_1_hd_address_is_never_the_passphrase_hash_address() {
+    for (layout, account_id) in [
+        (Some(SOLANA_HD_LAYOUT_BIP44_CHANGE), 0),
+        (Some(SOLANA_HD_LAYOUT_BIP44), 0),
+        (None, 1),
+    ] {
+        assert!(
+            hd_address(layout, account_id) != PASSPHRASE_ADDRESS,
+            "an HD address equals the passphrase-hash address"
+        );
+    }
+    let ctx = single_key_ctx_with(vec![platform_entry()]);
+    let coin = built_platform(&ctx, &platform_entry(), json!({})).expect("the platform coin is built");
+    assert!(
+        address_of(&coin) == PASSPHRASE_ADDRESS,
+        "the single-key address differs from the vector"
+    );
+}
+
+/// R40.1A.2: an absent `hd_path_layout` is `bip44_change`; an absent `path_to_address` is account 0.
+#[test]
+fn t40_1a_2_absent_layout_is_bip44_change() {
+    assert!(
+        hd_address(None, 0) == BIP44_CHANGE_ACCOUNT_0,
+        "the default layout differs from bip44_change"
+    );
+    let ctx = hd_ctx_with(vec![platform_entry()]);
+    let coin = built_platform(&ctx, &platform_entry(), json!({})).expect("the platform coin is built");
+    assert!(
+        address_of(&coin) == BIP44_CHANGE_ACCOUNT_0,
+        "the default account differs from account 0"
+    );
+    let coin = built_platform(&ctx, &platform_entry(), json!({ "path_to_address": null }))
+        .expect("the platform coin is built");
+    assert!(
+        address_of(&coin) == BIP44_CHANGE_ACCOUNT_0,
+        "a null path_to_address differs from the default"
+    );
+}
+
+/// R40.1A.6: an `hd_path_layout` other than the two values fails request parsing (`InvalidRequest`, HTTP 400 at
+/// the RPC layer, which maps every request-parse failure that way).
+#[test]
+fn t40_1a_6_unknown_layout_fails_request_parsing() {
+    for bad in [json!("bip44_extra"), json!("BIP44"), json!(""), json!(44)] {
+        let parsed =
+            serde_json::from_value::<EnablePlatformCoinWithTokensReq<SolanaWithTokensActivationRequest>>(json!({
+                "ticker": "SOL",
+                "confirmation_commitment": "finalized",
+                "client_url": CLOSED_NODE,
+                "spl_tokens_requests": [],
+                "hd_path_layout": bad,
+            }));
+        assert!(parsed.is_err(), "an unknown layout parsed");
+    }
+}
+
+/// T40.1A.3 / R40.1A.1: under a single-key login the layout and `path_to_address` change nothing, whatever they
+/// hold.
+#[test]
+fn t40_1a_3_single_key_login_ignores_layout_and_path_to_address() {
+    let ctx = single_key_ctx_with(vec![platform_entry()]);
+    let plain = address_of(&built_platform(&ctx, &platform_entry(), json!({})).expect("a coin"));
+    for extra in [
+        json!({ "hd_path_layout": SOLANA_HD_LAYOUT_BIP44 }),
+        json!({ "hd_path_layout": SOLANA_HD_LAYOUT_BIP44_CHANGE, "path_to_address": { "account_id": 5 } }),
+        json!({ "path_to_address": { "chain": "Internal", "address_id": 9 } }),
+        json!({ "path_to_address": "not an object" }),
+    ] {
+        let coin = built_platform(&ctx, &platform_entry(), extra).expect("a coin");
+        assert!(
+            address_of(&coin) == plain,
+            "a layout or path_to_address changed the single-key address"
+        );
+    }
+}
+
+/// R40.1A.2 / R40.1A.6: `derivation_path` absent gives the default `m/44'/501'`; a different base gives another
+/// address; a value that is not a two-level hardened path is a `PlatformCoinCreationError` naming it.
+#[test]
+fn t40_1a_2_derivation_path_default_and_malformed() {
+    let ctx = hd_ctx_with(vec![platform_entry()]);
+    let default_entry = entry_with_path(Some(json!("m/44'/501'")));
+    let coin = built_platform(&ctx, &default_entry, json!({})).expect("a coin");
+    assert!(
+        address_of(&coin) == BIP44_CHANGE_ACCOUNT_0,
+        "the explicit default base differs from the absent one"
+    );
+    let other = entry_with_path(Some(json!("m/44'/502'")));
+    let coin = built_platform(&ctx, &other, json!({})).expect("a coin");
+    assert!(
+        address_of(&coin) != BIP44_CHANGE_ACCOUNT_0,
+        "another base gave the default address"
+    );
+    for bad in [
+        json!("this is not a path"),
+        json!("m/44'"),
+        json!("m/44'/501'/0'"),
+        json!("m/44/501'"),
+        json!("m/44'/501"),
+        json!("44'/501'"),
+        json!("m/44'/2147483648'"),
+        json!(501),
+    ] {
+        let err = built_platform(&ctx, &entry_with_path(Some(bad)), json!({})).unwrap_err();
+        let text = creation_error_text(err.get_inner());
+        assert!(
+            text.contains("derivation_path"),
+            "the error does not name derivation_path"
+        );
+    }
+}
+
+/// R40.1A.6: under HD, `path_to_address` that does not parse, a `chain` other than `External`, and an
+/// `address_id` other than 0 are `PlatformCoinCreationError` naming `path_to_address`.
+#[test]
+fn t40_1a_6_hd_path_to_address_refusals() {
+    let ctx = hd_ctx_with(vec![platform_entry()]);
+    for extra in [
+        json!({ "path_to_address": { "chain": "Internal" } }),
+        json!({ "path_to_address": { "address_id": 1 } }),
+        json!({ "path_to_address": { "account_id": 1, "chain": "Internal", "address_id": 1 } }),
+        json!({ "path_to_address": "not an object" }),
+        json!({ "path_to_address": { "account_id": "zero" } }),
+    ] {
+        let err = built_platform(&ctx, &platform_entry(), extra).unwrap_err();
+        let text = creation_error_text(err.get_inner());
+        assert!(
+            text.contains("path_to_address"),
+            "the error does not name path_to_address"
+        );
+    }
+}
+
+/// R40.1A.6: a hardware `priv_key_policy` is refused before any node is contacted, under either login. The
+/// request carries no node URL, so a build that got as far as the node check would answer with the endpoint error.
+#[test]
+fn t40_1a_6_trezor_policy_is_refused_before_any_node() {
+    for ctx in [
+        hd_ctx_with(vec![platform_entry()]),
+        single_key_ctx_with(vec![platform_entry()]),
+    ] {
+        for form in [json!("Trezor"), json!({ "type": "Trezor" })] {
+            let req = platform_request(None, &[], json!({ "priv_key_policy": form }));
+            let priv_key = *ctx.legacy_passphrase_key_pair().private().secret;
+            let err = block_on(<SolanaCoin as PlatformWithTokensActivationOps>::enable_platform_coin(
+                ctx.clone(),
+                "SOL".to_owned(),
+                platform_entry(),
+                req.request,
+                SolanaProtocolInfo {},
+                &priv_key,
+            ))
+            .unwrap_err();
+            let text = creation_error_text(err.get_inner());
+            assert!(text.contains("hardware key policy"), "unexpected refusal text");
+            assert!(!text.contains("RPC endpoint"), "the refusal came after the node check");
+        }
+    }
+}
+
+/// R40.1A.6: through the generic activation the Trezor refusal has the `PlatformCoinCreationError` wire shape
+/// (HTTP 500, `{ticker, error}`) and registers nothing.
+#[test]
+fn t40_1a_6_trezor_policy_wire_shape_through_the_generic_activation() {
+    let ctx = hd_ctx_with(vec![platform_entry()]);
+    let req = platform_request(Some(CLOSED_NODE), &[], json!({ "priv_key_policy": "Trezor" }));
+    let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req)).unwrap_err();
+    let (wire, status) = platform_wire(err.get_inner());
+    assert!(
+        wire["error_type"] == "PlatformCoinCreationError",
+        "unexpected error wire shape"
+    );
+    assert!(wire["error_data"]["ticker"] == "SOL", "unexpected error wire shape");
+    assert!(
+        data_keys(&wire) == keys(&["ticker", "error"]),
+        "unexpected error wire shape"
+    );
+    assert!(
+        status == StatusCode::INTERNAL_SERVER_ERROR,
+        "unexpected error wire shape"
+    );
+}
+
+/// R40.1A.6: the WalletConnect form, and any other unaccepted form, fails request parsing.
+#[test]
+fn t40_1a_6_unaccepted_priv_key_policy_forms_fail_request_parsing() {
+    for form in [
+        json!({ "type": "WalletConnect", "data": { "session_topic": "topic" } }),
+        json!({ "type": "WalletConnect" }),
+        json!("WalletConnect"),
+        json!("NoSuchPolicy"),
+        json!(7),
+    ] {
+        let parsed =
+            serde_json::from_value::<EnablePlatformCoinWithTokensReq<SolanaWithTokensActivationRequest>>(json!({
+                "ticker": "SOL",
+                "confirmation_commitment": "finalized",
+                "client_url": CLOSED_NODE,
+                "spl_tokens_requests": [],
+                "priv_key_policy": form,
+            }));
+        assert!(parsed.is_err(), "an unaccepted priv_key_policy form parsed");
+    }
+}
+
+/// R40.1A.1, R40.1A.6: `ContextPrivKey` and an absent policy activate under either login with the login's own key;
+/// `IguanaPrivKey` is honoured under either login: under a single-key login the passphrase-hash address, under HD
+/// the address of the context's internal key (the one the UTXO family uses), whatever `hd_path_layout` and
+/// `path_to_address` hold, and `derivation_method` `Iguana`.
+#[test]
+fn t40_1a_6_context_and_iguana_policies() {
+    let hd = hd_ctx_with(vec![platform_entry()]);
+    for form in [json!("ContextPrivKey"), json!({ "type": "ContextPrivKey" })] {
+        let coin = built_platform(&hd, &platform_entry(), json!({ "priv_key_policy": form })).expect("a coin");
+        assert!(
+            address_of(&coin) == BIP44_CHANGE_ACCOUNT_0,
+            "ContextPrivKey changed the HD address"
+        );
+    }
+    let single = single_key_ctx_with(vec![platform_entry()]);
+    for policy in ["ContextPrivKey", "IguanaPrivKey"] {
+        let coin = built_platform(&single, &platform_entry(), json!({ "priv_key_policy": policy })).expect("a coin");
+        assert!(
+            address_of(&coin) == PASSPHRASE_ADDRESS,
+            "a policy changed the single-key address"
+        );
+    }
+    // Under an HD login the request is honoured: the context's internal key, with or without HD members.
+    let internal_address = {
+        let secret = crypto::CryptoCtx::from_ctx(&hd)
+            .expect("the crypto context")
+            .mm2_internal_privkey_secret();
+        let params: SolanaActivationParams = serde_json::from_value(json!({
+            "confirmation_commitment": "finalized",
+            "client_url": CLOSED_NODE,
+        }))
+        .expect("well-formed activation parameters");
+        let coin = block_on(solana_coin_from_conf_and_params(
+            "SOL",
+            &platform_entry(),
+            params,
+            secret.as_slice(),
+        ))
+        .expect("the platform coin is built");
+        address_of(&coin)
+    };
+    assert!(
+        internal_address != PASSPHRASE_ADDRESS && internal_address != BIP44_CHANGE_ACCOUNT_0,
+        "the internal-key address equals another vector"
+    );
+    for extra in [
+        json!({ "priv_key_policy": "IguanaPrivKey" }),
+        json!({ "priv_key_policy": { "type": "IguanaPrivKey" } }),
+        json!({
+            "priv_key_policy": "IguanaPrivKey",
+            "hd_path_layout": SOLANA_HD_LAYOUT_BIP44,
+            "path_to_address": { "account_id": 1, "chain": "Internal", "address_id": 3 },
+        }),
+    ] {
+        let coin = built_platform(&hd, &platform_entry(), extra.clone()).expect("a coin");
+        assert!(
+            address_of(&coin) == internal_address,
+            "IguanaPrivKey under HD did not give the internal-key address"
+        );
+        let request = platform_request(None, &[], extra).request;
+        let method = derivation_method_of(&hd, "SOL", &request).expect("a derivation method");
+        assert!(
+            serde_json::to_value(method).expect("serializable") == json!({ "type": "Iguana" }),
+            "IguanaPrivKey under HD did not give the Iguana derivation method"
+        );
+    }
+    // Under a single-key login the method is Iguana as well.
+    let request = platform_request(None, &[], json!({ "priv_key_policy": "IguanaPrivKey" })).request;
+    let method = derivation_method_of(&single, "SOL", &request).expect("a derivation method");
+    assert!(
+        serde_json::to_value(method).expect("serializable") == json!({ "type": "Iguana" }),
+        "unexpected derivation method"
+    );
+}
+
+/// R40.1A.7: the `derivation_method` wire shape under HD (full path, both layouts) and under a single-key login.
+#[test]
+fn t40_1a_7_derivation_method_wire_shape() {
+    let hd = hd_ctx_with(vec![platform_entry()]);
+    let request = |extra: Json| platform_request(None, &[], extra).request;
+    let wire = |ctx: &MmArc, extra: Json| {
+        let method = derivation_method_of(ctx, "SOL", &request(extra)).expect("a derivation method");
+        serde_json::to_value(method).expect("serializable")
+    };
+    assert!(
+        wire(&hd, json!({})) == json!({ "type": "HDWallet", "data": "m/44'/501'/0'/0'" }),
+        "unexpected wire"
+    );
+    assert!(
+        wire(
+            &hd,
+            json!({ "hd_path_layout": SOLANA_HD_LAYOUT_BIP44, "path_to_address": { "account_id": 1 } })
+        ) == json!({ "type": "HDWallet", "data": "m/44'/501'/1'" }),
+        "unexpected wire"
+    );
+    assert!(
+        wire(
+            &hd,
+            json!({ "hd_path_layout": SOLANA_HD_LAYOUT_BIP44_CHANGE, "path_to_address": { "account_id": 2 } })
+        ) == json!({ "type": "HDWallet", "data": "m/44'/501'/2'/0'" }),
+        "unexpected wire"
+    );
+    let single = single_key_ctx_with(vec![platform_entry()]);
+    assert!(
+        wire(&single, json!({ "hd_path_layout": SOLANA_HD_LAYOUT_BIP44 })) == json!({ "type": "Iguana" }),
+        "unexpected wire"
+    );
+}
+
+/// R40.1A.7: the path in the result follows the coin entry's `derivation_path`.
+#[test]
+fn t40_1a_7_derivation_method_follows_the_entry_base_path() {
+    let entry = entry_with_path(Some(json!("m/44'/502'")));
+    let hd = hd_ctx_with(vec![entry]);
+    let request = platform_request(None, &[], json!({})).request;
+    let method = derivation_method_of(&hd, "SOL", &request).expect("a derivation method");
+    assert!(
+        serde_json::to_value(method).expect("serializable")
+            == json!({ "type": "HDWallet", "data": "m/44'/502'/0'/0'" }),
+        "unexpected wire"
+    );
+}
+
+/// R40.1A.1 / brief item 5: a token uses the platform's key, so under HD its address (the balance key of the
+/// inline-token result and of `enable_spl`) is the HD platform address.
+#[test]
+fn t40_1a_5_token_under_hd_uses_the_hd_platform_address() {
+    let hd = hd_ctx_with(vec![platform_entry()]);
+    let platform = built_platform(
+        &hd,
+        &platform_entry(),
+        json!({ "hd_path_layout": SOLANA_HD_LAYOUT_BIP44 }),
+    )
+    .expect("a coin");
+    assert!(address_of(&platform) == BIP44_ACCOUNT_0, "unexpected platform address");
+    let token = SplToken::new(
+        6,
+        "TOK-SOL".to_owned(),
+        MINT.parse().expect("a mint"),
+        SPL_TOKEN_PROGRAM.parse().expect("a program"),
+        platform.clone(),
+    );
+    assert!(
+        token.my_address().expect("an address") == BIP44_ACCOUNT_0,
+        "the token address is not the HD one"
+    );
 }

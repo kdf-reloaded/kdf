@@ -97,6 +97,12 @@ Minimal example:
 }
 ```
 
+> **Before you upgrade.** If coins or Lightning channels are no longer visible after an
+> upgrade, a changed key or address rule for some coin families may be the reason. The safe way
+> is to note the address the new version shows, start the previous version again with the same
+> passphrase, `MM2.json` and activation requests, move the coins to the noted address, and
+> upgrade again. Read the upgrade notes in the [`CHANGELOG`](CHANGELOG.md) before you upgrade.
+
 > **Name lookups.** From 0.4.0 the node looks up every name through Google Public
 > DNS unless `dns_resolver` says otherwise. On a network that blocks Google Public
 > DNS, set `"dns_resolver": "system"` or your own DNS servers before you upgrade;

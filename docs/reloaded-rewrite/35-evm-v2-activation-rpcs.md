@@ -293,6 +293,17 @@ a sibling `params` object (G for the payload key; see erratum). A bare string
 Reloaded may additionally accept `Iguana` / `IguanaPrivKey` as aliases of
 `ContextPrivKey`.
 
+> *Status note added 2026-11-17 (Reloaded-original, clean side; the cleared text
+> above is unchanged; no forbidden-class input).* `IguanaPrivKey` (and its alias
+> `Iguana`) is no longer an alias of `ContextPrivKey` in Reloaded. Under a
+> global-HD login it activates a single-address coin on the daemon's internal key
+> (the HD context's key at the node-key path), in the single-address result
+> shape; `path_to_address`, `gap_limit`, `scan_policy` and `min_addresses_number`
+> are then ignored. Under an iguana login it equals `ContextPrivKey`. The bare
+> string spelling remains a request-parse failure, as the rule above says. The
+> reference's behavior for this value under HD is not recorded here; no parity is
+> claimed. See chapter 05 R46, status note of 2026-11-17.
+
 R35.1.4a `rpc_mode` selects the JSON-RPC transport. `Default` uses `nodes`.
 `Metamask` (WASM only) routes chain requests through the connected MetaMask
 provider. On WASM, `rpc_mode` and `priv_key_policy` shall be **both** MetaMask

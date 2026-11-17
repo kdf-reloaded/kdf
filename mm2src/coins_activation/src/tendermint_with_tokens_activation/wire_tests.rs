@@ -243,15 +243,39 @@ fn a_missing_avg_blocktime_is_a_platform_coin_creation_error() {
     assert_creation_error(&failure(&ctx, request(json!({ "ticker": "NOAVG" }))), "NOAVG");
 }
 
+/// The compressed secp256k1 generator point, a valid public key (a public constant).
+const SECP_KEY_HEX: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+/// The public key of the first test vector of RFC 8032 (an `ed25519` key).
+const ED25519_KEY_HEX: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+
+fn with_pubkey(key_type: &str, key_hex: &str, is_ledger_connection: bool) -> Json {
+    json!({ "type": "WithPubkey", "params": {
+        "pubkey": { "type": key_type, "value": hex::decode(key_hex).unwrap() },
+        "is_ledger_connection": is_ledger_connection,
+    } })
+}
+
+/// The `activation_params` of a request as the request parse leaves it, or the parse failure.
+fn parsed_form(activation_params: Json) -> Result<Option<ActivationParamsForm>, String> {
+    let mut value = request_json(json!({}));
+    value["activation_params"] = activation_params;
+    serde_json::from_value::<Req>(value)
+        .map(|req| req.request.activation_params)
+        .map_err(|e| e.to_string())
+}
+
 #[test]
-fn a_non_null_activation_params_is_a_platform_coin_creation_error() {
+fn the_wallet_connect_forms_are_parsed_and_refused_as_a_platform_coin_creation_error() {
+    // R36.1.3 forms 2 and 3 are not built yet (plan item 2): refused instead of activating with the local key.
     let ctx = ctx();
     for activation_params in [
-        json!({ "type": "WithPubkey", "params": { "pubkey": { "type": "secp256k1", "value": [] }, "is_ledger_connection": false } }),
         json!({ "type": "WalletConnect", "params": { "session_topic": "topic" } }),
         json!({ "priv_key_policy": { "type": "WalletConnect", "data": "topic" } }),
-        json!("anything"),
     ] {
+        assert_eq!(
+            parsed_form(activation_params.clone()),
+            Ok(Some(ActivationParamsForm::WalletConnect))
+        );
         let wire = failure(&ctx, request(json!({ "activation_params": activation_params })));
         assert_creation_error(&wire, PLATFORM);
         // The refusal is the signing-policy one, not a node failure.
@@ -268,9 +292,63 @@ fn a_non_null_activation_params_is_a_platform_coin_creation_error() {
 }
 
 #[test]
+fn the_public_key_form_is_parsed_for_both_key_types_and_the_ledger_flag() {
+    // R36.1.3 form 1 (T36.8, D36.17 (c)): both key types, the flag as given.
+    for (key_type, key_hex) in [("secp256k1", SECP_KEY_HEX), ("ed25519", ED25519_KEY_HEX)] {
+        for is_ledger_connection in [false, true] {
+            let form = parsed_form(with_pubkey(key_type, key_hex, is_ledger_connection))
+                .unwrap_or_else(|e| panic!("{key_type} {is_ledger_connection}: {e}"));
+            let Some(ActivationParamsForm::PublicKey {
+                public_key,
+                is_ledger_connection: parsed_flag,
+            }) = form
+            else {
+                panic!("expected the public-key form");
+            };
+            assert_eq!(public_key.to_bytes(), hex::decode(key_hex).unwrap(), "{key_type}");
+            assert_eq!(parsed_flag, is_ledger_connection);
+        }
+    }
+}
+
+#[test]
+fn a_malformed_activation_params_fails_request_parsing() {
+    // R36.1.3: an unknown type, a missing member, a key type other than the two, a value that is not an array of
+    // byte integers and a key of invalid length are request-parse failures (`InvalidRequest`), never a crash.
+    let wrong_length = json!({ "type": "WithPubkey", "params": {
+        "pubkey": { "type": "secp256k1", "value": [2, 1, 2, 3] }, "is_ledger_connection": false } });
+    let no_flag = json!({ "type": "WithPubkey", "params": { "pubkey": { "type": "secp256k1", "value": [] } } });
+    let rsa = json!({ "type": "WithPubkey", "params": {
+        "pubkey": { "type": "rsa", "value": [1, 2] }, "is_ledger_connection": false } });
+    let not_bytes = json!({ "type": "WithPubkey", "params": {
+        "pubkey": { "type": "ed25519", "value": [256, -1, "x"] }, "is_ledger_connection": false } });
+    let as_text = json!({ "type": "WithPubkey", "params": {
+        "pubkey": { "type": "ed25519", "value": ED25519_KEY_HEX }, "is_ledger_connection": false } });
+    let ed25519_wrong_length = json!({ "type": "WithPubkey", "params": {
+        "pubkey": { "type": "ed25519", "value": [1, 2, 3] }, "is_ledger_connection": false } });
+    for malformed in [
+        json!("anything"),
+        json!([]),
+        json!({}),
+        json!({ "type": "Other", "params": {} }),
+        json!({ "type": "WithPubkey" }),
+        json!({ "type": "WalletConnect", "params": {} }),
+        json!({ "priv_key_policy": { "type": "Trezor" } }),
+        wrong_length,
+        no_flag,
+        rsa,
+        not_bytes,
+        as_text,
+        ed25519_wrong_length,
+    ] {
+        assert!(parsed_form(malformed.clone()).is_err(), "{malformed}");
+    }
+}
+
+#[test]
 fn an_absent_or_null_activation_params_is_not_refused() {
+    assert_eq!(parsed_form(Json::Null), Ok(None));
     assert!(reject_unsupported_activation_params(PLATFORM, &None).is_ok());
-    assert!(reject_unsupported_activation_params(PLATFORM, &Some(Json::Null)).is_ok());
     // End to end the request proceeds to the nodes, so the error is the node failure, not the policy refusal.
     let ctx = ctx();
     let wire = failure(&ctx, request(json!({ "activation_params": null })));
@@ -279,6 +357,34 @@ fn an_absent_or_null_activation_params_is_not_refused() {
         .as_str()
         .unwrap()
         .contains("activation_params"));
+}
+
+/// T36.42 (R36.14.16, D36.17 (c)): the public-key form builds a coin at the key's account with no node reachable,
+/// whatever the login; the coin holds no private key.
+#[test]
+fn the_public_key_form_activates_the_account_of_the_key_without_a_node_and_whatever_the_login() {
+    for ctx in [ctx(), hd_ctx()] {
+        let form = |key_type: &str, key_hex: &str, ledger: bool| json!({ "activation_params": with_pubkey(key_type, key_hex, ledger) });
+        // secp256k1: the address of the key by the secp256k1 rule, not the login's.
+        let expected = coins::tendermint::account_id_from_pubkey_hex("cosmos", SECP_KEY_HEX)
+            .unwrap()
+            .to_string();
+        for ledger in [false, true] {
+            let coin =
+                built_platform(&ctx, "ATOM", form("secp256k1", SECP_KEY_HEX, ledger)).expect("a watch-only coin");
+            assert_eq!(coin.account_id.to_string(), expected);
+            assert!(coin.display_priv_key().is_err(), "no private key to display");
+        }
+        // ed25519: a different, valid account (the SDK rule of that key type), not the login's.
+        let ed25519 = built_platform(&ctx, "ATOM", form("ed25519", ED25519_KEY_HEX, false)).expect("a watch-only coin");
+        let login = built_address(&ctx, "ATOM", json!({}));
+        assert_ne!(ed25519.account_id.to_string(), login);
+        assert_ne!(ed25519.account_id.to_string(), expected);
+        assert!(ed25519.account_id.to_string().starts_with("cosmos1"));
+        assert!(ed25519.display_priv_key().is_err());
+        // The coin is wallet-only whatever the flag (R18.11.23a).
+        assert!(ed25519.wallet_only(&ctx));
+    }
 }
 
 const HARDWARE_REFUSAL: &str = "the hardware key policy Trezor is not supported for Tendermint coins in this version; \
@@ -1060,4 +1166,191 @@ fn an_hd_login_with_an_invalid_path_to_address_is_a_platform_coin_creation_error
             ),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// `priv_key_policy: IguanaPrivKey` under an HD login (CRD ch.36 §36.7, status note of 2026-11-17)
+// ---------------------------------------------------------------------------
+
+/// The address of the single internal key of the context, the key the UTXO family takes for `IguanaPrivKey`
+/// (`priv_key_build_policy` of the UTXO activation passes `CryptoCtx::mm2_internal_privkey_secret()`).
+fn internal_key_address(ctx: &MmArc) -> String {
+    let crypto_ctx = crypto::CryptoCtx::from_ctx(ctx).unwrap();
+    address_of_secret(crypto_ctx.mm2_internal_privkey_secret().as_slice())
+}
+
+/// Both spellings of the `IguanaPrivKey` value.
+fn iguana_policy_forms() -> [Json; 2] { [json!("IguanaPrivKey"), json!({ "type": "IguanaPrivKey" })] }
+
+#[test]
+fn an_hd_login_with_iguana_priv_key_activates_the_internal_key_not_the_hd_path_key() {
+    let ctx = hd_ctx();
+    let internal = internal_key_address(&ctx);
+    let hd_default = hd_address_at(&ctx, "m/44'/118'/0'/0/0");
+    assert_ne!(internal, hd_default);
+    for policy in iguana_policy_forms() {
+        assert_eq!(
+            built_address(&ctx, "ATOM", json!({ "priv_key_policy": policy })),
+            internal
+        );
+    }
+    // `path_to_address` plays no part: neither a valid one nor one that does not parse changes the key or fails.
+    for path_to_address in [
+        json!({ "account_id": 2, "chain": "Internal", "address_id": 5 }),
+        json!("nonsense"),
+        json!({ "chain": "Sideways" }),
+    ] {
+        let extra = json!({ "priv_key_policy": "IguanaPrivKey", "path_to_address": path_to_address });
+        assert_eq!(built_address(&ctx, "ATOM", extra), internal);
+    }
+    // A coin without a `derivation_path` needs none for the single key.
+    assert_eq!(
+        built_address(&ctx, "ATOM-NODERIV", json!({ "priv_key_policy": "IguanaPrivKey" })),
+        internal
+    );
+}
+
+#[test]
+fn the_internal_key_of_an_hd_login_is_the_key_the_utxo_family_takes_for_iguana_priv_key() {
+    // The UTXO activation builds `PrivKeyBuildPolicy::IguanaPrivKey(crypto_ctx.mm2_internal_privkey_secret())`.
+    let ctx = hd_ctx();
+    let crypto_ctx = crypto::CryptoCtx::from_ctx(&ctx).unwrap();
+    let internal = crypto_ctx.mm2_internal_privkey_secret();
+    let public_key = crypto::privkey::key_pair_from_secret(internal.as_slice())
+        .unwrap()
+        .public_slice()
+        .to_vec();
+    let coin = match built_platform(&ctx, "ATOM", json!({ "priv_key_policy": "IguanaPrivKey" })) {
+        Ok(coin) => coin,
+        Err(e) => panic!("the platform must be built: {:?}", e.get_inner()),
+    };
+    let expected = coins::tendermint::account_id_from_pubkey_hex("cosmos", &hex::encode(&public_key)).unwrap();
+    assert_eq!(coin.account_id, expected);
+}
+
+#[test]
+fn an_hd_login_with_context_priv_key_or_no_policy_still_activates_the_hd_path_key() {
+    let ctx = hd_ctx();
+    let expected = hd_address_at(&ctx, "m/44'/118'/0'/0/0");
+    for policy in [
+        json!(null),
+        json!("ContextPrivKey"),
+        json!({ "type": "ContextPrivKey" }),
+    ] {
+        assert_eq!(
+            built_address(&ctx, "ATOM", json!({ "priv_key_policy": policy })),
+            expected
+        );
+    }
+    // A malformed `path_to_address` still fails there, as before.
+    assert!(built_platform(
+        &ctx,
+        "ATOM",
+        json!({ "priv_key_policy": "ContextPrivKey", "path_to_address": "nonsense" })
+    )
+    .is_err());
+}
+
+#[test]
+fn an_iguana_login_activates_the_same_single_key_for_every_software_policy() {
+    let ctx = ctx();
+    let expected = address_of_secret(&*ctx.legacy_passphrase_key_pair().private().secret);
+    let policies = [
+        json!(null),
+        json!("ContextPrivKey"),
+        json!({ "type": "ContextPrivKey" }),
+        json!("IguanaPrivKey"),
+        json!({ "type": "IguanaPrivKey" }),
+    ];
+    for policy in policies {
+        assert_eq!(
+            built_address(&ctx, "ATOM", json!({ "priv_key_policy": policy })),
+            expected
+        );
+    }
+}
+
+#[test]
+fn the_hardware_policy_is_refused_under_both_logins() {
+    for ctx in [ctx(), hd_ctx()] {
+        for policy in [json!("Trezor"), json!({ "type": "Trezor" })] {
+            match built_platform(&ctx, "ATOM", json!({ "priv_key_policy": policy })) {
+                Ok(_) => panic!("the hardware policy must be refused"),
+                Err(e) => match e.get_inner() {
+                    TendermintActivationError::PlatformCoinCreationError { ticker, error } => {
+                        assert_eq!(ticker, "ATOM");
+                        assert_eq!(error, HARDWARE_REFUSAL);
+                    },
+                    other => panic!("unexpected error {:?}", other),
+                },
+            }
+        }
+    }
+}
+
+#[test]
+fn tokens_follow_the_key_of_the_platform_coin() {
+    // A token is built on the platform coin and holds no key of its own: its account is the platform's.
+    let ctx = hd_ctx();
+    let platform = built_platform(&ctx, "ATOM", json!({ "priv_key_policy": "IguanaPrivKey" }))
+        .unwrap_or_else(|e| panic!("the platform must be built: {:?}", e.get_inner()));
+    assert_eq!(platform.account_id.to_string(), internal_key_address(&ctx));
+
+    let initializer = TendermintTokenInitializer {
+        platform_coin: platform.clone(),
+    };
+    let req = request(json!({ "ticker": "ATOM", "tokens_params": [inline_token("CUSTOM-TOKEN", "ATOM")] }));
+    let coins = match block_on(initializer.enable_tokens_as_mm_coins(ctx.clone(), &req.request)) {
+        Ok(coins) => coins,
+        Err(_) => panic!("the token must be enabled"),
+    };
+    match coins.as_slice() {
+        [MmCoinEnum::TendermintToken(token)] => {
+            assert_eq!(token.my_address().unwrap(), internal_key_address(&ctx));
+            assert_eq!(token.my_address().unwrap(), platform.my_address().unwrap());
+        },
+        _ => panic!("one Tendermint token"),
+    }
+}
+
+/// A node that answers the health check and the ABCI info the activation result asks for.
+fn info_node() -> crate::evm_test_support::MockEvmNode {
+    spawn_node(move |method, _params| match method {
+        "health" => Reply::Result(json!({})),
+        "abci_info" => Reply::Result(json!({ "response": {
+            "data": "test", "version": "0", "app_version": "1", "last_block_height": "42",
+            "last_block_app_hash": ""
+        } })),
+        _ => Reply::RpcError,
+    })
+}
+
+#[test]
+fn the_task_variant_under_an_hd_login_honors_iguana_priv_key() {
+    let ctx = hd_ctx();
+    let node = info_node();
+    let task_id = init(
+        &ctx,
+        request(json!({
+            "ticker": "ATOM",
+            "nodes": [{ "url": node.url.clone() }],
+            "get_balances": false,
+            "priv_key_policy": { "type": "IguanaPrivKey" },
+        })),
+    )
+    .expect("init accepts the request");
+    let mut status = status(&ctx, task_id);
+    for _ in 0..300 {
+        if status["status"] != "InProgress" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        status = self::status(&ctx, task_id);
+    }
+    assert_eq!(status["status"], "Ok", "{:?}", status);
+    assert_eq!(status["details"]["address"], json!(internal_key_address(&ctx)));
+    assert_ne!(
+        status["details"]["address"],
+        json!(hd_address_at(&ctx, "m/44'/118'/0'/0/0"))
+    );
 }

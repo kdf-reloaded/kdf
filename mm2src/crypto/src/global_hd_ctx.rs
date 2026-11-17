@@ -261,5 +261,39 @@ mod tests {
         assert_eq!(segwit_xpub, helper);
     }
 
+    /// The published SLIP-0010 ed25519 test vector 1, through the derivation the context uses
+    /// (`ExtendedSigningKey::from_seed` for the master, `derive` over an `Ed25519DerivationPath`).
+    #[test]
+    fn slip10_ed25519_test_vector_1() {
+        let seed = hex::decode("000102030405060708090a0b0c0d0e0f").expect("a hex seed");
+        let master = ExtendedSigningKey::from_seed(&seed).expect("the master key");
+        let derive = |path: &str| {
+            let path: Ed25519DerivationPath = path.parse().expect("a derivation path");
+            master.derive(&path).expect("a derived key")
+        };
+        assert!(
+            hex::encode(master.signing_key.to_bytes())
+                == "2b4be7f19ee27bbf30c667b642d5f4aa69fd169872f8fc3059c08ebae2eb19e7",
+            "the master key differs from the vector"
+        );
+        let first = derive("m/0'");
+        assert!(
+            hex::encode(first.signing_key.to_bytes())
+                == "68e0fe46dfb67e368c75379acec591dad19df3cde26e63b93a8e704f1dade7a3",
+            "the key at m/0H differs from the vector"
+        );
+        assert!(
+            hex::encode(first.signing_key.verifying_key().to_bytes())
+                == "8c8a13df77a28f3445213a0f432fde644acaa215fc72dcdf300d5efaa85d350c",
+            "the public key at m/0H differs from the vector"
+        );
+        let last = derive("m/0'/1'/2'/2'/1000000000'");
+        assert!(
+            hex::encode(last.signing_key.to_bytes())
+                == "8f94d394a8e8fd6b1bc2f3f49f5c47e385281d5c17e65324b0f62483e37e8793",
+            "the key at m/0H/1H/2H/2H/1000000000H differs from the vector"
+        );
+    }
+
     use std::str::FromStr;
 }

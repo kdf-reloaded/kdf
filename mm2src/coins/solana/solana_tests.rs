@@ -156,6 +156,7 @@ fn solana_transaction_simulations() {
     let valid_tx_details = block_on(
         sol_coin
             .withdraw(WithdrawRequest {
+                memo: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -184,6 +185,7 @@ fn solana_transaction_zero_balance() {
     let invalid_tx_details = block_on(
         sol_coin
             .withdraw(WithdrawRequest {
+                memo: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -213,6 +215,7 @@ fn solana_transaction_simulations_not_enough_for_fees() {
     let invalid_tx_details = block_on(
         sol_coin
             .withdraw(WithdrawRequest {
+                memo: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -247,6 +250,7 @@ fn solana_transaction_simulations_max() {
     let valid_tx_details = block_on(
         sol_coin
             .withdraw(WithdrawRequest {
+                memo: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -276,6 +280,7 @@ fn solana_test_transactions() {
     let valid_tx_details = block_on(
         sol_coin
             .withdraw(WithdrawRequest {
+                memo: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),

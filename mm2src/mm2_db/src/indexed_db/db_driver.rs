@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Mutex;
 use wasm_bindgen::prelude::*;
-use web_sys::{IdbDatabase, IdbTransactionMode};
+use web_sys::{IdbDatabase, IdbOpenDbRequest, IdbRequest, IdbTransactionMode};
 
 #[path = "drivers/builder.rs"] mod builder;
 #[path = "drivers/cursor/cursor.rs"] pub(super) mod cursor;
@@ -104,4 +104,44 @@ where
             error!("Error sending the '{:?}' event: {}", event, error);
         }
     })
+}
+
+/// Withdraws the event handlers that a waiting future installed on an IndexedDB request.
+///
+/// The handlers are closures owned by the waiting future. If the future ends or is dropped while the request
+/// is still pending, the closures are freed, and a later event would call a freed closure. That throws a JS error,
+/// and an error thrown by an event handler aborts the request's transaction, together with every other write of it.
+/// Declare the guard after the closures, so it is dropped (and clears the handlers) before they are freed.
+struct RequestHandlersGuard {
+    request: IdbRequest,
+    /// `Some` if the `onupgradeneeded` handler was installed too.
+    open_request: Option<IdbOpenDbRequest>,
+}
+
+impl RequestHandlersGuard {
+    /// Guards the `onsuccess` and `onerror` handlers of the `request`.
+    fn new(request: &IdbRequest) -> RequestHandlersGuard {
+        RequestHandlersGuard {
+            request: request.clone(),
+            open_request: None,
+        }
+    }
+
+    /// Guards the `onsuccess`, `onerror` and `onupgradeneeded` handlers of the `request`.
+    fn for_open_request(request: &IdbOpenDbRequest) -> RequestHandlersGuard {
+        RequestHandlersGuard {
+            request: (**request).clone(),
+            open_request: Some(request.clone()),
+        }
+    }
+}
+
+impl Drop for RequestHandlersGuard {
+    fn drop(&mut self) {
+        self.request.set_onsuccess(None);
+        self.request.set_onerror(None);
+        if let Some(open_request) = &self.open_request {
+            open_request.set_onupgradeneeded(None);
+        }
+    }
 }

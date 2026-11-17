@@ -351,6 +351,30 @@ impl PrivKeyBuildPolicy {
             KeyPairPolicy::GlobalHDAccount(global_hd) => Ok(PrivKeyBuildPolicy::GlobalHDAccount(global_hd.clone())),
         }
     }
+
+    /// The build policy of an activation that carries a `priv_key_policy` request member.
+    ///
+    /// `IguanaPrivKey` is single-address on the daemon's internal key, `CryptoCtx::mm2_internal_privkey_secret()`,
+    /// under either login: under a global-HD login that is the node key, not an HD-derived address (CRD ch.05 R46
+    /// item 3, status note of 2026-11-17). `ContextPrivKey` follows the login (`detect_priv_key_policy`).
+    /// `Trezor` is not a software policy: the caller decides what a hardware value means, and this function
+    /// answers it as it answers `ContextPrivKey`.
+    pub fn from_activation_policy(
+        ctx: &MmArc,
+        policy: PrivKeyActivationPolicy,
+    ) -> MmResult<PrivKeyBuildPolicy, CryptoCtxError> {
+        match policy {
+            PrivKeyActivationPolicy::IguanaPrivKey => {
+                let crypto_ctx = CryptoCtx::from_ctx(ctx)?;
+                Ok(PrivKeyBuildPolicy::IguanaPrivKey(
+                    crypto_ctx.mm2_internal_privkey_secret(),
+                ))
+            },
+            PrivKeyActivationPolicy::ContextPrivKey | PrivKeyActivationPolicy::Trezor => {
+                PrivKeyBuildPolicy::detect_priv_key_policy(ctx)
+            },
+        }
+    }
 }
 #[derive(Debug)]
 pub enum DerivationMethod<Address, HDWallet> {

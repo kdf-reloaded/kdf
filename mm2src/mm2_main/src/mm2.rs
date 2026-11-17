@@ -75,7 +75,7 @@ pub mod lp_wallet;
 mod malloc_arena;
 #[path = "rpc.rs"] pub mod rpc;
 
-#[cfg(any(test, target_arch = "wasm32"))]
+#[cfg(test)]
 #[path = "mm2_tests.rs"]
 pub mod mm2_tests;
 

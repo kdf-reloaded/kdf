@@ -66,6 +66,9 @@ impl TendermintCoin {
         fee_addr: &[u8],
         uuid: &[u8],
     ) -> TransactionFut {
+        if let Some(refusal) = self.signing_refusal() {
+            return Box::new(futures01::future::err(refusal));
+        }
         let memo = try_tx_fus!(Uuid::from_slice(uuid)).to_string();
         let from_address = self.account_id.clone();
 
@@ -169,6 +172,9 @@ impl TendermintCoin {
         denom: Denom,
         decimals: u8,
     ) -> TransactionFut {
+        if let Some(refusal) = self.signing_refusal() {
+            return Box::new(futures01::future::err(refusal));
+        }
         let pubkey_hash = dhash160(other_pub);
         let to = try_tx_fus!(AccountId::new(
             &self.protocol_info.account_prefix,
@@ -220,6 +226,9 @@ impl TendermintCoin {
 
     /// Claim an HTLC (shared helper for maker-spends-taker and taker-spends-maker).
     pub(super) fn spend_htlc(&self, payment_tx: &[u8], secret: &[u8], secret_hash: &[u8]) -> TransactionFut {
+        if let Some(refusal) = self.signing_refusal() {
+            return Box::new(futures01::future::err(refusal));
+        }
         let tx = try_tx_fus!(cosmrs::Tx::from_bytes(payment_tx));
         let msg = try_tx_fus!(tx.body.messages.first().ok_or("Tx body couldn't be read."));
 
@@ -740,6 +749,12 @@ impl SwapOps for TendermintCoin {
         _htlc_privkey: &[u8],
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
+        // A watch-only coin names the refusal of CRD ch.36 R36.14.17 before the auto-refund answer.
+        if self.activation_policy.watch_only_ledger_flag().is_some() {
+            return Box::new(futures01::future::err(TransactionErr::Plain(
+                crate::PrivKeyNotAllowed::WatchOnlyCoin.to_string(),
+            )));
+        }
         // IRIS/Nucleus HTLCs auto-refund on chain expiry; no broadcast needed.
         Box::new(futures01::future::err(TransactionErr::Plain(
             "Tendermint HTLCs auto-refund on chain; no broadcast required.".into(),
@@ -755,6 +770,12 @@ impl SwapOps for TendermintCoin {
         _htlc_privkey: &[u8],
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
+        // A watch-only coin names the refusal of CRD ch.36 R36.14.17 before the auto-refund answer.
+        if self.activation_policy.watch_only_ledger_flag().is_some() {
+            return Box::new(futures01::future::err(TransactionErr::Plain(
+                crate::PrivKeyNotAllowed::WatchOnlyCoin.to_string(),
+            )));
+        }
         Box::new(futures01::future::err(TransactionErr::Plain(
             "Tendermint HTLCs auto-refund on chain; no broadcast required.".into(),
         )))

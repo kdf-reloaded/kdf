@@ -146,6 +146,7 @@ impl TableSignature for TxHistoryTable {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json as json;

@@ -986,6 +986,40 @@ fn a_token_can_be_enabled_only_on_the_enabled_address_of_its_platform() {
     assert_eq!(run_task(&ctx, same)["status"], "Ok");
 }
 
+/// CRD ch.05 R46 item 3, status note of 2026-11-17: a platform activated with `IguanaPrivKey` under an HD login runs on
+/// the internal key, so a token request carrying `path_to_address` is not compared with an HD-derived address.
+#[test]
+fn a_token_task_on_an_iguana_key_platform_under_an_hd_login_ignores_path_to_address() {
+    let node = spawn_node(|method, params| match method {
+        "eth_getBalance" => Reply::Result(json!("0x0")),
+        _ => healthy_node_reply(method, params, 0, 1),
+    });
+    let ctx = hd_ctx();
+    let request: EnablePlatformCoinWithTokensReq<EthWithTokensActivationRequest> = serde_json::from_value(json!({
+        "ticker": PLATFORM,
+        "nodes": [{ "url": node.url }],
+        "erc20_tokens_requests": [],
+        "swap_contract_address": SWAP_CONTRACT,
+        "priv_key_policy": { "type": "IguanaPrivKey" },
+    }))
+    .unwrap();
+    block_on(enable_platform_coin_with_tokens::<EthCoin>(ctx.clone(), request))
+        .unwrap_or_else(|e| panic!("the platform activation failed: {}", e));
+    assert!(matches!(
+        platform_coin(&ctx).derivation_method,
+        DerivationMethod::Iguana(_)
+    ));
+
+    let at = json!({ "ticker": "USDT-ERC20", "activation_params": { "path_to_address": { "account_id": 0, "chain": "External", "address_id": 5 } } });
+    let status = run_task(&ctx, at);
+    assert_eq!(status["status"], "Ok", "{}", status);
+    assert_eq!(status["details"]["wallet_balance"]["wallet_type"], "Iguana");
+    assert_eq!(
+        status["details"]["wallet_balance"]["address"],
+        platform_coin(&ctx).my_address().unwrap()
+    );
+}
+
 #[test]
 fn the_token_task_error_set_serializes_as_bound() {
     use crate::init_token::InitTokenError as E;

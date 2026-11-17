@@ -436,6 +436,16 @@ added.*
 > `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
 > `set_required_confirmations` and `set_requires_notarization` are routed on
 > both surfaces. Per-method shapes and error tables: §43.1R (dated amendment).
+>
+> *Phases 4 and 5 (swaps; daemon and network; this repository, 2026-11, one
+> pull request):* `all_swaps_uuids_by_filter`, `import_swaps`, `version`,
+> `stop`, `metrics`, `get_my_peer_id`, `get_directly_connected_peers`,
+> `get_gossip_mesh`, `get_gossip_peer_topics`, `get_gossip_topic_peers`,
+> `get_relay_mesh`, `ban_pubkey`, `list_banned_pubkeys` and `unban_pubkeys`
+> are routed on both surfaces. `recover_funds_of_swap` stays legacy-only until
+> the swap architecture decisions; `stats_swap_status` and `get_trade_fee`
+> stay legacy-only for good. With this the extension of the plan is complete:
+> 40 methods. Per-method shapes and error tables: §43.1R (dated amendment).
 
 **D43.1A.2** *Implement the reference's legacy-to-versioned fallback
 (R43.1A.1)?* Options: (i) parity — a legacy request for an unknown legacy
@@ -1094,6 +1104,30 @@ and `NoSuchCoin` as a record with status 400, as `trade_preimage` does.
 > Reloaded's own versioned `withdraw` answers a transport failure with 500
 > today; the difference to the documented 502 is recorded for a later
 > alignment of `withdraw` itself, after a reference-behavior round.
+>
+> *Reloaded status (clean side, 2026-11-16, third note):* §43.1D established
+> that the documentation states no status for `withdraw` and that 404 and 502
+> are what the reference answers (R43.1D.1, R43.1D.2); the two notes above
+> and the texts of 2026-11-15 that say "documented statuses" are to be read
+> as "the statuses the reference answers for `withdraw`". By the maintainer's
+> decision of 2026-11-16, Reloaded's versioned `withdraw`, `withdraw_nft` and
+> the start request of `task::withdraw::init` now answer `Transport` with
+> 502, as the reference does; the sentence above on the 500 is historical.
+>
+> *Reloaded status (clean side, 2026-11-16, sibling sets of the last two
+> groups):* the swap forms `all_swaps_uuids_by_filter` and `import_swaps`
+> follow `my_recent_swaps` (R43.1A.7); the peer and gossip queries
+> `get_my_peer_id`, `get_directly_connected_peers`, `get_gossip_mesh`,
+> `get_gossip_peer_topics`, `get_gossip_topic_peers` and `get_relay_mesh`
+> follow `peer_connection_healthcheck` (`Internal`, string, 500); `version`,
+> `stop` and `metrics` have no failure class of their own beyond `Internal`
+> where a string source exists. The ban methods `ban_pubkey`,
+> `list_banned_pubkeys` and `unban_pubkeys` have no documented versioned
+> sibling and take the general convention of R43.1C.8 as Reloaded's own
+> choice: a request the client got wrong `InvalidParam` (string, 400), a
+> failure of the node `Internal` (string, 500); a malformed public key never
+> reaches the method and answers the dispatcher's `InvalidRequest`. Decided
+> on 2026-11-16 under the maintainer's rule of 2026-11-15.
 
 **D43.1C.5** *Unknown members of `params` in the new forms.* The reference
 and Reloaded ignore them in every existing form of the shared names
@@ -1119,7 +1153,422 @@ not.
 > listed in plan `mmrpc-v2-completion` §1.4 with this reason; group B of that
 > plan is `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter`.
 
-## 43.1R Reloaded versioned forms of the legacy-only order, trading and wallet methods (Reloaded-original, clean side)
+## 43.1D Statuses and payloads of the versioned `withdraw` errors (reference behavior)
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-16,
+> measure 0.02 (attestation in §43.7).**
+> This section was written on 2026-11-16 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-9) under the two-team procedure of chapter 01 §1.4A, from
+> three inputs: the reference lineage at the rows `v2.6.0-beta` and
+> `v3.0.0-beta` of chapter 02 §2.15A (read read-only; no untabled state was
+> read); two pages of the published reference API documentation, fetched
+> again on 2026-11-16 from the host §43.1C names (the versioned `withdraw`
+> page and the v2.0 protocol overview page); and this repository's own tree.
+> It edits no sentence of §43.1A -- §43.1C. It **completes R43.1C.8**, and
+> where a statement here is more exact than the sentence it completes, the
+> statement here governs. Numbering: R43.1D.1 -- R43.1D.4 and T43.1D.1 --
+> T43.1D.6; no decision item is raised.
+
+*Scope.* R43.1C.8 names two statuses of the versioned `withdraw` error set (an
+unknown coin 404, a transport failure 502). This section states the whole
+set as the reference answers it: each `error_type` token, the JSON kind of
+its `error_data`, and its HTTP status. It records tokens, payload kinds and
+statuses only; which condition of which coin family leads to a token stays
+with the chapter that owns the family.
+
+**R43.1D.1** *What the statuses rest on (completes R43.1C.8).* The two pages
+fetched for this section state **no HTTP status** for any error, as R43.1C.8
+already records for the pages of its round; the statuses 404 and 502 that
+R43.1C.8 gives are therefore facts of the reference implementation (the
+statements it marks **[impl]**), not of the documentation, and there is no
+documented status from which an answered one could differ. The reference
+answers every typed error of the versioned `withdraw` with the status of
+R43.1D.2 as the status of the HTTP response, and with the error envelope of
+R43.1C.8 as its body. A token without payload leaves `error_data` out
+(chapter 55 R55.1.2 -- R55.1.3). A request whose `params` cannot be decoded
+never reaches the method and answers the dispatcher's `InvalidRequest`
+(string, HTTP 400, R43.1A.3).
+
+**R43.1D.2** *The error set.* At the row `v3.0.0-beta` the set has the 32
+tokens below. "Record" means a JSON object with the members named; an amount
+is a decimal string, as R43.1C.8 says.
+
+| `error_type` | `error_data` | HTTP status |
+| --- | --- | --- |
+| `NoSuchCoin` | record: `coin` (string) | 404 |
+| `Timeout` | record: `secs`, `nanos` (integers) | 408 |
+| `HwError` | string: the token of one hardware-wallet condition | 410 |
+| `Transport` | string | 502 |
+| `InternalError` | string | 500 |
+| `DbError` | string | 500 |
+| `ProtocolNotSupported` | string | 500 |
+| `NotSufficientBalance` | record: `coin` (string), `available`, `required` (decimal strings) | 400 |
+| `NotSufficientPlatformBalanceForFee` | record: `coin` (string), `available`, `required` (decimal strings) | 400 |
+| `ZeroBalanceToWithdrawMax` | none | 400 |
+| `AmountTooLow` | record: `amount`, `threshold` (decimal strings) | 400 |
+| `InvalidAddress` | string | 400 |
+| `InvalidFeePolicy` | string | 400 |
+| `InvalidFee` | record: `reason` (string), and `details` (any JSON value) only when there are any | 400 |
+| `InvalidMemo` | string | 400 |
+| `FromAddressNotFound` | none | 400 |
+| `UnexpectedFromAddress` | string | 400 |
+| `UnknownAccount` | record: `account_id` (integer) | 400 |
+| `UnexpectedUserAction` | record: `expected` (string) | 400 |
+| `UnsupportedError` | string | 400 |
+| `CoinDoesntSupportInitWithdraw` | record: `coin` (string) | 400 |
+| `CoinDoesntSupportNftWithdraw` | record: `coin` (string) | 400 |
+| `ContractTypeDoesntSupportNftWithdrawing` | string | 400 |
+| `ActionNotAllowed` | string | 400 |
+| `GetNftInfoError` | record: a nested error with its own `error_type` and, where that token has a payload, `error_data` | 400 |
+| `NotEnoughNftsAmount` | record: `token_address`, `token_id` (strings), `available`, `required` (each an array of integers, the number in 32-bit parts, lowest part first) | 400 |
+| `MyAddressNotNftOwner` | record: `my_address`, `token_owner` (strings) | 400 |
+| `NoChainIdSet` | record: `coin` (string) | 400 |
+| `SigningError` | string | 400 |
+| `TxTypeNotSupported` | none | 400 |
+| `IBCError` | record with exactly one key, which names the case, and a record as its value: `IBCChannelCouldNotBeFound` (`address_prefix`, string), `IBCChannelNotHealthy` (`channel_id`, integer), `IBCChannelMissingOnNode` (`channel_id`, integer), `Transport` (`reason`, string) or `InternalError` (`reason`, string) | 400 |
+| `BroadcastExpected` (browser builds only) | string | 400 |
+
+Read by status: 404 for `NoSuchCoin` alone; 408 for `Timeout` alone; 410 for
+`HwError` alone; 502 for `Transport` alone; 500 for `InternalError`, `DbError`
+and `ProtocolNotSupported`; 400 for every other token. `NoSuchCoin` answers
+a ticker that is not active in the node, whatever the reason: an unknown
+ticker, a coin that was never activated, and a platform coin in the passive
+state of R43.1E.6 answer alike.
+
+**R43.1D.3** *One set, three methods.* The set is shared by the versioned
+`withdraw`, by `withdraw_nft` and by the task-managed withdraw
+(`task::withdraw::init`: a refusal of the start request itself answers with
+the statuses of the table, while a failure of the running task is carried
+inside the status answer and has no HTTP status of its own). Four tokens
+concern an NFT transfer only (`CoinDoesntSupportNftWithdraw`,
+`GetNftInfoError`, `NotEnoughNftsAmount`, `MyAddressNotNftOwner`) and one the
+task-managed form only (`CoinDoesntSupportInitWithdraw`). Four further tokens
+are part of the set but no case that answers them was found at either row:
+`ActionNotAllowed`, `ContractTypeDoesntSupportNftWithdrawing`, `DbError` and
+`NoChainIdSet`. A client therefore has to accept every token of the table
+from `withdraw`, and may expect the general ones in practice.
+
+**R43.1D.4** *Reference states, and the documentation.* The two rows agree on
+the whole table except one line: where `v3.0.0-beta` has
+`ProtocolNotSupported` with a string, `v2.6.0-beta` has
+`NftProtocolNotSupported` with no payload; the status is 500 at both. The
+statuses of all other tokens, and their payload kinds, are the same at both
+rows. Against the documentation: the overview page describes seven tokens of
+`withdraw` (`NotSufficientBalance`, `AmountTooLow`, `InvalidAddress`,
+`InvalidFeePolicy`, `NoSuchCoin`, `Transport`, `InternalError`), and their
+documented payload kinds agree with the table; the other tokens of the table
+are not documented on the two pages. The error example that the overview
+page shows for `withdraw` carries a token that is in the set at neither row;
+the set's token for an amount below the floor is `AmountTooLow`, with
+`amount` and `threshold`.
+
+> **Compatibility (this repository on dev, 2026-11-16; its own code, not the
+> reference).** Reloaded's versioned `withdraw` has an error
+> set of its own. The statuses agree for every token both sets have, except
+> one: Reloaded answers `Transport` with 500, the reference with 502 (the
+> difference the second status note under D43.1C.4 already records).
+> `NoSuchCoin` is 404 and `Timeout` 408 in both. Reloaded has no `HwError`:
+> it answers hardware-wallet conditions with tokens of its own, three of them
+> with 410 and one with 500. Reloaded lacks
+> `NotSufficientPlatformBalanceForFee`, `InvalidFee`, `InvalidMemo`,
+> `SigningError`, `TxTypeNotSupported`, `ProtocolNotSupported`,
+> `NoChainIdSet`, `IBCError`, `BroadcastExpected`, `DbError`,
+> `ActionNotAllowed` and the NFT tokens, and it has tokens the reference
+> lacks. Nothing else of Reloaded's behavior was checked for this section.
+
+*Not established.* (1) Which backend failure of which coin family the
+reference answers as `Transport` and which as `InternalError` was not traced
+request by request. (2) The tokens a nested `GetNftInfoError` and the
+`HwError` string can take were not listed. (3) Only the two release rows and
+the two documentation pages named above were read. (4) Nothing was measured
+against a running reference binary.
+
+*Acceptance rows.* Each row is a versioned request (`mmrpc: "2.0"`, method
+`withdraw`) against a node with one coin active on a mock backend. *Parity*
+is the reference behavior of R43.1D.2.
+
+T43.1D.1 *Unknown coin.* A request that names a ticker the node has not
+activated answers HTTP 404 with `error_type` `NoSuchCoin` and `error_data` a
+record whose `coin` is the requested ticker.
+
+T43.1D.2 *Transport failure.* With a mock backend that, after activation,
+fails the requests the withdraw needs in a way the coin family's chapter
+classes as a transport failure, a request that is otherwise valid answers
+`error_type` `Transport` with a string as `error_data`. Parity: HTTP 502.
+
+T43.1D.3 *Insufficient balance.* A request for more than the wallet holds
+answers HTTP 400 with `NotSufficientBalance` and a record of `coin`,
+`available` and `required`, the two amounts as decimal strings.
+
+T43.1D.4 *A token without payload.* A request with `max` true from a wallet
+that holds nothing, for a coin family that answers
+`ZeroBalanceToWithdrawMax`, answers HTTP 400 and a body without an
+`error_data` member.
+
+T43.1D.5 *Invalid destination.* A request whose `to` is not an address of
+the coin answers HTTP 400 with `InvalidAddress` and a string.
+
+T43.1D.6 *Undecodable `params`.* A request whose `amount` has a JSON kind the
+method does not accept answers the dispatcher's `InvalidRequest`, HTTP 400,
+and no token of R43.1D.2 (R43.1D.1).
+
+## 43.1E The legacy `disable_coin` method (reference behavior)
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-16,
+> measure 0.02 (attestation in §43.7).**
+> This section was written on 2026-11-16 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-9) under the two-team procedure of chapter 01 §1.4A, from
+> three inputs: the reference lineage at the rows `v2.6.0-beta` and
+> `v3.0.0-beta` of chapter 02 §2.15A (read read-only; no untabled state was
+> read), **which agree on everything in this section**; the legacy
+> `disable_coin` page of the published reference API documentation, fetched
+> again on 2026-11-16 from the host §43.1C names; and this repository's own
+> tree. It edits no sentence of §43.1A -- §43.1C or of §43.1R. It
+> **completes R43.1B.3 and the `disable_coin` line of the table of
+> documented forms in §43.1B**, and it supplies what chapter 55 D55.6 and
+> chapter 38 R38.6.4Q.10 item 4 leave to this chapter; where a statement
+> here is more exact than the sentence it completes, the statement here
+> governs. Numbering: R43.1E.1 -- R43.1E.8, D43.1E.1 -- D43.1E.2 and
+> T43.1E.1 -- T43.1E.9.
+
+*Scope.* A wire contract of the legacy `disable_coin` method: its request,
+its answers with their HTTP statuses, and what a successful call does to the
+node's orders, to the coin and to the tokens of a platform coin. Statements
+marked **[doc]** rest on the documentation page, all others on the reference
+implementation.
+
+**R43.1E.1** *Surface and request.* `disable_coin` is routed on the legacy
+table only, at both rows; no versioned form exists at either, and a versioned
+request for the name answers `NoSuchMethod` (R43.1A.3). The request carries
+these members beside the envelope's own:
+
+| Member | Kind | Meaning |
+| --- | --- | --- |
+| `coin` | string, required | the ticker to disable |
+| `force_disable` | boolean, optional | absent, false or any value that is not a boolean: not forced. True: forced (R43.1E.5) |
+
+**[doc]** The page documents `coin` alone; `force_disable` is not documented.
+
+**R43.1E.2** *Success.* HTTP 200 and a `result` object with exactly three
+members:
+
+| Member | Kind | Meaning |
+| --- | --- | --- |
+| `coin` | string | the requested ticker |
+| `cancelled_orders` | array of strings | the identifiers of the orders this call cancelled (R43.1E.4); empty when there were none |
+| `passivized` | boolean | true when the coin was made passive instead of being removed (R43.1E.5), false when it was removed |
+
+**[doc]** The page documents `coin` and `cancelled_orders`; `passivized` is
+not documented.
+
+**R43.1E.3** *Refusals.* Every refusal answers **HTTP 500**. Two body shapes
+occur. The *plain* shape is the legacy error body of chapter 55 R55.1.10: an
+`error` string and nothing else. The *extended* shape has three top-level
+members, all always present: `error` (string), `orders` (object with the two
+arrays `matching` and `cancelled`) and `active_swaps` (array). Identifiers
+are strings in the usual hyphenated form.
+
+| Refusal | When it applies | Body |
+| --- | --- | --- |
+| No coin named | the request has no `coin` member, or it is not a string | plain |
+| Coin not active | the ticker is not registered; or it is a passive platform coin (R43.1E.6) and the request is not forced | extended; `orders.matching`, `orders.cancelled` and `active_swaps` are all empty |
+| Coin in use | at least one running swap of this node has the ticker as either of its coins (swaps of both protocol generations count), or at least one of this node's own orders, maker or taker, names the ticker on either side of its pair and is being matched at that moment | extended; `active_swaps` lists the identifiers of those swaps, `orders.matching` those of the orders being matched, either of them empty when it does not apply; `orders.cancelled` is empty |
+| Node failure | the node's registry, swap state or order state cannot be read, or the cancellation step fails | plain, or extended with empty lists |
+
+The coin-in-use refusal is **one** refusal for both causes, with one `error`
+text; a client tells the cause from which list is not empty. It is decided
+before anything is changed: no order is cancelled, the coin stays active, and
+`orders.cancelled` is therefore empty in every refusal the reference answers.
+
+**R43.1E.4** *What a successful call does to the orders.* After the checks of
+R43.1E.3 have passed, the node cancels every one of its own orders, maker and
+taker, that names the ticker on either side of its pair and can be
+cancelled, with the same effect on each order as a `cancel_all_orders`
+request by coin has.
+Their identifiers are the `cancelled_orders` of the answer. An order that
+began to be matched between the check and the cancellation is left in place
+and is not reported in the answer. The cancellation happens in every
+successful call, whether the coin is then removed or made passive. Only
+orders that name the **requested** ticker are considered: orders of a
+platform coin's tokens are untouched (R43.1E.5).
+
+**R43.1E.5** *What a successful call does to the coin and to its tokens.*
+
+1. *Dependent tokens.* The node keeps, for each platform coin, the set of
+   tokens that depend on it. A token enters the set when it is activated by a
+   token activation method or as part of a platform-with-tokens activation
+   (chapter 55) while its platform is registered; a layer-two coin enters the
+   set of its platform in the same way. A token activated by the legacy
+   `enable` or `electrum` method does **not** enter it (chapter 38
+   R38.6.4Q.10 item 2 records this for QRC20).
+2. *A token, or a coin without dependent tokens.* The coin is removed from
+   the node's registry and its background work is ended; a token is also
+   taken out of its platform's set. `passivized` is false.
+3. *A platform coin with at least one dependent token, not forced.* Nothing
+   is removed. The platform coin becomes **passive** (R43.1E.6), its tokens
+   stay active, and `passivized` is true.
+4. *A platform coin with dependent tokens, forced.* The platform coin and
+   every dependent token are removed from the registry and their background
+   work is ended. `passivized` is false. The checks of R43.1E.3 and the
+   cancellation of R43.1E.4 were made for the platform's ticker only: a
+   running swap or an order of a dependent token neither refuses the call nor
+   is cancelled by it (D43.1E.2).
+5. *Forcing a coin that is not a platform with tokens* changes nothing: the
+   call behaves as item 2.
+
+**R43.1E.6** *The passive state.* Only a platform coin can be passive.
+
+1. Every method that needs an active coin treats a passive coin as not
+   active: the versioned `withdraw`, for example, answers `NoSuchCoin`
+   (R43.1D.2).
+2. `get_enabled_coins`, in both forms, still lists it.
+3. The coin's own instance and its background work go on, and its dependent
+   tokens stay active.
+4. A further `disable_coin` for it answers the coin-not-active refusal unless
+   forced; forced, it is removed as R43.1E.5 item 4 or item 2 describes.
+5. Disabling its last dependent token neither removes it nor makes it active
+   again: it stays registered and passive.
+6. A platform-with-tokens activation of the ticker makes it active again
+   (chapter 55 D55.6); the legacy `enable` and `electrum` methods refuse the
+   ticker as already activated, with the legacy error body.
+
+**R43.1E.7** *Where the reference differs from its documentation.*
+
+| Subject | **[doc]** | Reference |
+| --- | --- | --- |
+| Request | `coin` | `coin`, `force_disable` |
+| Success | `coin`, `cancelled_orders` | those two and `passivized` |
+| Member that names blocking swaps | `swaps`, present only in that error | `active_swaps`, present in every extended refusal; no `swaps` member in any answer |
+| Member that names blocking orders | `orders` with `matching` and `cancelled`, present only in that error | `orders` with both arrays, present in every extended refusal |
+| Orders cancelled when the call is refused for a matching order | other orders may already have been cancelled and are listed in `orders.cancelled` | none is cancelled; `orders.cancelled` is always empty |
+| A coin that is not active | an error; no members named | the extended shape with empty lists |
+| HTTP status of a refusal | not stated | 500 |
+
+R43.1B.3 records the documented members correctly; the table adds what the
+reference answers in their place.
+
+**R43.1E.8** *Reference states.* The method, the registry operations it uses
+and the checks of R43.1E.3 are the same at `v2.6.0-beta` and `v3.0.0-beta`.
+Exceptions that a coin family makes to this section are that family's
+chapter's to state (chapter 40 §40.6B.5 records them for Solana).
+
+> **Compatibility (this repository on dev, 2026-11-16; its own code, not the
+> reference).**
+>
+> 1. *Request.* Reloaded reads `coin` only; `force_disable` is ignored.
+> 2. *No dependent-token set, no passive state.* Reloaded removes the
+>    requested ticker from its registry in every successful call and leaves
+>    the tokens of a platform coin registered; `passivized` is not answered.
+>    Chapter 55 D55.6 is open on exactly this.
+> 3. *Refusals.* Reloaded follows the documentation, not the reference: a
+>    running swap answers `error` with `swaps`; an order being matched answers
+>    `error` with `orders`, **after** the cancellable orders of the coin have
+>    been cancelled, so `orders.cancelled` can be non-empty; a coin that is
+>    not active answers the plain shape. No Reloaded answer has
+>    `active_swaps`. All are HTTP 500, as in the reference.
+> 4. *Background work.* Reloaded's removal ends none of the coin's background
+>    work at once (the note under chapter 38 R38.6.4Q.10).
+> 5. *Versioned form.* Reloaded's versioned `disable_coin` is §43.1R's and has
+>    no reference counterpart (R43.1E.1).
+>
+
+**D43.1E.1** *(Open, 2026-11-16.)* **Which members a refused `disable_coin`
+carries.** A client written from the documentation reads `swaps`; a client
+written against the reference reads `active_swaps` and expects `orders` and
+`active_swaps` in every extended refusal. Either choice alone leaves one of
+the two clients without the list it looks for. Options: (a) the reference
+shape (R43.1E.3); (b) the documented shape, which Reloaded has today; (c)
+both: the extended shape of R43.1E.3 with `swaps` added as a second member
+that holds the same list as `active_swaps`. The same question arises for
+`passivized` in the success answer, which costs nothing to add once D55.6 is
+decided, and for whether orders are cancelled before a matching-order
+refusal: the documented behavior (cancel first, report in
+`orders.cancelled`) and the reference behavior (cancel nothing) differ, and a
+client cannot tell from the body which one it got unless `orders.cancelled`
+is filled. *Recommendation:* (c), and keep the documented cancel-first
+behavior, which the body makes visible.
+
+> *Reloaded status (clean side, 2026-11-16):* resolved by the maintainer's
+> decision as option (c). A refused legacy `disable_coin` of the coin-in-use
+> and coin-not-active kinds answers the extended shape of R43.1E.3 (`error`,
+> `orders` with `matching` and `cancelled`, `active_swaps`) with `swaps` added
+> as a fourth member holding the same list as `active_swaps`; the "no coin
+> named" refusal and a node failure without lists stay plain; HTTP 500
+> throughout. The documented cancel-first behavior is kept and is visible in
+> `orders.cancelled`. The success answer is unchanged (`passivized` waits for
+> chapter 55 D55.6); `force_disable` is still not read. The versioned
+> `disable_coin` of §43.1R is unchanged.
+
+**D43.1E.2** *(Open, 2026-11-16.)* **A forced removal does not look at the
+dependent tokens.** In the reference the swap check, the matching-order check
+and the order cancellation of a forced call cover the platform's ticker only,
+while the call removes the dependent tokens as well (R43.1E.5 item 4). It
+arises for Reloaded only if D55.6 brings the dependent-token set and the
+forced removal. Options: (a) reproduce the reference; (b) apply R43.1E.3 and
+R43.1E.4 to the platform's ticker and to every dependent token before
+anything is removed, and refuse the whole call if any of them is in use.
+*Recommendation:* (b).
+
+*Not established.* (1) What ending a coin's background work covers was not
+traced family by family; chapter 38 R38.6.4Q.10 states it for QRC20 and
+chapter 40 §40.6B.5 for Solana. (2) Whether a passive platform coin still
+appears in answers other than `get_enabled_coins` was not examined method by
+method; R43.1E.6 item 1 states the rule those methods share. (3) The `error`
+texts are not recorded; they are not part of the contract. (4) Nothing was
+measured against a running reference binary.
+
+*Acceptance rows.* Each row is a legacy request (no `mmrpc` member) against a
+node with mock backends. *Parity* is the reference behavior bound above;
+where a D-item would change the expected result, the row says so.
+
+T43.1E.1 *Success without orders.* With a coin active that has no orders and
+no swaps, the call answers HTTP 200 and `result` with `coin` equal to the
+ticker and an empty `cancelled_orders`; the coin is no longer listed by
+`get_enabled_coins`. Parity: `passivized` is present and false.
+
+T43.1E.2 *Orders are cancelled.* With two maker orders that have the coin on
+either side and one that has not, the call answers the two identifiers in
+`cancelled_orders`, `my_orders` afterwards shows the third order only, and
+the coin is removed.
+
+T43.1E.3 *Coin not active.* A call for a ticker that was never activated
+answers HTTP 500. Parity: `error`, `orders` with two empty arrays and an
+empty `active_swaps`.
+
+T43.1E.4 *No coin named.* A call without `coin` answers HTTP 500 and a body
+whose only member is `error`.
+
+T43.1E.5 *Running swap.* With a swap in progress that uses the coin, the call
+answers HTTP 500 and names the swap's identifier; the coin stays active and
+no order is cancelled. Parity: the identifier is in `active_swaps`, `orders`
+is present with two empty arrays, and there is no `swaps` member. Under
+D43.1E.1 (c) the identifier is in `active_swaps` and in `swaps`.
+
+T43.1E.6 *Order being matched.* With one order of the coin held in the
+matching state and a second, idle order of the coin, the call answers HTTP
+500 with the first identifier in `orders.matching` and the coin stays
+active. Parity: the second order is not cancelled and `orders.cancelled` is
+empty. Under the documented behavior the second order is cancelled and
+listed in `orders.cancelled` (D43.1E.1).
+
+T43.1E.7 *Platform with a dependent token (reference behavior; applies to
+Reloaded if D55.6 brings the passive state).* With a platform coin and one
+token activated by a token activation method, an unforced call for the
+platform answers `passivized` true; afterwards the token's `my_balance`
+answers, a versioned `withdraw` for the platform answers `NoSuchCoin`,
+`get_enabled_coins` lists both, and a second unforced call answers the
+coin-not-active refusal.
+
+T43.1E.8 *Forced removal (as T43.1E.7).* From the state T43.1E.7 ends in, a
+call with `force_disable` true answers `passivized` false, and afterwards
+neither the platform nor the token is listed. Under D43.1E.2 (b) the same
+call is refused while the token has a running swap.
+
+T43.1E.9 *No versioned form in the reference.* A request with `mmrpc: "2.0"`
+and method `disable_coin` answers `NoSuchMethod`, HTTP 400, from the
+reference; from Reloaded it answers the form of §43.1R.
+
+## 43.1R Reloaded versioned forms of the legacy-only methods (Reloaded-original, clean side)
 
 *Added 2026-11-15. This section binds a KDF Reloaded extension (D43.1A.1 status
 note of 2026-11-15; plan `docs/plans/mmrpc-v2-completion.md`). §43.1B records
@@ -1147,10 +1596,12 @@ sibling, the versioned `orderbook` (R43.1A.6), the other three that of
 `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
 `set_required_confirmations` and `set_requires_notarization` are added. They
 follow the error set of their nearest documented sibling, the versioned
-`withdraw` as R43.1C.8 documents it: `NoSuchCoin` at 404 and `Transport` at
-502, where the order and trading forms answer 400 and 500. (Reloaded's own
-versioned `withdraw` answers a transport failure with 500 today; that
-difference is recorded at D43.1C.4 for a later alignment.) The same error name thus carries
+`withdraw`, with the statuses the reference answers for it (R43.1D.2; the
+documentation states none): `NoSuchCoin` at 404 and `Transport` at 502, where
+the order and trading forms answer 400 and 500. *(Amended 2026-11-16: the
+wording of 2026-11-15 said "as R43.1C.8 documents it" and noted Reloaded's
+`withdraw` answering 500; since 2026-11-16 Reloaded's `withdraw` answers 502
+as well, D43.1C.4 third note.)* The same error name thus carries
 different statuses in the two groups, as it does on the documented surface
 (D43.1C.4 second status note).
 
@@ -1159,8 +1610,13 @@ different statuses in the two groups, as it does on the documented surface
 `orderbook_depth`, `orders_history_by_filter`, `my_balance`, `disable_coin`,
 `send_raw_transaction`, `validateaddress`, `convertaddress`,
 `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`,
-`set_required_confirmations` and `set_requires_notarization` are routed on the
-versioned table as well as the legacy table. The legacy forms and their
+`set_required_confirmations`, `set_requires_notarization`,
+`all_swaps_uuids_by_filter`, `import_swaps`, `version`, `stop`, `metrics`,
+`get_my_peer_id`, `get_directly_connected_peers`, `get_gossip_mesh`,
+`get_gossip_peer_topics`, `get_gossip_topic_peers`, `get_relay_mesh`,
+`ban_pubkey`, `list_banned_pubkeys` and `unban_pubkeys` are routed on the
+versioned table as well as the legacy table. *(Amended 2026-11-16, phases 4
+and 5: the fourteen swap, daemon and network methods added.)* The legacy forms and their
 success bodies are unchanged; a legacy error keeps its text behind one
 `file:line]` token of the handler (the inner trace tokens of chained errors
 are no longer printed; the text is not part of the contract). Tested against
@@ -1191,6 +1647,11 @@ answer `InvalidRequest` (string, 400).
 | `kmd_rewards_info`, `coins_needed_for_kick_start` | none; `params` absent, `null`, `{}` or any object |
 | `set_required_confirmations` | `coin` string; `confirmations` integer |
 | `set_requires_notarization` | `coin` string; `requires_notarization` bool |
+| `all_swaps_uuids_by_filter` | all optional: `my_coin` string, `other_coin` string, `from_timestamp` integer, `to_timestamp` integer (seconds) |
+| `import_swaps` | `swaps` list of swap records |
+| `version`, `stop`, `metrics`, `get_my_peer_id`, `get_directly_connected_peers`, `get_gossip_mesh`, `get_gossip_peer_topics`, `get_gossip_topic_peers`, `get_relay_mesh`, `list_banned_pubkeys` | none; `params` absent, `null`, `{}` or any object |
+| `ban_pubkey` | `pubkey` string (32-byte hex); `reason` string (required, as on the legacy surface); `duration_min` integer (optional; absent = until unbanned) |
+| `unban_pubkeys` | `unban_by` object `{"type": "All"}` or `{"type": "Few", "data": [pubkeys]}` |
 
 Numbers accept the forms the legacy member accepts (decimal string, number,
 or the rational forms of chapter 08).
@@ -1211,6 +1672,20 @@ reason?}` (an invalid address is a success with `is_valid: false`);
 `kmd_rewards_info` the list; `coins_needed_for_kick_start` the ticker list;
 `set_required_confirmations` `{coin, confirmations}`;
 `set_requires_notarization` `{coin, requires_notarization}`;
+`all_swaps_uuids_by_filter` `{uuids, my_coin, other_coin, from_timestamp,
+to_timestamp, found_records}` (the member is `found_records`, as the legacy
+body has it); `import_swaps` `{imported, skipped}` (per-record failures stay
+inside `skipped`, R43.1B.3; the versioned form runs on the request task,
+where the legacy form runs on the blocking-work executor, an accepted
+difference with no wire effect); `version` the legacy object unchanged, so the
+versioned answer nests a `result` member holding the version string beside
+`datetime` inside `result` (the bare-body rule of R43.1C.6 applied without a
+redesign); `stop` the string `"success"`,
+answered before the shutdown proceeds; `metrics` the bare `{metrics}` object;
+`get_my_peer_id` the peer identifier string; the four gossip and peer
+queries their legacy maps or lists; `ban_pubkey` `"success"`;
+`list_banned_pubkeys` the map of public key to ban record;
+`unban_pubkeys` `{still_banned, unbanned, were_not_banned}`;
 `order_status` the legacy
 bare object unchanged (`type`, `order`, the orderbook-ticker members where the
 legacy body has them, and `cancellation_reason` for a history order; R43.1B
@@ -1220,9 +1695,9 @@ table row `order_status`).
 R55.1.2. A request the client got wrong answers 400, a failure of the node
 500; a refusal while the node's own clock is off (`ClockOutOfRange`) 503. A
 refusal while a coin's Electrum servers disagree answers 400, as `withdraw`
-does (chapter 38). The wallet and coin forms (phase 3) follow the documented
-`withdraw` set instead (R43.1C.8): an unknown coin 404, a transport failure
-502. One token may cover
+does (chapter 38). The wallet and coin forms (phase 3) follow the `withdraw`
+set as the reference answers it (R43.1D.2; the documentation states no
+status): an unknown coin 404, a transport failure 502. One token may cover
 several legacy texts; the text is not part of the contract.
 
 | `error_type` | `error_data` | Status | Failure class | Methods |
@@ -1255,14 +1730,19 @@ several legacy texts; the text is not part of the contract.
 | `CannotRetrieveOrderMatchContext` | none | 500 | ordermatch context unavailable | cancel_order |
 | `Internal` | string | 500 | any other failure of the node (the `orderbook` set) | orderbook_depth |
 | `InternalError` | string | 500 | any other failure of the node | all others |
-| `NoSuchCoin` | object `{coin}` | 404 | coin not found or not activated (the documented `withdraw` set) | my_balance, disable_coin, send_raw_transaction, validateaddress, convertaddress, convert_utxo_address (target coin), kmd_rewards_info (KMD), set_required_confirmations, set_requires_notarization |
-| `Transport` | string | 502 | node or server unreachable, invalid answer, broadcast refused by the network, and a transaction the coin cannot decode (the coin's broadcast gives one text for all three; the documented `withdraw` set) | my_balance, send_raw_transaction, kmd_rewards_info |
+| `NoSuchCoin` | object `{coin}` | 404 | coin not found or not activated (the `withdraw` set of R43.1D.2) | my_balance, disable_coin, send_raw_transaction, validateaddress, convertaddress, convert_utxo_address (target coin), kmd_rewards_info (KMD), set_required_confirmations, set_requires_notarization |
+| `Transport` | string | 502 | node or server unreachable, invalid answer, broadcast refused by the network, and a transaction the coin cannot decode (the coin's broadcast gives one text for all three; the `withdraw` set of R43.1D.2) | my_balance, send_raw_transaction, kmd_rewards_info |
 | `InvalidParam` | string | 400 | request carries neither `tx_hex` nor `tx_json`, or the wrong type; address conversion refused by the coin | send_raw_transaction, convertaddress |
 | `InvalidAddress` | string | 400 | address does not parse | convert_utxo_address |
 | `UnsupportedError` | string | 400 | target coin is not a UTXO coin | convert_utxo_address |
 | `ActiveSwapsBlockDeactivation` | object `{coin, swaps}` | 400 | running swaps use the coin (the legacy body carries `swaps` beside `error`) | disable_coin |
 | `MatchingOrdersBlockDeactivation` | object `{coin, matching, cancelled}` | 400 | orders of the coin are being matched (the legacy body carries `orders` beside `error`) | disable_coin |
 | `FeeCapBelowBaseFee` | as chapter 35 | 500 | EVM fee estimate below base fee (balance read) | my_balance |
+| `InvalidTimeStampRange` | none | 400 | `from_timestamp` after `to_timestamp` (browser builds; a native node answers an empty list) | all_swaps_uuids_by_filter |
+| `DbError` | string | 500 | swap storage failure (the `my_recent_swaps` set) | all_swaps_uuids_by_filter |
+| `InvalidParam` | string | 400 | public key banned already | ban_pubkey |
+| `Internal` | string | 500 | peer identity not initialized; metrics registry failure; swaps context or ban-list lock failure (the `peer_connection_healthcheck` set and the general convention) | get_my_peer_id, metrics, ban_pubkey, list_banned_pubkeys, unban_pubkeys |
+| none | | | `version`, `stop`, `import_swaps` and the peer and gossip queries other than `get_my_peer_id` have no failure of their own; a request that does not decode answers the dispatcher's `InvalidRequest` | |
 
 **T43.1R** *Tests.* Each versioned form: success in the 2.0 envelope with `id`
 echoed and `result` equal to the legacy content member by member; an unknown
@@ -1729,9 +2209,81 @@ shall be wound down as part of shutdown rather than abandoned.
   Reloaded-original, clean side: the four trading methods join the tables from
   this repository's own legacy shapes and failure classes; no forbidden-class
   input, chapter 01 R38 not engaged.
+- *Section 43.1R amended 2026-11-16 (phases 4 and 5), D43.1A.1 status note
+  extended, status note after D43.1C.4 on the sibling sets of the last two
+  groups.* Reloaded-original, clean side: the fourteen swap, daemon and network
+  methods join the tables from this repository's own legacy shapes and failure
+  classes; no forbidden-class input, chapter 01 R38 not engaged.
 - *Section 43.1R amended 2026-11-15 (phase 3), D43.1A.1 status note extended,
   second status note after D43.1C.4.* Reloaded-original, clean side: the ten
   wallet and coin methods join the tables from this repository's own legacy
   shapes and failure classes, and the per-group application of D43.1C.4 is
   recorded as the maintainer decided; no forbidden-class input, chapter 01
   R38 not engaged.
+- *Scoped addition (2026-11-16, Spec Reader round 0.5.0-9) -- §43.1D
+  (R43.1D.1 -- R43.1D.4, the error table, the compatibility note, the
+  not-established paragraph, T43.1D.1 -- T43.1D.6) and §43.1E (R43.1E.1 --
+  R43.1E.8 with their tables, the compatibility note, D43.1E.1 -- D43.1E.2,
+  the not-established paragraph, T43.1E.1 -- T43.1E.9); no other text of
+  this chapter was changed.* **KDF Dirty Gate: PASS on 2026-11-16, measure 0.02, no findings**
+  (chapter 01 R40; the attestation closes this item). *Inputs:* (1) the forbidden corpus
+  at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, read
+  read-only and consulted **only** to establish: for the versioned
+  `withdraw`, the `error_type` tokens of its error set, the JSON kind of
+  each token's payload, including the payloads nested in three of them, the
+  HTTP status of each token, which methods share the set, which tokens no
+  case was found to answer, and the one token in which the two rows differ;
+  for the legacy `disable_coin`, the method table that routes it, its
+  request members and how they are read, its success members, each refusal
+  with its body members, its HTTP status and the condition under which it
+  applies, the order of the method's checks and effects, what it does to the
+  node's orders, when a token counts as dependent on a platform coin, the
+  passive state of a platform coin and what observes it, what a forced call
+  removes and which tickers its checks cover; and the two rows' agreement
+  (the `disable_coin` method, the coin-registry operations it uses, its two
+  checks and both method tables are the same at both rows; the `withdraw`
+  error set differs in the one token R43.1D.4 names). Behavior, public wire
+  names, payload kinds and statuses only; no private identifier, function
+  body, helper decomposition, error, log, comment or test text was
+  reproduced, and the error texts of both methods are deliberately not
+  recorded. (2) The published reference API documentation, requested on
+  2026-11-16 under
+  `https://komodoplatform.com/en/docs/komodo-defi-framework/api/` and served,
+  after a permanent redirect, from the host §43.1B names: three pages -- the
+  versioned `withdraw` page, the v2.0 protocol overview page and the legacy
+  `disable_coin` page -- consulted **only** to establish whether an HTTP
+  status is documented, which `withdraw` tokens and payload kinds are
+  documented, and the documented request, success and error members of
+  `disable_coin`. Member names and tokens cross as the API contract; no
+  descriptive sentence, example value or error text of the documentation was
+  reproduced, and the token of the overview page's `withdraw` error example
+  is described, not named. (3) The public source of the `num-bigint` crate,
+  for the serialized form of an unsigned big integer (the two array-valued
+  members of one NFT token in R43.1D.2). (4) This repository's tree at the
+  base of this round (the dev branch as of 2026-11-16), for the two
+  compatibility notes. D43.1E.1 -- D43.1E.2 are Reloaded-original. No row
+  was added to chapter 02 §2.15A: both states read already had one, and each
+  row's identifier was confirmed, by read-only inspection of the historical
+  record's reference metadata, to be the commit its release tag names; the
+  documentation is not a state of the historical record and takes no row, so
+  it is named here by URL and fetch date.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-16, measure
+  0.02, no findings. Reference states (chapter 02 R13): PASS; the rows
+  `v2.6.0-beta` and `v3.0.0-beta`. Extent: the versioned `withdraw` error
+  set with its payload serialization and status mapping; the legacy
+  `disable_coin` method, the coin-registry operations and the two in-use
+  checks it relies on, the order cancellation by coin; both method tables;
+  the reference's tests on disabling platform coins; 12 source files read in
+  the relevant parts at `v3.0.0-beta`, with row agreement confirmed by
+  mechanical difference against `v2.6.0-beta`; mechanical comparison against
+  29 files at `v3.0.0-beta` and 28 at `v2.6.0-beta`; three public
+  documentation pages reached on 2026-11-16 and compared. Method: reading,
+  plus mechanical comparison (5-word overlap of the gated lines against
+  comment and literal wording; identifier-shaped tokens and
+  identifier-derived phrases against the identifier set); the additions
+  embed no code blocks.
+- *Status notes added 2026-11-16 -- third note after D43.1C.4, note after
+  D43.1E.1; wording amendment in §43.1R.* Reloaded-original, clean side: they
+  record the maintainer's 2026-11-16 decisions (withdraw `Transport` 502;
+  D43.1E.1 option (c)) and correct the "documented statuses" wording to what
+  §43.1D established; no forbidden-class input, chapter 01 R38 not engaged.

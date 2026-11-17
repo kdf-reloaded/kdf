@@ -434,10 +434,11 @@ fn kmd_rewards_info_and_kick_start_and_setting_error_wire_forms() {
 
 // ----- The legacy answer of a refused `disable_coin` -----
 
-/// The dev handler answered a blocked deactivation with HTTP 500 and `json!({"error": ..., "swaps": swaps})`, or
-/// `json!({"error": ..., "orders": {"matching": ..., "cancelled": ...}})` (`lp_commands_legacy::disable_coin`).
+/// CRD ch.43 R43.1E.3 with D43.1E.1 option (c): every refusal for a coin in use and the refusal for a coin that is not
+/// active answer HTTP 500 and the extended body with the four members `error`, `orders` (`matching`, `cancelled`),
+/// `active_swaps` and `swaps`, in this order, all always present; `active_swaps` and `swaps` hold the same list.
 #[test]
-fn disable_coin_legacy_refusals_keep_the_members_beside_error() {
+fn disable_coin_legacy_refusals_are_the_extended_body() {
     let uuid = uuid::Uuid::nil();
     let answer = legacy_disable_coin_refusal(MmError::new(DisableCoinError::ActiveSwapsBlockDeactivation {
         coin: "KMD".into(),
@@ -447,7 +448,8 @@ fn disable_coin_legacy_refusals_keep_the_members_beside_error() {
     assert_eq!(answer.status().as_u16(), 500);
     same(
         &String::from_utf8(answer.into_body()).unwrap(),
-        &r#"{"error":"There're active swaps using KMD","swaps":["00000000-0000-0000-0000-000000000000"]}"#.to_owned(),
+        &r#"{"error":"There're active swaps using KMD","orders":{"matching":[],"cancelled":[]},"active_swaps":["00000000-0000-0000-0000-000000000000"],"swaps":["00000000-0000-0000-0000-000000000000"]}"#
+            .to_owned(),
         "the active-swaps body",
     );
 
@@ -460,13 +462,39 @@ fn disable_coin_legacy_refusals_keep_the_members_beside_error() {
     assert_eq!(answer.status().as_u16(), 500);
     same(
         &String::from_utf8(answer.into_body()).unwrap(),
-        &r#"{"error":"There're currently matching orders using KMD","orders":{"matching":["00000000-0000-0000-0000-000000000000"],"cancelled":[]}}"#
+        &r#"{"error":"There're currently matching orders using KMD","orders":{"matching":["00000000-0000-0000-0000-000000000000"],"cancelled":[]},"active_swaps":[],"swaps":[]}"#
             .to_owned(),
         "the matching-orders body",
     );
 
-    // Every other failure is the legacy error text.
-    let refusal = legacy_disable_coin_refusal(MmError::new(DisableCoinError::NoSuchCoin { coin: "KMD".into() }));
+    // The orders that this call cancelled before the refusal are listed.
+    let answer = legacy_disable_coin_refusal(MmError::new(DisableCoinError::MatchingOrdersBlockDeactivation {
+        coin: "KMD".into(),
+        matching: vec![uuid.to_string()],
+        cancelled: vec![uuid.to_string()],
+    }))
+    .unwrap_or_else(|_| panic!("an answer"));
+    assert_eq!(answer.status().as_u16(), 500);
+    same(
+        &String::from_utf8(answer.into_body()).unwrap(),
+        &r#"{"error":"There're currently matching orders using KMD","orders":{"matching":["00000000-0000-0000-0000-000000000000"],"cancelled":["00000000-0000-0000-0000-000000000000"]},"active_swaps":[],"swaps":[]}"#
+            .to_owned(),
+        "the matching-orders body with cancelled orders",
+    );
+
+    // A coin that is not active: the extended body with empty lists.
+    let answer = legacy_disable_coin_refusal(MmError::new(DisableCoinError::NoSuchCoin { coin: "KMD".into() }))
+        .unwrap_or_else(|_| panic!("an answer"));
+    assert_eq!(answer.status().as_u16(), 500);
+    same(
+        &String::from_utf8(answer.into_body()).unwrap(),
+        &r#"{"error":"No such coin: KMD","orders":{"matching":[],"cancelled":[]},"active_swaps":[],"swaps":[]}"#
+            .to_owned(),
+        "the not-active body",
+    );
+
+    // A node failure that has no lists is the legacy error text.
+    let refusal = legacy_disable_coin_refusal(MmError::new(DisableCoinError::InternalError("registry".into())));
     match refusal {
         Err(error) => {
             let (files, rest) = split_location(&error);
@@ -475,9 +503,9 @@ fn disable_coin_legacy_refusals_keep_the_members_beside_error() {
                 files == vec!["wallet_rpc_tests".to_owned()],
                 "the refusal names its caller"
             );
-            assert!(rest == "No such coin: KMD", "the refusal text");
+            assert!(rest == "registry", "the refusal text");
         },
-        Ok(_) => panic!("a refusal without extra members is a legacy error"),
+        Ok(_) => panic!("a refusal without lists is a legacy error"),
     }
 }
 
@@ -1172,12 +1200,17 @@ fn disable_coin_answers_the_legacy_body() {
         "the legacy body",
     );
     assert!(!node.in_container(&order.uuid), "the order is cancelled");
-    // The coin is gone.
+    // The coin is gone: CRD ch.43 R43.1E.3 with D43.1E.1 option (c), the extended body with empty lists, HTTP 500.
+    let answer = run(ctx, legacy_request("disable_coin", json!({ "coin": "DYN" })))
+        .unwrap_or_else(|_| panic!("the legacy not-active answer is a response"));
+    assert_eq!(answer.status().as_u16(), 500);
     same(
-        &legacy_refusal(ctx, "disable_coin", json!({ "coin": "DYN" }), "lp_commands_legacy"),
-        &"No such coin: DYN".to_owned(),
-        "the unknown-coin text",
+        &String::from_utf8(answer.into_body()).unwrap(),
+        &r#"{"error":"No such coin: DYN","orders":{"matching":[],"cancelled":[]},"active_swaps":[],"swaps":[]}"#
+            .to_owned(),
+        "the not-active body",
     );
+    // No coin named: the plain legacy error.
     same(
         &legacy_refusal(ctx, "disable_coin", json!({}), "lp_commands_legacy"),
         &"No 'coin' field".to_owned(),
@@ -1210,8 +1243,9 @@ fn disable_coin_answers_the_versioned_result_and_its_refusals() {
     assert_data_member(&answer, "coin", json!("DYN"));
 }
 
-/// An order of the coin that is being matched blocks the deactivation: the legacy answer is HTTP 500 with the body
-/// `{"error": ..., "orders": {"matching": [...], "cancelled": [...]}}` and the versioned answer is the typed conflict.
+/// An order of the coin that is being matched blocks the deactivation: the legacy answer is HTTP 500 with the extended
+/// body of CRD ch.43 R43.1E.3 with D43.1E.1 option (c), `{"error", "orders": {"matching", "cancelled"}, "active_swaps",
+/// "swaps"}`, and the versioned answer is the typed conflict.
 /// The coin stays.
 #[test]
 fn disable_coin_is_blocked_by_an_order_that_is_being_matched() {
@@ -1233,6 +1267,8 @@ fn disable_coin_is_blocked_by_an_order_that_is_being_matched() {
         &json::to_string(&json!({
             "error": "There're currently matching orders using ETH",
             "orders": { "matching": [matching.uuid], "cancelled": [] },
+            "active_swaps": [],
+            "swaps": [],
         }))
         .unwrap(),
         "the legacy blocked body",

@@ -1,6 +1,6 @@
 # Plan: finish mmrpc 2.0 support for the legacy-only RPC methods
 
-**Status:** in progress (0.5.0; phase 1, order management, PR #359; phase 2, trading, PR #372; phase 3, wallet and coins, PR #379; phases 4–5 open) — **Last reviewed:** 2026-11-15
+**Status:** in progress (0.5.0; phase 1 PR #359; phase 2 PR #372; phase 3 PR #379; phases 4 and 5 in PR #387; `recover_funds_of_swap` waits for the swap architecture decisions) — **Last reviewed:** 2026-11-15
 
 > **Context:** written 2026-11-09, after CRD ch.43 §43.1A (PR #312) bound which methods exist on
 > which request surface. This plan proposes a Reloaded extension: versioned (`mmrpc: "2.0"`) forms of
@@ -158,15 +158,17 @@ does not reopen it by accident.
 
 ### 1.5 Phases and order
 
-One phase per group, one PR per phase, ordered by client impact:
+One phase per group, one PR per phase, ordered by client impact. *(Amended 2026-11-16: phases 4 and 5 were folded
+into one PR of two commits, group C then group E, because group C shrank to two wrappers once
+`recover_funds_of_swap` was held back and `stats_swap_status` kept legacy-only.)*
 
 | Phase | Group | Governing chapters |
 | --- | --- | --- |
 | 1 | A. Order management | 43, 11, 12, 59 |
 | 2 | B. Trading | 43 (§43.1R), 08, 11, 57, 60 |
 | 3 | D. Wallet and coins | 43 (§43.1R; errors follow the documented statuses of the versioned `withdraw`, D43.1C.4 second status note), 38, 49 |
-| 4 | C. Swaps | 43, 13, 51, 52 |
-| 5 | E. Daemon and network | 43, 28 |
+| 4 | C. Swaps (`all_swaps_uuids_by_filter`, `import_swaps`; `recover_funds_of_swap` later) | 43 (§43.1R), 13, 51, 52 |
+| 5 | E. Daemon and network | 43 (§43.1R), 28 |
 
 Phase 1 covers the methods the Stashi wallet calls. Each phase merges before the next starts. A
 change to a shared piece (the alias registration, the success wrapper, the error base) lands in phase

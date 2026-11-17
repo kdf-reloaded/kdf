@@ -63,19 +63,23 @@ impl From<TrezorProcessingError<RpcTaskError>> for WithdrawError {
     }
 }
 
+/// CRD ch.43 R43.1D.2: a condition that has a name in the hardware RPC error vocabulary (the classification the
+/// activation error sets use, [`HwError::hw_rpc_error`]) is the `HwError` token with that name; a connection timeout is
+/// `Timeout`; any other failure of the device or of its transport is `InternalError` with its text.
 impl From<HwError> for WithdrawError {
     fn from(e: HwError) -> Self {
-        let error = e.to_string();
-        match e {
-            HwError::NoTrezorDeviceAvailable => WithdrawError::NoTrezorDeviceAvailable,
-            HwError::FoundUnexpectedDevice { .. } => WithdrawError::FoundUnexpectedDevice(error),
-            _ => WithdrawError::HardwareWalletInternal(error),
+        if let HwError::ConnectionTimedOut { timeout } = &e {
+            return WithdrawError::Timeout(*timeout);
+        }
+        match e.hw_rpc_error() {
+            Some(word) => WithdrawError::hardware_wallet(word),
+            None => WithdrawError::InternalError(e.to_string()),
         }
     }
 }
 
 impl From<TrezorError> for WithdrawError {
-    fn from(e: TrezorError) -> Self { WithdrawError::HardwareWalletInternal(e.to_string()) }
+    fn from(e: TrezorError) -> Self { WithdrawError::from(HwError::from(e)) }
 }
 
 impl From<CryptoInitError> for WithdrawError {
@@ -102,7 +106,7 @@ impl From<RpcTaskError> for WithdrawError {
 
 impl From<Bip32Error> for WithdrawError {
     fn from(e: Bip32Error) -> Self {
-        WithdrawError::HardwareWalletInternal(format!("Error parsing pubkey received from Hardware Wallet: {}", e))
+        WithdrawError::InternalError(format!("Error parsing pubkey received from Hardware Wallet: {}", e))
     }
 }
 
@@ -251,6 +255,7 @@ where
             .note_pending_withdraw(&tx_bytes, spent_by_tx, signed.hash(), signed.outputs.clone());
         let tx_hex = tx_bytes.into();
         Ok(TransactionDetails {
+            unsigned: None,
             tx_json: None,
             from: vec![self.sender_address_string()],
             to: vec![req.to.clone()],
