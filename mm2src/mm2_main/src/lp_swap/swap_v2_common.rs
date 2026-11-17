@@ -1782,6 +1782,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn should_roundtrip_when_serializing_maker_swap_db_repr() {
         use super::super::maker_swap_v2::{MakerSwapDbRepr, MakerSwapEvent, SerializableKeypairBytes};
@@ -1837,6 +1838,7 @@ mod tests {
         assert!(back.conf_settings.taker_coin_nota);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn should_roundtrip_when_serializing_taker_swap_db_repr() {
         use super::super::taker_swap_v2::{TakerSwapDbRepr, TakerSwapEvent};
@@ -1898,6 +1900,7 @@ mod tests {
         assert_eq!(SwapV2Type::TakerV2 as u8, 2);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn should_carry_fields_when_constructing_active_swap_info() {
         let uuid = Uuid::new_v4();
@@ -1913,6 +1916,7 @@ mod tests {
         assert_eq!(info.swap_type, SwapV2Type::MakerV2);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn should_append_when_calling_add_event_on_db_repr() {
         use super::super::maker_swap_v2::{MakerSwapDbRepr, MakerSwapEvent};

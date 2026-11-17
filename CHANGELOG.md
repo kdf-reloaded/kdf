@@ -283,6 +283,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   updated to the matching release and the runner name in `.cargo/config.toml` is the standard one. This also
   updates `wasm-bindgen-futures`, which the browser build uses at run time, to 0.4.67. No CI job runs the
   browser tests yet. Detail: PR #373.
+- **The browser tests of `mm2_main` now compile.** `wasm-pack test --firefox --headless mm2src/mm2_main`
+  stopped at 52 compile errors, because test code that only works natively (tests written for the `tokio`
+  runtime, tests that create random identifiers with a function the browser build does not have, and
+  tests that use a native-only database helper) was also built for the browser. That test code is now left
+  out of the browser test build, as is the same kind of test code in `mm2_gui_storage`; only test code
+  changed. The run finds 12 tests: one fails because it needs a trade setup, one hangs because it starts a node on a network id the browser build does not support, and the other ten, the storage tests of orders and swaps, all pass; the list by name is in `docs/DEV_ENVIRONMENT.md`. No CI job runs the browser tests yet.
+  Detail: PR #N.
 - **The browser tests of `coins` now compile.** `wasm-pack test --firefox --headless mm2src/coins` stopped at
   compile errors, because some test code that only works natively (tests written for the `tokio` runtime and the BCH
   tests that use the SQLite history storage) was also built for the browser, and a test helper

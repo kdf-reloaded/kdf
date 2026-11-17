@@ -102,7 +102,7 @@ pub async fn disable_streaming(
     Ok(DisableStreamingResponse::success())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::heartbeat::HeartbeatStreamer;
     use super::*;
