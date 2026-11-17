@@ -138,6 +138,19 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
   R40.1.2, R40.1.3; PR #361.
 
+- **Solana wallet methods answer.** On an active Solana coin or SPL token
+  GLEEC KDF ends many requests without a JSON answer (`sign_message`,
+  `verify_message`, `validateaddress`, `convertaddress`,
+  `get_raw_transaction`, the legacy `my_tx_history`,
+  `set_required_confirmations`, `show_priv_key` and others). Reloaded answers
+  each: with a result where the code exists, with an error naming the coin
+  otherwise. Message signing uses the message's bytes with no prefix and a
+  base58 signature; `show_priv_key` gives the 64-byte keypair in base58. The
+  minimum transaction amount of an SPL token is one smallest unit of its own
+  decimals, where GLEEC KDF states one lamport for every token; no peer sees
+  it while Solana cannot trade. No switch: an abnormal end cannot be a
+  compatibility target. CRD ch.40 D40.6B.1, R40.6B.14; PR #401.
+
 - **Solana under an HD login.** GLEEC KDF refuses Solana activation under a
   global-HD login and derives no Solana key from a seed. Reloaded derives the
   key from the seed phrase at `m/44'/501'/N'/0'` by default, or at

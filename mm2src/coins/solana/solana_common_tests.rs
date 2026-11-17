@@ -53,6 +53,7 @@ pub fn spl_coin_for_test(
             ticker,
             token_contract_address,
             program_id: spl_token::ID,
+            settings: SolanaCoinSettings::default(),
         }),
         platform_coin: solana_coin,
     };
@@ -83,6 +84,7 @@ pub fn solana_coin_for_test(seed: String, net_type: SolanaNet) -> (MmArc, Solana
         ticker,
         client,
         spl_tokens_infos,
+        settings: SolanaCoinSettings::default(),
     }));
     (ctx, solana_coin)
 }

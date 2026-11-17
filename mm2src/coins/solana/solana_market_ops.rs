@@ -8,9 +8,11 @@ impl MarketCoinOps for SolanaCoin {
 
     fn my_address(&self) -> Result<String, String> { Ok(self.my_address.clone()) }
 
-    fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> { unimplemented!() }
+    /// The base58 ed25519 public key of the platform key, which is the address (`get_private_keys` reads it).
+    fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> { Ok(self.my_address.clone()) }
 
-    fn sign_message_hash(&self, _message: &str) -> Option<[u8; 32]> { unimplemented!() }
+    /// Solana signs the message bytes as they are, with no prefix and no pre-hash (`sign_message`): there is no hash.
+    fn sign_message_hash(&self, _message: &str) -> Option<[u8; 32]> { None }
 
     fn sign_message(&self, message: &str) -> SignatureResult<String> { solana_common::sign_message(self, message) }
 
@@ -70,7 +72,7 @@ impl MarketCoinOps for SolanaCoin {
         _wait_until: u64,
         _check_every: u64,
     ) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        unimplemented!()
+        Box::new(futures01::future::err(swaps_unsupported(&self.ticker)))
     }
 
     fn wait_for_tx_spend(
@@ -80,10 +82,14 @@ impl MarketCoinOps for SolanaCoin {
         _from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        unimplemented!()
+        Box::new(futures01::future::err(TransactionErr::Plain(swaps_unsupported(
+            &self.ticker,
+        ))))
     }
 
-    fn tx_enum_from_bytes(&self, _bytes: &[u8]) -> Result<TransactionEnum, String> { unimplemented!() }
+    fn tx_enum_from_bytes(&self, _bytes: &[u8]) -> Result<TransactionEnum, String> {
+        Err(format!("Transaction decoding is not supported for {}", self.ticker))
+    }
 
     fn current_block(&self) -> Box<dyn Future<Item = u64, Error = String> + Send> {
         let coin = self.clone();
@@ -91,9 +97,11 @@ impl MarketCoinOps for SolanaCoin {
         Box::new(fut.boxed().compat())
     }
 
-    fn display_priv_key(&self) -> Result<String, String> { Ok(self.key_pair.secret_bytes()[..].to_base58()) }
+    /// The 64-byte keypair (32-byte secret, then the 32-byte public key) in base58 (D40.6B.1 option (b)).
+    fn display_priv_key(&self) -> Result<String, String> { Ok(solana_common::keypair_base58(self)) }
 
-    fn min_tx_amount(&self) -> BigDecimal { BigDecimal::from(0) }
+    /// One lamport (CRD ch.40 D40.6B.1, maintainer decision).
+    fn min_tx_amount(&self) -> BigDecimal { solana_common::smallest_unit(SOLANA_DEFAULT_DECIMALS as u8) }
 
     fn min_trading_vol(&self) -> MmNumber { MmNumber::from("0.00777") }
 }

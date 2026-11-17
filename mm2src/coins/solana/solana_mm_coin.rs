@@ -64,75 +64,73 @@ impl MmCoin for SolanaCoin {
         Box::new(Box::pin(withdraw_impl(self.clone(), req)).compat())
     }
 
-    fn get_raw_transaction(&self, _req: RawTransactionRequest) -> RawTransactionFut { unimplemented!() }
+    fn get_raw_transaction(&self, _req: RawTransactionRequest) -> RawTransactionFut {
+        let coin = self.ticker.to_string();
+        Box::new(futures01::future::err(MmError::new(
+            RawTransactionError::NotImplemented { coin },
+        )))
+    }
 
     fn decimals(&self) -> u8 { self.decimals }
 
-    fn convert_to_address(&self, _from: &str, _to_address_format: Json) -> Result<String, String> { unimplemented!() }
-
-    fn validate_address(&self, address: &str) -> ValidateAddressResult {
-        if address.len() != 44 {
-            return ValidateAddressResult {
-                is_valid: false,
-                reason: Some("Invalid address length".to_string()),
-            };
-        }
-        let result = Pubkey::from_str(address);
-        match result {
-            Ok(pubkey) => {
-                if pubkey.is_on_curve() {
-                    ValidateAddressResult {
-                        is_valid: true,
-                        reason: None,
-                    }
-                } else {
-                    ValidateAddressResult {
-                        is_valid: false,
-                        reason: Some("not_on_curve".to_string()),
-                    }
-                }
-            },
-            Err(err) => ValidateAddressResult {
-                is_valid: false,
-                reason: Some(format!("{:?}", err)),
-            },
-        }
+    fn convert_to_address(&self, _from: &str, _to_address_format: Json) -> Result<String, String> {
+        Err(format!("convertaddress is not supported for {}", self.ticker))
     }
 
-    fn process_history_loop(&self, _ctx: MmArc) -> Box<dyn Future<Item = (), Error = ()> + Send> { unimplemented!() }
+    fn validate_address(&self, address: &str) -> ValidateAddressResult { solana_common::validate_address(address) }
 
-    fn history_sync_status(&self) -> HistorySyncState { unimplemented!() }
+    /// Solana has no transaction history yet (CRD ch.40 R40.6B.15): the loop has nothing to do and ends at once, so
+    /// a background start can never abort the process.
+    fn process_history_loop(&self, _ctx: MmArc) -> Box<dyn Future<Item = (), Error = ()> + Send> {
+        Box::new(futures01::future::ok(()))
+    }
+
+    /// There is no history to sync, so the state is the neutral `NotEnabled`.
+    fn history_sync_status(&self) -> HistorySyncState { HistorySyncState::NotEnabled }
 
     /// Get fee to be paid per 1 swap transaction
-    fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send> { unimplemented!() }
+    fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send> {
+        let error = format!("get_trade_fee is not supported for {}", self.ticker);
+        Box::new(futures01::future::err(error))
+    }
 
     async fn get_sender_trade_fee(
         &self,
-        value: TradePreimageValue,
-        stage: FeeApproxStage,
+        _value: TradePreimageValue,
+        _stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
-        unimplemented!()
+        Err(MmError::new(TradePreimageError::InternalError(format!(
+            "Trade fees are not supported for {}",
+            self.ticker
+        ))))
     }
 
-    fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> { unimplemented!() }
+    fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {
+        let error = TradePreimageError::InternalError(format!("Trade fees are not supported for {}", self.ticker));
+        Box::new(futures01::future::err(MmError::new(error)))
+    }
 
     async fn get_fee_to_send_taker_fee(
         &self,
-        dex_fee_amount: BigDecimal,
-        stage: FeeApproxStage,
+        _dex_fee_amount: BigDecimal,
+        _stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
-        unimplemented!()
+        Err(MmError::new(TradePreimageError::InternalError(format!(
+            "Trade fees are not supported for {}",
+            self.ticker
+        ))))
     }
 
-    fn required_confirmations(&self) -> u64 { 1 }
+    fn required_confirmations(&self) -> u64 { self.settings.required_confirmations() }
 
-    fn requires_notarization(&self) -> bool { false }
+    fn requires_notarization(&self) -> bool { self.settings.requires_notarization() }
 
-    fn set_required_confirmations(&self, _confirmations: u64) { unimplemented!() }
+    fn set_required_confirmations(&self, confirmations: u64) { self.settings.set_required_confirmations(confirmations) }
 
-    fn set_requires_notarization(&self, _requires_nota: bool) { unimplemented!() }
+    fn set_requires_notarization(&self, requires_nota: bool) { self.settings.set_requires_notarization(requires_nota) }
 
-    fn swap_contract_address(&self) -> Option<BytesJson> { unimplemented!() }
+    /// No swap contract exists: Solana swaps are not supported.
+    fn swap_contract_address(&self) -> Option<BytesJson> { None }
 
     fn mature_confirmations(&self) -> Option<u32> { None }
 

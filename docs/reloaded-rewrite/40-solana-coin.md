@@ -591,6 +591,12 @@ finding F6).
 > `solana-support` chooses Solana's floors when Solana trading is
 > designed. The cleared rule text above is unchanged.
 
+> **Reloaded status (clean side, 2026-11-17).** By the maintainer's decision
+> of 2026-11-15 the minimum transaction amount is one lamport
+> (0.000000001) for SOL and one smallest unit of the token's own decimals
+> (10^-decimals) for each SPL token; the minimum trading volume stays 0.00777
+> until Solana trading is designed. PR #401.
+
 ## 40.6B Reference behavior beyond activation: keys, withdraw, per-method answers, history and swaps
 
 > **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
@@ -1216,6 +1222,38 @@ platform; a wallet must be able to switch a coin off. The message-signing
 form is Reloaded's own under either option, because the reference has none
 to match.
 
+> *Reloaded status (clean side, 2026-11-17):* option (b) is built for every
+> method except `disable_coin`, which follows in its own change (PR #401):
+> - `sign_message` / `verify_message` keep Reloaded's form: the message's
+>   UTF-8 bytes as they are, no prefix and no pre-hash, and the 64-byte
+>   ed25519 signature in base58, checked against the base58 address as the
+>   public key; a token signs with its platform's key.
+> - `validateaddress` accepts any base58 text that decodes to exactly 32
+>   bytes (the finding of §40.6B.5 fixed) and gives a reason otherwise.
+> - `set_required_confirmations` and `set_requires_notarization` store the
+>   value per coin and the coin reports it (defaults 1 and false).
+> - `show_priv_key` answers the 64-byte keypair (secret then public key) in
+>   base58, the form common Solana wallets import (maintainer decision of
+>   2026-11-15); a token answers its platform's. The key-export method
+>   `get_private_keys` reports the same form for an active Solana coin in
+>   its default mode; its offline derivation mode still refuses Solana.
+> - `convertaddress`, `get_raw_transaction`, `get_trade_fee`,
+>   `sign_raw_transaction` and the legacy `my_tx_history` answer a
+>   structured error naming the coin; the versioned `my_tx_history` answers
+>   `NotSupportedFor`, as the reference does.
+> - `max_taker_vol` and `max_maker_vol` reach the coin's trade-fee
+>   estimates, which answer a structured internal error naming the coin
+>   (HTTP 500) instead of ending abnormally; refusing those two methods for
+>   an untradable coin, as the trade previews do, is left to a separate
+>   change because the refusal also covers Lightning.
+> - The history loop and the history state of an activation answer without
+>   doing anything; transaction history itself is package S10.
+> - Every operation a swap would use answers an error naming the coin:
+>   Solana swaps are not supported. Orders and trade previews are refused
+>   earlier by the trading refusal of §40.6A; a swap that reaches the node
+>   otherwise (an imported swap, its recovery, or a restart) gets those
+>   errors instead of an abnormal end.
+
 **D40.6B.2** *Balance of a token the wallet holds no account for
 (R40.6B.4).* Options: (a) answer zero, reading the associated token
 account derived with the token's `program_id`, which is also the address
@@ -1707,3 +1745,6 @@ with the shapes listed in §40.6 items 3-5.
   R40.1.4, T40.8, D40.2 and D40.6B.7 rest on the maintainer's decisions of
   2026-11-15, the public SLIP-0010, SLIP-0044 and BIP-39 specifications, and
   this repository's own code. The vectors were computed, not read.
+- *Clean-context addition (2026-11-17, forbidden corpus not consulted):*
+  the status notes after §40.6A's as-built note and after D40.6B.1 record
+  this repository's own code and the maintainer's decisions of 2026-11-15.
