@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{Request, RequestInit, RequestMode, Response as JsResponse};
+use web_sys::{Request, RequestInit, RequestMode, RequestRedirect, Response as JsResponse};
 
 /// The result containing either a pair of (HTTP status code, body) or a stringified error.
 pub type FetchResult<T> = Result<(StatusCode, T), MmError<SlurpError>>;
@@ -46,12 +46,56 @@ pub async fn slurp_post_json(url: &str, body: String) -> SlurpResult {
         .map(|(status_code, response)| (status_code, HeaderMap::new(), response.into_bytes()))
 }
 
+/// Executes a POST of a JSON body with the caller's own headers, returning the response status, headers and body,
+/// the whole exchange bounded by `timeout_s` seconds (the executor's timer; see below).
+///
+/// - At the bound the call returns [`SlurpError::Timeout`]. The browser's `fetch` itself is not aborted (no abort
+///   signal is wired): only the wait ends, the late answer is dropped.
+/// - A redirect is **not** followed (`redirect: manual`): the browser then reports an opaque redirect, which is a
+///   failure here, so `headers` never go to another host.
+/// - `Content-Type: application/json` is always set; a `Content-Type` in `headers` is replaced.
+/// - Header values are never logged and never put into an error text.
+/// - The returned header map is empty, because `wasm_bindgen` doesn't provide the way to extract all headers.
+///
+/// This path is compiled for the browser target but has no browser test.
+pub async fn slurp_post_json_with_headers_bounded(
+    url: &str,
+    body: String,
+    headers: &HeaderMap,
+    timeout_s: f64,
+) -> SlurpResult {
+    use common::executor::Timer;
+    use futures::future::{select, Either};
+
+    let mut request = FetchRequest::post(url).redirect_manual().body_utf8(body);
+    for (name, value) in headers.iter().filter(|(name, _)| **name != http::header::CONTENT_TYPE) {
+        // A value that is not visible ASCII cannot be sent through the browser API: refuse it, never render it.
+        let value = value
+            .to_str()
+            .map_to_mm(|_| SlurpError::InvalidRequest("a request header value is not visible ASCII".to_owned()))?;
+        request = request.header(name.as_str(), value);
+    }
+    request = request.header("Content-Type", "application/json");
+
+    let fetch = Box::pin(request.request_str());
+    match select(fetch, Timer::sleep(timeout_s)).await {
+        Either::Left((result, _)) => {
+            result.map(|(status_code, response)| (status_code, HeaderMap::new(), response.into_bytes()))
+        },
+        Either::Right(_) => MmError::err(SlurpError::Timeout {
+            uri: host_only(url),
+            error: format!("no complete response within {timeout_s} s"),
+        }),
+    }
+}
+
 pub struct FetchRequest {
     uri: String,
     method: FetchMethod,
     headers: HashMap<String, String>,
     body: Option<RequestBody>,
     mode: Option<RequestMode>,
+    redirect_manual: bool,
 }
 
 impl FetchRequest {
@@ -62,6 +106,7 @@ impl FetchRequest {
             headers: HashMap::new(),
             body: None,
             mode: None,
+            redirect_manual: false,
         }
     }
 
@@ -72,6 +117,7 @@ impl FetchRequest {
             headers: HashMap::new(),
             body: None,
             mode: None,
+            redirect_manual: false,
         }
     }
 
@@ -89,6 +135,12 @@ impl FetchRequest {
     /// The request is no-cors by default.
     pub fn cors(mut self) -> FetchRequest {
         self.mode = Some(RequestMode::Cors);
+        self
+    }
+
+    /// Do not follow a redirect: the browser reports an opaque redirect instead, which the caller sees as a failure.
+    pub fn redirect_manual(mut self) -> FetchRequest {
+        self.redirect_manual = true;
         self
     }
 
@@ -152,6 +204,9 @@ impl FetchRequest {
         if let Some(mode) = request.mode {
             req_init.set_mode(mode);
         }
+        if request.redirect_manual {
+            req_init.set_redirect(RequestRedirect::Manual);
+        }
 
         let js_request = Request::new_with_str_and_init(&uri, &req_init)
             .map_to_mm(|e| SlurpError::Internal(scrub(stringify_js_error(&e))))?;
@@ -159,7 +214,8 @@ impl FetchRequest {
             js_request
                 .headers()
                 .set(&hkey, &hval)
-                .map_to_mm(|e| SlurpError::Internal(scrub(stringify_js_error(&e))))?;
+                // A fixed text: the browser's own message can quote the header value.
+                .map_to_mm(|_| SlurpError::Internal("a request header could not be set".to_owned()))?;
         }
 
         let request_promise = window.fetch_with_request(&js_request);

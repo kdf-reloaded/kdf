@@ -39,6 +39,16 @@ pub enum StubBehavior {
     Down,
 }
 
+/// One answer of the stub keyed by the parameters of a request.
+struct ParamRule {
+    method: String,
+    /// The `params` array of the request (`prefix == false`), or the leading elements of it (`prefix == true`).
+    params: Json,
+    prefix: bool,
+    /// `Ok` is the result to answer, `Err` the JSON-RPC error object.
+    outcome: Result<Json, Json>,
+}
+
 enum Control {
     Push(String),
     Close,
@@ -55,6 +65,15 @@ struct StubState {
     errors: Mutex<HashMap<String, String>>,
     /// Canned results of the script-hash methods, per `(method, script hash)`; they win over `results`.
     scripthash_results: Mutex<HashMap<(String, String), Json>>,
+    /// Methods that answer the given JSON-RPC error object (`{"code": .., "message": ..}`) instead of a result; they
+    /// win over `results`.
+    error_objects: Mutex<HashMap<String, Json>>,
+    /// Canned answers keyed by the parameters of the request (see [`StubServer::set_params_result`]); they win over
+    /// `scripthash_results` and `results`.
+    param_rules: Mutex<Vec<ParamRule>>,
+    /// Every ordinary request (not `server.version` or `server.ping`) as `(method, params)`, in the order it was
+    /// answered, the elements of a batch one by one.
+    request_log: Mutex<Vec<(String, Json)>>,
     /// Every message (a request, or a batch of them) the stub received, in the order it arrived.
     messages: Mutex<Vec<Json>>,
     requests: Mutex<HashMap<String, usize>>,
@@ -110,6 +129,9 @@ impl StubServer {
             results: Mutex::new(HashMap::new()),
             errors: Mutex::new(HashMap::new()),
             scripthash_results: Mutex::new(HashMap::new()),
+            error_objects: Mutex::new(HashMap::new()),
+            param_rules: Mutex::new(Vec::new()),
+            request_log: Mutex::new(Vec::new()),
             messages: Mutex::new(Vec::new()),
             requests: Mutex::new(HashMap::new()),
             last_requests: Mutex::new(HashMap::new()),
@@ -221,8 +243,94 @@ impl StubServer {
             .insert(method.to_owned(), message.to_owned());
     }
 
-    /// Makes `method` answer its canned result again.
-    pub fn clear_error(&self, method: &str) { self.state.errors.lock().unwrap().remove(method); }
+    /// Makes `method` answer its canned result again (a message of [`Self::set_error`] and an object of
+    /// [`Self::set_error_object`] are both forgotten).
+    pub fn clear_error(&self, method: &str) {
+        self.state.errors.lock().unwrap().remove(method);
+        self.state.error_objects.lock().unwrap().remove(method);
+    }
+
+    /// Makes `method` answer the JSON-RPC error object `error` (for example `{"code": 1, "message": "history too large"}`)
+    /// instead of a result. [`Self::clear_error`] undoes it.
+    pub fn set_error_object(&self, method: &str, error: Json) {
+        self.state
+            .error_objects
+            .lock()
+            .unwrap()
+            .insert(method.to_owned(), error);
+    }
+
+    /// Makes `method` answer as a server that does not know it: the JSON-RPC error `-32601`, `unknown method`.
+    pub fn set_unknown_method_error(&self, method: &str) {
+        self.set_error_object(method, json!({"code": -32601, "message": "unknown method"}));
+    }
+
+    /// The result `method` answers when the `params` array of the request equals `params` exactly. It wins over
+    /// [`Self::set_result`] and [`Self::set_scripthash_result`]; a later call for the same method and parameters
+    /// replaces an earlier one.
+    pub fn set_params_result(&self, method: &str, params: Json, result: Json) {
+        self.set_param_rule(method, params, false, Ok(result));
+    }
+
+    /// Like [`Self::set_params_result`], but the rule matches every request whose `params` array starts with the
+    /// elements of `params_prefix`. A rule that matches the whole array wins over one that matches a prefix.
+    pub fn set_params_prefix_result(&self, method: &str, params_prefix: Json, result: Json) {
+        self.set_param_rule(method, params_prefix, true, Ok(result));
+    }
+
+    /// Makes `method` answer the JSON-RPC error object `error` when the `params` array of the request equals `params`
+    /// exactly. It wins over [`Self::set_params_result`] of the same parameters.
+    pub fn set_params_error(&self, method: &str, params: Json, error: Json) {
+        self.set_param_rule(method, params, false, Err(error));
+    }
+
+    /// Forgets every rule of [`Self::set_params_result`], [`Self::set_params_prefix_result`] and
+    /// [`Self::set_params_error`] of `method`.
+    pub fn clear_params_rules(&self, method: &str) {
+        self.state
+            .param_rules
+            .lock()
+            .unwrap()
+            .retain(|rule| rule.method != method);
+    }
+
+    fn set_param_rule(&self, method: &str, params: Json, prefix: bool, outcome: Result<Json, Json>) {
+        let mut rules = self.state.param_rules.lock().unwrap();
+        rules.retain(|rule| !(rule.method == method && rule.prefix == prefix && rule.params == params));
+        rules.push(ParamRule {
+            method: method.to_owned(),
+            params,
+            prefix,
+            outcome,
+        });
+    }
+
+    /// The `params` of every ordinary request of `method` (every method but `server.version` and `server.ping`) the
+    /// stub received, in the order the requests were answered.
+    pub fn request_params(&self, method: &str) -> Vec<Json> {
+        self.state
+            .request_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(logged, _)| logged == method)
+            .map(|(_, params)| params.clone())
+            .collect()
+    }
+
+    /// The method names of every ordinary request the stub received, in the order the requests were answered.
+    pub fn request_methods_in_order(&self) -> Vec<String> {
+        self.state
+            .request_log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(method, _)| method.clone())
+            .collect()
+    }
+
+    /// Every ordinary request as `(method, params)`, in the order the requests were answered.
+    pub fn request_log(&self) -> Vec<(String, Json)> { self.state.request_log.lock().unwrap().clone() }
 
     /// The result `method` (`blockchain.scripthash.get_balance`, `blockchain.scripthash.listunspent`, ...)
     /// answers for the script hash `scripthash`, the first parameter of the request. It wins over
@@ -361,6 +469,27 @@ impl StubServer {
 /// The header of a tip at `height` with the bytes `hex`, as `blockchain.headers.subscribe` answers and notifies it.
 fn header_json(height: u64, hex: &str) -> Json { json!({"height": height, "hex": hex}) }
 
+/// The outcome of the rule that fits `method` and `params`: a rule that matches the whole `params` array wins over one
+/// that matches a prefix, and a later rule over an earlier one.
+fn find_param_rule(state: &StubState, method: &str, params: &Json) -> Option<Result<Json, Json>> {
+    let rules = state.param_rules.lock().unwrap();
+    let fits = |rule: &&ParamRule| rule.method == method && !rule.prefix && rule.params == *params;
+    let fits_prefix = |rule: &&ParamRule| {
+        rule.method == method
+            && rule.prefix
+            && match (rule.params.as_array(), params.as_array()) {
+                (Some(prefix), Some(params)) => params.starts_with(prefix),
+                _ => false,
+            }
+    };
+    rules
+        .iter()
+        .rev()
+        .find(fits)
+        .or_else(|| rules.iter().rev().find(fits_prefix))
+        .map(|rule| rule.outcome.clone())
+}
+
 /// Answers one request; `None` stays unanswered. `subscribed` is set when the connection is answered a header
 /// subscription.
 fn answer(state: &StubState, behavior: StubBehavior, request: &Json, subscribed: &AtomicBool) -> Option<Json> {
@@ -371,9 +500,18 @@ fn answer(state: &StubState, behavior: StubBehavior, request: &Json, subscribed:
         .lock()
         .unwrap()
         .insert(method.clone(), request.clone());
+    if !matches!(method.as_str(), "server.version" | "server.ping") {
+        state
+            .request_log
+            .lock()
+            .unwrap()
+            .push((method.clone(), request["params"].clone()));
+    }
     let id = request["id"].clone();
     let result = |result: Json| Some(json!({"jsonrpc": "2.0", "id": id, "result": result}));
     let error = |message: &str| Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -1, "message": message}}));
+    let error_object = |error: Json| Some(json!({"jsonrpc": "2.0", "id": id, "error": error}));
+    let rule = find_param_rule(state, &method, &request["params"]);
     match (behavior, method.as_str()) {
         (StubBehavior::Silent, _) | (StubBehavior::Down, _) => None,
         (StubBehavior::BadVersion, "server.version") => error("unsupported protocol version"),
@@ -387,6 +525,20 @@ fn answer(state: &StubState, behavior: StubBehavior, request: &Json, subscribed:
         _ if state.errors.lock().unwrap().contains_key(&method) => {
             let message = state.errors.lock().unwrap().get(&method).cloned().unwrap_or_default();
             error(&message)
+        },
+        _ if state.error_objects.lock().unwrap().contains_key(&method) => {
+            let object = state
+                .error_objects
+                .lock()
+                .unwrap()
+                .get(&method)
+                .cloned()
+                .unwrap_or_default();
+            error_object(object)
+        },
+        _ if rule.is_some() => match rule.unwrap_or(Ok(Json::Null)) {
+            Ok(canned) => result(canned),
+            Err(object) => error_object(object),
         },
         (_, "blockchain.block.header")
             if request["params"][0].as_u64().map_or(false, |height| {
@@ -522,5 +674,119 @@ async fn serve_connection(
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::block_on;
+
+    /// Sends `requests` (one line each) over one connection and returns the answers in the order they arrive.
+    async fn ask(server: &StubServer, requests: &[Json]) -> Vec<Json> {
+        let stream = TcpStream::connect(server.addr()).await.expect("connect to the stub");
+        let (read, mut write) = tokio::io::split(stream);
+        let mut lines = BufReader::new(read).lines();
+        let mut answers = Vec::new();
+        for request in requests {
+            write
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .expect("write a request");
+            let line = lines.next_line().await.expect("read an answer").expect("an answer");
+            answers.push(serde_json::from_str(&line).expect("an answer is JSON"));
+        }
+        answers
+    }
+
+    fn call(id: u64, method: &str, params: Json) -> Json {
+        json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+    }
+
+    #[test]
+    fn params_results_match_exactly_or_by_prefix_and_the_exact_rule_wins() {
+        block_on(async {
+            let server = StubServer::start(StubBehavior::Answer).await;
+            server.set_result("m", json!("plain"));
+            server.set_params_prefix_result("m", json!(["a"]), json!("prefix"));
+            server.set_params_result("m", json!(["a", "b"]), json!("exact"));
+            let answers = ask(&server, &[
+                call(1, "m", json!(["a", "b"])),
+                call(2, "m", json!(["a", "c"])),
+                call(3, "m", json!(["z"])),
+                call(4, "m", json!(["a", "b", "c"])),
+            ])
+            .await;
+            let results: Vec<_> = answers.iter().map(|a| a["result"].clone()).collect();
+            assert_eq!(results, [
+                json!("exact"),
+                json!("prefix"),
+                json!("plain"),
+                json!("prefix")
+            ]);
+            // A later rule for the same parameters replaces the earlier one.
+            server.set_params_result("m", json!(["a", "b"]), json!("replaced"));
+            let answers = ask(&server, &[call(5, "m", json!(["a", "b"]))]).await;
+            assert_eq!(answers[0]["result"], json!("replaced"));
+        });
+    }
+
+    #[test]
+    fn params_errors_and_error_objects_answer_the_exact_error_and_clear_error_undoes_them() {
+        block_on(async {
+            let server = StubServer::start(StubBehavior::Answer).await;
+            server.set_result("m", json!("plain"));
+            server.set_params_result("m", json!(["a"]), json!("result"));
+            server.set_params_error("m", json!(["a"]), json!({"code": 7, "message": "only this one"}));
+            server.set_error_object("n", json!({"code": 1, "message": "history too large"}));
+            server.set_unknown_method_error("u");
+            let answers = ask(&server, &[
+                call(1, "m", json!(["a"])),
+                call(2, "m", json!(["b"])),
+                call(3, "n", json!([])),
+                call(4, "u", json!([])),
+            ])
+            .await;
+            assert_eq!(answers[0]["error"], json!({"code": 7, "message": "only this one"}));
+            assert_eq!(answers[1]["result"], json!("plain"));
+            assert_eq!(answers[2]["error"], json!({"code": 1, "message": "history too large"}));
+            assert_eq!(
+                answers[3]["error"],
+                json!({"code": -32601, "message": "unknown method"})
+            );
+
+            server.clear_error("n");
+            server.clear_error("u");
+            server.clear_params_rules("m");
+            let answers = ask(&server, &[
+                call(5, "n", json!([])),
+                call(6, "u", json!([])),
+                call(7, "m", json!(["a"])),
+            ])
+            .await;
+            assert_eq!(answers[0]["result"], Json::Null);
+            assert_eq!(answers[1]["result"], Json::Null);
+            assert_eq!(answers[2]["result"], json!("plain"));
+        });
+    }
+
+    #[test]
+    fn the_request_log_keeps_the_order_and_the_params_of_ordinary_requests_only() {
+        block_on(async {
+            let server = StubServer::start(StubBehavior::Answer).await;
+            let _ = ask(&server, &[
+                call(1, "server.version", json!(["x", "1.4"])),
+                call(2, "a", json!([1])),
+                call(3, "server.ping", json!([])),
+                call(4, "b", json!([2])),
+                call(5, "a", json!([3])),
+            ])
+            .await;
+            assert_eq!(server.request_methods_in_order(), ["a", "b", "a"]);
+            assert_eq!(server.request_params("a"), [json!([1]), json!([3])]);
+            assert_eq!(server.request_params("b"), [json!([2])]);
+            assert!(server.request_params("server.ping").is_empty());
+            assert_eq!(server.request_log().len(), 3);
+        });
     }
 }

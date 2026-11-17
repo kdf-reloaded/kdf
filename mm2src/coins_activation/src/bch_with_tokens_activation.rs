@@ -15,6 +15,7 @@ use common::executor::spawn;
 use common::log::info;
 use common::mm_number::BigDecimal;
 use common::Future01CompatExt;
+use crypto::CryptoCtx;
 use futures::future::{abortable, AbortHandle};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
@@ -282,6 +283,27 @@ impl From<PrivKeyNotAllowed> for BchWithTokensActivationError {
     fn from(e: PrivKeyNotAllowed) -> Self { BchWithTokensActivationError::PrivKeyNotAllowed(e.to_string()) }
 }
 
+/// The single key the BCH platform runs on, and with it its SLP tokens.
+///
+/// `IguanaPrivKey` selects the daemon's internal key, `CryptoCtx::mm2_internal_privkey_secret()`: under a global-HD
+/// login that is the node key, as the UTXO task route takes it. Every other value keeps the key the framework
+/// passes, the passphrase-hash key, which equals the internal key under an iguana login (CRD ch.05 R46 item 3,
+/// status note of 2026-11-17).
+fn platform_priv_key(
+    ctx: &MmArc,
+    policy: PrivKeyActivationPolicy,
+    passed: &[u8],
+) -> Result<Vec<u8>, MmError<BchWithTokensActivationError>> {
+    match policy {
+        PrivKeyActivationPolicy::IguanaPrivKey => {
+            let crypto_ctx =
+                CryptoCtx::from_ctx(ctx).mm_err(|e| BchWithTokensActivationError::Internal(e.to_string()))?;
+            Ok(crypto_ctx.mm2_internal_privkey_slice().to_vec())
+        },
+        PrivKeyActivationPolicy::ContextPrivKey | PrivKeyActivationPolicy::Trezor => Ok(passed.to_vec()),
+    }
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl PlatformWithTokensActivationOps for BchCoin {
@@ -290,8 +312,9 @@ impl PlatformWithTokensActivationOps for BchCoin {
     type ActivationResult = BchWithTokensActivationResult;
     type ActivationError = BchWithTokensActivationError;
 
-    /// `priv_key_policy` is read only to reject a hardware wallet: the platform is always built with the
-    /// wallet context's key policy, and only the task methods accept a device (CRD ch.55 R55.9.2, R55.9.4).
+    /// `priv_key_policy` rejects a hardware wallet here (only the task methods accept a device, CRD ch.55 R55.9.2,
+    /// R55.9.4) and, as `IguanaPrivKey`, selects the daemon's internal key for the platform (see
+    /// `platform_priv_key`).
     fn check_one_shot_request(request: &Self::ActivationRequest) -> Result<(), MmError<Self::ActivationError>> {
         if matches!(
             request.platform_request.utxo_params.priv_key_policy,
@@ -323,13 +346,15 @@ impl PlatformWithTokensActivationOps for BchCoin {
             }
         })?;
 
+        let policy = activation_request.platform_request.utxo_params.priv_key_policy;
+        let key = platform_priv_key(&ctx, policy, priv_key)?;
         let platform_coin = bch_coin_from_conf_and_params(
             &ctx,
             &ticker,
             &platform_conf,
             activation_request.platform_request,
             slp_prefix,
-            priv_key,
+            &key,
         )
         .await
         .map_to_mm(|error| BchWithTokensActivationError::PlatformCoinCreationError { ticker, error })?;
@@ -502,6 +527,38 @@ mod tests {
             <BchCoin as PlatformWithTokensActivationOps>::requested_token_tickers(&request),
             ["ASLP", "BSLP"]
         );
+    }
+
+    const MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    /// CRD ch.05 R46 item 3, status note of 2026-11-17: under an HD login `IguanaPrivKey` runs the platform (and with
+    /// it its SLP tokens) on the internal key; an absent value or `ContextPrivKey` keeps the passed
+    /// passphrase-hash key; under an iguana login nothing changes.
+    #[test]
+    fn the_platform_key_follows_the_policy_under_an_hd_login() {
+        let hd = MmCtxBuilder::new()
+            .with_conf(json!({ "enable_hd": true }))
+            .into_mm_arc();
+        CryptoCtx::init_with_global_hd_account(hd.clone(), MNEMONIC).unwrap();
+        let internal = CryptoCtx::from_ctx(&hd).unwrap().mm2_internal_privkey_secret();
+        let passed = hd.legacy_passphrase_key_pair().private().secret;
+        assert_ne!(internal, passed);
+
+        let key = |policy| platform_priv_key(&hd, policy, &*passed).unwrap_or_else(|_| panic!("no key"));
+        assert_eq!(key(PrivKeyActivationPolicy::IguanaPrivKey), internal.as_slice());
+        assert_eq!(key(PrivKeyActivationPolicy::ContextPrivKey), passed.as_slice());
+
+        let iguana = MmCtxBuilder::new().into_mm_arc();
+        CryptoCtx::init_with_iguana_passphrase(iguana.clone(), MNEMONIC).unwrap();
+        let same = iguana.legacy_passphrase_key_pair().private().secret;
+        for policy in [
+            PrivKeyActivationPolicy::IguanaPrivKey,
+            PrivKeyActivationPolicy::ContextPrivKey,
+        ] {
+            let key = platform_priv_key(&iguana, policy, &*same).unwrap_or_else(|_| panic!("no key"));
+            assert_eq!(key, same.as_slice());
+        }
     }
 
     #[test]

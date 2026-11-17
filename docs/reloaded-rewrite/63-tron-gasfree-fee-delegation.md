@@ -965,6 +965,15 @@ R23. **Header-bearing JSON POST.** The cross-platform
     exposes, with lower-cased names. *(Reference fact; the chapter 26 transport table is to be
     extended accordingly.)*
 
+    *Status note (2026-11-17).* A bounded accessor of this kind now exists
+    (`mm2_net::transport::slurp_post_json_with_headers_bounded`, see
+    [Chapter 26](26-cross-platform-and-wasm.md) §26.8). It sets
+    `Content-Type: application/json` so that the caller cannot override it,
+    does not follow redirects and never renders a header value. It does not
+    yet return the response headers on the browser target (the map is empty
+    there), so R23's browser sentence stays open until the GasFree rail
+    needs it.
+
 R24. **No silent substitution without consent (Reloaded-original).**
     A rail switch -- native to gasless under `auto`, or gasless to
     native under `fallback_to_native` -- MUST be visible in the

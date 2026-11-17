@@ -311,6 +311,20 @@ expose a dual transport substrate organised as:
 > the table above; the row is to be extended when that rail is
 > scheduled. The requirement passed the KDF Dirty Gate with chapter 63
 > on 2026-11-08.
+>
+> *Status note (2026-11-17).* A bounded POST-JSON accessor that carries
+> caller-supplied request headers now exists:
+> `mm2_net::transport::slurp_post_json_with_headers_bounded(url, body,
+> headers, timeout_s)`, with the same signature on both targets. The whole
+> exchange is bounded by `timeout_s` (native: the exchange's own bound ends
+> the spawned request; browser: the executor's timer ends the wait, the
+> browser's request is not aborted). A redirect is not followed, so the
+> headers never go to another host. `Content-Type: application/json` is
+> always set. Header values are never logged and never put into an error
+> text. The browser build returns an empty header map (the existing browser
+> accessors do the same) and has no browser test. The first user is the Tron
+> node client ([Chapter 21](21-tron-integration.md) R-N3, R-N9). The
+> table above is not changed.
 
 Consumers above the transport layer write one
 code path. The native WebSocket

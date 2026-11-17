@@ -173,7 +173,7 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
         // Any failure is reported through the legacy error envelope.
         CoinProtocol::SIA => {
             let request = try_s!(siacoin::SiaCoinActivationRequest::from_legacy_req(req));
-            let priv_key_policy = try_s!(PrivKeyBuildPolicy::detect_priv_key_policy(ctx));
+            let priv_key_policy = try_s!(PrivKeyBuildPolicy::from_activation_policy(ctx, request.priv_key_policy));
             try_s!(siacoin::SiaCoin::new(ctx, coins_en.clone(), &request, priv_key_policy).await).into()
         },
         CoinProtocol::TENDERMINT { .. } => {
@@ -671,6 +671,13 @@ pub async fn my_tx_history(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
         Ok(None) => return ERR!("No such coin: {}", request.coin),
         Err(err) => return ERR!("!lp_coinfind({}): {}", request.coin, err),
     };
+    // A Solana coin or SPL token has no history yet (CRD ch.40 R40.6B.15, D40.6B.1): a structured error naming the coin.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if matches!(coin, MmCoinEnum::SolanaCoin(_) | MmCoinEnum::SplToken(_)) {
+            return ERR!("my_tx_history is not supported for {}", request.coin);
+        }
+    }
 
     let history = try_s!(coin.load_history_from_file(&ctx).compat().await);
     let total_records = history.len();

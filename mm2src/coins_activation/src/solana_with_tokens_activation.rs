@@ -387,6 +387,9 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         _storage: impl TxHistoryStorage + 'static,
         _initial_balance: BigDecimal,
     ) -> AbortHandle {
-        todo!()
+        // Solana has no transaction history yet (CRD ch.40 R40.6B.15) and `tx_history()` is `false`, so this is not
+        // reached. Should that change, no task starts: the handle belongs to nothing and aborting it does nothing.
+        let (abort_handle, _abort_registration) = AbortHandle::new_pair();
+        abort_handle
     }
 }

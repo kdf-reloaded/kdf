@@ -121,6 +121,8 @@ const RPC_WIRE_DUMP_SECRET_KEY_MARKERS: &[&str] = &[
     "secret",
     "password",
     "api_key",
+    "api-key",
+    "authorization",
     "token",
 ];
 
@@ -135,9 +137,11 @@ fn rpc_wire_dump_secrets_enabled() -> bool {
 #[cfg(feature = "unsafe-rpc-wire-dump")]
 fn rpc_wire_dump_key_is_sensitive(key: &str) -> bool {
     let lowered = key.to_ascii_lowercase();
-    RPC_WIRE_DUMP_SECRET_KEY_MARKERS
-        .iter()
-        .any(|marker| lowered == *marker || lowered.contains(marker))
+    // A `headers` member (request headers of a node entry) is redacted as a whole, whatever its content.
+    lowered == "headers"
+        || RPC_WIRE_DUMP_SECRET_KEY_MARKERS
+            .iter()
+            .any(|marker| lowered == *marker || lowered.contains(marker))
 }
 
 #[cfg(feature = "unsafe-rpc-wire-dump")]
@@ -579,6 +583,25 @@ mod wire_dump_tests {
         assert_eq!(payload["params"]["passphrase"], RPC_WIRE_DUMP_REDACTED_VALUE);
         assert_eq!(payload["params"]["nested"]["private_key"], RPC_WIRE_DUMP_REDACTED_VALUE);
         assert_eq!(payload["params"]["safe"], "ok");
+    }
+
+    /// Request headers of a TRON node entry and API-key header names are redacted (CRD ch.35 R35.1.17 scope note).
+    #[test]
+    fn redacted_dump_hides_node_headers_and_api_key_members() {
+        let payload = br#"{"method":"enable","coin":"TRX","x-api-key":"k4","urls":[
+            "https://plain.example",
+            {"url":"https://node.example","headers":{"TRON-PRO-API-KEY":"k1","X-API-Key":"k2","Authorization":"Bearer k3"}},
+            {"url":"https://node2.example","Headers":{"X-Custom":"k5"}}]}"#;
+        let dumped = format_rpc_wire_dump_payload(payload, false);
+        for probe in ["k1", "k2", "k3", "k4", "k5"] {
+            assert!(!dumped.contains(probe), "a redacted value is in the dump");
+        }
+        let parsed: Json = json::from_str(&dumped).expect("expected valid JSON");
+        assert_eq!(parsed["coin"], "TRX");
+        assert_eq!(parsed["x-api-key"], RPC_WIRE_DUMP_REDACTED_VALUE);
+        assert_eq!(parsed["urls"][1]["headers"], RPC_WIRE_DUMP_REDACTED_VALUE);
+        assert_eq!(parsed["urls"][2]["Headers"], RPC_WIRE_DUMP_REDACTED_VALUE);
+        assert_eq!(parsed["urls"][1]["url"], "https://node.example");
     }
 
     #[test]

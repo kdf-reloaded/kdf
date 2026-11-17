@@ -2,12 +2,13 @@ use super::{CoinBalance, HistorySyncState, MarketCoinOps, MmCoin, SwapOps, Trade
 use crate::solana::rpc_client::TokenAccountsFilter;
 use crate::solana::rpc_pool::SolanaRpcPool;
 use crate::solana::solana_common::{ui_amount_to_amount, PrepareTransferData, SufficientBalanceError};
-use crate::solana::{solana_common, AccountError, SolanaCommonOps, SolanaFeeDetails};
-use crate::{BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend, NegotiateSwapContractAddrErr, RawTransactionFut,
-            RawTransactionRequest, SignatureResult, SolanaCoin, TradePreimageFut, TradePreimageResult,
-            TradePreimageValue, TransactionDetails, TransactionFut, TransactionType, UnexpectedDerivationMethod,
-            ValidateAddressResult, ValidateFeeArgs, ValidatePaymentInput, VerificationResult, WithdrawError,
-            WithdrawFut, WithdrawRequest, WithdrawResult};
+use crate::solana::{solana_common, swaps_unsupported, AccountError, SolanaCoinSettings, SolanaCommonOps,
+                    SolanaFeeDetails};
+use crate::{BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend, NegotiateSwapContractAddrErr, RawTransactionError,
+            RawTransactionFut, RawTransactionRequest, SignatureResult, SolanaCoin, TradePreimageError,
+            TradePreimageFut, TradePreimageResult, TradePreimageValue, TransactionDetails, TransactionErr,
+            TransactionFut, TransactionType, UnexpectedDerivationMethod, ValidateAddressResult, ValidateFeeArgs,
+            ValidatePaymentInput, VerificationResult, WithdrawError, WithdrawFut, WithdrawRequest, WithdrawResult};
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use bincode::serialize;
@@ -40,6 +41,8 @@ pub struct SplTokenConf {
     /// The token program that owns the mint (SPL Token or Token-2022). Stored only; the token's account, balance
     /// and transfer computations do not use it yet.
     pub program_id: Pubkey,
+    /// The confirmation settings of this token (`set_required_confirmations`, `set_requires_notarization`).
+    pub settings: SolanaCoinSettings,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +84,7 @@ impl SplToken {
             ticker,
             token_contract_address,
             program_id,
+            settings: SolanaCoinSettings::default(),
         });
         SplToken { conf, platform_coin }
     }
@@ -224,9 +228,13 @@ impl MarketCoinOps for SplToken {
 
     fn my_address(&self) -> Result<String, String> { Ok(self.platform_coin.my_address.clone()) }
 
-    fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> { unimplemented!() }
+    /// The platform's public key (the address); a token has no key of its own.
+    fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> {
+        self.platform_coin.get_public_key()
+    }
 
-    fn sign_message_hash(&self, _message: &str) -> Option<[u8; 32]> { unimplemented!() }
+    /// No prefix and no pre-hash exist (see the platform coin).
+    fn sign_message_hash(&self, _message: &str) -> Option<[u8; 32]> { None }
 
     fn sign_message(&self, message: &str) -> SignatureResult<String> {
         solana_common::sign_message(&self.platform_coin, message)
@@ -263,7 +271,7 @@ impl MarketCoinOps for SplToken {
         _wait_until: u64,
         _check_every: u64,
     ) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        unimplemented!()
+        Box::new(futures01::future::err(swaps_unsupported(&self.conf.ticker)))
     }
 
     fn wait_for_tx_spend(
@@ -273,24 +281,39 @@ impl MarketCoinOps for SplToken {
         _from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        unimplemented!()
+        Box::new(futures01::future::err(TransactionErr::Plain(swaps_unsupported(
+            &self.conf.ticker,
+        ))))
     }
 
-    fn tx_enum_from_bytes(&self, _bytes: &[u8]) -> Result<TransactionEnum, String> { unimplemented!() }
+    fn tx_enum_from_bytes(&self, _bytes: &[u8]) -> Result<TransactionEnum, String> {
+        Err(format!(
+            "Transaction decoding is not supported for {}",
+            self.conf.ticker
+        ))
+    }
 
     fn current_block(&self) -> Box<dyn Future<Item = u64, Error = String> + Send> { self.platform_coin.current_block() }
 
     fn display_priv_key(&self) -> Result<String, String> { self.platform_coin.display_priv_key() }
 
-    fn min_tx_amount(&self) -> BigDecimal { BigDecimal::from(0) }
+    /// One smallest unit of the token, 10^-decimals (CRD ch.40 D40.6B.1, maintainer decision).
+    fn min_tx_amount(&self) -> BigDecimal { solana_common::smallest_unit(self.conf.decimals) }
 
     fn min_trading_vol(&self) -> MmNumber { MmNumber::from("0.00777") }
 }
 
+// Swaps are not supported for Solana coins; every operation answers an error. Orders and trade previews are also
+// refused earlier (`untradable_coin_ticker`, CRD ch.60 R60.6.5). A swap that was imported from outside reaches these
+// methods, so none of them may abort (CRD ch.40 R40.6B.14).
 #[allow(forgetting_references, forgetting_copy_types, invalid_reference_casting)]
 #[async_trait]
 impl SwapOps for SplToken {
-    fn send_taker_fee(&self, _dex_fee: &DexFee, _fee_addr: &[u8], _uuid: &[u8]) -> TransactionFut { unimplemented!() }
+    fn send_taker_fee(&self, _dex_fee: &DexFee, _fee_addr: &[u8], _uuid: &[u8]) -> TransactionFut {
+        Box::new(futures01::future::err(TransactionErr::Plain(swaps_unsupported(
+            &self.conf.ticker,
+        ))))
+    }
 
     fn send_maker_payment(
         &self,
@@ -301,7 +324,9 @@ impl SwapOps for SplToken {
         amount: BigDecimal,
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        unimplemented!()
+        Box::new(futures01::future::err(TransactionErr::Plain(swaps_unsupported(
+            &self.conf.ticker,
+        ))))
     }
 
     fn send_taker_payment(
@@ -313,7 +338,9 @@ impl SwapOps for SplToken {
         amount: BigDecimal,
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        unimplemented!()
+        Box::new(futures01::future::err(TransactionErr::Plain(swaps_unsupported(
+            &self.conf.ticker,
+        ))))
     }
 
     fn send_maker_spends_taker_payment(
@@ -325,7 +352,9 @@ impl SwapOps for SplToken {
         htlc_privkey: &[u8],
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        unimplemented!()
+        Box::new(futures01::future::err(TransactionErr::Plain(swaps_unsupported(
+            &self.conf.ticker,
+        ))))
     }
 
     fn send_taker_spends_maker_payment(
@@ -337,7 +366,9 @@ impl SwapOps for SplToken {
         htlc_privkey: &[u8],
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        unimplemented!()
+        Box::new(futures01::future::err(TransactionErr::Plain(swaps_unsupported(
+            &self.conf.ticker,
+        ))))
     }
 
     fn send_taker_refunds_payment(
@@ -349,7 +380,9 @@ impl SwapOps for SplToken {
         htlc_privkey: &[u8],
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        unimplemented!()
+        Box::new(futures01::future::err(TransactionErr::Plain(swaps_unsupported(
+            &self.conf.ticker,
+        ))))
     }
 
     fn send_maker_refunds_payment(
@@ -361,19 +394,21 @@ impl SwapOps for SplToken {
         htlc_privkey: &[u8],
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        todo!()
+        Box::new(futures01::future::err(TransactionErr::Plain(swaps_unsupported(
+            &self.conf.ticker,
+        ))))
     }
 
     fn validate_fee(&self, _args: ValidateFeeArgs<'_>) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        unimplemented!()
+        Box::new(futures01::future::err(swaps_unsupported(&self.conf.ticker)))
     }
 
     fn validate_maker_payment(&self, input: ValidatePaymentInput) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        unimplemented!()
+        Box::new(futures01::future::err(swaps_unsupported(&self.conf.ticker)))
     }
 
     fn validate_taker_payment(&self, input: ValidatePaymentInput) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        unimplemented!()
+        Box::new(futures01::future::err(swaps_unsupported(&self.conf.ticker)))
     }
 
     fn check_if_my_payment_sent(
@@ -385,7 +420,7 @@ impl SwapOps for SplToken {
         search_from_block: u64,
         swap_contract_address: &Option<BytesJson>,
     ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send> {
-        unimplemented!()
+        Box::new(futures01::future::err(swaps_unsupported(&self.conf.ticker)))
     }
 
     async fn search_for_swap_tx_spend_my(
@@ -398,7 +433,7 @@ impl SwapOps for SplToken {
         _search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String> {
-        unimplemented!()
+        Err(swaps_unsupported(&self.conf.ticker))
     }
 
     async fn search_for_swap_tx_spend_other(
@@ -411,19 +446,23 @@ impl SwapOps for SplToken {
         _search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String> {
-        unimplemented!()
+        Err(swaps_unsupported(&self.conf.ticker))
     }
 
-    fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> { unimplemented!() }
+    fn extract_secret(&self, _secret_hash: &[u8], _spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+        Err(format!("Secret extraction is not supported for {}", self.conf.ticker))
+    }
 
     fn negotiate_swap_contract_addr(
         &self,
         _other_side_address: Option<&[u8]>,
     ) -> Result<Option<BytesJson>, MmError<NegotiateSwapContractAddrErr>> {
-        unimplemented!()
+        MmError::err(NegotiateSwapContractAddrErr::NoSwapContract)
     }
 
-    fn get_htlc_key_pair(&self) -> Option<KeyPair> { todo!() }
+    /// `None` is safe only because every send, spend, refund and validate method of this impl answers an error, so no
+    /// funds can move with a fallback key.
+    fn get_htlc_key_pair(&self) -> Option<KeyPair> { None }
 }
 
 #[async_trait]
@@ -438,48 +477,77 @@ impl MmCoin for SplToken {
         Box::new(Box::pin(withdraw_impl(self.clone(), req)).compat())
     }
 
-    fn get_raw_transaction(&self, _req: RawTransactionRequest) -> RawTransactionFut { unimplemented!() }
+    fn get_raw_transaction(&self, _req: RawTransactionRequest) -> RawTransactionFut {
+        let coin = self.conf.ticker.to_string();
+        Box::new(futures01::future::err(MmError::new(
+            RawTransactionError::NotImplemented { coin },
+        )))
+    }
 
     fn decimals(&self) -> u8 { self.conf.decimals }
 
-    fn convert_to_address(&self, _from: &str, _to_address_format: Json) -> Result<String, String> { unimplemented!() }
+    fn convert_to_address(&self, _from: &str, _to_address_format: Json) -> Result<String, String> {
+        Err(format!("convertaddress is not supported for {}", self.conf.ticker))
+    }
 
     fn validate_address(&self, address: &str) -> ValidateAddressResult { self.platform_coin.validate_address(address) }
 
-    fn process_history_loop(&self, _ctx: MmArc) -> Box<dyn Future<Item = (), Error = ()> + Send> { unimplemented!() }
+    /// Solana has no transaction history yet (CRD ch.40 R40.6B.15): the loop has nothing to do and ends at once, so
+    /// a background start can never abort the process.
+    fn process_history_loop(&self, _ctx: MmArc) -> Box<dyn Future<Item = (), Error = ()> + Send> {
+        Box::new(futures01::future::ok(()))
+    }
 
-    fn history_sync_status(&self) -> HistorySyncState { unimplemented!() }
+    /// There is no history to sync, so the state is the neutral `NotEnabled`.
+    fn history_sync_status(&self) -> HistorySyncState { HistorySyncState::NotEnabled }
 
     /// Get fee to be paid per 1 swap transaction
-    fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send> { unimplemented!() }
+    fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send> {
+        let error = format!("get_trade_fee is not supported for {}", self.conf.ticker);
+        Box::new(futures01::future::err(error))
+    }
 
     async fn get_sender_trade_fee(
         &self,
         _value: TradePreimageValue,
         _stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
-        unimplemented!()
+        Err(MmError::new(TradePreimageError::InternalError(format!(
+            "Trade fees are not supported for {}",
+            self.conf.ticker
+        ))))
     }
 
-    fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> { unimplemented!() }
+    fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {
+        let error = TradePreimageError::InternalError(format!("Trade fees are not supported for {}", self.conf.ticker));
+        Box::new(futures01::future::err(MmError::new(error)))
+    }
 
     async fn get_fee_to_send_taker_fee(
         &self,
         _dex_fee_amount: BigDecimal,
         _stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
-        unimplemented!()
+        Err(MmError::new(TradePreimageError::InternalError(format!(
+            "Trade fees are not supported for {}",
+            self.conf.ticker
+        ))))
     }
 
-    fn required_confirmations(&self) -> u64 { 1 }
+    fn required_confirmations(&self) -> u64 { self.conf.settings.required_confirmations() }
 
-    fn requires_notarization(&self) -> bool { false }
+    fn requires_notarization(&self) -> bool { self.conf.settings.requires_notarization() }
 
-    fn set_required_confirmations(&self, _confirmations: u64) { unimplemented!() }
+    fn set_required_confirmations(&self, confirmations: u64) {
+        self.conf.settings.set_required_confirmations(confirmations)
+    }
 
-    fn set_requires_notarization(&self, _requires_nota: bool) { unimplemented!() }
+    fn set_requires_notarization(&self, requires_nota: bool) {
+        self.conf.settings.set_requires_notarization(requires_nota)
+    }
 
-    fn swap_contract_address(&self) -> Option<BytesJson> { unimplemented!() }
+    /// No swap contract exists: Solana swaps are not supported.
+    fn swap_contract_address(&self) -> Option<BytesJson> { None }
 
     fn mature_confirmations(&self) -> Option<u32> { Some(1) }
 

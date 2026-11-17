@@ -107,13 +107,13 @@ pub(crate) async fn trc20_balance_units(
     let param_hex = hex::encode(parameter);
 
     let resp = api
-        .trigger_constant_contract(owner, contract, "balanceOf(address)", &param_hex)
+        .trigger_constant_read(owner, contract, "balanceOf(address)", &param_hex)
         .await
         .map_err(TronBalanceError::Node)?;
 
     let raw = resp
         .constant_result
-        .and_then(|mut results| results.pop())
+        .and_then(|results| results.into_iter().next())
         .ok_or(TronBalanceError::NoResult)?;
     let bytes = hex::decode(raw).map_err(|e| TronBalanceError::BadHex(e.to_string()))?;
     if bytes.len() != 32 {
