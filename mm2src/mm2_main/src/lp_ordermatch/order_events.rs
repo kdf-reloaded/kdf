@@ -44,7 +44,7 @@ impl EventStreamer for OrderStatusStreamer {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::super::ordermatch_types::{MakerReserved, MatchBy, TakerAction, TakerConnect, TakerRequest};
     use super::*;

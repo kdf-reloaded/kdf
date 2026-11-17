@@ -11,7 +11,8 @@ use rpc::v1::types::H160 as H160Json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as StdError;
 
-#[cfg(test)] mod account_storage_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod account_storage_tests;
 // On the browser target the suite is meant to exercise the IndexedDB backend
 // via `wasm-bindgen-test`. That backend is still a stub (D2), so wiring the
 // tests into `wasm32` is postponed until the real port lands; for now they are

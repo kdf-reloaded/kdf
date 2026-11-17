@@ -377,6 +377,13 @@ the previous version used. The safe way:
   updated to the matching release and the runner name in `.cargo/config.toml` is the standard one. This also
   updates `wasm-bindgen-futures`, which the browser build uses at run time, to 0.4.67. No CI job runs the
   browser tests yet. Detail: PR #373.
+- **The browser tests of `mm2_main` now compile.** `wasm-pack test --firefox --headless mm2src/mm2_main`
+  stopped at 52 compile errors, because test code that only works natively (tests written for the `tokio`
+  runtime, tests that create random identifiers with a function the browser build does not have, and
+  tests that use a native-only database helper) was also built for the browser. That test code is now left
+  out of the browser test build, as is the same kind of test code in `mm2_gui_storage`; only test code
+  changed. The run finds 12 tests: one fails without the `BOB_PASSPHRASE` test setup it asks for, one (`test_qrc20_tx_history`, which starts a node on network id 9998) hangs and is skipped, and the other ten, the storage tests of orders and swaps, all pass; the list by name is in `docs/DEV_ENVIRONMENT.md`. No CI job runs the browser tests yet.
+  Detail: PR #403.
 - **The browser tests of `coins` now compile.** `wasm-pack test --firefox --headless mm2src/coins` stopped at
   compile errors, because some test code that only works natively (tests written for the `tokio` runtime and the BCH
   tests that use the SQLite history storage) was also built for the browser, and a test helper

@@ -213,7 +213,7 @@ pub async fn unban_pubkeys_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>
     legacy_result(unban_pubkeys_core(ctx, UnbanPubkeysRequest { unban_by }).await)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::super::maker_swap::MakerSwapEvent;
     use super::*;
