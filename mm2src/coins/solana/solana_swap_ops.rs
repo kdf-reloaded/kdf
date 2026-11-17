@@ -2,6 +2,8 @@
 
 use super::*;
 
+// Every method of this impl is swap-only. No swap exists for this coin: an order or a swap naming it is refused first
+// (`untradable_coin_ticker`, CRD ch.60 R60.6.5), so none of the unimplemented methods below is reached.
 #[allow(forgetting_references, forgetting_copy_types, invalid_reference_casting)]
 #[async_trait]
 impl SwapOps for SolanaCoin {
@@ -129,7 +131,9 @@ impl SwapOps for SolanaCoin {
         unimplemented!()
     }
 
-    fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> { unimplemented!() }
+    fn extract_secret(&self, _secret_hash: &[u8], _spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+        Err(format!("Secret extraction is not supported for {}", self.ticker))
+    }
 
     fn negotiate_swap_contract_addr(
         &self,

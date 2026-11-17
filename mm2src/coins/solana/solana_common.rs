@@ -1,7 +1,7 @@
 use crate::solana::SolanaCommonOps;
 use crate::{BalanceError, MarketCoinOps, NumConversError, SignatureError, SignatureResult, SolanaCoin,
-            UnexpectedDerivationMethod, VerificationError, VerificationResult, WithdrawError};
-use base58::FromBase58;
+            UnexpectedDerivationMethod, ValidateAddressResult, VerificationError, VerificationResult, WithdrawError};
+use base58::{FromBase58, ToBase58};
 use bigdecimal::ToPrimitive;
 use common::mm_number::BigDecimal;
 use derive_more::Display;
@@ -111,6 +111,40 @@ pub fn ui_amount_to_amount(ui_amount: BigDecimal, decimals: u8) -> Result<u64, M
 pub fn amount_to_ui_amount(amount: u64, decimals: u8) -> BigDecimal {
     BigDecimal::from(amount) / BigDecimal::from(10_u64.pow(decimals as u32))
 }
+
+/// The length in bytes of a Solana public key, and so of an address once base58-decoded.
+const SOLANA_PUBKEY_LEN: usize = 32;
+
+/// `validateaddress` (CRD ch.40 §40.6B.5, D40.6B.1 option (b)): valid iff the text is base58 that decodes to exactly
+/// 32 bytes. The text is not required to be 44 characters or to lie on the curve: a 32-byte key encodes to 32..=44
+/// characters, and a program-derived address is off the curve by construction. An invalid answer carries a reason.
+pub fn validate_address(address: &str) -> ValidateAddressResult {
+    match address.from_base58() {
+        Ok(bytes) if bytes.len() == SOLANA_PUBKEY_LEN => ValidateAddressResult {
+            is_valid: true,
+            reason: None,
+        },
+        Ok(bytes) => ValidateAddressResult {
+            is_valid: false,
+            reason: Some(format!(
+                "The address decodes to {} bytes, expected {}",
+                bytes.len(),
+                SOLANA_PUBKEY_LEN
+            )),
+        },
+        Err(_) => ValidateAddressResult {
+            is_valid: false,
+            reason: Some("The address is not valid base58".to_string()),
+        },
+    }
+}
+
+/// One smallest unit of a coin with `decimals` decimals, 10^-decimals. Built from the exponent, so any `u8` is safe.
+pub fn smallest_unit(decimals: u8) -> BigDecimal { BigDecimal::new(1.into(), i64::from(decimals)) }
+
+/// The 64-byte keypair of the coin (32-byte secret, then the 32-byte public key) in base58, the form common Solana
+/// wallets import (CRD ch.40 D40.6B.1 option (b), `show_priv_key`).
+pub fn keypair_base58(coin: &SolanaCoin) -> String { coin.key_pair.to_bytes()[..].to_base58() }
 
 pub fn sign_message(coin: &SolanaCoin, message: &str) -> SignatureResult<String> {
     let signature = coin

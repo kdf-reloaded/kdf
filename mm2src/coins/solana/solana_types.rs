@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::solana::rpc_pool::SolanaRpcPool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
 pub const SOLANA_DEFAULT_DECIMALS: u64 = 9;
 pub const LAMPORTS_DUMMY_AMOUNT: u64 = 10;
@@ -263,6 +264,7 @@ pub async fn solana_coin_from_conf_and_params(
         client,
         decimals,
         spl_tokens_infos,
+        settings: SolanaCoinSettings::default(),
     }));
     Ok(solana_coin)
 }
@@ -275,6 +277,41 @@ pub struct SolanaCoinImpl {
     pub(crate) decimals: u8,
     pub(crate) my_address: String,
     pub(crate) spl_tokens_infos: Arc<Mutex<HashMap<String, SplTokenInfo>>>,
+    pub(crate) settings: SolanaCoinSettings,
+}
+
+/// The per-coin confirmation settings that `set_required_confirmations` and `set_requires_notarization` store and
+/// `required_confirmations` and `requires_notarization` read back (CRD ch.40 §40.6B.5, D40.6B.1 option (b)). No
+/// Solana code path waits on them; they exist so that the two RPCs answer and report what was set. Defaults: 1 and
+/// `false`.
+#[derive(Debug)]
+pub struct SolanaCoinSettings {
+    required_confirmations: AtomicU64,
+    requires_notarization: AtomicBool,
+}
+
+impl Default for SolanaCoinSettings {
+    fn default() -> Self {
+        SolanaCoinSettings {
+            required_confirmations: AtomicU64::new(1),
+            requires_notarization: AtomicBool::new(false),
+        }
+    }
+}
+
+impl SolanaCoinSettings {
+    pub fn required_confirmations(&self) -> u64 { self.required_confirmations.load(AtomicOrdering::Relaxed) }
+
+    pub fn set_required_confirmations(&self, confirmations: u64) {
+        self.required_confirmations
+            .store(confirmations, AtomicOrdering::Relaxed)
+    }
+
+    pub fn requires_notarization(&self) -> bool { self.requires_notarization.load(AtomicOrdering::Relaxed) }
+
+    pub fn set_requires_notarization(&self, requires_nota: bool) {
+        self.requires_notarization.store(requires_nota, AtomicOrdering::Relaxed)
+    }
 }
 
 impl Debug for SolanaCoinImpl {
