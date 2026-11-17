@@ -382,10 +382,13 @@ the previous version used. The safe way:
   - the token event subscription after a reconnect;
   - spends of the shared QTUM coins by QTUM and its tokens;
   - delegation, and the lock that orders withdraws.
-  Some of them wait in real time for the history collector's 30-second cycle. Detail: PR #N; CRD ch.38 §38.6.4Q.
+  Some of them wait in real time for the history collector's 30-second cycle. Detail: PR #406; CRD ch.38 §38.6.4Q.
 
 ### Plans touched
 
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase A (reproduce and measure)
+  done in PRs #385 and #406; its gate is met; the balance stream's in-node subscription test skipped, with the reason in
+  the plan.
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — the H7 row and Decision CB note now say that H7 applies to an absent
   `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family.
 - [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)

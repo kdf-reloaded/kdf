@@ -4427,7 +4427,7 @@ item 6).
 >    - so do two tokens, and the same token twice;
 >    - only two QTUM swap sends in a row avoid it.
 >    A token broadcast and a QTUM swap send started together list at the same
->    time.
+>    time, and both spend the one output.
 > 4. *T38.6.4Q.9.*
 >    - (a) As the reference: the status check asks the added and the removed
 >      delegations' history, and then the receipt; an error answer to any of
