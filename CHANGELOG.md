@@ -466,7 +466,8 @@ the previous version used. The safe way:
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
   headers and an API key; decisions about what lands before TRON is switched back on recorded.
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
-  the version-5 format and digests in the shared parser are in progress (PR #397).
+  the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #TBD); history skip of
+  unreadable transactions and the coins entry follow.
 
 ## [0.4.0-beta.1] — 2026-11-14
 
