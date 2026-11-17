@@ -213,7 +213,7 @@ the previous version used. The safe way:
   `.pre-upgrade` backup is kept; `shielded_db_upgrade_backups` in `MM2.json` sets that number
   (default 1, lowest 1). Other `.bak` files are left alone. To go back to an older build, put the
   backup over the wallet database file as described in `RELOADED_VS_GLEEC.md`.
-  Detail: PR #NNN; CRD ch.39 R39.8.0bc, T39.8.0j.
+  Detail: PR #407; CRD ch.39 R39.8.0bc, T39.8.0j.
 
 #### Tendermint (Cosmos) coins
 
