@@ -24,10 +24,10 @@ pub(crate) use super::{BalanceError, CoinBalance, CoinsContext, HistorySyncState
                        TransactionEnum, TransactionErr, TransactionFut, TransactionType, UnexpectedDerivationMethod,
                        VerificationError};
 pub(crate) use crate::{BalanceFut, CanRefundHtlc, CoinWithDerivationMethod, DerivationMethod, DexFee, FeeApproxStage,
-                       FoundSwapTxSpend, NegotiateSwapContractAddrErr, PrivKeyBuildPolicy, PrivKeyPolicy,
-                       RawTransactionRes, SignatureResult, TradePreimageFut, TradePreimageResult, TradePreimageValue,
-                       Transaction, TxFeeDetails, ValidateAddressResult, ValidateFeeArgs, ValidatePaymentInput,
-                       VerificationResult, WatcherOps, WithdrawFut, WithdrawRequest};
+                       FoundSwapTxSpend, NegotiateSwapContractAddrErr, PrivKeyActivationPolicy, PrivKeyBuildPolicy,
+                       PrivKeyPolicy, RawTransactionRes, SignatureResult, TradePreimageFut, TradePreimageResult,
+                       TradePreimageValue, Transaction, TxFeeDetails, ValidateAddressResult, ValidateFeeArgs,
+                       ValidatePaymentInput, VerificationResult, WatcherOps, WithdrawFut, WithdrawRequest};
 
 pub(crate) use async_trait::async_trait;
 pub(crate) use bigdecimal::BigDecimal;

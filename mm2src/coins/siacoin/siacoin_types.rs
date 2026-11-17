@@ -31,6 +31,12 @@ pub struct SiaCoinActivationRequest {
     pub required_confirmations: Option<u64>,
     pub gap_limit: Option<u32>,
     pub client_conf: SiaClientConf,
+    /// `IguanaPrivKey` activates the single address of the daemon's internal key under either login; an absent
+    /// value or `ContextPrivKey` follows the login (CRD ch.05 R46 item 3, status note of 2026-11-17). A hardware
+    /// value is parsed and refused by `SiaCoin::new` (`UnsupportedPrivKeyPolicy`, a task-level
+    /// `CoinCreationError`) before any network access: Sia has no hardware activation.
+    #[serde(default = "PrivKeyActivationPolicy::context_priv_key")]
+    pub priv_key_policy: PrivKeyActivationPolicy,
 }
 
 /// A debug view of the walletd client configuration that shows the server in host-only form and no secret:
@@ -71,6 +77,7 @@ impl fmt::Debug for SiaCoinActivationRequest {
             .field("required_confirmations", &self.required_confirmations)
             .field("gap_limit", &self.gap_limit)
             .field("client_conf", &RedactedClientConf(&self.client_conf))
+            .field("priv_key_policy", &self.priv_key_policy)
             .finish()
     }
 }
@@ -80,6 +87,7 @@ pub enum SiaCoinFromLegacyReqErr {
     InvalidRequiredConfs(serde_json::Error),
     InvalidGapLimit(serde_json::Error),
     InvalidClientConf(serde_json::Error),
+    InvalidPrivKeyPolicy(serde_json::Error),
 }
 
 impl SiaCoinActivationRequest {
@@ -91,12 +99,19 @@ impl SiaCoinActivationRequest {
             serde_json::from_value(req["gap_limit"].clone()).map_to_mm(SiaCoinFromLegacyReqErr::InvalidGapLimit)?;
         let client_conf =
             serde_json::from_value(req["client_conf"].clone()).map_to_mm(SiaCoinFromLegacyReqErr::InvalidClientConf)?;
+        let priv_key_policy = match &req["priv_key_policy"] {
+            Json::Null => PrivKeyActivationPolicy::ContextPrivKey,
+            policy => {
+                serde_json::from_value(policy.clone()).map_to_mm(SiaCoinFromLegacyReqErr::InvalidPrivKeyPolicy)?
+            },
+        };
 
         Ok(SiaCoinActivationRequest {
             tx_history,
             required_confirmations,
             gap_limit,
             client_conf,
+            priv_key_policy,
         })
     }
 }
