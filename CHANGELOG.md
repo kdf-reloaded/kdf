@@ -11,8 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Upgrade note: coins that are no longer visible after an upgrade
 
-**If coins or Lightning channels you held are no longer visible after an upgrade, go back to the
-previous version before you do anything else.** For some coin families a release can change the rule
+**If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
+before you move or spend anything.** For some coin families a release can change the rule
 that picks a coin's key or address, for example which key is used for a given `priv_key_policy` under
 an HD login. The node then shows a different address for that coin, and the funds stay at the address
 the previous version used. The safe way:
