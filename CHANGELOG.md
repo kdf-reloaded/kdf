@@ -290,11 +290,11 @@ the previous version used. The safe way:
 - **ZEC can be sent again.** With the version-5 coins entry, withdrawals, DEX fees, swap payments, claims and
   refunds of ZEC are built as version-5 transactions with the version-5 transaction id and signature, as the Zcash
   network requires since NU7. A Trezor refuses a version-5 ZEC transaction with a clear error. Incoming version-5
-  transactions are read; version 6 is not read yet. Detail: PR #TBD; CRD ch.39 R39.11.15 and §39.11.4V status notes.
+  transactions are read; version 6 is not read yet. Detail: PR #404; CRD ch.39 R39.11.15 and §39.11.4V status notes.
 - **A resumed version-2 swap of a Zcash-family coin checks the counterparty's signature against the right data.**
   The signature digest of a swap step received from the counterparty now commits to the amount, the network's branch id
   and, for version 5, the script of the output it spends, for KMD, ZEC and the other Zcash-family coins. Version-2
-  swaps run only when a stored version-2 swap is resumed. Detail: PR #TBD.
+  swaps run only when a stored version-2 swap is resumed. Detail: PR #404.
 
 #### Browser (WASM) build
 
@@ -466,7 +466,7 @@ the previous version used. The safe way:
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
   headers and an API key; decisions about what lands before TRON is switched back on recorded.
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
-  the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #TBD); history skip of
+  the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); history skip of
   unreadable transactions and the coins entry follow.
 
 ## [0.4.0-beta.1] — 2026-11-14
