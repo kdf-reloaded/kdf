@@ -16,8 +16,8 @@ or undo, and every change that needs a step from you.
 
 - **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
   coins, EVM coins and their tokens, BCH with its SLP tokens, Sia and Lightning.** Until now these families ignored the
-  value and used the HD address at `path_to_address`; for BCH with tokens, the key derived from the passphrase. A request
-  that asks for `IguanaPrivKey` now gets a different address.
+  value and used the HD address at `path_to_address`; for BCH with tokens, the key derived from the passphrase.
+  A request that asks for `IguanaPrivKey` now gets a different address.
   - *Upgrade risk:* if your activation requests already contain `IguanaPrivKey`, the address or Lightning identity of
     those coins changes after this upgrade, although you changed nothing. Follow the steps under "Coins that are no
     longer visible after an upgrade" below.
