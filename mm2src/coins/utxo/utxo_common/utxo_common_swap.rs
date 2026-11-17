@@ -2129,7 +2129,8 @@ pub(crate) fn build_funding_spend_preimage_tx(
             },
             amount: funding_output.value,
             witness: Vec::new(),
-            script_pubkey: None,
+            // The spent output is the funding output; ZIP 244 commits to its scriptPubKey.
+            script_pubkey: Some(funding_output.script_pubkey.clone().into()),
         }],
         outputs: vec![output],
         lock_time: 0,
@@ -2147,6 +2148,25 @@ pub(crate) fn build_funding_spend_preimage_tx(
         hash_algo: fields.tx_hash_algo.into(),
         sighash_suffix: fields.conf.sighash_suffix,
     })
+}
+
+/// A preimage received from the counterparty is parsed from transaction bytes, which carry neither the amount
+/// nor the scriptPubKey of the output an input spends. The ZIP 244 digest of a version 5 transaction commits to
+/// both, so the receiving side records them from the output it knows the input spends (the funding output or the
+/// taker payment output of the swap) before it signs or verifies. Any other transaction version is returned
+/// unchanged.
+pub(crate) fn with_spent_output_recorded(
+    signer: &TransactionInputSigner,
+    spent_output: &TransactionOutput,
+) -> TransactionInputSigner {
+    let mut signer = signer.clone();
+    if signer.overwintered && signer.version == 5 {
+        if let Some(input) = signer.inputs.get_mut(DEFAULT_SWAP_VOUT) {
+            input.amount = spent_output.value;
+            input.script_pubkey = Some(spent_output.script_pubkey.clone().into());
+        }
+    }
+    signer
 }
 
 /// Sign input 0 of `signer` over the cooperative branch of the funding redeem
@@ -2263,7 +2283,7 @@ where
         ))
     })?;
 
-    let signer = &preimage.preimage.0;
+    let signer = &with_spent_output_recorded(&preimage.preimage.0, funding_output);
     if signer.inputs.len() != 1
         || signer.inputs[0].previous_output.hash != gen_args.funding_tx.hash()
         || signer.inputs[0].previous_output.index != DEFAULT_SWAP_VOUT as u32
@@ -2354,7 +2374,11 @@ where
         args.taker_pub,
         args.maker_pub,
     );
-    let signer = &preimage.preimage.0;
+    let funding_output = match args.funding_tx.outputs.get(DEFAULT_SWAP_VOUT) {
+        Some(output) => output,
+        None => return TX_PLAIN_ERR!("funding tx has no output 0"),
+    };
+    let signer = &with_spent_output_recorded(&preimage.preimage.0, funding_output);
     let my_sig = try_tx_s!(sign_funding_spend_input(
         signer,
         &funding_redeem,
@@ -2475,7 +2499,8 @@ pub(crate) fn build_taker_payment_spend_preimage_tx(
             },
             amount: taker_output.value,
             witness: Vec::new(),
-            script_pubkey: None,
+            // The spent output is the taker payment's output; ZIP 244 commits to its scriptPubKey.
+            script_pubkey: Some(taker_output.script_pubkey.clone().into()),
         }],
         outputs,
         lock_time: 0,
@@ -2749,7 +2774,7 @@ where
     )
     .map_to_mm(|e| ValidateTakerPaymentSpendPreimageError::InternalError(format!("{:?}", e)))?;
 
-    let signer = &preimage.preimage.0;
+    let signer = &with_spent_output_recorded(&preimage.preimage.0, taker_output);
 
     if signer.inputs.len() != 1
         || signer.inputs[0].previous_output.hash != gen_args.taker_tx.hash()
@@ -2870,9 +2895,13 @@ where
     };
     // Re-attach outputs onto a fresh signer so the maker's signature commits
     // to the final output set.
+    let taker_payment_output = match gen_args.taker_tx.outputs.get(DEFAULT_SWAP_VOUT) {
+        Some(output) => output,
+        None => return TX_PLAIN_ERR!("taker-payment tx has no output 0"),
+    };
     let signer = TransactionInputSigner {
         outputs: std::mem::take(&mut outputs),
-        ..preimage.preimage.0.clone()
+        ..with_spent_output_recorded(&preimage.preimage.0, taker_payment_output)
     };
 
     let maker_sighash_type = SIGHASH_ALL_BASE | coin.as_ref().conf.fork_id;

@@ -1547,6 +1547,23 @@ mod tests {
         assert!(!is_beyond_tolerance(Some(100), 101, 1));
     }
 
+    /// CRD ch.39 T39.11.4V.11 (this repository's part): a block time of 25 seconds, the Zcash spacing from ZIP 218,
+    /// is read as the coin's block interval, and gives the tolerance ceil(180 / 25) = 8 blocks of the measured order
+    /// (R38.6.4o item 1) and the stale limit of the larger of 75 seconds and the floor (R38.6.4l item 8).
+    #[test]
+    fn t39_11_4v_11_a_block_time_of_25_is_accepted_by_the_electrum_readers() {
+        let conf = serde_json::json!({"coin": "ZXY", "overwintered": 1, "txversion": 5, "avg_blocktime": 25});
+        let interval = block_interval_from_conf(&conf);
+        assert_eq!(interval, Some(Duration::from_secs(25)));
+        assert_eq!(tolerance_blocks(interval), 8);
+        // 3 block intervals are 75 s: the production floor of 10 minutes decides, a floor of a minute does not.
+        assert_eq!(
+            stale_limit(interval, Duration::from_secs(600)),
+            Duration::from_secs(600)
+        );
+        assert_eq!(stale_limit(interval, Duration::from_secs(60)), Duration::from_secs(75));
+    }
+
     /// T38.6.4l.8: the limit of P1 for one maintained connection, with the production floor of 10 minutes.
     #[test]
     fn the_stale_limit_of_a_lone_connection() {
