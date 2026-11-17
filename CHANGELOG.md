@@ -14,6 +14,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Read this before you upgrade. It lists every change in this release that an older version can no longer read
 or undo, and every change that needs a step from you.
 
+- **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
+  coins, EVM coins and their tokens, BCH with its SLP tokens, Sia and Lightning.** Until now these families ignored the
+  value and used the HD address at `path_to_address`; for BCH with tokens, the key derived from the passphrase. A request
+  that asks for `IguanaPrivKey` now gets a different address.
+  - *Upgrade risk:* if your activation requests already contain `IguanaPrivKey`, the address or Lightning identity of
+    those coins changes after this upgrade, although you changed nothing. Follow the steps under "Coins that are no
+    longer visible after an upgrade" below.
+  - *Unchanged:* an absent value, `ContextPrivKey`, an iguana login, and the UTXO family, which already worked this way.
+  - *Lightning:* under an HD login, `IguanaPrivKey` starts a separate node identity with its own data. The channels of
+    the other identity are not shown. Activation is refused while the other identity still has open channels: close
+    them first under the previous `priv_key_policy`.
+  - *Sia and Lightning:* they now read `priv_key_policy`. A hardware value or an unknown value fails the request,
+    where it used to be ignored.
+
 #### Coins that are no longer visible after an upgrade
 
 **If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
