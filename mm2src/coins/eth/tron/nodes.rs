@@ -47,6 +47,8 @@ pub enum TronNodeConfigError {
     /// `host` is the host-only form of the URL.
     #[display(fmt = "TRON node URL '{}' is not a valid URI", host)]
     InvalidUrl { host: String },
+    #[display(fmt = "TRON node {} has a URL with a scheme other than http or https", position)]
+    BadScheme { position: usize },
     #[display(
         fmt = "TRON node {} has a header name that is not a valid HTTP header name",
         position
@@ -182,9 +184,16 @@ pub fn parse_nodes(urls: &Json, api_key: Option<&TronApiKey>) -> Result<Vec<Tron
                 },
                 _ => return Err(TronNodeConfigError::BadEntry { position }),
             };
-            if http::Uri::from_str(&url).is_err() {
+            let Ok(uri) = http::Uri::from_str(&url) else {
                 // Never echo the configured string: it may carry an API key (CRD ch.35 R35.1.14).
                 return Err(TronNodeConfigError::InvalidUrl { host: host_only(&url) });
+            };
+            // Only `http` and `https` (CRD ch.21 R21.10B.2); the position is named, never the URL.
+            if !uri
+                .scheme_str()
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+            {
+                return Err(TronNodeConfigError::BadScheme { position });
             }
             Ok(TronNode::new(url, headers, api_key))
         })
@@ -349,6 +358,28 @@ mod tests {
             ] {
                 assert!(!err.contains(secret), "{err} renders a configured string");
             }
+        }
+    }
+
+    #[test]
+    fn only_http_and_https_node_urls_are_accepted() {
+        for url in [
+            "http://a.example",
+            "https://a.example",
+            "HTTPS://a.example",
+            "Http://a.example:8090/x",
+        ] {
+            parse_nodes(&json!([url]), None).expect("accepted");
+        }
+        for url in [
+            "ws://SECRETHOST.example",
+            "wss://a.example",
+            "ftp://a.example",
+            "a.example:8090",
+        ] {
+            let err = parse_nodes(&json!(["https://ok.example", url]), None).expect_err("refused");
+            assert_eq!(err, TronNodeConfigError::BadScheme { position: 2 }, "{url}");
+            assert!(!err.to_string().contains("example"), "{err}");
         }
     }
 

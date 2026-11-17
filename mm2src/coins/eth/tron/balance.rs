@@ -107,7 +107,7 @@ pub(crate) async fn trc20_balance_units(
     let param_hex = hex::encode(parameter);
 
     let resp = api
-        .trigger_constant_contract(owner, contract, "balanceOf(address)", &param_hex)
+        .trigger_constant_read(owner, contract, "balanceOf(address)", &param_hex)
         .await
         .map_err(TronBalanceError::Node)?;
 

@@ -9,12 +9,13 @@
 //! - Nothing this module logs or returns names a node by more than scheme, host and port, and no header value or
 //!   API key is ever rendered (R-N1, R-N8, R-N9).
 //! - The node order is shared by a client and its clones, and is always a complete permutation of the nodes.
-//! - Whether the reference client shuffles the configured order is an open parity question; this client keeps the
-//!   configured order (R-N5).
+//! - The configured order is shuffled once, when the client is built, and each request walks from the head
+//!   (R-N5, CRD ch.21 R21.10B.3).
 
 use derive_more::Display;
 use mm2_err_handle::prelude::*;
 use mm2_net::transport::{slurp_post_json_with_headers_bounded, SlurpError};
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -124,6 +125,10 @@ where
     if let Some(error) = value.as_object().and_then(|object| object.get("Error")) {
         let text = error.as_str().map_or_else(|| error.to_string(), str::to_owned);
         return Err(TronApiError::NodeError(text));
+    }
+    if let Some(code) = transient_code(&value) {
+        // A busy or not-yet-solid node: the next node may answer (R21.10B.3); the code is a public TRON name.
+        return Err(TronApiError::NodeError(format!("node answered with code {code}")));
     }
     let answer: Resp = serde_json::from_value(value)
         .map_err(|e| TronApiError::InvalidResponse(format!("node answer does not decode: {e}")))?;
@@ -271,6 +276,43 @@ pub struct GetAccountResourceRequest {
     pub visible: bool,
 }
 
+/// The public TRON `response_code` names that mark a node as busy or not yet in sync: the request moves on to the
+/// next node (CRD ch.21 R21.10B.3). Any other code in a 2xx error object is final.
+const TRANSIENT_CODES: [&str; 4] = [
+    "SERVER_BUSY",
+    "NO_CONNECTION",
+    "NOT_ENOUGH_EFFECTIVE_CONNECTION",
+    "BLOCK_UNSOLIDIFIED",
+];
+
+/// The transient code of a 2xx error object, if the answer is one: a `code` beside `result: false` (or without a
+/// `result`), a `result` object carrying a `code`, or an `error` object carrying a `code`.
+fn transient_code(answer: &serde_json::Value) -> Option<&'static str> {
+    let object = answer.as_object()?;
+    let code_of = |holder: &serde_json::Map<String, serde_json::Value>| -> Option<&'static str> {
+        let code = holder.get("code")?.as_str()?;
+        TRANSIENT_CODES.iter().copied().find(|known| *known == code)
+    };
+    let nested = |key: &str| object.get(key).and_then(serde_json::Value::as_object).and_then(code_of);
+    let top_level = match object.get("result") {
+        None | Some(serde_json::Value::Bool(false)) => code_of(object),
+        Some(_) => None,
+    };
+    top_level.or_else(|| nested("result")).or_else(|| nested("error"))
+}
+
+/// A result, a constant result or an energy figure marks a node's own answer (a contract failure is a `result`
+/// object); a body with none of them is not an answer to this endpoint.
+fn check_trigger_answer(answer: &TriggerConstantContractResponse) -> Result<(), TronApiError> {
+    if answer.result.is_some() || answer.constant_result.is_some() || answer.energy_used.is_some() {
+        Ok(())
+    } else {
+        Err(TronApiError::InvalidResponse(
+            "triggerconstantcontract answer carries no result".to_owned(),
+        ))
+    }
+}
+
 /// The shape of a `getaccount` answer: a JSON object that is empty (the account does not exist on chain) or carries
 /// a `balance` or a `create_time` and decodes as [`AccountInfo`]. Anything else, such as a proxy's
 /// `{"message": "..."}`, is a bad answer.
@@ -337,12 +379,16 @@ struct Failure {
 impl TronApiClient {
     /// Create a client over `nodes`, in the configured order, for the coin `ticker` (used in debug lines). Each node
     /// attempt is bounded by the [`TRON_API_TIMEOUT_SEC`] cutoff.
+    ///
+    /// The configured list is put into a random order once, here (R-N5, CRD ch.21 R21.10B.3); each node keeps the
+    /// list position the request gave it for the log lines.
     pub fn new(ticker: &str, nodes: Vec<TronNode>) -> Self {
-        Self::with_cutoff(ticker, nodes, TRON_API_TIMEOUT_SEC as f64)
+        Self::with_cutoff(ticker, nodes, TRON_API_TIMEOUT_SEC as f64, true)
     }
 
-    /// Like [`Self::new`] with another cutoff; for tests, which cannot wait 10 s.
-    fn with_cutoff(ticker: &str, nodes: Vec<TronNode>, cutoff_s: f64) -> Self {
+    /// Like [`Self::new`] with another cutoff, and the order shuffled or kept as configured; tests use the kept
+    /// order and a short cutoff.
+    fn with_cutoff(ticker: &str, nodes: Vec<TronNode>, cutoff_s: f64, shuffle: bool) -> Self {
         let urls: Vec<String> = nodes.iter().map(|node| node.url().to_owned()).collect();
         let nodes: Vec<Node> = nodes
             .into_iter()
@@ -354,16 +400,20 @@ impl TronApiClient {
                 slot: listed.slot,
             })
             .collect();
-        let order = Mutex::new((0..nodes.len()).collect());
+        let mut order: Vec<usize> = (0..nodes.len()).collect();
+        if shuffle {
+            order.shuffle(&mut common::small_rng());
+        }
+        let order = Mutex::new(order);
         TronApiClient {
             inner: Arc::new(Inner { nodes, order, cutoff_s }),
         }
     }
 
-    /// Test constructor with an injected cutoff.
+    /// Test constructor with an injected cutoff and the configured order kept (no shuffle).
     #[cfg(test)]
     pub(crate) fn new_with_cutoff_s(ticker: &str, nodes: Vec<TronNode>, cutoff_s: f64) -> Self {
-        Self::with_cutoff(ticker, nodes, cutoff_s)
+        Self::with_cutoff(ticker, nodes, cutoff_s, false)
     }
 
     /// The host-only names of the nodes in the order the next request starts with.
@@ -442,6 +492,11 @@ impl TronApiClient {
         struct Empty {}
         // The block id must be usable for TAPOS: a body that decodes but carries an unusable id is a bad answer.
         self.try_post_validated("/wallet/getnowblock", &Empty {}, |block: &GetNowBlockResponse| {
+            if block.block_header.raw_data.timestamp <= 0 {
+                return Err(TronApiError::InvalidResponse(
+                    "getnowblock answer has a non-positive timestamp".to_owned(),
+                ));
+            }
             block.to_tapos().map(|_| ())
         })
         .await
@@ -477,6 +532,51 @@ impl TronApiClient {
         function_selector: &str,
         parameter_hex: &str,
     ) -> Result<TriggerConstantContractResponse, TronApiError> {
+        self.trigger_constant_contract_checked(
+            owner_address,
+            contract_address,
+            function_selector,
+            parameter_hex,
+            check_trigger_answer,
+        )
+        .await
+    }
+
+    /// Like [`Self::trigger_constant_contract`] for a read of a contract value (a balance, a decimals figure): a
+    /// first `constant_result` that is empty or not hex is a bad answer and moves on to the next node (R-N4 (d)).
+    pub async fn trigger_constant_read(
+        &self,
+        owner_address: &TronAddress,
+        contract_address: &TronAddress,
+        function_selector: &str,
+        parameter_hex: &str,
+    ) -> Result<TriggerConstantContractResponse, TronApiError> {
+        self.trigger_constant_contract_checked(
+            owner_address,
+            contract_address,
+            function_selector,
+            parameter_hex,
+            |answer| {
+                check_trigger_answer(answer)?;
+                match answer.constant_result.as_ref().and_then(|results| results.first()) {
+                    Some(first) if first.is_empty() || hex::decode(first).is_err() => Err(
+                        TronApiError::InvalidResponse("constant_result is empty or not hex".to_owned()),
+                    ),
+                    _ => Ok(()),
+                }
+            },
+        )
+        .await
+    }
+
+    async fn trigger_constant_contract_checked(
+        &self,
+        owner_address: &TronAddress,
+        contract_address: &TronAddress,
+        function_selector: &str,
+        parameter_hex: &str,
+        validate: fn(&TriggerConstantContractResponse) -> Result<(), TronApiError>,
+    ) -> Result<TriggerConstantContractResponse, TronApiError> {
         let req = TriggerConstantContractRequest {
             owner_address: owner_address.to_base58(),
             contract_address: contract_address.to_base58(),
@@ -484,22 +584,8 @@ impl TronApiClient {
             parameter: parameter_hex.to_string(),
             visible: true,
         };
-        self.try_post_validated(
-            "/wallet/triggerconstantcontract",
-            &req,
-            |answer: &TriggerConstantContractResponse| {
-                // A result, a constant result or an energy figure marks a node's own answer (a contract failure is
-                // a `result` object); a body with none of them is not an answer to this endpoint.
-                if answer.result.is_some() || answer.constant_result.is_some() || answer.energy_used.is_some() {
-                    Ok(())
-                } else {
-                    Err(TronApiError::InvalidResponse(
-                        "triggerconstantcontract answer carries no result".to_owned(),
-                    ))
-                }
-            },
-        )
-        .await
+        self.try_post_validated("/wallet/triggerconstantcontract", &req, validate)
+            .await
     }
 
     /// Broadcast a signed transaction (protobuf hex).
@@ -541,7 +627,27 @@ impl TronApiClient {
     pub async fn get_chain_parameters(&self) -> Result<GetChainParametersResponse, TronApiError> {
         #[derive(Serialize)]
         struct Empty {}
-        self.try_post("/wallet/getchainparameters", &Empty {}).await
+        self.try_post_validated(
+            "/wallet/getchainparameters",
+            &Empty {},
+            |answer: &GetChainParametersResponse| {
+                // The two prices every fee estimate needs must be present and positive.
+                let positive = |key: &str| {
+                    answer
+                        .chain_parameter
+                        .iter()
+                        .any(|parameter| parameter.key == key && parameter.value.is_some_and(|value| value > 0))
+                };
+                if positive("getTransactionFee") && positive("getEnergyFee") {
+                    Ok(())
+                } else {
+                    Err(TronApiError::InvalidResponse(
+                        "getchainparameters answer lacks a positive getTransactionFee or getEnergyFee".to_owned(),
+                    ))
+                }
+            },
+        )
+        .await
     }
 
     /// Get account resource quotas (bandwidth, energy).

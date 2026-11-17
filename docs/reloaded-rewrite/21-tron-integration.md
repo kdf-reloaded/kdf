@@ -513,6 +513,27 @@ answers a duplicate broadcast (lab row W9); until that is measured, no swap
 path may rely on broadcast failover, and a caller confirms a broadcast through
 `gettransactioninfobyid`.
 
+*Status note (2026-11-17), alignment with R21.10B.3.* The reference's node
+order and failover rules of R21.10B.3 are now followed where they differ
+from the text above; the sentences above are left as written.
+(1) R-N5: the configured list is shuffled once when the coin's client is
+built, then each request walks from the head and the rotation of R-N5
+stays; the parity question that R-N5 names is answered. A node keeps its
+configured list position in log lines. (2) R-N4, R-N6: a 2xx error object
+(`result: false` with a `code`, a `result` object with a `code`, or an `error`
+object with a `code`) whose code is `SERVER_BUSY`, `NO_CONNECTION`,
+`NOT_ENOUGH_EFFECTIVE_CONNECTION` or `BLOCK_UNSOLIDIFIED` moves the request to
+the next node, `broadcasthex` included; any other code stays final (R-N6). A
+re-sent transaction is rejected by the Nile test network as a duplicate and
+moves funds once. (3) R-N4 (d) is checked per node for more endpoints: a
+current-block answer with a negative number or a non-positive timestamp, a
+chain-parameter answer without a positive `getTransactionFee` or
+`getEnergyFee`, and a balance read whose first `constant_result` is empty or
+not hex move on. (4) Activation accepts only the `http` and `https` schemes
+(letter case ignored); another scheme is refused, naming the node's position
+only. R-WP2 still governs the top-level `Error` form (any text moves on), and
+R-N8 governs the all-failed error, where R21.10B.3 differs.
+
 > **Binding scope (R36).** The endpoint paths and their JSON
 > request/response shapes are the dictated public Tron node API.
 > The client struct, its node-storage representation, and the

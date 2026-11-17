@@ -14,7 +14,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const CHAIN_PARAMETERS: &str = r#"{"chainParameter":[{"key":"getEnergyFee","value":420}]}"#;
+const CHAIN_PARAMETERS: &str =
+    r#"{"chainParameter":[{"key":"getTransactionFee","value":1000},{"key":"getEnergyFee","value":420}]}"#;
 const ACCOUNT: &str = r#"{"balance":5000000,"create_time":1700000000000}"#;
 const TXID: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 /// A cutoff short enough for a test; the production value is 10 s.
@@ -51,7 +52,7 @@ fn labels(nodes: &[&StubNode]) -> Vec<String> { nodes.iter().map(|n| n.url()).co
 fn t_n1_a_429_with_a_non_json_body_moves_on_to_the_next_node() {
     let (limited, healthy) = (fixed(429, "Too Many Requests"), fixed(200, CHAIN_PARAMETERS));
     let client = client_over(&[&limited, &healthy], 5.);
-    assert_eq!(chain_parameters(&client).expect("the second node answers"), 1);
+    assert_eq!(chain_parameters(&client).expect("the second node answers"), 2);
     assert_eq!(limited.requests().len(), 1);
     assert_eq!(healthy.requests().len(), 1);
 }
@@ -75,11 +76,11 @@ fn t_n2_a_429_with_an_error_body_is_never_an_absent_account() {
 fn t_n3_a_200_with_a_non_json_body_moves_on_to_the_next_node() {
     let (broken, healthy) = (fixed(200, "<html>not json</html>"), fixed(200, CHAIN_PARAMETERS));
     let client = client_over(&[&broken, &healthy], 5.);
-    assert_eq!(chain_parameters(&client).expect("the second node answers"), 1);
+    assert_eq!(chain_parameters(&client).expect("the second node answers"), 2);
     // A body of the wrong shape is a bad answer too.
     let (wrong_shape, healthy) = (fixed(200, r#"{"chainParameter":"x"}"#), fixed(200, CHAIN_PARAMETERS));
     let client = client_over(&[&wrong_shape, &healthy], 5.);
-    assert_eq!(chain_parameters(&client).expect("the second node answers"), 1);
+    assert_eq!(chain_parameters(&client).expect("the second node answers"), 2);
 }
 
 #[test]
@@ -87,7 +88,7 @@ fn t_n4_a_node_that_never_answers_costs_the_cutoff_and_then_the_next_node_answer
     let (stuck, healthy) = (silent(), fixed(200, CHAIN_PARAMETERS));
     let client = client_over(&[&stuck, &healthy], TEST_CUTOFF_S);
     let started = Instant::now();
-    assert_eq!(chain_parameters(&client).expect("the second node answers"), 1);
+    assert_eq!(chain_parameters(&client).expect("the second node answers"), 2);
     let elapsed = started.elapsed();
     assert!(
         elapsed >= Duration::from_millis(350),
@@ -400,4 +401,111 @@ fn an_answer_that_is_not_an_answer_to_the_endpoint_fails_over_on_every_checked_e
     let client = client_over(&[&proxy_node, &healthy], 5.);
     let answer = block_on(client.broadcast_hex("0a02abcd")).expect("the second node accepts");
     assert_eq!(answer.txid.as_deref(), Some(TXID));
+}
+
+#[test]
+fn the_built_order_is_a_permutation_of_the_configured_list() {
+    let nodes: Vec<StubNode> = (0..8).map(|_| fixed(200, CHAIN_PARAMETERS)).collect();
+    let configured: Vec<String> = nodes.iter().map(StubNode::url).collect();
+    let client = TronApiClient::new("TRX", configured.iter().cloned().map(TronNode::plain).collect());
+    let mut built = client.order_labels();
+    assert_eq!(built.len(), configured.len());
+    built.sort();
+    let mut expected = configured;
+    expected.sort();
+    assert_eq!(built, expected, "the order is not a permutation of the configured list");
+}
+
+#[test]
+fn a_transient_code_moves_on_and_any_other_code_is_final() {
+    let accepted: &'static str = Box::leak(format!(r#"{{"result":true,"txid":"{TXID}"}}"#).into_boxed_str());
+    for code in [
+        "SERVER_BUSY",
+        "NO_CONNECTION",
+        "NOT_ENOUGH_EFFECTIVE_CONNECTION",
+        "BLOCK_UNSOLIDIFIED",
+    ] {
+        let busy_body: &'static str =
+            Box::leak(format!(r#"{{"result":false,"code":"{code}","message":"6e6f"}}"#).into_boxed_str());
+        let (busy, healthy) = (fixed(200, busy_body), fixed(200, accepted));
+        let client = client_over(&[&busy, &healthy], 5.);
+        let answer = block_on(client.broadcast_hex("0a02abcd")).expect("the second node accepts");
+        assert_eq!(answer.txid.as_deref(), Some(TXID), "{code}");
+    }
+
+    // Any other code ends the request at that node.
+    let (rejecting, never_asked) = (
+        fixed(
+            200,
+            r#"{"result":false,"code":"CONTRACT_VALIDATE_ERROR","message":"6e6f"}"#,
+        ),
+        fixed(200, accepted),
+    );
+    let client = client_over(&[&rejecting, &never_asked], 5.);
+    match block_on(client.broadcast_hex("0a02abcd")) {
+        Err(TronApiError::RemoteError { code, .. }) => assert_eq!(code, "CONTRACT_VALIDATE_ERROR"),
+        other => panic!("expected the node's rejection, got {other:?}"),
+    }
+    assert!(never_asked.requests().is_empty());
+
+    // Other endpoints and error-object forms: a `result` object and an `error` object carrying a transient code.
+    for body in [
+        r#"{"result":{"code":"BLOCK_UNSOLIDIFIED","message":"x"}}"#,
+        r#"{"error":{"code":"NO_CONNECTION","message":"x"}}"#,
+    ] {
+        let (busy, healthy) = (fixed(200, body), fixed(200, CHAIN_PARAMETERS));
+        let client = client_over(&[&busy, &healthy], 5.);
+        assert_eq!(chain_parameters(&client).expect("the second node answers"), 2);
+        assert_eq!(busy.requests().len(), 1);
+    }
+    let (busy, healthy) = (
+        fixed(200, r#"{"result":{"code":"SERVER_BUSY","message":"x"}}"#),
+        fixed(200, r#"{"constant_result":["00"]}"#),
+    );
+    let client = client_over(&[&busy, &healthy], 5.);
+    block_on(client.trigger_constant_contract(&address(), &address(), "f()", "")).expect("the second node answers");
+}
+
+#[test]
+fn endpoint_checks_move_on_to_the_next_node() {
+    let id = "0000000003456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    let block = |number: &str, timestamp: i64| -> &'static str {
+        Box::leak(
+            format!(
+                r#"{{"blockID":"{id}","block_header":{{"raw_data":{{"number":{number},"timestamp":{timestamp}}}}}}}"#
+            )
+            .into_boxed_str(),
+        )
+    };
+    for bad in [block("-1", 1), block("1", 0), block("1", -5)] {
+        let (bad_node, healthy) = (fixed(200, bad), fixed(200, block("1", 1)));
+        let client = client_over(&[&bad_node, &healthy], 5.);
+        block_on(client.get_now_block()).expect("the second node answers");
+        assert_eq!(bad_node.requests().len(), 1, "{bad}");
+    }
+
+    for bad in [
+        r#"{"chainParameter":[{"key":"getTransactionFee","value":0},{"key":"getEnergyFee","value":420}]}"#,
+        r#"{"chainParameter":[{"key":"getTransactionFee","value":1000}]}"#,
+        r#"{"chainParameter":[]}"#,
+    ] {
+        let bad_node = fixed(200, bad);
+        let full = fixed(
+            200,
+            r#"{"chainParameter":[{"key":"getTransactionFee","value":1000},{"key":"getEnergyFee","value":420}]}"#,
+        );
+        let client = client_over(&[&bad_node, &full], 5.);
+        assert_eq!(chain_parameters(&client).expect("the second node answers"), 2, "{bad}");
+        assert_eq!(bad_node.requests().len(), 1, "{bad}");
+    }
+
+    for bad in [r#"{"constant_result":[""]}"#, r#"{"constant_result":["zz"]}"#] {
+        let good_word = format!(r#"{{"constant_result":["{:064x}"]}}"#, 7);
+        let (bad_node, healthy) = (fixed(200, bad), StubNode::start(move |_, _| Reply::ok(&good_word)));
+        let client = client_over(&[&bad_node, &healthy], 5.);
+        let answer = block_on(client.trigger_constant_read(&address(), &address(), "balanceOf(address)", ""))
+            .expect("the second node answers");
+        assert_eq!(answer.constant_result.map(|r| r.len()), Some(1));
+        assert_eq!(bad_node.requests().len(), 1, "{bad}");
+    }
 }

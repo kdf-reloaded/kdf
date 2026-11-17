@@ -492,6 +492,9 @@ shows them, they go to no other host, and no peer sees them. A request is not re
 that answers with a redirect counts as failed, so the headers never reach another host. A URL that
 carries the key in its path or query keeps working and is shown host-only everywhere.
 
+The node list is put into a random order once, when the coin is activated, and only `http://` and
+`https://` URLs are accepted.
+
 The node that answers a request is tried first by the next one; a node that fails, answers with a
 status outside 2xx, with something that is not the expected JSON, or does not answer within 10
 seconds is skipped for that request. Several requests of one coin can run at the same time.

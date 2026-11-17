@@ -76,7 +76,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   (a rate limit included), with something that is not the expected JSON, or with the node's own error form;
   such an answer is never read as an empty account. The node that answers is asked first by the next
   request, and several requests of one coin can run at the same time instead of waiting for each other.
-  A signed transaction that a node rejects with a code ends the request with that code. An entry of the
+  A node that answers "busy" or "not in sync" (`SERVER_BUSY`, `NO_CONNECTION`, `NOT_ENOUGH_EFFECTIVE_CONNECTION`,
+  `BLOCK_UNSOLIDIFIED`) is skipped too, and the node list is shuffled once at activation and accepts only `http`
+  and `https` URLs. A signed transaction that a node rejects with any other code ends the request with that code. An entry of the
   TRON `urls` list can now be an object `{"url": "...", "headers": {...}}` whose headers go to that node
   only, and the new `MM2.json` key `tron_api_key` is sent as the `TRON-PRO-API-KEY` header to TronGrid
   hosts over HTTPS only. Header values and the key are never logged or shown. TRON stays switched off in this build,
