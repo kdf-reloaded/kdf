@@ -2311,7 +2311,7 @@ impl UtxoRpcClientOps for LightwalletdClient {
             match this.0.detect_output_spend(&output, from, &log).await {
                 Ok(SpendOutcome::NotSpent(_)) => Ok(None),
                 Ok(SpendOutcome::Spent(spend)) => {
-                    // The shared UTXO transaction type cannot read version 5 or 6, so a ZHTLC coin's
+                    // The shared UTXO transaction type cannot read version 6, so a ZHTLC coin's
                     // swap path does not come through here (z_tx_read); this trait form is for the
                     // shared callers and fails loudly rather than guessing at a transaction it cannot read.
                     let spending_tx: UtxoTx = deserialize(spend.tx.as_slice()).map_err(|e| {
