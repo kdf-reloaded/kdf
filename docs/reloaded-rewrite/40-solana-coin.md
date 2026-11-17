@@ -595,7 +595,7 @@ finding F6).
 > of 2026-11-15 the minimum transaction amount is one lamport
 > (0.000000001) for SOL and one smallest unit of the token's own decimals
 > (10^-decimals) for each SPL token; the minimum trading volume stays 0.00777
-> until Solana trading is designed. PR #N.
+> until Solana trading is designed. PR #401.
 
 ## 40.6B Reference behavior beyond activation: keys, withdraw, per-method answers, history and swaps
 
@@ -1223,7 +1223,7 @@ form is Reloaded's own under either option, because the reference has none
 to match.
 
 > *Reloaded status (clean side, 2026-11-17):* option (b) is built for every
-> method except `disable_coin`, which follows in its own change (PR #N):
+> method except `disable_coin`, which follows in its own change (PR #401):
 > - `sign_message` / `verify_message` keep Reloaded's form: the message's
 >   UTF-8 bytes as they are, no prefix and no pre-hash, and the 64-byte
 >   ed25519 signature in base58, checked against the base58 address as the

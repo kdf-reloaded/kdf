@@ -149,7 +149,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   minimum transaction amount of an SPL token is one smallest unit of its own
   decimals, where GLEEC KDF states one lamport for every token; no peer sees
   it while Solana cannot trade. No switch: an abnormal end cannot be a
-  compatibility target. CRD ch.40 D40.6B.1, R40.6B.14; PR #N.
+  compatibility target. CRD ch.40 D40.6B.1, R40.6B.14; PR #401.
 
 - **Solana under an HD login.** GLEEC KDF refuses Solana activation under a
   global-HD login and derives no Solana key from a seed. Reloaded derives the

@@ -240,7 +240,7 @@ the previous version used. The safe way:
   part of `max_taker_vol` / `max_maker_vol` and the legacy `my_tx_history` answer an error that
   names the coin instead of ending the request. The minimum transaction amount is now one lamport
   for SOL and one smallest unit of each SPL token. Solana stays switched off in this build.
-  Detail: PR #N; CRD ch.40 D40.6B.1, R40.6B.14, §40.6A.
+  Detail: PR #401; CRD ch.40 D40.6B.1, R40.6B.14, §40.6A.
 
 - **Solana activation errors follow the shapes GLEEC KDF uses, and a token address is checked when
   its coins entry is parsed.** On `enable_solana_with_tokens` a failed block-height or balance read
@@ -408,7 +408,7 @@ the previous version used. The safe way:
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 part a in PR #N.
+  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 part a in PR #401.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
