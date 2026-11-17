@@ -528,8 +528,8 @@ re-sent transaction is rejected by the Nile test network as a duplicate and
 moves funds once. (3) R-N4 (d) is checked per node for more endpoints: a
 current-block answer with a negative number or a non-positive timestamp, a
 chain-parameter answer without a positive `getTransactionFee` or
-`getEnergyFee`, and a balance read whose first `constant_result` is empty or
-not hex move on. (4) Activation accepts only the `http` and `https` schemes
+`getEnergyFee`, and a balance read whose `constant_result` is absent, empty or
+whose first entry is not hex move on. (4) Activation accepts only the `http` and `https` schemes
 (letter case ignored); another scheme is refused, naming the node's position
 only. R-WP2 still governs the top-level `Error` form (any text moves on), and
 R-N8 governs the all-failed error, where R21.10B.3 differs.

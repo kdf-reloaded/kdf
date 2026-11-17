@@ -113,7 +113,7 @@ pub(crate) async fn trc20_balance_units(
 
     let raw = resp
         .constant_result
-        .and_then(|mut results| results.pop())
+        .and_then(|results| results.into_iter().next())
         .ok_or(TronBalanceError::NoResult)?;
     let bytes = hex::decode(raw).map_err(|e| TronBalanceError::BadHex(e.to_string()))?;
     if bytes.len() != 32 {

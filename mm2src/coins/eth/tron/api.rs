@@ -543,7 +543,7 @@ impl TronApiClient {
     }
 
     /// Like [`Self::trigger_constant_contract`] for a read of a contract value (a balance, a decimals figure): a
-    /// first `constant_result` that is empty or not hex is a bad answer and moves on to the next node (R-N4 (d)).
+    /// `constant_result` that is absent, empty or whose first entry is not hex is a bad answer and moves on to the next node (R-N4 (d)).
     pub async fn trigger_constant_read(
         &self,
         owner_address: &TronAddress,
@@ -557,12 +557,12 @@ impl TronApiClient {
             function_selector,
             parameter_hex,
             |answer| {
-                check_trigger_answer(answer)?;
+                // A read needs a present, non-empty `constant_result` whose first entry is non-empty hex.
                 match answer.constant_result.as_ref().and_then(|results| results.first()) {
-                    Some(first) if first.is_empty() || hex::decode(first).is_err() => Err(
-                        TronApiError::InvalidResponse("constant_result is empty or not hex".to_owned()),
-                    ),
-                    _ => Ok(()),
+                    Some(first) if !first.is_empty() && hex::decode(first).is_ok() => Ok(()),
+                    _ => Err(TronApiError::InvalidResponse(
+                        "constant_result is absent, empty or not hex".to_owned(),
+                    )),
                 }
             },
         )

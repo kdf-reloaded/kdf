@@ -509,3 +509,16 @@ fn endpoint_checks_move_on_to_the_next_node() {
         assert_eq!(bad_node.requests().len(), 1, "{bad}");
     }
 }
+
+#[test]
+fn a_read_without_a_constant_result_moves_on_to_the_next_node() {
+    for bad in [r#"{"result":{"result":true}}"#, r#"{"constant_result":[]}"#] {
+        let good_word = format!(r#"{{"constant_result":["{:064x}"]}}"#, 7);
+        let (bad_node, healthy) = (fixed(200, bad), StubNode::start(move |_, _| Reply::ok(&good_word)));
+        let client = client_over(&[&bad_node, &healthy], 5.);
+        let answer = block_on(client.trigger_constant_read(&address(), &address(), "balanceOf(address)", ""))
+            .expect("the second node answers");
+        assert_eq!(answer.constant_result.map(|r| r.len()), Some(1));
+        assert_eq!(bad_node.requests().len(), 1, "{bad}");
+    }
+}
