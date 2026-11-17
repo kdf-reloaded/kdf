@@ -634,8 +634,8 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   as the WalletConnect form (not built yet), fails request parsing with `InvalidRequest` (HTTP 400). No switch exists.
   CRD ch.36 §36.7. PR #358.
 - **A Tendermint activation under an HD login honors `priv_key_policy: IguanaPrivKey`.** GLEEC KDF accepts and ignores
-  `priv_key_policy` for Tendermint coins; Reloaded activates the coin with the single internal key of the node, as for
-  the other coin families, and `path_to_address` then plays no part. An absent value and `ContextPrivKey` still use
+  `priv_key_policy` for Tendermint coins; Reloaded activates the coin with the single internal key of the node, as the
+  UTXO family does, and `path_to_address` then plays no part. An absent value and `ContextPrivKey` still use
   the key at `path_to_address`. No switch exists. CRD ch.36 §36.7. PR #396.
 - **A Tendermint coin activated from a public key is watch-only, and its orders are refused.** The `WithPubkey` form
   of `activation_params` builds a coin that holds no private key: it answers `withdraw` and the staking requests with

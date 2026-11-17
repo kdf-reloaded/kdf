@@ -66,8 +66,8 @@ pub struct TendermintActivationParams {
     tx_history: bool,
     #[serde(default = "default_get_balances")]
     get_balances: bool,
-    // Kept raw: it matters under an HD login without `IguanaPrivKey` only, where a value that does not parse is a platform-coin creation
-    // error (CRD ch.36 R36.1.4 step 3); under an iguana login it is ignored whatever it holds.
+    // Kept raw: it matters under an HD login without `IguanaPrivKey` only, where a value that does not parse is a
+    // platform-coin creation error (CRD ch.36 R36.1.4 step 3); under an iguana login it is ignored whatever it holds.
     #[serde(default)]
     path_to_address: Option<Json>,
     #[serde(default, deserialize_with = "deserialize_activation_params")]
@@ -467,8 +467,6 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
                 )
                 .await
             },
-            // An HD login signs with the key of the address at `path_to_address` under the coin's
-            // `derivation_path` (CRD ch.36 R36.1.2, R36.1.4 step 3).
             // An HD login whose request asks for `IguanaPrivKey` signs with the single internal key of the context,
             // the key the UTXO family takes for this case, and `path_to_address` plays no part (Reloaded-original,
             // CRD ch.36 §36.7, status note of 2026-11-17). The `priv_key` the generic activator passes is the
@@ -490,6 +488,8 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
                 )
                 .await
             },
+            // An HD login signs with the key of the address at `path_to_address` under the coin's
+            // `derivation_path` (CRD ch.36 R36.1.2, R36.1.4 step 3).
             KeyPairPolicy::GlobalHDAccount(global_hd) => {
                 let path_to_address = path_to_address_of(&ticker, &activation_request.path_to_address)?;
                 tendermint_coin_from_conf_and_request_with_global_hd(

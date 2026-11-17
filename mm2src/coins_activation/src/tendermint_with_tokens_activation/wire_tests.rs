@@ -1295,6 +1295,22 @@ fn tokens_follow_the_key_of_the_platform_coin() {
     let platform = built_platform(&ctx, "ATOM", json!({ "priv_key_policy": "IguanaPrivKey" }))
         .unwrap_or_else(|e| panic!("the platform must be built: {:?}", e.get_inner()));
     assert_eq!(platform.account_id.to_string(), internal_key_address(&ctx));
+
+    let initializer = TendermintTokenInitializer {
+        platform_coin: platform.clone(),
+    };
+    let req = request(json!({ "ticker": "ATOM", "tokens_params": [inline_token("CUSTOM-TOKEN", "ATOM")] }));
+    let coins = match block_on(initializer.enable_tokens_as_mm_coins(ctx.clone(), &req.request)) {
+        Ok(coins) => coins,
+        Err(_) => panic!("the token must be enabled"),
+    };
+    match coins.as_slice() {
+        [MmCoinEnum::TendermintToken(token)] => {
+            assert_eq!(token.my_address().unwrap(), internal_key_address(&ctx));
+            assert_eq!(token.my_address().unwrap(), platform.my_address().unwrap());
+        },
+        _ => panic!("one Tendermint token"),
+    }
 }
 
 /// A node that answers the health check and the ABCI info the activation result asks for.
