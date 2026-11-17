@@ -376,6 +376,14 @@ the previous version used. The safe way:
   Qtum testnet server now run against the stub, offline, in CI. Detail: PR #385; CRD ch.38
   §38.6.4Q.
 
+- **More offline tests pin how QTUM and its tokens share servers and coins.** Fifteen tests cover:
+  - the connections QTUM and two tokens hold;
+  - what disabling a token or QTUM stops;
+  - the token event subscription after a reconnect;
+  - spends of the shared QTUM coins by QTUM and its tokens;
+  - delegation, and the lock that orders withdraws.
+  Some of them wait in real time for the history collector's 30-second cycle. Detail: PR #N; CRD ch.38 §38.6.4Q.
+
 ### Plans touched
 
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — the H7 row and Decision CB note now say that H7 applies to an absent
