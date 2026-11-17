@@ -50,6 +50,11 @@ pub struct LightningParams {
     pub payment_retries: Option<usize>,
     // Node's backup path for channels and other data that requires backup.
     pub backup_path: Option<String>,
+    // `IguanaPrivKey` runs the node on the internal key under a global-HD login: a separate Lightning identity with
+    // its own data directory (CRD ch.05 R46 item 2, status note of 2026-11-17). An absent value or
+    // `ContextPrivKey` keeps the passphrase-hash seed and the data directory it always had.
+    #[serde(default = "crate::PrivKeyActivationPolicy::context_priv_key")]
+    pub priv_key_policy: crate::PrivKeyActivationPolicy,
 }
 
 pub async fn start_lightning(
@@ -76,11 +81,22 @@ pub async fn start_lightning(
     // Initialize the Logger
     let logger = ctx.log.0.clone();
 
-    // Initialize Persister
-    let persister = ln_utils::init_persister(ctx, platform.clone(), conf.ticker.clone(), params.backup_path).await?;
+    // The identity (node seed and data directory) the request's key policy selects
+    let identity = ln_utils::LightningIdentity::select(ctx, params.priv_key_policy)?;
 
     // Initialize the KeysManager
-    let keys_manager = ln_utils::init_keys_manager(ctx)?;
+    let keys_manager = ln_utils::init_keys_manager(ctx, identity)?;
+
+    // Initialize Persister, which refuses a data directory that belongs to another node
+    let persister = ln_utils::init_persister(
+        ctx,
+        platform.clone(),
+        conf.ticker.clone(),
+        params.backup_path,
+        identity,
+        &keys_manager,
+    )
+    .await?;
 
     // Initialize the NetGraphMsgHandler. This is used for providing routes to send payments over
     let network_graph = Arc::new(persister.get_network_graph(protocol_conf.network.into()).await?);

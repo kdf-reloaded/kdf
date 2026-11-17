@@ -126,10 +126,10 @@ pub mod utxo_indexedb_block_header_storage;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod utxo_sql_block_header_storage;
 
-#[cfg(any(test, target_arch = "wasm32"))]
-pub mod utxo_common_tests;
+#[cfg(test)] pub mod utxo_common_tests;
 #[cfg(test)] pub mod utxo_tests;
-#[cfg(target_arch = "wasm32")] pub mod utxo_wasm_tests;
+#[cfg(all(test, target_arch = "wasm32"))]
+pub mod utxo_wasm_tests;
 
 const KILO_BYTE: u64 = 1000;
 /// https://bitcoin.stackexchange.com/a/77192
@@ -849,6 +849,8 @@ impl UtxoCoinFields {
             join_splits: vec![],
             shielded_spends: vec![],
             shielded_outputs: vec![],
+            sapling_v5: Default::default(),
+            orchard: Default::default(),
             zcash: self.conf.zcash,
             str_d_zeel,
             hash_algo: self.tx_hash_algo.into(),

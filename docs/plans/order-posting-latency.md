@@ -141,7 +141,7 @@ the second time with the beta head first.
   active-order file before the history row. When only the history write failed, the order was not placed,
   but its active file stayed, so a restart restored it as a live order; this held at the default too. A
   failed history write now deletes the active record again, for maker and taker orders, and still returns the
-  history error (ch.32 R-GH8a as-built note). Owner: session 6a.
+  history error (ch.32 R-GH8a as-built note).
 
 ## Work packages
 

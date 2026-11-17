@@ -5,7 +5,7 @@ use crate::standalone_coin::{InitStandaloneCoinActivationOps, InitStandaloneCoin
                              InitStandaloneCoinTaskManagerShared};
 use async_trait::async_trait;
 use coins::coin_balance::{EnableCoinBalance, EnableCoinBalanceOps, EnableCoinScanPolicy, IguanaWalletBalance};
-use coins::hd_pubkey::RpcTaskXPubExtractor;
+use coins::hd_pubkey::{HDXPubExtractor, RpcTaskXPubExtractor};
 use coins::siacoin::{SiaCoin, SiaCoinActivationRequest, SiaCoinNewError};
 use coins::{BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, PrivKeyBuildPolicy, RegisterCoinError};
 use crypto::hw_rpc_task::{HwConnectStatuses, HwRpcTaskAwaitingStatus, HwRpcTaskUserAction};
@@ -208,7 +208,8 @@ impl InitStandaloneCoinActivationOps for SiaCoin {
         _protocol_info: SiaProtocolInfo,
         _task_handle: &SiaRpcTaskHandle,
     ) -> MmResult<Self, SiaInitError> {
-        let priv_key_policy = PrivKeyBuildPolicy::detect_priv_key_policy(&ctx).mm_err(SiaInitError::from)?;
+        let priv_key_policy = PrivKeyBuildPolicy::from_activation_policy(&ctx, activation_request.0.priv_key_policy)
+            .mm_err(SiaInitError::from)?;
         let coin = SiaCoin::new(&ctx, coin_conf, &activation_request.0, priv_key_policy)
             .await
             .mm_err(|e| SiaInitError::from_new_err(e, ticker))?;
@@ -248,29 +249,7 @@ impl InitStandaloneCoinActivationOps for SiaCoin {
             None
         };
 
-        // Activation itself never grows the HD wallet past account 0 (ch.46
-        // R46.1.3: only a single-address HD-account state reaches a successfully
-        // activated Sia coin) -- `EnableCoinScanPolicy::default()`
-        // (`ScanIfNewWallet`) only scans a *newly created* account's addresses up
-        // to its gap limit; it never creates a second account, and `SiaHDWallet`
-        // has no persistent account storage to have grown one from a prior run
-        // (`sia_hd_wallet.rs` module doc comment), so the "new wallet" branch is
-        // the only one ever taken here.
-        let wallet_balance = if single_address_balance_requested(&ctx.conf) {
-            // Compatibility switch `sia_activation_single_address_balance`: the reference's
-            // single-address report, also under HD (see `single_address_balance_requested`).
-            let address = self.my_address().map_to_mm(SiaInitError::Internal)?;
-            let balance = self
-                .my_balance()
-                .compat()
-                .await
-                .mm_err(|error| SiaInitError::CouldNotGetBalance(error.to_string()))?;
-            single_address_wallet_balance(address, balance)
-        } else {
-            self.enable_coin_balance(xpub_extractor, EnableCoinScanPolicy::default(), 0, None)
-                .await
-                .mm_err(|error| SiaInitError::CouldNotGetBalance(error.to_string()))?
-        };
+        let wallet_balance = activation_wallet_balance(self, &ctx.conf, xpub_extractor).await?;
 
         task_handle
             .update_in_progress_status(SiaInProgressStatus::Finishing)
@@ -281,6 +260,40 @@ impl InitStandaloneCoinActivationOps for SiaCoin {
             current_block,
             wallet_balance,
         })
+    }
+}
+
+/// The `wallet_balance` of R46.2.4 for an activated coin: the single-address form, or the HD report.
+///
+/// Activation itself never grows the HD wallet past account 0 (ch.46 R46.1.3: only a single-address
+/// HD-account state reaches a successfully activated Sia coin). The HD report therefore lists account 0 with
+/// exactly its address 0, the address `my_address()` answers (ch.20 §20.4.1), and that address's balance:
+/// `min_addresses_number` of `1` makes the activation list address 0 of the external chain, and
+/// `EnableCoinScanPolicy::DoNotScan` keeps the gap-limit scan from listing any further address (a scan would
+/// report every used address it finds). `SiaHDWallet` has no persistent account storage to have grown a
+/// second account from a prior run, so the new account 0 is the only one ever reported.
+async fn activation_wallet_balance<XPubExtractor>(
+    coin: &SiaCoin,
+    conf: &Json,
+    xpub_extractor: Option<&XPubExtractor>,
+) -> MmResult<EnableCoinBalance, SiaInitError>
+where
+    XPubExtractor: HDXPubExtractor + Sync,
+{
+    if single_address_balance_requested(conf) {
+        // Compatibility switch `sia_activation_single_address_balance`: the reference's
+        // single-address report, also under HD (see `single_address_balance_requested`).
+        let address = coin.my_address().map_to_mm(SiaInitError::Internal)?;
+        let balance = coin
+            .my_balance()
+            .compat()
+            .await
+            .mm_err(|error| SiaInitError::CouldNotGetBalance(error.to_string()))?;
+        Ok(single_address_wallet_balance(address, balance))
+    } else {
+        coin.enable_coin_balance(xpub_extractor, EnableCoinScanPolicy::DoNotScan, 1, None)
+            .await
+            .mm_err(|error| SiaInitError::CouldNotGetBalance(error.to_string()))
     }
 }
 
@@ -396,6 +409,109 @@ mod tests {
                 "address": "addr:abc",
                 "balance": { "spendable": "0", "unspendable": "0" }
             })
+        );
+    }
+
+    /// T46.8.3 (R46.2.4): under an HD context the default `wallet_balance` is the HD report with account 0 and
+    /// exactly its address 0 -- the address `my_address()` answers -- and that address's balance. The mock
+    /// walletd serves the consensus tip and the balance only; a request for an address's events (a scan) would
+    /// be answered with a 404 and fail the activation.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn hd_activation_report_lists_account_0_with_its_single_address() {
+        use async_trait::async_trait;
+        use coins::hd_pubkey::HDExtractPubkeyError;
+        use common::block_on;
+        use crypto::trezor::utxo::TrezorUtxoCoin;
+        use crypto::{DerivationPath, HardwareWalletArc, XPub};
+        use mm2_core::mm_ctx::MmCtxBuilder;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        struct NoExtractor;
+
+        #[async_trait]
+        impl HDXPubExtractor for NoExtractor {
+            async fn extract_utxo_xpub(
+                &self,
+                _trezor_utxo_coin: TrezorUtxoCoin,
+                _derivation_path: DerivationPath,
+            ) -> MmResult<XPub, HDExtractPubkeyError> {
+                MmError::err(HDExtractPubkeyError::CoinDoesntSupportTrezor)
+            }
+
+            fn hardware_context(&self) -> Option<HardwareWalletArc> { None }
+        }
+
+        // 5 SC in hastings.
+        const SPENDABLE_HASTINGS: &str = "5000000000000000000000000";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => request.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).into_owned();
+                let path = request.split_whitespace().nth(1).unwrap_or_default().to_owned();
+                let (status, body) = if path.ends_with("/api/consensus/tip") {
+                    ("200 OK", format!(r#"{{"height":7,"id":"{}"}}"#, "0".repeat(64)))
+                } else if path.ends_with("/balance") {
+                    (
+                        "200 OK",
+                        format!(r#"{{"siacoins":"{SPENDABLE_HASTINGS}","immatureSiacoins":"0"}}"#),
+                    )
+                } else {
+                    ("404 Not Found", "not served".to_owned())
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let ctx = MmCtxBuilder::new().with_conf(json!({ "netid": 8762 })).into_mm_arc();
+        crypto::CryptoCtx::init_with_global_hd_account(
+            ctx.clone(),
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .expect("valid test mnemonic");
+        let request: SiaCoinActivationRequest = serde_json::from_value(json!({
+            "client_conf": { "server_url": format!("http://127.0.0.1:{port}/"), "timeout": 5 },
+        }))
+        .unwrap();
+        let priv_key_policy = PrivKeyBuildPolicy::detect_priv_key_policy(&ctx).unwrap();
+        let coin = block_on(SiaCoin::new(
+            &ctx,
+            json!({ "coin": "SC", "required_confirmations": 1 }),
+            &request,
+            priv_key_policy,
+        ))
+        .expect("the coin is built against the mock walletd");
+
+        let report = match block_on(activation_wallet_balance(&coin, &json!({}), None::<&NoExtractor>)) {
+            Ok(report) => report,
+            Err(e) => panic!("the HD report is not built: {e}"),
+        };
+        let report = serde_json::to_value(report).unwrap();
+        assert_eq!(report["wallet_type"], "HD");
+        let accounts = report["accounts"].as_array().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["account_index"], 0);
+        let addresses = accounts[0]["addresses"].as_array().unwrap();
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0]["address"], coin.my_address().unwrap());
+        assert_eq!(
+            addresses[0]["balance"]["SC"],
+            json!({ "spendable": "5", "unspendable": "0" })
         );
     }
 }

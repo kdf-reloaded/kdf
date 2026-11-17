@@ -1,6 +1,6 @@
 # Plan: ZEC transactions in the version-5 format (Zcash NU7)
 
-**Status:** planning (post-beta; nothing is implemented) — **Last reviewed:** 2026-11-12
+**Status:** in progress (0.5.0; route (A) decided 2026-11-17; P1 format and digests in progress) — **Last reviewed:** 2026-11-17
 
 > **Context.** The Zcash network upgrade NU7 activated on mainnet at height 3,543,405 (ZIP 259,
 > consensus branch id `0x77190AD9`). From NU7 on, a transaction's version must be 5 or 6, also for a
@@ -55,22 +55,42 @@ swap path of the shielded coins; (B) follows the same route for ZEC.
 
 **Recommendation:** (B); (A) only where (B) cannot serve the swap scripts.
 
+*Amended 2026-11-17 — decided: route (A).* Two facts checked after this plan was written changed the recommendation:
+the pinned `zcash_protocol` 0.10.6 has no NU7 branch id (`Nu7` exists only behind its unstable build option, with the
+placeholder `0xFFFFFFFF`), so the pinned `zcash_primitives` can neither build nor read an NU7 transaction; and ZEC is a
+transparent UTXO coin, so every ZEC build, signature and parse goes through the shared UTXO code, where (B) would need an
+adapter at each site. `zcash_protocol` 0.11 and `zcash_primitives` 0.31 have NU7, but moving the Zcash family is a migration
+of the ARRR path and of the three vendored Zcash crates. Route (A) extends the shared transaction type and signature hash
+with the ZIP-225 layout and the ZIP-244 digests, pinned by the public ZIP-244 test vectors; the branch id stays a configured
+value. A later upgrade of the Zcash library family is a separate item; once it is in, the library can serve as an independent
+cross-check of the v5 serializer in tests.
+
 ## Work packages
 
 | Id | What | State |
 |---|---|---|
-| Z1 | **Configuration.** Accept `txversion` 5, with the version group id `0x26A7270A` and the NU7 branch id as defaults; refuse an unsupported `txversion` at activation with a clear error. | Not started |
-| Z2 | **Withdrawal:** build and sign a version-5 transaction. | Not started |
-| Z3 | **Swap path:** the HTLC payment, the spend and the refund, with P2SH inputs under the ZIP-244 digest. | Not started |
-| Z4 | **Reading version-5 transactions** through the Zcash reader: history, verification of unspent outputs, validation of swap payments. | Not started |
-| Z5 | **The ZIP-244 transaction id** for the node's own transactions. | Not started |
-| Z6 | **Tests:** the public ZIP-244 test vectors (the zcash-test-vectors repository, MIT) and round trips. | Not started |
+| Z1 | **Configuration.** Accept `txversion` 5 with the keys of the shared coins file (`version_group_id` and `consensus_branch_id`, each with or without a `0x` prefix); default the version group id to `0x26A7270A` for version 5 when it is absent; refuse `txversion` 6 or higher, and 5 without `overwintered`, at activation with a clear error. *(Amended 2026-11-17.)* | Not started (P2) |
+| Z2 | **Withdrawal:** build and sign a version-5 transaction. | Not started (P2) |
+| Z3 | **Swap path:** the HTLC payment, the spend and the refund, with P2SH inputs under the ZIP-244 digest. | Not started (P2) |
+| Z4 | **Reading version-5 transactions** in the shared UTXO parser (route A; all three bundles of ZIP 225): history, verification of unspent outputs, validation of swap payments. | In progress (P1 parser, P2 wiring) |
+| Z5 | **The ZIP-244 transaction id**, for the node's own transactions and for incoming ones with Sapling or Orchard parts. | In progress (P1) |
+| Z6 | **Tests:** the public ZIP-244 test vectors (the zcash-test-vectors repository, MIT) and round trips. | In progress (P1) |
 | Z7 | **Reference position:** a Spec Reader pass that records in the CRD how the reference implementation handles ZEC after NU7, before the implementation starts. | Not started |
 | Z8 | **Lab:** a small mainnet withdrawal, then a ZEC/RIN swap between two KDF Reloaded nodes. | Not started |
 | Z9 | **Coins file:** `txversion` 5, the version group id and the branch id for ZEC in komodo-coins-rin, once the code ships. | Not started |
 
+## Decisions (2026-11-17)
+
+- Route (A); version 5 only (not 6); the parser reads all three ZIP-225 bundles and computes the full ZIP-244 transaction id.
+- Expiry height stays 0 unless the reference answer differs; the fee rule is unchanged (the fee is computed per
+  transaction).
+- `required_confirmations` for ZEC stays 3; the 25-second spacing gets test cases only.
+- No guard against a coins file that switches to version 5 before or after the release: a build without version-5 support
+  activates ZEC and shows balances, and every send is refused by the network, no funds move (lab row of 2026-11-16 and
+  2026-11-17 on the 0.4.0-beta.1 release and on dev).
+- Pull requests: P1 format and digests (Z4 parser, Z5, Z6); P2 ZEC wiring (Z1–Z3, Z4 wiring) with a mainnet withdrawal and a
+  ZEC/RIN swap between two KDF Reloaded nodes as READY conditions; P3 the coins file (Z9).
+
 ## Open points
 
-- Whether ZEC is marked `wallet_only` in the coins file until the fix (the maintainer's decision).
-- Fees under ZIP 317.
-- What the 25-second block spacing means for ZEC's confirmation settings and swap lock times.
+- Fees under ZIP 317, if the lab shows a refusal.

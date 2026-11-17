@@ -48,6 +48,7 @@ fn normalize_txid(txid: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::nodes::TronNode;
     use super::*;
 
     const TXID: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
@@ -84,7 +85,7 @@ mod tests {
     #[test]
     fn empty_transaction_is_refused_before_any_request() {
         // A client over an unreachable node: reaching it would give a different error text.
-        let api = TronApiClient::new(vec!["http://127.0.0.1:1".to_owned()]);
+        let api = TronApiClient::new("TRX", vec![TronNode::plain("http://127.0.0.1:1".to_owned())]);
         let err = common::block_on(broadcast_raw_tx(Some(api), Vec::new())).unwrap_err();
         assert!(err.contains("empty transaction"), "{err}");
     }

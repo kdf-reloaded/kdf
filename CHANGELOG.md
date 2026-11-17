@@ -6,8 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
+<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". A change that an older version can no longer read or undo, or that needs a step from the user before or after upgrading, also gets an emphasized plain-words item under "### Breaking changes and upgrade notes" at the top of the section. -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
+
+### Breaking changes and upgrade notes
+
+Read this before you upgrade. It lists every change in this release that an older version can no longer read
+or undo, and every change that needs a step from you.
+
+- **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
+  coins, EVM coins and their tokens, BCH with its SLP tokens, Sia and Lightning.** Until now these families ignored the
+  value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed single-address HD key, and BCH
+  with tokens and Lightning the key derived from the passphrase. A request that asks for `IguanaPrivKey` now gets a
+  different address or Lightning identity.
+  - *Upgrade risk:* if your activation requests already contain `IguanaPrivKey`, the address or Lightning identity of
+    those coins changes after this upgrade, although you changed nothing. Follow the steps under "Coins that are no
+    longer visible after an upgrade" below.
+  - *Unchanged:* an absent value, `ContextPrivKey`, an iguana login, and the UTXO family, which already worked this way.
+  - *Lightning:* under an HD login, `IguanaPrivKey` starts a separate node identity with its own data. The channels of
+    the other identity are not shown. Activation is refused while the other identity still has open channels: the
+    error names that identity; close its channels first under the policy it names. Channels opened before this upgrade
+    belong to the default identity (no `priv_key_policy` or `ContextPrivKey`), even if your requests already said
+    `IguanaPrivKey`.
+  - *Sia and Lightning:* they now read `priv_key_policy`. A hardware value or an unknown value fails the request,
+    where it used to be ignored.
+
+#### Coins that are no longer visible after an upgrade
+
+**If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
+before you move or spend anything.** For some coin families a release can change the rule
+that picks a coin's key or address, for example which key is used for a given `priv_key_policy` under
+an HD login. The node then shows a different address for that coin, and the funds stay at the address
+the previous version used. The safe way:
+1. Note the address the new version shows for that coin.
+2. Start the previous version again, with the same passphrase, `MM2.json` and activation requests.
+3. Move the coins to the address you noted, or close the Lightning channels.
+4. Upgrade again.
 
 ### Added
 
@@ -62,12 +96,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 #### Solana coins
 
+- **Solana activates under an HD login, at a path the request chooses.** Under an HD login the
+  Solana key is now derived from the seed phrase at `m/44'/501'/N'/0'` by default, or at
+  `m/44'/501'/N'` when the activation request sends `"hd_path_layout": "bip44"`; N comes from
+  `path_to_address.account_id`. Nothing is stored: a wallet that used `"bip44"` must send it on
+  every activation, or it gets the default address. One seed phrase therefore gives three Solana
+  addresses: as a single-key passphrase, with the default layout, and with `"bip44"`. A request
+  that asks for a hardware wallet is refused and the WalletConnect form is an invalid request; a
+  request that asks for `IguanaPrivKey` under an HD login gets the wallet's single internal key and
+  its address, not the address of a single-key login with the same words. Solana stays switched off in this build. Detail:
+  PR #392; CRD ch.40 §40.1A.
+
 - **Solana entries of a coins file in the form GLEEC KDF uses can be read.** Besides its own
   forms, KDF Reloaded now reads, in native builds, a Solana platform entry with
   `"protocol_data": {}` and an SPL token entry of type `SOLANATOKEN` with `platform`, `decimals`, `mint_address` and `program_id`. A
   `mint_address` or `program_id` that is not a valid public key makes the entry unreadable, and the
   activation reports a protocol parse error. Solana stays switched off in this build, so no Solana
   coin can be activated yet. Detail: PR #361; CRD ch.40 R40.1.2, R40.1.3.
+
+#### TRON coins
+
+- **The TRON node client gives each node a time limit and fails over when a node answers badly.** A node
+  that does not answer within 10 seconds is skipped, and so is a node that answers with an error status
+  (a rate limit included), with something that is not the expected JSON, or with the node's own error form;
+  such an answer is never read as an empty account. The node that answers is asked first by the next
+  request, and several requests of one coin can run at the same time instead of waiting for each other.
+  A node that answers "busy" or "not in sync" (`SERVER_BUSY`, `NO_CONNECTION`, `NOT_ENOUGH_EFFECTIVE_CONNECTION`,
+  `BLOCK_UNSOLIDIFIED`) is skipped too, and the node list is shuffled once at activation and accepts only `http`
+  and `https` URLs. A signed transaction that a node rejects with any other code ends the request with that code. An entry of the
+  TRON `urls` list can now be an object `{"url": "...", "headers": {...}}` whose headers go to that node
+  only, and the new `MM2.json` key `tron_api_key` is sent as the `TRON-PRO-API-KEY` header to TronGrid
+  hosts over HTTPS only. Header values and the key are never logged or shown. TRON stays switched off in this build,
+  so none of this can be used yet. Detail: PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
 
 #### Tendermint (Cosmos) coins
 
@@ -174,8 +234,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `priv_key_policy`, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
   as the WalletConnect form, fails request parsing with `InvalidRequest` (HTTP 400) instead of
   activating with the local key. Detail: PR #358; CRD ch.36 §36.7, status note of 2026-11-15
+- **A Tendermint activation under an HD login now honors `priv_key_policy: IguanaPrivKey`.** It used
+  to ignore the member and activate the key at `path_to_address`. It now activates the coin with the
+  node's single internal key, as the UTXO family does, and `path_to_address` plays no part.
+  An absent `priv_key_policy` and `ContextPrivKey` activate the key at `path_to_address` as before,
+  and an iguana login does not change. Tokens follow the platform coin's key, and the task form
+  behaves the same. Detail: PR #396; CRD ch.36 §36.7, status note of 2026-11-17
+
+#### EVM, BCH, Sia and Lightning coins
+
+- **Under an HD login, `priv_key_policy: IguanaPrivKey` now activates the node's own single address for
+  EVM coins, BCH with its tokens, Sia and Lightning, as the UTXO family does.** Under a global-HD login
+  these families ignored the value (EVM treated it as `ContextPrivKey`, so the coin was an HD coin at
+  `path_to_address`; BCH with tokens ran on the old passphrase-hash key; Sia and Lightning had no such
+  request member). The value now runs the coin on the node's internal key, the key the node uses as its
+  own identity under an HD login, and the activation answers in the single-address form. An absent value
+  and `ContextPrivKey` keep today's behavior, and an iguana login is unchanged. `get_my_address` answers
+  the address of an EVM coin that is active as a single address, instead of the HD address at
+  `path_to_address`, and a token activated with `path_to_address` on such a platform is no longer refused.
+  Sia and Lightning take the new member `priv_key_policy` (default `ContextPrivKey`; a hardware value is
+  refused by both). EVM still takes the value only in the
+  object form, `{"type": "IguanaPrivKey"}`, as before.
+  **Warning for Lightning:** with an HD login, requesting `IguanaPrivKey` starts a separate Lightning
+  identity (its own node key, data directory, backup directory and history). The channels of the other
+  identity are not shown and are not watched while this identity is in use: close or settle them first,
+  or do not stay on the other identity longer than the channels' dispute delay. A counterparty could
+  close such a channel with an old state, and if nobody watches within the dispute delay the penalty
+  cannot be claimed and funds can be lost. Nothing is moved or deleted, and the channels are shown and
+  watched again when the activation goes back to the default policy. A data directory that was opened
+  by another node key is refused instead of being opened. A Lightning activation is also refused while the other identity still has channels that are
+  not closed (pending open, open, or closing without a recorded closing transaction): the error tells you
+  to close them first by activating under the previous `priv_key_policy`. Closed channels, and an empty or
+  missing history of the other identity, allow the activation. Detail: PR #400; CRD ch.05 R46,
+  status note of 2026-11-17.
 
 #### Solana coins
+
+- **Every wallet request naming a Solana coin or SPL token answers, and Solana swap operations
+  answer an error.** Message signing and verification, address validation, the confirmation settings
+  and `show_priv_key` now answer; `validateaddress` accepts every valid Solana address (any base58
+  text of 32 bytes), and `show_priv_key` gives the 64-byte keypair in base58 that common Solana
+  wallets import. `convertaddress`, `get_raw_transaction`, `get_trade_fee`, `sign_raw_transaction`,
+  the trade-fee part of `max_taker_vol` / `max_maker_vol` and the legacy `my_tx_history` answer an
+  error that names the coin instead of ending the request, and so does every swap operation, also
+  for a swap imported or recovered by hand; switching a coin off follows in a later change. The
+  minimum transaction amount is now one lamport for SOL and one smallest unit of each SPL token.
+  Solana stays switched off in this build. Detail: PR #401; CRD ch.40 D40.6B.1, R40.6B.14, §40.6A.
 
 - **Solana activation errors follow the shapes GLEEC KDF uses, and a token address is checked when
   its coins entry is parsed.** On `enable_solana_with_tokens` a failed block-height or balance read
@@ -225,6 +329,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   storage transaction, including other writes in it. The waiting code now withdraws its handlers when it
   finishes or is cancelled, and a finished transaction withdraws its own. Detail: PR #376; CRD ch.26 R9A.
 
+- **Test code of the coin and node layers is no longer shipped in the browser build.** The browser test
+  modules of `coins` and of the node library (`mm2_main`), and the test helpers only they use, were
+  compiled into the browser build, and the browser test library was a normal dependency of eight crates.
+  They are now built only for tests, and the test library is a test-only dependency of `coins` and
+  `mm2_main` and no longer a dependency of the six crates that do not use it. The release browser bundle
+  (`kdflib_bg.wasm`) shrinks from 23,005,576 to 22,253,053 bytes. The browser tests of `coins` are the
+  same 24 as before, test for test (18 pass, 5 fail, 1 hangs, as before). The browser tests of `mm2_main`
+  and `mm2_gui_storage` did not compile before and do not compile now, with the same errors.
+  Detail: PR #391.
+
 - **Test code of the storage and network layers is no longer shipped in the browser build.** The browser
   test modules of the storage layer (`mm2_db`) and the network layer (`mm2_net`) were compiled into the
   browser build and into the test build of every crate that uses them, and the test library they use was
@@ -268,6 +382,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   are unchanged. The SLP token rows rest on unit tests; no live SLP row is run, because the coins file
   the lab uses has no SLP token entry; the live store comparison covers BCH alone. Detail: PR #380;
   CRD ch.36 R36.14.23 -- R36.14.26.
+
+#### Siacoin
+
+- **Under an HD login the Sia activation answer now lists the coin's address.** The answer of
+  `task::enable_sia` is the per-account report under an HD login, but it listed account 0 with no
+  address. It now lists account 0 with its single address, the one the coin uses, and that address's
+  balance. Detail: PR #402; CRD ch.46 R46.2.4.
 
 #### QTUM and QRC20
 
@@ -324,12 +445,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that withdraw on public testnet servers no longer fail when two of those servers briefly disagree
   about the chain: they turn the server height checks off, which they do not test. Detail: PR #377.
 
+- **Offline tests now pin how a QRC20 token behaves over Electrum.** A local stub Electrum server
+  now answers the QRC20 contract methods. Twelve new tests cover token activation, a balance read
+  that a server answers with an error, the history collector's requests and its failures,
+  including the server's "history too large" answer. The five QRC20 tests that needed the public
+  Qtum testnet server now run against the stub, offline, in CI. Detail: PR #385; CRD ch.38
+  §38.6.4Q.
+
 ### Plans touched
 
+- [`hd-key-unification`](docs/plans/hd-key-unification.md) — the H7 row and Decision CB note now say that H7 applies to an absent
+  `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family.
 - [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)
   build outside the shielded coins — versioned history, wallet management, event delivery to the page and
   smaller items — in order of cost, and the limits a browser has by nature, also listed in
-  `docs/WASM_BUILD.md`.
+  `docs/WASM_BUILD.md`. It now also lists the browser tests and lint (a CI job, the failing browser tests,
+  the browser-target lint) and the three probe fixes merged since it was written.
 - [`mmrpc-v2-completion`](docs/plans/mmrpc-v2-completion.md) — in progress (0.5.0): phase 1 (order
   management) implemented in PR #359, phase 2 (trading) in PR #372, phase 3 (wallet and coins) in PR #379,
   phases 4 and 5 (swaps; daemon and network) in PR #387; decisions D1–D10 recorded; the extension is complete except
@@ -350,12 +481,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361, S1 in PR #371.
+  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 part a in PR #401.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
   Tendermint transaction history, is built in PR #363; its address index now covers every
   store-served coin family (PR #380); item 1a, the WalletConnect form of the activation, is built (PR #393).
+- [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
+  client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
+  headers and an API key; decisions about what lands before TRON is switched back on recorded.
+- [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
+  the version-5 format and digests in the shared parser are in progress (PR #397).
 
 ## [0.4.0-beta.1] — 2026-11-14
 

@@ -10,11 +10,14 @@ pub mod api;
 pub(crate) mod balance;
 pub(crate) mod broadcast;
 pub mod fee;
+pub mod nodes;
 pub mod proto;
 pub mod sign;
 pub mod tx_builder;
 pub mod withdraw;
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod node_client_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod test_node;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod wallet_path_tests;
@@ -42,7 +45,7 @@ pub fn addr_from_pubkey_str(pubkey: &str) -> Result<String, String> {
 /// TRX uses 6 decimal places (1 TRX = 1,000,000 SUN).
 pub const TRX_DECIMALS: u8 = 6;
 
-/// HTTP request timeout for TRON API calls.
+/// The cutoff of one node attempt of the TRON API client (CRD ch.21 R-N3), in seconds.
 pub const TRON_API_TIMEOUT_SEC: u64 = 10;
 
 /// TRON network variants.

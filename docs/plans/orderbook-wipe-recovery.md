@@ -57,7 +57,7 @@
 - (b) adds requests and helps only our own nodes. Revisit it if the lab shows
   that reference relays are the bottleneck once (a) is deployed.
 - (d) belongs to the maker-side plan `docs/plans/maker-gossip-rate-control.md`,
-  item (c)4, owned by tnn-miner-1c. It is **not** part of this plan.
+  item (c)4. It is **not** part of this plan.
 
 **Neither (a) nor (c) helps** when the stream stalls completely, with neither
 updates nor keep-alives arriving. Our relay then drops the book at 90 s, as the
@@ -222,8 +222,7 @@ problem rather than a race.
 
 ## (d) Keep-alive round after a relay (re)connect
 
-This is owned by `docs/plans/maker-gossip-rate-control.md` (Decision AO,
-tnn-miner-1c), item (c)4. It is maker-side, not relay-side, and it is not
+This is owned by `docs/plans/maker-gossip-rate-control.md`, item (c)4. It is maker-side, not relay-side, and it is not
 designed or implemented here.
 
 The two plans meet at one point: (d) resets the 90 s expiry at the relay right

@@ -272,6 +272,7 @@ mod tests {
                 sequence: 0xffff_fffe,
                 amount: *amount,
                 witness: vec![],
+                script_pubkey: None,
             })
             .collect();
 
@@ -292,6 +293,8 @@ mod tests {
             join_splits: vec![],
             shielded_spends: vec![],
             shielded_outputs: vec![],
+            sapling_v5: Default::default(),
+            orchard: Default::default(),
             zcash: false,
             str_d_zeel: None,
             hash_algo: SignerHashAlgo::DSHA256,

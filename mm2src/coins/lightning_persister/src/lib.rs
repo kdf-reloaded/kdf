@@ -298,6 +298,35 @@ fn payment_info_from_row(row: &Row<'_>) -> Result<PaymentInfo, SqlError> {
     Ok(payment_info)
 }
 
+/// Whether the channel history of `storage_ticker` holds a channel that is not settled, so that someone must still
+/// watch it. A missing table, which is a node that never ran under that name, and an empty one hold none.
+///
+/// A channel counts as unsettled when the history does not record it as closed (this covers a channel pending open,
+/// open, and one whose closing is under way but not yet recorded), and also when it is recorded as closed but was
+/// funded and no closing transaction has been recorded for it yet (a closing that is not confirmed as seen). A
+/// channel that was closed before it was ever funded has nothing at stake. The check reads only the history table:
+/// it needs neither the node's keys nor its channel manager.
+pub async fn has_unsettled_channels(
+    sqlite_connection: SqliteConnShared,
+    storage_ticker: String,
+) -> Result<bool, SqlError> {
+    let table_name = channels_history_table(&storage_ticker);
+    validate_table_name(&table_name)?;
+    let sql = format!(
+        "SELECT COUNT(*) FROM {} WHERE is_closed = 0 OR (funding_tx IS NOT NULL AND closing_tx IS NULL);",
+        table_name
+    );
+    async_blocking(move || {
+        let conn = sqlite_connection.lock().unwrap();
+        if query_single_row(&conn, CHECK_TABLE_EXISTS_SQL, [table_name], string_from_row)?.is_none() {
+            return Ok(false);
+        }
+        let unsettled: i64 = conn.query_row(&sql, [], |r| r.get(0))?;
+        Ok(unsettled > 0)
+    })
+    .await
+}
+
 fn get_last_channel_rpc_id_sql(for_coin: &str) -> Result<String, SqlError> {
     let table_name = channels_history_table(for_coin);
     validate_table_name(&table_name)?;

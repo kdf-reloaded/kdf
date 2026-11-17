@@ -736,11 +736,12 @@ mod tests {
         assert_eq!(display, H256Json::from(internal.take()).reversed());
     }
 
-    /// T39.11.e: for every version the old parser supported (here 4), each step's decision is the same
-    /// under the routed and the shared parser; for version 5 the routed parser reads what the shared
-    /// one cannot.
+    /// T39.11.e: each step's decision is the same under the routed and the shared parser. Since the
+    /// version-5 layout in the shared parser, that holds for versions 4 and 5 (CRD ch.39 status note of
+    /// 2026-11-17 under R39.11.15); for version 5 the transaction id of the shared parser is the ZIP-244
+    /// id the Zcash library computes, a cross-check of the two implementations.
     #[test]
-    fn the_payment_output_decision_is_the_same_under_both_parsers_for_v4_and_the_routed_one_reads_v5() {
+    fn the_payment_output_decision_is_the_same_under_both_parsers_for_v4_and_v5() {
         let redeem = b"a stand-in redeem script".to_vec();
         let expected = p2sh_script(&redeem);
         let amount = 123_456u64;
@@ -763,22 +764,18 @@ mod tests {
             assert_eq!(routed_secret, Ok(secret.to_vec()), "v5={v5}");
             assert!(extract_secret(dhash160(b"wrong").as_slice(), &raw).is_err());
 
-            let shared: Result<UtxoTx, _> = deserialize(raw.as_slice());
+            let shared: UtxoTx = deserialize(raw.as_slice()).expect("the shared parser reads versions 4 and 5");
+            assert_eq!(shared.hash(), txid_internal(&routed), "v5={v5}");
             if v5 {
-                // Version 5 is outside what the shared parser lays out.
-                assert!(shared.is_err(), "the shared parser cannot read version 5");
                 assert_ne!(txid_internal(&routed), dhash256(&raw), "ZIP-244, not double-SHA256");
-            } else {
-                let shared = shared.expect("the shared parser reads version 4");
-                assert_eq!(shared.hash(), txid_internal(&routed));
-                assert_eq!(shared.outputs[0].script_pubkey.to_vec(), expected);
-                assert_eq!(shared.outputs[0].value, amount);
-                assert_eq!(
-                    utxo_common::extract_secret(secret_hash.as_slice(), &raw),
-                    routed_secret,
-                    "secret extraction decides the same under both parsers"
-                );
             }
+            assert_eq!(shared.outputs[0].script_pubkey.to_vec(), expected, "v5={v5}");
+            assert_eq!(shared.outputs[0].value, amount, "v5={v5}");
+            assert_eq!(
+                utxo_common::extract_secret(secret_hash.as_slice(), &raw),
+                routed_secret,
+                "secret extraction decides the same under both parsers (v5={v5})"
+            );
         }
     }
 

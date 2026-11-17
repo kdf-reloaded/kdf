@@ -20,7 +20,7 @@ use ser_error_derive::SerializeErrorType;
 use serde::{Deserialize, Serialize};
 
 use crate::eth::{addr_from_raw_pubkey, checksum_address};
-use crate::{coin_conf, CoinProtocol};
+use crate::{coin_conf, lp_coinfind, CoinProtocol, DerivationMethod, MmCoinEnum};
 
 // ── Request / Response types ────────────────────────────────────────────
 
@@ -143,7 +143,10 @@ pub async fn get_my_address_rpc(
     })?;
 
     let wallet_address = match protocol {
-        CoinProtocol::ETH { .. } | CoinProtocol::ERC20 { .. } => my_eth_address(&ctx, &req, &conf)?,
+        CoinProtocol::ETH { .. } | CoinProtocol::ERC20 { .. } => match active_single_address(&ctx, &req.coin).await? {
+            Some(address) => address,
+            None => my_eth_address(&ctx, &req, &conf)?,
+        },
         _ => return MmError::err(GetMyAddressError::CoinIsNotSupported(req.coin.clone())),
     };
 
@@ -151,6 +154,20 @@ pub async fn get_my_address_rpc(
         coin: req.coin,
         wallet_address,
     })
+}
+
+/// The own address of an EVM coin that is active with a single address (`IguanaPrivKey`, or any activation under
+/// an iguana login). Such a coin has no HD address at `path_to_address`: the coin's own address is the answer,
+/// including under an HD login (CRD ch.05 R46 item 3, status note of 2026-11-17).
+async fn active_single_address(ctx: &MmArc, ticker: &str) -> Result<Option<String>, MmError<GetMyAddressError>> {
+    let found = lp_coinfind(ctx, ticker).await.map_to_mm(GetMyAddressError::Internal)?;
+    match found {
+        Some(MmCoinEnum::EthCoin(coin)) => match &coin.derivation_method {
+            DerivationMethod::Iguana(address) => Ok(Some(checksum_address(&format!("{:#x}", address)))),
+            DerivationMethod::HDWallet(_) => Ok(None),
+        },
+        _ => Ok(None),
+    }
 }
 
 /// Resolve the EVM address from the running signing identity. An HD wallet

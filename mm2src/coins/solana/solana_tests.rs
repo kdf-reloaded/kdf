@@ -110,12 +110,13 @@ fn solana_validate_address() {
     let res = sol_coin.validate_address("GMtMFbuVgjDnzsBd3LLBfM4X8RyYcDGCM92tPq2PG6B2");
     assert_eq!(res.is_valid, true);
 
-    // Typo
-    let res = sol_coin.validate_address("Fr8fraJXAe1cFU81mF7NhHTrUzXjZAJkQE1gUQ11riH");
+    // Typo: a character outside the base58 alphabet
+    let res = sol_coin.validate_address("Fr8fraJXAe1cFU81mF7NhHTrUzXjZAJkQE1gUQ11ri0");
     assert_eq!(res.is_valid, false);
 
-    // invalid len
-    let res = sol_coin.validate_address("r8fraJXAe1cFU81mF7NhHTrUzXjZAJkQE1gUQ11riHn");
+    // Not 32 bytes once decoded (CRD ch.40 T40.6B.17: a 32-byte address of 43 characters is valid, so the
+    // length of the text alone no longer decides)
+    let res = sol_coin.validate_address("GMtMFbuVgjDnzsBd3LLBfM4X8RyYcDG");
     assert_eq!(res.is_valid, false);
 }
 

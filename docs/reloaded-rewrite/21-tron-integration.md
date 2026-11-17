@@ -420,6 +420,120 @@ debug form already hides its node list.
 per-request timeout so a stalled node cannot block the pipeline.
 The concrete timeout value is discretionary.
 
+*Status note (2026-11-17).* The sentence of R-N1 that speaks of the
+ordering policy's "stop on a non-retryable rejection" is narrowed to
+R-N6: the only answer that ends a request at a node without trying the
+others is a well-formed broadcast rejection. Every other node failure
+(R-N4) moves on to the next node. The sentence itself is left as written.
+
+**R-N3 (per-attempt cutoff; Reloaded-original).** Each node attempt MUST
+be bounded by a wall-clock cutoff of 10 seconds that covers connecting,
+sending the request, reading the whole body and decoding it. There is no
+overall deadline beyond the attempts: a request over N nodes takes at most
+about N times the cutoff. The value is that of
+[Chapter 35](35-evm-v2-activation-rpcs.md) R35.1.10, so that Tron and EVM
+nodes behave alike. This realizes R-N2. A native build ends the spawned
+exchange at the cutoff; a browser build ends the wait only (the browser's
+own request is not aborted).
+
+**R-N4 (what a node failure is; Reloaded-original).** Each of the
+following moves the request on to the next node: (a) a connection,
+transport or name-lookup failure; (b) the cutoff of R-N3; (c) an HTTP
+status outside 2xx, 429 included; (d) a body that is not JSON or does not
+decode into the endpoint's answer; (e) a 2xx body that is the node's error
+form, a JSON object with a top-level `Error` string (measured on a public
+node). A read MUST never be answered from a non-2xx body. An endpoint's
+"empty" answer (an absent account) counts only as a 2xx answer in the
+endpoint's documented empty form. A redirect is not followed: a 3xx status
+is a non-2xx failure (c).
+
+**R-N5 (order; Reloaded-original).** The starting order is the configured
+order; the client does not shuffle it. Whether the reference shuffles it as
+the EVM path does (R35.1.7) is an open parity question; until it is
+answered the configured order stands. The node that answers becomes the
+first node of the order and the nodes that failed before it move to the
+tail in their relative order. The order is shared by the coin's client and
+its clones and lives as long as the coin is activated.
+
+**R-N6 (broadcast; Reloaded-original).** `broadcasthex` moves on after
+(a) to (d) like every other endpoint (and after (e), as before), so a signed
+transaction may reach several nodes; this is safe because the transaction
+id is fixed. A well-formed rejection by a node (`result: false` with a code)
+ends the request with that node's code and message; no further node is
+asked. How a node answers a duplicate of a transaction that an earlier,
+timed-out attempt already delivered has not been measured: the rejection is
+reported as it is, and the caller can confirm the transaction through
+`gettransactioninfobyid`.
+
+**R-N7 (concurrency; Reloaded-original).** No lock is held while a node is
+being asked. A request walks a snapshot of the order and, when a node
+answers, stores the rotation of that snapshot; the last store wins and the
+stored order is always a complete permutation (as D35.8 (iii) for the EVM
+path). Two requests of one coin MAY run at the same time, and a request
+stuck on a slow node does not hold up another.
+
+**R-N8 (all nodes failed; Reloaded-original).** The caller gets one error:
+of the class of the last failure that was not a cutoff, or, when every node
+hit the cutoff, a timeout-class "nodes unreachable" error. The text is
+host-only (R35.1.14 via R-N1) and credential-free (R35.1.17), and lists each
+host tried once with its failure. Each node failure is logged at debug level
+with the coin's ticker and the node's position in the configured list
+(R35.1.16 form); logging the all-failed error is the caller's.
+
+**R-N9 (request headers and API key; Reloaded-original).** An entry of the
+legacy `urls` array of the activation request is either a URL string or an
+object `{"url": "...", "headers": {"Name": "value", ...}}`; the headers of
+an object entry go to that node only. Header names MUST be valid HTTP
+header names and values valid HTTP header values; an invalid one refuses
+the activation with an error that does not echo it. The optional top-level
+`MM2.json` key `tron_api_key` is sent as the header `TRON-PRO-API-KEY` only
+to the hosts `api.trongrid.io`, `nile.trongrid.io` and
+`api.shasta.trongrid.io` (an exact host match, letter case ignored; never a
+prefix, suffix or substring match, and never the userinfo of a URL), and only
+when the node URL's scheme is `https`: a TronGrid host given as `http` gets no
+key, while the headers of its own entry stay as configured. The key is never
+sent to another host of the same list. A header of the same name (letter
+case ignored) on the node's own entry wins over the key for that node. The
+headers and the key are secrets: no log line, error text, RPC answer or
+debug output shows them (the debug forms say `headers: <set>` and
+`tron_api_key: <set>`), they go to no other host, and no peer sees them. The
+placeholder alloy provider that activation builds from the same node list
+(§21.4) receives the plain URL strings only, without headers: a known
+boundary, as no Tron request goes through it. A reference client never sends
+either form (a Reloaded request extension; no switch, because it adds an
+input and changes nothing for a client that does not send it).
+
+*Status note (2026-11-17), follow-ups of R-N3 and R-N6.* (1) On the browser
+build the request to a node is not aborted at the cutoff of R-N3; only the
+wait ends. Remedy: wire an abort signal (`AbortController`) into the browser
+request. (2) R-N6: an attempt that timed out may already have delivered the
+transaction, so a later node's rejection of the duplicate can report a sent
+transaction as rejected. Remedy: measure on the Nile test network how a node
+answers a duplicate broadcast (lab row W9); until that is measured, no swap
+path may rely on broadcast failover, and a caller confirms a broadcast through
+`gettransactioninfobyid`.
+
+*Status note (2026-11-17), alignment with R21.10B.3.* The reference's node
+order and failover rules of R21.10B.3 are now followed where they differ
+from the text above; the sentences above are left as written.
+(1) R-N5: the configured list is shuffled once when the coin's client is
+built, then each request walks from the head and the rotation of R-N5
+stays; the parity question that R-N5 names is answered. A node keeps its
+configured list position in log lines. (2) R-N4, R-N6: a 2xx error object
+(`result: false` with a `code`, a `result` object with a `code`, or an `error`
+object with a `code`) whose code is `SERVER_BUSY`, `NO_CONNECTION`,
+`NOT_ENOUGH_EFFECTIVE_CONNECTION` or `BLOCK_UNSOLIDIFIED` moves the request to
+the next node, `broadcasthex` included; any other code stays final (R-N6). A
+re-sent transaction is rejected by the Nile test network as a duplicate and
+moves funds once. (3) R-N4 (d) is checked per node for more endpoints: a
+current-block answer with a negative number or a non-positive timestamp, a
+chain-parameter answer without a positive `getTransactionFee` or
+`getEnergyFee`, and a balance read whose `constant_result` is absent, empty or
+whose first entry is not hex move on. (4) Activation accepts only the `http` and `https` schemes
+(letter case ignored); another scheme is refused, naming the node's position
+only. R-WP2 still governs the top-level `Error` form (any text moves on), and
+R-N8 governs the all-failed error, where R21.10B.3 differs.
+
 > **Binding scope (R36).** The endpoint paths and their JSON
 > request/response shapes are the dictated public Tron node API.
 > The client struct, its node-storage representation, and the
@@ -547,6 +661,399 @@ take a TRX and a TRC20 withdraw through a stub node to a signed
 transaction, and check that the encoded contract of a TRX transfer
 starts with its type field (`08 01`) and that of a TRC20 transfer
 with `08 1f`.
+
+## 21.10B Reference behavior of the TRON wallet surface
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-17,
+> measure 0.04 (attestation in §21.13).**
+> This section was written on 2026-11-17 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-10) under the two-team procedure of chapter 01 §1.4A, from the
+> reference lineage at the rows `v3.0.0-beta`, `v2.6.0-beta` and
+> `feat/tron-swap-support (as of 2026-04-23)` of chapter 02 §2.15A (read
+> read-only; no untabled state was read), public TRON documentation, and
+> this repository's own tree. It edits no sentence of §21.0 -- §21.11B. Each
+> rule names the existing rule it completes; where a statement here is more
+> exact than the sentence it completes, the statement here describes the
+> reference and the completed rule still governs Reloaded until the lane
+> decides otherwise. Numbering: R21.10B.1 -- R21.10B.9, T21.10B.1 --
+> T21.10B.15, D21.10B.1 -- D21.10B.3.
+
+*Scope.* The wallet surface a client meets when TRON is switched on: the
+mmrpc 2.0 activation route, the node client's order and failover, key
+policies and HD methods, the activation result, transaction history, the
+withdraw fee estimate, the address methods, and orders. Swaps stay with
+§21.11B. Unless a rule says otherwise it states the row `v3.0.0-beta`.
+
+**R21.10B.1** *Reference states (completes the §21.4 reference note).* The
+row `v2.6.0-beta` has **no TRON wallet behavior**: the `TRX` protocol case
+and its network selector exist, there is no `TRC20` case, and a `TRX`
+platform given to `enable_eth_with_tokens` or `task::enable_eth::init` is
+not refused but built as an ordinary EVM coin (EVM JSON-RPC transport over
+the given nodes, 18 decimals, the EVM address form, `swap_contract_address`
+required as for every EVM platform at that row); no rule below holds there.
+The row `feat/tron-swap-support (as of 2026-04-23)` agrees with
+`v3.0.0-beta` on every point of this section except one: its withdraw fee
+estimate has no account-creation cost and its fee details have no
+`account_creation_fee` member (R21.10B.7).
+
+**R21.10B.2** *Activation request (completes R-A1 and the §21.4 note; the
+member table of chapter 35 R35.1.1 applies with these TRON points).*
+
+- *Routes.* Both `enable_eth_with_tokens` and `task::enable_eth::init`
+  read the same request; TRC20 tokens may also be added later through
+  `enable_erc20` and `task::enable_erc20::init`, which accept a `TRC20`
+  protocol on a TRON platform. A token whose `platform` is not the
+  requested platform answers `PlatformCoinMismatch` (HTTP 400).
+- *`nodes`.* Each entry reads `url` and `komodo_proxy` (default `false`;
+  when `true` the requests to that node carry the signed-proxy
+  authentication of chapter 35's `nodes[].komodo_proxy` row). Only the
+  `http` and `https` schemes are accepted; any other scheme, or a `url`
+  that does not parse, answers `InvalidPayload` (HTTP 400). An empty or
+  absent list answers `AtLeastOneNodeRequired` (HTTP 400). The nodes are
+  not contacted while the list is checked.
+- *`swap_contract_address`, `fallback_swap_contract`, `swap_v2_contracts`.*
+  The generic EVM rule of F21.B3 (§21.11B.1): ignored for a coin whose
+  config says `"wallet_only": true`; for a trading-capable coin
+  `swap_contract_address` is required and non-zero, `fallback_swap_contract`
+  optional and non-zero, and `swap_v2_contracts` required when the node
+  runs trading protocol v2, each refusal `InvalidPayload` (HTTP 400). The
+  members take the EVM `0x` 20-byte hex form; a base58check value fails
+  request decoding.
+- *`required_confirmations`.* The request value, else the coin config's,
+  else 1; a token's `required_confirmations` in `erc20_tokens_requests`
+  overrides the token config's, else the platform's effective value.
+- *`tx_history`.* Not a member of this request: the value is ignored and
+  no history process starts (R21.10B.6).
+- *`get_balances`.* Default `true`. When `false`, a single-address result
+  carries no balances and lists the token tickers instead (chapter 35
+  R35.1.3); an HD result is unaffected.
+- *Other members.* `priv_key_policy` (R21.10B.4), `rpc_mode`,
+  `path_to_address`, `gap_limit`, `scan_policy`, `min_addresses_number`,
+  `mm2`, `contract_supports_watchers` and `swap_gas_fee_policy` are read as
+  for every EVM platform.
+- *Refused requests.* A request carrying `nft_req` answers `Internal`
+  (HTTP 500) on the one-shot route, and the same token in the task status,
+  before any key or node work; nothing is registered.
+- *Token decimals.* A TRC20 token whose config has no `decimals`, or
+  `decimals` 0, is **not** refused: the reference reads the token's
+  `decimals()` through `POST /wallet/triggerconstantcontract` at activation
+  and uses the answer. A value above 255 or a failed read answers
+  `Transport` (HTTP 502). A configured contract address that is neither
+  form of R-AD1 answers `TokenProtocolParseError` (HTTP 500). This differs
+  from R-A1 step 4, which stays the Reloaded rule.
+- *Node failure at activation.* When no node yields the current block, the
+  activation answers `Internal` (HTTP 500), not `Transport`; a failed
+  balance read answers `Transport` (HTTP 502).
+
+**R21.10B.3** *Node order and failover (completes R-N1, R-N2 and R-WP2).*
+
+- *Order.* The configured list is shuffled into a random order once, at
+  activation. Each request walks the list from its head. When a node
+  succeeds, the list is rotated so that this node becomes the head and the
+  nodes that failed before it move, in their order, to the tail.
+- *Time bound.* Each request to one node is bounded by **10 seconds** (all
+  builds). There is no bound over the whole walk, so a request can take up
+  to 10 seconds per configured node.
+- *Answers that move the request to the next node:* a connection or
+  transport failure; the time bound; **any non-2xx HTTP status** (429 and
+  5xx included, with any body); a 2xx body that is not JSON; a 2xx JSON
+  body that does not have the shape the endpoint documents; a 2xx error
+  object (below) whose code is one of the public TRON `response_code`
+  names `SERVER_BUSY`, `NO_CONNECTION`, `NOT_ENOUGH_EFFECTIVE_CONNECTION`
+  or `BLOCK_UNSOLIDIFIED`, or whose text is the answer of the java-tron
+  HTTP rate limiter (the text is java-tron's own, published in that
+  project's source). Endpoint-level checks also move on: a current-block
+  answer with a negative number or a non-positive timestamp, a
+  chain-parameter answer without a positive `getTransactionFee` or
+  `getEnergyFee`, and a balance or decimals read whose first
+  `constant_result` is empty or not hex. An energy dry run whose answer
+  has no positive `energy_used` does **not** move on: the withdraw fails
+  with `Transport` (HTTP 502).
+- *2xx error objects recognized* (the forms the public TRON HTTP API
+  uses): an object with a top-level `Error` string; an object with an
+  `error` object carrying `code` and `message`; an object whose `result`
+  is an object with `result: false`, or without `result` but with `code`;
+  and an object with `result: false` beside `code` and `message`. Any such
+  object whose code and text are not in the list above is a **final**
+  rejection: the request fails at once and no further node is asked. A
+  2xx empty object is not an error object (it is the absent-account
+  answer of R-WP1).
+- *Exhaustion.* When every node failed by a moving answer, the caller
+  gets the last node's failure. A withdraw reports every node failure,
+  final or not, as `Transport` (HTTP 502).
+
+R-WP2 makes Reloaded move on after a top-level `Error` object of any text;
+the reference stops there unless the text is the rate limiter's. R-WP2
+governs Reloaded.
+
+**R21.10B.4** *Key policies and HD (completes R-A2).*
+
+- *Single key and global HD.* Both activate. Under a global-HD login the
+  address is derived under the coin config's `derivation_path` (the
+  reference's own TRON configs use `m/44'/195'`, the SLIP-44 TRON type of
+  R-A2), with `path_to_address` and `gap_limit` as for every EVM platform;
+  a config without `derivation_path` answers `InvalidPayload` (HTTP 400).
+  TRC20 tokens use the platform's HD wallet and therefore its coin type.
+- *HD methods.* `get_new_address`, `account_balance`,
+  `task::get_new_address::init`, `task::scan_for_new_addresses::init` and
+  `task::account_balance::init` work for a TRX or TRC20 ticker under a
+  global-HD login; addresses are reported in base58check and balances as a
+  map from ticker to balance covering the platform and its enabled
+  tokens. An address counts as used when the chain has created its
+  account (a non-empty `POST /wallet/getaccount` answer) or when any
+  enabled TRC20 token has a non-zero balance at it. `task::create_new_account::init`
+  fails for every TRON coin with `Internal` in the task status, before any
+  account is created.
+- *Trezor.* `enable_eth_with_tokens` refuses every hardware policy with
+  `UnexpectedDeviceActivationPolicy` (HTTP 400). On `task::enable_eth::init`
+  a TRON platform under the Trezor policy, with an otherwise valid request,
+  ends with `Internal` in the task status before any device exchange.
+- *WalletConnect.* Refused on both routes with `Internal` (HTTP 500 on the
+  one-shot route), because a TRON chain has no EVM chain identifier.
+- *MetaMask (browser builds only).* `rpc_mode` `Metamask` is refused with
+  `Internal`. The MetaMask `priv_key_policy` with the default `rpc_mode`
+  is **accepted**: the coin activates on the MetaMask account's key, shown
+  in base58check, while withdraw (chapter 47 R47.5.6a) and message signing
+  refuse it. D21.10B.3.
+
+**R21.10B.5** *Activation result (completes the §21.4 note and R-WP5).* The
+result has the EVM family's shape with no TRON-specific member. Single
+key: `current_block` is the TRON head block number from
+`POST /wallet/getnowblock`; `eth_addresses_infos` and `erc20_addresses_infos`
+are keyed by the base58check address; each entry carries
+`derivation_method` (`{"type":"Iguana"}`), `pubkey` (the uncompressed
+secp256k1 key as `04` followed by 128 hex digits) and `balances` (or
+`tickers` when `get_balances` is `false`). TRX balances are in whole TRX at
+6 decimals, TRC20 balances at the token's decimals, each as `spendable`
+and `unspendable` (0) decimal strings; `nfts_infos` is empty. Global HD:
+`current_block`, `ticker`, `wallet_balance` (accounts with base58check
+addresses and their derivation paths) and an empty `nfts_infos`.
+`enable_erc20` reports the token contract in base58check as
+`token_contract_address`.
+
+**R21.10B.6** *Transaction history (completes R-T4).* No TRON history source
+exists at either row: the reference reads none of the full-node API, a
+provider's account endpoints or the event service for history, and no
+background history process runs for TRX or TRC20. The versioned
+`my_tx_history` answers `NotSupportedFor` (HTTP 400) for TRX and TRC20, as
+for the whole EVM family. The legacy `my_tx_history` answers success with
+an empty `transactions` list (only a history file stored earlier under the
+same ticker and address would be read), `current_block` from the TRON
+node, and `sync_status` `{"state":"NotEnabled"}`. The only TRON transaction
+record the reference produces is the withdraw result of R21.10B.7: `from`
+and `to` in base58check, `tx_hash` as 64 lowercase hex digits without
+`0x`, `tx_hex` the signed protobuf transaction, `block_height` 0,
+`internal_id` empty, `timestamp` the local time of building,
+`transaction_type` `StandardTransfer`, `memo` null and `fee_details` of
+R21.10B.7.
+
+**R21.10B.7** *Withdraw fee estimate and amounts (completes R-F1, R-F2,
+R-W2, R-W3 and R-W6).*
+
+- *Inputs read per withdraw:* the current block, the sender's
+  `POST /wallet/getaccountresource` (`freeNetUsed`, `freeNetLimit`,
+  `NetUsed`, `NetLimit`, `EnergyUsed`, `EnergyLimit`; an empty answer is
+  all zero) and `POST /wallet/getchainparameters` (`getTransactionFee`,
+  `getEnergyFee`, `getCreateNewAccountFeeInSystemContract`,
+  `getCreateAccountFee`, `getCreateNewAccountBandwidthRate`; the last
+  defaults to 1).
+- *Bandwidth* is the serialized size of the transaction with one 65-byte
+  signature plus 64 bytes per contract. For a recipient whose account
+  exists, the bandwidth fee is the shortfall of the sender's free plus
+  staked bandwidth, times `getTransactionFee`.
+- *New account (TRX only).* For a TRX transfer to an address the chain has
+  not created, the estimate adds `getCreateNewAccountFeeInSystemContract`
+  as `account_creation_fee`; the bandwidth is the size times
+  `getCreateNewAccountBandwidthRate` and is free when the sender's
+  **staked** bandwidth covers it, else it is replaced by
+  `getCreateAccountFee` (reported with `bandwidth_used` 0). A node that
+  does not report a positive `getCreateNewAccountFeeInSystemContract`
+  makes such a withdraw fail with `InternalError` (HTTP 500). A TRC20
+  transfer never counts an account-creation cost.
+- *Energy (TRC20).* The dry run of `transfer(address,uint256)` through
+  `POST /wallet/triggerconstantcontract` gives `energy_used`; the energy
+  fee is its shortfall over the sender's staked energy, times
+  `getEnergyFee`. The contract's origin energy share is **not** read: the
+  whole dry-run energy is charged to the sender. The transaction's
+  `fee_limit` is the dry-run energy times `getEnergyFee`, with no margin
+  (D21.10B.1). A TRX transfer has no energy and `fee_limit` 0.
+- *Amounts.* TRX `max: true`: a zero balance answers
+  `ZeroBalanceToWithdrawMax`; otherwise the amount is the balance less the
+  fee of the transaction carrying that amount, settled when the fee no
+  longer changes, and a balance that does not exceed the fee answers
+  `AmountTooLow` with `amount` 0 and the fee as `threshold`. TRX without
+  `max`: an amount above the balance, or an amount plus fee above it,
+  answers `NotSufficientBalance` (the second with `required` the sum).
+  TRC20 `max: true` sends the whole token balance; for any TRC20 withdraw
+  a TRX balance below the fee answers `NotSufficientPlatformBalanceForFee`
+  with the platform ticker, the TRX balance and the fee. An amount of zero
+  without `max` is not refused before building. All four answer HTTP 400.
+- *Other request members.* Any `fee` answers `InvalidFeePolicy`; a `memo`
+  answers `UnsupportedError`; `expiration_seconds` (TRON only) sets the
+  transaction's expiry that many seconds after the reference block's
+  time, default 60, with no upper bound.
+- *Fee details.* `{"type": "Tron"}` with `coin` (TRX; for a token, the
+  platform ticker), `bandwidth_used` and `energy_used` (integers),
+  `bandwidth_fee`, `energy_fee` and `total_fee` (decimal strings in TRX),
+  and `account_creation_fee` (decimal string, present only when not zero).
+  `spent_by_me` adds the fee for TRX and not for a token.
+- *Routes.* The direct `withdraw` and `task::withdraw::init` take the same
+  path for TRX and TRC20; the task delivers the same result or error
+  token in its status. Key-policy refusals are chapter 49's (R49.9 and the
+  `UnsupportedError` arm of R49.27a).
+
+The node's own bandwidth rule (TRON Developer Hub, *Resource Model*) draws
+a transaction's bandwidth from staked or from free bandwidth as a whole and
+otherwise burns TRX for the whole size; the reference charges only the
+shortfall of the two pools summed. Remedy: Reloaded's estimate follows the
+node's rule, so that it is never below what the node charges.
+
+**R21.10B.8** *Address methods (completes R-WP5 and R-AD1).*
+
+- `validateaddress` accepts the base58check form (34 characters starting
+  with `T`, checksum checked) and the hex wire form (42 hex digits
+  starting `41`, or 44 starting `0x41`); everything else, the EVM `0x`
+  20-byte form included, answers `is_valid: false` with a `reason`.
+- `convertaddress` is the EVM method unchanged: `to_address_format` takes
+  the EVM formats only, `from` must be an EVM `0x` address (a base58check
+  or `41…` value is refused with the legacy error body), and the answer is
+  the EVM mixed-case `0x` form. D21.10B.2.
+- `get_my_address` refuses TRX and TRC20 with `CoinIsNotSupported`
+  (HTTP 400); a coin config without `mm2` answers `CoinsConfCheckError`
+  (HTTP 400) first.
+- `show_priv_key` answers the single key or the activated HD key as
+  `0x` followed by 64 hex digits, the EVM form; hardware, WalletConnect and
+  MetaMask keys are refused with the legacy error body.
+- The withdraw destination and `my_balance` follow R-WP5: both address
+  forms in, base58check out.
+
+**R21.10B.9** *Orders (completes R-D1 and the order-placement bullet of
+F21.B3).* `setprice`, `buy` and `sell` have no TRON-specific check. With
+the coin configured `"wallet_only": true` -- every TRON config of the
+reference -- each answers the legacy error body (chapter 55 R55.1.10,
+HTTP 500) from the wallet-only check that runs before any balance or fee
+work, naming the wallet-only ticker; no order is created. A TRON coin
+activated as trading-capable passes that check and then fails the
+balance-and-fee check, because the swap fee is computed through the EVM
+gas path and the coin has no EVM node; the answer is the same legacy
+error body and no order is created. The row `v2.6.0-beta` has the same
+wallet-only check.
+
+**D21.10B.1** *TRC20 `fee_limit` policy.* The reference sets `fee_limit` to
+the dry-run energy times the energy price with no margin; Reloaded today
+sets a fixed cap (compatibility note). The cap is not visible to a peer.
+Options: (a) the reference's figure; (b) the estimate plus a stated margin,
+bounded by a stated maximum; (c) a fixed cap. The choice also fixes what
+the fee details report as the most the transfer can cost (D21.B5 of
+§21.11B.4 states the charging semantics).
+
+**D21.10B.2** *`convertaddress` for a TRON coin.* The reference answers an
+EVM `0x` form for a TRON coin. Options: (a) parity; (b) refuse the method
+for TRX and TRC20; (c) convert between the base58check and the `41…` hex
+form under a TRON-specific format value.
+
+**D21.10B.3** *Key policies that activate but cannot send.* At the
+reference a browser build activates TRON under MetaMask and shows an
+address that withdraw then refuses. Options: (a) parity; (b) refuse at
+activation every key policy the TRON withdraw refuses (R21.10B.4), with
+the refusal token of the route.
+
+> **Compatibility (this repository on dev, 2026-11-17; its own code, not
+> the reference).** TRX and TRC20 activate only through legacy `enable`
+> and `electrum`, behind the availability constant (D55.5); the request
+> reads `urls`, not `nodes`, so `komodo_proxy` has no counterpart, and any
+> parseable URI is accepted. The node list keeps the given order (no
+> shuffle); the 10-second bound and the rotation to the head agree.
+> Activation takes the node's internal key for every login, so under a
+> global-HD login the TRON address is not derived under the coin's
+> `derivation_path` and differs from the reference's address for the same
+> seed; R-A2 is not met on that route today. A TRC20 config without
+> `decimals` is refused (R-A1 step 4). Reloaded has no TRON history source
+> either; its `convertaddress` is the same EVM method, and its order
+> creation has a wallet-only check of its own. The withdraw
+> estimate uses fixed bandwidth figures, counts an account-creation cost
+> for a TRC20 recipient too, and is best-effort (it is left out when a
+> node read fails); `max: true` for TRX sends the whole balance without
+> deducting the fee, and a TRX amount plus fee above the balance is not
+> refused before building; the TRC20 `fee_limit` is a fixed cap.
+
+*Not established.* (1) Nothing was measured against a running reference
+binary or a live node. (2) The exact text the legacy error body carries in
+R21.10B.8 and R21.10B.9 is deliberately not recorded. (3) Whether the TRON
+node's energy dry run includes the dynamic-energy penalty in
+`energy_used` was not checked. (4) The swap-fee failure of R21.10B.9 for a
+trading-capable coin was read, not executed.
+
+*Acceptance rows.* Each row runs against a stub TRON node that answers the
+public endpoints of §21.9 with the forms the row names. *Parity* is the
+reference behavior above; where Reloaded keeps a different rule the row
+names it.
+
+T21.10B.1 *Activation result.* A one-shot activation of a TRX platform
+with one TRC20 token, single key, answers a result keyed by the
+base58check address, the stub's head block as `current_block`, the TRX
+balance scaled by 6 decimals and the token balance by the token's
+decimals.
+
+T21.10B.2 *NFT request.* The same request with `nft_req` answers
+`Internal`, HTTP 500, and leaves TRX and the token inactive.
+
+T21.10B.3 *Token without decimals.* A token config without `decimals`:
+parity activates the token with the decimals the stub's `decimals()` answer
+gives, and a stub that fails that read gives `Transport`, HTTP 502.
+Reloaded, while R-A1 step 4 stands: refused.
+
+T21.10B.4 *Node list.* An empty `nodes` answers `AtLeastOneNodeRequired`
+and a `ws` URL answers `InvalidPayload`, both HTTP 400, with no request to
+any node.
+
+T21.10B.5 *Moving answers.* With two stubs, the first answering in turn
+HTTP 429, HTTP 503, a non-JSON 2xx body, a 2xx body of the wrong shape and
+a 2xx error object with a transient TRON code, each balance read succeeds
+from the second stub, and the next read starts at the second stub.
+
+T21.10B.6 *Final answer.* With two stubs, the first answering a 2xx error
+object with a permanent TRON code, the read fails and the second stub
+receives no request (parity; R-WP2 governs Reloaded for the `Error` form).
+
+T21.10B.7 *Time bound.* A first stub that never answers is abandoned
+after 10 seconds and the second stub serves the read.
+
+T21.10B.8 *Global HD.* Under a global-HD login with a config whose
+`derivation_path` names coin type 195, the activated address equals the
+base58check address derived at `m/44'/195'/0'/0/0` from the same seed;
+`get_new_address` and `account_balance` answer base58check addresses;
+`task::create_new_account::init` ends with `Internal`.
+
+T21.10B.9 *Key policies.* `enable_eth_with_tokens` under the Trezor policy
+answers `UnexpectedDeviceActivationPolicy`, HTTP 400; under WalletConnect
+it answers `Internal`, HTTP 500.
+
+T21.10B.10 *History.* The versioned `my_tx_history` for TRX answers
+`NotSupportedFor`, HTTP 400; the legacy method answers an empty list with
+`sync_status` `NotEnabled`.
+
+T21.10B.11 *New recipient.* A TRX withdraw to an address the stub reports
+as absent carries `account_creation_fee` equal to the stub's
+`getCreateNewAccountFeeInSystemContract` and a `total_fee` that includes
+it; a TRC20 withdraw to the same address carries no such member.
+
+T21.10B.12 *TRX max.* With a balance above the fee, `max: true` sends the
+balance less `total_fee`; with a balance not above the fee it answers
+`AmountTooLow`; with a zero balance `ZeroBalanceToWithdrawMax`.
+
+T21.10B.13 *TRC20 fee from TRX.* A TRC20 withdraw whose TRX balance is
+below the estimated fee answers `NotSufficientPlatformBalanceForFee` with
+the platform ticker; with `max: true` and enough TRX it sends the whole
+token balance.
+
+T21.10B.14 *Address methods.* `validateaddress` accepts a base58check, a
+`41…` and a `0x41…` form of one address and refuses its EVM `0x` form;
+`get_my_address` for TRX answers `CoinIsNotSupported`, HTTP 400.
+
+T21.10B.15 *Orders.* With TRX configured wallet-only, `setprice`, `buy`
+and `sell` against any active coin each answer the legacy error body and
+`my_orders` stays empty.
 
 ## 21.11 Deferred Work
 
@@ -1097,6 +1604,16 @@ V3. The address encoding, protobuf transaction/contract formats,
   listing and an on-chain query; the gate script was not run because there
   are no code blocks. *Measure:* 0.01 on the discretionary-expression
   basis.
+- *Clean-context addition (2026-11-17, forbidden corpus not consulted):*
+  R-N3 to R-N9 and the status note after R-N2 in §21.9 are
+  Reloaded-original. They rest on this repository's own code, chapter 35
+  R35.1.7 to R35.1.17 and D35.8 (iii), and on a black-box measurement of a
+  public Tron test node on 2026-11-10 (the error form of the node API: a 2xx
+  answer with a top-level `Error` string, a non-2xx status only from the HTTP
+  layer). The open parity question is whether the reference shuffles the
+  configured node order (R-N5); it was not asked and nothing was taken from
+  the reference. Their tests are in the Tron node-client test module
+  (T-N1 to T-N8 and the header tests of R-N9).
 - *Clean-context addition (2026-10-28, forbidden corpus not consulted):* the
   sentence in §21.9 R-N1 that applies chapter 35 R35.1.17 to the Tron client,
   with its status remark, is Reloaded-original. It rests on the maintainer
@@ -1132,3 +1649,54 @@ V3. The address encoding, protobuf transaction/contract formats,
   chapter 49's fee-descriptor rule, the public Tron node HTTP API, and a
   public-network observation of the Nile testnet node on 2026-11-10
   (chapter 01 R6) for the node's empty-account and `Error` answer forms.
+- *Scoped addition (2026-11-17, Spec Reader round 0.5.0-10) -- §21.10B
+  (R21.10B.1 -- R21.10B.9, D21.10B.1 -- D21.10B.3, the compatibility note,
+  the not-established paragraph, T21.10B.1 -- T21.10B.15); no other text of
+  this chapter was changed.* **KDF Dirty Gate: PASS on 2026-11-17, measure 0.04, no findings**
+  (chapter 01 R40; the attestation closes this item).
+  *Inputs:* (1) the forbidden corpus at the rows `v3.0.0-beta`,
+  `v2.6.0-beta` and `feat/tron-swap-support (as of 2026-04-23)` of chapter
+  02 §2.15A, read read-only (the `v3.0.0-beta` sources were read from a
+  checkout at the row `dev (as of 2026-03-27)` whose source tree was
+  confirmed identical to `v3.0.0-beta` by mechanical difference), and
+  consulted **only** to establish: for a TRON platform and its TRC20
+  tokens, which mmrpc 2.0 activation members are read and how, which
+  requests are refused with which `error_type` token and HTTP status, the
+  node list's order, the per-request time bound, which node answers move a
+  request to the next node and which end it, the key policies and HD
+  methods that work or fail, the activation result's shape and address
+  form, whether any history source exists and what the history methods
+  answer, the withdraw fee inputs and amounts, the fee-details members, the
+  address methods' accepted and returned forms, and the outcome of order
+  creation; and the agreement of the three rows on these points (the
+  `v2.6.0-beta` row has no TRON wallet behavior; the branch row differs in
+  the account-creation cost only). Behavior, public wire names, error
+  tokens, statuses, public TRON API endpoint paths, response members,
+  chain-parameter keys and `response_code` names only; no private
+  identifier, function body, helper decomposition, error, log, comment or
+  test text was reproduced, the legacy error texts are deliberately not
+  recorded, and the java-tron rate-limiter text is described, not quoted.
+  (2) Public TRON documentation: TRON Developer Hub, *Resource Model*, for
+  the node's bandwidth rule in R21.10B.7 (already cited in §21.11B.6).
+  (3) This repository's tree at the base of this round (the dev branch as
+  of 2026-11-17), for the compatibility note and the cross-references.
+  D21.10B.1 -- D21.10B.3 are Reloaded-original. No row was added to chapter
+  02 §2.15A: every state read already had one, and each row's identifier
+  was confirmed, by read-only inspection of the historical record's
+  reference metadata, to be the commit the row names.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-17, measure
+  0.04 on the discretionary-expression basis, no findings. Reference states
+  (chapter 02 R13): PASS; the rows `dev (as of 2026-03-27)` and
+  `v3.0.0-beta`, whose trees are identical, `feat/tron-swap-support (as of
+  2026-04-23)` and `v2.6.0-beta`, all tabled in §2.15A. Extent: the TRON
+  wallet surface of the reference (mmrpc 2.0 platform and token activation;
+  the node client and its failover; key policies and HD; the activation
+  result; history; the withdraw fee estimate and amounts; fee details;
+  address methods; order creation), compared at the rows `dev (as of
+  2026-03-27)` and `v3.0.0-beta` (the same tree), `feat/tron-swap-support
+  (as of 2026-04-23)` and `v2.6.0-beta`; 22 source files of that surface
+  compared at the dev/`v3.0.0-beta` tree, the core client, fee, withdraw and
+  activation files read in full or in their relevant parts; the branch row
+  and `v2.6.0-beta` compared on the points attributed to them. Method:
+  reading, combined with a mechanical word n-gram comparison (6-gram and
+  4-gram) and a per-token inventory; the additions embed no code blocks.

@@ -138,6 +138,33 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
   R40.1.2, R40.1.3; PR #361.
 
+- **Solana wallet methods answer.** On an active Solana coin or SPL token
+  GLEEC KDF ends many requests without a JSON answer (`sign_message`,
+  `verify_message`, `validateaddress`, `convertaddress`,
+  `get_raw_transaction`, the legacy `my_tx_history`,
+  `set_required_confirmations`, `show_priv_key` and others). Reloaded answers
+  each: with a result where the code exists, with an error naming the coin
+  otherwise. Message signing uses the message's bytes with no prefix and a
+  base58 signature; `show_priv_key` gives the 64-byte keypair in base58. The
+  minimum transaction amount of an SPL token is one smallest unit of its own
+  decimals, where GLEEC KDF states one lamport for every token; no peer sees
+  it while Solana cannot trade. No switch: an abnormal end cannot be a
+  compatibility target. CRD ch.40 D40.6B.1, R40.6B.14; PR #401.
+
+- **Solana under an HD login.** GLEEC KDF refuses Solana activation under a
+  global-HD login and derives no Solana key from a seed. Reloaded derives the
+  key from the seed phrase at `m/44'/501'/N'/0'` by default, or at
+  `m/44'/501'/N'` with the request member `"hd_path_layout": "bip44"`; nothing
+  is stored per wallet, so a client that used `"bip44"` must send it on every
+  activation. One seed phrase gives three Solana addresses (single-key, default
+  layout, `"bip44"`). `hd_path_layout`, `path_to_address` and `priv_key_policy`
+  are additional request members; a hardware-wallet policy is refused, and
+  `IguanaPrivKey` under an HD login gives the wallet's single internal key
+  and its address. No
+  switch: the reference behavior is a refusal, which cannot be a useful
+  compatibility target, and no peer sees which key a wallet uses. CRD ch.40
+  §40.1A; PR #392.
+
 - **Opt-in: an absent `max_eth_tx_type` read as unrestricted.** By default
   Reloaded reads a coin configuration with no `max_eth_tx_type` key as GLEEC KDF
   does: the coin may send untyped (legacy) transactions only, and an EIP-1559
@@ -610,6 +637,17 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.36 R36.3.5, ch.18 R18.6B, ch.49 R49.28 to
   R49.30, ch.35 R35.6.8, R35.6.9. PR #323.
 
+- **The TRON node client (TRON is still switched off) gives each node a time limit, fails over on bad answers and
+  accepts request headers and an API key.** A TRON node that does not answer within 10 seconds is skipped, and so is a
+  node that answers with an error status, with something that is not the expected JSON, or with the node's own
+  error form; a rate-limit answer is never read as an empty account. The node that answers is asked first next time,
+  and several requests of one coin run at the same time. A signed transaction that a node rejects with a code ends the
+  request with that code. An entry of the TRON `urls` list may also be an object `{"url": "...", "headers": {...}}`
+  whose headers go to that node only, and the top-level `MM2.json` key `tron_api_key` is sent as `TRON-PRO-API-KEY`
+  to TronGrid hosts over HTTPS only. Both are Reloaded request extensions that a reference client never sends; no switch is
+  needed because a request without them is served as before. The values are secrets and are never logged or shown.
+  Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.
@@ -634,6 +672,16 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   as the WalletConnect form sent as this member (the WalletConnect forms of `activation_params` are built, see below),
   fails request parsing with `InvalidRequest` (HTTP 400). No switch exists.
   CRD ch.36 §36.7. PR #358.
+- **A Tendermint activation under an HD login honors `priv_key_policy: IguanaPrivKey`.** GLEEC KDF accepts and ignores
+  `priv_key_policy` for Tendermint coins; Reloaded activates the coin with the single internal key of the node, as the
+  UTXO family does, and `path_to_address` then plays no part. An absent value and `ContextPrivKey` still use
+  the key at `path_to_address`. No switch exists. CRD ch.36 §36.7. PR #396.
+- **`priv_key_policy: IguanaPrivKey` under an HD login runs EVM coins, BCH with its tokens, Sia and Lightning on the node's
+  internal key.** This is a Reloaded decision; the reference behavior is not recorded in the CRD, and no parity is
+  claimed. Under a global-HD login `IguanaPrivKey` activates a single-address coin on the internal key (the HD context's
+  key at the node-key path), as Reloaded's UTXO family does; an absent value and `ContextPrivKey` keep today's behavior,
+  and an iguana login is unchanged. Lightning under this value is a separate identity with its own data directory.
+  No switch exists. CRD ch.05 R46, ch.35 R35.1.4, ch.51 R64, status notes of 2026-11-17.
 - **A Tendermint coin activated from a public key is watch-only, and its orders are refused.** The `WithPubkey` form
   of `activation_params` builds a coin that holds no private key: it answers `withdraw` and the staking requests with
   an unsigned document for the caller's own wallet (a `sign_doc`, or with `is_ledger_connection: true` the Amino form

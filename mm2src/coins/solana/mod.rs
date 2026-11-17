@@ -23,11 +23,11 @@ pub(crate) use crate::solana::rpc_pool::SolanaRpcPool;
 pub(crate) use crate::solana::solana_common::{lamports_to_sol, PrepareTransferData, SufficientBalanceError};
 pub(crate) use crate::solana::spl::SplTokenInfo;
 pub(crate) use crate::{BalanceError, BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend,
-                       NegotiateSwapContractAddrErr, RawTransactionFut, RawTransactionRequest, SignatureResult,
-                       TradePreimageFut, TradePreimageResult, TradePreimageValue, TransactionDetails, TransactionFut,
-                       TransactionType, UnexpectedDerivationMethod, ValidateAddressResult, ValidateFeeArgs,
-                       ValidatePaymentInput, VerificationResult, WithdrawError, WithdrawFut, WithdrawRequest,
-                       WithdrawResult};
+                       NegotiateSwapContractAddrErr, RawTransactionError, RawTransactionFut, RawTransactionRequest,
+                       SignatureResult, TradePreimageError, TradePreimageFut, TradePreimageResult, TradePreimageValue,
+                       TransactionDetails, TransactionErr, TransactionFut, TransactionType,
+                       UnexpectedDerivationMethod, ValidateAddressResult, ValidateFeeArgs, ValidatePaymentInput,
+                       VerificationResult, WithdrawError, WithdrawFut, WithdrawRequest, WithdrawResult};
 pub(crate) use async_trait::async_trait;
 pub(crate) use base58::ToBase58;
 pub(crate) use bigdecimal::BigDecimal;
@@ -59,6 +59,7 @@ pub mod solana_common;
 #[cfg(test)] mod solana_common_tests;
 mod solana_decode_tx_helpers;
 #[cfg(test)] mod solana_tests;
+#[cfg(test)] mod solana_wallet_answers_tests;
 pub mod spl;
 #[cfg(test)] mod spl_tests;
 
