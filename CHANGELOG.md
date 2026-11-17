@@ -9,6 +9,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
 
+### Upgrade note: coins that are no longer visible after an upgrade
+
+**If coins or Lightning channels you held are no longer visible after an upgrade, go back to the
+previous version before you do anything else.** For some coin families a release can change the rule
+that picks a coin's key or address, for example which key is used for a given `priv_key_policy` under
+an HD login. The node then shows a different address for that coin, and the funds stay at the address
+the previous version used. The safe way:
+1. Start the previous version again, with the same passphrase and settings.
+2. Move the coins to an address the new version shows, or close the Lightning channels.
+3. Upgrade again.
+
 ### Added
 
 #### Start-up and configuration
