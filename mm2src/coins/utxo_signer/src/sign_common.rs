@@ -6,6 +6,7 @@ use primitives::hash::{H256, H512};
 use script::{Builder, Script, TransactionInputSigner, UnsignedTransactionInput};
 
 pub(crate) fn complete_tx(unsigned: TransactionInputSigner, signed_inputs: Vec<TransactionInput>) -> UtxoTx {
+    let consensus_branch_id = unsigned.transaction_branch_id();
     UtxoTx {
         inputs: signed_inputs,
         n_time: unsigned.n_time,
@@ -25,6 +26,9 @@ pub(crate) fn complete_tx(unsigned: TransactionInputSigner, signed_inputs: Vec<T
         zcash: unsigned.zcash,
         str_d_zeel: unsigned.str_d_zeel,
         tx_hash_algo: unsigned.hash_algo.into(),
+        consensus_branch_id,
+        sapling_v5: unsigned.sapling_v5,
+        orchard: unsigned.orchard,
     }
 }
 

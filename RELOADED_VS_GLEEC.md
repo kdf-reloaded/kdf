@@ -662,6 +662,12 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   `priv_key_policy` for Tendermint coins; Reloaded activates the coin with the single internal key of the node, as the
   UTXO family does, and `path_to_address` then plays no part. An absent value and `ContextPrivKey` still use
   the key at `path_to_address`. No switch exists. CRD ch.36 §36.7. PR #396.
+- **`priv_key_policy: IguanaPrivKey` under an HD login runs EVM coins, BCH with its tokens, Sia and Lightning on the node's
+  internal key.** This is a Reloaded decision; the reference behavior is not recorded in the CRD, and no parity is
+  claimed. Under a global-HD login `IguanaPrivKey` activates a single-address coin on the internal key (the HD context's
+  key at the node-key path), as Reloaded's UTXO family does; an absent value and `ContextPrivKey` keep today's behavior,
+  and an iguana login is unchanged. Lightning under this value is a separate identity with its own data directory.
+  No switch exists. CRD ch.05 R46, ch.35 R35.1.4, ch.51 R64, status notes of 2026-11-17.
 - **A Tendermint coin activated from a public key is watch-only, and its orders are refused.** The `WithPubkey` form
   of `activation_params` builds a coin that holds no private key: it answers `withdraw` and the staking requests with
   an unsigned document for the caller's own wallet (a `sign_doc`, or with `is_ledger_connection: true` the Amino form

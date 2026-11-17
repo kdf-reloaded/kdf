@@ -384,6 +384,7 @@ impl SlpToken {
 
         signed_inputs.insert(0, signed_p2sh_input);
 
+        let consensus_branch_id = unsigned.transaction_branch_id();
         let signed = UtxoTx {
             version: unsigned.version,
             n_time: unsigned.n_time,
@@ -403,6 +404,9 @@ impl SlpToken {
             zcash: unsigned.zcash,
             str_d_zeel: unsigned.str_d_zeel,
             tx_hash_algo: self.platform_coin.as_ref().tx_hash_algo,
+            consensus_branch_id,
+            sapling_v5: unsigned.sapling_v5,
+            orchard: unsigned.orchard,
         };
 
         let _broadcast = self

@@ -13,6 +13,7 @@ mod raw_header;
 mod read_hash;
 mod repr;
 mod transaction;
+pub mod zip244;
 
 pub mod constants {
     pub use crate::constants_::*;
@@ -25,7 +26,7 @@ pub use primitives::{bytes, compact, hash, U256};
 pub use raw_header::{RawBlockHeader, RawHeaderError};
 pub use read_hash::{HashedData, ReadAndHash};
 pub use repr::RepresentH256;
-pub use transaction::{JoinSplit, OutPoint, ShieldedOutput, ShieldedSpend, Transaction, TransactionInput,
-                      TransactionOutput, TxHashAlgo};
+pub use transaction::{JoinSplit, OrchardAction, OrchardBundle, OutPoint, SaplingBundleV5, SaplingSpendV5,
+                      ShieldedOutput, ShieldedSpend, Transaction, TransactionInput, TransactionOutput, TxHashAlgo};
 
 pub type ShortTransactionId = hash::H48;

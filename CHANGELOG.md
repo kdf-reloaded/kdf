@@ -14,6 +14,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Read this before you upgrade. It lists every change in this release that an older version can no longer read
 or undo, and every change that needs a step from you.
 
+- **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
+  coins, EVM coins and their tokens, BCH with its SLP tokens, Sia and Lightning.** Until now these families ignored the
+  value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed single-address HD key, and BCH
+  with tokens and Lightning the key derived from the passphrase. A request that asks for `IguanaPrivKey` now gets a
+  different address or Lightning identity.
+  - *Upgrade risk:* if your activation requests already contain `IguanaPrivKey`, the address or Lightning identity of
+    those coins changes after this upgrade, although you changed nothing. Follow the steps under "Coins that are no
+    longer visible after an upgrade" below.
+  - *Unchanged:* an absent value, `ContextPrivKey`, an iguana login, and the UTXO family, which already worked this way.
+  - *Lightning:* under an HD login, `IguanaPrivKey` starts a separate node identity with its own data. The channels of
+    the other identity are not shown. Activation is refused while the other identity still has open channels: the
+    error names that identity; close its channels first under the policy it names. Channels opened before this upgrade
+    belong to the default identity (no `priv_key_policy` or `ContextPrivKey`), even if your requests already said
+    `IguanaPrivKey`.
+  - *Sia and Lightning:* they now read `priv_key_policy`. A hardware value or an unknown value fails the request,
+    where it used to be ignored.
+
 #### Coins that are no longer visible after an upgrade
 
 **If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
@@ -201,6 +218,33 @@ the previous version used. The safe way:
   and an iguana login does not change. Tokens follow the platform coin's key, and the task form
   behaves the same. Detail: PR #396; CRD ch.36 §36.7, status note of 2026-11-17
 
+#### EVM, BCH, Sia and Lightning coins
+
+- **Under an HD login, `priv_key_policy: IguanaPrivKey` now activates the node's own single address for
+  EVM coins, BCH with its tokens, Sia and Lightning, as the UTXO family does.** Under a global-HD login
+  these families ignored the value (EVM treated it as `ContextPrivKey`, so the coin was an HD coin at
+  `path_to_address`; BCH with tokens ran on the old passphrase-hash key; Sia and Lightning had no such
+  request member). The value now runs the coin on the node's internal key, the key the node uses as its
+  own identity under an HD login, and the activation answers in the single-address form. An absent value
+  and `ContextPrivKey` keep today's behavior, and an iguana login is unchanged. `get_my_address` answers
+  the address of an EVM coin that is active as a single address, instead of the HD address at
+  `path_to_address`, and a token activated with `path_to_address` on such a platform is no longer refused.
+  Sia and Lightning take the new member `priv_key_policy` (default `ContextPrivKey`; a hardware value is
+  refused by both). EVM still takes the value only in the
+  object form, `{"type": "IguanaPrivKey"}`, as before.
+  **Warning for Lightning:** with an HD login, requesting `IguanaPrivKey` starts a separate Lightning
+  identity (its own node key, data directory, backup directory and history). The channels of the other
+  identity are not shown and are not watched while this identity is in use: close or settle them first,
+  or do not stay on the other identity longer than the channels' dispute delay. A counterparty could
+  close such a channel with an old state, and if nobody watches within the dispute delay the penalty
+  cannot be claimed and funds can be lost. Nothing is moved or deleted, and the channels are shown and
+  watched again when the activation goes back to the default policy. A data directory that was opened
+  by another node key is refused instead of being opened. A Lightning activation is also refused while the other identity still has channels that are
+  not closed (pending open, open, or closing without a recorded closing transaction): the error tells you
+  to close them first by activating under the previous `priv_key_policy`. Closed channels, and an empty or
+  missing history of the other identity, allow the activation. Detail: PR #400; CRD ch.05 R46,
+  status note of 2026-11-17.
+
 #### Solana coins
 
 - **Solana activation errors follow the shapes GLEEC KDF uses, and a token address is checked when
@@ -342,6 +386,8 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`hd-key-unification`](docs/plans/hd-key-unification.md) — the H7 row and Decision CB note now say that H7 applies to an absent
+  `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family.
 - [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)
   build outside the shielded coins — versioned history, wallet management, event delivery to the page and
   smaller items — in order of cost, and the limits a browser has by nature, also listed in
@@ -376,6 +422,8 @@ the previous version used. The safe way:
 - [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
   headers and an API key; decisions about what lands before TRON is switched back on recorded.
+- [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
+  the version-5 format and digests in the shared parser are in progress (PR #397).
 
 ## [0.4.0-beta.1] — 2026-11-14
 

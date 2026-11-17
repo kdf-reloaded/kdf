@@ -148,6 +148,7 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
                 sequence: SEQUENCE_FINAL,
                 amount: input.value,
                 witness: Vec::new(),
+                script_pubkey: None,
             });
         }
         self
@@ -332,6 +333,7 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
                     sequence: SEQUENCE_FINAL,
                     amount: utxo.value,
                     witness: vec![],
+                    script_pubkey: None,
                 });
                 self.sum_inputs += utxo.value;
 
@@ -488,12 +490,15 @@ pub async fn p2sh_spending_tx<T: UtxoCommonOps>(
             },
             amount: prev_transaction.outputs[0].value,
             witness: Vec::new(),
+            script_pubkey: None,
         }],
         outputs: outputs.clone(),
         expiry_height: 0,
         join_splits: vec![],
         shielded_spends: vec![],
         shielded_outputs: vec![],
+        sapling_v5: Default::default(),
+        orchard: Default::default(),
         value_balance: 0,
         version_group_id: coin.as_ref().conf.version_group_id,
         consensus_branch_id: coin.as_ref().conf.consensus_branch_id,
@@ -511,6 +516,7 @@ pub async fn p2sh_spending_tx<T: UtxoCommonOps>(
         coin.as_ref().conf.signature_version,
         coin.as_ref().conf.fork_id
     ));
+    let consensus_branch_id = unsigned.transaction_branch_id();
     Ok(UtxoTx {
         version: unsigned.version,
         n_time: unsigned.n_time,
@@ -530,6 +536,9 @@ pub async fn p2sh_spending_tx<T: UtxoCommonOps>(
         zcash: coin.as_ref().conf.zcash,
         str_d_zeel: unsigned.str_d_zeel,
         tx_hash_algo: unsigned.hash_algo.into(),
+        consensus_branch_id,
+        sapling_v5: unsigned.sapling_v5,
+        orchard: unsigned.orchard,
     })
 }
 

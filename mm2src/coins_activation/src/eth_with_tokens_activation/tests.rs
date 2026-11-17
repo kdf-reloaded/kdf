@@ -1104,6 +1104,190 @@ fn path_to_address_selects_the_enabled_address_of_an_hd_daemon() {
 }
 
 // ---------------------------------------------------------------------------
+// `priv_key_policy: IguanaPrivKey` under a global-HD login (CRD ch.05 R46 item 3, status note of 2026-11-17)
+// ---------------------------------------------------------------------------
+
+/// The EVM address of the daemon-internal key of `ctx`.
+fn internal_key_address(ctx: &MmArc) -> Address {
+    let crypto_ctx = CryptoCtx::from_ctx(ctx).unwrap();
+    coins::eth::addr_from_raw_pubkey(&hex::decode(crypto_ctx.mm2_internal_pubkey_hex()).unwrap()).unwrap()
+}
+
+fn registered_platform(ctx: &MmArc) -> EthCoin {
+    match block_on(lp_coinfind(ctx, PLATFORM)).unwrap().unwrap() {
+        coins::MmCoinEnum::EthCoin(coin) => coin,
+        other => panic!("not an EVM coin: {}", other.ticker()),
+    }
+}
+
+fn zero_balance_node() -> MockEvmNode {
+    spawn_node(|method, params| match method {
+        "eth_getBalance" => Reply::Result(json!("0x0")),
+        _ => healthy_node_reply(method, params, 0, 0),
+    })
+}
+
+#[test]
+fn iguana_priv_key_is_its_own_policy_variant_and_the_alias_follows_it() {
+    for (policy, iguana) in [
+        (json!({ "type": "ContextPrivKey" }), false),
+        (json!({ "type": "IguanaPrivKey" }), true),
+        (json!({ "type": "Iguana" }), true),
+    ] {
+        let parsed = serde_json::from_value::<Req>(request_json(&[], json!({ "priv_key_policy": policy }))).unwrap();
+        assert_eq!(
+            matches!(parsed.request.priv_key_policy(), EthPrivKeyPolicy::IguanaPrivKey),
+            iguana,
+            "{}",
+            policy
+        );
+    }
+    // The bare string is not a policy for any variant of this enum (it never was).
+    assert!(serde_json::from_value::<Req>(request_json(&[], json!({ "priv_key_policy": "IguanaPrivKey" }))).is_err());
+}
+
+#[test]
+fn an_hd_login_with_iguana_priv_key_activates_the_internal_key() {
+    use coins::eth::derive_eth_hd_activation_key;
+    use crypto::KeyPairPolicy;
+
+    for spelling in ["IguanaPrivKey", "Iguana"] {
+        let ctx = hd_ctx();
+        let internal = internal_key_address(&ctx);
+        // The internal key is not the HD address at the coin derivation path, nor the passphrase-hash key.
+        let global_hd = match CryptoCtx::from_ctx(&ctx).unwrap().key_pair_policy() {
+            KeyPairPolicy::GlobalHDAccount(global_hd) => global_hd.clone(),
+            KeyPairPolicy::Iguana => panic!("an HD context is expected"),
+        };
+        let conf = coins::coin_conf(&ctx, PLATFORM);
+        let path_address = derive_eth_hd_activation_key(&global_hd, &conf, &PathToAddress::default())
+            .unwrap()
+            .address();
+        assert_ne!(internal, path_address);
+
+        let node = zero_balance_node();
+        let result = activate(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({
+                    "priv_key_policy": { "type": spelling },
+                    // Ignored on the single-address branch.
+                    "path_to_address": { "account_id": 0, "chain": "External", "address_id": 3 },
+                    "erc20_tokens_requests": tokens(&["USDT-ERC20"]),
+                }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+        let result = serde_json::to_value(&result).unwrap();
+        let eth_infos = result["eth_addresses_infos"]
+            .as_object()
+            .expect("the Iguana result form");
+        assert_eq!(eth_infos.len(), 1);
+        let (address, info) = eth_infos.iter().next().unwrap();
+        assert_eq!(address, &coins::eth::checksum_address(&format!("{:#x}", internal)));
+        assert_eq!(info["derivation_method"], json!({ "type": "Iguana" }));
+        assert!(result.get("wallet_balance").is_none());
+
+        let coin = registered_platform(&ctx);
+        assert_eq!(coin.enabled_address(), internal);
+        assert!(matches!(coin.derivation_method, coins::DerivationMethod::Iguana(_)));
+    }
+}
+
+#[test]
+fn an_hd_login_without_or_with_context_priv_key_keeps_the_hd_address() {
+    use coins::eth::derive_eth_hd_activation_key;
+    use crypto::KeyPairPolicy;
+
+    for extra in [json!({}), json!({ "priv_key_policy": { "type": "ContextPrivKey" } })] {
+        let ctx = hd_ctx();
+        let global_hd = match CryptoCtx::from_ctx(&ctx).unwrap().key_pair_policy() {
+            KeyPairPolicy::GlobalHDAccount(global_hd) => global_hd.clone(),
+            KeyPairPolicy::Iguana => panic!("an HD context is expected"),
+        };
+        let conf = coins::coin_conf(&ctx, PLATFORM);
+        let path_address = derive_eth_hd_activation_key(&global_hd, &conf, &PathToAddress::default())
+            .unwrap()
+            .address();
+        let node = zero_balance_node();
+        activate(&ctx, request(std::slice::from_ref(&node.url), extra.clone()))
+            .unwrap_or_else(|e| panic!("the HD activation failed: {}", e));
+        let coin = registered_platform(&ctx);
+        assert_eq!(coin.enabled_address(), path_address);
+        assert!(matches!(coin.derivation_method, coins::DerivationMethod::HDWallet(_)));
+    }
+}
+
+#[test]
+fn an_iguana_login_activates_the_same_key_for_every_software_policy() {
+    let mut addresses = Vec::new();
+    for extra in [
+        json!({}),
+        json!({ "priv_key_policy": { "type": "ContextPrivKey" } }),
+        json!({ "priv_key_policy": { "type": "IguanaPrivKey" } }),
+    ] {
+        let ctx = iguana_ctx();
+        let node = healthy_node();
+        activate(&ctx, request(std::slice::from_ref(&node.url), extra)).unwrap();
+        let coin = registered_platform(&ctx);
+        assert!(matches!(coin.derivation_method, coins::DerivationMethod::Iguana(_)));
+        assert_eq!(coin.enabled_address(), internal_key_address(&ctx));
+        addresses.push(coin.enabled_address());
+    }
+    assert!(addresses.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
+#[test]
+fn the_task_route_honours_iguana_priv_key_under_an_hd_login() {
+    let ctx = hd_ctx();
+    let internal = internal_key_address(&ctx);
+    let node = zero_balance_node();
+    let response = block_on(init_platform_coin_with_tokens::<EthCoin>(
+        ctx.clone(),
+        request(
+            std::slice::from_ref(&node.url),
+            json!({ "priv_key_policy": { "type": "IguanaPrivKey" } }),
+        ),
+    ))
+    .unwrap_or_else(|e| panic!("init failed: {}", e));
+    let status = poll_terminal(&ctx, response.task_id);
+    assert_eq!(status["status"], "Ok", "{}", status);
+    assert!(status["details"]["eth_addresses_infos"].is_object(), "{}", status);
+    let coin = registered_platform(&ctx);
+    assert_eq!(coin.enabled_address(), internal);
+    assert!(matches!(coin.derivation_method, coins::DerivationMethod::Iguana(_)));
+}
+
+#[test]
+fn get_my_address_answers_the_active_single_address_coin_under_an_hd_login() {
+    use coins::rpc_command::get_my_address::get_my_address_rpc;
+
+    let ctx = hd_ctx();
+    let ask = || {
+        let request = serde_json::from_value(json!({ "coin": PLATFORM })).unwrap();
+        block_on(get_my_address_rpc(ctx.clone(), request))
+            .unwrap_or_else(|e| panic!("get_my_address failed: {}", e))
+            .wallet_address
+    };
+    let internal = coins::eth::checksum_address(&format!("{:#x}", internal_key_address(&ctx)));
+    // Not active: the address the login derives at the path.
+    let before = ask();
+    assert_ne!(before, internal);
+
+    let node = zero_balance_node();
+    activate(
+        &ctx,
+        request(
+            std::slice::from_ref(&node.url),
+            json!({ "priv_key_policy": { "type": "IguanaPrivKey" } }),
+        ),
+    )
+    .unwrap();
+    assert_eq!(ask(), internal, "the active coin's own address");
+}
+
+// ---------------------------------------------------------------------------
 // T35.11: the inline NFT activation (R35.1.4b)
 // ---------------------------------------------------------------------------
 
