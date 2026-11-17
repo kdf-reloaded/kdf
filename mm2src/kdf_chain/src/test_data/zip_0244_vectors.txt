@@ -4,6 +4,8 @@
 # (generated there by zcash_test_vectors/zip_0244.py), fetched 2026-11-17. The ten vectors are
 # copied unchanged; the JSON array is rewritten as one line per vector, the auth_digest field is
 # left out (nothing here computes it) and an absent value (null) is written as `-`.
+# Commit of the repository the vectors and the license text below were taken from:
+# 78321beacb0e0477e33cd002b56585a107c2708c
 #
 # Line format, fields separated by one space:
 #   tx txid amounts script_pubkeys transparent_input sighash_shielded sighash_all sighash_none
@@ -14,7 +16,9 @@
 # inputs; `transparent_input` is the index of the input the sighash_* digests are for. `txid` and
 # the digests are in digest byte order.
 #
-# License of the vectors (the repository's LICENSE-MIT):
+# License: the zcash-test-vectors repository is dual-licensed under the MIT license or the
+# Apache License 2.0, at the user's option (its README). This copy relies on the MIT option.
+# The MIT license text of the repository's LICENSE-MIT, verbatim:
 #
 # The MIT License (MIT)
 #
