@@ -14,6 +14,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Read this before you upgrade. It lists every change in this release that an older version can no longer read
 or undo, and every change that needs a step from you.
 
+#### ZEC needs its version-5 coins entry
+
+**ZEC sends need the coins entry with `"txversion": 5` and `"consensus_branch_id": "0x77190ad9"`.** Since the Zcash
+network upgrade NU7 the network refuses version-4 transactions. This release builds version-5 ZEC transactions when the
+ZEC entry says `txversion` 5; with the old entry (`txversion` 4) every ZEC send is still refused by the network, and a
+version before this one cannot send ZEC with either entry. Balances and receiving work with both entries and in every
+version. Activation now also refuses a Zcash-family (`overwintered`) entry whose `txversion` is not 4 or 5, and a
+version-5 entry without `consensus_branch_id`, with an error that names the field.
+
 #### Coins that are no longer visible after an upgrade
 
 **If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
@@ -207,6 +216,17 @@ the previous version used. The safe way:
   such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
 
 ### Fixed
+
+#### ZEC
+
+- **ZEC can be sent again.** With the version-5 coins entry, withdrawals, DEX fees, swap payments, claims and
+  refunds of ZEC are built as version-5 transactions with the version-5 transaction id and signature, as the Zcash
+  network requires since NU7. A Trezor refuses a version-5 ZEC transaction with a clear error. Incoming version-5
+  transactions are read; version 6 is not read yet. Detail: PR #TBD; CRD ch.39 R39.11.15 and §39.11.4V status notes.
+- **A resumed version-2 swap of a Zcash-family coin checks the counterparty's signature against the right data.**
+  The signature digest of a swap step received from the counterparty now commits to the amount, the network's branch id
+  and, for version 5, the script of the output it spends, for KMD, ZEC and the other Zcash-family coins. Version-2
+  swaps run only when a stored version-2 swap is resumed. Detail: PR #TBD.
 
 #### Browser (WASM) build
 

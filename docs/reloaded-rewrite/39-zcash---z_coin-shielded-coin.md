@@ -6825,12 +6825,31 @@ a version that has no default; (c) as (b), and also refuse an `overwintered`
 value other than the integers `0` and `1`. Recommendation: (b), which is the
 plan's configuration step; (c) only after a check of the coins files in use.
 
+> *Reloaded status (clean side, 2026-11-17):* resolved by the maintainer's
+> decision as option (b). Activation refuses, with a typed error naming the
+> field and the value, an overwintered entry whose `txversion` is not 4 or 5
+> (version 3 included, and an absent `txversion`, which reads as 1), and an
+> overwintered entry with `txversion` 5 that names no `consensus_branch_id`.
+> For version 5 the `version_group_id` defaults to `0x26A7270A`. The
+> task-managed activation answers `CoinCreationError` with the ticker and the
+> error text, as for an invalid branch id. Entries that are not overwintered
+> and the `overwintered` selector are unchanged; option (c) was not taken.
+
 D39.11.4V.3 *(Open.)* *Version 6 on the transparent coin's read path.* The
 network accepts versions 5 and 6 (the status note under R39.11.15); the plan's
 reading step names version 5. Options: (a) read version 5 only, and treat a
 version-6 transaction as unreadable under D39.11.4V.1 and in the swap steps of
 R39.11.4V.8; (b) read versions 5 and 6 through the Zcash library reader, whose
 version coverage R39.11.15 records. Recommendation: (b).
+
+> *Reloaded status (clean side, 2026-11-17):* resolved by the maintainer's
+> decision as a staged form of (b): the shared UTXO parser reads version 5
+> (status note of 2026-11-17 under R39.11.15); a version-6 transaction stays
+> unreadable, under D39.11.4V.1 and in the swap steps of R39.11.4V.8, until the
+> Zcash library family is upgraded to a release that knows the NU7 branch id;
+> from then on versions 5 and 6 are read through that library's reader. The
+> pinned library cannot read an NU7 transaction of either version (status note
+> under R39.11.15). The upgrade is a condition of the 0.5.0 release.
 
 *Not established.* (1) Nothing was run against a reference binary or a live
 Zcash node; no node's refusal text is recorded. (2) Whether the WalletConnect
@@ -8581,3 +8600,7 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   code differs from and agrees with R39.11.4V.2 -- R39.11.4V.10; no
   forbidden-class input beyond the cleared section it cites, chapter 01 R38 not
   engaged.
+- *Status notes added 2026-11-17 -- after D39.11.4V.2 and D39.11.4V.3.*
+  Reloaded-original, clean side: they record the maintainer's resolutions of
+  2026-11-17 and what this repository builds for them; no forbidden-class
+  input, chapter 01 R38 not engaged.
