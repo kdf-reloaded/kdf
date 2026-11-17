@@ -6367,6 +6367,22 @@ R39.11.15 **Version coverage of the two parsers (public facts, for planning).**
 > upgrade NU7 (mainnet height 3,543,405, ZIP 259) a Zcash transaction's version
 > must be 5 or 6, also for a transparent-only transaction (ZIP 2003, ZIP 259).
 > For the transparent coin ZEC see plan `zec-v5-transactions`.
+>
+> *Status (2026-11-17, this repository; clean side):* the **shared UTXO parser**
+> now implements the ZIP-225 version-5 layout for writing and reading, with all
+> three bundles (transparent, Sapling, Orchard), and computes the ZIP-244
+> transaction identifier for version 5; the shared signature hash computes the
+> ZIP-244 transparent signature digest for version 5 (for a P2SH input it
+> commits to the spent output's scriptPubKey, as ZIP 244 §S.2 defines, not to the
+> redeem script). The consensus branch id is the coin's configured value.
+> Versions 1 to 4 are unchanged; an overwintered version 6 or higher is refused
+> at parsing and at signing instead of being read in the version-4 layout. The
+> code is checked against the public ZIP-244 test vectors (zcash-test-vectors,
+> MIT). The **Zcash library reader** pinned here cannot read a transaction under
+> the NU7 branch id `0x77190AD9`: its `zcash_protocol` 0.10.6 knows NU7 only as
+> an unstable placeholder (`0xFFFFFFFF`) and refuses an unknown branch id; the
+> published `zcash_protocol` 0.11.0 has it. The coin wiring for ZEC follows in
+> the plan's next pull request.
 
 R39.11.16 **Requirement for Ironwood-era support.** Before a shielded coin may
 transact on a network whose standardness rule requires a transaction version the
@@ -8136,3 +8152,7 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   tree at both release rows; diffs between the tabled states; pattern
   searches for numerals and store-layout wording; the additions embed no
   code blocks, so the repository's clean-room gate tool was not run.
+- *Status note added 2026-11-17 -- under R39.11.15.* Reloaded-original, clean side:
+  it records this repository's version-5 layout and ZIP-244 digests in the
+  shared UTXO code, written from the public ZIPs 225 and 244 and checked against
+  the public test vectors; no forbidden-class input, chapter 01 R38 not engaged.

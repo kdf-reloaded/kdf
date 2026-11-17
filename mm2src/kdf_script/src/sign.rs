@@ -8,6 +8,9 @@
 //     fork-id flag for replay protection).
 //   * "overwintered" — ZIP-243 Zcash Sapling (BLAKE2b personalised
 //     digest tree).
+//   * "ZIP-244" — Zcash version 5 transactions (ZIP-225 layout): a
+//     different BLAKE2b digest tree that also commits to the amounts and
+//     scriptPubKeys of all inputs.
 //
 // The "legacy" and "witness v0" digests (and the fork-id form of the latter) can carry a
 // per-coin sighash suffix (CRD ch.61): four little-endian bytes appended after the 4-byte
@@ -22,8 +25,9 @@ use crate::bytes::Bytes;
 use crate::hash::{H256, H512};
 use crate::{Builder, Script};
 use blake2b_simd::Params as Blake2b;
-use chain::{JoinSplit, OutPoint, ShieldedOutput, ShieldedSpend, Transaction, TransactionInput, TransactionOutput,
-            TxHashAlgo};
+use chain::zip244;
+use chain::{JoinSplit, OrchardBundle, OutPoint, SaplingBundleV5, ShieldedOutput, ShieldedSpend, Transaction,
+            TransactionInput, TransactionOutput, TxHashAlgo};
 use crypto::{dhash256, sha256};
 use keys::KeyPair;
 use serde::Deserialize;
@@ -41,6 +45,13 @@ const PERS_JOINSPLITS: &[u8] = b"ZcashJSplitsHash";
 const PERS_SAPLING_SPENDS: &[u8] = b"ZcashSSpendsHash";
 const PERS_SAPLING_OUTPUTS: &[u8] = b"ZcashSOutputHash";
 const PERS_SIGHASH: &[u8] = b"ZcashSigHash";
+
+// --- ZIP-244 personalisation tags of the transparent signature digest ---
+
+const PERS_ZIP244_TRANSPARENT: &[u8] = b"ZTxIdTranspaHash";
+const PERS_ZIP244_AMOUNTS: &[u8] = b"ZTxTrAmountsHash";
+const PERS_ZIP244_SCRIPTS: &[u8] = b"ZTxTrScriptsHash";
+const PERS_ZIP244_TXIN: &[u8] = b"Zcash___TxInHash";
 
 // --- Sighash flag bits (Bitcoin script reference) -----------------
 
@@ -127,10 +138,14 @@ impl Sighash {
     }
 }
 
-/// Why a signature hash could not be computed. Only the Radiant dialect can fail (CRD ch.58
+/// Why a signature hash could not be computed. Two cases can fail. The Radiant dialect (CRD ch.58
 /// R58.3.3): an output script in scope of the sighash base type that its reference walk cannot
-/// accept leaves no digest, so no signature over such a transaction could verify. Each variant names
-/// the index of the offending output in the transaction.
+/// accept leaves no digest, so no signature over such a transaction could verify. Each of those
+/// variants names the index of the offending output in the transaction. And a Zcash transaction of
+/// an overwintered version above 5: its layout is not built, so no digest is computed.
+/// The version 5 digest (ZIP 244) can also fail, for a hash type it does not define, an input
+/// without a spent scriptPubKey, an input index out of range or a `SIGHASH_SINGLE` input without
+/// an output at its index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureHashError {
     /// The script cannot be decoded: an operand runs past its end, a push length is cut off or a
@@ -143,6 +158,19 @@ pub enum SignatureHashError {
     MultipleStateSeparators { output_index: usize },
     /// An `OP_RETURN` comes before an `OP_STATESEPARATOR` in the script.
     ReturnBeforeStateSeparator { output_index: usize },
+    /// An overwintered transaction of a version above 5. Only versions 3, 4 and 5 have a layout and a
+    /// digest here.
+    UnsupportedTransactionVersion { version: i32 },
+    /// ZIP 244 commits to the scriptPubKey of every spent output; this input carries none.
+    MissingSpentScriptPubkey { input_index: usize },
+    /// ZIP 244 defines only `SIGHASH_ALL`, `SIGHASH_NONE` and `SIGHASH_SINGLE`, each with or without
+    /// `SIGHASH_ANYONECANPAY`.
+    UndefinedHashType { hash_type: u32 },
+    /// The input index is not an input of the transaction.
+    InputIndexOutOfRange { input_index: usize },
+    /// `SIGHASH_SINGLE` needs an output with the same index as the input; ZIP 244 makes it invalid
+    /// when there is none.
+    SingleWithoutOutput { input_index: usize },
 }
 
 impl fmt::Display for SignatureHashError {
@@ -164,6 +192,27 @@ impl fmt::Display for SignatureHashError {
                     "output {output_index}: the script has OP_RETURN before a state separator"
                 )
             },
+            SignatureHashError::UnsupportedTransactionVersion { version } => {
+                write!(f, "overwintered transaction version {version} has no signature digest")
+            },
+            SignatureHashError::MissingSpentScriptPubkey { input_index } => {
+                write!(f, "input {input_index}: the spent output's scriptPubKey is not known")
+            },
+            SignatureHashError::UndefinedHashType { hash_type } => {
+                write!(
+                    f,
+                    "hash type 0x{hash_type:x} is not defined for a version 5 transaction"
+                )
+            },
+            SignatureHashError::InputIndexOutOfRange { input_index } => {
+                write!(f, "input {input_index} is not an input of the transaction")
+            },
+            SignatureHashError::SingleWithoutOutput { input_index } => {
+                write!(
+                    f,
+                    "input {input_index}: SIGHASH_SINGLE has no output at the input's index"
+                )
+            },
         }
     }
 }
@@ -178,6 +227,10 @@ pub struct UnsignedTransactionInput {
     pub sequence: u32,
     pub amount: u64,
     pub witness: Vec<Vec<u8>>,
+    /// The scriptPubKey of the output this input spends. Only the ZIP 244 digest of a Zcash version 5
+    /// transaction reads it (it commits to the scriptPubKey of every input); every other version
+    /// leaves it `None`. For a P2SH output this is the P2SH script itself, not the redeem script.
+    pub script_pubkey: Option<Script>,
 }
 
 impl From<TransactionInput> for UnsignedTransactionInput {
@@ -187,6 +240,7 @@ impl From<TransactionInput> for UnsignedTransactionInput {
             sequence: i.sequence,
             amount: 0,
             witness: i.script_witness.into_iter().map(Vec::from).collect(),
+            script_pubkey: None,
         }
     }
 }
@@ -230,6 +284,11 @@ pub struct TransactionInputSigner {
     pub join_splits: Vec<JoinSplit>,
     pub shielded_spends: Vec<ShieldedSpend>,
     pub shielded_outputs: Vec<ShieldedOutput>,
+    /// The Sapling part of a version 5 transaction (ZIP 244 hashes it into the signature digest).
+    /// Empty for every other version.
+    pub sapling_v5: SaplingBundleV5,
+    /// The Orchard part of a version 5 transaction. Empty for every other version.
+    pub orchard: OrchardBundle,
     pub zcash: bool,
     pub str_d_zeel: Option<String>,
     pub hash_algo: SignerHashAlgo,
@@ -250,7 +309,7 @@ impl TransactionInputSigner {
             n_time: t.n_time,
             overwintered: t.overwintered,
             version_group_id: t.version_group_id,
-            consensus_branch_id: 0,
+            consensus_branch_id: t.consensus_branch_id,
             expiry_height: t.expiry_height,
             value_balance: t.value_balance,
             inputs: t.inputs.into_iter().map(Into::into).collect(),
@@ -259,16 +318,29 @@ impl TransactionInputSigner {
             join_splits: t.join_splits,
             shielded_spends: t.shielded_spends,
             shielded_outputs: t.shielded_outputs,
+            sapling_v5: t.sapling_v5,
+            orchard: t.orchard,
             zcash: t.zcash,
             str_d_zeel: t.str_d_zeel,
             hash_algo: t.tx_hash_algo.into(),
             sighash_suffix,
         }
     }
+
+    /// The consensus branch id the built transaction carries: only the version 5 layout has the
+    /// field (ZIP 225), every other version leaves it zero, like a parsed transaction does.
+    pub fn transaction_branch_id(&self) -> u32 {
+        if self.overwintered && self.version == 5 {
+            self.consensus_branch_id
+        } else {
+            0
+        }
+    }
 }
 
 impl From<TransactionInputSigner> for Transaction {
     fn from(s: TransactionInputSigner) -> Self {
+        let consensus_branch_id = s.transaction_branch_id();
         let inputs = s
             .inputs
             .iter()
@@ -298,6 +370,9 @@ impl From<TransactionInputSigner> for Transaction {
             join_split_sig: H512::default(),
             str_d_zeel: s.str_d_zeel,
             tx_hash_algo: s.hash_algo.into(),
+            consensus_branch_id,
+            sapling_v5: s.sapling_v5,
+            orchard: s.orchard,
         }
     }
 }
@@ -307,10 +382,18 @@ impl TransactionInputSigner {
     /// signing and verifying site goes through (CRD ch.61 R61.4.2); the signer's
     /// `sighash_suffix` enters here.
     ///
+    /// A Zcash version 5 transaction (overwintered, version 5) gets the ZIP 244 digest whatever the
+    /// signature version: it commits to the amounts and the spent scriptPubKeys recorded in
+    /// `inputs`, so `input_amount` and `script_pubkey` are not read for it (for a P2SH input the
+    /// redeem script is not hashed at all). `sighashtype` must then be one of the six values ZIP 244
+    /// defines.
+    ///
     /// # Errors
     ///
-    /// Only the Radiant dialect with the fork-id bit set can fail, for an output script in scope of
-    /// the sighash base type that its reference walk rejects (CRD ch.58 R58.3.3). Every other
+    /// The Radiant dialect with the fork-id bit set can fail, for an output script in scope of
+    /// the sighash base type that its reference walk rejects (CRD ch.58 R58.3.3). An overwintered
+    /// transaction of a version above 5 always fails: its layout is not built. A version 5
+    /// transaction fails for the reasons of [`SignatureHashError`] that name ZIP 244. Every other
     /// version and flag combination returns `Ok`.
     pub fn signature_hash(
         &self,
@@ -320,6 +403,12 @@ impl TransactionInputSigner {
         sigversion: SignatureVersion,
         sighashtype: u32,
     ) -> Result<H256, SignatureHashError> {
+        if self.overwintered && self.version >= 5 {
+            if self.version != 5 {
+                return Err(SignatureHashError::UnsupportedTransactionVersion { version: self.version });
+            }
+            return self.sighash_zip244(Some(input_index), sighashtype);
+        }
         let sighash = Sighash::from_u32(sigversion, sighashtype);
         // The Radiant dialect has its own digest and takes no suffix; configuration refuses the
         // combination (R61.3.3), so this zero is unreachable from a resolved coin configuration.
@@ -475,6 +564,9 @@ impl TransactionInputSigner {
             binding_sig: H512::default(),
             join_split_pubkey: H256::default(),
             join_split_sig: H512::default(),
+            consensus_branch_id: 0,
+            sapling_v5: SaplingBundleV5::default(),
+            orchard: OrchardBundle::default(),
         };
 
         let mut s = Stream::default();
@@ -592,6 +684,12 @@ impl TransactionInputSigner {
         sighashtype: u32,
         sighash: Sighash,
     ) -> Result<H256, String> {
+        if self.version >= 5 {
+            return Err(format!(
+                "the ZIP-243 digest does not apply to version {}; use `signature_hash`",
+                self.version
+            ));
+        }
         self.sighash_overwintered(input_index, script_pubkey, sighashtype, sighash)
     }
 
@@ -686,6 +784,127 @@ impl TransactionInputSigner {
             .append(&i.sequence);
 
         Ok(blake2b_personal(&s.out(), &personal))
+    }
+
+    // --- ZIP-244 Zcash version 5 digest ---------------------------
+
+    /// The ZIP 244 signature digest (S) of a version 5 transaction: for the transparent input
+    /// `input_index` with `hash_type`, or, for `None`, the digest a Sapling spend or an Orchard
+    /// action signs (`SIGHASH_ALL`, no transparent input). A coinbase transaction, or one without
+    /// transparent inputs, has the transparent part of its transaction id instead (S.2).
+    fn sighash_zip244(&self, input_index: Option<usize>, hash_type: u32) -> Result<H256, SignatureHashError> {
+        if let Some(index) = input_index {
+            if index >= self.inputs.len() {
+                return Err(SignatureHashError::InputIndexOutOfRange { input_index: index });
+            }
+        }
+        let prevouts: Vec<OutPoint> = self.inputs.iter().map(|i| i.previous_output).collect();
+        let sequences: Vec<u32> = self.inputs.iter().map(|i| i.sequence).collect();
+
+        let header = zip244::header_digest(
+            zip244::header_word(self.version),
+            self.version_group_id,
+            self.consensus_branch_id,
+            self.lock_time,
+            self.expiry_height,
+        );
+
+        let is_coinbase = self.inputs.len() == 1 && self.inputs[0].previous_output.is_null();
+        let transparent = if self.inputs.is_empty() || is_coinbase {
+            zip244::transparent_digest(&prevouts, &sequences, &self.outputs)
+        } else {
+            self.zip244_transparent_sig_digest(&prevouts, &sequences, input_index, hash_type)?
+        };
+
+        Ok(zip244::root_digest(
+            self.consensus_branch_id,
+            &header,
+            &transparent,
+            &zip244::sapling_digest(&self.sapling_v5),
+            &zip244::orchard_digest(&self.orchard),
+        ))
+    }
+
+    /// ZIP 244 S.2: the transparent signature digest of a transaction that has transparent inputs.
+    fn zip244_transparent_sig_digest(
+        &self,
+        prevouts: &[OutPoint],
+        sequences: &[u32],
+        input_index: Option<usize>,
+        hash_type: u32,
+    ) -> Result<H256, SignatureHashError> {
+        // S.2a: a transparent input signs one of six hash types; a shielded signature is SIGHASH_ALL.
+        let hash_type = match input_index {
+            Some(_) => hash_type,
+            None => 0x01,
+        };
+        if !matches!(hash_type, 0x01 | 0x02 | 0x03 | 0x81 | 0x82 | 0x83) {
+            return Err(SignatureHashError::UndefinedHashType { hash_type });
+        }
+        let anyone_can_pay = hash_type & 0x80 != 0;
+        let base = hash_type & 0x1f;
+        if let Some(index) = input_index {
+            if base == 0x03 && index >= self.outputs.len() {
+                return Err(SignatureHashError::SingleWithoutOutput { input_index: index });
+            }
+        }
+
+        // The scriptPubKey of every spent output must be known, also under ANYONECANPAY.
+        let mut spent_scripts = Vec::with_capacity(self.inputs.len());
+        for (n, input) in self.inputs.iter().enumerate() {
+            match &input.script_pubkey {
+                Some(script) => spent_scripts.push(script.to_bytes()),
+                None => return Err(SignatureHashError::MissingSpentScriptPubkey { input_index: n }),
+            }
+        }
+
+        // S.2b, S.2e: outpoints and sequences, or nothing under ANYONECANPAY.
+        let (prevouts_sig, sequence_sig) = if anyone_can_pay {
+            (zip244::prevouts_digest(&[]), zip244::sequence_digest(&[]))
+        } else {
+            (zip244::prevouts_digest(prevouts), zip244::sequence_digest(sequences))
+        };
+
+        // S.2c, S.2d: the amounts and the scriptPubKeys (with their length prefixes) of all inputs.
+        let mut amounts = Stream::default();
+        let mut scripts = Stream::default();
+        if !anyone_can_pay {
+            for (input, script) in self.inputs.iter().zip(&spent_scripts) {
+                amounts.append(&input.amount);
+                scripts.append(script);
+            }
+        }
+        let amounts_sig = blake2b_personal(&amounts.out(), PERS_ZIP244_AMOUNTS);
+        let scripts_sig = blake2b_personal(&scripts.out(), PERS_ZIP244_SCRIPTS);
+
+        // S.2f: all outputs, only the one at the input's index, or none.
+        let outputs_sig = match (base, input_index) {
+            (0x01, _) => zip244::outputs_digest(&self.outputs),
+            (0x03, Some(index)) => zip244::outputs_digest(&self.outputs[index..=index]),
+            _ => zip244::outputs_digest(&[]),
+        };
+
+        // S.2g: the input being signed (outpoint, amount, scriptPubKey, sequence); nothing for a
+        // shielded signature.
+        let mut txin = Stream::default();
+        if let Some(index) = input_index {
+            let input = &self.inputs[index];
+            txin.append(&input.previous_output)
+                .append(&input.amount)
+                .append(&spent_scripts[index])
+                .append(&input.sequence);
+        }
+        let txin_sig = blake2b_personal(&txin.out(), PERS_ZIP244_TXIN);
+
+        let mut s = Stream::default();
+        s.append(&(hash_type as u8))
+            .append(&prevouts_sig)
+            .append(&amounts_sig)
+            .append(&scripts_sig)
+            .append(&sequence_sig)
+            .append(&outputs_sig)
+            .append(&txin_sig);
+        Ok(blake2b_personal(&s.out(), PERS_ZIP244_TRANSPARENT))
     }
 }
 
@@ -934,6 +1153,7 @@ mod tests {
                 },
                 amount: 0,
                 witness: vec![Vec::new()],
+                script_pubkey: None,
             }],
             outputs: vec![TransactionOutput {
                 value,
@@ -942,6 +1162,8 @@ mod tests {
             join_splits: vec![],
             shielded_spends: vec![],
             shielded_outputs: vec![],
+            sapling_v5: Default::default(),
+            orchard: Default::default(),
             zcash: false,
             str_d_zeel: None,
             hash_algo: SignerHashAlgo::DSHA256,
@@ -1799,5 +2021,265 @@ mod suffix_tests {
                 .expect("signature hash")[..],
             &constant[..]
         );
+    }
+}
+
+/// ZIP 244 signature digests of version 5 Zcash transactions (ZIP 225 layout).
+#[cfg(test)]
+mod zip244_tests {
+    use super::{SignatureHashError, SignatureVersion, TransactionInputSigner};
+    use crate::bytes::Bytes;
+    use crate::hash::H256;
+    use crate::script::Script;
+    use chain::Transaction;
+    use serialization::deserialize;
+
+    /// The ZIP 244 hash types, each paired with the vector field that carries its digest.
+    const HASH_TYPES: [u32; 6] = [0x01, 0x02, 0x03, 0x81, 0x82, 0x83];
+
+    /// One line of the ZIP 244 test vectors (see the file header for the source and license).
+    struct Vector {
+        tx: Bytes,
+        amounts: Vec<u64>,
+        script_pubkeys: Vec<Vec<u8>>,
+        transparent_input: Option<usize>,
+        sighash_shielded: H256,
+        /// The digests for `HASH_TYPES`, in that order; `None` where the vector has none.
+        sighashes: Vec<Option<H256>>,
+    }
+
+    fn vectors() -> Vec<Vector> {
+        let optional_digest = |field: &str| match field {
+            "-" => None,
+            hex => Some(hex.parse::<H256>().expect("a digest is 64 hex digits")),
+        };
+        include_str!("../../kdf_chain/src/test_data/zip_0244_vectors.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .map(|line| {
+                let fields: Vec<&str> = line.split(' ').collect();
+                assert_eq!(fields.len(), 12, "a vector line has twelve fields");
+                Vector {
+                    tx: fields[0].parse().expect("the transaction is hex"),
+                    amounts: match fields[2] {
+                        "-" => vec![],
+                        list => list.split(',').map(|a| a.parse().expect("an amount")).collect(),
+                    },
+                    script_pubkeys: match fields[3] {
+                        "-" => vec![],
+                        list => list
+                            .split(',')
+                            .map(|s| match s {
+                                "." => vec![],
+                                hex => Vec::from(hex.parse::<Bytes>().expect("a script is hex")),
+                            })
+                            .collect(),
+                    },
+                    transparent_input: match fields[4] {
+                        "-" => None,
+                        index => Some(index.parse().expect("an input index")),
+                    },
+                    sighash_shielded: fields[5].parse().expect("a digest is 64 hex digits"),
+                    sighashes: fields[6..12].iter().map(|field| optional_digest(field)).collect(),
+                }
+            })
+            .collect()
+    }
+
+    /// A signer for the vector's transaction with the spent amounts and scriptPubKeys of its
+    /// transparent inputs filled in (a coinbase vector has none to fill).
+    fn signer_for(vector: &Vector) -> TransactionInputSigner {
+        let tx: Transaction = deserialize(&vector.tx[..]).expect("a vector transaction parses");
+        let mut signer = TransactionInputSigner::from_transaction(tx, 0);
+        if !vector.amounts.is_empty() {
+            assert_eq!(vector.amounts.len(), signer.inputs.len());
+            for (n, input) in signer.inputs.iter_mut().enumerate() {
+                input.amount = vector.amounts[n];
+                input.script_pubkey = Some(Script::from(vector.script_pubkeys[n].clone()));
+            }
+        }
+        signer
+    }
+
+    fn digest(signer: &TransactionInputSigner, input: usize, hash_type: u32) -> Result<H256, SignatureHashError> {
+        // The scriptCode and amount arguments are not read for a version 5 transaction; pass values
+        // that would change any digest that read them.
+        signer.signature_hash(
+            input,
+            u64::MAX,
+            &Script::from(vec![0x51]),
+            SignatureVersion::Base,
+            hash_type,
+        )
+    }
+
+    #[test]
+    fn vectors_are_all_there() {
+        assert_eq!(vectors().len(), 10);
+    }
+
+    #[test]
+    fn shielded_signature_digest_matches_every_vector() {
+        for (n, vector) in vectors().iter().enumerate() {
+            let signer = signer_for(vector);
+            let got = signer.sighash_zip244(None, 0x01).expect("a shielded digest");
+            assert_eq!(
+                got, vector.sighash_shielded,
+                "vector {n}: the shielded signature digest"
+            );
+        }
+    }
+
+    #[test]
+    fn transparent_signature_digests_match_every_vector() {
+        for (n, vector) in vectors().iter().enumerate() {
+            let signer = signer_for(vector);
+            let Some(input) = vector.transparent_input else {
+                assert!(
+                    vector.sighashes.iter().all(Option::is_none),
+                    "vector {n}: without a transparent input there are no transparent digests"
+                );
+                continue;
+            };
+            for (hash_type, want) in HASH_TYPES.iter().zip(&vector.sighashes) {
+                match want {
+                    Some(want) => assert_eq!(
+                        digest(&signer, input, *hash_type).expect("a transparent digest"),
+                        *want,
+                        "vector {n}: hash type 0x{hash_type:02x} of input {input}"
+                    ),
+                    None => assert_eq!(
+                        digest(&signer, input, *hash_type),
+                        Err(SignatureHashError::SingleWithoutOutput { input_index: input }),
+                        "vector {n}: SIGHASH_SINGLE of input {input} has no output at its index"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// The first vector with at least two transparent inputs and an output for each of them.
+    fn two_input_signer() -> TransactionInputSigner {
+        let vector = vectors()
+            .into_iter()
+            .find(|v| v.amounts.len() >= 2 && v.transparent_input == Some(0))
+            .expect("a vector with two transparent inputs");
+        signer_for(&vector)
+    }
+
+    #[test]
+    fn spent_script_of_the_signed_input_is_hashed_not_the_script_code() {
+        // ZIP 244 S.2g commits to the spent output's scriptPubKey. For a P2SH input that is the P2SH
+        // script, so the redeem script a caller passes as the script code changes nothing.
+        let signer = two_input_signer();
+        let sign = |script_code: &[u8]| {
+            signer
+                .signature_hash(0, 0, &Script::from(script_code.to_vec()), SignatureVersion::Base, 0x01)
+                .expect("a digest")
+        };
+        assert_eq!(
+            sign(&[0x51]),
+            sign(&[0x6a, 0x6a]),
+            "the script code is not an input of the digest"
+        );
+
+        let mut changed = signer.clone();
+        changed.inputs[0].script_pubkey = Some(Script::from(vec![0xa9, 0x14]));
+        assert_ne!(
+            digest(&signer, 0, 0x01),
+            digest(&changed, 0, 0x01),
+            "the spent scriptPubKey of the signed input is an input of the digest"
+        );
+    }
+
+    #[test]
+    fn other_inputs_amounts_and_scripts_matter_unless_anyone_can_pay() {
+        let signer = two_input_signer();
+        let mut changed = signer.clone();
+        changed.inputs[1].amount += 1;
+        assert_ne!(digest(&signer, 0, 0x01), digest(&changed, 0, 0x01));
+        assert_eq!(digest(&signer, 0, 0x81), digest(&changed, 0, 0x81));
+
+        let mut changed = signer.clone();
+        changed.inputs[1].script_pubkey = Some(Script::from(vec![0x00, 0x14]));
+        assert_ne!(digest(&signer, 0, 0x01), digest(&changed, 0, 0x01));
+        assert_eq!(digest(&signer, 0, 0x81), digest(&changed, 0, 0x81));
+    }
+
+    #[test]
+    fn digest_takes_the_branch_id_from_the_signer() {
+        let signer = two_input_signer();
+        assert_eq!(
+            signer.consensus_branch_id, 0xc2d6_d0b4,
+            "the vectors carry their own branch id"
+        );
+        let mut other = signer.clone();
+        other.consensus_branch_id = 0x77190ad9;
+        assert_ne!(digest(&signer, 0, 0x01), digest(&other, 0, 0x01));
+    }
+
+    #[test]
+    fn every_input_needs_its_spent_script() {
+        let mut signer = two_input_signer();
+        signer.inputs[1].script_pubkey = None;
+        assert_eq!(
+            digest(&signer, 0, 0x01),
+            Err(SignatureHashError::MissingSpentScriptPubkey { input_index: 1 })
+        );
+        // Also under ANYONECANPAY, which hashes only the signed input's script.
+        assert_eq!(
+            digest(&signer, 0, 0x81),
+            Err(SignatureHashError::MissingSpentScriptPubkey { input_index: 1 })
+        );
+    }
+
+    #[test]
+    fn undefined_hash_types_and_indices_are_refused() {
+        let signer = two_input_signer();
+        for hash_type in [0x00, 0x04, 0x41, 0x84, 0xc1, 0x101] {
+            assert_eq!(
+                digest(&signer, 0, hash_type),
+                Err(SignatureHashError::UndefinedHashType { hash_type }),
+                "hash type 0x{hash_type:x}"
+            );
+        }
+        let past_the_end = signer.inputs.len();
+        assert_eq!(
+            digest(&signer, past_the_end, 0x01),
+            Err(SignatureHashError::InputIndexOutOfRange {
+                input_index: past_the_end
+            })
+        );
+    }
+
+    #[test]
+    fn versions_above_five_have_no_digest() {
+        let mut signer = two_input_signer();
+        signer.version = 6;
+        assert_eq!(
+            digest(&signer, 0, 0x01),
+            Err(SignatureHashError::UnsupportedTransactionVersion { version: 6 })
+        );
+        assert!(signer
+            .signature_hash_overwintered(
+                0,
+                &Script::from(vec![0x51]),
+                0x01,
+                super::Sighash::from_u32(SignatureVersion::Base, 1)
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn built_transaction_carries_the_branch_id_only_for_version_five() {
+        let signer = two_input_signer();
+        let tx = Transaction::from(signer.clone());
+        assert_eq!(tx.consensus_branch_id, 0xc2d6_d0b4);
+        assert_eq!(tx.sapling_v5, signer.sapling_v5);
+        assert_eq!(tx.orchard, signer.orchard);
+
+        let mut v4 = signer;
+        v4.version = 4;
+        assert_eq!(Transaction::from(v4).consensus_branch_id, 0);
     }
 }

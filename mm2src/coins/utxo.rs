@@ -849,6 +849,8 @@ impl UtxoCoinFields {
             join_splits: vec![],
             shielded_spends: vec![],
             shielded_outputs: vec![],
+            sapling_v5: Default::default(),
+            orchard: Default::default(),
             zcash: self.conf.zcash,
             str_d_zeel,
             hash_algo: self.tx_hash_algo.into(),
