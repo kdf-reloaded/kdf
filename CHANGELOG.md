@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
+<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #403; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
 
 ### Added
@@ -289,7 +289,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   tests that use a native-only database helper) was also built for the browser. That test code is now left
   out of the browser test build, as is the same kind of test code in `mm2_gui_storage`; only test code
   changed. The run finds 12 tests: one fails because it needs a trade setup, one hangs because it starts a node on a network id the browser build does not support, and the other ten, the storage tests of orders and swaps, all pass; the list by name is in `docs/DEV_ENVIRONMENT.md`. No CI job runs the browser tests yet.
-  Detail: PR #N.
+  Detail: PR #403.
 - **The browser tests of `coins` now compile.** `wasm-pack test --firefox --headless mm2src/coins` stopped at
   compile errors, because some test code that only works natively (tests written for the `tokio` runtime and the BCH
   tests that use the SQLite history storage) was also built for the browser, and a test helper
