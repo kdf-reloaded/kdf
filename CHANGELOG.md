@@ -151,6 +151,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `priv_key_policy`, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
   as the WalletConnect form, fails request parsing with `InvalidRequest` (HTTP 400) instead of
   activating with the local key. Detail: PR #358; CRD ch.36 §36.7, status note of 2026-11-15
+- **A Tendermint activation under an HD login now honors `priv_key_policy: IguanaPrivKey`.** It used
+  to ignore the member and activate the key at `path_to_address`. It now activates the coin with the
+  node's single internal key, as the UTXO family does, and `path_to_address` plays no part.
+  An absent `priv_key_policy` and `ContextPrivKey` activate the key at `path_to_address` as before,
+  and an iguana login does not change. Tokens follow the platform coin's key, and the task form
+  behaves the same. Detail: PR #396; CRD ch.36 §36.7, status note of 2026-11-17
 
 #### Solana coins
 
