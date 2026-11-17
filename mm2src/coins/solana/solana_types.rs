@@ -4,6 +4,9 @@ use super::*;
 use crate::solana::rpc_pool::SolanaRpcPool;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
+/// The text of every swap operation of a Solana coin or token (CRD ch.40 R40.6B.14): swaps are not supported.
+pub(crate) fn swaps_unsupported(ticker: &str) -> String { format!("Solana swaps are not supported ({ticker})") }
+
 pub const SOLANA_DEFAULT_DECIMALS: u64 = 9;
 pub const LAMPORTS_DUMMY_AMOUNT: u64 = 10;
 

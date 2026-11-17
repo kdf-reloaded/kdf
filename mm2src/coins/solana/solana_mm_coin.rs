@@ -129,8 +129,8 @@ impl MmCoin for SolanaCoin {
 
     fn set_requires_notarization(&self, requires_nota: bool) { self.settings.set_requires_notarization(requires_nota) }
 
-    /// Swap-only (the swap start); kept unreachable by the trading refusal (`untradable_coin_ticker`).
-    fn swap_contract_address(&self) -> Option<BytesJson> { unimplemented!() }
+    /// No swap contract exists: Solana swaps are not supported.
+    fn swap_contract_address(&self) -> Option<BytesJson> { None }
 
     fn mature_confirmations(&self) -> Option<u32> { None }
 

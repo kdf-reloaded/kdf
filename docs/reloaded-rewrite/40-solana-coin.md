@@ -1235,7 +1235,8 @@ to match.
 > - `show_priv_key` answers the 64-byte keypair (secret then public key) in
 >   base58, the form common Solana wallets import (maintainer decision of
 >   2026-11-15); a token answers its platform's. The key-export method
->   reports the same form for an active Solana coin.
+>   `get_private_keys` reports the same form for an active Solana coin in
+>   its default mode; its offline derivation mode still refuses Solana.
 > - `convertaddress`, `get_raw_transaction`, `get_trade_fee`,
 >   `sign_raw_transaction` and the legacy `my_tx_history` answer a
 >   structured error naming the coin; the versioned `my_tx_history` answers
@@ -1247,8 +1248,11 @@ to match.
 >   change because the refusal also covers Lightning.
 > - The history loop and the history state of an activation answer without
 >   doing anything; transaction history itself is package S10.
-> - Operations only a swap reaches stay unimplemented behind the trading
->   refusal of §40.6A, which keeps them unreachable.
+> - Every operation a swap would use answers an error naming the coin:
+>   Solana swaps are not supported. Orders and trade previews are refused
+>   earlier by the trading refusal of §40.6A; a swap that reaches the node
+>   otherwise (an imported swap, its recovery, or a restart) gets those
+>   errors instead of an abnormal end.
 
 **D40.6B.2** *Balance of a token the wallet holds no account for
 (R40.6B.4).* Options: (a) answer zero, reading the associated token

@@ -25,9 +25,9 @@ pub(crate) use crate::solana::spl::SplTokenInfo;
 pub(crate) use crate::{BalanceError, BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend,
                        NegotiateSwapContractAddrErr, RawTransactionError, RawTransactionFut, RawTransactionRequest,
                        SignatureResult, TradePreimageError, TradePreimageFut, TradePreimageResult, TradePreimageValue,
-                       TransactionDetails, TransactionFut, TransactionType, UnexpectedDerivationMethod,
-                       ValidateAddressResult, ValidateFeeArgs, ValidatePaymentInput, VerificationResult,
-                       WithdrawError, WithdrawFut, WithdrawRequest, WithdrawResult};
+                       TransactionDetails, TransactionErr, TransactionFut, TransactionType,
+                       UnexpectedDerivationMethod, ValidateAddressResult, ValidateFeeArgs, ValidatePaymentInput,
+                       VerificationResult, WithdrawError, WithdrawFut, WithdrawRequest, WithdrawResult};
 pub(crate) use async_trait::async_trait;
 pub(crate) use base58::ToBase58;
 pub(crate) use bigdecimal::BigDecimal;

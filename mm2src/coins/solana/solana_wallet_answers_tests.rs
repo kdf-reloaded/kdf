@@ -324,3 +324,134 @@ fn t40_6b_16_both_forms_of_my_tx_history_answer_with_an_error() {
         );
     }
 }
+
+#[test]
+fn t40_6b_14_every_swap_operation_answers_an_error_on_sol_and_token() {
+    let (_, sol, token) = sol_and_token(6);
+    let tx = TransactionEnum::from(crate::UtxoTx::default());
+    let dex_fee = DexFee::Standard(MmNumber::from(1));
+    let payment_input = || ValidatePaymentInput {
+        payment_tx: vec![1],
+        time_lock: 1,
+        taker_pub: vec![2],
+        maker_pub: vec![3],
+        secret_hash: vec![4],
+        amount: BigDecimal::from(1),
+        swap_contract_address: None,
+        try_spv_proof_until: 0,
+        confirmations: 1,
+    };
+    let no_contract: Option<BytesJson> = None;
+    let coins = [("SOL", &sol as &dyn MmCoin), ("USDC", &token as &dyn MmCoin)];
+    for (_ticker, coin) in coins {
+        assert!(
+            block_on(coin.send_taker_fee(&dex_fee, &[1], &[2]).compat()).is_err(),
+            "send_taker_fee must answer an error"
+        );
+        assert!(
+            block_on(
+                coin.send_maker_payment(1, &[1], &[2], &[3], BigDecimal::from(1), &no_contract)
+                    .compat()
+            )
+            .is_err(),
+            "send_maker_payment must answer an error"
+        );
+        assert!(
+            block_on(
+                coin.send_taker_payment(1, &[1], &[2], &[3], BigDecimal::from(1), &no_contract)
+                    .compat()
+            )
+            .is_err(),
+            "send_taker_payment must answer an error"
+        );
+        assert!(
+            block_on(
+                coin.send_maker_spends_taker_payment(&[1], 1, &[2], &[3], &[4], &no_contract)
+                    .compat()
+            )
+            .is_err(),
+            "send_maker_spends_taker_payment must answer an error"
+        );
+        assert!(
+            block_on(
+                coin.send_taker_spends_maker_payment(&[1], 1, &[2], &[3], &[4], &no_contract)
+                    .compat()
+            )
+            .is_err(),
+            "send_taker_spends_maker_payment must answer an error"
+        );
+        assert!(
+            block_on(
+                coin.send_taker_refunds_payment(&[1], 1, &[2], &[3], &[4], &no_contract)
+                    .compat()
+            )
+            .is_err(),
+            "send_taker_refunds_payment must answer an error"
+        );
+        assert!(
+            block_on(
+                coin.send_maker_refunds_payment(&[1], 1, &[2], &[3], &[4], &no_contract)
+                    .compat()
+            )
+            .is_err(),
+            "send_maker_refunds_payment must answer an error"
+        );
+        let fee_args = ValidateFeeArgs {
+            fee_tx: &tx,
+            expected_sender: &[1],
+            fee_addr: &[2],
+            dex_fee: &dex_fee,
+            min_block_number: 0,
+            uuid: &[3],
+        };
+        assert!(
+            block_on(coin.validate_fee(fee_args).compat()).is_err(),
+            "validate_fee must answer an error"
+        );
+        assert!(
+            block_on(coin.validate_maker_payment(payment_input()).compat()).is_err(),
+            "validate_maker_payment must answer an error"
+        );
+        assert!(
+            block_on(coin.validate_taker_payment(payment_input()).compat()).is_err(),
+            "validate_taker_payment must answer an error"
+        );
+        assert!(
+            block_on(
+                coin.check_if_my_payment_sent(1, &[1], &[2], &[3], 0, &no_contract)
+                    .compat()
+            )
+            .is_err(),
+            "check_if_my_payment_sent must answer an error"
+        );
+        assert!(
+            block_on(coin.search_for_swap_tx_spend_my(1, &[1], &[2], &[3], &[4], 0, &no_contract)).is_err(),
+            "search_for_swap_tx_spend_my must answer an error"
+        );
+        assert!(
+            block_on(coin.search_for_swap_tx_spend_other(1, &[1], &[2], &[3], &[4], 0, &no_contract)).is_err(),
+            "search_for_swap_tx_spend_other must answer an error"
+        );
+        assert!(
+            coin.extract_secret(&[1], &[2]).is_err(),
+            "extract_secret must answer an error"
+        );
+        assert!(
+            coin.negotiate_swap_contract_addr(None).is_err(),
+            "negotiate_swap_contract_addr must answer an error"
+        );
+        assert!(coin.get_htlc_key_pair().is_none(), "get_htlc_key_pair must answer None");
+        assert!(
+            coin.swap_contract_address().is_none(),
+            "swap_contract_address must answer None"
+        );
+        assert!(
+            block_on(coin.wait_for_confirmations(&[1], 1, false, 0, 1).compat()).is_err(),
+            "wait_for_confirmations must answer an error"
+        );
+        assert!(
+            block_on(coin.wait_for_tx_spend(&[1], 0, 0, &no_contract).compat()).is_err(),
+            "wait_for_tx_spend must answer an error"
+        );
+    }
+}

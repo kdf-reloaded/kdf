@@ -72,9 +72,7 @@ impl MarketCoinOps for SolanaCoin {
         _wait_until: u64,
         _check_every: u64,
     ) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        // Reached only by a swap stage. A pair naming this coin is refused before any swap exists
-        // (`untradable_coin_ticker`), so no swap path gets here.
-        unimplemented!()
+        Box::new(futures01::future::err(swaps_unsupported(&self.ticker)))
     }
 
     fn wait_for_tx_spend(
@@ -84,8 +82,9 @@ impl MarketCoinOps for SolanaCoin {
         _from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        // Swap-only; kept unreachable by the trading refusal (`untradable_coin_ticker`).
-        unimplemented!()
+        Box::new(futures01::future::err(TransactionErr::Plain(swaps_unsupported(
+            &self.ticker,
+        ))))
     }
 
     fn tx_enum_from_bytes(&self, _bytes: &[u8]) -> Result<TransactionEnum, String> {

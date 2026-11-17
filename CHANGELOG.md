@@ -232,15 +232,16 @@ the previous version used. The safe way:
 
 #### Solana coins
 
-- **No request naming a Solana coin or SPL token ends without an answer any more.** Message
-  signing and verification, address validation, the confirmation settings and `show_priv_key` now
-  answer; `validateaddress` accepts every valid Solana address (any base58 text of 32 bytes), and
-  `show_priv_key` gives the 64-byte keypair in base58 that common Solana wallets import.
-  `convertaddress`, `get_raw_transaction`, `get_trade_fee`, `sign_raw_transaction`, the trade-fee
-  part of `max_taker_vol` / `max_maker_vol` and the legacy `my_tx_history` answer an error that
-  names the coin instead of ending the request. The minimum transaction amount is now one lamport
-  for SOL and one smallest unit of each SPL token. Solana stays switched off in this build.
-  Detail: PR #401; CRD ch.40 D40.6B.1, R40.6B.14, §40.6A.
+- **Every wallet request naming a Solana coin or SPL token answers, and Solana swap operations
+  answer an error.** Message signing and verification, address validation, the confirmation settings
+  and `show_priv_key` now answer; `validateaddress` accepts every valid Solana address (any base58
+  text of 32 bytes), and `show_priv_key` gives the 64-byte keypair in base58 that common Solana
+  wallets import. `convertaddress`, `get_raw_transaction`, `get_trade_fee`, `sign_raw_transaction`,
+  the trade-fee part of `max_taker_vol` / `max_maker_vol` and the legacy `my_tx_history` answer an
+  error that names the coin instead of ending the request, and so does every swap operation, also
+  for a swap imported or recovered by hand; switching a coin off follows in a later change. The
+  minimum transaction amount is now one lamport for SOL and one smallest unit of each SPL token.
+  Solana stays switched off in this build. Detail: PR #401; CRD ch.40 D40.6B.1, R40.6B.14, §40.6A.
 
 - **Solana activation errors follow the shapes GLEEC KDF uses, and a token address is checked when
   its coins entry is parsed.** On `enable_solana_with_tokens` a failed block-height or balance read
