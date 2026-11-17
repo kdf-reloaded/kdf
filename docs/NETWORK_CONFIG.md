@@ -499,7 +499,7 @@ shows them, they go to no other host, and no peer sees them. A request is not re
 that answers with a redirect counts as failed, so the headers never reach another host. A URL that
 carries a key in its path is shown host-only everywhere. A key in the query string works: the
 endpoint path is appended to the path of the URL and the query stays at the end, so
-`https://h/x?key=1` is asked as `https://h/x/wallet/getaccount?key=1` (a fragment is dropped). A
+`https://h/x?key=1` is asked as `https://h/x/wallet/getaccount?key=1` (a fragment is dropped, and a trailing slash on the URL is ignored). A
 `headers` entry is the other way to send a key.
 
 The node list is put into a random order once, when the coin is activated, and only `http://` and

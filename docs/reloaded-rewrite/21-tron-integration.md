@@ -574,8 +574,9 @@ R-N8 governs the all-failed error, where R21.10B.3 differs.
 *Status note (2026-11-17), request URL of a node (T2a).* The request URL of an
 endpoint is the node URL with the endpoint path appended to the URL's path and
 the URL's query kept at the end: `https://h/x?key=1` is asked as
-`https://h/x/wallet/getaccount?key=1`; a fragment is dropped, and a URL without a
-query is asked as before. A key in the query string of a node URL therefore
+`https://h/x/wallet/getaccount?key=1`; a fragment is dropped, a trailing slash
+on the node URL is ignored (`https://h/` is asked as
+`https://h/wallet/getaccount`), and a URL without a query is asked as before. A key in the query string of a node URL therefore
 works; the node is still named host-only everywhere (R-N1). The `headers` object
 and `tron_api_key` of this rule also apply to the entries of the `nodes` list of
 the mmrpc 2.0 route (R21.10B.2).
