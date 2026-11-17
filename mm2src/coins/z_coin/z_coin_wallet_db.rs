@@ -2490,7 +2490,7 @@ impl ShieldedDbUpgradePolicy {
     }
 }
 
-/// Why a wallet-database upgrade did not start. The wallet database is unchanged in every case.
+/// Why a wallet-database upgrade did not start. The wallet database's content is unchanged in every case.
 #[derive(Debug, PartialEq, Eq)]
 enum WalletUpgradeError {
     /// The backup could not be made, or the database could not be read.
@@ -2530,13 +2530,14 @@ impl WalletUpgradeError {
 /// R39.8.0ba, R39.8.0bc: back up and verify, migrate a working copy made from the backup, verify,
 /// fall back to preserve-and-rebuild.
 ///
-/// The caller holds the wallet-database mutation lock. The original file is never
-/// modified by the migration: it runs on a private working copy that replaces the
+/// The caller holds the wallet-database mutation lock. The migration never changes the
+/// original's content: it runs on a private working copy that replaces the
 /// original only after it classifies as [`WalletDbGeneration::SelectedCurrent`]. On any
 /// failure of the migration the original is moved aside (the rebuild path of R39.8.0x) and
 /// activation proceeds with a fresh wallet. A failure before the migration starts (no room
 /// for the copies, no backup, a backup that fails verification) is returned as an error
-/// with the original untouched; a successful upgrade then prunes the older backups.
+/// with the original's content unchanged (opening it may recover an interrupted transaction and
+/// closing it may fold its write-ahead log into the file); a successful upgrade then prunes the older backups.
 ///
 /// # Errors
 ///
@@ -2603,7 +2604,7 @@ fn upgrade_previous_reloaded_wallet(
 }
 
 /// R39.8.0bc: checks the free space, writes a consistent copy of `path` to a fresh
-/// `.pre-upgrade.<ms>.bak` name and verifies it. Nothing is left behind on failure.
+/// `.pre-upgrade.<ms>.bak` name and verifies it. No backup file is left behind on failure.
 fn back_up_wallet_before_upgrade(path: &Path, policy: &ShieldedDbUpgradePolicy) -> Result<PathBuf, WalletUpgradeError> {
     // The first connection of this activation to the wallet database; the caller holds the
     // mutation lock (R39.8.0ad).
@@ -7585,7 +7586,7 @@ pub(crate) mod tests {
     }
 
     /// R39.8.0bc, test (c): with too little free space the activation is refused with both
-    /// figures and nothing is written.
+    /// figures and no backup is written.
     #[test]
     fn insufficient_free_space_refuses_the_upgrade_and_writes_nothing() {
         fn almost_full(_dir: &Path) -> Result<u64, String> { Ok(1000) }
@@ -7641,7 +7642,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// A free-space figure that cannot be read refuses the upgrade; nothing is written.
+    /// A free-space figure that cannot be read refuses the upgrade; no backup is written.
     #[test]
     fn unreadable_free_space_refuses_the_upgrade() {
         fn unreadable(_dir: &Path) -> Result<u64, String> { Err("no statvfs".to_owned()) }

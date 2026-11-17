@@ -36,8 +36,10 @@ mod imp {
         let stat = unsafe { stat.assume_init() };
         // The field widths differ per platform.
         #[allow(clippy::unnecessary_cast)]
-        let (blocks, block_size) = (stat.f_bavail as u64, stat.f_frsize as u64);
-        Ok(blocks.saturating_mul(block_size))
+        let (blocks, fragment_size, block_size) = (stat.f_bavail as u64, stat.f_frsize as u64, stat.f_bsize as u64);
+        // `f_frsize` is the unit of `f_bavail`; some filesystems leave it zero, and then `f_bsize` is.
+        let unit = if fragment_size == 0 { block_size } else { fragment_size };
+        Ok(blocks.saturating_mul(unit))
     }
 }
 
@@ -49,7 +51,13 @@ mod imp {
     use winapi::um::fileapi::GetDiskFreeSpaceExW;
 
     pub(super) fn available_bytes(path: &Path) -> Result<u64, String> {
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        // A UNC directory name (`\\server\share\dir`) must end with a backslash for this call.
+        let is_unc = wide.starts_with(&[u16::from(b'\\'), u16::from(b'\\')]);
+        if is_unc && wide.last() != Some(&u16::from(b'\\')) {
+            wide.push(u16::from(b'\\'));
+        }
+        wide.push(0);
         // SAFETY: an all-zero `ULARGE_INTEGER` is a valid value.
         let mut available: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
         // SAFETY: `wide` is a NUL-terminated UTF-16 string and `available` is a valid out-pointer;

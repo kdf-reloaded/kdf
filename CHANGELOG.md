@@ -206,9 +206,10 @@ the previous version used. The safe way:
   still waiting in the database's log file, and it was neither checked nor limited in number. Now the
   node first checks the disk has room for two copies of the database plus 16 MiB and, if not,
   refuses to activate the coin with an error that gives the bytes needed and available, without
-  writing anything. It then writes a consistent copy named `<TICKER>_RELOADED_WALLET.db.pre-upgrade.<ms>.bak`
+  writing a backup. It then writes a consistent copy named `<TICKER>_RELOADED_WALLET.db.pre-upgrade.<ms>.bak`
   and checks it (SQLite integrity check, same table layout as the original); a copy that fails is
-  deleted and the activation fails, with the wallet database untouched. The upgrade itself runs on a
+  deleted and the activation fails, with the wallet database's content unchanged (opening it may
+  recover an interrupted write, and closing it may fold its log file into it). The upgrade itself runs on a
   second copy made from the checked backup. After a successful upgrade only the newest
   `.pre-upgrade` backup is kept; `shielded_db_upgrade_backups` in `MM2.json` sets that number
   (default 1, lowest 1). Other `.bak` files are left alone. To go back to an older build, put the

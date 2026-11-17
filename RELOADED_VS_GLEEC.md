@@ -1043,13 +1043,13 @@ file. Before it changes anything, the node:
 
 - checks that the disk holding the database has room for the backup and for the working copy:
   twice the size of the wallet database plus 16 MiB. If not, the activation fails with an error that
-  gives the bytes needed and the bytes available, and nothing is written. Free some space and
+  gives the bytes needed and the bytes available, and no backup is written. Free some space and
   activate again;
 - writes a consistent copy of the database next to it, named
   `<TICKER>_RELOADED_WALLET.db.pre-upgrade.<milliseconds>.bak`, in the same data directory. It is
   about as large as the wallet database;
 - checks the copy (SQLite integrity check, same table layout as the original). If the check fails,
-  the copy is deleted, the wallet database stays as it was, and the activation fails with an error
+  the copy is deleted, the wallet database's content stays as it was, and the activation fails with an error
   naming the check.
 
 The upgrade then runs on a second copy made from the verified backup, and replaces the wallet

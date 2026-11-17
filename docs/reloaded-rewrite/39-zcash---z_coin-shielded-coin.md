@@ -2982,12 +2982,17 @@ adds an entry. An unknown or corrupt schema stays refused (R39.8.0x).
    for journals, page padding and concurrent use of the disk. The figure used is
    the space available to the user running the node. If it is smaller, activation
    fails with the typed error `InsufficientDiskSpace` carrying the path, the
-   needed bytes and the available bytes, and nothing has been written. If the
-   free space cannot be read, activation fails with the typed schema error, also
-   before anything is written. The free-space source is replaceable in tests.
+   needed bytes and the available bytes, and no backup or working copy has been
+   written. If the free space cannot be read, activation fails with the typed
+   schema error, also before any backup or working copy is written. The wallet
+   database's content is unchanged in both cases. The free-space source is
+   replaceable in tests.
 2. **Consistent backup.** The backup is taken with SQLite's `VACUUM INTO` on the
    first connection this activation opens to the wallet database, while the
-   serialization of R39.8.0ad is held. The copy contains every committed
+   serialization of R39.8.0ad is held. That connection is read-write: opening
+   the database may recover an interrupted transaction, and closing the
+   connection may fold the write-ahead log into the main file; neither changes
+   the database's content. The copy contains every committed
    transaction, including content that is still in the write-ahead log, as one
    statement; a checkpoint that a reader blocks cannot make it incomplete. It is
    written to a fresh `<file>.pre-upgrade.<ms>.bak` name (a sequence number is
@@ -2995,8 +3000,8 @@ adds an entry. An unknown or corrupt schema stays refused (R39.8.0x).
    `user_version` and the migration records are carried, the bytes are not.
 3. **Verify.** The backup is opened read-only and must report `ok` for
    `PRAGMA integrity_check` and have the same schema fingerprint as the source.
-   If a check fails, the backup is deleted, the original is left unchanged and
-   untouched by any rename, and activation fails with the typed error
+   If a check fails, the backup is deleted, the original's content is unchanged
+   and it is not moved or renamed, and activation fails with the typed error
    `ShieldedDbBackupVerification` naming the backup and the failed check (`open`,
    `integrity_check` or `schema fingerprint`). It does not fall back to the
    rebuild of R39.8.0ba item 4: a backup that cannot be trusted means the upgrade
@@ -3021,11 +3026,12 @@ free-space source shall prove: (a) rows committed to a write-ahead-logged
 database but not checkpointed, while a reader holds a snapshot, are in the
 backup; (b) a backup made unreadable after it is written refuses the upgrade
 with `ShieldedDbBackupVerification`, deletes it, and leaves the original
-byte-identical and still classified as the previous generation; a backup whose
+unchanged in content and still classified as the previous generation; a backup whose
 schema fingerprint differs from the source fails the fingerprint check; (c) too
 little free space yields `InsufficientDiskSpace` with the needed and the
 available figures, the needed figure equal to `2 x page_count x page_size` plus
-the margin, and the directory listing unchanged; an unreadable free-space figure
+the margin, and no backup or working copy written (the directory listing shows
+no new file); an unreadable free-space figure
 also refuses; (d) with more than N `.pre-upgrade` backups the newest N remain
 (the one just made among them), their older siblings and sidecars are gone, and
 other `.bak` kinds are untouched; the key is read as specified; (e) a wallet

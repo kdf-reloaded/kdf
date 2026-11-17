@@ -266,9 +266,9 @@ pub enum ZCoinBuildError {
         reason: String,
     },
     /// The backup taken before a wallet-database schema upgrade failed one of its checks, so the
-    /// upgrade did not start (CRD ch.39 R39.8.0bc). The backup was deleted; the wallet database is unchanged.
+    /// upgrade did not start (CRD ch.39 R39.8.0bc). The backup was deleted; the wallet database's content is unchanged.
     #[display(
-        fmt = "Backup of the shielded wallet database {} failed verification ({}); the wallet database was left unchanged",
+        fmt = "Backup of the shielded wallet database {} failed verification ({}); the backup was deleted and the wallet database's content is unchanged",
         path,
         check
     )]
@@ -277,9 +277,9 @@ pub enum ZCoinBuildError {
         check: String,
     },
     /// The disk holding the shielded wallet database has too little free space for the backup and the
-    /// working copy of a schema upgrade (CRD ch.39 R39.8.0bc). Nothing was written.
+    /// working copy of a schema upgrade (CRD ch.39 R39.8.0bc). No backup or working copy was written.
     #[display(
-        fmt = "Not enough free disk space to upgrade the shielded wallet database {}: {} bytes are needed, {} bytes are available; free some space and activate again. The wallet database was left unchanged",
+        fmt = "Not enough free disk space to upgrade the shielded wallet database {}: {} bytes are needed, {} bytes are available; free some space and activate again. No backup was written and the wallet database's content is unchanged",
         path,
         needed_bytes,
         available_bytes
