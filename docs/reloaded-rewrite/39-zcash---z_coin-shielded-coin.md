@@ -6376,12 +6376,14 @@ R39.11.15 **Version coverage of the two parsers (public facts, for planning).**
 > commits to the spent output's scriptPubKey, as ZIP 244 §S.2 defines, not to the
 > redeem script). The consensus branch id is the coin's configured value.
 > Versions 1 to 4 are unchanged; an overwintered version 6 or higher is refused
-> at parsing and at signing instead of being read in the version-4 layout. The
+> at signing, and for now at parsing instead of being read in the version-4
+> layout; whether incoming version-6 transactions are read is an open decision. The
 > code is checked against the public ZIP-244 test vectors (zcash-test-vectors,
 > MIT). The **Zcash library reader** pinned here cannot read a transaction under
 > the NU7 branch id `0x77190AD9`: its `zcash_protocol` 0.10.6 knows NU7 only as
 > an unstable placeholder (`0xFFFFFFFF`) and refuses an unknown branch id; the
-> published `zcash_protocol` 0.11.0 has it. The coin wiring for ZEC follows in
+> published `zcash_protocol` 0.11.0 maps `Nu7` to `0x77190AD9` with the mainnet
+> height 3,543,405 (per that crate's source and changelog). The coin wiring for ZEC follows in
 > the plan's next pull request.
 
 R39.11.16 **Requirement for Ironwood-era support.** Before a shielded coin may
