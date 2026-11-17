@@ -140,8 +140,8 @@ the previous version used. The safe way:
   The legacy `enable` and `electrum` methods keep activating TRON as an extension. A key in the query string of a
   TRON node URL now works: `https://h/x?key=1` is asked as `https://h/x/wallet/getaccount?key=1`.
   `task::withdraw` takes TRX and TRC20 coins. **TRON stays switched off in this build**, so every route still
-  answers "TRON support is not available in this build" and none of this can be used yet. Detail: CRD ch.21 §21.4,
-  R21.10B.2, R21.10B.4, R21.10B.5; ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
+  answers "TRON support is not available in this build" and none of this can be used yet. Detail: PR #405; CRD
+  ch.21 §21.4, R21.10B.2, R21.10B.4, R21.10B.5; ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
 
 #### Tendermint (Cosmos) coins
 
@@ -436,7 +436,8 @@ the previous version used. The safe way:
 - [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
   headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
-  (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays.
+  (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
+  (PR #405).
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser are in progress (PR #397).
 

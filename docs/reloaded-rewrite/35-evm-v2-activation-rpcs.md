@@ -459,7 +459,7 @@ version for all nodes" (public-docs citation; the message text is not bound).
 > 5. Under MetaMask (WASM) chain requests still go to `nodes`, not through the
 >    provider.
 
-*Status note (2026-11-17), TRON platform (T2a).* The `ticker` row's TRON
+*Status note (2026-11-17), TRON platform (PR #405).* The `ticker` row's TRON
 platform protocol is now accepted on this route (`TRX` platform, `TRC20` tokens
 in `erc20_tokens_requests`; behind `TRON_ACTIVATION_AVAILABLE`, `false`, so the
 route answers the "not available" refusal for now). For a TRON platform the

@@ -1409,7 +1409,7 @@ that target, this item the current tree.
 > nothing, so in this beta Reloaded activates TRON on no path. The decision
 > above stands for when TRON returns, planned for the next beta.
 
-*Status note (2026-11-17), mmrpc 2.0 TRON route built (T2a).* The sentence
+*Status note (2026-11-17), mmrpc 2.0 TRON route built (PR #405).* The sentence
 above that Reloaded has no mmrpc 2.0 TRON activation is superseded:
 `enable_eth_with_tokens`, `task::enable_eth::*`, `enable_erc20` and
 `task::enable_erc20::init` accept the TRON platform (`TRX`) and its TRC20 tokens,

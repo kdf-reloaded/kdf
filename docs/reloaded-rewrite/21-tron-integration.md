@@ -213,7 +213,7 @@ public method strings are part of the external API contract
 > legacy route a documented Reloaded extension; chapter 35 R35.1.1's
 > `ticker` row describes the target, not the current tree.
 
-*Status note (2026-11-17), the mmrpc 2.0 route is built (T2a; D21.B1 (a),
+*Status note (2026-11-17), the mmrpc 2.0 route is built (PR #405; D21.B1 (a),
 decided 2026-11-17).* `enable_eth_with_tokens` and `task::enable_eth::init` /
 `status` / `user_action` / `cancel` accept a platform whose protocol is `TRX`,
 with its TRC20 tokens in `erc20_tokens_requests`; `enable_erc20` and
@@ -281,7 +281,7 @@ status, not at `init`.
    the Tron node client attached, leaving the swap-contract
    binding empty (§21.11).
 
-*Status note (2026-11-17), step 4 (decided with R21.10B.2, T2a).* Step 4 no
+*Status note (2026-11-17), step 4 (decided with R21.10B.2, PR #405).* Step 4 no
 longer requires the coin config to declare `decimals` for a TRC20 token: a token
 config without `decimals`, or with `decimals` 0, reads the token's `decimals()`
 through `POST /wallet/triggerconstantcontract` at activation and uses the
@@ -571,7 +571,7 @@ whose first entry is not hex move on. (4) Activation accepts only the `http` and
 only. R-WP2 still governs the top-level `Error` form (any text moves on), and
 R-N8 governs the all-failed error, where R21.10B.3 differs.
 
-*Status note (2026-11-17), request URL of a node (T2a).* The request URL of an
+*Status note (2026-11-17), request URL of a node (PR #405).* The request URL of an
 endpoint is the node URL with the endpoint path appended to the URL's path and
 the URL's query kept at the end: `https://h/x?key=1` is asked as
 `https://h/x/wallet/getaccount?key=1`; a fragment is dropped, a trailing slash
@@ -1403,7 +1403,7 @@ route with the swap-contract fields instead. The umbrella plan
 
 *Status note (2026-11-17), D21.B1 decided: (a).* TRON has the mmrpc 2.0 route
 and keeps the legacy route as a documented Reloaded extension (maintainer
-decision EJ (A); built in T2a, see the note at §21.4).
+decision of 2026-11-08; built in PR #405, see the note at §21.4).
 
 **D21.B2 -- Contract choice.** No released reference client exists, so
 the contract is Reloaded's to choose: (a) adopt the public MIT Tron-VM
