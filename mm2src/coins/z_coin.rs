@@ -114,8 +114,9 @@ use z_coin_sapling_cache::ZCoinSqliteSaplingCache;
 use z_coin_sapling_cache::{SaplingBlockState, SaplingStateCacheOps, ZCoinSaplingCacheError};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod z_coin_wallet_db;
+#[cfg(not(target_arch = "wasm32"))] mod z_disk_space;
 #[cfg(not(target_arch = "wasm32"))]
-use z_coin_wallet_db::{unmined_value, UnminedNote, ZCoinShieldedHistory};
+use z_coin_wallet_db::{unmined_value, ShieldedDbUpgradePolicy, UnminedNote, ZCoinShieldedHistory};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod z_lightwalletd;
 #[cfg(not(target_arch = "wasm32"))]
@@ -2954,12 +2955,13 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for ZCoinBuilder<'a> {
 
         #[cfg(not(target_arch = "wasm32"))]
         let (shielded_history, wallet_db_scanned_through) = {
-            let shielded_history = ZCoinShieldedHistory::open_or_create(
+            let shielded_history = ZCoinShieldedHistory::open_or_create_with_policy(
                 self.ticker,
                 self.db_dir_path.clone(),
                 consensus_params.clone(),
                 &extfvk,
                 self.protocol_info.check_point_block.as_ref(),
+                &ShieldedDbUpgradePolicy::from_node_conf(&self.ctx.conf),
             )?;
             let scanned_through = shielded_history
                 .scanned_height()
