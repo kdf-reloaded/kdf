@@ -1262,6 +1262,63 @@ pub enum HistorySyncState {
     InProgress(Json),
     Error(Json),
     Finished,
+    /// A finished pass of a UTXO history collector that skipped transactions it could not read (CRD ch.39
+    /// D39.11.4V.1). It serializes with the state name `Finished`, and its `additional_info` is the object
+    /// `{"unreadable_transactions": [...]}`. A pass that skipped nothing is [`HistorySyncState::Finished`], which has
+    /// no `additional_info`.
+    #[serde(rename = "Finished")]
+    FinishedWithUnreadable(Json),
+}
+
+/// A transaction that a UTXO history collector skipped in the current pass because it cannot be read (CRD ch.39
+/// D39.11.4V.1, R38.5A.9). The list of them lives in memory only and is rebuilt on every pass.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UnreadableTransaction {
+    /// The transaction hash as the history rows show it.
+    pub tx_hash: String,
+    /// A short fixed reason. It never carries a transaction body, hex or key.
+    pub error: String,
+}
+
+impl HistorySyncState {
+    /// `InProgress` of a UTXO history collector: `transactions_left`, and the `unreadable_transactions` member only
+    /// when the pass has skipped a transaction. With nothing skipped the answer is exactly `{"transactions_left": n}`.
+    pub(crate) fn utxo_in_progress(transactions_left: usize, unreadable: &[UnreadableTransaction]) -> Self {
+        let mut info = json!({ "transactions_left": transactions_left });
+        if !unreadable.is_empty() {
+            info["unreadable_transactions"] = json!(unreadable);
+        }
+        HistorySyncState::InProgress(info)
+    }
+
+    /// The finished state of a UTXO history collector: plain `Finished` when the pass skipped nothing.
+    pub(crate) fn utxo_finished(unreadable: &[UnreadableTransaction]) -> Self {
+        if unreadable.is_empty() {
+            HistorySyncState::Finished
+        } else {
+            HistorySyncState::FinishedWithUnreadable(json!({ "unreadable_transactions": unreadable }))
+        }
+    }
+
+    /// The running `InProgress` state with the `unreadable_transactions` member set, so that a skip shows at once;
+    /// `None` for any other state (a pass that is not running has no `transactions_left` to keep).
+    pub(crate) fn in_progress_with_unreadable(&self, unreadable: &[UnreadableTransaction]) -> Option<Self> {
+        let HistorySyncState::InProgress(info) = self else {
+            return None;
+        };
+        let mut info = info.clone();
+        info.as_object_mut()?
+            .insert("unreadable_transactions".to_owned(), json!(unreadable));
+        Some(HistorySyncState::InProgress(info))
+    }
+
+    /// Whether the history is finished, with or without skipped transactions.
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self,
+            HistorySyncState::Finished | HistorySyncState::FinishedWithUnreadable(_)
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1355,5 +1412,91 @@ mod transaction_details_wire_tests {
         assert_eq!(wire["legacy_amino_json"], json!({}));
         assert_eq!(wire["original_tx_type_url"], "/x");
         assert!(wire.get("internal_id").is_some());
+    }
+}
+
+#[cfg(test)]
+mod history_sync_state_tests {
+    use super::*;
+
+    fn skipped(hash: &str, error: &str) -> UnreadableTransaction {
+        UnreadableTransaction {
+            tx_hash: hash.to_owned(),
+            error: error.to_owned(),
+        }
+    }
+
+    #[test]
+    fn finished_without_a_skip_is_exactly_the_state_member() {
+        let wire = json::to_string(&HistorySyncState::utxo_finished(&[])).unwrap();
+        assert_eq!(wire, r#"{"state":"Finished"}"#);
+        assert_eq!(
+            json::to_string(&HistorySyncState::Finished).unwrap(),
+            r#"{"state":"Finished"}"#
+        );
+    }
+
+    #[test]
+    fn in_progress_without_a_skip_is_exactly_the_old_answer() {
+        let wire = json::to_string(&HistorySyncState::utxo_in_progress(3, &[])).unwrap();
+        assert_eq!(
+            wire,
+            r#"{"state":"InProgress","additional_info":{"transactions_left":3}}"#
+        );
+        let old = json::to_string(&HistorySyncState::InProgress(json!({ "transactions_left": 3 }))).unwrap();
+        assert_eq!(wire, old);
+    }
+
+    #[test]
+    fn finished_with_a_skip_carries_the_list_under_the_finished_state() {
+        let state = HistorySyncState::utxo_finished(&[skipped("ab", "unreadable")]);
+        assert!(state.is_finished());
+        assert_eq!(
+            json::to_value(&state).unwrap(),
+            json!({
+                "state": "Finished",
+                "additional_info": { "unreadable_transactions": [{ "tx_hash": "ab", "error": "unreadable" }] },
+            })
+        );
+    }
+
+    #[test]
+    fn a_running_state_gains_the_list_and_keeps_transactions_left() {
+        let running = HistorySyncState::InProgress(json!({ "transactions_left": 4 }));
+        let next = running
+            .in_progress_with_unreadable(&[skipped("ab", "unreadable")])
+            .expect("a running state takes the list");
+        assert_eq!(
+            json::to_value(&next).unwrap(),
+            json!({
+                "state": "InProgress",
+                "additional_info": {
+                    "transactions_left": 4,
+                    "unreadable_transactions": [{ "tx_hash": "ab", "error": "unreadable" }],
+                },
+            })
+        );
+        assert!(HistorySyncState::Finished
+            .in_progress_with_unreadable(&[skipped("ab", "unreadable")])
+            .is_none());
+        assert!(HistorySyncState::NotStarted
+            .in_progress_with_unreadable(&[skipped("ab", "unreadable")])
+            .is_none());
+    }
+
+    #[test]
+    fn in_progress_with_a_skip_has_the_list_beside_transactions_left() {
+        let state = HistorySyncState::utxo_in_progress(2, &[skipped("ab", "unreadable")]);
+        assert!(!state.is_finished());
+        assert_eq!(
+            json::to_value(&state).unwrap(),
+            json!({
+                "state": "InProgress",
+                "additional_info": {
+                    "transactions_left": 2,
+                    "unreadable_transactions": [{ "tx_hash": "ab", "error": "unreadable" }],
+                },
+            })
+        );
     }
 }

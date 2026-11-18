@@ -6906,6 +6906,25 @@ complete, and report its identifier through the history's sync status or error
 channel; (c) add a row from the backend's listing alone (identifier and height,
 amounts unknown). Recommendation: (b).
 
+> *Reloaded status (clean side, 2026-11-18):* resolved by the maintainer's
+> decision as option (b), for every UTXO coin. Both history collectors of this
+> repository skip a transaction they cannot read and go on with the rest of
+> the pass, as R38.5A.9 already required for the cases it names. The version-two
+> collector of BCH and SLP now also skips a transaction, or a transaction whose
+> input transaction, does not parse, where it used to pause and start again. The
+> skip is now reported: while a pass runs and when it ends, `sync_status`
+> carries `additional_info.unreadable_transactions`, a list of the skipped
+> transactions with `tx_hash` and a short `error`, for example
+> `{"state": "Finished", "additional_info": {"unreadable_transactions":
+> [{"tx_hash": "...", "error": "the transaction cannot be parsed: ..."}]}}`.
+> A transaction skipped because one of its input transactions cannot be read,
+> or because an input spends an output that does not exist, is reported with
+> that reason. The list is rebuilt on every pass, so a transaction that reads
+> later leaves it. A pass that skips nothing answers exactly as before
+> (`{"state": "Finished"}`). A backend or transport failure is not reported as
+> unreadable; its handling is unchanged. Until the Zcash library upgrade of
+> D39.11.4V.3, a version-6 ZEC transaction is reported this way.
+
 D39.11.4V.2 *(Open.)* *An entry whose version this software cannot build.*
 Reproducing the reference (R39.11.4V.5) accepts any `txversion`, gives version 5
 a version group id and a branch id of 0 when the entry names none, and answers a
@@ -8700,6 +8719,10 @@ entries in its list cannot be told apart. Passing the position to the fallback c
 - *Status note added 2026-11-17 -- under R39.11.4V.10.* Reloaded-original,
   clean side: it records that Reloaded computes the fee over the version-5 size;
   no forbidden-class input, chapter 01 R38 not engaged.
+- *Status note added 2026-11-18 -- after D39.11.4V.1.* Reloaded-original,
+  clean side: it records the maintainer's resolution of 2026-11-18 and what this
+  repository builds for it; no forbidden-class input, chapter 01 R38 not
+  engaged.
 - *Clean-context addition (2026-11-17), §39.8.0.3:* R39.8.0bc, T39.8.0j and the status
   note after R39.8.0ba are Reloaded-original, clean side, written from this repository's
   own code and the public SQLite documentation of `VACUUM INTO`; no forbidden-class input,
