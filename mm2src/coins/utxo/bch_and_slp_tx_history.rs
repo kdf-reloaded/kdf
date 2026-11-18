@@ -1,9 +1,10 @@
 /// This module is named bch_and_slp_tx_history temporary. We will most likely use the same approach for every
 /// supported UTXO coin.
 use super::RequestTxHistoryResult;
+use crate::history_absence::{removed_rows_line, AbsenceMarks, ChainChangeWatch};
 use crate::my_tx_history_v2::TxHistoryStorage;
 use crate::utxo::bch::BchCoin;
-use crate::utxo::utxo_common;
+use crate::utxo::utxo_common::{self, listed_height_change, HeightChange};
 use crate::utxo::UtxoStandardOps;
 use crate::{BlockHeightAndTime, HistorySyncState, MarketCoinOps};
 use async_trait::async_trait;
@@ -15,6 +16,7 @@ use futures::compat::Future01CompatExt;
 use mm2_core::mm_ctx::MmArc;
 use mm2_metrics::MetricsArc;
 use rpc::v1::types::H256 as H256Json;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 struct BchAndSlpHistoryCtx<Storage: TxHistoryStorage> {
@@ -23,6 +25,14 @@ struct BchAndSlpHistoryCtx<Storage: TxHistoryStorage> {
     storage: Storage,
     metrics: MetricsArc,
     current_balance: BigDecimal,
+    /// The absence rule (CRD ch.38 §38.5C): memory only, so a restart starts counting again.
+    absence: AbsenceMarks,
+    /// The chain-changed events of the coin's client: one ends the wait for the next pass at once (CRD ch.38 §38.5C
+    /// amendment of 2026-11-18, item 3).
+    chain_changes: ChainChangeWatch,
+    /// A chain-changed event came and no listing has succeeded since: it survives a failed listing and is cleared only
+    /// by an Ok one.
+    chain_changed: bool,
 }
 
 // States have to be generic over storage type because BchAndSlpHistoryCtx is generic over it
@@ -94,7 +104,9 @@ impl<T: TxHistoryStorage> State for FetchingTxHashes<T> {
 
         let maybe_tx_ids = ctx.coin.request_tx_history(ctx.metrics.clone()).await;
         match maybe_tx_ids {
-            RequestTxHistoryResult::Ok(all_tx_ids_with_height) => {
+            RequestTxHistoryResult::Ok(all_tx_ids_with_height, qualifying_tip) => {
+                // The pass the event asked for has its listing.
+                ctx.chain_changed = false;
                 let in_storage = match ctx.storage.unique_tx_hashes_num_in_history(ctx.coin.ticker()).await {
                     Ok(num) => num,
                     Err(e) => return Self::change_state(Stopped::storage_error(e)),
@@ -105,7 +117,7 @@ impl<T: TxHistoryStorage> State for FetchingTxHashes<T> {
                         HistorySyncState::InProgress(json!({ "transactions_left": txes_left }));
                 }
 
-                Self::change_state(UpdatingUnconfirmedTxes::new(all_tx_ids_with_height))
+                Self::change_state(UpdatingUnconfirmedTxes::new(all_tx_ids_with_height, qualifying_tip))
             },
             RequestTxHistoryResult::HistoryTooLarge => Self::change_state(Stopped::<T, T::Error>::history_too_large()),
             RequestTxHistoryResult::Retry { error } => {
@@ -174,7 +186,19 @@ impl<T: TxHistoryStorage> State for WaitForHistoryUpdateTrigger<T> {
 
     async fn on_changed(self: Box<Self>, ctx: &mut BchAndSlpHistoryCtx<T>) -> StateResult<Self::Ctx, Self::Result> {
         loop {
-            Timer::sleep(30.).await;
+            // A chain-changed event runs the pass at once, whatever the tests below say. The event is kept in the flag
+            // until a listing succeeds, and a burst of events counts once.
+            {
+                let idle = Timer::sleep(30.);
+                futures::pin_mut!(idle);
+                let event = ctx.chain_changes.wait();
+                futures::pin_mut!(event);
+                futures::future::select(idle, event).await;
+            }
+            ctx.chain_changed |= ctx.chain_changes.take();
+            if ctx.chain_changed {
+                return Self::change_state(FetchingTxHashes::new());
+            }
             match ctx.storage.history_contains_unconfirmed_txes(ctx.coin.ticker()).await {
                 Ok(contains) => {
                     if contains {
@@ -182,6 +206,10 @@ impl<T: TxHistoryStorage> State for WaitForHistoryUpdateTrigger<T> {
                     }
                 },
                 Err(e) => return Self::change_state(Stopped::storage_error(e)),
+            }
+            // A row found absent once waits for a second listing: do not wait for a balance change.
+            if ctx.absence.any() {
+                return Self::change_state(FetchingTxHashes::new());
             }
 
             match ctx.coin.my_balance().compat().await {
@@ -204,6 +232,7 @@ impl<T: TxHistoryStorage> State for WaitForHistoryUpdateTrigger<T> {
 /// listing does not contain it. The row and the listing are matched by the transaction hash: the
 /// stored text is the displayed (explorer) form, which `H256Json` parses and prints byte for byte,
 /// the same order the listing uses (CRD ch.38 R38.5A.10). Errors if the stored text is not a hash.
+#[cfg(test)]
 fn listed_height(all_tx_ids_with_height: &[(H256Json, u64)], tx_hash: &str) -> Result<Option<u64>, String> {
     let tx_hash = H256Json::from_str(tx_hash).map_err(|e| e.to_string())?;
     Ok(all_tx_ids_with_height
@@ -212,17 +241,28 @@ fn listed_height(all_tx_ids_with_height: &[(H256Json, u64)], tx_hash: &str) -> R
         .map(|(_, height)| *height))
 }
 
+/// Whether a stored row of height `stored` is to take the height `listed` that the backend listing reports (CRD ch.38
+/// R38.5A.10 and the D38.5C.2 status note, item 1): an unconfirmed row listed at a positive height matures, a
+/// confirmed row listed at another positive height takes it over, and a confirmed row listed as unconfirmed goes
+/// back to height 0.
+fn row_takes_listed_height(stored: u64, listed: u64) -> bool {
+    (stored == 0 && listed > 0) || listed_height_change(stored, listed) != HeightChange::Same
+}
+
 // States have to be generic over storage type because BchAndSlpHistoryCtx is generic over it
 struct UpdatingUnconfirmedTxes<T> {
     phantom: std::marker::PhantomData<T>,
     all_tx_ids_with_height: Vec<(H256Json, u64)>,
+    /// The tip by which this listing may be judged for the absence rule; `None` when it does not qualify.
+    qualifying_tip: Option<u64>,
 }
 
 impl<T> UpdatingUnconfirmedTxes<T> {
-    fn new(all_tx_ids_with_height: Vec<(H256Json, u64)>) -> Self {
+    fn new(all_tx_ids_with_height: Vec<(H256Json, u64)>, qualifying_tip: Option<u64>) -> Self {
         UpdatingUnconfirmedTxes {
             phantom: Default::default(),
             all_tx_ids_with_height,
+            qualifying_tip,
         }
     }
 }
@@ -235,51 +275,71 @@ impl<T: TxHistoryStorage> State for UpdatingUnconfirmedTxes<T> {
     type Result = ();
 
     async fn on_changed(self: Box<Self>, ctx: &mut BchAndSlpHistoryCtx<T>) -> StateResult<BchAndSlpHistoryCtx<T>, ()> {
-        match ctx.storage.get_unconfirmed_txes_from_history(ctx.coin.ticker()).await {
-            Ok(unconfirmed) => {
-                for mut tx in unconfirmed {
-                    let found = match listed_height(&self.all_tx_ids_with_height, &tx.tx_hash) {
-                        Ok(found) => found,
-                        Err(e) => {
-                            error!(
-                                "Skipping the stored {} row with invalid tx_hash '{}': {}",
-                                ctx.coin.ticker(),
-                                tx.tx_hash,
-                                e
-                            );
-                            continue;
-                        },
-                    };
-                    match found {
-                        Some(height) => {
-                            if height > 0 {
-                                match ctx.coin.get_block_timestamp(height).await {
-                                    Ok(time) => tx.timestamp = time,
-                                    Err(_) => return Self::change_state(OnIoErrorCooldown::new()),
-                                };
-                                tx.block_height = height;
-                                if let Err(e) = ctx.storage.update_tx_in_history(ctx.coin.ticker(), &tx).await {
-                                    return Self::change_state(Stopped::storage_error(e));
-                                }
-                            }
-                        },
-                        None => {
-                            // This can potentially happen when unconfirmed tx is removed from mempool for some reason.
-                            // We should remove it from storage too.
-                            if let Err(e) = ctx
-                                .storage
-                                .remove_tx_from_history(ctx.coin.ticker(), &tx.internal_id)
-                                .await
-                            {
-                                return Self::change_state(Stopped::storage_error(e));
-                            }
-                        },
-                    }
-                }
-                Self::change_state(FetchingTransactionsData::new(self.all_tx_ids_with_height))
-            },
-            Err(e) => Self::change_state(Stopped::storage_error(e)),
+        let ticker = ctx.coin.ticker().to_owned();
+        let stored = match ctx.storage.tx_hashes_and_heights(&ticker).await {
+            Ok(stored) => stored,
+            Err(e) => return Self::change_state(Stopped::storage_error(e)),
+        };
+        // The stored heights per hash. A row whose stored text is not a hash is skipped.
+        let mut stored_heights: HashMap<H256Json, Vec<u64>> = HashMap::new();
+        for (tx_hash, height) in stored {
+            match H256Json::from_str(&tx_hash) {
+                Ok(hash) => stored_heights.entry(hash).or_default().push(height),
+                Err(e) => error!(
+                    "Skipping the stored {} row with invalid tx_hash '{}': {}",
+                    ticker, tx_hash, e
+                ),
+            }
         }
+
+        // The removal comes first, before any detail request of the pass (R38.5C.1 item 2). All rows of a hash, the
+        // BCH row and the SLP token rows, go together.
+        if let Some(tip) = self.qualifying_tip {
+            let listed: HashSet<H256Json> = self.all_tx_ids_with_height.iter().map(|(hash, _)| *hash).collect();
+            let to_remove = ctx.absence.judge(tip, &listed, stored_heights.keys().copied());
+            if !to_remove.is_empty() {
+                let texts: Vec<String> = to_remove.iter().map(|hash| format!("{:02x}", hash)).collect();
+                match ctx.storage.remove_txes_by_hash(&ticker, texts).await {
+                    Ok(removed) => info!("{}", removed_rows_line(&ticker, removed)),
+                    Err(e) => return Self::change_state(Stopped::storage_error(e)),
+                }
+                for hash in &to_remove {
+                    stored_heights.remove(hash);
+                }
+            }
+        }
+
+        // A listed hash that the store holds takes the listed height (R38.5A.10, D38.5C.2 status note item 1).
+        for (hash, height) in &self.all_tx_ids_with_height {
+            let needs_change = stored_heights
+                .get(hash)
+                .is_some_and(|heights| heights.iter().any(|stored| row_takes_listed_height(*stored, *height)));
+            if !needs_change {
+                continue;
+            }
+            let timestamp = if *height > 0 {
+                match ctx.coin.get_block_timestamp(*height).await {
+                    Ok(time) => Some(time),
+                    Err(_) => return Self::change_state(OnIoErrorCooldown::new()),
+                }
+            } else {
+                None
+            };
+            let rows = match ctx.storage.get_txes_by_hash(&ticker, &format!("{:02x}", hash)).await {
+                Ok(rows) => rows,
+                Err(e) => return Self::change_state(Stopped::storage_error(e)),
+            };
+            for mut tx in rows {
+                tx.block_height = *height;
+                if let Some(time) = timestamp {
+                    tx.timestamp = time;
+                }
+                if let Err(e) = ctx.storage.update_tx_in_history(&ticker, &tx).await {
+                    return Self::change_state(Stopped::storage_error(e));
+                }
+            }
+        }
+        Self::change_state(FetchingTransactionsData::new(self.all_tx_ids_with_height))
     }
 }
 
@@ -439,12 +499,16 @@ pub async fn bch_and_slp_history_loop(
     metrics: MetricsArc,
     current_balance: BigDecimal,
 ) {
+    let chain_changes = ChainChangeWatch::of(&coin.as_ref().rpc_client);
     let ctx = BchAndSlpHistoryCtx {
         coin,
         mm_ctx,
         storage,
         metrics,
         current_balance,
+        absence: AbsenceMarks::default(),
+        chain_changes,
+        chain_changed: false,
     };
     let state_machine: StateMachine<_, ()> = StateMachine::from_ctx(ctx);
     state_machine.run(Init::new()).await;
@@ -581,6 +645,9 @@ mod tests {
             mm_ctx,
             storage,
             current_balance: BigDecimal::from(0),
+            absence: AbsenceMarks::default(),
+            chain_changes: ChainChangeWatch::default(),
+            chain_changed: false,
         };
         let state = FetchingTransactionsData::<SqliteTxHistoryStorage>::new(vec![(malformed_hash, 0), (valid_hash, 0)]);
         let _next = block_on(Box::new(state).on_changed(&mut ctx));
@@ -637,6 +704,9 @@ mod tests {
             mm_ctx,
             storage,
             current_balance: BigDecimal::from(0),
+            absence: AbsenceMarks::default(),
+            chain_changes: ChainChangeWatch::default(),
+            chain_changed: false,
         };
         let _next = block_on(Box::new(Init::<SqliteTxHistoryStorage>::new()).on_changed(&mut ctx));
 
@@ -688,6 +758,9 @@ mod tests {
             mm_ctx,
             storage,
             current_balance: BigDecimal::from(0),
+            absence: AbsenceMarks::default(),
+            chain_changes: ChainChangeWatch::default(),
+            chain_changed: false,
         };
         // Indirect check only: the state machine gives no hook to name the next state, so this proves that the state
         // does not panic and hands over (a `ChangeState`, not a `Finish`) with the sync state as `Init` set it.
@@ -697,5 +770,395 @@ mod tests {
             *ctx.coin.as_ref().history_sync_state.lock().unwrap(),
             HistorySyncState::NotStarted
         ));
+    }
+}
+
+/// CRD ch.38 §38.5C (D38.5C.1 and D38.5C.2 status notes): the removal rule and the changed height in the BCH and SLP
+/// collector, over the SQLite store.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod absence_tests {
+    use super::*;
+    use crate::sql_tx_history_storage::SqliteTxHistoryStorage;
+    use crate::utxo::bch::bch_coin_without_network_for_test;
+    use crate::utxo::rpc_clients::{NativeClientImpl, VerboseBlock};
+    use common::block_on;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use mocktopus::mocking::*;
+
+    const SLP_TOKEN: &str = "cc";
+
+    fn text_of(byte: u8) -> String { hex::encode([byte; 32]) }
+
+    fn hash_of(byte: u8) -> H256Json { H256Json::from([byte; 32]) }
+
+    /// The BCH row of the transaction `byte`; its `internal_id` is the hash text.
+    fn bch_row(ticker: &str, byte: u8, height: u64) -> crate::TransactionDetails {
+        bch_row_with_text(ticker, &text_of(byte), height)
+    }
+
+    fn bch_row_with_text(ticker: &str, id: &str, height: u64) -> crate::TransactionDetails {
+        serde_json::from_value(json!({
+            "tx_hex": "00", "tx_hash": id, "from": ["me"], "to": ["other"],
+            "total_amount": "1", "spent_by_me": "0", "received_by_me": "0", "my_balance_change": "0",
+            "block_height": height, "timestamp": if height > 0 { 1 } else { 0 },
+            "fee_details": {"type": "Utxo", "amount": "0.00001"},
+            "coin": ticker, "internal_id": id
+        }))
+        .unwrap()
+    }
+
+    /// The SLP token row of the same transaction: the same `tx_hash`, its own `internal_id`.
+    fn slp_row(ticker: &str, byte: u8, height: u64) -> crate::TransactionDetails {
+        slp_row_with_text(ticker, &text_of(byte), height)
+    }
+
+    fn slp_row_with_text(ticker: &str, id: &str, height: u64) -> crate::TransactionDetails {
+        let mut row = bch_row_with_text(ticker, id, height);
+        row.internal_id = hex::decode(format!("{}01", id)).unwrap().into();
+        row.transaction_type = crate::TransactionType::TokenTransfer(hex::decode(SLP_TOKEN).unwrap().into());
+        row.from = vec!["me-token-form".to_owned()];
+        row.to = vec!["other-token-form".to_owned()];
+        row
+    }
+
+    struct Fixture {
+        ctx: BchAndSlpHistoryCtx<SqliteTxHistoryStorage>,
+        ticker: String,
+    }
+
+    impl Fixture {
+        fn new(rows: impl FnOnce(&str) -> Vec<crate::TransactionDetails>) -> Fixture {
+            let coin = bch_coin_without_network_for_test();
+            let ticker = coin.ticker().to_owned();
+            let storage = SqliteTxHistoryStorage::in_memory();
+            block_on(storage.init(&ticker)).unwrap();
+            block_on(storage.add_transactions_to_history(&ticker, rows(&ticker))).unwrap();
+            let mm_ctx = MmCtxBuilder::default().into_mm_arc();
+            Fixture {
+                ctx: BchAndSlpHistoryCtx {
+                    coin,
+                    metrics: mm_ctx.metrics.clone(),
+                    mm_ctx,
+                    storage,
+                    current_balance: BigDecimal::from(0),
+                    absence: AbsenceMarks::default(),
+                    chain_changes: ChainChangeWatch::default(),
+                    chain_changed: false,
+                },
+                ticker,
+            }
+        }
+
+        /// One pass over `listing`, taken at `tip` (`None`: the listing does not qualify).
+        fn pass(&mut self, listing: &[(u8, u64)], tip: Option<u64>) {
+            let listing = listing.iter().map(|(byte, height)| (hash_of(*byte), *height)).collect();
+            self.pass_hashes(listing, tip);
+        }
+
+        fn pass_hashes(&mut self, listing: Vec<(H256Json, u64)>, tip: Option<u64>) {
+            let state = UpdatingUnconfirmedTxes::<SqliteTxHistoryStorage>::new(listing, tip);
+            let _next = block_on(Box::new(state).on_changed(&mut self.ctx));
+        }
+
+        fn rows_of(&self, byte: u8) -> Vec<crate::TransactionDetails> { self.rows_of_text(&text_of(byte)) }
+
+        fn rows_of_text(&self, text: &str) -> Vec<crate::TransactionDetails> {
+            block_on(self.ctx.storage.get_txes_by_hash(&self.ticker, text)).unwrap()
+        }
+
+        fn count(&self, table_suffix: &str) -> i64 {
+            let conn = self.ctx.storage.0.lock().unwrap();
+            conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {}_{};",
+                    self.ticker.replace('-', "_"),
+                    table_suffix
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        }
+    }
+
+    /// A confirmed transaction with its BCH row and its SLP token row, and a second, listed one.
+    fn two_transactions(ticker: &str) -> Vec<crate::TransactionDetails> {
+        vec![
+            bch_row(ticker, 0xa1, 100),
+            bch_row(ticker, 0xb2, 90),
+            slp_row(ticker, 0xb2, 90),
+        ]
+    }
+
+    #[test]
+    fn a_confirmed_transaction_absent_from_two_listings_one_block_apart_is_removed_with_its_token_row() {
+        let mut fx = Fixture::new(two_transactions);
+        assert_eq!((fx.count("tx_history"), fx.count("tx_cache")), (3, 2));
+        assert!(fx.count("tx_address") > 0);
+
+        fx.pass(&[(0xa1, 100)], Some(800));
+        assert_eq!(fx.rows_of(0xb2).len(), 2, "kept after one absence");
+        assert!(fx.ctx.absence.any());
+
+        fx.pass(&[(0xa1, 100)], Some(801));
+        assert!(fx.rows_of(0xb2).is_empty(), "the BCH row and the SLP row went together");
+        assert_eq!(fx.rows_of(0xa1).len(), 1);
+        assert!(!fx.ctx.absence.any());
+        // The address index entries of the removed rows went with them; the raw transactions stay in the cache.
+        assert_eq!(fx.count("tx_history"), 1);
+        let conn = fx.ctx.storage.0.lock().unwrap();
+        let orphans: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {0}_tx_address WHERE internal_id NOT IN (SELECT internal_id FROM {0}_tx_history);",
+                    fx.ticker.replace('-', "_")
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
+        drop(conn);
+        assert_eq!(fx.count("tx_cache"), 2);
+    }
+
+    #[test]
+    fn an_unconfirmed_transaction_is_no_longer_removed_at_its_first_absence() {
+        let mut fx = Fixture::new(|ticker| vec![bch_row(ticker, 0xe5, 0), slp_row(ticker, 0xe5, 0)]);
+        fx.pass(&[], Some(800));
+        assert_eq!(fx.rows_of(0xe5).len(), 2, "the first absence keeps it");
+        fx.pass(&[], Some(801));
+        assert!(fx.rows_of(0xe5).is_empty());
+    }
+
+    /// CRD ch.38 §38.5C amendment of 2026-11-18, item 3: a chain-changed event ends the wait for the next pass at once
+    /// (the wait is 30 s otherwise), whatever the balance and the marks say.
+    #[test]
+    fn a_chain_changed_event_ends_the_wait_for_the_next_pass_at_once() {
+        let mut fx = Fixture::new(|_| vec![]);
+        let (events, receiver) = futures::channel::mpsc::unbounded();
+        fx.ctx.chain_changes = ChainChangeWatch::from_receiver(receiver);
+        events.unbounded_send(()).unwrap();
+        let started = std::time::Instant::now();
+        let _next =
+            block_on(Box::new(WaitForHistoryUpdateTrigger::<SqliteTxHistoryStorage>::new()).on_changed(&mut fx.ctx));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the wait was not cut short"
+        );
+        assert!(!fx.ctx.absence.any());
+    }
+
+    /// Two events that are queued together make one pass: the wait takes the whole burst.
+    #[test]
+    fn two_queued_chain_changed_events_give_one_pass() {
+        let mut fx = Fixture::new(|_| vec![]);
+        let (events, receiver) = futures::channel::mpsc::unbounded();
+        fx.ctx.chain_changes = ChainChangeWatch::from_receiver(receiver);
+        events.unbounded_send(()).unwrap();
+        events.unbounded_send(()).unwrap();
+        let _next =
+            block_on(Box::new(WaitForHistoryUpdateTrigger::<SqliteTxHistoryStorage>::new()).on_changed(&mut fx.ctx));
+        assert!(fx.ctx.chain_changed, "the pass is asked for");
+        assert!(
+            !fx.ctx.chain_changes.take(),
+            "no second event is left for a second pass"
+        );
+    }
+
+    fn native_listing_error() -> common::jsonrpc_client::JsonRpcError {
+        common::jsonrpc_client::JsonRpcError {
+            client_info: "test".to_owned(),
+            request: common::jsonrpc_client::JsonRpcRequestEnum::Single(common::jsonrpc_client::JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: "0".to_owned(),
+                method: "listtransactions".to_owned(),
+                params: Vec::new(),
+            }),
+            error: common::jsonrpc_client::JsonRpcErrorType::Transport("no answer".to_owned()),
+        }
+    }
+
+    /// A chain-changed event survives a failed listing and is cleared only by an Ok one.
+    #[test]
+    fn a_failed_listing_keeps_the_chain_changed_flag_and_an_ok_one_clears_it() {
+        let mut fx = Fixture::new(|_| vec![]);
+        fx.ctx.chain_changed = true;
+        NativeClientImpl::get_block_count.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(800u64))));
+        NativeClientImpl::list_transactions
+            .mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::err(native_listing_error()))));
+        let _next = block_on(Box::new(FetchingTxHashes::<SqliteTxHistoryStorage>::new()).on_changed(&mut fx.ctx));
+        assert!(fx.ctx.chain_changed, "the failed listing keeps the event");
+
+        NativeClientImpl::list_transactions
+            .mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::ok(vec![]))));
+        let _next = block_on(Box::new(FetchingTxHashes::<SqliteTxHistoryStorage>::new()).on_changed(&mut fx.ctx));
+        assert!(!fx.ctx.chain_changed, "the Ok listing clears it");
+    }
+
+    #[test]
+    fn two_absences_at_the_same_tip_keep_the_transaction() {
+        let mut fx = Fixture::new(two_transactions);
+        fx.pass(&[(0xa1, 100)], Some(800));
+        fx.pass(&[(0xa1, 100)], Some(800));
+        assert_eq!(fx.rows_of(0xb2).len(), 2);
+        assert!(fx.ctx.absence.any());
+    }
+
+    #[test]
+    fn a_listing_that_contains_the_transaction_again_clears_the_mark() {
+        let mut fx = Fixture::new(two_transactions);
+        fx.pass(&[(0xa1, 100)], Some(800));
+        assert!(fx.ctx.absence.any());
+        fx.pass(&[(0xa1, 100), (0xb2, 90)], Some(801));
+        assert!(!fx.ctx.absence.any());
+        fx.pass(&[(0xa1, 100)], Some(802));
+        assert_eq!(fx.rows_of(0xb2).len(), 2, "counting started again");
+    }
+
+    /// A listing that failed, was cut off, was `history too large`, or came from an out-of-date server or during the
+    /// disagreement state reaches the pass without a tip (see the tests of `listing_tip_of`).
+    #[test]
+    fn a_listing_without_a_tip_removes_nothing_and_sets_no_mark() {
+        let mut fx = Fixture::new(two_transactions);
+        fx.pass(&[(0xa1, 100)], None);
+        fx.pass(&[(0xa1, 100)], None);
+        assert_eq!(fx.rows_of(0xb2).len(), 2);
+        assert!(!fx.ctx.absence.any());
+    }
+
+    #[test]
+    fn a_confirmed_row_listed_as_unconfirmed_goes_back_to_height_zero_with_its_token_row() {
+        let mut fx = Fixture::new(two_transactions);
+        fx.pass(&[(0xa1, 100), (0xb2, 0)], Some(800));
+        let rows = fx.rows_of(0xb2);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.block_height == 0), "{rows:?}");
+        assert_eq!(fx.rows_of(0xa1)[0].block_height, 100);
+    }
+
+    /// The time of a block comes from the daemon: here the height added to a base.
+    fn mock_block_times() {
+        NativeClientImpl::get_block_hash.mock_safe(|_client, height| {
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&height.to_be_bytes());
+            MockResult::Return(Box::new(futures01::future::ok(H256Json::from(bytes))))
+        });
+        NativeClientImpl::get_block.mock_safe(|_client, hash| {
+            let height = u64::from_be_bytes(hash.0[..8].try_into().unwrap());
+            let block: VerboseBlock = serde_json::from_value(json!({
+                "hash": hash, "confirmations": 1, "size": 1, "version": 1,
+                "merkleroot": "00".repeat(32), "tx": [], "time": 1_700_000_000u64 + height,
+                "nonce": 0, "bits": "1d00ffff", "difficulty": 1.0, "chainwork": "00".repeat(32),
+            }))
+            .unwrap();
+            MockResult::Return(Box::new(futures01::future::ok(block)))
+        });
+    }
+
+    #[test]
+    fn a_held_hash_listed_at_another_height_takes_the_new_height_and_time_in_all_its_rows() {
+        mock_block_times();
+        let mut fx = Fixture::new(two_transactions);
+        fx.pass(&[(0xa1, 100), (0xb2, 95)], Some(800));
+        let rows = fx.rows_of(0xb2);
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .all(|row| row.block_height == 95 && row.timestamp == 1_700_000_095));
+        // The listed hash at its stored height is passed over: nothing changes.
+        let a = fx.rows_of(0xa1);
+        assert_eq!((a[0].block_height, a[0].timestamp), (100, 1));
+    }
+
+    #[test]
+    fn an_unconfirmed_row_listed_at_a_positive_height_still_matures_for_both_rows() {
+        mock_block_times();
+        let mut fx = Fixture::new(|ticker| vec![bch_row(ticker, 0xe5, 0), slp_row(ticker, 0xe5, 0)]);
+        fx.pass(&[(0xe5, 120)], Some(800));
+        let rows = fx.rows_of(0xe5);
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .all(|row| row.block_height == 120 && row.timestamp == 1_700_000_120));
+    }
+
+    #[test]
+    fn the_store_methods_list_heights_and_remove_all_rows_of_a_hash() {
+        let fx = Fixture::new(two_transactions);
+        let mut listed = block_on(fx.ctx.storage.tx_hashes_and_heights(&fx.ticker)).unwrap();
+        listed.sort();
+        assert_eq!(listed.len(), 3);
+        assert!(listed.contains(&(text_of(0xa1), 100)));
+        assert_eq!(listed.iter().filter(|(hash, _)| *hash == text_of(0xb2)).count(), 2);
+        let removed = block_on(fx.ctx.storage.remove_txes_by_hash(&fx.ticker, vec![text_of(0xb2)])).unwrap();
+        assert_eq!(removed, 2);
+        assert!(fx.rows_of(0xb2).is_empty());
+    }
+
+    /// A hash whose bytes read differently in the two byte orders: `[b; 32]` cannot show a reversal.
+    fn ordered_text() -> String { hex::encode((0u8..32).collect::<Vec<_>>()) }
+
+    /// The stored text and the listed hash relate as in production: the listing parses the displayed text, and prints
+    /// it back byte for byte; the reversed hash is another transaction.
+    fn ordered_listing_hash() -> (H256Json, H256Json) {
+        let text = ordered_text();
+        let listed = H256Json::from_str(&text).unwrap();
+        assert_eq!(format!("{:02x}", listed), text);
+        assert_ne!(listed, listed.reversed());
+        (listed, listed.reversed())
+    }
+
+    fn ordered_rows(ticker: &str) -> Vec<crate::TransactionDetails> {
+        let text = ordered_text();
+        vec![
+            bch_row_with_text(ticker, &text, 100),
+            slp_row_with_text(ticker, &text, 100),
+            bch_row(ticker, 0xa1, 100),
+        ]
+    }
+
+    #[test]
+    fn removal_matches_the_hash_in_the_byte_order_of_the_listing() {
+        let (listed, reversed) = ordered_listing_hash();
+        let text = ordered_text();
+
+        // The listing contains the stored transaction: kept, and no mark.
+        let mut fx = Fixture::new(ordered_rows);
+        fx.pass_hashes(vec![(listed, 100), (hash_of(0xa1), 100)], Some(800));
+        fx.pass_hashes(vec![(listed, 100), (hash_of(0xa1), 100)], Some(801));
+        assert_eq!(fx.rows_of_text(&text).len(), 2);
+        assert!(!fx.ctx.absence.any());
+
+        // The listing contains the reversed hash only, which is another transaction: the stored one is absent twice.
+        let mut fx = Fixture::new(ordered_rows);
+        fx.pass_hashes(vec![(reversed, 100), (hash_of(0xa1), 100)], Some(800));
+        assert_eq!(fx.rows_of_text(&text).len(), 2, "kept after one absence");
+        fx.pass_hashes(vec![(reversed, 100), (hash_of(0xa1), 100)], Some(801));
+        assert!(
+            fx.rows_of_text(&text).is_empty(),
+            "the BCH row and the SLP row went together"
+        );
+        assert_eq!(fx.rows_of(0xa1).len(), 1);
+    }
+
+    #[test]
+    fn a_changed_height_matches_the_hash_in_the_byte_order_of_the_listing() {
+        mock_block_times();
+        let (listed, reversed) = ordered_listing_hash();
+        let text = ordered_text();
+
+        // The reversed hash at another height is another transaction: the stored rows keep their height.
+        let mut fx = Fixture::new(ordered_rows);
+        fx.pass_hashes(vec![(reversed, 95)], None);
+        assert!(fx.rows_of_text(&text).iter().all(|row| row.block_height == 100));
+
+        // The listed hash at another height moves both rows, with that block's time.
+        fx.pass_hashes(vec![(listed, 95)], None);
+        let rows = fx.rows_of_text(&text);
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .all(|row| row.block_height == 95 && row.timestamp == 1_700_000_095));
     }
 }

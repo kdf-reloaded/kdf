@@ -32,6 +32,12 @@ or undo, and every change that needs a step from you.
     upgrade; the steps under "Coins that are no longer visible after an upgrade" below apply if a coin is no longer
     shown afterwards.
   Detail: PR #411; CRD ch.39 R39.8.0ba, R39.8.0bc and the status note of 2026-11-18; RELOADED_VS_GLEEC.md.
+- **Transaction history now drops transactions that are no longer on the chain, and shows a moved transaction at its
+  new height.** This applies to UTXO coins, Qtum, QRC20 tokens, BCH and SLP. After the upgrade, a stored history row
+  whose transaction the coin's servers no longer list disappears, once two server listings at least one block apart
+  confirm its absence. This can happen to a transaction of a chain branch that was later abandoned. A transaction the
+  servers now report at another height shows that height and its block's time.
+  - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
 - **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
   coins, EVM coins and their tokens, BCH with its SLP tokens, Sia and Lightning.** Until now these families ignored the
   value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed single-address HD key, and BCH
@@ -169,6 +175,11 @@ the previous version used. The safe way:
   `task::withdraw` takes TRX and TRC20 coins. **TRON stays switched off in this build**, so every route still
   answers "TRON support is not available in this build" and none of this can be used yet. Detail: PR #405; CRD
   ch.21 §21.4, R21.10B.2, R21.10B.4, R21.10B.5; ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
+- **`convertaddress` for a TRON coin converts between the base58check and the `41...` hex form.** Its
+  `to_address_format` is `{"format": "base58"}` or `{"format": "hex"}`, `from` may also be `0x41...`, and an EVM `0x`
+  address or an EVM format value is refused; GLEEC KDF answers the EVM `0x` form here. `validateaddress` and
+  `get_my_address` already answered as the CRD states. TRON stays switched off in this build. Detail: PR #412;
+  CRD ch.21 R21.10B.8, D21.10B.2.
 
 #### Tendermint (Cosmos) coins
 
@@ -242,7 +253,8 @@ the previous version used. The safe way:
   in the source tree are gone. Transactions are built by the node's own assembler over the libraries' public interface.
   A shielded transaction expires after the same 40 blocks as before, and the Zcash network upgrade NU7 is known to the
   node, so a transparent-only Zcash transaction under its branch identifier is read by both of the node's readers. The
-  wallet database is migrated once; read the first item under "Breaking changes and upgrade notes" above.
+  wallet database is migrated once; read "The shielded (ARRR, Pirate) wallet database is migrated irreversibly" under "Breaking changes and
+  upgrade notes" above.
   Detail: PR #411; CRD ch.39 status notes of 2026-11-18, ch.34 ledger entry of 2026-11-18.
 - **The shielded coin's library stack now also builds with Orchard scanning enabled; no behavior
   change.** The way the transaction builder is asked for an output-only Ironwood bundle no longer
@@ -308,6 +320,12 @@ the previous version used. The safe way:
   status note of 2026-11-17.
 
 #### Solana coins
+
+- **`disable_coin` works for Solana coins and SPL tokens.** A token, and a platform without tokens,
+  are removed and can be activated again; a removed token no longer stays in its platform's token
+  records. A platform with active tokens is handled as for every other family: the platform is
+  removed and its tokens stay. A Solana ticker that is not active answers the usual refusal. Solana
+  stays switched off in this build. Detail: PR #413; CRD ch.40 D40.6B.1, T40.6B.20; ch.43 §43.1E.
 
 - **Every wallet request naming a Solana coin or SPL token answers, and Solana swap operations
   answer an error.** Message signing and verification, address validation, the confirmation settings
@@ -412,6 +430,18 @@ the previous version used. The safe way:
   are unchanged. The SLP token rows rest on unit tests; no live SLP row is run, because the coins file
   the lab uses has no SLP token entry; the live store comparison covers BCH alone. Detail: PR #380;
   CRD ch.36 R36.14.23 -- R36.14.26.
+- **Stale history rows are removed, and changed heights are taken over.** A stored row whose transaction the servers
+  no longer list was kept forever in the history of UTXO coins, Qtum and QRC20 tokens, and kept once confirmed for BCH
+  and SLP. Now a row is removed when two successful listings in a row, at least one block apart, from servers that are
+  up to date, do not contain it. All rows of one transaction go together. A failed or cut-off listing, a listing from
+  a server that is behind, and any listing while the servers disagree about the chain remove nothing. One log line
+  reports each removal. A transaction listed at another height takes that height and its block's time. Detail: PR #408;
+  CRD ch.38 §38.5C, D38.5C.1 and D38.5C.2.
+- **The transaction history reacts to a reorganization of the chain at once.** Each coin's Electrum client now notices
+  when the chain its servers follow changes: on every new block it compares the recent block headers of an up-to-date
+  server with the ones it already holds. When they differ, the history collectors run at once instead of waiting for a
+  balance change, and one WARN line names the height from which the chain changed. At most one small request is made
+  per new block. Detail: PR #409; CRD ch.38 §38.5C (the amendment after D38.5C.2).
 
 #### Siacoin
 
@@ -529,7 +559,7 @@ the previous version used. The safe way:
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 part a in PR #401.
+  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the

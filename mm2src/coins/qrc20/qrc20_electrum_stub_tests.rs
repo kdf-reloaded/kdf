@@ -592,7 +592,7 @@ fn t38_6_4q_6_history_request_error_is_a_retry_and_only_the_exact_history_too_la
                 {"tx_hash": "bb".repeat(32), "height": 6, "log_index": 0},
             ]),
         );
-        let RequestTxHistoryResult::Ok(ids) = coin.request_tx_history(env.ctx.metrics.clone()).await else {
+        let RequestTxHistoryResult::Ok(ids, _) = coin.request_tx_history(env.ctx.metrics.clone()).await else {
             panic!("a list is a history")
         };
         assert_eq!(ids.len(), 2);
@@ -700,14 +700,26 @@ fn t38_6_4q_6_failed_receipt_of_one_listed_transaction_leaves_it_out_and_stores_
             spendable: balance_of(1),
             unspendable: BigDecimal::from(0),
         };
-        assert!(!coin.check_if_history_update_is_needed(&history_map, &Some(balance.clone()), &balance));
+        assert!(!coin.check_if_history_update_is_needed(
+            &history_map,
+            &Some(balance.clone()),
+            &balance,
+            &AbsenceMarks::default(),
+            false
+        ));
         // A changed balance asks for the history again, and so does the first pass.
         let other = CoinBalance {
             spendable: balance_of(2),
             unspendable: BigDecimal::from(0),
         };
-        assert!(coin.check_if_history_update_is_needed(&history_map, &Some(balance.clone()), &other));
-        assert!(coin.check_if_history_update_is_needed(&history_map, &None, &balance));
+        assert!(coin.check_if_history_update_is_needed(
+            &history_map,
+            &Some(balance.clone()),
+            &other,
+            &AbsenceMarks::default(),
+            false
+        ));
+        assert!(coin.check_if_history_update_is_needed(&history_map, &None, &balance, &AbsenceMarks::default(), false));
     });
 }
 
@@ -1590,7 +1602,7 @@ fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_
         server.set_result(GET_HISTORY, json!([]));
         assert!(matches!(
             token.request_tx_history(env.ctx.metrics.clone()).await,
-            RequestTxHistoryResult::Ok(_)
+            RequestTxHistoryResult::Ok(..)
         ));
 
         // No answer at all: the request stays pending, and balance and history keep working meanwhile.
@@ -1602,7 +1614,7 @@ fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_
             assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
             assert!(matches!(
                 token.request_tx_history(env.ctx.metrics.clone()).await,
-                RequestTxHistoryResult::Ok(_)
+                RequestTxHistoryResult::Ok(..)
             ));
         };
         let (outcome, ()) = futures::join!(pending, rest);
@@ -1621,5 +1633,182 @@ fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_
         assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
         Timer::sleep(2.).await;
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 3);
+    });
+}
+
+// ---- CRD ch.38 §38.5C (D38.5C.1 and D38.5C.2 status notes): rows the listing no longer holds, changed heights ----
+
+/// One stored transfer row of the transaction `hash_byte`.
+fn stored_row(hash_byte: u8, log_index: u64, block_height: u64) -> (H256Json, TxInternalId, crate::TransactionDetails) {
+    let tx_hash = H256Json::from([hash_byte; 32]);
+    let id = TxInternalId::new(tx_hash, 0, log_index);
+    let row = utxo_common::history_row_for_test(block_height, BytesJson::from(id.clone()).0);
+    (tx_hash, id, row)
+}
+
+fn history_map_of(rows: Vec<(H256Json, TxInternalId, crate::TransactionDetails)>) -> HistoryMapByHash {
+    let mut map = HistoryMapByHash::new();
+    for (hash, id, row) in rows {
+        map.entry(hash).or_default().insert(id, row);
+    }
+    map
+}
+
+fn listing(entries: &[(u8, u64)]) -> TxIds {
+    entries
+        .iter()
+        .map(|(byte, height)| (H256Json::from([*byte; 32]), *height))
+        .collect()
+}
+
+fn rows_in(map: &HistoryMapByHash) -> usize { map.values().map(|rows| rows.len()).sum() }
+
+#[test]
+fn t38_5c_a_confirmed_transaction_absent_from_two_listings_one_block_apart_is_removed_with_all_its_rows() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        // A has one row; B is a transaction with two transfer rows.
+        let mut map = history_map_of(vec![
+            stored_row(0xa1, 0, 100),
+            stored_row(0xb2, 0, 90),
+            stored_row(0xb2, 1, 90),
+        ]);
+        let mut absence = AbsenceMarks::default();
+        let only_a = listing(&[(0xa1, 100)]);
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 800, &only_a));
+        assert_eq!(rows_in(&map), 3);
+        assert!(coin.remove_unlisted_rows(&mut absence, &mut map, 801, &only_a));
+        assert_eq!(rows_in(&map), 1, "both rows of B went together");
+        assert!(map.contains_key(&H256Json::from([0xa1; 32])));
+        assert!(!absence.any());
+    });
+}
+
+#[test]
+fn t38_5c_an_unconfirmed_transaction_follows_the_same_rule() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let mut map = history_map_of(vec![stored_row(0xe5, 0, 0)]);
+        let mut absence = AbsenceMarks::default();
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 800, &listing(&[])));
+        assert!(coin.remove_unlisted_rows(&mut absence, &mut map, 801, &listing(&[])));
+        assert_eq!(rows_in(&map), 0);
+    });
+}
+
+#[test]
+fn t38_5c_one_absence_or_two_at_the_same_tip_keep_the_row_and_the_mark_keeps_the_need_to_run_test_true() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let mut map = history_map_of(vec![stored_row(0xb2, 0, 90)]);
+        let mut absence = AbsenceMarks::default();
+        let balance = CoinBalance {
+            spendable: balance_of(1),
+            unspendable: BigDecimal::from(0),
+        };
+        // No mark, an unchanged balance and a settled row: no pass.
+        assert!(!coin.check_if_history_update_is_needed(&map, &Some(balance.clone()), &balance, &absence, false));
+        // A chain-changed event (CRD ch.38 §38.5C amendment of 2026-11-18, item 3) forces the pass whatever the rest says.
+        assert!(coin.check_if_history_update_is_needed(&map, &Some(balance.clone()), &balance, &absence, true));
+
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 800, &listing(&[])));
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 800, &listing(&[])));
+        assert_eq!(rows_in(&map), 1);
+        // The mark: the pass runs although the balance is unchanged.
+        assert!(coin.check_if_history_update_is_needed(&map, &Some(balance.clone()), &balance, &absence, false));
+    });
+}
+
+#[test]
+fn t38_5c_a_listing_that_contains_the_transaction_again_clears_the_mark() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let mut map = history_map_of(vec![stored_row(0xb2, 0, 90)]);
+        let mut absence = AbsenceMarks::default();
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 800, &listing(&[])));
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 801, &listing(&[(0xb2, 90)])));
+        assert!(!absence.any());
+        assert_eq!(rows_in(&map), 1);
+    });
+}
+
+/// A failed, cut-off or `history too large` listing gives no tip, so it never reaches the rule.
+#[test]
+fn t38_5c_a_listing_that_failed_or_was_too_large_carries_no_tip_and_a_good_one_carries_the_tip_of_its_server() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+
+        server.set_error(GET_HISTORY, "stub history error");
+        assert!(matches!(
+            coin.request_tx_history(env.ctx.metrics.clone()).await,
+            RequestTxHistoryResult::Retry { .. }
+        ));
+        server.clear_error(GET_HISTORY);
+        server.set_error_object(GET_HISTORY, json!({"code": 1, "message": "history too large"}));
+        assert!(matches!(
+            coin.request_tx_history(env.ctx.metrics.clone()).await,
+            RequestTxHistoryResult::HistoryTooLarge
+        ));
+
+        // One connected server: its tip with each listing, and a new block moves it.
+        server.clear_error(GET_HISTORY);
+        server.set_result(GET_HISTORY, json!([]));
+        let RequestTxHistoryResult::Ok(_, first) = coin.request_tx_history(env.ctx.metrics.clone()).await else {
+            panic!("a list is a history")
+        };
+        assert_eq!(first, Some(777));
+        // That a new block moves the tip of the single server is tested on the pool
+        // (`t38_5c_one_connected_server_gives_its_tip_for_each_listing`); here the next tip is taken as given.
+        let second = first.map(|tip| tip + 1);
+        // Two listings from the single server, one block apart, remove the row.
+        let mut map = history_map_of(vec![stored_row(0xb2, 0, 90)]);
+        let mut absence = AbsenceMarks::default();
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, first.unwrap(), &listing(&[])));
+        assert!(coin.remove_unlisted_rows(&mut absence, &mut map, second.unwrap(), &listing(&[])));
+        assert_eq!(rows_in(&map), 0);
+    });
+}
+
+#[test]
+fn t38_5c_a_changed_height_is_taken_over_with_the_new_time_and_an_unconfirmed_listing_resets_all_rows() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let (mut a, b) = two_served_txs(&coin);
+        serve_tx(&server, &a);
+        serve_tx(&server, &b);
+        let id = |served: &ServedTx| json::from_value::<H256Json>(json!(txid_of(&served.tx))).unwrap();
+        let mut history_map = HistoryMapByHash::new();
+        let tx_ids = vec![(id(&a), a.block), (id(&b), b.block)];
+        assert!(coin.process_tx_ids(&env.ctx, &mut history_map, tx_ids).await);
+        assert_eq!(rows_in(&history_map), 3);
+
+        // The block of A changed, and its block has another time; B (two rows) is listed as unconfirmed.
+        a.block = 710;
+        a.time = 1_700_000_999;
+        serve_tx(&server, &a);
+        let tx_ids = vec![(id(&a), 710), (id(&b), 0)];
+        assert!(coin.process_tx_ids(&env.ctx, &mut history_map, tx_ids).await);
+
+        let rows_of = |served: &ServedTx| -> Vec<crate::TransactionDetails> {
+            history_map[&id(served)].values().cloned().collect()
+        };
+        let a_rows = rows_of(&a);
+        assert_eq!(a_rows.len(), 1);
+        assert_eq!((a_rows[0].block_height, a_rows[0].timestamp), (710, 1_700_000_999));
+        let b_rows = rows_of(&b);
+        assert_eq!(b_rows.len(), 2);
+        assert!(b_rows.iter().all(|row| row.block_height == 0), "{b_rows:?}");
     });
 }

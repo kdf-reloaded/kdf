@@ -5,6 +5,7 @@ use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::header_time_only::read_window_times;
 #[cfg(not(target_arch = "wasm32"))]
 use common::dns_resolver::connect_tcp;
+use common::jsonrpc_client::process_transport_single_result;
 use futures::channel::mpsc as futures_mpsc;
 use script::Script;
 use std::collections::{HashMap, HashSet};
@@ -569,6 +570,12 @@ impl ElectrumClientImpl {
     /// new swaps and withdrawals of the coin are refused with it.
     pub fn chain_disagreement(&self) -> Option<String> { self.pool.chain_disagreement() }
 
+    /// A channel of chain-changed events: one `()` each time the client sees that the chain it follows has changed
+    /// (CRD ch.38 §38.5C, D38.5C.2 status note, amendment of 2026-11-18). The history collectors of the coin subscribe.
+    pub fn subscribe_chain_changes(&self) -> futures::channel::mpsc::UnboundedReceiver<()> {
+        self.pool.subscribe_chain_changes()
+    }
+
     /// Starts the background maintenance of the pool: the first pass connects the servers in the
     /// background and later passes keep the maintained set (CRD ch.38 R38.6.4c). Nothing waits for it.
     /// With `spawn_ping` the maintained connections are pinged on a regular cadence.
@@ -1008,6 +1015,36 @@ impl ElectrumClient {
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-scripthash-get-history
     pub fn scripthash_get_history(&self, hash: &str) -> RpcRes<Vec<ElectrumTxHistoryItem>> {
         rpc_func!(self, "blockchain.scripthash.get_history", hash)
+    }
+
+    /// `blockchain.scripthash.get_history` with the tip a history collector may judge the listing by: `Some(tip)`
+    /// only when the server that answered was up to date at that moment and the coin's servers did not disagree about
+    /// the chain (CRD ch.38 §38.5C, D38.5C.1 status note).
+    pub async fn scripthash_get_history_for_absence(
+        &self,
+        hash: &str,
+    ) -> Result<(Vec<ElectrumTxHistoryItem>, Option<u64>), JsonRpcError> {
+        let request = rpc_req!(self, "blockchain.scripthash.get_history", hash);
+        self.send_request_with_listing_tip(request).await
+    }
+
+    /// Sends `request` over the pool like [`rpc_func!`] does and returns, with the decoded answer, the tip by which
+    /// the answering server's listing may be judged (see [`PoolShared::listing_tip_of`]).
+    pub async fn send_request_with_listing_tip<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        request: JsonRpcRequest,
+    ) -> Result<(T, Option<u64>), JsonRpcError> {
+        let client_info = JsonRpcClient::client_info(self);
+        let budget = call_budget_of_caller(self.pool.timings.call_budget);
+        let routed = self
+            .pool
+            .route(JsonRpcRequestEnum::Single(request.clone()), budget)
+            .await;
+        let tip = routed
+            .as_ref()
+            .ok()
+            .and_then(|(addr, _)| self.pool.listing_tip_of(&addr.0));
+        process_transport_single_result(routed, client_info, request).map(|answer| (answer, tip))
     }
 
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-scripthash-gethistory

@@ -974,6 +974,22 @@ node's rule, so that it is never below what the node charges.
 - The withdraw destination and `my_balance` follow R-WP5: both address
   forms in, base58check out.
 
+*Status note (2026-11-17), what Reloaded does for each method of
+R21.10B.8.* `validateaddress` is as the bullet states: base58check, `41...` (42)
+and `0x41...` (44) are valid, the EVM `0x` 20-byte form is
+`is_valid: false` with a `reason`. `convertaddress` differs from the first
+bullet as decided in D21.10B.2: it converts between the TRON forms and
+refuses the EVM form (see the note at D21.10B.2); for an EVM coin it is
+unchanged. `get_my_address` refuses TRX and TRC20 with `CoinIsNotSupported`
+(HTTP 400); the general check of the coin config runs first, and a missing
+coin or a protocol that does not parse answers `CoinsConfCheckError`
+(HTTP 400); the extra "no `mm2` member" case of the bullet is not checked by
+this method for any coin. `show_priv_key` answers the local key as `0x` and
+64 hex digits for a TRON coin as for an EVM coin; a key the node does not
+hold (Trezor, MetaMask) is refused with the legacy error body, and a
+WalletConnect key cannot occur because activation refuses that policy
+(R21.10B.4).
+
 **R21.10B.9** *Orders (completes R-D1 and the order-placement bullet of
 F21.B3).* `setprice`, `buy` and `sell` have no TRON-specific check. With
 the coin configured `"wallet_only": true` -- every TRON config of the
@@ -998,6 +1014,17 @@ the fee details report as the most the transfer can cost (D21.B5 of
 EVM `0x` form for a TRON coin. Options: (a) parity; (b) refuse the method
 for TRX and TRC20; (c) convert between the base58check and the `41…` hex
 form under a TRON-specific format value.
+
+*Status note (2026-11-17), D21.10B.2 decided: (c).* For a TRX or TRC20 coin,
+`convertaddress` converts between the base58check form and the `41...` hex
+form. `to_address_format` takes `{"format": "base58"}` (the base58check form,
+34 characters starting with `T`) or `{"format": "hex"}` (42 hex digits, the
+prefix `41` and the 20-byte payload, lowercase, no `0x`). `from` is any input
+form of R-AD1: base58check, `41...` hex, or `0x41...` hex. The EVM `0x`
+20-byte form as `from`, and the EVM format values (`mixedcase`, `singlecase`)
+or any other format value, are refused with the legacy error body (HTTP 400,
+`InvalidParam`). The two TRON format values are accepted for TRON coins only:
+an EVM coin keeps `mixedcase` and `singlecase` and refuses `base58` and `hex`.
 
 **D21.10B.3** *Key policies that activate but cannot send.* At the
 reference a browser build activates TRON under MetaMask and shows an

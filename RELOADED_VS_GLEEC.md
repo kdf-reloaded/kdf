@@ -661,6 +661,12 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   query string of a node URL works. Entries of `nodes` may also carry a `headers` object and get `tron_api_key`.
   CRD ch.21 §21.4, R21.10B.2, R21.10B.4, D21.B1, D21.B7, D21.10B.3.
 
+- **`convertaddress` for a TRON coin (still switched off) converts between the base58check and the `41...` hex form.**
+  GLEEC KDF answers an EVM `0x` form for a TRX or TRC20 address. Reloaded takes `{"format": "base58"}` or
+  `{"format": "hex"}`, accepts `from` as base58check, `41...` or `0x41...`, and refuses an EVM `0x` address and the EVM
+  format values with the legacy error body; an EVM coin is unchanged. No switch; row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 R21.10B.8, D21.10B.2.
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.

@@ -880,6 +880,43 @@ addition no row is removed while the coin is in the state of R38.6.4o item
 Under each option Reloaded's legacy collector first has to meet R38.5A.3
 item (a).
 
+*Status note (2026-11-16, clean side; maintainer decision). D38.5C.1 is
+decided:* option (c), with a Reloaded refinement for how absence is
+established. It applies to the legacy history file, the QRC20 token
+collector (in place of R38.6.4Q.6 item 2) and the SQLite store alike, and
+replaces R38.5C.1 and R38.5C.3 items 2 and 3 for removal. For confirmed rows
+of the SQLite store it is a recorded departure from R38.5C.4 item 1.
+
+1. *When a row is removed.* A stored row, confirmed or not, is removed only
+   when **two successful listings in a row**, at least one block apart, both
+   answered by up-to-date servers (R38.6.4o item 4), do not contain its
+   transaction hash. The two listings must together cover every own address
+   the row concerns. All rows of one transaction hash (the several rows of a
+   QRC20 transaction, the BCH row and the SLP token row) are removed together.
+   A coin with a single connected server needs two listings from that server,
+   at least one block apart.
+   "One block apart" is judged from the chain tips observed with the two
+   listings: for an Electrum server, its last reported tip; for a native
+   daemon, its block count read with the listing.
+2. *What never removes.* A failed listing, a listing cut off by its time
+   budget or by a `history too large` answer, a listing from an out-of-date
+   server, and any listing while the coin is in the disagreement state of
+   R38.6.4o item 12.
+3. *Rows cannot stay forever.* A row found absent once carries a mark: the
+   height at which its absence was first seen. While any row carries such a
+   mark, the collector's need-to-run test (R38.5A.5) is true, so the second
+   listing comes at the next pass after a new block, not only at a balance
+   change. A listing that contains the hash clears the mark. What holds a
+   removal back is named in item 2, plus the absence of a new block. Each ends
+   by itself when its cause ends; none needs a user action.
+   The marks are kept in memory only; after a restart of the node the
+   counting starts again, which can delay a removal but never causes one.
+4. *Write and log.* A pass that removed rows writes the history at once
+   (R38.5A.3) and logs one INFO line naming the coin and the number of rows
+   removed. No line is logged per row.
+5. *Afterwards.* A removed hash that a later listing contains is fetched as
+   new, as in R38.5C.1 item 4.
+
 D38.5C.2 *(Open, 2026-11-16.)* **A stored confirmed row whose transaction is
 now at another height.** Neither store of the reference takes the new height
 over, and no pass runs for it while the balance is unchanged (R38.5C.2,
@@ -892,6 +929,79 @@ goes back to height 0; (c) option (b), and a pass is also started when the
 coin's client sees that the chain it follows has changed, since the
 need-to-run test alone does not start one. *Recommendation:* (c); what
 makes the client see the change is this repository's own design.
+
+*Status note (2026-11-16, clean side; maintainer decision). D38.5C.2 is
+decided:* option (c), in two steps. It is a recorded departure from R38.5C.2
+and R38.5C.4 item 2 for both stores.
+
+1. *In a pass that runs.* A listed positive height that differs from a
+   stored row's height is taken over, together with that block's time. A
+   stored confirmed row that the listing reports as unconfirmed goes back to
+   height 0. All rows of the hash change together.
+2. *Starting a pass.* A pass is also started when the coin's client sees
+   that the chain it follows has changed. One WARN line names the coin and
+   the height from which the chain changed, if known. How the client sees
+   the change is this repository's own design, specified when it is built;
+   until then, item 1 applies in the passes that run anyway.
+
+*Amendment (2026-11-18, clean side; Reloaded-original; implements item 2 of
+the status note above). How the client sees that its chain changed.*
+1. *The chain view.* Each Electrum client keeps the base headers (the first
+   80 bytes, as compared by item 12 of R38.6.4o, D38.6.4o.14) of the last
+   2*T* + 2 heights of the chain it follows, *T* being the coin's tolerance
+   (R38.6.4o item 1). The view is fed only by header notifications and
+   header answers of up-to-date maintained connections (R38.6.4o item 4), and
+   not at all while the coin is in the disagreement state (item 12). No block
+   identifier is computed: the identifier function differs between header
+   families, and comparing base headers at the same height works for all of
+   them.
+2. *One check per new tip.* When an up-to-date connection first reports a
+   height above the highest in the view, the client sends that connection one
+   directed `blockchain.block.headers` request (R38.6.4g) for the heights from
+   the highest in the view up to the one below the new tip. It compares each
+   returned base header with the view at the same height.
+   - All equal: the chain only grew; the view takes the new headers, the new
+     tip's included, and drops the oldest.
+   - A difference: the chain changed. One more directed request over the
+     whole view finds the lowest height that differs, the height from which
+     the chain changed; a difference at the bottom of the view is reported as
+     "at or below" its lowest height. The view is then replaced by the new
+     chain's headers.
+   - A request that fails or is not answered within the per-request bound
+     concludes nothing; the next tip is checked as usual.
+3. *What a change starts.* The client sends a chain-changed event to every
+   history collector of the coin instance: the legacy UTXO collector, the
+   QRC20 collector and the BCH/SLP collector. The event makes the collector
+   run a pass at once, whatever its need-to-run test says. That pass applies
+   item 1 of the status note above and counts absences under D38.5C.1.
+4. *The log.* One WARN line per change: `<ticker>: the Electrum servers report
+   a reorganization of the chain from height <H>` (or `at or below height
+   <L>`).
+   Nothing is said about consequences. Every change is reported, a change
+   back to a chain the view held before included, as in a race of two blocks
+   at the tip: each is a reorganization.
+5. *Cost and bounds.* At most one small directed request per new block per
+   coin instance, plus one when a change is found, always to a connection
+   that is already maintained. A chain that only grows always compares equal,
+   so no header family can make every block look like a change. A single
+   server answering a made-up header can cause at most one extra history pass
+   and one WARN line. It cannot remove a row, which needs two listings under
+   D38.5C.1.
+6. *One connected server.* The same applies to that server's headers alone.
+7. *Edges.*
+   - When the view is empty, or a new tip is more than 2*T* + 2 heights above
+     its highest, the view starts again from the new tip, with no request, no
+     event and no WARN: there is nothing to compare with.
+   - A tip at or below the view's highest height is not checked. A
+     replacement at the same height is therefore seen when the next higher
+     tip arrives.
+   - A header list that cannot be split into equal parts of at least 80 bytes
+     matching the requested count concludes nothing. A coin whose servers
+     never return such a list therefore never sees a change, and relies on
+     the passes that run anyway.
+   - With `electrum_tip_checks` `false` (R38.6.4o item 11) the view is not
+     fed and no change is seen; the history then relies on the passes that
+     run anyway.
 
 *Acceptance rows for a mock backend.* Each row names what the mock answers
 and what the node does. *Parity* is the reference behavior bound above;
@@ -6161,6 +6271,19 @@ R38.8.6 **Tests (two-direction, observable).**
   server.* Written by a session that never read the forbidden corpus. The input
   is this repository's code and its tests. It takes no forbidden-class input,
   so chapter 01 R38 is not engaged and no gate pass is required.
+- *Maintainer decisions (2026-11-16), clean side -- status notes after D38.5C.1
+  and D38.5C.2: removal of unlisted rows after two listings, and changed
+  heights taken over.* Written by a session that never read the forbidden
+  corpus, from the maintainer's decisions and this repository's code. It takes
+  no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+  is required.
+- *Reloaded-original amendment (2026-11-18), clean side -- after the status
+  note on D38.5C.2: how the client sees that its chain changed (a view of base
+  headers, one directed header request per new tip, a chain-changed event to
+  the history collectors, one WARN line).* Written by a session that never
+  read the forbidden corpus, from the maintainer's decision of 2026-11-16 and
+  this repository's code. It takes no forbidden-class input, so chapter 01 R38
+  is not engaged and no gate pass is required.
 - *Scoped addition (2026-11-18, Spec Reader round 0.5.0-12) -- §38.6.10 (R38.6.10.1 -- R38.6.10.6, the code-quality finding and
   T38.6.10.1 -- T38.6.10.4) and the status note at the head of this
   chapter; cleared together with chapter 37 §37.5.11. No other text of this

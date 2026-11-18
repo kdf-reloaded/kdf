@@ -5370,3 +5370,605 @@ fn t38_6_4o_12_a_resolved_fork_ends_the_state() {
         }
     });
 }
+
+// ---- CRD ch.38 §38.5C: the listing a history collector may judge by ------------------------------------------------
+
+const GET_HISTORY: &str = "blockchain.scripthash.get_history";
+
+/// The decision over injected inputs: only an up-to-date maintained server on a coin whose servers agree gives its tip.
+#[test]
+fn t38_5c_listing_tip_decision_over_injected_inputs() {
+    use super::electrum_pool::qualifying_listing_tip;
+    assert_eq!(qualifying_listing_tip(false, Some(true), Some(7)), Some(7));
+    // An out-of-date server.
+    assert_eq!(qualifying_listing_tip(false, Some(false), Some(7)), None);
+    // A server that is not a maintained connection was not judged.
+    assert_eq!(qualifying_listing_tip(false, None, Some(7)), None);
+    // The disagreement state, whatever the server.
+    assert_eq!(qualifying_listing_tip(true, Some(true), Some(7)), None);
+    // No tip known.
+    assert_eq!(qualifying_listing_tip(false, Some(true), None), None);
+}
+
+/// A listing answered by the only connected server carries its tip, and a second one after a new block carries the
+/// next tip: two listings one block apart, which the absence rule needs.
+#[test]
+fn t38_5c_one_connected_server_gives_its_tip_for_each_listing() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let server = stub_at(5, H).await;
+        server.set_result(GET_HISTORY, json!([]));
+        let client = agreement_pool("LST1", &[&server], true);
+        join_with_heights(&client, &[&server]).await;
+        let client = ElectrumClient(client);
+
+        let (_, first) = client.scripthash_get_history_for_absence("aa").await.unwrap();
+        assert_eq!(first, Some(H));
+        server.push_header(H + 1);
+        wait_until("the new tip", || snap_of(&client, &server).height == Some(H + 1)).await;
+        let (_, second) = client.scripthash_get_history_for_absence("aa").await.unwrap();
+        assert_eq!(second, Some(H + 1));
+
+        // The rule: absent from both listings, one block apart, removes.
+        let hash = H256Json::from([9u8; 32]);
+        let listed = std::collections::HashSet::new();
+        let mut marks = crate::history_absence::AbsenceMarks::default();
+        assert!(marks.judge(first.unwrap(), &listed, vec![hash]).is_empty());
+        assert_eq!(marks.judge(second.unwrap(), &listed, vec![hash]), vec![hash]);
+    });
+}
+
+/// A listing from an out-of-date server carries no tip, and the same server carries one again when it is up to date.
+#[test]
+fn t38_5c_a_listing_from_an_out_of_date_server_carries_no_tip() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let ticker = "LST2";
+        let (a, b, c) = (stub_at(5, H).await, stub_at(5, H).await, stub_at(5, H - 4).await);
+        for server in [&a, &b, &c] {
+            server.set_result(GET_HISTORY, json!([]));
+        }
+        let client = checked_pool(
+            &[&a, &b, &c],
+            PoolSetup {
+                order: ServerOrder::Random,
+                block_interval: Some(Duration::from_secs(60)),
+                ..PoolSetup::new(ticker)
+            },
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&a, &b, &c]).await;
+        assert_eq!(view_of(&client, &c).out_of_date, Some("behind"));
+
+        assert_eq!(client.pool.listing_tip_of(&a.addr()), Some(H));
+        assert_eq!(client.pool.listing_tip_of(&c.addr()), None);
+
+        // Asked through the client, the listing is answered by an up-to-date server (the out-of-date one is tried last).
+        let client_api = ElectrumClient(client.clone());
+        for _ in 0..10 {
+            let (_, tip) = client_api.scripthash_get_history_for_absence("aa").await.unwrap();
+            assert_eq!(tip, Some(H));
+        }
+        assert_eq!(c.requests(GET_HISTORY), 0);
+
+        c.set_tip(H);
+        wait_until("the stub to be up to date again", || {
+            view_of(&client, &c).out_of_date.is_none()
+        })
+        .await;
+        assert_eq!(client.pool.listing_tip_of(&c.addr()), Some(H));
+    });
+}
+
+/// No listing carries a tip while the coin is in the disagreement state, and one does again after it ends.
+#[test]
+fn t38_5c_no_listing_carries_a_tip_in_the_disagreement_state() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let stubs = [stub_at(5, H).await, stub_at(5, H).await, stub_at(5, H).await];
+        for stub in &stubs {
+            stub.set_default_block_header("aa");
+            stub.set_result(GET_HISTORY, json!([]));
+        }
+        let client = agreement_pool("LST3", &[&stubs[0], &stubs[1], &stubs[2]], true);
+        activate_judged(&client).await.unwrap();
+        client.pool.run_pass().await;
+        wait_until("the heights", || {
+            stubs.iter().all(|s| snap_of(&client, s).height.is_some())
+        })
+        .await;
+        let api = ElectrumClient(client.clone());
+        assert_eq!(api.scripthash_get_history_for_absence("aa").await.unwrap().1, Some(H));
+
+        stubs[0].set_tip(H + 2);
+        wait_until("the disagreement state", || client.chain_disagreement().is_some()).await;
+        assert_eq!(api.scripthash_get_history_for_absence("aa").await.unwrap().1, None);
+
+        stubs[1].set_tip(H + 2);
+        stubs[2].set_tip(H + 2);
+        wait_until("the end of the state", || client.chain_disagreement().is_none()).await;
+        assert_eq!(
+            api.scripthash_get_history_for_absence("aa").await.unwrap().1,
+            Some(H + 2)
+        );
+    });
+}
+
+// ---- CRD ch.38 §38.5C, D38.5C.2 status note, amendment of 2026-11-18: the chain view ----------------------------------
+
+const BLOCK_HEADERS: &str = "blockchain.block.headers";
+
+/// An 80-byte header of the chain `tag` at `height` (hex); two chains differ at every height.
+fn chain_hdr(tag: u8, height: u64) -> String {
+    let mut bytes = vec![0u8; 80];
+    bytes[0] = tag;
+    bytes[1..9].copy_from_slice(&height.to_le_bytes());
+    hex::encode(bytes)
+}
+
+/// Makes `server` serve the chain `tag` from `from` to `to`, both included.
+fn serve_chain(server: &StubServer, tag: u8, from: u64, to: u64) {
+    for height in from..=to {
+        server.set_chain_header(height, &chain_hdr(tag, height));
+    }
+}
+
+/// How many chain-changed events `rx` holds; they are taken.
+fn events_in(rx: &mut futures_mpsc::UnboundedReceiver<()>) -> usize {
+    let mut events = 0;
+    while rx.try_recv().is_ok() {
+        events += 1;
+    }
+    events
+}
+
+/// A stub at `tip` serving the chain 1 from `tip` to `tip + 40`.
+async fn chain_stub(tip: u64) -> StubServer {
+    let server = stub_at(5, tip).await;
+    serve_chain(&server, 1, tip.saturating_sub(10), tip + 40);
+    server
+}
+
+fn chain_client(
+    ticker: &'static str,
+    servers: &[&StubServer],
+    timings: ElectrumPoolTimings,
+) -> Arc<ElectrumClientImpl> {
+    checked_pool(
+        servers,
+        PoolSetup {
+            // T = 1, so the view holds 4 heights.
+            ..PoolSetup::new(ticker)
+        },
+        timings,
+        script_draw(&[], 0.5),
+    )
+}
+
+/// Pushes the tip `height` and waits until the check of the chain view has ended and the view's highest height is
+/// `highest`.
+async fn push_tip_and_settle(client: &Arc<ElectrumClientImpl>, server: &StubServer, height: u64, highest: u64) {
+    server.set_tip(height);
+    wait_until("the chain view to take the tip", || {
+        client.pool.chain_check_idle_for_test()
+            && client.pool.chain_view_for_test().keys().next_back() == Some(&highest)
+    })
+    .await;
+}
+
+/// A chain that only grows, one block at a time and with gaps: no event, no WARN, and exactly one header request per
+/// new tip.
+#[test]
+fn t38_5c_chain_view_a_chain_that_only_grows_gives_no_event() {
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        let ticker = "CHV1";
+        let server = chain_stub(H).await;
+        let client = chain_client(ticker, &[&server], quiet_timings());
+        let mut events = client.pool.subscribe_chain_changes();
+        join_with_heights(&client, &[&server]).await;
+        wait_until("the view to take the first header", || {
+            client.pool.chain_view_for_test().len() == 1
+        })
+        .await;
+        assert_eq!(server.requests(BLOCK_HEADERS), 0, "the first header needs no request");
+
+        for n in 1..=10u64 {
+            push_tip_and_settle(&client, &server, H + n, H + n).await;
+            assert_eq!(server.requests(BLOCK_HEADERS) as u64, n, "one request per new tip");
+        }
+        // The view holds the last 2T + 2 = 4 heights.
+        let heights: Vec<u64> = client.pool.chain_view_for_test().keys().copied().collect();
+        assert_eq!(heights, vec![H + 7, H + 8, H + 9, H + 10]);
+        // A gap: the tip jumps by three; one request for the heights between.
+        push_tip_and_settle(&client, &server, H + 13, H + 13).await;
+        assert_eq!(server.requests(BLOCK_HEADERS), 11);
+        assert_eq!(
+            server.request_params(BLOCK_HEADERS).last().cloned(),
+            Some(json!([H + 10, 3]))
+        );
+        // The same tip again, and a lower one, cost nothing.
+        server.push_header(H + 13);
+        server.push_header(H + 12);
+        Timer::sleep(0.1).await;
+        assert_eq!(server.requests(BLOCK_HEADERS), 11);
+
+        assert_eq!(events_in(&mut events), 0);
+        if capturing {
+            assert!(warn_lines(ticker).is_empty(), "{:?}", warn_lines(ticker));
+        }
+    });
+}
+
+/// A two-block reorganization at the tip: one event, one WARN naming the lowest height that differs, and the view
+/// holds the new chain. A race back and forth between the two chains is reported at every change.
+#[test]
+fn t38_5c_chain_view_a_reorganization_gives_one_event_and_one_warn() {
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        let ticker = "CHV2";
+        let server = chain_stub(H).await;
+        let client = chain_client(ticker, &[&server], quiet_timings());
+        let mut first = client.pool.subscribe_chain_changes();
+        let mut second = client.pool.subscribe_chain_changes();
+        let dropped = client.pool.subscribe_chain_changes();
+        drop(dropped);
+        join_with_heights(&client, &[&server]).await;
+        wait_until("the view to take the first header", || {
+            client.pool.chain_view_for_test().len() == 1
+        })
+        .await;
+        for n in 1..=10u64 {
+            push_tip_and_settle(&client, &server, H + n, H + n).await;
+        }
+        assert_eq!(events_in(&mut first), 0);
+
+        // The server replaces the heights H + 9 and H + 10 and then pushes H + 11.
+        for height in [H + 9, H + 10, H + 11] {
+            server.set_chain_header(height, &chain_hdr(2, height));
+        }
+        push_tip_and_settle(&client, &server, H + 11, H + 11).await;
+        assert_eq!(events_in(&mut first), 1);
+        assert_eq!(events_in(&mut second), 1);
+        let view = client.pool.chain_view_for_test();
+        assert_eq!(view.keys().copied().collect::<Vec<_>>(), vec![
+            H + 8,
+            H + 9,
+            H + 10,
+            H + 11
+        ]);
+        assert_eq!(view[&(H + 8)], hex::decode(chain_hdr(1, H + 8)).unwrap());
+        for height in [H + 9, H + 10, H + 11] {
+            assert_eq!(view[&height], hex::decode(chain_hdr(2, height)).unwrap());
+        }
+        // One request for the gap, one over the whole view.
+        assert_eq!(server.requests(BLOCK_HEADERS), 10 + 2);
+        assert_eq!(
+            server.request_params(BLOCK_HEADERS).last().cloned(),
+            Some(json!([H + 7, 4])),
+            "the whole view: the heights H + 7 to H + 10 (the lowest height the view held)"
+        );
+        let warns = |ticker| warn_lines(ticker);
+        if capturing {
+            assert_eq!(warns(ticker), vec![format!(
+                "WARN {ticker}: the Electrum servers report a reorganization of the chain from height {}",
+                H + 9
+            )]);
+        }
+
+        // The chain 1 comes back, and then the chain 2 again: each change is an event and a WARN of its own.
+        for height in [H + 9, H + 10, H + 11, H + 12] {
+            server.set_chain_header(height, &chain_hdr(1, height));
+        }
+        push_tip_and_settle(&client, &server, H + 12, H + 12).await;
+        assert_eq!(events_in(&mut first), 1);
+        for height in [H + 9, H + 10, H + 11, H + 12, H + 13] {
+            server.set_chain_header(height, &chain_hdr(2, height));
+        }
+        push_tip_and_settle(&client, &server, H + 13, H + 13).await;
+        assert_eq!(events_in(&mut first), 1);
+        assert_eq!(events_in(&mut second), 2);
+        let view = client.pool.chain_view_for_test();
+        assert_eq!(view.keys().copied().collect::<Vec<_>>(), vec![
+            H + 10,
+            H + 11,
+            H + 12,
+            H + 13
+        ]);
+        if capturing {
+            let from = format!(
+                "WARN {ticker}: the Electrum servers report a reorganization of the chain from height {}",
+                H + 9
+            );
+            // The view then held H + 9 as its lowest height, so the third change is reported "at or below" it.
+            let at_or_below = format!(
+                "WARN {ticker}: the Electrum servers report a reorganization of the chain at or below height {}",
+                H + 9
+            );
+            assert_eq!(warns(ticker), vec![from.clone(), from, at_or_below]);
+        }
+    });
+}
+
+/// One change that two connections report gives one event and one WARN.
+#[test]
+fn t38_5c_chain_view_one_change_reported_by_two_connections_gives_one_warn() {
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        let ticker = "CHV2B";
+        let (a, b) = (chain_stub(H).await, chain_stub(H).await);
+        let client = chain_client(ticker, &[&a, &b], quiet_timings());
+        let mut events = client.pool.subscribe_chain_changes();
+        join_with_heights(&client, &[&a, &b]).await;
+        wait_until("the view", || client.pool.chain_view_for_test().len() == 1).await;
+        for n in 1..=3u64 {
+            a.set_tip(H + n);
+            b.set_tip(H + n);
+            wait_until("the view to take the tip", || {
+                client.pool.chain_check_idle_for_test()
+                    && client.pool.chain_view_for_test().keys().next_back() == Some(&(H + n))
+            })
+            .await;
+        }
+        assert_eq!(events_in(&mut events), 0);
+
+        // Both servers serve the chain 2 from H + 3 and push the new tip.
+        for server in [&a, &b] {
+            serve_chain(server, 2, H + 3, H + 4);
+        }
+        a.set_tip(H + 4);
+        b.set_tip(H + 4);
+        wait_until("the view to take the new chain", || {
+            client.pool.chain_view_for_test().get(&(H + 4)) == Some(&hex::decode(chain_hdr(2, H + 4)).unwrap())
+        })
+        .await;
+        // Both reports have been dealt with.
+        Timer::sleep(0.3).await;
+        wait_until("the checks to end", || client.pool.chain_check_idle_for_test()).await;
+        assert_eq!(events_in(&mut events), 1);
+        if capturing {
+            assert_eq!(warn_lines(ticker), vec![format!(
+                "WARN {ticker}: the Electrum servers report a reorganization of the chain from height {}",
+                H + 3
+            )]);
+        }
+    });
+}
+
+/// A change at the bottom of the view is reported as "at or below".
+#[test]
+fn t38_5c_chain_view_a_difference_at_the_bottom_is_reported_as_at_or_below() {
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        let ticker = "CHV3";
+        let server = chain_stub(H).await;
+        let client = chain_client(ticker, &[&server], quiet_timings());
+        let mut events = client.pool.subscribe_chain_changes();
+        join_with_heights(&client, &[&server]).await;
+        wait_until("the view", || client.pool.chain_view_for_test().len() == 1).await;
+        for n in 1..=3u64 {
+            push_tip_and_settle(&client, &server, H + n, H + n).await;
+        }
+        // The whole view is replaced: H .. H + 3 differ; the view's lowest height is H.
+        serve_chain(&server, 2, H, H + 4);
+        push_tip_and_settle(&client, &server, H + 4, H + 4).await;
+        assert_eq!(events_in(&mut events), 1);
+        if capturing {
+            assert_eq!(warn_lines(ticker), vec![format!(
+                "WARN {ticker}: the Electrum servers report a reorganization of the chain at or below height {H}"
+            )]);
+        }
+    });
+}
+
+/// A connection that is out of date feeds nothing: its tip, above the view's highest, starts no check and no event.
+#[test]
+fn t38_5c_chain_view_an_out_of_date_connection_feeds_nothing() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let (a, b) = (chain_stub(H).await, chain_stub(H).await);
+        // The third server is 4 blocks ahead (more than T = 3), on another chain, and answers last.
+        let c = StubServer::start(StubBehavior::Answer).await;
+        c.set_reply_delay(HEADERS, ms(250));
+        c.set_tip(H + 4);
+        serve_chain(&c, 2, H, H + 40);
+        let client = checked_pool(
+            &[&a, &b, &c],
+            PoolSetup {
+                order: ServerOrder::Random,
+                block_interval: Some(Duration::from_secs(60)),
+                ..PoolSetup::new("CHV4")
+            },
+            // The disagreement is not confirmed during the test.
+            ElectrumPoolTimings {
+                confirm_floor: ms(60_000),
+                ..quiet_timings()
+            },
+            script_draw(&[], 0.5),
+        );
+        let mut events = client.pool.subscribe_chain_changes();
+        join_with_heights(&client, &[&a, &b, &c]).await;
+        assert_eq!(view_of(&client, &c).out_of_date, Some("ahead"));
+        assert!(client.chain_disagreement().is_none());
+        Timer::sleep(0.15).await;
+        assert!(client.pool.chain_check_idle_for_test());
+        assert_eq!(c.requests(BLOCK_HEADERS), 0);
+        let view = client.pool.chain_view_for_test();
+        assert_eq!(view.keys().copied().collect::<Vec<_>>(), vec![H]);
+        assert_eq!(view[&H], hex::decode(chain_hdr(1, H)).unwrap());
+        assert_eq!(events_in(&mut events), 0);
+
+        // An up-to-date server's tip is checked as usual.
+        a.set_tip(H + 1);
+        wait_until("the view", || client.pool.chain_view_for_test().contains_key(&(H + 1))).await;
+        assert_eq!(events_in(&mut events), 0);
+    });
+}
+
+/// Nothing feeds the view in the disagreement state.
+#[test]
+fn t38_5c_chain_view_the_disagreement_state_feeds_nothing() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let stubs = [chain_stub(H).await, chain_stub(H).await, chain_stub(H).await];
+        for stub in &stubs {
+            stub.set_default_block_header("aa");
+        }
+        let client = agreement_pool("CHV5", &[&stubs[0], &stubs[1], &stubs[2]], true);
+        let mut events = client.pool.subscribe_chain_changes();
+        activate_judged(&client).await.unwrap();
+        client.pool.run_pass().await;
+        wait_until("the heights", || {
+            stubs.iter().all(|s| snap_of(&client, s).height.is_some())
+        })
+        .await;
+        wait_until("the view", || client.pool.chain_view_for_test().len() == 1).await;
+
+        // One server runs ahead: the state begins.
+        stubs[0].set_tip(H + 3);
+        wait_until("the disagreement state", || client.chain_disagreement().is_some()).await;
+        stubs[1].set_tip(H + 1);
+        stubs[2].set_tip(H + 1);
+        wait_until("the new heights", || {
+            snap_of(&client, &stubs[1]).height == Some(H + 1) && snap_of(&client, &stubs[2]).height == Some(H + 1)
+        })
+        .await;
+        Timer::sleep(0.1).await;
+        assert!(client.chain_disagreement().is_some());
+        assert!(client.pool.chain_check_idle_for_test());
+        for stub in &stubs {
+            assert_eq!(stub.requests(BLOCK_HEADERS), 0);
+        }
+        assert_eq!(
+            client.pool.chain_view_for_test().keys().copied().collect::<Vec<_>>(),
+            vec![H]
+        );
+        assert_eq!(events_in(&mut events), 0);
+    });
+}
+
+/// A header request that fails, and one that is not answered, conclude nothing; the next tip is checked normally.
+#[test]
+fn t38_5c_chain_view_a_failed_or_unanswered_request_concludes_nothing() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let server = chain_stub(H).await;
+        let client = chain_client("CHV6", &[&server], quiet_timings());
+        let mut events = client.pool.subscribe_chain_changes();
+        join_with_heights(&client, &[&server]).await;
+        wait_until("the view", || client.pool.chain_view_for_test().len() == 1).await;
+        push_tip_and_settle(&client, &server, H + 1, H + 1).await;
+
+        // A different chain from H + 1 on, but the request fails.
+        serve_chain(&server, 2, H + 1, H + 6);
+        server.set_error(BLOCK_HEADERS, "boom");
+        server.set_tip(H + 2);
+        wait_until("the failing request", || server.requests(BLOCK_HEADERS) == 2).await;
+        wait_until("the check to end", || client.pool.chain_check_idle_for_test()).await;
+        assert_eq!(
+            client.pool.chain_view_for_test().keys().next_back().copied(),
+            Some(H + 1)
+        );
+        assert_eq!(events_in(&mut events), 0);
+
+        // Not answered within the request bound (400 ms).
+        server.clear_error(BLOCK_HEADERS);
+        server.set_reply_delay(BLOCK_HEADERS, ms(2_000));
+        server.set_tip(H + 3);
+        wait_until("the unanswered request", || server.requests(BLOCK_HEADERS) == 3).await;
+        wait_until("the check to end", || client.pool.chain_check_idle_for_test()).await;
+        assert_eq!(
+            client.pool.chain_view_for_test().keys().next_back().copied(),
+            Some(H + 1)
+        );
+        assert_eq!(events_in(&mut events), 0);
+
+        // The connection that timed out is dropped and suspended; the maintenance pass joins it again, and the tip
+        // it reports is checked normally: the heights since H + 1 are asked for, and the difference is found.
+        server.set_reply_delay(BLOCK_HEADERS, Duration::ZERO);
+        wait_until("the suspension to end", || {
+            snap_of(&client, &server).suspended_until.is_none()
+        })
+        .await;
+        client.pool.run_pass().await;
+        wait_until("the chain view to take the tip", || {
+            client.pool.chain_check_idle_for_test()
+                && client.pool.chain_view_for_test().keys().next_back() == Some(&(H + 3))
+        })
+        .await;
+        assert_eq!(events_in(&mut events), 1);
+        assert_eq!(server.request_params(BLOCK_HEADERS)[3], json!([H + 1, 2]));
+        // Then the next tip is checked as usual.
+        push_tip_and_settle(&client, &server, H + 4, H + 4).await;
+        assert_eq!(events_in(&mut events), 0);
+    });
+}
+
+/// An answer that is not a list of the asked count of headers concludes nothing either.
+#[test]
+fn t38_5c_chain_view_an_answer_that_does_not_split_concludes_nothing() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let server = chain_stub(H).await;
+        let client = chain_client("CHV7", &[&server], quiet_timings());
+        let mut events = client.pool.subscribe_chain_changes();
+        join_with_heights(&client, &[&server]).await;
+        wait_until("the view", || client.pool.chain_view_for_test().len() == 1).await;
+        // 1 header of 5 bytes: the stride is below a base header.
+        server.set_params_result(
+            BLOCK_HEADERS,
+            json!([H, 1]),
+            json!({"count": 1, "hex": "0102030405", "max": 2016}),
+        );
+        server.set_tip(H + 1);
+        wait_until("the request", || server.requests(BLOCK_HEADERS) == 1).await;
+        wait_until("the check to end", || client.pool.chain_check_idle_for_test()).await;
+        assert_eq!(
+            client.pool.chain_view_for_test().keys().copied().collect::<Vec<_>>(),
+            vec![H]
+        );
+        assert_eq!(events_in(&mut events), 0);
+    });
+}
+
+/// A header list whose headers carry a merged-mining proof is cut at its even stride, and the bytes after the base
+/// header do not make a difference.
+#[test]
+fn t38_5c_chain_view_the_bytes_after_the_base_header_make_no_difference() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let server = chain_stub(H).await;
+        let client = chain_client("CHV8", &[&server], quiet_timings());
+        let mut events = client.pool.subscribe_chain_changes();
+        join_with_heights(&client, &[&server]).await;
+        wait_until("the view", || client.pool.chain_view_for_test().len() == 1).await;
+        // The same base header at H, served with a 40-byte proof; the tip carries another proof length.
+        server.set_chain_header(H, &format!("{}{}", chain_hdr(1, H), "ab".repeat(40)));
+        server.set_chain_header(H + 1, &format!("{}{}", chain_hdr(1, H + 1), "cd".repeat(40)));
+        push_tip_and_settle(&client, &server, H + 1, H + 1).await;
+        assert_eq!(events_in(&mut events), 0);
+    });
+}
+
+/// One connected server: the same logic, over that server's headers alone (item 6).
+#[test]
+fn t38_5c_chain_view_one_connected_server_sees_its_chain_change() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let server = chain_stub(H).await;
+        let client = chain_client("CHV9", &[&server], quiet_timings());
+        let mut events = client.pool.subscribe_chain_changes();
+        assert_eq!(client.servers_view().servers.len(), 1);
+        join_with_heights(&client, &[&server]).await;
+        wait_until("the view", || client.pool.chain_view_for_test().len() == 1).await;
+        push_tip_and_settle(&client, &server, H + 1, H + 1).await;
+        serve_chain(&server, 2, H + 1, H + 2);
+        push_tip_and_settle(&client, &server, H + 2, H + 2).await;
+        assert_eq!(events_in(&mut events), 1);
+    });
+}

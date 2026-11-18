@@ -34,6 +34,34 @@ pub enum TronAddressError {
     InvalidHex(String),
 }
 
+/// The target form of `convertaddress` for a TRON coin (CRD ch.21 D21.10B.2): the base58check display form or the
+/// 42-digit hex wire form (`41` and the 20-byte payload, lowercase, no `0x`). The EVM format values are not members.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "format")]
+pub enum TronAddressFormat {
+    /// Base58Check, starting with `T`.
+    #[serde(rename = "base58")]
+    Base58,
+    /// The wire form in hex: `41` and the 20-byte payload.
+    #[serde(rename = "hex")]
+    Hex,
+}
+
+impl TronAddress {
+    /// Convert the address text `from` (any form of [`TronAddress::parse`]) to `format`.
+    ///
+    /// # Errors
+    ///
+    /// The [`TronAddressError`] of parsing `from`; an EVM `0x` 20-byte address is refused as an invalid length.
+    pub fn convert(from: &str, format: TronAddressFormat) -> Result<String, TronAddressError> {
+        let address = Self::parse(from)?;
+        Ok(match format {
+            TronAddressFormat::Base58 => address.to_base58(),
+            TronAddressFormat::Hex => address.to_hex(),
+        })
+    }
+}
+
 /// A TRON blockchain address.
 ///
 /// Internally stores the 20-byte EVM address (without the 0x41 prefix).
