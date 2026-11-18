@@ -5370,3 +5370,127 @@ fn t38_6_4o_12_a_resolved_fork_ends_the_state() {
         }
     });
 }
+
+// ---- CRD ch.38 §38.5C: the listing a history collector may judge by ------------------------------------------------
+
+const GET_HISTORY: &str = "blockchain.scripthash.get_history";
+
+/// The decision over injected inputs: only an up-to-date maintained server on a coin whose servers agree gives its tip.
+#[test]
+fn t38_5c_listing_tip_decision_over_injected_inputs() {
+    use super::electrum_pool::qualifying_listing_tip;
+    assert_eq!(qualifying_listing_tip(false, Some(true), Some(7)), Some(7));
+    // An out-of-date server.
+    assert_eq!(qualifying_listing_tip(false, Some(false), Some(7)), None);
+    // A server that is not a maintained connection was not judged.
+    assert_eq!(qualifying_listing_tip(false, None, Some(7)), None);
+    // The disagreement state, whatever the server.
+    assert_eq!(qualifying_listing_tip(true, Some(true), Some(7)), None);
+    // No tip known.
+    assert_eq!(qualifying_listing_tip(false, Some(true), None), None);
+}
+
+/// A listing answered by the only connected server carries its tip, and a second one after a new block carries the
+/// next tip: two listings one block apart, which the absence rule needs.
+#[test]
+fn t38_5c_one_connected_server_gives_its_tip_for_each_listing() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let server = stub_at(5, H).await;
+        server.set_result(GET_HISTORY, json!([]));
+        let client = agreement_pool("LST1", &[&server], true);
+        join_with_heights(&client, &[&server]).await;
+        let client = ElectrumClient(client);
+
+        let (_, first) = client.scripthash_get_history_for_absence("aa").await.unwrap();
+        assert_eq!(first, Some(H));
+        server.push_header(H + 1);
+        wait_until("the new tip", || snap_of(&client, &server).height == Some(H + 1)).await;
+        let (_, second) = client.scripthash_get_history_for_absence("aa").await.unwrap();
+        assert_eq!(second, Some(H + 1));
+
+        // The rule: absent from both listings, one block apart, removes.
+        let hash = H256Json::from([9u8; 32]);
+        let listed = std::collections::HashSet::new();
+        let mut marks = crate::history_absence::AbsenceMarks::default();
+        assert!(marks.judge(first.unwrap(), &listed, vec![hash]).is_empty());
+        assert_eq!(marks.judge(second.unwrap(), &listed, vec![hash]), vec![hash]);
+    });
+}
+
+/// A listing from an out-of-date server carries no tip, and the same server carries one again when it is up to date.
+#[test]
+fn t38_5c_a_listing_from_an_out_of_date_server_carries_no_tip() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let ticker = "LST2";
+        let (a, b, c) = (stub_at(5, H).await, stub_at(5, H).await, stub_at(5, H - 4).await);
+        for server in [&a, &b, &c] {
+            server.set_result(GET_HISTORY, json!([]));
+        }
+        let client = checked_pool(
+            &[&a, &b, &c],
+            PoolSetup {
+                order: ServerOrder::Random,
+                block_interval: Some(Duration::from_secs(60)),
+                ..PoolSetup::new(ticker)
+            },
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&a, &b, &c]).await;
+        assert_eq!(view_of(&client, &c).out_of_date, Some("behind"));
+
+        assert_eq!(client.pool.listing_tip_of(&a.addr()), Some(H));
+        assert_eq!(client.pool.listing_tip_of(&c.addr()), None);
+
+        // Asked through the client, the listing is answered by an up-to-date server (the out-of-date one is tried last).
+        let client_api = ElectrumClient(client.clone());
+        for _ in 0..10 {
+            let (_, tip) = client_api.scripthash_get_history_for_absence("aa").await.unwrap();
+            assert_eq!(tip, Some(H));
+        }
+        assert_eq!(c.requests(GET_HISTORY), 0);
+
+        c.set_tip(H);
+        wait_until("the stub to be up to date again", || {
+            view_of(&client, &c).out_of_date.is_none()
+        })
+        .await;
+        assert_eq!(client.pool.listing_tip_of(&c.addr()), Some(H));
+    });
+}
+
+/// No listing carries a tip while the coin is in the disagreement state, and one does again after it ends.
+#[test]
+fn t38_5c_no_listing_carries_a_tip_in_the_disagreement_state() {
+    block_on(async {
+        const H: u64 = 1_000;
+        let stubs = [stub_at(5, H).await, stub_at(5, H).await, stub_at(5, H).await];
+        for stub in &stubs {
+            stub.set_default_block_header("aa");
+            stub.set_result(GET_HISTORY, json!([]));
+        }
+        let client = agreement_pool("LST3", &[&stubs[0], &stubs[1], &stubs[2]], true);
+        activate_judged(&client).await.unwrap();
+        client.pool.run_pass().await;
+        wait_until("the heights", || {
+            stubs.iter().all(|s| snap_of(&client, s).height.is_some())
+        })
+        .await;
+        let api = ElectrumClient(client.clone());
+        assert_eq!(api.scripthash_get_history_for_absence("aa").await.unwrap().1, Some(H));
+
+        stubs[0].set_tip(H + 2);
+        wait_until("the disagreement state", || client.chain_disagreement().is_some()).await;
+        assert_eq!(api.scripthash_get_history_for_absence("aa").await.unwrap().1, None);
+
+        stubs[1].set_tip(H + 2);
+        stubs[2].set_tip(H + 2);
+        wait_until("the end of the state", || client.chain_disagreement().is_none()).await;
+        assert_eq!(
+            api.scripthash_get_history_for_absence("aa").await.unwrap().1,
+            Some(H + 2)
+        );
+    });
+}

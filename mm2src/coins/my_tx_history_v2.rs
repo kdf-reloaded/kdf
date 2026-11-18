@@ -73,6 +73,22 @@ pub trait TxHistoryStorage: Send + Sync + 'static {
         internal_id: &BytesJson,
     ) -> Result<RemoveTxResult, MmError<Self::Error>>;
 
+    /// The transaction hash and the block height of every stored row, one entry per row (a hash with several rows,
+    /// such as the BCH row and the SLP token row of one transaction, appears once per row).
+    async fn tx_hashes_and_heights(&self, for_coin: &str) -> Result<Vec<(String, u64)>, MmError<Self::Error>>;
+
+    /// Every stored row of the transaction hash `tx_hash` (the text form of the `tx_hash` column).
+    async fn get_txes_by_hash(
+        &self,
+        for_coin: &str,
+        tx_hash: &str,
+    ) -> Result<Vec<TransactionDetails>, MmError<Self::Error>>;
+
+    /// Removes every row of each transaction hash of `tx_hashes`, with the address index entries of the rows, in one
+    /// store transaction (CRD ch.38 §38.5C, D38.5C.1 status note). The transaction cache stays. Returns the number of
+    /// removed rows.
+    async fn remove_txes_by_hash(&self, for_coin: &str, tx_hashes: Vec<String>) -> Result<usize, MmError<Self::Error>>;
+
     /// Gets the transaction by internal_id from the selected coin's history
     async fn get_tx_from_history(
         &self,

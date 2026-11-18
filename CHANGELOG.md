@@ -14,6 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Read this before you upgrade. It lists every change in this release that an older version can no longer read
 or undo, and every change that needs a step from you.
 
+- **Transaction history now drops transactions that are no longer on the chain, and shows a moved transaction at its
+  new height.** This applies to UTXO coins, Qtum, QRC20 tokens, BCH and SLP. After the upgrade, a stored history row
+  whose transaction the coin's servers no longer list disappears, once two server listings at least one block apart
+  confirm its absence. This can happen to a transaction of a chain branch that was later abandoned. A transaction the
+  servers now report at another height shows that height and its block's time.
+  - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
 - **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
   coins, EVM coins and their tokens, BCH with its SLP tokens, Sia and Lightning.** Until now these families ignored the
   value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed single-address HD key, and BCH
@@ -387,6 +393,13 @@ the previous version used. The safe way:
   are unchanged. The SLP token rows rest on unit tests; no live SLP row is run, because the coins file
   the lab uses has no SLP token entry; the live store comparison covers BCH alone. Detail: PR #380;
   CRD ch.36 R36.14.23 -- R36.14.26.
+- **Stale history rows are removed, and changed heights are taken over.** A stored row whose transaction the servers
+  no longer list was kept forever in the history of UTXO coins, Qtum and QRC20 tokens, and kept once confirmed for BCH
+  and SLP. Now a row is removed when two successful listings in a row, at least one block apart, from servers that are
+  up to date, do not contain it. All rows of one transaction go together. A failed or cut-off listing, a listing from
+  a server that is behind, and any listing while the servers disagree about the chain remove nothing. One log line
+  reports each removal. A transaction listed at another height takes that height and its block's time. Detail: PR #408;
+  CRD ch.38 §38.5C, D38.5C.1 and D38.5C.2.
 
 #### Siacoin
 

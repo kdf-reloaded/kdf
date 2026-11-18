@@ -1277,8 +1277,14 @@ impl From<NumConversError> for GenerateTxError {
 }
 
 pub enum RequestTxHistoryResult {
-    Ok(Vec<(H256Json, u64)>),
-    Retry { error: String },
+    /// The listing, and the tip height by which it may be judged for the absence rule (CRD ch.38 §38.5C, D38.5C.1
+    /// status note): `Some` only when the listing is complete and the server that answered it was up to date at that
+    /// moment and the coin's servers did not disagree about the chain (a native daemon is the single server, so only
+    /// the tip is needed). `None`: the rows are used as before, but the listing neither marks nor removes a row.
+    Ok(Vec<(H256Json, u64)>, Option<u64>),
+    Retry {
+        error: String,
+    },
     HistoryTooLarge,
     CriticalError(String),
 }

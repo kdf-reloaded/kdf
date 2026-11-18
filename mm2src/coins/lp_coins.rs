@@ -226,6 +226,7 @@ pub mod eth;
 pub mod hd_pubkey;
 pub mod hd_wallet;
 pub mod hd_wallet_storage;
+pub(crate) mod history_absence;
 #[cfg(not(target_arch = "wasm32"))] pub mod lightning;
 // R39.6.1: z_coin is available on WASM (with IndexedDB storage backend).
 pub(crate) mod endpoint_suspension;
