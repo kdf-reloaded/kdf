@@ -31,7 +31,7 @@ or undo, and every change that needs a step from you.
   - *Before you upgrade:* make your own copy of the wallet database file and of the seed or passphrase as for any
     upgrade; the steps under "Coins that are no longer visible after an upgrade" below apply if a coin is no longer
     shown afterwards.
-  Detail: PR #NNN; CRD ch.39 R39.8.0ba, R39.8.0bc and the status note of 2026-11-18; RELOADED_VS_GLEEC.md.
+  Detail: PR #411; CRD ch.39 R39.8.0ba, R39.8.0bc and the status note of 2026-11-18; RELOADED_VS_GLEEC.md.
 - **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
   coins, EVM coins and their tokens, BCH with its SLP tokens, Sia and Lightning.** Until now these families ignored the
   value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed single-address HD key, and BCH
@@ -234,7 +234,7 @@ the previous version used. The safe way:
   A shielded transaction expires after the same 40 blocks as before, and the Zcash network upgrade NU7 is known to the
   node, so a transparent-only Zcash transaction under its branch identifier is read by both of the node's readers. The
   wallet database is migrated once; read the first item under "Breaking changes and upgrade notes" above.
-  Detail: PR #NNN; CRD ch.39 status notes of 2026-11-18, ch.34 ledger entry of 2026-11-18.
+  Detail: PR #411; CRD ch.39 status notes of 2026-11-18, ch.34 ledger entry of 2026-11-18.
 - **The shielded coin's library stack now also builds with Orchard scanning enabled; no behavior
   change.** The way the transaction builder is asked for an output-only Ironwood bundle no longer
   changes a public type that the Zcash wallet library constructs itself, which kept that library from
