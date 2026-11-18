@@ -19,7 +19,6 @@ extensions). Mixed treatment -- see §38.0.
 > and an extra payload after the lock-time) for every UTXO coin, DASH and
 > Kerrigan included, what that means for history, balances and swaps, and a
 > gap in this repository's reader. No sentence above or below it is changed.
->
 
 ## 38.0 Treatment & scope split
 
