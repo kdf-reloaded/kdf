@@ -356,7 +356,7 @@ the previous version used. The safe way:
   when the chain its servers follow changes: on every new block it compares the recent block headers of an up-to-date
   server with the ones it already holds. When they differ, the history collectors run at once instead of waiting for a
   balance change, and one WARN line names the height from which the chain changed. At most one small request is made
-  per new block. Detail: PR #N; CRD ch.38 §38.5C (the amendment after D38.5C.2).
+  per new block. Detail: PR #409; CRD ch.38 §38.5C (the amendment after D38.5C.2).
 
 #### Siacoin
 

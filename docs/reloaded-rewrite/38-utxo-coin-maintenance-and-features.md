@@ -952,9 +952,9 @@ the status note above). How the client sees that its chain changed.*
    height above the highest in the view, the client sends that connection one
    directed `blockchain.block.headers` request (R38.6.4g) for the heights from
    the highest in the view up to the one below the new tip. It compares each
-   returned base header, and the new tip's, with the view at the same height.
-   - All equal: the chain only grew; the view takes the new headers and drops
-     the oldest.
+   returned base header with the view at the same height.
+   - All equal: the chain only grew; the view takes the new headers, the new
+     tip's included, and drops the oldest.
    - A difference: the chain changed. One more directed request over the
      whole view finds the lowest height that differs, the height from which
      the chain changed; a difference at the bottom of the view is reported as
@@ -970,9 +970,9 @@ the status note above). How the client sees that its chain changed.*
 4. *The log.* One WARN line per change: `<ticker>: the Electrum servers report
    a reorganization of the chain from height <H>` (or `at or below height
    <L>`).
-   Nothing is said about consequences. A change back to a chain the view held
-   within the last 2*T* + 2 heights, as in a race of two blocks at the tip, is
-   not reported a second time.
+   Nothing is said about consequences. Every change is reported, a change
+   back to a chain the view held before included, as in a race of two blocks
+   at the tip: each is a reorganization.
 5. *Cost and bounds.* At most one small directed request per new block per
    coin instance, plus one when a change is found, always to a connection
    that is already maintained. A chain that only grows always compares equal,
@@ -989,9 +989,9 @@ the status note above). How the client sees that its chain changed.*
      replacement at the same height is therefore seen when the next higher
      tip arrives.
    - A header list that cannot be split into equal parts of at least 80 bytes
-     matching the requested count concludes nothing.
-   - A change back to a chain the view held sends the chain-changed event,
-     because the history may differ again, but logs no WARN.
+     matching the requested count concludes nothing. A coin whose servers
+     never return such a list therefore never sees a change, and relies on
+     the passes that run anyway.
    - With `electrum_tip_checks` `false` (R38.6.4o item 11) the view is not
      fed and no change is seen; the history then relies on the passes that
      run anyway.
