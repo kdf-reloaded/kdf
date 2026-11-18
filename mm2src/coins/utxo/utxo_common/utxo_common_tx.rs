@@ -516,6 +516,7 @@ pub async fn p2sh_spending_tx<T: UtxoCommonOps>(
         str_d_zeel,
         hash_algo,
         sighash_suffix: coin.as_ref().conf.sighash_suffix,
+        read_by_library: false,
     };
     let signed_input = try_s!(p2sh_spend(
         &unsigned,

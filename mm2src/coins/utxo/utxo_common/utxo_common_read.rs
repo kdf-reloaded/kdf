@@ -45,17 +45,22 @@ pub fn read_utxo_tx(bytes: &[u8]) -> Result<UtxoTx, serialization::Error> {
 }
 
 fn read_with_library(bytes: &[u8]) -> Result<UtxoTx, serialization::Error> {
-    let ztx = ZTransaction::read(bytes, BranchId::Sapling)
-        .map_err(|e| serialization::Error::Custom(format!("Zcash reader: {e}")))?;
     // The library reader stops after the transaction; the shared parser refuses bytes behind it, so does this.
-    let mut written = Vec::with_capacity(bytes.len());
-    ztx.write(&mut written)
+    let mut rest: &[u8] = bytes;
+    let ztx = ZTransaction::read(&mut rest, BranchId::Sapling)
         .map_err(|e| serialization::Error::Custom(format!("Zcash reader: {e}")))?;
-    if written.len() < bytes.len() {
+    if !rest.is_empty() {
         return Err(serialization::Error::UnreadData);
     }
-    let header = u32::from_le_bytes(bytes[..4].try_into().expect("the reader read the header"));
-    let version_group_id = u32::from_le_bytes(bytes[4..8].try_into().expect("the reader read the group id"));
+    let word = |range: std::ops::Range<usize>| -> Result<u32, serialization::Error> {
+        let raw: [u8; 4] = bytes
+            .get(range)
+            .and_then(|slice| slice.try_into().ok())
+            .ok_or(serialization::Error::UnexpectedEnd)?;
+        Ok(u32::from_le_bytes(raw))
+    };
+    let header = word(0..4)?;
+    let version_group_id = word(4..8)?;
     let version = header & 0x7FFF_FFFF;
 
     let (inputs, outputs) = match ztx.transparent_bundle() {
@@ -322,7 +327,7 @@ mod tests {
         agree(&built, "library-built");
     }
 
-    /// A transaction read by the library is never signed: the signer refuses its version.
+    /// A transaction read by the library is never signed: the signer refuses it by its own error.
     #[test]
     fn the_signer_refuses_a_transaction_the_library_read() {
         let bytes = v6_transparent_tx_bytes(Some(([7; 32], 0)), vec![0x51], &[(1_000, P2PKH.to_vec())]);
@@ -335,7 +340,7 @@ mod tests {
             SignatureVersion::Base,
             1,
         );
-        assert!(result.is_err(), "{result:?}");
-        assert!(result.unwrap_err().to_string().contains("version 6"));
+        // The refusal is explicit, before and independent of the version check.
+        assert_eq!(result, Err(script::SignatureHashError::ReadByLibrary));
     }
 }

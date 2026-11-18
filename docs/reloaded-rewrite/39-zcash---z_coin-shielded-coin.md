@@ -7106,7 +7106,8 @@ version coverage R39.11.15 records. Recommendation: (b).
 > constant. The library result becomes the shared transaction type: inputs,
 > outputs, lock time and expiry height are filled in for the call sites, and the
 > transaction carries the bytes as received and the library's transaction
-> identifier (ZIP 244 for version 5, ZIP 229 for version 6); serialization
+> identifier (ZIP 229 for version 6; ZIP 244 if the threshold moves to
+> version 5); serialization
 > writes those bytes and the identifier is the library's, so the byte comparison
 > of the payment validation and the identifier lookup at the backend work
 > unchanged. Bytes after the transaction are refused, as the shared parser does.
@@ -8872,8 +8873,9 @@ entries in its list cannot be told apart. Passing the position to the fallback c
 - *Status note added 2026-11-17 -- under R39.11.4V.10.* Reloaded-original,
   clean side: it records that Reloaded computes the fee over the version-5 size;
   no forbidden-class input, chapter 01 R38 not engaged.
-- *Status notes added 2026-11-18 -- after D39.11.4V.1, after D39.11.4V.3, after
-  R39.11.4V.8 and after the status note under R39.11.15.* Reloaded-original,
+- *Status notes added 2026-11-18 -- a later note after D39.11.4V.1, and notes
+  after D39.11.4V.3, after R39.11.4V.8 and after the status note under
+  R39.11.15.* Reloaded-original,
   clean side: they record the maintainer's resolution of 2026-11-18 for version 6
   and what this repository builds for it, from this repository's own code and the
   published `zcash_primitives` 0.31.1 sources; no forbidden-class input, chapter

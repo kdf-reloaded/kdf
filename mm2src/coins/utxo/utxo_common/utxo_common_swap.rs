@@ -2147,6 +2147,7 @@ pub(crate) fn build_funding_spend_preimage_tx(
         str_d_zeel: None,
         hash_algo: fields.tx_hash_algo.into(),
         sighash_suffix: fields.conf.sighash_suffix,
+        read_by_library: false,
     })
 }
 
@@ -2529,6 +2530,7 @@ pub(crate) fn build_taker_payment_spend_preimage_tx(
         str_d_zeel: None,
         hash_algo: fields.tx_hash_algo.into(),
         sighash_suffix: fields.conf.sighash_suffix,
+        read_by_library: false,
     })
 }
 
