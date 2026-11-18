@@ -1255,7 +1255,7 @@ to match.
 >   errors instead of an abnormal end.
 
 > *Reloaded status (clean side, 2026-11-18):* `disable_coin` answers for
-> both Solana kinds (PR #N), completing option (b). A token, and a platform
+> both Solana kinds (PR #413), completing option (b). A token, and a platform
 > without tokens, are removed and can be activated again; a disabled token is
 > also taken out of its platform's token records. A platform with active
 > tokens is handled as every other family handles it today: the platform is
