@@ -6574,7 +6574,7 @@ R39.11.15 **Version coverage of the two parsers (public facts, for planning).**
 > to `0x77190AD9`), so the Zcash library reader now reads versions 5 and 6 under
 > the NU7 branch id. The shared UTXO parser keeps version 5 and still refuses an
 > overwintered version above 5; the read entry point of the UTXO coins gives
-> version 6 and later to the library reader (D39.11.4V.3, PR #TBD). The sentence
+> version 6 and later to the library reader (D39.11.4V.3, PR #422). The sentence
 > above that says whether incoming version-6 transactions are read was open on
 > 2026-11-17 and is answered: they are.
 
@@ -6949,7 +6949,7 @@ read with wrong contents. What each surface does with the refusal:
   decided by D39.11.4V.3.
 
 > *Reloaded status (clean side, 2026-11-18):* Reloaded reads version 5 (shared
-> parser) and version 6 and later (Zcash library reader, D39.11.4V.3, PR #TBD)
+> parser) and version 6 and later (Zcash library reader, D39.11.4V.3, PR #422)
 > on every surface listed above: history and the history of a transaction's
 > input transactions, validation of a counterparty's DEX fee and payments,
 > the spend search over the node and the Electrum backends, secret extraction
@@ -7049,7 +7049,7 @@ amounts unknown). Recommendation: (b).
 > D39.11.4V.3, a version-6 ZEC transaction is reported this way.
 >
 > *Reloaded status (clean side, 2026-11-18; later note, the text above is
-> unchanged):* since the version-6 reader of D39.11.4V.3 (PR #TBD), a
+> unchanged):* since the version-6 reader of D39.11.4V.3 (PR #422), a
 > version-6 ZEC transaction is no longer reported: it is read and gets a row.
 > What stays reported is a transaction the readers cannot read, for example a
 > version-6 transaction cut off in its header (`error` then names the Zcash
@@ -7096,7 +7096,7 @@ version coverage R39.11.15 records. Recommendation: (b).
 > *Reloaded status (clean side, 2026-11-18; later note, the text above is
 > unchanged):* the maintainer's decision of 2026-11-18 stages the wording of
 > 2026-11-17 as follows: version 5 stays on the shared UTXO parser, and the
-> Zcash library reader reads version 6 and later. Built (PR #TBD): the read
+> Zcash library reader reads version 6 and later. Built (PR #422): the read
 > entry point of the UTXO coins, `read_utxo_tx` in `coins`, looks at the header
 > of the bytes. An overwintered transaction of version 6 or above goes to the
 > library reader (`Transaction::read`, with one fixed branch id, which the

@@ -427,7 +427,7 @@ the previous version used. The safe way:
   and a test checks that both readers give the same id and bytes). History rows, the input amounts of a transaction that
   spends a version-6 output, validation of the counterparty's DEX fee and payments, spend detection and secret extraction
   all work on it, where the transaction was skipped or the step failed before. A transaction that cannot be read by
-  either reader is still reported by the history. Detail: PR #TBD; CRD ch.39 D39.11.4V.3 status note of 2026-11-18.
+  either reader is still reported by the history. Detail: PR #422; CRD ch.39 D39.11.4V.3 status note of 2026-11-18.
 - **A resumed version-2 swap of a Zcash-family coin checks the counterparty's signature against the right data.**
   The signature digest of a swap step received from the counterparty now commits to the amount, the network's branch id
   and, for version 5, the script of the output it spends, for KMD, ZEC and the other Zcash-family coins. Version-2
@@ -482,9 +482,9 @@ the previous version used. The safe way:
   the history, as before, and tried again on the next pass. Until now nothing said so: the history reached `Finished`
   as if it were complete. `sync_status` now lists each skipped transaction in
   `additional_info.unreadable_transactions`, with its `tx_hash` and a short `error`. This includes transactions skipped
-  because an input transaction cannot be read. When nothing is skipped, the answer is unchanged. (ZEC version-6
-  transactions were listed here until they became readable, see below.) The BCH and SLP history also no longer pauses at a
-  transaction that does not parse; it skips it and stores the rest. Detail: PR #415; CRD ch.39 D39.11.4V.1.
+  because an input transaction cannot be read. When nothing is skipped, the answer is unchanged. The BCH and SLP
+  history also no longer pauses at a transaction that does not parse; it skips it and stores the rest. Detail: PR #415;
+  CRD ch.39 D39.11.4V.1.
 
 - **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is
   served from the store (BCH and SLP tokens, and now Tendermint coins), the versioned method
