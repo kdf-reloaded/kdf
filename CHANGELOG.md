@@ -130,7 +130,7 @@ the previous version used. The safe way:
   cases: when swaps of that coin that are not finished were started with another key (activate with the key they
   were started with, let them finish or refund, then switch), and when a wallet database of the coin cannot be
   read while a swap still has to send its payment or fee. Changing `account` alone is allowed.
-  Detail: PR #NNN; CRD ch.39 R39.8.0bd, T39.8.0k, ch.05 status note of 2026-11-18.
+  Detail: PR #414; CRD ch.39 R39.8.0bd, T39.8.0k, ch.05 status note of 2026-11-18.
 
 #### Solana coins
 
