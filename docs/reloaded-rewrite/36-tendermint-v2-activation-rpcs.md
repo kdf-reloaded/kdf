@@ -232,6 +232,12 @@ determining the error of R36.1.6:
 
 No failure leaves the platform or any of its tokens partially registered.
 
+*Pointer (2026-11-18).* A `ticker` that is registered but passive (chapter 43
+R43.1E.6), a requested token that is already registered, and
+`enable_tendermint_token` against a passive platform are the subject of
+chapter 43 §43.1F (R43.1F.2 -- R43.1F.6; passed the KDF Dirty Gate on 2026-11-18). This
+pointer binds nothing of its own.
+
 R36.1.5 **Success result** (HTTP 200):
 
 | Field | JSON type | Presence | Content |
@@ -1379,6 +1385,11 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   mechanical comparison (identifier-shaped token intersection at both rows;
   5-, 4- and 3-word sequence comparison against comment and string-literal
   text; row-to-row difference); the additions embed no code blocks.
+- *Pointer added 2026-11-18 (Spec Reader round 0.5.0-13) -- the note after
+  R36.1.4.* It names chapter 43 R43.1F.2 -- R43.1F.6 and states no behavior
+  of its own; it travels with chapter 43 §43.1F for the KDF Dirty Gate.
+  **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter 43's
+  provenance footer.
 
 ---
 
