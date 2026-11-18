@@ -367,6 +367,13 @@ Lifecycle on relay connect:
 > relay reconnect and after a node restart with the same data directory, signing
 > on the same session prompted in the wallet and returned a signed transaction,
 > and the key fingerprint stayed the same; before this change both cases failed.
+> Privacy: the relay identity is now persistent, so the relay operator can
+> link all connections and sessions of a node across restarts and reconnects,
+> whereas before each connect had a fresh identity; this is the price of
+> sessions that survive reconnects and restarts. A stored key that cannot be
+> decoded is replaced by a new one and logged at warning level (existing
+> sessions must then be paired again); a missing key on first start is logged
+> at debug level only.
 > The key is secret: it is never logged,
 > returned or put into an error text; the debug log carries only the first
 > eight hex digits of the public key and whether the key was loaded or newly

@@ -48,11 +48,16 @@ pub(crate) async fn load_or_create(
         return Ok((key, ClientKeySource::Loaded));
     }
     if stored.is_some() {
-        common::log::debug!("walletconnect: stored relay client key is unusable");
+        common::log::warn!(
+            "walletconnect: stored relay client key is unusable; a new client identity was created, and existing \
+             WalletConnect sessions must be paired again"
+        );
     }
     let key = SigningKey::generate(&mut rand::thread_rng());
     storage.save_client_key(hex::encode(key.to_bytes())).await?;
-    common::log::debug!("walletconnect: a new relay client identity was created");
+    if stored.is_none() {
+        common::log::debug!("walletconnect: a new relay client identity was created");
+    }
     Ok((key, ClientKeySource::Created))
 }
 
