@@ -1254,6 +1254,17 @@ to match.
 >   otherwise (an imported swap, its recovery, or a restart) gets those
 >   errors instead of an abnormal end.
 
+> *Reloaded status (clean side, 2026-11-18):* `disable_coin` answers for
+> both Solana kinds (PR #413), completing option (b). A token, and a platform
+> without tokens, are removed and can be activated again; a disabled token is
+> also taken out of its platform's token records. A platform with active
+> tokens is handled as every other family handles it today: the platform is
+> removed and its tokens stay registered, without the passive state of
+> chapter 43 R43.1E.6 and without `force_disable`, both of which wait for
+> chapter 55 D55.6. A coin that is not active answers the refusal of chapter
+> 43 R43.1E.3 in its extended shape. T40.6B.20 holds except its passive and
+> forced clauses.
+
 **D40.6B.2** *Balance of a token the wallet holds no account for
 (R40.6B.4).* Options: (a) answer zero, reading the associated token
 account derived with the token's `program_id`, which is also the address
@@ -1748,3 +1759,6 @@ with the shapes listed in §40.6 items 3-5.
 - *Clean-context addition (2026-11-17, forbidden corpus not consulted):*
   the status notes after §40.6A's as-built note and after D40.6B.1 record
   this repository's own code and the maintainer's decisions of 2026-11-15.
+- *Clean-context addition (2026-11-18, forbidden corpus not consulted):*
+  the status note on `disable_coin` after D40.6B.1 records this repository's
+  own code and chapter 43 §43.1E as cleared.
