@@ -114,6 +114,11 @@ Minimal example:
 > GLEEC KDF); set it to `none` to disable session persistence. See
 > [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) for details.
 
+> **WalletConnect app name.** A wallet lists this node as `KDF Reloaded <identifier>`,
+> where the identifier is the first eight characters of the node's relay client key (the
+> one the connect log prints), so several nodes can be told apart. Set the optional
+> `walletconnect.app_name` in `MM2.json` to a non-empty text to use a name of your own.
+
 > **Memory allocator arenas (Linux).** On Linux with glibc the daemon limits the
 > memory allocator to two arenas at start-up, which removed the memory growth
 > measured for a maker that updated its orders about 80 times a second on a

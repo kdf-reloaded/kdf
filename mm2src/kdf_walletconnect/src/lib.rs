@@ -27,7 +27,7 @@ use relay_rpc::domain::MessageId;
 /// name it without depending on `relay_rpc` directly.
 pub use relay_rpc::domain::Topic;
 use relay_rpc::rpc::params::session::{Namespace, ProposeNamespaces, SettleNamespaces};
-use relay_rpc::rpc::params::Relay;
+use relay_rpc::rpc::params::{Metadata, Relay};
 use session::rpc::{propose, settle};
 use session::{EncodingAlgo, Session, SessionManager};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -124,17 +124,21 @@ fn relay_host(address: &str) -> &str {
 /// Expected JSON shape:
 /// ```jsonc
 /// {
-///   "walletconnect": { "project_id": "<id>", "relay_address": "wss://..." },
+///   "walletconnect": { "project_id": "<id>", "relay_address": "wss://...", "app_name": "<name>" },
 ///   "wc_session_persistence": "open"
 /// }
 /// ```
 /// `project_id` is required (issued by WalletConnect Cloud); `relay_address`
-/// is optional and defaults to [`metadata::RELAY_ADDRESS`]; the top-level
+/// is optional and defaults to [`metadata::RELAY_ADDRESS`]; `app_name` is
+/// optional: when present and not empty it is the application name wallets
+/// list for this node, in place of `KDF Reloaded <client key fingerprint>`; the top-level
 /// `wc_session_persistence` toggle is optional and defaults to
 /// [`WcSessionPersistence::Open`].
 struct WalletConnectConfig {
     project_id: String,
     relay_address: String,
+    /// The operator's own application name (`walletconnect.app_name`), when set and not empty.
+    app_name: Option<String>,
     persistence: WcSessionPersistence,
 }
 
@@ -151,10 +155,15 @@ impl WalletConnectConfig {
             .filter(|addr| !addr.is_empty())
             .unwrap_or(metadata::RELAY_ADDRESS)
             .to_string();
+        let app_name = section["app_name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
         let persistence = WcSessionPersistence::from_conf(&ctx.conf)?;
         Ok(WalletConnectConfig {
             project_id,
             relay_address,
+            app_name,
             persistence,
         })
     }
@@ -280,6 +289,8 @@ pub struct WalletConnectCtx {
     persistence: WcSessionPersistence,
     /// Used to reopen the relay connection after the relay closed it.
     connect_params: RelayConnectParams,
+    /// The app metadata advertised to wallets; built once the relay client key is known.
+    app_metadata: Metadata,
 }
 
 /// In-progress proposal state retained between publishing a `wc_sessionPropose`
@@ -321,6 +332,8 @@ impl WalletConnectCtx {
         storage.init().await?;
 
         let (signing_key, key_source) = client_key::load_or_create(storage.as_ref()).await?;
+        let app_metadata =
+            metadata::generate_metadata(config.app_name.as_deref(), &client_key::fingerprint(&signing_key));
         let connect_params = RelayConnectParams {
             project_id: config.project_id,
             relay_address: config.relay_address,
@@ -344,6 +357,7 @@ impl WalletConnectCtx {
             storage,
             persistence: config.persistence,
             connect_params,
+            app_metadata,
         });
 
         handle.restore_sessions().await?;
@@ -432,6 +446,7 @@ impl WalletConnectCtx {
             &our_public,
             &pairing.required_namespaces,
             pairing.optional_namespaces.as_ref(),
+            &self.app_metadata,
         );
         let propose_namespaces = propose_namespaces_from_value(&pairing.required_namespaces);
 
@@ -938,7 +953,7 @@ impl WalletConnectCtx {
             },
         };
 
-        let session = build_session(session_topic.clone(), pending, settle);
+        let session = build_session(session_topic.clone(), pending, settle, &self.app_metadata);
         if let Err(e) = self.persist_session(&session).await {
             common::log::error!("walletconnect: failed to persist settled session: {e}");
         }
@@ -976,6 +991,7 @@ fn build_propose_request(
     our_public: &PublicKey,
     required_namespaces: &serde_json::Value,
     optional_namespaces: Option<&serde_json::Value>,
+    app_metadata: &Metadata,
 ) -> propose::ProposeRequest {
     let required = serde_json::from_value(required_namespaces.clone()).unwrap_or_default();
     let optional = optional_namespaces.and_then(|value| serde_json::from_value(value.clone()).ok());
@@ -986,7 +1002,7 @@ fn build_propose_request(
         }],
         proposer: propose::Proposer {
             public_key: hex::encode(our_public.to_bytes()),
-            metadata: metadata::generate_metadata(),
+            metadata: app_metadata.clone(),
         },
         required_namespaces: required,
         optional_namespaces: optional,
@@ -1002,7 +1018,12 @@ fn propose_namespaces_from_value(value: &serde_json::Value) -> ProposeNamespaces
 
 /// Builds the settled [`Session`] from the in-flight establishment state and the
 /// parsed `wc_sessionSettle` payload (chapter 22 §22.8.1.5).
-fn build_session(session_topic: Topic, pending: PendingSettle, settle: settle::SettleRequest) -> Session {
+fn build_session(
+    session_topic: Topic,
+    pending: PendingSettle,
+    settle: settle::SettleRequest,
+    app_metadata: &Metadata,
+) -> Session {
     let encoding = session_encoding_for_wallet_name(&settle.controller.metadata.name);
     Session {
         topic: session_topic,
@@ -1014,7 +1035,7 @@ fn build_session(session_topic: Topic, pending: PendingSettle, settle: settle::S
         encoding,
         properties: settle.session_properties,
         subscription_id: None,
-        proposer: metadata::generate_metadata(),
+        proposer: app_metadata.clone(),
         relay: settle.relay,
         namespaces: settle_to_relay_namespaces(settle.namespaces),
         propose_namespaces: pending.propose_namespaces,
@@ -1522,6 +1543,8 @@ mod establishment_tests {
     /// The WC2 ECDH (chapter 22 §22.6): the proposer side (which retains its
     /// ephemeral secret) and the responder side must converge on the same
     /// 32-byte symmetric key and therefore the same session topic.
+    fn test_app_metadata() -> Metadata { metadata::generate_metadata(None, "00000000") }
+
     #[test]
     fn ecdh_round_trip_derives_matching_key_and_topic() {
         let our_secret = StaticSecret::from([7u8; 32]);
@@ -1568,7 +1591,7 @@ mod establishment_tests {
             }
         });
 
-        let request = build_propose_request(&public, &required, None);
+        let request = build_propose_request(&public, &required, None, &test_app_metadata());
 
         assert_eq!(propose::METHOD, "wc_sessionPropose");
         assert_eq!(propose::TAG.request, 1100);
@@ -1641,7 +1664,7 @@ mod establishment_tests {
         });
 
         let settle: settle::SettleRequest = serde_json::from_value(params).expect("parse settle request");
-        let session = build_session(session_topic.clone(), pending, settle);
+        let session = build_session(session_topic.clone(), pending, settle, &test_app_metadata());
 
         assert_eq!(session.topic, session_topic);
         assert_eq!(session.pairing_topic, pairing_topic);
@@ -1711,7 +1734,7 @@ mod establishment_tests {
         });
 
         let settle: settle::SettleRequest = serde_json::from_value(params).expect("parse settle request");
-        let session = build_session(session_topic, pending, settle);
+        let session = build_session(session_topic, pending, settle, &test_app_metadata());
         let bytes = [0x01u8, 0x02, 0x03, 0xff];
 
         assert_eq!(session.pairing_topic, pairing_topic);
@@ -1816,6 +1839,21 @@ mod reconnect_tests {
             .expect("base64url payload");
         let claims: serde_json::Value = serde_json::from_slice(&payload).expect("JSON claims");
         claims["iss"].as_str().expect("iss claim").to_string()
+    }
+
+    #[test]
+    fn app_name_is_the_project_and_the_fingerprint_of_the_key_in_use() {
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let fp = client_key::fingerprint(&key);
+        assert_eq!(
+            metadata::generate_metadata(None, &fp).name,
+            format!("KDF Reloaded {fp}")
+        );
+        assert_eq!(metadata::generate_metadata(Some("My Node"), &fp).name, "My Node");
+        assert_eq!(
+            metadata::generate_metadata(Some(""), &fp).name,
+            format!("KDF Reloaded {fp}")
+        );
     }
 
     fn params_with(signing_key: SigningKey) -> RelayConnectParams {

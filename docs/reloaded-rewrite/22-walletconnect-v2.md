@@ -363,10 +363,27 @@ Lifecycle on relay connect:
 > stored. Reason: sessions are meant to keep working after a relay reconnect
 > and after a node restart, and a client identity that changed with each
 > connect could make the relay refuse requests on sessions made under an
-> earlier identity. Lab check pending. The key is secret: it is never logged,
+> earlier identity. Lab result (2026-11-18, Keplr Mobile, ATOM mainnet): after a
+> relay reconnect and after a node restart with the same data directory, signing
+> on the same session prompted in the wallet and returned a signed transaction,
+> and the key fingerprint stayed the same; before this change both cases failed.
+> The key is secret: it is never logged,
 > returned or put into an error text; the debug log carries only the first
 > eight hex digits of the public key and whether the key was loaded or newly
 > created.
+
+> **Status note (2026-11-18, Reloaded-original; informative).** The app
+> metadata the node advertises in a session proposal (and keeps as the
+> `proposer` of the settled session) names the project and tells instances
+> apart: `name` is `KDF Reloaded <fp>`, where `<fp>` is the first eight
+> lower-case hex digits of the public relay client key (the fingerprint the
+> connect log prints), `description` is `KDF Reloaded WalletConnect client`,
+> `url` is unchanged and `icons` stay empty. The name is stable across restarts
+> and upgrades of one data directory and differs between instances, so a wallet
+> that lists the paired apps shows each node apart. The metadata is built once
+> the client key is loaded or created. The optional `MM2.json` member
+> `walletconnect.app_name`, when present and not empty, replaces the whole
+> `name`; an empty value is ignored.
 
 ### 22.5.3 On-disk record format (Interop / wire-format reuse, R29)
 

@@ -313,7 +313,12 @@ the previous version used. The safe way:
   CRD ch.22 §22.5.2.
 - **A WalletConnect session keeps working after the relay reconnects or the node restarts.** The node now
   keeps one relay client identity, stored with its sessions, instead of a new one for every connection.
-  Lab check pending. Detail: PR #393; CRD ch.22 §22.5.2.
+  Field-checked with a wallet after a relay reconnect and after a restart. Detail: PR #393; CRD ch.22 §22.5.2.
+- **A wallet lists each node as "KDF Reloaded" with a short identifier.** The wallet used to list every
+  paired node as "Komodo DeFi Framework", so nodes could not be told apart. The name is now
+  `KDF Reloaded <identifier>`, where the identifier is the first eight characters of the node's relay
+  client key, the one the connect log prints; it does not change between restarts. An operator can set a
+  name of their own with `walletconnect.app_name` in `MM2.json`. Detail: PR #393; CRD ch.22 §22.5.2.
 
 #### Tendermint (Cosmos) coins
 
